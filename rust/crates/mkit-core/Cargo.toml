@@ -1,0 +1,185 @@
+[package]
+name = "mkit-core"
+description = "Content-addressed VCS primitives for mkit: BLAKE3 hashing, canonical objects, refs, packs, and transport traits"
+keywords = ["mkit", "vcs", "blake3", "content-addressed", "version-control"]
+categories = ["data-structures", "encoding", "cryptography"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Publishable to crates.io. Metadata-only PR — actual `cargo publish`
+# is gated behind a separate release process. The `publish` key is
+# left unset (cargo default = `true`) so a future `cargo publish -p
+# mkit-core` works without further metadata changes.
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = "1"
+# Verified streaming (BLAKE3 tree hashing: outboard + slice proof) for
+# `verify::verify_blob_slice`/`verify_blob_len_proof` (issue #1015 verifier
+# kit PR 2, SPEC-DISCLOSURE). Pure Rust, `std`-based but only via
+# `io::Cursor`-style in-memory use — no filesystem, no threads — so it
+# builds cleanly for wasm32 (already proven: `mkit-wasm` depends on the
+# same version for its `/streaming` demo). Same major as that transitive
+# copy, and `blake3 = "1"` above is the same workspace pin `bao::Hash`
+# (a `blake3::Hash` re-export) resolves against, so no second major shows
+# up in the tree. Run `bash scripts/check-wasm-dep-graph.sh` after
+# touching this dependency.
+bao = "0.13"
+# `bytes::{Buf, BufMut}` back the `commonware-codec` Read/Write buffer
+# traits used by the packlist node codec (transfer.rs). Pure, wasm-clean.
+bytes = "1"
+# commonware-* (compatible requirements at workspace root).
+#
+# `commonware-codec` is NON-optional: the transfer packlist node
+# (transfer.rs) is encoded with it (idiomatic Option/Vec + RangeCfg cap).
+# It is `default-features = false` (no `std`) and compiles to wasm32.
+#
+# The others are optional, gated by the feature flags below. NOTE on
+# merkle identity: a merkelized object's id is a Binary Merkle Tree root
+# (see `merkle.rs`). We do NOT use `commonware_storage::bmt` for it,
+# because `bmt` is gated behind `commonware-storage/std`, which drags in
+# `zstd-sys` (a C lib that cannot target wasm32) — and `mkit-wasm` computes
+# object ids. Instead `merkle.rs` vendors the identical BMT construction
+# over the `blake3` crate (wasm-clean) and a native-only test cross-verifies
+# it byte-for-byte against `commonware_storage::bmt` (see dev-dependencies).
+commonware-codec = { workspace = true }
+commonware-storage = { workspace = true, features = ["std"], optional = true }
+commonware-cryptography = { workspace = true, features = ["std"], optional = true }
+commonware-coding = { workspace = true, optional = true }
+commonware-parallel = { workspace = true, optional = true, features = ["std"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
+# Direct dependency (already pulled in transitively by ed25519-dalek
+# regardless of features) needed only under `batch-verify`, to check a
+# signature's `R` component for small-order encoding — see that
+# feature's doc below and `sign::verify_batch`.
+curve25519-dalek = { version = "5", optional = true }
+getrandom = "0.4"
+# `delta::encode`'s block-hash index (a `HashMap<u64, u32>` keyed by an
+# already well-distributed hash, not attacker-facing key material) uses
+# `FxHasher`/`FxSeededState` instead of the default `SipHash` — see
+# `delta.rs`'s module docs. Already resolved transitively (via
+# `mkit-cli`'s `reqwest` → `quinn` chain) at the pinned `2.1` line; this
+# direct dependency makes that explicit rather than relying on it.
+# `no_std`-by-default (this crate enables its default `std` feature) and
+# pure arithmetic, so it stays wasm32-clean like the rest of this
+# dependency list.
+rustc-hash = "2.1"
+# `subtle` is a constant-time-equality primitive used by the Ed25519
+# `SecretSeed` PartialEq. dalek pulls it transitively but we depend on
+# it directly so the constant-time guarantee is explicit at this crate
+# boundary instead of relying on a transitive pin.
+subtle = { version = "2", default-features = false }
+tempfile = "3"
+thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
+# Per-entry pack payload compression (SPEC-PACKFILE v2, issue #646).
+# `zstd-sys` is a C lib that cannot target wasm32 (see the comment on
+# `commonware-storage` above) — this is `optional = true`, gated by the
+# `pack-zstd` feature below, so `mkit-wasm` (which needs `pack.rs` to
+# compile but never calls into pack compression) can opt out via
+# `default-features = false`. 0.13.3 is already resolved transitively
+# via the commonware dependency stack. This direct dependency uses the
+# newer safe wrapper while sharing the same underlying zstd C library.
+zstd = { version = "0.14", optional = true }
+# POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
+# Windows path uses default ACLs as documented in `docs/specs/SPEC-SIGNING.md`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Keep the untargeted `getrandom = "0.4"` above for native builds
+# (`KeyPair::generate`, ancestry ids). On wasm32-unknown-unknown the 0.4
+# crate needs `wasm_js` (`Crypto.getRandomValues` via wasm-bindgen);
+# without it, `cargo check -p mkit-core --no-default-features --target
+# wasm32-unknown-unknown` fails even though `mkit-wasm` builds — that
+# crate declares this feature on the root package, which unifies onto
+# this copy. Do not enable on native.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[features]
+# `pack-zstd` is on by default for every normal (native) consumer —
+# `PackWriter`/`PackReader` transparently compress/decompress pack
+# entries per SPEC-PACKFILE v2 without any call-site changes. It is
+# the one default feature that pulls a dependency outside the
+# always-wasm-safe base, so every crate that targets
+# wasm32-unknown-unknown (`mkit-wasm`; `apps/repo-worker`, built via
+# worker-build) opts out explicitly with `default-features = false`
+# on its `mkit-core` dependency.
+default = ["pack-zstd"]
+# SPEC-PACKFILE v2 (issue #646): zstd-compressed pack entries (`0x03`
+# zstd-raw, `0x04` zstd-delta). Disabling this feature does not make
+# `pack.rs` reject v2 packs at compile time — a build without it can
+# still fail closed at runtime on a `0x03`/`0x04` entry — it only
+# means this build's `PackWriter` never emits them and this build's
+# `PackReader` can't decompress ones it receives.
+pack-zstd = ["dep:zstd"]
+# Canonical first-parent snapshots use the synchronous in-memory MMB primitive.
+history-mmr = ["dep:commonware-storage", "dep:commonware-cryptography"]
+# Sparse witnesses use the canonical Tree codec and the base BLAKE3 hasher.
+sparse-checkout = []
+# Issue #159 — erasure-coded pack delivery via Reed-Solomon.
+pack-shards = [
+    "commonware-codec/std",
+    "dep:commonware-coding",
+    "dep:commonware-cryptography",
+    "dep:commonware-parallel",
+]
+# Ed25519 batch signature verification (`sign::verify_batch`): one
+# randomized-coefficient multiscalar-multiplication check across many
+# signatures instead of one scalar multiplication per signature —
+# strictly less total CPU work for the common all-valid case, used by
+# mkit-cli's post-fetch signature-verification fan-out
+# (`verify_new_object_signatures`) as a fast path ahead of the
+# existing per-object `verify_strict` loop. Pulls in ed25519-dalek's
+# `batch` feature (`keccak` + `strobe-rs` for the Merlin transcript)
+# and `curve25519-dalek` directly (used to check a signature's `R` for
+# small-order encoding, matching `verify_strict`'s guarantee against
+# that malleability class — see `sign::verify_batch`'s doc comment);
+# all pure Rust, no C deps. NOT a default feature — unlike
+# `pack-zstd`, nothing about mkit-core's own API needs it, so making it
+# default would cost every native consumer these extra dependencies
+# for no benefit, including ones with no reason to opt out the way
+# wasm32/Worker crates already do (e.g. `contrib/signers/*`, which
+# depend on `mkit-core` with default features and never call
+# `verify_batch`). `mkit-cli`, the one consumer that uses it, enables
+# it explicitly on its `mkit-core` dependency instead.
+batch-verify = ["ed25519-dalek/batch", "dep:curve25519-dalek"]
+
+[dev-dependencies]
+# `hazmat::ExpandedSecretKey` (test-only): constructs a genuine
+# small-order-`R` signature forgery to prove `sign::verify_batch`'s `R`
+# small-order check is load-bearing, not redundant with the batch
+# equation itself. Additive on top of the plain `[dependencies]` entry
+# above; never enabled outside test builds.
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "hazmat"] }
+# Test-only: computing the same SHA-512 hashes the forgery above needs
+# (secret-key expansion input, and H(R||A||M)) directly, matching the
+# version already resolved transitively via ed25519-dalek/curve25519-dalek.
+sha2 = "0.11"
+# Storage experiments need the deterministic runtime, not the shipped history API.
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true, features = ["std"] }
+serde_json = "1"
+# Native-only: cross-verify `merkle.rs`'s vendored BMT against the
+# canonical `commonware_storage::bmt` so the vendored construction stays
+# byte-for-byte identical to the house primitive (the wasm build uses the
+# vendored path; this proves they agree). std is fine for a native test.
+commonware-storage = { workspace = true, features = ["std"] }
+commonware-cryptography = { workspace = true, features = ["std"] }
+hex = "0.4"
+# Property-based testing: auto-shrinks counterexamples on round-trip
+# / invariant assertions. See issue #164.
+proptest = "1"
+# Snapshot testing for human-readable test fixtures. Snapshots live in
+# `src/snapshots/`; review with `cargo insta review`.
+insta = "1"
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true
