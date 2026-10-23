@@ -12,7 +12,7 @@
 //!    reader resolves end-to-end and that pins to a fixed byte prefix
 //!    for a deterministic input.
 //!
-//! Goldens for #2 / #3 do NOT live on disk — they're inline byte
+//! Goldens for do NOT live on disk — they're inline byte
 //! arrays so the spec change → test failure feedback is immediate.
 //! The exception is the C-encoded v2 fixtures under
 //! `rust/tests/golden/pack-v2/` (see [`pack_v2_fixtures`]), which exist
@@ -224,7 +224,7 @@ fn empty_pack_pin_bytes() {
 
 /// The exact 61 bytes `pack_basic_pin_bytes_roundtrip` builds via
 /// `PackWriter` — captured as a literal byte-for-byte pin BEFORE
-/// issue #646's v2/zstd changes landed. Unlike that test (which
+/// v2/zstd changes landed. Unlike that test (which
 /// re-derives the pack through the current `PackWriter` and would
 /// silently drift if writer and reader changed in lockstep), this
 /// array can never change: it is the one fixed point
@@ -241,7 +241,7 @@ const PINNED_V1_SINGLE_RAW_PACK: [u8; 61] = [
 
 #[test]
 fn v1_pack_still_reads_bit_identical() {
-    // No-regression guardrail for issue #646 (SPEC-PACKFILE v2,
+    // No-regression guardrail for (SPEC-PACKFILE v2,
     // zstd-compressed entries): a pre-existing v1 pack, pinned as raw
     // bytes captured before the v2 changes, MUST decode to exactly the
     // same result after those changes as it did before. `PackWriter`
@@ -390,7 +390,7 @@ fn pack_v2_compressed_delta_pin_bytes_roundtrip() {
 }
 
 /// SPEC-PACKFILE v2 committed fixtures (`rust/tests/golden/pack-v2/`,
-/// §10 vector #20).
+/// §10 vector 20).
 ///
 /// The writer-driven v2 pins above need `pack-zstd` to build their packs,
 /// so a decode-only build had no real v2 bytes to read. These fixtures are
@@ -651,7 +651,7 @@ mod pack_v2_fixtures {
                 "# SPEC-PACKFILE v2 fixtures, written by the C zstd encoder (pack-zstd)\n\
                  # Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-core --test golden_pack`\n\
                  # Format: <file> <blake3-hex-of-file-bytes>\n\
-                 # See docs/specs/SPEC-PACKFILE.md section 10, vector #20.\n",
+                 # See docs/specs/SPEC-PACKFILE.md section 10, vector 20.\n",
             );
             for (name, description, pushes) in fixtures() {
                 let mut w = PackWriter::new();
