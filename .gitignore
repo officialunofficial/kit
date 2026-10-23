@@ -1,0 +1,23 @@
+.DS_Store
+*.log
+
+/rust/target/
+/rust/**/target/
+/rust/fuzz/corpus/
+/rust/fuzz/artifacts/
+/rust/mutants.out/
+/rust/mutants.out.old/
+/rust/dist/
+
+# Local agent state stays untracked.
+.claude/*
+
+# Keys, secrets and local environment files never enter the repository.
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+secrets.*
+credentials.*

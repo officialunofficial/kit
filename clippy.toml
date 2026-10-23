@@ -1,0 +1,21 @@
+# clippy configuration for the mkit workspace.
+
+msrv = "1.95"
+
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold = 8
+
+# `unwrap_used` is denied workspace-wide (see [workspace.lints] in
+# rust/Cargo.toml) so production code surfaces errors via `?`/typed errors
+# instead of panicking. `expect_used` is intentionally NOT denied:
+# `expect("reason")` stays the sanctioned escape hatch for a genuine,
+# documented invariant, so each production panic carries a reason. Tests
+# stay idiomatic regardless — a failed `unwrap()`/`expect()` in a test is
+# the assertion.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+disallowed-methods = [
+    { path = "std::env::set_var", reason = "races other threads on POSIX; set env at process start" },
+    { path = "reqwest::blocking::Response::json", reason = "use parse_json_body with a named cap", allow-invalid = true },
+]

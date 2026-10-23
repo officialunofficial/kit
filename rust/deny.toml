@@ -1,0 +1,150 @@
+# cargo-deny schema v2 (EmbarkStudios/cargo-deny >= 0.16). Severity keywords
+# moved from per-check settings to the top level; what remains here are
+# "scope" values: which dep set each check applies to.
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # Transitive through yubikey 0.9.0-pre.0 for certificate parsing; mkit does
+    # not expose RSA private-key decryption, and no fixed yubikey release exists.
+    #
+    # TODO(2026-11-19): re-justify this ignore or drop it. cargo-deny v0.19's
+    # advisories schema does not yet support a native `expires` field on
+    # ignore entries (unexpected-keys error on `expires`), so we encode the
+    # 90-day expiry in this TODO comment plus a reminder block in
+    # .github/workflows/rust-security.yml. When cargo-deny adds `expires`
+    # natively, replace this with the structured form.
+    #
+    # The regression test in rust/crates/mkit-keystore/tests/no_rsa_decrypt.rs
+    # asserts the yubikey RSA decrypt entrypoint stays unreferenced workspace-
+    # wide; if that test is removed, this ignore MUST go too.
+    #
+    # Re-confirmed 2026-08-21: still live, and still the only option.
+    # `cargo tree -i rsa` puts rsa v0.10.0-rc.18 in the graph through exactly
+    # one edge — yubikey 0.9.0-pre.0 -> mkit-keystore — and 0.9.0-pre.0 is
+    # still the newest yubikey on crates.io, so there is no fixed release to
+    # move to. Dropping the ignore would fail the gate on a vulnerability we
+    # cannot patch; the containment is the no_rsa_decrypt.rs guard, which
+    # still scans for `piv::decrypt_data` workspace-wide and still passes.
+    { id = "RUSTSEC-2023-0071", reason = "transitive via yubikey 0.9.0-pre.0 cert parsing; mkit never calls the affected RSA decrypt path (see mkit-keystore/tests/no_rsa_decrypt.rs). Re-justify by 2026-11-19." },
+    # `paste` (macro crate) marked unmaintained 2024-10-07. Pulled
+    # transitively by commonware-* (via blst/aws-lc-sys macro
+    # expansion) when the optional `history-mmr` / `sparse-checkout`
+    # / `pack-shards` / `bls-threshold` features are enabled. No
+    # runtime exposure: paste expands at compile time, produces no
+    # binary code we own. The dependency comes in via the commonware
+    # crates (https://github.com/commonwarexyz/monorepo) — once
+    # commonware migrates off paste this ignore goes. Re-justify by
+    # 2026-11-19.
+    #
+    # Re-confirmed 2026-07-15 on the commonware 2026.7.0 train: `paste`
+    # v1.0.15 is still transitively present (`cargo deny check
+    # advisories` still fires this one; unlike RUSTSEC-2025-0055 below,
+    # it is not stale).
+    #
+    # Re-confirmed again 2026-08-21: unchanged on the same train.
+    # `cargo tree -i paste` shows v1.0.15 entering as a proc-macro via
+    # commonware-codec -> commonware-coding -> mkit-core, so it still
+    # expands at compile time and contributes no runtime code.
+    #
+    # Re-confirmed 2026-09-04 on the commonware 2026.9.0 train (MKIT-2
+    # bump from 2026.7.1): `cargo tree -i paste` still shows v1.0.15
+    # entering as a proc-macro, now via commonware-codec ->
+    # commonware-cryptography -> commonware-runtime -> commonware-storage
+    # -> mkit-core (the exact intermediate crates shifted; the macro-only,
+    # compile-time-only shape did not).
+    { id = "RUSTSEC-2024-0436", reason = "transitive via commonware-* feature-gated deps; macro-only, no runtime exposure. Re-justify by 2026-11-19." },
+    # RUSTSEC-2025-0055 (tracing-subscriber 0.2.25 ANSI-escape log
+    # injection) REMOVED 2026-07-15: it came in via commonware-runtime
+    # 2026.5.x -> arkworks (ark-ed-on-bls12-381-bandersnatch ->
+    # ark-r1cs-std 0.5.0) -> tracing-subscriber 0.2, for the evrf/
+    # "golden" DKG curve. On the commonware 2026.7.0 train that whole
+    # arkworks/bandersnatch chain is gone from the dependency graph
+    # (`cargo update` dropped ark-bls12-381, ark-ec,
+    # ark-ed-on-bls12-381-bandersnatch, ark-ff, ark-poly, ark-r1cs-std,
+    # ark-relations, ark-serialize, ark-std; the sole remaining
+    # `tracing-subscriber` in the tree is v0.3.23, the fixed line).
+    # `cargo deny check advisories` confirms with an
+    # `advisory-not-detected` warning — this ignore is now dead weight.
+
+    # RUSTSEC-2026-0370 / -0371 / -0372 (all reported 2026-10-16): upstream
+    # folded the standalone zvariant, zvariant_derive and zbus_names crates
+    # into zbus 6.0.0 (as `zbus::wire` / `zbus::names`) and filed these
+    # informational "unmaintained" advisories itself to push the migration
+    # (z-galaxy/zbus#2043). They reach us only through the optional
+    # `backend-linux-secret-service` keystore feature:
+    #
+    #   mkit-cli / mkit-fuzz (all-features) -> mkit-keystore
+    #     -> zbus-secret-service-keyring-store 1.0.1
+    #     -> secret-service 5.2.0 + zbus 5.19.0
+    #     -> zbus_names / zbus_macros -> zvariant -> zvariant_derive
+    #
+    # Not exploitable here: these are INFO unmaintained advisories, not
+    # vulnerabilities — no CVE and no known defect in the pinned code.
+    # zvariant_derive is a proc-macro (compile-time only, contributes no
+    # runtime code); zvariant/zbus_names do D-Bus wire marshalling and
+    # bus-name validation on the per-user session bus (same-UID local IPC
+    # to gnome-keyring/KWallet), not an attacker-reachable surface. The
+    # backend is opt-in and Linux-desktop only.
+    #
+    # No maintained upgrade path yet: zbus-secret-service-keyring-store
+    # 1.0.1 and secret-service 5.2.0 are the newest releases and still pin
+    # zbus 5.x; only a zbus-6-based release of one of them removes this
+    # chain. The lockfile now carries the terminal 5.x releases
+    # (zvariant/zvariant_derive 5.15.1, zbus_names 4.3.5).
+    #
+    # TODO(2026-11-19): re-check whether zbus-secret-service-keyring-store
+    # or secret-service has a zbus-6 release; if so, bump and drop all
+    # three ignores together (the crates leave the graph as one unit).
+    { id = "RUSTSEC-2026-0370", reason = "transitive via zbus-secret-service-keyring-store 1.0.1 -> zbus 5.19.0 for the opt-in Linux secret-service keystore backend; informational unmaintained flag (merged into zbus 6.0), no known defect. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0371", reason = "same path as RUSTSEC-2026-0370; D-Bus bus-name types on the same-UID session bus only, not attacker-reachable. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0372", reason = "same path as RUSTSEC-2026-0370; proc-macro crate, compile-time only, no runtime code. Re-justify by 2026-11-19." },
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "Zlib",
+    # libfuzzer-sys ships its LLVM-derived C shim under NCSA alongside
+    # its Rust MIT/Apache-2.0. Pulled in only when --features libfuzzer
+    # is enabled (not our default).
+    "NCSA",
+    # `option-ext` (transitive dep of ctap-hid-fido2 via the dirs-sys
+    # path) ships under MPL-2.0. MPL-2.0 is a file-level copyleft —
+    # modifications to MPL-licensed files must remain MPL, but
+    # combining with differently-licensed code is allowed. Widely used
+    # (Firefox, Thunderbird). Accepted for transitive use.
+    "MPL-2.0",
+    # webpki-roots / cert bundles used by rustls ship under the
+    # Community Data License (CDLA) Permissive 2.0 — an OSI-aligned
+    # permissive data license for the Mozilla CA trust store snapshot.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The publish=false crates (mkit-wasm, benches, fuzz — plus the
+# out-of-tree contrib signers) depend on workspace siblings via bare
+# `path = "..."` without a version pin, which cargo-deny treats as a
+# wildcard. The 12 crates published to crates.io carry `version + path`
+# internal deps (publishing requires it); the bare-path form is fine for
+# the crates that never leave the workspace. Whitelist it.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

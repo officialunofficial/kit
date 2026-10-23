@@ -1,0 +1,27 @@
+# Treat all files as text. Store line endings as LF and check them out as LF
+# on every platform. This keeps golden vectors byte-stable.
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.bash text eol=lf
+*.zsh  text eol=lf
+*.fish text eol=lf
+*.rs   text eol=lf
+
+# Cargo.lock is dense and machine-generated. Skip its body in diffs.
+Cargo.lock -diff
+
+# Binary golden payloads. Keep them byte-exact and hide their diffs.
+rust/tests/golden/redaction/*.bin -diff -text
+rust/tests/golden/transport/*.bin -diff -text
+rust/tests/golden/**/*.bin -diff
+
+# Mark generated files for review tools.
+rust/crates/*/generated/** linguist-generated=true
+rust/tests/golden/objects/**/*.json linguist-generated=true
+rust/tests/golden/grants/**/*.json linguist-generated=true
+rust/tests/golden/http-objects/*.json linguist-generated=true
+rust/tests/golden/proofs/**/*.json linguist-generated=true
+rust/tests/golden/disclosure/**/*.json linguist-generated=true
+rust/tests/golden/uploads/**/*.json linguist-generated=true
+rust/tests/golden/refs-index/**/*.json linguist-generated=true

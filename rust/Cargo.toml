@@ -1,0 +1,77 @@
+[workspace]
+resolver = "3"
+members = []
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.95.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/officialunofficial/mkit"
+authors = ["Official Unofficial, Inc."]
+
+# Commonware requirements allow compatible 2026.x releases so downstream
+# consumers can select a newer release. Cargo.lock keeps the workspace
+# reproducible. Consumer feature flags stay at the use site because they vary
+# by crate.
+[workspace.dependencies]
+commonware-macros = { version = "=2026.9.0", default-features = false }
+# default-features = false matches the strictest consumer (mkit-attest and
+# mkit-core). A consumer that needs the default feature set must use a direct
+# dependency, because `workspace = true` cannot re-enable default features.
+commonware-storage = { version = "2026.9.0", default-features = false }
+commonware-cryptography = { version = "2026.9.0", default-features = false }
+commonware-runtime = { version = "2026.9.0" }
+commonware-coding = { version = "2026.9.0" }
+commonware-codec = { version = "2026.9.0", default-features = false }
+commonware-parallel = { version = "2026.9.0", default-features = false }
+commonware-utils = { version = "2026.9.0", default-features = false }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+# Flag `pub` items not reachable from the crate root: in a workspace this
+# keeps internal APIs honestly scoped (`pub(crate)`) instead of leaking a
+# wider surface than callers can actually use.
+unreachable_pub = "warn"
+# Kani proof harnesses live in `#[cfg(kani)]` modules next to the code they
+# verify. `cargo kani` sets the cfg. Declare it so normal builds accept it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(commonware_stability_BETA)", "cfg(commonware_stability_GAMMA)", "cfg(commonware_stability_DELTA)", "cfg(commonware_stability_EPSILON)", "cfg(commonware_stability_RESERVED)"] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Clippy checks every workspace package and cannot exempt one feature name.
+redundant_feature_names = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+# `doc_lazy_continuation` fires on style-only indentation in module docs.
+# We use it intentionally for vertically-aligned bullet lists — the
+# auto-fix rewrites prose into one-line-per-item form which hurts
+# readability. Silence at the workspace root.
+doc_lazy_continuation = "allow"
+# `module_inception` is fine for our generated buffa modules.
+module_inception = "allow"
+# Downstream transitive deps (wit-bindgen via getrandom, hashbrown via tempfile)
+# carry their own duplicate-version baggage we do not control. Revisit once
+# the ecosystem converges.
+multiple_crate_versions = "allow"
+# Panicking on a `None`/`Err` hides failure modes from callers. Production code
+# must surface errors via `?`/typed errors; tests are exempt
+# (`allow-unwrap-in-tests` in clippy.toml), where a failed unwrap *is* the
+# assertion.
+unwrap_used = "deny"
+# A stray `dbg!()` left in shipped code spams stderr and leaks internals.
+# It's only ever a debugging aid, so fail the build rather than warn.
+dbg_macro = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+# Keep unwinding in release so a panic produces a real backtrace for users.
+# Panics should be rare: production code bans `unwrap()` and uses
+# `expect("reason")`.
+panic = "unwind"
+overflow-checks = true
