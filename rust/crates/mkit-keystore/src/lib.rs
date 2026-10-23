@@ -13,15 +13,10 @@ mod backend;
 mod backend_linux_secret_service;
 #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
 mod backend_macos_keychain;
-#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-mod backend_systemd_creds;
-#[cfg(feature = "backend-yubikey")]
-mod backend_yubikey;
 mod encrypted_record;
 mod error;
 #[cfg(any(
     all(target_os = "linux", feature = "linux-secret-service"),
-    all(target_os = "linux", feature = "systemd-creds"),
     all(target_os = "macos", feature = "macos-keychain")
 ))]
 mod native_list;
@@ -33,10 +28,6 @@ pub use backend::open_backend;
 pub use backend_linux_secret_service::LinuxSecretServiceKeystore;
 #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
 pub use backend_macos_keychain::MacosKeychainKeystore;
-#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-pub use backend_systemd_creds::SystemdCredsKeystore;
-#[cfg(feature = "backend-yubikey")]
-pub use backend_yubikey::YubiKeyKeystore;
 pub use error::{Error, Result};
 #[cfg(feature = "bls-threshold")]
 pub use software::{BlsShareMetadata, LoadedBlsShare};

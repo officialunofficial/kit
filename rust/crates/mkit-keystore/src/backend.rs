@@ -12,8 +12,6 @@ pub fn open_backend(kind: BackendKind) -> Result<Box<dyn Keystore>> {
         BackendKind::SoftwareRaw => Ok(Box::new(SoftwareRawKeystore::new()?)),
         BackendKind::MacosKeychain => open_macos_keychain_backend(),
         BackendKind::LinuxSecretService => open_linux_secret_service_backend(),
-        BackendKind::SystemdCreds => open_systemd_creds_backend(),
-        BackendKind::YubiKey => open_yubikey_backend(),
         other => Err(Error::BackendUnavailable(format!(
             "backend `{other}` is not implemented in this build"
         ))),
@@ -46,31 +44,6 @@ fn open_linux_secret_service_backend() -> Result<Box<dyn Keystore>> {
     ))
 }
 
-#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-#[allow(clippy::unnecessary_wraps)]
-fn open_systemd_creds_backend() -> Result<Box<dyn Keystore>> {
-    Ok(Box::new(crate::SystemdCredsKeystore::new()?))
-}
-
-#[cfg(not(all(target_os = "linux", feature = "systemd-creds")))]
-fn open_systemd_creds_backend() -> Result<Box<dyn Keystore>> {
-    Err(Error::BackendUnavailable(
-        "systemd-creds backend requires Linux and the `systemd-creds` feature".into(),
-    ))
-}
-
-#[cfg(feature = "backend-yubikey")]
-fn open_yubikey_backend() -> Result<Box<dyn Keystore>> {
-    Ok(Box::new(crate::YubiKeyKeystore::new()?))
-}
-
-#[cfg(not(feature = "backend-yubikey"))]
-fn open_yubikey_backend() -> Result<Box<dyn Keystore>> {
-    Err(Error::BackendUnavailable(
-        "YubiKey backend requires the `backend-yubikey` feature".into(),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,30 +57,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "backend-yubikey"))]
-    #[test]
-    fn yubikey_backend_fails_closed_when_unavailable() {
-        match open_backend(BackendKind::YubiKey) {
-            Err(Error::BackendUnavailable(_)) => {}
-            Err(error) => panic!("unexpected error: {error}"),
-            Ok(_) => panic!("unexpected backend"),
-        }
-    }
-
     #[cfg(not(all(target_os = "linux", feature = "linux-secret-service")))]
     #[test]
     fn linux_secret_service_backend_fails_closed_when_unavailable() {
         match open_backend(BackendKind::LinuxSecretService) {
-            Err(Error::BackendUnavailable(_)) => {}
-            Err(error) => panic!("unexpected error: {error}"),
-            Ok(_) => panic!("unexpected backend"),
-        }
-    }
-
-    #[cfg(not(all(target_os = "linux", feature = "systemd-creds")))]
-    #[test]
-    fn systemd_creds_backend_fails_closed_when_unavailable() {
-        match open_backend(BackendKind::SystemdCreds) {
             Err(Error::BackendUnavailable(_)) => {}
             Err(error) => panic!("unexpected error: {error}"),
             Ok(_) => panic!("unexpected backend"),

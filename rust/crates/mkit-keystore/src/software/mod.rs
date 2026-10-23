@@ -25,14 +25,8 @@ use crypto::{
 use protectors::LinuxSecretServiceProtector;
 #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
 use protectors::MacosKeychainProtector;
-#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-use protectors::SystemdCredsProtector;
 #[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
 use protectors::linux_desktop_session_available;
-#[cfg(all(test, target_os = "linux", feature = "systemd-creds"))]
-use protectors::systemd_creds::systemd_creds_protector_for_availability;
-#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-use protectors::systemd_creds_protector;
 
 #[cfg(all(test, feature = "bls-threshold"))]
 use crate::encrypted_record;
@@ -852,10 +846,6 @@ fn default_protector_for_write(root: &Path) -> Result<Arc<dyn KeyProtector>> {
                 Err(error) => return Err(error),
             }
         }
-        #[cfg(feature = "systemd-creds")]
-        {
-            return systemd_creds_protector(root);
-        }
     }
     let _ = root;
     Err(Error::BackendUnavailable(
@@ -864,7 +854,6 @@ fn default_protector_for_write(root: &Path) -> Result<Arc<dyn KeyProtector>> {
 }
 
 fn default_protector_by_id(root: &Path, id: &str) -> Result<Arc<dyn KeyProtector>> {
-    #[cfg(not(all(target_os = "linux", feature = "systemd-creds")))]
     let _ = root;
 
     match id {
@@ -872,8 +861,6 @@ fn default_protector_by_id(root: &Path, id: &str) -> Result<Arc<dyn KeyProtector
         MacosKeychainProtector::ID => Ok(Arc::new(MacosKeychainProtector)),
         #[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
         LinuxSecretServiceProtector::ID => Ok(Arc::new(LinuxSecretServiceProtector)),
-        #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-        SystemdCredsProtector::ID => systemd_creds_protector(root),
         _ => Err(Error::BackendUnavailable(format!(
             "software key record requires unavailable protector `{id}`"
         ))),

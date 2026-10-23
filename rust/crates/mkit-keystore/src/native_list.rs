@@ -97,7 +97,7 @@ pub(crate) fn is_malformed_list_entry_error(error: &Error) -> bool {
 }
 
 /// Reject the key attributes that none of the extractable-secret backends
-/// (software, macOS Keychain, Linux Secret Service, systemd-creds) can
+/// (software, macOS Keychain, Linux Secret Service) can
 /// honor. `backend` names the backend for the error
 /// message so callers don't each carry a copy of this validation.
 pub(crate) fn validate_attrs(backend: &str, attrs: &crate::KeyAttrs) -> Result<()> {
