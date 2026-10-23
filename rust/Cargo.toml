@@ -7,6 +7,9 @@ members = [
     "crates/mkit-attest",
     "crates/mkit-keystore",
     "crates/mkit-git-bridge",
+    "crates/mkit-transport-memory",
+    "crates/mkit-transport-file",
+    "crates/mkit-transport-ssh",
 ]
 
 [workspace.package]
