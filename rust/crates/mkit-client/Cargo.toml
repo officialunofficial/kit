@@ -1,0 +1,37 @@
+[package]
+name = "mkit-client"
+description = "Runtime-independent async protocol client for mkit servers: reads, signed writes and ticketed push on native and wasm"
+readme = "README.md"
+keywords = ["mkit", "vcs", "client", "wasm", "connect"]
+categories = ["network-programming", "web-programming::http-client"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Reading compressed packs (SPEC-PACKFILE v2) needs a zstd decoder. The default
+# is the C backend. Push then writes compressed packs, and reads use the C
+# decoder. It pulls in `zstd-sys`, so it does not build for wasm32.
+default = ["pack-zstd"]
+pack-zstd = ["mkit-core/pack-zstd"]
+
+[dependencies]
+mkit-core = { version = "0.5", path = "../mkit-core", default-features = false }
+mkit-rpc = { version = "0.5", path = "../mkit-rpc", features = ["transport-messages"] }
+buffa = "0.9.1"
+http = "1"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+
+[dev-dependencies]
+mkit-test-util = { path = "../mkit-test-util" }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
