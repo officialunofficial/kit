@@ -8,8 +8,7 @@ audience: implementers of pack producers and consumers; transport implementers
 # SPEC-PACK-SHARDS &mdash; erasure-coded pack delivery
 
 Status: **Normative** for mkit v0.x &mdash; the in-process codec and the
-wire/transport delivery surface are both implemented. Tracks issue
-[#159](https://github.com/officialunofficial/mkit/issues/159).
+wire/transport delivery surface are both implemented.
 Scope: a wire-level encoding *of* a pack &mdash; the on-disk packfile format
 (SPEC-PACKFILE) is unchanged.
 
@@ -86,10 +85,9 @@ offset  size   field
 For the v0 default `(16, 4)` config the manifest is `717` bytes:
 `5 + 32 + 2 + 2 + 32 + 4 + 20 * 32`.
 
-`version` was bumped `0x01` → `0x02` by issue
-[#661](https://github.com/officialunofficial/mkit/issues/661), which
+`version` was bumped `0x01` → `0x02` when the codec
 switched the Reed-Solomon hasher from `Sha256` to `Blake3` (§4) &mdash; a
-hard cutover, not dual-hasher support. `0x01` (the pre-#661
+hard cutover, not dual-hasher support. `0x01` (the earlier
 `ReedSolomon<Sha256>` scheme) is retired **permanently** and MUST NOT
 be reused for a different wire meaning: a `0x01` manifest's
 `commitment` can never check out against the `Blake3`-based decoder,
@@ -159,8 +157,7 @@ Producers and consumers MUST use the same scheme and digest. The
 `commonware-parallel` execution strategy (`Sequential` vs a `Rayon`
 thread pool) is a caller-selectable performance parameter, not part
 of the wire contract &mdash; see `encode_pack_to_shards_with_strategy` /
-`decode_pack_from_shards_with_strategy` and issue
-[#653](https://github.com/officialunofficial/mkit/issues/653).
+`decode_pack_from_shards_with_strategy`.
 
 ### 4.1 Encode
 

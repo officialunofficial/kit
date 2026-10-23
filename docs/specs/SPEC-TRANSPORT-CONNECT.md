@@ -19,8 +19,8 @@ additively: v2 adds RPCs and fields and never renumbers or removes one,
 so `buf breaking` stays green. The breaks are semantic only. mkit is
 pre-production (CONTRIBUTING, "Pre-production compatibility policy"), so
 v2 has no v1 compatibility machinery: no v1 reader, no negotiation, and
-no fallback mode. The proto messages v2 names land with the M1
-implementation, and the admission messages with the M3 implementation
+no fallback mode. The proto messages v2 names land with the version 2
+implementation, and the admission messages with the admission implementation
 (§8); until then the implementations described under
 "Reference implementation" below implement the v1 surface only. §9
 records the version history.
@@ -49,7 +49,7 @@ in-process server &mdash; real HTTP, real protobuf framing, real Connect
 streaming, backed by `mkit-transport-memory` rather than R2/a Durable
 Object. The `mkit-server` library and its conformance host (§7.2) drive the same
 client end to end; they replaced `mkit serve --http`, which the CLI no longer has.
-[`apps/vcs-worker`](../../apps/vcs-worker) (mkit#699)
+[`apps/vcs-worker`](../../apps/vcs-worker)
 implements the unary and client-streaming RPCs
 (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`/`UploadPack`)
 against this proto over R2 and a Durable Object; `DownloadPack`
@@ -89,7 +89,7 @@ buf.yaml (repo root, v2, three-module workspace)
 └── proto/mkit/transport/v1/transport.proto   → mkit.transport.v1
 ```
 
-This module shares the repo-root `buf.yaml` workspace (mkit#677, "buf
+This module shares the repo-root `buf.yaml` workspace ("buf
 workspace + proto path restructure") alongside `rust/crates/mkit-rpc/proto`
 (`mkit.rpc.v1`) and `apps/repo-worker/proto` (`mkit.repo.v1`). `buf
 lint` / `buf breaking` run from the repo root against the whole
@@ -100,7 +100,7 @@ module's first commit onward, so every subsequent change to
 `transport.proto` is checked against the immediately prior version &mdash;
 there is no grace period after this document merges.
 
-A follow-up (tracked as mkit#679) extracts `RefExpectation` and
+A follow-up (tracked as) extracts `RefExpectation` and
 `RefEntry` into a shared `mkit/common/v1/refs.proto` imported by
 `mkit.rpc.v1.ssh`, `mkit.repo.v1`, and this package &mdash; the buf
 workspace (§1) now makes that cross-module import resolvable. Until
@@ -133,17 +133,17 @@ same trait `mkit-transport-s3` and `-ssh` implement.
 | `download_pack(key)` | `DownloadPack` | server-streaming |
 | `upload_blob(bytes, key)` (default impl: delegates to `upload_pack`) | *(none &mdash; client calls `UploadPack`)* | &mdash; |
 | `download_blob(key)` (default impl: delegates to `download_pack`) | *(none &mdash; client calls `DownloadPack`)* | &mdash; |
-| *(none &mdash; deployment discovery, M1)* | `GetServerInfo` (§2.1) | unary |
-| *(none &mdash; retained storage receipt, M5)* | `GetReceipt` (§2.2) | unary |
-| *(none &mdash; upload ticket, M1)* | `BeginUpload` (§7.6) | unary |
-| *(none &mdash; one part of a ticketed upload, M1)* | `UploadPart` (§7.6) | client-streaming |
-| *(none &mdash; completes a multipart upload, M1)* | `CompleteUpload` (§7.6) | unary |
+| *(none &mdash; deployment discovery)* | `GetServerInfo` (§2.1) | unary |
+| *(none &mdash; retained storage receipt)* | `GetReceipt` (§2.2) | unary |
+| *(none &mdash; upload ticket)* | `BeginUpload` (§7.6) | unary |
+| *(none &mdash; one part of a ticketed upload)* | `UploadPart` (§7.6) | client-streaming |
+| *(none &mdash; completes a multipart upload)* | `CompleteUpload` (§7.6) | unary |
 | *(none &mdash; reads a namespace authority generation)* | `GetAuthorityGeneration` (SPEC-SERVER §6.2.1) | unary |
 | *(none &mdash; raises a namespace authority generation)* | `SetAuthorityGeneration` (SPEC-SERVER §6.2.1) | unary |
-| *(none &mdash; reads a namespace's grant epoch, M2)* | `GetGrantEpoch` ([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)) | unary |
-| *(none &mdash; raises a namespace's grant epoch, M2)* | `SetGrantEpoch` ([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)) | unary |
-| *(none &mdash; sets a repository's visibility, M2)* | `SetRepoVisibility` ([SPEC-WRITE-GRANTS §9.1](SPEC-WRITE-GRANTS.md#91-visibility)) | unary |
-| *(none &mdash; mints a signed URL token, M2)* | `IssueObjectUrl` ([SPEC-WRITE-GRANTS §9.4](SPEC-WRITE-GRANTS.md#94-signed-url-tokens)) | unary |
+| *(none &mdash; reads a namespace's grant epoch)* | `GetGrantEpoch` ([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)) | unary |
+| *(none &mdash; raises a namespace's grant epoch)* | `SetGrantEpoch` ([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)) | unary |
+| *(none &mdash; sets a repository's visibility)* | `SetRepoVisibility` ([SPEC-WRITE-GRANTS §9.1](SPEC-WRITE-GRANTS.md#91-visibility)) | unary |
+| *(none &mdash; mints a signed URL token)* | `IssueObjectUrl` ([SPEC-WRITE-GRANTS §9.4](SPEC-WRITE-GRANTS.md#94-signed-url-tokens)) | unary |
 
 `write_ref` and the blob verbs are `Transport`-trait-level default
 methods that delegate to another trait method **before any transport
@@ -154,13 +154,12 @@ Connect server implementing the seven wire RPCs above (§2's table)
 gets every `Transport` trait verb for free through the client-side
 default impls, exactly as every other transport already does.
 
-The four rows marked "M1" are v2 additions. They have no `Transport`
-trait verb: they are deployment discovery and the ticketed upload
-protocol, which a client drives around the seven verb RPCs. Their proto
-messages land with the M1 implementation (§8), additively. The four rows
-marked "M2" are SPEC-WRITE-GRANTS additions for grant epochs, repository
-visibility, and URL tokens; their proto messages land with the M2
-implementation, additively.
+The rows for deployment discovery and the ticketed upload protocol are v2
+additions. They have no `Transport` trait verb: a client drives them
+around the seven verb RPCs. Their proto messages land with the version 2
+implementation (§8), additively. The rows for grant epochs, repository
+visibility, and URL tokens are SPEC-WRITE-GRANTS additions; their proto
+messages land with the grants implementation, additively.
 
 Endpoints follow the standard Connect convention:
 `POST /mkit.transport.v1.TransportService/<Method>`.
@@ -262,7 +261,7 @@ receipt per ref, including a deletion, and per lease scope as
 SPEC-SERVER §15.6 requires. This read allocates no write replay entry and does not expose the reader's published-view
 state. Advance receipts expose `previous` and the paired `packmap` of a
 committed write on that ref to every caller entitled to the receipt. SSH and enc clients receive
-no storage receipts in M5; their wire schemas do not change.
+no storage receipts; their wire schemas do not change.
 
 ---
 
@@ -551,7 +550,7 @@ message Challenge {
 }
 ```
 
-The proto messages land additively with the M3 implementation (§8).
+The proto messages land additively with the admission implementation (§8).
 Each `Challenge` is opaque: `scheme` names the external protocol that
 interprets `value`, and a challenge defined by another protocol can
 travel unchanged in `value` (informative: a deployment can mirror each
@@ -675,7 +674,7 @@ automatically.
 
 A client implementation must keep the HTTP status of an error
 response, so that it still recognizes a raw 402 that carries no
-Connect detail (informative; an M3 implementation requirement). The
+Connect detail (informative; an admission implementation requirement). The
 `connectrpc` 0.9 client drops that status when it builds its error
 (`client/mod.rs`, lines 2173&ndash;2255). Without a helper it fails the operation and shows the
 description and the challenge schemes to the user.
@@ -914,7 +913,7 @@ of controls is not feature-based `NotApplicable`.
 
 The reference Worker (§7.1) is the one deployment target where
 Connect streaming has a known, previously-hit failure mode:
-`apps/repo-worker/README.md` §"WatchRefs / streaming (issue #705, building on the #697 spike)"
+`apps/repo-worker/README.md` §"WatchRefs / streaming (building on the spike)"
 documents that `worker::WebSocket::events()` returns a **borrowed**
 `EventStream<'ws>`, which cannot satisfy a generated server-streaming
 trait method's `'static + Send` `ServiceStream<T>` bound &mdash; that
@@ -922,7 +921,7 @@ constraint is why `mkit.repo.v1.RepoService.WatchRefs` is served over
 a hand-rolled WebSocket instead of Connect server-streaming today.
 
 `DownloadPack` faces the identical shape of problem (server-to-client
-streaming on Workers), and the M2 Task 0 spike (mkit#697) prototyped
+streaming on Workers), and an earlier spike prototyped
 the design answer this document specifies: bridge the source of
 events (there, a Durable Object `/watch` WebSocket; for `DownloadPack`,
 a chunked read from R2/filesystem) into an **owned**
@@ -955,8 +954,8 @@ root cause (a `wrangler dev` limitation vs. a remaining adapter bug)
 not isolated. This document specifies the bridge as the correct
 *design*, informed by the mechanical proof; it does not claim the
 design is proven to deliver bytes to a real client yet. The reference
-Worker issue (mkit#699) and the streaming pack transfer issue
-(mkit#702) MUST re-verify end-to-end delivery (ideally against a real
+Worker and the streaming pack transfer
+MUST re-verify end-to-end delivery (ideally against a real
 Cloudflare deployment, not only `wrangler dev`) before either is
 considered done &mdash; a proto/spec review is not a substitute for that
 runtime verification.
@@ -979,7 +978,7 @@ dialect:
 **Reference-server behavior.**
 
 A `connectrpc` and `workers-rs` service
-([`apps/vcs-worker`](../../apps/vcs-worker), mkit#699), reusing
+([`apps/vcs-worker`](../../apps/vcs-worker)), reusing
 `apps/repo-worker`'s proven patterns: vendored `generated/` staged by
 `build.rs` (`MKIT_TRANSPORT_CODEGEN=1` to regenerate via
 `connectrpc-build` against the canonical
@@ -1206,7 +1205,7 @@ in process). There is no standalone self-hosted server binary: the former
 
 `mkit serve <path>` (the CLI) is only the `mkit+ssh://` forced-command
 server, speaking the SSH-frame protocol on stdin/stdout. Its former HTTP
-mode (`--http`, mkit#700) and encrypted listener (`--listen-enc`) are gone,
+mode (`--http`) and encrypted listener (`--listen-enc`) are gone,
 and with them the axum-hosted `TransportServer` of
 `mkit-transport-connect`'s former `server` feature.
 
@@ -1245,7 +1244,7 @@ constructs for the `mkit+https://` scheme (and loopback-only
 `mkit+http://`) &mdash; see
 `rust/crates/mkit-cli/src/remote_dispatch/mod.rs`.
 
-**Auth modes** (mkit#699 follow-up, closing the gap this document
+**Auth modes** (closing the gap this document
 originally flagged in "Reference implementation" above):
 `ConnectTransport` supports two independent, additive auth modes &mdash;
 a deployment can require either, both, or neither:
@@ -1276,7 +1275,7 @@ discovery after the retry ladder, and invalid advertisements retain the
 conservative `false` default. There is no local opt-in. Transactional SQLite
 and Durable Object deployments can therefore enable the existing packmap
 re-baseline gate automatically; the gate still requires advertised atomicity
-before resetting a chain (mkit#521).
+before resetting a chain.
 
 Every `Transport` method `ConnectTransport` implements is driven through
 the same `mkit_core::protocol::retrying`/`BackoffIterator` ladder
@@ -1309,8 +1308,7 @@ The regression tests
 variants, and the retry ladder itself (a flaky in-process server that
 fails the first N calls with a retryable error class, and a
 non-retryable-error/ladder-exhaustion pair) &mdash; through a real in-process
-`TransportService` server (memory-backed, not R2/DO), per this issue's
-testing decision: a real server, not a mock standing in for one.
+`TransportService` server (memory-backed, not R2/DO): a real server, not a mock standing in for one.
 
 ### 7.4 Repository addressing
 
@@ -2043,14 +2041,14 @@ protocol limits.
 ## 8. Out of scope
 
 This document specifies the proto and its consumption pattern only.
-Explicitly deferred to sibling issues:
+Explicitly deferred to later work:
 
-- The reference Worker implementation (mkit#699).
-- ~~`mkit serve`'s HTTP mode (mkit#700).~~ Implemented, then removed with the
+- The reference Worker implementation.
+- ~~`mkit serve`'s HTTP mode.~~ Implemented, then removed with the
   standalone server &mdash; see §7.2.
-- ~~The native CLI Connect client (mkit#701).~~ Implemented &mdash; see §7.3.
-- ~~The shared retry/backoff Connect interceptor (mkit#703).~~ Implemented
-  directly in `ConnectTransport` (mkit#790) &mdash; see §7.3.
+- ~~The native CLI Connect client.~~ Implemented &mdash; see §7.3.
+- ~~The shared retry/backoff Connect interceptor.~~ Implemented
+  directly in `ConnectTransport` &mdash; see §7.3.
 - S3 multipart upload (unrelated transport; not superseded by this
   document at all).
 - Migrating `mkit.repo.v1.WatchRefs` to real Connect server-streaming
@@ -2059,16 +2057,16 @@ Explicitly deferred to sibling issues:
 - End-to-end runtime verification of the `DownloadPack` streaming
   bridge (§6.3's known risk) &mdash; this is a proto/design review gate, not
   a working-server acceptance gate.
-- Generated TypeScript (`connect-es`) clients for this service (M2
-  scope, tracked with mkit#706).
-- Implementing version 2 (M1): multi-repository routing, the namespace
+- Generated TypeScript (`connect-es`) clients for this service
+  (tracked separately).
+- Implementing version 2: multi-repository routing, the namespace
   and write policies, sharded server metadata, `GetServerInfo`, upload
   tickets and resumable parts, ref deletion, and `ListRefs` paging, with
-  the proto additions they need (mkit#1084, mkit#1090).
+  the proto additions they need.
 - Implementing write and read grants, epochs, signed reads, private
   repositories and URL tokens, specified in
-  [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md) (M2; mkit#1085, mkit#1089).
-- Implementing admission (M3, mkit#1086): the `AdmissionChallenge` and
+  [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md).
+- Implementing admission: the `AdmissionChallenge` and
   `Challenge` proto messages, the `AdmissionRequired` `TransportError`
   variant and the retryable mapping of `aborted` (§5), the server's
   admission step and outcomes (§5.1, §7.7), and the client's 402
@@ -2086,25 +2084,25 @@ Explicitly deferred to sibling issues:
 | `2` | draft | §7.4 client URL parsing accepts the union of the self-certifying and authority-mode namespace grammars; the server still enforces only its own mode's grammar, and grants, grant epochs, and visibility statements keep the self-certifying grammar. No wire schema change. |
 | `2` | draft | Opt-in authority-owned opaque namespace grammar in §7.4; disjoint from self-certifying names, with deployment-rooted ownership and refused owner statements under SPEC-SERVER §6.2.2. No wire schema or CLI change. |
 | `2` (ListRepos) | draft | Additive §7.10 namespace listing RPC and new messages, atomic coordinator visibility indexes, bounded sorted pages and integrity-protected tokens; grants retain public listing rights only. |
-| `2` (WP-2.16) | draft | Additive namespace Get/SetAuthorityGeneration RPCs outside auth-v2, with deployment-authority statements and pending completion hints. |
-| `2` (WP-1.28c) | draft | §7.9 states the client rule for stale listings: a listed branch whose packmap and head are both strongly absent is skipped without a tracking ref; a present head with no packmap and any transport error stay failures. |
-| `2` (WP-1.15) | draft | §7.4's ssh/enc paragraph gains ssh root mode (`mkit serve --root`, one repository per process addressed by `<NAMESPACE>/<NAME>`) and the enc `--enc-repository` listener binding, and notes the same-session implicit-membership rule transport-identity sessions use in place of upload tickets (informative). |
-| `2` (WP-1.28b) | draft | §7.9 clarifies per-bucket ListRefs index lag and head/packmap age differences. |
-| `2` (WP-1.11b) | draft | §5 and §7.6: a part receipt bound to another ticket is an invalid receipt (`invalid_argument`), with no cross-ticket oracle. |
-| `2` (WP-3.13) | draft | §5.1 permits order-preserving combined WWW-Authenticate challenge lists on platforms that fold response fields; servers SHOULD separate field lines and clients/helpers MUST parse challenge lists (RFC 9110). |
+| `2` | draft | Additive namespace Get/SetAuthorityGeneration RPCs outside auth-v2, with deployment-authority statements and pending completion hints. |
+| `2` | draft | §7.9 states the client rule for stale listings: a listed branch whose packmap and head are both strongly absent is skipped without a tracking ref; a present head with no packmap and any transport error stay failures. |
+| `2` | draft | §7.4's ssh/enc paragraph gains ssh root mode (`mkit serve --root`, one repository per process addressed by `<NAMESPACE>/<NAME>`) and the enc `--enc-repository` listener binding, and notes the same-session implicit-membership rule transport-identity sessions use in place of upload tickets (informative). |
+| `2` | draft | §7.9 clarifies per-bucket ListRefs index lag and head/packmap age differences. |
+| `2` | draft | §5 and §7.6: a part receipt bound to another ticket is an invalid receipt (`invalid_argument`), with no cross-ticket oracle. |
+| `2` | draft | §5.1 permits order-preserving combined WWW-Authenticate challenge lists on platforms that fold response fields; servers SHOULD separate field lines and clients/helpers MUST parse challenge lists (RFC 9110). |
 | `2` | draft | §5.1 names the admission headers with the `Admission-` prefix: `ADMISSION-REQUIRED`, `Admission-Authorization`, `ADMISSION-SIGNATURE`, `Admission-Receipt` and `ADMISSION-RESPONSE`. The sample challenge schemes are neutral. |
-| `2` | draft | Informative §7.1 clarification: concurrent new-operation duplicates may each reach admission before reservation; admission credentials are single-use to avoid double charging (WP-3.13 orchestrator ruling). |
-| `2` | draft | §7.9 defines absent or zero `page_size` as the advertised maximum and malformed or foreign page tokens as `invalid_argument` (WP-1.28a). |
-| `2` (WP-1.10) | draft | §7.6 requires canonical branch-head/packmap pairing for ticketed advances; §7.8 rejects deletion with tickets. |
-| `2` (WP-1.11a) | draft | §5 classifies invalid part receipts as `invalid_argument`; §7.6 permits storage-session abort after a root mismatch and retains rotated receipt keys for at least seven days. |
-| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). The additive empty `MembershipNotVisible` error detail marks the membership-lag `unavailable` (§5); the message stays unchanged. BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6; WP-1.9a amendment 1). WP-4.11 scopes §7.4's Host/path/forwarded-selector prohibition to Connect RPCs and cross-links plain HTTP read admission (§5.1). |
+| `2` | draft | Informative §7.1 clarification: concurrent new-operation duplicates may each reach admission before reservation; admission credentials are single-use to avoid double charging. |
+| `2` | draft | §7.9 defines absent or zero `page_size` as the advertised maximum and malformed or foreign page tokens as `invalid_argument`. |
+| `2` | draft | §7.6 requires canonical branch-head/packmap pairing for ticketed advances; §7.8 rejects deletion with tickets. |
+| `2` | draft | §5 classifies invalid part receipts as `invalid_argument`; §7.6 permits storage-session abort after a root mismatch and retains rotated receipt keys for at least seven days. |
+| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5); SPEC-WRITE-GRANTS: signed reads and `X-Write-Grant` (§7.1), the grant RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC. The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until tickets land. Branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). The additive empty `MembershipNotVisible` error detail marks the membership-lag `unavailable` (§5); the message stays unchanged. BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6). It scopes §7.4's Host/path/forwarded-selector prohibition to Connect RPCs and cross-links plain HTTP read admission (§5.1). |
 | `2` | draft | Additive opt-in pack locations in `DownloadPack`, discovery support and lifetime fields (§2.1), client verification and streaming fallback (§6.2), and unchanged repository isolation and upload verification (§§7.4, 7.6). |
 | `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1; SPEC-SERVER §12); §7.7 ticket-pack loss clarified as a defensive abort case. |
 | `2` | draft | Additive `GetServerInfoResponse.async_inspection = 18` (§2.1); published-view and quarantine rules in SPEC-SERVER §§10–11; §7.1 never stores a sync inspector `unavailable` for replay; §7.6 `AlreadyPresent` is never answered for a pack with hidden content. |
-| `2` | draft | Additive `GetServerInfoResponse.inspection_max_objects = 19` (§2.1) advertises the configured synchronous-inspection advance cap, absent without inspectors (WP-5.5a). |
+| `2` | draft | Additive `GetServerInfoResponse.inspection_max_objects = 19` (§2.1) advertises the configured synchronous-inspection advance cap, absent without inspectors. |
 | `2` | draft | Additive `GetReceipt` signed writer-view read (§2.2), storage-receipt fields on `UpdateRefResponse` and `AdvanceRefsResponse` (§§3–4), and current receipt-and-notice key semantics in `GetServerInfo` (§2.1); SPEC-SERVER §15. |
 | `2` | draft | Editorial: §3 and §7.3 retry obligations for `UpdateRef`/`AdvanceRefs` reconciled with SPEC-TRANSPORT §7 (verification toolchain). |
-| `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
+| `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending shared-proto extraction. |
 
 ---
 
@@ -2115,11 +2113,12 @@ The acceptance gate for this document itself is static, not behavioral:
 - `buf lint` (`STANDARD` category) against `proto/mkit/transport/v1/transport.proto` &mdash; zero errors, zero lint exceptions.
 - `buf breaking` initialized (`breaking.use: [FILE]` in `buf.yaml`, §1) as the baseline for every future change to this module.
 - The proto compiles cleanly through the real `buffa`/`connectrpc-build` codegen path (not just `protoc`) &mdash; verified by generating and compiling the full client and server stub set (`TransportService`, `TransportServiceClient`, every request/response/`oneof` message) against `buffa 0.9.1`/`connectrpc 0.9`/`connectrpc-build 0.9`, mirroring the exact `include_generated!()` pattern `mkit-repo-client`/`apps/repo-worker` use.
-- Explicit maintainer sign-off on the RPC shapes in this document, per the originating issue's Testing Decisions.
+- Explicit maintainer sign-off on the RPC shapes in this document.
 
-mkit#699/#700/#701 each own their own runtime test anchors (integration
-tests against a real or locally-hosted server); this document is not
-amended to list them. mkit#701 (§7.3) is the first to land one:
+The reference Worker, the HTTP mode and the native client each own their
+own runtime test anchors (integration tests against a real or
+locally-hosted server); this document is not amended to list them. The
+native client (§7.3) is the first to land one:
 `rust/crates/mkit-transport-connect/tests/roundtrip.rs` runs a real
 in-process `TransportService` server and drives every `Transport` verb
 through it via the generated client &mdash; see §7.3 for what it does and
@@ -2133,7 +2132,7 @@ reference Worker).
 | Invariant | Enforced by |
 |---|---|
 | Every `Transport` trait verb has exactly one corresponding wire RPC, or is a documented client-side default-impl delegation with no independent wire shape. | §2's mapping table; `protocol.rs`'s default-impl doc comments. |
-| `RefExpectation`'s wire numbers (`ANY=1`, `MISSING=2`, `MATCH=3`) never change, even after mkit#679 extracts a shared proto. | `buf breaking` (`FILE` category, §1); the `RefExpectation` doc comment matching `ssh.proto`'s "do NOT renumber" contract. |
+| `RefExpectation`'s wire numbers (`ANY=1`, `MISSING=2`, `MATCH=3`) never change, even after a shared proto is extracted. | `buf breaking` (`FILE` category, §1); the `RefExpectation` doc comment matching `ssh.proto`'s "do NOT renumber" contract. |
 | A rejected `UploadPack` stream never creates or overwrites the destination pack. | §6.1's server-side rejection checks, mirroring SPEC-TRANSPORT §4.2's SSH requirement. |
 | `DownloadPack` either completes its stream with `chunk.last = true`, returns one negotiated location, or fails the whole call before any message is sent. Location bytes are verified before use, with one streaming fallback on failure. | §6.2. |
 | Every `TransportError` variant a server can raise has exactly one Connect code it maps to; a client's inverse mapping is mechanical, not heuristic. | §5's table. |
@@ -2146,7 +2145,7 @@ reference Worker).
 | Every admitted reservation gets exactly one outcome: `Committed`, `Aborted`, or `Expired`. | §7.7. |
 | A stock multi-repository deployment never runs `write_policy = open`. | §7.5 write policy. |
 | An `AdvanceRefs` conflict is a typed response value, never a Connect error. | §4 &mdash; matches `AdvanceOutcome`'s three-variant, no-error-variant shape in `protocol.rs`. |
-| The `DownloadPack` Workers-streaming design is documented as unverified end-to-end until a sibling issue proves real client-visible delivery. | §6.3's "Known risk" paragraph; mkit#699/#702's re-verification requirement. |
+| The `DownloadPack` Workers-streaming design is documented as unverified end-to-end until a later change proves real client-visible delivery. | §6.3's "Known risk" paragraph; re-verification requirement. |
 
 ## Wasm server deadline policy
 

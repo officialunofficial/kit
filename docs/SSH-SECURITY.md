@@ -1,6 +1,6 @@
 # SSH transport security model
 
-Status: **Informative**. Addresses red-team R-10 / R-11.
+Status: **Informative**.
 
 This document describes what mkit's SSH transport does and does NOT do,
 what guarantees users can rely on, and how to harden a deployment.

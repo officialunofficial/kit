@@ -12,7 +12,7 @@ files).
 Scope: gear table derivation, chunking parameters, and the determinism
 contract that makes chunked_blob hashes stable across producers.
 
-Resolves red-team R-46 (gear-seed determinism gap).
+The gear seed is fixed, so chunking is deterministic.
 
 ---
 
@@ -115,7 +115,7 @@ mkit-core the worktree picks `CHUNK_THRESHOLD = 1 MiB`
 is chunked**, the parameters above MUST be used.
 
 Implementation status: end-to-end wiring is in place across the
-hashing, staging, commit, and read-back paths (issue #203).
+hashing, staging, commit, and read-back paths.
 
 A single helper, `worktree::store_file_object`, is the one place that
 decides a regular file's object representation: at or below

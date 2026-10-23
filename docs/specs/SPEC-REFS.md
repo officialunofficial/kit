@@ -15,13 +15,13 @@ share it, given the server support §5.1 requires for s3 and http; the
 in-process memory transport's atomicity is in-process only, because it
 is never shared across processes. The local
 `mkit-core` `refs::cas_write` helper used by commands that write refs
-directly is serialized under a per-ref lock (#637, §5.1). See
+directly is serialized under a per-ref lock (§5.1). See
 SPEC-CONVENTIONS §2 for what draft/stable and normative/advisory mean.
 Scope: ref names, ref wire bytes, ref storage layout, and the exact
 semantics of `listRefs(prefix)` and `updateRef(condition)` across
 transports.
 
-Resolves red-team R-07, R-08, R-13, R-40.
+This spec fixes the ref name grammar and the write rules.
 
 ---
 
@@ -311,7 +311,7 @@ instance's single `Mutex`, so all three conditions are atomic for every
 thread sharing that instance. It provides no cross-process atomicity and
 needs none: the memory transport is an in-process test transport. The
 file transport's `.match` is atomic across processes via the OS lock
-above. As of #637, the local `mkit-core`
+above. As of, the local `mkit-core`
 `refs::cas_write` helper used by commands that mutate refs directly on
 disk (without going through the file transport) is also atomic across
 processes: every write condition takes a dedicated `<common_dir>/refs-<ref>.lock`
@@ -342,7 +342,7 @@ of itself &mdash; it does not, on its own, coordinate against a `commit`,
 rule that closes this gap** &mdash; see SPEC-CONCURRENCY §3.1, which documents
 it as a real, currently unresolved coordination gap, and states mkit's
 supported deployment shape (a served root a worktree-owning process
-does not also mutate directly) rather than a locking fix. MKIT-11/#655
+does not also mutate directly) rather than a locking fix. The server
 added detection (a stderr warning when a local command runs against a
 root a live `mkit serve` holds `serve.lock` on) without closing the
 gap &mdash; see SPEC-CONCURRENCY §3.1 for exactly what is and is not
@@ -488,7 +488,7 @@ base/ours/theirs material lives only in this sidecar.
    returns `RefConflict` and the ref is left at the winner's value.
    Enforced by the OS exclusive lock (§5.1); the local `mkit-core`
    `refs::cas_write` helper (not the file transport) has the same
-   exactly-one-winner property since #637, proven by
+   exactly-one-winner property, proven by
    `cas_match_race_never_loses_an_update_across_uncoordinated_callers`.
 6. **Ref name grammar**: valid &mdash; `main`, `feat/v1.0-beta`,
    `release/2024_09`. Invalid &mdash; `feat/..`, `/main`, `main@v1`,
@@ -524,4 +524,4 @@ across separate instances, which never share state (§5.1). The file
 transport's own `.match` is race-free across processes (OS exclusive
 lock), and the local `mkit-core` `refs::cas_write` helper used by
 commands that write refs directly rather than through the file transport
-is, as of #637, likewise serialized under a per-ref lock (§5.1).
+is, as of, likewise serialized under a per-ref lock (§5.1).

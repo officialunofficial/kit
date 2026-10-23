@@ -19,7 +19,7 @@ grants, including the stored-epoch equality check in §7 step 11, the
 §8.2 and §8.3 ref-scope rules, and the unsigned grant-epoch RPCs. It
 verifies signed reads (§9.2), enforces private-repository reads and both
 `SetRepoVisibility` modes (§9.1, §9.3), and mints URL tokens (§9.4).
-ssh/enc grant registration remains for later M2 work packages.
+ssh/enc grant registration remains for later work.
 Golden
 vectors ([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests))
 land with each implementation; §13.1 lists those that exist and names
@@ -56,8 +56,8 @@ Conformance: an independent implementation MUST be able to produce and
 verify every statement, header and token in this document from this
 document alone.
 
-Driving issues: mkit#1085 (grants) and mkit#1089 (signed reads, private
-repositories, URL tokens).
+Driving needs: grants, signed reads, private
+repositories and URL tokens.
 
 ---
 
@@ -477,7 +477,7 @@ replayed later, or at another deployment.
 ### 5.3 RPCs
 
 Both RPCs act on a namespace, not a repository, and their proto lands
-with the M2 implementation, additively.
+with the grants implementation, additively.
 
 `GetGrantEpoch` and `SetGrantEpoch` are namespace RPCs. They carry no
 `X-Repository`, and a client MUST NOT sign them.
@@ -926,7 +926,7 @@ is `permission_denied` in every case.
 
 ### 9.4 Signed URL tokens
 
-HTTP object serving (M4) serves private content through short-lived
+HTTP object serving serves private content through short-lived
 URL tokens. `IssueObjectUrl` mints them.
 
 **Request.** `IssueObjectUrl(repository, target, ttl)` is a signed read
@@ -934,7 +934,7 @@ URL tokens. `IssueObjectUrl` mints them.
 requested lifetime in seconds; 0 asks for the default. The caller needs
 read access under §9.3, and an unauthorized caller gets `not_found`. The
 server does not resolve the target: the token binds the unresolved
-target, and serving decides what it resolves to (M4), so issuing a
+target, and serving decides what it resolves to, so issuing a
 token reveals nothing about the repository's contents.
 
 **Lifetime.** The token lives `min(ttl, url_token_ttl)` seconds, or
@@ -1030,7 +1030,7 @@ for their principals are registered server-side instead.
   by the forced command's principal argument; on enc, the peer's static
   key.
 - The deployment operator registers a signed grant (in the §4.2
-  encoding) for a principal (informative: an operator command in M2,
+  encoding) for a principal (informative: an operator command,
   wrapped by [SPEC-SERVER §16.5](SPEC-SERVER.md#165-procedures)). Registration verifies §7 steps
   1, 3, 4 and 5 and rejects a grant whose grantee is not the principal.
 - No grant is carried on ssh and enc, so any of the three §6 paths may
@@ -1159,15 +1159,15 @@ the workspace grant separator `mkit-workspace-grant:v1`.
   crate, which gains Keccak-256 and secp256k1 recovery, not the core
   crate), server enforcement, and the proto for `GetGrantEpoch`,
   `SetGrantEpoch`, `SetRepoVisibility` and `IssueObjectUrl`. They land
-  in M2.
-- The CLI: `mkit grant create`, `list` and `revoke`, and `mkit epoch`
-  (M2). Informative: the client grant store lives under the user config
+  with the grants implementation.
+- The CLI: `mkit grant create`, `list` and `revoke`, and `mkit epoch`.
+  Informative: the client grant store lives under the user config
   directory and is never repository-scoped, like the other credential
   and signing keys of [SPEC-CONFIG-SECURITY](SPEC-CONFIG-SECURITY.md).
 - HTTP object serving: URL forms, target resolution, reachability, cache
-  headers, and the publication of the URL-token key set (M4, mkit#1088).
+  headers, and the publication of the URL-token key set.
 - The published view and quarantine, which decide what the published
-  view contains (M5).
+  view contains.
 - Owners that no single key controls, for example multisig or contract
   accounts.
 - The workspace grant (`mkit-workspace-grant:v1`). It grants workspace
@@ -1271,8 +1271,8 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 | `1` (stored-shape amendment) | draft | §9.4 requires the current server-clock visibility change time for both envelope and statement changes; incomplete stored visibility rows fail closed. |
 | `1` (visibility admission amendment) | draft | `SetRepoVisibility` runs the server's admission and outcome stages in both modes (§9.1; SPEC-SERVER §3). No change to the statement, signature or stored visibility row. |
 | `1` (URL-token visibility amendment) | draft | A URL token issued at or before the repository's last visibility change is refused (§9.4). The stored visibility row requires a server-clock change time and refuses incomplete rows; the token statement and signature are unchanged. |
-| `1` (R-205 amendment) | draft | Repository visibility without a stored setting follows the deployment default, public unless configured; explicit visibility always wins. Changing the default also changes existing repositories without explicit visibility. |
-| `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc (mkit#1085, mkit#1089). WP-4.11 adds the `token=` URL form and key-set publication, and amends token paths to 0–1024 bytes so an empty path names the root tree. Fix round 1 orders stateless token checks before the stored-epoch read. WP-2.9 pins the `DownloadPack` signed-read body; WP-2.11 lands the URL-token fixtures. Fix round 2 caps `url_token_ttl` at 24 h and excludes control characters from token paths. |
+| `1` (visibility default amendment) | draft | Repository visibility without a stored setting follows the deployment default, public unless configured; explicit visibility always wins. Changing the default also changes existing repositories without explicit visibility. |
+| `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc. Adds the `token=` URL form and key-set publication, and amends token paths to 0–1024 bytes so an empty path names the root tree. Fix round 1 orders stateless token checks before the stored-epoch read. Pins the `DownloadPack` signed-read body; Lands the URL-token fixtures. Fix round 2 caps `url_token_ttl` at 24 h and excludes control characters from token paths. |
 
 ---
 

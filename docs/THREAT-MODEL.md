@@ -88,7 +88,7 @@ mkit defends:
   `mkit_core::sign::{verify_commit,verify_remix,verify_tag}` &mdash; the same
   check `mkit verify <rev>` runs manually &mdash; before the remote-tracking
   ref is published; a structurally invalid or missing signature aborts
-  the fetch and leaves local state untouched (issue #692). This is a
+  the fetch and leaves local state untouched. This is a
   default, not a guarantee against every key an attacker could produce:
   it proves the signature is well-formed over the object's own bytes,
   not that the signing key is one the user trusts (no trust-root /
@@ -256,7 +256,7 @@ ignored.
 | `ssh.user_known_hosts_file`         | **User**  | Selects which file is the source of trust.                |
 | `ssh.identity_file`                 | **User**  | Selects which private key SSH presents.                   |
 | `user.identity`                     | **User**  | Author identity; cannot be repo-selected for signed data. |
-| `pull.require_signed`               | **User**  | Disables post-fetch signature verification (§3.1, #692).  |
+| `pull.require_signed`               | **User**  | Disables post-fetch signature verification (§3.1).  |
 | `default_branch`                    | Repo      | UX default. No security weight.                           |
 | `remote_endpoint`                   | Repo      | Address; trust is on the user's transport config.         |
 | `remote_bucket`                     | Repo      | Address.                                                  |
@@ -280,8 +280,7 @@ but `mkit push`, `mkit pull`, and `mkit fetch` will refuse to attach
 ambient `MKIT_API_TOKEN` or `MKIT_R2_*` credentials to a
 repo-configured endpoint unless the user has explicitly listed that
 endpoint in user-scoped `trusted_remote_endpoint`. This closes the
-hostile-clone credential-exfiltration channel tracked in issue #97
-without breaking safe portable defaults for unauthenticated mirrors
+hostile-clone credential-exfiltration channel without breaking safe portable defaults for unauthenticated mirrors
 and SSH-bearing remotes.
 
 The gate is enforced at a single transport-dispatch choke point
@@ -303,7 +302,7 @@ unchanged.
 
 ## 5. Trust-roots scope
 
-`mkit verify-attest` and `mkit verify --trusted` (issue #693) both load
+`mkit verify-attest` and `mkit verify --trusted` both load
 trust roots from `$XDG_CONFIG_HOME/mkit/trust-roots.toml` by default.
 The path is **not** repo-local for the same reason as §4: a hostile
 clone must not choose its own verifier. `mkit trust add/list/remove`
@@ -472,7 +471,7 @@ matching update here.
   -D warnings`, `cargo test --workspace --locked`, keystore backend feature
   jobs for Linux/macOS with opt-in live native-backend roundtrips,
   `cargo deny`, reproducible-build smoke, `mkit version` byte-exact assertion.
-  Windows is not a supported build/test/release target (MKIT-6; see
+  Windows is not a supported build/test/release target (see
   `docs/INVARIANTS.md`).
 
 ---

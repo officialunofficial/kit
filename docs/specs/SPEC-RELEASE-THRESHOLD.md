@@ -73,7 +73,7 @@ A single party (the project lead, in practice) runs
 maintainer their `Share`, plus the cohort's public `Sharing<MinSig>`
 (which every holder also keeps a copy of for partial-verification).
 
-Trust assumptions in this phase:
+Trust assumptions of the trusted dealer:
 
 1. The dealer is honest at the moment of dealing &mdash; they do not retain
    the unsplit secret after distribution and do not collude with any

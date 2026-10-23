@@ -7,7 +7,7 @@
 # atomically into $MKIT_INSTALL_DIR (default: ~/.local/bin).
 #
 # This script targets Darwin and Linux (including WSL, which runs the real
-# Linux binary). Windows is not a supported target (MKIT-6; see
+# Linux binary). Windows is not a supported target (see
 # docs/INVARIANTS.md) — Windows users should run mkit under WSL.
 #
 # Usage:

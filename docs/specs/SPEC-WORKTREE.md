@@ -12,7 +12,7 @@ here; **Draft** because §5's out-of-scope surface (`worktree
 move`/`lock`/`repair`) is not yet covered by this document.
 Scope: the common-dir / per-worktree state split, the linked-tree
 pointer-file format, the `worktrees/` registry, repository discovery,
-cross-worktree locking, and gc root-collection semantics. Issue #493.
+cross-worktree locking, and gc root-collection semantics.
 
 Reference implementation: `mkit-core/src/layout.rs` (the
 `RepoLayout` type is the single path-resolution authority; every
@@ -39,7 +39,7 @@ Divergences from git, both deliberate:
   per-worktree-adjacent in some git docs): it constrains the one object
   graph every tree reads.
 - **The stash is per-worktree.** git's stash is a shared ref
-  (`refs/stash`); mkit's is a worktree-state manifest, and #493
+  (`refs/stash`); mkit's is a worktree-state manifest, and
   specifies tree-local stash semantics (`stash` in a linked tree never
   touches a sibling's entries).
 
@@ -202,10 +202,10 @@ tree-local stash.
 Fail closed: a registry enumeration error or an unreadable sibling
 source aborts collection; gc never prunes on a partial view. The
 applied-packs record is a redownload-avoidance cache and MUST NOT be a
-root source (#409); gc may delete it freely.
+root source; gc may delete it freely.
 The `upload-parts/` receipt store is likewise a deletable cache and MUST NOT
 be a GC root. It is distinct from `receipts/`, reserved for signed storage
-receipts in M5. Part upload resume works only while the push plan regenerates
+receipts. Part upload resume works only while the push plan regenerates
 the same pack bytes.
 
 ### 4.5 `worktree add` write ordering (crash safety)
@@ -232,7 +232,7 @@ versions with and without worktree support while linked trees exist.
 - `mkit-core/src/layout.rs` unit tests: accessor/classification
   goldens, discovery fail-closed matrix, pointer-file golden bytes,
   id grammar.
-- `mkit-cli/tests/layout_phase0_pin.rs`: the single-worktree `.mkit`
+- `mkit-cli/tests/layout_baseline_pin.rs`: the single-worktree `.mkit`
   shape is a compatibility surface; it must never drift.
 - `mkit-cli/tests/linked_worktree_discovery.rs`,
   `worktree_command.rs`, `worktree_gc_cross_tree.rs`: shared-store,

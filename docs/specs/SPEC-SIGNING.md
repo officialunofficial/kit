@@ -15,8 +15,8 @@ named library function.
 Scope: the exact bytes covered by an Ed25519 signature on a commit or
 remix, and the domain separator used.
 
-This document resolves red-team risks R-04 (no version/magic in signing
-bytes) and R-17 (cross-domain signature confusion).
+This document puts a version and magic in the signing bytes and
+separates signature domains.
 
 ---
 
@@ -110,7 +110,7 @@ in the way some earlier hash constructions were, so nothing here is
 compensating for that).
 
 `COMMIT_DOMAIN` covers commits, `REMIX_DOMAIN` covers remixes, and
-`TAG_DOMAIN` covers annotated/signed tag objects (§4a, issue #230). The
+`TAG_DOMAIN` covers annotated/signed tag objects (§4a). The
 tag domain is **deliberately distinct** from the commit/remix domains so
 a tag signature can never be replayed as a commit/remix signature, or
 vice versa.
@@ -174,7 +174,7 @@ Where `PROLOGUE` is the 6 bytes defined in SPEC-OBJECTS §2:
 - `content_digest` (32 bytes) &mdash; same reasoning: downstream pack-digest
   annotation. Not a commit identity input.
 
-These two exclusions resolve red-team R-45. They are the only commit-
+These two exclusions keep the annotations out of the signing bytes. They are the only commit-
 struct fields excluded from signing bytes.
 
 The **signing hash** is then:
@@ -271,7 +271,7 @@ distinct digests.
 Therefore, a signature over any one of the commit/remix/tag domain
 digests cannot be replayed as a signature over either of the other two.
 
-This is the defense against R-17. The previous scheme used only the
+This is the defense against cross-domain signature confusion. The previous scheme used only the
 ObjectType tag byte (0x03/0x04) as separator &mdash; one byte of domain &mdash; and
 was fragile. v1 uses ≥ 11 bytes of high-entropy ASCII plus a null
 terminator.
@@ -469,11 +469,11 @@ and the mechanism that enforces or detects each.
 
 | Invariant | Enforced by |
 |---|---|
-| A signature in one domain never verifies in another (commit ↔ remix ↔ tag; R-17) | `u16_le(domain.len)` prefix + disjoint domain strings, both preceding any user-controlled byte (§2.1, §5) |
+| A signature in one domain never verifies in another (commit ↔ remix ↔ tag) | `u16_le(domain.len)` prefix + disjoint domain strings, both preceding any user-controlled byte (§2.1, §5) |
 | Flipping any covered field (tree, parents, author, message, timestamp, signer, tag target/type/name) invalidates the signature | signing bytes cover every identity field of the object (§3, §4, §4a) |
 | No field-boundary ambiguity in signing bytes | every variable-length field is length-prefixed (`Identity`, `message_len`, `parent_count`, `name_len`) (§3, §4, §4a) |
 | A signature is bound to one object type and schema version | the 6-byte PROLOGUE leads the signing bytes (§3) |
-| `message_hash`/`content_digest` annotations never shift the signing hash (R-45) | both fields excluded from signing bytes (§3) |
+| `message_hash`/`content_digest` annotations never shift the signing hash | both fields excluded from signing bytes (§3) |
 | Malleable/non-canonical signatures are rejected identically by all verifiers | the §1 acceptance predicate's checks 1–3 (non-canonical/low-order `R` or `A`, non-canonical or out-of-range `S` all fail) (§1) |
 | An annotated-but-unsigned tag never passes verification | all-zero signature fails the strict Ed25519 check (§4a) |
 | The verification key is the object's own `signer` field, never caller-supplied | verifier rebuilds signing bytes and parses `signer` from the object (§6) |

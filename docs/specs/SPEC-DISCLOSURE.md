@@ -18,8 +18,8 @@ a served object set is the full content that commit id commits to
 ("closure profile" / full disclosure, §7), and a multi-chunk range
 container (MKDS, §8).
 
-This is issue #1015 (verifier kit). Out of scope, deliberately:
-wasm bindings (PR 4), CLI commands (PR 5), the docs guide (PR 6).
+This spec covers the verifier kit. Out of scope, deliberately:
+wasm bindings, CLI commands and the docs guide.
 
 ## 1. Purpose and trust model
 
@@ -39,8 +39,7 @@ A verified disclosure does **not** prove:
 
 - **completeness.** That the disclosed path is the *only* thing under its
   parent, or that nothing else exists in the repository. A disclosure
-  bundle carries a proof of *inclusion*, never of *exclusion* &mdash; see §9
-  and issue [#1027](https://github.com/officialunofficial/mkit/issues/1027).
+  bundle carries a proof of *inclusion*, never of *exclusion* &mdash; see §9.
 - **signer identity.** `signer`/`signature_valid` report whether the
   commit's (or remix's) embedded Ed25519 signature verifies against its
   embedded public key (SPEC-SIGNING §3). Binding that public key to a
@@ -568,8 +567,7 @@ is needed for the additive container.
 
 - **Non-membership.** `payload_kind 3` is reserved for a future proof
   that a name is *absent* from a `Tree` (a range proof over the two
-  lex-adjacent entries). Tracked as
-  [#1027](https://github.com/officialunofficial/mkit/issues/1027). Not
+  lex-adjacent entries). Not
   implemented here.
 
 ## 10. Invariants

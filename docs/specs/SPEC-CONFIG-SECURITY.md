@@ -34,7 +34,7 @@ Without enforcement, any repo-scoped knob that names a file path,
 selects a process to spawn, points at a network endpoint that will
 carry ambient credentials, or selects a private signing key would be
 attacker-controlled. This is the same confused-deputy shape closed
-in GHSA-001 and tracked further in issue #97.
+in GHSA-001.
 
 The defense is structural, not per-call: at the config READ site,
 every key is classified as either repo-safe (`SAFE`) or user-only
@@ -82,8 +82,8 @@ including a matcher for a `remote.<name>.*` pattern key.
 | `ssh.strict_host_key_checking`       | **UNSAFE** | Letting the repo disable host-key checking opens `mkit push` to MITM.                                                                                                              |
 | `ssh.user_known_hosts_file`          | **UNSAFE** | The source of trust for SSH host-key verification.                                                                                                                                  |
 | `ssh.identity_file`                  | **UNSAFE** | Selects which private key SSH presents. Same shape as `signing_key`.                                                                                                                |
-| `admission_helper` (M3) | **UNSAFE** | Names an executable the client runs when a remote answers with an admission challenge ([SPEC-TRANSPORT-CONNECT §5.1](SPEC-TRANSPORT-CONNECT.md#51-admission-challenges)). It spawns a process and can spend the user's money, so it is RCE plus a payment primitive if repo-controlled. Repository config MUST NOT set it. The client runs it only for a remote that passes the user-scoped `trusted_remote_endpoint` gate (§3.4). |
-| `remote.<name>.admission_headers` (M3) | **UNSAFE** | Adds header names to the admission-helper allowlist of remote `<name>`. If repo-controlled, it could widen what a helper may attach to requests. It can never add a hard-reserved header (the auth v2 envelope headers, `X-Write-Grant`, `X-Mkit-*`, `X-Forwarded-*`, `Host`, `Content-*`, `Transfer-Encoding`, `Connect-*`, `Cookie`, `Idempotency-Key`, hop-by-hop headers; full list in SPEC-TRANSPORT-CONNECT §5.1); an entry naming one has no effect. `mkit config` SHOULD refuse to write a reserved name, and the load-time warning for one SHOULD use the fixed wording of SPEC-TRANSPORT-CONNECT §5.1. Unlike `remote.<name>.url`, this member of the `remote.<name>.*` family is user-scoped only. |
+| `admission_helper` | **UNSAFE** | Names an executable the client runs when a remote answers with an admission challenge ([SPEC-TRANSPORT-CONNECT §5.1](SPEC-TRANSPORT-CONNECT.md#51-admission-challenges)). It spawns a process and can spend the user's money, so it is RCE plus a payment primitive if repo-controlled. Repository config MUST NOT set it. The client runs it only for a remote that passes the user-scoped `trusted_remote_endpoint` gate (§3.4). |
+| `remote.<name>.admission_headers` | **UNSAFE** | Adds header names to the admission-helper allowlist of remote `<name>`. If repo-controlled, it could widen what a helper may attach to requests. It can never add a hard-reserved header (the auth v2 envelope headers, `X-Write-Grant`, `X-Mkit-*`, `X-Forwarded-*`, `Host`, `Content-*`, `Transfer-Encoding`, `Connect-*`, `Cookie`, `Idempotency-Key`, hop-by-hop headers; full list in SPEC-TRANSPORT-CONNECT §5.1); an entry naming one has no effect. `mkit config` SHOULD refuse to write a reserved name, and the load-time warning for one SHOULD use the fixed wording of SPEC-TRANSPORT-CONNECT §5.1. Unlike `remote.<name>.url`, this member of the `remote.<name>.*` family is user-scoped only. |
 | `transport_auth` | **UNSAFE** | Selects whether network requests invoke the ambient signing identity. Repository config MUST NOT enable it. User-scoped envelope signing additionally requires exact `trusted_remote_endpoint` approval before signer resolution. |
 | `attest.default_algorithm`           | **UNSAFE** | Selector. Flipping from `ed25519` to `secp256k1` / `p256` routes attestation signing to whichever non-Ed25519 key the user happens to have set up (confused-deputy).               |
 | `attest.signer`                      | **UNSAFE** | Selector. Flipping from `repo-key` to `external` or `keystore` weaponizes a user-scoped binary/keystore against attacker-chosen content.                                          |
@@ -92,8 +92,8 @@ including a matcher for a `remote.<name>.*` pattern key.
 | `attest.external_signer_timeout_secs`| **UNSAFE** | Timeout for the spawned external signer. Listed in `REPO_FORBIDDEN_KEYS` alongside the other `attest.external_signer_*` keys: a repo-controlled value could keep a hostile signer subprocess alive (or starve a benign one) and only makes sense under the same trust scope as the path/argv it governs. |
 | `attest.secp256k1_key_path`          | **UNSAFE** | Legacy raw-file path for a secp256k1 signing key.                                                                                                                                   |
 | `attest.p256_key_path`               | **UNSAFE** | Legacy raw-file path for a P-256 signing key.                                                                                                                                       |
-| `grant.webauthn_rp` (WP-2.13) | **UNSAFE** | Pins the `WebAuthn` relying parties (`<rp_id> <origin>...`, repeatable) whose assertions `mkit grant create --webauthn-assertion` and the user grant store accept as an owner signature ([SPEC-WRITE-GRANTS §4.3](SPEC-WRITE-GRANTS.md)). If repo-controlled, the attacker would choose which relying party vouches for an owner. Without a pin a `webauthn-p256` import is refused, so this key fails closed. |
-| user grant store (WP-2.13)           | **not a key** | `$XDG_CONFIG_HOME/mkit/grants/<grant id>.grant` (directory 0700, files 0600). Its location derives from the XDG base directory alone: there is no config key, flag or repository path that relocates it, and the store never reads a repository path. Every file is re-parsed and its owner signature re-verified on load, at most 1,024 files of at most 16 KiB each; a bad file costs one warning and is skipped. A planted file therefore cannot forge a grant, only fail to load. |
+| `grant.webauthn_rp` | **UNSAFE** | Pins the `WebAuthn` relying parties (`<rp_id> <origin>...`, repeatable) whose assertions `mkit grant create --webauthn-assertion` and the user grant store accept as an owner signature ([SPEC-WRITE-GRANTS §4.3](SPEC-WRITE-GRANTS.md)). If repo-controlled, the attacker would choose which relying party vouches for an owner. Without a pin a `webauthn-p256` import is refused, so this key fails closed. |
+| user grant store           | **not a key** | `$XDG_CONFIG_HOME/mkit/grants/<grant id>.grant` (directory 0700, files 0600). Its location derives from the XDG base directory alone: there is no config key, flag or repository path that relocates it, and the store never reads a repository path. Every file is re-parsed and its owner signature re-verified on load, at most 1,024 files of at most 16 KiB each; a bad file costs one warning and is skipped. A planted file therefore cannot forge a grant, only fail to load. |
 | `remote.<name>.url`                  | **SAFE** with runtime gate | Named-remote address. Same classification as `remote_endpoint`: each endpoint still flows through `enforce_trusted_remote_endpoint`, so a repo-controlled named remote cannot smuggle ambient `MKIT_API_TOKEN` / `MKIT_R2_*` credentials.       |
 | `remote.<name>.type`                 | SAFE       | Dispatch hint for a named remote (`file` / `http` / `s3` / `ssh`); same reasoning as `remote_type`.                                                                                  |
 | `branch.<name>.remote`               | SAFE       | Per-branch upstream remote name. A UX/tracking pointer with no credential-routing or signing weight; the named remote it points at is still gated per-endpoint.                       |
@@ -210,7 +210,7 @@ writes to the user-scoped config. The repo-scoped knob can therefore
 NEVER unilaterally trust a remote &mdash; the user's hand is always
 required.
 
-The admission helper (M3) has a gate of its own. The client MUST NOT run a
+The admission helper has a gate of its own. The client MUST NOT run a
 user-scoped `admission_helper`
 ([SPEC-TRANSPORT-CONNECT §5.1](SPEC-TRANSPORT-CONNECT.md#51-admission-challenges))
 for a remote unless the remote's endpoint equals the user-scoped
@@ -306,8 +306,8 @@ When you add a key to `Config`:
 - `docs/THREAT-MODEL.md` §4 &mdash; wider trust-boundary discussion.
 - `docs/specs/SPEC-KEYSTORE.md` §8.2 &mdash; the keystore-side requirement that
   every keystore selector be repo-forbidden.
-- Issue #97 &mdash; the credential-exfiltration follow-up that motivated
-  the runtime gate on `remote_endpoint`.
+- The credential-exfiltration channel that the runtime gate on
+  `remote_endpoint` closes.
 
 ---
 
@@ -322,7 +322,7 @@ and where each guarantee is anchored.
 | Serializing repo config never emits an UNSAFE key | explicit write-site allow-list in `config::write` (§3.2) |
 | `mkit config <key> <value>` never writes an UNSAFE key repo-scoped | the command intercepts `REPO_FORBIDDEN_KEYS` and routes to the user-scoped file (§3.2) |
 | A repo can NEVER unilaterally attach ambient credentials to its own endpoint | `enforce_trusted_remote_endpoint` requires the user-scoped `trusted_remote_endpoint` to match (§3.4) |
-| A repo can NEVER make the client run the admission helper or widen its header allowlist (M3) | both keys are UNSAFE, and the helper runs only for a remote matching `trusted_remote_endpoint` (§2, §3.4) |
+| A repo can NEVER make the client run the admission helper or widen its header allowlist | both keys are UNSAFE, and the helper runs only for a remote matching `trusted_remote_endpoint` (§2, §3.4) |
 | Repo-scoped `user.name` / `user.email` never influence the signed author | both are inert; `commit::resolve_author` never reads them (§2) |
 | The classification cannot silently drift from the code | `REPO_FORBIDDEN_KEYS` is the single source of truth (§1); the meta-test iterates the whole array and panics on a missing arm (§4) |
 | Every drop is user-visible with pinned wording | stderr warning, snapshot-tested (§3.3) |

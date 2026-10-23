@@ -79,7 +79,7 @@ Working-tree commands:
   - `-f`/`--force` &mdash; remove worktree files even when their content has
     diverged from the staged blob. Without `--force`, `rm` refuses to
     destroy a locally-modified tracked file (a dirty-worktree guard in
-    the spirit of the #176 restore guards); use `--cached` to keep the
+    the spirit of the restore guards); use `--cached` to keep the
     file or `--force` to discard the local changes.
 - `mkit mv [-f|--force] <source>... <dest>` &mdash; move or rename a tracked
   path and stage the change. `mv <src> <dst>` renames `src` to `dst`, or
@@ -180,7 +180,7 @@ Working-tree commands:
   hunk (default 3, matching git's `-U3`).
 - `mkit worktree add <path> [<commit-ish>]` / `list [--porcelain]` /
   `remove [--force] <path>` / `prune [--dry-run]` &mdash; manage linked working
-  trees (git-worktree parity, #493). Linked trees share the one object
+  trees (git-worktree parity). Linked trees share the one object
   store and the shared refs; each tree keeps its own `HEAD`, index,
   in-progress-operation state, and stash (note: git shares the stash
   across worktrees; mkit's stash is deliberately per-tree). `add` with no
@@ -199,7 +199,7 @@ Working-tree commands:
   *file* (`mkitdir: <path>`) into the main repository's
   `.mkit/worktrees/<id>/`. Interim limit: `mkit gc` refuses to run while
   linked worktrees exist (cross-tree root collection is a tracked
-  follow-up phase of #493) &mdash; remove or prune them first.
+  follow-up) &mdash; remove or prune them first.
 - `mkit stash [save|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
   save/restore WIP
   changes. `apply` restores an entry without removing it; `clear` drops
@@ -581,7 +581,7 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   prints nothing and still exits 0. `--pattern` filters to full ref names
   matching a shell glob (`*` spans `/`, `?` matches one char, `[...]` is a
   character class &mdash; the same matcher as `branch --list`/`tag -l`). This is
-  the stable inspection surface for refs (#652): scripts should use it
+  the stable inspection surface for refs: scripts should use it
   instead of `ls`/`cat` on `.mkit/refs/`, which is not a supported interface.
 - `mkit ref cat <name>` &mdash; print the resolved hash for exactly one ref,
   following `HEAD`'s symbolic indirection (`HEAD` is mkit's only symbolic
@@ -979,7 +979,7 @@ Remote / sync:
   and repoint any `branch.<b>.remote` upstream tracking it. Refuses to
   clobber an existing `<new>`. Removing or renaming a remote never
   touches the user-scoped `trusted_remote_endpoint`, which is keyed by
-  exact URL rather than remote name (so the #97 credential-trust gate is
+  exact URL rather than remote name (so the credential-trust gate is
   preserved).
 - `mkit remote get-url <name>` &mdash; print a remote's URL (use `default` for
   the flat default remote). `mkit remote set-url <name> <url>` &mdash; change an
@@ -1034,7 +1034,7 @@ Remote / sync:
   "branch":"...","old":"<hex>|null","new":"<hex>|null",
   "up_to_date":<bool>}` on success, or `{"ok":false,"error":"..."}` on
   failure.
-- **Post-fetch signature verification (issue #692, default ON).**
+- **Post-fetch signature verification (default ON).**
   `clone`/`pull`/`fetch` verify every commit/remix/tag the fetch newly
   introduces &mdash; the same check `mkit verify <rev>` runs manually
   (`mkit_core::sign::{verify_commit,verify_remix,verify_tag}`) &mdash; before
@@ -1082,7 +1082,7 @@ Remote / sync:
   first-parent history into several advances, each moving the branch to an
   intermediate commit whose closure fits; nothing is uploaded ahead of its
   advance. **Every intermediate state is published**: the remote branch, its
-  Stage 2 hooks, receipts and lifecycle events all fire once per advance, and
+  server hooks, receipts and lifecycle events all fire once per advance, and
   a failed push leaves the branch at the last published commit, which the
   error names. Run `mkit push` again to resume from there (the
   remote-tracking ref follows each advance). The first advance uses your usual
@@ -1091,7 +1091,7 @@ Remote / sync:
   client checks that your stored write grants cover every advance: a
   non-owner key needs `c` to create the branch (or `u`/`f` to update it), and
   an `f` grant for the later advances, on every server until indexed-mode
-  `u`-only fast-forwards land (R-148); the owner key needs no grant. A push
+  `u`-only fast-forwards land; the owner key needs no grant. A push
   that would be refused midway is refused up front, with no advance
   published. A single commit or merge that cannot be split (a merge always
   lands whole) and still needs more than six packs is refused before any
@@ -1103,7 +1103,7 @@ Remote / sync:
   the parts already accepted, provided the regenerated push plan is identical.
   After an interruption, run `mkit push` again to resume; the message reports
   how many parts were saved. Legacy Connect remotes use the existing upload path.
-- **Transfer progress (#711).** `clone`/`push`/`pull`/`fetch` stream a
+- **Transfer progress.** `clone`/`push`/`pull`/`fetch` stream a
   live, honest progress line on stderr while the network transfer runs &mdash;
   `Writing objects: N objects, B bytes` while building/uploading the
   outgoing pack, `Unpacking objects: N objects` while applying a
@@ -1295,7 +1295,7 @@ Remote / sync:
 Agent integration:
 
 - `mkit mcp [--repository <path>]` &mdash; start a Model Context Protocol
-  server on stdio so LLM agents (Claude, Cursor, etc.) can drive local
+  server on stdio so MCP clients can drive local
   mkit repositories through structured tool calls instead of raw shell.
   Exposes a conservative tool surface: status / diff (unstaged, staged,
   vs target) / log / show / branch / cat-file inspection, staging
@@ -1319,11 +1319,11 @@ Agent integration:
   external/multi-signer attestation controls are intentionally omitted
   because they can direct subprocess execution (use the `attest` CLI for
   that flow). `initialize` must precede tool calls. Tool results carry
-  the child command's output and its sysexits code on failure. Register
-  with an MCP client, for example:
+  the child command's output and its sysexits code on failure. Set the
+  MCP client's server command to:
 
   ```sh
-  claude mcp add mkit-repo -- mkit mcp --repository /path/to/repo
+  mkit mcp --repository /path/to/repo
   ```
 
 Grants, epochs and repository visibility ([SPEC-WRITE-GRANTS](specs/SPEC-WRITE-GRANTS.md)):
@@ -1545,7 +1545,7 @@ v1 subset:
 - `.mkit` and `.git` are always ignored (matched on the basename, ASCII
   case-insensitively).
 
-**Deferred (documented non-goals for now, #256):** nested per-directory
+**Deferred (documented non-goals for now):** nested per-directory
 ignore files (only the repo root is read), global excludes
 (`core.excludesFile`), and escaped trailing spaces.
 
@@ -1570,7 +1570,7 @@ These are documented behaviors, not bugs, with tracked follow-ups:
   no cross-branch delta graph, so those specific numbers would be
   fabricated. `clone`/`push`/`pull`/`fetch` do stream an honest
   `Writing objects: N objects, B bytes` / `Unpacking objects: N objects`
-  progress line (#711) &mdash; real counts only; see "Transfer progress"
+  progress line &mdash; real counts only; see "Transfer progress"
   above.
 - **`mkit remote`** lists remote **names only** (git-shaped); use
   `mkit remote -v` for `<name>\t<url> (fetch)`/`(push)`.
@@ -1625,15 +1625,15 @@ These are documented behaviors, not bugs, with tracked follow-ups:
 
 Several Git commands that were once "wontfix-by-design" have been
 **reinstated under safety guards** as part of the git-parity
-porcelain-completion work (#250): `mkit revert`, `mkit mv`, `mkit clean`, and
+porcelain-completion work: `mkit revert`, `mkit mv`, `mkit clean`, and
 `mkit reset --hard` are all available and documented above. Each keeps an
 mkit data-loss guard &mdash; for example, `clean` and `reset --hard` refuse to delete or
 discard without an explicit `-f` &mdash; rather than adopting git's silent
 destructive default. Rename *detection* in diff/log output remains a
-separate, unscheduled follow-up (decision #226): `mkit mv` stages the move
+separate, unscheduled follow-up: `mkit mv` stages the move
 but `status` shows it as a delete plus add, not `R`.
 
-Note: object garbage collection (`mkit gc`) **is shipped** (issue #233).
+Note: object garbage collection (`mkit gc`) **is shipped**.
 History-rewriting commands (`commit --amend`, `reset`, `rebase`) record
 the superseded commit in the recovery log, and `mkit gc` reclaims
 unreachable objects once they fall outside the grace window. See
@@ -1933,8 +1933,8 @@ the full subcommand list plus common flags; per-argument completion
 
 ### Using mkit as `git` (opt-in shim)
 
-`mkit` exposes a git-compatible CLI surface, so existing git habits &mdash; and AI
-agents that emit `git <cmd>` &mdash; can drive it. `contrib/git-shim/mkit-git` is an
+`mkit` exposes a git-compatible CLI surface, so existing git habits &mdash; and
+automated agents that emit `git <cmd>` &mdash; can drive it. `contrib/git-shim/mkit-git` is an
 **opt-in** forwarder (`git <args>` → `mkit <args>`) that you install yourself;
 it is never installed automatically and **never shadows the real `git`**.
 

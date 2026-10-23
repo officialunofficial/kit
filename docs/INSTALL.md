@@ -95,7 +95,7 @@ Targets shipped today:
 - `x86_64-unknown-linux-gnu` (Linux x86_64)
 - `aarch64-unknown-linux-gnu` (Linux arm64)
 
-Windows is not a supported target (MKIT-6; see `docs/INVARIANTS.md`).
+Windows is not a supported target (see `docs/INVARIANTS.md`).
 Windows users should run mkit under WSL, which uses the Linux binary.
 
 **Linux glibc requirement.** The published x86_64 and aarch64 Linux

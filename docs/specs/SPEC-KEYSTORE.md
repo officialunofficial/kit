@@ -62,7 +62,7 @@ Shipped against this spec:
   `mkit_core::sign::{load_raw_32, save_raw_32}` hardening.
 - OS-native backends behind feature flags: `macos-keychain`,
   `linux-secret-service`, `systemd-creds`. (Windows is not a supported
-  target &mdash; MKIT-6; see §6.4.)
+  target &mdash; see §6.4.)
 - `YubiKey` backend behind `backend-yubikey` &mdash; OpenPGP signing slot (Ed25519)
   and PIV signing slot (P-256). secp256k1 is reported `UnsupportedAlgorithm`;
   FIDO2/CTAP keys are not handled in this backend and remain on the external
@@ -397,8 +397,7 @@ Requirements:
 
 - `sign` takes `&mut self` to support backends with sessions, prompts, retry
   counters, cached public-key state, or external connections.
-- The trait is `Send`, not `Send + Sync`, intentionally. Issue #104 sketched
-  `Send + Sync`, but the implementation needs `&mut self` signing because many
+- The trait is `Send`, not `Send + Sync`, intentionally. The implementation needs `&mut self` signing because many
   real backends have session state, prompt state, retry counters, cached
   handles, or child-process state. A concrete signer may still be `Sync`, but
   callers must not rely on concurrent signing through one handle.
@@ -774,7 +773,7 @@ Requirements:
 
 ### 6.4 Windows backend (removed)
 
-Windows is not a supported mkit target (MKIT-6; see
+Windows is not a supported mkit target (see
 `docs/INVARIANTS.md`): commonware-runtime 2026.9.0's non-Linux
 storage-sync path calls `libc::sync()`, which does not exist on
 `x86_64-pc-windows-msvc`, so the workspace and its test suite no longer
@@ -1428,7 +1427,7 @@ the per-section requirements above remain normative.
   **Not shipped:** a dedicated YubiKey FIDO2/CTAP routing in this backend
   &mdash; FIDO2 stays on the external signer path per §6.7. **Removed:**
   the Windows Credential Manager backend (§6.4) &mdash; Windows is not a
-  supported target (MKIT-6).
+  supported target.
 - Add backend factory/resolution so CLI, commit signing, and attestation signing
   route by full key ref. **Shipped** &mdash; `open_backend` plus `selection_for`
   in `commands/key.rs`, mirrored in commit and attest paths.
@@ -1438,7 +1437,7 @@ the per-section requirements above remain normative.
 
 - Cross-platform CI for Linux desktop-compatible paths, Linux
   headless/server-compatible paths, and macOS (Windows is not a
-  supported target &mdash; MKIT-6): live OS-native backend tests are
+  supported target): live OS-native backend tests are
   gated by `MKIT_RUN_NATIVE_KEYSTORE_TESTS=1` per §14.4; not every CI runner
   currently exercises every backend.
 - Golden vectors and verification-equivalence tests: **shipped** for

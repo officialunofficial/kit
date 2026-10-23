@@ -8,10 +8,9 @@ specs for normative detail rather than restating it, and every command and
 code snippet on this page has been run against a real repository as part of
 writing it.
 
-This is issue [#1015](https://github.com/officialunofficial/mkit/issues/1015)
-(the "verifier kit"), PR 6 of 6. The kit itself &mdash; proofs, the disclosure
-module, closure export, the CLI, the wasm exports &mdash; is scoped and
-delivered in PRs 1&ndash;5; this document explains how to *use* it.
+This guide covers the "verifier kit". The kit itself &mdash; proofs, the
+disclosure module, closure export, the CLI, the wasm exports &mdash; lives in
+the code. This document explains how to *use* it.
 
 ## Contents
 
@@ -124,8 +123,7 @@ if identity matters there.
 One structural detail worth internalizing: `Commit`'s `message_hash` and
 `content_digest` fields are **inside** the commit id (they're part of the
 canonical bytes BLAKE3'd to produce it) but **outside** the signature (the
-signing bytes explicitly exclude them, SPEC-SIGNING §3, red-team item
-R-45 &mdash; otherwise a downstream re-computation of either annotation would
+signing bytes explicitly exclude them, SPEC-SIGNING §3 &mdash; otherwise a downstream re-computation of either annotation would
 silently shift the commit hash). Practically: those two fields are
 authenticated by the id check, not by the signature check. A verifier that
 cares about them should compare the commit-id-authenticated values, not
@@ -374,7 +372,7 @@ chunk. For chunk index 0 that's already the file's absolute offset
 (nothing precedes it). For any later chunk, the verifier needs the sum of
 every preceding chunk's *content length* to turn a chunk-relative offset
 into a file-absolute one &mdash; and per-chunk lengths are deliberately **not**
-bound into a `ChunkedBlob`'s leaves (issue #1015 decision 1), so they have
+bound into a `ChunkedBlob`'s leaves, so they have
 to be proven separately when wanted. A **length proof**
 (`chunk_len_proofs`, `--with-offsets` on the CLI) is a tiny Bao slice over
 just the canonical prologue (bytes `0..10`, at Bao offset `0`, not `+10`)
@@ -479,8 +477,7 @@ mkit's Binary Merkle Tree proofs (`mkit_core::merkle::Proof`) are,
 deliberately, **byte-identical** to `commonware_storage::bmt::Proof` at the
 release train mkit pins (`2026.9.0`, `rust/Cargo.toml`): same wire framing
 (`be32(leaf_count) || varint(n) || n * 32-byte digest`), same sibling
-selection algorithm, for single, range, and multi-leaf proofs alike (issue
-#1015 Decision 2). A verifier already built against the upstream
+selection algorithm, for single, range, and multi-leaf proofs alike. A verifier already built against the upstream
 `commonware-storage` crate (makechain, for instance) can decode an mkit
 proof directly with the upstream type and run upstream's own
 `verify_*_inclusion` **unchanged** &mdash; no mkit-specific decoder, and no
@@ -742,14 +739,13 @@ own test harness should take.
   client that already trusts a git SHA-1 verifies it with git's own
   hashing, not this kit. Partial disclosure is an mkit-id-only capability.
 - **Ancestry (history MMB) proofs and pack-shard DA sampling are not part
-  of this kit.** Both are real, separately-scoped capabilities (see issue
-  #1015 §"Later") that need a chain-side anchor beyond a single commit id
+  of this kit.** Both are real, separately-scoped capabilities (see
+  SPEC-DISCLOSURE) that need a chain-side anchor beyond a single commit id
   to be useful &mdash; "branch tip at block B extends tip at block A" and
   "this shard is part of that committed erasure-coded set," respectively.
   Neither is implemented here.
 - **Non-membership proofs** (proving a name is *absent* from a `Tree`) are
-  reserved as disclosure `payload_kind 3` (`Absent`); see
-  [#1027](https://github.com/officialunofficial/mkit/issues/1027). A
+  reserved as disclosure `payload_kind 3` (`Absent`). A
   disclosure bundle only ever proves inclusion.
 - **wasm caps**, independent of the native crate's own bounds (`mkit_core::verify`,
   which mkit-wasm builds on top of): objects 16 MiB

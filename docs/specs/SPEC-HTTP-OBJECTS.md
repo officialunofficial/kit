@@ -8,13 +8,12 @@ audience: implementers of HTTP object servers, caches, browsers, and disclosure 
 # SPEC-HTTP-OBJECTS &mdash; HTTP object serving and proofs
 
 Status: **Draft, normative.** The contract is pinned by the golden vectors;
-HTTP adapters and the span verifier follow in WP-4.12–4.16.
+HTTP adapters and the span verifier follow later.
 Scope: repository selection, URL parsing, published-content resolution,
 HTTP representations, read authorization and admission, URL-token carriage,
 and browser access. This document changes no protobuf schema.
 
-Authority: this document specifies the plain HTTP contract for issue #1088,
-WP-4.11. [SPEC-CONVENTIONS](SPEC-CONVENTIONS.md) supplies normative keywords.
+Authority: this document specifies the plain HTTP contract for object serving. [SPEC-CONVENTIONS](SPEC-CONVENTIONS.md) supplies normative keywords.
 [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md), abbreviated STC, owns
 repository identities and admission headers. [SPEC-SERVER](SPEC-SERVER.md)
 owns indexed mode, the published view, hooks, and durable outcomes.
@@ -26,12 +25,12 @@ published ref and must revalidate. Both authorize within the selected
 repository before returning content, including on cache validation requests.
 A content digest alone grants no access to another repository's content.
 
-User decision M4-a (2026-09-27) deliberately reinterprets PRD §6.6's
-statement that a Range request can include a byte-range disclosure proof:
+This spec deliberately departs from the idea that a Range request can
+include a byte-range disclosure proof:
 a proof range is selected by `?proof=1&range=a-b`, never by `Range`.
 The proof is a separate representation with its own validator and media type.
 This lets a verifier request the complete proof without HTTP slicing it.
-User decision M4-b uses the MKDS container of existing MKDP v2 bundles
+The proof uses the MKDS container of existing MKDP v2 bundles
 ([SPEC-DISCLOSURE](SPEC-DISCLOSURE.md), multi-chunk span section).
 MKDP payload kind 3 remains reserved; MKDP v2 bytes are unchanged.
 
@@ -74,7 +73,7 @@ a trailing `?`, empty parameter, unknown parameter, or repeated parameter
 MUST produce 400. Parameter names MUST NOT be percent-encoded. A token value
 is opaque at this stage: its token-format validation belongs to §3 step 5,
 so even an empty or malformed token MUST NOT cause a token-derived 400.
-Token-bearing vectors are deferred to WP-2.11/4.15.
+Token-bearing vectors are deferred.
 
 A ref MUST satisfy [SPEC-REFS §3](SPEC-REFS.md#3-ref-name-grammar), occupy at
 most 512 bytes, and begin `refs/`. Percent-encoding in a ref MUST produce
@@ -305,7 +304,7 @@ from indexed metadata before Admission. The server MUST build the proof only
 after Admission allows it.
 Informative: complete preceding chunk-length proofs make ranges beyond
 roughly 30,000 preceding chunks (about 2 GiB of file) exceed the 64 MiB
-bundle cap and return 416. WP-4.14a's boundary-aware builder reduces reads
+bundle cap and return 416. A boundary-aware builder reduces reads
 and peak memory by retaining only the needed chunk bytes. It does not reduce
 the encoded proof size: the complete preceding proof set grows with the first
 chunk index. An oversized proof still returns 416. Changing that proof-size
@@ -485,9 +484,9 @@ applicable reader-view `mkit.transport.v1.RedactionNotice`
 tombstoned id ahead of 304, and 451 precedence against 304 and
 Admission, including the tombstoned-manifest chunk case.
 
-Token-bearing URL vectors follow WP-2.11/4.15. The product MKDS verifier,
-boundary-aware builder, and verifier bindings follow WP-4.14a; HTTP query
-ranges and Workers prefetch follow WP-4.14b. Signed-read HTTP GETs and schema
+Token-bearing URL vectors, the product MKDS verifier, the boundary-aware
+builder, verifier bindings, HTTP query ranges and Workers prefetch are
+future work. Signed-read HTTP GETs and schema
 extensions for an object-id admission field or token principal require
 separate work.
 
@@ -496,9 +495,9 @@ separate work.
 | Version | Status | Changes |
 |---|---|---|
 | 1 | draft | Extend §5.1 with inline MP4/WebM video, MP3/Ogg/WAV audio, HEIC images, Markdown and CSV. Dangerous extensions remain binary attachments; filename encoding, security headers and ordinary byte ranges are unchanged. |
-| 1 | draft | WP-4.16b (R-201) adds an extension allowlist and encoded filenames to successful ordinary ref-path Blob/ChunkedBlob responses, including HEAD and 206; object-id, proof, non-file, 304 and error responses are unchanged. |
-| 1 | draft | WP-4.12 clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it (SPEC-SERVER §9.6; R-163, R-169). |
-| 1 | draft | WP-4.14a clarifies that the boundary-aware builder reduces reads and memory, while complete preceding length proofs still impose an O(first chunk index) encoded-size cost and 416 on oversize. |
+| 1 | draft | Adds an extension allowlist and encoded filenames to successful ordinary ref-path Blob/ChunkedBlob responses, including HEAD and 206; object-id, proof, non-file, 304 and error responses are unchanged. |
+| 1 | draft | Clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it (SPEC-SERVER §9.6). |
+| 1 | draft | Clarifies that the boundary-aware builder reduces reads and memory, while complete preceding length proofs still impose an O(first chunk index) encoded-size cost and 416 on oversize. |
 | 1 | draft | Initial HTTP contract, selecting MKDP v2 or MKDS v1 without changing object bytes or protobuf. Fix round 1 clarifies bearer and admission-gated caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |
 
 ## 11. Invariants

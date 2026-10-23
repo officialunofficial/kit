@@ -47,7 +47,7 @@ allowlisted release fingerprint, and points at a commit reachable from
    - `aarch64-unknown-linux-gnu`
    - `x86_64-unknown-linux-gnu`
 
-   Windows is not a supported target (MKIT-6; see `docs/INVARIANTS.md`).
+   Windows is not a supported target (see `docs/INVARIANTS.md`).
    Windows users should run mkit under WSL, which uses the Linux binary.
 
    Each target ships one archive, `mkit-X.Y.Z-<target>.tar.gz`: the `mkit`
@@ -353,7 +353,7 @@ that replaces crates.io for a standalone crate, and runs its portable-fixture
 tests natively (default and raw-only) and on `wasm32-unknown-unknown` through
 `wasm-pack test --node`. The consumer has no path dependency, `[patch]` table
 or workspace; the script refuses a lock file in which an mkit crate does not
-resolve from a registry source. It runs in Cloud Build's primitives step.
+resolve from a registry source.
 
 ### Token
 
@@ -497,7 +497,7 @@ sha256sum -c THIRD-PARTY-NOTICES.sha256 || shasum -a 256 -c THIRD-PARTY-NOTICES.
 `cargo about generate` fails the `third-party-notices` job outright if any
 dependency's license isn't in `rust/about.toml`'s `accepted` list &mdash; that list
 is kept in lockstep with `rust/deny.toml`'s `[licenses] allow` list (the
-license check cargo-deny already runs on every PR via `cloudbuild/security.yaml`).
+license check cargo-deny already runs on every PR via `.github/workflows/rust-security.yml`).
 `.github/workflows/third-party-notices.yml` runs the same `cargo about
 generate` check on every PR that touches the dependency graph, so an
 unapproved license is caught before a release attempt, not during one.
@@ -586,7 +586,7 @@ Every new direct dependency added to a workspace `Cargo.toml` must:
 
 ### Keystore backend dependency review
 
-The optional keystore backend and envelope-encryption dependencies (issue #104)
+The optional keystore backend and envelope-encryption dependencies
 were reviewed for the V1 keystore. All are pinned in `Cargo.toml`, reflected in
 `Cargo.lock`, sourced from crates.io, accepted by `cargo deny`, and isolated
 from default builds unless listed as always-on.
@@ -810,7 +810,7 @@ verify.proto, from the `rust/crates/mkit-rpc/proto` module) and
 `buf.build/officialunofficial/mkit-repo` (repo.proto, from the
 `apps/repo-worker/proto` module) are the two named modules in the repo-root
 `buf.yaml` v2 workspace that the `buf-push` job in `crates-publish.yml`
-publishes on every tagged release (issue #719). Both are pushed **private** &mdash;
+publishes on every tagged release. Both are pushed **private** &mdash;
 `signer.proto` is the security-critical external-signer wire contract
 ([SPEC-EXTERNAL-SIGNER.md](specs/SPEC-EXTERNAL-SIGNER.md)) and `repo.proto` is
 this repo's internal `RepoService` contract; flip a module to public only as a

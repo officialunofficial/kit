@@ -192,8 +192,8 @@ is a protocol difference.
 acceptance effects, and two broken servers could appear conforming.
 
 **Enforcement:** the differential runner drives wire requests and typed HTTP
-observations. Native two-host and mutation regressions run in the Cloud Build
-workspace test gate. This checks decision equivalence; Tier 2 separately checks
+observations. Native two-host and mutation regressions run in the workspace test
+gate. This checks decision equivalence; Tier 2 separately checks
 crash, recovery, and concurrency behavior.
 
 ## Primitive cold resume binds cursor metadata before decoder progress
@@ -791,7 +791,7 @@ repository's packs, or receive contradictory evidence for one operation.
 
 **Enforced by:** `rust/crates/mkit-server/tests/golden_receipts.rs` pins the
 format, subject and key-window checks. Runtime issuance, replay and field
-exclusion are specified in SPEC-SERVER §15 and await WP-5.8 implementation
+exclusion are specified in SPEC-SERVER §15 and await implementation
 and conformance coverage.
 
 ## Ticketed UploadPack writes no business metadata and requires a marker
@@ -804,7 +804,7 @@ reads are permitted; it writes no metadata row and makes no quota charge,
 replay reservation, authorization, admission or `pre_receive` call.
 
 **Because:** the marker proves that a holder of this ticket supplied and
-verified these pack bytes. WP-1.10 requires it with the pack blob before
+verified these pack bytes. The upload path requires it with the pack blob before
 consuming the ticket, even when another repository already stored the pack.
 
 **If violated:** an advance could attach a globally present pack without an
@@ -994,7 +994,7 @@ expired signature, or keep polling after its ticket is invalid.
 
 **Enforced by:** `ConnectTransport::advance_refs_with_deadline` and its pending
 response, renewal and deadline tests. The caller's real ticket deadline is
-pending WP-1.17; until then the helper uses the seven-day maximum lifetime.
+not yet wired; until then the helper uses the seven-day maximum lifetime.
 
 ## External signer capabilities precede signing material
 
@@ -1029,9 +1029,7 @@ not change with it.
 
 **If violated:** every PR Dependabot opens for that directory fails CI on
 the frozen-lockfile install step and gets closed unmerged, silently, on a
-recurring weekly schedule. See `apps/web`'s Dependabot PRs #921, #922, #923,
-#931, and #934 — all closed unmerged for exactly this reason before this
-invariant was enforced.
+recurring weekly schedule.
 
 **Enforced by:** `scripts/check-dependabot-coverage.sh`, run by the
 "Meta: actionlint" workflow on any change to `.github/dependabot.yml`,
@@ -1178,7 +1176,7 @@ feature, no `install.ps1` or Scoop packaging, and no
 dev-dependencies pull it in) — `libc::sync()` does not exist on `x86_64-pc-windows-msvc`, so the
 workspace and its test suite no longer build there. Maintaining a Windows
 CI/release leg that cannot actually build or test the workspace would ship
-an untested binary, so Windows was dropped as a supported target (MKIT-6)
+an untested binary, so Windows was dropped as a supported target
 rather than worked around. Windows users run mkit under WSL, which uses
 the Linux binary.
 
@@ -1219,9 +1217,8 @@ the server at all.
 
 **Enforced by:** `scripts/check-wasm-dep-graph.sh` (a `cargo tree` check
 per crate) and the `cargo check --target wasm32-unknown-unknown`
-steps for `mkit-wasm` and `mkit-server`, all run by `just ci-scripts`
-(part of `just ci`); cloudbuild/ci.yaml runs the script and the
-`mkit-server` wasm32 build on `main` and PRs to it.
+steps for `mkit-wasm` and `mkit-server`, all run by the CI workflow
+(`.github/workflows/rust.yml`).
 
 ## The default `mkit` CLI is server-free
 
@@ -1248,8 +1245,8 @@ release check (`scripts/check-release-artifact-features.sh`) then fails
 only at release time, where this check fails at the PR.
 
 **Enforced by:** `scripts/check-cli-baseline.sh` (a `cargo tree` model of
-the graph plus a grep of `commands/serve/`), run by `just ci-scripts`
-(part of `just ci`), `just ci-server` and cloudbuild/ci.yaml; the release build's real compiler artifacts are
+the graph plus a grep of `commands/serve/`), run by the CI workflow
+(`.github/workflows/rust.yml`); the release build's real compiler artifacts are
 checked by `scripts/check-release-artifact-features.sh` against
 `scripts/release/mkit-packages.golden`.
 
@@ -1281,18 +1278,18 @@ readable before it is complete, on one backend only.
 (full-capability and `RefsOnly` memory stores, `MemoryBlobStore`),
 and `fs_backends.rs` (`FsLayoutStore`, `FsBlobStore`). The suite's own
 mutation tests (`suite_selftest.rs`) prove each case fails the store bug it
-targets. All run in the workspace nextest (`just ci`, cloudbuild/ci.yaml).
+targets. All run in the workspace nextest (`.github/workflows/rust.yml`).
 
-## M2 Connect surfaces remain explicit stubs until implementation
+## Grant Connect surfaces remain explicit stubs until implementation
 
 **Always:** `GetGrantEpoch`, `SetGrantEpoch`, `SetRepoVisibility` and
 `IssueObjectUrl` return `unimplemented` ("not implemented yet") until
-WP-2.8, WP-2.9 and WP-2.11 implement them. They write no state.
+the server implements them. They write no state.
 
 **Because:** their paths currently bypass auth-v2 `Procedure` dispatch.
-WP-2.8 keeps both namespace epoch RPCs outside that path permanently, by
+The server keeps both namespace epoch RPCs outside that path permanently, by
 spec §5.3 (`grant_epoch_paths_are_permanently_outside_procedure`).
-WP-2.9 and WP-2.11 must add mode-specific and signed-read authorization
+The remaining RPCs must add mode-specific and signed-read authorization
 before enabling their repository RPCs.
 
 **If violated:** an unauthenticated repository RPC can mutate state or mint a token.
@@ -1427,8 +1424,8 @@ upstream type directly, applying only mkit's outer type-domain wrap
 (`wrap_id`) on top. mkit cannot depend on `commonware-storage`'s `bmt`
 module directly for this (it drags in `commonware-cryptography`'s
 unconditional `blst` C dependency, which does not build for
-`wasm32-unknown-unknown` — see `merkle.rs`'s module docs and issue
-#843), so the construction is vendored and the byte-identity claim has
+`wasm32-unknown-unknown` — see `merkle.rs`'s module docs), so the
+construction is vendored and the byte-identity claim has
 no compiler to enforce it.
 
 **If violated:** a proof mkit produces would fail to decode, or would
@@ -1555,7 +1552,7 @@ from the wrong leaf, or accept an incomplete range as a valid disclosure.
 **Enforced by:** `mkit_core::verify::span` and its unit tests,
 `rust/crates/mkit-core/tests/golden_http_objects.rs` product/reference parity
 and builder byte-identity checks, and `rust/crates/mkit-wasm/tests/verify.rs`
-(WP-4.14a; SPEC-DISCLOSURE §8 and SPEC-HTTP-OBJECTS §5.2).
+(SPEC-DISCLOSURE §8 and SPEC-HTTP-OBJECTS §5.2).
 
 ## Closure walks share one `children` function
 
@@ -1644,7 +1641,7 @@ last use. `ObjectStore` base admission charges before allocation through
 the provided `DeltaBaseSource` method; existing sources default to charging
 the bytes returned by `base()`.
 
-**Because:** PRD §6.5 forbids existence oracles. If a push could close its
+**Because:** repository isolation forbids existence oracles. If a push could close its
 history, or resolve a delta, over objects held only by another repository or
 the global store, the push's success would reveal that some other repository
 holds those objects, and the repository would reference objects it never
@@ -1665,7 +1662,7 @@ unsigned or foreign objects.
 `delta_bomb_is_rejected_before_any_delta_is_applied`,
 `compressed_claims_are_charged_before_decompression`,
 `external_bases_are_charged_against_the_budget`). The server-side wiring and
-the cross-repository uniform-error conformance test belong to WP-4.7.
+the cross-repository uniform-error conformance test belong to the server.
 
 ## Closure profile is raw-only
 
@@ -1740,7 +1737,7 @@ partially verified data.
 **Enforced by:** `rust/crates/mkit-core/src/pack/window/tests.rs` differential,
 resume, cursor-binding, released-window, resource-budget, and trailer-split tests;
 the `mkit-core-wasm-check` v2 differential harness. Caller staging rollback and
-source immutability remain obligations of WP-4.7/4.8; the core reader does not store objects.
+source immutability remain obligations of the caller; the core reader does not store objects.
 
 ## Cursor metadata preserves validation and private state
 
@@ -1779,7 +1776,7 @@ external bases, duplicates, compressed fixtures and budget/error checks), plus
 
 ## Repository addressing binds authentication and storage routing
 
-**Always:** stage 0 validates `X-Repository` with the shared identity grammar
+**Always:** the first stage validates `X-Repository` with the shared identity grammar
 and stores its resolved identity on `Authenticated`. Every operation routes
 refs and replay state through `ShardMap` using that repository. Multi ref reads
 require a ref row in the named repository; Multi pack RPCs return
@@ -1796,8 +1793,8 @@ reuse its replay result, or learn whether it holds particular content.
 `pipeline::tests::single_repository_header_rules_preserve_04_requests_and_fail_at_stage_zero`,
 native `tests/repository_routing.rs` over memory and SQLite (including the
 same repository name in different namespaces and shared nonces), and the
-conformance `repo.*` wire cases. Namespace authorization is WP-1.5; pack
-membership is WP-1.10; WP-1.22 moved existence to the coordinator repository registry.
+conformance `repo.*` wire cases. The server checks namespace authorization and pack
+membership. The coordinator repository registry owns existence.
 
 ## Branch shards preserve atomic advances and registered repository state
 
@@ -1871,7 +1868,7 @@ interleaving property test covers the protocol model; pipeline regressions
 protect the implementation. `LeaseSweep` guards expired coordinator rows and
 moves its timer atomically with each renewal. Recovery is declared with the
 persistent `lr` marker; restore/rebuild procedures MUST call
-`mark_lease_table_recovered` before serving writes (WP-1.29). Completion waits
+`mark_lease_table_recovered` before serving writes. Completion waits
 `epoch_lease + margin` after that marker, independent of namespace creation time.
 
 ## Namespace and write policy decide before allocation and never read existence
@@ -1896,7 +1893,7 @@ wasm-safe provided trait methods. `Pipeline::authorize` enforces STC §7.5 and
 SPEC-SERVER §6.2. `pipeline::tests::policy` covers the policy/principal/hook matrix,
 startup refusals, identical existing/missing repository denials, and empty
 coordinator/ref shards after every denial. Wire `policy.*` cases pin owner,
-non-owner and allowlist behavior. Grants and private reads remain M2.
+non-owner and allowlist behavior. Grants and private reads are out of scope here.
 
 ## Ticket, reservation and outbox rows keep exactly one outcome per reservation
 
@@ -1931,11 +1928,11 @@ repository membership, and backlog/caps can undercount durable obligations.
 **Enforced by:** `mkit-server/src/store/{tickets,outbox}.rs` pure planner tests,
 strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cases.rs`
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
-and SQLite. WP-1.10 exercises consumption and the defensive abort over native
+and SQLite. Tests exercise consumption and the defensive abort over native
 memory/SQLite and wire cases; the kind-2 expiry handler closes tickets with
-one guarded `Expired` row and best-effort session abort. WP-3.3 enforces guarded
+one guarded `Expired` row and best-effort session abort. The server enforces guarded
 Pending reservations, ReadServed, reconciliation and backlog limits.
-WP-3.13 corrects the kind-8 acknowledgment/completion window from #1219;
+The kind-8 acknowledgment/completion window is exact;
 regular `timers/outcome_delivery.rs` regressions cover appends before and
 after the guarded fresh read and complete empty-backlog acknowledgment.
 ## Relay delivery advances durable per-source watermarks before source cleanup
@@ -1952,7 +1949,7 @@ watermarks are bounded by source shards.
 **Always:** a key that is ever relay-deleted has exactly one producer. Its
 source `os` sequence orders every upsert and delete. Identical upserts from
 several producers remain valid for never-deleted keys, including object-index
-`i` rows (R-130).
+`i` rows.
 
 **Because:** one target `rh` per source deduplicates rows, but cannot order
 conflicting operations from distinct sources on a deleted key.
@@ -1981,7 +1978,7 @@ same guarded checkpoint, and fires that deliver nothing back off. No
 closed-form fire bound is claimed; the relay throughput regressions pin
 fire counts for representative schedules. A row appended mid-cycle waits
 for the current cycle to finish. This can exceed `RELAY_LAG_BOUND_MS` in time;
-WP-1.23c's `namespace_relay_watermark` must tolerate it. A target's later
+The `namespace_relay_watermark` must tolerate it. A target's later
 row is never retried while its earlier row remains undelivered.
 At the SQL soft capacity limit, only a valid, guarded `rs` checkpoint, with
 any relay-row deletions, or a guarded kind-3 relay timer reschedule may use
@@ -2002,7 +1999,7 @@ than one fire's inspection cap of permanently failing rows.
 **If violated:** re-delivery overwrites newer index values, hook effects detach
 from their membership writes, or newly queued rows lose their relay timer.
 Restoring an older source requires raising `os` above every target's `rh` for
-that source or re-keying it (R-102; WP-1.29).
+that source or re-keying it.
 
 **Enforced by:** `mkit-server/src/relay/tests.rs` crash, contention, ordering,
 chunk-limit, wake-up and bounded-cycle fairness tests. Fires inspect up to four
@@ -2055,7 +2052,7 @@ on its source shard. Only ref shards are relay sources. The test-only `TestTimer
 kind may append a ref-index delete without a lease: it is compiled out of
 release builds and can fire after the lease expires. A new relay source class
 requires its own coordinator watermark design before it can append rows.
-This binds WP-1.10 (#1188), 4.7, 4.8, 4.10, 5.3b, 5.6 and 5.7b. The namespace
+This binds every consumer of the relay. The namespace
 watermark bounds every undelivered relay row's **commit time** from below;
 consumers compare it against `T + MAX_APPLY_WINDOW + margin`.
 
@@ -2095,13 +2092,13 @@ absent from the set has no high-water mark. Every restored relay row and the
 source's next sequence therefore exceed every target's `rh[source]`. Missing
 sources are refused or reconstructed at the supplied watermark; missing
 coordinators require an explicit epoch floor and are marked recovered.
-Relay rows carry upserts and deletes (R-134). Redelivering a row is
+Relay rows carry upserts and deletes. Redelivering a row is
 idempotent under `rh` ordering and the single-producer rule for relay-deleted
 keys; gaps are harmless because delivery compares sequences only with `rh`.
 The epoch jump prevents a grant issued and revoked after the snapshot from
 becoming valid again. Owners must re-issue grants after restore. Already
 delivered rows cannot be replayed from an older target's snapshot; index and
-membership reconciliation is required before GA (R-116).
+membership reconciliation is required before GA.
 
 **If violated:** relay delivery can skip a required update, a restored grant
 can regain authority through an unexpired old shard lease, or revocation can
@@ -2117,7 +2114,7 @@ and `fresh_restore_orders_root_and_rewrites_recovery_epoch_and_relay` enforce
 the memory invariants; native `export_restore_roundtrip_and_usage_refusals`
 enforces Fresh refusal and SQLite import.
 `mkit-server/src/relay/deliver.rs` guards target upserts and `rh` together.
-In-place and Merge restore require another proof and are deferred to WP-5.11b.
+In-place and Merge restore require another proof and are deferred.
 
 ## Deployment discovery is public and repository-independent
 
@@ -2281,7 +2278,7 @@ part, publish a pack or create repository membership.
 **If violated:** a forged receipt can publish unverified content, or an
 upload can bypass BeginUpload's authorization and admission.
 
-**Enforced by:** `upload::receipt::tests`, `pipeline::parts::tests`, and `pipeline::tests::begin_parts` (WP-1.11a).
+**Enforced by:** `upload::receipt::tests`, `pipeline::parts::tests`, and `pipeline::tests::begin_parts`.
 
 ## Filesystem multipart staging is separate from pack visibility
 
@@ -2402,7 +2399,7 @@ and independent terminal writes can charge one reservation twice.
 
 **Enforced by:** `pipeline/http_admission.rs`, `http_objects/paid.rs`,
 `timers/reservation_reconcile.rs` and the focused `http_objects/paid_reads` tests.
-With HTTP serving enabled, adapters must retain the injected spawner's tasks (WP-4.16).
+With HTTP serving enabled, adapters must retain the injected spawner's tasks.
 
 ## HTTP URL tokens bind before stored epoch access
 
@@ -2420,7 +2417,7 @@ remain fresh after the authorization expires.
 
 **Enforced by:** `pipeline/http_tokens.rs`, `policy/read.rs` and counted-store
 `http_objects/private_tokens` tests. With HTTP serving enabled, shared-cache bypass belongs
-to the adapters in WP-4.16.
+to the adapters.
 
 ## Unsupported HTTP proofs stop before preparation and payment
 
@@ -2442,7 +2439,7 @@ unsupported cache validation, or reservations for an unservable read.
 **Enforced by:** SPEC-HTTP-OBJECTS §3, the HTTP `unsupported_proofs`,
 `private_tokens`, `publication_access`, `takedown_denial` and `paid_reads` tests.
 
-## Published refs and durable dependency work (WP-5.4)
+## Published refs and durable dependency work
 
 **Always:** head and packmap publish together at the greatest contiguous cleared
 prefix. Deletion preserves sequence boundaries. External delta dependencies,
@@ -2461,7 +2458,7 @@ precedes published-view selection.
 [HTTP publication access tests](../rust/crates/mkit-server/src/pipeline/tests/http_objects/publication_access.rs).
 Async inspector scheduling and durable hold integration remain future work.
 
-## Independent global denial and pending takedown intent (WP-5.6a-1)
+## Independent global denial and pending takedown intent
 
 **Always:** current V1 denial rows and each active V2 action deny independently.
 Acceptance binds immutable verified descriptors and activates every denial before
@@ -2479,7 +2476,7 @@ failed delivery remains owned by durable timer work.
 (`interrupted_activation_replays_pending_until_every_denial_is_active`,
 `timer15_restart_finalizes_interrupted_signed_acceptance`).
 
-## Lean preservation cannot imply completed takedown (WP-5.6a-2 contract)
+## Lean preservation cannot imply completed takedown
 
 **Always:** verified restricted copies do not establish final holders or completed
 takedown. Discovery waits for the safety cut and relay watermark. Open namespace
@@ -2549,7 +2546,7 @@ block/deleting observations and NotAfter. `collectable` checks one pending row
 and its final plan guards `c`; unknown pending state closes collection. The
 content relay hook atomically commits holder/count/c changes, ordinary hold and
 exact pending-row release, and the watermark. A late blocked holder retains a
-durable takedown request for WP-5.6a. No permissive release API is exposed.
+durable takedown request. No permissive release API is exposed.
 
 Extraction verifies sources and enqueues/renews holders; takedown exposure requires admin
 keys, `LAUNCH_PROFILE=paid-workers`, `TAKEDOWN_ENABLED=true`, indexed Paid mode and
@@ -2557,7 +2554,7 @@ complete §14.7 preservation configuration, with partial configuration refused
 at startup.
 
 
-### Scheduled extraction freezes closure and protects source lifetimes (WP-4.10b-2)
+### Scheduled extraction freezes closure and protects source lifetimes
 
 **Always:** extraction effects begin only after the complete consumed union has
 passed closure and deterministic selection. Object counts and canonical-byte
@@ -2577,7 +2574,7 @@ Verified; large legitimate reused groups can become permanently unclaimable.
 cover header/body mutation, six groups with 256 members, union counts, closure lag,
 replaced/expired tickets and canceled owners. Gone tombstones retain generations.
 
-### Delta source reconstruction advances with bounded live memory (WP-4.10b-2)
+### Delta source reconstruction advances with bounded live memory
 
 **Always:** each unfinished extraction-source reconstruction alarm persists one
 lookup prefix or one ancestry/decode step. Only a previous canonical accumulator
@@ -2621,7 +2618,7 @@ bytes and calls remain identical. No durable inspection continuation is created.
 of at most 1,000 rows enumerate the set without an inspection tree walk,
 reference-page reads, object-store reads or role classification; inspection shares
 the 1,000-call accounting contract. Scanners decode chunk membership through
-R-193 private retrieval.
+private retrieval.
 
 **If violated:** unscanned content can publish, retry can bypass inspection, or
 an accepted request can exhaust its configured invocation budget.
@@ -2683,7 +2680,7 @@ an obligation or generation change.
 **Enforced by:** `timers/publication_recheck.rs` and the publication recheck
 regressions. No tag, timer kind, public protocol,
 packmap limit or whole-alarm budget changes. Pre-launch timer codecs are reset,
-not migrated (R-198 B1).
+not migrated.
 
 ## Corrupt preservation sources have terminal audited checkpoints
 
@@ -2704,7 +2701,7 @@ retrying the same bad bytes cannot repair them and can monopolize Worker alarms.
 **Enforced by:** preservation work corruption/restart and transient-I/O regressions;
 `zstd_heap_bounds` measures the actual decoder on native and wasm32.
 
-### Embedder URL token issuance (R-204)
+### Embedder URL token issuance
 
 - **Always:** reader URL batches share RPC read authorization, stored epoch,
   audience and TTL minting, and return tokens only for accessible published targets.
@@ -2715,7 +2712,7 @@ retrying the same bad bytes cannot repair them and can monopolize Worker alarms.
 - **Enforced:** `Pipeline::issue_url`, `ObjectReader::issue_urls` and its shared
   bounded reader preflight; parity, private, denial and pending-publication tests.
 
-### Deployment default visibility (R-205)
+### Deployment default visibility
 
 - **Always:** every visibility read uses a stored visibility when present, and
   otherwise the deployment default, which is public unless configured.
@@ -2726,7 +2723,7 @@ retrying the same bad bytes cannot repair them and can monopolize Worker alarms.
 - **Enforced:** `pipeline::repo_is_private` in the three strong visibility lookups; Connect,
   HTTP, URL issuance, readers and snapshots use those paths. No visibility cache.
 
-## Restricted preserved reads and atomic operator holds (WP-5.6a-3)
+## Restricted preserved reads and atomic operator holds
 
 **Always:** Get/List keep acquisition, verified preservation, discovery, legal
 hold, purge and real completion separate. Any discovery never claims complete.
@@ -2898,8 +2895,7 @@ a cleanup following external paths could remove another checkout's output.
 unrelated output or source.
 
 **Enforced by:** `scripts/local-build.py`,
-`scripts/check-build-dir-authority.py`, and `scripts/tests/local-build.test.sh`
-through `just check-local-build` and the existing local `just ci-scripts` gate.
+`scripts/check-build-dir-authority.py`, and `scripts/tests/local-build.test.sh`.
 No CI caching configuration changes. Stop concurrent edits before applying GC;
 Git status is rechecked but editors do not participate in a shared lock.
 

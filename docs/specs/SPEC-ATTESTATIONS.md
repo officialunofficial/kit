@@ -619,7 +619,7 @@ DSSE signing        = "DSSEv1 ..." (PAE, §2.1)
 
 The PAE prefix `"DSSEv1 "` cannot collide with either domain prefix
 (no `\x00` byte, different leading bytes). Cross-domain signature
-confusion (SPEC-SIGNING §2's R-17) is therefore extended to cover
+confusion (SPEC-SIGNING §2) is therefore extended to cover
 attestations with no additional work.
 
 ### 7.3 Transport **(planned)**

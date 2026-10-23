@@ -463,7 +463,7 @@ note on large packs.
   `PACK_BODY_LIMIT` widens to `usize::MAX` and `S3_SINGLE_PUT_MAX`
   becomes the real gate). Raising `PACK_BODY_LIMIT` itself is the
   streaming/constant-memory `Transport` redesign tracked elsewhere in
-  the production-readiness epic, out of scope here.
+  a later production-readiness effort, out of scope here.
 - `REF_BODY_LIMIT = 256` bytes (a ref is 64 hex + newline; the
   256-byte ceiling accommodates trailing whitespace and trivial
   S3 metadata).

@@ -11,8 +11,8 @@ Status: **Normative** for mkit v1 and v2.
 Scope: the byte layout of a `.mkit`-produced packfile, used for
 transport upload/download and for bundle exchange.
 
-Resolves red-team R-05 (no spec at all) and R-06 (magic rename risk).
-Version 2 (§3.3, §3.4) adds per-entry zstd compression (issue #646);
+This spec defines the pack format and its magic.
+Version 2 (§3.3, §3.4) adds per-entry zstd compression;
 it does not change header framing, caps, ordering, or trailer
 semantics from v1 &mdash; only two new entry types.
 
@@ -337,8 +337,8 @@ or `entry_count`.
 **The per-pack cap is a format choice, not a transport ceiling.**
 Earlier versions of this section justified the 4 GiB figure by AWS
 S3/Cloudflare R2's 5 GiB single-`PUT` limit, and flagged multipart
-upload as a future-version candidate (red-team R-14). That framing is
-stale: S3/R2 multipart upload (issue #704) shipped without a `version`
+upload as a future-version candidate. That framing is
+stale: S3/R2 multipart upload shipped without a `version`
 bump, because it turned out to be a purely transport-layer concern
 &mdash; `CreateMultipartUpload`/`UploadPart` against each backend's own
 single-`PUT` ceiling, resolved entirely inside the transport
@@ -348,7 +348,7 @@ verification bounded in memory and time; it is not derived from, and
 no longer needs to track, any transport's own object-size limits.
 
 **A push whose payload exceeds one pack's cap is not blocked &mdash; it
-splits.** `remote_dispatch::build_and_upload_packs` (issue #831) seals
+splits.** `remote_dispatch::build_and_upload_packs` seals
 and uploads a new pack the moment the next entry would exceed the cap,
 chaining every pack one push produced onto a single packlist node
 (`PackListNode.packs: Vec<Hash>`, in apply/build order &mdash; see the
@@ -536,7 +536,7 @@ mkit v1 is the first version. The format rule going forward is:
   - `0` &mdash; never emitted; reserved to distinguish "all-zero buffer" from
     a real pack.
   - `2` &mdash; **consumed.** Per-entry zstd compression, `0x03`/`0x04`
-    entry types (§3.3, §3.4; issue #646). A pre-v2 reader that has not
+    entry types (§3.3, §3.4). A pre-v2 reader that has not
     taken this spec revision correctly fails closed on a `version = 2`
     header with `UnsupportedPackVersion` &mdash; it does not attempt to
     parse `0x03`/`0x04` entries it doesn't know about. That IS the
@@ -555,7 +555,7 @@ The conformance vectors below are exercised in
 `rust/crates/mkit-core/tests/golden_pack.rs` and the unit tests in
 `rust/crates/mkit-core/src/pack.rs::tests` and `pack/zstd_tests.rs`.
 They are inline byte pins rather than on-disk goldens, so any framing
-drift fails the test suite immediately; #20 is the exception, a set of
+drift fails the test suite immediately; vector 20 is the exception, a set of
 committed C-encoded packs that give decode-only builds real bytes.
 Reader-error vectors map to `PackError` variants on the Rust API
 surface; the spec-level names below stay protocol-neutral.
@@ -598,7 +598,7 @@ surface; the spec-level names below stay protocol-neutral.
     `compressed_raw_entry_roundtrips` (`pack.rs::tests`) and the
     golden byte-layout pin
     `pack_v2_compressed_raw_pin_bytes_roundtrip` (`golden_pack.rs`).
-14. **Minimal v2 pack, compressed-delta entry**: same shape as #13 for
+14. **Minimal v2 pack, compressed-delta entry**: same shape as vector 13 for
     a `0x04` entry &mdash; raw base plus delta stream compressed against a
     highly-compressible target. Pinned by
     `compressed_delta_entry_roundtrips` and
@@ -614,7 +614,7 @@ surface; the spec-level names below stay protocol-neutral.
     (`rejects_decompressed_len_over_object_cap`).
 18. **Pre-existing v1 golden vectors decode unchanged** after the v2
     writer/reader changes &mdash; `v1_pack_still_reads_bit_identical`
-    re-runs vectors #1–#12 above and asserts byte-identical output,
+    re-runs vectors 1–12 above and asserts byte-identical output,
     the no-regression guardrail for the format this revision does not
     otherwise touch.
 19. **`0x03`/`0x04` payload that is not exactly one zstd frame** &mdash;

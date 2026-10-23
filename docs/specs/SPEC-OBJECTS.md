@@ -27,7 +27,7 @@ ObjectType (u8)         name
 0x04                    remix
 0x05                    chunked_blob
 0x06                    delta
-0x07                    tag            (annotated / signed tag; new in v1, issue #230)
+0x07                    tag            (annotated / signed tag; new in v1)
 ```
 
 `0x01`–`0x06` are unchanged in v1. `0x07` (tag) is additive: it appends
@@ -148,7 +148,7 @@ when ordering is canonical.
 0x04    executable   regular file, executable bit set (POSIX 0o755)
 ```
 
-Mode `0x04` is new in v1 (previously absent; see red-team R-41 &mdash; silent
+Mode `0x04` is new in v1 (previously absent; its absence was a silent
 data-loss bug for any POSIX workflow). Writers MUST emit `0x04` for any
 file with the POSIX executable bit set at staging time. Non-POSIX hosts
 MAY round-trip `0x04` bytes opaquely.
@@ -168,8 +168,7 @@ scoped per diff as git does.
 detection (`-C`). Those require git's content-similarity scoring; mkit's
 chunked/merkle blobs give a natural shared-chunk similarity signal, so they
 are a tractable follow-up rather than a structural gap. `merge` still
-treats all moves as (delete, add) pairs. Departure tracked from red-team
-R-21.
+treats all moves as (delete, add) pairs. This differs from git.
 
 ---
 
@@ -193,8 +192,7 @@ repeat parent_count:
 
 Differences from mkit's legacy (pre-v1) commit encoding:
 - `author_mid: u64` → `Identity` tagged union (§9).
-- `timestamp: u32` → `u64`. Avoids 2106 overflow (red-team 7d / Team Lead
-  7d).
+- `timestamp: u32` → `u64`. Avoids 2106 overflow.
 - Relative field order of `signer` and `message` is preserved.
 
 Message bytes are UTF-8 **by convention**: writers SHOULD emit UTF-8,
@@ -215,7 +213,6 @@ stores them because:
 
 Writers with no annotation to record MUST emit them as `0x00`*32 (zero
 hash). Readers MUST NOT reject a commit because they are zero.
-(This resolves red-team R-45.)
 
 ### 5.2 Root commits
 
@@ -262,7 +259,7 @@ interprets it.
 
 ## 6a. Tag (`0x07`)
 
-An **annotated / signed tag** object (issue #230). Lightweight tags are
+An **annotated / signed tag** object. Lightweight tags are
 *not* objects &mdash; they are a bare `refs/tags/<name>` ref pointing straight
 at a commit (see SPEC-REFS). A tag object is created only by
 `mkit tag -a` (annotated) or `mkit tag -s` (signed); in both cases the
@@ -463,8 +460,8 @@ This prevents trivial amplification and prologue-replay attacks.
 |---------|----------|------------------------------------------------------------------|
 | `0x01`  | v1.0     | First mkit format. See §2 for prologue. No v0 compatibility.     |
 
-`schema_version` stays at `0x01`. Adding the `tag` object type (`0x07`,
-#230) is an **additive object-type allocation within v1**: it introduces
+`schema_version` stays at `0x01`. Adding the `tag` object type (`0x07`)
+is an **additive object-type allocation within v1**: it introduces
 a new `object_type` byte and a new body layout but changes no existing
 type's bytes, so `schema_version` is NOT bumped and every pre-tag golden
 vector is unaffected. A version bump is reserved for changes that alter

@@ -11,8 +11,6 @@ Status: **Normative** for mkit v1.
 Scope: the byte layout of the delta instruction stream referenced by
 packfile `0x02 delta` entries (see SPEC-PACKFILE §3.2).
 
-Resolves red-team R-19 (no delta format spec, no version byte).
-
 ---
 
 ## 1. Framing context
@@ -60,7 +58,7 @@ MUST verify:
 - The sum of all emitted bytes equals `result_len` at end-of-stream.
 
 Mismatches yield `DeltaCorrupt`. The Rust implementation surfaces this
-as `MkitError::DeltaCorrupt(DeltaCorruption)` (MKIT-13; prior to this,
+as `MkitError::DeltaCorrupt(DeltaCorruption)` (earlier versions collapsed
 "COPY past base", "reserved bits set", "zero opcode", "zero-length
 COPY", "result_len overrun", and "result_len underrun at EOF" were all
 collapsed into the generic `MkitError::TrailingData`, which
@@ -260,8 +258,8 @@ are inline byte arrays so any framing drift trips immediately.
     `cap_hint_does_not_scale_with_base_len`).
 15. **Fuzz harness**: `apply(base, arbitrary_bytes)` MUST NOT panic,
     MUST NOT read out of bounds, MUST either succeed or return a
-    well-defined error (see red-team R-18).
-16. **MKIT-13 regression**: every corruption kind above (vectors 5, 6, 8,
+    well-defined error.
+16. **Corruption regression**: every corruption kind above (vectors 5, 6, 8,
     9, 10, 11, plus a mid-stream COPY result_len overrun) MUST come back
     as `MkitError::DeltaCorrupt(_)`, never the generic
     `MkitError::TrailingData` that `serialize.rs` reserves for the
