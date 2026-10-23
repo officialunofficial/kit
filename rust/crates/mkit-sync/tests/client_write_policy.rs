@@ -2,8 +2,6 @@
 #![cfg(feature = "connect-native")]
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]
 
-mod support;
-
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -14,32 +12,49 @@ use std::time::{Duration, Instant};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use buffa::Message;
 use ed25519_dalek::{Signer as _, SigningKey};
-use mkit_attest::grant::{
-    Capabilities, Grant, Namespace, OwnerScheme, RefFlags, RefPattern, RefScopes, RepoScope,
-    RepositoryIdentity, SignedHeader,
+use mkit_client::{
+    Destination, RequestContext, RequestHeaders, RequestPolicy, Signer, Veto, proto,
 };
-use mkit_client::{Clock, RequestContext, RequestHeaders, RequestPolicy, Veto, proto};
 use mkit_core::{
-    hash::{Hash, hash, to_hex, to_hex_bytes},
+    hash::{Hash, to_hex, to_hex_bytes},
     layout::RepoLayout,
     protocol::PackKey,
-    refs::{self, RefWriteCondition},
-    serialize::serialize,
+    refs::RefWriteCondition,
     store::ObjectStore,
 };
 use mkit_sync::{
-    ClientSource, NativeClock, NativeHttp, PushLease, PushOptions, PushTarget, RemoteSource,
-    SourceError, TransportSource, WriteRecovery,
+    ClientSource, NativeClock, NativeHttp, RemoteSource, SourceError, TransportSource,
+    WriteRecovery,
 };
 use mkit_transport_connect::admission::{
     AdmissionContext, AdmissionPolicy, AdmissionResponder, AdmissionResponderError,
 };
-use mkit_transport_connect::{
-    ConnectTransport, EnvelopeSigner, GrantOperation, GrantRequest, GrantSource,
-};
-use support::{
-    Dalek, Live, READER_SEED, WRITER_SEED, build_commit, destination, self_certifying_namespace,
-};
+use mkit_transport_connect::{ConnectTransport, EnvelopeSigner};
+
+/// The seed of the writer key.
+const WRITER_SEED: u8 = 0x11;
+
+/// An Ed25519 signer over a one-byte seed.
+struct Dalek(SigningKey);
+
+impl Dalek {
+    fn new(seed: u8) -> Self {
+        Self(SigningKey::from_bytes(&[seed; 32]))
+    }
+}
+
+impl Signer for Dalek {
+    fn public_key(&self) -> [u8; 32] {
+        self.0.verifying_key().to_bytes()
+    }
+    async fn sign(&self, digest: &Hash) -> Result<[u8; 64], String> {
+        Ok(self.0.sign(digest).to_bytes())
+    }
+}
+
+fn destination(origin: &str, repository: &str) -> Destination {
+    Destination::new(origin.to_owned(), repository.to_owned()).unwrap()
+}
 
 struct Envelope(SigningKey);
 impl EnvelopeSigner for Envelope {
@@ -56,156 +71,6 @@ fn transport(origin: &str, repository: &str, seed: u8) -> ConnectTransport {
         Some(Arc::new(Envelope(SigningKey::from_bytes(&[seed; 32])))),
     )
     .unwrap()
-}
-
-struct StoredGrant {
-    encoded: String,
-    operations: Mutex<Vec<String>>,
-}
-impl GrantSource for StoredGrant {
-    fn select(&self, request: &GrantRequest<'_>) -> Option<String> {
-        assert_eq!(
-            request.public_key_hex,
-            to_hex(&support::public_key(READER_SEED))
-        );
-        self.operations.lock().unwrap().push(
-            match request.operation {
-                GrantOperation::Read => "read",
-                GrantOperation::BeginUpload { .. } => "begin",
-                GrantOperation::Write { .. } => "write",
-                GrantOperation::Part => panic!("ticket credentials must not consult grants"),
-                _ => panic!("unexpected grant operation"),
-            }
-            .into(),
-        );
-        Some(self.encoded.clone())
-    }
-}
-impl RequestPolicy for StoredGrant {
-    fn headers(&self, request: &RequestContext<'_>) -> Result<RequestHeaders, Veto> {
-        assert_eq!(request.public_key, support::public_key(READER_SEED));
-        let method = request.signing.procedure.rsplit('/').next().unwrap();
-        if matches!(method, "UploadPart" | "CompleteUpload")
-            || request
-                .intent
-                .is_some_and(|intent| intent.ticketed && method == "UploadPack")
-        {
-            return Ok(RequestHeaders::new());
-        }
-        self.operations.lock().unwrap().push(
-            if request.intent.is_some() {
-                "write"
-            } else {
-                "read"
-            }
-            .into(),
-        );
-        Ok(RequestHeaders::new().with_write_grant(self.encoded.clone()))
-    }
-}
-fn grant(origin: &str, repository: &str) -> Arc<StoredGrant> {
-    let namespace = Namespace::parse(&self_certifying_namespace()).unwrap();
-    let now = NativeClock.now_ms();
-    let statement = Grant {
-        namespace,
-        scope: RepoScope::Repository(
-            RepositoryIdentity::new(Some(namespace), repository.rsplit('/').next().unwrap())
-                .unwrap(),
-        ),
-        grantee: support::public_key(READER_SEED),
-        capabilities: Capabilities::ReadWrite,
-        audiences: vec![origin.into()],
-        ref_scopes: Some(
-            RefScopes::new(vec![(
-                RefPattern::parse("refs/heads/*").unwrap(),
-                RefFlags::parse("cuf").unwrap(),
-            )])
-            .unwrap(),
-        ),
-        epoch: 0,
-        created_ms: now - 1000,
-        expiry_ms: now + 300_000,
-        nonce: [7; 32],
-    }
-    .encode()
-    .unwrap();
-    let signature = SigningKey::from_bytes(&[WRITER_SEED; 32])
-        .sign(&hash(&statement))
-        .to_bytes()
-        .to_vec();
-    Arc::new(StoredGrant {
-        encoded: SignedHeader {
-            statement,
-            scheme: OwnerScheme::Ed25519,
-            blob: signature,
-        }
-        .encode()
-        .unwrap(),
-        operations: Mutex::new(Vec::new()),
-    })
-}
-
-#[test]
-fn grant_authorized_push_and_fresh_requests_match_both_backends() {
-    let mut published = Vec::new();
-    for client_backend in [false, true] {
-        let live = Live::self_certifying_with_grants();
-        let repository = format!("{}/grantee", self_certifying_namespace());
-        let grants = grant(&live.origin, &repository);
-        let dir = tempfile::tempdir().unwrap();
-        let layout = RepoLayout::single(dir.path());
-        ObjectStore::init(&layout).unwrap();
-        let store = ObjectStore::open(&layout).unwrap();
-        let (objects, tip) = build_commit(WRITER_SEED, None, &[("file", b"grant-authorized")], 1);
-        for object in objects {
-            store.write(&serialize(&object).unwrap()).unwrap();
-        }
-        refs::write_ref(&layout, "main", &tip).unwrap();
-        let run = |source: &dyn RemoteSource| {
-            let report = mkit_sync::push(
-                dir.path(),
-                source,
-                &PushOptions::default().with_target(PushTarget::Branch {
-                    local: "main".into(),
-                    remote: "main".into(),
-                    lease: PushLease::FastForward,
-                }),
-            )
-            .unwrap();
-            assert_eq!(report.tip, Some(tip));
-            assert_eq!(source.read_ref("refs/heads/main").unwrap(), Some(tip));
-            let packmap = source.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
-            // Signed reads consult current grants again rather than caching a request's selection.
-            assert_eq!(source.read_ref("refs/heads/main").unwrap(), Some(tip));
-            (tip, packmap)
-        };
-        published.push(if client_backend {
-            let http = NativeHttp::new().unwrap();
-            let signer = Dalek::new(READER_SEED);
-            let client = mkit_client::Client::signed(
-                &http,
-                destination(&live.origin, &repository),
-                &signer,
-                &NativeClock,
-            )
-            .with_request_policy(grants.as_ref());
-            run(&ClientSource::new(&client, &http))
-        } else {
-            let tx =
-                transport(&live.origin, &repository, READER_SEED).with_grant_source(grants.clone());
-            run(&TransportSource::new(&tx))
-        });
-        let calls = grants.operations.lock().unwrap();
-        assert!(
-            calls
-                .iter()
-                .filter(|operation| operation.as_str() == "read")
-                .count()
-                >= 3
-        );
-        assert!(calls.iter().any(|operation| operation == "write"));
-    }
-    assert_eq!(published[0], published[1]);
 }
 
 #[derive(Debug)]

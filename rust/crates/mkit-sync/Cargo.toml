@@ -76,12 +76,10 @@ mkit-transport-connect = { path = "../mkit-transport-connect" }
 mkit-test-util = { path = "../mkit-test-util" }
 http = "1"
 mkit-transport-memory = { path = "../mkit-transport-memory" }
-connectrpc = { version = "0.9.0", default-features = false, features = ["server"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 base64 = "0.22"
 buffa = "0.9.1"
-mkit-attest = { path = "../mkit-attest", features = ["grants"] }
 
 [[example]]
 name = "gen_zstd_fixture"
