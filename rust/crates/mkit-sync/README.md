@@ -314,13 +314,8 @@ starts; it retains the same body and identity. An exchange failure after writing
 starts is returned to the caller. Pool checkout checks elapsed idle time even
 when the current-thread runtime is paused. No scheduler thread is added.
 
-The channel adds no zstd: with `--no-default-features` the tree has none, and pack decode goes through
-mkit-core's `pack-ruzstd`. `scripts/check-sync-native-deps.sh` runs in CI and
-fails if `zstd`, `zstd-safe`, `zstd-sys`, `aws-lc-*`, `openssl*`,
-`native-tls`, `rustls-native-certs`, `brotli` and other compression crates,
-`libz-sys`, `hyper-tls`, `h2`, `connectrpc` or `reqwest` enter the normal or
-build graph, if tokio's multi-thread scheduler is enabled, or if `flate2`,
-`hyper`, `rustls`, `ring` or (in the `pack-ruzstd` row) `ruzstd` leave it.
+The channel adds no zstd: with `--no-default-features` the tree has none, and
+the build reads raw packs only.
 
 ### Worktree primitives
 
@@ -333,14 +328,10 @@ command line's `checkout`, `reset` and `restore` use the same functions.
 
 | Feature | Default | Effect |
 |---|---|---|
-| `pack-zstd` | yes | Reads zstd-compressed (format v2) pack entries through the zstd C library. Without it, v2 packs are rejected unless `pack-ruzstd` is on. |
-| `pack-ruzstd` | no | Pure-Rust decode of v2 pack entries, for builds without `pack-zstd`. |
+| `pack-zstd` | yes | Reads zstd-compressed (format v2) pack entries through the zstd C library. Without it, v2 packs are rejected. |
 | `history-mmr` | no | Publish versioned first-parent ancestry snapshots with branch writes. |
 | `client` | no | `ClientSource`, `Executor`, `FuturesExecutor`: the `mkit-client` backend. |
 | `connect-native` | no | `client` plus `NativeHttp`, `NativeClock`, `default_tls_config`. Gzip only; adds no zstd of its own (build with `--no-default-features` for a tree without it). |
-
-The embedding native addon builds `--no-default-features --features
-pack-ruzstd,connect-native`.
 
 ## Dependency footprint
 
@@ -350,14 +341,11 @@ pack-ruzstd,connect-native`.
 |---|---|---|---|
 | default (`pack-zstd`) | 67 | yes | C zstd |
 | `--no-default-features` | 64 | no | raw packs only |
-| `--no-default-features --features pack-ruzstd` | 66 | no | `ruzstd` |
 | `--features client` | 88 | yes | C zstd |
-| `--no-default-features --features pack-ruzstd,client` | 87 | no | `ruzstd` |
 | `--features connect-native` | 117 | yes | C zstd |
 | `--no-default-features --features connect-native` | 114 | no | raw packs only |
-| `--no-default-features --features pack-ruzstd,connect-native` | **116** | **no** | `ruzstd` |
 
-The last row is the addon build. `connect-native` adds hyper, hyper-util,
+`connect-native` adds hyper, hyper-util,
 hyper-rustls, rustls (`ring`), webpki-roots, tokio (`rt`, `net`, `time`),
 flate2 (pure-Rust backend), http, http-body-util, bytes and getrandom, about 30
 crates over the `client` row; no async runtime beyond the current-thread

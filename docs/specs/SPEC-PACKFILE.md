@@ -621,24 +621,19 @@ surface; the spec-level names below stay protocol-neutral.
     two concatenated frames, a valid frame plus one trailing byte, a
     lone skippable frame (magic `0x184D2A5?`), or a skippable frame
     before or after a valid one &rarr; rejected (`ZstdDecompress`) by
-    every decoder backend (§3.3 "one zstd frame"). Pinned by
-    `c_backend_enforces_one_frame`, `ruzstd_enforces_one_frame` and
-    `backends_agree_on_adversarial_frames` (`pack/zstd_tests.rs`).
-20. **C-encoded v2 fixtures decode byte-identically under a
-    decode-only backend**: the committed packs in
-    `rust/tests/golden/pack-v2/` (`0x03`, `0x04`, a mixed pack with an
-    in-pack delta chain, a compressed tree and signed commit, and
-    10 KiB / 64 KiB / 263 KiB literal-heavy blobs whose frames use the
-    4- and 5-byte literals-section headers), written by the C zstd
-    encoder, recover the object ids and bytes their `.json` sidecars
-    list through `PackEntries` and `PackReader::read` with only the
-    pure-Rust `pack-ruzstd` decoder compiled in
-    (`pack_v2_fixtures_decode_without_c_zstd`), including on a 32-bit
-    wasm32 target (`scripts/wasm-ruzstd-check.sh`), and decode
-    identically under both backends
-    (`backends_agree_on_committed_v2_fixtures`).
-    Each sidecar records every frame's offset and length, so the
-    reference `zstd -d` CLI can cross-check the decoded bytes.
+    the decoder (§3.3 "one zstd frame"). Pinned by
+    `decoder_enforces_one_frame` and `rejects_adversarial_frames`
+    (`pack/zstd_tests.rs`).
+20. **C-encoded v2 fixtures decode to their sidecar objects**: the
+    committed packs in `rust/tests/golden/pack-v2/` (`0x03`, `0x04`, a
+    mixed pack with an in-pack delta chain, a compressed tree and signed
+    commit, and 10 KiB / 64 KiB / 263 KiB literal-heavy blobs whose frames
+    use the 4- and 5-byte literals-section headers), written by the C zstd
+    encoder, recover the object ids and bytes their `.json` sidecars list
+    through `PackEntries` and `PackReader::read`
+    (`pack_v2_fixtures_decode`). Each sidecar records every frame's offset
+    and length, so the reference `zstd -d` CLI can cross-check the decoded
+    bytes.
 21. **Unsigned length boundaries:** lengths `2^31` and `2^32 - 1` in a
     short, correctly checksummed pack are interpreted without sign extension
     or wraparound. The general reader returns `UnexpectedEof`; an indexed

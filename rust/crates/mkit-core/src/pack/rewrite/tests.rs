@@ -441,7 +441,7 @@ fn unchanged_ignores_a_deferred_writer_error() {
     assert_eq!(state.finish().unwrap().bytes, pack);
 }
 
-#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+#[cfg(feature = "pack-zstd")]
 #[test]
 fn committed_compressed_fixtures_rewrite_with_either_decoder() {
     for pack in [

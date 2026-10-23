@@ -188,9 +188,8 @@ for a constrained host). Delta bases that are not in the same pack come from
 
 | Feature | Effect |
 | --- | --- |
-| `pack-ruzstd` (default) | Pure-Rust decode of compressed packs. Builds for `wasm32-unknown-unknown`. Push still writes raw packs. |
-| `pack-zstd` | Native only: the C zstd backend. Push writes compressed packs and reads use the C decoder. Pulls in `zstd-sys`. |
-| neither | Raw packs only; a compressed entry fails closed at runtime. |
+| `pack-zstd` (default) | The C zstd backend. Push writes compressed packs and reads use the C decoder. Pulls in `zstd-sys`, so it does not build for `wasm32-unknown-unknown`. |
+| off | Raw packs only. A compressed entry fails closed at runtime. |
 
 The default build contains no tokio, hyper,
 connectrpc, reqwest or zstd-sys; `scripts/check-wasm-dep-graph.sh` fails CI if

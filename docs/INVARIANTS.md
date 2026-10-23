@@ -1205,11 +1205,7 @@ unrecognized `BackendKind`/`KeyRef` backend string, not a fail-closed one.
 `zstd-sys`, `commonware-runtime` or `commonware-storage`; `mkit-wasm`'s also
 contains no `tokio`. Each crate depends on `mkit-core` with
 `default-features = false`, which keeps `pack-zstd` (and so `zstd-sys`) out.
-The same holds for `mkit-core` built with `--no-default-features
---features pack-ruzstd`, the pure-Rust decode-only zstd backend a Workers
-build uses to read v2 packs: that graph must contain `ruzstd` and none of
-the crates above. `mkit-wasm` stays raw-only (SPEC-DISCLOSURE §7.2), so
-its graph must not contain `ruzstd` either until it opts in.
+`mkit-wasm` stays raw-only (SPEC-DISCLOSURE §7.2).
 
 **Because:** none of those crates build for `wasm32-unknown-unknown`.
 `mkit-wasm` ships to browsers, `apps/repo-worker` runs on Cloudflare
@@ -1224,8 +1220,7 @@ the native build happened to have. A wasm32 embedder could no longer build
 the server at all.
 
 **Enforced by:** `scripts/check-wasm-dep-graph.sh` (a `cargo tree` check
-per crate, including the `mkit-core` `pack-ruzstd` graph, which must
-contain `ruzstd`) and the `cargo check --target wasm32-unknown-unknown`
+per crate) and the `cargo check --target wasm32-unknown-unknown`
 steps for `mkit-wasm` and `mkit-server`, all run by `just ci-scripts`
 (part of `just ci`); cloudbuild/ci.yaml runs the script and the
 `mkit-server` wasm32 build on `main` and PRs to it.
@@ -1327,93 +1322,37 @@ precondition or limit, or buffer a stream where the spec requires streaming.
 `native-wire-conformance` job. `baseline_pipeline_memory.rs` separately exercises
 the pipeline over memory stores and the store mutants each case must catch.
 
-## Both zstd backends accept exactly one frame per entry
+## The zstd decoder accepts exactly one frame per entry
 
 **Always:** a `0x03`/`0x04` entry's payload after `uncompressed_len` is
-exactly one RFC 8878 Zstandard frame (SPEC-PACKFILE §3.3). The C backend
-(`pack-zstd`) and the pure-Rust backend (`pack-ruzstd`) both reject a
-skippable or legacy frame magic, a second concatenated frame and any
-trailing byte, with `PackError::ZstdDecompress`. Both apply the same §3.3
-bomb guards (claim ≤ `MAX_RAW_OBJECT_SIZE` before decoding, output bounded
-to the claim, exact length re-check). Both paths reserve output fallibly
-without zero-filling the claim; unpack charges the resident budget first.
-The pure-Rust path reads out at most `claim + 1` bytes and never grows the
-reserved output. Both decode windows are capped at 8 MiB independently of the
-claim. The shared allocation-free preflight checks frame windows and encoded
-block sizes before either decoder starts. The named `mkit-ruzstd` dependency
-checks `min(Window_Size, 128 KiB)` before raw/RLE materialization and before
-executing any compressed sequences. The fork is selected by a versioned path
-dependency, retaining the import name
-`ruzstd`. Published and independent-workspace consumers inherit the named
-package without `[patch]` tables. Its separate
-ring and block scratch have a fixed 28 MiB working allowance, including
-transient old/new ring allocations during growth, outside the owned-payload
-resident cap and the window reader's carry/output budget. Scheduled verification
-reserves that scratch within its unchanged 48 MiB allowance by retaining a
-1 MiB LRU (or one newest admitted larger base) and releasing the idle reader
-window before nested delta-base decode. The physical window geometry and
-entry admission formula remain unchanged. A post-entry cursor commits only
-after delta verification succeeds; the next alarm resumes with the same hash
-and etag checks. Member-chain copies drop after their dependency/byte charges
-are staged. The pure-Rust path also
-checks what `ruzstd` skips and the C decoder enforces: the declared
-content size against the claim and the decoded length, the content
-checksum, the reserved descriptor and sequence-mode bits, and the
-per-block size bound for every window. When both features are on,
-the C decoder serves reads.
+exactly one RFC 8878 Zstandard frame (SPEC-PACKFILE §3.3). The decoder
+(`pack-zstd`) rejects a skippable or legacy frame magic, a second
+concatenated frame and any trailing byte, with `PackError::ZstdDecompress`.
+It applies the §3.3 bomb guards: the claim is at most `MAX_RAW_OBJECT_SIZE`
+before decoding, the output is bounded to the claim, and the decoded length
+is checked against the claim. The decoder reserves output fallibly without
+zero-filling the claim, and unpack charges the resident budget first. The
+decode window is capped at 8 MiB independently of the claim. An
+allocation-free preflight checks the frame window, the encoded block sizes,
+the reserved descriptor bit and the reserved sequence-mode bits before the
+decoder starts. A build without `pack-zstd` fails closed on a compressed
+entry.
 
-**Because:** a pack must mean the same objects on a native build (C)
-and a Workers isolate (`ruzstd`). A frame one runtime accepts and the
-other rejects splits pushes, fetches and indexed state between them.
+**Because:** a pack must mean the same objects on every build. A frame one
+build accepts and another rejects splits pushes and fetches between them.
 
-**If violated:** a push accepted on one runtime is rejected on the other,
-or a runtime decodes bytes the spec forbids (a second frame's content).
+**If violated:** a runtime decodes bytes the spec forbids, such as a second
+frame's content.
 
 The hand-written frame parsing assembles header fields in `u64`, never
-`usize`, so it behaves the same on 32-bit wasm32 as on 64-bit native.
+`usize`, so it behaves the same on 32-bit and 64-bit targets.
 
-**Residual divergence (documented, not closed):** the two decoders agree
-on the encoder frames covered by the differential proptest over
-`PackWriter` output and C-encoded fixtures, and on the curated adversarial
-table. On *malformed* frames they do not fully agree. Fail-closed on
-`pack-ruzstd` (it rejects, C accepts): corrupt entropy-coded sections the C
-one-shot decoder tolerates. Fail-open
-(it accepts, C rejects) and both-accept-different-bytes cases also exist
-for a small share of corrupted frames, in Huffman/FSE table internals
-that no cheap check reaches; the reference `zstd` CLI rejects those
-frames too. Over 850k mutated frames: 134 accepted only by `pack-ruzstd`,
-2,580 accepted only by C, 4 accepted by both with different bytes, no
-panics. This decoder-level difference remains documented; object ids are
-content-derived. Integrity is unaffected: decoded bytes must parse as a canonical object and are stored
-under their own content id, so no runtime can accept wrong content under
-a given id. The divergence can only change which objects, if any, a
-crafted pack yields on each runtime.
-
-**Consumers MUST:** a server that accepts a pushed pack through
-`pack-ruzstd` MUST NOT serve that pack's `0x03`/`0x04` frames verbatim to
-other clients unless the reference (C) decoder decodes them to the same
-bytes the server indexed (both decoders can accept a frame yet produce
-different bytes). Otherwise it MUST serve server-derived bytes instead:
-raw v1 entries, or frames the server re-encoded itself. No consumer may assume two runtimes derive the same
-object set from the same client-supplied compressed frames. Owners:
-WP-4.7 (indexed ingestion) and WP-4.8 (Workers verification), which
-enable `pack-ruzstd` first.
-
-**Enforced by:** `mkit_core::pack::zstd_tests` (`c_backend_enforces_one_frame`,
-`ruzstd_enforces_one_frame`, `ruzstd_rejects_claims_before_or_at_the_cap`,
-`ruzstd_rejects_huge_window_frame`,
-`ruzstd_decodes_4_and_5_byte_literals_headers`,
-`ruzstd_enforces_reserved_bits_and_block_size`, and under
-`--all-features` the differential `backends_agree_on_adversarial_frames`,
-`backends_agree_on_bit_flipped_frames`,
-`backends_agree_on_reserved_sequence_mode_bits`,
-`window_divergences_are_fail_closed`,
-`backends_agree_on_committed_v2_fixtures` and
-`ruzstd_matches_c_on_writer_output`), plus
-`golden_pack::pack_v2_fixtures::pack_v2_fixtures_decode_without_c_zstd`
-over `rust/tests/golden/pack-v2/`, the `pack-ruzstd`-only nextest run in
-`just ci`, and `scripts/wasm-ruzstd-check.sh` (the same fixtures decoded
-on a real wasm32 target by `mkit-core-wasm-check`, in `just ci-scripts`).
+**Enforced by:** `mkit_core::pack::zstd_tests` (`decoder_enforces_one_frame`,
+`rejects_adversarial_frames`, `rejects_reserved_sequence_mode_bits`,
+`enforces_window_and_block_limits` and
+`rejects_oversized_literals_and_block_bodies`), plus
+`golden_pack::pack_v2_fixtures::pack_v2_fixtures_decode` over
+`rust/tests/golden/pack-v2/`.
 
 ## Hosted workspaces separate public projects from owner execution
 
@@ -1746,9 +1685,8 @@ construction.
 **If violated:** a native exporter could emit a v2 pack that a wasm
 verifier rejects (or, without the type scan, tries to decompress and
 hits the `pack-zstd` stub), splitting the verifier kit into two
-incompatible carriers. The type scan still runs first when a build has
-the `pack-ruzstd` decoder, so a compressed entry is a profile violation
-there too, not a decoded object.
+incompatible carriers. The type scan runs first, so a compressed entry is a profile violation,
+not a decoded object.
 
 **Enforced by:** `mkit_core::pack::tests::raw_only_writer_emits_v1_raw_for_compressible_payload`,
 `raw_only_writer_rejects_deltas`,

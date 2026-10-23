@@ -187,8 +187,8 @@ impl<K: ObjectSink> DeltaBaseSource for SinkBases<'_, K> {
 }
 
 /// Check `pack` against its requested id, decode it, verify the signed kinds
-/// and hand every object to `sink`. Compressed entries need a zstd backend
-/// (`pack-ruzstd`, on by default, or `pack-zstd`); without one they fail closed.
+/// and hand every object to `sink`. Compressed entries need the `pack-zstd`
+/// feature, on by default; without it they fail closed.
 ///
 /// # Errors
 /// A pack that does not hash to `pack_id`, a malformed pack or one beyond

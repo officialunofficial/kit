@@ -194,8 +194,8 @@ fn generated_pack(entries: &[(bool, bool, Vec<u8>)]) -> Vec<u8> {
     writer
         .push_delta(&hash::hash(b"raw seed"), b"tiny delta")
         .unwrap();
-    // Native writers emit 0x03 and 0x04 here. Ruzstd-only writers emit the
-    // equivalent v1 entries; golden tests supply compressed inputs there.
+    // Writers with `pack-zstd` emit 0x03 and 0x04 here. Writers without it
+    // emit the equivalent v1 entries; golden tests supply compressed inputs.
     writer.push_raw(hash::hash(&[7; 2048]), &[7; 2048]).unwrap();
     writer
         .push_delta(&hash::hash(b"raw seed"), &[9; 2048])
@@ -1370,7 +1370,7 @@ fn a_resumed_reader_reports_frames_only_for_entries_it_yields() {
     assert_eq!(resumed.last_frame(), None);
 }
 
-#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+#[cfg(feature = "pack-zstd")]
 #[test]
 fn explicit_geometry_carried_compressed_frame_binds_the_released_prefix() {
     let raw = vec![0x42; 4096];
@@ -2036,7 +2036,7 @@ fn exact_checkpoint_at_window_edge_and_split_trailer() {
     }
 }
 
-#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+#[cfg(feature = "pack-zstd")]
 #[test]
 fn one_pass_carried_compressed_entry_never_reacquires_a_window() {
     let raw = vec![0x42; 4096];

@@ -874,10 +874,6 @@ fn remote_with_zstd_pack() -> Remote {
     remote
 }
 
-// Test builds unify mkit-core's features across the dev-dependencies, so this
-// runs with the C decoder available whichever of the two features is selected;
-// the pure-Rust-only build is held by `scripts/check-sync-native-deps.sh`
-// (the normal graph has `ruzstd` and no `zstd`).
 #[test]
 fn a_zstd_compressed_pack_is_cloned() {
     let remote = remote_with_zstd_pack();

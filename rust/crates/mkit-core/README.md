@@ -30,12 +30,6 @@ Optional features (`history-mmr`, `sparse-checkout`, `pack-shards`) gate
 heavier `commonware-*`-backed paths &mdash; see the crate's `Cargo.toml` for what
 each pulls in.
 
-`pack-ruzstd` selects the bounded pure-Rust decoder package `mkit-ruzstd`,
-imported internally as `ruzstd`. The versioned path dependency becomes a named
-registry dependency when this crate is published, so downstream workspaces need
-no Cargo patch. The fork retains upstream's MIT license and attribution.
-See **rust/vendor/ruzstd/VENDORED.md** for the RFC 8878 bounds and upstream status.
-
 ## Merge operations without a filesystem
 
 `ops::{merge_trees, revert, cherry_pick}` accept any `ObjectSource + ObjectSink`.

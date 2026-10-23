@@ -13,7 +13,7 @@
 //! `DecompressedSizeOverCap`, `DecompressedSizeMismatch`, and `ZstdDecompress`.
 //! The decoded budget includes owned entry buffers, including carried wire bytes
 //! plus decoded output when both are live. Decoder-internal memory is additional
-//! (in particular the ruzstd ring buffer; see the parent module).
+//! (in particular the zstd window buffer; see the parent module).
 //!
 //! A resumed run re-fetches its current window and checks the checkpoint's
 //! prefix commitment before yielding entries. Completed windows are not re-read.

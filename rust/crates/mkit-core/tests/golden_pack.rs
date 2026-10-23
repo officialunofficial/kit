@@ -396,7 +396,7 @@ fn pack_v2_compressed_delta_pin_bytes_roundtrip() {
 /// so a decode-only build had no real v2 bytes to read. These fixtures are
 /// produced once by the C encoder (`MKIT_WRITE_GOLDEN=1 cargo test -p
 /// mkit-core --test golden_pack`, default features) and read back by every
-/// build that has a decoder, including `pack-ruzstd` alone. `MANIFEST.txt`
+/// build that has a decoder. `MANIFEST.txt`
 /// pins the BLAKE3 of every file; each `.json` sidecar lists the entries'
 /// wire types, object ids and byte digests, plus the zstd frame offsets
 /// for an independent `zstd -d` cross-check.
@@ -702,12 +702,10 @@ mod pack_v2_fixtures {
     }
 
     /// Every committed v2 fixture decodes to the sidecar's objects through
-    /// both [`PackEntries`] and [`PackReader::read`], with whichever
-    /// decoder this build has — the pure-Rust one under `pack-ruzstd`
-    /// alone.
+    /// both [`PackEntries`] and [`PackReader::read`].
     #[test]
-    #[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
-    fn pack_v2_fixtures_decode_without_c_zstd() {
+    #[cfg(feature = "pack-zstd")]
+    fn pack_v2_fixtures_decode() {
         use std::collections::HashMap;
 
         use mkit_core::pack::{PackEntries, PackEntry, pack_key};
@@ -807,7 +805,7 @@ mod pack_v2_fixtures {
 
     /// With no decoder compiled in, a compressed entry still fails closed.
     #[test]
-    #[cfg(not(any(feature = "pack-zstd", feature = "pack-ruzstd")))]
+    #[cfg(not(feature = "pack-zstd"))]
     fn compressed_fixture_fails_closed_without_a_decoder() {
         let pack = load("raw_4k_repeat.bin");
         let dir = tempfile::TempDir::new().unwrap();
