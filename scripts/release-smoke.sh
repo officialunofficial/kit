@@ -4,8 +4,7 @@
 # Mechanizes docs/RELEASE.md's "Smoke test" checklist for a Linux/macOS
 # release archive (`.tar.gz`): verify the cosign signature and the
 # SHA256SUMS entry, extract it, check the `mkit version` contract and the
-# bundled man page/completions, run a basic init/keygen/add/commit flow,
-# and (unless --skip-npm) check the matching npm package.
+# bundled man page/completions, run a basic init/keygen/add/commit flow.
 #
 # WHY: this checklist used to be run once per release, by a human, by hand.
 # Mechanizing it makes it repeatable: as a pre-flight dry run against a
@@ -15,7 +14,7 @@
 #
 # Usage:
 #   scripts/release-smoke.sh --archive <path/to/mkit-X.Y.Z-<triple>.tar.gz> \
-#     --version X.Y.Z [--skip-npm] [--skip-cosign] [--skip-sha256sums]
+#     --version X.Y.Z [--skip-cosign] [--skip-sha256sums]
 #
 # Looks for, alongside <archive> (all optional — a missing sidecar is
 # skipped with a warning so this also works against a bare local build):
@@ -26,7 +25,6 @@ set -euo pipefail
 
 archive=""
 version=""
-skip_npm=0
 skip_cosign=0
 skip_sha256sums=0
 
@@ -34,7 +32,6 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --archive) archive="$2"; shift 2 ;;
     --version) version="$2"; shift 2 ;;
-    --skip-npm) skip_npm=1; shift ;;
     --skip-cosign) skip_cosign=1; shift ;;
     --skip-sha256sums) skip_sha256sums=1; shift ;;
     *)
@@ -45,7 +42,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$archive" ] || [ -z "$version" ]; then
-  echo "usage: $0 --archive <path/to/mkit-X.Y.Z-<triple>.tar.gz> --version X.Y.Z [--skip-npm] [--skip-cosign] [--skip-sha256sums]" >&2
+  echo "usage: $0 --archive <path/to/mkit-X.Y.Z-<triple>.tar.gz> --version X.Y.Z [--skip-cosign] [--skip-sha256sums]" >&2
   exit 2
 fi
 if [ ! -f "$archive" ]; then
@@ -169,26 +166,6 @@ trap 'rm -rf "$work_dir" "$repo_dir"' EXIT
   "$bin" commit -m "smoke test commit"
 ) || error "basic init/keygen/add/commit flow failed"
 [ "$fail" -eq 0 ] && note "basic init/keygen/add/commit flow OK"
-
-# ── npm package ──────────────────────────────────────────────────────────
-if [ "$skip_npm" -eq 1 ]; then
-  note "skipping npm checks (--skip-npm)"
-elif ! command -v npm >/dev/null 2>&1; then
-  warn "npm not installed — skipping npm checks"
-else
-  note "checking @officialunofficial/mkit-wasm@${version} on npm"
-  if ! npm view "@officialunofficial/mkit-wasm@${version}" >/dev/null; then
-    error "npm view @officialunofficial/mkit-wasm@${version} failed"
-  fi
-  npm_dir="$(mktemp -d)"
-  trap 'rm -rf "$work_dir" "$repo_dir" "$npm_dir"' EXIT
-  (
-    cd "$npm_dir"
-    npm init -y >/dev/null
-    npm install --save-exact "@officialunofficial/mkit-wasm@${version}" >/dev/null
-    npm audit signatures
-  ) || error "npm audit signatures failed for @officialunofficial/mkit-wasm@${version}"
-fi
 
 if [ "$fail" -ne 0 ]; then
   echo "release-smoke: FAILED — see errors above" >&2

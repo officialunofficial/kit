@@ -25,9 +25,8 @@ name: "Release: Artifacts"
 # Cache safety: every Swatinem/rust-cache invocation here uses a release-
 # specific `prefix-key`, partitioned away from the keys that PR-event
 # workflows write to. This prevents a malicious PR from poisoning a cache
-# that this workflow (which carries `secrets.MKIT_NPM_TOKEN` and
-# `id-token: write`) would later deserialize. See the cache-poisoning
-# supply-chain audit pass.
+# that this workflow (which carries `id-token: write`) would later
+# deserialize.
 #
 # No secrets are needed for cosign keyless — OIDC token comes from GitHub.
 
@@ -268,7 +267,7 @@ jobs:
           version: '31.0'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Select only mkit-cli with -p to avoid workspace feature unification (D31).
+      # Select only mkit-cli with -p to avoid workspace feature unification.
       - name: Build release mkit binary
         shell: bash
         working-directory: rust
@@ -713,156 +712,3 @@ jobs:
             A CycloneDX SBOM (`sbom.cdx.json`) is attached. Reflects the
             Rust crate graph of the whole workspace, including library and
             test dependencies, plus toolchain and OS libraries.
-
-            ### npm package
-
-            The WASM bindings are also published to npm as
-            [`@officialunofficial/mkit-wasm`](https://www.npmjs.com/package/@officialunofficial/mkit-wasm) at the
-            same version, with Sigstore-backed provenance attached to this
-            workflow run.
-
-  publish-wasm:
-    name: Publish mkit-wasm to npm
-    runs-on: ubuntu-latest
-    # npm provenance (`npm publish --provenance`, below) requires a PUBLIC
-    # source repository. While the repo is private/internal this job is
-    # SKIPPED (not failed) so the CLI binary release still goes green; it
-    # self-activates the next time a tag is pushed after the repo is made
-    # public. The job body keeps its own explicit public-repo guard as a
-    # defense-in-depth check.
-    #
-    if: ${{ !cancelled() && needs.release.result == 'success' && github.event.repository.visibility == 'public' }}
-    needs: [validate-release-tag, build, release]
-    permissions:
-      contents: write       # attach assets to the GitHub Release
-      id-token: write       # npm provenance via OIDC
-    steps:
-      - name: Resolve tag
-        id: meta
-        shell: bash
-        run: |
-          TAG="${{ needs.validate-release-tag.outputs.tag }}"
-          REF="${{ needs.validate-release-tag.outputs.ref }}"
-          COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
-          VERSION="${{ needs.validate-release-tag.outputs.version }}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout (at resolved tag)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ steps.meta.outputs.commit }}
-          fetch-depth: 0
-
-      - name: Install Rust ${{ env.RUST_VERSION }} + wasm32 target
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          targets: wasm32-unknown-unknown
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16  # v2
-        with:
-          workspaces: rust -> rust/target
-          prefix-key: "rust-release-wasm32"
-          key: release-wasm32
-          cache-on-failure: false
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
-        with:
-          version: '31.0'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Node.js (npm registry)
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
-        with:
-          node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
-
-      # Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 22's bundled npm
-      # on GitHub-hosted runners drifts with each LTS patch, so pin
-      # explicitly rather than trust whatever ships that day.
-      - name: Ensure npm >= 11.5.1 (Trusted Publishing requirement)
-        run: npm install -g npm@^11.5.1
-
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --locked --version 0.13.1
-
-      - name: Build mkit-wasm (target=bundler)
-        working-directory: rust
-        run: |
-          wasm-pack build crates/mkit-wasm \
-            --release \
-            --target bundler \
-            --out-dir pkg
-
-      - name: Patch bundler glue for Bun / Workers compat
-        # wasm-pack 0.13's auto-init `__wbg_set_wasm(wasm)` call breaks
-        # under Bun + Cloudflare Workers (their bundler resolution stores
-        # a WebAssembly.Module / path-shim, not the wasm-bindgen exports
-        # namespace). The patcher additively exports `mkit_wasm_init(module)`
-        # so consumers on broken bundlers can recover with a one-liner.
-        # Strictly additive — esbuild/webpack/vite consumers are untouched.
-        run: node scripts/patch-wasm-bundler-glue.mjs rust/crates/mkit-wasm/pkg
-
-      - name: Set npm package name + version
-        working-directory: rust/crates/mkit-wasm/pkg
-        env:
-          VERSION: ${{ steps.meta.outputs.version }}
-        run: |
-          # Override the npm package name to the scoped form. The Rust
-          # crate stays unscoped (`mkit-wasm`); the npm distribution name
-          # is `@officialunofficial/mkit-wasm`, matching the GitHub org
-          # this repo lives under. See docs/RELEASE.md for rationale.
-          npm pkg set name=@officialunofficial/mkit-wasm
-          # Force-align the package.json version to the git tag.
-          npm version --no-git-tag-version --allow-same-version "$VERSION"
-          jq '{name, version, license, repository}' package.json
-
-      - name: Require public repository for npm provenance
-        env:
-          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
-        run: |
-          if [ "${REPOSITORY_VISIBILITY}" != "public" ]; then
-            echo "::error::npm provenance requires a public GitHub repository; refusing to publish without provenance." >&2
-            exit 1
-          fi
-
-      # Trusted Publishing (OIDC): npm CLI auto-detects this job's GitHub
-      # Actions OIDC token (id-token: write, above) and authenticates
-      # without any stored npm token, PROVIDED the @officialunofficial/
-      # mkit-wasm package's Trusted Publisher is configured on npmjs.com to
-      # trust org=officialunofficial, repo=mkit, workflow=release.yml — see
-      # docs/RELEASE.md. No NODE_AUTH_TOKEN: if OIDC isn't wired up yet on
-      # the npm side, this fails closed instead of silently falling back to
-      # a stale/absent token. Provenance is automatic under Trusted
-      # Publishing — the explicit --provenance flag is kept for older-CLI
-      # defense in depth.
-      - name: Publish to npm
-        working-directory: rust/crates/mkit-wasm/pkg
-        run: npm publish --access public --provenance
-
-      - name: Stage WASM bundle for GitHub Release
-        shell: bash
-        run: |
-          STAGE="mkit-wasm-${{ steps.meta.outputs.version }}-npm"
-          mkdir -p "${STAGE}"
-          cp -R rust/crates/mkit-wasm/pkg/. "${STAGE}/"
-          tar -czf "${STAGE}.tar.gz" "${STAGE}"
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
-          else
-            shasum -a 256 "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
-          fi
-          ls -la "${STAGE}.tar.gz" "${STAGE}.tar.gz.sha256"
-
-      - name: Attach WASM bundle to GitHub Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3
-        with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          files: |
-            mkit-wasm-${{ steps.meta.outputs.version }}-npm.tar.gz
-            mkit-wasm-${{ steps.meta.outputs.version }}-npm.tar.gz.sha256

@@ -1,7 +1,7 @@
 name: "Release: verify distribution channels"
 
 # Manually dispatched verification that mkit actually installs and works
-# from every distribution channel this project ships — crates.io, npm,
+# from every distribution channel this project ships — crates.io,
 # the curl-pipe install script, cargo binstall, and Homebrew — each in an
 # isolated environment. This is the automated, multi-channel completion of
 # docs/RELEASE.md's "Smoke test" section (which scripts/release-smoke.sh
@@ -22,9 +22,8 @@ name: "Release: verify distribution channels"
 # through the distribution flow, expect `install-script` and `homebrew`
 # below to fail, and `cargo-binstall` to silently fall back to a
 # from-source build instead of fetching a prebuilt binary. `cargo-install`
-# and `npm` are unaffected — crates.io and the npm registry are already
-# public today regardless of this repo's visibility — so those two are
-# meaningful right now.
+# is unaffected, because crates.io is public regardless of this repo's
+# visibility.
 
 on:
   workflow_dispatch:
@@ -32,10 +31,6 @@ on:
       version:
         description: "Version to verify, no leading v (e.g. 0.3.0)"
         required: true
-      npm_version:
-        description: "npm package version to verify (may lag the release version — e.g. npm is still on 0.2.1 while crates.io is on 0.3.0)"
-        required: false
-        default: ""
 
 permissions:
   contents: read
@@ -91,51 +86,6 @@ jobs:
 
       - name: Basic flow smoke
         run: bash scripts/basic-flow-smoke.sh "$RUNNER_TEMP/cargo-binstall/bin/mkit" "${{ inputs.version }}"
-
-  npm:
-    name: npm install @officialunofficial/mkit-wasm
-    runs-on: ubuntu-latest
-    steps:
-      - name: Resolve npm version
-        id: v
-        shell: bash
-        run: |
-          v="${{ inputs.npm_version }}"
-          if [ -z "$v" ]; then
-            v="$(npm view @officialunofficial/mkit-wasm version)"
-            echo "npm_version input not set — using published latest: ${v}"
-          fi
-          echo "version=${v}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
-        with:
-          node-version: "22"
-
-      - name: npm view + install
-        run: |
-          npm view "@officialunofficial/mkit-wasm@${{ steps.v.outputs.version }}"
-          mkdir "$RUNNER_TEMP/npm-smoke" && cd "$RUNNER_TEMP/npm-smoke"
-          npm init -y
-          npm install --save-exact "@officialunofficial/mkit-wasm@${{ steps.v.outputs.version }}"
-
-      - name: npm audit signatures
-        working-directory: ${{ runner.temp }}/npm-smoke
-        run: npm audit signatures
-
-      # Functional smoke, not just "did it install": requires the module
-      # and calls a real exported function, proving the wasm actually
-      # loads and executes rather than merely being present on disk.
-      - name: Functional smoke (require + call blake3_hex)
-        working-directory: ${{ runner.temp }}/npm-smoke
-        run: |
-          node -e "
-            const wasm = require('@officialunofficial/mkit-wasm');
-            const h = wasm.blake3_hex(new TextEncoder().encode('hello'));
-            console.log('blake3_hex(hello) =', h);
-            if (!/^[0-9a-f]{64}\$/.test(h)) { throw new Error('not a 64-hex-char hash: ' + h); }
-            console.log('OK');
-          "
 
   install-script:
     name: install.sh (${{ matrix.image }})

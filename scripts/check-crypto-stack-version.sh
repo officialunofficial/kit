@@ -5,10 +5,8 @@
 # Cargo-semver-compatible version across the repo's Cargo workspaces.
 #
 # WHY: several crates independently re-verify signatures/digests the same
-# byte-for-byte way another crate already does (mkit-wasm's Ed25519 exports
-# vs. mkit-core::sign, apps/*-worker's write-envelope strict-verify vs.
-# mkit-core), and the golden-vector / cross-impl-parity tests assert that
-# stays true. Two Cargo-incompatible versions of the same crypto crate in
+# byte-for-byte way another crate already does, and the golden-vector
+# tests assert that it stays true. Two Cargo-incompatible versions of the same crypto crate in
 # the dependency graph can silently diverge in wire-visible behavior (see
 # ed25519-dalek 2->3 dropping the `std` feature and re-deriving errors from
 # `core::error::Error`, or a future change to signature/verification
