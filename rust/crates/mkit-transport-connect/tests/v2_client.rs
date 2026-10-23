@@ -1263,6 +1263,8 @@ impl GrantSource for TestGrant {
     }
 }
 
+/// Tests that move the shared fake clocks below run one at a time.
+static CLOCK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static GRANT_CLOCK: AtomicI64 = AtomicI64::new(1_700_000_000_000);
 fn grant_now() -> i64 {
     GRANT_CLOCK.load(Ordering::SeqCst)
@@ -1288,6 +1290,7 @@ fn lag_sleep(duration: std::time::Duration) {
 
 #[test]
 fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
+    let _serial = CLOCK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let lag = || {
@@ -1397,6 +1400,7 @@ fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
 
 #[test]
 fn advance_deadline_uses_earliest_ticket_expiry() {
+    let _serial = CLOCK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let start = 1_700_000_000_000;
@@ -1446,6 +1450,7 @@ fn advance_deadline_uses_earliest_ticket_expiry() {
 
 #[test]
 fn non_owner_grant_survives_begin_parts_pending_poll_and_resign() {
+    let _serial = CLOCK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     GRANT_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
@@ -1947,6 +1952,7 @@ fn begin_rejection_and_v2_small_unimplemented_are_terminal() {
 
 #[test]
 fn expired_ticket_rejects_before_first_advance_poll() {
+    let _serial = CLOCK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     LAG_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
@@ -1977,6 +1983,7 @@ fn expired_ticket_rejects_before_first_advance_poll() {
 
 #[test]
 fn lag_bound_clears_after_pending_reply() {
+    let _serial = CLOCK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let start = 1_700_000_000_000;
@@ -2150,6 +2157,7 @@ fn nonces(served: &Served, rpc: &str) -> Vec<String> {
 
 #[test]
 fn begin_upload_keeps_nonce_inside_ladder_until_actual_lapse() {
+    let _serial = CLOCK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (jump, expect_new) in [(280_000, false), (301_000, true)] {
@@ -2173,6 +2181,7 @@ fn begin_upload_keeps_nonce_inside_ladder_until_actual_lapse() {
 
 #[test]
 fn upload_pack_renews_at_attempt_start_inside_margin() {
+    let _serial = CLOCK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     RENEW_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
@@ -2194,6 +2203,7 @@ fn upload_pack_renews_at_attempt_start_inside_margin() {
 
 #[test]
 fn update_ref_renews_after_actual_lapse() {
+    let _serial = CLOCK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     RENEW_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
@@ -2214,6 +2224,7 @@ fn update_ref_renews_after_actual_lapse() {
 
 #[test]
 fn upload_part_and_complete_renew_at_attempt_start_inside_margin() {
+    let _serial = CLOCK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let bytes = vec![7; (8 << 20) + 1];
@@ -2349,6 +2360,7 @@ impl PartReceiptStore for TrackedReceiptStore {
 
 #[test]
 fn expired_ticket_receipts_do_not_resume() {
+    let _serial = CLOCK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let start = 1_700_000_000_000;
