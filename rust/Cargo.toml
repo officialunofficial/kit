@@ -13,6 +13,7 @@ members = [
     "crates/mkit-transport-s3",
     "crates/mkit-client",
     "crates/mkit-transport-connect",
+    "crates/mkit-sign-file",
     "crates/mkit-sync",
     "crates/mkit-cli",
     "fuzz",
