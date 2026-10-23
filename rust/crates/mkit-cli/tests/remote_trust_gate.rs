@@ -109,6 +109,7 @@ fn push_allows_repo_remote_when_user_trusts_endpoint() {
     );
 }
 
+#[cfg(feature = "s3")]
 #[test]
 fn push_rejects_repo_configured_s3_remote_with_env_creds() {
     let td = tempfile::tempdir().unwrap();

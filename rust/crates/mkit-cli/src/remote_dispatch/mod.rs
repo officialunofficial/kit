@@ -41,6 +41,7 @@ use mkit_transport_connect::{
     ConnectTransport, PENDING_INTERRUPTED_MESSAGE, remote_identity_from_url,
 };
 use mkit_transport_file::FileTransport;
+#[cfg(feature = "s3")]
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
 
@@ -821,6 +822,13 @@ fn open_with_ssh_options(
         let tx = ConnectTransport::connect_with_signer(url, envelope_signer)?;
         return Ok(Arc::new(tx));
     }
+    #[cfg(not(feature = "s3"))]
+    if url.starts_with("mkit+s3://") {
+        return Err(DispatchError::UnsupportedScheme(format!(
+            "'{url}' needs S3 support — rebuild with `--features s3`"
+        )));
+    }
+    #[cfg(feature = "s3")]
     if url.starts_with("mkit+s3://") {
         // S3Transport::connect reads MKIT_R2_ACCESS_KEY_ID /
         // MKIT_R2_SECRET_ACCESS_KEY from the environment. Missing

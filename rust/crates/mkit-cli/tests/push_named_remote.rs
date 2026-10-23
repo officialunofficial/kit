@@ -345,6 +345,7 @@ fn bare_push_to_repo_planted_upstream_is_still_gated() {
 
 /// S3 sibling of the named-remote gate: a hostile repo-scoped named S3
 /// remote with ambient R2 credentials present must also be refused.
+#[cfg(feature = "s3")]
 #[test]
 fn named_repo_s3_remote_with_creds_is_still_gated() {
     let td = repo_with_commit(b"hi");

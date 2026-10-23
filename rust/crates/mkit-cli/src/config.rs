@@ -1268,6 +1268,7 @@ where
         return None;
     }
 
+    #[cfg(feature = "s3")]
     if endpoint.starts_with("mkit+s3://")
         && (getenv(mkit_transport_s3::ENV_ACCESS_KEY).is_some()
             || getenv(mkit_transport_s3::ENV_SECRET_KEY).is_some())
@@ -2113,6 +2114,7 @@ mod tests {
         assert!(msg.is_none());
     }
 
+    #[cfg(feature = "s3")]
     #[test]
     fn repo_s3_remote_with_env_creds_requires_user_trust() {
         let cfg = layered(

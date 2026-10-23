@@ -72,6 +72,9 @@ mkit-transport-file = { version = "0.5", path = "../mkit-transport-file" }
 # unconditional; the CLI hosts no Connect HTTP server.
 mkit-transport-connect = { version = "0.5", path = "../mkit-transport-connect" }
 mkit-transport-ssh = { version = "0.5", path = "../mkit-transport-ssh" }
+# Optional: `mkit+s3://` remotes on S3-compatible storage (R2). Off by
+# default so the baseline build has no S3 client. Turn on via `--features s3`.
+mkit-transport-s3 = { version = "0.5", path = "../mkit-transport-s3", optional = true }
 # Optional: the tokio runtime `mkit mcp --http` (the `mcp-v2` feature) runs
 # on, with the hyper server. Off by default, so the default `mkit-cli`
 # build stays server-free (scripts/check-cli-baseline.sh): tokio is in the
@@ -271,6 +274,8 @@ testcontainers = { version = "0.27", features = ["blocking"] }
 
 [features]
 default = []
+# Enables `mkit+s3://` remotes through `mkit-transport-s3`. Off by default.
+s3 = ["dep:mkit-transport-s3"]
 # Compile-time exhaustiveness mirror of mkit-attest's bls-threshold —
 # pulls the BLS Algorithm variant into scope so the CLI's match arms
 # cover it (returning UNAVAILABLE per-site). The release-party signer
@@ -290,18 +295,19 @@ mcp-v2 = ["dep:rmcp", "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:subtle", 
 # export-only era.
 git-bridge = ["dep:mkit-git-bridge"]
 git-export = ["git-bridge"]
-# Verifiable sparse-checkout (issue #158). Pulls the
-# `mkit-core` sparse module and the matching transport-side fetchers
-# into scope. Off by default — the upstream `commonware-storage` is
-# ALPHA-tier.
+# Verifiable sparse-checkout. Pulls the `mkit-core` sparse module and, when
+# `s3` is on, the matching S3 fetcher into scope. Off by default — the
+# upstream `commonware-storage` is ALPHA-tier.
 sparse-checkout = [
     "mkit-core/sparse-checkout",
+    "mkit-transport-s3?/sparse-checkout",
 ]
-# Issue #159 — `mkit pack-shard <hash>` producer subcommand
-# and shard-aware HTTP / S3 downloads. Default-off because the
-# commonware dep stack is large.
+# `mkit pack-shard <hash>` producer subcommand and, when `s3` is on,
+# shard-aware S3 downloads. Default-off because the commonware dep stack is
+# large.
 pack-shards = [
     "mkit-core/pack-shards",
+    "mkit-transport-s3?/pack-shards",
 ]
 # Canonical first-parent ancestry snapshots and contextual proofs. Opt in for
 # commit/branch/merge/rebase/cherry-pick publication and verified reflog output.
