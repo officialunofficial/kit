@@ -6,12 +6,10 @@ name: "CI: Third-party notices"
 # with rust/deny.toml's [licenses] allow list) at PR time, not at tag time.
 # cargo-about and cargo-deny parse/evaluate SPDX license expressions with
 # different logic, so this is a distinct check from the cargo-deny license
-# gate already running on Cloud Build (cloudbuild/security.yaml) — not a
-# duplicate of it.
+# gate in rust-security.yml, not a duplicate of it.
 #
 # Does not compile the workspace: cargo-about resolves the dependency graph
-# via `cargo metadata`, so this job is cheap even though it isn't on Cloud
-# Build.
+# via `cargo metadata`, so this job is cheap.
 
 on:
   push:
@@ -28,7 +26,7 @@ on:
   # job is gated on the in-workflow paths-filter below instead — this avoids
   # the "required-but-skipped" trap where a path-filtered trigger leaves a
   # required status stuck pending on PRs that don't touch the dependency
-  # graph. Mirrors the same pattern already used by mcp.yml/web.yml.
+  # graph.
   pull_request:
     branches: [main]
 

@@ -2,7 +2,7 @@ name: Set up Rust
 description: >-
   Install the Rust toolchain, (optionally) protoc, and a lockfile-keyed cargo
   cache. Consolidates the toolchain + protoc + cache trio that the CI workflows
-  (rust.yml, coverage.yml, docs.yml) otherwise duplicate, so the pinned action
+  (rust.yml, formal.yml, connect-latest.yml and others) otherwise duplicate, so the pinned action
   SHAs and the protoc version live in exactly one place.
 
 inputs:

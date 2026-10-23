@@ -6,7 +6,7 @@ name: "Release: Artifacts"
 #   1. Builds mkit binaries for macOS (arm64/x86_64) and
 #      Linux (x86_64/arm64; glibc, dynamically linked) with a pinned Rust
 #      toolchain (see rust/rust-toolchain.toml), one archive per target.
-#      Windows is not a supported target (MKIT-6; see docs/INVARIANTS.md) —
+#      Windows is not a supported target (see docs/INVARIANTS.md) —
 #      WSL runs the Linux binary.
 #   2. Produces a CycloneDX SBOM (sbom.cdx.json).
 #   3. Signs every archive with cosign OIDC keyless (transparency log: Rekor)
@@ -799,7 +799,7 @@ jobs:
             --target bundler \
             --out-dir pkg
 
-      - name: Patch bundler glue for Bun / Workers compat (issue #90)
+      - name: Patch bundler glue for Bun / Workers compat
         # wasm-pack 0.13's auto-init `__wbg_set_wasm(wasm)` call breaks
         # under Bun + Cloudflare Workers (their bundler resolution stores
         # a WebAssembly.Module / path-shim, not the wasm-bindgen exports

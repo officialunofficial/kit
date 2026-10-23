@@ -10,16 +10,16 @@ name: "Release: verify distribution channels"
 # nothing here runs automatically on push or pull_request. Dispatch it
 # manually against an already-published version — typically right after
 # cutting a release, or periodically to catch drift in a channel nobody
-# happened to test by hand. Windows is not a supported target (MKIT-6; see
+# happened to test by hand. Windows is not a supported target (see
 # docs/INVARIANTS.md), so there is no Windows/Scoop channel to verify.
 #
-# CURRENT LIMITATION (as of 2026-07-14, ahead of #779's public-repo flip):
+# CURRENT LIMITATION (as of 2026-07-14, before the repository is public):
 # install.sh, cargo binstall's prebuilt-binary path, and Homebrew all
 # resolve through GitHub Releases or a tap that mirrors them — all of
 # which need the repo to be PUBLIC for anonymous access. The Homebrew tap
 # also doesn't have a real formula yet (see docs/RELEASE.md's pre-release
 # checklist). Until the repo goes public AND a real release has gone
-# through Phase 5 distribution, expect `install-script` and `homebrew`
+# through the distribution flow, expect `install-script` and `homebrew`
 # below to fail, and `cargo-binstall` to silently fall back to a
 # from-source build instead of fetching a prebuilt binary. `cargo-install`
 # and `npm` are unaffected — crates.io and the npm registry are already
@@ -171,7 +171,7 @@ jobs:
 
       # Runs the install.sh AT THIS COMMIT (not curl-piped from the live
       # mkit.sh domain) so this tests the script content actually under
-      # review/on this branch, matching the "test what's in this tree"
+      # review, matching the "test what's in this tree"
       # principle used elsewhere in this repo's CI.
       - name: Run install.sh
         env:

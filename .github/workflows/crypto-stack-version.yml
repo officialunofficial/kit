@@ -3,8 +3,7 @@ name: "Meta: crypto-stack version"
 # Enforces docs/INVARIANTS.md's "Single crypto-stack version across
 # workspaces" invariant. Pure text check (grep/sed/awk over Cargo.toml),
 # no toolchain needed, so this stays a fast standalone workflow rather than
-# riding along inside the Rust CI (Cloud Build) or the GitHub-Actions-
-# focused "Meta: actionlint" workflow.
+# riding along inside the Rust CI.
 
 on:
   push:
