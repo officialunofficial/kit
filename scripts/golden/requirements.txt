@@ -1,0 +1,8 @@
+# Python packages for the independent golden-vector checks in this directory.
+# The checks share no code with the Rust crates. Exact versions keep the
+# result the same on every run.
+#
+#   python3 -m venv .venv && .venv/bin/pip install -r scripts/golden/requirements.txt
+pycryptodome==4.1.0
+ecdsa==0.19.2
+six==1.17.0

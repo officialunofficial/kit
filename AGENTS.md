@@ -26,6 +26,7 @@ kit is a content-addressed, signed version-control system. Security comes first.
 - Add a dependency only when the code cannot reasonably do without it.
 - Every new behavior needs a test. Every parser needs a fuzz target.
 - Run `cargo fmt`, `cargo clippy -- -D warnings` and `cargo test` before you commit.
+- Run `scripts/check-writing.sh` and `scripts/check-unsafe-safety.sh` before you commit. CI runs both.
 
 ## Writing
 
