@@ -15,7 +15,7 @@
 // The canonical version of this proto can be found at
 // https://github.com/grpc/grpc-proto/blob/master/grpc/health/v1/health.proto
 //
-// Vendored verbatim (mkit#796): this is the standard gRPC/Connect
+// Vendored verbatim: this is the standard gRPC/Connect
 // health-checking protocol — `grpc_health_probe`, kubelet's `grpc:`
 // liveness/readiness probes, service meshes (Linkerd/Istio), and any
 // `grpc.health.v1.Health` client all assume this EXACT package, message,

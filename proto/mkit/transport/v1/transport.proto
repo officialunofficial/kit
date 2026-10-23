@@ -20,9 +20,9 @@
 // same "duplicate now, wire-numbers pinned, extract later" pattern
 // `mkit.repo.v1.RefExpectation` already uses against `ssh.proto`
 // (apps/repo-worker/proto/mkit/repo/v1/repo.proto); a future issue
-// (tracked as mkit#679) extracts both into a shared
+// (tracked as) extracts both into a shared
 // `mkit/common/v1/refs.proto` once the buf workspace exists
-// (mkit#677) to import across module boundaries.
+// to import across module boundaries.
 //
 // The service implementation is `mkit-server`'s `connect` binding over
 // its pipeline; the
@@ -388,7 +388,7 @@ message GetServerInfoResponse {
   bytes receipt_public_key = 11;
   // 64-hex BLAKE3 of receipt_public_key; empty only if unconfigured.
   string receipt_key_id = 12;
-  // Accepted owner signature schemes; empty until M2 (SPEC-TRANSPORT-CONNECT §2.1).
+  // Accepted owner signature schemes; empty until grants are enabled (SPEC-TRANSPORT-CONNECT §2.1).
   repeated string grant_schemes = 13;
   // "allowlist", "any", or "single-repository" (SPEC-TRANSPORT-CONNECT §2.1, §7.5).
   string namespace_policy = 14;

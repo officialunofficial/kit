@@ -8773,7 +8773,7 @@ pub struct GetServerInfoResponseView<'a> {
     ///
     /// Field 12: `receipt_key_id`
     pub receipt_key_id: ::core::option::Option<&'a str>,
-    /// Accepted owner signature schemes; empty until M2 (SPEC-TRANSPORT-CONNECT §2.1).
+    /// Accepted owner signature schemes; empty until grants are enabled (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 13: `grant_schemes`
     pub grant_schemes: ::buffa::RepeatedView<'a, &'a str>,
@@ -9501,7 +9501,7 @@ impl GetServerInfoResponseOwnedView {
     pub fn receipt_key_id(&self) -> ::core::option::Option<&'_ str> {
         self.0.reborrow().receipt_key_id
     }
-    /// Accepted owner signature schemes; empty until M2 (SPEC-TRANSPORT-CONNECT §2.1).
+    /// Accepted owner signature schemes; empty until grants are enabled (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 13: `grant_schemes`
     #[must_use]

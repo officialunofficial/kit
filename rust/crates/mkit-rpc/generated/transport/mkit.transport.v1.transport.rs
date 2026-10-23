@@ -6357,7 +6357,7 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub receipt_key_id: ::core::option::Option<::buffa::alloc::string::String>,
-    /// Accepted owner signature schemes; empty until M2 (SPEC-TRANSPORT-CONNECT §2.1).
+    /// Accepted owner signature schemes; empty until grants are enabled (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 13: `grant_schemes`
     #[serde(
