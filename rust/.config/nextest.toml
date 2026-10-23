@@ -26,3 +26,67 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # Emit JUnit XML alongside the human-readable output so GitHub Actions
 # can render failure annotations inline on PR diffs.
 path = "junit.xml"
+
+# The fault-injection suites rebuild many on-disk crash images and run many
+# concurrent mutators, so each test spawns the binary many times. They are
+# deterministic and do not hang. Give them a longer per-test ceiling, so a
+# loaded runner does not kill them under the default envelope.
+[[profile.default.overrides]]
+filter = 'binary(crash_recovery) or binary(lock_contention)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(crash_recovery) or binary(lock_contention)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+# The bounded stateful suite (tests/state_machine.rs) spawns the binary for
+# every operation. It does not hang, but a slow runner can drift toward the
+# default ceiling.
+[[profile.default.overrides]]
+filter = 'test(=stateful_invariants)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'test(=stateful_invariants)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+# The history ancestry tests and the parallel tree-build fan-out test build
+# large fixtures in the unoptimized profile. A loaded runner takes more than
+# a minute. They do not hang. Give them a longer ceiling, and no retry.
+[[profile.default.overrides]]
+filter = 'package(mkit-core) and (test(/history::ancestry::tests::/) or test(=worktree::tests::build_tree_parallel_fanout_assigns_each_hash_to_the_right_file))'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'package(mkit-core) and (test(/history::ancestry::tests::/) or test(=worktree::tests::build_tree_parallel_fanout_assigns_each_hash_to_the_right_file))'
+retries = 0
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[profile.ignored-lane]
+# A few tests need real subprocess sleeps, real timers or a real `ssh`
+# connection. They sit behind `#[ignore]` instead of running in every test
+# run. This profile names the tests that the serial ignored-only CI lane
+# runs, so the workflow does not repeat the list:
+#   cargo nextest run --profile ignored-lane --run-ignored ignored-only
+#
+# The lane uses an explicit name filter, not a plain `--run-ignored
+# ignored-only`. The workspace has other `#[ignore]`d tests that CI runners
+# do not provision: the native keystore backends (they need
+# MKIT_RUN_NATIVE_KEYSTORE_TESTS), the Docker-based S3 test and the
+# recorders and profiling tools that run by hand. Some of these panic when
+# their gate is unset, so a plain run would fail.
+default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|wait_child_timeout_kills_stalled_child|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap/)'
+# Run the tests one at a time, so their real timers and sockets do not
+# contend. Only localhost networking is needed.
+test-threads = 1
+# Failures print in full, and no test retries.
+retries = 0
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The pack residency test decodes more than 200 MiB on the wire and verifies
+# every stored object. The unoptimized build takes more than 30 seconds, so
+# it gets a longer ceiling on a slower runner.
+[[profile.ignored-lane.overrides]]
+filter = 'test(=large_mixed_pack_decodes_under_production_resident_cap)'
+slow-timeout = { period = "300s", terminate-after = 1 }
