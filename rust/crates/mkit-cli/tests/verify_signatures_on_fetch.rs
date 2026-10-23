@@ -1,4 +1,4 @@
-//! Issue #692: `clone`/`pull`/`fetch` must verify every newly-fetched
+//! `clone`/`pull`/`fetch` must verify every newly-fetched
 //! commit/remix/tag's Ed25519 signature and fail closed by default —
 //! mirroring the manual `mkit verify <rev>` check
 //! (`mkit_core::sign::{verify_commit,verify_remix,verify_tag}`).
@@ -92,15 +92,14 @@ fn pull_rejects_a_tampered_commit_signature_and_leaves_bob_untouched() {
     let tampered = tamper_head_commit_signature(alice.path());
 
     let tx: Arc<MemoryTransport> = Arc::new(MemoryTransport::new());
-    // Push does not verify signatures (out of scope for #692 — see the
+    // Push does not verify signatures (out of scope for — see the
     // issue's "Out of scope" section); the tampered history reaches the
     // remote exactly as a hostile remote's own unsigned/forged commits
     // would appear to a fetcher who never pushed them at all.
     push_all(alice.path(), tx.as_ref()).expect("push (no verification on push side)");
 
-    let err = pull_all(bob.path(), tx.as_ref(), "default", None).expect_err(
-        "pull must reject a commit whose signature does not verify, by default (issue #692)",
-    );
+    let err = pull_all(bob.path(), tx.as_ref(), "default", None)
+        .expect_err("pull must reject a commit whose signature does not verify, by default");
     match &err {
         DispatchError::UnsignedOrInvalidObject { hash, .. } => {
             assert_eq!(*hash, mkit_core::hash::to_hex(&tampered));
@@ -236,7 +235,7 @@ fn cli_pull_exits_nonzero_and_does_not_update_state_on_a_tampered_remote() {
             .status
             .success()
     );
-    // Push doesn't verify signatures (out of scope for #692); the
+    // Push doesn't verify signatures (out of scope for); the
     // tampered history reaches the bare remote.
     assert!(run_in(alice.path(), &["push"]).status.success());
 
