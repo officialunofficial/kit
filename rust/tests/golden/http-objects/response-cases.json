@@ -7,7 +7,7 @@
         ],
         "body_bytes": 0,
         "headers": {
-          "Access-Control-Allow-Headers": "Range, If-None-Match, If-Range, Payment-Authorization, PAYMENT-SIGNATURE, Authorization, Accept-Payment",
+          "Access-Control-Allow-Headers": "Range, If-None-Match, If-Range, Admission-Authorization, ADMISSION-SIGNATURE, Authorization, Accept-Admission",
           "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
           "Access-Control-Allow-Origin": "*",
           "Cache-Control": "private",
@@ -587,7 +587,7 @@
     {
       "expect": {
         "absent_headers": [
-          "PAYMENT-REQUIRED"
+          "ADMISSION-REQUIRED"
         ],
         "body_bytes": 0,
         "headers": {
@@ -616,7 +616,7 @@
     {
       "expect": {
         "absent_headers": [
-          "PAYMENT-REQUIRED"
+          "ADMISSION-REQUIRED"
         ],
         "body_bytes": 0,
         "headers": {
@@ -631,7 +631,7 @@
         },
         "status": 304
       },
-      "name": "not_modified_paid_policy",
+      "name": "not_modified_admitted_policy",
       "request": {
         "admission_called": false,
         "admission_configured": true,
@@ -642,7 +642,7 @@
     {
       "expect": {
         "absent_headers": [
-          "PAYMENT-REQUIRED"
+          "ADMISSION-REQUIRED"
         ],
         "body_bytes": 0,
         "headers": {
@@ -658,7 +658,7 @@
         },
         "status": 304
       },
-      "name": "not_modified_proof_paid_policy",
+      "name": "not_modified_proof_admitted_policy",
       "request": {
         "admission_called": false,
         "admission_configured": true,
@@ -854,9 +854,9 @@
           "Cache-Control": "no-store",
           "Content-Security-Policy": "sandbox; default-src 'none'",
           "Content-Type": "application/json",
-          "PAYMENT-REQUIRED": "opaque-challenge",
+          "ADMISSION-REQUIRED": "opaque-challenge",
           "Referrer-Policy": "no-referrer",
-          "WWW-Authenticate": "Payment example",
+          "WWW-Authenticate": "Admission example",
           "X-Content-Type-Options": "nosniff"
         },
         "status": 402
@@ -1027,7 +1027,7 @@
         },
         "status": 200
       },
-      "name": "paid",
+      "name": "admitted",
       "request": {
         "admission": "allow",
         "method": "GET",
@@ -1057,7 +1057,7 @@
         },
         "status": 200
       },
-      "name": "paid_ref",
+      "name": "admitted_ref",
       "request": {
         "admission": "allow",
         "method": "GET",
@@ -1449,7 +1449,7 @@
         },
         "status": 200
       },
-      "name": "proof_paid",
+      "name": "proof_admitted",
       "request": {
         "admission": "allow",
         "kind": "MKDS",
@@ -1469,8 +1469,8 @@
           "Access-Control-Allow-Origin": "*",
           "Cache-Control": "private, max-age=31536000, immutable",
           "Content-Security-Policy": "sandbox; default-src 'none'",
-          "PAYMENT-RESPONSE": "opaque-response",
-          "Payment-Receipt": "opaque-receipt",
+          "ADMISSION-RESPONSE": "opaque-response",
+          "Admission-Receipt": "opaque-receipt",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff"
         },
@@ -1539,7 +1539,7 @@
         ],
         "headers": {
           "Access-Control-Allow-Origin": "https://viewer.example",
-          "Access-Control-Expose-Headers": "ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE, Link",
+          "Access-Control-Expose-Headers": "ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Admission-Receipt, ADMISSION-REQUIRED, ADMISSION-RESPONSE, Link",
           "Content-Security-Policy": "sandbox; default-src 'none'",
           "Referrer-Policy": "no-referrer",
           "Vary": "Origin",

@@ -67,7 +67,7 @@ The host uses the core backoff ladder for classified transient failures.
 Ambiguous writes retain their authenticated operation, body, and identity until
 expiry. Grants are selected per signed request. Only `BeginUpload`, `UpdateRef`,
 and ticketless `AdvanceRefs` run a one-shot admission helper, followed by a new
-retry ladder. Ticket-consuming calls return payment challenges without a helper.
+retry ladder. Ticket-consuming calls return admission challenges without a helper.
 Pending verification and membership waits retain their deadlines and cancellation
 checkpoints. HTTP request budgets are clipped to the remaining advance deadline.
 

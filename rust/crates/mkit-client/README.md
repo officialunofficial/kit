@@ -30,7 +30,7 @@ A call sends one request and returns. What would otherwise be a wait is a typed
 
 | Error | Meaning |
 | --- | --- |
-| `PaymentRequired(AdmissionRequired)` | An admission challenge (402). Carries every challenge in the server's order, the description, and the raw `WWW-Authenticate` / `PAYMENT-REQUIRED` values for a helper. A 402 whose body is not a Connect error parses from those headers alone, with no challenges. |
+| `AdmissionRequired(AdmissionRequired)` | An admission challenge (402). Carries every challenge in the server's order, the description, and the raw `WWW-Authenticate` / `ADMISSION-REQUIRED` values for a helper. A 402 whose body is not a Connect error parses from those headers alone, with no challenges. |
 | `PendingVerification { retry_after }` | A consumed pack is still under verification. The hint is 1-60 s. |
 | `MembershipNotVisible` | The ticket's repository membership is not visible yet (index lag). |
 | `RetryAfter { ms }` | `unavailable` with a `Retry-After` delay, clamped to 1-60 s. |
@@ -82,7 +82,7 @@ or authorization credential; ordinary extra headers retain reserved-name checks.
 The host verifies grant authority and scope, filters helper headers, and prevents
 replacement of a transport credential. Policy callbacks do not run helpers or
 schedule retries. `after_response` observes successful response headers so the
-host can record bounded payment receipts.
+host can record bounded admission receipts.
 
 `PartReceiptStore`, `TicketMetadata`, and `StoredPart` describe caller-owned
 multipart acknowledgement persistence. `put` must finish durably before returning;

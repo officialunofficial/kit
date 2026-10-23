@@ -351,8 +351,8 @@ fn signing_time_is_charged_to_the_existing_attempt_timeout() {
     assert!(fixture.requests.lock().unwrap().is_empty());
 }
 
-struct PaymentResponder(std::sync::atomic::AtomicUsize);
-impl mkit_transport_connect::admission::AdmissionResponder for PaymentResponder {
+struct TestResponder(std::sync::atomic::AtomicUsize);
+impl mkit_transport_connect::admission::AdmissionResponder for TestResponder {
     fn respond(
         &self,
         context: &mkit_transport_connect::admission::AdmissionContext<'_>,
@@ -361,12 +361,12 @@ impl mkit_transport_connect::admission::AdmissionResponder for PaymentResponder 
         assert!(context.procedure.ends_with("/UpdateRef"));
         assert_eq!(
             context.required.www_authenticate,
-            ["Payment realm=repository"]
+            ["Admission realm=repository"]
         );
-        assert_eq!(context.required.payment_required, ["opaque-challenge"]);
+        assert_eq!(context.required.admission_required, ["opaque-challenge"]);
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(vec![(
-            "Payment-Authorization".into(),
+            "Admission-Authorization".into(),
             "helper-response".into(),
         )])
     }
@@ -376,11 +376,11 @@ fn malformed_gzip_402_runs_admission_helper_and_retries_both_facade_paths() {
     for via_source in [false, true] {
         let mut fixture = Fixture::responses(vec![
             ("402 Payment Required".into(),
-             "Content-Encoding: gzip\r\nWWW-Authenticate: Payment realm=repository\r\nPayment-Required: opaque-challenge\r\n".into(),
+             "Content-Encoding: gzip\r\nWWW-Authenticate: Admission realm=repository\r\nAdmission-Required: opaque-challenge\r\n".into(),
              b"malformed gzip".to_vec()),
             ("200 OK".into(), "Content-Type: application/proto\r\n".into(), Vec::new()),
         ]);
-        let helper = Arc::new(PaymentResponder(std::sync::atomic::AtomicUsize::new(0)));
+        let helper = Arc::new(TestResponder(std::sync::atomic::AtomicUsize::new(0)));
         fixture.client =
             ConnectTransport::connect_for_test(fixture.client.origin().parse().unwrap())
                 .with_admission(mkit_transport_connect::admission::AdmissionPolicy::new(
@@ -414,12 +414,12 @@ fn malformed_gzip_402_runs_admission_helper_and_retries_both_facade_paths() {
         assert!(
             !requests[0]
                 .to_ascii_lowercase()
-                .contains("payment-authorization:")
+                .contains("admission-authorization:")
         );
         assert!(
             requests[1]
                 .to_ascii_lowercase()
-                .contains("payment-authorization: helper-response\r\n")
+                .contains("admission-authorization: helper-response\r\n")
         );
     }
 }

@@ -157,13 +157,13 @@ fn admission_config_routes_to_user_and_refuses_reserved_names() {
             .success()
     );
     assert!(
-        run(&["config", "remote.origin.admission_headers", "X-Payment"])
+        run(&["config", "remote.origin.admission_headers", "X-Admission"])
             .status
             .success()
     );
     let user = fs::read_to_string(xdg.path().join("mkit/config")).unwrap();
     assert!(user.contains("admission_helper = /usr/bin/true"));
-    assert!(user.contains("remote.origin.admission_headers = X-Payment"));
+    assert!(user.contains("remote.origin.admission_headers = X-Admission"));
     assert!(
         !fs::read_to_string(td.path().join(".mkit/config"))
             .unwrap()

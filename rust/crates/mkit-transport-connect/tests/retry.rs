@@ -395,9 +395,9 @@ impl generated::TransportService for FlakyService {
             .update_ref(&name, condition, &new_id)
             .map_err(to_connect_error)?;
         Ok(Response::new(generated::UpdateRefResponse::default())
-            .with_header("payment-receipt", "receipt-secret")
-            .with_header("payment-receipt", "v".repeat(8_193))
-            .with_header("payment-response", "reply-secret"))
+            .with_header("admission-receipt", "receipt-secret")
+            .with_header("admission-receipt", "v".repeat(8_193))
+            .with_header("admission-response", "reply-secret"))
     }
 
     async fn advance_refs(
@@ -763,8 +763,8 @@ impl AdmissionResponder for StaticResponder {
             return Err(AdmissionResponderError::Failed("responder failed".into()));
         }
         Ok(vec![(
-            "Payment-Authorization".into(),
-            "Payment secret".into(),
+            "Admission-Authorization".into(),
+            "Admission secret".into(),
         )])
     }
 }
@@ -814,10 +814,10 @@ fn admission_retries_once_and_keeps_headers_and_identity() {
         assert_eq!(responder_calls.load(Ordering::SeqCst), 1);
         let headers = captures.lock().unwrap();
         assert_eq!(headers.len(), 2);
-        assert_eq!(headers[0].get("payment-authorization"), None);
+        assert_eq!(headers[0].get("admission-authorization"), None);
         assert_eq!(
-            headers[1].get("payment-authorization").unwrap(),
-            "Payment secret"
+            headers[1].get("admission-authorization").unwrap(),
+            "Admission secret"
         );
         assert_eq!(
             headers[0].get("idempotency-key"),
@@ -868,7 +868,7 @@ fn raw_http_402_stops_after_one_attempt() {
             .unwrap();
         let mut bytes = [0; 4096];
         let _ = stream.read(&mut bytes).unwrap();
-        stream.write_all(b"HTTP/1.1 402 Payment Required\r\nContent-Length: 0\r\nWWW-Authenticate: Payment opaque\r\nConnection: close\r\n\r\n").unwrap();
+        stream.write_all(b"HTTP/1.1 402 Payment Required\r\nContent-Length: 0\r\nWWW-Authenticate: Admission opaque\r\nConnection: close\r\n\r\n").unwrap();
     });
     let hash = blake3_hash(b"head");
     let error = connect_to(port)
@@ -877,7 +877,7 @@ fn raw_http_402_stops_after_one_attempt() {
     match error {
         TransportError::AdmissionRequired(required) => {
             assert!(required.challenges.is_empty());
-            assert_eq!(required.www_authenticate, ["Payment opaque"]);
+            assert_eq!(required.www_authenticate, ["Admission opaque"]);
         }
         other => panic!("expected admission challenge, got {other}"),
     }
@@ -912,7 +912,7 @@ fn helper_headers_remain_on_every_transport_retry() {
     assert!(
         headers[1..]
             .iter()
-            .all(|h| h.get("payment-authorization").unwrap() == "Payment secret")
+            .all(|h| h.get("admission-authorization").unwrap() == "Admission secret")
     );
     drop(headers);
     shutdown(stop, handle);
@@ -929,8 +929,8 @@ fn raw_402_passes_empty_challenges_to_responder() {
             assert!(ctx.required.challenges.is_empty());
             assert!(ctx.required.description.is_empty());
             Ok(vec![(
-                "Payment-Authorization".into(),
-                "Payment token".into(),
+                "Admission-Authorization".into(),
+                "Admission token".into(),
             )])
         }
     }
@@ -963,8 +963,8 @@ fn helper_past_identity_margin_gets_new_nonce() {
         ) -> Result<Vec<(String, String)>, AdmissionResponderError> {
             ADMISSION_CLOCK.fetch_add(280_000, Ordering::SeqCst);
             Ok(vec![(
-                "Payment-Authorization".into(),
-                "Payment token".into(),
+                "Admission-Authorization".into(),
+                "Admission token".into(),
             )])
         }
     }
@@ -1016,8 +1016,12 @@ fn receipts_are_observed_only_on_success_and_hide_values() {
         .unwrap();
     let receipts = observed.lock().unwrap();
     assert_eq!(receipts.len(), 2);
-    assert!(receipts.iter().any(|(name, _)| name == "payment-receipt"));
-    assert!(receipts.iter().any(|(name, _)| name == "payment-response"));
+    assert!(receipts.iter().any(|(name, _)| name == "admission-receipt"));
+    assert!(
+        receipts
+            .iter()
+            .any(|(name, _)| name == "admission-response")
+    );
     assert!(receipts.iter().all(|(_, debug)| !debug.contains("secret")));
     shutdown(stop, handle);
 

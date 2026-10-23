@@ -104,50 +104,52 @@ mod tests {
     fn golden_bytes() {
         let challenges = [
             (
-                "mpp",
-                "Payment id=\"fake-example-not-valid\", method=\"tempo\", intent=\"charge\", request=\"fake-example-request-not-valid\"",
+                "challenge-a",
+                "Admission id=\"fake-example-not-valid\", request=\"fake-example-request-not-valid\"",
             ),
-            ("x402", "fake-example-payment-required-not-valid"),
+            ("challenge-b", "fake-example-admission-required-not-valid"),
         ];
         assert_eq!(
-            encode_admission_challenge(&challenges, "Example upload payment required."),
+            encode_admission_challenge(&challenges, "Example upload admission required."),
             include_bytes!("../../../tests/golden/transport/admission-challenge.bin")
         );
     }
 
     #[test]
     fn bounds() {
-        for good in ["a", "0", "mpp.v1-2", &"a".repeat(64)] {
+        for good in ["a", "0", "scheme.v1-2", &"a".repeat(64)] {
             assert!(is_valid_scheme(good));
         }
-        for bad in ["", "A", "mpp_1", "-mpp", &"a".repeat(65)] {
+        for bad in ["", "A", "scheme_1", "-scheme", &"a".repeat(65)] {
             assert!(!is_valid_scheme(bad));
         }
         assert_eq!(validate_challenges(&[], ""), Err(BoundError::Count));
-        assert!(validate_challenges(&vec![("mpp", "v"); 8], "").is_ok());
+        assert!(validate_challenges(&vec![("challenge-a", "v"); 8], "").is_ok());
         assert_eq!(
-            validate_challenges(&vec![("mpp", "v"); 9], ""),
+            validate_challenges(&vec![("challenge-a", "v"); 9], ""),
             Err(BoundError::Count)
         );
-        assert!(validate_challenges(&[("mpp", &"v".repeat(8192))], &"d".repeat(512)).is_ok());
+        assert!(
+            validate_challenges(&[("challenge-a", &"v".repeat(8192))], &"d".repeat(512)).is_ok()
+        );
         assert_eq!(
-            validate_challenges(&[("mpp", &"v".repeat(8193))], ""),
+            validate_challenges(&[("challenge-a", &"v".repeat(8193))], ""),
             Err(BoundError::Value)
         );
         assert_eq!(
-            validate_challenges(&[("mpp", "v")], &"d".repeat(513)),
+            validate_challenges(&[("challenge-a", "v")], &"d".repeat(513)),
             Err(BoundError::Description)
         );
         assert_eq!(
-            validate_challenges(&[("mpp", "a\r")], ""),
+            validate_challenges(&[("challenge-a", "a\r")], ""),
             Err(BoundError::Value)
         );
         assert_eq!(
-            validate_challenges(&[("mpp", "a")], "a\n"),
+            validate_challenges(&[("challenge-a", "a")], "a\n"),
             Err(BoundError::Description)
         );
         assert_eq!(
-            validate_challenges(&[("mpp", "a\u{85}")], ""),
+            validate_challenges(&[("challenge-a", "a\u{85}")], ""),
             Err(BoundError::Value)
         );
     }

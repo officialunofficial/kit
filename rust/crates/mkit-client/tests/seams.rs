@@ -1631,7 +1631,7 @@ impl mkit_client::RequestPolicy for Credentials {
     }
 
     fn after_response(&self, _: &mkit_client::RequestContext<'_>, headers: &http::HeaderMap) {
-        assert_eq!(headers["payment-receipt"], "opaque");
+        assert_eq!(headers["admission-receipt"], "opaque");
         self.replies.set(self.replies.get() + 1);
     }
 }
@@ -1651,7 +1651,7 @@ fn request_policy_selects_fresh_credentials_for_signed_reads_and_observes_receip
         })?;
         response
             .headers_mut()
-            .insert("payment-receipt", "opaque".parse().unwrap());
+            .insert("admission-receipt", "opaque".parse().unwrap());
         Ok(response)
     });
     let signer = PolicySigner::new(&log);
@@ -1703,7 +1703,7 @@ fn request_policy_survives_both_builder_orders_on_writes() {
             let mut response = unary(&proto::UpdateRefResponse::default())?;
             response
                 .headers_mut()
-                .insert("payment-receipt", "opaque".parse().unwrap());
+                .insert("admission-receipt", "opaque".parse().unwrap());
             Ok(response)
         });
         let signer = PolicySigner::new(&log);

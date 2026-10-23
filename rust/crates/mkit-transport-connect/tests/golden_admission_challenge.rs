@@ -12,20 +12,18 @@ fn client_decodes_admission_challenge_golden() {
         .join("../../tests/golden/transport/admission-challenge.bin");
     let message = AdmissionChallenge::decode_from_slice(&fs::read(path).unwrap()).unwrap();
     assert_eq!(message.challenges.len(), 2);
-    assert_eq!(message.challenges[0].scheme.as_deref(), Some("mpp"));
+    assert_eq!(message.challenges[0].scheme.as_deref(), Some("challenge-a"));
     assert_eq!(
         message.challenges[0].value.as_deref(),
-        Some(
-            "Payment id=\"fake-example-not-valid\", method=\"tempo\", intent=\"charge\", request=\"fake-example-request-not-valid\""
-        )
+        Some("Admission id=\"fake-example-not-valid\", request=\"fake-example-request-not-valid\"")
     );
-    assert_eq!(message.challenges[1].scheme.as_deref(), Some("x402"));
+    assert_eq!(message.challenges[1].scheme.as_deref(), Some("challenge-b"));
     assert_eq!(
         message.challenges[1].value.as_deref(),
-        Some("fake-example-payment-required-not-valid")
+        Some("fake-example-admission-required-not-valid")
     );
     assert_eq!(
         message.description.as_deref(),
-        Some("Example upload payment required.")
+        Some("Example upload admission required.")
     );
 }

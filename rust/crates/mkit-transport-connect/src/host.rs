@@ -595,9 +595,9 @@ impl WriteRecovery for HostPolicy<'_> {
             return Ok(true);
         }
         match error {
-            SourceError::PaymentRequired { challenges } => {
+            SourceError::AdmissionRequired { challenges } => {
                 if self.helper_ran.replace(true) {
-                    return Err(SourceError::PaymentRequired {
+                    return Err(SourceError::AdmissionRequired {
                         challenges: Box::new(
                             (**challenges).clone().with_reason(
                                 "remote challenged again after the admission helper ran",
@@ -810,7 +810,7 @@ pub(crate) fn map_source(error: SourceError, upload: bool) -> TransportError {
         SourceError::ProtocolError => TransportError::ProtocolError,
         SourceError::PayloadTooLarge(n) => TransportError::PayloadTooLarge(n),
         SourceError::InsecureScheme => TransportError::InsecureScheme,
-        SourceError::PaymentRequired { challenges } => {
+        SourceError::AdmissionRequired { challenges } => {
             TransportError::AdmissionRequired(challenges)
         }
         SourceError::PendingVerification { .. }
@@ -850,7 +850,7 @@ pub(crate) fn map_client(error: mkit_client::Error, upload: bool) -> TransportEr
             })),
             upload,
         ),
-        mkit_client::Error::PaymentRequired(challenges) => {
+        mkit_client::Error::AdmissionRequired(challenges) => {
             TransportError::AdmissionRequired(challenges)
         }
         mkit_client::Error::Connection(_) => TransportError::ServerError { status: 503 },

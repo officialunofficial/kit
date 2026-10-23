@@ -68,7 +68,7 @@ pub enum SourceError {
     #[error("insecure scheme: plain http:// is allowed only for loopback hosts")]
     InsecureScheme,
     #[error("{challenges}")]
-    PaymentRequired { challenges: Box<AdmissionRequired> },
+    AdmissionRequired { challenges: Box<AdmissionRequired> },
     #[error("remote error: verification pending, retry after {retry_after:?}")]
     PendingVerification { retry_after: Duration },
     #[error("remote error: repository membership not yet visible")]
@@ -108,7 +108,7 @@ impl SourceError {
             Self::PendingVerification { .. }
             | Self::MembershipNotVisible
             | Self::RetryAfter { .. } => FailureClass::Resumable,
-            Self::PaymentRequired { challenges } if challenges.reason.is_none() => {
+            Self::AdmissionRequired { challenges } if challenges.reason.is_none() => {
                 FailureClass::Resumable
             }
             Self::ConnectionFailed => FailureClass::Transient,
@@ -156,7 +156,7 @@ impl From<TransportError> for SourceError {
             TransportError::ProtocolError => Self::ProtocolError,
             TransportError::PayloadTooLarge(value) => Self::PayloadTooLarge(value),
             TransportError::InsecureScheme => Self::InsecureScheme,
-            TransportError::AdmissionRequired(challenges) => Self::PaymentRequired { challenges },
+            TransportError::AdmissionRequired(challenges) => Self::AdmissionRequired { challenges },
             TransportError::PendingVerification { retry_after } => {
                 Self::PendingVerification { retry_after }
             }
@@ -174,13 +174,13 @@ mod tests {
 
     #[test]
     fn terminal_admission_does_not_request_host_resumption() {
-        let required = AdmissionRequired::new(Vec::new(), "pay".into(), Vec::new(), Vec::new())
+        let required = AdmissionRequired::new(Vec::new(), "admit".into(), Vec::new(), Vec::new())
             .with_reason("helper failed");
         let expected = required.to_string();
         let error = SourceError::from(TransportError::AdmissionRequired(Box::new(required)));
         assert_eq!(error.class(), FailureClass::Refusal);
         assert_eq!(error.to_string(), expected);
-        let SourceError::PaymentRequired { challenges } = error else {
+        let SourceError::AdmissionRequired { challenges } = error else {
             panic!("admission lost its structure")
         };
         assert_eq!(challenges.reason, Some("helper failed"));

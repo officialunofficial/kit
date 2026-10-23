@@ -1142,7 +1142,7 @@ fn an_early_admission_reply_keeps_its_typed_challenge_after_upload_receiver_clos
     finished_sender.send(()).unwrap();
     server.join().unwrap();
     assert!(
-        matches!(result, Err(Error::PaymentRequired(required)) if required.www_authenticate == ["test challenge"])
+        matches!(result, Err(Error::AdmissionRequired(required)) if required.www_authenticate == ["test challenge"])
     );
     assert!(
         channel.produced.load(Ordering::Relaxed) < 64,

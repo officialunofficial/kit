@@ -16,7 +16,7 @@ and browser access. This document changes no protobuf schema.
 Authority: this document specifies the plain HTTP contract for issue #1088,
 WP-4.11. [SPEC-CONVENTIONS](SPEC-CONVENTIONS.md) supplies normative keywords.
 [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md), abbreviated STC, owns
-repository identities and payment headers. [SPEC-SERVER](SPEC-SERVER.md)
+repository identities and admission headers. [SPEC-SERVER](SPEC-SERVER.md)
 owns indexed mode, the published view, hooks, and durable outcomes.
 
 ## 1. Purpose and rationale
@@ -120,7 +120,7 @@ HEAD follows the same checks as GET but MUST send no body on every status.
 
 | Step | Condition and required result |
 |---|---|
-| 1 | OPTIONS preflight: 204, no authentication, authorization, or payment required. |
+| 1 | OPTIONS preflight: 204, no authentication, authorization, or admission required. |
 | 2 | Method other than GET or HEAD: 405, `Allow: GET, HEAD, OPTIONS`. |
 | 3 | URL or query syntax fails §2: 400. |
 | 4 | Bearer-gated deployment: require the same bearer gate as RPCs; missing or invalid bearer yields 401. Every HTTP-objects response in such a deployment MUST be private. OPTIONS is unauthenticated but still private; the key document is exempt from the bearer gate and private caching rule. |
@@ -139,7 +139,7 @@ private-token validity, Authorizer, ordinary published target resolution and
 takedown checks at steps 5–8. If those checks permit the read, any `proof=1`
 query MUST then receive the same 416 with `Cache-Control: no-store`, before
 proof-context validation, canonical representation metadata, selector sizing,
-validators, Admission, payment reservations or response-stream setup. HEAD
+validators, Admission, reservations or response-stream setup. HEAD
 MUST send no body. No proof capability may be advertised by this profile.
 `commit`, `path` and query `range` are checked only for syntax; their stored
 context, applicability and bounds do not affect this refusal. Ordinary
@@ -381,11 +381,11 @@ using SPEC-SERVER §7.2's key-list JSON shape (`version`, `keys`, `keyId`,
 32hex URL-token key id from SPEC-WRITE-GRANTS §9.4, and `alg` is `ed25519`.
 The document MUST carry `Content-Type: application/json` and
 `Cache-Control: public, max-age=300`, MUST require neither bearer nor
-URL-token authentication nor payment, and MUST include the active and
+URL-token authentication nor admission, and MUST include the active and
 retained verification keys. The read CORS policy applies to this document.
 The separate storage receipt-and-notice key list at
 `/.well-known/mkit-receipt-keys.json` follows SPEC-SERVER §15.5: it is
-likewise public without bearer, URL-token authentication, or payment,
+likewise public without bearer, URL-token authentication, or admission,
 and permits every CORS origin.
 
 ## 7. Authorization, admission, and durable read outcomes
@@ -404,20 +404,20 @@ headers under SPEC-SERVER §6.3's allowlist, bounds, and redaction rules.
 When reads are configured for Admission, GET and HEAD MUST be admitted
 alike. `declared_bytes` MUST be the selected GET body byte count after
 ordinary Range or proof selection; `pack_id` MUST be empty. HEAD declares
-the GET count but records `ReadServed` with zero bytes served. Payment
+the GET count but records `ReadServed` with zero bytes served. Admission
 credential forwarding and redaction MUST follow STC §5.1 and SPEC-SERVER
-§6.3/§6.6, including bearer/Payment header separation.
+§6.3/§6.6, including bearer/Admission header separation.
 
 A challenge MUST return 402, pass through `WWW-Authenticate` and
-`PAYMENT-REQUIRED`, and carry `Cache-Control: no-store` (or
+`ADMISSION-REQUIRED`, and carry `Cache-Control: no-store` (or
 `private, no-store` under a bearer gate). Its body MUST be
 the `AdmissionChallenge` message using canonical protobuf JSON, with
 `Content-Type: application/json` (HEAD omits the body). A success MUST pass
-through `Payment-Receipt` and `PAYMENT-RESPONSE` when supplied and MUST
+through `Admission-Receipt` and `ADMISSION-RESPONSE` when supplied and MUST
 be private. Challenge and deny MUST allocate no reservation or replay state.
 A 402 MUST NOT carry `ETag`, any `X-Mkit-*` header, or `Content-Range`.
-Informative: because 304 and 416 precede Admission, a caller without payment
-can confirm a guessed ETag or learn the size N of paid public content. This is
+Informative: because 304 and 416 precede Admission, a caller without admission
+can confirm a guessed ETag or learn the size N of admission-gated public content. This is
 accepted by design: revalidation and unsatisfiable ranges are never charged.
 Private content is protected by the earlier token and Authorizer steps.
 
@@ -446,13 +446,13 @@ configuration MUST carry `Vary: Origin`; disallowed origins MUST NOT
 receive Allow-Origin.
 `Access-Control-Allow-Credentials` MUST NOT be emitted. CORS MUST cover
 errors and 304 as well as success, so browsers can observe challenges.
-Preflight MUST use 204 without auth or payment and allow these values:
+Preflight MUST use 204 without auth or admission and allow these values:
 
 | Header | Value |
 |---|---|
 | `Access-Control-Allow-Methods` | `GET, HEAD, OPTIONS` |
-| `Access-Control-Allow-Headers` | `Range, If-None-Match, If-Range, Payment-Authorization, PAYMENT-SIGNATURE, Authorization, Accept-Payment` |
-| `Access-Control-Expose-Headers` | `ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE, Link` |
+| `Access-Control-Allow-Headers` | `Range, If-None-Match, If-Range, Admission-Authorization, ADMISSION-SIGNATURE, Authorization, Accept-Admission` |
+| `Access-Control-Expose-Headers` | `ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Admission-Receipt, ADMISSION-REQUIRED, ADMISSION-RESPONSE, Link` |
 
 ## 9. Vectors and deferred work
 
@@ -499,7 +499,7 @@ separate work.
 | 1 | draft | WP-4.16b (R-201) adds an extension allowlist and encoded filenames to successful ordinary ref-path Blob/ChunkedBlob responses, including HEAD and 206; object-id, proof, non-file, 304 and error responses are unchanged. |
 | 1 | draft | WP-4.12 clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it (SPEC-SERVER §9.6; R-163, R-169). |
 | 1 | draft | WP-4.14a clarifies that the boundary-aware builder reduces reads and memory, while complete preceding length proofs still impose an O(first chunk index) encoded-size cost and 416 on oversize. |
-| 1 | draft | Initial HTTP contract, selecting MKDP v2 or MKDS v1 without changing object bytes or protobuf. Fix round 1 clarifies bearer and paid caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |
+| 1 | draft | Initial HTTP contract, selecting MKDP v2 or MKDS v1 without changing object bytes or protobuf. Fix round 1 clarifies bearer and admission-gated caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |
 
 ## 11. Invariants
 
@@ -510,7 +510,7 @@ separate work.
 | A global extracted copy grants no read access | repository membership and published reachability (§4) |
 | Pending content never escapes through HTTP | published view for all callers (§4) |
 | A proof cannot be sliced by HTTP Range | separate query-selected representation (§5.2) |
-| Cached private or paid content never becomes public | composing privacy overrides (§5.3) |
+| Cached private or admission-gated content never becomes public | composing privacy overrides (§5.3) |
 | A reservation has one durable terminal result | conditional read outcomes and reconciliation (§7; SPEC-SERVER §5) |
 | Token credentials do not enter observability output | query redaction (§6) |
 

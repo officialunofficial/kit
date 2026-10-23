@@ -136,8 +136,8 @@ pub struct AdmissionRequired {
     pub description: String,
     /// Bounded `WWW-Authenticate` header values.
     pub www_authenticate: Vec<String>,
-    /// Bounded `PAYMENT-REQUIRED` header values.
-    pub payment_required: Vec<String>,
+    /// Bounded `ADMISSION-REQUIRED` header values.
+    pub admission_required: Vec<String>,
     /// Terminal admission state, if a helper already ran or hit its cap.
     pub reason: Option<&'static str>,
 }
@@ -150,13 +150,13 @@ impl AdmissionRequired {
         challenges: Vec<AdmissionChallengeEntry>,
         description: String,
         www_authenticate: Vec<String>,
-        payment_required: Vec<String>,
+        admission_required: Vec<String>,
     ) -> Self {
         Self {
             challenges,
             description,
             www_authenticate,
-            payment_required,
+            admission_required,
             reason: None,
         }
     }
@@ -175,7 +175,7 @@ impl fmt::Debug for AdmissionRequired {
             .field("challenges", &self.challenges)
             .field("description_len", &self.description.len())
             .field("www_authenticate_count", &self.www_authenticate.len())
-            .field("payment_required_count", &self.payment_required.len())
+            .field("admission_required_count", &self.admission_required.len())
             .field("reason", &self.reason)
             .finish_non_exhaustive()
     }

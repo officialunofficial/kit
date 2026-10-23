@@ -32,7 +32,7 @@ authorization policy, upload tickets, admission challenges, and read
 consistency &mdash; and how
 the deployment targets (reference Worker, `mkit-server`, native CLI
 client) consume one generated codebase. It does not cover S3 multipart,
-the `WatchRefs` live-feed migration, pricing or payment verification,
+the `WatchRefs` live-feed migration, pricing or admission verification,
 or any server/client implementation; those are separate changes (§8).
 Write and read grants, epochs, signed reads, and private repositories
 are [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md)'s.
@@ -521,18 +521,17 @@ reason, no admission challenge or denial is `resource_exhausted`.
 **Protocol requirement.**
 
 A server MAY refuse a request until the caller does something outside
-this protocol. Examples are a payment, a quota top-up, or verifying an
+this protocol. Examples are a fee, a quota top-up, or verifying an
 email address. A plain `resource_exhausted` cannot express this,
 because clients retry it on a backoff ladder. A plain
 `permission_denied` cannot express it either, because it gives the
 caller nothing to act on. An admission challenge is a
 `permission_denied` error that tells the caller what to do.
 
-mkit registers no challenge schemes and interprets none. Payment
-protocols such as MPP (the Machine Payments Protocol) and x402 define
-their own challenges, credentials, and receipts. This section defines
-only how they travel through `mkit.transport.v1` and which headers a
-client may attach in reply. Pricing, payment verification, and
+mkit registers no challenge schemes and interprets none. An external
+protocol defines its own challenges, credentials, and receipts. This
+section defines only how they travel through `mkit.transport.v1` and which
+headers a client may attach in reply. Pricing, admission verification, and
 settlement belong to the deployment.
 
 **Error.** The server answers a challenged request with HTTP status
@@ -556,7 +555,7 @@ The proto messages land additively with the M3 implementation (§8).
 Each `Challenge` is opaque: `scheme` names the external protocol that
 interprets `value`, and a challenge defined by another protocol can
 travel unchanged in `value` (informative: a deployment can mirror each
-`WWW-Authenticate: Payment` challenge it sends as one entry). A client
+`WWW-Authenticate` challenge it sends as one entry). A client
 treats a detail that breaks these bounds, or a second
 `AdmissionChallenge` detail, as `InvalidResponse`. No RPC response
 message carries an admission result; a challenge is only ever this
@@ -567,9 +566,9 @@ and fails at once instead of retrying, because the code is
 `permission_denied` (§5).
 
 **Header pass-through.** The 402 response MAY also carry the raw
-challenge headers of the payment protocols the deployment supports:
-one or more `WWW-Authenticate: Payment …` fields (MPP) and a
-`PAYMENT-REQUIRED` field (x402). The server passes them through as
+challenge headers of the external protocols the deployment supports:
+one or more `WWW-Authenticate` fields and an `ADMISSION-REQUIRED` field.
+The server passes them through as
 the deployment's business layer produced them. mkit does not
 interpret them. A server SHOULD send each challenge-carrying pass-through
 field as its own field line. A platform that combines repeated
@@ -579,7 +578,7 @@ is conforming when challenge order is preserved. Clients and admission
 helpers MUST parse these values as a challenge list under
 [RFC 9110 §11.6.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-11.6.1),
 including quoted commas in auth-params, rather than treating each field
-line as one challenge. `PAYMENT-REQUIRED` is unaffected.
+line as one challenge. `ADMISSION-REQUIRED` is unaffected.
 
 **Unary RPCs only.** A challenge applies only to unary RPCs, because a
 client-streaming RPC reports its status after the client has sent the
@@ -589,7 +588,7 @@ is the part path (`UploadPart`, `CompleteUpload`, and a ticketed
 the deployment runs admission, `GetServerInfo` advertises
 `admission = true` and `begin_upload_threshold_bytes = 0`, so
 `BeginUpload` is mandatory for every upload (§7.6). §7.7 states which
-RPC of an upload is admitted. Paid bulk downloads are served over
+RPC of an upload is admitted. Admission-gated bulk downloads are served over
 plain HTTP under [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md),
 where a 402 is an ordinary response. That specification fixes HTTP read
 authorization, admission, cache headers, and CORS.
@@ -599,7 +598,7 @@ server authenticates before it challenges. For a signed write it
 checks the replay ledger and authorizes before admission, in the order
 §7.1 fixes, so a retry of a committed operation returns its stored
 result and never meets a new challenge. An anonymous operation, such
-as a paid public read, MAY be challenged directly.
+as an admission-gated public read, MAY be challenged directly.
 
 **No state on challenge.** A challenged request MUST NOT change any
 state. The server creates no namespace or repository, reserves no
@@ -634,7 +633,7 @@ colocation alone does not establish an atomicity guarantee.
 **Protocol requirement.**
 
 **Binding (informative).** Binding a challenge to one request, for
-example an HMAC over the MPP challenge parameters, an `opaque` value,
+example an HMAC over the challenge parameters, an `opaque` value,
 or a `digest` over the unary `BeginUpload` body, is the deployment's
 job. mkit supplies the fingerprint to bind: the repository, the
 signer, the `pack_id`, and the byte count. A retry sends a
@@ -642,26 +641,26 @@ byte-identical signed body (§7.1), so a `digest` binding holds across
 it.
 
 **Bearer deployments.** A deployment that authenticates callers with
-`Authorization: Bearer` MUST advertise `header="Payment-Authorization"`
-in every MPP challenge it sends, so the payment credential never
+`Authorization: Bearer` MUST advertise `header="Admission-Authorization"`
+in every challenge it sends, so the admission credential never
 displaces the bearer token.
 
 **Caching.** A 402 response carries `Cache-Control: no-store`. A
-response that carries a `Payment-Receipt` field (MPP) or a
-`PAYMENT-RESPONSE` field (x402) passes that field through to the client
-and carries `Cache-Control: private`.
+response that carries an `Admission-Receipt` or an `ADMISSION-RESPONSE`
+field passes that field through to the client and carries
+`Cache-Control: private`.
 
 **CORS.** A deployment that serves browsers exposes the challenge and
 receipt headers (`Access-Control-Expose-Headers: WWW-Authenticate,
-Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE`) and allows the
-credential request headers (`Payment-Authorization`,
-`PAYMENT-SIGNATURE`, `Authorization`, and `Accept-Payment`). A preflight `OPTIONS`
-request never requires payment.
+Admission-Receipt, ADMISSION-REQUIRED, ADMISSION-RESPONSE`) and allows the
+credential request headers (`Admission-Authorization`,
+`ADMISSION-SIGNATURE`, `Authorization`, and `Accept-Admission`). A preflight `OPTIONS`
+request never requires admission.
 
-**Redaction.** Servers and clients MUST keep payment credentials and
+**Redaction.** Servers and clients MUST keep admission credentials and
 receipts out of logs, traces, error messages, and analytics. This
 covers every header a client attaches from its admission helper,
-`Payment-Receipt`, `PAYMENT-RESPONSE`, and the helper's output.
+`Admission-Receipt`, `ADMISSION-RESPONSE`, and the helper's output.
 
 #### Client behavior
 
@@ -669,7 +668,7 @@ A client builds `AdmissionRequired{challenges, description}` from the
 `AdmissionChallenge` detail. A 402 response without that detail, for
 example one an intermediary produced, yields an `AdmissionRequired`
 with no challenges and an empty description. In both cases the client
-also keeps the response's `WWW-Authenticate` and `PAYMENT-REQUIRED`
+also keeps the response's `WWW-Authenticate` and `ADMISSION-REQUIRED`
 fields for the helper. The client never parses a `problem+json` or
 other non-Connect body, and never retries `AdmissionRequired`
 automatically.
@@ -703,8 +702,8 @@ closes it:
   "description": "text from the detail, or empty",
   "challenges": [{ "scheme": "…", "value": "…" }],
   "headers": {
-    "www-authenticate": ["Payment id=\"…\", …"],
-    "payment-required": ["…"]
+    "www-authenticate": ["Admission id=\"…\", …"],
+    "admission-required": ["…"]
   }
 }
 ```
@@ -713,19 +712,18 @@ closes it:
 detail's entries, in order, and is empty when the 402 had no detail.
 `headers` maps each lowercase header name to the list of that field's
 values, in the order received; it holds only `www-authenticate` and
-`payment-required`, and omits a name the response did not carry.
+`admission-required`, and omits a name the response did not carry.
 
 The helper answers with exit status 0 and one JSON object on standard
 output that maps header names to string values:
 
 ```json
-{ "Payment-Authorization": "Payment eyJ…" }
+{ "Admission-Authorization": "Admission eyJ…" }
 ```
 
-For an MPP challenge the helper returns `Authorization: Payment …`,
-or `Payment-Authorization: Payment …` when the challenge sets
-`header="Payment-Authorization"`. For an x402 challenge it returns
-`PAYMENT-SIGNATURE` (informative). Any other exit status, output that
+The helper returns the credential in the header its challenge names
+(informative): `Authorization`, `Admission-Authorization` or
+`ADMISSION-SIGNATURE`. Any other exit status, output that
 is not such an object, an empty object, a header name that is not an
 HTTP token, two names that differ only in case, or a value that
 contains a control character other than horizontal tab aborts the
@@ -734,8 +732,8 @@ operation. A header value longer than 8,192 bytes also aborts it.
 **Header allowlist.** The client attaches a helper header only if its
 name is on the remote's allowlist. Names compare case-insensitively.
 
-- The default allowlist is `Payment-Authorization`,
-  `PAYMENT-SIGNATURE`, and `Authorization`. `Authorization` is on it
+- The default allowlist is `Admission-Authorization`,
+  `ADMISSION-SIGNATURE`, and `Authorization`. `Authorization` is on it
   only when the client does not already send `Authorization` to that
   remote, that is, when no `MKIT_API_TOKEN` bearer token (§7.3) is
   configured for it.
@@ -782,7 +780,7 @@ of the auth v2 canonical string. They stay attached to every transport
 retry of that attempt on the backoff ladder. A second challenge for the
 same operation fails it; the client does not run the helper again.
 
-**Receipts.** A client keeps a `Payment-Receipt` or `PAYMENT-RESPONSE`
+**Receipts.** A client keeps an `Admission-Receipt` or `ADMISSION-RESPONSE`
 field it receives out of logs and traces, and MAY report it to the
 user.
 
@@ -1140,7 +1138,7 @@ A server processes a signed write in this order:
      stream instead.
 
    Only a new operation continues beyond this step, apart from the scoped
-   upload resume above. So a retry never presents a spent payment credential
+   upload resume above. So a retry never presents a spent admission credential
    again, and one signer's result is never served to another.
 3. **Authorize** the write (§7.5), then run **admission** (§5.1)
    (for `BeginUpload`, after the live-ticket check of §7.7). A
@@ -1153,7 +1151,7 @@ A server processes a signed write in this order:
 
 Concurrent duplicates of a new operation that both complete step 2 before
 either reserves may each reach admission; an admission hook MUST treat
-payment credentials as single-use (e.g. by challenge id) so at most one
+admission credentials as single-use (e.g. by challenge id) so at most one
 is charged. For unary writes, reservation, acceptance effects, and saved result
 form one atomic unit with no externally observable in-flight window; holding
 admission does not create one.
@@ -1800,7 +1798,7 @@ independent byte reservations.
   An unconditional update whose presence changes after admission MUST abort
   rather than apply a different ref effect (SPEC-SERVER §6.3).
 
-A deployment settles a payment on `Committed` and releases it on
+A deployment settles a charge on `Committed` and releases it on
 `Aborted` or `Expired`, so an aborted upload settles nothing
 (informative). Outcome delivery is at least once with a stable reservation
 identity for deduplication, as [SPEC-SERVER](SPEC-SERVER.md) specifies. Repeated
@@ -2076,7 +2074,7 @@ Explicitly deferred to sibling issues:
   admission step and outcomes (§5.1, §7.7), and the client's 402
   handling, `admission_helper`, and header allowlist (§5.1).
 - The remote-hook contract and outcome guarantees: see [SPEC-SERVER](SPEC-SERVER.md).
-- Pricing, payment verification, and settlement: deployment policy,
+- Pricing, admission verification, and settlement: deployment policy,
   never mkit's (§5.1).
 
 ---
@@ -2094,7 +2092,8 @@ Explicitly deferred to sibling issues:
 | `2` (WP-1.28b) | draft | §7.9 clarifies per-bucket ListRefs index lag and head/packmap age differences. |
 | `2` (WP-1.11b) | draft | §5 and §7.6: a part receipt bound to another ticket is an invalid receipt (`invalid_argument`), with no cross-ticket oracle. |
 | `2` (WP-3.13) | draft | §5.1 permits order-preserving combined WWW-Authenticate challenge lists on platforms that fold response fields; servers SHOULD separate field lines and clients/helpers MUST parse challenge lists (RFC 9110). |
-| `2` | draft | Informative §7.1 clarification: concurrent new-operation duplicates may each reach admission before reservation; payment credentials are single-use to avoid double charging (WP-3.13 orchestrator ruling). |
+| `2` | draft | §5.1 names the admission headers with the `Admission-` prefix: `ADMISSION-REQUIRED`, `Admission-Authorization`, `ADMISSION-SIGNATURE`, `Admission-Receipt` and `ADMISSION-RESPONSE`. The sample challenge schemes are neutral. |
+| `2` | draft | Informative §7.1 clarification: concurrent new-operation duplicates may each reach admission before reservation; admission credentials are single-use to avoid double charging (WP-3.13 orchestrator ruling). |
 | `2` | draft | §7.9 defines absent or zero `page_size` as the advertised maximum and malformed or foreign page tokens as `invalid_argument` (WP-1.28a). |
 | `2` (WP-1.10) | draft | §7.6 requires canonical branch-head/packmap pairing for ticketed advances; §7.8 rejects deletion with tickets. |
 | `2` (WP-1.11a) | draft | §5 classifies invalid part receipts as `invalid_argument`; §7.6 permits storage-session abort after a root mismatch and retains rotated receipt keys for at least seven days. |
@@ -2198,7 +2197,7 @@ the host dispatches itself.
 
 A per-RPC call sends one request and never waits. The outcomes a caller
 schedules come back as typed errors: a challenge (§5.1, every challenge, and a
-402 without a Connect body parsed from `WWW-Authenticate` and `PAYMENT-REQUIRED`),
+402 without a Connect body parsed from `WWW-Authenticate` and `ADMISSION-REQUIRED`),
 a `PendingVerification` hint, a membership-lag `unavailable`, and an
 `unavailable` carrying `Retry-After` (1&ndash;60 s). Every signed call accepts a
 caller-owned request identity (the nonce, which is also the `Idempotency-Key`,

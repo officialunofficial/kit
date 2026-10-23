@@ -66,8 +66,8 @@ impl AdmissionResponder for TestAdmission {
         ));
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(vec![(
-            "Payment-Authorization".into(),
-            "test-payment".into(),
+            "Admission-Authorization".into(),
+            "test-admission".into(),
         )])
     }
 }
@@ -199,7 +199,7 @@ impl TestService {
             advance: None,
             upload_token: None,
             part_index: None,
-            admission: header("payment-authorization"),
+            admission: header("admission-authorization"),
             streamed_bytes: 0,
             largest_chunk: 0,
         });
@@ -1288,6 +1288,8 @@ fn lag_sleep(duration: std::time::Duration) {
 
 #[test]
 fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let lag = || {
         (
             ErrorCode::Unavailable,
@@ -1395,6 +1397,8 @@ fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
 
 #[test]
 fn advance_deadline_uses_earliest_ticket_expiry() {
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let start = 1_700_000_000_000;
     LAG_CLOCK.store(start, Ordering::SeqCst);
     let served = Served::new(State {
@@ -1442,6 +1446,8 @@ fn advance_deadline_uses_earliest_ticket_expiry() {
 
 #[test]
 fn non_owner_grant_survives_begin_parts_pending_poll_and_resign() {
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     GRANT_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
     let served = Served::new(State {
         advance_pending_once: true,
@@ -1866,8 +1872,8 @@ fn begin_upload_admission_retries_once_with_headers() {
         .collect();
     assert_eq!(begins.len(), 3);
     assert_eq!(begins[0].admission, None);
-    assert_eq!(begins[1].admission.as_deref(), Some("test-payment"));
-    assert_eq!(begins[2].admission.as_deref(), Some("test-payment"));
+    assert_eq!(begins[1].admission.as_deref(), Some("test-admission"));
+    assert_eq!(begins[2].admission.as_deref(), Some("test-admission"));
     assert_eq!(
         begins[0].signed.as_ref().unwrap()[3],
         begins[1].signed.as_ref().unwrap()[3]
@@ -1941,6 +1947,8 @@ fn begin_rejection_and_v2_small_unimplemented_are_terminal() {
 
 #[test]
 fn expired_ticket_rejects_before_first_advance_poll() {
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     LAG_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
     let served = Served::new(State {
         begin_expiries: [1_700_000_000_001].into(),
@@ -1969,6 +1977,8 @@ fn expired_ticket_rejects_before_first_advance_poll() {
 
 #[test]
 fn lag_bound_clears_after_pending_reply() {
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let start = 1_700_000_000_000;
     LAG_CLOCK.store(start, Ordering::SeqCst);
     let served = Served::new(State {
@@ -2140,6 +2150,8 @@ fn nonces(served: &Served, rpc: &str) -> Vec<String> {
 
 #[test]
 fn begin_upload_keeps_nonce_inside_ladder_until_actual_lapse() {
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (jump, expect_new) in [(280_000, false), (301_000, true)] {
         RENEW_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
         let served = Served::new(State {
@@ -2161,6 +2173,8 @@ fn begin_upload_keeps_nonce_inside_ladder_until_actual_lapse() {
 
 #[test]
 fn upload_pack_renews_at_attempt_start_inside_margin() {
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     RENEW_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
     let served = Served::new(State {
         upload_unavailable_once: true,
@@ -2180,6 +2194,8 @@ fn upload_pack_renews_at_attempt_start_inside_margin() {
 
 #[test]
 fn update_ref_renews_after_actual_lapse() {
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     RENEW_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
     let served = Served::new(State {
         update_failures: 1,
@@ -2198,6 +2214,8 @@ fn update_ref_renews_after_actual_lapse() {
 
 #[test]
 fn upload_part_and_complete_renew_at_attempt_start_inside_margin() {
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let bytes = vec![7; (8 << 20) + 1];
     let key = PackKey::new(hash(&bytes));
     for (rpc, state) in [
@@ -2331,6 +2349,8 @@ impl PartReceiptStore for TrackedReceiptStore {
 
 #[test]
 fn expired_ticket_receipts_do_not_resume() {
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let start = 1_700_000_000_000;
     RENEW_CLOCK.store(start, Ordering::SeqCst);
     let served = Served::new(State {

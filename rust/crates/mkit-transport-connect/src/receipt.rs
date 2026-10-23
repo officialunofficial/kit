@@ -1,4 +1,4 @@
-//! Bounded payment receipt values from successful unary writes.
+//! Bounded admission receipt values from successful unary writes.
 use http::HeaderMap;
 use std::sync::Arc;
 
@@ -45,7 +45,7 @@ pub(crate) fn observe_receipts(
     observer: &Option<ReceiptObserver>,
 ) {
     let Some(observer) = observer else { return };
-    for name in ["payment-receipt", "payment-response"] {
+    for name in ["admission-receipt", "admission-response"] {
         let mut accepted = 0;
         for value in headers.get_all(name) {
             let bytes = value.as_bytes();
@@ -77,9 +77,9 @@ mod tests {
     fn oversized_values_do_not_consume_receipt_limit() {
         let mut headers = HeaderMap::new();
         for _ in 0..8 {
-            headers.append("payment-receipt", "x".repeat(8_193).parse().unwrap());
+            headers.append("admission-receipt", "x".repeat(8_193).parse().unwrap());
         }
-        headers.append("payment-receipt", "valid".parse().unwrap());
+        headers.append("admission-receipt", "valid".parse().unwrap());
         let received = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&received);
         let observer: Option<ReceiptObserver> = Some(Arc::new(move |receipt| {

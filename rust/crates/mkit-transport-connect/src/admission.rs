@@ -186,8 +186,8 @@ pub fn filter_headers(
             return Err(reject(&name, "is reserved"));
         }
         if ![
-            "payment-authorization",
-            "payment-signature",
+            "admission-authorization",
+            "admission-signature",
             "authorization",
         ]
         .contains(&lower.as_str())
@@ -317,7 +317,7 @@ mod tests {
         );
         for (output, fail) in [
             (
-                vec![("Payment-Authorization".into(), "secret".into())],
+                vec![("Admission-Authorization".into(), "secret".into())],
                 true,
             ),
             (vec![("X-Not-Allowed".into(), "secret".into())], false),
@@ -348,7 +348,7 @@ mod tests {
         }
         runs.store(8, Ordering::SeqCst);
         let policy = AdmissionPolicy::new(Arc::new(FakeResponder {
-            output: vec![("Payment-Authorization".into(), "secret".into())],
+            output: vec![("Admission-Authorization".into(), "secret".into())],
             fail: false,
             calls: calls.clone(),
         }));
@@ -406,9 +406,9 @@ mod tests {
             let error = filter(name, "value", &[name], false).unwrap_err();
             assert!(error.to_string().contains("reserved"), "{name}");
         }
-        assert!(filter("authorization", "Payment abc", &[], false).is_ok());
+        assert!(filter("authorization", "Admission abc", &[], false).is_ok());
         assert!(
-            filter("Authorization", "Payment abc", &[], true)
+            filter("Authorization", "Admission abc", &[], true)
                 .unwrap_err()
                 .to_string()
                 .contains("reserved")
@@ -417,10 +417,10 @@ mod tests {
 
     #[test]
     fn allowlist_grammar_value_and_carried_limits() {
-        for name in ["Payment-Authorization", "PAYMENT-SIGNATURE"] {
+        for name in ["Admission-Authorization", "ADMISSION-SIGNATURE"] {
             assert!(filter(name, "value", &[], false).is_ok());
         }
-        assert!(filter("X-Payment", "value", &["x-payment"], false).is_ok());
+        assert!(filter("X-Admission", "value", &["x-admission"], false).is_ok());
         assert!(
             filter("X-Other", "value", &[], false)
                 .unwrap_err()
@@ -430,15 +430,15 @@ mod tests {
         for name in ["bad name", "bad:name", &"x".repeat(65)] {
             assert!(filter(name, "value", &[name], false).is_err());
         }
-        assert!(filter("X-Payment", &"v".repeat(8_192), &["x-payment"], false).is_ok());
+        assert!(filter("X-Admission", &"v".repeat(8_192), &["x-admission"], false).is_ok());
         for value in [&"v".repeat(8_193), "a\r", "a\n", "a\0", "a\x7f", "é"] {
-            assert!(filter("X-Payment", value, &["x-payment"], false).is_err());
+            assert!(filter("X-Admission", value, &["x-admission"], false).is_err());
         }
         let eight = (0..8)
             .map(|n| (format!("x-test-{n}"), "v".into()))
             .collect();
         let mut extra: HashSet<String> = (0..9).map(|n| format!("x-test-{n}")).collect();
-        extra.insert("x-payment".into());
+        extra.insert("x-admission".into());
         assert!(filter_headers(eight, &extra, &HeaderMap::new(), false).is_ok());
         let nine = (0..9)
             .map(|n| (format!("x-test-{n}"), "v".into()))
@@ -447,8 +447,8 @@ mod tests {
         assert!(
             filter_headers(
                 vec![
-                    ("X-Payment".into(), "a".into()),
-                    ("x-payment".into(), "b".into())
+                    ("X-Admission".into(), "a".into()),
+                    ("x-admission".into(), "b".into())
                 ],
                 &extra,
                 &HeaderMap::new(),
@@ -457,10 +457,10 @@ mod tests {
             .is_err()
         );
         let mut carried = HeaderMap::new();
-        carried.insert("x-payment", "here".parse().unwrap());
+        carried.insert("x-admission", "here".parse().unwrap());
         assert!(
             filter_headers(
-                vec![("x-payment".into(), "else".into())],
+                vec![("x-admission".into(), "else".into())],
                 &extra,
                 &carried,
                 false

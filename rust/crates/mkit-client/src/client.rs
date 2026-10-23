@@ -734,7 +734,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     /// # Errors
     /// An anonymous client without unsigned-write opt-in, an observer veto,
     /// a signer refusal, or transport and
-    /// remote failures (including [`Error::PaymentRequired`] when the server
+    /// remote failures (including [`Error::AdmissionRequired`] when the server
     /// admits uploads).
     pub async fn begin_upload(
         &self,
@@ -1468,7 +1468,7 @@ mod unsigned_write_tests {
                 Client::anonymous(&channel, profile_destination()).with_request_policy(&policy);
             assert!(matches!(
                 ready(client.read_ref("refs/heads/main", None)),
-                Err(Error::PaymentRequired(_))
+                Err(Error::AdmissionRequired(_))
             ));
         }
         assert!(policy.0.borrow().is_empty());

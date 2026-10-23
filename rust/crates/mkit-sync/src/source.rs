@@ -326,12 +326,12 @@ mod tests {
     fn every_resumable_outcome_survives_transport_source_and_sync() {
         let required = AdmissionRequired::new(
             vec![AdmissionChallengeEntry {
-                scheme: "payment".into(),
+                scheme: "admission".into(),
                 value: "opaque".into(),
             }],
-            "pay".into(),
+            "admit".into(),
             vec!["challenge".into()],
-            vec!["payment".into()],
+            vec!["admission".into()],
         );
         for index in 0..4 {
             // Every read verb uses the same explicit adapter, and none retries.
@@ -369,7 +369,7 @@ mod tests {
                     }
                     (1, SourceError::MembershipNotVisible) => (),
                     (2, SourceError::RetryAfter { ms }) => assert_eq!(ms, 3000),
-                    (3, SourceError::PaymentRequired { challenges }) => {
+                    (3, SourceError::AdmissionRequired { challenges }) => {
                         assert_eq!(*challenges, required);
                     }
                     other => panic!("unexpected {other:?}"),
@@ -408,12 +408,12 @@ mod tests {
     fn every_resumable_write_outcome_survives_transport_source_and_sync() {
         let required = AdmissionRequired::new(
             vec![AdmissionChallengeEntry {
-                scheme: "payment".into(),
+                scheme: "admission".into(),
                 value: "opaque".into(),
             }],
-            "pay".into(),
+            "admit".into(),
             vec!["challenge".into()],
-            vec!["payment".into()],
+            vec!["admission".into()],
         );
         for index in 0..4 {
             for verb in 0..4 {
@@ -442,7 +442,7 @@ mod tests {
                     }
                     (1, SourceError::MembershipNotVisible) => (),
                     (2, SourceError::RetryAfter { ms }) => assert_eq!(ms, 3000),
-                    (3, SourceError::PaymentRequired { challenges }) => {
+                    (3, SourceError::AdmissionRequired { challenges }) => {
                         assert_eq!(*challenges, required);
                     }
                     other => panic!("unexpected {other:?}"),
@@ -462,7 +462,7 @@ mod tests {
                 TransportError::ServerError { status: 503 },
                 TransportError::ServerError { status: 400 },
                 TransportError::AdmissionRequired(Box::new(
-                    AdmissionRequired::new(Vec::new(), "pay".into(), Vec::new(), Vec::new())
+                    AdmissionRequired::new(Vec::new(), "admit".into(), Vec::new(), Vec::new())
                         .with_reason("helper failed"),
                 )),
             ] {

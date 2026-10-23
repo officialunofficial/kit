@@ -209,7 +209,7 @@ writes with `Client::with_unsigned_writes()` and retain retry identity through
 without that opt-in.
 Use `Client::with_request_policy` to select stored grants and validated admission
 headers for each signed request, including reads. The host verifies grants,
-selects credentials, and observes bounded payment receipts; the source does not
+selects credentials, and observes bounded admission receipts; the source does not
 read configuration or run helpers.
 
 `ClientSession` retains negotiated capabilities and upload commitments across
@@ -226,7 +226,7 @@ part before reporting progress or sending another part. A fresh instance calls
 uploads only missing parts. Receipt types are shared with the synchronous Connect
 adapter, so existing stores keep their record format.
 
-Without `with_write_recovery`, typed scheduling and payment outcomes return to the
+Without `with_write_recovery`, typed scheduling and admission outcomes return to the
 caller. Install a `WriteRecovery` to schedule retries or run an admission helper;
 its `recover` runs outside the asynchronous executor. The source retains the
 operation identity across ambiguous failures and renews expired envelopes.
@@ -249,8 +249,8 @@ the server denies all come back as the same `SyncError::RepositoryNotFound`
 
 Every source operation returns `SourceError`, carried by `SyncError::Source`.
 `PendingVerification { retry_after }`, `MembershipNotVisible`,
-`RetryAfter { ms }`, and `PaymentRequired { challenges }` preserve the host's
-next action. Payment challenges retain the full `AdmissionRequired` record,
+`RetryAfter { ms }`, and `AdmissionRequired { challenges }` preserve the host's
+next action. Admission challenges retain the full `AdmissionRequired` record,
 including helper headers and terminal admission reasons. The library returns
 these outcomes immediately unless a host write-recovery callback schedules a retry.
 

@@ -28,7 +28,8 @@ use mkit_cli::remote_dispatch;
 use mkit_core::hash::Hash;
 use mkit_core::layout::RepoLayout;
 use mkit_core::protocol::{
-    AdvanceOutcome, PackKey, RefWriteCondition, Transport, TransportError, TransportResult,
+    AdvanceOutcome, CommitOutcome, PackKey, RefWriteCondition, Transport, TransportError,
+    TransportResult, UploadLimits,
 };
 use mkit_core::refs::{self, Ref};
 use mkit_core::store::ObjectStore;
@@ -155,7 +156,7 @@ impl TestService {
         });
         if self.admission_required
             && procedure == "AdvanceRefs"
-            && ctx.headers().get("payment-authorization").is_none()
+            && ctx.headers().get("admission-authorization").is_none()
         {
             return Err(
                 ConnectError::permission_denied("admission required").with_detail(
@@ -167,7 +168,7 @@ impl TestService {
                                 value: Some("secret-challenge-value".into()),
                                 ..Default::default()
                             }],
-                            description: Some("pay to write".into()),
+                            description: Some("admission needed to write".into()),
                             ..Default::default()
                         },
                     ),
@@ -408,9 +409,6 @@ impl generated::TransportService for TestService {
             );
         }
         let msg = request.to_owned_message();
-        if self.ticketed && msg.ticket_ids.is_empty() {
-            return Err(ConnectError::failed_precondition("tickets missing"));
-        }
         let head_ref = msg.head_ref.unwrap_or_default();
         let head_condition = wire_to_condition(msg.head_expectation, msg.head_expected_id)?;
         let head_new = to_hash(msg.head_new_id)?;
@@ -419,6 +417,31 @@ impl generated::TransportService for TestService {
             wire_to_condition(msg.packmap_expectation, msg.packmap_expected_id)?;
         let packmap_new = to_hash(msg.packmap_new_id)?;
 
+        // An atomic server checks both preconditions before it writes either
+        // ref, and reports the packmap first.
+        if self.ticketed {
+            let holds = |name: &str, condition: &RefWriteCondition| {
+                let current = self.inner.read_ref(name).map_err(to_connect_error)?;
+                Ok::<_, ConnectError>(match condition {
+                    RefWriteCondition::Any => true,
+                    RefWriteCondition::Missing => current.is_none(),
+                    RefWriteCondition::Match(expected) => current == Some(*expected),
+                })
+            };
+            let outcome = if !holds(&packmap_ref, &packmap_condition)? {
+                Some(generated::AdvanceOutcome::PackmapConflict)
+            } else if !holds(&head_ref, &head_condition)? {
+                Some(generated::AdvanceOutcome::HeadConflict)
+            } else {
+                None
+            };
+            if let Some(outcome) = outcome {
+                return Ok(Response::new(generated::AdvanceRefsResponse {
+                    outcome: Some(outcome.into()),
+                    ..Default::default()
+                }));
+            }
+        }
         let outcome = self
             .inner
             .advance_refs(
@@ -1118,7 +1141,7 @@ fn cli_admission_helper_trust_filter_json_and_exit_codes() {
         let header = if case == "reserved" {
             "X-Mkit-Ref"
         } else {
-            "Payment-Authorization"
+            "Admission-Authorization"
         };
         if case != "missing-helper" {
             std::fs::write(&helper, format!("#!/bin/sh\ncat >/dev/null\ntouch '{}'\nprintf '%s' '{{\"{header}\":\"secret-helper-value\"}}'\n", marker.display())).unwrap();
@@ -1823,6 +1846,33 @@ impl Transport for ResetBeforeAdvance<'_> {
         self.inner
             .advance_refs(head, head_condition, tip, packmap, packmap_condition, node)
     }
+    fn advance_refs_committing(
+        &self,
+        head: &str,
+        head_condition: RefWriteCondition,
+        tip: &Hash,
+        packmap: &str,
+        packmap_condition: RefWriteCondition,
+        node: &Hash,
+        commit: &[PackKey],
+    ) -> TransportResult<CommitOutcome> {
+        self.interleave();
+        self.inner.advance_refs_committing(
+            head,
+            head_condition,
+            tip,
+            packmap,
+            packmap_condition,
+            node,
+            commit,
+        )
+    }
+    fn upload_limits(&self) -> UploadLimits {
+        self.inner.upload_limits()
+    }
+    fn atomic_advance_status(&self) -> Option<bool> {
+        self.inner.atomic_advance_status()
+    }
     fn atomic_force_head_condition(&self, head: Option<Hash>) -> RefWriteCondition {
         self.inner.atomic_force_head_condition(head)
     }
@@ -1837,6 +1887,29 @@ fn head(repo: &common::Repo) -> Hash {
         .unwrap()
 }
 
+/// A test signer for the write envelope. The test server accepts any key.
+struct EnvelopeKey(ed25519_dalek::SigningKey);
+
+impl mkit_transport_connect::EnvelopeSigner for EnvelopeKey {
+    fn public_key_hex(&self) -> String {
+        mkit_core::hash::to_hex(self.0.verifying_key().as_bytes())
+    }
+    fn sign_hex(&self, digest: &Hash) -> Result<String, String> {
+        use ed25519_dalek::Signer as _;
+        Ok(mkit_core::hash::to_hex_bytes(
+            &self.0.sign(digest).to_bytes(),
+        ))
+    }
+}
+
+fn signed_transport(url: &str) -> Box<dyn Transport> {
+    let key = EnvelopeKey(ed25519_dalek::SigningKey::from_bytes(&[7; 32]));
+    Box::new(
+        mkit_transport_connect::ConnectTransport::connect_with_signer(url, Some(Arc::new(key)))
+            .unwrap(),
+    )
+}
+
 /// A force push that loses a race with a pack chain reset replans and
 /// publishes. The head-only case resets the branch to a past commit. The
 /// appending case adds a commit on top of it.
@@ -1845,8 +1918,8 @@ fn run_rebaseline_race(appending: bool) {
     let (port, shutdown, handle, calls) =
         spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
     let url = format!("mkit+http://127.0.0.1:{port}/myproj");
-    let transport = remote_dispatch::open(&url).unwrap();
-    let competing = remote_dispatch::open(&url).unwrap();
+    let transport = signed_transport(&url);
+    let competing = signed_transport(&url);
     assert!(transport.supports_atomic_advance());
 
     let local = common::Repo::new();

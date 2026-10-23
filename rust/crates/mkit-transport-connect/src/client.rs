@@ -701,7 +701,7 @@ impl ConnectTransport {
         self.pending_observer = Some(Arc::new(observer));
         self
     }
-    /// Observe bounded payment receipt headers on successful unary writes.
+    /// Observe bounded admission receipt headers on successful unary writes.
     #[must_use]
     pub fn with_admission_receipt_observer(
         mut self,

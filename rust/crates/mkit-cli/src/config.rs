@@ -2460,11 +2460,11 @@ mod tests {
         let cfg = layer(
             None,
             Some(
-                "admission_helper = /usr/bin/helper\nremote.origin.admission_headers = X-Payment\n",
+                "admission_helper = /usr/bin/helper\nremote.origin.admission_headers = X-Admission\n",
             ),
         );
         assert_eq!(cfg.admission_helper, "/usr/bin/helper");
-        assert_eq!(cfg.remote_admission_headers["origin"], "X-Payment");
+        assert_eq!(cfg.remote_admission_headers["origin"], "X-Admission");
         assert!(cfg.remotes.is_empty());
     }
 }

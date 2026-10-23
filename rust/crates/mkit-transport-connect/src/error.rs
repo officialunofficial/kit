@@ -133,7 +133,7 @@ fn admission_required(err: &ConnectError) -> Option<Result<AdmissionRequired, Tr
             challenges,
             description,
             visible_header_values(err, "www-authenticate")?,
-            visible_header_values(err, "payment-required")?,
+            visible_header_values(err, "admission-required")?,
         ))
     })())
 }
@@ -353,16 +353,16 @@ mod tests {
                 .iter()
                 .map(|c| c.scheme.as_str())
                 .collect::<Vec<_>>(),
-            ["mpp", "x402"]
+            ["challenge-a", "challenge-b"]
         );
-        assert_eq!(required.description, "Example upload payment required.");
+        assert_eq!(required.description, "Example upload admission required.");
         assert!(!mkit_core::protocol::is_retryable(
             &TransportError::AdmissionRequired(required.clone())
         ));
         let mut modified = *required;
         modified.description = "bad\x1b[31m\r\u{202e}text".into();
         let display = modified.to_string();
-        assert!(display.contains("mpp, x402"));
+        assert!(display.contains("challenge-a, challenge-b"));
         assert!(display.contains("\\u{1b}"));
         assert!(display.contains("\\u{d}"));
         assert!(display.contains("\\u{202e}"));
@@ -438,9 +438,9 @@ mod tests {
         raw.response_headers_mut()
             .insert(STATUS_MARKER, "402".parse().unwrap());
         raw.response_headers_mut()
-            .append("www-authenticate", "Payment a".parse().unwrap());
+            .append("www-authenticate", "Admission a".parse().unwrap());
         raw.response_headers_mut()
-            .append("payment-required", "x".parse().unwrap());
+            .append("admission-required", "x".parse().unwrap());
         raw.response_headers_mut()
             .append("x-other", "secret".parse().unwrap());
         let TransportError::AdmissionRequired(required) = map_connect_error(raw, ErrorContext::Ref)
@@ -449,14 +449,14 @@ mod tests {
         };
         assert!(required.challenges.is_empty());
         assert!(required.description.is_empty());
-        assert_eq!(required.www_authenticate, ["Payment a"]);
-        assert_eq!(required.payment_required, ["x"]);
+        assert_eq!(required.www_authenticate, ["Admission a"]);
+        assert_eq!(required.admission_required, ["x"]);
         assert!(!format!("{required:?}").contains("secret"));
 
         let detail = ErrorDetail::from_message(
             CHALLENGE_TYPE,
             &AdmissionChallenge {
-                challenges: vec![challenge("mpp", "v")],
+                challenges: vec![challenge("challenge-a", "v")],
                 ..Default::default()
             },
         );
@@ -498,7 +498,7 @@ mod tests {
         for _ in 0..8 {
             error
                 .response_headers_mut()
-                .append("payment-required", "v".repeat(8_192).parse().unwrap());
+                .append("admission-required", "v".repeat(8_192).parse().unwrap());
         }
         assert!(matches!(
             map_connect_error(error.clone(), ErrorContext::Ref),
@@ -506,7 +506,7 @@ mod tests {
         ));
         error
             .response_headers_mut()
-            .append("payment-required", "v".parse().unwrap());
+            .append("admission-required", "v".parse().unwrap());
         assert!(matches!(
             map_connect_error(error, ErrorContext::Ref),
             TransportError::InvalidResponse
@@ -530,7 +530,7 @@ mod tests {
             if let Ok(value) = http::HeaderValue::from_bytes(invalid) {
                 error
                     .response_headers_mut()
-                    .insert("payment-required", value);
+                    .insert("admission-required", value);
                 assert!(matches!(
                     map_connect_error(error, ErrorContext::Ref),
                     TransportError::InvalidResponse

@@ -406,7 +406,7 @@ impl<
                 }
                 Err(error) => {
                     let mapped = source_error(error);
-                    if matches!(mapped, SourceError::PaymentRequired { .. })
+                    if matches!(mapped, SourceError::AdmissionRequired { .. })
                         && (ticketed
                             || !matches!(procedure, "BeginUpload" | "UpdateRef" | "AdvanceRefs"))
                     {
@@ -438,7 +438,7 @@ impl<
                     let Some(recovery) = self.recovery else {
                         return Err(mapped);
                     };
-                    definitive = matches!(mapped, SourceError::PaymentRequired { .. })
+                    definitive = matches!(mapped, SourceError::AdmissionRequired { .. })
                         || (procedure == "AdvanceRefs"
                             && (matches!(mapped, SourceError::PendingVerification { .. })
                                 || (ticketed

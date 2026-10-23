@@ -17,7 +17,7 @@ const MAX_STDOUT: usize = 128 * 1024;
 const DEADLINE: Duration = Duration::from_mins(2);
 
 // The helper stays in mkit's foreground process group, so it can prompt on
-// the terminal (for example to confirm a payment) and receives Ctrl-C with
+// the terminal (for example to confirm an admission request) and receives Ctrl-C with
 // mkit. A descendant that keeps an inherited pipe open cannot extend the wait:
 // unfinished reader and writer threads are skipped at the deadline.
 fn stop_helper(child: &mut std::process::Child) {
@@ -122,10 +122,10 @@ impl ExecResponder {
                 serde_json::json!(ctx.required.www_authenticate),
             );
         }
-        if !ctx.required.payment_required.is_empty() {
+        if !ctx.required.admission_required.is_empty() {
             headers.insert(
-                "payment-required".into(),
-                serde_json::json!(ctx.required.payment_required),
+                "admission-required".into(),
+                serde_json::json!(ctx.required.admission_required),
             );
         }
         let input = serde_json::json!({
@@ -295,21 +295,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let stdin = dir.path().join("stdin.json");
         let body = format!(
-            "cat > '{}'; printf '%s' '{{\"Payment-Authorization\":\"Payment secret\"}}'",
+            "cat > '{}'; printf '%s' '{{\"Admission-Authorization\":\"Admission secret\"}}'",
             stdin.display()
         );
         let (_script_dir, helper) = script(&body);
         let required = AdmissionRequired::new(
             vec![AdmissionChallengeEntry {
-                scheme: "pay".into(),
+                scheme: "admit".into(),
                 value: "opaque".into(),
             }],
             "untrusted".into(),
-            vec!["Payment id=\"a,b\", request=\"x,y\", Basic realm=\"other\"".into()],
+            vec!["Admission id=\"a,b\", request=\"x,y\", Basic realm=\"other\"".into()],
             vec!["invoice".into()],
         );
         let result = helper.respond(&context(&required)).unwrap();
-        assert_eq!(result[0].0, "Payment-Authorization");
+        assert_eq!(result[0].0, "Admission-Authorization");
         let input: serde_json::Value =
             serde_json::from_slice(&std::fs::read(stdin).unwrap()).unwrap();
         assert_eq!(
@@ -319,8 +319,8 @@ mod tests {
                 "repository": "default",
                 "procedure": "/mkit.transport.v1.TransportService/UpdateRef",
                 "description": "untrusted",
-                "challenges": [{"scheme": "pay", "value": "opaque"}],
-                "headers": {"www-authenticate": ["Payment id=\"a,b\", request=\"x,y\", Basic realm=\"other\""], "payment-required": ["invoice"]}
+                "challenges": [{"scheme": "admit", "value": "opaque"}],
+                "headers": {"www-authenticate": ["Admission id=\"a,b\", request=\"x,y\", Basic realm=\"other\""], "admission-required": ["invoice"]}
             })
         );
     }

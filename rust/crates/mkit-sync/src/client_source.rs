@@ -145,7 +145,7 @@ fn source_error(error: ClientError) -> SourceError {
         ClientError::Connection(_) => SourceError::ServerError { status: 503 },
         ClientError::RequestTimeout(cause) => SourceError::RemoteError(cause),
         ClientError::Transport(cause) => SourceError::RemoteError(format!("transport: {cause}")),
-        ClientError::PaymentRequired(challenges) => SourceError::PaymentRequired { challenges },
+        ClientError::AdmissionRequired(challenges) => SourceError::AdmissionRequired { challenges },
         ClientError::PendingVerification { retry_after } => {
             SourceError::PendingVerification { retry_after }
         }
@@ -626,29 +626,29 @@ mod tests {
         }
         let response = Response::builder()
             .status(402)
-            .header("www-authenticate", "Payment opaque")
-            .header("payment-required", "opaque-payment")
+            .header("www-authenticate", "Admission opaque")
+            .header("admission-required", "opaque-admission")
             .body(Vec::new())
             .unwrap();
         let transport = FailureResponse(RefCell::new(Some(response)));
         let dest = Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
         let client = Client::anonymous(&transport, dest);
         let source = ClientSource::new(&client, &FuturesExecutor);
-        let SyncError::Source(SourceError::PaymentRequired { challenges }) =
+        let SyncError::Source(SourceError::AdmissionRequired { challenges }) =
             source.repository_error(source.list_branches().unwrap_err())
         else {
-            panic!("payment flattened")
+            panic!("challenge flattened")
         };
-        assert_eq!(challenges.www_authenticate, ["Payment opaque"]);
-        assert_eq!(challenges.payment_required, ["opaque-payment"]);
+        assert_eq!(challenges.www_authenticate, ["Admission opaque"]);
+        assert_eq!(challenges.admission_required, ["opaque-admission"]);
     }
 
     #[test]
-    fn client_source_preserves_all_payment_challenges() {
+    fn client_source_preserves_all_admission_challenges() {
         use base64::Engine as _;
         let detail = mkit_core::admission::encode_admission_challenge(
-            &[("mpp", "first"), ("x402", "second")],
-            "pay to read",
+            &[("challenge-a", "first"), ("challenge-b", "second")],
+            "admission needed to read",
         );
         let value = base64::engine::general_purpose::STANDARD.encode(detail);
         let body = format!(
@@ -660,19 +660,19 @@ mod tests {
         let dest = Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
         let client = Client::anonymous(&transport, dest);
         let source = ClientSource::new(&client, &FuturesExecutor);
-        let crate::SyncError::Source(SourceError::PaymentRequired { challenges }) =
+        let crate::SyncError::Source(SourceError::AdmissionRequired { challenges }) =
             source.repository_error(source.read_ref("refs/heads/main").unwrap_err())
         else {
-            panic!("payment flattened")
+            panic!("challenge flattened")
         };
-        assert_eq!(challenges.description, "pay to read");
+        assert_eq!(challenges.description, "admission needed to read");
         assert_eq!(
             challenges
                 .challenges
                 .iter()
                 .map(|entry| (entry.scheme.as_str(), entry.value.as_str()))
                 .collect::<Vec<_>>(),
-            [("mpp", "first"), ("x402", "second")]
+            [("challenge-a", "first"), ("challenge-b", "second")]
         );
     }
 

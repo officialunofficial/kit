@@ -80,7 +80,7 @@ impl Fixture {
                                             outcome: outcome.map(Into::into),
                                             ..Default::default()
                                         })
-                                        .with_header("payment-receipt", "receipt"),
+                                        .with_header("admission-receipt", "receipt"),
                                     )
                                 }
                             },

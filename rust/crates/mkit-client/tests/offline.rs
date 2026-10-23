@@ -185,32 +185,35 @@ fn anonymous(script: &Script) -> Client<'_, Script> {
 
 fn challenge_body() -> String {
     let detail = encode_admission_challenge(
-        &[("mpp", "id=\"a\", realm=\"x, y\""), ("x402", "opaque")],
-        "pay to read",
+        &[
+            ("challenge-a", "id=\"a\", realm=\"x, y\""),
+            ("challenge-b", "opaque"),
+        ],
+        "admission needed to read",
     );
     serde_json::json!({
         "code": "permission_denied",
-        "message": "payment required",
+        "message": "admission required",
         "details": [{"type": "mkit.transport.v1.AdmissionChallenge", "value": STANDARD.encode(detail)}],
     })
     .to_string()
 }
 
 #[test]
-fn payment_required_carries_every_challenge_and_header() {
+fn admission_required_carries_every_challenge_and_header() {
     let script = Script::new(|_| {
         json(
             402,
             &[
-                ("www-authenticate", "Payment id=\"a\", realm=\"x, y\""),
-                ("www-authenticate", "Payment id=\"b\""),
-                ("payment-required", "eyJ4NDAyIjoxfQ"),
+                ("www-authenticate", "Admission id=\"a\", realm=\"x, y\""),
+                ("www-authenticate", "Admission id=\"b\""),
+                ("admission-required", "eyJ4NDAyIjoxfQ"),
             ],
             &challenge_body(),
         )
     });
     let error = block_on(anonymous(&script).read_ref("refs/heads/main", None)).unwrap_err();
-    let Error::PaymentRequired(required) = error else {
+    let Error::AdmissionRequired(required) = error else {
         panic!("expected a typed challenge");
     };
     let schemes: Vec<_> = required
@@ -218,11 +221,11 @@ fn payment_required_carries_every_challenge_and_header() {
         .iter()
         .map(|c| c.scheme.as_str())
         .collect();
-    assert_eq!(schemes, ["mpp", "x402"]);
+    assert_eq!(schemes, ["challenge-a", "challenge-b"]);
     assert_eq!(required.challenges[0].value, "id=\"a\", realm=\"x, y\"");
-    assert_eq!(required.description, "pay to read");
+    assert_eq!(required.description, "admission needed to read");
     assert_eq!(required.www_authenticate.len(), 2);
-    assert_eq!(required.payment_required, ["eyJ4NDAyIjoxfQ"]);
+    assert_eq!(required.admission_required, ["eyJ4NDAyIjoxfQ"]);
 }
 
 #[test]
@@ -231,18 +234,18 @@ fn a_402_without_a_connect_body_still_parses_from_headers() {
         Ok(Response::builder()
             .status(402)
             .header("content-type", "text/html")
-            .header("www-authenticate", "Payment id=\"p\"")
-            .header("payment-required", "abc")
-            .body(b"<html>pay</html>".to_vec())
+            .header("www-authenticate", "Admission id=\"p\"")
+            .header("admission-required", "abc")
+            .body(b"<html>admit</html>".to_vec())
             .unwrap())
     });
     let error = block_on(anonymous(&script).pack_exists(&[3; 32], None, None)).unwrap_err();
-    let Error::PaymentRequired(required) = error else {
+    let Error::AdmissionRequired(required) = error else {
         panic!("expected a typed challenge");
     };
     assert!(required.challenges.is_empty());
-    assert_eq!(required.www_authenticate, ["Payment id=\"p\""]);
-    assert_eq!(required.payment_required, ["abc"]);
+    assert_eq!(required.www_authenticate, ["Admission id=\"p\""]);
+    assert_eq!(required.admission_required, ["abc"]);
 }
 
 #[test]
@@ -254,7 +257,7 @@ fn malformed_or_duplicated_challenge_details_are_invalid() {
         .to_string()
     };
     let doubled = {
-        let good = STANDARD.encode(encode_admission_challenge(&[("mpp", "v")], ""));
+        let good = STANDARD.encode(encode_admission_challenge(&[("challenge-a", "v")], ""));
         serde_json::json!({"code":"permission_denied","details":[
             {"type":"mkit.transport.v1.AdmissionChallenge","value":good},
             {"type":"mkit.transport.v1.AdmissionChallenge","value":good}]})
@@ -686,11 +689,11 @@ fn a_failing_sink_aborts_the_unpack() {
 }
 
 #[test]
-fn a_stream_end_frame_challenge_is_a_typed_payment_required() {
+fn a_stream_end_frame_challenge_is_a_typed_admission_required() {
     let (key, _) = sample_pack(1);
     let script = Script::new(move |_| {
         let mut body = Vec::new();
-        let detail = encode_admission_challenge(&[("mpp", "v")], "pay");
+        let detail = encode_admission_challenge(&[("challenge-a", "v")], "admit");
         let end = serde_json::json!({"error": {"code":"permission_denied","details":[
             {"type":"mkit.transport.v1.AdmissionChallenge","value":STANDARD.encode(detail)}]}})
         .to_string();
@@ -699,18 +702,18 @@ fn a_stream_end_frame_challenge_is_a_typed_payment_required() {
         body.extend_from_slice(end.as_bytes());
         Ok(Response::builder()
             .header("content-type", "application/connect+proto")
-            .header("www-authenticate", "Payment id=\"p\"")
-            .header("payment-required", "abc")
+            .header("www-authenticate", "Admission id=\"p\"")
+            .header("admission-required", "abc")
             .body(body)
             .unwrap())
     });
     let error = block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)).unwrap_err();
-    let Error::PaymentRequired(required) = error else {
+    let Error::AdmissionRequired(required) = error else {
         panic!("expected admission challenge");
     };
     assert_eq!(required.challenges.len(), 1);
-    assert_eq!(required.www_authenticate, ["Payment id=\"p\""]);
-    assert_eq!(required.payment_required, ["abc"]);
+    assert_eq!(required.www_authenticate, ["Admission id=\"p\""]);
+    assert_eq!(required.admission_required, ["abc"]);
 }
 
 #[test]

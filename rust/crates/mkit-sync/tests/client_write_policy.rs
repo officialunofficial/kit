@@ -136,14 +136,14 @@ fn ok(message: &impl Message) -> WireResponse {
 }
 fn challenge() -> WireResponse {
     let detail = STANDARD_NO_PAD.encode(mkit_core::admission::encode_admission_challenge(
-        &[("payment", "opaque-offer")],
-        "payment required",
+        &[("admission", "opaque-offer")],
+        "admission required",
     ));
     WireResponse {
         status: 402,
         content_type: "application/json",
         body: format!(
-            r#"{{"code":"permission_denied","message":"payment required","details":[{{"type":"mkit.transport.v1.AdmissionChallenge","value":"{detail}"}}]}}"#
+            r#"{{"code":"permission_denied","message":"admission required","details":[{{"type":"mkit.transport.v1.AdmissionChallenge","value":"{detail}"}}]}}"#
         ).into_bytes(),
     }
 }
@@ -212,7 +212,7 @@ impl FaultServer {
                 let request = capture(&stream);
                 let response = response(index, &request);
                 saved.lock().unwrap().push(request);
-                write!(stream, "HTTP/1.1 {} Result\r\nContent-Type: {}\r\nContent-Length: {}\r\nWWW-Authenticate: Payment challenge\r\nPAYMENT-REQUIRED: opaque-challenge\r\nConnection: close\r\n\r\n", response.status, response.content_type, response.body.len()).unwrap();
+                write!(stream, "HTTP/1.1 {} Result\r\nContent-Type: {}\r\nContent-Length: {}\r\nWWW-Authenticate: Admission challenge\r\nADMISSION-REQUIRED: opaque-challenge\r\nConnection: close\r\n\r\n", response.status, response.content_type, response.body.len()).unwrap();
                 stream.write_all(&response.body).unwrap();
             }
         });
@@ -355,14 +355,14 @@ impl AdmissionResponder for HostAdmission {
         assert_eq!(context.origin, self.origin);
         assert_eq!(context.repository, "default");
         assert_eq!(context.required.challenges.len(), 1);
-        assert_eq!(context.required.challenges[0].scheme, "payment");
+        assert_eq!(context.required.challenges[0].scheme, "admission");
         assert_eq!(context.required.challenges[0].value, "opaque-offer");
-        assert_eq!(context.required.www_authenticate, ["Payment challenge"]);
-        assert_eq!(context.required.payment_required, ["opaque-challenge"]);
+        assert_eq!(context.required.www_authenticate, ["Admission challenge"]);
+        assert_eq!(context.required.admission_required, ["opaque-challenge"]);
         self.runs.fetch_add(1, Ordering::SeqCst);
         Ok(vec![(
-            "payment-authorization".into(),
-            "approved-payment".into(),
+            "admission-authorization".into(),
+            "approved-admission".into(),
         )])
     }
 }
@@ -407,7 +407,7 @@ impl WriteRecovery for HostAdmission {
         error: &SourceError,
         attempt: u32,
     ) -> Result<bool, SourceError> {
-        let SourceError::PaymentRequired { challenges } = error else {
+        let SourceError::AdmissionRequired { challenges } = error else {
             return Ok(false);
         };
         if attempt != 1 {
@@ -443,10 +443,13 @@ fn admission_402_runs_host_responder_once_and_replays_identical_write_on_both_ba
         let server = FaultServer::new(2, |index, request| {
             assert!(request.path.ends_with("/UpdateRef"));
             if index == 0 {
-                assert!(!request.headers.contains_key("payment-authorization"));
+                assert!(!request.headers.contains_key("admission-authorization"));
                 challenge()
             } else {
-                assert_eq!(request.headers["payment-authorization"], "approved-payment");
+                assert_eq!(
+                    request.headers["admission-authorization"],
+                    "approved-admission"
+                );
                 ok(&proto::UpdateRefResponse::default())
             }
         });
@@ -546,7 +549,7 @@ fn ticketed_upload_402_never_runs_admission_helper_on_either_backend() {
                 .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
                 .unwrap_err()
         };
-        assert!(matches!(error, SourceError::PaymentRequired { .. }));
+        assert!(matches!(error, SourceError::AdmissionRequired { .. }));
         assert_eq!(host.runs.load(Ordering::SeqCst), 0);
         assert_eq!(server.requests.lock().unwrap().len(), 3);
     }
@@ -590,7 +593,10 @@ fn unsigned_admission_recovery_matches_both_backends_without_synthetic_signer() 
             if index == 0 {
                 challenge()
             } else {
-                assert_eq!(request.headers["payment-authorization"], "approved-payment");
+                assert_eq!(
+                    request.headers["admission-authorization"],
+                    "approved-admission"
+                );
                 ok(&proto::UpdateRefResponse::default())
             }
         });

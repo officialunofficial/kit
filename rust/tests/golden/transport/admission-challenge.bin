@@ -1,5 +1,5 @@
 
-u
-mppnPayment id="fake-example-not-valid", method="tempo", intent="charge", request="fake-example-request-not-valid"
-/
-x402'fake-example-payment-required-not-valid Example upload payment required.
+^
+challenge-aOAdmission id="fake-example-not-valid", request="fake-example-request-not-valid"
+8
+challenge-b)fake-example-admission-required-not-valid"Example upload admission required.

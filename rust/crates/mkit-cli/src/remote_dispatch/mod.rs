@@ -1409,7 +1409,7 @@ impl From<mkit_sync::SourceError> for DispatchError {
             S::ProtocolError => TransportError::ProtocolError,
             S::PayloadTooLarge(value) => TransportError::PayloadTooLarge(value),
             S::InsecureScheme => TransportError::InsecureScheme,
-            S::PaymentRequired { challenges } => TransportError::AdmissionRequired(challenges),
+            S::AdmissionRequired { challenges } => TransportError::AdmissionRequired(challenges),
             other => return Self::Source(other),
         };
         Self::Transport(transport)
@@ -1659,7 +1659,7 @@ mod tests {
             TransportError::AccessDenied,
             TransportError::AdmissionRequired(Box::new(AdmissionRequired::new(
                 Vec::new(),
-                "pay".into(),
+                "admit".into(),
                 Vec::new(),
                 Vec::new(),
             ))),

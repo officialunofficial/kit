@@ -168,7 +168,6 @@ scan() {
 }
 scan 'sqlite3_' 'SQLite linked into mkit'
 scan 'x-mkit-test-' 'test-faults seam compiled in'
-scan '/__stub/' 'MPP stub control plane compiled in'
 scan '/__mkit_test/' 'test-control routes compiled in'
 scan 'TEST_OUTBOX_BACKLOG_ROWS' 'test-only Worker backlog var compiled in'
 scan 'TEST_TICKET_TTL_MS' 'test-only Worker ticket var compiled in'

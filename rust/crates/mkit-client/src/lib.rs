@@ -16,7 +16,7 @@ pub use connect::{
     AdvertiseRequestTimeout, ChannelError, Clock, Destination, Detail, Error, HttpTransport,
     Identity, RemoteError, Reply, RequestTimeout, Signer,
 };
-/// Challenge types carried by [`Error::PaymentRequired`].
+/// Challenge types carried by [`Error::AdmissionRequired`].
 pub use mkit_core::protocol::{AdmissionChallengeEntry, AdmissionRequired};
 /// Canonical messages, shared with the native client and server.
 pub use mkit_rpc::transport::mkit::transport::v1 as proto;

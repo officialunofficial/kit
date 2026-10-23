@@ -394,7 +394,7 @@ pub struct Reply<R> {
 
 /// Failures. Per-RPC calls return the typed, resumable outcomes
 /// ([`Error::PendingVerification`], [`Error::MembershipNotVisible`],
-/// [`Error::RetryAfter`], [`Error::PaymentRequired`]) instead of waiting.
+/// [`Error::RetryAfter`], [`Error::AdmissionRequired`]) instead of waiting.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -435,10 +435,10 @@ pub enum Error {
     ReservedHeader(String),
     /// The server requires an out-of-protocol action (STC §5.1). Every
     /// challenge is carried, in the server's order; the raw `WWW-Authenticate`
-    /// and `PAYMENT-REQUIRED` values ride along for an admission helper. A 402
+    /// and `ADMISSION-REQUIRED` values ride along for an admission helper. A 402
     /// without a Connect body still yields this, with no challenges.
     #[error("{0}")]
-    PaymentRequired(Box<AdmissionRequired>),
+    AdmissionRequired(Box<AdmissionRequired>),
     /// A consumed pack is still under verification; ask again after the hint.
     #[error("verification pending, retry after {retry_after:?}")]
     PendingVerification { retry_after: Duration },
@@ -1435,7 +1435,7 @@ pub(crate) fn decode_response_diagnosed<D: FailureObserver + ?Sized>(
     if !response.status().is_success() {
         let parsed = parse_remote_error(response.body(), response.status(), profile);
         if response.status().as_u16() == 402 || challenged(parsed.as_ref().ok()) {
-            return Err(Error::PaymentRequired(Box::new(admission_required(
+            return Err(Error::AdmissionRequired(Box::new(admission_required(
                 parsed.ok().as_ref(),
                 response.headers(),
             )?)));
@@ -1647,7 +1647,7 @@ fn admission_required(
         challenges,
         description,
         header_values(headers, "www-authenticate")?,
-        header_values(headers, "payment-required")?,
+        header_values(headers, "admission-required")?,
     ))
 }
 
@@ -1818,7 +1818,7 @@ pub(crate) fn end_error_diagnosed<D: FailureObserver + ?Sized>(
     let mut remote = parse_remote_error(&bytes, status, profile)
         .map_err(|_| Error::Invalid("Connect end error"))?;
     if challenged(Some(&remote)) {
-        return Err(Error::PaymentRequired(Box::new(admission_required(
+        return Err(Error::AdmissionRequired(Box::new(admission_required(
             Some(&remote),
             headers,
         )?)));
