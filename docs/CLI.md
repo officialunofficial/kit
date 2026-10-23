@@ -1245,8 +1245,8 @@ Remote / sync:
   single rev means `<rev>..HEAD`; for example,
   `mkit git format-patch upstream/main -o patches/`.
 
-  All `mkit git` subcommands require building the binary with
-  `--features git-bridge` (alias: `git-export`); they shell out to `git`.
+  The `git-bridge` feature, on by default, provides the `mkit git`
+  subcommands. They shell out to `git`.
 
 Agent integration:
 
@@ -1753,7 +1753,7 @@ with a user-scoped `signing_key` as for any private clone. To a caller
 the hook does not admit, a private repository answers `not_found`,
 indistinguishable from a missing one. `MKIT_API_TOKEN` is still sent as
 `Authorization: Bearer …`, but the server does not pass it to hooks: it
-discards an `Authorization` value unless it is a single `Payment`
+discards an `Authorization` value unless it is a single admission
 credential, and an unsigned request captures no credentials at all.
 
 See `docs/specs/SPEC-TRANSPORT.md` for the other transports' wire

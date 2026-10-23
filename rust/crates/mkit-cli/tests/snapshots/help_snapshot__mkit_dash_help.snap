@@ -265,15 +265,15 @@ commands:
                     the output dir, default .mkit/pack-shards; --force encodes
                     below the size threshold) (feature: pack-shards)
   git export <dest>  Export refs to a git mirror, one-way; --passthrough
-                    publishes an imported repo as a true git fork (feature: git-bridge)
-  git import <url> [<dir>]  Import a git upstream as a signed downstream fork (feature: git-bridge)
+                    publishes an imported repo as a true git fork
+  git import <url> [<dir>]  Import a git upstream as a signed downstream fork
   git fetch|pull     Update refs/remotes/<name>/* and imported tags from the
                     upstream (locally-moved tags are never clobbered);
-                    pull also fast-forwards the current branch (feature: git-bridge)
+                    pull also fast-forwards the current branch
   git verify         Verify bridge state against the local store
-                    (--fork-audit re-derives referenced content) (feature: git-bridge)
-  git status         Show bridge state dirs: direction, endpoints, key, refs (feature: git-bridge)
-  git format-patch <range>  Render native commits as `git am`-able patches (feature: git-bridge)
+                    (--fork-audit re-derives referenced content)
+  git status         Show bridge state dirs: direction, endpoints, key, refs
+  git format-patch <range>  Render native commits as `git am`-able patches
   blame [--format=json|--porcelain|--line-porcelain] [-w] [-M[<num>]] [-C[<num>]] [--ignore-rev <rev>] [--ignore-rev-precise] [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>
                     Show line-level commit attribution; -L limits to a line
                     range, -w ignores whitespace, -M/-C detect moved/copied

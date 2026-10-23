@@ -250,7 +250,7 @@ predicates = "3"
 assert_fs = "1"
 
 [features]
-default = []
+default = ["git-bridge"]
 # Enables `mkit+s3://` remotes through `mkit-transport-s3`. Off by default.
 s3 = ["dep:mkit-transport-s3"]
 # Enables `mkit mcp`'s modern serving path (MCP 2026-07-28, via the official
@@ -261,12 +261,9 @@ s3 = ["dep:mkit-transport-s3"]
 # server stays the default `mkit mcp` implementation either way. Turn on via
 # `--features mcp-v2`.
 mcp-v2 = ["dep:rmcp", "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:subtle", "dep:http", "dep:tower-service", "dep:http-body-util", "dep:bytes", "tokio/net", "tokio/signal"]
-# The git bridge (`mkit git ...`, SPEC-GIT-BRIDGE / SPEC-GIT-IMPORT).
-# Default-off while experimental; flip after the mapping has survived
-# real mirrors. `git-export` is a back-compat alias from the bridge's
-# export-only era.
+# The git bridge (`mkit git ...`, SPEC-GIT-BRIDGE / SPEC-GIT-IMPORT). On by
+# default: it is the way to adopt mkit from an existing git repository.
 git-bridge = ["dep:mkit-git-bridge"]
-git-export = ["git-bridge"]
 # Verifiable sparse-checkout. Pulls the `mkit-core` sparse module and, when
 # `s3` is on, the matching S3 fetcher into scope. Off by default — the
 # upstream `commonware-storage` is ALPHA-tier.
