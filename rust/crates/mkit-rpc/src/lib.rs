@@ -1,0 +1,110 @@
+#![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
+#![doc = include_str!("../README.md")]
+//!
+//! Versioned wire protocols for mkit cross-system speech.
+//!
+//! mkit-rpc owns the schemas mkit uses to talk to processes outside
+//! its address space:
+//!
+//! - **External signers** (`signer.proto`): mkit-cli ↔ a subprocess
+//!   signer (file, FIDO2, TPM, future hardware backends).
+//! - **SSH transport** (`ssh.proto`): mkit-cli ↔ a remote
+//!   `mkit-server` over an `ssh(1)` child process.
+//! - **Signature verification** (`verify.proto`, issue #692):
+//!   message-only contract for the post-fetch commit/remix/tag check
+//!   `clone`/`pull`/`fetch` run by default. No bound RPC method yet —
+//!   mkit-cli's local dispatch calls the Rust implementation
+//!   (`mkit_core::sign::verify_commit`/`verify_remix`/`verify_tag`)
+//!   directly; the schema exists so a future ConnectRPC transport can
+//!   bind the identical check instead of reimplementing it.
+//!
+//! Shared vocabulary (`common.proto`) — algorithms, key forms, error
+//! codes, protocol-version negotiation — is re-exported at the crate
+//! root for convenience.
+//!
+//! ## Wire framing
+//!
+//! Both protocols use the same length-prefixed framing:
+//!
+//! ```text
+//! [u32 LE length][N bytes protobuf-encoded Frame]
+//! ```
+//!
+//! [`MAX_FRAME_BYTES`] caps the length at 1 MiB. Larger frames are
+//! a protocol error and the connection MUST be closed.
+//!
+//! ## Stability
+//!
+//! The schemas are frozen at protocol version 1 across the 0.x line.
+//! Wire-compatible additions (new enum values, new optional fields,
+//! new oneof variants) ship as patches. Breaking changes bump the
+//! protocol-version integer in `common.proto` and introduce sibling
+//! `signer2.proto` / `ssh2.proto` files rather than mutating v1.
+
+#![cfg_attr(docsrs, feature(doc_cfg))]
+// This crate (including the generated protobuf modules) contains zero
+// `unsafe` — enforce that it stays that way.
+#![forbid(unsafe_code)]
+
+// Generated protobuf modules. `_includes.rs` is emitted by
+// buffa-build; it sets up the module tree for common.proto,
+// signer.proto, ssh.proto under `mkit::rpc::v1`.
+include!(concat!(env!("OUT_DIR"), "/_includes.rs"));
+
+/// Maximum length of a single framed protobuf message in bytes.
+/// Both directions of both protocols enforce this cap; receivers
+/// MUST close the connection on a longer frame.
+pub const MAX_FRAME_BYTES: u32 = 1024 * 1024;
+
+/// The protocol version mkit v0.1.x speaks. Aliased here so callers
+/// don't need to chase the generated module path.
+pub const PROTOCOL_VERSION: i32 = crate::mkit::rpc::v1::ProtocolVersion::ProtocolVersion1 as i32;
+
+mod framing;
+mod helpers;
+pub use framing::{
+    FRAME_RECURSION_LIMIT, FrameError, frame_decode_options, read_frame, write_frame,
+};
+pub use helpers::{
+    CHUNK_DATA_MAX, MAX_REF_NAME, body_name, cond_to_wire, list_response_refs,
+    map_update_ref_error, ref_entry_to_ref, rpc_error_to_transport, signer_error_frame,
+    ssh_error_frame, unexpected_frame,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_version_constant_is_one() {
+        // Wire-load-bearing. v0.1.0 ships PROTOCOL_VERSION = 1.
+        // If this assert fails, common.proto was edited in a way
+        // that breaks the protocol contract — bump the integer
+        // explicitly rather than letting codegen drift.
+        assert_eq!(PROTOCOL_VERSION, 1);
+    }
+
+    #[test]
+    fn pin_response_debug_redacts_pin() {
+        // signer.proto marks `pin` with [debug_redact = true]; a stray
+        // `{:?}` log of a PinResponse must never echo the PIN.
+        let pr = crate::mkit::rpc::v1::signer::PinResponse {
+            pin: Some("123456".into()),
+            ..Default::default()
+        };
+        let dbg = format!("{pr:?}");
+        assert!(dbg.contains("[REDACTED]"), "Debug must redact pin: {dbg}");
+        assert!(!dbg.contains("123456"), "PIN leaked into Debug: {dbg}");
+    }
+}
+
+/// Public server-hook wire types and authentication (feature `hooks`).
+#[cfg(feature = "hooks")]
+pub mod hooks;
+
+/// Shared transport and health wire types and Connect service traits.
+#[cfg(any(feature = "transport", feature = "transport-messages"))]
+#[allow(missing_debug_implementations, clippy::all, clippy::pedantic)]
+pub mod transport {
+    include!(concat!(env!("OUT_DIR"), "/_connectrpc.rs"));
+}

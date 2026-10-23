@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/mkit-core",
     "crates/mkit-test-util",
+    "crates/mkit-rpc",
 ]
 
 [workspace.package]
