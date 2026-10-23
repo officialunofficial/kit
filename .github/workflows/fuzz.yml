@@ -52,7 +52,7 @@ jobs:
           cache-on-failure: false
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --locked --version 0.13.2
 
       - name: Run fuzz target (${{ matrix.target }}, 60s)
         working-directory: rust/fuzz
