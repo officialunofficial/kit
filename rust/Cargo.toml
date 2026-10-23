@@ -85,6 +85,10 @@ unwrap_used = "deny"
 # A stray `dbg!()` left in shipped code spams stderr and leaks internals.
 # It's only ever a debugging aid, so fail the build rather than warn.
 dbg_macro = "deny"
+# Every `unsafe` block needs a `// SAFETY:` comment that states the invariant
+# and why it holds (AGENTS.md). scripts/check-unsafe-safety.sh repeats the
+# check on the source text, so code under other targets and features is covered.
+undocumented_unsafe_blocks = "deny"
 
 [profile.release]
 codegen-units = 1
