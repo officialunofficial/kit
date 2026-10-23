@@ -1,0 +1,470 @@
+//! `mkit stash save|list|pop|drop|show` — stash working-directory
+//! changes. Backing logic lives in `mkit_core::ops::stash`.
+
+use std::io::Write;
+
+use clap::{Parser, Subcommand, ValueEnum};
+use mkit_core::layout::RepoLayout;
+use mkit_core::ops::stash;
+use mkit_core::store::ObjectStore;
+
+use crate::clap_shim;
+use crate::exit;
+use crate::format::{self, JsonObject};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum StashFormat {
+    Default,
+    Json,
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "mkit stash", about = "Stash working-directory changes.")]
+struct StashOpts {
+    #[command(subcommand)]
+    sub: StashCmd,
+    /// Emit a machine-readable JSON result object to stdout. On `list`
+    /// this is JSONL (one `{"index":N,"hash":"<hex>","message":"..."}`
+    /// per entry); every other subcommand emits one outcome object.
+    #[arg(long, value_enum, default_value = "default", global = true)]
+    format: StashFormat,
+}
+
+#[derive(Debug, Parser)]
+struct SaveOpts {
+    /// Stash message.
+    #[arg(short, long, default_value = "")]
+    message: String,
+}
+
+#[derive(Debug, Subcommand)]
+enum StashCmd {
+    /// Save the current worktree changes as a new stash entry.
+    Save(SaveOpts),
+    /// List all stash entries.
+    List,
+    /// Apply and remove a stash entry (default: entry 0).
+    Pop {
+        /// Also restore the staged state recorded by the stash (like
+        /// `git stash pop --index`), not just the worktree changes.
+        #[arg(long = "index")]
+        restore_index: bool,
+        #[arg(default_value = "0")]
+        index: String,
+    },
+    /// Apply a stash entry WITHOUT removing it (default: entry 0).
+    Apply {
+        /// Also restore the staged state recorded by the stash (like
+        /// `git stash apply --index`), not just the worktree changes.
+        #[arg(long = "index")]
+        restore_index: bool,
+        #[arg(default_value = "0")]
+        index: String,
+    },
+    /// Remove ALL stash entries.
+    Clear,
+    /// Remove a stash entry without applying it (default: entry 0).
+    Drop {
+        #[arg(default_value = "0")]
+        index: String,
+    },
+    /// Show the diff of a stash entry (default: entry 0).
+    Show {
+        #[arg(default_value = "0")]
+        index: String,
+    },
+}
+
+/// Parse a stash entry reference. Accepts a bare index (`2`) or git's
+/// `stash@{N}` revision syntax (`stash@{2}`) — the same spelling `stash
+/// list` prints, so users can copy it back verbatim.
+fn parse_stash_index(spec: &str) -> Result<usize, String> {
+    let core = spec
+        .strip_prefix("stash@{")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .unwrap_or(spec);
+    core.parse::<usize>()
+        .map_err(|_| format!("invalid stash reference '{spec}' (expected N or stash@{{N}})"))
+}
+
+#[must_use]
+pub fn run(args: &[String]) -> u8 {
+    // `mkit stash` (no args) = save with empty message.
+    // `mkit stash -m <msg>` = save with message.
+    // Either is the "save is the default subcommand" form, which
+    // clap doesn't model directly; rewrite the argv so clap sees an
+    // explicit `save` subcommand when the user omitted it.
+    let needs_default = args.first().is_none_or(|a| {
+        !matches!(
+            a.as_str(),
+            "save" | "list" | "pop" | "apply" | "drop" | "clear" | "show" | "-h" | "--help"
+        )
+    });
+    let rewritten: Vec<String> = if needs_default {
+        std::iter::once("save".to_owned())
+            .chain(args.iter().cloned())
+            .collect()
+    } else {
+        args.to_vec()
+    };
+
+    let opts = match clap_shim::parse::<StashOpts>("mkit stash", &rewritten) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
+    };
+    let layout = match super::resolve_layout(&cwd) {
+        Ok(layout) => layout,
+        Err(code) => return code,
+    };
+    let store = match super::open_store_configured(&layout) {
+        Ok(s) => s,
+        Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
+    };
+
+    // Commands that mutate the worktree/index/manifest must serialise
+    // against other worktree commands: `save`/`pop`/`apply`/`drop`/`clear`.
+    // (`apply` writes the worktree; `clear` rewrites the manifest.)
+    // `list` and `show` are read-only and run unlocked.
+    let lock = match opts.sub {
+        StashCmd::Save(_)
+        | StashCmd::Pop { .. }
+        | StashCmd::Apply { .. }
+        | StashCmd::Drop { .. }
+        | StashCmd::Clear => match super::acquire_worktree_lock(&layout) {
+            Ok(l) => Some(l),
+            Err(code) => return code,
+        },
+        StashCmd::List | StashCmd::Show { .. } => None,
+    };
+
+    let json = matches!(opts.format, StashFormat::Json);
+    // `lock` is held until this binding drops at the end of `run`, so the
+    // worktree stays serialised across the whole `dispatch` call.
+    let code = dispatch(opts.sub, &store, &layout, json);
+    drop(lock);
+    code
+}
+
+/// `error(msg, code)` plus, when `json` is set, a `{"ok":false,...}`
+/// line on stdout.
+fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", false).field_str("error", msg);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
+    emit_err(msg, code)
+}
+
+/// Run a parsed stash subcommand. Split out of [`run`] so the worktree
+/// lock acquisition / mode dispatch stays small enough for clippy's
+/// `too_many_lines`.
+#[allow(clippy::too_many_lines)] // linear per-subcommand dispatch, plus --format=json branches
+fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout, json: bool) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
+    match sub {
+        StashCmd::Save(save) => {
+            // git stores the descriptor in the stash message itself, so a
+            // no-message save records the auto `WIP on <branch>: <hash>
+            // <subject>` line and `stash list` shows it verbatim. An
+            // explicit message records `On <branch>: <message>`.
+            let branch = super::head_branch_name(layout);
+            let effective = if save.message.is_empty() {
+                match head_descriptor(store, layout) {
+                    Some((short, subject)) => format!("WIP on {branch}: {short} {subject}"),
+                    None => format!("WIP on {branch}"),
+                }
+            } else {
+                format!("On {branch}: {}", save.message)
+            };
+            match stash::save(store, layout, &effective) {
+                Ok(()) => {
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(
+                        stderr,
+                        "Saved working directory and index state {effective}"
+                    );
+                    drop(stderr);
+                    if json {
+                        let mut obj = JsonObject::new();
+                        obj.field_bool("ok", true)
+                            .field_str("kind", "save")
+                            .field_str("message", &effective);
+                        let mut stdout = std::io::stdout().lock();
+                        let _ = writeln!(stdout, "{}", obj.finish());
+                    }
+                    exit::OK
+                }
+                Err(e) => emit_err(&format!("stash save: {e}"), exit::GENERAL_ERROR),
+            }
+        }
+        StashCmd::List => match stash::list(layout) {
+            Ok(list) => {
+                // git prints nothing for an empty stash; one
+                // `stash@{N}: <message>` line per entry otherwise (no hash
+                // column, matching git). `--format=json` emits the same
+                // set as JSONL, mirroring `branch --format=json`.
+                let mut stdout = std::io::stdout().lock();
+                for (i, e) in list.entries.iter().enumerate() {
+                    if json {
+                        let mut obj = JsonObject::new();
+                        obj.field_u64("index", i as u64)
+                            .field_hash("hash", &e.commit_hash)
+                            .field_str("message", &e.message);
+                        let _ = writeln!(stdout, "{}", obj.finish());
+                    } else {
+                        let _ = writeln!(stdout, "stash@{{{i}}}: {}", e.message);
+                    }
+                }
+                exit::OK
+            }
+            Err(e) => emit_err(&format!("stash list: {e}"), exit::GENERAL_ERROR),
+        },
+        // `pop` removes the entry after a successful restore; `apply`
+        // leaves it in place. Both run the same #205/#176 destructive-
+        // restore guard so they never clobber uncommitted edits on
+        // unrelated paths.
+        StashCmd::Pop {
+            index,
+            restore_index,
+        } => match parse_stash_index(&index) {
+            Ok(i) => restore_entry(store, layout, i, true, restore_index, json),
+            Err(e) => emit_err(&e, exit::USAGE),
+        },
+        StashCmd::Apply {
+            index,
+            restore_index,
+        } => match parse_stash_index(&index) {
+            Ok(i) => restore_entry(store, layout, i, false, restore_index, json),
+            Err(e) => emit_err(&e, exit::USAGE),
+        },
+        StashCmd::Clear => match stash::clear(layout) {
+            Ok(()) => {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "cleared all stash entries");
+                drop(stderr);
+                if json {
+                    let mut obj = JsonObject::new();
+                    obj.field_bool("ok", true).field_str("kind", "clear");
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = writeln!(stdout, "{}", obj.finish());
+                }
+                exit::OK
+            }
+            Err(e) => emit_err(&format!("stash clear: {e}"), exit::GENERAL_ERROR),
+        },
+        StashCmd::Drop { index } => match parse_stash_index(&index) {
+            Ok(i) => {
+                // Capture the entry id before removal for git's
+                // `Dropped stash@{N} (<id>)` confirmation.
+                let was = stash::list(layout)
+                    .ok()
+                    .and_then(|l| l.entries.get(i).map(|e| e.commit_hash));
+                match stash::drop(layout, i) {
+                    Ok(()) => {
+                        let mut stderr = std::io::stderr().lock();
+                        match was {
+                            Some(h) => {
+                                let _ = writeln!(
+                                    stderr,
+                                    "Dropped refs/stash@{{{i}}} ({})",
+                                    format::short_hash(&h, format::SUMMARY_ABBREV)
+                                );
+                            }
+                            None => {
+                                let _ = writeln!(stderr, "Dropped refs/stash@{{{i}}}");
+                            }
+                        }
+                        drop(stderr);
+                        if json {
+                            let mut obj = JsonObject::new();
+                            obj.field_bool("ok", true)
+                                .field_str("kind", "drop")
+                                .field_u64("index", i as u64)
+                                .field_opt_hash("hash", was.as_ref());
+                            let mut stdout = std::io::stdout().lock();
+                            let _ = writeln!(stdout, "{}", obj.finish());
+                        }
+                        exit::OK
+                    }
+                    Err(e) => emit_err(&format!("stash drop: {e}"), exit::GENERAL_ERROR),
+                }
+            }
+            Err(e) => emit_err(&e, exit::USAGE),
+        },
+        StashCmd::Show { index } => match parse_stash_index(&index) {
+            Ok(i) => match stash::render_stash_show(store, layout, i) {
+                Ok(output) => {
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = stdout.write_all(output.as_bytes());
+                    exit::OK
+                }
+                Err(e) => emit_err(&format!("stash show: {e}"), exit::GENERAL_ERROR),
+            },
+            Err(e) => emit_err(&e, exit::USAGE),
+        },
+    }
+}
+
+/// Restore stash entry `index` into the worktree. `drop_entry` chooses
+/// between `pop` (removes the entry after a clean restore) and `apply`
+/// (leaves it on the stack). Both run the #205/#176 destructive-restore
+/// guard up-front so a refusal leaves the stash and worktree untouched.
+fn restore_entry(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    index: usize,
+    drop_entry: bool,
+    restore_index: bool,
+    json: bool,
+) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
+    let verb = if drop_entry { "pop" } else { "apply" };
+    // Empty stash → git's `No stash entries found.` (exit 1).
+    let entries = stash::list(layout).map(|l| l.entries).unwrap_or_default();
+    if entries.is_empty() {
+        return emit_err("No stash entries found.", exit::GENERAL_ERROR);
+    }
+    let entry_hash = entries.get(index).map(|e| e.commit_hash);
+    let tree_hash = match stash::entry_tree_hash(store, layout, index) {
+        Ok(h) => h,
+        Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+    };
+    if let Err(e) = super::ensure_restore_safe(layout, store, tree_hash) {
+        return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
+    }
+
+    // Without `--index`, keep the original behavior: `pop` restores the
+    // worktree, records recovery, and drops the entry; `apply` restores and
+    // keeps it.
+    if !restore_index {
+        let result = if drop_entry {
+            stash::pop(store, layout, index)
+        } else {
+            stash::apply(store, layout, index)
+        };
+        return match result {
+            Ok(()) => {
+                report_restore(drop_entry, index, entry_hash, json);
+                exit::OK
+            }
+            Err(e) => emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+        };
+    }
+
+    // `--index`: restore the worktree (keeping the entry), then re-stage the
+    // recorded index, and only THEN drop the entry (for `pop`). Sequencing
+    // the entry removal last means a failure in the index rewrite leaves the
+    // stash in place for a normal retry, rather than dropping it with the
+    // index half-restored.
+    let snapshot_index = match stash::entry_index(store, layout, index) {
+        Ok(i) => i,
+        Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+    };
+    if let Err(e) = stash::apply(store, layout, index) {
+        return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
+    }
+    if let Some(restored) = snapshot_index {
+        // Write the exact recorded index — preserving staged deletions, which
+        // a tree round-trip would drop.
+        if let Err(e) = mkit_core::index::write_index(layout, &restored) {
+            return emit_err(
+                &format!("stash {verb}: restore index: {e}"),
+                exit::GENERAL_ERROR,
+            );
+        }
+    } else {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "note: this stash has no recorded index state; --index had no effect"
+        );
+    }
+    if drop_entry && let Err(e) = stash::pop_finalize(layout, index) {
+        return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
+    }
+    report_restore(drop_entry, index, entry_hash, json);
+    exit::OK
+}
+
+/// git-shaped post-restore line: `pop` reports `Dropped refs/stash@{N}
+/// (<id>)` (the entry was removed); `apply` reports it stays on the stack.
+/// When `json` is set, also emits the `--format=json` outcome object.
+fn report_restore(
+    drop_entry: bool,
+    index: usize,
+    entry_hash: Option<mkit_core::hash::Hash>,
+    json: bool,
+) {
+    let entry_short = entry_hash.map(|h| format::short_hash(&h, format::SUMMARY_ABBREV));
+    let mut stderr = std::io::stderr().lock();
+    if drop_entry {
+        match entry_short.as_deref() {
+            Some(id) => {
+                let _ = writeln!(stderr, "Dropped refs/stash@{{{index}}} ({id})");
+            }
+            None => {
+                let _ = writeln!(stderr, "Dropped refs/stash@{{{index}}}");
+            }
+        }
+    } else {
+        let _ = writeln!(stderr, "Applied stash@{{{index}}} (kept on the stack)");
+    }
+    drop(stderr);
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("kind", if drop_entry { "pop" } else { "apply" })
+            .field_u64("index", index as u64)
+            .field_opt_hash("hash", entry_hash.as_ref());
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
+}
+
+/// `(short-hash, subject)` of the current HEAD commit, for git's auto
+/// stash message. `None` when HEAD is unborn or unreadable.
+fn head_descriptor(store: &ObjectStore, layout: &RepoLayout) -> Option<(String, String)> {
+    let head = mkit_core::refs::resolve_head(layout).ok().flatten()?;
+    let subject = match store.read_object(&head).ok()? {
+        mkit_core::object::Object::Commit(c) => String::from_utf8_lossy(&c.message)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_owned(),
+        _ => String::new(),
+    };
+    Some((format::short_hash(&head, format::SUMMARY_ABBREV), subject))
+}
+
+use super::error as emit_err;
+
+#[cfg(test)]
+mod tests {
+    use super::parse_stash_index;
+
+    #[test]
+    fn parses_bare_index() {
+        assert_eq!(parse_stash_index("0").unwrap(), 0);
+        assert_eq!(parse_stash_index("3").unwrap(), 3);
+    }
+
+    #[test]
+    fn parses_stash_at_brace_syntax() {
+        assert_eq!(parse_stash_index("stash@{0}").unwrap(), 0);
+        assert_eq!(parse_stash_index("stash@{12}").unwrap(), 12);
+    }
+
+    #[test]
+    fn rejects_malformed_references() {
+        assert!(parse_stash_index("stash@{}").is_err());
+        assert!(parse_stash_index("stash@{x}").is_err());
+        assert!(parse_stash_index("-1").is_err());
+        assert!(parse_stash_index("stash@{1").is_err());
+    }
+}

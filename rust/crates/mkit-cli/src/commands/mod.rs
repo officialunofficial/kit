@@ -1,0 +1,1102 @@
+//! Subcommand implementations. Each top-level command is its own
+//! module.
+//!
+//! Dispatch lives in `main.rs`; business logic lives in library
+//! crates; this module is the thin presentation shim.
+
+pub mod add;
+pub mod attest;
+pub mod attest_factory;
+pub mod bisect;
+pub mod blame;
+pub mod branch;
+pub mod cat;
+pub mod cat_file;
+pub mod checkout;
+pub mod cherry_pick;
+pub mod clean;
+pub mod clone;
+pub mod closure;
+pub mod commit;
+pub mod config_cmd;
+pub mod conflict;
+pub mod diff;
+pub mod epoch;
+pub mod fetch;
+pub mod for_each_ref;
+pub mod gc;
+#[cfg(feature = "git-bridge")]
+pub mod git;
+#[cfg(feature = "git-bridge")]
+pub mod git_import;
+#[cfg(feature = "git-bridge")]
+pub mod git_tools;
+pub mod grant;
+pub mod hash_cmd;
+pub mod init;
+pub mod key;
+pub mod keygen;
+pub mod log;
+pub mod ls_files;
+pub mod ls_tree;
+pub mod mcp;
+#[cfg(feature = "mcp-v2")]
+pub mod mcp_v2;
+pub mod merge;
+pub mod merge_base;
+pub mod mv;
+#[cfg(feature = "pack-shards")]
+pub mod pack_shard;
+pub mod prove;
+pub mod pull;
+pub mod push;
+pub mod rebase;
+pub mod ref_cmd;
+pub mod reflog;
+pub mod remote;
+pub mod reset;
+pub mod restore;
+pub mod rev_list;
+pub mod rev_parse;
+pub mod revert;
+pub mod revspec;
+pub mod rm;
+pub mod self_update;
+pub mod serve;
+pub mod show;
+pub mod show_ref;
+pub mod sparse_checkout;
+pub mod stash;
+pub mod status;
+pub mod summary;
+pub mod switch;
+pub mod symbolic_ref;
+pub mod tag;
+pub mod tree;
+pub mod trust;
+pub mod trust_roots;
+pub mod update_ref;
+pub mod verify;
+pub mod verify_attest;
+pub mod verify_proof;
+pub mod visibility;
+pub mod worktree;
+
+use crate::exit;
+use mkit_core::hash::Hash;
+use mkit_core::index::EntryStatus;
+use mkit_core::layout::RepoLayout;
+use mkit_core::object::Object;
+use mkit_core::ops::diff::{DiffKind, diff_trees};
+use mkit_core::ops::recovery::{self, RecoveryEntry};
+use mkit_core::refs::{self, Head, RefError, RefWriteCondition};
+use mkit_core::store::ObjectStore;
+use mkit_core::worktree as core_worktree;
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+
+// The restore-safety, index and history-aware ref-write primitives live in
+// `mkit-sync` (a pull's fast-forward is built on them); every command keeps
+// reaching them through this module.
+pub(crate) use mkit_sync::worktree::{
+    collect_worktree_paths, current_head_tree, fanout_read_batch, index_path_descends_from,
+    index_path_matches_or_descends, index_tracks_path_or_descendant, restore_affects_path,
+};
+pub use mkit_sync::worktree::{
+    ensure_restore_safe, ensure_restore_safe_with_options, read_or_seed_index_from_head,
+    restore_worktree_and_index, sync_index_to_tree, write_ref_recording_history,
+};
+
+/// [`refs::list_refs`], with the per-ref read-and-decode step fanned out
+/// across rayon's global thread pool once there's enough work to amortize
+/// dispatch — the directory walk itself stays sequential either way (see
+/// [`refs::list_refs_with`]'s docs). Same sequential-vs-rayon crossover
+/// shape as `commands::add`'s hashing fan-outs and `remote_dispatch`'s
+/// pack/delta/signature fan-outs (`crate::fanout`). Measured ~2x faster at
+/// 1k-10k refs and still faster, not a wash, even at 100 (`cargo bench -p
+/// mkit-benches --bench refs_ops -- list_refs_fanout`).
+pub(crate) fn list_refs_parallel(layout: &RepoLayout) -> Result<Vec<refs::Ref>, RefError> {
+    refs::list_refs_with(layout, fanout_read_batch)
+}
+
+/// [`refs::list_tags`], fanned out the same way as [`list_refs_parallel`]
+/// — a command that lists heads and tags together (e.g. `for-each-ref`,
+/// `show-ref`, `ref list`) gets the parallel win on both namespaces, not
+/// just the one that happened to be wired up first.
+pub(crate) fn list_tags_parallel(layout: &RepoLayout) -> Result<Vec<refs::Ref>, RefError> {
+    refs::list_tags_with(layout, fanout_read_batch)
+}
+
+/// [`refs::list_remote_refs`], fanned out the same way as
+/// [`list_refs_parallel`].
+pub(crate) fn list_remote_refs_parallel(
+    layout: &RepoLayout,
+    remote: &str,
+) -> Result<Vec<refs::Ref>, RefError> {
+    refs::list_remote_refs_with(layout, remote, fanout_read_batch)
+}
+
+/// Open the object store for a mutating command, honoring the repo's
+/// configured durability schedule (`durability.objects`, see
+/// [`crate::config::Config::object_sync_policy`]). Falls back to the
+/// First line of a commit/remix message (empty string on any read
+/// failure). Shared by `checkout`'s detached-HEAD report and `blame`'s
+/// porcelain `summary` field so the "subject" extraction can't drift.
+pub(crate) fn commit_subject(store: &ObjectStore, commit: &Hash) -> String {
+    let msg = match store.read_object(commit) {
+        Ok(Object::Commit(c)) => c.message,
+        _ => return String::new(),
+    };
+    String::from_utf8_lossy(&msg)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// batched default when the config cannot be read — a broken config
+/// must not change write semantics silently, and Batch is the default
+/// contract.
+pub fn open_store_configured(
+    layout: &RepoLayout,
+) -> Result<ObjectStore, mkit_core::store::StoreError> {
+    let mut store = ObjectStore::open(layout)?;
+    if let Ok(cfg) = crate::config::read_or_default(layout) {
+        store.set_sync_policy(cfg.object_sync_policy());
+    }
+    Ok(store)
+}
+
+/// Read an object's serialised bytes from `store`, mapping a failure to
+/// the `(message, exit-code)` shape commands return. Shared by `attest`,
+/// `git`'s `publish_attestations`, and `git_import`'s `mint_attestations`
+/// — each needs a commit's raw bytes (not just its hash) to compute the
+/// attestation subject's paired `sha256` digest (SPEC-ATTESTATIONS
+/// §4.2), and previously duplicated this read-and-format-error shape
+/// independently.
+pub(crate) fn read_object_bytes(store: &ObjectStore, hash: &Hash) -> Result<Vec<u8>, (String, u8)> {
+    store.read(hash).map_err(|e| {
+        (
+            format!("read {}: {e}", mkit_core::hash::to_hex(hash)),
+            exit::GENERAL_ERROR,
+        )
+    })
+}
+
+/// Resolve the [`RepoLayout`] a command operates on (#493 Phase 1):
+/// pointer-following discovery. A `.mkit` DIRECTORY (or none at all)
+/// resolves to the classic single-worktree layout exactly as before; a
+/// `.mkit` pointer FILE resolves to the linked tree's split layout. On
+/// a broken pointer the error has already been printed and the
+/// returned code is the exit status to propagate — a broken linked
+/// tree must never silently operate on the wrong directory. Command
+/// code must obtain its layout HERE and never construct one ad hoc.
+pub fn resolve_layout(cwd: &Path) -> Result<RepoLayout, u8> {
+    mkit_core::layout::discover(cwd)
+        .map_err(|e| error(&format!("worktree discovery: {e}"), exit::DATAERR))
+}
+
+/// Shared helper: emit a "not yet wired" notice and return the
+/// tempfail exit code. Commands whose backing state-machines haven't
+/// been wired into the CLI yet say so honestly rather than pretending
+/// to work.
+#[must_use]
+pub fn not_yet_ported(cmd: &str) -> u8 {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "error: `mkit {cmd}` is not yet wired");
+    exit::TEMPFAIL
+}
+
+/// Shared helper: print a usage error and return the USAGE exit code.
+#[must_use]
+pub fn usage_error(msg: &str) -> u8 {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "error: {msg}");
+    exit::USAGE
+}
+
+/// Shared helper: print `error: <msg>` to stderr and return `code`.
+///
+/// This is the single source of truth for the `error: …`-prefixed
+/// stderr channel used by every subcommand. It generalises
+/// [`usage_error`] (which hardcodes [`exit::USAGE`]) to an arbitrary
+/// exit code so command modules don't each carry their own copy.
+#[must_use]
+pub(crate) fn error(msg: &str, code: u8) -> u8 {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "error: {msg}");
+    code
+}
+
+/// Load the tree hash of a commit object, surfacing a CLI error code.
+///
+/// Shared by the `cherry-pick`/`revert`/`merge` replay+rollback paths,
+/// which all need the tree of a resolved commit before restoring it.
+///
+/// # Errors
+/// Returns [`exit::DATAERR`] if the object is not a commit, or
+/// [`exit::GENERAL_ERROR`] if it cannot be read.
+pub(crate) fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, u8> {
+    match store.read_object(&commit_hash) {
+        Ok(Object::Commit(c)) => Ok(c.tree_hash),
+        Ok(_) => Err(error("object is not a commit", exit::DATAERR)),
+        Err(e) => Err(error(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
+    }
+}
+
+/// Point the current branch (or detached HEAD) at `new_head`, routing a
+/// branch advance through the history-MMB helper.
+///
+/// Shared by `cherry-pick`/`revert`/`merge`. Unlike the historical
+/// per-command copies, a failure to read HEAD is propagated as an error
+/// rather than silently fabricating `Head::Branch("main")` and writing
+/// the commit pointer to the wrong (or a non-existent) `main` ref.
+///
+/// # Errors
+/// Returns a human-readable message if HEAD cannot be read or the ref
+/// write fails.
+pub(crate) fn advance_head(layout: &RepoLayout, new_head: &Hash) -> Result<(), String> {
+    let head = refs::read_head(layout).map_err(|e| format!("read HEAD: {e}"))?;
+    match head {
+        Head::Branch(name) => {
+            write_ref_recording_history(layout, &name, RefWriteCondition::Any, new_head)
+                .map_err(|e| format!("write ref: {e}"))
+        }
+        Head::Detached(_) => {
+            refs::write_head_detached(layout, new_head).map_err(|e| format!("update HEAD: {e}"))
+        }
+    }
+}
+
+/// Restore the current branch (or detached HEAD) to `target` as the
+/// final step of a conflict `--abort`/rollback.
+///
+/// Shared by `cherry-pick`/`revert`/`merge` `restore_to`. As with
+/// [`advance_head`], an unreadable HEAD is reported as an error instead
+/// of defaulting to `main` — a corrupted HEAD during `--abort` must not
+/// silently clobber/create a `main` branch.
+///
+/// # Errors
+/// Returns a CLI exit code (already printed via [`error`]) on failure.
+pub(crate) fn restore_head_ref(layout: &RepoLayout, target: &Hash) -> Result<(), u8> {
+    let head =
+        refs::read_head(layout).map_err(|e| error(&format!("read HEAD: {e}"), exit::DATAERR))?;
+    match head {
+        Head::Branch(name) => {
+            write_ref_recording_history(layout, &name, RefWriteCondition::Any, target)
+                .map_err(|e| error(&format!("restore ref: {e}"), exit::CANTCREAT))
+        }
+        Head::Detached(_) => refs::write_head_detached(layout, target)
+            .map_err(|e| error(&format!("restore HEAD: {e}"), exit::CANTCREAT)),
+    }
+}
+
+/// Basename of the repo-level lock that serialises worktree/index
+/// read-modify-write commands (`add`, `rm`, `commit`, `merge`,
+/// `checkout`, `rebase`, `cherry-pick`, `stash`, `sparse-checkout`).
+///
+/// Ref-only mutations (`branch`/`tag`) and config-only mutations do not
+/// take this lock — they rely on ref-CAS / atomic-config writes instead.
+pub use mkit_sync::WORKTREE_LOCK;
+
+/// Acquire the shared worktree/index lock for this worktree.
+///
+/// Hold the returned guard across the whole read-modify-write so a
+/// second mutating `mkit` blocks (then times out) instead of racing on
+/// the worktree + `.mkit/index`. On failure, the lock message has
+/// already been printed to stderr and the returned [`u8`] is the exit
+/// code to propagate.
+///
+/// Mirrors the pattern already used in `sparse_checkout` and
+/// `remote_dispatch`; new mutating commands should reuse this helper
+/// rather than calling `repo_lock::acquire_default` directly.
+///
+/// # Errors
+/// Returns [`exit::TEMPFAIL`] when the lock cannot be taken within the
+/// default timeout (another `mkit` holds it, or a stale lockfile is
+/// present).
+pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<mkit_core::repo_lock::RepoLock, u8> {
+    // Per-worktree state: the lock serialises THIS tree's worktree/
+    // index mutations (#493 Phase 3 adds a separate shared lock for
+    // store/refs/gc mutation).
+    let lock = mkit_core::repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK)
+        .map_err(|e| {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "error: repo lock: {e}");
+            exit::TEMPFAIL
+        })?;
+    warn_if_served(layout);
+    Ok(lock)
+}
+
+/// Basename of the shared lock a live `mkit serve` process holds for its
+/// whole lifetime (SPEC-CONCURRENCY §3.1, MKIT-11/#655). Lives in the
+/// common dir (`FileTransport` always serves a single-worktree root, so
+/// common dir and worktree state dir coincide there — see
+/// `mkit_core::layout`). Local mutating commands never take this lock
+/// themselves; they only [`probe_exclusive`](mkit_core::repo_lock::probe_exclusive)
+/// it via `warn_if_served` to detect a live `serve`.
+pub use mkit_sync::SERVE_LOCK;
+
+/// Warn on stderr when at least one `mkit serve` is currently alive
+/// against `layout`'s common dir. Called by [`acquire_worktree_lock`]
+/// and [`acquire_worktrees_registry_lock`] right after they take their
+/// own lock, so every worktree-mutating command and `gc` gets the
+/// warning "for free."
+///
+/// `pub(crate)`, not private: a handful of call sites take
+/// [`WORKTREE_LOCK`]/[`WORKTREES_REGISTRY_LOCK`] directly via
+/// `mkit_core::repo_lock::acquire`/`acquire_default` instead of through
+/// [`acquire_worktree_lock`]/[`acquire_worktrees_registry_lock`] — narrowly
+/// scoped locks held across only part of a larger operation, where
+/// threading a `RepoLock` guard back out through this module's `u8`-exit-code
+/// wrapper doesn't fit the caller's own error type (e.g. `remote_dispatch`'s
+/// per-branch pull/fetch locks, which propagate `LockError` via `?` into
+/// `DispatchError`; `status`'s opportunistic, near-zero-timeout cache
+/// refresh). Every such site MUST call this function right after acquiring
+/// either lock, exactly as this module's two wrappers do — grep this
+/// function's callers before adding a new direct `acquire`/`acquire_default`
+/// call against either lock name.
+///
+/// This is detection, not coordination: `FileTransport`'s only lock
+/// (`refs/.lock`) serializes file-transport instances against each
+/// other, not against local worktree mutation or `gc` — see
+/// SPEC-CONCURRENCY §3.1. A probe failure (I/O error) is swallowed:
+/// this is a best-effort diagnostic, never a reason to fail the calling
+/// command.
+pub(crate) fn warn_if_served(layout: &RepoLayout) {
+    mkit_sync::warn_if_served(layout, &crate::remote_dispatch::CliObserver);
+}
+
+/// Basename of the common-dir lock serialising linked-worktree
+/// registry mutations (`worktree add`/`remove`/`prune`), the
+/// branch-checkout guard + HEAD-write critical sections
+/// (`checkout`/`switch`, `branch -d`/`-m`), and gc's freeze of the
+/// worktree set. Distinct from [`WORKTREE_LOCK`], which guards ONE
+/// tree's worktree/index state.
+///
+/// GLOBAL LOCK ORDER (SPEC-WORKTREE §4.3): a process that takes more
+/// than one of these MUST acquire in this order —
+/// `worktrees.lock` ≺ per-tree `worktree.lock`(s) ≺
+/// `refs-history.lock` — or two multi-lock takers can stall each
+/// other until the 5s timeout.
+pub const WORKTREES_REGISTRY_LOCK: &str = "worktrees.lock";
+
+/// Acquire the shared worktree-registry lock (common dir).
+///
+/// # Errors
+/// [`exit::TEMPFAIL`] when the lock cannot be taken (message already
+/// printed), mirroring [`acquire_worktree_lock`].
+pub fn acquire_worktrees_registry_lock(
+    layout: &RepoLayout,
+) -> Result<mkit_core::repo_lock::RepoLock, u8> {
+    let lock = mkit_core::repo_lock::acquire_default(layout.common_dir(), WORKTREES_REGISTRY_LOCK)
+        .map_err(|e| {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "error: worktree registry lock: {e}");
+            exit::TEMPFAIL
+        })?;
+    warn_if_served(layout);
+    Ok(lock)
+}
+
+/// Every worktree of `layout`'s repository as `(tree root, layout)`
+/// pairs: the main tree first, then each healthy linked tree from the
+/// registry. Broken (prunable) registry entries are skipped — they
+/// have no live HEAD to consult; `worktree prune` reaps them.
+///
+/// # Errors
+/// A human-readable message when the registry cannot be enumerated
+/// (fail closed: a caller consulting sibling HEADs must not treat an
+/// unreadable registry as "no siblings").
+pub(crate) fn all_worktree_layouts(
+    layout: &RepoLayout,
+) -> Result<Vec<(std::path::PathBuf, RepoLayout)>, String> {
+    let mut out = Vec::new();
+    if let Some(main_root) = layout.common_dir().parent() {
+        out.push((main_root.to_path_buf(), RepoLayout::single(main_root)));
+    }
+    for wt in mkit_core::layout::worktrees(layout).map_err(|e| format!("worktree registry: {e}"))? {
+        if wt.prunable.is_some() {
+            continue;
+        }
+        let Some(tree_root) = wt.tree_root else {
+            continue;
+        };
+        out.push((
+            tree_root.clone(),
+            RepoLayout::linked(tree_root, wt.state_dir, layout.common_dir()),
+        ));
+    }
+    Ok(out)
+}
+
+/// The tree (other than the invoking one) that has `branch` checked
+/// out, if any. Branch moves are single-writer-per-branch (the
+/// history-MMB journal assumes it), so `checkout`/`switch`/`worktree
+/// add` refuse to put one branch on two trees, and `branch -d`/`-m`
+/// refuse to pull a branch out from under a sibling tree.
+///
+/// # Errors
+/// Propagates registry/HEAD read failures as a message — fail closed.
+pub(crate) fn branch_checked_out_elsewhere(
+    layout: &RepoLayout,
+    branch: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let self_state = layout
+        .worktree_state_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| layout.worktree_state_dir().to_path_buf());
+    for (tree_root, candidate) in all_worktree_layouts(layout)? {
+        let candidate_state = candidate
+            .worktree_state_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.worktree_state_dir().to_path_buf());
+        if candidate_state == self_state {
+            continue; // the invoking tree itself
+        }
+        match refs::read_head(&candidate) {
+            Ok(Head::Branch(name)) if name == branch => return Ok(Some(tree_root)),
+            // A sibling with no HEAD yet (mid-add) holds no branch.
+            Ok(_) | Err(RefError::NoHead) => {}
+            Err(e) => {
+                return Err(format!(
+                    "read HEAD of worktree at {}: {e}",
+                    tree_root.display()
+                ));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// C-style-quote `path` the way Git does for porcelain / `--name-*`
+/// output when a path contains bytes that need escaping. Returns `None`
+/// when the path is "plain" (all printable ASCII except `"`/`\`) and can
+/// be emitted as-is. Shared by `status` and `diff --name-only/-status`.
+///
+/// Quoting rule (matches Git's `quote_c_style` with the default
+/// `core.quotePath=true`): quote if any byte is a control char (`< 0x20`),
+/// `"`, `\`, or non-printable / non-ASCII (`>= 0x7f`). Inside the quotes,
+/// the common control chars use their `\a\b\t\n\v\f\r` escapes, `"` and
+/// `\` are backslash-escaped, printable ASCII is literal, and everything
+/// else is a 3-digit `\NNN` octal escape (per UTF-8 byte).
+pub(crate) fn c_quote_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let needs = bytes
+        .iter()
+        .any(|&b| b < 0x20 || b == b'"' || b == b'\\' || b >= 0x7f);
+    if !needs {
+        return None;
+    }
+    let mut out = String::with_capacity(bytes.len() + 2);
+    out.push('"');
+    for &b in bytes {
+        match b {
+            0x07 => out.push_str("\\a"),
+            0x08 => out.push_str("\\b"),
+            0x09 => out.push_str("\\t"),
+            0x0a => out.push_str("\\n"),
+            0x0b => out.push_str("\\v"),
+            0x0c => out.push_str("\\f"),
+            0x0d => out.push_str("\\r"),
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(b as char),
+            other => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\{other:03o}");
+            }
+        }
+    }
+    out.push('"');
+    Some(out)
+}
+
+/// Resolve a CLI path argument to a repo-relative, `/`-separated index
+/// path, validating it. Shared by `rm` and `mv` so both resolve and
+/// validate pathspecs identically (absolute args are mapped under the
+/// repo root, `.`/`..` are normalized, and the result is checked against
+/// [`mkit_core::index::validate_index_path`]).
+pub(crate) fn index_path_for_arg(root: &Path, arg: &Path) -> Result<String, String> {
+    use std::path::Component;
+    let rel = if arg.is_absolute() {
+        absolute_arg_to_repo_relative(root, arg)?
+    } else {
+        arg.to_path_buf()
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    for component in rel.as_path().components() {
+        match component {
+            Component::Normal(part) => {
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| "path is not valid UTF-8".to_string())?;
+                parts.push(part.to_string());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts.pop().is_none() {
+                    return Err(format!("invalid path: {}", arg.display()));
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(format!("invalid path: {}", arg.display()));
+            }
+        }
+    }
+
+    let path = parts.join("/");
+    if !mkit_core::index::validate_index_path(&path) {
+        return Err(format!("invalid path: {path}"));
+    }
+    Ok(path)
+}
+
+/// Map an absolute path argument to a path relative to the repo `root`,
+/// erroring if it escapes the repository. Handles not-yet-existing tail
+/// components (the leaf may not exist yet, e.g. an `mv` destination).
+pub(crate) fn absolute_arg_to_repo_relative(
+    root: &Path,
+    arg: &Path,
+) -> Result<std::path::PathBuf, String> {
+    use std::ffi::OsString;
+    let root = root.canonicalize().map_err(|e| format!("repo root: {e}"))?;
+
+    if let Ok(rel) = arg.strip_prefix(&root) {
+        return Ok(rel.to_path_buf());
+    }
+
+    let mut suffix: Vec<OsString> = vec![
+        arg.file_name()
+            .ok_or_else(|| format!("invalid path: {}", arg.display()))?
+            .to_os_string(),
+    ];
+    let mut ancestor = arg
+        .parent()
+        .ok_or_else(|| format!("invalid path: {}", arg.display()))?;
+    while ancestor.symlink_metadata().is_err() {
+        let name = ancestor
+            .file_name()
+            .ok_or_else(|| format!("path is outside repository: {}", arg.display()))?;
+        suffix.push(name.to_os_string());
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| format!("path is outside repository: {}", arg.display()))?;
+    }
+
+    let mut normalized = ancestor
+        .canonicalize()
+        .map_err(|e| format!("path {}: {e}", ancestor.display()))?;
+    for component in suffix.iter().rev() {
+        normalized.push(component);
+    }
+
+    normalized
+        .strip_prefix(&root)
+        .map(Path::to_path_buf)
+        .map_err(|_| format!("path is outside repository: {}", arg.display()))
+}
+
+/// The worktree's current staged representation `(status, hash)` for
+/// `path`: a regular file (with its exec bit), a symlink (blob of its
+/// target), or `None` when the path is missing or not a stageable type
+/// (e.g. a directory). Mirrors how `add` stages one entry, so a caller can
+/// compare a worktree path to an index entry by **content AND mode/type** —
+/// catching symlink-target and chmod-only changes that a content-only hash
+/// would miss.
+pub(crate) fn worktree_entry_state(
+    root: &Path,
+    store: &dyn mkit_core::store::ObjectSink,
+    path: &str,
+) -> Result<Option<(EntryStatus, Hash)>, String> {
+    let abs = root.join(path);
+    let meta = match abs.symlink_metadata() {
+        Ok(m) => m,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(format!("metadata {}: {e}", abs.display())),
+    };
+    if meta.file_type().is_file() {
+        let (opened_meta, bytes) = core_worktree::read_regular_file_bounded(&abs)
+            .map_err(|e| format!("read {}: {e}", abs.display()))?;
+        let h =
+            core_worktree::store_file_object(store, &bytes).map_err(|e| format!("store: {e}"))?;
+        Ok(Some((file_exec_status(&opened_meta), h)))
+    } else if meta.file_type().is_symlink() {
+        let target =
+            fs::read_link(&abs).map_err(|e| format!("read link {}: {e}", abs.display()))?;
+        let target_str = target
+            .to_str()
+            .ok_or_else(|| "symlink target is not valid UTF-8".to_string())?;
+        if !core_worktree::validate_symlink_target(target_str) {
+            return Err(format!("invalid symlink target: {target_str}"));
+        }
+        let blob = Object::Blob(mkit_core::object::Blob {
+            data: target_str.as_bytes().to_vec(),
+        });
+        let ser = mkit_core::serialize::serialize(&blob).map_err(|e| format!("serialize: {e}"))?;
+        let h = store.put(&ser).map_err(|e| format!("store: {e}"))?;
+        Ok(Some((EntryStatus::Symlink, h)))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(unix)]
+fn file_exec_status(meta: &fs::Metadata) -> EntryStatus {
+    use std::os::unix::fs::PermissionsExt;
+    if meta.permissions().mode() & 0o111 != 0 {
+        EntryStatus::Executable
+    } else {
+        EntryStatus::Blob
+    }
+}
+
+#[cfg(not(unix))]
+fn file_exec_status(_meta: &fs::Metadata) -> EntryStatus {
+    EntryStatus::Blob
+}
+
+// ---------------------------------------------------------------------------
+// History-MMB ref-write helper (feature: history-mmr)
+// ---------------------------------------------------------------------------
+//
+// CLI branch writes publish versioned first-parent ancestry when enabled.
+// History locking precedes the full-ref mutation guard.
+
+/// Delete a non-current branch and invalidate its current ancestry pointer.
+/// Historical generation snapshots are preserved. A later
+/// recreation gets a fresh generation bound to the new chain.
+pub fn delete_ref_recording_history(layout: &RepoLayout, branch: &str) -> Result<(), RefError> {
+    #[cfg(feature = "history-mmr")]
+    {
+        if matches!(refs::read_head(layout)?, refs::Head::Branch(current) if current == branch) {
+            return Err(RefError::CurrentBranch(branch.to_string()));
+        }
+        let store = ObjectStore::open(layout).map_err(|e| RefError::InvalidRef(e.to_string()))?;
+        refs::delete_ref_with_ancestry(layout, branch, None, &store)
+    }
+    #[cfg(not(feature = "history-mmr"))]
+    {
+        refs::delete_ref_safe(layout, branch)
+    }
+}
+
+/// Delete the old name after rename, including its current ancestry pointer.
+/// The caller creates the destination with a distinct full-ref identity first.
+/// This helper permits deleting the checked-out name during HEAD relocation.
+pub fn delete_ref_dropping_history(layout: &RepoLayout, branch: &str) -> Result<(), RefError> {
+    #[cfg(feature = "history-mmr")]
+    {
+        let store = ObjectStore::open(layout).map_err(|e| RefError::InvalidRef(e.to_string()))?;
+        refs::delete_ref_with_ancestry(layout, branch, None, &store)
+    }
+    #[cfg(not(feature = "history-mmr"))]
+    {
+        refs::delete_ref(layout, branch)
+    }
+}
+
+/// Delete a ref only if its tip still matches, invalidating current ancestry
+/// while preserving historical evidence. Used for rename source removal and
+/// destination rollback so a concurrent advance is never deleted.
+pub fn delete_ref_dropping_history_if_matches(
+    layout: &RepoLayout,
+    branch: &str,
+    expected: Hash,
+) -> Result<(), RefError> {
+    #[cfg(feature = "history-mmr")]
+    {
+        let store = ObjectStore::open(layout).map_err(|e| RefError::InvalidRef(e.to_string()))?;
+        refs::delete_ref_with_ancestry(layout, branch, Some(expected), &store)
+    }
+    #[cfg(not(feature = "history-mmr"))]
+    {
+        refs::delete_ref_if_matches(layout, branch, expected)
+    }
+}
+
+/// Current branch name for recovery logging — empty for a detached HEAD
+/// or an unreadable/symbolic-only HEAD.
+#[must_use]
+pub fn head_branch_name(layout: &RepoLayout) -> String {
+    match refs::read_head(layout) {
+        Ok(Head::Branch(name)) => name,
+        _ => String::new(),
+    }
+}
+
+/// Record `superseded` (the old branch tip a history-rewriting op is
+/// about to replace) in the recovery log so `mkit gc` keeps it
+/// recoverable.
+///
+/// Call this **before** moving the ref and while holding the worktree
+/// lock (every caller does both): recording first guarantees that a
+/// persisted ref move always has a persisted recovery entry, and the
+/// lock keeps a concurrent `recovery::expire` from clobbering the append.
+/// On failure the caller MUST abort the rewrite (propagate the returned
+/// error) rather than orphan an unrecoverable commit. The zero hash is a
+/// no-op inside [`recovery::record`].
+pub fn record_superseded(
+    layout: &RepoLayout,
+    op: &str,
+    branch: &str,
+    superseded: Hash,
+) -> Result<(), (String, u8)> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let entry = RecoveryEntry {
+        timestamp,
+        op: op.to_owned(),
+        superseded,
+        branch: branch.to_owned(),
+    };
+    recovery::record(layout, &entry).map_err(|e| (format!("recovery log: {e}"), exit::CANTCREAT))
+}
+
+/// After staging a `result_tree` (which, being a tree, omits removed paths),
+/// add `Removed` tombstones to the index for every path present in
+/// `base_tree` but absent from `result_tree`.
+///
+/// `sync_index_to_tree`/`restore_worktree_and_index` set the index from a
+/// tree, so a staged DELETION is silently dropped. Callers that stage a
+/// computed result without committing (e.g. `cherry-pick -n` / `revert -n`)
+/// use this so the deletion stays staged — otherwise an all-deletions result
+/// leaves an empty index and `mkit commit` rejects it as "nothing staged".
+pub fn stage_removed_tombstones(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    base_tree: Option<Hash>,
+    result_tree: Hash,
+) -> Result<(), String> {
+    let diff = diff_trees(store, base_tree, Some(result_tree))
+        .map_err(|e| format!("diff for staged deletions: {e}"))?;
+    let removed: Vec<String> = diff
+        .entries
+        .iter()
+        .filter(|e| e.kind == DiffKind::Removed)
+        .map(|e| e.path.clone())
+        .collect();
+    if removed.is_empty() {
+        return Ok(());
+    }
+    let mut idx = mkit_core::index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
+    for path in removed {
+        match idx.find_entry(&path) {
+            Some(j) => {
+                idx.entries[j].status = EntryStatus::Removed;
+                idx.entries[j].object_hash = mkit_core::hash::ZERO;
+            }
+            None => idx.upsert_entry(mkit_core::index::IndexEntry {
+                path,
+                status: EntryStatus::Removed,
+                object_hash: mkit_core::hash::ZERO,
+                mtime_ns: 0,
+                size: 0,
+                ino: 0,
+                ctime_ns: 0,
+            }),
+        }
+    }
+    mkit_core::index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))
+}
+
+/// Tracked paths present in the current index but absent from the target
+/// tree, each paired with its index entry's `(status, hash)` — for
+/// destructive worktree moves (`reset --hard`, `checkout`) these files
+/// are deleted explicitly (`restore_tree_to_worktree` with `clean =
+/// false` writes/overwrites but never deletes). The `(status, hash)`
+/// lets the caller detect local edits by content AND mode/type.
+pub(crate) fn dropped_tracked_paths(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    target_tree: Hash,
+) -> Result<Vec<(String, EntryStatus, Hash)>, String> {
+    let idx = read_or_seed_index_from_head(layout, store)?;
+    let snapshot = mkit_core::store::EphemeralSink::new(store);
+    let index_tree = core_worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
+        .map_err(|e| format!("index tree: {e}"))?;
+    let mut out = Vec::new();
+    for e in diff_trees(&snapshot, Some(index_tree), Some(target_tree))
+        .map_err(|e| format!("diff index vs target: {e}"))?
+        .entries
+        .into_iter()
+        .filter(|e| e.kind == DiffKind::Removed)
+    {
+        if let Some(entry) = idx
+            .entries
+            .iter()
+            .find(|ie| ie.path == e.path && ie.status != EntryStatus::Removed)
+        {
+            out.push((e.path, entry.status, entry.object_hash));
+        }
+    }
+    Ok(out)
+}
+
+/// The first dropped path whose worktree entry differs from its indexed
+/// `(status, hash)` — a local edit to content, mode (exec bit), or symlink
+/// target. `None` if every dropped path is unmodified, missing, or a
+/// directory (no file to lose). This is a direct per-dropped-path check, so
+/// destructive moves never silently discard a local edit — independent of
+/// how the shared worktree-snapshot guard treats ignored files.
+pub(crate) fn locally_modified_dropped_path(
+    cwd: &Path,
+    store: &ObjectStore,
+    dropped: &[(String, EntryStatus, Hash)],
+) -> Result<Option<String>, String> {
+    let snapshot = mkit_core::store::EphemeralSink::new(store);
+    for (path, idx_status, idx_hash) in dropped {
+        if let Some((wt_status, wt_hash)) = worktree_entry_state(cwd, &snapshot, path)?
+            && (wt_status != *idx_status
+                || !core_worktree::content_eq(&snapshot, &wt_hash, idx_hash)
+                    .map_err(|e| e.to_string())?)
+        {
+            return Ok(Some(path.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// Delete a dropped tracked path from the worktree. A regular file or
+/// symlink is removed; a directory (untracked content that replaced the
+/// tracked file) is LEFT in place rather than recursively deleted, and a
+/// missing path is a no-op — so this never crashes on `IsADirectory` and
+/// never nukes untracked directories.
+pub(crate) fn remove_dropped_path(abs: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(abs) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => fs::remove_file(abs),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{advance_head, c_quote_path, restore_head_ref};
+    use mkit_core::hash::Hash;
+
+    #[cfg(feature = "history-mmr")]
+    fn write_commit(store: &mkit_core::store::ObjectStore, parents: Vec<Hash>, seed: u8) -> Hash {
+        use mkit_core::object::{Commit, Identity, Object};
+
+        let commit = Commit::new_unannotated(
+            [seed; 32],
+            parents,
+            Identity::ed25519([seed; 32]),
+            [seed; 32],
+            b"msg".to_vec(),
+            0,
+            [0u8; 64],
+        );
+        let bytes = mkit_core::serialize::serialize(&Object::Commit(commit)).unwrap();
+        store.write(&bytes).unwrap()
+    }
+
+    #[cfg(feature = "history-mmr")]
+    #[test]
+    fn write_ref_recording_history_backfills_v01x_style_repo_from_object_store() {
+        use super::write_ref_recording_history;
+        use mkit_core::history::{AncestrySnapshot, Position, verify_inclusion};
+        use mkit_core::refs::{self, RefWriteCondition};
+        use mkit_core::store::ObjectStore;
+
+        let td = tempfile::tempdir().unwrap();
+        let repo_root = td.path();
+        let layout = mkit_core::layout::RepoLayout::single(repo_root);
+        let store = ObjectStore::init(&layout).unwrap();
+
+        // Build a 3-commit chain entirely via the object store and point
+        // `refs/heads/main` at the tip directly — simulating a repo
+        // written without `history-mmr`: the ref exists, but
+        // no canonical ancestry snapshot has been published.
+        let c0 = write_commit(&store, vec![], 1);
+        let c1 = write_commit(&store, vec![c0], 2);
+        let c2 = write_commit(&store, vec![c1], 3);
+        refs::write_ref(&layout, "main", &c2).unwrap();
+
+        // The first history-mmr-enabled write for this branch: a new
+        // commit c3 on top of the pre-existing tip c2.
+        let c3 = write_commit(&store, vec![c2], 4);
+        write_ref_recording_history(&layout, "main", RefWriteCondition::Match(c2), &c3).unwrap();
+
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(c3));
+
+        // The journal must now hold the full backfilled chain (c0, c1,
+        // c2) PLUS the new c3 — not just c3 alone.
+        let hist = AncestrySnapshot::load(&layout, "main").unwrap();
+        assert_eq!(hist.len(), 4);
+        let root = hist.root();
+        for (i, c) in [c0, c1, c2, c3].into_iter().enumerate() {
+            let pos = Position(i as u64);
+            let proof = hist.prove(pos).unwrap();
+            assert!(
+                verify_inclusion(&c, pos, &proof, &root),
+                "commit at position {i} failed inclusion proof after backfill"
+            );
+        }
+    }
+
+    #[cfg(feature = "history-mmr")]
+    #[test]
+    fn write_ref_recording_history_does_not_backfill_a_genuinely_fresh_branch() {
+        use super::write_ref_recording_history;
+        use mkit_core::history::AncestrySnapshot;
+        use mkit_core::refs::RefWriteCondition;
+        use mkit_core::store::ObjectStore;
+
+        let td = tempfile::tempdir().unwrap();
+        let repo_root = td.path();
+        let layout = mkit_core::layout::RepoLayout::single(repo_root);
+        let store = ObjectStore::init(&layout).unwrap();
+
+        // No pre-existing ref: this is a brand new branch's first ever
+        // commit, not a v0.1.x migration. There is nothing to backfill.
+        let c0 = write_commit(&store, vec![], 1);
+        write_ref_recording_history(&layout, "main", RefWriteCondition::Missing, &c0).unwrap();
+
+        let hist = AncestrySnapshot::load(&layout, "main").unwrap();
+        assert_eq!(
+            hist.len(),
+            1,
+            "only the one real write, no phantom backfill entries"
+        );
+    }
+
+    /// A long v0.1.x-style chain (ref exists on disk, journal never
+    /// touched) — simulates an existing repo enabling `history-mmr` for
+    /// the first time.
+    #[cfg(feature = "history-mmr")]
+    const CONCURRENT_BACKFILL_CHAIN_LEN: usize = 500;
+
+    /// Concurrent initial publications serialize ancestry construction under
+    /// the history lock and produce one complete chain without duplicate leaves.
+    #[cfg(feature = "history-mmr")]
+    #[test]
+    fn write_ref_recording_history_concurrent_backfill_does_not_duplicate_leaves() {
+        use super::write_ref_recording_history;
+        use mkit_core::history::AncestrySnapshot;
+        use mkit_core::refs::{self, RefWriteCondition};
+        use mkit_core::store::ObjectStore;
+        use std::sync::{Arc, Barrier};
+
+        let td = tempfile::tempdir().unwrap();
+        let repo_root = td.path();
+        let layout = Arc::new(mkit_core::layout::RepoLayout::single(repo_root));
+        let store = ObjectStore::init(&layout).unwrap();
+
+        let mut tip: Option<Hash> = None;
+        for seed in 0..CONCURRENT_BACKFILL_CHAIN_LEN {
+            let seed = u8::try_from(seed % 256).expect("seed % 256 fits in u8");
+            tip = Some(write_commit(&store, tip.into_iter().collect(), seed));
+        }
+        let tip = tip.unwrap();
+        refs::write_ref(&layout, "main", &tip).unwrap();
+
+        // Two independent new commits, each racing to be the first
+        // history-mmr-enabled write for this branch.
+        let c_a = write_commit(&store, vec![tip], 250);
+        let c_b = write_commit(&store, vec![tip], 251);
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        let (layout_a, barrier_a) = (Arc::clone(&layout), Arc::clone(&barrier));
+        let t_a = std::thread::spawn(move || {
+            barrier_a.wait();
+            write_ref_recording_history(&layout_a, "main", RefWriteCondition::Any, &c_a)
+        });
+        let (layout_b, barrier_b) = (Arc::clone(&layout), Arc::clone(&barrier));
+        let t_b = std::thread::spawn(move || {
+            barrier_b.wait();
+            write_ref_recording_history(&layout_b, "main", RefWriteCondition::Any, &c_b)
+        });
+
+        let res_a = t_a.join().expect("thread a must not panic");
+        let res_b = t_b.join().expect("thread b must not panic");
+        res_a.expect("writer a must succeed");
+        res_b.expect("writer b must succeed");
+
+        let hist = AncestrySnapshot::load(&layout, "main").unwrap();
+        assert_eq!(
+            hist.len(),
+            CONCURRENT_BACKFILL_CHAIN_LEN as u64 + 1,
+            "the winning tip must have exactly its own first-parent ancestry; \
+             the superseded sibling writer is not an ancestor"
+        );
+    }
+
+    #[test]
+    fn c_quote_leaves_plain_paths_alone() {
+        assert_eq!(c_quote_path("a.txt"), None);
+        assert_eq!(c_quote_path("dir/with space.txt"), None); // space is plain
+        assert_eq!(c_quote_path("weird-but-ascii_!@#$%.rs"), None);
+    }
+
+    #[test]
+    fn c_quote_escapes_special_bytes() {
+        assert_eq!(c_quote_path("a\tb.txt").as_deref(), Some(r#""a\tb.txt""#));
+        assert_eq!(
+            c_quote_path("line\nfeed").as_deref(),
+            Some(r#""line\nfeed""#)
+        );
+        assert_eq!(c_quote_path("q\"x").as_deref(), Some(r#""q\"x""#));
+        assert_eq!(
+            c_quote_path("back\\slash").as_deref(),
+            Some(r#""back\\slash""#)
+        );
+    }
+
+    #[test]
+    fn c_quote_octal_escapes_non_ascii() {
+        // "é" is UTF-8 0xC3 0xA9 → \303\251 (matches git core.quotePath).
+        assert_eq!(c_quote_path("é").as_deref(), Some(r#""\303\251""#));
+        // Combined with ASCII: only the non-ASCII bytes are octal-escaped.
+        assert_eq!(c_quote_path("x-é").as_deref(), Some(r#""x-\303\251""#));
+    }
+
+    // Regression: the shared replay helpers must NOT fabricate
+    // `Head::Branch("main")` when HEAD is unreadable/missing. A missing
+    // HEAD previously caused cherry-pick/revert/merge (and especially the
+    // `--abort` recovery path) to silently write the commit pointer to
+    // `refs/heads/main`, clobbering or creating a `main` branch the user
+    // never had. Both helpers must surface the read error instead.
+
+    #[test]
+    fn advance_head_errors_when_head_missing_instead_of_writing_main() {
+        let td = tempfile::tempdir().unwrap();
+        let layout = mkit_core::layout::RepoLayout::single(td.path());
+        // No HEAD file exists → refs::read_head returns NoHead.
+        let new_head: Hash = [0x11; 32];
+        let err = advance_head(&layout, &new_head).expect_err("missing HEAD must error");
+        assert!(err.contains("read HEAD"), "unexpected error: {err}");
+        // Crucially, no `main` ref was fabricated.
+        assert!(
+            !layout.heads_dir().join("main").exists(),
+            "advance_head must not write refs/heads/main when HEAD is unreadable"
+        );
+    }
+
+    #[test]
+    fn restore_head_ref_errors_when_head_missing_instead_of_writing_main() {
+        let td = tempfile::tempdir().unwrap();
+        let layout = mkit_core::layout::RepoLayout::single(td.path());
+        let target: Hash = [0x22; 32];
+        let code = restore_head_ref(&layout, &target).expect_err("missing HEAD must error");
+        assert_eq!(code, crate::exit::DATAERR);
+        assert!(
+            !layout.heads_dir().join("main").exists(),
+            "restore_head_ref must not write refs/heads/main when HEAD is unreadable"
+        );
+    }
+}

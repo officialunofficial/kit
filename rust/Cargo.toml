@@ -13,6 +13,7 @@ members = [
     "crates/mkit-client",
     "crates/mkit-transport-connect",
     "crates/mkit-sync",
+    "crates/mkit-cli",
 ]
 
 [workspace.package]
