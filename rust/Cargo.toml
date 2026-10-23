@@ -14,6 +14,8 @@ members = [
     "crates/mkit-transport-connect",
     "crates/mkit-sync",
     "crates/mkit-cli",
+    "fuzz",
+    "benches",
 ]
 
 [workspace.package]

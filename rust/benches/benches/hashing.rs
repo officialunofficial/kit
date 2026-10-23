@@ -1,0 +1,136 @@
+//! Hashing throughput: BLAKE3 (mkit's primitive) vs SHA-1 (git's
+//! default) vs SHA-256 (git's experimental hash) vs BLAKE2b. All
+//! libraries hash the SAME random buffer at four sizes covering the
+//! object spectrum mkit sees in practice (small commits → blob).
+//!
+//! Output: `target/criterion/<bench>/<size>/estimates.json`. The
+//! `render-charts` binary reads these and emits SVGs.
+//!
+//! We also emit a flattened JSON summary at
+//! `target/bench-results/hashing.json` so the renderer doesn't need
+//! to re-implement criterion's dir layout discovery.
+
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use mkit_benches::{Sample, Unit, time_one};
+
+const SIZES: &[(usize, &str)] = &[
+    (1024, "1 KiB"),
+    (64 * 1024, "64 KiB"),
+    (1024 * 1024, "1 MiB"),
+    (16 * 1024 * 1024, "16 MiB"),
+];
+
+fn random_buffer(n: usize) -> Vec<u8> {
+    // Deterministic, dataset-stable PRNG. Sample bytes from a fixed
+    // LCG so reruns produce identical inputs and the throughput
+    // numbers are diff-able across commits.
+    let mut state: u64 = 0xdead_beef_cafe_d00d;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        out.push((state >> 56) as u8);
+    }
+    out
+}
+
+fn bench_hashing(c: &mut Criterion) {
+    let mut samples: Vec<Sample> = Vec::new();
+
+    for &(n, axis) in SIZES {
+        let buf = random_buffer(n);
+        let mut group = c.benchmark_group(format!("hashing/{axis}"));
+        group.throughput(Throughput::Bytes(n as u64));
+
+        // BLAKE3 — mkit's primitive.
+        group.bench_with_input(BenchmarkId::new("BLAKE3 (mkit)", n), &buf, |b, buf| {
+            b.iter(|| mkit_core::hash::hash(buf));
+        });
+        samples.push(Sample {
+            category: "hashing".into(),
+            axis: axis.into(),
+            library: "BLAKE3 (mkit)".into(),
+            value: throughput_mib(
+                n,
+                time_one(50, 200, || {
+                    let _ = mkit_core::hash::hash(&buf);
+                }),
+            ),
+            unit: Unit::MibPerSec,
+        });
+
+        // SHA-1 — git's default object hash.
+        group.bench_with_input(BenchmarkId::new("SHA-1 (git)", n), &buf, |b, buf| {
+            use sha1::{Digest, Sha1};
+            b.iter(|| Sha1::digest(buf));
+        });
+        samples.push(Sample {
+            category: "hashing".into(),
+            axis: axis.into(),
+            library: "SHA-1 (git)".into(),
+            value: throughput_mib(
+                n,
+                time_one(50, 200, || {
+                    use sha1::{Digest, Sha1};
+                    let _ = Sha1::digest(&buf);
+                }),
+            ),
+            unit: Unit::MibPerSec,
+        });
+
+        // SHA-256 — git's experimental object hash.
+        group.bench_with_input(
+            BenchmarkId::new("SHA-256 (git-sha256)", n),
+            &buf,
+            |b, buf| {
+                use sha2::{Digest, Sha256};
+                b.iter(|| Sha256::digest(buf));
+            },
+        );
+        samples.push(Sample {
+            category: "hashing".into(),
+            axis: axis.into(),
+            library: "SHA-256 (git-sha256)".into(),
+            value: throughput_mib(
+                n,
+                time_one(50, 200, || {
+                    use sha2::{Digest, Sha256};
+                    let _ = Sha256::digest(&buf);
+                }),
+            ),
+            unit: Unit::MibPerSec,
+        });
+
+        // BLAKE2b — comparison anchor.
+        group.bench_with_input(BenchmarkId::new("BLAKE2b", n), &buf, |b, buf| {
+            use blake2::{Blake2b512, Digest};
+            b.iter(|| Blake2b512::digest(buf));
+        });
+        samples.push(Sample {
+            category: "hashing".into(),
+            axis: axis.into(),
+            library: "BLAKE2b".into(),
+            value: throughput_mib(
+                n,
+                time_one(50, 200, || {
+                    use blake2::{Blake2b512, Digest};
+                    let _ = Blake2b512::digest(&buf);
+                }),
+            ),
+            unit: Unit::MibPerSec,
+        });
+
+        group.finish();
+    }
+
+    mkit_benches::write_summary("hashing", &samples);
+}
+
+fn throughput_mib(bytes: usize, seconds_per_iter: f64) -> f64 {
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    mib / seconds_per_iter
+}
+
+criterion_group!(benches, bench_hashing);
+criterion_main!(benches);

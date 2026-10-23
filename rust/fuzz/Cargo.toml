@@ -1,0 +1,220 @@
+# cargo-fuzz crate. It IS a workspace member (see the root Cargo.toml
+# `members` list), which is only safe because libfuzzer-sys is behind
+# the optional `libfuzzer` feature — the default `cargo build` / `cargo
+# test` never pulls it in (it's nightly-only on stable builds). cargo-fuzz
+# drives the libfuzzer binaries with `--features libfuzzer` itself.
+#
+# Two execution paths:
+#
+# * `cd rust/fuzz && cargo +nightly fuzz run delta` — libfuzzer-sys
+#   harness; the iteration counter inside each target body still
+#   enforces the FUZZ.md guardrails.
+# * `cd rust && cargo test --manifest-path fuzz/Cargo.toml` — plain unit-test
+#   harness over the same target bodies, so CI catches regressions
+#   even without nightly.
+#
+# Guardrails enforced in every target (see docs/FUZZ.md):
+#   1. <= 100 iterations per target invocation.
+#   2. <= 64 KiB input per iteration.
+#   3. Bounded allocations: input cap (2) + per-op output caps inside
+#      mkit-core bound the worst-case heap to ~1 MiB per iteration.
+#      mkit-core uses the global allocator in production, so we do not
+#      swap in a custom allocator in the fuzz harness — that would make
+#      the harness diverge from production. See docs/FUZZ.md.
+#   4. 100 ms wall-clock cap per iteration.
+#   5. No unbounded loops; iteration counter mandatory.
+#   6. Seeded RNG so failures reproduce.
+
+[package]
+name = "mkit-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = "1"
+buffa = "0.9.1"
+mkit-attest = { path = "../crates/mkit-attest", features = ["grants"] }
+mkit-core = { path = "../crates/mkit-core", features = ["sparse-checkout"] }
+mkit-git-bridge = { path = "../crates/mkit-git-bridge" }
+mkit-keystore = { path = "../crates/mkit-keystore", features = ["fuzzing"] }
+mkit-rpc = { path = "../crates/mkit-rpc", features = ["arbitrary"] }
+tempfile = "3"
+
+# libfuzzer-sys is gated on the `libfuzzer` feature so `cargo test`
+# (stable, no nightly) doesn't pull it in. cargo-fuzz drives the build
+# with `--features libfuzzer` automatically.
+libfuzzer-sys = { version = "0.4", optional = true }
+
+# `minifuzz` (commonware-invariants) drives the in-process `#[test]`
+# property runs — see the `rpc_decode` pilot in `src/lib.rs`. Dev-only:
+# the libfuzzer binaries never touch it. Pinned to the commonware
+# 2026.9.x train, same as the workspace-root commonware-* deps.
+[dev-dependencies]
+commonware-invariants = "2026.9.0"
+
+[features]
+default = []
+libfuzzer = ["dep:libfuzzer-sys"]
+
+[[bin]]
+name = "delta"
+path = "fuzz_targets/delta.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "pack"
+path = "fuzz_targets/pack.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "tree"
+path = "fuzz_targets/tree.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "software_key_record"
+path = "fuzz_targets/software_key_record.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "rpc_decode"
+path = "fuzz_targets/rpc_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+# When run as plain unit tests (no `--features libfuzzer`), the targets
+# expose their guardrail-enforcing bodies via `pub fn run_unit_tests()`
+# in each file. The shim below exposes them as `#[test]`s.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "git_commit_parse"
+path = "fuzz_targets/git_commit_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "git_tag_parse"
+path = "fuzz_targets/git_tag_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "git_tree_parse"
+path = "fuzz_targets/git_tree_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "merkle_packlist"
+path = "fuzz_targets/merkle_packlist.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "merkle_proof"
+path = "fuzz_targets/merkle_proof.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "sparse_verify"
+path = "fuzz_targets/sparse_verify.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "disclosure_decode"
+path = "fuzz_targets/disclosure_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "verify_disclosure"
+path = "fuzz_targets/verify_disclosure.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "span_decode"
+path = "fuzz_targets/span_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "verify_span"
+path = "fuzz_targets/verify_span.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "pack_entries"
+path = "fuzz_targets/pack_entries.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "verify_closure"
+path = "fuzz_targets/verify_closure.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "grant_parse"
+path = "fuzz_targets/grant_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "epoch_visibility_parse"
+path = "fuzz_targets/epoch_visibility_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
