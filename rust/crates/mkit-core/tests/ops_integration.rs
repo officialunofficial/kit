@@ -237,9 +237,9 @@ fn merge_and_cherry_pick_are_byte_deterministic() {
     let (_d, s) = fresh();
     // Use deterministic blob bytes — every input here is a fixed
     // constant so the resulting hashes are stable across runs.
-    let v0 = put_blob(&s, b"phase5a:v0");
-    let v1 = put_blob(&s, b"phase5a:v1");
-    let v2 = put_blob(&s, b"phase5a:v2");
+    let v0 = put_blob(&s, b"ops-integration:v0");
+    let v1 = put_blob(&s, b"ops-integration:v1");
+    let v2 = put_blob(&s, b"ops-integration:v2");
 
     let base = put_tree(&s, vec![entry(b"f.txt", EntryMode::Blob, v0)]);
     let ours = put_tree(&s, vec![entry(b"f.txt", EntryMode::Blob, v1)]);

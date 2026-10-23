@@ -43,7 +43,7 @@ fn main() -> std::io::Result<()> {
     write_vector(&out_dir, "index_3entries", &three_bytes)?;
 
     // 3. ref_detached.bin — 65-byte ref wire (lowercase hex + \n).
-    let detached = hash::hash(b"phase4-detached-head");
+    let detached = hash::hash(b"refs-index-detached-head");
     let wire = encode_ref_wire(&detached);
     write_vector(&out_dir, "ref_detached", &wire)?;
 
@@ -79,7 +79,7 @@ fn three_entry_index() -> Index {
     idx.entries.push(IndexEntry {
         path: "README.md".to_string(),
         status: EntryStatus::Blob,
-        object_hash: hash::hash(b"phase4-blob"),
+        object_hash: hash::hash(b"refs-index-blob"),
         mtime_ns: 0,
         size: 0,
         ino: 0,
@@ -88,7 +88,7 @@ fn three_entry_index() -> Index {
     idx.entries.push(IndexEntry {
         path: "src".to_string(),
         status: EntryStatus::Tree,
-        object_hash: hash::hash(b"phase4-tree"),
+        object_hash: hash::hash(b"refs-index-tree"),
         mtime_ns: 0,
         size: 0,
         ino: 0,
@@ -97,7 +97,7 @@ fn three_entry_index() -> Index {
     idx.entries.push(IndexEntry {
         path: "scripts/build".to_string(),
         status: EntryStatus::Executable,
-        object_hash: hash::hash(b"phase4-exe"),
+        object_hash: hash::hash(b"refs-index-exe"),
         mtime_ns: 0,
         size: 0,
         ino: 0,
