@@ -10,7 +10,7 @@ is, what it assumes, and what it found. The per-model READMEs under
 mutant, bound, state count and run time.
 
 The formal verification effort integrates the Quint and Lean models and was
-done against the specs on the `feat/mkit-server` line (PR #1082). The spec
+done against the current specs. The spec
 text is normative. Where a model found the spec wrong, the spec was fixed;
 where it found the code wrong, the code was fixed with a regression test,
 or the gap is listed under [Open findings](#open-findings).
@@ -209,7 +209,7 @@ after.
 ### Fixed in the spec
 
 The models also found spec text that was wrong or incomplete, and the
-spec was corrected on this branch: the scrub lap is at most 65 publishes,
+spec was corrected: the scrub lap is at most 65 publishes,
 not 64, and that bound needs the scrub write to land (SPEC-HISTORY-PROOF
 §4.5); SPEC-GC now states the normative writer condition
 `T - mtime < grace`; SPEC-TRANSPORT §7 and SPEC-TRANSPORT-CONNECT now
@@ -259,46 +259,42 @@ These findings and exclusions remain open within the stated model bounds.
 
 ## Run the checks
 
-The `just` recipes run every layer and are what
-[`.github/workflows/formal.yml`](../.github/workflows/formal.yml) runs
-nightly (and on `workflow_dispatch`). Each prints one line per check and
-fails on any unexpected outcome. Times below are from a shared 15-core
-arm64 Mac. `just formal` is the smallest useful set, but at about an
-hour it runs nightly rather than on every PR; most of it is the `quint
-run` simulations of the refs model.
+The scripts under [`formal/scripts`](../formal/scripts) run the layers.
+[`.github/workflows/formal.yml`](../.github/workflows/formal.yml) runs the
+same scripts nightly and on `workflow_dispatch`. Each script prints one line
+per check and fails on any unexpected outcome. Times below are from a shared
+15-core arm64 Mac. The Quint layer takes about an hour, which is why the
+checks run nightly and not on every pull request. Most of that time is the
+`quint run` simulations of the refs model.
 
-| Recipe | What it runs | Time (developer machine) |
+| Command | What it runs | Time (developer machine) |
 |---|---|---|
-| `just formal` | `formal-quint`, `formal-lean`, `formal-conformance` | about 1 h (56 and 65 min in two runs) |
-| `just formal-quint` | every `formal/quint/*/check.sh` in its default mode: quint typecheck, test and run, plus TLC where the script runs it by default. `just formal-quint all` adds gc's TLC runs (~50 min). | 55 to 65 min (advance 8 to 12, gc 3, history 5 to 6, refs 26 to 40, transport 9 to 10) |
-| `just formal-apalache` | every `check.sh` with `APALACHE=1` at its default lengths | hours (advance alone: 14 min; gc about 2 h) |
-| `just formal-lean` | `lake build`, then `difftest-merkle.sh` and `difftest-delta.sh` | 20 s with a warm build |
-| `just formal-kani` | every Kani harness, one at a time (`KANI_FILTER=regex` to pick some) | about 1.5 h |
-| `just formal-conformance` | `cargo test -p mkit-formal-conformance` (offline, checked-in traces) | seconds after the build |
-| `just formal-fixtures` | regenerate the conformance traces from the model and diff them | about 3 min |
+| `bash formal/scripts/run-quint.sh` | every `formal/quint/*/check.sh` in its default mode: quint typecheck, test and run, plus TLC where the script runs it by default. `--all` adds the TLC runs that a script leaves off by default. | history 5 to 6 min, refs 26 to 40 min |
+| `bash formal/scripts/run-kani.sh` | every Kani harness, one at a time (`KANI_FILTER=regex` to pick some) | about 1.5 h |
+| `cargo test -p mkit-formal-conformance` (in `rust/`) | the conformance replay: offline, checked-in traces | seconds after the build |
+| `CHECK=1 bash formal/scripts/gen-refs-traces.sh` | regenerate the conformance traces from the model and diff them | about 3 min |
 
 ### Install the tools
 
-The pins live in the `formal_*` variables at the end of the
-[`justfile`](../justfile), and `formal.yml` repeats them.
+The pins live in `formal/scripts/setup-apalache.sh` (Apalache) and
+`formal.yml` (Quint, Kani).
 
 On macOS:
 
 ```sh
-brew install openjdk@21 elan-init just jq node
+brew install openjdk@21 jq node
 npm install -g @informalsystems/quint@0.32.0
-just formal-setup-apalache      # Apalache 0.62.2 into ~/.local/share/mkit-fv, sha256-checked
+bash formal/scripts/setup-apalache.sh   # Apalache 0.62.2 into ~/.local/share/mkit-fv, sha256-checked
 cargo install --locked kani-verifier --version 0.68.0 && cargo kani setup
 ```
 
 The `check.sh` scripts find Homebrew's keg-only `openjdk@21` on their
-own. elan reads `formal/lean/lean-toolchain` and fetches Lean v4.34.0 on
-the first `lake build`.
+own.
 
 On Linux, install a Java 21 JDK (for example `apt install
-openjdk-21-jdk-headless`) and set `JAVA_HOME` to it, install Node.js,
-`jq` and [elan](https://github.com/leanprover/elan), then run the same
-`npm`, `just formal-setup-apalache` and `cargo install` commands.
+openjdk-21-jdk-headless`) and set `JAVA_HOME` to it, install Node.js and
+`jq`, then run the same `npm`, `setup-apalache.sh` and `cargo install`
+commands.
 
 `FV_HOME` (default `~/.local/share/mkit-fv`) moves the Apalache install;
 `APALACHE_MC` and `TLA2TOOLS` point at another copy. Each `check.sh`
