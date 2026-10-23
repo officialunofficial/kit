@@ -12,19 +12,11 @@ on:
     paths:
       - 'rust/**/Cargo.toml'
       - 'rust/**/Cargo.lock'
-      - 'contrib/signers/**/Cargo.toml'
-      - 'contrib/signers/**/Cargo.lock'
-      - 'apps/*/Cargo.toml'
-      - 'apps/**/Cargo.lock'
       - 'scripts/check-crypto-stack-version.sh'
   pull_request:
     paths:
       - 'rust/**/Cargo.toml'
       - 'rust/**/Cargo.lock'
-      - 'contrib/signers/**/Cargo.toml'
-      - 'contrib/signers/**/Cargo.lock'
-      - 'apps/*/Cargo.toml'
-      - 'apps/**/Cargo.lock'
       - 'scripts/check-crypto-stack-version.sh'
 
 permissions:

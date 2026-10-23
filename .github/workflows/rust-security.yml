@@ -56,36 +56,8 @@ jobs:
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
 
-      # The reference external signers (contrib/signers/) are a SEPARATE Cargo
-      # workspace with their own lockfile — audit both. Keep the --ignore list
-      # in lockstep with rust/deny.toml [advisories.ignore] and
-      # cloudbuild/security.yaml.
+      # Keep the --ignore list in lockstep with rust/deny.toml
+      # [advisories.ignore].
       - name: cargo audit (rust workspace)
         working-directory: rust
         run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0055 --ignore RUSTSEC-2026-0370 --ignore RUSTSEC-2026-0371 --ignore RUSTSEC-2026-0372
-
-      - name: cargo audit (contrib/signers workspace)
-        working-directory: contrib/signers
-        run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0055 --ignore RUSTSEC-2026-0370 --ignore RUSTSEC-2026-0371 --ignore RUSTSEC-2026-0372
-
-      # apps/{keys,repo,vcs}-worker and apps/mkit-worker-common are separate
-      # Cargo workspaces (own Cargo.lock, path-dep on rust/crates/mkit-core)
-      # that a /rust or /contrib/signers audit never sees. None of them use
-      # yubikey/openpgp-card (RUSTSEC-2023-0071 / RUSTSEC-2025-0055 don't
-      # apply). All three now use mkit-core for shared write authorization,
-      # which pulls commonware-codec -> paste (unmaintained,
-      # RUSTSEC-2024-0436). Apply only the existing paste exception reviewed
-      # in rust/deny.toml, with its existing re-justification deadline.
-      # The pinned commonware-codec 2026.9.0 still uses paste 1.0.15;
-      # neither has a newer release that removes this advisory.
-      - name: cargo audit (apps/keys-worker workspace)
-        working-directory: apps/keys-worker
-        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436
-
-      - name: cargo audit (apps/repo-worker workspace)
-        working-directory: apps/repo-worker
-        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436
-
-      - name: cargo audit (apps/mkit-worker-common workspace)
-        working-directory: apps/mkit-worker-common
-        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436

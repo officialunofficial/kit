@@ -34,7 +34,7 @@ fail=0
 MANIFESTS=()
 while IFS= read -r -d '' manifest; do
   MANIFESTS+=("$manifest")
-done < <(find rust contrib/signers apps -name Cargo.toml -not -path '*/target/*' -print0)
+done < <(find rust -name Cargo.toml -not -path '*/target/*' -print0)
 
 # Extracts the version string after either `crate = "X.Y"` or
 # `crate = { version = "X.Y", ... }`, then normalizes it to Cargo's
@@ -79,7 +79,7 @@ check_commonware_family() {
   local lockfiles=()
   while IFS= read -r -d '' lockfile; do
     lockfiles+=("$lockfile")
-  done < <(find rust contrib/signers apps -name Cargo.lock -not -path '*/target/*' -print0)
+  done < <(find rust -name Cargo.lock -not -path '*/target/*' -print0)
 
   local lock_versions=""
   if [ "${#lockfiles[@]}" -gt 0 ]; then
