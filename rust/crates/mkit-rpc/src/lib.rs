@@ -98,10 +98,6 @@ mod tests {
     }
 }
 
-/// Public server-hook wire types and authentication (feature `hooks`).
-#[cfg(feature = "hooks")]
-pub mod hooks;
-
 /// Shared transport and health wire types and Connect service traits.
 #[cfg(any(feature = "transport", feature = "transport-messages"))]
 #[allow(missing_debug_implementations, clippy::all, clippy::pedantic)]

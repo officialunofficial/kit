@@ -22,8 +22,8 @@ for package in lock['package']:
         print(f"{package['name']} {package['version']}")
 VERSIONS
 
-crates=(-p mkit-rpc -p mkit-transport-connect -p mkit-client -p mkit-repo-client)
-features='mkit-rpc/transport,mkit-rpc/transport-messages,mkit-rpc/hooks'
+crates=(-p mkit-rpc -p mkit-transport-connect -p mkit-client)
+features='mkit-rpc/transport,mkit-rpc/transport-messages'
 "${cargo_cmd[@]}" build --locked "${crates[@]}" --features "$features"
 "${cargo_cmd[@]}" nextest run --locked "${crates[@]}" --features "$features" -j 3
 # Mirror both mkit-client wasm builds in rust.yml.
