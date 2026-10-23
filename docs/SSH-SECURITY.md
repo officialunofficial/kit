@@ -129,14 +129,6 @@ affected, not every SSH session on your machine.
   one, by `mkit serve --max-session-secs <secs>` (default `0`, off): a
   hard cap on the process's lifetime, whatever the client does, exit 76.
   Set it above the longest legitimate clone or push.
-- **No admission challenges over ssh.** A `mkit-server` deployment whose
-  admission asks for a credential (or a reservation, which only a ticketed
-  upload can settle) cannot take that write over an ssh
-  session: this transport carries no admission credential. The write is
-  refused with `Error{INVALID_REQUEST, "admission required: use
-  mkit+https"}` and empty `details`, so a client reports a non-retryable
-  remote error, never a ref conflict. Push over `mkit+https://` instead;
-  reads are unaffected.
 
 ---
 

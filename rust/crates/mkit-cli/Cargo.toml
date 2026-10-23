@@ -72,6 +72,9 @@ mkit-transport-file = { version = "0.5", path = "../mkit-transport-file" }
 # unconditional; the CLI hosts no Connect HTTP server.
 mkit-transport-connect = { version = "0.5", path = "../mkit-transport-connect" }
 mkit-transport-ssh = { version = "0.5", path = "../mkit-transport-ssh" }
+# The engine of `mkit serve`: the ssh frame session over a repository on disk.
+# It builds no async runtime.
+mkit-serve = { version = "0.5", path = "../mkit-serve" }
 # Optional: `mkit+s3://` remotes on S3-compatible storage (R2). Off by
 # default so the baseline build has no S3 client. Turn on via `--features s3`.
 mkit-transport-s3 = { version = "0.5", path = "../mkit-transport-s3", optional = true }

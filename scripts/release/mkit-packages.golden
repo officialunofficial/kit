@@ -144,7 +144,6 @@ libc
 linux-raw-sys
 litemap
 log
-md-5
 memchr
 miniz_oxide
 mio
@@ -152,15 +151,13 @@ mkit-attest
 mkit-cli
 mkit-client
 mkit-core
+mkit-git-bridge
 mkit-keystore
-mkit-primitives
 mkit-rpc
-mkit-server
+mkit-serve
 mkit-sync
 mkit-transport-connect
 mkit-transport-file
-mkit-transport-http
-mkit-transport-s3
 mkit-transport-ssh
 num
 num-bigint
@@ -217,6 +214,7 @@ serde_derive
 serde_json
 serde_repr
 serde_spanned
+sha1
 sha2
 sha3
 shlex

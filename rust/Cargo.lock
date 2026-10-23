@@ -3100,6 +3100,7 @@ dependencies = [
  "mkit-git-bridge",
  "mkit-keystore",
  "mkit-rpc",
+ "mkit-serve",
  "mkit-sync",
  "mkit-test-util",
  "mkit-transport-connect",

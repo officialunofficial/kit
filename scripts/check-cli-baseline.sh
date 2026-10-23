@@ -9,11 +9,15 @@
 #   - no hyper `server` feature, no hyper-util `server*` feature, and no
 #     connectrpc `server` or `axum` feature.
 #
+# `mkit serve` (rust/crates/mkit-cli/src/commands/serve/) and its engine
+# `mkit-serve` build no async runtime. The `mkit-serve` graph must contain
+# no `tokio` or `futures*` package, and the `serve` code must not name tokio.
+#
 # tokio itself is NOT banned: the default CLI graph has it through the
 # Connect client (`mkit-transport-connect`) and reqwest's blocking client.
-# Nor is tower-http, reqwest's redirect layer. This is a fast `cargo tree` model of the graph; the
-# release build's compiler artifacts are checked separately by
-# scripts/check-release-artifact-features.sh.
+# Nor is tower-http, reqwest's redirect layer. This is a fast `cargo tree`
+# model of the graph; the release build's compiler artifacts are checked
+# separately by scripts/check-release-artifact-features.sh.
 
 set -euo pipefail
 
@@ -46,8 +50,17 @@ for f in "${banned_features[@]}"; do
   fi
 done
 
+serve_tree=$(cd rust && cargo tree --locked -p mkit-serve -e normal --target all --prefix none)
+if printf '%s\n' "$serve_tree" | grep -qE '^(tokio|futures[a-z-]*) '; then
+  err "the mkit-serve graph contains an async runtime: $(printf '%s\n' "$serve_tree" | grep -E '^(tokio|futures[a-z-]*) ' | sort -u | tr '\n' ' ')"
+fi
+
+if grep -rn 'tokio' rust/crates/mkit-cli/src/commands/serve; then
+  err "\`mkit serve\` (rust/crates/mkit-cli/src/commands/serve/) names tokio; it must build no async runtime"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "check-cli-baseline: FAILED (see docs/INVARIANTS.md, \"The default \`mkit\` CLI is server-free\")" >&2
   exit 1
 fi
-echo "check-cli-baseline: OK (no axum/SQLite/mkit-server-native, no server features)"
+echo "check-cli-baseline: OK (no axum/SQLite/mkit-server-native, no server features; mkit-serve: no async runtime)"

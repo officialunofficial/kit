@@ -1114,7 +1114,51 @@ Remote / sync:
   delta graph. Progress shows only when stderr is a tty; `-q`/`--quiet`
   forces it off, and `MKIT_PROGRESS=always`/`never` overrides the
   tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
-- `MKIT_API_TOKEN` is sent as a bearer token by `mkit+https://` remotes.
+- `mkit serve [--idle-timeout-secs <secs>] [--max-session-secs <secs>] <path>` &mdash; internal SSH
+  transport server. It speaks the mkit-rpc SSH framing on stdin and stdout
+  and has no other mode. It has no network listener. The engine is the
+  `mkit-serve` crate. The refs and packs are the files that `mkit+file://`
+  remotes use. `mkit serve --root <dir> [--principal <hex>] [<ns>/<name>]`
+  is the multi-repository form that a forge forces. The path names a
+  `<NAMESPACE>/<NAME>` under `<dir>`. When the path is omitted, an
+  `SSH_ORIGINAL_COMMAND` of exactly `mkit serve <path>` supplies it. A bare
+  name, an uppercase byte, `..`, an extra component or a symlinked component
+  is refused. Only the Ed25519 owner of the namespace may write.
+  `--principal` is a raw 32-byte key as 64 lowercase hex characters. It is
+  the sshd configuration's assertion of the caller's key. The command reads
+  it from argv alone, never from the environment. A session without it is
+  read-only in root mode. A namespace that is an address has no key to match
+  over ssh, so it is read-only. Plain mode, without `--root`, lets every
+  session write. See SPEC-TRANSPORT §4.1 and
+  [SSH-SECURITY.md](SSH-SECURITY.md) §5. Both forms hold a shared
+  `serve.lock` in `<path>/.mkit` for as long as the process is alive. Any
+  number of concurrent `serve` processes may hold it at once. A local
+  worktree-mutating command or `gc` run against that same path while the
+  lock is held prints a warning to stderr and proceeds. It is not refused.
+  This is detection, not coordination (SPEC-CONCURRENCY §3.1).
+
+  `--idle-timeout-secs <secs>` (default `60`; `0` disables it) ends the
+  session after that long without a byte from the client. It applies before
+  the handshake, between requests and in the middle of an upload. The
+  server discards the partial pack, answers `Error{INVALID_REQUEST, "idle
+  timeout"}` and exits 76. An upload that keeps sending never trips the
+  timeout, however slow it is. The timeout bounds only a *silent* client. A
+  client that trickles bytes, or stops reading a download, is not idle. For
+  those, `--max-session-secs <secs>` (default `0`, off) ends the process
+  that long after it starts, whatever the client does, with exit 76. Set it
+  above your longest legitimate clone or push. Both flags accept at most
+  604800 (7 days). See [SSH-SECURITY.md](SSH-SECURITY.md) §4.
+
+  The server serves refs only under `refs/` (SPEC-REFS §2). It refuses a
+  read or write of any other name by name ("ref name must start with refs/
+  …"). At startup, when no other `mkit serve` process serves the root, it
+  removes upload temp files (`packs/.<hex>.tmp.<pid>.<seq>`) that a crashed
+  server left, once they are an hour old. It refuses a root marked
+  `.mkit/server-meta` (exit 78), because the refs of that root live in a
+  database.
+
+  `--http` and `--listen-enc` do not exist. `MKIT_API_TOKEN` is sent as a
+  bearer token by `mkit+https://` remotes.
 - `mkit pack-shard <hash> [--out <dir>] [--force]` &mdash; encode a stored
   pack into Reed-Solomon shards plus a manifest, ready to publish to
   an HTTP / S3 origin. Producer side of the SPEC-PACK-SHARDS

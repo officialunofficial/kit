@@ -63,6 +63,7 @@ _mkit() {
         'bisect:Binary search for a bad commit'
         'gc:Reclaim unreachable objects'
         'sparse-checkout:Manage sparse checkout patterns'
+        'serve:Start SSH transport server (internal)'
         'mcp:Start a Model Context Protocol server on stdio for LLM agents'
         'pack-shard:Encode a stored pack into Reed-Solomon shards'
         'git:Git-bridge subcommands (git export, feature-gated)'

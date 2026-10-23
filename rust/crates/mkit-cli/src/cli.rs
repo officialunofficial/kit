@@ -267,6 +267,7 @@ commands:
                     Reclaim unreachable objects older than the grace
                     window (default 14d); -n/--dry-run previews
   sparse-checkout    Manage sparse checkout patterns
+  serve <path>       Start SSH transport server (internal)
   mcp [--repository <path>]
                     Start a Model Context Protocol server on stdio so LLM
                     agents can drive this repository (status/diff/log/add/
@@ -422,6 +423,7 @@ mod tests {
             "bisect",
             "sparse-checkout",
             "self",
+            "serve",
             "mcp",
             "pack-shard",
             "blame",

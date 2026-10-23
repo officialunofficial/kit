@@ -1811,6 +1811,55 @@ fn blame_merge_aware_vs_first_parent() {
     );
 }
 
+// ---------- serve ---------------------------------------------------------
+
+#[test]
+fn serve_errors_on_missing_path() {
+    // `mkit serve` without a path should fail with a usage error.
+    // Clap renders "Usage:" (capital U) in its error output; match
+    // case-insensitively so the test isn't tied to clap's exact
+    // formatting.
+    let td = tempfile::tempdir().unwrap();
+    let out = run_in(td.path(), &["serve"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.to_lowercase().contains("usage"),
+        "expected usage diagnostic on stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn serve_rejects_bad_handshake_and_exits() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+
+    let mut child = Command::new(mkit_bin())
+        .args(["serve", td.path().to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn serve");
+
+    // Send a single frame with the wrong opcode (should be OP_HELLO = 0x00).
+    // Frame = [op=0x01][len=0u32].
+    let frame = [0x01, 0, 0, 0, 0];
+    child.stdin.as_mut().unwrap().write_all(&frame).unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().expect("wait serve");
+    // The server rejects the bad handshake and exits with the specific
+    // PROTOCOL_ERROR code (76) — not a panic (101), not a generic 1.
+    assert_eq!(
+        out.status.code(),
+        Some(76),
+        "serve must exit PROTOCOL_ERROR (76) on a bad handshake: {out:?}"
+    );
+}
+
 // ---------- sparse-checkout ----------------------------------------------
 
 #[test]

@@ -187,17 +187,9 @@ key as 64 lowercase hex), and only a principal equal to the
 namespace's key may write; a forced command asserting no principal
 serves reads only. `--principal` is a trust assertion made by the
 sshd configuration — never by the peer, and never from the
-environment; see [SSH-SECURITY.md](../SSH-SECURITY.md) §5. Packs
-uploaded and verified in a session (at most seven between packmap
-writes) may be consumed into membership by that session's packmap
-write — the implicit form of the upload tickets signed writes use. The
-packmap check only refuses: the node's `prev` is absent or the packmap
-value the write replaces (under `Any` the current value is read and the
-condition rewritten to guard it, so a concurrent move surfaces as an
-ordinary CAS conflict), the node and every pack it lists — at most
-1,024 — are pending in this session or already members (a pending
-packlist listed as a pack is refused: a packlist is a node, not a
-pack), or the write is refused.
+environment; see [SSH-SECURITY.md](../SSH-SECURITY.md) §5. The server
+does not track which packs a session uploaded. A packmap write is an
+ordinary ref write, and a client verifies what it fetches.
 
 ### 4.2 Conversation
 
@@ -320,8 +312,7 @@ See [`SSH-SECURITY.md`](../SSH-SECURITY.md) for the full trust model.
 
 The `mkit serve` server enforces per-connection budgets to bound a
 misbehaving or malicious client (see
-[`mkit-server/src/ssh/budget.rs`](../../rust/crates/mkit-server/src/ssh/budget.rs),
-the session `mkit serve` runs since it moved onto `mkit-server`):
+[`mkit-serve/src/budget.rs`](../../rust/crates/mkit-serve/src/budget.rs)):
 
 - `MAX_FRAMES_PER_CONN = 10_000` &mdash; hard cap on frames after `Hello`.
 - `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on cumulative request payload bytes.

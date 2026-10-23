@@ -145,6 +145,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "worktree" => commands::worktree::run(&rest),
         "blame" => commands::blame::run(&rest),
         "self" => commands::self_update::run(&rest),
+        "serve" => commands::serve::run(&rest),
         #[cfg(feature = "git-bridge")]
         "git" => commands::git::run(&rest),
         #[cfg(not(feature = "git-bridge"))]
