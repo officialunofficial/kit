@@ -10,7 +10,7 @@
 #
 # WHY: a SPEC-*.md file with no status line (or a typo'd one) silently
 # defeats the maturity signal readers rely on to know whether a doc is safe
-# to build against — see issue #717.
+# to build against — see.
 
 set -euo pipefail
 

@@ -20,7 +20,7 @@
 #     origin rules (SPEC-WRITE-GRANTS §3.2) re-implemented here;
 #   * the §4.2 header built with base64.urlsafe_b64encode(x).rstrip(b"=");
 #   * BLAKE3 from the pure-Python transcription in blake3_subtree_ref.py
-#     (WP-1.3), checked against `b3sum` (the official CLI) unless --no-b3sum;
+#     checked against `b3sum` (the official CLI) unless --no-b3sum;
 #   * the signed fixtures: each epoch and visibility statement rebuilt from
 #     its §5.1/§9.1 fields, every statement re-signed from the owner seed with
 #     pycryptodome's RFC 8032 Ed25519 over BLAKE3(statement) (deterministic,

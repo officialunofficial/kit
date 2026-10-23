@@ -11,7 +11,7 @@
 # Mechanizing it makes it repeatable: as a pre-flight dry run against a
 # locally packaged archive (no cosign bundle / SHA256SUMS yet — those steps
 # are skipped with a warning, not a failure) and as the real verification
-# pass against a downloaded GitHub Release archive (issue #779 Phase 4).
+# pass against a downloaded GitHub Release archive.
 #
 # Usage:
 #   scripts/release-smoke.sh --archive <path/to/mkit-X.Y.Z-<triple>.tar.gz> \
