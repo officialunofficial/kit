@@ -43,6 +43,7 @@ mkit-core = { path = "../crates/mkit-core", features = ["sparse-checkout"] }
 mkit-git-bridge = { path = "../crates/mkit-git-bridge" }
 mkit-keystore = { path = "../crates/mkit-keystore", features = ["fuzzing"] }
 mkit-rpc = { path = "../crates/mkit-rpc", features = ["arbitrary"] }
+mkit-serve = { path = "../crates/mkit-serve" }
 tempfile = "3"
 
 # libfuzzer-sys is gated on the `libfuzzer` feature so `cargo test`
@@ -214,6 +215,14 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "epoch_visibility_parse"
 path = "fuzz_targets/epoch_visibility_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "ssh_session"
+path = "fuzz_targets/ssh_session.rs"
 test = false
 doc = false
 bench = false

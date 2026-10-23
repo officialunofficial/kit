@@ -28,6 +28,7 @@ from recurring.
 | `fuzz_targets/git_tag_parse.rs` | `mkit-git-bridge gitparse::parse_tag` |
 | `fuzz_targets/git_tree_parse.rs` | `mkit-git-bridge gitparse::parse_tree` plus `map_mode` |
 | `fuzz_targets/rpc_decode.rs`   | `SignerFrame` / `SshFrame` wire decode (never panics) plus `Arbitrary`-driven encode/decode roundtrip |
+| `fuzz_targets/ssh_session.rs`  | `mkit_serve::serve_session` (arbitrary client bytes after a valid `Hello`; the session ends, every pack on disk hashes to its name, no temp file stays, nothing is written outside `packs/` and `refs/`) |
 | `fuzz_targets/sparse_verify.rs` | `sparse::build_sparse` / `sparse::verify_sparse` (never panics on adversarial manifest/proof bytes) |
 | `fuzz_targets/merkle_proof.rs` | `merkle::compute_{tree,chunked}_id` / `merkle::Proof::decode` / `merkle::verify_tree_entry` / `merkle::verify_chunk` (never panics; a freshly built proof verifies; adversarial proof bytes reject cleanly, whether at decode or at verify) |
 | `fuzz_targets/merkle_packlist.rs` | `transfer::decode_packlist` / `transfer::encode_packlist` (never panics; a decoded node re-encodes and re-decodes to the same node) |

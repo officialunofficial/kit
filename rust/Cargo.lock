@@ -3200,6 +3200,7 @@ dependencies = [
  "mkit-git-bridge",
  "mkit-keystore",
  "mkit-rpc",
+ "mkit-serve",
  "tempfile",
 ]
 
@@ -3247,6 +3248,16 @@ dependencies = [
  "mkit-core",
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "mkit-serve"
+version = "0.5.0"
+dependencies = [
+ "mkit-core",
+ "mkit-rpc",
+ "mkit-transport-file",
+ "tempfile",
 ]
 
 [[package]]

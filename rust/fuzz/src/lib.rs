@@ -1142,6 +1142,65 @@ pub fn sparse_verify_one_iteration(input: &[u8]) {
     let _ = verify_sparse(&root, &filter, &response);
 }
 
+/// One ssh session over a fresh repository: a valid `Hello`, then `input`
+/// as the raw byte stream of the client. The session must end. Afterwards the
+/// repository holds only complete files: every pack hashes to its name, no
+/// upload temp file stays, and nothing exists outside `packs/`, `refs/` and
+/// `.mkit/refs/`.
+pub fn ssh_session_one_iteration(input: &[u8]) {
+    use mkit_core::hash::{hash, to_hex};
+    use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
+    use mkit_rpc::mkit::rpc::v1::ssh::{Hello, SshFrame, ssh_frame};
+    use mkit_serve::{ReadFrames, Repo, SessionConfig, WriteFrames, WritePolicy, serve_session};
+
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let mut stream = Vec::new();
+    let hello = SshFrame {
+        body: Some(ssh_frame::Body::Hello(Box::new(
+            Hello::default().with_proto(ProtocolVersion::ProtocolVersion1),
+        ))),
+        ..Default::default()
+    };
+    mkit_rpc::write_frame(&mut stream, &hello).expect("encode Hello");
+    stream.extend_from_slice(input);
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = Repo::open(dir.path(), WritePolicy::Open).expect("open repo");
+    let mut src = ReadFrames(std::io::Cursor::new(stream));
+    let mut sink = WriteFrames(Vec::new());
+    let _ = serve_session(
+        &repo,
+        None,
+        &mut src,
+        &mut sink,
+        &SessionConfig::new("fuzz"),
+    );
+
+    let mut dirs = vec![dir.path().to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        for entry in std::fs::read_dir(&d).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            let rel = path.strip_prefix(dir.path()).expect("under root");
+            let top = rel.components().next().expect("a component");
+            if top.as_os_str() == "packs" {
+                let name = rel.file_name().expect("name").to_string_lossy();
+                let bytes = std::fs::read(&path).expect("read pack");
+                assert_eq!(name, to_hex(&hash(&bytes)), "a pack must hash to its name");
+            } else {
+                assert!(
+                    top.as_os_str() == "refs" || rel.starts_with(".mkit/refs"),
+                    "unexpected file {}",
+                    rel.display()
+                );
+            }
+        }
+    }
+}
+
 /// Single-shot: invoke `body(input)` exactly once, with the
 /// per-iteration wall-clock cap. libfuzzer harnesses call this from
 /// their `fuzz_target!` body; the iteration counter lives one level up,
@@ -1391,6 +1450,19 @@ mod tests {
             let started = Instant::now();
             verify_span_one_iteration_with(case, &fixture);
             assert!(started.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
+        }
+    }
+
+    #[test]
+    fn ssh_session_target_runs_within_caps() {
+        run_iterated_unit(ssh_session_one_iteration).expect("guardrails held");
+        for case in [
+            &b""[..],
+            &[0xff; 64][..],
+            &[0, 0, 0, 0][..],
+            &[1, 0, 0, 0, 0xff][..],
+        ] {
+            run_one(case, ssh_session_one_iteration).expect("guardrails held");
         }
     }
 

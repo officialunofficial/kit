@@ -69,6 +69,7 @@ cargo test --workspace       # all crates, all tests
 | `mkit-git-bridge`                    | git import/export bridge                                   |
 | `mkit-sync`                          | native clone/fetch/pull as a library                       |
 | `mkit-rpc`                           | shared stdio framing for subprocess protocols              |
+| `mkit-serve`                         | self-host server: the ssh frame session over a repository  |
 | `mkit-cli`                           | the `mkit` binary                                          |
 | `mkit-transport-{memory,file,connect,s3,ssh}` | one crate per transport scheme                    |
 | `mkit-wasm`                          | wasm-bindgen surface for browsers / Workers (npm-only, not on crates.io) |

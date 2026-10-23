@@ -1,0 +1,25 @@
+[package]
+name = "mkit-serve"
+description = "Self-host server for mkit: the ssh frame session over a repository on disk"
+keywords = ["mkit", "vcs", "server", "ssh"]
+categories = ["network-programming", "filesystem"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Inter-workspace deps need an explicit `version` next to the path so
+# `cargo publish` accepts them.
+mkit-core = { version = "0.5", path = "../mkit-core" }
+mkit-rpc = { version = "0.5", path = "../mkit-rpc" }
+mkit-transport-file = { version = "0.5", path = "../mkit-transport-file" }
+
+[dev-dependencies]
+tempfile = "3"

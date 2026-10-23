@@ -9,6 +9,7 @@ members = [
     "crates/mkit-git-bridge",
     "crates/mkit-transport-memory",
     "crates/mkit-transport-file",
+    "crates/mkit-serve",
     "crates/mkit-transport-ssh",
     "crates/mkit-transport-s3",
     "crates/mkit-client",
