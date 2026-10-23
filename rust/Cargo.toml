@@ -4,6 +4,9 @@ members = [
     "crates/mkit-core",
     "crates/mkit-test-util",
     "crates/mkit-rpc",
+    "crates/mkit-attest",
+    "crates/mkit-keystore",
+    "crates/mkit-git-bridge",
 ]
 
 [workspace.package]
