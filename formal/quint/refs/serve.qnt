@@ -1,11 +1,10 @@
 // -*- mode: Bluespec; -*-
-// Server-era root locks and the served-name rule (verification toolchain / ref concurrency model,
-// workstream quint-refs). Companion of refs.qnt, which keeps the ref CAS and
+// Server-era root locks and the served-name rule (ref concurrency model). Companion of refs.qnt, which keeps the ref CAS and
 // lock-order model; the ref writes a server makes are refs.qnt's `file` ops.
 //
 // Module `serveLocks` models SPEC-CONCURRENCY §2 (lock inventory rows
-// `serve.lock`) and §3.1 ("MKIT-11/#655 turned this from silent into
-// detected"), as of this branch:
+// `serve.lock`) and §3.1 ("the server now detects this case instead of
+// staying silent"):
 //   - every live server process on a root, `mkit serve` (ssh-frame) and
 //     a `mkit-server` fs-layout server, holds `serve.lock` SHARED for its whole lifetime;
 //   - `mkit-server` also holds `server.lock` EXCLUSIVELY (one per root),

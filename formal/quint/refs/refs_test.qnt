@@ -29,7 +29,7 @@ module refs_test {
       .then(acquire("p2")).then(readRef("p2")).then(commitRef("p2"))
       .expect(and { Safety, disk.get(0) == 2, lastAction.outcome == "conflict" })
 
-  // #658: rename's delete_ref_if_matches vs a concurrent Match advance.
+  // Rename's delete_ref_if_matches vs a concurrent Match advance.
   run renameDeleteVsCommitTest =
     initFixed(SAFE_INIT, 1, ABSENT, ABSENT)
       .then(beginOp("p1", op("branch", 0, 0, Match(1), 1, true)))
@@ -63,7 +63,7 @@ module refs_test {
       .then(commitRef("p1")).then(commitRef("p2"))
       .expect(and { Safety, disk.get(0) == 1, lastAction.outcome == "conflict" })
 
-  // MUTANT (pre-#637): no refs-<ref>.lock -> Match lost update; NoLostUpdateLocal fails.
+  // MUTANT (pre-fix): no refs-<ref>.lock -> Match lost update; NoLostUpdateLocal fails.
   run mutantNoRefLockLostUpdateTest =
     initFixed({ ...NO_FAULTS, noRefLock: true }, 1, 1, ABSENT)
       .then(beginOp("p1", op("updateRef", 0, 0, Match(1), 2, false)))
@@ -216,7 +216,7 @@ module refs_test {
       .then(acquire("p2")).then(readRef("p2")).then(commitRef("p2"))
       .expect(and { Safety, disk.get(0) == ABSENT, lastAction.outcome == "ok" })
 
-  // MUTANT (pre-#637): the same unconditional delete lands inside the Match
+  // MUTANT (pre-fix): the same unconditional delete lands inside the Match
   // window; the Match then resurrects the deleted ref. NoLostUpdateLocal fails.
   run mutantNoRefLockDeleteTest =
     initFixed({ ...NO_FAULTS, noRefLock: true }, 1, 1, ABSENT)

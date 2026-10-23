@@ -10,12 +10,12 @@ list of properties, mutants, bounds and recorded results.
 | Directory | Tool | Covers | Model |
 |---|---|---|---|
 | [`quint/refs/`](quint/refs/README.md) | Quint, TLC, Apalache | Ref CAS per lock domain, lock order, recovery log, `serve.lock` and `server.lock`, served names; `refs_mbt.qnt` feeds the conformance test | ref concurrency model, ref conformance model |
-| [`quint/history/`](quint/history/README.md) | Quint, TLC, Apalache | History publication, crash recovery, the scrub schedule | MKIT-20 |
+| [`quint/history/`](quint/history/README.md) | Quint, TLC, Apalache | History publication, crash recovery, the scrub schedule | history publication model |
 | [`quint/gc/`](quint/gc/README.md) | Quint, TLC, Apalache | `mkit gc`, the recovery log, concurrent writers and the grace window, the server `ContentIndex` GC ordering | garbage-collection model |
 | [`quint/transport/`](quint/transport/README.md) | Quint, TLC, Apalache | Requested transport identities, shard quorum, release threshold signing | transport model |
 | [`quint/advance/`](quint/advance/README.md) | Quint, TLC, Apalache | `advance_refs`, the retry ladder, `read_ref` disambiguation, the re-baseline gate | remote-advance model |
 | [`lean/`](lean/README.md) | Lean 4 | Merkle inclusion proofs and the delta codec: proofs plus differential tests against Rust | Merkle proof model, delta model |
-| [`kani/`](kani/README.md) | Kani | Bounded checks of the untrusted-input decoders (harnesses live next to the Rust code) | MKIT-23 |
+| [`kani/`](kani/README.md) | Kani | Bounded checks of the untrusted-input decoders (harnesses live next to the Rust code) | decoder harnesses |
 | [`scripts/`](scripts/) | quint, jq | `gen-refs-traces.sh`: regenerates the ITF fixtures for `rust/crates/mkit-formal-conformance` | ref conformance model |
 
 ## Running

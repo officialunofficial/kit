@@ -1,4 +1,4 @@
-# History publication and recovery (MKIT-20)
+# History publication and recovery
 
 Tool pins (verification toolchain): quint 0.32.0, Java 21, Apalache 0.62.2 run directly on
 the TLA+ that `quint compile` emits, and TLC from the `tlc2.TLC` class in that
@@ -172,8 +172,8 @@ touch publication, recovery or the scrub, so no model change was needed.
 | `ActualPublishBound`: no leaf goes more than `LAP_FRACTION+1` (real 65) publishes unread, the corrected §4.5 bound | holds (TLC over the whole finite instance: any number of publishes, with the fast-forwards per generation bounded by the leaf cap; Apalache length 8); falsified by `mutWrapWithoutFull`; falsified by `scrubLossy`, as §4.5 now says |
 | `TimeBound`: after a publish, every leaf was read within `MAX_AGE` (7 days) | holds, including with lost writes; falsified by `mutIgnoreAge` and by `scrubClockBack` (wall clock steps back, now stated in §4.5) |
 | `InvalidForcesFull`: invalid, missing or foreign-generation scrub state always forces a full walk | holds; falsified by `mutTrustInvalid` |
-| `SpecPublishBound`: the superseded "64 fast-forward publishes" | **violated**, kept as a regression witness for finding 1 |
-| `WindowOnlyWhenFresh`: window only if "fewer than" 7 days elapsed | holds since the MKIT-57 fix (finding 2); falsified by `mutAgeInclusive`, the pre-fix `elapsed > MAX_AGE` comparison |
+| `SpecPublishBound`: the superseded "64 fast-forward publishes" | **violated**, kept as a regression witness |
+| `WindowOnlyWhenFresh`: window only if "fewer than" 7 days elapsed | holds since the fix; falsified by `mutAgeInclusive`, the pre-fix `elapsed > MAX_AGE` comparison |
 
 ## Commands and outcomes
 
@@ -199,7 +199,7 @@ quint run canaries x6, each mutant::its invariant x12                      viola
 quint run mutLoadIgnoresTx::ServedMatchesRef / ServedGenerationFresh        ok
 quint run mutRecoverSkipsPending::Safety                                  ok
 quint run scrub/scrubLossy/scrubClockBack/mut* (16 steps)                 as in the table
-quint run scrub::WindowOnlyWhenFresh (16 steps)                           ok (2026-09-27, after MKIT-57)
+quint run scrub::WindowOnlyWhenFresh (16 steps)                           ok (2026-09-27, after the fix)
 quint run mutAgeInclusive::WindowOnlyWhenFresh (16 steps)                 violation
 tlc history::Safety                                   ok         200,388 distinct (VIEW), depth 37, 12s
 tlc history::IntentEventuallyCleared                  ok         400,776 distinct (VIEW + calm), under 1 min
@@ -232,7 +232,7 @@ apalache mutFreshGenOnFF::FastForwardRetainsGeneration length 8  violation 11s
 apalache mutSkipVerify::IntentRootsRetained     length 7   violation   7s
 apalache mutFinishAnyRef::FinishOnlyFromRecorded length 7  violation   9s
 apalache mutWriteBeforeInvalidate::CurrentMatchesRef length 7  violation 14s
-apalache scrub::ActualPublishBound,TimeBound,InvalidForcesFull,WindowOnlyWhenFresh length 8  NoError 36s (2026-09-27, after MKIT-57)
+apalache scrub::ActualPublishBound,TimeBound,InvalidForcesFull,WindowOnlyWhenFresh length 8  NoError 36s (2026-09-27, after the fix)
 apalache mutAgeInclusive::WindowOnlyWhenFresh  length 8   violation   6s (2026-09-27)
 apalache scrub::SpecPublishBound                length 8   violation   4s
 apalache mutTrustInvalid::InvalidForcesFull     length 8   violation   3s
@@ -248,8 +248,8 @@ are exhaustive for the finite instances described above, nothing more.
 
 ## Findings
 
-Status against the SPEC-HISTORY-PROOF text on this branch (including the
-§4.1/§4.5 spec text fixes in this PR).
+Status against the SPEC-HISTORY-PROOF text (including the
+§4.1/§4.5 spec text fixes).
 
 1. **Scrub lap is 65 publishes, not 64.** Fixed in the spec: §4.5 now
    gives `floor((vt-1)/window) + 1`, at most 65. `window = max(512, vt/64)`,
@@ -259,7 +259,7 @@ Status against the SPEC-HISTORY-PROOF text on this branch (including the
    maximum. Minimal scaled counterexample to the old claim (TLC, Apalache,
    quint): a full verify with `vt=7`, `w=2`, then 3 window publishes cover
    `[0,6)`, and leaf 6 is not read again until the 4th publish.
-2. **The 7-day boundary was off by one (fixed, MKIT-57).** §4.5 permits the
+2. **The 7-day boundary was off by one (fixed).** §4.5 permits the
    window path only when *fewer than* 604800 s have elapsed. The code used
    the window path when `now - last_full_verify_unix <= 604800` (`stale` was
    `> SCRUB_MAX_AGE_SECS`), so at exactly 604800 s it took the window path.

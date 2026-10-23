@@ -1,5 +1,5 @@
 // -*- mode: Bluespec; -*-
-// First-parent history publication and crash recovery (MKIT-20).
+// First-parent history publication and crash recovery.
 //
 // Models docs/specs/SPEC-HISTORY-PROOF.md §4.3-§4.4 for ONE branch under the
 // guards of SPEC-CONCURRENCY §3.3/§4, aligned with

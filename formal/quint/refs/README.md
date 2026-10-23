@@ -1,7 +1,6 @@
 # quint-refs: ref CAS, lock order, server locks, served names
 
-Quint models of mkit's ref concurrency (formal verification effort, PR
-#1082), updated to the server-era specs on this branch: SPEC-REFS v3 and
+Quint models of mkit's ref concurrency (formal verification effort), covering the server rules of SPEC-REFS v3 and
 SPEC-CONCURRENCY with `mkit-server`.
 
 | File | What it models |
@@ -12,9 +11,7 @@ SPEC-CONCURRENCY with `mkit-server`.
 | `serve_test.qnt` | Pinned interleavings for `serve.qnt` (`serve_test`, `served_test`) |
 | `check.sh` | Runs every check below and compares each result with the expected one |
 
-## What changed for the server-era specs
-
-Source: `git diff e7257500 HEAD -- docs/specs/SPEC-CONCURRENCY.md docs/specs/SPEC-REFS.md`.
+## Server rules covered
 
 - **`serve.lock` / `server.lock`** (SPEC-CONCURRENCY §2 table, §3.1):
   every live server, `mkit serve` and any server embedding `mkit-server`'s filesystem layout, holds
@@ -27,7 +24,7 @@ Source: `git diff e7257500 HEAD -- docs/specs/SPEC-CONCURRENCY.md docs/specs/SPE
   and takes the shared lock; busy means skip. Modelled against concurrent
   uploads of other servers, including a stalled streaming upload whose temp
   file is older than the age bound (`SweepAlone`, `NoLiveUploadSwept`).
-- **Cross-domain gap now covers `mkit-server`** (§3.1): a `mkit-server`
+- **Cross-domain gap covers `mkit-server`** (§3.1): a `mkit-server`
   fs-layout deployment writes refs through `FileTransport` under the same
   `<root>/.mkit/refs/.lock` (`FsLayoutStore::apply` ->
   `FileTransport::with_ref_lock`), so in `refs.qnt` a `file` op is a CAS
@@ -47,9 +44,8 @@ Source: `git diff e7257500 HEAD -- docs/specs/SPEC-CONCURRENCY.md docs/specs/SPE
   `ssh/tests.rs`), as are the derived local bounds (494 / 502 bytes) and
   prefix normalization (§4.2).
 - **Memory transport**: `mkit-transport-memory`'s `update_ref` holds its
-  `Mutex` across read-check-write, and SPEC-REFS §5.1 now says `atomic*`
-  (in-process only). The former witness `WitnessMemMatchRace` is now the
-  Safety conjunct `NoLostUpdateMem`; the old race survives as the
+  `Mutex` across read-check-write, and SPEC-REFS §5.1 says `atomic*`
+  (in-process only). The Safety conjunct `NoLostUpdateMem` covers the race; the race survives as the
   `refs2_memNoMutex` mutant (also caught for Missing, which a HashMap
   cannot decide by O_EXCL).
 
@@ -107,7 +103,7 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 | Instance | Must violate | What it shows |
 |----------|--------------|---------------|
 | `refs3_misorder` | `NoDeadlock`, `LockOrderRespected` | the §4 order is what prevents deadlock |
-| `refs2_noRefLock` | `NoLostUpdateLocal` | pre-#637 lost update |
+| `refs2_noRefLock` | `NoLostUpdateLocal` | pre-fix lost update |
 | `refs2_noFileLock` | `NoLostUpdateFile` | RefLock is needed |
 | `refs2_gcSkipTrees` | `ExpireHoldsSuperset`, `NoRecordExpireInterleave` | §3.2 superset rule |
 | `refs2_racyAcquire` | `LockOwnership` | broken flock |
@@ -146,7 +142,7 @@ cover the whole space to their bounds.
   effects (a starting `mkit serve` skips its sweep, a starting server waits)
   are liveness only. Lock waits never time out (the 5 s timeout is
   abstracted, as in `refs.qnt`). Stop and crash are one action.
-- A SQLite-metadata `mkit-server` deployment keeps refs in SQLite (the R-81 marker makes
+- A SQLite-metadata `mkit-server` deployment keeps refs in SQLite (the root marker makes
   `FileTransport` refuse ref writes on that root) and is not modelled;
   neither is `mkit-server`'s S3 spool sweep (under `server.lock`, used
   only by `mkit-server`).

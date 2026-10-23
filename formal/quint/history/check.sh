@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproduce every history check (MKIT-20, pins from MKIT-17):
+# Reproduce every history check:
 #   ./check.sh               quint typecheck/test/run + TLC safety and progress
 #   APALACHE=1 ./check.sh    adds bounded Apalache runs on the compiled TLA+
 #                            (history depth ${HISTORY_DEPTH:-10}; see README for timings)
@@ -124,7 +124,7 @@ for c in CanaryNoWindow CanaryNoLapFull; do qrun scrub.qnt scrub "$c" violation 
 qrun scrub.qnt mutIgnoreAge TimeBound violation 16
 qrun scrub.qnt mutWrapWithoutFull ActualPublishBound violation 16
 qrun scrub.qnt mutTrustInvalid InvalidForcesFull violation 16
-# finding 2 (MKIT-57, fixed): window path only when fewer than MAX_AGE elapsed;
+# Fixed: window path only when fewer than MAX_AGE elapsed;
 # the pre-fix `>` comparison is the mutant that must break it
 qrun scrub.qnt scrub WindowOnlyWhenFresh ok 16
 qrun scrub.qnt mutAgeInclusive WindowOnlyWhenFresh violation 16

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Regenerate the ITF fixtures of the refs model-based conformance test
-# (Linear MKIT-22, epic MKIT-17).
+# Regenerate the ITF fixtures of the refs model-based conformance model.
 #
 #   formal/scripts/gen-refs-traces.sh          regenerate the checked-in fixtures
 #   CHECK=1 formal/scripts/gen-refs-traces.sh  regenerate into a temp dir and
@@ -21,7 +20,7 @@
 # (quint's carries a wall-clock timestamp), and each state is one line.
 # The result is still ITF (a trace may carry any subset of the variables).
 #
-# Pins (MKIT-17): quint 0.32.0 (rust backend). Another version may draw
+# Pins: quint 0.32.0 (rust backend). Another version may draw
 # different traces for the same seed: CHECK=1 then reports a diff, which is
 # not a conformance failure (regenerate and review).
 #

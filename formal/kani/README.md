@@ -51,8 +51,7 @@ a `*_canary_*` harness is `#[kani::should_panic]` and must report
 the checker has falsified a deliberately wrong statement, which shows the
 property it mirrors is checkable at that bound. Every other harness must
 report `VERIFICATION:- SUCCESSFUL`. The two harnesses marked
-**FINDING** below failed until the production code was fixed (MKIT-56,
-MKIT-59, 2026-09-27); both now pass.
+**FINDING** below failed until the production code was fixed (2026-09-27); both now pass.
 `kani::cover!` sites must be `satisfied` (Kani prints `N of N cover
 properties satisfied`); they show the asserted `Ok` paths are reachable.
 
@@ -96,7 +95,7 @@ build. Cap: 15 min per harness.
 | `merkle_roundtrip_one_chunk` | independent §1.1/§5.3 builder's proof accepted by `verify_chunk` | 1 symbolic chunk | pass | 11 s |
 | `merkle_roundtrip_two_chunks` | as above, both positions | 2 symbolic chunks | pass | 26 s |
 | `merkle_canary_tampered_leaf_verifies` | canary: "any leaf verifies under a genuine proof" | 2 chunks | falsified (expected) | 15 s |
-| `merkle_builder_empty_tree_refuses` | **new**: §5.4 builder rule (added on this branch): every single-leaf, multi-leaf and range request against the empty `Tree` is refused | any `u32` position/start/end | pass after the MKIT-56 fix (FINDING 1; failed before with `start = end = 0`), 1/1 cover | 8 s |
+| `merkle_builder_empty_tree_refuses` | **new**: §5.4 builder rule: every single-leaf, multi-leaf and range request against the empty `Tree` is refused | any `u32` position/start/end | pass after the fix (FINDING 1; failed before with `start = end = 0`), 1/1 cover | 8 s |
 
 ### mkit-core: pack (BLAKE3 → `toy_hash`, zstd decompression stubbed)
 
@@ -144,7 +143,7 @@ build. Cap: 15 min per harness.
    returns `Ok(Proof { leaf_count: 0, siblings: [] })`.
    `merkle_builder_empty_tree_refuses` reports this counterexample
    (`start = 0, end = 0`; the single-leaf and multi-leaf builders refuse
-   correctly). **Fixed (MKIT-56):** `range_proof` now returns
+   correctly). **Fixed:** `range_proof` now returns
    `PositionOutOfRange(start)` for every range of the empty tree, an
    intentional divergence from upstream `commonware_storage::bmt` (commented
    in the code; the commonware cross-check draws `n >= 1` only). Regression
@@ -166,7 +165,7 @@ build. Cap: 15 min per harness.
   `read_frame`, non-empty keystore round-trip fields, and multi-entry
   trees: see the doc comments on each module. They are left to the fuzz
   targets and proptests.
-- The §3.3 writer rule added on this branch ("a writer MUST NOT emit a
+- The §3.3 writer rule ("a writer MUST NOT emit a
   `0x03`/`0x04` entry whose `uncompressed_len` would exceed
   `MAX_RAW_OBJECT_SIZE`") is enforced in `maybe_compress_capped`, behind
   the `pack-zstd` C compressor that Kani cannot model. It is not

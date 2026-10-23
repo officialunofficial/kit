@@ -1,8 +1,7 @@
 // -*- mode: Bluespec; -*-
-// Ref CAS and lock-order model for mkit (ref concurrency model, workstream quint-refs).
+// Ref CAS and lock-order model for mkit (ref concurrency model).
 //
-// Models (specs on branch claude/kind-brahmagupta-esqhc0, server era;
-// SPEC-REFS v3, SPEC-CONCURRENCY as of this branch):
+// Models (SPEC-REFS v3, SPEC-CONCURRENCY):
 //   - SPEC-REFS §5 updateRef conditions Any / Missing / Match(H) and deletes
 //     (unconditional `delete_ref`, conditional `delete_ref_if_matches`).
 //   - SPEC-REFS §5.1 atomicity matrix for the three in-repo lock domains:
@@ -14,7 +13,7 @@
 //               `FileTransport::with_ref_lock`), so a `file` op below stands
 //               for a CAS from `mkit serve`, `mkit-server` or a direct
 //               `mkit+file://` push alike. (a SQLite-metadata `mkit-server` keeps
-//               refs in SQLite; the R-81 root marker makes FileTransport refuse
+//               refs in SQLite; the root marker makes FileTransport refuse
 //               ref writes there, so that root has no on-disk ref domain; not
 //               modelled.)
 //       mem   : in-process memory transport. The code
@@ -116,7 +115,7 @@ module refs {
   // Mutation switches used ONLY to show the invariants are non-vacuous.
   type Faults = {
     misorder: bool,     // a process may take its plan in reverse (violates §4)
-    noRefLock: bool,    // local writers skip refs-<ref>.lock (pre-#637 behaviour)
+    noRefLock: bool,    // local writers skip refs-<ref>.lock (pre-fix behaviour)
     noFileLock: bool,   // file transport skips RefLock
     gcSkipTrees: bool,  // gc expires holding only worktrees.lock (violates §3.2)
     racyAcquire: bool,  // acquire ignores exclusivity (a broken flock; violates §2)

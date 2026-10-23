@@ -1,5 +1,5 @@
 // -*- mode: Bluespec; -*-
-// Scrub schedule for fast-forward publication (MKIT-20).
+// Scrub schedule for fast-forward publication.
 //
 // Models docs/specs/SPEC-HISTORY-PROOF.md §4.5 (scrub v2, generation-bound,
 // with the corrected 65-publish lap and the lost-write caveat) as implemented by
@@ -14,7 +14,7 @@ module scrubCore {
   const LOSSY_SCRUB_WRITES: bool  // crash before / ignored error in `let _ = write_scrub_state`
   const CLOCK_STEPS_BACK: bool    // wall clock may step backwards
   const BUG_IGNORE_AGE: bool      // mutant: no 7-day staleness check
-  const BUG_AGE_INCLUSIVE: bool   // mutant: pre-MKIT-57 `elapsed > MAX_AGE` (window at exactly 7 days)
+  const BUG_AGE_INCLUSIVE: bool   // mutant: pre-fix `elapsed > MAX_AGE` (window at exactly 7 days)
   const BUG_WRAP_WITHOUT_FULL: bool  // mutant: lap end wraps without full walk
   const BUG_TRUST_INVALID: bool   // mutant: corrupt/foreign state read as valid
   const MAXPUB: int               // publish-count bound (simulation)
@@ -168,7 +168,7 @@ module scrubCore {
   val TimeBound = lastMode != "init" implies
     leavesOf(chainLen).forall(i => real - lastReal.get(i) <= MAX_AGE)
   // §4.5: the window path requires FEWER than MAX_AGE seconds elapsed.
-  // Finding 2 (MKIT-57, fixed: `decide_chain` now uses `>=`); the pre-fix
+  // Fixed: `decide_chain` now uses `>=`; the pre-fix
   // `>` is kept as `mutAgeInclusive`, which must violate this.
   val WindowOnlyWhenFresh = lastMode == "window" implies lastElapsed < MAX_AGE
   // §4.5: missing/corrupt/foreign-generation state always forces a full walk.
@@ -235,7 +235,7 @@ module mutTrustInvalid {     // violates InvalidForcesFull
                    BUG_WRAP_WITHOUT_FULL = false,
                    BUG_TRUST_INVALID = true, MAXPUB = 12).*
 }
-module mutAgeInclusive {     // violates WindowOnlyWhenFresh (pre-MKIT-57 code)
+module mutAgeInclusive {     // violates WindowOnlyWhenFresh (pre-fix code)
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
                    BUG_IGNORE_AGE = false, BUG_AGE_INCLUSIVE = true,
                    BUG_WRAP_WITHOUT_FULL = false,

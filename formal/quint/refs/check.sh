@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproduce every quint-refs check (MKIT-17 / MKIT-19): refs.qnt (ref CAS and
+# Reproduce every quint-refs check: refs.qnt (ref CAS and
 # lock order) and serve.qnt (serve.lock / server.lock, the startup upload
 # sweep, the served-name rule).
 #
@@ -9,7 +9,7 @@
 #   QUINT=0 skips `quint run`; ONLY=<regex> restricts TLC/Apalache to
 #   matching "<module>::<invariant>" checks.
 #
-# Pins (MKIT-17 review): quint 0.32.0, Apalache 0.62.2 run directly on the
+# Pins: quint 0.32.0, Apalache 0.62.2 run directly on the
 # compiled TLA+ (not `quint verify`), TLC = tlc2.TLC from the Apalache 0.62.2
 # jar, Java 21. Tool locations (override any of them):
 #   FV_HOME     ${FV_HOME:-$HOME/.local/share/mkit-fv}
