@@ -1,4 +1,4 @@
-//! Integration test for mkit#798: per-verb-class client timeouts.
+//! Integration test for: per-verb-class client timeouts.
 //!
 //! `ConnectTransport` applies a short `UNARY_TIMEOUT` to cheap unary RPCs
 //! (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`) and a much
@@ -55,7 +55,7 @@ impl generated::TransportService for SlowService {
         ))
     }
 
-    // WP-1.2: compile-only stubs for the additive M1 trait methods.
+    // Compile-only stubs for the additive trait methods.
     async fn get_server_info(
         &self,
         _ctx: RequestContext,

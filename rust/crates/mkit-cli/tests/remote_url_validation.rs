@@ -1,4 +1,4 @@
-//! `remote add` / `clone` URL + name control-char validation (#217).
+//! `remote add` / `clone` URL + name control-char validation.
 //!
 //! A URL (or remote name) containing a newline would inject extra
 //! `key = value` lines into `.mkit/config` via `config::write`, which

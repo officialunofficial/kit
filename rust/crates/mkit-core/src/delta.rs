@@ -24,7 +24,7 @@
 use crate::object::MkitError;
 
 /// The specific kind of structural corruption a v1 delta stream failed
-/// on (MKIT-13), carried by [`MkitError::DeltaCorrupt`]. `#[non_exhaustive]`
+/// on, carried by [`MkitError::DeltaCorrupt`]. `#[non_exhaustive]`
 /// so a future delta-stream kind (v2, say) can add a corruption variant
 /// without that being a breaking change for downstream `match`es.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -298,7 +298,7 @@ pub(crate) fn check_length_bounds(base_len: usize, result_len: usize) -> Result<
 /// end-of-stream, reserved bits set, etc.) — distinct from
 /// [`MkitError::TrailingData`], which is reserved for the unrelated
 /// "non-empty trailing bytes after a complete object" condition in
-/// `serialize.rs` (MKIT-13).
+/// `serialize.rs`.
 ///
 /// # Panics
 ///
@@ -805,7 +805,7 @@ mod tests {
         );
     }
 
-    /// MKIT-13: structural delta corruption must be reported as
+    /// Structural delta corruption must be reported as
     /// [`MkitError::DeltaCorrupt`], not the generic [`MkitError::TrailingData`]
     /// (which SPEC-DELTA §10 reserves for the genuine trailing-bytes-after-
     /// a-complete-object case in `serialize.rs`). This collects one crafted

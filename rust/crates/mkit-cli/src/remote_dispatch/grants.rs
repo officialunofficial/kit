@@ -1,9 +1,9 @@
 //! Local grant choice for the Connect client, over the user grant store
 //! (`crate::grants::store`).
 //!
-//! Selection (WP-2.13, R-129, D-B2): filter to the grants valid for the
+//! Selection: filter to the grants valid for the
 //! request, rank the higher epoch first, then the P-18 rules (capability
-//! preference for reads, a grant that forces for an update (R-150), repository
+//! preference for reads, a grant that forces for an update, repository
 //! over namespace scope, the most specific ref scope, the latest expiry), then the greater header bytes so the choice
 //! never depends on directory order.
 //!
@@ -142,8 +142,8 @@ impl LocalGrants {
                         let scopes = grant.ref_scopes.as_ref()?;
                         let mut rank = usize::MAX;
                         // A server that can't check fast-forwards (every
-                        // Stage 1 deployment) applies a `MATCH` update only
-                        // under `f` (R-150). Prefer a grant that forces, and
+                        // current deployment) applies a `MATCH` update only
+                        // under `f`. Prefer a grant that forces, and
                         // fall back to a `u`-only one for a server that can.
                         let mut forces = true;
                         for reference in refs {
@@ -234,14 +234,14 @@ impl GrantSource for LocalGrants {
     }
 }
 
-/// The grant pre-check of a split push (WP-1.17b, B5) over a Connect client's
+/// The grant pre-check of a split push over a Connect client's
 /// local grants: every advance must be covered before the first upload, so a
 /// grantee that would be refused at a later advance never publishes a prefix.
 ///
 /// The owner key needs no grant, and a repository without a namespace takes
 /// none. Otherwise each advance's condition must have a grant that covers it,
 /// and the later advances (`Match` updates) need a grant carrying `f`: no
-/// server yet accepts `u` alone for them (Stage 1 refuses it, "update without
+/// server yet accepts `u` alone for them (the server refuses it, "update without
 /// force needs indexed mode", and indexed mode's ancestry check remains a
 /// known gap). The check asks for an `Any` write, which only an `f` grant covers.
 pub(crate) struct ConnectAuthority {
@@ -558,7 +558,7 @@ mod tests {
         let source = LocalGrants::from_headers(vec![broad.clone(), exact.clone()]);
         for (condition, expected) in [
             (GrantCondition::Missing, exact.as_str()),
-            // An update prefers the grant that can force (R-150), whatever
+            // An update prefers the grant that can force, whatever
             // the scope: an opaque server applies `MATCH` updates only under `f`.
             (GrantCondition::Match, broad.as_str()),
             (GrantCondition::Any, broad.as_str()),

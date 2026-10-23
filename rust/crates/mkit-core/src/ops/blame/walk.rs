@@ -76,9 +76,9 @@ fn file_blob_at(
 ///
 /// The child→parent edges recorded here — including the non-first-parent
 /// edges of a merge — are exactly the merge-DAG edges the blame walk visits;
-/// a future provable-blame ancestry accumulator (#495) can be built from this
+/// a future provable-blame ancestry accumulator can be built from this
 /// same traversal instead of a second ancestor-set pass. They are not
-/// surfaced as public API, since #458 has no consumer for them yet.
+/// surfaced as public API, since nothing consumes them yet.
 pub(super) fn build_file_dag(
     store: &ObjectStore,
     head_hash: Hash,
@@ -496,7 +496,7 @@ pub(super) struct PreciseRequest<'r> {
     pub(super) ignore_whitespace: bool,
 }
 
-/// `--ignore-rev-precise` (#496): refine one parent's positional
+/// `--ignore-rev-precise`: refine one parent's positional
 /// [`ignore_fallthrough`] result (`fall`) with content matching, so a line
 /// a reformat/reorder moved can be attributed to its true surviving origin
 /// instead of whatever line happens to sit at the same offset in the hunk.
@@ -574,7 +574,7 @@ pub(super) fn precise_overrides(req: &PreciseRequest) -> Vec<Option<usize>> {
 
     // `fall` is only ever defined over the LCS-unmatched new lines (the
     // domain `ignore_fallthrough` pairs); further exclude lines an earlier
-    // merge parent already explained (finding #3) — they must not compete
+    // merge parent already explained (finding) — they must not compete
     // for candidates a still-unresolved line needs.
     let unmatched_new: Vec<usize> = (0..mapping.len())
         .filter(|&ni| mapping[ni].is_none() && !matched[ni])
@@ -686,7 +686,7 @@ pub(super) fn precise_overrides(req: &PreciseRequest) -> Vec<Option<usize>> {
 /// runs over file-contiguous lines directly; here the arrays are dense
 /// (unmatched-only), so the file-adjacency check is added explicitly (the
 /// old dense run overstated the parallel — a fragmented decoy could tie a
-/// genuinely contiguous block; #523 finding #7).
+/// genuinely contiguous block).
 ///
 /// Longer run wins; a length tie breaks toward git's positional guess
 /// (`positional`), if any, then by lowest old-line index. `work` accumulates

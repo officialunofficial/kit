@@ -78,7 +78,7 @@ fn open_history(root: &Path, branch: &str) -> AncestrySnapshot {
     AncestrySnapshot::load(&RepoLayout::single(root), branch).expect("open ancestry")
 }
 
-/// The core regression test (issue #648, TDD step 1): delete a branch
+/// The core regression test (TDD step 1): delete a branch
 /// via `mkit branch -d`, create a NEW branch with the SAME name, and
 /// advance it once. The new incarnation's on-disk ancestry must be
 /// fresh and contain the complete current chain.
@@ -89,7 +89,7 @@ fn branch_delete_then_recreate_starts_a_fresh_ancestry() {
     commit_file(root, "root.txt", "root\n", "root");
 
     // Branch "feature", advanced twice off main. `checkout -b` itself
-    // appends one "branch creation" leaf (issue #206's `write_ref_recording_history`
+    // appends one "branch creation" leaf (`write_ref_recording_history`
     // Missing-CAS create), so two commits on top make three leaves total.
     ok(root, &["checkout", "-b", "feature"]);
     commit_file(root, "a.txt", "a\n", "a");

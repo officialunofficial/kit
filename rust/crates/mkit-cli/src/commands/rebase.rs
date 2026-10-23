@@ -20,8 +20,7 @@
 //! into the worktree + index (via the shared `conflict` helper) and
 //! writes a `mkit-conflicts` sidecar inside `.mkit/rebase-apply/`.
 //!
-//! `--continue` does NOT re-run cherry-pick on the paused commit (the
-//! #177 bug). Instead it builds the rewritten commit's tree from the
+//! `--continue` does NOT re-run cherry-pick on the paused commit. Instead it builds the rewritten commit's tree from the
 //! resolved index/worktree, creates the commit, moves `todo[0]` to
 //! `done`, and keeps replaying the remaining commits.
 //!
@@ -154,7 +153,7 @@ fn start(
         );
     }
     // Resolve the rebase target through the shared revspec resolver
-    // (#227) so `rebase HEAD~2`, short/full hashes, tags, and branch
+    // so `rebase HEAD~2`, short/full hashes, tags, and branch
     // names all work — the same grammar `reset`/`restore`/`cherry-pick`
     // accept. The current branch name recorded in the rebase state
     // (`head_name`) comes from HEAD below, not from this argument.

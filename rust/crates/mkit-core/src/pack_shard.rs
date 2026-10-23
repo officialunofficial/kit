@@ -1,10 +1,10 @@
 //! Erasure-coded pack delivery via Reed-Solomon shards.
 //!
-//! This module is the in-process encode/reconstruct core for issue #159:
-//! it wraps
+//! This module is the in-process encode/reconstruct core.
+//! It wraps
 //! `commonware_coding::ReedSolomon<Blake3>` so a producer can split a
 //! pack into `N + K` shards and a consumer can reconstruct the pack
-//! from any `N` of those shards. (Issue #661 cut this over from
+//! from any `N` of those shards. (The module moved from
 //! `ReedSolomon<Sha256>`; see the `RsScheme` type alias below.)
 //!
 //! The wire format and motivation are normatively documented in
@@ -58,7 +58,7 @@ pub use commonware_coding::Config;
 // `commonware-parallel` dependency of their own.
 pub use commonware_parallel::{Rayon as ParallelStrategy, Sequential as SequentialStrategy};
 
-// Issue #653 evaluated swapping this to `ReedSolomon<Blake3>` to match
+// An earlier design evaluated swapping this to `ReedSolomon<Blake3>` to match
 // the hash primitive mkit uses elsewhere (`history.rs`) and drop a
 // redundant per-shard hash pass (the internal Merkle-tree build in
 // `commonware-coding::reed_solomon::{encode, decode}` hashes every
@@ -70,7 +70,7 @@ pub use commonware_parallel::{Rayon as ParallelStrategy, Sequential as Sequentia
 // on different mkit versions unless the manifest format itself
 // versions that change.
 //
-// Issue #661 landed the cutover: `MANIFEST_VERSION` bumped `0x01` →
+// The cutover landed: `MANIFEST_VERSION` bumped `0x01` →
 // `0x02`, `RsScheme` now wraps `Blake3`, and `decode_manifest` rejects
 // a `0x01` manifest with a version-specific error instead of the
 // generic "unsupported version" message, since a `0x01` manifest's
@@ -78,8 +78,7 @@ pub use commonware_parallel::{Rayon as ParallelStrategy, Sequential as Sequentia
 // This is a **hard cutover, not dual-hasher support** — a `0x01`
 // producer and a `0x02`+ consumer (or vice versa) simply cannot
 // interoperate; the old peer must re-shard with a current mkit. See
-// SPEC-PACK-SHARDS.md §4 and
-// https://github.com/officialunofficial/mkit/issues/661.
+// SPEC-PACK-SHARDS.md §4.
 type RsScheme = commonware_coding::ReedSolomon<Blake3>;
 type Commitment = <RsScheme as commonware_coding::Scheme>::Commitment;
 type RsChunk = <RsScheme as commonware_coding::Scheme>::Shard;
@@ -160,11 +159,11 @@ pub const SHARD_SIZE_THRESHOLD: u64 = 1024 * 1024;
 pub const MANIFEST_MAGIC: [u8; 4] = *b"MKSH";
 
 /// Wire-format version for a serialised [`ShardSet`]. Bumped whenever
-/// the on-the-wire layout — or, as with the issue #661 `Sha256` →
+/// the on-the-wire layout — or, as with the `Sha256` →
 /// `Blake3` hasher cutover, the meaning of an existing field —
 /// changes in a non-backwards-compatible way.
 ///
-/// `0x01` is retired (it identified the pre-#661 `ReedSolomon<Sha256>`
+/// `0x01` is retired (it identified the pre-fix `ReedSolomon<Sha256>`
 /// scheme) and MUST NOT be reused for a different wire meaning: an old
 /// cached manifest or peer stuck on `0x01` must always be recognised
 /// and rejected with [`decode_manifest`]'s version-specific error,
@@ -523,7 +522,7 @@ fn decode_shard_iter<'a, S: Strategy>(
 /// Deliberately written against `Commitment` — i.e.
 /// `<RsScheme as commonware_coding::Scheme>::Commitment` — rather than
 /// a concrete hasher's digest type, so a future `RsScheme` hasher swap
-/// (as #661 did to this function's previous `Sha256`-typed signature)
+/// (as the cutover did to this function's previous `Sha256`-typed signature)
 /// only needs `Commitment` to keep satisfying the same two bounds:
 /// `AsRef<[u8]>` and a fixed size equal to [`HASH_LEN`].
 fn digest_to_bytes(d: &Commitment) -> [u8; HASH_LEN] {
@@ -661,7 +660,7 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<ShardSet, ShardError> {
     }
     if bytes[4] != MANIFEST_VERSION {
         // 0x01 is not just "some other unsupported version" — it's the
-        // specific, retired pre-#661 Sha256-era scheme. A commitment
+        // specific, retired pre-fix Sha256-era scheme. A commitment
         // computed under that scheme can never check out against the
         // current Blake3-based `RsScheme`, so give the caller a
         // pointed, actionable message instead of the generic one.
@@ -796,7 +795,7 @@ mod tests {
 
     // ---- Strategy is a runtime parameter, not a hardcoded const ----
     //
-    // Issue #653: `pack_shard.rs` used to pin
+    // `pack_shard.rs` used to pin
     // `const STRATEGY: Sequential = Sequential;` and pass `&STRATEGY`
     // into every `RsScheme::encode` / `RsScheme::decode` call — no
     // caller, test, or config could ever supply a different
@@ -1108,7 +1107,7 @@ mod tests {
         );
     }
 
-    // ---- Issue #661: hard cutover from ReedSolomon<Sha256> to
+    // ---- Hard cutover from ReedSolomon<Sha256> to
     // ReedSolomon<Blake3> --------------------------------------------
 
     #[test]
@@ -1120,7 +1119,7 @@ mod tests {
 
         // A validly-shaped manifest, but with the prologue version byte
         // forced back to the retired 0x01 (Sha256-era) value — as if a
-        // pre-#661 producer (or a stale cache) handed it to a current
+        // pre-fix producer (or a stale cache) handed it to a current
         // decoder.
         let pack = synthetic_pack(32 * 1024);
         let (_, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
@@ -1151,7 +1150,7 @@ mod tests {
     #[test]
     fn blake3_scheme_roundtrips() {
         // Same shape as `lossy_round_trip_drops_shards_0_5_10_17`, but
-        // named to pin down that the post-#661 `RsScheme =
+        // named to pin down that the post-fix `RsScheme =
         // ReedSolomon<Blake3>` swap round-trips correctly end to end:
         // encode, drop `extra_shards` (4) shards, decode from the
         // remaining `minimum_shards` (16), and confirm the reconstructed
@@ -1175,7 +1174,7 @@ mod tests {
 
     #[test]
     fn commitment_from_a_different_scheme_fails_the_merkle_check_not_silently() {
-        // Emulates a producer stuck on the pre-#661 Sha256-era scheme
+        // Emulates a producer stuck on the pre-fix Sha256-era scheme
         // handing a manifest to a consumer decoding with the
         // post-cutover Blake3 `RsScheme`. The manifest's version byte
         // could read 0x02 (e.g. corrupted or forged) without the

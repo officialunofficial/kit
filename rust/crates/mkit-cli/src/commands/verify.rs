@@ -9,7 +9,7 @@
 //! `signer` public key produced the attached signature — it does NOT
 //! check that key against any allow-list, so a signature from a freshly
 //! generated attacker key verifies exactly the same as one from a key
-//! the caller actually trusts (issue #693). Passing `--trusted` (or
+//! the caller actually trusts. Passing `--trusted` (or
 //! `--trust-roots <path>`) additionally cross-checks `signer` against
 //! the trust-roots registry `mkit trust add/list/remove` manages
 //! (`commands/trust_roots.rs`), failing closed — exit code

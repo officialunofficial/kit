@@ -296,7 +296,7 @@ fn remote_admission_name(key: &str) -> Option<&str> {
 }
 
 /// Warn on stderr the first time `user.name`/`user.email` is set in a
-/// repo that has never set `user.identity` (MKIT-12/#655): these are
+/// repo that has never set `user.identity`: these are
 /// git-compatibility aliases that never feed the signed commit author
 /// (see `user_name_does_not_spoof_the_signed_author` in
 /// `tests/config_git_aliases.rs`), and a user coming from git may

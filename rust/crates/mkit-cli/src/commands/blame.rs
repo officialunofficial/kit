@@ -724,7 +724,7 @@ fn render_json(result: &BlameResult) -> u8 {
 ///   `author*` and both `*-tz` are `+0000` (mkit timestamps are UTC).
 /// - `filename` is the blamed path, or the `-C` copy source for a
 ///   cross-file copy. git's `previous` line is outside the in-scope field
-///   set (#524) and is not emitted.
+///   set and is not emitted.
 fn render_porcelain(
     store: &ObjectStore,
     result: &BlameResult,

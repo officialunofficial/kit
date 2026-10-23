@@ -475,8 +475,8 @@ fn failed_rename_restores_source_state() {
 /// shape planted under `.mkit/git/`) lives in
 /// `git_tools::tests::state_names_and_resolve_state_skip_dot_leading_orphans`
 /// (feature `git-bridge`), since those functions only exist under that
-/// feature. This is the test the PR #659 review's finding 1 called out
-/// as missing: before the dot-leading-segment rejection in
+/// feature. This test covers the case
+/// that was missing: before the dot-leading-segment rejection in
 /// `validate_ref_name`, this orphan was a fully populated, listable ref
 /// namespace, not the harmless empty-directory debris the old docs
 /// claimed.
@@ -546,7 +546,7 @@ fn prefix_nested_remotes_coexist() {
     );
 }
 
-/// #660: `remote remove a` must not delete the tracking refs of a
+/// `remote remove a` must not delete the tracking refs of a
 /// configured sibling `a/b` nested under it — the directory-keyed
 /// layout means `a/b`'s refs live under `refs/remotes/a/b/`, inside
 /// `a`'s own directory prefix, but they belong to a different remote.
@@ -596,7 +596,7 @@ fn remove_prefix_remote_preserves_nested_sibling() {
     );
 }
 
-/// #660: `remote rename a x` must not drag a configured sibling `a/b`'s
+/// `remote rename a x` must not drag a configured sibling `a/b`'s
 /// refs or bridge state along to `x/b` — `a/b`'s state must stay
 /// exactly where it is, and its config entry (still `a/b` -> its own
 /// URL) is untouched throughout. This is stricter than git (git 2.50.1
@@ -664,7 +664,7 @@ fn rename_prefix_remote_preserves_nested_sibling() {
     );
 }
 
-/// #660: exercises the ancestor-recursion arm of `walk_unprotected` —
+/// Exercises the ancestor-recursion arm of `walk_unprotected` —
 /// the sibling nests two levels down (`a/b/c`), so the walker must
 /// recurse through the intermediate `b` directory rather than treating
 /// it as removable whole.
@@ -695,7 +695,7 @@ fn deeply_nested_sibling_survives() {
     );
 }
 
-/// #789 review finding 1 (blocking): the exact repro that broke the old
+/// Regression: the exact repro that broke the old
 /// per-entry selective move. Remote `a` has both an ordinary branch
 /// (`main`) and a multi-segment branch `b/main`, so `refs/remotes/a/b/`
 /// exists as an ordinary, *unprotected* branch-namespace directory — one
@@ -760,7 +760,7 @@ fn rename_into_own_subtree_with_sibling_present() {
     );
 }
 
-/// #789 review finding 2 (blocking): with a sibling present (forcing the
+/// Regression: with a sibling present (forcing the
 /// selective path), an occupied destination must fail closed with the
 /// same restore contract the fast path (`rename_state_dir`) already has
 /// — not merge into the occupant, and not strand state in the temp
@@ -821,7 +821,7 @@ fn selective_move_restores_on_occupied_destination() {
     assert!(!stray_temp, "no temp dir should remain after a failed move");
 }
 
-/// #789 review finding 2 (blocking): exercises the move closure's
+/// Regression: exercises the move closure's
 /// relative-path composition end-to-end when the sibling nests more than
 /// one level down (`a/b/c`, not a direct child of `a`) — the walker must
 /// recurse through the intermediate `b` directory, and the moved entries
@@ -878,14 +878,14 @@ fn deeply_nested_sibling_survives_rename() {
     }
 }
 
-/// #789 review finding 4: exercises `merge_tree_into`'s recursive arm
+/// Regression: exercises `merge_tree_into`'s recursive arm
 /// during a *restore* — not just the ordinary extraction path the other
 /// sibling tests above already cover. Sibling `a/b/c` is configured, so
 /// `a/b` is a retained ancestor directory that survives extraction (it
 /// still holds `c/`). Remote `a` also has a branch namespace `b/main`,
 /// so extraction pulls an ordinary, unprotected `refs/remotes/a/b/main`
 /// out from underneath that same retained ancestor and into
-/// `tmp/b/main`. An occupied destination forces the phase-4 failure, so
+/// `tmp/b/main`. An occupied destination forces the step-4 failure, so
 /// the restore has to merge `tmp/b/main` back into `src/b/`, which still
 /// exists (holding `c/`) — exactly the "recurse into a like-named
 /// directory that already exists at the destination" arm
@@ -906,7 +906,7 @@ fn selective_move_restore_recurses_into_retained_ancestors() {
     r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
     r.ok(&["remote", "add", "a/b/c", "mkit+file:///tmp/nowhere-c"]);
 
-    // Occupied, non-empty destination forces the final rename (phase 4)
+    // Occupied, non-empty destination forces the final rename (step 4)
     // to fail, driving the restore path.
     let taken = layout.remotes_dir().join("taken");
     std::fs::create_dir_all(&taken).unwrap();
@@ -949,7 +949,7 @@ fn selective_move_restore_recurses_into_retained_ancestors() {
     assert!(!stray_temp, "no temp dir should remain after a failed move");
 }
 
-/// #789 review finding 3 (should-fix, minimum bar): documents and pins
+/// Documents and pins
 /// the destination-side nesting boundary that `move_state_dir`'s
 /// `protected` set does not cover — a configured sibling nesting under
 /// the DESTINATION of a rename, rather than under `old`'s own directory
@@ -1035,7 +1035,7 @@ fn rename_round_trip_into_sibling_fails_closed() {
     );
 }
 
-/// #660 regression guard: with no configured sibling nested under the
+/// Regression guard: with no configured sibling nested under the
 /// target, `move_state_dir`'s selective path is never invoked
 /// (`nested_sibling_names` returns empty, so `protected` is empty) — the
 /// pre-existing whole-directory fast paths (`remove_dir_all`,
@@ -1065,7 +1065,7 @@ fn no_sibling_fast_path_unchanged() {
     );
     // `remote remove` deliberately leaves bridge state in place
     // (`warn_orphaned_bridge_state`) regardless of siblings — unaffected
-    // by #660.
+    // that behavior.
     assert!(
         layout
             .git_state_dir()

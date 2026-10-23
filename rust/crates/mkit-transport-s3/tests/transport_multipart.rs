@@ -176,7 +176,7 @@ fn multipart_upload_aborts_on_part_failure() {
         .with_body(init_response_xml())
         .create();
 
-    // Part 1 succeeds.
+    // The first part succeeds.
     let _m_part1 = server
         .mock("PUT", object_path.as_str())
         .match_query(mockito::Matcher::Exact(format!(
@@ -186,7 +186,7 @@ fn multipart_upload_aborts_on_part_failure() {
         .with_header("etag", "\"etag-part-1\"")
         .create();
 
-    // Part 2 fails with a persistent 500 (retried `fast_backoff`'s 5
+    // The second part fails with a persistent 500 (retried `fast_backoff`'s 5
     // attempts, all failing) — 1 initial + 5 retries = 6 expected hits.
     let _m_part2_fail = server
         .mock("PUT", object_path.as_str())

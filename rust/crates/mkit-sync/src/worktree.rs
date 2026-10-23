@@ -224,7 +224,7 @@ pub fn collect_worktree_paths(
 pub fn index_tracks_path_or_descendant(index: &Index, path: &str) -> bool {
     // Delegates to `Index::tracks_path_or_descendant`, which answers via
     // the maintained `path -> position` map in `O(log n + k)` instead of
-    // this function's old `O(n)` full scan (issue #708) — `add_tree` calls
+    // this function's old `O(n)` full scan — `add_tree` calls
     // this once per directory/file it walks.
     index.tracks_path_or_descendant(path)
 }

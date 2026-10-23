@@ -1,10 +1,10 @@
-//! Phase 0 of #493 (`RepoLayout`) promises a byte-identical on-disk
+//! The `RepoLayout` type promises a byte-identical on-disk
 //! layout for classic single-worktree repositories. These tests pin
 //! that contract: the exact `.mkit/` structure a scripted command
 //! sequence produces, and the agreement between `RepoLayout`'s
 //! accessors and the real files the binary writes.
 //!
-//! Later phases preserve this baseline; versioned optional state is pinned
+//! New features preserve this baseline; versioned optional state is pinned
 //! separately so feature additions cannot hide relocation of existing files.
 
 mod common;
@@ -120,7 +120,7 @@ fn scripted_sequence_produces_historical_layout() {
     }
     assert_eq!(
         entries, expected,
-        "single-worktree .mkit layout drifted — Phase 0/1 of #493 forbids this"
+        "single-worktree .mkit layout drifted — the layout contract forbids this"
     );
 }
 

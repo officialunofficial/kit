@@ -1,4 +1,4 @@
-//! Issue #658, Fix B — regression tests for `commit.rs`'s `expected_tip`
+//! Regression tests for `commit.rs`'s `expected_tip`
 //! wiring (the value `run` hands to `advance_head` as the CAS
 //! precondition per commit mode). `commands::commit::advance_head_tests`
 //! (a `mkit-cli` unit test module) already proves the CAS MECHANISM
@@ -10,7 +10,7 @@
 //!   `parents[0]` (`state.orig_head`) here — that value is deliberately
 //!   decoupled from live HEAD (see `commit.rs`'s parent-selection
 //!   comment), so a merge concluded after something else moved the
-//!   branch is INTENDED to succeed, not spuriously conflict. If Fix B
+//!   branch is INTENDED to succeed, not spuriously conflict. If the CAS
 //!   were wired to the wrong variable, this would incorrectly abort.
 //! - **plain commit**: confirms a branch moved during message
 //!   composition (before the lock, so already-expected to be picked up
@@ -62,9 +62,8 @@ fn write_editor_script(
 /// simulating "something else advanced the branch between merge-start
 /// and merge-conclude" (the existing "e.g. a reset" scenario the
 /// parent-selection comment already treats as legitimate, unchanged by
-/// #658).
 ///
-/// If Fix B's `expected_tip` for this mode were wired to `parents[0]`
+/// If the CAS `expected_tip` for this mode were wired to `parents[0]`
 /// (`state.orig_head`, the PRE-merge tip) instead of a fresh
 /// `resolve_head` read, this commit would spuriously CAS-fail
 /// (`Match(orig_head)` against a ref that no longer holds it) and exit
@@ -132,7 +131,7 @@ fn merge_conclusion_commit_succeeds_after_branch_moved_since_merge_started() {
             assert_eq!(
                 c.parents,
                 vec![orig_head, feature_tip],
-                "merge commit's parents must be [orig_head, merge_head], unaffected by Fix B"
+                "merge commit's parents must be [orig_head, merge_head], unaffected by the CAS"
             );
         }
         other => panic!("expected a commit at the new tip, got {other:?}"),
@@ -141,8 +140,8 @@ fn merge_conclusion_commit_succeeds_after_branch_moved_since_merge_started() {
 
 /// Plain-commit mode: a branch move that lands during `$EDITOR`
 /// composition (before `commit` takes its write lock) is ALREADY
-/// expected to be picked up fresh by the existing (pre-#658) parent
-/// read — this pins that Fix B's `expected_tip` stays aligned with that
+/// expected to be picked up fresh by the existing (pre-fix) parent
+/// read — this pins that the CAS `expected_tip` stays aligned with that
 /// same fresh read (not some earlier snapshot), so the commit still
 /// lands cleanly rather than spuriously CAS-failing against a value
 /// nothing actually still holds.

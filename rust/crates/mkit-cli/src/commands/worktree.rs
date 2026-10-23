@@ -1,4 +1,4 @@
-//! `mkit worktree` — manage linked working trees (#493 Phase 2).
+//! `mkit worktree` — manage linked working trees.
 //!
 //! `add <path> [<commit-ish>]`, `list [--porcelain]`,
 //! `remove [--force] <path>`, `prune [--dry-run]`, with git's

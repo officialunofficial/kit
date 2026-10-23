@@ -1,4 +1,4 @@
-//! #267 — root-publishing commands take the repo lock.
+//! Root-publishing commands take the repo lock.
 //!
 //! `tag -a`/`-s`, `fetch`/`pull`, and `attest` write an object (or
 //! attestation) before the ref/sidecar that makes it reachable, so they must

@@ -1,5 +1,5 @@
 //! `mkit cherry-pick <commit> | --continue | --abort` — replay a single
-//! commit onto HEAD, with a resolvable-conflict workflow (#177).
+//! commit onto HEAD, with a resolvable-conflict workflow.
 //!
 //! On a clean merge we create a new commit on the current branch using
 //! the original commit's message. On conflict we materialise the

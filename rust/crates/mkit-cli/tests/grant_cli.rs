@@ -1,4 +1,4 @@
-//! `mkit grant` end to end through the real binary (WP-2.13, R-155): create
+//! `mkit grant` end to end through the real binary: create
 //! (all three owner sources), add, list, and the config-security fences.
 //! Everything runs against an isolated `XDG_CONFIG_HOME`; nothing here talks
 //! to a server (see `grant_e2e.rs` for that).

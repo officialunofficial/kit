@@ -4,7 +4,7 @@
 //! These tests also assert man-page and shell-completion coverage of
 //! the documented subcommand list, so a new command can't silently ship
 //! without being added to `man/mkit.1` and `completions/mkit.{bash,zsh,
-//! fish}` (the drift that #219 fixed for `pack-shard`).
+//! fish}` (the drift that fixed for `pack-shard`).
 
 use std::path::PathBuf;
 use std::process::Command;

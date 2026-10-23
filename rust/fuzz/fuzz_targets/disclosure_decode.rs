@@ -1,5 +1,5 @@
-//! cargo-fuzz target — partial-disclosure bundle decoding (issue #1015
-//! verifier kit PR 2, SPEC-DISCLOSURE). See sibling `merkle_proof.rs` for
+//! cargo-fuzz target — partial-disclosure bundle decoding
+//! (SPEC-DISCLOSURE). See sibling `merkle_proof.rs` for
 //! guardrail rationale. Decoding a bundle must never panic on adversarial
 //! input, regardless of the commit id it is checked against.
 

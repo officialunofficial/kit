@@ -52,7 +52,7 @@ pub fn run(args: &[String]) -> u8 {
             let _ = stdout.write_all(&b.data);
         }
         // A ChunkedBlob is the canonical representation for files above
-        // the chunking threshold (#203). Reassemble its chunks and
+        // the chunking threshold. Reassemble its chunks and
         // stream the full content, matching `mkit cat` on a plain Blob.
         Object::ChunkedBlob(_) => match worktree::read_blob(&store, &h) {
             Ok(data) => {

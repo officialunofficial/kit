@@ -18,8 +18,8 @@
 //! - **`--hard`** — move HEAD, reset the index to the target tree, AND
 //!   reset the worktree to it (discarding tracked-file changes). Like
 //!   git, untracked files are left in place. This is the one destructive
-//!   variant, so it runs the same dirty/untracked guard as `checkout`
-//!   (#176): it **refuses** to discard locally-modified or staged content
+//!   variant, so it runs the same dirty/untracked guard as `checkout`:
+//!   it **refuses** to discard locally-modified or staged content
 //!   unless `-f`/`--force` is given. That guard is an mkit safety
 //!   divergence — git's `reset --hard` discards silently.
 

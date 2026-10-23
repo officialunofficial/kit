@@ -29,8 +29,8 @@ fn use_color(is_tty: bool) -> bool {
 
 /// Pure decision function, taking `NO_COLOR`/`CLICOLOR_FORCE` as
 /// explicit booleans instead of reading the ambient process env. Split
-/// out so tests can drive every combination deterministically (#505 PR
-/// 5/5) instead of branching on whatever `NO_COLOR`/`CLICOLOR_FORCE`
+/// out so tests can drive every combination deterministically
+/// instead of branching on whatever `NO_COLOR`/`CLICOLOR_FORCE`
 /// happen to be set to in the current process.
 fn use_color_with(no_color: bool, force: bool, is_tty: bool) -> bool {
     if no_color {
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn use_color_with_matrix_honours_precedence_and_tty() {
-        // #505 PR 5/5: inject NO_COLOR/CLICOLOR_FORCE/tty explicitly
+        // Inject NO_COLOR/CLICOLOR_FORCE/tty explicitly
         // instead of branching on the ambient process env — deterministic
         // regardless of what NO_COLOR/CLICOLOR_FORCE happen to be set to
         // wherever the test runs.

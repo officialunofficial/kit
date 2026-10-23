@@ -1,4 +1,4 @@
-//! `mkit fetch --all` / `mkit pull --all` (#709): loop the existing
+//! `mkit fetch --all` / `mkit pull --all`: loop the existing
 //! per-remote fetch/pull dispatch over every configured remote instead
 //! of just one, reusing the same per-remote tracking-ref snapshot +
 //! report shape fetch/pull already use for a single remote.

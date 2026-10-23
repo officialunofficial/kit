@@ -110,7 +110,7 @@ pub enum DispatchError {
     NotCommit,
     #[error("restore: {0}")]
     Restore(#[from] restore::RestoreError),
-    /// The per-endpoint credential-trust gate (#97) refused to build a
+    /// The per-endpoint credential-trust gate refused to build a
     /// credential-bearing transport for a repo-chosen endpoint the user
     /// has not explicitly trusted. The wrapped string is the actionable
     /// message produced by [`crate::config::endpoint_credential_trust`].
@@ -165,7 +165,7 @@ pub enum DispatchError {
     /// The fetched tip's object closure exceeds the
     /// [`mkit_core::ops::graph::MAX_REACHABLE`] verification cap, so
     /// completeness could not be confirmed. On the applied-pack skip path
-    /// (#409) this closure walk is the sole guarantee the local store is
+    /// this closure walk is the sole guarantee the local store is
     /// whole; a truncated walk could silently pass over missing objects, so
     /// we fail closed rather than publish a ref we can't fully verify. This is
     /// NOT a self-heal trigger.
@@ -176,11 +176,11 @@ pub enum DispatchError {
     /// A commit/remix/tag newly introduced by this fetch failed Ed25519
     /// signature verification via [`mkit_core::sign::verify_commit`] /
     /// `verify_remix` / `verify_tag` — the exact check `mkit verify <rev>`
-    /// runs manually (issue #692). A hostile remote (THREAT-MODEL §3.1) can
+    /// runs manually. A hostile remote (THREAT-MODEL §3.1) can
     /// otherwise push an unsigned or forged history that `clone`/`pull`/
     /// `fetch` would silently materialise. Deliberately distinct from
     /// [`RemoteMissingObject`](Self::RemoteMissingObject) so it does NOT
-    /// feed the applied-pack self-heal retry (#409): an invalid signature
+    /// feed the applied-pack self-heal retry: an invalid signature
     /// is not evidence of local staleness, and clearing the applied-packs
     /// record would not make a hostile remote's history valid. Fails
     /// closed by default; opt out with `--no-verify-signatures` or the
@@ -188,7 +188,7 @@ pub enum DispatchError {
     /// from repo-scoped config — see [`crate::config::REPO_FORBIDDEN_KEYS`]).
     #[error("object {hash} failed signature verification: {reason}")]
     UnsignedOrInvalidObject { hash: String, reason: String },
-    /// A remote name passed to the applied-packs record (#409) is not a legal
+    /// A remote name passed to the applied-packs record is not a legal
     /// ref name (per [`mkit_core::refs::validate_ref_name`]). A remote name
     /// *is* a ref name, so this should never occur for a config-registered
     /// remote; it is defence-in-depth against a malformed name being used as
@@ -338,10 +338,10 @@ impl DispatchError {
 }
 
 /// Open a transport for `endpoint` only after the per-endpoint
-/// credential-trust gate (#97) approves it.
+/// credential-trust gate approves it.
 ///
 /// This is the single choke point through which push / fetch / pull
-/// (and named-remote callers in #175) MUST build a transport: it runs
+/// (and named-remote callers in) MUST build a transport: it runs
 /// [`crate::config::endpoint_credential_trust`] — keyed on the resolved
 /// ENDPOINT and its `repo_chosen` provenance — *before* constructing
 /// the transport, so a credential-bearing HTTP/S3 transport is never
@@ -418,7 +418,7 @@ pub(crate) struct PushRemote {
 }
 
 /// [`open_trusted`] for a push: the same trust gate and transport, plus the
-/// grant pre-check a split push needs (WP-1.17b, B5).
+/// grant pre-check a split push needs.
 ///
 /// # Errors
 /// As [`open_trusted`].
@@ -455,7 +455,7 @@ pub(crate) fn open_trusted_for_push(
     })
 }
 
-/// The single chokepoint that resolves SSH trust-pinning (issue #389) and
+/// The single chokepoint that resolves SSH trust-pinning and
 /// `mkit+https://` envelope-signing config from `cfg` and opens a
 /// transport. Every config-bearing caller — [`open_trusted`] (push /
 /// fetch / pull) and `clone` — routes through here, so both are resolved
@@ -495,7 +495,7 @@ fn is_connect_url(url: &str) -> bool {
 
 /// [`open_trusted`] for a Connect endpoint, returning the concrete
 /// [`ConnectTransport`] so callers can reach the epoch and visibility RPCs
-/// (WP-2.14). `sign` chooses whether the ambient signing identity is used:
+/// `sign` chooses whether the ambient signing identity is used:
 /// `mkit epoch` and statement-mode `mkit visibility set` send unsigned RPCs
 /// and pass `false`; envelope-mode visibility passes `true` and so needs
 /// `transport_auth = envelope` and a trusted remote, like `mkit push`.
@@ -688,7 +688,7 @@ pub(crate) fn owner_ed25519_signer(
 
 /// Resolve an [`mkit_transport_connect::EnvelopeSigner`] from `cfg`, when
 /// `cfg.transport_auth_envelope()` is set — `Ok(None)` otherwise (the
-/// default: bearer-token-only, unchanged from #700/#701).
+/// default: bearer-token-only, unchanged from).
 ///
 /// Reuses EXACTLY the same signer resolution as `mkit commit`'s
 /// [`crate::commands::commit::load_commit_signer`] (`cfg.signer` ==
@@ -749,8 +749,8 @@ pub(crate) fn envelope_signer_from_config(
 /// Map the three `ssh.*` trust-pinning keys from a merged [`Config`] into
 /// the [`SshOptions`] carried to the spawned `ssh(1)` child. An empty
 /// string means "unset" — `build_ssh_command` emits no flag for it, so
-/// the user's `ssh(1)` defaults are inherited. The producer half of
-/// issue #389 (the consumer half, `build_ssh_command`, wires the fields
+/// the user's `ssh(1)` defaults are inherited. The producer half of the SSH option pair
+/// (the consumer half, `build_ssh_command`, wires the fields
 /// into argv). Sole caller is [`open_with_config`].
 fn ssh_options_from_config(cfg: &crate::config::Config) -> SshOptions {
     SshOptions {
@@ -779,9 +779,9 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
 /// Scheme dispatch with explicit SSH options and an optional `mkit+https://`
 /// / `mkit+http://` envelope signer. Identical to [`open`] for every
 /// non-SSH, non-Connect scheme; the `mkit+ssh://` branch threads
-/// `ssh_options` (issue #389) into the spawned `ssh(1)` child via
+/// `ssh_options` into the spawned `ssh(1)` child via
 /// [`SshTransport::connect_with_options`], and the `mkit+https://`/
-/// `mkit+http://` branch threads `envelope_signer` (issue #699 follow-up)
+/// `mkit+http://` branch threads `envelope_signer`
 /// into [`ConnectTransport::connect_with_signer`]. Reached via [`open`]
 /// (no config — both `None`/default) and [`open_with_config`] for non-Connect
 /// schemes; `open_with_config` handles Connect URLs itself, so the Connect
@@ -839,7 +839,7 @@ fn open_with_ssh_options(
     }
     if url.starts_with("mkit+ssh://") {
         // Parse the URL, then spawn `ssh(1)` with the caller-supplied
-        // trust-pinning options (issue #389). `connect_with_options`
+        // trust-pinning options. `connect_with_options`
         // performs the `Hello` / `HelloResponse` handshake. Any failure
         // here tears the child down before returning, so callers never
         // see a half-initialised transport.
@@ -1070,7 +1070,7 @@ pub fn push_branch(
 /// `MKIT_PACK_REBASELINE_DEPTH` env var, default 64). `0` disables
 /// re-baselining. Semantics are otherwise identical — see [`push_branch`].
 ///
-/// This is the depth-policy seam (#547): integration tests inject a small
+/// This is the depth-policy seam: integration tests inject a small
 /// threshold (e.g. 3) to exercise the re-baseline path in-process with a
 /// handful of pushes, where reaching the default threshold would take ~64
 /// real pushes and the env-var override cannot be set on the test's own
@@ -1096,10 +1096,10 @@ pub fn push_branch_with_depth(
 }
 
 /// [`push_branch_with_depth`] with an explicit per-pack payload cap in
-/// place of the format's hardcoded [`pack::MAX_TOTAL_PAYLOAD`] (issue
-/// #831). Semantics are otherwise identical — see [`push_branch`].
+/// place of the format's hardcoded [`pack::MAX_TOTAL_PAYLOAD`].
+/// Semantics are otherwise identical — see [`push_branch`].
 ///
-/// This is the payload-cap test seam, mirroring the #547
+/// This is the payload-cap test seam, mirroring the
 /// `rebaseline_threshold` pattern: integration tests inject a tiny cap
 /// (a few KiB) to exercise multi-pack splitting in-process without
 /// moving a multi-GiB plan through it.
@@ -1181,8 +1181,8 @@ pub fn push_branch_steps(
     .map_err(Into::into)
 }
 
-/// [`pull_all_with`] with signature verification on — the CLI's default
-/// (issue #692). Existing in-process callers (the integration-test suite)
+/// [`pull_all_with`] with signature verification on — the CLI's default.
+/// Existing in-process callers (the integration-test suite)
 /// that construct only validly-signed histories are unaffected.
 pub fn pull_all(
     cwd: &Path,
@@ -1217,8 +1217,8 @@ fn sync_options(
 /// `refs/remotes/default/<branch>`; see [`mkit_sync::pull`] for the contract.
 /// Returns the number of remote branches fetched.
 ///
-/// `require_signed` gates the post-fetch commit/remix/tag signature check
-/// (issue #692) — `true` (the CLI's default, see [`pull_all`]) verifies
+/// `require_signed` gates the post-fetch commit/remix/tag signature check:
+/// `true` (the CLI's default, see [`pull_all`]) verifies
 /// every newly-fetched object and fails closed; `false` is the explicit
 /// `--no-verify-signatures` / `pull.require_signed = false` opt-out.
 pub fn pull_all_with(
@@ -1243,8 +1243,8 @@ pub(crate) fn pull_all_with_source(
     Ok(report.fetch.branches_fetched)
 }
 
-/// [`fetch_all_with`] with signature verification on — the CLI's default
-/// (issue #692). Existing in-process callers (the integration-test suite)
+/// [`fetch_all_with`] with signature verification on — the CLI's default.
+/// Existing in-process callers (the integration-test suite)
 /// that construct only validly-signed histories are unaffected.
 pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
     fetch_all_with(cwd, tx, remote, true)
@@ -1254,7 +1254,7 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, 
 /// reachable from each remote ref and writes the ref into
 /// `refs/remotes/<remote>/<branch>`; see [`mkit_sync::fetch`].
 ///
-/// See [`pull_all_with`] for the `require_signed` contract (issue #692).
+/// See [`pull_all_with`] for the `require_signed` contract.
 pub fn fetch_all_with(
     cwd: &Path,
     tx: &dyn Transport,

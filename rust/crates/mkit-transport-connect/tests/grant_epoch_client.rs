@@ -1,5 +1,5 @@
 //! `ConnectTransport::{get_grant_epoch, set_grant_epoch, set_repo_visibility}`
-//! (WP-2.14, R-156) against a stub `TransportService`: what goes on the wire
+//! against a stub `TransportService`: what goes on the wire
 //! (no envelope and no `X-Repository` for the epoch RPCs; an envelope only in
 //! envelope-mode `SetRepoVisibility`), and how `unavailable` + `Retry-After`
 //! becomes `Completion::Pending` instead of an error.

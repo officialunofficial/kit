@@ -1,4 +1,4 @@
-//! `--format=json` on the mutating commands unified by issue #710:
+//! `--format=json` on the mutating commands:
 //! `commit`, `push`, `pull`, `fetch`, `merge`, `cherry-pick`, `revert`,
 //! `rebase`, `stash`, `tag`, and `verify-attest`.
 //!

@@ -142,7 +142,7 @@ fn probe_chain_errors_on_an_undownloadable_node_like_resolve_pack_chain() {
     ));
 }
 
-// ---- advance_packmap — multi-key (issue #831) -------------------
+// ---- advance_packmap — multi-key -------------------
 
 fn decode_node_at(tx: &MemoryTransport, key: Hash) -> transfer::PackListNode {
     let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();

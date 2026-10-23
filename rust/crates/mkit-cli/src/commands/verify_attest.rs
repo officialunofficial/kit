@@ -407,7 +407,7 @@ pub fn run(args: &[String]) -> u8 {
 // in-repo path-fencing policy, and the keyid<->pubkey cross-check all
 // live in `commands/trust_roots.rs` now — shared with `mkit trust
 // add/list/remove` and `mkit verify --trusted` so the three never grow
-// separate trust-file formats (issue #693). Pull the names this module
+// separate trust-file formats. Pull the names this module
 // still uses directly into scope; the `mod tests` block below resolves
 // them via `use super::*`.
 use super::trust_roots::{
@@ -570,7 +570,7 @@ mod tests {
 
     #[test]
     fn load_trust_roots_drops_keyid_pubkey_mismatch() {
-        // #223: keyid embeds pubkey `aa..`, but pubkey_hex says `bb..`.
+        // Keyid embeds pubkey `aa..`, but pubkey_hex says `bb..`.
         // The entry must be dropped, not silently trusted.
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("tr.toml");

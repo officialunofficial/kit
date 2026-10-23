@@ -7,7 +7,7 @@
 //! resolves the plan without contacting the remote.
 //!
 //! Every endpoint flows through `remote_dispatch::open_trusted`, so the
-//! #97 per-endpoint credential gate applies to named remotes too —
+//! per-endpoint credential gate applies to named remotes too —
 //! trust is keyed on the resolved ENDPOINT, never the remote name.
 
 use std::io::Write;
@@ -62,7 +62,7 @@ struct PushOpts {
     /// non-fast-forward (CAS) rejection.
     #[arg(long, value_enum, default_value = "default")]
     format: PushFormat,
-    /// Suppress transfer progress output on stderr (#711).
+    /// Suppress transfer progress output on stderr.
     #[arg(short = 'q', long)]
     quiet: bool,
 }

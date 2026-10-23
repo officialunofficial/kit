@@ -168,7 +168,7 @@ pub fn acquire(dir: &Path, name: &str, timeout: Duration) -> LockResult<RepoLock
 /// shared holders may coexist; a shared lock only conflicts with an
 /// [`acquire`] (exclusive) holder or an in-progress [`probe_exclusive`].
 ///
-/// Used by `mkit serve` (#655/MKIT-11): every live `serve` process holds
+/// Used by `mkit serve`: every live `serve` process holds
 /// a shared lock on `<common_dir>/serve.lock` for its lifetime, so
 /// [`probe_exclusive`] on that same name reports "busy" for as long as
 /// at least one `serve` is alive, without serve instances excluding each
@@ -199,7 +199,7 @@ pub fn acquire_default(dir: &Path, name: &str) -> LockResult<RepoLock> {
 /// exclusive hold has already been dropped by the time this returns), or
 /// `Ok(false)` when another process currently holds it.
 ///
-/// Used by `mkit serve`'s local-command guard (#655/MKIT-11) to detect
+/// Used by `mkit serve`'s local-command guard to detect
 /// "is at least one `serve` alive against this root?" without blocking —
 /// a local command that finds the lock busy proceeds anyway and only
 /// emits a warning (see `mkit-cli`'s `commands::warn_if_served`).
@@ -410,7 +410,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // #635 / INV-16 / INV-17 — blocking-wait regression tests.
+    // INV-16 / INV-17 — blocking-wait regression tests.
     // -----------------------------------------------------------------
 
     /// INV-16: a lockfile orphaned by a process that died mid-hold must
@@ -465,7 +465,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // MKIT-11 — shared lock + non-blocking exclusive probe.
+    // Shared lock + non-blocking exclusive probe.
     // -----------------------------------------------------------------
 
     /// Two shared holders may coexist on the same lock name: this is

@@ -55,8 +55,8 @@ pub const COMMIT_DOMAIN: &[u8] = b"mkit.commit\x00";
 /// including the trailing `\x00`.
 pub const REMIX_DOMAIN: &[u8] = b"mkit.remix\x00";
 
-/// Domain separator used when signing annotated/signed tag objects
-/// (issue #230). Nine bytes including the trailing `\x00`.
+/// Domain separator used when signing annotated/signed tag objects.
+/// Nine bytes including the trailing `\x00`.
 ///
 /// DELIBERATELY DISTINCT from [`COMMIT_DOMAIN`] / [`REMIX_DOMAIN`] so a
 /// tag signature can never be replayed as a commit/remix signature, or

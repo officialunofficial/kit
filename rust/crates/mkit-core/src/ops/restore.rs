@@ -669,7 +669,7 @@ fn restore_tree_inner(
 /// chunks before writing them (as `restore_blob_with` does, to give a
 /// parallel `read_chunks` something to fan out) would raise this path's
 /// peak memory from one chunk (≤256 KiB) to a full [`RESTORE_CHUNK_BATCH`]
-/// batch (≤16 MiB) for no benefit, regressing issue #828's original
+/// batch (≤16 MiB) for no benefit, regressing the original
 /// "reassemble without ever holding more than one chunk" guarantee on a
 /// path that can never use the extra batch size for anything.
 fn restore_blob(
@@ -729,8 +729,8 @@ where
         Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable)?,
         Object::ChunkedBlob(cb) => {
             // Stream each batch straight to the open tmp file instead of
-            // concatenating the whole reassembled file into memory first
-            // (issue #828): peak memory is one `batch_size`-chunk batch
+            // concatenating the whole reassembled file into memory first.
+            // Peak memory is one `batch_size`-chunk batch
             // (bounded, see this function's doc), not the file's total
             // size. Batching (rather than one chunk at a time) lets a
             // parallel-capable `read_chunks` fan a batch's independent

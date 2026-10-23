@@ -10,7 +10,7 @@
 //!
 //! `#[ignore]`d: requires `python3` with the `cryptography` package
 //! installed (`pip install cryptography`), which isn't guaranteed on
-//! every CI runner (in particular Cloud Build's pinned `_CI_IMAGE`).
+//! every CI runner.
 //! Run manually with `cargo test --test dsse_cross_verify -- --ignored`
 //! after `pip install cryptography` when touching DSSE envelope or PAE
 //! code.

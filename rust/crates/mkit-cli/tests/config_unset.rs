@@ -1,5 +1,5 @@
 //! `mkit config --unset <key>` and `--local`/`--global` scope
-//! overrides (#709).
+//! overrides.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;

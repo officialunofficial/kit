@@ -1,9 +1,9 @@
-//! PR-A integration tests.
+//! Integration tests:
 //!
-//! - #205: `stash pop` runs the #176 destructive-restore guard before
+//! - `stash pop` runs the destructive-restore guard before
 //!   restoring, so a dirty unrelated file is never clobbered and the
 //!   stash entry survives a refused pop.
-//! - #222: the `worktree.lock` serialises mutating commands — a second
+//! - The `worktree.lock` serialises mutating commands — a second
 //!   mutator blocks on the held lock and ultimately fails rather than
 //!   racing the worktree/index.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
@@ -89,7 +89,7 @@ impl Repo {
     }
 }
 
-/// #205: `stash pop` must run the destructive-restore guard before it
+/// `stash pop` must run the destructive-restore guard before it
 /// touches the worktree. A dirty UNRELATED tracked file must block the
 /// pop, the file must be left untouched, and the stash entry must remain
 /// so the user can retry after cleaning up.
@@ -115,7 +115,7 @@ fn stash_pop_refuses_and_preserves_entry_when_unrelated_file_dirty() {
     // Dirty an UNRELATED tracked file with uncommitted edits.
     repo.write("other.txt", b"precious-uncommitted\n");
 
-    // Pop must be refused by the #176 guard.
+    // Pop must be refused by the guard.
     let out = fail(repo.path(), repo.xdg(), &["stash", "pop"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -127,17 +127,17 @@ fn stash_pop_refuses_and_preserves_entry_when_unrelated_file_dirty() {
     assert_eq!(
         fs::read_to_string(repo.path().join("other.txt")).unwrap(),
         "precious-uncommitted\n",
-        "refused pop must not clobber the dirty unrelated file (#205)"
+        "refused pop must not clobber the dirty unrelated file"
     );
     // ...and the stash entry survives for a retry.
     let listed = ok(repo.path(), repo.xdg(), &["stash", "list"]);
     assert!(
         String::from_utf8_lossy(&listed.stdout).contains("stash@{0}"),
-        "stash entry must survive a refused pop (#205)"
+        "stash entry must survive a refused pop"
     );
 }
 
-/// #205 happy path: with a clean worktree, `stash pop` restores the
+/// Happy path: with a clean worktree, `stash pop` restores the
 /// stashed content and drops the entry.
 #[test]
 fn stash_pop_succeeds_on_clean_worktree() {
@@ -167,14 +167,14 @@ fn stash_pop_succeeds_on_clean_worktree() {
     );
 }
 
-/// #222: while the worktree lock is held, a second mutating command must
+/// While the worktree lock is held, a second mutating command must
 /// block on it and then fail (TEMPFAIL) rather than racing the
 /// worktree/index. We acquire the lock directly (the same helper the CLI
 /// uses) and assert a concurrent `mkit add` blocks for roughly the lock
 /// timeout before failing.
-// #505 PR 5/5: blocks the full ~5s default lock timeout every run —
-// quarantined to the serial `--ignored` CI lane (cloudbuild/ci.yaml,
-// .github/workflows/rust.yml) instead of paying that wait on every
+// Blocks the full ~5s default lock timeout every run —
+// quarantined to the serial `--ignored` CI lane
+// (.github/workflows/rust.yml) instead of paying that wait on every
 // `cargo test`.
 #[test]
 #[ignore = "blocks the full ~5s worktree-lock timeout; run via the serial --ignored CI lane"]

@@ -1166,7 +1166,7 @@ mod tests {
 
     #[test]
     fn blame_m_detects_sub_block_move_adjacent_to_new_line() {
-        // Review P1: a moved block sitting next to a genuinely-new line.
+        // A moved block sitting next to a genuinely-new line.
         // Parent: LONG1, LONG2, B, C. Child: B, C, NEW, LONG1, LONG2.
         // git -M credits LONG1/LONG2 to the parent and keeps NEW on the
         // child; whole-run matching would miss it (the run NEW+LONG1+LONG2
@@ -1201,7 +1201,7 @@ mod tests {
 
     #[test]
     fn blame_w_c_detects_copy_with_whitespace_change() {
-        // Review P1: a block copied into a new file *with a reindent*.
+        // A block copied into a new file *with a reindent*.
         // Under plain -C the changed whitespace hides the copy; under
         // -w -C it must still be credited to the origin commit. Verified
         // against real `git blame -w -C`.
@@ -1343,7 +1343,7 @@ mod tests {
 
     #[test]
     fn blame_w_c_credits_copy_through_prior_whitespace_edit() {
-        // Review P1: the copy *source* must be blamed with the active `-w`,
+        // The copy *source* must be blamed with the active `-w`,
         // so a copied block traces through a prior whitespace-only edit in
         // the source file. d1 = indented block; d2 dedents it (ws-only); d3
         // copies it to b.txt. `git blame -w -C` credits d1, not the d2
@@ -1389,7 +1389,7 @@ mod tests {
 
     #[test]
     fn blame_c_credits_copy_through_prior_same_file_move() {
-        // Review P1: the copy *source* must be blamed with the implied `-M`,
+        // The copy *source* must be blamed with the implied `-M`,
         // so a copied block traces through a prior same-file move in the
         // source. d1 = block then X,Y; d2 moves the block below X,Y; d3
         // copies it to b.txt. `git blame -C` credits d1, not the d2 move.
@@ -1452,7 +1452,7 @@ mod tests {
 
     #[test]
     fn blame_m_many_single_line_moves_no_stack_overflow() {
-        // Review P1 (#2): N independent single-line moves used to recurse N
+        // N independent single-line moves used to recurse N
         // deep. With the work-stack it must just complete. Reverse 400 long,
         // distinct lines: each is its own move block, so all revert to c_a.
         let (_d, store) = fresh_store();
@@ -1482,7 +1482,7 @@ mod tests {
 
     #[test]
     fn blame_m_large_new_block_terminates() {
-        // Review P1 (#1): a large genuinely-new block with no move/copy
+        // A large genuinely-new block with no move/copy
         // match must not blow up the (previously cubic) search. 3000 new,
         // distinct lines that appear in no source: all stay on the editing
         // commit, and the call returns promptly via the source key-index.
@@ -1581,7 +1581,7 @@ mod tests {
 
     #[test]
     fn blame_w_keeps_position_for_whitespace_equal_duplicate() {
-        // Regression (PR #464 review P1): old `ab`, new `ab` + `a b`.
+        // Regression: old `ab`, new `ab` + `a b`.
         // Stripping whitespace collapses both new lines to the key `ab`,
         // so a position-blind LCS would pair the *second* new line with
         // the old one and report line 1 as new — the reverse of git.
@@ -1603,8 +1603,8 @@ mod tests {
 
     #[test]
     fn blame_w_blank_line_duplicate_is_position_stable() {
-        // The same duplicate-key hazard with blank lines (review P1 calls
-        // it out explicitly): inserting a second blank line must credit the
+        // The same duplicate-key hazard with blank lines:
+        // inserting a second blank line must credit the
         // *added* blank to the new commit and leave the original blank on
         // its commit, matching `git blame -w` (verified against real git).
         let (_d, store) = fresh_store();
@@ -2013,7 +2013,7 @@ mod tests {
         );
     }
 
-    // --- `--ignore-rev-precise` (#496) ---------------------------------
+    // --- `--ignore-rev-precise` ---------------------------------
 
     #[test]
     fn blame_ignore_rev_precise_reattributes_moved_reindented_lines() {
@@ -2029,7 +2029,7 @@ mod tests {
         // across the WHOLE file (not just the enclosing hunk), so it finds
         // YYY's and XXX's true origins even though the positional pass
         // found no local candidate for either. Not pinned against git — no
-        // git equivalent exists; documented mkit-only divergence (#496).
+        // git equivalent exists; documented mkit-only divergence.
         let (_d, store) = fresh_store();
         let c0 = put_file_commit(&store, "f.txt", b"keep\ntail\n", vec![], 1, 100);
         let c1 = put_file_commit(&store, "f.txt", b"keep\nXXX\ntail\n", vec![c0], 2, 200);
@@ -2189,7 +2189,7 @@ mod tests {
 
     #[test]
     fn precise_overrides_never_teleports_edited_line_worse_than_positional() {
-        // Regression for the #523 review counterexample proving the earlier
+        // Regression for the review counterexample proving the earlier
         // "never worse than positional" claim FALSE. The fix makes it true
         // by construction: a slot whose positional guess is already a real
         // parent line (`Some(j)`) is only re-pointed by a *genuine moved
@@ -2254,7 +2254,7 @@ mod tests {
 
     #[test]
     fn precise_overrides_reindented_brace_does_not_teleport_without_w() {
-        // Regression for #523 finding #2: without `-w`, `line_key` keeps raw
+        // Regression: without `-w`, `line_key` keeps raw
         // bytes, so a reindented `"    }"` is a 5-byte key that clears a
         // naive `len < 3` guard and would teleport to any other same-indent
         // `"    }"` in the parent. The trivial-key guard now measures the
@@ -2457,7 +2457,7 @@ mod tests {
         assert!(matches!(err, BlameError::FileNotFound(_)), "got {err:?}");
     }
 
-    // ---- merge-aware walk (#458) -----------------------------------------
+    // ---- merge-aware walk -----------------------------------------
     // All scenarios verified against real `git blame` / `git blame
     // --first-parent` (2.50.1); mkit hashes differ, so assert by commit.
 
@@ -3568,7 +3568,7 @@ mod tests {
 
     #[test]
     fn blame_c_merge_boundary_copy_from_second_parent() {
-        // -C merge residual #2, closed. Real git recipe (git 2.50.1): the
+        // -C merge residual, closed. Real git recipe (git 2.50.1): the
         // blamed file (`b.txt`) is ADDED by the merge — no parent contains
         // it at all — and its sole copy source lives on the SECOND parent:
         //   base: base.txt="base"

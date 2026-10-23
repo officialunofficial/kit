@@ -1,4 +1,4 @@
-//! `mkit clone -b <branch> -o <name>` (#709): land on an explicit
+//! `mkit clone -b <branch> -o <name>`: land on an explicit
 //! branch instead of the remote's default, and name the persisted
 //! remote instead of the implicit flat `default`.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers

@@ -1,5 +1,5 @@
 //! Per-key end-to-end regression tests for the hostile-clone config
-//! attack surface tracked in #97 and GHSA-001. Each test plants a
+//! attack surface of GHSA-001. Each test plants a
 //! `.mkit/config` containing exactly one forbidden key, runs `mkit
 //! config <key>` against the repo, and asserts:
 //!

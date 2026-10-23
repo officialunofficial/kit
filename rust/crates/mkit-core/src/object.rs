@@ -33,7 +33,7 @@ pub enum ObjectType {
     Remix = 0x04,
     ChunkedBlob = 0x05,
     Delta = 0x06,
-    /// Annotated / signed tag. New in v1 (issue #230). See
+    /// Annotated / signed tag. New in v1. See
     /// `SPEC-OBJECTS.md` §6a and [`Tag`].
     Tag = 0x07,
 }
@@ -693,7 +693,7 @@ pub enum MkitError {
     /// with a misleading "length mismatch".
     #[error("delta length {len} exceeds u32::MAX for field `{field}`")]
     DeltaLengthOverflow { field: &'static str, len: usize },
-    /// Structural corruption in a v1 delta instruction stream (MKIT-13):
+    /// Structural corruption in a v1 delta instruction stream:
     /// anything `delta::decode` rejects that is neither a version
     /// mismatch ([`Self::UnsupportedObjectVersion`]) nor a truncated
     /// stream ([`Self::UnexpectedEof`]). Distinct from

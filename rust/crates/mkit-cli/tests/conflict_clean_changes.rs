@@ -1,4 +1,4 @@
-//! #269 regression: the conflict workflow must apply an operation's
+//! Regression: the conflict workflow must apply an operation's
 //! *clean* (non-conflicting) changes to the index/worktree, and must
 //! refuse `--continue` when a regular conflicted file was resolved in the
 //! worktree but not staged. Exercised via cherry-pick (the shared
@@ -84,7 +84,7 @@ fn continue_preserves_clean_changes_alongside_a_conflict() {
         "cherry-pick should conflict on a.txt"
     );
 
-    // #269: the clean add must already be applied to the worktree (not
+    // The clean add must already be applied to the worktree (not
     // deferred until some later step that never staged it).
     assert!(
         root.join("b.txt").exists(),
@@ -154,7 +154,7 @@ fn continue_refuses_unstaged_deletion_resolution() {
     assert!(!out.status.success(), "cherry-pick should conflict");
 
     // Resolve by DELETING the conflicted file, but forget `mkit rm` — the
-    // stale staged ours-entry would otherwise be committed (#269 finding 1).
+    // stale staged ours-entry would otherwise be committed.
     fs::remove_file(root.join("a.txt")).unwrap();
     let cont = run_in(root, &["cherry-pick", "--continue"]);
     assert!(

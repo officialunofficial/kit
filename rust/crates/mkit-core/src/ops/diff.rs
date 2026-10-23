@@ -757,7 +757,6 @@ struct MergeRegion {
 /// conflict. Identical `ours`/`theirs` merge trivially. Unlike a full
 /// diff3 this does not auto-resolve *identical overlapping* edits (those
 /// stay a conflict): it errs toward conflict, never toward a wrong merge.
-/// (#298)
 #[must_use]
 pub fn merge_blob_3way(base: &[u8], ours: &[u8], theirs: &[u8]) -> Option<Vec<u8>> {
     if ours == theirs {
@@ -900,7 +899,7 @@ pub fn diff_line_counts(old_bytes: &[u8], new_bytes: &[u8]) -> Option<(usize, us
 /// most this many leading bytes. Exposed so a caller that only needs the
 /// classification — not a diff — can read just this much of a blob (e.g.
 /// [`crate::worktree::LoadedBlob::prefix`]) instead of paying for full
-/// content, which matters for a chunked blob (mkit#606).
+/// content, which matters for a chunked blob.
 pub const BINARY_SNIFF_LEN: usize = 8000;
 
 /// Git's binary heuristic (`buffer_is_binary`): a NUL byte within the
@@ -1344,11 +1343,11 @@ pub enum DiffError {
 /// Compare HEAD ↔ index and index ↔ worktree, returning a list of
 /// [`StatusEntry`] grouped by staging state.
 ///
-/// Pre-#102 this function diffed only HEAD↔worktree and annotated
+/// Pre-fix this function diffed only HEAD↔worktree and annotated
 /// each entry with index-state. That hid one hazard: a path staged
 /// to the index whose worktree was later reverted to match HEAD
 /// would diff to nothing — but `mkit commit` (which signs HEAD↔
-/// index post-#102) would still commit the staged content. The
+/// index post-fix) would still commit the staged content. The
 /// staged change was invisible to `mkit status`.
 ///
 /// New shape:
@@ -2384,7 +2383,7 @@ mod tests {
         }
     }
 
-    // ---- merge_blob_3way (#298) ----
+    // ---- merge_blob_3way ----
 
     #[test]
     fn merge3_identical_sides_merge_trivially() {
@@ -2405,7 +2404,7 @@ mod tests {
 
     #[test]
     fn merge3_adjacent_line_edits_auto_merge() {
-        // The motivating #298 case: line 1 changed on one side, line 2 on the
+        // The motivating case: line 1 changed on one side, line 2 on the
         // other. Adjacent but non-overlapping → clean merge, no conflict.
         let base = b"x\ny\n";
         let ours = b"X\ny\n"; // line 1
@@ -2457,7 +2456,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // unified_hunks_opts — WhitespaceMode (#712)
+    // unified_hunks_opts — WhitespaceMode
     // -----------------------------------------------------------------
 
     #[test]
@@ -2536,7 +2535,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // unified_hunks_opts — context-line count (#712)
+    // unified_hunks_opts — context-line count
     // -----------------------------------------------------------------
 
     fn ten_lines_changing_the_fifth() -> (Vec<u8>, Vec<u8>) {

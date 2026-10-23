@@ -1,5 +1,5 @@
-//! `mkit mv` — guarded move/rename, driven end-to-end through the binary
-//! (#250). These tests assert the worktree move and the staged/committed
+//! `mkit mv` — guarded move/rename, driven end-to-end through the binary.
+//! These tests assert the worktree move and the staged/committed
 //! result; the `R` rename rendering it now produces in `status`/`diff` is
 //! covered in `rename_detection.rs`.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers

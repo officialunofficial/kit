@@ -27,7 +27,7 @@ struct PullOpts {
     /// Named remote to pull from (default: the flat default remote).
     remote: Option<String>,
     /// Skip Ed25519 signature verification on newly-fetched commits/
-    /// remixes/tags (issue #692). Verification is ON by default and fails
+    /// remixes/tags. Verification is ON by default and fails
     /// closed on an unsigned or invalid signature — this flag, or the
     /// user-scoped `pull.require_signed = false` config, is the only way
     /// to opt out. Not settable from repo-scoped config.
@@ -45,7 +45,7 @@ struct PullOpts {
     /// `--all`, one JSON object is printed per remote pulled.
     #[arg(long, value_enum, default_value = "default")]
     format: PullFormat,
-    /// Suppress transfer progress output on stderr (#711).
+    /// Suppress transfer progress output on stderr.
     #[arg(short = 'q', long)]
     quiet: bool,
 }
@@ -69,7 +69,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(c) => c,
         Err(e) => return emit_err_json(&format!("config: {e}"), exit::CONFIG_ERROR, json),
     };
-    // Fail closed by default (issue #692): verify unless `--no-verify-signatures`
+    // Fail closed by default: verify unless `--no-verify-signatures`
     // or the user-scoped `pull.require_signed = false` config opted out.
     let require_signed = !opts.no_verify_signatures && cfg.merged.pull_require_signed_or_default();
     if opts.all {
@@ -252,7 +252,7 @@ fn print_ff_stat(layout: &RepoLayout, old: Hash, new: Hash) {
     };
     if let Ok(result) = mkit_core::ops::diff_trees(&store, Some(old_tree), Some(new_tree)) {
         let mut stderr = std::io::stderr().lock();
-        // `render_stat` hoists its own `DisplaySource` wrapping (#625).
+        // `render_stat` hoists its own `DisplaySource` wrapping.
         let _ = super::diff::render_stat(&mut stderr, &store, result.entries.iter());
     }
 }

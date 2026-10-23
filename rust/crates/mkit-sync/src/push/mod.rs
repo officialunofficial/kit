@@ -512,7 +512,7 @@ fn push_branch_once(
         return Err(PushError::Sync(SyncError::Interrupted));
     }
 
-    // Re-baseline decision (#406/#521), made only now that we know there IS
+    // Re-baseline decision, made only now that we know there IS
     // something to send: walk the current chain exactly once and decide
     // whether this push should reset the chain to a single self-contained
     // node instead of appending. When NOT re-baselining, the walk is cached
@@ -595,7 +595,7 @@ fn push_branch_once(
     // "too many" only keeps the append plan.)
 
     // Build the plan into one or more payload-bounded packs (splitting
-    // when the plan exceeds `pack_payload_cap`, issue #831) and upload
+    // when the plan exceeds `pack_payload_cap`) and upload
     // each as it's sealed. Raws first (non-blobs before blobs), then
     // deltas (their bases are external — resolved from the fetcher's
     // store via earlier packs, never a base introduced earlier in THIS
@@ -621,7 +621,7 @@ fn push_branch_once(
     )?;
 
     // Chain the pack(s) onto the packmap AND move the head together
-    // (#408): a transactional transport applies both atomically, the
+    // A transactional transport applies both atomically, the
     // default does packmap-then-head. Either way the head never lands
     // past a packmap that can't reconstruct it. `Append`'s
     // `self_contained` lets a full-closure push reset a broken chain
@@ -658,7 +658,7 @@ fn plan_branch(
         plan
     } else {
         let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
-        // Plan FIRST, against the remote's current tip (#521 perf): a no-op push
+        // Plan FIRST, against the remote's current tip (for speed): a no-op push
         // (the remote already holds this closure) yields an empty plan and takes
         // the cheap head-only path below WITHOUT walking the packmap chain. Only
         // a push that actually has objects to send pays the O(depth) chain probe.
@@ -831,7 +831,7 @@ fn build_and_upload_packs(
                 )?;
             }
             w.push_prepared_raw(entry)?;
-            // Honest progress (#711): one real object just got staged into
+            // Honest progress: one real object just got staged into
             // the outgoing pack. Never git's fabricated
             // Enumerating/Counting/Compressing lines — see `SyncEvent`.
             report_packed(sink, observer);
@@ -880,7 +880,7 @@ fn build_and_upload_packs(
     Ok(pack_keys)
 }
 
-/// Honest progress (#711): one real object just got staged into the outgoing
+/// Honest progress: one real object just got staged into the outgoing
 /// pack. Never git's fabricated Enumerating/Counting/Compressing lines — see
 /// `SyncEvent`. A dry seal stages nothing to send and reports nothing.
 fn report_packed(sink: PackSink<'_>, observer: &dyn SyncObserver) {
@@ -933,7 +933,7 @@ fn size_capped_batch_lens(sizes: &[u64], payload_cap: u64, max_entries: usize) -
 /// [`prepare_delta_batch`] read + zstd-compress sequentially instead of
 /// fanning out across rayon's thread pool, for a pool of a given size.
 /// Same crossover shape as `add.rs`'s `HASH_FANOUT_FILES_PER_THREAD`
-/// (PR #951) — rayon's pool-dispatch overhead loses to a plain loop
+/// — rayon's pool-dispatch overhead loses to a plain loop
 /// below a few entries per thread and wins clearly above it — measured
 /// for the pack-build path specifically with `cargo bench -p
 /// mkit-benches --bench pack_build_fanout`.

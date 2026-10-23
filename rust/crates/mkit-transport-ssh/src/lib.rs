@@ -1192,7 +1192,7 @@ mod tests {
         assert_eq!(out, vec![1, 2, 3, 4]);
     }
 
-    // --- upload_pack_streaming / download_pack_streaming (issue #702) ---
+    // --- upload_pack_streaming / download_pack_streaming ---
 
     /// Test-only adapter mirroring [`read_download_pack_body`]: drives
     /// [`assemble_download_pack_stream`] from a generic in-memory reader
@@ -1403,9 +1403,9 @@ mod tests {
     }
 
     #[test]
-    // #505 PR 5/5: spawns a real external `sleep 5` child process —
-    // quarantined to the serial `--ignored` CI lane (cloudbuild/ci.yaml,
-    // .github/workflows/rust.yml) instead of paying real subprocess
+    // Spawns a real external `sleep 5` child process —
+    // quarantined to the serial `--ignored` CI lane
+    // (.github/workflows/rust.yml) instead of paying real subprocess
     // spawn/kill overhead on every `cargo test`.
     #[ignore = "spawns a real external subprocess; run via the serial --ignored CI lane"]
     fn wait_child_timeout_kills_stalled_child() {
@@ -1605,7 +1605,7 @@ mod tests {
         );
     }
 
-    // --- build_ssh_command argv wiring (issue #389) ----------------------
+    // --- build_ssh_command argv wiring ----------------------
 
     /// Collect the argv tokens of a built `Command` as owned strings so
     /// tests can assert on the spawned `ssh(1)` command line.
@@ -1632,7 +1632,7 @@ mod tests {
 
     /// A fully-populated `SshOptions` must surface as the documented
     /// `-o StrictHostKeyChecking=… -o UserKnownHostsFile=… -i …` flags
-    /// (SSH-SECURITY.md §3). This is the consumer half of issue #389 —
+    /// (SSH-SECURITY.md §3). This is the consumer half of —
     /// it already worked, but the test pins the exact flag form so the
     /// producer wiring has a contract to satisfy.
     #[test]

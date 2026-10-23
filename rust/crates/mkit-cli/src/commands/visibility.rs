@@ -1,4 +1,4 @@
-//! `mkit visibility set` (WP-2.14, R-156): switch a repository between public
+//! `mkit visibility set`: switch a repository between public
 //! and private (SPEC-WRITE-GRANTS §9.1).
 //!
 //! Two modes, chosen by `--statement`:

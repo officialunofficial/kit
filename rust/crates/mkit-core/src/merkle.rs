@@ -86,7 +86,7 @@
 //! (`verify_tree_entry`, `verify_chunk`, and their range/multi
 //! counterparts), never the bare inner root — passing a caller the inner
 //! root invited skipping the type-domain wrap and accepting, say, a
-//! `Tree` proof against a `ChunkedBlob` id (issue #1015 §Security). The
+//! `Tree` proof against a `ChunkedBlob` id (SPEC-DISCLOSURE). The
 //! inner-root-comparing primitives (`Proof::verify_element_inclusion` and
 //! friends) stay `pub(crate)`, kept only so the cross-check test can
 //! compare directly against upstream's verifiers.
@@ -655,7 +655,7 @@ impl Proof {
     /// which need to show the *bare* BMT proof accepts a position/leaf the
     /// id-based verifier must still reject. Every real caller MUST use the
     /// id-based [`verify_tree_entry`] / [`verify_chunk`], which close the
-    /// inner-root-vs-id confusion footgun (issue #1015 §Security) — so this
+    /// inner-root-vs-id confusion footgun (SPEC-DISCLOSURE) — so this
     /// is deliberately not reachable outside tests, not just `pub(crate)`.
     #[cfg(test)]
     pub(crate) fn verify_element_inclusion(
@@ -987,7 +987,7 @@ pub fn verify_chunks_multi(
 /// [`verify_chunk`]'s "reject a caller-supplied position 0" rule is
 /// unaffected — that guards a different, single-leaf proof shape; this
 /// one always proves exactly `{0, chunk_position}` together. Used by
-/// `crate::verify` (issue #1015 verifier kit PR 2, SPEC-DISCLOSURE) to
+/// `crate::verify` (SPEC-DISCLOSURE) to
 /// authenticate a disclosed chunk's `total_size`/`chunk_size`
 /// announcement alongside its content id, in a single proof.
 pub(crate) fn verify_chunk_with_meta_leaf(
@@ -1231,7 +1231,7 @@ mod tests {
     #[test]
     fn single_leaf_tree_proof_has_no_siblings() {
         // Odd trailing node at every level up to the root: the proof must
-        // omit the self-duplicate sibling entirely (issue #1015: the old
+        // omit the self-duplicate sibling entirely (the old
         // format wrongly emitted it).
         let t = tree(vec![entry(b"only", EntryMode::Blob, 1)]);
         let id = compute_tree_id(&t);
@@ -1283,7 +1283,7 @@ mod tests {
     fn empty_tree_builders_refuse_position_zero() {
         // SPEC-MERKLE-OBJECTS §5.4: position 0 of the empty `Tree`
         // (leaf_count 0), including the range `0..=0`, MUST be refused
-        // rather than answered with the all-default proof (MKIT-56).
+        // rather than answered with the all-default proof.
         let empty = tree(vec![]);
         assert_eq!(
             build_tree_entries_range_proof(&empty, 0, 0),
@@ -1406,7 +1406,7 @@ mod tests {
         /// single/range/multi positions, mkit's encoded bytes must equal
         /// upstream's, and each side's verifier must accept the other's
         /// bytes/positions against the (matching) inner root. A mutated
-        /// proof must be rejected by both. Pins issue #1015's
+        /// proof must be rejected by both. Pins the
         /// "commonware-aligned bytes" claim beyond the root-only check
         /// above.
         #[test]

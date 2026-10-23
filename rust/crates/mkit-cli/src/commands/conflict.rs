@@ -1,11 +1,11 @@
-//! Shared CLI helpers for the resolvable-conflict workflow (#177).
+//! Shared CLI helpers for the resolvable-conflict workflow.
 //!
 //! Materialises conflict material into the worktree + index, classifies
 //! each conflict into a presentation class, and scans for leftover
 //! conflict markers so `--continue` can refuse to proceed while the user
 //! has not resolved a textual conflict.
 //!
-//! Materialisation always honours the #176 restore guards: callers run
+//! Materialisation always honours the restore guards: callers run
 //! [`super::ensure_restore_safe`] over the conflict-time tree before
 //! invoking [`materialize_conflicts`], so dirty tracked files and
 //! untracked collisions are never clobbered.
@@ -78,7 +78,7 @@ fn side_is_blob_or_absent(store: &ObjectStore, side: Option<Hash>) -> bool {
 
 /// `true` when a side's tree mode is a symlink or executable — shapes
 /// that conflict markers cannot represent and that must round-trip their
-/// exact mode (#214).
+/// exact mode.
 fn side_is_special_mode(mode: Option<EntryMode>) -> bool {
     matches!(mode, Some(EntryMode::Symlink | EntryMode::Executable))
 }
@@ -98,7 +98,7 @@ pub fn classify(store: &ObjectStore, c: &Conflict) -> Result<ConflictClass, Stri
             {
                 return Ok(ConflictClass::Special);
             }
-            // Symlink / executable on either side (#214): the merge
+            // Symlink / executable on either side: the merge
             // engine now carries the real `EntryMode`, so we route these
             // to Special unambiguously instead of guessing from bytes.
             // Writing conflict markers into a symlink target is
@@ -143,7 +143,7 @@ pub fn classify(store: &ObjectStore, c: &Conflict) -> Result<ConflictClass, Stri
 /// "ours" at every conflicted path and the clean changes everywhere
 /// else). It is applied to the index + worktree FIRST — otherwise the
 /// non-conflicting changes would never reach the index and `--continue`
-/// (which builds from the index) would silently drop them (#269). The
+/// (which builds from the index) would silently drop them. The
 /// caller runs [`super::ensure_restore_safe`] over `merged_tree` first,
 /// so this never clobbers dirty tracked or untracked content. Conflict
 /// markers are then overlaid on the conflicted paths.
@@ -193,7 +193,7 @@ pub fn materialize_conflicts(
             }
             ConflictClass::DeleteModify => {
                 // Keep the surviving (modified) side in the worktree,
-                // honouring its exec/symlink mode (#214).
+                // honouring its exec/symlink mode.
                 materialize_conflict_side(store, &abs, c)?;
                 let _ = writeln!(
                     stderr,
@@ -235,7 +235,7 @@ fn status_for_mode(mode: EntryMode) -> EntryStatus {
 /// removed when ours deleted it). Keeps the index a single-stage
 /// resolved snapshot.
 ///
-/// The ours-side [`EntryMode`] carried on the [`Conflict`] (#214) is
+/// The ours-side [`EntryMode`] carried on the [`Conflict`] is
 /// preserved into the staged [`EntryStatus`] so executable bits and
 /// symlinks survive `--continue` across merge / cherry-pick / rebase —
 /// `build_tree_from_index` derives the committed tree mode from the
@@ -288,7 +288,7 @@ fn write_text_markers(abs: &Path, ours: &[u8], theirs: &[u8]) -> Result<(), Stri
 }
 
 /// Materialise the surviving side of a binary / special conflict into
-/// the worktree, honouring its tree mode (#214).
+/// the worktree, honouring its tree mode.
 ///
 /// We prefer the ours-side (the side `stage_ours` records in the index)
 /// so the worktree file and the staged index entry agree; if ours is
@@ -693,7 +693,7 @@ pub fn reset_conflict_paths(
         let abs = root.join(path);
         if let Some(target_entry) = target_map.get(path.as_str()) {
             // Restore the path's pre-op content + index entry, honouring
-            // the recorded symlink/exec mode (#214).
+            // the recorded symlink/exec mode.
             match target_entry.status {
                 EntryStatus::Symlink => {
                     write_symlink_to_worktree(store, &abs, target_entry.object_hash)?;
@@ -808,7 +808,7 @@ fn worktree_object(store: &ObjectStore, abs: &Path) -> Result<Option<(EntryStatu
 /// Refuse `--continue` when a conflicted path's worktree resolution does
 /// not match what is staged in the index. The final tree is built from
 /// the index, so any unstaged resolution would be silently dropped and
-/// then overwritten by the worktree restore (#269).
+/// then overwritten by the worktree restore.
 ///
 /// This compares the worktree's canonical `(status, hash)` against the
 /// staged index entry, so it catches every shape of unstaged resolution:
@@ -816,7 +816,7 @@ fn worktree_object(store: &ObjectStore, abs: &Path) -> Result<Option<(EntryStatu
 /// (file→symlink, file→dir) without `mkit rm`/`mkit add`, etc. An
 /// *unchanged* conflict (worktree still equals the staged ours-side,
 /// including its exec/symlink mode) matches and continues without a
-/// re-`add` — preserving the #214 mode-resolution contract.
+/// re-`add` — preserving the mode-resolution contract.
 ///
 /// # Errors
 /// Returns a message naming the first unstaged-resolution path.
@@ -837,7 +837,7 @@ pub fn ensure_conflict_paths_staged(
             // deletion is recorded; consistent.
             (None, None) => true,
             // Worktree content matches the live staged entry exactly
-            // (content + mode) → resolved (incl. the unchanged #214 case).
+            // (content + mode) → resolved (including an unchanged mode).
             (Some((ws, wh)), Some(e)) => *ws == e.status && *wh == e.object_hash,
             // Worktree has content but nothing live staged, or worktree
             // gone while content is still staged → unstaged resolution.

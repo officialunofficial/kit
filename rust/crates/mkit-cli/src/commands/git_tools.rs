@@ -420,7 +420,7 @@ fn render_patch(
     let mut buf: Vec<u8> = Vec::new();
     for e in &diff.entries {
         let mut one: Vec<u8> = Vec::new();
-        // Deliberately NOT wrapped in `DisplaySource` (#625): this patch
+        // Deliberately NOT wrapped in `DisplaySource`: this patch
         // body is format-patch-style output that `git am` applies into new
         // commits elsewhere, not a render a human just glances at.
         // Corruption here must surface as a loud `HashMismatch`, not
@@ -589,7 +589,7 @@ mod tests {
         assert_eq!(slug("???"), "patch");
     }
 
-    /// PR #659 review, finding 1's missing test: a `.rename.tmp.<pid>.0`
+    /// Regression test: a `.rename.tmp.<pid>.0`
     /// orphan under `.mkit/git/` — the crash debris `remote.rs`'s
     /// `rename_state_dir` can leave behind between its two renames —
     /// must not count as a second bridge state. Before the

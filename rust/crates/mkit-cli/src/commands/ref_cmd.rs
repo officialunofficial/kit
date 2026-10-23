@@ -1,7 +1,7 @@
 //! `mkit ref list [--pattern <glob>]` / `mkit ref cat <name>` — stable
-//! ref-inspection plumbing (#652).
+//! ref-inspection plumbing.
 //!
-//! The epic (#634) settled on keeping refs as plain loose files rather
+//! The design keeps refs as plain loose files rather
 //! than migrating them to a denser storage primitive, but that decision
 //! only holds up if "ls-able" is satisfied by a stable command surface
 //! rather than by shelling out to `ls`/`cat` on `.mkit/refs/`. These two

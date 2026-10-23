@@ -14,7 +14,7 @@ use mkit_fuzz::{MAX_ITER, delta_one_iteration, run_one};
 static ITERS: AtomicU32 = AtomicU32::new(0);
 
 fuzz_target!(|data: &[u8]| {
-    // Guardrail #1: stop after MAX_ITER even if libfuzzer keeps calling.
+    // Guardrail: stop after MAX_ITER even if libfuzzer keeps calling.
     let n = ITERS.fetch_add(1, Ordering::Relaxed);
     if n >= MAX_ITER {
         return;

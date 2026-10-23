@@ -2,9 +2,9 @@
 //! changed` summary, and the +/- graph, sized to the terminal.
 //!
 //! One [`LoadedBlob`] load per diff side supplies the text-vs-binary sniff,
-//! byte sizes, and line counts (#624); rendering reads display-only, without
-//! per-read hash verification (#625). Extracted from `commands/diff.rs`
-//! (#633) after two consecutive PRs grew this cluster in place.
+//! byte sizes, and line counts; rendering reads display-only, without
+//! per-read hash verification. Extracted from `commands/diff.rs`
+//! after two consecutive PRs grew this cluster in place.
 
 use std::io::Write;
 
@@ -43,7 +43,7 @@ enum StatChange {
 /// entry's sizes come from blob metadata (a chunked blob's manifest
 /// `total_size`, or an inline blob's length) with no further read at all;
 /// full content is materialized only for a text entry that actually needs
-/// line counts (#606).
+/// line counts.
 fn entry_stat_change<S: ObjectSource + ?Sized>(
     store: &S,
     e: &DiffEntry,
@@ -97,7 +97,7 @@ fn entry_stat_change<S: ObjectSource + ?Sized>(
 ///
 /// A diffstat is display-only by definition — every row is a byte size or
 /// a line count a human reads and discards — so this reads every changed
-/// blob without BLAKE3 re-verification via [`DisplaySource`] (#625).
+/// blob without BLAKE3 re-verification via [`DisplaySource`].
 /// Callers pass their source directly; the no-verify choice lives here,
 /// not at each call site.
 pub(in crate::commands) fn render_stat<'a, S: ObjectSource + ?Sized>(
@@ -286,7 +286,7 @@ fn terminal_columns() -> usize {
 
 /// Load a diff side's top-level object once — every view `render_stat`
 /// needs (sniff prefix, byte length, full content) derives from this
-/// single read. A side with no hash (add/delete) is the empty blob (#624).
+/// single read. A side with no hash (add/delete) is the empty blob.
 fn load_blob<S: ObjectSource + ?Sized>(store: &S, h: Option<Hash>) -> Result<LoadedBlob, String> {
     match h {
         Some(h) => LoadedBlob::load(store, &h).map_err(super::read_err),
@@ -337,7 +337,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // render_stat over chunked blobs (#606): binary sizing must come from
+    // render_stat over chunked blobs: binary sizing must come from
     // manifest metadata, never a full reassembly.
     // -----------------------------------------------------------------
 
@@ -562,7 +562,7 @@ mod tests {
         // object. Taking them through separate prefix + len store reads
         // re-read (and in the real store, re-hash-verified) every small
         // blob per changed file, which measurably slowed a
-        // many-small-files commit's diffstat (#624).
+        // many-small-files commit's diffstat.
         let mut store = RecordingSource::default();
         let old_hash = fake_hash(21);
         let new_hash = fake_hash(22);
@@ -632,8 +632,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // `DisplaySource` (#625): wrapping the source for display-only reads
-    // must be invisible to render output and to the #628 read-count
+    // `DisplaySource`: wrapping the source for display-only reads
+    // must be invisible to render output and to the read-count
     // guarantees above — the wrapper only changes verification.
     // -----------------------------------------------------------------
 
@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn render_stat_through_display_source_preserves_single_read_per_side() {
-        // The #624 single-read guarantee (each side's top-level object
+        // The single-read guarantee (each side's top-level object
         // read exactly once) must hold through `DisplaySource` too.
         let mut store = RecordingSource::default();
         let old_hash = fake_hash(51);
@@ -762,7 +762,7 @@ mod tests {
 
     #[test]
     fn render_stat_through_display_source_reads_no_trailing_chunks() {
-        // The #606 no-trailing-chunk-read guarantee for chunked binaries
+        // The no-trailing-chunk-read guarantee for chunked binaries
         // must hold through `DisplaySource` too.
         let mut store = RecordingSource::default();
 

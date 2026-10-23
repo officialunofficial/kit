@@ -10,7 +10,7 @@
 //!   tracked file whose worktree content differs from the staged blob.
 //!
 //! Multiple pathspecs may be given. The safety guard reuses the same
-//! "don't clobber user work" spirit as the #176 restore guards: a
+//! "don't clobber user work" spirit as the restore guards: a
 //! tracked-but-modified file is not deleted without `--force`.
 
 use std::path::{Path, PathBuf};

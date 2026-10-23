@@ -1,4 +1,4 @@
-//! PR-H1 (#228): branch/remote/stash completeness driven end-to-end
+//! Branch/remote/stash completeness driven end-to-end
 //! through the real binary.
 //!
 //! Covers:
@@ -173,7 +173,7 @@ fn branch_force_delete_removes_branch() {
 fn branch_delete_absent_errors_for_both_d_and_force() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    // Parity reconciliation (#249): like `git branch -D <missing>`, both
+    // Parity reconciliation: like `git branch -D <missing>`, both
     // `-d` and `-D` error on an absent branch — `-D` no longer silently
     // no-ops, so a typo'd name is surfaced rather than swallowed.
     let safe = run_in(root, x, &["branch", "-d", "ghost"]);

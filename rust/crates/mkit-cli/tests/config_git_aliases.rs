@@ -1,4 +1,4 @@
-//! Git-compatibility `config` aliases (#250): `user.name` /
+//! Git-compatibility `config` aliases: `user.name` /
 //! `user.email`. They round-trip like git, but are **non-authoritative** —
 //! they must never feed mkit's cryptographic commit author (which is
 //! `user.identity` / the signing key). These tests pin both the parity
@@ -194,7 +194,7 @@ fn user_name_does_not_spoof_the_signed_author() {
     );
 }
 
-// ---------- MKIT-12: warn when user.name/user.email is set without ----
+// ---------- Warn when user.name/user.email is set without ----
 // ---------- user.identity ----------------------------------------------
 
 #[test]

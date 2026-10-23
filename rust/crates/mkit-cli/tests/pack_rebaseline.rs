@@ -1,13 +1,13 @@
-//! Periodic re-baseline integration tests (#406).
+//! Periodic re-baseline integration tests.
 //!
 //! `push_branch` bounds a branch's packlist chain depth: once a push would
 //! grow the chain past the re-baseline threshold (default 64, see
 //! `remote_dispatch::packmap::rebaseline_depth`), it resets the chain to a
 //! single self-contained node instead of appending to it. This is a
 //! storage/transfer-encoding change only — every commit keeps its hash and
-//! stays checkout-able (see issue #406's "does NOT squash history" note).
+//! stays checkout-able (re-baselining does NOT squash history).
 //!
-//! ## Injecting a small threshold (#547)
+//! ## Injecting a small threshold
 //!
 //! Two seams, one per kind of test:
 //!
@@ -46,7 +46,7 @@ use mkit_transport_file::FileTransport;
 use mkit_transport_memory::MemoryTransport;
 
 /// The small threshold the in-process concurrency tests inject via
-/// `push_branch_with_depth` (#547) — reachable with a handful of pushes,
+/// `push_branch_with_depth` — reachable with a handful of pushes,
 /// unlike the default 64.
 const TEST_DEPTH: usize = 3;
 
@@ -104,7 +104,7 @@ fn all_ancestor_commit_hashes(store: &ObjectStore, tip: Hash) -> HashSet<Hash> {
 // `mkit+file://` remote (env-var injection via subprocess, see module docs).
 // ---------------------------------------------------------------------------
 
-/// Fix for mkit #521: `mkit+file://` (`FileTransport`) uses the DEFAULT,
+/// Force-push safety: `mkit+file://` (`FileTransport`) uses the DEFAULT,
 /// non-transactional `advance_refs` (packmap-then-head) — it does not
 /// override [`Transport::supports_atomic_advance`], so it inherits `false`.
 /// A proactive re-baseline reset writes a fresh node with `prev = None`,
@@ -115,9 +115,9 @@ fn all_ancestor_commit_hashes(store: &ObjectStore, tip: Hash) -> HashSet<Hash> {
 /// chain on a non-atomic transport must keep appending — never reset — and
 /// the remote must stay fully clonable throughout.
 ///
-/// This supersedes the pre-#521 version of this test (which asserted the
-/// opposite: that the chain collapses to one self-contained node here).
-/// That assertion described exactly the unsafe behavior #521 closes: on a
+/// An earlier version of this test asserted the opposite: that the chain
+/// collapses to one self-contained node here.
+/// That assertion described exactly the unsafe behavior this test now rules out: on a
 /// non-atomic transport, a divergent push racing at this same depth
 /// threshold could commit a packmap reset, lose the head CAS, and leave
 /// the remote with a head pointing at an unreconstructable closure (see
@@ -234,16 +234,16 @@ fn depth_zero_disables_rebaseline() {
 /// A [`MemoryTransport`] wrapper with a genuinely atomic `advance_refs`:
 /// both preconditions are checked under one lock before either ref is
 /// written, so a losing push never commits half of a two-ref advance.
-/// This models the transactional advance #408 provides on production
+/// This models the transactional advance that production
 /// remotes (native HTTP + makechain's `/refs/advance`).
 ///
 /// The plain default `advance_refs` (used by [`MemoryTransport`] /
 /// [`FileTransport`] and exercised by the other tests in this file and in
 /// `push_delta.rs`) commits packmap-then-head sequentially; that is
 /// documented as safe when a losing head race still leaves an *appended*
-/// (superset) packmap. #406's re-baseline reset (`prev = None`) breaks
+/// (superset) packmap. The re-baseline reset (`prev = None`) breaks
 /// that assumption for a torn write — which is exactly the production
-/// hazard #408's atomic advance exists to close — so this specific test
+/// hazard that the atomic advance exists to close — so this specific test
 /// needs the real atomic contract to be meaningful rather than incidental
 /// to the non-transactional fallback's commit order.
 struct AtomicTransport {
@@ -320,7 +320,7 @@ impl Transport for AtomicTransport {
     // packmap write as one indivisible transaction (both preconditions
     // checked under one lock before either write lands), which is exactly
     // the contract `Transport::supports_atomic_advance` gates the
-    // pack-chain re-baseline reset on (mkit #521): declaring it here is
+    // pack-chain re-baseline reset on (mkit): declaring it here is
     // what lets `divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable`
     // below still exercise the re-baseline path at all.
     fn supports_atomic_advance(&self) -> bool {
@@ -351,7 +351,7 @@ fn grow_chain_to_test_depth(alice: &Repo, tx: &dyn Transport) -> Hash {
 fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     // Drives `push_branch_with_depth` in-process (like the existing
     // divergent-push tests in push_delta.rs) to control the exact CAS
-    // race, at an injected small threshold (#547) instead of reaching the
+    // race, at an injected small threshold instead of reaching the
     // default one with ~64 real pushes.
     let alice = Repo::new();
     let bob = Repo::new();
@@ -456,7 +456,7 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     }
 }
 
-/// mkit #521 (force-push safety): a force push (`RefWriteCondition::Any`)
+/// Force-push safety: a force push (`RefWriteCondition::Any`)
 /// that reaches the re-baseline threshold on an ATOMIC transport must still
 /// NOT reset the chain — it must append.
 ///

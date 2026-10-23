@@ -1,10 +1,10 @@
-//! #493 Phase 1: linked-worktree discovery, end to end.
+//! Linked-worktree discovery, end to end.
 //!
-//! `mkit worktree add` does not exist yet (Phase 2), so these tests
-//! hand-build the exact on-disk shape it will produce — a
+//! These tests hand-build the exact on-disk shape that `mkit worktree add`
+//! produces — a
 //! `worktrees/<id>/` state dir under the main `.mkit` and a
 //! `mkitdir: …` pointer file — and then drive the REAL binary from
-//! inside the linked tree. This pins the Phase 1 contract:
+//! inside the linked tree. This pins the discovery contract:
 //!
 //! - a linked tree shares the main repository's object store and refs;
 //! - its HEAD/index/op-state live in its own state dir, and tree-local
@@ -20,7 +20,7 @@ use common::{Repo, mkit};
 use mkit_core::layout::RepoLayout;
 
 /// Hand-build a linked worktree of `repo` in its own tempdir, the way
-/// Phase 2's `worktree add` will: state dir + commondir + back-pointer
+/// `worktree add` does: state dir + commondir + back-pointer
 /// under the main `.mkit`, pointer file in the new tree, HEAD on
 /// `branch`, and the tree's files materialized by `checkout` run from
 /// the linked tree itself. Returns the tempdir (keep it alive) and the
@@ -156,7 +156,7 @@ fn stash_in_linked_tree_is_tree_local() {
     );
 
     // The stash manifest lives in the linked tree's state dir, not the
-    // main `.mkit` (stash is per-worktree state per #493).
+    // main `.mkit` (stash is per-worktree state per).
     assert!(
         repo.mkit_dir().join("worktrees/wt1/stash").is_file(),
         "stash must land in the linked tree's state dir"
@@ -211,8 +211,8 @@ fn broken_pointer_fails_closed_with_clear_error() {
 
 #[test]
 fn single_worktree_repos_are_untouched_by_discovery() {
-    // Belt and braces on top of layout_phase0_pin: a normal repo's
-    // full add/commit/status flow is oblivious to Phase 1.
+    // Belt and braces on top of layout_baseline_pin: a normal repo's
+    // full add/commit/status flow is oblivious to discovery.
     let repo = Repo::new();
     repo.commit_file("a.txt", b"one\n", "seed");
     let layout = RepoLayout::single(repo.path());

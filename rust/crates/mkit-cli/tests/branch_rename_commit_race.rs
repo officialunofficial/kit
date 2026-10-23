@@ -1,6 +1,6 @@
-//! Issue #658 — "Race 1" from the immutable/mutable-log perf analysis:
-//! `branch -m` (Fix A: CAS-guarded delete, `refs::delete_ref_if_matches`)
-//! racing `commit` (Fix B: `Match`-conditioned ref advance,
+//! "Race 1" from the immutable/mutable-log perf analysis:
+//! `branch -m` (CAS-guarded delete, `refs::delete_ref_if_matches`)
+//! racing `commit` (`Match`-conditioned ref advance,
 //! `commit::advance_head`) on the SAME branch, driven through real
 //! `mkit` subprocesses.
 //!
@@ -14,7 +14,7 @@
 //! After the fix, for every round: the landed commit (if any) is
 //! reachable from exactly one of {old branch name, new branch name},
 //! never both and never neither while `commit` claims success. This is
-//! #658's strongest proof — it drives the real CLI, not a
+//! strongest proof of the fix — it drives the real CLI, not a
 //! `mkit-core`-internal simulation of it.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
@@ -44,7 +44,7 @@ const PADDING_FILES: u32 = 50;
 
 /// Find the (single) commit in the store whose message is exactly
 /// `msg`, if any landed durably. Presence here does NOT imply it's
-/// reachable from any ref — Fix B's whole point is that a refused
+/// reachable from any ref — the conditioned advance's whole point is that a refused
 /// advance still leaves the commit object durable-but-unreferenced
 /// ("GC-recoverable", never corrupted).
 fn find_commit_with_message(store: &ObjectStore, msg: &str) -> Option<Hash> {
@@ -118,13 +118,13 @@ fn assert_round_outcome(
     }
     // The commit object exists (durable) but is reachable from NEITHER
     // branch name — acceptable ONLY if `commit` itself reported the
-    // failure (Fix B's TEMPFAIL / a lock conflict). A reported success
-    // here means the commit was silently lost — exactly the #658 bug
+    // failure (the conditioned advance's TEMPFAIL / a lock conflict). A reported success
+    // here means the commit was silently lost — exactly the bug
     // this test guards against.
     assert!(
         !commit_reported_ok,
         "iteration {i}: commit {hash:?} is durable but UNREACHABLE from either branch, yet \
-         `commit` reported success — the commit was silently lost (issue #658). rename \
+         `commit` reported success — the commit was silently lost. rename \
          stderr: {} / commit stderr: {}",
         String::from_utf8_lossy(&rename_out.stderr),
         String::from_utf8_lossy(&commit_out.stderr)

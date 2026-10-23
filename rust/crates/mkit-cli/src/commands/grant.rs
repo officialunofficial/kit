@@ -1,4 +1,4 @@
-//! `mkit grant create|add|list|revoke` (WP-2.13, WP-2.14; R-155, R-156):
+//! `mkit grant create|add|list|revoke`:
 //! issue, import, inspect and revoke SPEC-WRITE-GRANTS write and read grants.
 //!
 //! This is the *client* grant store, under the user config directory. It

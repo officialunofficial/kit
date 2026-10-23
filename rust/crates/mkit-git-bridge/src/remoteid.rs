@@ -26,7 +26,7 @@ pub fn remote_identity(dest: &str) -> String {
 /// `base` is `Some`. Exposed (test-only) so the relative-path test can
 /// absolutize deterministically instead of mutating the shared process
 /// cwd via `set_current_dir` — a `set_current_dir` call races every
-/// other test in the binary running in parallel (#505 PR 5/5).
+/// other test in the binary running in parallel.
 fn remote_identity_relative_to(dest: &str, base: Option<&Path>) -> String {
     // file:// URLs → local path handling.
     if let Some(rest) = dest.strip_prefix("file://") {
@@ -226,7 +226,7 @@ mod tests {
         // `../up.git` doesn't exist: the `.git`-stripped fallback must
         // still agree with the identity seen from the absolutized
         // clone URL (`<td>/a/up.git` → `<td>/a/up`). Absolutize against
-        // an explicit `base` instead of `set_current_dir` (#505 PR 5/5):
+        // an explicit `base` instead of `set_current_dir`:
         // mutating the process cwd races every other test in this binary
         // running in parallel.
         let from_rel = remote_identity_relative_to("../up.git", Some(&base));

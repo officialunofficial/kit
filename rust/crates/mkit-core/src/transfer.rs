@@ -6,7 +6,7 @@
 //! which objects of a ref's closure to send, and how — raw, or as a delta
 //! against a base the remote already holds. The plan is then serialised
 //! with [`crate::pack::PackWriter`] into one or more packs — split when
-//! the plan's payload exceeds a single pack's cap (issue #831; the CLI's
+//! the plan's payload exceeds a single pack's cap (the CLI's
 //! `remote_dispatch::build_and_upload_packs` owns the splitting) — each
 //! keyed by its own BLAKE3 digest.
 //!
@@ -64,7 +64,7 @@ const PACKLIST_HEADER_LEN: usize = 4 + 1;
 /// a ~64-byte node) instead of re-uploading the whole history's list.
 ///
 /// A node's `prev` is reset to `None` (rather than linked to the prior head)
-/// when a push re-baselines (#406) — proactively bounding chain depth, or
+/// when a push re-baselines — proactively bounding chain depth, or
 /// reactively escaping a broken chain. Either way the packs the superseded
 /// chain referenced become unreachable from the new head node: they are not
 /// deleted here (this module only ever writes new nodes/packs, never
@@ -178,7 +178,7 @@ const MAX_TREE_DEPTH: usize = 64;
 /// Where the same path is a plain [`crate::object::Blob`] on both sides
 /// (a changed small file, under `CHUNK_THRESHOLD`), the old blob is paired
 /// as the new blob's delta base directly — no similarity search, just
-/// "same path, old version" (#646a). A path whose kind changed between the
+/// "same path, old version". A path whose kind changed between the
 /// two blob/chunked-blob variants, or that has no old-side counterpart at
 /// all (added path, or a rename), is left unpaired.
 ///
@@ -278,7 +278,7 @@ fn pair_entry(
             pair_chunks(store, &new_cb.chunks, &old_cb.chunks, out)
         }
         // A changed same-path small blob: the old blob at this path is a
-        // natural delta base for the new one (#646a). Never overwrite an
+        // natural delta base for the new one. Never overwrite an
         // existing pairing for `new_hash`, mirroring `pair_chunks`'
         // determinism guarantee.
         (Ok(Object::Blob(_)), Ok(Object::Blob(_))) => {
@@ -468,7 +468,7 @@ pub struct PlannedDelta {
 
 /// A deterministic plan for the pack(s) a push uploads for one ref —
 /// serialised into a single pack when it fits under the payload cap, or
-/// split across several when it doesn't (issue #831).
+/// split across several when it doesn't.
 ///
 /// Entries are pre-ordered for [`crate::pack::PackWriter`]: all `raw`
 /// objects first (non-blobs before blobs, each group in BLAKE3 order),
@@ -493,11 +493,11 @@ pub struct PackPlan {
     ///
     /// * Reactively, when the prior chain is unreadable — a self-contained
     ///   pack is the one kind that can safely escape a broken chain.
-    /// * Proactively (#406): when a *healthy* chain has simply grown past
+    /// * Proactively: when a *healthy* chain has simply grown past
     ///   the re-baseline depth threshold, the push side calls [`plan_pack`]
     ///   with `old_tip: None` specifically to force `self_contained: true`,
     ///   then resets the chain to bound its depth. This reuses the atomic
-    ///   head+packmap advance (#408) the reactive reset already depends on
+    ///   head+packmap advance the reactive reset already depends on
     ///   — no separate mechanism was needed once that landed.
     pub self_contained: bool,
 }
@@ -982,8 +982,8 @@ mod tests {
     }
 
     // =================================================================
-    // object_type() short-circuit for plan_pack's type check (#636 /
-    // INV-14) — classification must use the cheap type-prologue check
+    // object_type() short-circuit for plan_pack's type check (INV-14)
+    // — classification must use the cheap type-prologue check
     // rather than a full read+verify, while objects actually selected as
     // delta candidates still get a real, verified read.
     // =================================================================

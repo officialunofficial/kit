@@ -80,7 +80,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
             // asserts. Any refactor that widens this must
             // update docs/CLI.md and ship a 1.0 major bump. The
             // top-level `--version`/`-V` flags are aliases of the
-            // `version` subcommand (git-parity, #248) and emit the same
+            // `version` subcommand (git-parity) and emit the same
             // canonical string.
             let _ = writeln!(stdout, "mkit {}", cli::CLI_VERSION);
             exit::OK

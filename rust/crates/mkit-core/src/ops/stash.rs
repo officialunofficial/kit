@@ -262,7 +262,7 @@ pub fn list(layout: &RepoLayout) -> StashResult<StashList> {
 
 /// Resolve the tree hash recorded by stash entry `idx` (newest = 0)
 /// without mutating anything. Callers use this to run a restore-safety
-/// pre-flight (the #176 guard) over the stash tree before [`pop`].
+/// pre-flight (the guard) over the stash tree before [`pop`].
 ///
 /// # Errors
 /// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
@@ -359,7 +359,7 @@ pub fn entry_index(
 /// entry. Index 0 = newest.
 ///
 /// # Safety against data loss
-/// This restores **unconditionally** — it does not itself run the #176
+/// This restores **unconditionally** — it does not itself run the
 /// destructive-restore guard, because that guard lives in the CLI layer
 /// (`commands::ensure_restore_safe`). Callers that expose `pop` to users
 /// **must** run [`entry_tree_hash`] + the guard first so uncommitted
@@ -449,7 +449,7 @@ pub fn pop_finalize(layout: &RepoLayout, idx: usize) -> StashResult<()> {
 ///
 /// # Safety against data loss
 /// Like [`pop`], this restores **unconditionally** — it does not run the
-/// #176 destructive-restore guard itself. Callers exposing `apply` to
+/// destructive-restore guard itself. Callers exposing `apply` to
 /// users **must** run [`entry_tree_hash`] + `ensure_restore_safe` first,
 /// exactly as `pop` does, so uncommitted edits on unrelated paths are
 /// never clobbered.

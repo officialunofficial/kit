@@ -1,4 +1,4 @@
-//! `mkit diff -w`/`-b`/`-U<n>` (#712) — whitespace-insensitive comparison
+//! `mkit diff -w`/`-b`/`-U<n>` — whitespace-insensitive comparison
 //! and context-line control.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 

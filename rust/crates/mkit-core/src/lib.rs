@@ -1,5 +1,5 @@
 // This attribute sits, identically, at the root of every library crate
-// (#441) and is deliberately NOT hoisted into `[workspace.lints.clippy]`:
+// and is deliberately NOT hoisted into `[workspace.lints.clippy]`:
 // manifest lint tables cannot cfg-gate, so a workspace-wide deny would hit
 // `#[cfg(test)]` code (which legitimately prints), and `mkit-rpc` declares
 // its own `[lints.clippy]` table (dropping workspace inheritance), so it
@@ -63,13 +63,13 @@ pub mod transfer;
 pub mod upload_parts;
 // Partial-disclosure verification: prove and verify that a path, chunk, or
 // byte range belongs to a commit id, with no store access and no trust
-// beyond the id itself (issue #1015 verifier kit PR 2). `default-features
+// beyond the id itself (verifier kit). `default-features
 // = false` wasm-safe, builder included: `build_disclosure_from` reads through
 // any verifying `store::ObjectSource`; `build_disclosure` wraps `ObjectStore`.
 pub mod verify;
 pub mod write_auth;
 
-// Repository path layout (issue #493 Phase 0): the single authority
+// Repository path layout: the single authority
 // for resolving state under `.mkit/`, splitting shared (common-dir)
 // from per-worktree state.
 pub mod layout;
@@ -89,7 +89,7 @@ pub mod worktree;
 // Transport trait surface (vtable + SSH framing + retry policy).
 pub mod protocol;
 
-// Issue #157 — append-only MMB (Merkle Mountain Belt) over the commit
+// Append-only MMB (Merkle Mountain Belt) over the commit
 // chain for O(log n) inclusion proofs. Feature-gated so the
 // `commonware-storage` dep tree only materialises for downstream callers
 // that opt in. Persisted (journaled) MMB is in this build; commit-field
@@ -97,7 +97,7 @@ pub mod protocol;
 #[cfg(feature = "history-mmr")]
 pub mod history;
 
-// Verifiable sparse-checkout (issue #158). Feature-gated
+// Verifiable sparse-checkout. Feature-gated
 // because the upstream `commonware-storage::AuthenticatedBitMap` is
 // ALPHA-tier and pulls in `commonware-runtime` /
 // `commonware-cryptography`. Off by default.

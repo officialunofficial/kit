@@ -1,5 +1,5 @@
-//! cargo-fuzz target — `PackEntries` store-less iterator (issue #1015
-//! verifier kit PR 3). Never panics on adversarial pack bytes; agrees
+//! cargo-fuzz target — `PackEntries` store-less iterator.
+//! Never panics on adversarial pack bytes; agrees
 //! with `PackReader::read` on validity for packs the reader accepts.
 
 #![no_main]

@@ -1,4 +1,4 @@
-//! Named-remote + upstream-tracking + CAS-safe push tests (#175).
+//! Named-remote + upstream-tracking + CAS-safe push tests.
 //!
 //! Driven end-to-end through the real binary against a `mkit+file://`
 //! bare-directory remote (the file transport is URL-reachable and
@@ -277,7 +277,7 @@ fn push_all_mirrors_every_branch() {
     assert!(remote.path().join("refs/heads/feature").exists());
 }
 
-/// #175 must not weaken #97: a hostile *named* repo remote with ambient
+/// Named remotes must not weaken the credential gate: a hostile *named* repo remote with ambient
 /// credentials is still refused per ENDPOINT.
 #[test]
 fn named_repo_remote_with_token_is_still_gated() {

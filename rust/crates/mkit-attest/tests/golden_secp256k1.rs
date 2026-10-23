@@ -12,7 +12,7 @@
 //!
 //! The public key (compressed SEC1 of secret=1) is the well-known
 //! secp256k1 generator G — the literal constant from SEC2 §2.4.1 /
-//! BIP-340 test vector #1. That makes the pubkey side of the expected
+//! BIP-340 test vector 1. That makes the pubkey side of the expected
 //! value independently verifiable.
 //!
 //! Feature-gated behind `algo-secp256k1`; when the feature is off the
@@ -24,7 +24,7 @@
 use mkit_attest::signer_k256::{Secp256k1Signer, verify_secp256k1};
 
 /// Fixed secret scalar = 1 (i.e. big-endian 32-byte [0;31] + [1]).
-/// Matches BIP-340 test vector #1 and SEC2 §2.4.1 for the generator G,
+/// Matches BIP-340 test vector 1 and SEC2 §2.4.1 for the generator G,
 /// so the pubkey pins to a value auditors can spot-check against spec.
 fn fixed_secret() -> [u8; 32] {
     let mut k = [0u8; 32];

@@ -1,5 +1,4 @@
-//! Golden vectors for the SPEC-DISCLOSURE.md closure profile
-//! (issue #1015 "verifier kit" PR 3).
+//! Golden vectors for the SPEC-DISCLOSURE.md closure profile.
 //!
 //! Two halves, same as `golden_disclosure.rs`:
 //!

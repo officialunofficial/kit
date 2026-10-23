@@ -5,7 +5,7 @@
 //!
 //! - **default (no `--staged`)** — restore the worktree file(s) for each
 //!   path from the index (the staged content), discarding uncommitted
-//!   worktree edits. Reuses the #176 "don't clobber user work" spirit: a
+//!   worktree edits. Reuses the "don't clobber user work" spirit: a
 //!   worktree file whose content diverges from the staged blob is refused
 //!   without `-f/--force`, so an accidental `restore` never silently eats
 //!   an un-staged edit.
@@ -267,7 +267,7 @@ fn apply_index_restore(idx: &mut Index, path: &str, source: Option<IndexEntry>) 
 /// Worktree restore: for each matching tracked path, rewrite the worktree
 /// file from the source tree. Refuses (unless `force`) to clobber a
 /// worktree file whose content diverges from the *index* entry, mirroring
-/// the #176 destructive-restore guards.
+/// the destructive-restore guards.
 fn restore_worktree(
     cwd: &Path,
     store: &ObjectStore,

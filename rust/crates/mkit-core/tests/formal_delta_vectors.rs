@@ -1,5 +1,5 @@
 //! Differential-test vector exporter for the Lean model of
-//! `docs/specs/SPEC-DELTA.md` (Linear MKIT-25, `formal/lean/`).
+//! `docs/specs/SPEC-DELTA.md` (`formal/lean/`).
 //!
 //! Writes golden and seeded-random base/target pairs to a text file: per case
 //! the base, the target, the Rust writer's stream (`delta::encode`), and a

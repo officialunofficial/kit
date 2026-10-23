@@ -39,7 +39,7 @@ fn version_stdout_is_byte_exact() {
 }
 
 /// The top-level `--version` / `-V` flags are aliases of the `version`
-/// subcommand (git-parity, #248). They are part of the same packaging
+/// subcommand (git-parity). They are part of the same packaging
 /// contract, so pin them to byte-identical stdout and empty stderr.
 #[test]
 fn version_flags_match_subcommand_byte_for_byte() {

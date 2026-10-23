@@ -1,5 +1,5 @@
 //! Push over a transport whose retry ladder re-issues a landed head write
-//! (MKIT-58, SPEC-TRANSPORT §7).
+//! (SPEC-TRANSPORT §7).
 //!
 //! `update_ref` with `Missing`/`Match` is not idempotent across retries: when
 //! the first attempt lands and its response is lost, the ladder's re-issue

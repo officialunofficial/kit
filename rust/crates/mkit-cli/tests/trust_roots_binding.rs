@@ -1,12 +1,11 @@
-//! `mkit trust` + `mkit verify --trusted` end-to-end coverage (issue
-//! #693).
+//! `mkit trust` + `mkit verify --trusted` end-to-end coverage.
 //!
 //! Spawns the real `mkit` binary so the full argv -> dispatch ->
 //! trust-roots-file -> commit-verification path is exercised — not
 //! just the in-process unit tests in `commands/trust.rs` /
 //! `commands/verify.rs`.
 //!
-//! Core regression this file pins (the issue's "Testing Decisions"):
+//! Core regression this file pins:
 //! signing a commit with a key that is absent from a trust-roots file
 //! makes `mkit verify --trusted <rev>` exit non-zero with a clear
 //! "untrusted signer" message, even though the bare cryptographic
@@ -70,7 +69,7 @@ fn write_trust_roots(path: &std::path::Path, keyid: &str, pubkey_hex: &str) {
 fn verify_without_trusted_flag_ignores_trust_roots() {
     // Baseline: plain `mkit verify HEAD` (no --trusted) verifies the
     // signature and says nothing about trust — this is the exact gap
-    // issue #693 closes for the --trusted path, pinned here so a
+    // closes for the --trusted path, pinned here so a
     // regression can't silently make the default flag-less path start
     // failing closed too.
     let (td, _signer) = repo_with_signed_commit();

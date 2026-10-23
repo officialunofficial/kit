@@ -1,5 +1,5 @@
 //! Native-only acceptance test for SPEC-DISCLOSURE v2 inner roots
-//! (issue #1024): every accept golden is verified using **only** bundle
+//! Every accept golden is verified using **only** bundle
 //! fields, `commonware_storage::bmt::Proof`, `commonware_cryptography::blake3`,
 //! and `mkit_core::hash::domain_digest` with the hardcoded domain byte
 //! strings from the spec. Never calls `mkit_core::merkle` or

@@ -1,4 +1,4 @@
-//! Spike for issue #650 — evaluates `commonware-storage`'s [`Freezer`] and
+//! Spike for — evaluates `commonware-storage`'s [`Freezer`] and
 //! [`prunable::Archive`] as a replacement for mkit's hand-rolled loose-file
 //! [`ObjectStore`], using mkit's real object shapes (BLAKE3-domain object
 //! ids as keys, variable-size serialized `Blob`/`Tree`/`Commit` bytes as
@@ -139,8 +139,7 @@ fn freezer_cfg(context: &deterministic::Context, suffix: &str) -> FreezerConfig<
         key_write_buffer: NZUsize!(64 * 1024),
         key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
         value_partition: format!("spike-value-{suffix}"),
-        // Exercise the built-in zstd compression path (#646 is expected to
-        // fold into this once the migration lands): a mid zstd level, same
+        // Exercise the built-in zstd compression path: a mid zstd level, same
         // shape as `prunable::Config::compression`.
         value_compression: Some(3),
         value_write_buffer: NZUsize!(64 * 1024),

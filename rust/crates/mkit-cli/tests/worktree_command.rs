@@ -1,9 +1,9 @@
-//! `mkit worktree add/list/remove/prune` (#493 Phase 2) — acceptance
+//! `mkit worktree add/list/remove/prune` — acceptance
 //! criteria from the issue, driven through the real binary:
 //! a second tree shares the one object store; branch double-checkout
 //! is refused everywhere; tree-local commands stay tree-local;
 //! `remove` protects local work; `prune` reaps only dead registry
-//! entries; and gc unions retention roots across every tree (Phase 3).
+//! entries; and gc unions retention roots across every tree.
 
 mod common;
 
@@ -323,7 +323,7 @@ fn gc_keeps_sibling_staged_objects_and_prunes_real_garbage() {
     assert!(out.status.success());
 
     // Stage (don't commit) work in the SIBLING — exactly the object a
-    // non-worktree-aware gc would prune (#493 Phase 3 acceptance).
+    // non-worktree-aware gc would prune.
     std::fs::write(tree.join("staged-only.txt"), b"precious\n").unwrap();
     let out = mkit(&tree, repo.xdg(), &["add", "staged-only.txt"]);
     assert!(out.status.success());

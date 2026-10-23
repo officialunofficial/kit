@@ -533,7 +533,7 @@ fn porcelain_code(staging: StatusStaging, kind: DiffKind) -> &'static str {
         (StatusStaging::Unstaged, DiffKind::Modified) => " M",
         (StatusStaging::Unstaged, DiffKind::ModeChanged) => " T",
         // PartiallyStaged is documented as retained-for-back-compat
-        // and no longer produced by status_diff post-#102, but render
+        // and no longer produced by status_diff post-fix, but render
         // defensively in case it ever resurfaces. `MM` matches git's
         // double-mod indicator.
         (StatusStaging::PartiallyStaged, DiffKind::Added) => "AM",

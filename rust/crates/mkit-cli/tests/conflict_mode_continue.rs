@@ -1,4 +1,4 @@
-//! Regression tests for #214: a conflict resolved via `--continue` must
+//! Regression tests: a conflict resolved via `--continue` must
 //! preserve the ours-side executable bit and symlink mode instead of
 //! silently demoting the path to a plain blob.
 //!
@@ -111,11 +111,11 @@ impl Repo {
     }
 }
 
-/// #214 + #269: an executable ours-side that conflicts with a non-exec
+/// An executable ours-side that conflicts with a non-exec
 /// theirs must stay executable through `--continue`. The user resolves
 /// the content, restores the exec bit, and stages it; both the
-/// resolved content (#269: an edited resolution must not be silently
-/// dropped) and the executable mode (#214) survive the commit.
+/// resolved content (an edited resolution must not be silently
+/// dropped) and the executable mode survive the commit.
 #[test]
 fn merge_continue_preserves_ours_exec_bit() {
     let repo = Repo::new();
@@ -143,7 +143,7 @@ fn merge_continue_preserves_ours_exec_bit() {
     fail(repo.path(), repo.xdg(), &["merge", "feature"]);
 
     // Resolve the content, restore the exec bit (the rewrite reset perms),
-    // and stage it. #269: an edited resolution must be staged —
+    // and stage it. An edited resolution must be staged —
     // `--continue` refuses an unstaged edit rather than silently committing
     // the stale staged content.
     repo.write("script.sh", b"echo resolved\n");
@@ -158,16 +158,16 @@ fn merge_continue_preserves_ours_exec_bit() {
     assert_eq!(
         repo.head_tree_mode("script.sh"),
         EntryMode::Executable,
-        "exec bit must survive merge --continue (#214)"
+        "exec bit must survive merge --continue"
     );
     assert_eq!(
         fs::read(repo.path().join("script.sh")).unwrap(),
         b"echo resolved\n",
-        "the resolved content must be committed, not the stale staged ours (#269)"
+        "the resolved content must be committed, not the stale staged ours"
     );
 }
 
-/// #214: a symlink/symlink conflict must materialise a REAL symlink in
+/// A symlink/symlink conflict must materialise a REAL symlink in
 /// the worktree (not a regular file holding the target text), and
 /// `--continue` must commit the path with `Symlink` mode.
 #[test]
@@ -196,7 +196,7 @@ fn merge_continue_preserves_symlink_mode() {
     let meta = fs::symlink_metadata(repo.path().join("link")).unwrap();
     assert!(
         meta.file_type().is_symlink(),
-        "conflict symlink must be materialised as a real symlink (#214)"
+        "conflict symlink must be materialised as a real symlink"
     );
     let target = fs::read_link(repo.path().join("link")).unwrap();
     assert_eq!(target.to_str().unwrap(), "ours-target");
@@ -207,6 +207,6 @@ fn merge_continue_preserves_symlink_mode() {
     assert_eq!(
         repo.head_tree_mode("link"),
         EntryMode::Symlink,
-        "symlink mode must survive merge --continue (#214)"
+        "symlink mode must survive merge --continue"
     );
 }

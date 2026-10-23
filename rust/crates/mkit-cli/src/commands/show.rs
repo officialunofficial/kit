@@ -185,14 +185,14 @@ fn show_commit_like(
         .map_err(|e| (format!("diff: {e}"), exit::GENERAL_ERROR))?;
     // `--stat` renders the diffstat instead of the full patch (like
     // `git show --stat`), reusing `diff`'s byte-exact stat renderer;
-    // `render_stat` hoists its own `DisplaySource` wrapping (#625).
+    // `render_stat` hoists its own `DisplaySource` wrapping.
     if stat {
         return super::diff::render_stat(out, store, result.entries.iter())
             .map_err(|e| (e, exit::GENERAL_ERROR));
     }
     // The patch loop below only ever prints what it renders here — nothing
     // durable is published from this path — so skip the BLAKE3 re-verify
-    // on every changed blob (#625).
+    // on every changed blob.
     let display = DisplaySource::new(store);
     for e in &result.entries {
         super::diff::emit_entry_patch(

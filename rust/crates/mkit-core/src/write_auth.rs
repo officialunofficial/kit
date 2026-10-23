@@ -212,7 +212,7 @@ pub enum ExpectedCommitment<'a> {
     /// with the first stream message itself.
     PackStream,
     /// `UploadPart` stream: any well-formed `part:`. Verification does not
-    /// bind the commitment to a ticket, so the handler (WP-1.11) MUST, before
+    /// bind the commitment to a ticket, so the handler MUST, before
     /// reading any part byte, compare the ticket id and index with the first
     /// stream message and call
     /// [`PartPlan::check`](crate::upload_parts::PartPlan::check) with the

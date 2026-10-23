@@ -284,7 +284,7 @@ impl generated::TransportService for FlakyService {
         Err(ConnectError::unimplemented("not implemented yet"))
     }
 
-    // WP-1.2: compile-only stubs for the additive M1 trait methods.
+    // Compile-only stubs for the additive trait methods.
     async fn get_server_info(
         &self,
         _ctx: RequestContext,
@@ -1157,7 +1157,7 @@ fn list_refs_retries_on_unavailable_then_succeeds() {
 
 #[test]
 fn update_ref_retries_on_unavailable_then_succeeds() {
-    // Mutating CAS op: SPEC-TRANSPORT §7 / mkit#790 both call out that this
+    // Mutating CAS op: SPEC-TRANSPORT §7 / both call out that this
     // is safe by construction because `is_retryable` excludes `RefConflict`
     // — a transient `unavailable` retries, a CAS conflict never does.
     let (port, shutdown_tx, handle, calls) = spawn_flaky_server(Rpc::UpdateRef, 2);

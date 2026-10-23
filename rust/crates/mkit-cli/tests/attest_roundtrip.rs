@@ -615,7 +615,7 @@ fn attest_malformed_predicate_file_errors() {
 
 // -- External-signer argv pass-through ---------------------------------
 //
-// The following three tests cover the gap that motivated PR #66 + #68:
+// The following three tests cover argv pass-through:
 // previously, `mkit attest --signer external` spawned the signer with
 // zero argv and forced wrapper shell scripts. Each test drives the real
 // `mkit-sign-file` reference binary, which takes `--key <path>` on

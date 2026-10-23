@@ -8,7 +8,7 @@
 //! unless `-x` (also remove ignored) or `-X` (remove *only* ignored).
 //!
 //! Ignore matching uses the shared path-aware matcher (`.gitignore` +
-//! `.mkitignore`, #256), so `-x`/`-X` honor anchored/`**`/multi-segment
+//! `.mkitignore`), so `-x`/`-X` honor anchored/`**`/multi-segment
 //! patterns and a file under an ignored directory counts as ignored.
 
 use std::io::Write;
@@ -200,7 +200,7 @@ fn collect_dir(
 
         // A directory shadowing a path tracked as a *file* is not untracked
         // content: git reports only the tracked-side deletion and suppresses
-        // the directory's contents (#288). Skip the whole subtree — this must
+        // the directory's contents. Skip the whole subtree — this must
         // precede the `index_tracks_path_or_descendant` branch below, which
         // would otherwise treat `f` as a tracked-descendant and descend into
         // `f/`, deleting `f/child`. The dir stays (shadows a tracked path), so

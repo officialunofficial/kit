@@ -42,7 +42,7 @@ fn assert_key_list_json_includes_capabilities(root: &std::path::Path) {
 }
 
 /// `windows-credential` was dropped as a backend (Windows is no longer a
-/// supported target, MKIT-6): `mkit key list --backend windows-credential`
+/// supported target): `mkit key list --backend windows-credential`
 /// now fails to even parse the backend name, so it exits `CONFIG_ERROR`
 /// (an unrecognized backend string) rather than the old `UNAVAILABLE`
 /// exit a compiled-in-but-unimplemented backend produced.

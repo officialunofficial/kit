@@ -31,7 +31,7 @@
 //! [`ObjectStore::read_unverified`] (and the [`DisplaySource`] adapter
 //! built on it), reserved for display-only rendering where a corrupt
 //! object should surface as a bad render, never as durable state — see
-//! its doc for the full policy (#625).
+//! its doc for the full policy.
 //!
 //! See `docs/specs/SPEC-OBJECTS.md` §10 for the path-layout rule.
 
@@ -275,7 +275,7 @@ pub struct ObjectStore {
     /// has performed. There is no read-side equivalent of `syncer` to
     /// inject a recording double against, so this is a plain counter
     /// instead — used to prove callers (e.g. the pack reader's delta-base
-    /// resolution, issue #643) hit the store at most once per distinct
+    /// resolution) hit the store at most once per distinct
     /// object rather than once per reference to it.
     #[cfg(test)]
     read_calls: Arc<AtomicU64>,
@@ -574,7 +574,7 @@ impl ObjectStore {
     /// [`Self::read`] performs — a [`StoreError::HashMismatch`] can
     /// therefore never come out of this path.
     ///
-    /// # Policy — display-only paths ONLY (#625)
+    /// # Policy — display-only paths ONLY
     /// This exists for hot read-only rendering (`diff`/`show`/commit
     /// summaries formatting a diffstat or patch preview). It is the same
     /// "cheap read" tradeoff [`Self::object_type`] already makes for shape

@@ -84,7 +84,7 @@ impl SplitMix {
 /// reconstructed buffer immediately. The parser MUST NOT panic and
 /// MUST NOT read OOB on any input.
 pub fn delta_one_iteration(input: &[u8]) {
-    // Truncate per guardrail #2.
+    // Truncate per guardrail.
     let input = &input[..input.len().min(MAX_INPUT)];
     if input.len() < 2 {
         return;
@@ -111,7 +111,7 @@ pub fn delta_one_iteration(input: &[u8]) {
 }
 
 /// Shared pre-check for [`pack_one_iteration`] / [`pack_one_iteration_with_store`]:
-/// truncate per guardrail #2 and refuse to feed packs whose declared
+/// truncate per guardrail and refuse to feed packs whose declared
 /// `entry_count` would force a giant `Vec::with_capacity` (the reader
 /// already enforces `MAX_ENTRIES`, but the cap here prevents the test
 /// from even trying). Returns `None` when the iteration should be
@@ -133,7 +133,7 @@ fn pack_validated_input(input: &[u8]) -> Option<&[u8]> {
 /// auto-cleaned at scope exit. Real libfuzzer / `fuzz_target!` runs call
 /// this directly, where per-call isolation matters; the unit-test loop
 /// uses [`pack_one_iteration_with_store`] instead to reuse one store
-/// across all `MAX_ITER` iterations (#505 PR 5/5).
+/// across all `MAX_ITER` iterations.
 pub fn pack_one_iteration(input: &[u8]) {
     let Some(input) = pack_validated_input(input) else {
         return;
@@ -154,7 +154,7 @@ pub fn pack_one_iteration(input: &[u8]) {
 /// instead of a fresh tempdir. Lets the unit-test loop amortize the
 /// tempdir + `ObjectStore::init` cost across all `MAX_ITER` iterations
 /// instead of paying for 100 real filesystem inits per `cargo test`
-/// invocation (#505 PR 5/5).
+/// invocation.
 pub fn pack_one_iteration_with_store(input: &[u8], store: &mkit_core::store::ObjectStore) {
     let Some(input) = pack_validated_input(input) else {
         return;
@@ -538,8 +538,8 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
     }
 }
 
-/// Decode a partial-disclosure bundle (issue #1015 verifier kit PR 2,
-/// SPEC-DISCLOSURE) from arbitrary input against a fixed dummy commit id.
+/// Decode a partial-disclosure bundle (SPEC-DISCLOSURE)
+/// from arbitrary input against a fixed dummy commit id.
 /// `verify::verify_disclosure` decodes the bundle before ever comparing
 /// against the caller's id, so this exercises the decoder's bounds
 /// (oversize bundle, bad magic/version, over-cap `Vec`/`Proof` lengths,
@@ -1230,7 +1230,7 @@ pub fn run_iterated_unit(body: fn(&[u8])) -> Result<(), GuardrailError> {
 
 /// As [`run_iterated_unit`], but threads a caller-owned `state: &T`
 /// through to `body` on every iteration instead of requiring `body` to
-/// build its own per-call state (#505 PR 5/5) — used by the pack target
+/// build its own per-call state — used by the pack target
 /// to reuse one tempdir/store across all `MAX_ITER` iterations.
 pub fn run_iterated_unit_with<T>(state: &T, body: fn(&[u8], &T)) -> Result<(), GuardrailError> {
     let mut prng = SplitMix::new(RNG_SEED);
@@ -1372,7 +1372,7 @@ mod tests {
         }
     }
 
-    /// Guardrail #1: MAX_ITER caps every PRNG run at 100.
+    /// Guardrail: MAX_ITER caps every PRNG run at 100.
     #[test]
     fn delta_target_runs_within_caps() {
         run_iterated_unit(delta_one_iteration).expect("guardrails held");
@@ -1380,7 +1380,7 @@ mod tests {
 
     #[test]
     fn pack_target_runs_within_caps() {
-        // #505 PR 5/5: one tempdir/store reused across all MAX_ITER
+        // One tempdir/store reused across all MAX_ITER
         // iterations instead of 100 real filesystem inits — the
         // per-iteration isolation `pack_one_iteration` gives real
         // libfuzzer runs isn't needed by this deterministic PRNG-driven
@@ -1517,9 +1517,9 @@ mod tests {
     /// property tests. Replaces the bespoke splitmix64 loop
     /// (`run_iterated_unit`) for this one target while honouring the
     /// FUZZ.md guardrails: `with_search_limit(MAX_ITER)` caps iterations
-    /// (#1), `with_seed(RNG_SEED)` keeps the run deterministic (#6), and
+    /// `with_seed(RNG_SEED)` keeps the run deterministic, and
     /// the body truncates each input to `MAX_INPUT` and applies the
-    /// per-iteration wall-clock cap (#2, #4) via `run_one`. minifuzz's
+    /// per-iteration wall-clock cap via `run_one`. minifuzz's
     /// mutational sampler caps its buffer at 8 KiB, so inputs stay well
     /// under the 64 KiB ceiling. On failure it prints a
     /// `MINIFUZZ_BRANCH = 0x...` token; replay it with

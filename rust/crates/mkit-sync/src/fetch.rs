@@ -1,7 +1,7 @@
 //! Fetching: reconstruct every remote branch from its packmap chain and
 //! publish remote-tracking refs.
 //!
-//! Each branch is fetched in two phases (#642): the packs are fully
+//! Each branch is fetched in two phases: the packs are fully
 //! downloaded to private staging before the repo lock is taken, and the lock
 //! is held only from the first local write through the branch's ref publish.
 //! That is narrow enough that a slow transfer does not serialize out
@@ -65,7 +65,7 @@ pub(crate) struct FetchedChain {
     prefix_packs: usize,
 }
 
-/// Phase 1 of a branch fetch: walk `branch`'s packmap chain from `head_key`
+/// Step 1 of a branch fetch: walk `branch`'s packmap chain from `head_key`
 /// and download every pack in it not already recorded in `applied`. Pure
 /// network I/O (the local object store is never touched), so the caller does
 /// not need the repo lock.
@@ -118,7 +118,7 @@ pub(crate) struct Applied {
     pub(crate) objects_unpacked: usize,
 }
 
-/// Phase 2 of a branch fetch: unpack `fetched`'s downloaded packs into
+/// Step 2 of a branch fetch: unpack `fetched`'s downloaded packs into
 /// `store` and verify the closure at `tip` is complete, running the
 /// applied-pack self-heal retry on a stale-record failure.
 ///
@@ -387,7 +387,7 @@ fn fetch_objects_inner(
             // including when the head matches but that tip changed.
             let checkpoint = checkpoint_path.as_deref().and_then(Checkpoint::load);
 
-            // Phase 1: resolve this branch's chain and download its packs.
+            // Step 1: resolve this branch's chain and download its packs.
             // No repo lock is held.
             let fetched = resolve_and_download_chain(
                 source,
@@ -405,7 +405,7 @@ fn fetch_objects_inner(
                 nodes: fetched.nodes,
             };
 
-            // Phase 2: unpack, verify and publish this branch's ref under a
+            // Step 2: unpack, verify and publish this branch's ref under a
             // repo lock acquired fresh for this branch and released once this
             // loop iteration ends, never held across another branch's
             // download.
@@ -440,7 +440,7 @@ fn fetch_objects_inner(
                         return Err(e);
                     };
                     // Release the lock for the retry's network re-download
-                    // too, mirroring phase 1's unlocked download, and
+                    // too, mirroring step 1's unlocked download, and
                     // re-acquire before the retry's local unpack and publish,
                     // which still need the GC-prune protection.
                     drop(lock);

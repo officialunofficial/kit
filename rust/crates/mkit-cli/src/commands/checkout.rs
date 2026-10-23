@@ -152,7 +152,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(mkit_core::refs::Head::Branch(ref cur)) if cur == name
     );
 
-    // Single-writer-per-branch across worktrees (#493): if this
+    // Single-writer-per-branch across worktrees: if this
     // checkout would END on a branch (existing or being created),
     // refuse when a sibling tree already has it checked out — branch
     // moves flow through the history-MMB ref path, which assumes one
@@ -244,7 +244,7 @@ pub fn run(args: &[String]) -> u8 {
         super::current_head_tree(&layout, &store).ok().flatten()
     };
 
-    // Run the destructive-restore safety gate (#176) BEFORE touching
+    // Run the destructive-restore safety gate BEFORE touching
     // anything. This is read-only — it refuses the checkout if dirty
     // tracked files, staged changes, or untracked-path collisions with
     // the target tree would be clobbered. Untracked files that do NOT
@@ -280,7 +280,7 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
 
-    // Update HEAD FIRST, before mutating the worktree/index (#223). The
+    // Update HEAD FIRST, before mutating the worktree/index. The
     // failure modes are asymmetric: if we materialised the new tree and
     // *then* HEAD failed to advance, the worktree would hold the new
     // branch's files while HEAD still pointed at the old branch — a

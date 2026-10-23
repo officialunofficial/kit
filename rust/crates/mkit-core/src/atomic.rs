@@ -12,7 +12,7 @@
 //! storage in its own right before its caller returns. Do not
 //! "optimise" these writes onto the batch path.
 //!
-//! The one documented exception is `refs::RemoteRefBatch` (#645):
+//! The one documented exception is `refs::RemoteRefBatch`:
 //! `refs/remotes/*` entries are not pointers anything orders against —
 //! they are a locally-cached, trivially recomputable-from-a-re-fetch
 //! view of another repository's branches — so a multi-ref fan-out (one
@@ -165,7 +165,7 @@ pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Test-only directory-fsync call counter (issue #645).
+/// Test-only directory-fsync call counter.
 ///
 /// [`sync_parent_dir`] is the single choke point every parent-directory
 /// fsync in this crate goes through — `write_atomic`, `write_create_new`,

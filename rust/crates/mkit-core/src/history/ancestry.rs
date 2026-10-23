@@ -1902,7 +1902,6 @@ mod tests {
     /// *fewer than* `SCRUB_MAX_AGE_SECS` have elapsed since the last full
     /// verification. One second short of the bound still scrubs a window;
     /// exactly at the bound the schedule is stale and a full walk runs
-    /// (MKIT-57).
     #[test]
     fn scrub_age_boundary_is_exclusive() {
         // One second before the bound: the rotating window advances.

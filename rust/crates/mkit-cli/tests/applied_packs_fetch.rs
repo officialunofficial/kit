@@ -1,4 +1,4 @@
-//! Issue #409: fetch-side applied-pack record.
+//! Fetch-side applied-pack record.
 //!
 //! Verifies, via a counting transport wrapper around the in-process
 //! `MemoryTransport`, that a steady-state fetch skips packs already
@@ -58,7 +58,7 @@ fn commit_all(dir: &Path, msg: &str) {
 
 /// Counts calls to `download_pack` specifically (NOT `download_blob`, which
 /// the packlist chain-node walk uses and which stays unconditional per the
-/// #409 spec) so tests can assert exactly how many *pack* bodies were
+/// applied-packs design) so tests can assert exactly how many *pack* bodies were
 /// pulled over the wire on a given fetch. Everything else delegates to an
 /// inner [`MemoryTransport`].
 struct CountingTransport {
@@ -97,7 +97,7 @@ impl Transport for CountingTransport {
     // Explicitly delegated (rather than left to the trait's default, which
     // would route through `Self::download_pack`/`Self::upload_pack` and
     // inflate the pack counter with chain-node blob traffic): the packlist
-    // chain walk is unconditional by design (#409) and must never count
+    // chain walk is unconditional by design and must never count
     // against the pack-download assertions below.
     fn upload_blob(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
         self.inner.upload_blob(bytes, key)
@@ -155,7 +155,7 @@ fn steady_state_fetch_skips_already_applied_packs() {
 
     // Fetch 2: nothing changed on the remote since fetch 1 — every pack in
     // the chain is already recorded as applied, so this must download ZERO
-    // packs (the whole point of #409).
+    // packs (the whole point of).
     fetch_all(bob.path(), &tx, "default").expect("fetch 2 (steady state)");
     assert_eq!(
         tx.take_pack_downloads(),
@@ -420,7 +420,7 @@ fn cross_branch_fetch_persists_progress_before_a_later_branchs_failure_propagate
 /// Build a repo with three branches — each contributing one distinct pack —
 /// pushed to a fresh file-transport remote, and return that remote's
 /// tempdir. Shared setup for the load-once / persist-once counting tests
-/// below (#546), which drive the fetch through the CLI binary so the
+/// below, which drive the fetch through the CLI binary so the
 /// warning lines the applied-packs cache emits on injected I/O failures can
 /// be counted on the subprocess's stderr.
 #[cfg(unix)]
@@ -445,7 +445,7 @@ fn three_branch_file_remote() -> tempfile::TempDir {
     remote
 }
 
-/// #546 acceptance: the applied-packs record is loaded exactly ONCE per
+/// Acceptance: the applied-packs record is loaded exactly ONCE per
 /// fetch, not once per branch. Every `AppliedPacks::load` that hits an
 /// unreadable record emits exactly one "could not read applied-packs
 /// record" warning (and nothing else does), so an unreadable record turns
@@ -512,7 +512,7 @@ fn multi_branch_fetch_loads_the_record_exactly_once() {
     }
 }
 
-/// #546 acceptance: the applied-packs record is persisted at most ONCE per
+/// Acceptance: the applied-packs record is persisted at most ONCE per
 /// fetch, not once per branch. Mirror of the load-counting test above: a
 /// read-only `applied-packs/` directory makes every persist attempt fail at
 /// tmp-file creation with exactly one "could not persist applied-packs

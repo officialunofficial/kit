@@ -1,5 +1,5 @@
 //! Owner signing for `mkit grant create`, `mkit epoch bump` and
-//! `mkit visibility set` (WP-2.13, R-155).
+//! `mkit visibility set`.
 //!
 //! One module, three ways to get the SPEC-WRITE-GRANTS §4 signature:
 //!

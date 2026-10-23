@@ -1,13 +1,13 @@
 //! Recovery log — durable record of commits superseded by
 //! history-rewriting operations (`commit --amend`, `reset`, `rebase`),
 //! so they (a) remain GC roots within a retention window and (b) can be
-//! surfaced and restored. This is Part 2 of #260, the recovery half of
-//! the gc model (Part 1 added the reachability root set in
+//! surfaced and restored. This is the recovery half of
+//! the gc model (the reachability root set lives in
 //! [`super::gc`]).
 //!
 //! Why this exists: the per-branch history journal stores only opaque
 //! MMB digests, so a superseded tip is otherwise unrecoverable the moment
-//! it leaves the ref set — and `mkit gc` (#233) would reclaim it. Each
+//! it leaves the ref set — and `mkit gc` would reclaim it. Each
 //! rewrite appends the old tip here; gc treats every logged hash as a
 //! root (clock-free), and [`expire`] drops entries older than the
 //! retention policy so they stop pinning objects.
@@ -19,7 +19,7 @@
 //! corrupt log makes gc abort rather than under-count roots.
 //!
 //! NOTE: the *producers* (recording at the amend/reset/rebase rewrite
-//! sites) are Part 2b — this module is the format, store, retention
+//! sites) live elsewhere — this module is the format, store, retention
 //! policy, and gc-root integration.
 //!
 //! ## Concurrency

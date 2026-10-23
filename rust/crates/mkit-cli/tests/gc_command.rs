@@ -1,4 +1,4 @@
-//! `mkit gc` (#233) end-to-end: prunes unreachable objects, honors
+//! `mkit gc` end-to-end: prunes unreachable objects, honors
 //! `--dry-run` and the grace window, and never reclaims a commit that the
 //! recovery log pins (the amend/reset/rebase safety net). Spawns the real
 //! binary.

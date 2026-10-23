@@ -1,4 +1,4 @@
-//! `mkit log` / `mkit diff` revision arguments and ranges (#249, #252) — the
+//! `mkit log` / `mkit diff` revision arguments and ranges — the
 //! mkit-specific paths the differential harness can't compare deterministically
 //! (empty/reverse ranges, range + `-n`, and the `A...B` symmetric range for
 //! both `log` and `diff`).

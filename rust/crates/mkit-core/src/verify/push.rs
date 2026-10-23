@@ -1,5 +1,5 @@
 //! Incremental push verification: check the history a push introduces
-//! before any ref moves (PRD §6.5, indexed mode).
+//! before any ref moves (indexed mode).
 //!
 //! [`verify_push`] walks each new tip's closure through the same BFS as
 //! the closure verifiers (`closure::walk`, edges from
@@ -60,7 +60,7 @@ impl PushReport {
 /// wrong is collected into the [`PushReport`] rather than stopping at the
 /// first problem, so a server can reject with a complete reason.
 ///
-/// # Repository isolation (PRD §6.5)
+/// # Repository isolation
 ///
 /// - `source` MUST serve only this repository's members plus the objects
 ///   of the push being verified. A source backed by a global content

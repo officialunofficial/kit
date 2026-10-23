@@ -1,5 +1,5 @@
-//! cargo-fuzz target — partial-disclosure bundle verification (issue
-//! #1015 verifier kit PR 2, SPEC-DISCLOSURE). A fresh, real fixture is
+//! cargo-fuzz target — partial-disclosure bundle verification
+//! (SPEC-DISCLOSURE). A fresh, real fixture is
 //! built per call (real libfuzzer runs, unlike the unit-test loop, want
 //! per-call isolation — mirrors `pack.rs`). Verifying must never panic; a
 //! freshly built bundle must verify; a mutated bundle must reject

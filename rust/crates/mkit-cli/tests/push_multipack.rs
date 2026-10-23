@@ -1,4 +1,4 @@
-//! Multi-pack push integration tests (issue #831).
+//! Multi-pack push integration tests.
 //!
 //! `push_branch`/`push_branch_with_depth` build the whole push plan into a
 //! single pack, hard-capped at `pack::MAX_TOTAL_PAYLOAD` (4 GiB in
@@ -7,7 +7,7 @@
 //! together on ONE packmap node (`PackListNode.packs: Vec<Hash>`, apply
 //! order preserved) instead of failing with `PackfileTooLarge`.
 //!
-//! `push_branch_with_limits` (#547-style seam) takes an explicit
+//! `push_branch_with_limits` (a test seam) takes an explicit
 //! `pack_payload_cap` so these tests can force a split with a few KiB of
 //! content instead of moving gigabytes through the harness.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers

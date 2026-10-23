@@ -1,5 +1,5 @@
 //! Differential-test vector exporter for the Lean model of
-//! `docs/specs/SPEC-MERKLE-OBJECTS.md` (Linear MKIT-24, `formal/lean/`).
+//! `docs/specs/SPEC-MERKLE-OBJECTS.md` (`formal/lean/`).
 //!
 //! Writes golden (exhaustive small) and seeded-random BMT cases to a text
 //! file: per tree the leaf digests, a hash-oracle table of every

@@ -202,7 +202,7 @@ impl generated::TransportService for TestService {
         Err(ConnectError::unimplemented("not implemented yet"))
     }
 
-    // WP-1.2: compile-only stubs for the additive M1 trait methods.
+    // Compile-only stubs for the additive trait methods.
     async fn get_server_info(
         &self,
         ctx: RequestContext,

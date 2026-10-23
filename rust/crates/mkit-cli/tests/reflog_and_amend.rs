@@ -1,5 +1,5 @@
-//! Integration tests for PR-H4: `mkit reflog` (read-only, #231) and
-//! `mkit commit --amend` (#232).
+//! Integration tests for `mkit reflog` (read-only) and
+//! `mkit commit --amend`.
 //!
 //! These spawn the built `mkit` binary so they exercise the real CLI
 //! dispatch, signing, and ref-history paths end-to-end. The
@@ -83,7 +83,7 @@ fn head_hash(root: &Path) -> String {
 }
 
 // ------------------------------------------------------------------
-// reflog (#231)
+// reflog
 // ------------------------------------------------------------------
 
 #[test]
@@ -201,7 +201,7 @@ fn reflog_no_commits_yet_is_clean() {
 }
 
 // ------------------------------------------------------------------
-// commit --amend (#232)
+// commit --amend
 // ------------------------------------------------------------------
 
 #[test]

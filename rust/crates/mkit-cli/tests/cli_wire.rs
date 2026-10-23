@@ -274,7 +274,7 @@ fn bisect_start_creates_state_file() {
 
 #[test]
 fn bisect_run_converges_to_first_bad_commit() {
-    // #528: `bisect run <cmd>` drives the loop automatically — it checks
+    // `bisect run <cmd>` drives the loop automatically — it checks
     // out each candidate, runs the command, and maps the exit code (0=good,
     // 1-127≠125=bad) until it prints the first bad commit. Bug is introduced
     // at c3 (marker flips to BAD); the run must converge to c3.
@@ -311,7 +311,7 @@ fn bisect_run_converges_to_first_bad_commit() {
 
 #[test]
 fn bisect_run_skips_untestable_candidate_and_still_converges() {
-    // #528: exit 125 marks a candidate untestable (skip). The bug is at c3;
+    // Exit 125 marks a candidate untestable (skip). The bug is at c3;
     // c4 (above the first-bad) is untestable. Skipping c4 is bypassed as the
     // range narrows below it, so the run still converges to c3. (A skip that
     // STRANDED the answer next to `bad` would instead be ambiguous — see
@@ -346,7 +346,7 @@ fn bisect_run_skips_untestable_candidate_and_still_converges() {
 
 #[test]
 fn bisect_run_survives_test_command_dirtying_a_tracked_file() {
-    // Review #1: the test command modifies a tracked file each iteration
+    // The test command modifies a tracked file each iteration
     // (as `cargo test` refreshing Cargo.lock, or a snapshot writer, would).
     // The per-candidate checkout is forced, discarding the scribbles, so the
     // run still converges instead of aborting on the second candidate.
@@ -379,7 +379,7 @@ fn bisect_run_survives_test_command_dirtying_a_tracked_file() {
 
 #[test]
 fn bisect_run_reports_ambiguity_when_all_candidates_skipped() {
-    // Review #3: when every remaining candidate is skipped, the run must NOT
+    // When every remaining candidate is skipped, the run must NOT
     // print `bad` as a definitive first-bad — it reports ambiguity (like
     // git) and exits non-zero.
     let td = tempfile::tempdir().unwrap();
@@ -1043,7 +1043,7 @@ fn blame_c_c_widens_to_unchanged_source_file() {
 
 #[test]
 fn blame_c_inline_threshold_flips_copy_attribution() {
-    // #525: inline `-C<num>` sets the similarity threshold (an alphanumeric
+    // Inline `-C<num>` sets the similarity threshold (an alphanumeric
     // char count). The copied block is EXACTLY 40 alnum chars, so a
     // threshold at or below 40 detects the copy (credit the origin) while
     // 41 misses it (the block reads as new) — the boundary flip git's
@@ -1110,7 +1110,7 @@ fn blame_c_inline_threshold_flips_copy_attribution() {
 
 #[test]
 fn blame_c_inline_threshold_composes_with_repeat() {
-    // #525: a numeric `-C<num>` still counts toward the copy *level*, so
+    // A numeric `-C<num>` still counts toward the copy *level*, so
     // `-C<num> -C` reaches level 2 (whole-parent search) with the given
     // threshold. The source file is UNCHANGED in the copying commit, so
     // only level 2 can find it — proving the repeat composed — and the
@@ -1156,7 +1156,7 @@ fn blame_c_inline_threshold_composes_with_repeat() {
 
 #[test]
 fn blame_c_c_c_searches_whole_parent_tree_for_unmodified_source() {
-    // #526: git's third -C ("copies from other files in any commit")
+    // Git's third -C ("copies from other files in any commit")
     // whole-tree-searches at EVERY walk step, not just the file-creating
     // commit. Here a block is appended to a PERSISTING file (main.txt, which
     // has a porigin) and copied from an UNMODIFIED src.txt. -C -C only
@@ -1206,7 +1206,7 @@ fn blame_c_c_c_searches_whole_parent_tree_for_unmodified_source() {
 
 #[test]
 fn blame_stacked_short_flags_reach_clap() {
-    // Review #2: the inline-threshold pre-scan must only consume a *numeric*
+    // The inline-threshold pre-scan must only consume a *numeric*
     // glued value; stacked short clusters where `-M`/`-C` leads (`-CC` =
     // `-C -C`, `-Mw` = `-M -w`) must still reach clap, not be misread as a
     // threshold. `-CC` on an unchanged source is level 2 and credits the
@@ -1253,7 +1253,7 @@ fn blame_stacked_short_flags_reach_clap() {
 
 #[test]
 fn blame_c_copy_tiebreak_prefers_older_ancestor_source() {
-    // #527: two equally-similar copy sources. git credits the source that
+    // Two equally-similar copy sources. git credits the source that
     // traces to the OLDER (ancestor) commit — blame's push-back bias — not
     // the first candidate in path order. Here the older source (committed
     // first) is alphabetically LAST (src_z), so a path-order pick would
@@ -1287,7 +1287,7 @@ fn blame_c_copy_tiebreak_prefers_older_ancestor_source() {
 
 #[test]
 fn blame_c_copy_tiebreak_older_source_wins_regardless_of_path_order() {
-    // #527 guard: the mirror of the tracer — the older source is now
+    // Guard: the mirror of the tracer — the older source is now
     // alphabetically FIRST (src_a). git still credits the older commit, so
     // the tie-break must pick by ancestry, not "prefer the last candidate."
     // Pinned against git 2.50.1: `git blame -C -C dst.txt` credits c1.
@@ -1315,7 +1315,7 @@ fn blame_c_copy_tiebreak_older_source_wins_regardless_of_path_order() {
 
 #[test]
 fn blame_porcelain_matches_git_field_block_with_boundary() {
-    // #524: grouped porcelain. c1 introduces 3 lines (a boundary/root
+    // Grouped porcelain. c1 introduces 3 lines (a boundary/root
     // commit); c2 edits line 2 and appends line 4. Field ordering and
     // grouping are pinned against git 2.50.1 (mkit's documented divergences:
     // 64-hex ids, Identity author, empty *-mail, +0000 tz, no `previous`).
@@ -1368,7 +1368,7 @@ fn blame_porcelain_matches_git_field_block_with_boundary() {
 
 #[test]
 fn blame_line_porcelain_repeats_header_per_line() {
-    // #524: --line-porcelain repeats the full metadata block for every line.
+    // --line-porcelain repeats the full metadata block for every line.
     let td = tempfile::tempdir().unwrap();
     init_repo(td.path());
     make_commit(td.path(), "f.txt", b"alpha\nbravo\ncharlie\n", "c1");
@@ -1391,7 +1391,7 @@ fn blame_line_porcelain_repeats_header_per_line() {
 
 #[test]
 fn blame_porcelain_emits_copy_source_filename() {
-    // #524: on a `-C` cross-file copy, the porcelain `filename` is the copy
+    // On a `-C` cross-file copy, the porcelain `filename` is the copy
     // SOURCE (git parity), and the block is credited to the source's origin.
     let b1 = "fn handler_alpha_beta_gamma() { compute_the_thing(); }";
     let b2 = "fn second_helper_delta_epsilon() { do_more(); }";
@@ -1484,7 +1484,7 @@ fn blame_ignore_revs_file_errors_are_git_faithful() {
 fn blame_ignore_rev_precise_requires_ignore_rev() {
     // `--ignore-rev-precise` only refines an active `--ignore-rev` /
     // `--ignore-revs-file` set; without one it has nothing to refine, so it
-    // is a usage error rather than a silent no-op (#496).
+    // is a usage error rather than a silent no-op.
     let td = tempfile::tempdir().unwrap();
     init_repo(td.path());
     make_commit(td.path(), "f.txt", b"a\n", "first");
@@ -1503,7 +1503,7 @@ fn blame_ignore_rev_precise_requires_ignore_rev() {
 
 #[test]
 fn blame_ignore_rev_precise_diverges_from_positional_default() {
-    // End-to-end (#496): a noise commit reorders three distinct-origin
+    // End-to-end: a noise commit reorders three distinct-origin
     // lines around a fixed middle line and reindents them. Under -w the
     // matcher recognizes the middle-reordered line unchanged wherever it
     // landed, but the other two end up with no in-hunk counterpart at all,
@@ -1954,11 +1954,11 @@ fn sparse_checkout_disable_refuses_untracked_file_that_full_restore_would_remove
     );
 }
 
-// ---------- diff (revision resolver, #207) -------------------------------
+// ---------- diff (revision resolver) -------------------------------
 
 #[test]
 fn diff_head_tilde_one_shows_second_commit_change() {
-    // PR-B / #207: `mkit diff HEAD~1` must resolve the revision to its
+    // `mkit diff HEAD~1` must resolve the revision to its
     // tree and emit a real diff against the worktree (which mirrors the
     // tip), NOT silently treat `HEAD~1` as a pathspec and exit empty.
     let td = tempfile::tempdir().unwrap();
@@ -1996,7 +1996,7 @@ fn diff_branch_ref_resolves_and_diffs() {
 
 #[test]
 fn diff_bad_revision_errors_not_silent_empty() {
-    // A hash-shaped arg that resolves to nothing is a hard error (#207),
+    // A hash-shaped arg that resolves to nothing is a hard error,
     // not a silent empty diff.
     let td = tempfile::tempdir().unwrap();
     init_repo(td.path());
@@ -2014,7 +2014,7 @@ fn diff_bad_revision_errors_not_silent_empty() {
 
 #[test]
 fn diff_staged_with_revision_is_usage_error() {
-    // #223: `--staged` already fixes HEAD vs index; an explicit revision
+    // `--staged` already fixes HEAD vs index; an explicit revision
     // is contradictory.
     let td = tempfile::tempdir().unwrap();
     init_repo(td.path());
@@ -2024,7 +2024,7 @@ fn diff_staged_with_revision_is_usage_error() {
     assert!(!out.status.success(), "--staged HEAD should fail: {out:?}");
 }
 
-// ---------- branch / tag ref-write safety (#206) -------------------------
+// ---------- branch / tag ref-write safety -------------------------
 
 #[test]
 fn branch_create_collision_is_rejected() {

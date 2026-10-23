@@ -183,7 +183,7 @@ fn collect_others(
             // NOTE: unlike `status` and `clean`, git's `ls-files --others`
             // does NOT suppress a directory that shadows a tracked file — it
             // lists the contents (`f/child`) as raw untracked plumbing. So no
-            // collision check here; descend normally (#288).
+            // collision check here; descend normally.
             collect_others(root, &abs, &path, entry_ignored, idx, ignore, opts, out)?;
             continue;
         }

@@ -17,7 +17,7 @@
 //! Concurrency: gc holds the repo lock for its whole run, and the
 //! root-publishing paths now take the same lock around their object-write +
 //! ref/attestation-publish window — `tag` (annotated/signed), `fetch` /
-//! `pull`, and `attest` (#267) — so they are serialized against gc. The
+//! `pull`, and `attest` — so they are serialized against gc. The
 //! grace window remains the belt-and-suspenders net (like Git's default
 //! `gc.pruneExpire`, vs `prune --expire=now`): `--grace-secs 0` bypasses it
 //! and prints a warning, but with the publishers now locked it is safe even
@@ -75,7 +75,7 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
 
-    // Hold EVERY worktree's lock for the whole run (#493 Phase 3) —
+    // Hold EVERY worktree's lock for the whole run —
     // the shared lock spanning trees. Root collection unions each
     // tree's HEAD/index/op-state, so gc must serialize against
     // worktree/index-mutating commands in ALL trees, not just the
@@ -83,7 +83,7 @@ pub fn run(args: &[String]) -> u8 {
     // deterministic (main first, then registry ids ascending, from
     // `all_state_layouts`) so concurrent multi-lock takers cannot
     // deadlock. The root publishers `tag`, `fetch` and `attest` take
-    // their tree's worktree.lock (#267), so they serialize against gc;
+    // their tree's worktree.lock, so they serialize against gc;
     // the grace window protects only writers outside gc's lock set
     // (SPEC-GC "Concurrent writers and the grace window").
     // Registry lock FIRST (global lock order: worktrees.lock before

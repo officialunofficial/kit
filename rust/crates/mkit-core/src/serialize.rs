@@ -27,7 +27,7 @@ const MAX_REMIX_SOURCES: u32 = 10_000;
 /// Decode-side cap on `ChunkedBlob` chunk count. `pub(crate)` (not
 /// private) so `crate::verify` can bound a disclosure bundle's claimed
 /// chunk count against the same limit a real `ChunkedBlob` is decoded
-/// under (issue #1015 verifier kit PR 2).
+/// under.
 pub(crate) const MAX_CHUNKS: u32 = 1_000_000;
 
 // ---------------------------------------------------------------------
@@ -413,7 +413,7 @@ impl<'a> Reader<'a> {
         // malformed object from disk/remote can't deserialize with an
         // invalid payload (e.g. a binary `DidKey` that isn't a printable
         // multibase string). `is_valid` is the single source of truth and
-        // the serialize side already gates on it (#223).
+        // the serialize side already gates on it.
         if !id.is_valid() {
             return Err(MkitError::InvalidIdentity);
         }
@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(deserialize(&buf), Err(MkitError::UnexpectedEof));
     }
 
-    // ---- Fallible-serialize tests (review follow-up #22) ----
+    // ---- Fallible-serialize tests ----
 
     #[test]
     fn serialize_rejects_invalid_identity_in_commit() {
@@ -1020,7 +1020,7 @@ mod tests {
         // Wire format: [u8 kind][u16 LE len][payload]. A DidKey payload must
         // be a printable-ASCII multibase string, so a malformed object with a
         // binary/whitespace DidKey payload must be rejected at the read
-        // boundary, not silently deserialized (#223).
+        // boundary, not silently deserialized.
         let id_bytes = |payload: &[u8]| {
             let mut b = vec![0x02u8]; // IdentityKind::DidKey
             let len = u16::try_from(payload.len()).expect("test payload fits u16");

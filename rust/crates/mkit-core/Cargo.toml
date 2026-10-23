@@ -21,8 +21,7 @@ workspace = true
 [dependencies]
 blake3 = "1"
 # Verified streaming (BLAKE3 tree hashing: outboard + slice proof) for
-# `verify::verify_blob_slice`/`verify_blob_len_proof` (issue #1015 verifier
-# kit PR 2, SPEC-DISCLOSURE). Pure Rust, `std`-based but only via
+# `verify::verify_blob_slice`/`verify_blob_len_proof` (SPEC-DISCLOSURE). Pure Rust, `std`-based but only via
 # `io::Cursor`-style in-memory use — no filesystem, no threads — so it
 # builds cleanly for wasm32 (already proven: `mkit-wasm` depends on the
 # same version for its `/streaming` demo). Same major as that transitive
@@ -78,7 +77,7 @@ subtle = { version = "2", default-features = false }
 tempfile = "3"
 thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
-# Per-entry pack payload compression (SPEC-PACKFILE v2, issue #646).
+# Per-entry pack payload compression (SPEC-PACKFILE v2).
 # `zstd-sys` is a C lib that cannot target wasm32 (see the comment on
 # `commonware-storage` above) — this is `optional = true`, gated by the
 # `pack-zstd` feature below, so `mkit-wasm` (which needs `pack.rs` to
@@ -112,7 +111,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 # worker-build) opts out explicitly with `default-features = false`
 # on its `mkit-core` dependency.
 default = ["pack-zstd"]
-# SPEC-PACKFILE v2 (issue #646): zstd-compressed pack entries (`0x03`
+# SPEC-PACKFILE v2: zstd-compressed pack entries (`0x03`
 # zstd-raw, `0x04` zstd-delta). Disabling this feature does not make
 # `pack.rs` reject v2 packs at compile time — a build without it can
 # still fail closed at runtime on a `0x03`/`0x04` entry — it only
@@ -123,7 +122,7 @@ pack-zstd = ["dep:zstd"]
 history-mmr = ["dep:commonware-storage", "dep:commonware-cryptography"]
 # Sparse witnesses use the canonical Tree codec and the base BLAKE3 hasher.
 sparse-checkout = []
-# Issue #159 — erasure-coded pack delivery via Reed-Solomon.
+# Erasure-coded pack delivery via Reed-Solomon.
 pack-shards = [
     "commonware-codec/std",
     "dep:commonware-coding",
@@ -174,7 +173,7 @@ commonware-storage = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
 hex = "0.4"
 # Property-based testing: auto-shrinks counterexamples on round-trip
-# / invariant assertions. See issue #164.
+# / invariant assertions.
 proptest = "1"
 # Snapshot testing for human-readable test fixtures. Snapshots live in
 # `src/snapshots/`; review with `cargo insta review`.

@@ -63,7 +63,7 @@ fn verify_chunk_size() -> usize {
 
 /// Verify the Ed25519 signature on every commit/remix/tag in `stored` —
 /// the digests [`unpack_downloaded_packs`] just wrote, i.e. the objects
-/// this fetch actually introduced (issue #692). Uses the exact same check
+/// this fetch actually introduced. Uses the exact same check
 /// `mkit verify <rev>` runs manually
 /// ([`mkit_core::sign::verify_commit`]/`verify_remix`/`verify_tag`), so
 /// clone/pull/fetch cannot publish a remote-tracking ref to a hostile

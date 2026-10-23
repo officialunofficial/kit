@@ -1,13 +1,13 @@
-//! Issue #642 — narrow `pull_all`/`fetch_all`'s repo-lock hold to the
+//! Narrow `pull_all`/`fetch_all`'s repo-lock hold to the
 //! ref-publish window instead of the whole network transfer, without
-//! reopening the #267 GC-prune race.
+//! reopening the GC-prune race.
 //!
 //! Four things are under test:
 //!
 //! 1. [`fetch_all_does_not_hold_repo_lock_during_pack_download`] and
 //!    [`pull_all_does_not_hold_repo_lock_during_pack_download`] prove the
 //!    lock is free while a pack is in flight over the network — the bug
-//!    this issue fixes. Run against the pre-#642 code, these fail (the
+//!    the code fixes. Run against the pre-fix code, these fail (the
 //!    lock-probe times out because the whole transfer holds the lock).
 //! 2. [`gc_blocks_while_repo_lock_held_mid_fetch_critical_section`] proves
 //!    the mechanism the narrowed design leans on for safety: a concurrent
@@ -15,12 +15,12 @@
 //!    fetch/pull holds across its local-write + ref-publish window
 //!    (`mkit_sync` `apply_fetched_chain`) is held.
 //! 3. [`fetch_objects_survive_a_grace_zero_gc_run_during_the_unlocked_download_phase`]
-//!    exercises the issue's literal testing decision: an aggressive
+//!    exercises the main hazard: an aggressive
 //!    concurrent `gc --grace-secs 0` running purely during the (now
 //!    unlocked) download window must never corrupt the eventual fetch.
 //! 4. [`concurrent_fetch_and_aggressive_gc_never_lose_fetched_objects`] is
 //!    a soak test mirroring `lock_contention.rs`'s
-//!    `publisher_vs_gc_never_corrupts` (the original #267 regression test)
+//!    `publisher_vs_gc_never_corrupts` (the original regression test)
 //!    but for `fetch` instead of `tag -a`, driving the real subprocesses
 //!    against a `mkit+file://` remote over many iterations.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
@@ -46,7 +46,7 @@ use mkit_transport_memory::MemoryTransport;
 /// Delegates to [`common::mkit_env`] for the full isolation every other
 /// suite gets (`XDG_CONFIG_HOME` + `HOME` + `EDITOR`/`VISUAL`/`GIT_EDITOR`
 /// all pointed at a throwaway dir, stdin closed) — found missing here
-/// during the epic-#634 code review: this file previously hand-rolled its
+/// during code review: this file previously hand-rolled its
 /// own `run_in` that set only `XDG_CONFIG_HOME`, leaving the developer's
 /// real `$EDITOR`/`$HOME` reachable by any code path in these tests that
 /// happens to need them (e.g. an uncommitted `commit` falling through to
@@ -181,7 +181,7 @@ impl Transport for BlockingTransport {
 /// still returns almost immediately; this only guards against a false
 /// failure when the *lock itself* isn't the bottleneck, e.g. a shared
 /// build machine under heavy concurrent CI/test load. It stays far short
-/// of `DEFAULT_TIMEOUT` (5s) so a genuinely held lock (the pre-#642 bug)
+/// of `DEFAULT_TIMEOUT` (5s) so a genuinely held lock (the pre-fix bug)
 /// still fails the probe well before that budget elapses.
 fn lock_is_free(layout: &RepoLayout) -> bool {
     mkit_core::repo_lock::acquire(
@@ -239,7 +239,7 @@ fn fetch_all_does_not_hold_repo_lock_during_pack_download() {
     );
     assert!(
         lock_was_free,
-        "#642: the repo lock must be free while a fetch's pack download is in \
+        "the repo lock must be free while a fetch's pack download is in \
          flight; a probe acquire timed out, meaning the lock is still held \
          across the network transfer"
     );
@@ -295,7 +295,7 @@ fn pull_all_does_not_hold_repo_lock_during_pack_download() {
     );
     assert!(
         lock_was_free,
-        "#642: the repo lock must be free while a pull's pack download is in \
+        "the repo lock must be free while a pull's pack download is in \
          flight; a probe acquire timed out, meaning the lock is still held \
          across the network transfer"
     );
@@ -316,10 +316,10 @@ fn pull_all_does_not_hold_repo_lock_during_pack_download() {
 #[test]
 fn gc_blocks_while_repo_lock_held_mid_fetch_critical_section() {
     // `mkit_sync` `apply_fetched_chain` holds the repo lock continuously from
-    // the first object it unpacks through the caller's ref publish (#642).
+    // the first object it unpacks through the caller's ref publish.
     // Simulate being inside that window by holding the same lock directly,
     // and confirm a concurrent `gc --grace-secs 0` cannot proceed until it
-    // is released — the invariant (#267) the narrowed lock design depends
+    // is released — the invariant the narrowed lock design depends
     // on: gc can never observe a downloaded-but-not-yet-referenced object.
     let repo = Repo::new();
     repo.commit_file("base.txt", b"base\n", "base");
@@ -355,8 +355,7 @@ fn gc_blocks_while_repo_lock_held_mid_fetch_critical_section() {
 
 // ---------------------------------------------------------------------------
 // 3. A grace-zero gc running purely during the unlocked download window
-//    must never corrupt the eventual fetch (the issue's literal testing
-//    decision).
+//    must never corrupt the eventual fetch.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -422,7 +421,7 @@ fn fetch_objects_survive_a_grace_zero_gc_run_during_the_unlocked_download_phase(
 
 // ---------------------------------------------------------------------------
 // 4. Soak test mirroring lock_contention.rs's `publisher_vs_gc_never_corrupts`
-//    (#267), for `fetch` instead of `tag -a`.
+//    but for `fetch` instead of `tag -a`.
 // ---------------------------------------------------------------------------
 
 /// Every worker must end either applied (0) or lock-busy (75, TEMPFAIL) — no
@@ -470,7 +469,7 @@ fn concurrent_fetch_and_aggressive_gc_never_lose_fetched_objects() {
         check_invariants(bob.path(), &format!("fetch-vs-gc/{k}")).unwrap();
 
         // If the tracking ref moved this iteration, its closure must be
-        // fully intact — the #267 race this narrowed lock must still
+        // fully intact — the race this narrowed lock must still
         // close.
         let bob_layout = RepoLayout::single(bob.path());
         if let Some(tip) = refs::read_remote_ref(&bob_layout, "origin", "main").unwrap() {

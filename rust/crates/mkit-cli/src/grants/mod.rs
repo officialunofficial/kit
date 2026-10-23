@@ -5,7 +5,7 @@
 //! Nothing here is repository-scoped. The store lives beside the user
 //! config, the relying-party pins come from the user config, and every
 //! header is verified with the `mkit-attest` verifier before it is stored or
-//! sent (SPEC-CONFIG-SECURITY; WP-2.13).
+//! sent (SPEC-CONFIG-SECURITY).
 
 pub mod cli;
 pub mod owner;

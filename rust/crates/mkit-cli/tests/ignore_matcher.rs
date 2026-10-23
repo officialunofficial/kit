@@ -1,5 +1,5 @@
-//! End-to-end coverage for the path-aware `.gitignore`/`.mkitignore` matcher
-//! (#256). The unit-level grammar is exercised in `mkit_core::ignore`; these
+//! End-to-end coverage for the path-aware `.gitignore`/`.mkitignore` matcher.
+//! The unit-level grammar is exercised in `mkit_core::ignore`; these
 //! tests prove the upgraded semantics actually flow through the real
 //! commands that consume the matcher — `add` (worktree tree-builder) and
 //! `ls-files --others`.
@@ -225,7 +225,7 @@ fn tracked_file_matching_gitignore_stays_visible_and_restages() {
     fs::write(root.join(".gitignore"), "*.log\n").unwrap();
     fs::write(root.join("debug.log"), b"v2\n").unwrap();
 
-    // Finding 1: it must NOT be reported as a deletion, and stays tracked.
+    // It must NOT be reported as a deletion, and stays tracked.
     let status = out_str(&run_in(root, x, &["status", "--porcelain"]));
     assert!(
         !status
@@ -238,7 +238,7 @@ fn tracked_file_matching_gitignore_stays_visible_and_restages() {
         "the tracked file stays tracked despite the ignore rule"
     );
 
-    // Finding 2: `add .` restages the tracked file's modification.
+    // `add .` restages the tracked file's modification.
     assert!(run_in(root, x, &["add", "."]).status.success());
     let staged = out_str(&run_in(root, x, &["status", "--porcelain"]));
     assert!(

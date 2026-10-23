@@ -165,7 +165,7 @@ pub fn run(args: &[String]) -> u8 {
         }
         Some(RemoteCmd::Remove { name }) => {
             // Removing a remote only touches the repo-scoped address
-            // book. The user-scoped `trusted_remote_endpoint` (#97) is
+            // book. The user-scoped `trusted_remote_endpoint` is
             // keyed by exact URL, not by remote name, and is never
             // serialised by `config::write`, so the credential-trust
             // boundary is unaffected: a later remote reusing the same URL
@@ -181,7 +181,7 @@ pub fn run(args: &[String]) -> u8 {
             } else if cfg.remotes.remove(&name).is_none() {
                 return emit_err(&format!("remote '{name}' not found"), exit::GENERAL_ERROR);
             }
-            // Configured remotes nested under `name` (#660): their ref
+            // Configured remotes nested under `name`: their ref
             // and bridge-state subtrees must survive the removal even
             // though they share `name`'s directory prefix.
             let siblings = nested_sibling_names(&cfg.remotes, &name);
@@ -215,7 +215,7 @@ pub fn run(args: &[String]) -> u8 {
                 cfg.remotes.insert(old, entry);
                 return emit_err(&format!("remote '{new}' already exists"), exit::CANTCREAT);
             }
-            // Configured remotes nested under `old` (#660): computed
+            // Configured remotes nested under `old`: computed
             // before `new` is inserted below, so `new` can never be
             // mistaken for one of `old`'s own siblings even when `new`
             // itself extends `old` (`rename a a/sub`).
@@ -294,7 +294,7 @@ pub fn run(args: &[String]) -> u8 {
 /// rename already happened, and a follow-up fetch repopulates.
 ///
 /// `siblings` lists the configured remote names nested under `old`
-/// (#660, `nested_sibling_names`); this joins them against the root it
+/// (`nested_sibling_names`); this joins them against the root it
 /// already owns (`layout.remotes_dir()`) to build the protected set that
 /// `move_state_dir` needs — empty in the overwhelmingly common case, in
 /// which `move_state_dir` takes its whole-directory fast path.
@@ -315,7 +315,7 @@ fn move_tracking_refs(layout: &RepoLayout, old: &str, new: &str, siblings: &[Str
 /// maps, and the staging mirror stay bound to the same remote name.
 ///
 /// `siblings` lists the configured remote names nested under `old`
-/// (#660, `nested_sibling_names`); this joins them against the root it
+/// (`nested_sibling_names`); this joins them against the root it
 /// already owns (`layout.git_state_dir()`) to build the protected set —
 /// see `move_tracking_refs` for the shared `move_state_dir` call.
 fn move_bridge_state(layout: &RepoLayout, old: &str, new: &str, siblings: &[String]) {
@@ -330,8 +330,8 @@ fn move_bridge_state(layout: &RepoLayout, old: &str, new: &str, siblings: &[Stri
     }
 }
 
-/// The applied-packs record (`<common dir>/applied-packs/<name>`, #409) is a
-/// pure per-remote cache whose lifecycle follows the remote's (#545): drop it
+/// The applied-packs record (`<common dir>/applied-packs/<name>`) is a
+/// pure per-remote cache whose lifecycle follows the remote's: drop it
 /// on remove so a later re-add of the same name starts from an empty record
 /// instead of inheriting a stale one (which would trip the fetch-side
 /// self-heal's spurious full re-download once the store has been gc'd).
@@ -347,7 +347,7 @@ fn remove_applied_packs_record(layout: &RepoLayout, name: &str) {
     }
 }
 
-/// The applied-packs record follows a rename (#545), so the renamed remote's
+/// The applied-packs record follows a rename, so the renamed remote's
 /// next fetch reuses its redownload-avoidance cache instead of pulling the
 /// full pack chain again, and no orphan record is left under the old name.
 /// Best-effort and non-fatal, like `move_tracking_refs`: on failure the next
@@ -367,7 +367,7 @@ fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
 /// subdirectories) on both sides, *including* the case where one name is
 /// a path-prefix of the other (`a` <-> `a/b`), and *including* the case
 /// where a configured sibling remote nests inside `old`'s own directory
-/// prefix (`a/b` configured while `a` is renamed or removed, #660) and
+/// prefix (`a/b` configured while `a` is renamed or removed) and
 /// must not be dragged along or deleted with it. `protected` (built by
 /// the caller via `nested_sibling_names` + its own root) lists the
 /// absolute paths of those siblings' state directories; empty in the
@@ -386,11 +386,11 @@ fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
 /// `root`, `.rename.tmp.<pid>.0` — one path, no prefix-nesting or
 /// protected-sibling case analysis at the call site.
 ///
-/// Phase 1 extracts `src`'s content into `tmp`:
+/// Step 1 extracts `src`'s content into `tmp`:
 /// - `protected.is_empty()` (no sibling in the way): a single
 ///   whole-directory `fs::rename(&src, &tmp)` — always legal, since
 ///   renaming a directory to a fresh sibling of `root` is never a move
-///   into its own subtree. This is the pre-#660 fast path, still exactly
+///   into its own subtree. This is the pre-fix fast path, still exactly
 ///   two renames total for the common case.
 /// - otherwise: `tmp` is created empty and `walk_unprotected` extracts
 ///   every unprotected entry under `src` into it one at a time (skipping
@@ -399,10 +399,10 @@ fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
 ///   dragged to the equivalent position under `dst`.
 ///
 /// Either way `tmp` ends up holding exactly what should land at `dst`.
-/// Phase 2 (`prune_empty_parents`) tidies `src`'s now-empty ancestors —
+/// Step 2 (`prune_empty_parents`) tidies `src`'s now-empty ancestors —
 /// `src` itself may legitimately remain non-empty when protected content
-/// stayed behind, which is the point. Phase 3 creates `dst`'s parents
-/// (`fs::rename` won't). Phase 4 is the single `fs::rename(&tmp, &dst)`
+/// stayed behind, which is the point. Step 3 creates `dst`'s parents
+/// (`fs::rename` won't). Step 4 is the single `fs::rename(&tmp, &dst)`
 /// that completes the move.
 ///
 /// A missing source directory is a no-op (nothing to move).
@@ -410,12 +410,12 @@ fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
 /// # Restore / "parked at" contract — covers every phase, not just the
 /// final rename
 ///
-/// If anything from phase 1 through phase 4 fails after content has
+/// If anything from step 1 through step 4 fails after content has
 /// actually reached `tmp`, the move backs out on a best-effort basis
 /// before the error is returned, so a failed move is a clean no-op
 /// rather than stranding state — the caller's existing warning then
 /// fires as before, and a follow-up fetch self-heals. If `tmp` never
-/// received any content (phase 1 itself failed outright — `create_dir`
+/// received any content (step 1 itself failed outright — `create_dir`
 /// or the whole-dir rename never succeeded), there is nothing to restore
 /// and the original error is returned unadorned.
 ///
@@ -434,11 +434,11 @@ fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
 /// where the plain error text says nothing about where the content
 /// actually went. A `merge_tree_into` success followed by a failed
 /// best-effort `remove_dir(&tmp)` cleanup does NOT count as a restore
-/// failure and must NOT trigger the annotation (finding 5c, #789): the
+/// failure and must NOT trigger the annotation: the
 /// content is home, and a leftover (near-)empty `tmp` husk is inert
 /// debris, not stranded state.
 ///
-/// Parent creation/pruning (phases 2 and 3) are themselves best-effort:
+/// Parent creation/pruning (steps 2 and 3) are themselves best-effort:
 /// a creation failure falls through to the following `rename`, which
 /// then fails and is handled by the same restore path; a prune failure
 /// is silent since it's tidiness, not correctness.
@@ -472,11 +472,11 @@ fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
 ///
 /// A protected root that exists as a plain *file* (a branch-path /
 /// remote-name collision inherent to the directory-keyed layout, and
-/// predating #660) is adopted into the protection set by
+/// predating) is adopted into the protection set by
 /// `walk_unprotected`'s exact-path check and left untouched — the safe
 /// direction for an input this function doesn't otherwise reason about.
 ///
-/// # Destination-side nesting boundary (finding 3, #789 — not fixed here)
+/// # Destination-side nesting boundary (not fixed here)
 ///
 /// `protected` is always computed by the caller from `old`
 /// (`nested_sibling_names(remotes, old)`), never from `new`. When a
@@ -489,7 +489,7 @@ fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
 /// above fires, the caller's standard warning is emitted, and the
 /// source state is intact rather than merged into the sibling's
 /// directory or dragging it along. This is a deliberate boundary, not a
-/// bug — see the #660/#789 PR discussion for why destination-side
+/// bug — see the PR discussion for why destination-side
 /// protection (computing and reasoning about siblings of `new` too) is
 /// out of scope here. `rename_round_trip_into_sibling_fails_closed`
 /// pins this exact shape.
@@ -509,7 +509,7 @@ fn move_state_dir(root: &Path, old: &str, new: &str, protected: &[PathBuf]) -> s
                 // via a recursive `walk_unprotected` call rooted at an
                 // ancestor under `src`), so it is always under `src` —
                 // never leave an entry behind on the strength of a
-                // silently-ignored mismatch here (finding 5a, #789).
+                // silently-ignored mismatch here.
                 let rel = entry
                     .strip_prefix(&src)
                     .expect("walk_unprotected only ever yields entries located under src");
@@ -534,7 +534,7 @@ fn move_state_dir(root: &Path, old: &str, new: &str, protected: &[PathBuf]) -> s
         return Ok(());
     };
     if !tmp.exists() {
-        // Phase 1 never got as far as creating/populating `tmp`: `src`
+        // Step 1 never got as far as creating/populating `tmp`: `src`
         // is untouched, so there is nothing to restore.
         return Err(e);
     }
@@ -554,7 +554,7 @@ fn move_state_dir(root: &Path, old: &str, new: &str, protected: &[PathBuf]) -> s
     // Merge succeeded: the state is home. `tmp` is now an inert
     // (near-)empty husk; best-effort cleanup only — its failure is
     // tidiness debris, not stranded state, so the annotation above must
-    // not fire for it (finding 5c, #789).
+    // not fire for it.
     let _ = std::fs::remove_dir(&tmp);
     Err(e)
 }
@@ -575,7 +575,7 @@ fn prune_empty_parents(dir: &Path, root: &Path) {
 /// Configured remote names that are proper extensions of `name`
 /// (`name + "/"` prefix): the subtrees under `name`'s state directories
 /// that actually belong to OTHER configured remotes and must survive a
-/// rename/remove of `name` (#660). Empty in the overwhelmingly common
+/// rename/remove of `name`. Empty in the overwhelmingly common
 /// case, in which callers take the pre-existing whole-directory fast
 /// path unchanged.
 fn nested_sibling_names(remotes: &BTreeMap<String, RemoteEntry>, name: &str) -> Vec<String> {
@@ -643,12 +643,12 @@ fn walk_unprotected(
 /// recursing into any like-named directory that already exists at the
 /// destination (needed because `into` — `src` — may have retained
 /// ancestor directories of protected content that a moved entry's
-/// relative path nests under, finding 4 / #789) and renaming everything
+/// relative path nests under) and renaming everything
 /// else directly. Not a general merge utility: used only to put
 /// `move_state_dir`'s temp contents back where they came from.
 fn merge_tree_into(from: &Path, into: &Path) -> std::io::Result<()> {
     // Snapshot the entry list before any mutation, the same discipline
-    // as `walk_unprotected` (finding 5b, #789): recursing into a
+    // as `walk_unprotected`: recursing into a
     // like-named destination directory below mutates `into`, and a
     // naive un-snapshotted `read_dir(from)` iterator is only required to
     // reflect entries present at some unspecified point during the
@@ -692,7 +692,7 @@ fn warn_orphaned_bridge_state(layout: &RepoLayout, name: &str) {
 /// Best-effort removal of `refs/remotes/<name>/` after a remove.
 ///
 /// `siblings` lists the configured remote names nested under `name`
-/// (#660, `nested_sibling_names`); this joins them against the root it
+/// (`nested_sibling_names`); this joins them against the root it
 /// already owns (`layout.remotes_dir()`) to build the protected set. When
 /// empty (the overwhelmingly common case) this is the unchanged
 /// whole-directory `remove_dir_all` fast path; otherwise a selective walk

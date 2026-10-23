@@ -1,5 +1,5 @@
 //! `mkit reset --hard` and `mkit clean` — guarded destructive worktree
-//! commands (#250), driven end-to-end through the binary.
+//! commands, driven end-to-end through the binary.
 //!
 //! Both refuse to destroy without an explicit `-f` (the mkit safety
 //! divergence): `reset --hard` discards tracked changes silently in git
@@ -133,7 +133,7 @@ fn reset_hard_removes_tracked_file_absent_from_target_keeps_untracked() {
 #[cfg(unix)]
 #[test]
 fn reset_hard_refuses_discarding_mode_only_change_to_ignored_tracked_dropped_file() {
-    // Finding 1 (mode case): a chmod-only change has the same content hash,
+    // A chmod-only change has the same content hash,
     // so the dropped-path guard must compare mode/type too, not just bytes.
     use std::os::unix::fs::PermissionsExt;
     let (td, xdg) = repo(&[("base.txt", b"base\n")]);
@@ -243,7 +243,7 @@ fn clean_force_d_removes_untracked_directories() {
 
 #[test]
 fn clean_fd_keeps_ignored_files_inside_untracked_dir() {
-    // Finding 1: -fd must not wholesale-delete an untracked dir that holds
+    // -fd must not wholesale-delete an untracked dir that holds
     // an ignored file (git keeps the ignored file and the dir around it).
     let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
     let (root, x) = (td.path(), xdg.path());
@@ -270,7 +270,7 @@ fn clean_fd_keeps_ignored_files_inside_untracked_dir() {
 
 #[test]
 fn clean_fd_protects_nested_repository() {
-    // Finding 2: -fd must not delete a nested repository's metadata.
+    // -fd must not delete a nested repository's metadata.
     let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
     let (root, x) = (td.path(), xdg.path());
     fs::create_dir_all(root.join("nested/.mkit")).unwrap();
@@ -290,7 +290,7 @@ fn clean_fd_protects_nested_repository() {
 
 #[test]
 fn clean_fd_dot_pathspec_cleans_everything() {
-    // Finding 5: `clean -fd .` must clean under cwd, not no-op.
+    // `clean -fd .` must clean under cwd, not no-op.
     let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
     let (root, x) = (td.path(), xdg.path());
     fs::write(root.join("untracked.txt"), b"u\n").unwrap();
@@ -305,7 +305,7 @@ fn clean_fd_dot_pathspec_cleans_everything() {
 
 #[test]
 fn clean_x_and_capital_x_conflict() {
-    // Finding 6: -x and -X are mutually exclusive.
+    // -x and -X are mutually exclusive.
     let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
     let (root, x) = (td.path(), xdg.path());
     let out = run_in(root, x, &["clean", "-n", "-x", "-X"]);
@@ -317,7 +317,7 @@ fn clean_x_and_capital_x_conflict() {
 
 #[test]
 fn reset_hard_refuses_discarding_modified_ignored_but_tracked_dropped_file() {
-    // Finding 3: a file tracked before an ignore pattern matched it is
+    // A file tracked before an ignore pattern matched it is
     // invisible to the shared (build_tree) guard; if it is locally modified
     // and the target drops it, reset --hard must still refuse without -f.
     let (td, xdg) = repo(&[("base.txt", b"base\n")]);

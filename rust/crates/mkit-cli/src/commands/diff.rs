@@ -13,7 +13,7 @@
 //! A leading positional that is not a resolvable revision is treated as
 //! the start of the pathspec list; a leading positional that *looks*
 //! like a revision (ref / commit / range) but fails to resolve is a
-//! hard error rather than a silent empty diff (#207).
+//! hard error rather than a silent empty diff.
 //!
 //! Trailing positional paths (pathspecs) filter the output to entries
 //! at or below those paths. The default output is a Git-compatible
@@ -269,7 +269,7 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut stdout = std::io::stdout().lock();
     if opts.stat {
-        // `render_stat` hoists its own `DisplaySource` wrapping (#625).
+        // `render_stat` hoists its own `DisplaySource` wrapping.
         return match render_stat(&mut stdout, &snapshot, selected.into_iter()) {
             Ok(()) => diff_status,
             Err(msg) => emit_err(&msg, exit::GENERAL_ERROR),
@@ -277,7 +277,7 @@ pub fn run(args: &[String]) -> u8 {
     }
     // The patch paths below print what they render here — nothing durable
     // is published from this path — so skip the BLAKE3 re-verify on every
-    // changed blob (#625).
+    // changed blob.
     let display = DisplaySource::new(&snapshot);
     for e in selected {
         let res = if opts.name_only || opts.name_status {
@@ -423,8 +423,8 @@ type DiffEndpoints = (Option<Hash>, Option<Hash>, Vec<String>);
 /// on error so the caller can route it through `emit_err`.
 ///
 /// Cases:
-/// - `--staged <rev>...` (any positionals) — usage contradiction
-///   (#223): `--staged` already fixes both endpoints (HEAD vs index).
+/// - `--staged <rev>...` (any positionals) — usage contradiction,
+///   because `--staged` already fixes both endpoints (HEAD vs index).
 /// - `<a>..<b> [paths…]` — range form; both ends resolved to trees.
 /// - `<a> <b> [paths…]` — two revisions, when both resolve.
 /// - `<a> [paths…]` — one revision vs worktree (or vs index w/--staged
@@ -455,7 +455,7 @@ fn resolve_merge_base_endpoints(
 
     // A second positional that resolves to a revision selects the
     // two-revision form. One that only *looks* like a revision but fails to
-    // resolve is a hard error (#207); anything else is a pathspec, leaving
+    // resolve is a hard error; anything else is a pathspec, leaving
     // the single-revision (vs worktree) form.
     if let Some(second) = args.get(1) {
         match revspec::resolve_revision(store, layout, second) {
@@ -524,11 +524,11 @@ fn resolve_diff_endpoints(
         return resolve_merge_base_endpoints(store, snapshot, layout, args);
     }
 
-    // #223: `--staged` with explicit revisions is contradictory —
+    // `--staged` with explicit revisions is contradictory —
     // `--staged` already pins HEAD vs the index. Pathspecs are fine, but
     // a leading argument that *looks* like a revision is not, and must
-    // fail closed: if it resolves it is the contradiction (#223), and if
-    // it does not it is a bad revision (#207). Either way we error rather
+    // fail closed: if it resolves it is the contradiction, and if
+    // it does not it is a bad revision. Either way we error rather
     // than silently treating a typo'd hash as a no-match pathspec (which
     // would empty-succeed and diverge from `git diff --cached <bad-rev>`).
     // A non-rev-looking leading arg (e.g. `path/`, `file.txt`) still falls
@@ -600,7 +600,7 @@ fn resolve_diff_endpoints(
         None => {
             // No leading revision → default HEAD vs worktree; all
             // positionals are pathspecs. If the first arg *looked* like
-            // a revision but failed to resolve, error loudly (#207)
+            // a revision but failed to resolve, error loudly
             // rather than silently treating it as a pathspec.
             if let Some(first) = args.first()
                 && looks_like_rev_request(first)
@@ -736,7 +736,7 @@ fn strip_range_end(s: &str) -> (&str, bool) {
     }
 }
 
-/// Heuristic for #207: does this argument look like the user *intended*
+/// Heuristic: does this argument look like the user *intended*
 /// a revision (so a resolve failure should be a hard error) rather than
 /// a pathspec? True for hash-shaped tokens, `A..B` ranges, and the
 /// literal `HEAD` (possibly with `~`/`^` navigation). A plain
@@ -957,7 +957,7 @@ fn quoted_side(side: char, path: &str) -> String {
 }
 
 /// Read a blob's bytes from the store, reassembling chunked blobs via
-/// the shared core helper so diff/cat/checkout agree (#203).
+/// the shared core helper so diff/cat/checkout agree.
 fn read_blob<S: ObjectSource + ?Sized>(store: &S, h: &Hash) -> Result<Vec<u8>, String> {
     worktree::read_blob(store, h).map_err(read_err)
 }

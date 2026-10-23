@@ -9,8 +9,8 @@
 //! It does **not** prove:
 //!
 //! * that the disclosed path is the *only* thing at that location (no
-//!   sibling-completeness claim — see the closure profile, issue #1015
-//!   PR 3, for that);
+//!   sibling-completeness claim — see the closure profile,
+//!   for that);
 //! * anything about who the signer *is* — `signer`/`signature_valid`
 //!   report whether the embedded Ed25519 signature verifies against the
 //!   embedded public key; binding that key to an identity or trust level
@@ -23,7 +23,7 @@
 //!
 //! Wire format, verification algorithm, and bounds are pinned in
 //! `docs/specs/SPEC-DISCLOSURE.md`; golden vectors live under
-//! `rust/tests/golden/disclosure/`. See issue #1015 (verifier kit) PR 2.
+//! `rust/tests/golden/disclosure/`.
 //!
 //! ## Layering
 //!
@@ -43,7 +43,7 @@
 //! [`verify_closure`], [`verify_closure_streaming`],
 //! [`verify_closure_packs`], and [`verify_closure_manifest`], with
 //! [`verify_closure_store`] and [`export_closure`] as native store-backed
-//! operations (issue #1015 PR 3).
+//! operations.
 //!
 //! Everything here, the builder included, compiles with
 //! `--no-default-features` and targets `wasm32-unknown-unknown`; no
@@ -80,7 +80,7 @@
 //! house style). The whole bundle is capped at [`MAX_BUNDLE_BYTES`];
 //! trailing bytes are rejected.
 //!
-//! `ChunkHdr.chunk_id` is not literal to issue #1015's original design
+//! `ChunkHdr.chunk_id` is not literal to the original design
 //! note, which omitted it: without an explicit chunk id, a verifier
 //! reading a byte-range bundle would have no value to check the Bao slice
 //! against before folding it into the enclosing `ChunkedBlob`'s multi-proof
@@ -112,7 +112,7 @@ pub const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 const BUNDLE_MAGIC: &[u8; 4] = b"MKDP";
 /// Current (and only) bundle version byte. v1 is rejected with
 /// [`VerifyError::UnsupportedBundleVersion`]; there is no compatibility
-/// decoder (SPEC-DISCLOSURE v2, issue #1024).
+/// decoder (SPEC-DISCLOSURE v2).
 const BUNDLE_VERSION: u8 = 2;
 /// Cap on `commit_bytes` — comfortably above any real commit (~250 B) or
 /// remix (larger, due to `sources`), far below `MAX_RAW_OBJECT_SIZE`.

@@ -1,7 +1,7 @@
-//! Issue #545: the applied-packs record's lifecycle follows its remote's.
+//! The applied-packs record's lifecycle follows its remote's.
 //!
 //! `mkit remote remove` must delete the per-remote applied-packs record
-//! (#409/#520) and `mkit remote rename` must move it, so that:
+//! and `mkit remote rename` must move it, so that:
 //!
 //! * remove → gc → re-add of the same name fetches cleanly, with no
 //!   spurious stale-record self-heal (asserted via the fetch's stderr, not
@@ -12,7 +12,7 @@
 //!
 //! Both operations must be non-fatal when the record is missing.
 //!
-//! A positive control (ported from PR #573) re-plants the record into the
+//! A positive control (ported from) re-plants the record into the
 //! remove → gc → re-add sequence and asserts the self-heal note DOES fire,
 //! so the no-self-heal assertion can never go vacuously green.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
@@ -33,7 +33,7 @@ use common::Repo;
 
 /// Counts calls to `download_pack` specifically (NOT `download_blob`, which
 /// the packlist chain-node walk uses and which stays unconditional per the
-/// #409 spec) so tests can assert exactly how many *pack* bodies were pulled
+/// applied-packs design) so tests can assert exactly how many *pack* bodies were pulled
 /// over the wire on a given fetch. Everything else delegates to an inner
 /// [`MemoryTransport`]. A sibling copy lives in `applied_packs_fetch.rs`;
 /// integration-test binaries can't share non-`common` helpers, and folding
@@ -104,7 +104,7 @@ impl Transport for CountingTransport {
 /// remove → gc → re-add of the same name: with the record deleted at remove
 /// time, the re-added remote's first fetch is a clean full fetch — it must
 /// NOT trip the stale-record self-heal (whose "looks stale ... clearing it"
-/// note plus retry is the spurious-path marker #545 eliminates).
+/// note plus retry is the spurious-path marker that this lifecycle removes).
 #[test]
 fn remove_deletes_record_and_readd_fetch_has_no_self_heal() {
     // Origin publishes a two-pack chain over mkit+file://.
@@ -170,9 +170,9 @@ fn remove_deletes_record_and_readd_fetch_has_no_self_heal() {
     );
 }
 
-/// Positive control for the test above, ported from PR #573: restore the
+/// Positive control for the test above: restore the
 /// pre-remove record into the same remove → gc → re-add sequence, simulating
-/// pre-#545 behavior where `remote remove` left the file behind. The stale
+/// the old behavior where `remote remove` left the file behind. The stale
 /// record claims packs are applied whose objects the gc'd store no longer
 /// holds, so the fetch MUST emit the "looks stale" self-heal note — and
 /// still succeed via the full re-download retry. Without this control, a
@@ -215,7 +215,7 @@ fn stale_record_surviving_remove_trips_self_heal_note() {
     );
     consumer.ok(&["remote", "add", "up", &url]);
 
-    // Simulate pre-#545 behavior: the record survives the remove.
+    // Simulate pre-fix behavior: the record survives the remove.
     fs::create_dir_all(record.parent().unwrap()).unwrap();
     fs::write(&record, &record_bytes).unwrap();
 

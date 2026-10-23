@@ -276,7 +276,7 @@ fn seventh_data_pack_is_refused_before_its_begin_upload() {
     let tx = TicketTransport::new(Fault::None);
     let err = push(&repo, &tx, 4096).unwrap_err();
     // One commit cannot be split, so the exact local dry seal refuses it
-    // before any pack goes up (WP-1.17b); it names the commit.
+    // before any pack goes up; it names the commit.
     match &err {
         DispatchError::PushTooLarge {
             packs: 7,
@@ -445,7 +445,7 @@ fn missing_delta_base_restarts_with_self_contained_bytes() {
 }
 
 // ---------------------------------------------------------------------------
-// Splitting an oversized push along first-parent history (WP-1.17b, R-164)
+// Splitting an oversized push along first-parent history
 // ---------------------------------------------------------------------------
 
 const CAP: u64 = 4096;

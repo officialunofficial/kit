@@ -166,7 +166,7 @@ fn create(layout: &RepoLayout, name: &str) -> u8 {
     let Ok(Some(h)) = refs::resolve_head(layout) else {
         return emit_err("no HEAD commit to branch from", exit::GENERAL_ERROR);
     };
-    // `MustNotExist` (issue #206) refuses to silently clobber an
+    // `MustNotExist` refuses to silently clobber an
     // existing branch of the same name. Route through
     // `write_ref_recording_history` so the new branch picks up a
     // fresh history-MMB journal (the empty pre-leaf root + this
@@ -183,8 +183,8 @@ fn create(layout: &RepoLayout, name: &str) -> u8 {
 /// `mkit branch -d/-D <name>` — delete a branch.
 ///
 /// Both `-d` and `-D` route through `delete_ref_recording_history`,
-/// which refuses to delete the branch HEAD currently points at (issue
-/// #206) — deleting the current branch would leave HEAD dangling, and
+/// which refuses to delete the branch HEAD currently points at —
+/// deleting the current branch would leave HEAD dangling, and
 /// git refuses this even under `-D`. mkit does not track per-branch
 /// merge status, so `-d` and `-D` behave identically here. Like git,
 /// **both** error on a missing branch (`error: branch '<name>' not
@@ -192,8 +192,8 @@ fn create(layout: &RepoLayout, name: &str) -> u8 {
 /// rather than swallowed.
 ///
 /// On `--features history-mmr` builds, `delete_ref_recording_history`
-/// additionally destroys the branch's history-MMB journal partition
-/// (issue #648): without that, recreating a branch under the same name
+/// additionally destroys the branch's history-MMB journal partition.
+/// Without that, recreating a branch under the same name
 /// would reopen the deleted incarnation's non-empty journal and resume
 /// appending on top of its old leaves.
 fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
@@ -205,7 +205,7 @@ fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
     // (was <hash>).` confirmation.
     let was = refs::read_ref(layout, name).ok().flatten();
     // Refuse to delete a branch a SIBLING worktree has checked out
-    // (#493) — delete_ref_safe below only knows about this tree's HEAD.
+    // — delete_ref_safe below only knows about this tree's HEAD.
     // Registry lock: atomic vs a concurrent checkout/worktree-add
     // grabbing the branch between this check and the delete.
     let _registry_lock = match super::acquire_worktrees_registry_lock(layout) {
@@ -257,7 +257,7 @@ fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
 /// history-MMB journal on `--features history-mmr` builds, exactly as a
 /// freshly created branch would. The source deletion routes through
 /// `delete_ref_dropping_history`, which on the same builds destroys the
-/// OLD name's journal partition (issue #648) — a rename always starts
+/// OLD name's journal partition — a rename always starts
 /// the new name with a fresh journal, so leaving the old name's journal
 /// behind would only serve to be wrongly inherited if that name is ever
 /// reused (e.g. renamed back, or a new unrelated branch of that name).
@@ -286,8 +286,8 @@ fn rename(layout: &RepoLayout, names: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("read {old}: {e}"), exit::GENERAL_ERROR),
     };
 
-    // Refuse to rename a branch a SIBLING worktree has checked out
-    // (#493): its HEAD would dangle on the old name. (Renaming the
+    // Refuse to rename a branch a SIBLING worktree has checked out,
+    // because its HEAD would dangle on the old name. (Renaming the
     // branch checked out HERE is fine — HEAD is moved below.)
     // Registry lock: atomic vs a concurrent checkout/worktree-add.
     let _registry_lock = match super::acquire_worktrees_registry_lock(layout) {
@@ -317,7 +317,7 @@ fn rename(layout: &RepoLayout, names: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("write {new}: {e}"), exit::CANTCREAT),
     }
 
-    // CAS-guarded, not unconditional (#658): `hash` is the tip we read
+    // CAS-guarded, not unconditional: `hash` is the tip we read
     // above, before the destination was even created. If a concurrent
     // `commit` advanced `old` in the meantime (via its own
     // Match-conditioned advance — see `commit.rs`'s `advance_head`),

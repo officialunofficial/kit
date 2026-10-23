@@ -1,5 +1,5 @@
 //! Picking the remote a grant, epoch or visibility command talks to, the
-//! audience it signs for, and waiting for the server to finish (WP-2.14).
+//! audience it signs for, and waiting for the server to finish.
 
 use std::time::Duration;
 

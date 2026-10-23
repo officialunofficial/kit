@@ -1,5 +1,4 @@
-//! Golden vectors for the SPEC-DISCLOSURE.md partial-disclosure bundle
-//! (issue #1015 "verifier kit" PR 2).
+//! Golden vectors for the SPEC-DISCLOSURE.md partial-disclosure bundle.
 //!
 //! Like `golden_proofs.rs`, this file is deliberately two independent
 //! halves:
@@ -18,7 +17,7 @@
 //! from an external test crate; see that module's docs on why `Step` is
 //! public but the payload's wire shape is not). This mirrors exactly what
 //! an independent, non-Rust verifier's own vector generator would need to
-//! do, per issue #1015's acceptance criteria.
+//! do, per acceptance criteria.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fmt::Write as _;

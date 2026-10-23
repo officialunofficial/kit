@@ -1681,10 +1681,10 @@ mod tests {
         }
 
         #[test]
-        // #505 PR 5/5: real subprocess + wall-clock timeout, several
+        // Real subprocess + wall-clock timeout, several
         // seconds of real sleep total across this module's three tests.
-        // Quarantined to the serial `--ignored` CI lane (cloudbuild/ci.yaml,
-        // .github/workflows/rust.yml) instead of running on every `cargo test`.
+        // Quarantined to the serial `--ignored` CI lane
+        // (.github/workflows/rust.yml) instead of running on every `cargo test`.
         #[ignore = "real subprocess + wall-clock timeout; run via the serial --ignored CI lane"]
         fn hang_before_stdout_times_out_and_reaps_child() {
             // Child reads stdin then sleeps forever without writing
@@ -1710,7 +1710,7 @@ mod tests {
         }
 
         #[test]
-        // #505 PR 5/5: quarantined alongside the other two subprocess-sleep
+        // Quarantined alongside the other two subprocess-sleep
         // tests in this module — see `hang_before_stdout_times_out_and_reaps_child`.
         #[ignore = "real subprocess + wall-clock timeout; run via the serial --ignored CI lane"]
         fn fills_stderr_before_stdout_does_not_deadlock() {
@@ -1744,7 +1744,7 @@ mod tests {
         }
 
         #[test]
-        // #505 PR 5/5: quarantined alongside the other two subprocess-sleep
+        // Quarantined alongside the other two subprocess-sleep
         // tests in this module — see `hang_before_stdout_times_out_and_reaps_child`.
         #[ignore = "real subprocess + wall-clock timeout; run via the serial --ignored CI lane"]
         fn valid_response_then_never_exits_is_bounded() {
@@ -1926,7 +1926,7 @@ mod tests {
 
         #[test]
         fn signer_that_skips_hello_response_is_rejected() {
-            // #558 / SPEC-EXTERNAL-SIGNER §4 / SPEC-RPC §4: a signer that
+            // SPEC-EXTERNAL-SIGNER §4 and SPEC-RPC §4: a signer that
             // pipelines straight to a valid SignResponse, never sending
             // HelloResponse, never completed the version handshake and
             // must be rejected outright rather than tolerated as it was

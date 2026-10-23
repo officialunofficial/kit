@@ -832,7 +832,7 @@ impl ConnectTransport {
         self.with_client_source(|source| source.list_refs_with_page_limit(prefix, max_pages))
     }
     /// Poll a ticket-consuming advance until it commits or `deadline` expires.
-    /// WP-1.17 passes the earliest consumed ticket expiry here. Until then,
+    /// Callers do not pass the earliest consumed ticket expiry here yet. Until then,
     /// the maximum seven-day ticket lifetime bounds calls with no deadline.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
@@ -1261,7 +1261,7 @@ mod tests {
     fn connect_accepts_https_and_does_not_panic_building_tls_config() {
         // Regression test: rustls 0.23 panics building a `ClientConfig` if
         // no crypto provider is installed and more than one backend
-        // feature is linked in the process (mkit#701) — this exercises
+        // feature is linked in the process — this exercises
         // exactly that path. Construction does not make a network call.
         let t = ConnectTransport::connect("mkit+https://example.invalid/proj").unwrap();
         assert!(t.server_info.get().is_none());
@@ -1272,7 +1272,7 @@ mod tests {
         // SPEC-TRANSPORT-CONNECT §2: every RPC resolves to the FIXED path
         // `/mkit.transport.v1.TransportService/<Method>` — a `/project`
         // path segment on the `mkit+https://` URL must NOT become a
-        // prefix on the Connect base URI (mkit#701 regression: an earlier
+        // prefix on the Connect base URI (regression: an earlier
         // version of this code folded the path in, breaking every call
         // against a server mounted at the standard root path).
         let t = ConnectTransport::connect("mkit+https://example.invalid/myproj").unwrap();
@@ -1426,7 +1426,7 @@ mod tests {
         assert_eq!(escape_offending("a\u{7}b"), "a\\u{7}b");
     }
 
-    // -- per-verb-class timeouts (mkit#798) ------------------------------
+    // -- per-verb-class timeouts ------------------------------
 
     #[test]
     fn timeouts_default_to_the_named_constants() {

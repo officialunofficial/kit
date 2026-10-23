@@ -2,7 +2,7 @@
 //!
 //! mkit serialises worktree mutations under a `flock`-backed lock file
 //! (`.mkit/worktree.lock`, 5s acquire timeout → exit `TEMPFAIL`/75). Per
-//! #635/INV-16, the lock's sentinel file is never unlinked and carries no
+//! INV-16, the lock's sentinel file is never unlinked and carries no
 //! meaning by itself — only the kernel lock does — so a lockfile left behind
 //! by a killed process does not block later commands (the kernel already
 //! released its lock when the dead process's descriptor closed). These tests
@@ -87,7 +87,7 @@ fn concurrent_independent_mutators_serialize_cleanly() {
 
 #[test]
 fn unlocked_stale_lockfile_does_not_block() {
-    // #635/INV-16: a lockfile left behind by a crashed holder must not
+    // INV-16: a lockfile left behind by a crashed holder must not
     // permanently wedge future commands. The sentinel's mere on-disk
     // presence is not the mutual-exclusion signal — the kernel `flock` is
     // — so an inert leftover file (present, but nobody holds its lock, as
@@ -105,7 +105,7 @@ fn unlocked_stale_lockfile_does_not_block() {
 
 #[test]
 fn publisher_vs_gc_never_corrupts() {
-    // Root-publisher race (#267): a `tag -a` writes its object then publishes a
+    // Root-publisher race: a `tag -a` writes its object then publishes a
     // ref; a concurrent `gc --grace-secs 0` must not prune the just-written
     // object out from under it. They share the worktree lock, so each iteration
     // must leave the repo consistent and any created tag resolvable.

@@ -161,7 +161,7 @@ fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Re
 /// [`ClientTransport`] wrapper that signs read and write RPCs with an auth v2
 /// envelope before delegating to `inner`. This is the same transport type used
 /// whether or not envelope auth is configured, so the bearer-token-only
-/// path (`ConnectTransport::connect`, #700/#701) pays no signing overhead
+/// path (`ConnectTransport::connect`) pays no signing overhead
 /// beyond one `Option` check per call.
 #[derive(Clone)]
 pub struct EnvelopeTransport<T> {

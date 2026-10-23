@@ -473,7 +473,7 @@ impl<'s> WriteBatch<'s> {
 /// pool of 512 threads exists for the identical reason).
 ///
 /// 64 is chosen from a benchmark sweep (16/32/64/128 workers, 1000-object
-/// batches) on macOS/APFS (issue #864), repeated with 25-sample mean/
+/// batches) on macOS/APFS, repeated with 25-sample mean/
 /// stddev tracking after an initial small-sample pass overstated its
 /// confidence in the 128 result. The 16-vs-64 comparison is robust and
 /// reproduced across three independent runs: 64 is consistently ~20-30%
@@ -752,7 +752,7 @@ mod tests {
                 batch.write(&bytes).unwrap();
             }
             // Duplicates must not add flushes either.
-            batch.write(b"object #0").unwrap();
+            batch.write(b"object 0").unwrap();
             batch.commit().unwrap();
 
             let fulls = rec

@@ -560,7 +560,7 @@ fn reconstruct_rejects_mkit_illegal_tree_names() {
 
 /// Helper: the translated git body of a signed commit.
 ///
-/// #505 PR 5/5: deliberately minimal (empty tree, no parents) — the
+/// Deliberately minimal (empty tree, no parents) — the
 /// tests below only mutate the synthesized `mkit-*` headers of a bridge
 /// commit body, so they don't need `build_fixture`'s full >1 MiB
 /// chunked-blob / nested-tree / tag fixture (that fixture exists for the
@@ -584,7 +584,7 @@ fn as_commit(body: Vec<u8>) -> GitObject {
     }
 }
 
-/// #505 PR 5/5: split from the former `shallow_verify_reports_failed_on_tamper`
+/// Split from the former `shallow_verify_reports_failed_on_tamper`
 /// mega-test (also switched off the >1 MiB `build_fixture` fixture — see
 /// `minimal_signed_commit_body`). §10: a tampered signature reports
 /// Failed — never Unsigned, never Verified.
@@ -605,7 +605,7 @@ fn shallow_verify_reports_failed_on_tampered_signature() {
     );
 }
 
-/// #505 PR 5/5: split from the former `shallow_verify_reports_failed_on_tamper`
+/// Split from the former `shallow_verify_reports_failed_on_tamper`
 /// mega-test. §10: a tampered carried `mkit-tree` (signed bytes change)
 /// reports Failed — never Unsigned, never Verified.
 #[test]
@@ -625,7 +625,7 @@ fn shallow_verify_reports_failed_on_tampered_tree() {
     );
 }
 
-/// #505 PR 5/5: split from the former table-driven `reconstruct_fail_closed_branches`
+/// Split from the former table-driven `reconstruct_fail_closed_branches`
 /// mega-test (also switched off the >1 MiB `build_fixture` fixture — see
 /// `minimal_signed_commit_body`) so each fail-closed branch below is its
 /// own localizable test. §1.2/§9: a schema bump (`mkit-schema 2`) refuses.

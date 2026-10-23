@@ -47,7 +47,7 @@ pub struct Conflict {
     /// Tree mode of the ours-side entry (`None` when ours deleted the
     /// path). Carried so a downstream resolver can stage the ours-side
     /// with its real exec/symlink mode instead of defaulting to a plain
-    /// blob (#214).
+    /// blob.
     pub ours_mode: Option<EntryMode>,
     /// Tree mode of the theirs-side entry (`None` when theirs deleted
     /// the path).
@@ -257,7 +257,7 @@ fn single_blob_bytes<S: ObjectSource + ?Sized>(
 }
 
 /// Attempt a line-level 3-way merge of a both-sides-modified regular-file
-/// blob (#298). Returns the hash of the merged blob when ours/theirs
+/// blob. Returns the hash of the merged blob when ours/theirs
 /// changed disjoint regions of base, or `None` to fall back to a
 /// modify/modify conflict (overlapping changes, a binary side, or a
 /// chunked/large blob). Genuine store I/O errors propagate.
@@ -542,7 +542,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         try_text_merge(store, b.object_hash, o.object_hash, t.object_hash)?
                 {
                     // Both changed the same regular file, but on disjoint
-                    // lines — auto-merge the content (#298). Mode is shared,
+                    // lines — auto-merge the content. Mode is shared,
                     // so it carries over unambiguously.
                     add_entry(merged, min_name, o.mode, merged_hash);
                 } else {
@@ -1137,7 +1137,7 @@ mod tests {
         let r = merge_trees(&s, Some(base), Some(ours), Some(theirs)).unwrap();
         assert!(
             !r.has_conflicts(),
-            "disjoint line edits should auto-merge (#298), got {:?}",
+            "disjoint line edits should auto-merge, got {:?}",
             r.conflicts
         );
         let f = find_entry(&tree_entries(&s, r.tree_hash), b"f.txt")

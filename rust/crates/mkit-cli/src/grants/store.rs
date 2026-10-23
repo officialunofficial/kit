@@ -1,4 +1,4 @@
-//! The user grant store (WP-2.13, R-155).
+//! The user grant store.
 //!
 //! One file per grant at `$XDG_CONFIG_HOME/mkit/grants/<grant id hex>.grant`,
 //! holding the raw SPEC-WRITE-GRANTS §4.2 header value and nothing else;

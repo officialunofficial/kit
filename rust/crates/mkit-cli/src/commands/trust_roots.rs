@@ -5,8 +5,7 @@
 //! --trusted`/`--trust-roots` (`commands/verify.rs`), and `mkit
 //! verify-attest --trust-roots` (`commands/verify_attest.rs`). This
 //! module owns the parser, the writer, and the repo-local path-fencing
-//! policy so none of the three grow a second trust-file format
-//! (issue #693).
+//! policy so none of the three grow a second trust-file format.
 //!
 //! Grammar (a strict subset of TOML):
 //!
@@ -96,7 +95,7 @@ pub fn note_if_missing(trust_path: &Path) {
 
 /// Parse every `[[trust_root]]` block in `text`. Blocks with missing
 /// `keyid`/`pubkey_hex`, unparsable hex, or a keyid/pubkey mismatch
-/// (#223) are dropped with a stderr note rather than surfaced as a
+/// are dropped with a stderr note rather than surfaced as a
 /// hard error — matches `verify-attest`'s tolerant-parser policy.
 #[must_use]
 pub fn parse(text: &str) -> Vec<TrustEntry> {
@@ -213,7 +212,7 @@ fn add_entry_to_registry(reg: &mut Registry, e: &TrustEntry) {
 /// Does `entries` contain a live `ed25519` trust root whose pubkey
 /// bytes equal `signer`? Used by `mkit verify --trusted` to cross-check
 /// a commit/remix/tag's embedded `signer` field — commit signing is
-/// Ed25519-only today (issue #693 implementation notes).
+/// Ed25519-only today.
 ///
 /// Returns the matching entry's `keyid` on success.
 #[must_use]
@@ -261,7 +260,7 @@ pub fn save(path: &Path, entries: &[TrustEntry]) -> Result<(), (String, u8)> {
         .map_err(|e| (format!("write {}: {e}", path.display()), exit::CANTCREAT))
 }
 
-/// Cross-check (#223) that `keyid` is consistent with the declared
+/// Cross-check that `keyid` is consistent with the declared
 /// public key bytes. The canonical keyid shape is `<prefix>:<body>`:
 ///
 /// - `blake3:<hex>` — body is `blake3(pubkey)`; verify the digest.

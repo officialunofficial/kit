@@ -3,7 +3,7 @@
 //! A file's content lives either in a single inline [`Blob`](crate::object::Blob)
 //! or behind a [`ChunkedBlob`](crate::object::ChunkedBlob) manifest. [`LoadedBlob`]
 //! is the one-read-per-object view over both shapes; [`read_blob`] is the one-shot
-//! full-content convenience on top of it. Extracted from `worktree.rs` (#633) —
+//! full-content convenience on top of it. Extracted from `worktree.rs` —
 //! this cluster reconstructs content and has nothing to do with walking a worktree.
 
 use std::borrow::Cow;
@@ -45,7 +45,7 @@ pub fn read_blob<S: crate::store::ObjectSource + ?Sized>(
 /// content (text row), and taking each view through a separate store-level
 /// read re-read (and re-hash-verified) the same object two times per
 /// changed file, a per-entry cost that dominates a many-small-files
-/// diffstat (#624).
+/// diffstat.
 ///
 /// Chunk objects are still read on demand: [`Self::len`] reads none,
 /// [`Self::prefix`] reads only leading chunks, [`Self::into_content`]
@@ -56,7 +56,7 @@ pub fn read_blob<S: crate::store::ObjectSource + ?Sized>(
 /// every chunk (including that same leading one) to reassemble — a caller
 /// doing both, as `diff --stat` does, reads the first chunk twice. Caching
 /// it would need either interior mutability or a consuming-prefix API, to
-/// save an O(1) read on an O(n-chunks) path; not worth it (#624).
+/// save an O(1) read on an O(n-chunks) path; not worth it.
 #[derive(Debug)]
 pub enum LoadedBlob {
     /// An inline [`Blob`](crate::object::Blob): its full content, already
@@ -90,7 +90,7 @@ impl LoadedBlob {
     /// reads. `total_size` is trustworthy without re-verifying against the
     /// chunks: every reassembly path enforces it via
     /// [`ChunkedBlob::check_reassembled_size`], so a manifest with a wrong
-    /// `total_size` cannot have been durably written (#550).
+    /// `total_size` cannot have been durably written.
     #[must_use]
     pub fn len(&self) -> u64 {
         match self {
@@ -329,7 +329,7 @@ pub fn content_eq<S: crate::store::ObjectSource + ?Sized>(
 /// [`LoadedBlob::len`] already documents: every reassembly path enforces
 /// it via [`ChunkedBlob::check_reassembled_size`], so a manifest with a
 /// wrong `total_size` cannot have been durably written through mkit's own
-/// writers (#550). A side every one of whose chunks gets actually read
+/// writers. A side every one of whose chunks gets actually read
 /// (no id ever matched a boundary on that side — the case an append or a
 /// wholly-rewritten file hits) has its real byte count checked against
 /// its declared `total_size` before returning, exactly like the old

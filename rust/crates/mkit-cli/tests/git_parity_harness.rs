@@ -1,4 +1,4 @@
-//! Differential git-parity harness (Phase -1, #247 — umbrella #246).
+//! Differential git-parity harness.
 //!
 //! Runs the same script under real `git` and under `mkit`, normalizes the
 //! output **modulo object-id length** (git's 40-hex SHA-1 vs mkit's 64-hex
@@ -12,8 +12,8 @@
 //!   leak in; git identity is pinned via `GIT_*` env vars.
 //! - Differential cases early-return (pass) when no real `git` is on PATH, so
 //!   the suite stays green in environments without git.
-//! - Rows that are not yet implemented are `#[ignore]`d with their phase and
-//!   issue. Each phase un-ignores its rows as it ships the feature, so CI
+//! - Rows that are not yet implemented are `#[ignore]`d with a reason.
+//!   Each feature un-ignores its rows as it ships, so CI
 //!   enforces only the currently-passing subset (no `rust.yml` change needed —
 //!   `cargo nextest` skips ignored tests by default).
 
@@ -830,7 +830,7 @@ fn diff_stat_scaled_graph_matches_git() {
 }
 
 // =====================================================================
-// Passing subset — clean dry-run parity (#250). `git clean -n` and
+// Passing subset — clean dry-run parity. `git clean -n` and
 // `mkit clean -n` print identical `Would remove <path>` lines (no object
 // ids); reset --hard isn't compared (git discards silently, mkit guards).
 // =====================================================================
@@ -893,7 +893,7 @@ fn clean_without_force_refused_like_git() {
 }
 
 // =====================================================================
-// Passing subset — mv guard parity (#250). The happy-path move shows as
+// Passing subset — mv guard parity. The happy-path move shows as
 // `R` under git (rename detection) but delete+add under mkit, so only the
 // guard/error behavior is compared differentially (both must fail).
 // =====================================================================
@@ -963,7 +963,7 @@ fn config_user_name_round_trips_like_git() {
 }
 
 // =====================================================================
-// Passing subset — branch list / delete reconciliation (#249).
+// Passing subset — branch list / delete reconciliation.
 // =====================================================================
 
 #[test]
@@ -1007,7 +1007,7 @@ fn branch_delete_missing_fails_like_git() {
 }
 
 // =====================================================================
-// Passing subset — read-only plumbing (#251). rev-parse /
+// Passing subset — read-only plumbing. rev-parse /
 // show-ref / ls-tree output is parity-able modulo hash length; cat-file
 // on a blob is byte-exact (type / size / content carry no object id).
 // =====================================================================
@@ -1330,7 +1330,7 @@ fn config_core_inert_key_matches_git() {
 }
 
 // =====================================================================
-// Pending rows — ignored until the owning phase ships them. Each carries
+// Pending rows — ignored until the owning feature ships. Each carries
 // the comparison so un-ignoring is a one-line change once implemented.
 // =====================================================================
 
@@ -1362,7 +1362,7 @@ fn status_porcelain_v2_matches_git() {
 
 /// Replace a tracked file `f` on disk with a directory `f/` holding a child.
 /// git suppresses the colliding untracked contents and reports only the
-/// tracked-side deletion (`1 .D … f`, `mW = 000000`); mkit must match (#288).
+/// tracked-side deletion (`1 .D … f`, `mW = 000000`); mkit must match.
 /// A *non-empty* replacement directory is what actually exercises the
 /// collision — an empty dir has no child to (wrongly) surface as untracked.
 fn setup_file_replaced_by_dir(h: &Harness) {

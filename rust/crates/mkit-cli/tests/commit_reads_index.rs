@@ -1,7 +1,7 @@
 //! Verifies that `mkit commit` builds its tree from the staging index
 //! (`.mkit/index`), NOT from a recursive walk of the working tree.
 //!
-//! Resolves issue #102 — pre-Option-B, `mkit add` wrote to the index
+//! Before this contract, `mkit add` wrote to the index
 //! but `mkit commit` ignored it and snapshotted the entire worktree.
 //! These tests pin the new contract:
 //!
@@ -12,7 +12,7 @@
 //! 3. Committing with an empty index is a hard error (no silent
 //!    "commit nothing" mode).
 //! 4. `mkit add .` followed by `mkit commit` produces a tree
-//!    byte-equivalent to what the pre-#102 behaviour produced (the
+//!    byte-equivalent to what the pre-fix behaviour produced (the
 //!    snapshot use-case still works with one extra command).
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
@@ -131,7 +131,7 @@ fn unstaged_files_are_excluded_from_commit_tree() {
     );
     assert!(
         !body.contains("unstaged.txt"),
-        "commit tree contains unstaged file — issue #102 regression. body=\n{body}"
+        "commit tree contains unstaged file. body=\n{body}"
     );
 }
 
@@ -139,8 +139,8 @@ fn unstaged_files_are_excluded_from_commit_tree() {
 fn commit_with_empty_index_is_an_error() {
     let td = init_repo();
     let p = td.path();
-    // Files exist on disk but nothing was added — pre-#102 this
-    // silently committed the whole worktree. Post-#102, this is a
+    // Files exist on disk but nothing was added — pre-fix this
+    // silently committed the whole worktree. Post-fix, this is a
     // hard error so the failure surfaces loudly instead of producing
     // a "ghost commit" the user didn't intend.
     fs::write(p.join("orphan.txt"), b"on disk, not staged").unwrap();
@@ -805,7 +805,7 @@ fn add_dot_stages_symlinked_directory_without_recursing() {
     );
 }
 
-/// Reviewer finding 1 (PR #103): an index whose only entries are
+/// An index whose only entries are
 /// `Removed` is a meaningful changeset — the user is committing
 /// removals — and must produce an empty-tree commit, not an error.
 /// Pre-fix, `commit.rs` checked `staged_count() == 0` (which excludes
@@ -850,7 +850,7 @@ fn rm_then_commit_excludes_the_removed_path() {
     ok(p, &["commit", "-m", "first"]);
 
     // Stage a removal of b.txt; the file may or may not still be on
-    // disk — index is the source of truth post-#102.
+    // disk — index is the source of truth post-fix.
     ok(p, &["rm", "b.txt"]);
     ok(p, &["commit", "-m", "drop b"]);
     let commit = head_commit(p);
@@ -875,7 +875,7 @@ fn rm_directory_stages_tracked_descendants() {
     ok(p, &["add", "."]);
     ok(p, &["commit", "-m", "first"]);
 
-    // Removing a directory now requires -r (Git-parity, #188).
+    // Removing a directory now requires -r (Git-parity).
     ok(p, &["rm", "-r", "sub"]);
     ok(p, &["commit", "-m", "drop sub"]);
 

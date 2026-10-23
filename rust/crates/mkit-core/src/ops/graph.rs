@@ -158,7 +158,7 @@ pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Ha
 
 /// Collect every object reachable from **any** of `roots` — the
 /// multi-root generalization of [`reachable_objects`]. This is the
-/// closure `mkit gc` (#233) keeps live: seed it with the full retention
+/// closure `mkit gc` keeps live: seed it with the full retention
 /// root set from [`super::gc::collect_roots`] and every object NOT in the
 /// result is unreachable.
 ///
@@ -175,7 +175,7 @@ pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Ha
 /// object, so a caller (gc) fails closed rather than under-counting the
 /// live set.
 ///
-/// # Content integrity of leaves (#636)
+/// # Content integrity of leaves
 ///
 /// This walk classifies blob/delta leaves via a cheap type check
 /// ([`ObjectStore::object_type`]) instead of a full verified read, so a
@@ -183,7 +183,7 @@ pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Ha
 /// A blob whose stored bytes are corrupted but whose type prologue is
 /// intact is still counted as reachable (and, for `gc`, therefore
 /// survives). This is a deliberate scope change from the walk's
-/// pre-#636 behavior, where every leaf's content was verified
+/// pre-fix behavior, where every leaf's content was verified
 /// incidentally as a side effect of the full read the old
 /// classification path did. Corruption is still caught — just later,
 /// the first time something actually reads the leaf's bytes (pack
@@ -547,7 +547,7 @@ mod tests {
     }
 
     // =================================================================
-    // object_type() short-circuit (#636 / INV-14) — the walk must
+    // object_type() short-circuit (INV-14) — the walk must
     // classify blob/delta leaves via the cheap type-prologue check
     // instead of a full read+verify+decode, without changing the
     // reachable/unreachable classification of any object (INV-3).

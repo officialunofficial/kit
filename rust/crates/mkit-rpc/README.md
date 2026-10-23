@@ -16,7 +16,7 @@ address space:
   an `ssh(1)` child process. See `docs/specs/SPEC-TRANSPORT.md`.
 - **Signature verification** (`verify.proto`) &mdash; the `VerifyRequest`/
   `VerifyResponse` contract `mkit clone`/`pull`/`fetch` check every
-  newly-fetched commit/remix/tag against (issue #692). Message-only today
+  newly-fetched commit/remix/tag against. Message-only today
   (no bound RPC method): `mkit-cli`'s local dispatch
   (`rust/crates/mkit-cli/src/remote_dispatch/packmap.rs`) calls the Rust
   implementation directly (`mkit_core::sign::{verify_commit,verify_remix,verify_tag}`);

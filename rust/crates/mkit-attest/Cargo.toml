@@ -39,7 +39,7 @@ grants = ["algo-ed25519", "algo-secp256k1", "algo-p256", "dep:sha3"]
 # the registry. Track the workspace.package.version.
 #
 # `default-features = false`: mkit-core's default set includes
-# `pack-zstd` (SPEC-PACKFILE v2 compression, issue #646), which pulls
+# `pack-zstd` (SPEC-PACKFILE v2 compression), which pulls
 # `zstd-sys` — not wasm32-buildable. mkit-attest doesn't touch
 # `pack.rs`, but it IS a dependency of mkit-wasm (wasm32 target), and
 # Cargo unifies a dependency's enabled features across every edge that

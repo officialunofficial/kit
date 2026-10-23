@@ -1,10 +1,10 @@
-//! #493 Phase 3: cross-worktree gc correctness and the lock split.
+//! Cross-worktree gc correctness and the lock split.
 //!
 //! Root collection unions HEAD + index + `ORIG_HEAD` + in-progress-op
 //! state across EVERY worktree, and gc's "shared lock spanning trees"
 //! is the union of all per-tree worktree locks, taken in deterministic
 //! order. The ~5s lock-timeout test lives in the serial `#[ignore]`
-//! lane per the #505 test-suite policy.
+//! lane per the test-suite policy.
 
 mod common;
 
@@ -124,9 +124,9 @@ fn destructive_commands_in_linked_tree_stay_tree_local() {
 /// gc must block (and then time out) while a SIBLING tree's worktree
 /// lock is held — the cross-tree half of the lock split. ~5s of
 /// deliberate lock-timeout spinning, so this runs in the serial
-/// `--run-ignored` CI lane (see #505), not the default suite.
+/// `--run-ignored` CI lane, not the default suite.
 #[test]
-#[ignore = "deliberate ~5s lock-timeout; serial CI lane (#505)"]
+#[ignore = "deliberate ~5s lock-timeout; serial CI lane"]
 fn gc_blocks_on_a_sibling_worktree_lock() {
     let repo = Repo::new();
     repo.commit_file("a.txt", b"one\n", "seed");

@@ -1,4 +1,4 @@
-//! Integration tests for the resolvable-conflict workflow (#177):
+//! Integration tests for the resolvable-conflict workflow:
 //! merge / cherry-pick / rebase conflict → state → resolve → continue /
 //! abort / skip.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
@@ -305,7 +305,7 @@ fn merge_delete_modify_conflict() {
     repo.commit_file("a.txt", b"theirs-modified\n", "theirs modifies");
     // main deletes a.txt. `mkit rm` stages the removal; whether it also
     // removes the worktree file depends on the rm worktree-removal work
-    // (#188/PR5), so tolerate an already-removed file rather than assuming
+    // Tolerate an already-removed file rather than assuming
     // it still exists — keeps this test correct in isolation and combined.
     ok(repo.path(), repo.xdg(), &["checkout", "main"]);
     ok(repo.path(), repo.xdg(), &["rm", "a.txt"]);
@@ -401,7 +401,7 @@ fn merge_symlink_conflict_no_markers() {
 
     // A symlink/symlink target divergence is an add/add conflict: the
     // merge MUST stop (non-zero exit) and record resolvable conflict
-    // state in the sidecar (#177).
+    // state in the sidecar.
     fail(repo.path(), repo.xdg(), &["merge", "feature"]);
     assert!(repo.mkit_dir().join("MERGE_HEAD").exists());
     assert!(repo.mkit_dir().join("mkit-conflicts").exists());

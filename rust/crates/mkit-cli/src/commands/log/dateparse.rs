@@ -1,10 +1,9 @@
 //! Parses `mkit log --since`/`--until` date arguments.
 //!
 //! Deliberately **not** git's full natural-language `approxidate` grammar
-//! (issue #712's implementation notes point at the CLI's existing small,
-//! explicit parsers — e.g. `HEAD~n` in `revspec.rs` — as the model to
-//! follow, rather than adding a new date-parsing dependency or a large
-//! grammar). Supported forms, tried in this order:
+//! (the CLI follows its existing small, explicit parsers — e.g.
+//! `HEAD~n` in `revspec.rs` — rather than adding a new date-parsing
+//! dependency or a large grammar). Supported forms, tried in this order:
 //!
 //! - `@<unix-seconds>` — an exact Unix timestamp (git's own spelling).
 //! - `now` / `today` — the current instant.

@@ -38,7 +38,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    // Bounded + symlink-safe read (#223): refuse to follow a final
+    // Bounded + symlink-safe read: refuse to follow a final
     // symlink and cap the size at MAX_FILE_BYTES rather than slurping an
     // arbitrarily large file (or a symlink target outside the repo)
     // through `std::fs::read`.

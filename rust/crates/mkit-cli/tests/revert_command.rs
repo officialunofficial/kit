@@ -1,4 +1,4 @@
-//! `mkit revert` (#255) end-to-end: a clean revert undoes a commit as a
+//! `mkit revert` end-to-end: a clean revert undoes a commit as a
 //! new forward commit, the reverted commit stays reachable, and the
 //! conflict path records resumable state that `--abort` unwinds. Spawns
 //! the real binary.

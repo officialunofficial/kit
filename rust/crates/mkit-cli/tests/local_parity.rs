@@ -1,4 +1,4 @@
-//! Integration tests for PR5 local-command Git parity (#188):
+//! Integration tests for local-command Git parity:
 //! `rm` worktree removal + `--cached`/`-r`/`-f` + dirty/untracked
 //! guards, `diff` unified hunks + `--staged` + pathspecs, and
 //! `add -A`/`-u`/multi-pathspec. Spawns the real binary.

@@ -1,4 +1,4 @@
-//! Issue #641 — `mkit commit`'s interactive message composition
+//! `mkit commit`'s interactive message composition
 //! (`$EDITOR`) and signer/key loading must happen OUTSIDE the write
 //! lock (`worktree.lock`); the lock should be held only around the
 //! actual index/ref mutation.
@@ -36,7 +36,7 @@ fn write_slow_editor_script(
 
 /// While `mkit commit` (no `-m`) is blocked inside its stubbed `$EDITOR`,
 /// a concurrent lock-acquire attempt on `worktree.lock` (the same lock
-/// `mkit commit` itself takes) must succeed promptly. Before the #641
+/// `mkit commit` itself takes) must succeed promptly. Before the
 /// fix, `commit.rs` acquires the lock BEFORE spawning `$EDITOR`, so this
 /// acquire attempt is `Busy` until the editor exits; after the fix, the
 /// lock is not taken until the message (and signer) are already
@@ -102,7 +102,7 @@ fn editor_window_does_not_hold_the_write_lock() {
     assert!(
         acquired,
         "worktree.lock was held while `$EDITOR` was still open — the write lock's \
-         scope must not cover interactive message composition (issue #641)"
+         scope must not cover interactive message composition"
     );
 }
 
@@ -113,7 +113,7 @@ fn editor_window_does_not_hold_the_write_lock() {
 /// while `mkit commit`'s `$EDITOR` is open, rather than blocking until
 /// the editor exits (or, in the worst case, timing out).
 ///
-/// This mirrors the issue's testing decision #1: "stub `$EDITOR` with a
+/// This test stubs `$EDITOR` with a
 /// script that sleeps briefly, then concurrently run a second
 /// lightweight command ... and assert it succeeds promptly rather than
 /// blocking or timing out."
@@ -158,7 +158,7 @@ fn concurrent_tag_completes_promptly_during_editor_window() {
     assert!(
         elapsed < Duration::from_millis(800),
         "tag took {elapsed:?} while `mkit commit`'s $EDITOR was open — it looks like it \
-         waited out (part of) the editor window instead of running unobstructed (issue #641)"
+         waited out (part of) the editor window instead of running unobstructed"
     );
 
     let out = commit_thread.join().expect("commit thread panicked");

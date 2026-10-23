@@ -1,4 +1,4 @@
-//! `mkit epoch show|bump` (WP-2.14, R-156): read and advance a namespace's
+//! `mkit epoch show|bump`: read and advance a namespace's
 //! grant epoch at a deployment (SPEC-WRITE-GRANTS §5).
 //!
 //! Both RPCs are unsigned transport: no auth v2 envelope and no

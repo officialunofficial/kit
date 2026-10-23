@@ -30,7 +30,7 @@ pub(crate) fn resolve_pack_chain(
 ///
 /// Produced by [`probe_chain`] (the push-side pre-plan re-baseline probe in
 /// `push_branch`) and consumed by [`advance_packmap`]'s first CAS attempt —
-/// so a healthy chain is walked once per push, not twice (mkit #521 perf
+/// so a healthy chain is walked once per push, not twice (mkit perf
 /// fix; previously the pre-plan depth probe and `advance_packmap`'s own
 /// [`resolve_pack_chain`] call each walked the whole chain independently).
 /// `advance_packmap` only reuses this when the packmap's live value still
@@ -52,7 +52,7 @@ pub(crate) struct ResolvedChain {
 /// Walk a branch's packlist chain from `head_key` ONCE, returning both its
 /// depth and its flattened oldest-first pack keys as a single
 /// [`ResolvedChain`]. Sole caller is `push_branch`'s pre-plan re-baseline
-/// probe (#406); see [`ResolvedChain`] for why threading its result into
+/// probe; see [`ResolvedChain`] for why threading its result into
 /// [`advance_packmap`] matters.
 pub(crate) fn probe_chain(
     tx: &PushContext<'_>,
@@ -141,12 +141,12 @@ pub(crate) fn advance_packmap(
                 // commit atomically. Keep these guards for direct callers.
                 debug_assert!(
                     tx.supports_atomic_advance(),
-                    "re-baseline reset requires a transactional advance_refs (mkit #521)"
+                    "re-baseline reset requires a transactional advance_refs (mkit)"
                 );
                 debug_assert!(
                     !matches!(head_condition, refs::RefWriteCondition::Any),
                     "re-baseline reset must not run with an `Any` head condition — the \
-                     ordered advance_refs fallback would strand the head (mkit #521)"
+                     ordered advance_refs fallback would strand the head (mkit)"
                 );
                 ChainState::Reset { prior }
             }
@@ -191,7 +191,7 @@ pub(crate) fn advance_packmap(
             .map(PackKey::from_hash)
             .chain(std::iter::once(PackKey::from_hash(node.key)))
             .collect();
-        // Commit the packmap AND the head together (#408). A transactional
+        // Commit the packmap AND the head together. A transactional
         // transport applies both atomically; the default does packmap-then-
         // head — still safe, the head never lands past an unadvanced packmap.
         match tx

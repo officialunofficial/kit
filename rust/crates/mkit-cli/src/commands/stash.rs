@@ -226,7 +226,7 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout, json: bool)
             Err(e) => emit_err(&format!("stash list: {e}"), exit::GENERAL_ERROR),
         },
         // `pop` removes the entry after a successful restore; `apply`
-        // leaves it in place. Both run the same #205/#176 destructive-
+        // leaves it in place. Both run the same destructive-
         // restore guard so they never clobber uncommitted edits on
         // unrelated paths.
         StashCmd::Pop {
@@ -313,7 +313,7 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout, json: bool)
 
 /// Restore stash entry `index` into the worktree. `drop_entry` chooses
 /// between `pop` (removes the entry after a clean restore) and `apply`
-/// (leaves it on the stack). Both run the #205/#176 destructive-restore
+/// (leaves it on the stack). Both run the destructive-restore
 /// guard up-front so a refusal leaves the stash and worktree untouched.
 fn restore_entry(
     store: &ObjectStore,

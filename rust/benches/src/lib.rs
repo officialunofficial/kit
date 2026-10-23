@@ -74,11 +74,11 @@ pub fn time_one<F: FnMut()>(warmup: u32, iters: u32, mut f: F) -> f64 {
 /// iteration's payload, matching every `iter_with_setup` call site's
 /// own fresh-per-iteration convention), but its cost is excluded from
 /// the timing: only `f`'s wall-clock cost is measured. Found necessary
-/// during the epic-#634 code review — `time_one` alone bakes setup
+/// during code review — `time_one` alone bakes setup
 /// cost (subprocess spawns, filesystem init) into the "published"
 /// summary numbers whenever a caller puts setup inside the timed
 /// closure, and that cost is rarely symmetric across compared
-/// variants (issue #639).
+/// variants.
 ///
 /// # Panics
 /// Panics if `iters` is zero.
@@ -205,8 +205,8 @@ mod tests {
         let _ = time_one_with_setup(2, 0, || {}, |()| {});
     }
 
-    /// The actual regression test for issue #639's reintroduced bias
-    /// (found during the epic-#634 code review): setup cost must NOT
+    /// The actual regression test for the reintroduced bias
+    /// (found during code review): setup cost must NOT
     /// leak into the timed measurement. `setup` sleeps for a fixed,
     /// easily-distinguished duration; `f` does nothing. If setup were
     /// (mis)included in the timing — the exact bug `object_commit.rs`/

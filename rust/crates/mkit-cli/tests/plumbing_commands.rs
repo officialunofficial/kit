@@ -1,5 +1,5 @@
 //! Read-only plumbing — `rev-parse` / `cat-file` / `ls-tree` / `ls-files` /
-//! `show-ref` / `for-each-ref` / `symbolic-ref` (#251). Covers the
+//! `show-ref` / `for-each-ref` / `symbolic-ref`. Covers the
 //! mkit-specific paths the differential harness can't compare (abbreviated
 //! BLAKE3 ids, repo-root path, `-z`, detached HEAD, unsupported format atoms).
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
@@ -680,7 +680,7 @@ fn status_porcelain_v2_line_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// `mkit ref list` / `mkit ref cat` (#652) — stable ref-inspection plumbing,
+// `mkit ref list` / `mkit ref cat` — stable ref-inspection plumbing,
 // decoupling "refs are ls-able" from "refs are stored as loose files".
 // ---------------------------------------------------------------------------
 

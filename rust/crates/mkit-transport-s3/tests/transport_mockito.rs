@@ -198,7 +198,7 @@ fn download_pack_200_returns_body() {
     // signals "no shards published" so the transport falls through to
     // the monolithic-body GET below. A bare `Matcher::Any` would feed
     // the manifest path a body that fails `decode_manifest`, which —
-    // post-fix-#9 — surfaces as `InvalidResponse` rather than silently
+    // post-fix — surfaces as `InvalidResponse` rather than silently
     // downgrading. Splitting the mocks by URL keeps the legacy
     // happy-path behaviour explicit.
     #[cfg(feature = "pack-shards")]

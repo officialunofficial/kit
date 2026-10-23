@@ -1,9 +1,9 @@
 //! Golden vectors for BMT inclusion proofs (`docs/specs/SPEC-MERKLE-OBJECTS.md`
-//! §5, issue #1015 "verifier kit" PR 1).
+//! §5).
 //!
 //! Each vector is an encoded [`mkit_core::merkle::Proof`] (`<name>.bin`) plus
 //! a `.json` sidecar carrying everything an independent verifier — with no
-//! access to this crate's Rust source, per issue #1015's acceptance
+//! access to this crate's Rust source, per acceptance
 //! criteria — needs to check it: the object id to verify against, the
 //! proven leaf data, the position/range/positions, the `max_items` decode
 //! bound, and the expected accept/reject outcome (with a reason for every
@@ -448,7 +448,7 @@ fn build_vectors() -> Vec<Vector> {
         "neg_id_vs_inner_root",
         "A valid tree_7entry proof, but `object_id_hex` here is deliberately \
          the bare (pre-wrap) inner root rather than the real object id — the \
-         mistake SPEC-MERKLE-OBJECTS §5 and issue #1015 §Security call out. \
+         mistake SPEC-MERKLE-OBJECTS §5 and §Security call out. \
          A verifier MUST apply the type-domain wrap before comparing.",
         base_proof.encode(),
         &inner_root7, // deliberately wrong: not wrap_id(Tree, inner_root7)

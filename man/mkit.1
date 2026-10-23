@@ -493,8 +493,7 @@ is omitted the previous commit's message is reused and no editor is
 launched. The superseded commit is not deleted; it remains on disk as an
 unreachable object until
 .Cm gc
-ships
-.Pq issue #233 .
+ships.
 .It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl graph Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl n Ar N Oc Oo Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
 Show commit history. With no argument the walk starts at
 .Cm HEAD ;
@@ -1340,7 +1339,7 @@ Only refs named under
 are served; any other name is refused.
 It has no network listener.
 .It Cm mcp Op Fl Fl repository Ar path
-Start a Model Context Protocol server on stdio so LLM agents can drive
+Start a Model Context Protocol server on stdio so MCP clients can drive
 local repositories: status, diff, log, show, branch, add, commit,
 checkout, plus signature verification and DSSE attestation tools.
 .Fl Fl repository
@@ -1350,8 +1349,8 @@ operations and never overrides
 data-loss guards.
 .It Cm pack-shard Oo Fl Fl out Ar dir Oc Oo Fl Fl force Oc Ar hash
 Encode a stored pack into Reed-Solomon shards plus a manifest, ready to
-publish to an HTTP or S3 origin (producer side of SPEC-PACK-SHARDS Phase
-2). The pack must already be in the local object store. Output lands
+publish to an HTTP or S3 origin (producer side of SPEC-PACK-SHARDS).
+The pack must already be in the local object store. Output lands
 under
 .Pa <out>/packs/<hex>/shards/<index>
 with the manifest written last, so racing readers see either no manifest

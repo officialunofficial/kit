@@ -10,7 +10,7 @@
 //!   signer (file, FIDO2, TPM, future hardware backends).
 //! - **SSH transport** (`ssh.proto`): mkit-cli ↔ a remote
 //!   `mkit-server` over an `ssh(1)` child process.
-//! - **Signature verification** (`verify.proto`, issue #692):
+//! - **Signature verification** (`verify.proto`):
 //!   message-only contract for the post-fetch commit/remix/tag check
 //!   `clone`/`pull`/`fetch` run by default. No bound RPC method yet —
 //!   mkit-cli's local dispatch calls the Rust implementation

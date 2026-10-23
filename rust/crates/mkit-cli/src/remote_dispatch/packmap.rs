@@ -1,7 +1,7 @@
 //! CLI configuration of the packmap rollover policy.
 /// Default chain depth at which a push re-baselines: resets the packlist
-/// chain to a single fresh self-contained node instead of appending to it
-/// (#406). Bounds clone cost, which otherwise grows with the chain length
+/// chain to a single fresh self-contained node instead of appending to it.
+/// Bounds clone cost, which otherwise grows with the chain length
 /// (one node walked/downloaded per push since the last re-baseline).
 /// Overridable via `MKIT_PACK_REBASELINE_DEPTH` for tests; `0` disables
 /// re-baselining entirely.

@@ -20,9 +20,9 @@ baseline build lean:
 |---|---|
 | `s3` | `mkit+s3://` remotes on S3-compatible storage (`mkit-transport-s3`). |
 | `git-bridge` (default) | `mkit git …` (SPEC-GIT-BRIDGE/SPEC-GIT-IMPORT). |
-| `sparse-checkout` | Verifiable sparse-checkout (issue #158). |
-| `pack-shards` | `mkit pack-shard <hash>` and shard-aware HTTP/S3 downloads (issue #159). |
-| `history-mmr` | Append-only Merkle Mountain Belt ref-write journal (issue #157). |
+| `sparse-checkout` | Verifiable sparse-checkout. |
+| `pack-shards` | `mkit pack-shard <hash>` and shard-aware HTTP/S3 downloads. |
+| `history-mmr` | Append-only Merkle Mountain Belt ref-write journal. |
 | `bls-threshold` | BLS12-381 threshold-signing exhaustiveness (compile-time only today). |
 
 See the top-level README and `docs/CLI.md` for the full command reference

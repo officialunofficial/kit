@@ -113,7 +113,7 @@ pub(super) fn stage_tracked_changes(
         // Regular files route through `store_file_object` so large
         // (> CHUNK_THRESHOLD) content lands as a ChunkedBlob, matching
         // `worktree::{build_tree,hash_file}` and keeping commit/status/rm
-        // hashes consistent (#203). Symlinks are always a single Blob of
+        // hashes consistent. Symlinks are always a single Blob of
         // their target path.
         let (status, h, stat) = if meta.file_type().is_file() {
             let (h, opened_meta) = worktree::hash_file_with_metadata(&batch, &abs)
@@ -437,7 +437,7 @@ fn add_whole_worktree(
 /// a pool of a given size.
 ///
 /// Measured with `cargo bench -p mkit-benches --bench add_hash_fanout`
-/// (PR #951 Slack thread) on a 4-core box: rayon's pool-dispatch
+/// on a 4-core box: rayon's pool-dispatch
 /// overhead makes it 25-100% slower than a plain loop for 1-16 files,
 /// roughly ties a plain loop at 32, and wins clearly from 64 files up
 /// (the realistic-bulk-add case `add_staging`'s 10k/100k cases already
@@ -588,8 +588,8 @@ fn route_path(
     if !index::validate_index_path(&rel_str) {
         return Err(emit_err(&format!("invalid path: {rel_str}"), exit::DATAERR));
     }
-    // One O(log n) lookup shared by every check below (issue #708 —
-    // `find_entry` used to be an O(n) scan, and this path once ran it
+    // One O(log n) lookup shared by every check below (`find_entry` used to be an O(n) scan, and
+    // this path once ran it
     // three times per file, making bulk staging O(N^2)).
     let existing_pos = idx.find_entry(&rel_str);
     let previous_status = existing_pos.map_or(EntryStatus::Blob, |i| idx.entries[i].status);
@@ -613,7 +613,7 @@ fn route_path(
     // Regular files route through `store_file_object` (via
     // `hash_file_with_metadata`, called by the caller once hashing
     // actually runs) so large (> CHUNK_THRESHOLD) content lands as a
-    // ChunkedBlob, matching `worktree::{build_tree,hash_file}` (#203).
+    // ChunkedBlob, matching `worktree::{build_tree,hash_file}`.
     // Symlinks stay a single Blob of their target path and are cheap
     // enough (no file-content I/O) to stage right here.
     if meta.file_type().is_file() {

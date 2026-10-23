@@ -1,6 +1,5 @@
 //! Local record of pack digests already applied to this repo's object
 //! store, keyed by remote — the fetch-side redownload-avoidance cache for
-//! issue #409.
 //!
 //! Fetch walks only the packmap suffix after a verified branch checkpoint,
 //! or the whole chain when no checkpoint is usable. [`AppliedPacks`] skips
@@ -39,9 +38,9 @@
 //! clearing the record and retrying once with a full re-download whenever a
 //! run that skipped at least one pack also hits an error.
 //!
-//! # Repo-layout classification (cross-link: #493 Phase 0)
+//! # Repo-layout classification (cross-link: `RepoLayout`)
 //!
-//! #493's `RepoLayout` migration will eventually own every ad-hoc
+//! `RepoLayout` migration will eventually own every ad-hoc
 //! `mkit_dir.join(...)` call site, including this one. When it lands, this
 //! path MUST be classified as **common-dir (shared) state**: the record
 //! describes what is already in the shared object store, so every worktree
@@ -53,7 +52,7 @@
 //! safe to delete — a missing record just means the next fetch re-downloads
 //! the whole chain once, per the self-heal behaviour above.
 //!
-//! # Lifecycle (#545)
+//! # Lifecycle
 //!
 //! The record's lifecycle follows its remote's: `mkit remote remove` calls
 //! [`AppliedPacks::remove_record`] and `mkit remote rename` calls
@@ -118,7 +117,7 @@ impl AppliedPacks {
     }
 
     /// [`Self::load`], with the fetch path's non-fatal policy folded in: the
-    /// applied-pack record is purely a performance cache (#409), so a fetch
+    /// applied-pack record is purely a performance cache, so a fetch
     /// whose objects durably land must never fail because the cache couldn't
     /// be read. On any load error this warns and falls back to an empty
     /// in-memory record (every pack re-downloads, always correct); persisting
@@ -175,7 +174,7 @@ impl AppliedPacks {
     }
 
     /// Delete the on-disk record for `remote`, if any. The record's
-    /// lifecycle follows the remote's (#545): `mkit remote remove` calls
+    /// lifecycle follows the remote's: `mkit remote remove` calls
     /// this so a later re-add of the same name starts from an empty record
     /// instead of inheriting a stale one — which would skip packs a since
     /// gc'd store no longer holds and trip the self-heal's spurious full
@@ -201,7 +200,7 @@ impl AppliedPacks {
     }
 
     /// Move the on-disk record from `old` to `new`. The record's lifecycle
-    /// follows the remote's (#545): `mkit remote rename` calls this so the
+    /// follows the remote's: `mkit remote rename` calls this so the
     /// renamed remote's next fetch reuses the cache instead of re-downloading
     /// its full pack chain, and no orphan record is left under the old name.
     ///
@@ -262,7 +261,7 @@ fn record_file_name(remote: &str) -> String {
 /// [`AppliedPacks::empty`] on the fetch path and
 /// [`AppliedPacks::remove_record`]/[`AppliedPacks::rename_record`] on the
 /// `remote remove`/`rename` path all route through it, so the command
-/// handlers and the fetch path cannot drift (#545).
+/// handlers and the fetch path cannot drift.
 fn record_path(layout: &RepoLayout, remote: &str) -> PathBuf {
     layout.applied_packs_dir().join(record_file_name(remote))
 }

@@ -1,4 +1,4 @@
-//! Regression tests for #208: unbounded tree-depth recursion.
+//! Regression tests for: unbounded tree-depth recursion.
 //!
 //! A crafted untrusted repo can nest thousands of single-entry trees in a
 //! tiny pack. Content-addressing rules out true cycles, but each level still

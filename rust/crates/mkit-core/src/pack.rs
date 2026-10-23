@@ -107,8 +107,8 @@ pub const ENTRY_FRAME_LEN: usize = 1 + 4;
 pub const VERSION_OFFSET: usize = 4;
 /// Byte offset of the 4-byte `entry_count` field within the header —
 /// after the 4-byte magic and 4-byte version fields. Found hardcoded
-/// as the literal range `8..12` at four call sites during the
-/// epic-#634 code review; named here instead, consistent with this
+/// as the literal range `8..12` at four call sites during
+/// code review; named here instead, consistent with this
 /// file's existing `HEADER_LEN`/`TRAILER_LEN` convention.
 pub const ENTRY_COUNT_OFFSET: usize = 8;
 
@@ -120,7 +120,7 @@ pub const ENTRY_COUNT_OFFSET: usize = 8;
 const MIN_COMPRESS_LEN: usize = 64;
 /// zstd compression level `PackWriter` uses for `0x03`/`0x04` entries.
 /// The library default (`ZSTD_CLEVEL_DEFAULT`); no benchmark evidence
-/// in issue #646 justified deviating from it.
+/// justified deviating from it.
 #[cfg(feature = "pack-zstd")]
 const ZSTD_LEVEL: i32 = 3;
 /// Byte length of a `0x03`/`0x04` entry's `uncompressed_len` length
@@ -267,7 +267,7 @@ impl PreparedDelta {
 /// arrives. [`Self::finish`] only patches the header's entry count
 /// (unknown up front from a streaming writer) and appends the trailer —
 /// it never re-copies the pushed entries into a second, same-sized
-/// buffer (issue #647).
+/// buffer.
 #[derive(Debug)]
 pub struct PackWriter {
     // The final packfile bytes, built incrementally: `new` writes the
@@ -335,7 +335,7 @@ impl PackWriter {
     /// it explicitly to avoid an extra BLAKE3 pass over the same buffer.
     /// Takes `bytes` by reference (not by value): the streaming writer
     /// copies it straight into the output buffer as it's pushed, so it
-    /// never needs to own the caller's copy (issue #647). Returns the
+    /// never needs to own the caller's copy. Returns the
     /// same hash for chaining.
     ///
     /// Applies the SPEC-PACKFILE §3.3 compression policy transparently:
@@ -561,7 +561,7 @@ impl PackWriter {
     /// Test-only variant of [`Self::finish`] that also reports, via
     /// `bytes_copied`, how many payload bytes it copies WHILE finishing
     /// (as opposed to while entries were pushed). Proves `finish`
-    /// streams rather than double-buffers (issue #647): the unpatched
+    /// streams rather than double-buffers: the unpatched
     /// writer re-copied every pushed entry's payload into a fresh
     /// same-size buffer inside `finish`, so this counter would track
     /// the whole pack; the streaming writer only ever appends the
@@ -1103,7 +1103,7 @@ impl PackReader {
     /// `owned_bytes`, the total number of payload bytes it allocates
     /// freshly (as opposed to borrowing straight from the
     /// already-resident `pack_bytes`). Proves the streaming reader
-    /// (issue #647) never re-copies a raw entry's bytes: only delta
+    /// never re-copies a raw entry's bytes: only delta
     /// targets and successfully staged compressed raw payloads increment
     /// this counter. Borrowed raw entries never increment it.
     #[cfg(test)]
@@ -1132,7 +1132,7 @@ impl PackReader {
         budget: &ResidentBudget<'_>,
     ) -> Result<UnpackReport, PackError> {
         let mut parser = PackEntries::new_with_payload_cap(pack_bytes, payload_cap)?;
-        // Phase 1 retains only borrowed wire frames. Count uses without
+        // Step 1 retains only borrowed wire frames. Count uses without
         // decompressing, and remember the final position naming each base.
         let mut entries = Vec::new();
         entries
@@ -1149,7 +1149,7 @@ impl PackReader {
             entries.push(entry);
         }
         let batch = store.batch();
-        // Phase 2 keeps the native fan-out. Each worker decompresses its
+        // Step 2 keeps the native fan-out. Each worker decompresses its
         // current raw frame, stages it, and drops unneeded owned bytes.
         let raw_frames: Vec<_> = entries
             .iter()
@@ -1172,7 +1172,7 @@ impl PackReader {
 /// repository's own membership. A server MUST NOT back this with a
 /// global content store or another repository's objects: whether a
 /// delta resolves would then reveal that some other repository holds
-/// the base (PRD §6.5 repository isolation, no existence oracles).
+/// the base (repository isolation, no existence oracles).
 ///
 /// The seam is generic, never `dyn`: [`PackReader::read`] instantiates
 /// it with `&ObjectStore` so the hot unpack path stays monomorphic.
@@ -1315,7 +1315,7 @@ pub struct DecodeReport {
 /// passes it.
 ///
 /// The budget is **per call**. It bounds one decode, not a process: a
-/// server running several decodes at once (WP-4.7) must size it from its
+/// server running several decodes at once must size it from its
 /// isolate's memory limit divided by its decode concurrency. The default,
 /// [`Self::DEFAULT_MAX_DECODED_BYTES`] (1 GiB), equals the largest object
 /// the format allows ([`MAX_RAW_OBJECT_SIZE`]) so that any single valid
@@ -1888,7 +1888,7 @@ fn finish_pack_read<'b>(
     let mut raw_results = raw_results.into_iter();
     let mut in_pack = std::collections::HashMap::new();
     let mut report = UnpackReport::default();
-    // Phase 3 exposes bases only at their pack position and releases
+    // Step 3 exposes bases only at their pack position and releases
     // them immediately after their last use, including cached store bases.
     for (position, entry) in entries.into_iter().enumerate() {
         match entry {
@@ -2096,7 +2096,7 @@ type RawStageResult<'b> = Option<Result<(Hash, Option<OwnedBytes<'b>>), PackErro
 type RawStageResults<'b> = Vec<RawStageResult<'b>>;
 
 /// Validate, hash and stage independent raw frames, preserving result order.
-/// Errors stay in the result queue until phase 3 reaches that pack position.
+/// Errors stay in the result queue until step 3 reaches that pack position.
 fn stage_raw_entries<'b>(
     batch: &crate::batch::WriteBatch<'_>,
     frames: &[(usize, EncodedPayload<'_>)],
@@ -2321,7 +2321,7 @@ impl<'a> PackEntries<'a> {
     /// field this iterator validates every position against (`self.pos
     /// == self.count`⇒ done), exposed so a caller collecting every
     /// entry into a `Vec` up front (as [`PackReader::read_inner`]'s
-    /// phase 1 does) can size it exactly instead of growing it one
+    /// step 1 does) can size it exactly instead of growing it one
     /// `push` at a time.
     pub(crate) fn entry_count(&self) -> usize {
         self.count as usize
@@ -2599,11 +2599,11 @@ fn resolve_delta_target<B: DeltaBaseSource>(
     // externally resolved base is cached into `in_pack` under its own
     // hash so a later delta entry referencing the same out-of-pack base
     // hits the cache-hit branch above instead of paying another full
-    // read + verify + decode (#643). This is safe because
+    // read + verify + decode. This is safe because
     // `external_base` has already established that the bytes are the
     // object `base_hash` names (the store's `read` hash-verifies; an
     // unverified source is re-derived there). Cloning once here (vs.
-    // #643's original Arc::clone) is the cost of composing with #647's
+    // the original Arc::clone) is the cost of composing with the
     // Cow-based `in_pack`, which trades that one-time clone for
     // zero-copy borrows on the far more common raw-entry path — a net
     // win, and this clone only happens once per unique out-of-pack
@@ -3701,7 +3701,7 @@ mod tests {
 
     #[test]
     fn total_payload_tracks_wire_sum_for_mixed_raw_and_delta() {
-        // issue #831: push-side pack-splitting decisions read
+        // Push-side pack-splitting decisions read
         // `total_payload()` to decide when to seal a pack, so it must
         // track the writer's real running wire-payload sum — checked
         // here against both a plain raw entry and a delta entry, and
@@ -3809,10 +3809,10 @@ mod tests {
         // Same defect as `delta_before_its_base_in_pack_order_is_rejected`,
         // but with enough raw entries ahead of the base (200 — comfortably
         // over `stage_raw_entries`'s `ENTRIES_PER_THREAD * threads` on any
-        // CI runner up to dozens of cores) to force phase 2's parallel
+        // CI runner up to dozens of cores) to force step 2's parallel
         // `std::thread::scope` fan-out rather than its small-pack
         // sequential fallback. The base-before-delta rule must hold
-        // regardless of how phase 2 schedules raw-entry work across
+        // regardless of how step 2 schedules raw-entry work across
         // threads.
         let mut content_base = vec![0u8; 256];
         for (i, b) in content_base.iter_mut().enumerate() {
@@ -3847,14 +3847,14 @@ mod tests {
 
     #[test]
     fn earlier_delta_base_missing_wins_over_later_malformed_raw_entry() {
-        // Phase 2 validates every raw entry in the pack up front
+        // Step 2 validates every raw entry in the pack up front
         // (independent per entry, so it can fan out across threads),
-        // but phase 3 decides *in pack order* which single problem is
+        // but step 3 decides *in pack order* which single problem is
         // actually reported. A delta at position 0 with a missing base
         // must win over a malformed raw entry at a later position —
         // the pre-fan-out single-loop reader would have rejected
         // position 0 and never even looked at the later one. 200
-        // well-formed raw fillers keep phase 2 on its parallel branch
+        // well-formed raw fillers keep step 2 on its parallel branch
         // (comfortably over `stage_raw_entries`'s threshold on any CI
         // runner), with one malformed entry mixed in among them.
         let base_obj = write_blob_via_serialize(&[0u8; 64]);
@@ -3866,7 +3866,7 @@ mod tests {
         w.push_delta(&base_hash, &stream).unwrap();
         for i in 0..200u32 {
             if i == 100 {
-                // Not a canonical storable object — fails phase 2's
+                // Not a canonical storable object — fails step 2's
                 // `validate_storable_object` with `PackError::InvalidObject`.
                 w.push_raw([0xEE; 32], b"not a valid mkit object").unwrap();
                 continue;
@@ -4269,7 +4269,7 @@ mod tests {
 
     #[test]
     fn unpack_does_not_recopy_raw_payloads_into_a_second_buffer() {
-        // Issue #647: `PackReader::read` used to copy EVERY raw entry's
+        // `PackReader::read` used to copy EVERY raw entry's
         // payload into a fresh `Arc<[u8]>` retained in `in_pack` for the
         // whole call — redundant given `pack_bytes` (the pack's own
         // bytes) is already resident in the caller's memory the whole
@@ -4355,7 +4355,7 @@ mod tests {
 
     #[test]
     fn pack_writer_finish_does_not_recopy_pushed_payloads() {
-        // Issue #647: `PackWriter::finish()` used to hold every pushed
+        // `PackWriter::finish()` used to hold every pushed
         // entry in a separate `entries` list and then copy ALL of them
         // a second time into a freshly `Vec::with_capacity`'d output
         // buffer. A streaming writer appends each entry's frame
@@ -4416,7 +4416,7 @@ mod tests {
 
     #[test]
     fn multiple_deltas_against_shared_external_base_read_store_once() {
-        // Regression for #643: N deltas in one pack all referencing the
+        // Regression: N deltas in one pack all referencing the
         // SAME out-of-pack (already-in-store) base object must resolve
         // that base with exactly one physical store read, not N — the
         // first store-resolved base should be cached into `in_pack` for
@@ -4465,7 +4465,7 @@ mod tests {
     }
 
     // =====================================================================
-    // SPEC-PACKFILE v2: zstd-compressed entries (issue #646)
+    // SPEC-PACKFILE v2: zstd-compressed entries
     // =====================================================================
 
     /// Highly-compressible synthetic payload: `MIN_COMPRESS_LEN` (64) is
@@ -4716,7 +4716,7 @@ mod tests {
     }
 
     // =====================================================================
-    // `DeltaBaseSource` seam / `decode_entries_with` (WP-4.2)
+    // `DeltaBaseSource` seam / `decode_entries_with`
     // =====================================================================
 
     /// `(target id, target bytes, delta stream against the base)`.
@@ -5133,7 +5133,7 @@ mod tests {
         assert_eq!(reader.to_string(), decoder.to_string());
     }
 
-    /// The WP-4.2 review's memory probe: one 64 KiB raw base, then `n`
+    /// The memory probe: one 64 KiB raw base, then `n`
     /// deltas, each a valid SPEC-DELTA stream that rebuilds a distinct
     /// `target_len`-byte blob purely by copying base bytes (a few bytes of
     /// wire per 64 KiB of result; `pack-zstd` shrinks it further).
@@ -5304,7 +5304,7 @@ mod tests {
     }
 
     /// A repository-membership source over in-memory objects, counting
-    /// fetches (the review's `bomb ext` shape: bases live only here).
+    /// fetches (the `bomb ext` shape: bases live only here).
     struct Members {
         objects: std::collections::HashMap<Hash, Vec<u8>>,
         fetches: usize,

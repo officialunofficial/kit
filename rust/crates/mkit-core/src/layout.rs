@@ -1,5 +1,5 @@
 //! Repository path layout: the single authority for resolving on-disk
-//! state under `.mkit/` (issue #493, Phase 0).
+//! state under `.mkit/`.
 //!
 //! Every piece of repository state is classified into exactly one of two
 //! directories:
@@ -15,13 +15,13 @@
 //! In the classic single-worktree layout both directories are the same
 //! `<root>/.mkit/`, so [`RepoLayout::single`] produces byte-identical
 //! paths to the historical ad-hoc joins. In a **linked** working tree
-//! (#493 Phase 1) they differ: the linked tree's per-tree state lives
+//! they differ: the linked tree's per-tree state lives
 //! under the main repository's `.mkit/worktrees/<id>/`, and the linked
 //! tree's own `.mkit` is a plain FILE — the pointer file — instead of
 //! a directory. Nothing outside this module may assume the two
 //! directories coincide.
 //!
-//! # Linked-worktree on-disk model (#493 Phase 1)
+//! # Linked-worktree on-disk model
 //!
 //! ```text
 //! <main>/.mkit/                       # common dir (shared state)
@@ -38,7 +38,7 @@
 //! Both files are UTF-8, single-line, LF-terminated, and capped at
 //! [`MAX_POINTER_FILE_BYTES`]. Discovery ([`discover`]) fails closed on
 //! any malformed or dangling pointer; a `.mkit` DIRECTORY (every
-//! pre-Phase-1 repository) always resolves to the single-worktree
+//! repository without linked worktrees) always resolves to the single-worktree
 //! layout, byte-identical to before.
 //!
 //! # Classification table
@@ -76,7 +76,7 @@
 //! Rationale for the git-divergent entries: `shallow` is shared because
 //! it constrains the one shared object graph; the stash is per-worktree
 //! (unlike git's `refs/stash`) because mkit's stash is a worktree-state
-//! manifest, not a ref — #493 specifies stash as tree-local.
+//! manifest, not a ref — the layout keeps stash tree-local.
 //!
 //! # Invariants
 //!
@@ -113,7 +113,7 @@ pub const SPARSE_CHECKOUT_FILE_NAME: &str = "sparse-checkout";
 /// Attestation store directory name under the common dir.
 pub const ATTESTATIONS_DIR_NAME: &str = "attestations";
 /// Per-remote applied-pack record directory name under the common dir.
-/// A redownload-avoidance cache — never a gc root source (#409).
+/// A redownload-avoidance cache — never a gc root source.
 pub const APPLIED_PACKS_DIR_NAME: &str = "applied-packs";
 /// Resumable upload receipt cache directory under the common dir.
 pub const UPLOAD_PARTS_DIR_NAME: &str = "upload-parts";
@@ -201,7 +201,7 @@ impl RepoLayout {
         self.common_dir == self.worktree_state_dir
     }
 
-    /// Layout of a linked working tree (#493 Phase 1): working files at
+    /// Layout of a linked working tree: working files at
     /// `worktree_root`, per-tree state in `worktree_state_dir` (a
     /// `worktrees/<id>` dir under the main repository's common dir),
     /// shared state in `common_dir`.
@@ -425,7 +425,7 @@ impl RepoLayout {
         self.worktree_state_dir.join(BISECT_FILE)
     }
 
-    /// `stash` — this worktree's stash manifest (tree-local by #493).
+    /// `stash` — this worktree's stash manifest (tree-local by).
     #[must_use]
     pub fn stash_file(&self) -> PathBuf {
         self.worktree_state_dir.join(STASH_FILE_NAME)
@@ -519,7 +519,7 @@ fn read_capped_line(path: &Path) -> Result<Option<String>, DiscoverError> {
 }
 
 /// Write the linked-tree pointer file: `<tree>/.mkit` containing
-/// `mkitdir: <state_dir>\n`. Used by `worktree add` (#493 Phase 2);
+/// `mkitdir: <state_dir>\n`. Used by `worktree add`;
 /// public now so the format has exactly one writer and one reader.
 ///
 /// # Errors
@@ -530,7 +530,7 @@ pub fn write_pointer_file(tree_root: &Path, state_dir: &Path) -> std::io::Result
 }
 
 /// Resolve the [`RepoLayout`] for the repository whose working tree is
-/// rooted at `worktree_root` (#493 Phase 1 discovery).
+/// rooted at `worktree_root` (discovery).
 ///
 /// - `.mkit` is a directory, or absent: the classic single-worktree
 ///   layout ([`RepoLayout::single`]) — absence is NOT an error here so
@@ -695,7 +695,7 @@ pub fn worktrees(layout: &RepoLayout) -> Result<Vec<WorktreeEntry>, DiscoverErro
 }
 
 /// Every per-tree STATE layout of the repository, for cross-worktree
-/// root collection (#493 Phase 3): the main tree first, then one
+/// root collection: the main tree first, then one
 /// layout per `worktrees/<id>` state dir that exists on disk — in
 /// deterministic order (main, then ids ascending), so multi-lock
 /// acquisition over the result cannot deadlock against itself.
@@ -763,7 +763,7 @@ mod tests {
 
     /// Every accessor, paired with its expected `.mkit`-relative path in
     /// the single-worktree layout and its class. The golden strings are
-    /// the exact historical joins — Phase 0 must be byte-identical.
+    /// the exact historical joins — the single-worktree layout must be byte-identical.
     fn accessor_table(l: &RepoLayout) -> Vec<(&'static str, PathBuf, &'static str, Class)> {
         use Class::{Common, Worktree};
         vec![
@@ -872,7 +872,7 @@ mod tests {
         Worktree,
     }
 
-    /// Phase 0 golden invariant: in the single-worktree layout every
+    /// Golden invariant: in the single-worktree layout every
     /// accessor equals the historical `<root>/.mkit/<relative>` join,
     /// byte for byte.
     #[test]
@@ -1044,7 +1044,7 @@ mod tests {
         // Absent .mkit: single (store open reports not-a-repo later).
         let l = discover(tmp.path()).unwrap();
         assert!(l.is_single());
-        // Directory .mkit: single, byte-identical to Phase 0.
+        // Directory .mkit: single, byte-identical to the historical layout.
         std::fs::create_dir_all(tmp.path().join(".mkit")).unwrap();
         let l = discover(tmp.path()).unwrap();
         assert!(l.is_single());

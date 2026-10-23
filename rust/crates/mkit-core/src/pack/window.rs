@@ -111,7 +111,7 @@ enum Phase {
 /// through its cursors) is an entry, in order, of the one pack whose bytes hash to the verified pack id: the trailer,
 /// and `expected_pack_id` when set. A cursor from pack A used on a source that yields different bytes for any
 /// not-yet-verified range fails with `PackfileCorrupted`, never `Done`. The reader does not re-read ranges it has
-/// already verified. **Keeping the source immutable across resumes is the caller's job** (informative: WP-4.8 binds
+/// already verified. **Keeping the source immutable across resumes is the caller's job** (informative: a server binds
 /// R2 range reads to the object's etag). A source whose already-verified prefix changed after verification can still
 /// reach `Done`, but only with entries of the verified pack.
 #[derive(Debug)]

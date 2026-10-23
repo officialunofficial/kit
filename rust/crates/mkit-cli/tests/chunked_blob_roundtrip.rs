@@ -1,4 +1,4 @@
-//! Golden round-trip for files above the chunking threshold (#203).
+//! Golden round-trip for files above the chunking threshold.
 //!
 //! A clean tracked file larger than `CHUNK_THRESHOLD` (1 MiB) is stored
 //! as a `ChunkedBlob` by `mkit add`, exactly as `worktree::build_tree`

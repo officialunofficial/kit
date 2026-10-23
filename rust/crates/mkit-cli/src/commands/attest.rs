@@ -67,7 +67,7 @@ use crate::exit;
 const DEFAULT_PREDICATE_TYPE: &str =
     "https://github.com/officialunofficial/mkit/spec/predicate/empty/v1";
 
-/// Hard cap on a `--predicate-file` body (#223). A DSSE predicate is a
+/// Hard cap on a `--predicate-file` body. A DSSE predicate is a
 /// small JSON object; refusing anything past 1 MiB stops a runaway or
 /// hostile file from being slurped whole into memory before the JSON
 /// parse even runs.
@@ -386,7 +386,7 @@ pub fn run(args: &[String]) -> u8 {
     // Hold the repo lock across the envelope write so a concurrent
     // `gc --grace-secs 0` can't compute its live set (which treats
     // attestation subjects as roots) before this attestation lands and then
-    // prune the just-attested commit (#267). The repo was validated above
+    // prune the just-attested commit. The repo was validated above
     // (`layout.common_dir().is_dir()`), so a non-repo reported cleanly. Held
     // tightly, after signing (which may shell out to an external signer),
     // around the write only.
@@ -397,7 +397,7 @@ pub fn run(args: &[String]) -> u8 {
     // The commit was resolved before the lock; re-verify it still exists in
     // the object store now that gc can't run, so we never write an
     // attestation whose subject a concurrent `gc --grace-secs 0` pruned
-    // between resolution and this save (#267). (`obj_store` avoids shadowing
+    // between resolution and this save. (`obj_store` avoids shadowing
     // the `mkit_attest::store` module used for `store::save`.)
     let obj_store = match mkit_core::store::ObjectStore::open(&layout) {
         Ok(s) => s,
@@ -491,7 +491,7 @@ pub(crate) fn factory_error_code(e: &FactoryError) -> u8 {
     }
 }
 
-/// Read a `--predicate-file` with a size cap (#223). Stats the file
+/// Read a `--predicate-file` with a size cap. Stats the file
 /// first so an oversized predicate is rejected before any large read,
 /// then reads with a bounded `take` as defence-in-depth against a file
 /// that grows between the stat and the read.

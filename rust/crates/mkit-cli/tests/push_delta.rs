@@ -4,11 +4,11 @@
 //!
 //! 1. A small edit to a large (>1 MiB) FastCDC-chunked file produces a
 //!    second push that transfers delta-sized bytes for the changed region,
-//!    not whole chunks (acceptance #1).
+//!    not whole chunks (acceptance).
 //! 2. A fresh clone after a delta push reconstructs the file byte-for-byte
-//!    with every object hash verifying (acceptance #2).
+//!    with every object hash verifying (acceptance).
 //! 3. Re-pushing identical content transfers nothing — identical-object
-//!    dedup is preferred over delta (acceptance #3).
+//!    dedup is preferred over delta (acceptance).
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
@@ -714,7 +714,7 @@ fn push_blocks_on_a_corrupt_deeper_packmap_node() {
 
 #[test]
 fn advance_refs_default_distinguishes_packmap_and_head_conflicts() {
-    // The #408 atomic-advance primitive: even the non-transactional default
+    // The atomic-advance primitive: even the non-transactional default
     // impl must report WHICH precondition failed, so the push loop can retry
     // a packmap conflict but fail a head conflict.
     use mkit_core::protocol::AdvanceOutcome;

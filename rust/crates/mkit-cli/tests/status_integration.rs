@@ -251,7 +251,7 @@ fn status_no_head_shows_all_as_changes() {
     );
 }
 
-/// Reviewer finding 3 (PR #103): `mkit commit` now signs HEAD↔index,
+/// `mkit commit` now signs HEAD↔index,
 /// but `mkit status` was still computing HEAD↔worktree. A user who
 /// stages a change and then reverts the worktree to match HEAD would
 /// see "nothing to commit" while `mkit commit` happily commits the

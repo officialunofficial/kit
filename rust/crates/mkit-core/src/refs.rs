@@ -28,8 +28,8 @@
 //! (`cas_lock_name`; SPEC-CONCURRENCY §2). It uses the same blocking
 //! kernel-lock primitive as `repo_lock` elsewhere, so a mutation is atomic
 //! across processes regardless of what other locks each caller holds, and
-//! mutations of different refs never contend. #637 introduced the lock as
-//! one repo-wide `refs.lock`; it is now keyed per ref. History-aware
+//! mutations of different refs never contend. The lock is keyed per ref.
+//! History-aware
 //! branch writers take `refs-history-<digest>.lock` first
 //! (SPEC-CONCURRENCY §4).
 
@@ -708,7 +708,7 @@ pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
 }
 
 /// CAS-guarded delete: removes a branch ref only if its current on-disk
-/// value is exactly `expected`. Issue #658.
+/// value is exactly `expected`.
 ///
 /// [`delete_ref`] is unconditional — it removes whatever is at `path`
 /// regardless of what a caller last read. That is fine for the
@@ -787,7 +787,7 @@ pub fn write_remote_ref(
     )
 }
 
-/// Batched writer for remote-tracking refs (#645): amortises the
+/// Batched writer for remote-tracking refs: amortises the
 /// parent-directory fsync across every ref written into it, instead of
 /// paying one per ref like [`write_remote_ref`] in a loop.
 ///
@@ -2054,7 +2054,7 @@ mod tests {
         assert!(matches!(err, RefError::Conflict(_)));
     }
 
-    // --- INV-15 / #637: Match CAS must be atomic across uncoordinated
+    // --- INV-15: Match CAS must be atomic across uncoordinated
     // callers -------------------------------------------------------------
 
     /// Reproduces the lost-update race described in INV-15: two callers
@@ -2078,7 +2078,7 @@ mod tests {
     /// iterations because the race window is a handful of syscalls wide
     /// and is not guaranteed to be hit on any single attempt.
     ///
-    /// Before the #637 fix (no lock around the `Match` arm) this
+    /// Before the fix (no lock around the `Match` arm) this
     /// reliably reproduces a "both succeeded" iteration within a few
     /// hundred attempts. After the fix, the per-ref
     /// `refs-<digest>.lock` both callers share makes the
@@ -2331,7 +2331,7 @@ mod tests {
     /// Normal-case companion to the race test above: with no
     /// contention, a sequence of `Match` CAS writes on the same ref must
     /// still succeed every time and never wedge (guards against the
-    /// per-ref `refs-<digest>.lock` acquire/release, added for #637,
+    /// per-ref `refs-<digest>.lock` acquire/release, added for,
     /// leaking or deadlocking across repeated calls from the same
     /// layout).
     #[test]
@@ -2348,10 +2348,10 @@ mod tests {
         }
     }
 
-    // --- INV-15 / #658: CAS-guarded delete must not lose a concurrent
+    // --- INV-15: CAS-guarded delete must not lose a concurrent
     // Match-conditioned advance ---------------------------------------
 
-    /// Primitive-level reproduction of #658's "Race 1": a caller (e.g.
+    /// Primitive-level reproduction of "Race 1": a caller (e.g.
     /// `branch -m`) reads a branch's tip `T`, then — before it gets
     /// around to deleting the ref — a concurrent `Match(T)` CAS (e.g.
     /// `commit`'s fixed advance) lands, moving the ref to `C`. The
@@ -2362,7 +2362,7 @@ mod tests {
     /// this same sequence at plain, unconditional [`delete_ref`] instead
     /// of [`delete_ref_if_matches`] removes the ref regardless of `T` vs
     /// `C`, silently destroying the concurrently-landed `C` — exactly
-    /// the bug #658 reports. [`delete_ref_if_matches`] must refuse
+    /// the bug. [`delete_ref_if_matches`] must refuse
     /// instead.
     #[test]
     fn cas_delete_refuses_when_ref_moved_after_read() {
@@ -2506,11 +2506,11 @@ mod tests {
         assert!(
             bad_iteration.is_none(),
             "iteration {bad_iteration:?}: a concurrent Match-conditioned advance and a \
-             CAS-guarded delete on the same ref did not serialize correctly (issue #658)"
+             CAS-guarded delete on the same ref did not serialize correctly"
         );
     }
 
-    /// Cross-ref counterpart to the race test above: the #637 lock
+    /// Cross-ref counterpart to the race test above: the lock
     /// was first one repo-wide `refs.lock`, so a `Match` CAS on branch "other"
     /// would block one on unrelated branch "main" for no reason —
     /// nothing about this CAS invariant spans refs. Now keyed per ref
@@ -2670,7 +2670,7 @@ mod tests {
         assert_eq!(loaded[0], valid);
     }
 
-    // --- remote-ref batching (#645) --------------------------------------
+    // --- remote-ref batching --------------------------------------
     //
     // `push`/`fetch` publish one remote-tracking ref per branch in a loop
     // (`mkit-cli`'s `remote_dispatch::push_all_with` /
@@ -2682,10 +2682,10 @@ mod tests {
     // into one fsync per distinct directory touched, however many refs
     // were written into it.
 
-    /// Baseline (pre-#645): today's per-ref loop — exactly what
+    /// Baseline (pre-fix): today's per-ref loop — exactly what
     /// `push_all_with`/`mkit-sync`'s `fetch_objects_inner` do today — pays one
     /// directory fsync per ref, even though every ref lands in the same
-    /// `refs/remotes/origin/` directory. This is the O(N) cost #645
+    /// `refs/remotes/origin/` directory. This is the O(N) cost that batching
     /// exists to amortise; it must keep holding after the fix, since
     /// `write_remote_ref` itself (used elsewhere for single-ref writes)
     /// is intentionally left on the unbatched path.
@@ -2711,7 +2711,7 @@ mod tests {
         );
     }
 
-    /// The #645 fix: staging N remote-tracking-ref writes into one
+    /// The fix: staging N remote-tracking-ref writes into one
     /// `RemoteRefBatch` and committing once must cost O(1) directory
     /// fsyncs (one per distinct directory touched — here a single flat
     /// `refs/remotes/origin/` namespace, so exactly one), not O(N).

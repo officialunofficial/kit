@@ -3,7 +3,7 @@
 //! [`ObjectSource`] is the read trait shared by the store and its overlays;
 //! [`EphemeralSink`] is the in-memory snapshot overlay for query commands;
 //! [`DisplaySource`] is the display-only adapter that opts a render path out of
-//! per-read hash verification (#625). Extracted from `store.rs` (#633): these are
+//! per-read hash verification. Extracted from `store.rs`: these are
 //! consumers of the store's read API, distinct from its on-disk write/fsync
 //! machinery.
 
@@ -34,7 +34,7 @@ pub trait ObjectSource {
 
     /// Read `h` without integrity verification, for display-only
     /// rendering — see [`ObjectStore::read_unverified`] for the full
-    /// policy (#625). Defaults to the fully-verifying [`Self::read`], so
+    /// policy. Defaults to the fully-verifying [`Self::read`], so
     /// every existing and third-party [`ObjectSource`] stays verifying
     /// unless it explicitly opts in by overriding this method.
     ///
@@ -219,7 +219,7 @@ impl ObjectSource for EphemeralSink<'_> {
 /// [`crate::verify::build_disclosure_from`], whose bundles are published
 /// proofs. See
 /// [`ObjectStore::read_unverified`] for the full policy this wrapper
-/// exists to apply consistently (#625).
+/// exists to apply consistently.
 pub struct DisplaySource<'a, S: ObjectSource + ?Sized> {
     inner: &'a S,
 }

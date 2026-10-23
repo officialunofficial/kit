@@ -25,7 +25,7 @@ use generated::__buffa::oneof::upload_pack_request::Body as UploadBody;
 // ---------------------------------------------------------------------------
 // Server-side TransportError -> ConnectError (forward direction of
 // SPEC-TRANSPORT-CONNECT §5's table). Test-only, but mirrors what a real
-// server (mkit#699) must implement.
+// server must implement.
 // ---------------------------------------------------------------------------
 
 fn to_connect_error(err: TransportError) -> ConnectError {
@@ -106,7 +106,7 @@ impl generated::TransportService for TestService {
         Err(ConnectError::unimplemented("not implemented yet"))
     }
 
-    // WP-1.2: compile-only stubs for the additive M1 trait methods.
+    // Compile-only stubs for the additive trait methods.
     async fn get_server_info(
         &self,
         _ctx: RequestContext,

@@ -241,7 +241,7 @@ fn repo_lock_blocks_concurrent_acquire() {
     let mkit = dir.path().join(".mkit");
     fs::create_dir_all(&mkit).unwrap();
     let _held = repo_lock::acquire_default(&mkit, "index.lock").unwrap();
-    // #505 PR 5/5: the lock is already held, so `acquire` must reject it
+    // The lock is already held, so `acquire` must reject it
     // on the very first poll — `Duration::ZERO` proves that deterministically
     // instead of paying a real (if short) wall-clock wait for a timeout that
     // was never going to succeed.

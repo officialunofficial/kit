@@ -1,5 +1,5 @@
 //! GC retention roots — the complete set of object hashes that
-//! `mkit gc` (#233) must treat as live, plus the live-object closure
+//! `mkit gc` must treat as live, plus the live-object closure
 //! over them.
 //!
 //! Pruning is only safe if the root set is **complete**: anything gc can
@@ -23,7 +23,7 @@
 //!   history-rewriting op (see [`super::recovery`]); retained so it stays
 //!   recoverable until `recovery::expire` drops it past the window.
 //!
-//! RECOVERY (#260): commits superseded by `commit --amend`, `reset`, or
+//! RECOVERY: commits superseded by `commit --amend`, `reset`, or
 //! `rebase` are unrecoverable from the opaque-digest history journal, so
 //! [`super::recovery`] logs them (the commands record the old tip before
 //! moving the ref) and they are roots here.
@@ -96,8 +96,8 @@ pub enum GcRootsError {
     #[error("refusing to gc: {0} is a symlink (objects may live outside the repo)")]
     SymlinkedStore(String),
     /// The linked-worktree registry could not be enumerated. Root
-    /// collection must union EVERY tree's per-tree state (#493 Phase
-    /// 3); a partial view would let a sibling's staged work be pruned.
+    /// collection must union EVERY tree's per-tree state;
+    /// a partial view would let a sibling's staged work be pruned.
     #[error("worktree registry: {0}")]
     Worktrees(#[from] crate::layout::DiscoverError),
 }
@@ -134,7 +134,7 @@ pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError
     }
 
     // Per-tree sources, unioned over EVERY worktree of the repository
-    // (#493 Phase 3): the main tree plus each registered state dir —
+    // the main tree plus each registered state dir —
     // including prunable-but-unpruned ones, whose staged work stays
     // pinned until `worktree prune` explicitly reaps it. Fail closed:
     // a registry error or an unreadable sibling state aborts
@@ -248,8 +248,8 @@ fn collect_tree_roots(
 /// Does not verify leaf (blob/delta) content integrity as part of the
 /// walk — see [`super::graph::reachable_closure`]'s "Content integrity
 /// of leaves" doc section. `gc` is therefore no longer an incidental
-/// corruption-detection pass over blob content the way it was before
-/// #636; it still fails closed on a *missing* object, just not on a
+/// corruption-detection pass over blob content the way it was before the
+/// object-type short-circuit; it still fails closed on a *missing* object, just not on a
 /// present-but-corrupted one.
 ///
 /// # Errors

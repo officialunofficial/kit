@@ -1,5 +1,4 @@
-//! Honest transfer-progress reporting for `clone`/`push`/`pull`/`fetch`
-//! (#711).
+//! Honest transfer-progress reporting for `clone`/`push`/`pull`/`fetch`.
 //!
 //! `mkit clone`/`push`/`pull`/`fetch` previously printed only a start
 //! banner and a final summary — the network transfer itself was silent.
@@ -60,13 +59,13 @@ pub enum Event {
     /// `Transport::upload_pack` — that pack's upload is complete. Fires
     /// once per pack; a push whose plan exceeds a single pack's payload
     /// cap fires this more than once, and `bytes` accumulates across
-    /// calls (issue #831) rather than reporting only the last pack.
+    /// calls rather than reporting only the last pack.
     PackUploaded(u64),
     /// `count` objects were unpacked from one downloaded pack (pull/fetch
     /// side, `unpack_downloaded_packs`) — real counts from the pack's own
     /// [`mkit_core::pack::UnpackReport`].
     ObjectsUnpacked(usize),
-    /// A split push (WP-1.17b) is starting advance `index` of `total`. The
+    /// A split push is starting advance `index` of `total`. The
     /// counters restart for it and its label carries the step.
     Step { index: usize, total: usize },
 }
@@ -109,7 +108,7 @@ impl Reporter {
                 }
             }
             Event::PackUploaded(bytes) => {
-                // Accumulate, not overwrite: a multi-pack push (#831)
+                // Accumulate, not overwrite: a multi-pack push
                 // fires this once per pack, and the reported total must
                 // cover every pack uploaded so far, not just the last one.
                 self.bytes = self.bytes.saturating_add(bytes);
@@ -476,7 +475,7 @@ mod tests {
         report(Event::ObjectsUnpacked(3));
     }
 
-    /// issue #831: a multi-pack push fires `PackUploaded` once per
+    /// A multi-pack push fires `PackUploaded` once per
     /// pack. The reported byte total must accumulate across those
     /// calls, not report only the last pack (the bug this test pins).
     #[test]
@@ -593,7 +592,7 @@ mod tests {
         assert!(!should_report(true));
     }
 
-    /// A split push (WP-1.17b): the live progress line names the step, a
+    /// A split push: the live progress line names the step, a
     /// piped run gets one line per landed advance, a quiet run and a single
     /// advance get none.
     #[test]

@@ -171,7 +171,7 @@ fn lists_all_tools_with_annotations() {
     }
 }
 
-/// #505 PR 5/5: shared setup for the per-behavior tests below (split
+/// Shared setup for the per-behavior tests below (split
 /// from the former `full_workflow_init_to_log` mega-test, which chained
 /// ~11 behaviors into one `#[test]` — a failure partway through gave no
 /// signal about which later behavior would have passed). Establishes
@@ -540,7 +540,7 @@ fn verify_attest_rejects_in_repo_trust_roots() {
 
 #[test]
 fn verify_trusted_succeeds_with_external_trust_roots() {
-    // `mkit_verify`'s `trusted`/`trust_roots` args (issue #693), end-to-end
+    // `mkit_verify`'s `trusted`/`trust_roots` args, end-to-end
     // through JSON-RPC: commit, then cross-check the commit's signer
     // against a trust-roots file OUTSIDE the repo.
     let root = tempfile::tempdir().unwrap();

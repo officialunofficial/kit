@@ -30,7 +30,7 @@ struct CloneOpts {
     /// Shallow clone depth (not yet wired).
     #[arg(long, value_name = "N")]
     depth: Option<u32>,
-    /// One or more sparse-checkout patterns (issue #158).
+    /// One or more sparse-checkout patterns.
     /// Pulls the full ref set + reachable pack, then runs the
     /// verifiable sparse pipeline on the new working tree's HEAD,
     /// materialising only the matching files.
@@ -54,13 +54,13 @@ struct CloneOpts {
     url: String,
     /// Destination directory. Defaults to the final URL segment.
     dir: Option<String>,
-    /// Skip Ed25519 signature verification on fetched commits/remixes/tags
-    /// (issue #692). Verification is ON by default and fails closed on an
+    /// Skip Ed25519 signature verification on fetched commits/remixes/tags.
+    /// Verification is ON by default and fails closed on an
     /// unsigned or invalid signature — this flag, or the user-scoped
     /// `pull.require_signed = false` config, is the only way to opt out.
     #[arg(long = "no-verify-signatures")]
     no_verify_signatures: bool,
-    /// Suppress transfer progress output on stderr (#711).
+    /// Suppress transfer progress output on stderr.
     #[arg(short = 'q', long)]
     quiet: bool,
 }
@@ -95,7 +95,7 @@ pub fn run(args: &[String]) -> u8 {
         );
     }
     // git prints this before doing any work; match the shape. Honest
-    // per-object transfer progress (#711) streams on stderr during the
+    // per-object transfer progress streams on stderr during the
     // pull below, and mkit's own object-transfer summary follows at the
     // end — mkit deliberately never fabricates git's
     // Enumerating/Counting/Compressing/`Total N (delta D)` lines (see
@@ -118,7 +118,7 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&e.to_string(), clone_init_exit_code(&e)),
     };
 
-    // Issue #389: clone establishes trust for a brand-new endpoint, so it
+    // Clone establishes trust for a brand-new endpoint, so it
     // bypasses `open_trusted`'s credential gate — but it must still thread
     // the per-repo `ssh.*` trust-pinning keys into the spawned `ssh(1)`.
     // Routing through `open_with_config` keeps that resolution in the one
@@ -129,7 +129,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(merged) => merged,
         Err(e) => return emit_err(&format!("read config: {e}"), exit::CONFIG_ERROR),
     };
-    // Fail closed by default (issue #692): verify unless `--no-verify-signatures`
+    // Fail closed by default: verify unless `--no-verify-signatures`
     // or the user-scoped `pull.require_signed = false` config opted out.
     // `merged` only ever carries user-scoped + built-in values here (the
     // repo config we just wrote holds only `remote_endpoint`/`remote_type`),

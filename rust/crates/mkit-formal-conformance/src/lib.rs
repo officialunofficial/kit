@@ -1,4 +1,4 @@
-//! Model-based conformance tests for mkit's formal models (Linear MKIT-22).
+//! Model-based conformance tests for mkit's formal models.
 //!
 //! This library is intentionally empty. The tests live in `tests/`:
 //!

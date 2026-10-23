@@ -625,7 +625,7 @@ mod tests {
 
     #[test]
     fn streaming_reader_buffer_stays_bounded_regardless_of_input_size() {
-        // The whole point of issue #828: ingest memory must not scale
+        // The point of the reader: ingest memory must not scale
         // with file size. Run several MiB through the reader and assert
         // its internal window is a fixed `WINDOW_MULTIPLE * max_size`
         // allocation that never grows or reallocates — bounded by the
@@ -733,7 +733,7 @@ mod tests {
 
         /// `ChunkReader` (streaming) produces byte-identical chunks to
         /// `ChunkIterator` (in-memory) for arbitrary input — the
-        /// correctness contract issue #828's ingest streaming depends on:
+        /// correctness contract that streaming ingest depends on:
         /// content addressing must not change based on how a file was
         /// read.
         #[test]

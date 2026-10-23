@@ -213,7 +213,7 @@ mod tests {
 
     fn fixed_secret() -> [u8; 32] {
         // All zeros with last byte = 1 — the canonical RFC 6979 /
-        // secp256k1 test scalar (also the BIP-340 "test key #1" base).
+        // secp256k1 test scalar (also the BIP-340 "test key 1" base).
         let mut k = [0u8; 32];
         k[31] = 1;
         k

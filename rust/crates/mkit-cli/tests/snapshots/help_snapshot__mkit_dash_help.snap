@@ -257,8 +257,8 @@ commands:
   sparse-checkout    Manage sparse checkout patterns
   serve <path>       Start SSH transport server (internal)
   mcp [--repository <path>]
-                    Start a Model Context Protocol server on stdio so LLM
-                    agents can drive this repository (status/diff/log/add/
+                    Start a Model Context Protocol server on stdio so MCP
+                    clients can drive this repository (status/diff/log/add/
                     commit/branch + verify/attest); --repository confines
                     tool calls to that path
   pack-shard [--out <dir>] [--force] <hash>

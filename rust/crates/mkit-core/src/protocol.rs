@@ -845,17 +845,17 @@ pub trait Transport: Send + Sync {
     /// superset of what the (unmoved) head needs — still reconstructable.
     /// That safety argument does NOT extend to a packmap **reset** (a fresh
     /// node with `prev = None`, produced by the pack-chain re-baseline,
-    /// mkit #406): a reset is not a superset of the prior chain, so a
+    /// mkit): a reset is not a superset of the prior chain, so a
     /// packmap write that commits while the paired head write loses its CAS
     /// would strand the (still-unmoved) head pointing at a commit whose
-    /// closure the reset packmap can no longer reconstruct (mkit #521).
+    /// closure the reset packmap can no longer reconstruct (mkit).
     ///
     /// Callers MUST treat `false` (the default) as "never request a
     /// packmap reset against this transport" — see
     /// `remote_dispatch::push_branch`'s re-baseline gate. Override to
     /// `true` ONLY when [`Self::advance_refs`] is overridden with a
     /// genuinely transactional implementation (e.g. the HTTP transport's
-    /// single-request `/refs/advance` endpoint, mkit #408). If that endpoint
+    /// single-request `/refs/advance` endpoint). If that endpoint
     /// cannot encode an unconditional head write, also override
     /// [`Self::atomic_force_head_condition`] so force pushes stay atomic.
     fn supports_atomic_advance(&self) -> bool {

@@ -543,7 +543,7 @@ impl Summary {
 }
 
 /// Bulk sink: deferred-fsync writes + the kind probe the tag path
-/// needs (review finding: without `kind_of`, chunked tag targets
+/// needs (without `kind_of`, chunked tag targets
 /// misclassify and fork hashes between sink choices).
 struct BulkSink<'a> {
     bw: BulkWriter<'a>,

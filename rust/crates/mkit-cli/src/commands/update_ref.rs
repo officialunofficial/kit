@@ -82,7 +82,7 @@ pub fn run(args: &[String]) -> u8 {
     // update-ref publishes a gc root (refs/heads/* or refs/tags/*) at an
     // arbitrary object, so hold the repo lock across resolve + publish: a
     // concurrent `gc --grace-secs 0` then can't prune a (possibly
-    // unreachable) target between resolving it and writing the ref (#267).
+    // unreachable) target between resolving it and writing the ref.
     // Acquired after repo validation (store open) so a non-repo reported
     // cleanly above; covers the delete path too for consistency.
     let _lock = match super::acquire_worktree_lock(&layout) {

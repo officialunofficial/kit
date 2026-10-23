@@ -30,7 +30,7 @@ use mkit_core::to_hex;
 pub(crate) const KEY_SEED: [u8; 32] = [0x11; 32];
 
 // ---------------------------------------------------------------------------
-// Loud skips (#505 PR 2/5)
+// Loud skips
 // ---------------------------------------------------------------------------
 //
 // Tests that depend on an external tool or an opt-in environment flag used

@@ -1,5 +1,4 @@
-//! Honest transfer-progress reporting for `clone`/`push`/`pull`/`fetch`
-//! (#711).
+//! Honest transfer-progress reporting for `clone`/`push`/`pull`/`fetch`.
 //!
 //! Driven end-to-end through the real binary against a `mkit+file://`
 //! bare-directory remote, mirroring `push_named_remote.rs`'s pattern.

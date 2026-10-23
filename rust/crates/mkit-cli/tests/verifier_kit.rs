@@ -1,5 +1,5 @@
 //! End-to-end CLI coverage for `prove` / `verify-proof` / `closure`
-//! (issue #1015 verifier kit PR 5).
+//! (verifier kit).
 #![allow(clippy::unwrap_used)]
 
 mod common;

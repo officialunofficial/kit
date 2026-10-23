@@ -1,7 +1,7 @@
 //! CLI-surface coverage for the `durability.objects` escape hatch
 //! (SPEC-OBJECTS §10.1). The key is honored by the object-store sync
 //! policy, so it must also be settable and showable through `mkit
-//! config` — regression for the review finding that
+//! config` — regression:
 //! `mkit config durability.objects per-object` exited 78 with
 //! "unknown config key".
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers

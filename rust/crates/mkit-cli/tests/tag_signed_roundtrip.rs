@@ -1,4 +1,4 @@
-//! End-to-end tests for annotated / signed tags (issue #230).
+//! End-to-end tests for annotated / signed tags.
 //!
 //! Spawns the real `mkit` binary so the full argv → dispatch →
 //! object-store → refs path is exercised:

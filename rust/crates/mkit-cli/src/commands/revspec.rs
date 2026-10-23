@@ -1,4 +1,4 @@
-//! Shared revision-spec resolver (issue #227, parent #226).
+//! Shared revision-spec resolver (parent).
 //!
 //! [`resolve_revision`] turns a user-supplied revision string into a
 //! single object [`Hash`](tyalias@mkit_core::Hash). It is the keystone the diff/checkout/

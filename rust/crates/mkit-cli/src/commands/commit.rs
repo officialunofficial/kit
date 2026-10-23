@@ -15,10 +15,10 @@
 //! 4. Sign the commit, write the `Commit` object, advance
 //! `refs/heads/<current>` and `HEAD`.
 //!
-//! Pre-issue-#102 `mkit commit` walked the worktree directly via
+//! Pre-fix `mkit commit` walked the worktree directly via
 //! `worktree::build_tree`, ignoring the index entirely. That made
 //! `mkit add` write-only state with no reader and surprised any user
-//! reasoning by analogy from git. Post-#102, the staging area is
+//! reasoning by analogy from git. Post-fix, the staging area is
 //! load-bearing: only paths in the index land in the commit's tree.
 
 use std::io::Write;
@@ -84,7 +84,7 @@ struct CommitOptions {
     /// is reused (no `$EDITOR` is launched).
     ///
     /// NOTE: the superseded commit is not deleted — it stays on disk as
-    /// an unreachable object until `mkit gc` ships (see issue #233).
+    /// an unreachable object until `mkit gc` ships.
     #[arg(long)]
     amend: bool,
     /// Suppress the commit summary line (git `-q`).
@@ -152,7 +152,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // ---- Everything up to the lock acquisition below is read-only and/or
-    // interactive (#641): it composes the commit message — possibly
+    // interactive: it composes the commit message — possibly
     // spawning `$EDITOR`, which can block for an arbitrary, user-paced
     // amount of time — and loads the signer/key. None of it mutates the
     // repo, so none of it needs `worktree.lock`. The lock is acquired
@@ -368,8 +368,7 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     // Read the staging index. An absent file OR a totally empty
-    // entries vector is a hard error — see module docs and issue
-    // #102. An all-Removed index, by contrast, is a meaningful
+    // entries vector is a hard error — see module docs. An all-Removed index, by contrast, is a meaningful
     // changeset (the user is committing deletions) and produces an
     // empty-tree commit, so we DON'T gate on `staged_count()` (which
     // excludes Removed entries by design).
@@ -492,7 +491,7 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
     // The tip this commit was actually built on, enforced as advance_head's
-    // CAS precondition (issue #658, Fix B) — which value counts as "the
+    // CAS precondition — which value counts as "the
     // tip" depends on the mode:
     //
     // - `--amend`: NOT `parents` (that's the superseded commit's OWN
@@ -856,8 +855,8 @@ fn resolve_amend_target(layout: &RepoLayout, store: &ObjectStore) -> Result<Comm
 ///
 /// `expected` is the tip this commit was actually built on top of —
 /// `Some(parent)` for a normal advance, `None` for a root commit or an
-/// unborn branch's first commit — and is enforced as a CAS precondition
-/// (issue #658, Fix B): `Some(t)` becomes `RefWriteCondition::Match(t)`,
+/// unborn branch's first commit — and is enforced as a CAS precondition:
+/// `Some(t)` becomes `RefWriteCondition::Match(t)`,
 /// `None` becomes `RefWriteCondition::Missing`. Before this, the
 /// branch-ref advance used `RefWriteCondition::Any`, an unconditional
 /// clobber: a concurrent writer (e.g. `branch -m` publishing a stale
@@ -900,7 +899,7 @@ fn advance_head(
     }
 }
 
-/// Issue #658, Fix B — direct, deterministic tests of `advance_head`'s
+/// Direct, deterministic tests of `advance_head`'s
 /// CAS enforcement. These exercise the mechanism itself (does it
 /// translate `expected` into the right [`refs::RefWriteCondition`], and
 /// does a mismatch surface as `TEMPFAIL` rather than a silent clobber)
@@ -943,7 +942,7 @@ mod advance_head_tests {
             .unwrap()
     }
 
-    /// The core Fix B regression: if the branch moved to a value other
+    /// The core CAS regression: if the branch moved to a value other
     /// than `expected` since the caller captured it (a concurrent
     /// writer landed in the window between `run`'s parent read and this
     /// call), the advance must refuse — `TEMPFAIL`, matching the

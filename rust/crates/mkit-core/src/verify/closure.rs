@@ -677,7 +677,7 @@ pub fn verify_closure_packs(
     mode: ClosureMode,
     packs: &[&[u8]],
 ) -> Result<ClosureReport, VerifyError> {
-    // Phase 1 (sequential, cheap): walk each pack's frames to validate
+    // Step 1 (sequential, cheap): walk each pack's frames to validate
     // the raw-only profile and record every entry's `(pack_index,
     // payload_range)` in encounter order. This never decompresses —
     // `is_raw_only` (computed by `PackEntries::new`'s header scan) is
@@ -718,7 +718,7 @@ pub fn verify_closure_packs(
         }
     }
 
-    // Phase 2 (fanned out above a size threshold): deserialize + derive
+    // Step 2 (fanned out above a size threshold): deserialize + derive
     // the id of every recorded entry — the actual CPU-bound work
     // (canonical decode + a BLAKE3/BMT id derivation per object),
     // independent per entry since each only reads its own payload

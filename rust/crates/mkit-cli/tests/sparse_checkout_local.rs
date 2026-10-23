@@ -1,5 +1,4 @@
-//! End-to-end coverage for the local-transport sparse-checkout path
-//! (issue #158).
+//! End-to-end coverage for the local-transport sparse-checkout path.
 //!
 //! These tests exercise the in-process pipeline:
 //!   1. Build a tree manually.

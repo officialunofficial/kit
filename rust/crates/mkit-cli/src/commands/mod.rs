@@ -184,7 +184,7 @@ pub(crate) fn read_object_bytes(store: &ObjectStore, hash: &Hash) -> Result<Vec<
     })
 }
 
-/// Resolve the [`RepoLayout`] a command operates on (#493 Phase 1):
+/// Resolve the [`RepoLayout`] a command operates on:
 /// pointer-following discovery. A `.mkit` DIRECTORY (or none at all)
 /// resolves to the classic single-worktree layout exactly as before; a
 /// `.mkit` pointer FILE resolves to the linked tree's split layout. On
@@ -318,8 +318,8 @@ pub use mkit_sync::WORKTREE_LOCK;
 /// present).
 pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<mkit_core::repo_lock::RepoLock, u8> {
     // Per-worktree state: the lock serialises THIS tree's worktree/
-    // index mutations (#493 Phase 3 adds a separate shared lock for
-    // store/refs/gc mutation).
+    // index mutations. A separate shared lock covers
+    // store/refs/gc mutation.
     let lock = mkit_core::repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK)
         .map_err(|e| {
             let mut stderr = std::io::stderr().lock();
@@ -331,7 +331,7 @@ pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<mkit_core::repo_lock
 }
 
 /// Basename of the shared lock a live `mkit serve` process holds for its
-/// whole lifetime (SPEC-CONCURRENCY §3.1, MKIT-11/#655). Lives in the
+/// whole lifetime (SPEC-CONCURRENCY §3.1). Lives in the
 /// common dir (`FileTransport` always serves a single-worktree root, so
 /// common dir and worktree state dir coincide there — see
 /// `mkit_core::layout`). Local mutating commands never take this lock

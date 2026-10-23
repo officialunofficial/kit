@@ -1,5 +1,5 @@
 //! `mkit log --author`/`--grep`/`--since`/`--until`/`--no-merges`/
-//! `--first-parent` (#712) — commit-history filtering against a fixture
+//! `--first-parent` — commit-history filtering against a fixture
 //! with mixed authors, mixed messages, and a real merge commit.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 

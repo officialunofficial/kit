@@ -1,4 +1,4 @@
-//! PR-C integration tests (#212): `mkit restore` and `mkit reset`.
+//! Integration tests: `mkit restore` and `mkit reset`.
 //!
 //! Covered behaviours:
 //! - `restore --staged <path>` unstages (the index entry reverts to HEAD)

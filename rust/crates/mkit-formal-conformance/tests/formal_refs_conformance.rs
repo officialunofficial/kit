@@ -1,5 +1,4 @@
-//! Model-based conformance for the refs model (Linear MKIT-22, epic
-//! MKIT-17).
+//! Model-based conformance for the refs model.
 //!
 //! Replays every step of the ITF traces under
 //! `tests/fixtures/formal_refs/` (drawn from `formal/quint/refs/refs_mbt.qnt`

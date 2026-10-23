@@ -1,5 +1,5 @@
 //! cargo-fuzz target — `verify_closure` / `verify_closure_manifest`
-//! (issue #1015 verifier kit PR 3, SPEC-DISCLOSURE §7). Never panics;
+//! (SPEC-DISCLOSURE §7). Never panics;
 //! a freshly exported closure verifies; a mutated manifest rejects.
 
 #![no_main]

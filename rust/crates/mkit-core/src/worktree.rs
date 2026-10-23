@@ -196,7 +196,7 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
         i
     } else {
         // Single-layout assumption: `dir` is treated as a classic
-        // single-worktree root. Linked-worktree callers (#493 Phase 1+)
+        // single-worktree root. Linked-worktree callers (for example a linked worktree)
         // must pass `Some(index)` or this fallback reads the wrong
         // index; the CLI always passes the discovered layout's index.
         loaded = index::read_index(&crate::layout::RepoLayout::single(dir))
@@ -323,7 +323,7 @@ fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
         } else if meta.file_type().is_dir() {
             // A directory on disk at a path tracked as a *file* shadows that
             // tracked entry. git reports only the tracked-side deletion and
-            // suppresses the directory's contents as untracked (#288); mirror
+            // suppresses the directory's contents as untracked; mirror
             // that by leaving the whole subtree out of the snapshot, so the
             // tracked file reads as deleted and nothing inside surfaces.
             if index.has_tracked_file_at(&rel_path) {
@@ -396,7 +396,7 @@ struct PendingFileHash<'e> {
 /// in [`build_tree_inner`]'s own loop wins over thread-spawn overhead —
 /// same crossover shape as [`probe_staged_objects`]. The value borrows
 /// `mkit-cli`'s `commands::add::HASH_FANOUT_FILES_PER_THREAD`
-/// (measured on PR #951's Slack thread): both fan out the exact same
+/// (measured by benchmark): both fan out the exact same
 /// per-item cost, `hash_file_with_metadata`'s open+read+BLAKE3, so the
 /// same crossover point applies here. `worktree_walk_fanout` is this
 /// path's own regression guard, not a from-scratch tuning.
@@ -995,7 +995,7 @@ pub fn read_regular_file_bounded(path: &Path) -> WorktreeResult<(fs::Metadata, V
 /// single [`Blob`](crate::object::Blob) needs its bytes contiguous
 /// anyway, and the threshold keeps this small (1 MiB). Files above the
 /// threshold are streamed chunk-by-chunk directly from the open file
-/// handle instead of first buffering the whole file (issue #828):
+/// handle instead of first buffering the whole file:
 /// ingest memory is bounded by one `FastCdc` window regardless of the
 /// file's total size.
 ///
@@ -1067,8 +1067,8 @@ fn hash_file_with_metadata_using<S: ObjectSink + ?Sized>(
 /// memory a fan-out `hash_chunks` needs to hold resident to at most
 /// `STREAM_HASH_BATCH * chunker::MAX_SIZE` (16 MiB at the current 256
 /// KiB `MAX_SIZE`) regardless of the file's total size — the same
-/// "independent of file size" bound issue #828 gave the streaming
-/// reader itself, just sized for a batch instead of one chunk.
+/// "independent of file size" bound that the streaming
+/// reader itself gives, just sized for a batch instead of one chunk.
 const STREAM_HASH_BATCH: usize = 64;
 
 /// Store one already-cut chunk as a canonical Blob object, returning its
@@ -1144,8 +1144,8 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 
 /// Store a large (> [`CHUNK_THRESHOLD`]) file's content as a
 /// [`ChunkedBlob`] manifest, streaming chunks directly from `reader`
-/// instead of requiring the whole file resident in memory first (issue
-/// #828). Bounds ingest memory to one fixed `ChunkReader` window
+/// instead of requiring the whole file resident in memory first.
+/// Bounds ingest memory to one fixed `ChunkReader` window
 /// (1 MiB), an owned batch of at most 64 chunks (16 MiB), and the
 /// growing chunk-hash list (32 bytes/chunk). The reader and batch stay
 /// bounded independently of total file size.
@@ -1832,7 +1832,7 @@ mod tests {
 
     #[test]
     fn hash_file_with_metadata_streaming_matches_store_file_object_in_memory() {
-        // The streaming disk path (issue #828) must be content-address
+        // The streaming disk path must be content-address
         // equivalent to the original whole-buffer path for the same
         // bytes — same test data/PRNG shape as `large_file_becomes_chunked_blob`.
         let work = TempDir::new().unwrap();
@@ -2345,7 +2345,7 @@ mod tests {
     /// (one Blob, one Tree), which the deserializer rejects under
     /// its strict ascending-name rule. We catch it earlier with a
     /// clearer error so the user knows which path needs unstaging.
-    /// (Reviewer finding 2 on PR #103.)
+    /// (Regression: a blob then a subdirectory with the same name.)
     #[test]
     fn from_index_rejects_blob_then_subdir_collision() {
         let (_sd, store) = fresh_store();
@@ -2465,7 +2465,7 @@ mod tests {
     }
 
     /// All-Removed index → empty root tree, NOT an error.
-    /// (Reviewer finding 1 on PR #103.) `staged_count()` excludes
+    /// `staged_count()` excludes
     /// Removed entries by design; the tree builder does too. The
     /// resulting empty tree is a valid commit target — applying a
     /// removals-only changeset to a tree that previously contained
@@ -2546,7 +2546,7 @@ mod tests {
 
     /// A file entry whose object is a `ChunkedBlob` (the canonical
     /// representation for > `CHUNK_THRESHOLD` content) is accepted by the
-    /// commit/index tree builder, NOT rejected as "non-blob" (#203). The
+    /// commit/index tree builder, NOT rejected as "non-blob". The
     /// resulting tree carries an `EntryMode::Blob` pointing at the
     /// manifest, exactly as `build_tree` produces for a large worktree
     /// file.
@@ -2698,7 +2698,7 @@ mod tests {
         use std::sync::Arc;
 
         let (_sd, mut store) = fresh_store();
-        // Stage 20 files across nested dirs (many tree objects).
+        // Add 20 files across nested dirs (many tree objects).
         let mut idx = Index::default();
         for i in 0..20 {
             let blob = Object::Blob(crate::object::Blob {

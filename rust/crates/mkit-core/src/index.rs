@@ -120,7 +120,7 @@ pub struct Index {
     /// Entries in insertion order.
     pub entries: Vec<IndexEntry>,
     /// `path -> position in entries`, maintained by every mutation that
-    /// goes through this type's own methods (issue #708). Lets
+    /// goes through this type's own methods. Lets
     /// `find_entry`/`tracks_path_or_descendant`/`has_tracked_file_at` —
     /// each called up to three times per staged file by `mkit add -A` —
     /// answer in `O(log n)` instead of the `O(n)` linear scan that made
@@ -208,7 +208,7 @@ impl Index {
     /// files, never directories), a hit means `path` is tracked as a
     /// non-directory object. Used by the untracked-discovery walks to detect
     /// a worktree directory that shadows a tracked file: git suppresses the
-    /// directory's contents as untracked in that case (#288), reporting only
+    /// directory's contents as untracked in that case, reporting only
     /// the tracked-side deletion. A `Removed` tombstone does **not** count —
     /// the path is no longer tracked, so its replacement is genuinely
     /// untracked. `O(log n)`.
@@ -1521,7 +1521,7 @@ mod tests {
         assert_eq!(rebuilt, tree);
     }
 
-    // ---- by_path (issue #708) --------------------------------------------
+    // ---- by_path --------------------------------------------
 
     fn blob_entry(path: &str) -> IndexEntry {
         IndexEntry {

@@ -1,4 +1,4 @@
-//! #260 Part 2b — the history-rewriting commands (`commit --amend`,
+//! The history-rewriting commands (`commit --amend`,
 //! `reset`, `rebase`) must record the superseded tip in
 //! `.mkit/recovery-log` so `mkit gc` keeps it recoverable. Spawns the
 //! real binary and asserts the old tip's full hash lands in the log.

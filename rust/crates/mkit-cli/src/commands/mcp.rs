@@ -1,6 +1,6 @@
 //! `mkit mcp` — a local Model Context Protocol server over stdio.
 //!
-//! Exposes a conservative subset of mkit as MCP tools so LLM agents can
+//! Exposes a conservative subset of mkit as MCP tools so MCP clients can
 //! read, search, and manipulate local mkit repositories — the mkit
 //! analog of the reference `mcp-server-git`. Design choices follow that
 //! template where it is right and diverge where mkit is stronger:

@@ -1,8 +1,8 @@
-//! Pins `add.rs`'s hash-fan-out threshold behavior (PR #951 review):
+//! Pins `add.rs`'s hash-fan-out threshold behavior:
 //! a batch with one unhashable file prints exactly one `error:` line
 //! and exits non-zero, whether the batch stays below
 //! `hash_fanout_threshold()` (sequential path) or clears it (rayon
-//! path). Regression guard for the code-review finding that the
+//! path). Regression guard: the
 //! parallel path used to print one line per failing file instead of
 //! one for the whole command — and for the sequential branch added
 //! alongside it, which reimplements the same fail-fast contract by

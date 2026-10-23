@@ -62,7 +62,7 @@ pub const DEFAULT_P256_KEY_REF: &str = "software:default-p256";
 ///   environment credentials,
 /// * disable SSH host-key verification on `mkit push` (MITM),
 /// * disable post-fetch commit/remix/tag signature verification
-///   (`pull.require_signed`, issue #692) — a hostile repo must not be able
+///   (`pull.require_signed`) — a hostile repo must not be able
 ///   to switch off the one check that would otherwise reject its own
 ///   unsigned/forged history on the next clone/pull/fetch.
 ///
@@ -127,7 +127,7 @@ pub struct Config {
     /// [`user_identity`](Self::user_identity) / the signing key). Repo-safe.
     /// `mkit config` warns on stderr the first time this or
     /// [`user_email`](Self::user_email) is set while `user_identity` is
-    /// still empty (MKIT-12), since a user coming from git might
+    /// still empty, since a user coming from git might
     /// otherwise expect it to control authorship.
     pub user_name: String,
     /// Git-compatibility alias `user.email`. Non-authoritative, exactly
@@ -154,8 +154,8 @@ pub struct Config {
     pub http_ssl_ca_info: String,
     /// Write-auth scheme for `mkit+https://` / `mkit+http://` remotes
     /// (`mkit-transport-connect::ConnectTransport`). Empty/`"bearer"`
-    /// (default) sends `MKIT_API_TOKEN` as a Bearer token, unchanged from
-    /// #700/#701. `"envelope"` ADDITIONALLY signs every write RPC
+    /// (default) sends `MKIT_API_TOKEN` as a Bearer token.
+    /// `"envelope"` ADDITIONALLY signs every write RPC
     /// (`UpdateRef`/`AdvanceRefs`/`UploadPack`) with an Ed25519 write
     /// envelope, reusing the exact SAME signer resolution as commit
     /// signing — [`Self::signer`] / [`Self::signing_key`] /
@@ -175,7 +175,7 @@ pub struct Config {
     pub signer: String,
     /// `pull.require_signed` — gates whether `clone`/`pull`/`fetch` verify
     /// every newly-fetched commit/remix/tag's Ed25519 signature before
-    /// publishing the remote-tracking ref (issue #692). Empty (the
+    /// publishing the remote-tracking ref. Empty (the
     /// documented default) and any value except `"false"`/`"0"`/`"no"`/
     /// `"off"` mean "verify, fail closed"; see
     /// [`Config::pull_require_signed_or_default`]. User-scoped only — a
@@ -483,7 +483,7 @@ impl Config {
         }
     }
 
-    /// Effective `pull.require_signed` (issue #692): `true` unless the
+    /// Effective `pull.require_signed`: `true` unless the
     /// user-scoped config explicitly disabled it. Empty (unset, the
     /// documented default) and any unrecognized value are treated as
     /// "verify" — only an explicit falsy spelling opts out, so a typo in
@@ -547,7 +547,7 @@ pub fn resolve_key_path(layout: &RepoLayout, value: &str) -> Result<PathBuf, Con
     // A relative key path is repo-relative with a mandatory
     // `.mkit/keys/` prefix. Resolve the `.mkit/` component against the
     // layout's COMMON dir — the one shared key store — so a linked
-    // worktree (#493) signs with the same repo keys as the main tree.
+    // worktree signs with the same repo keys as the main tree.
     // Single-worktree repos resolve byte-identically to the historical
     // `<root>/.mkit/…` join.
     let Ok(under_mkit) = path.strip_prefix(mkit_core::MKIT_DIR) else {
@@ -869,7 +869,7 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "attest.p256_key_path" => val.clone_into(&mut cfg.attest.p256_key_path),
         // Dotted section keys: `remote.<name>.{url,type}` (repo-safe
         // addresses) and `branch.<b>.{remote,merge}` (per-branch
-        // upstream). Each remote endpoint still flows through the #97
+        // upstream). Each remote endpoint still flows through the
         // per-endpoint gate, so a named remote cannot smuggle ambient
         // creds.
         _ if apply_section_kv(cfg, key, val) => {}
@@ -1085,7 +1085,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
 pub const DEFAULT_REMOTE_NAME: &str = "default";
 
 /// A resolved remote: its endpoint URL plus whether the repo-scoped
-/// config selected it (`repo_chosen`), which the #97 credential gate
+/// config selected it (`repo_chosen`), which the credential gate
 /// keys on. Returned by [`resolve_remote`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRemote {
@@ -1329,7 +1329,7 @@ pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
         out.push('\n');
     }
     // Atomic temp + fsync + rename so a crash mid-write can't leave the
-    // security-sensitive user config half-written (#223). A reader either
+    // security-sensitive user config half-written. A reader either
     // sees the old contents or the fully-updated file, never a torn one.
     write_atomic_user_config(&path, out.as_bytes())?;
     Ok(())
@@ -1897,7 +1897,7 @@ mod tests {
         assert!(cfg.ssh_identity_file.is_empty());
     }
 
-    /// Issue #692: a hostile clone must not be able to switch off
+    /// A hostile clone must not be able to switch off
     /// post-fetch signature verification via its own repo-scoped config —
     /// that would let it silently defang the exact check meant to reject
     /// its own unsigned/forged history.
@@ -2210,7 +2210,7 @@ mod tests {
 
     #[test]
     fn resolve_key_path_resolves_against_common_dir_in_linked_worktree() {
-        // #493 Phase 1: a linked tree signs with the ONE shared repo
+        // A linked tree signs with the ONE shared repo
         // key store, not a phantom keys dir under its own root.
         let layout = RepoLayout::linked("/trees/wt1", "/main/.mkit/worktrees/wt1", "/main/.mkit");
         let out = resolve_key_path(&layout, ".mkit/keys/default.key").unwrap();
