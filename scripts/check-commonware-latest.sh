@@ -41,7 +41,7 @@ for package in lock['package']:
         print(f"{package['name']} {package['version']}")
 PY
 
-crates=(-p mkit-core -p mkit-attest -p mkit-transport-enc)
+crates=(-p mkit-core -p mkit-attest)
 if [ -f crates/mkit-primitives/Cargo.toml ]; then
   crates+=(-p mkit-primitives)
 fi

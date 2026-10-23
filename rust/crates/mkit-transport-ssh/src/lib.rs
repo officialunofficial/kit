@@ -342,8 +342,7 @@ impl Transport for SshTransport {
             };
             write_child_frame_or_err(io, header)?;
 
-            // Body chunks. The per-frame data cap lives in `mkit_rpc::CHUNK_DATA_MAX`
-            // so transport-ssh and transport-enc cannot drift on the bound.
+            // Body chunks. The per-frame data cap lives in `mkit_rpc::CHUNK_DATA_MAX`.
             let mut offset = 0u64;
             let total = bytes.len();
             let mut iter_pos = 0usize;

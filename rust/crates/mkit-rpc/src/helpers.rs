@@ -13,12 +13,9 @@
 //!   `rpc_error_to_transport`, `map_update_ref_error`,
 //!   `unexpected_frame`, `body_name`,
 //!   `ref_entry_to_ref`, plus the `MAX_REF_NAME` and `CHUNK_DATA_MAX`
-//!   limits): shared between `mkit-transport-ssh` and
-//!   `mkit-transport-enc`. Both transports speak the same
-//!   `SshFrame` wire, so the response-parsing helpers are
-//!   transport-independent; the only thing that differs is the
-//!   advisory string baked into a `RemoteError`, which is parameterised
-//!   via a `&str` label (e.g. `"ssh"` / `"enc"`).
+//!   limits): used by `mkit-transport-ssh`. The response-parsing
+//!   helpers are transport-independent; the advisory string baked into
+//!   a `RemoteError` is parameterised via a `&str` label (e.g. `"ssh"`).
 
 use crate::mkit::common::v1::{RefEntry, RefExpectation};
 use crate::mkit::rpc::v1::Error as RpcError;
@@ -95,9 +92,7 @@ pub fn cond_to_wire(c: RefWriteCondition) -> (Vec<u8>, RefExpectation) {
 }
 
 /// Map a server `Error` reply to an `update_ref` request into a
-/// [`TransportError`]. Shared by `mkit-transport-ssh` and
-/// `mkit-transport-enc` so the two clients classify CAS conflicts
-/// identically and cannot drift.
+/// [`TransportError`]. Used by `mkit-transport-ssh`.
 ///
 /// Per SPEC-TRANSPORT §4.2.1, the server signals a compare-and-swap
 /// mismatch as `ERROR_CODE_INVALID_REQUEST` carrying the *current* ref

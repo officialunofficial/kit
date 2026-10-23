@@ -205,35 +205,6 @@ mkit does NOT defend:
 - A user who disables host-key checking at the OpenSSH layer.
 - A user who pins a known-bad CA in their system trust store.
 
-#### 3.4.1 Encrypted transport (`mkit+enc://`) peer authentication
-
-The encrypted-stream transport uses two independent, *directional*
-authentication mechanisms &mdash; do not conflate them:
-
-- **Server-to-client** &mdash; the `?pubkey=<…>` value in the client's
-  `mkit+enc://<host>:<port>?pubkey=<key>` URL pins the **server's**
-  static ed25519 key. The client's `dial` aborts the handshake if the
-  remote's actual key does not match. This authenticates the SERVER to
-  the CLIENT (there is no TOFU; see SPEC-TRANSPORT-ENC §1). It does
-  **not** say anything about who the client is.
-- **Client-to-server** &mdash; authentication of the dialing client is the
-  job of the server's bouncer **allowlist**, not of `?pubkey=`. Issue
-  #178 made the listener **fail-closed**: it refused to bind without an
-  allowlist of authorized peers (or an explicit allow-any development
-  escape). A client whose static ed25519 key is not on the allowlist is
-  rejected at the handshake and never receives a `HelloResponse`,
-  list-refs, packs, or update-ref. The standalone listener has since been
-  removed and the transport is deprecated (no maintained server); the
-  policy below applies to any listener built on `mkit-transport-enc`.
-  This closes the previous "accepts any peer" gap where the listener
-  hardcoded a permissive bouncer.
-
-The server identity is a stable key file (so pinned client `?pubkey=`
-values survive restarts) and the allowlist / identity key paths are
-user-scoped or CLI-only &mdash; never read from repo-local `.mkit/config`
-(§4), so a hostile clone can neither authorize itself as a peer nor
-swap the server identity.
-
 ### 3.5 Compromised release pipeline runner
 
 Attacker has code execution on the GitHub Actions runner that

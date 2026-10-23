@@ -1,12 +1,8 @@
 //! Deterministic retry regression: an in-process `TransportService` that
 //! fails the first N calls to a given RPC with a retryable Connect error
-//! class (`unavailable`), then succeeds — mirroring
-//! `mkit-transport-http`'s `retry_503_then_200_succeeds` /
-//! `retry_uses_injected_backoff_and_sleeper` pattern (mkit#790).
+//! class (`unavailable`), then succeeds.
 //!
-//! Before mkit#790, `ConnectTransport` made every RPC as a single attempt
-//! with no retry/backoff, unlike `mkit-transport-http`/`-ssh`/`-enc`. This
-//! file asserts every `Transport` method now goes through the shared
+//! This file asserts every `Transport` method goes through the shared
 //! `mkit_core::protocol::retrying`/`BackoffIterator` ladder: a transient
 //! `unavailable` is absorbed and the call still returns `Ok`, a
 //! non-retryable error is NOT retried (surfaces on the first attempt), and

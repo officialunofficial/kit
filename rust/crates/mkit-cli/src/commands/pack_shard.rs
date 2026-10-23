@@ -11,9 +11,9 @@
 //! ```
 //!
 //! Operators publish those files to whichever HTTP / S3 location their
-//! clients hit. Shard-aware clients (`mkit-transport-http`,
-//! `mkit-transport-s3` with `--features pack-shards`) discover them via
-//! the predictable URL / key paths.
+//! clients hit. Shard-aware clients (`mkit-transport-s3` with
+//! `--features pack-shards`) discover them via the predictable URL / key
+//! paths.
 //!
 //! Compiled only when the CLI is built with `--features pack-shards`
 //! (default off — the commonware dep stack is large).

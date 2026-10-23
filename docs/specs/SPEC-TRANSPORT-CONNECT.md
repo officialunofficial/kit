@@ -37,15 +37,11 @@ or any server/client implementation; those are separate changes (§8).
 Write and read grants, epochs, signed reads, and private repositories
 are [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md)'s.
 
-Supersedes: [SPEC-TRANSPORT](SPEC-TRANSPORT.md) §5 ("HTTP transport") as
-the ACTIVE implementation behind `mkit+https://`/`mkit+http://` in
-`mkit-cli` &mdash; `mkit-transport-connect` is what `remote_dispatch` now
-constructs for those schemes. SPEC-TRANSPORT §5 is not yet deleted: the
-`mkit-transport-http` crate remains in the tree (unused by `mkit-cli`'s
-dispatch) because its `sparse-checkout` and `pack-shards` extensions
-(SPEC-TRANSPORT §5.6 and the `pack-shards` cargo feature) have no
-`mkit.transport.v1` equivalent yet &mdash; full retirement waits on that gap
-being resolved, not just core-verb parity.
+Replaces the removed JSON HTTP transport (SPEC-TRANSPORT §5) behind
+`mkit+https://`/`mkit+http://` in `mkit-cli` &mdash;
+`mkit-transport-connect` is what `remote_dispatch` constructs for those
+schemes. The `sparse-checkout` and `pack-shards` extensions have no
+`mkit.transport.v1` equivalent.
 
 Reference implementation: `mkit-transport-connect` (the native CLI
 client, §7.3) against `mkit-transport-connect/tests/roundtrip.rs`'s
@@ -122,7 +118,7 @@ is the one package still pending the same move.
 
 `TransportService` maps one-to-one onto the verbs of the
 [`Transport`](../../rust/crates/mkit-core/src/protocol.rs) trait &mdash; the
-same trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` implement today.
+same trait `mkit-transport-s3` and `-ssh` implement.
 
 | `Transport` trait method | RPC | Shape |
 |---|---|---|
@@ -1246,24 +1242,20 @@ excluded by design and S3 remotes are not yet covered. Wasm/browser clients
 retain browser-managed certificate trust; these native settings do not affect
 them. This changes no wire contract.
 
-This crate is now the implementation `mkit-cli`'s `remote_dispatch`
+This crate is the implementation `mkit-cli`'s `remote_dispatch`
 constructs for the `mkit+https://` scheme (and loopback-only
-`mkit+http://`), replacing `mkit-transport-http` there &mdash; see
-`rust/crates/mkit-cli/src/remote_dispatch/mod.rs`. `mkit-transport-http`
-itself is NOT deleted (its `sparse-checkout`/`pack-shards` extensions
-have no `mkit.transport.v1` equivalent yet, §8), so SPEC-TRANSPORT §5 is
-marked superseded rather than removed.
+`mkit+http://`) &mdash; see
+`rust/crates/mkit-cli/src/remote_dispatch/mod.rs`.
 
 **Auth modes** (mkit#699 follow-up, closing the gap this document
 originally flagged in "Reference implementation" above):
 `ConnectTransport` supports two independent, additive auth modes &mdash;
 a deployment can require either, both, or neither:
 
-- **Bearer token** (unchanged, #700/#701): `MKIT_API_TOKEN`, read from
+- **Bearer token**: `MKIT_API_TOKEN`, read from
   the environment at `connect()` time, sent as `Authorization: Bearer
-  <token>` on every call. This is `mkit-transport-http`'s scheme
-  (SPEC-TRANSPORT §5.2) and is what bearer-mode `mkit-server` deployments
-  (§7.2) expect.
+  <token>` on every call. This is what bearer-mode `mkit-server`
+  deployments (§7.2) expect.
 - **Ed25519 envelope**: `mkit-client` signs the auth v2 contract
   in §7.1 for reads and writes, with an exact request body commitment for
   reads and unary writes, including the framed `DownloadPack` request, and
@@ -1290,7 +1282,7 @@ before resetting a chain (mkit#521).
 
 Every `Transport` method `ConnectTransport` implements is driven through
 the same `mkit_core::protocol::retrying`/`BackoffIterator` ladder
-`mkit-transport-http`/`-ssh`/`-enc` share (mkit#703, mkit#790): a
+`mkit-transport-ssh` shares: a
 transient `ConnectionFailed` or the Connect codes §5 maps onto a
 5xx/429-equivalent (`unavailable`, `resource_exhausted`), or `aborted`
 (§5), is retried per
@@ -1439,10 +1431,8 @@ it always has. `mkit serve --root <DIR>` is the multi-repository form:
 the path names a `<NAMESPACE>/<NAME>` resolved to the directory
 `<DIR>/<NAMESPACE>/<NAME>`, one repository per process, and writes run
 the `ed25519-` owner rule of §7.5 against the `--principal` key the
-sshd configuration asserts (SPEC-TRANSPORT §4.1). For enc (deprecated),
-a listener under multi-repository addressing binds every session it
-accepts to one configured repository (SPEC-TRANSPORT-ENC §6). Both carry the
-same implicit-membership rule in place of §7.6's upload tickets: packs
+sshd configuration asserts (SPEC-TRANSPORT §4.1). SSH carries the
+implicit-membership rule in place of §7.6's upload tickets: packs
 uploaded and verified in a session (at most seven before a packmap
 write) may be consumed into membership by that session's packmap write
 — never by a later session's. The packmap check only refuses: the
@@ -2061,9 +2051,6 @@ Explicitly deferred to sibling issues:
 - ~~`mkit serve`'s HTTP mode (mkit#700).~~ Implemented, then removed with the
   standalone server &mdash; see §7.2.
 - ~~The native CLI Connect client (mkit#701).~~ Implemented &mdash; see §7.3.
-- Fully deleting `mkit-transport-http` and SPEC-TRANSPORT §5 (waits on a
-  `mkit.transport.v1` equivalent for its `sparse-checkout`/`pack-shards`
-  extensions, not just core-verb parity &mdash; see §7.3).
 - ~~The shared retry/backoff Connect interceptor (mkit#703).~~ Implemented
   directly in `ConnectTransport` (mkit#790) &mdash; see §7.3.
 - S3 multipart upload (unrelated transport; not superseded by this

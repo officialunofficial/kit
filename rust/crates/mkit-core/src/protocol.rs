@@ -428,8 +428,7 @@ impl Iterator for BackoffIterator {
 
 /// Transport-agnostic retry driver shared by every [`Transport`]
 /// implementation, so the SPEC-TRANSPORT §7 ladder lives in exactly one
-/// place instead of being reimplemented per crate. Extracted from what
-/// was `HttpTransport::retrying` in `mkit-transport-http`.
+/// place instead of being reimplemented per crate.
 ///
 /// `op` is re-invoked from scratch on every attempt — it MUST perform a
 /// fresh, self-contained unit of work each call (a new HTTP request on
@@ -928,7 +927,7 @@ pub struct UploadLimits {
 ///
 /// # Why a trait
 ///
-/// `mkit-transport-enc` and (once its transport layer lands) `mkit-core::sparse` need to
+/// `mkit-transport-connect` and `mkit-core::sparse` need to
 /// drive `async fn` bodies from a sync method. Hard-coding
 /// `tokio::runtime::Handle::block_on` would bleed tokio across the
 /// workspace; hard-coding `commonware_runtime::deterministic` would

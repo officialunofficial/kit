@@ -1,14 +1,11 @@
 //! Integration coverage for the `mkit+https` / `mkit+http` dispatch
-//! branch in [`mkit_cli::remote_dispatch::open`] — now backed by
-//! [`mkit_transport_connect::ConnectTransport`] (mkit#701), the native
+//! branch in [`mkit_cli::remote_dispatch::open`], backed by
+//! [`mkit_transport_connect::ConnectTransport`], the native
 //! `mkit.transport.v1` `ConnectRPC` client.
 //!
-//! Replaces the retired `remote_dispatch_http.rs`, whose `mockito`-based
-//! fixture mocked the now-inactive `mkit-transport-http` JSON dialect —
-//! per this issue's testing decision, the replacement drives a full
-//! push/pull roundtrip against a REAL in-process
-//! `mkit.transport.v1.TransportService` server (a `connectrpc` hyper
-//! server, memory-backed) instead of a mock standing in for one.
+//! The tests drive full push and pull round trips against a real
+//! in-process `mkit.transport.v1.TransportService` server (a `connectrpc`
+//! hyper server, memory-backed), not a mock standing in for one.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
@@ -17,6 +14,7 @@ mod https;
 
 use std::collections::{BTreeMap, HashMap};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -27,7 +25,14 @@ use connectrpc::{
 };
 use futures::StreamExt;
 use mkit_cli::remote_dispatch;
-use mkit_core::protocol::{AdvanceOutcome, PackKey, RefWriteCondition, Transport, TransportError};
+use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
+use mkit_core::protocol::{
+    AdvanceOutcome, PackKey, RefWriteCondition, Transport, TransportError, TransportResult,
+};
+use mkit_core::refs::{self, Ref};
+use mkit_core::store::ObjectStore;
+use mkit_core::transfer::decode_packlist;
 use mkit_transport_connect::generated;
 use mkit_transport_memory::MemoryTransport;
 
@@ -1742,4 +1747,210 @@ fn cli_https_latency_comparison() {
             rows[rows.len() - 1].0.as_millis()
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Force push re-baseline race
+// ---------------------------------------------------------------------------
+
+const PACKMAP: &str = "refs/mkit/packmap/main";
+
+/// Runs a competing push, once, just before the wrapped transport writes
+/// refs. The competing push resets the pack chain under the force push.
+struct ResetBeforeAdvance<'a> {
+    inner: &'a dyn Transport,
+    competing: &'a dyn Transport,
+    competing_store: &'a ObjectStore,
+    competing_tip: Hash,
+    observed_head: Hash,
+    fired: AtomicBool,
+}
+
+impl ResetBeforeAdvance<'_> {
+    fn interleave(&self) {
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            remote_dispatch::push_branch_with_depth(
+                self.competing,
+                self.competing_store,
+                "main",
+                self.competing_tip,
+                RefWriteCondition::Match(self.observed_head),
+                1,
+            )
+            .unwrap();
+            let key = self.competing.read_ref(PACKMAP).unwrap().unwrap();
+            let bytes = self
+                .competing
+                .download_pack(&PackKey::new(key))
+                .unwrap();
+            assert!(decode_packlist(&bytes).unwrap().prev.is_none());
+        }
+    }
+}
+
+impl Transport for ResetBeforeAdvance<'_> {
+    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        self.inner.upload_pack(bytes, key)
+    }
+    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        self.inner.download_pack(key)
+    }
+    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+        self.inner.pack_exists(key)
+    }
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        tip: &Hash,
+    ) -> TransportResult<()> {
+        self.interleave();
+        self.inner.update_ref(name, condition, tip)
+    }
+    fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
+        self.inner.read_ref(name)
+    }
+    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
+        self.inner.list_refs(prefix)
+    }
+    fn advance_refs(
+        &self,
+        head: &str,
+        head_condition: RefWriteCondition,
+        tip: &Hash,
+        packmap: &str,
+        packmap_condition: RefWriteCondition,
+        node: &Hash,
+    ) -> TransportResult<AdvanceOutcome> {
+        self.interleave();
+        self.inner
+            .advance_refs(head, head_condition, tip, packmap, packmap_condition, node)
+    }
+    fn atomic_force_head_condition(&self, head: Option<Hash>) -> RefWriteCondition {
+        self.inner.atomic_force_head_condition(head)
+    }
+    fn supports_atomic_advance(&self) -> bool {
+        self.inner.supports_atomic_advance()
+    }
+}
+
+fn head(repo: &common::Repo) -> Hash {
+    refs::read_ref(&RepoLayout::single(repo.path()), "main")
+        .unwrap()
+        .unwrap()
+}
+
+/// A force push that loses a race with a pack chain reset replans and
+/// publishes. The head-only case resets the branch to a past commit. The
+/// appending case adds a commit on top of it.
+fn run_rebaseline_race(appending: bool) {
+    let backend = Arc::new(MemoryTransport::new());
+    let (port, shutdown, handle, calls) =
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+    let url = format!("mkit+http://127.0.0.1:{port}/myproj");
+    let transport = remote_dispatch::open(&url).unwrap();
+    let competing = remote_dispatch::open(&url).unwrap();
+    assert!(transport.supports_atomic_advance());
+
+    let local = common::Repo::new();
+    local.commit_file("f.txt", b"base", "base");
+    let base = head(&local);
+    let store = ObjectStore::open(&RepoLayout::single(local.path())).unwrap();
+    remote_dispatch::push_branch_with_depth(
+        &*transport,
+        &store,
+        "main",
+        base,
+        RefWriteCondition::Missing,
+        64,
+    )
+    .unwrap();
+    local.commit_file("f.txt", b"remote", "remote");
+    let remote = head(&local);
+    remote_dispatch::push_branch_with_depth(
+        &*transport,
+        &store,
+        "main",
+        remote,
+        RefWriteCondition::Match(base),
+        64,
+    )
+    .unwrap();
+
+    local.ok(&["reset", "--hard", "-f", &mkit_core::hash::to_hex(&base)]);
+    if appending {
+        local.commit_file("f.txt", b"forced", "forced");
+    }
+    let target = head(&local);
+    let replacement = common::Repo::new();
+    replacement.commit_file("f.txt", b"replacement", "replacement");
+    let replacement_store = ObjectStore::open(&RepoLayout::single(replacement.path())).unwrap();
+    let racing = ResetBeforeAdvance {
+        inner: &*transport,
+        competing: &*competing,
+        competing_store: &replacement_store,
+        competing_tip: head(&replacement),
+        observed_head: remote,
+        fired: AtomicBool::new(false),
+    };
+    let advances = |calls: &CapturedCalls| {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.procedure == "AdvanceRefs")
+            .count()
+    };
+    let before = advances(&calls);
+    remote_dispatch::push_branch_with_depth(
+        &racing,
+        &store,
+        "main",
+        target,
+        RefWriteCondition::Any,
+        64,
+    )
+    .unwrap();
+    assert!(racing.fired.load(Ordering::SeqCst));
+    assert_eq!(
+        advances(&calls) - before,
+        3,
+        "reset, rejected stale force, replanned force"
+    );
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| call.procedure != "UpdateRef"),
+        "ref writes go through the atomic advance"
+    );
+    assert_eq!(backend.read_ref("refs/heads/main").unwrap(), Some(target));
+
+    let clone = common::Repo::new();
+    remote_dispatch::pull_all(clone.path(), &*transport, "default", None).unwrap();
+    assert_eq!(head(&clone), target);
+    assert_eq!(
+        std::fs::read(clone.path().join("f.txt")).unwrap(),
+        if appending {
+            b"forced".as_slice()
+        } else {
+            b"base".as_slice()
+        }
+    );
+    let clone_store = ObjectStore::open(&RepoLayout::single(clone.path())).unwrap();
+    assert!(clone_store.read_object(&target).is_ok());
+    assert!(clone_store.read_object(&base).is_ok());
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+#[test]
+fn connect_head_only_force_replans_after_atomic_rebaseline() {
+    run_rebaseline_race(false);
+}
+
+#[test]
+fn connect_appending_force_replans_after_atomic_rebaseline() {
+    run_rebaseline_race(true);
 }

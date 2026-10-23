@@ -292,9 +292,7 @@ Notes on the published set:
   `mkit serve` session), so it must be on crates.io before `mkit-cli`;
   `cargo publish --workspace` orders the two from the dependency graph. There
   is no standalone server binary or container image; embedders host the
-  reference implementation through its library API. `mkit-transport-enc` is
-  deprecated and receives no further
-  server counterpart.
+  reference implementation through its library API. 
 
 - **`mkit-cli`** &mdash; published so `cargo install mkit-cli` installs the `mkit`
   binary; it also ships via the signed GitHub Release archives and `cargo

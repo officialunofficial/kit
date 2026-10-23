@@ -29,7 +29,7 @@
 //! There is deliberately **no background update check** — this command
 //! only ever runs when invoked. Network egress: `api.github.com` and
 //! the release-asset host, HTTPS only, with an https→http redirect
-//! downgrade refused (mirrors `mkit-transport-http`, #223).
+//! downgrade refused.
 //!
 //! Environment:
 //! * `GH_TOKEN` / `GITHUB_TOKEN` — bearer for the GitHub API. Optional;
@@ -67,8 +67,7 @@ const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 /// 512 MB leaves room without letting a gzip bomb fill the disk).
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Maximum redirects; https→http downgrades are refused outright
-/// (mirrors mkit-transport-http #223).
+/// Maximum redirects; https→http downgrades are refused outright.
 const MAX_REDIRECTS: usize = 5;
 
 /// Per-request timeout. The archive is a few MB; 120 s tolerates slow
@@ -566,8 +565,7 @@ fn cmp_versions(a: &str, b: &str) -> Result<std::cmp::Ordering, String> {
 
 fn http_client(env: &UpdateEnv) -> Result<reqwest::blocking::Client, (String, u8)> {
     // Refuse https→http redirect downgrades: a downgrade would move
-    // the bearer token onto a plaintext channel (mirrors
-    // mkit-transport-http #223).
+    // the bearer token onto a plaintext channel.
     let policy = reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= MAX_REDIRECTS {
             return attempt.error("too many redirects");

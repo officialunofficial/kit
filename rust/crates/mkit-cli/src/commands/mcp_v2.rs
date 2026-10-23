@@ -105,12 +105,12 @@ fn tool_from_spec(spec: &ToolSpec) -> Tool {
 }
 
 /// Environment-variable fallback for `--http-token`, checked when the flag
-/// is omitted — mirrors `mkit-server`'s bearer-token/
-/// `mkit_transport_http::TOKEN_ENV` sourcing, but under a name of its own:
-/// `mkit mcp --http` and `mkit-server` are different threat models
-/// (a high-privilege, agent-facing tool catalog including `mkit_checkout`,
-/// versus a Git transport) and MUST NOT share a secret — a token leaked to
-/// one surface would otherwise also grant the other.
+/// is omitted. It has a name of its own, not
+/// `mkit_transport_connect::TOKEN_ENV`: `mkit mcp --http` and a remote
+/// transport are different threat models (a high-privilege, agent-facing
+/// tool catalog including `mkit_checkout`, versus a Git transport) and MUST
+/// NOT share a secret — a token leaked to one surface would otherwise also
+/// grant the other.
 const MCP_TOKEN_ENV: &str = "MKIT_MCP_TOKEN";
 
 /// Entry point for `mkit mcp` under `--features mcp-v2`: serve over stdio,

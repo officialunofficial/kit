@@ -1258,10 +1258,10 @@ where
     }
 
     if endpoint.starts_with("mkit+http://") || endpoint.starts_with("mkit+https://") {
-        if getenv(mkit_transport_http::TOKEN_ENV).is_some() {
+        if getenv(mkit_transport_connect::TOKEN_ENV).is_some() {
             return Some(format!(
                 "refusing repo-configured remote `{endpoint}` with ambient {} bearer token; trust it explicitly with `mkit config trusted_remote_endpoint {endpoint}` (writes {})",
-                mkit_transport_http::TOKEN_ENV,
+                mkit_transport_connect::TOKEN_ENV,
                 user_config_path().display()
             ));
         }
@@ -2095,7 +2095,7 @@ mod tests {
             None,
         );
         let msg = gate_for_flat(&cfg, &|name| {
-            (name == mkit_transport_http::TOKEN_ENV).then(|| "token".to_string())
+            (name == mkit_transport_connect::TOKEN_ENV).then(|| "token".to_string())
         })
         .expect("repo-scoped HTTP remote with token must be rejected");
         assert!(msg.contains("trusted_remote_endpoint"));
@@ -2108,7 +2108,7 @@ mod tests {
             Some("trusted_remote_endpoint = mkit+https://example.invalid/repo\n"),
         );
         let msg = gate_for_flat(&cfg, &|name| {
-            (name == mkit_transport_http::TOKEN_ENV).then(|| "token".to_string())
+            (name == mkit_transport_connect::TOKEN_ENV).then(|| "token".to_string())
         });
         assert!(msg.is_none());
     }
@@ -2135,7 +2135,7 @@ mod tests {
     #[test]
     fn user_chosen_http_remote_with_token_is_allowed() {
         let token =
-            |name: &str| (name == mkit_transport_http::TOKEN_ENV).then(|| "tok".to_string());
+            |name: &str| (name == mkit_transport_connect::TOKEN_ENV).then(|| "tok".to_string());
         let ep = "mkit+https://example.invalid/repo";
         // repo_chosen = false (user-scoped or CLI-supplied endpoint).
         assert!(trusted_remote_error_for(ep, false, "", &token).is_none());

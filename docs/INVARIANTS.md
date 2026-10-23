@@ -1174,10 +1174,8 @@ feature, no `install.ps1` or Scoop packaging, and no
 `BackendKind` has no Windows Credential Manager variant.
 
 **Because:** commonware-runtime 2026.9.0's storage-sync path calls
-`libc::sync()` on every non-Linux target (`rust/crates/mkit-transport-enc`
-depends on `commonware-runtime` unconditionally, and `mkit-core`'s
-dev-dependencies pull it in
-too) — `libc::sync()` does not exist on `x86_64-pc-windows-msvc`, so the
+`libc::sync()` on every non-Linux target (`mkit-core`'s
+dev-dependencies pull it in) — `libc::sync()` does not exist on `x86_64-pc-windows-msvc`, so the
 workspace and its test suite no longer build there. Maintaining a Windows
 CI/release leg that cannot actually build or test the workspace would ship
 an untested binary, so Windows was dropped as a supported target (MKIT-6)

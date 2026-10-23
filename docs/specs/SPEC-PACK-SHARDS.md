@@ -224,12 +224,7 @@ This SPEC ships in two stages.
 
 * **Manifest wire format pinned**: see §2.1.
   `encode_manifest`/`decode_manifest` in `mkit_core::pack_shard`.
-* **HTTP transport**: `Accept-Pack-Shards: <N>+<K>` request header;
-  `X-Pack-Shards: <N>+<K>` response header signaling shard mode.
-  Shard URLs at `/packs/<lower-hex(pack_hash)>/shards/<index>`,
-  manifest at `/packs/<hex>/shards.manifest`. Behind
-  `--features pack-shards` on `mkit-transport-http`. Parallel-fetch
-  client: one std thread per shard URL, collect the first
+* **Parallel fetch**: one std thread per shard URL, collect the first
   `minimum_shards` successful responses, drop stragglers. Up to
   `extra_shards` failures tolerated; `extra_shards + 1` failures
   short-circuit to `PackNotFound`.
@@ -241,10 +236,7 @@ This SPEC ships in two stages.
   present-but-undecodable manifest &mdash; any other error status, or a
   malformed `200` body &mdash; propagates instead of falling back: it is
   indistinguishable from tampering, and silently downgrading to the
-  monolithic pack would mask that. This mirrors the HTTP transport's
-  posture, whose shard path is entered only after the server
-  advertises `X-Pack-Shards`, so a failure once inside it is treated
-  as a server-side bug and surfaced rather than downgraded.
+  monolithic pack would mask that.
 * **SSH transport**: explicitly skipped. SSH is a single ordered
   stream; the shard model does not fit and per-shard sigv4-style
   signing is meaningless over an authenticated tunnel.

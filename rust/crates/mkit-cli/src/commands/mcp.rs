@@ -104,8 +104,8 @@ pub fn run(args: &[String]) -> u8 {
 
 /// `mcp-v2` swaps the whole `mkit mcp` implementation over to the rmcp-based
 /// server (MCP 2026-07-28) at compile time — the same "feature changes the
-/// command's behavior, off by default" shape `enc-transport` and
-/// `history-mmr` use elsewhere in this crate — rather than adding a runtime flag, so there
+/// command's behavior, off by default" shape `history-mmr` uses
+/// elsewhere in this crate — rather than adding a runtime flag, so there
 /// is exactly one code path per build to test and reason about. Either way
 /// `dispatch` is the only thing that differs: the tool catalog, argv-building,
 /// path confinement, and injection defenses below are shared unconditionally.

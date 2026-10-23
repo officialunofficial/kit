@@ -7,7 +7,7 @@
 // CLI client compile against this one proto, with no per-target dialect. It maps
 // one-to-one onto the verbs of the
 // `Transport` trait (rust/crates/mkit-core/src/protocol.rs), the same
-// trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` already implement.
+// trait `mkit-transport-s3` and `-ssh` already implement.
 // See docs/specs/SPEC-TRANSPORT-CONNECT.md for the full normative
 // contract (error-code mapping, CAS semantics, streaming design,
 // deployment-target consumption).

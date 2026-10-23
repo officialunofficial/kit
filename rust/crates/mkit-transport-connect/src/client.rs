@@ -262,9 +262,7 @@ pub enum UploadEvent {
 }
 
 /// Environment variable consulted at [`ConnectTransport::connect`] time for
-/// an optional Bearer token — same name `mkit-transport-http` used
-/// (`MKIT_API_TOKEN`), so switching a deployment from the retired JSON
-/// dialect to this Connect client needs no operator-facing config change.
+/// an optional Bearer token (`MKIT_API_TOKEN`).
 pub const TOKEN_ENV: &str = "MKIT_API_TOKEN";
 
 /// Default timeout for cheap unary RPCs — `ListRefs`, `ReadRef`,
@@ -280,7 +278,7 @@ pub const TOKEN_ENV: &str = "MKIT_API_TOKEN";
 pub const UNARY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default timeout for pack-transfer RPCs — `UploadPack`, `DownloadPack`.
-/// Matches `mkit-transport-http::DEFAULT_TIMEOUT` — generous enough for a
+/// Generous enough for a
 /// large pack transfer over a slow link, bounded enough that a hung peer
 /// can't wedge a caller indefinitely. Override via
 /// [`ConnectTransport::with_pack_transfer_timeout`] for deployments moving
@@ -362,7 +360,7 @@ fn validate_http_scheme(url: &Url) -> TransportResult<()> {
 }
 
 /// Short, deterministic retry ladder for tests: 5 attempts, 1ms apart,
-/// capped at 1ms. Mirrors `mkit-transport-http`'s `test_backoff`.
+/// capped at 1ms.
 fn test_backoff() -> BackoffIterator {
     BackoffIterator::with(Duration::from_millis(1), Duration::from_millis(1), 5)
 }
@@ -458,8 +456,7 @@ impl ConnectTransport {
     /// Parse `mkit+https://host/project` (or loopback-only
     /// `mkit+http://…`), strip the `mkit+` prefix, and build the transport.
     ///
-    /// The token is sourced from `MKIT_API_TOKEN` at connect time (same
-    /// variable `mkit-transport-http` reads). A missing variable is fine —
+    /// The token is sourced from `MKIT_API_TOKEN` at connect time. A missing variable is fine —
     /// public read endpoints remain accessible.
     ///
     /// RPCs use the fixed `/mkit.transport.v1.TransportService/<Method>`

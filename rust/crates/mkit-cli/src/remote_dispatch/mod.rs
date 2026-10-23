@@ -813,10 +813,8 @@ fn open_with_ssh_options(
     if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
         validate_connect_repository(url)?;
         // ConnectTransport::connect_with_signer strips the `mkit+` prefix
-        // itself and reads MKIT_API_TOKEN from the environment (mkit#701 —
-        // the native mkit.transport.v1 ConnectRPC client, replacing the
-        // retired mkit-transport-http JSON dialect as of
-        // SPEC-TRANSPORT-CONNECT verb parity). Only the config-less `open`
+        // itself and reads MKIT_API_TOKEN from the environment (the native
+        // mkit.transport.v1 ConnectRPC client). Only the config-less `open`
         // reaches this branch (`open_with_config` returns early for Connect
         // URLs), so `envelope_signer` is always `None` here; bearer token and
         // envelope signing are independent, additive auth modes.
@@ -840,10 +838,6 @@ fn open_with_ssh_options(
         let target = parse_mkit_ssh_url(url).map_err(SshInitError::from)?;
         let tx = SshTransport::connect_with_options(&target, ssh_options)?;
         return Ok(Arc::new(tx));
-    }
-    #[cfg(feature = "enc-transport")]
-    if url.starts_with("mkit+enc://") {
-        return open_enc(url);
     }
     if let Some((scheme, rest)) = url
         .split_once("://")
@@ -882,65 +876,6 @@ fn validate_connect_repository(url: &str) -> Result<(), DispatchError> {
         DispatchError::MalformedUrl(format!("repository identity `{path}` in {url}: {reason}"))
     })?;
     Ok(())
-}
-
-/// `mkit+enc://` dispatch (issue #156).
-///
-/// Parses the URL, derives an ephemeral dialer keypair (keystore
-/// integration is SPEC-TRANSPORT-ENC §6 item 5, still deferred), and
-/// runs the encrypted-stream handshake against the URL-advertised
-/// server public key.
-///
-/// Client identity (issue #178): an allowlisting server pins the
-/// dialer's static ed25519 key. To survive across restarts the client
-/// can supply a STABLE raw-32 key file via the `MKIT_ENC_CLIENT_KEY`
-/// environment variable (a user-scoped / CLI-supplied path — never
-/// repo-local `.mkit/config`, which `open_enc` has no access to anyway).
-/// When the variable is unset we fall back to a fresh ephemeral key per
-/// process, which still works against an allow-any enc listener.
-#[cfg(feature = "enc-transport")]
-const ENC_CLIENT_KEY_ENV: &str = "MKIT_ENC_CLIENT_KEY";
-
-#[cfg(feature = "enc-transport")]
-fn open_enc(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
-    use mkit_transport_enc::url::parse_enc_url;
-
-    let target = parse_enc_url(url).map_err(DispatchError::Transport)?;
-    let sk = load_or_ephemeral_client_key()?;
-    let tx = mkit_transport_enc::connect_tcp(&target.host, target.port, &target.server_pubkey, sk)
-        .map_err(|e| DispatchError::Transport(TransportError::RemoteError(e.to_string())))?;
-    Ok(Arc::new(tx))
-}
-
-/// Resolve the dialer's static signing key.
-///
-/// If `MKIT_ENC_CLIENT_KEY` points at a raw 32-byte key file, load it
-/// (with the standard `load_raw_32` 0600/owner hardening) so the
-/// client's public key is stable — letting an allowlisting server pin
-/// it across restarts. Otherwise draw a fresh ephemeral key from the
-/// system RNG (≥256 bits) for back-compat with allow-any servers.
-#[cfg(feature = "enc-transport")]
-fn load_or_ephemeral_client_key()
--> Result<commonware_cryptography::ed25519::PrivateKey, DispatchError> {
-    use commonware_codec::DecodeExt as _;
-    use commonware_cryptography::ed25519::PrivateKey;
-    use zeroize::Zeroizing;
-
-    let map_err = |e: String| DispatchError::Transport(TransportError::RemoteError(e));
-
-    if let Some(path) = std::env::var_os(ENC_CLIENT_KEY_ENV).filter(|s| !s.is_empty()) {
-        let seed = mkit_core::sign::load_raw_32(std::path::Path::new(&path))
-            .map_err(|e| map_err(format!("load {ENC_CLIENT_KEY_ENV}: {e}")))?;
-        return PrivateKey::decode(seed.as_ref())
-            .map_err(|e| map_err(format!("client key construction failed: {e}")));
-    }
-
-    // Ephemeral fallback. Draw 32 bytes from `getrandom`, wrapped in
-    // `Zeroizing` so the stack copy is scrubbed on drop; the resulting
-    // `PrivateKey` carries its own `Secret`-based zeroization.
-    let mut secret = Zeroizing::new([0u8; 32]);
-    getrandom::fill(secret.as_mut()).map_err(|e| map_err(e.to_string()))?;
-    PrivateKey::decode(secret.as_ref()).map_err(|e| map_err(e.to_string()))
 }
 
 /// Push every ref under `refs/heads/` to the remote. Returns the count of

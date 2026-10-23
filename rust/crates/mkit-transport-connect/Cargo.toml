@@ -48,7 +48,7 @@ base64 = "0.22"
 
 # Async runtime driving the ConnectRPC client. The `Transport` trait (mkit_core::protocol::Transport) is
 # synchronous; `mkit_core::protocol::async_shim::Executor` bridges the
-# client side, mirroring mkit-transport-enc's `tcp::TokioExecutor`.
+# client side.
 tokio = { version = "1", default-features = false, features = [
     "rt",
     "rt-multi-thread",
@@ -74,8 +74,7 @@ log = "0.4"
 
 # CSPRNG for the write-envelope idempotency key (`envelope::EnvelopeTransport`)
 # — same crate/version mkit-core, mkit-cli, and mkit-keystore already pull in
-# for their own random-value needs (key generation, ephemeral enc-transport
-# keys).
+# for their own random-value needs (key generation).
 getrandom = "0.4"
 
 # Pure-Rust TLS root store for `HttpClient::with_tls` (Mozilla root program

@@ -17,7 +17,7 @@ Most are off by default to keep the baseline build lean:
 
 | Feature | Adds |
 |---|---|
-| `enc-transport` | `mkit+enc://` client dispatch (SPEC-TRANSPORT-ENC §6; deprecated, no maintained server). |
+| `s3` | `mkit+s3://` remotes on S3-compatible storage (`mkit-transport-s3`). |
 | `git-bridge` (alias `git-export`) | `mkit git …` (SPEC-GIT-BRIDGE/SPEC-GIT-IMPORT). |
 | `sparse-checkout` | Verifiable sparse-checkout (issue #158). |
 | `pack-shards` | `mkit pack-shard <hash>` and shard-aware HTTP/S3 downloads (issue #159). |

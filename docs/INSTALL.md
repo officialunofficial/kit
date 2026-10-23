@@ -70,8 +70,7 @@ cargo test --workspace       # all crates, all tests
 | `mkit-sync`                          | native clone/fetch/pull as a library                       |
 | `mkit-rpc`                           | shared stdio framing for subprocess protocols              |
 | `mkit-cli`                           | the `mkit` binary                                          |
-| `mkit-transport-{memory,file,http,s3,ssh}` | one crate per transport scheme                       |
-| `mkit-transport-enc`                 | `mkit+enc://` encrypted transport (deprecated: no maintained server) |
+| `mkit-transport-{memory,file,connect,s3,ssh}` | one crate per transport scheme                    |
 | `mkit-wasm`                          | wasm-bindgen surface for browsers / Workers (npm-only, not on crates.io) |
 
 ## From GitHub Releases

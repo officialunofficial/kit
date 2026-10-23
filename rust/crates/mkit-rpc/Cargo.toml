@@ -49,7 +49,7 @@ thiserror = "2"
 # mkit-rpc now also re-exports a small set of shared transport-side
 # frame helpers (cond_to_wire, rpc_error_to_transport, ref_entry_to_ref,
 # unexpected_frame, body_name, MAX_REF_NAME, CHUNK_DATA_MAX) — used by
-# both mkit-transport-ssh and mkit-transport-enc. Those helpers need
+# mkit-transport-ssh. Those helpers need
 # `TransportError`, `Ref`, `RefWriteCondition`, and `validate_ref_name`
 # from mkit-core. mkit-core does NOT depend on mkit-rpc, so this is
 # acyclic.
@@ -59,7 +59,7 @@ thiserror = "2"
 # crate sits on the mkit-wasm -> mkit-attest -> mkit-rpc -> mkit-core
 # path, and mkit-core's default `pack-zstd` feature (issue #646) pulls
 # a non-wasm32-buildable C dependency. Every other consumer of
-# mkit-rpc (mkit-cli, mkit-attest, mkit-transport-enc,
+# mkit-rpc (mkit-cli, mkit-attest,
 # mkit-transport-ssh) also depends on mkit-core directly with default
 # features on, so their builds still get `pack-zstd` via that edge.
 mkit-core = { version = "0.5", path = "../mkit-core", default-features = false }

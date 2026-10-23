@@ -1161,9 +1161,7 @@ Remote / sync:
 
   `mkit serve` has no network listener, and `--http` and `--listen-enc` are
   usage errors (exit 64). Serve repositories over SSH with `mkit serve`, or
-  embed `mkit-server` to expose Connect over HTTP. The
-  `mkit+enc://` transport is deprecated: no maintained server exists for it
-  (a `mkit` built with `--features enc-transport` still carries the client).
+  embed `mkit-server` to expose Connect over HTTP.
   `MKIT_API_TOKEN` is sent as a bearer token by `mkit+https://` remotes.
 
   **Refs outside `refs/`.** `mkit serve` before 0.5 stored any
