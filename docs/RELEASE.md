@@ -703,7 +703,6 @@ x86_64 build is the most reliable reproducibility target for third parties.
 | Secret | Purpose | Required for |
 | --- | --- | --- |
 | `CRATES_PACKAGE_KEY` (org-level) | crates.io publish token (publish-new plus publish-update) | `crates-publish.yml` |
-| `CODECOV_TOKEN` | Codecov upload auth &mdash; **vestigial**: no GitHub workflow reads it. Coverage runs on Cloud Build (`cloudbuild/coverage.yaml`); the live token is the GCP Secret Manager copy | &mdash; (see [`CODECOV_TOKEN`](#codecov_token)) |
 | `BUF_TOKEN` | Buf Schema Registry API token (write access) &mdash; pushes the `mkit-rpc`/`mkit-repo` proto modules | `crates-publish.yml`'s `buf-push` job (see [`BUF_TOKEN`](#buf_token)) |
 
 cosign keyless and npm Trusted Publishing (auth plus provenance) both run on
@@ -725,28 +724,6 @@ For the very first publish, ensure each crate name is available or already owned
 by the org; crates.io rejects deps on unpublished crates, so the dependency-order
 publish in `crates-publish.yml` handles a clean first release once the token and
 version are in place.
-
-### `CODECOV_TOKEN`
-
-Codecov receives the lcov report from the Cloud Build coverage build
-(`cloudbuild/coverage.yaml`, trigger `mkit-coverage-main`) so the README badge,
-trend chart, and PR-diff overlay work. The live token lives in **GCP Secret
-Manager**, not GitHub: no GitHub workflow reads `CODECOV_TOKEN` anymore, so the
-GitHub Actions secret of the same name is vestigial and safe to delete.
-
-1. Sign in at <https://app.codecov.io/> with the GitHub account that admins the
-   `officialunofficial` org.
-2. Add the `officialunofficial/mkit` repo; copy the "Upload token".
-3. Store it as the `CODECOV_TOKEN` secret in GCP Secret Manager and grant the
-   Cloud Build service account access (`cloudbuild/coverage.yaml` mounts
-   `projects/${PROJECT_ID}/secrets/CODECOV_TOKEN/versions/latest`). The upload
-   is optional: if the secret is absent, the upload step is skipped and the
-   report is still produced and logged.
-4. Trigger a run: push to `main` (`mkit-coverage-main` fires on push to `main`
-   only). The first run seeds the baseline; subsequent runs populate the badge.
-5. Once the repo flips public, Codecov accepts tokenless uploads from public
-   repos via GitHub OIDC &mdash; but that applies to GitHub Actions uploads, not
-   Cloud Build, so the Secret Manager token stays.
 
 ### npm Trusted Publishing (OIDC) — `@officialunofficial/mkit-wasm`
 
