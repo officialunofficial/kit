@@ -1228,12 +1228,9 @@ steps for `mkit-wasm` and `mkit-server`, all run by `just ci-scripts`
 **Always:** the normal dependency graph of `mkit-cli` with its default
 features, on every target, contains no `axum`, `mkit-server-native` (a removed crate, kept on the ban list),
 `rusqlite` or `libsqlite3-sys`; it enables no hyper `server` feature, no
-hyper-util `server*` feature and no connectrpc `server` or `axum` feature;
-and it has `mkit-server` (the engine of `mkit serve`) with only the `ssh`
-and `fs` features. `mkit serve` builds no async runtime: it runs the ssh
-session under `futures::executor::block_on`, and its code names no tokio.
+hyper-util `server*` feature and no connectrpc `server` or `axum` feature.
 tokio itself is allowed: it is the runtime of the Connect and reqwest
-*clients* in the default graph, and `mkit-server` uses only `tokio::sync`.
+*clients* in the default graph.
 
 **Because:** the CLI is what every user installs (`cargo install
 mkit-cli`, the release archives). The HTTP server, the
@@ -1248,7 +1245,7 @@ release check (`scripts/check-release-artifact-features.sh`) then fails
 only at release time, where this check fails at the PR.
 
 **Enforced by:** `scripts/check-cli-baseline.sh` (a `cargo tree` model of
-the graph plus a grep of `commands/serve/`), run by `just ci-scripts`
+the graph), run by `just ci-scripts`
 (part of `just ci`), `just ci-server` and cloudbuild/ci.yaml; the release build's real compiler artifacts are
 checked by `scripts/check-release-artifact-features.sh` against
 `scripts/release/mkit-packages.golden`.

@@ -62,7 +62,6 @@ pub mod revert;
 pub mod revspec;
 pub mod rm;
 pub mod self_update;
-pub mod serve;
 pub mod show;
 pub mod show_ref;
 pub mod sparse_checkout;

@@ -125,10 +125,6 @@ tower-service = { version = "0.3", optional = true }
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 mkit-rpc = { version = "0.5", path = "../mkit-rpc" }
-# `mkit serve` drives the session future with `futures::executor::block_on`
-# on the main thread: no async runtime. Already in the graph (via
-# mkit-transport-connect and reqwest), so not a new supply-chain root.
-futures = { version = "0.3", default-features = false, features = ["executor", "std"] }
 buffa = "0.9.1"
 # `mkit add -A`/`add .` hashes untracked/modified worktree files in
 # parallel (commands/add.rs) — each file's read+BLAKE3 pass is
@@ -216,9 +212,8 @@ mkit-keystore = { version = "0.5", path = "../mkit-keystore", features = ["backe
 tempfile = "3"
 mkit-test-util = { path = "../mkit-test-util" }
 mkit-transport-memory = { path = "../mkit-transport-memory" }
-# Integration tests for HTTP/S3 scheme dispatch use a local mockito
-# server. SSH dispatch tests only cover URL parsing (no live subprocess
-# in CI), so the `mkit-transport-ssh` exports are enough on their own.
+# The self-update test uses a local mockito server standing in for the
+# release host.
 mockito = "1"
 # `attest_roundtrip` tests derive per-algorithm public keys at test time
 # to build trust-roots TOML files. Dev-only: the CLI binary itself never
@@ -263,14 +258,6 @@ trycmd = "1"
 assert_cmd = "2"
 predicates = "3"
 assert_fs = "1"
-# tests/ssh_e2e_real.rs's containerized real-sshd test: a genuine
-# OpenSSH daemon (lscr.io/linuxserver/openssh-server) via Docker, closing
-# the gap the module docs' host-level skeleton left open ("would flake
-# across runners" — the container sidesteps exactly that fragility, since
-# the daemon's provisioning lives in a pinned, pre-built image instead of
-# on the host). `blocking` feature: this suite's tests are plain `#[test]`,
-# not async.
-testcontainers = { version = "0.27", features = ["blocking"] }
 
 [features]
 default = []

@@ -136,10 +136,6 @@ tower_http_allowed = {"follow-redirect", "futures-util", "tower"}
 extra = features.get("tower-http", set()) - tower_http_allowed
 if extra:
     err(f"tower-http was compiled with {sorted(extra)}; mkit allows only {sorted(tower_http_allowed)}")
-# mkit-cli's own `mkit-server` dependency (WP-M0-13): ssh + fs only.
-extra = features.get("mkit-server", set()) - {"ssh", "fs"}
-if extra:
-    err(f"mkit-server was compiled with {sorted(extra)} (mkit-cli declares only ssh, fs)")
 # Package allowlist.
 with open(golden_path, encoding="utf-8") as f:
     golden = {l.strip() for l in f if l.strip() and not l.startswith("#")}
@@ -154,8 +150,7 @@ print(f"check-release-artifact-features: mkit: {len(features)} packages compiled
       f"hyper={sorted(features.get('hyper', []))} "
       f"hyper-util={sorted(features.get('hyper-util', []))} "
       f"connectrpc={sorted(features.get('connectrpc', []))} "
-      f"tower-http={sorted(features.get('tower-http', []))} "
-      f"mkit-server={sorted(features['mkit-server']) if 'mkit-server' in features else 'absent'}")
+      f"tower-http={sorted(features.get('tower-http', []))}")
 
 for e in errors:
     print(f"check-release-artifact-features: ERROR: {e}", file=sys.stderr)

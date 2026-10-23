@@ -100,7 +100,6 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "fetch",
     "pull",
     "push",
-    "serve",
     "mcp",
     "key",
     "grant",

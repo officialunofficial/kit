@@ -27,6 +27,3 @@ Most are off by default to keep the baseline build lean:
 See the top-level README and `docs/CLI.md` for the full command reference
 and agent-integration notes (`mkit mcp`).
 
-`mkit serve <path>` is only the `mkit+ssh://` forced-command server; it has
-no HTTP or encrypted-transport listener, which keeps the HTTP server stack
-and `SQLite` out of this crate.

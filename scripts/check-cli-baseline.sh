@@ -7,18 +7,11 @@
 #
 #   - no `axum`, `mkit-server-native`, `rusqlite` or `libsqlite3-sys`;
 #   - no hyper `server` feature, no hyper-util `server*` feature, and no
-#     connectrpc `server` or `axum` feature;
-#   - `mkit-server` (the engine of `mkit serve`) with only its `ssh` and
-#     `fs` features, never `connect`, `memory` or `test-faults`;
-#
-# and `mkit serve` (rust/crates/mkit-cli/src/commands/serve/) must not name
-# tokio: it runs its session under `futures::executor::block_on` and builds
-# no async runtime.
+#     connectrpc `server` or `axum` feature.
 #
 # tokio itself is NOT banned: the default CLI graph has it through the
-# Connect client (`mkit-transport-connect`) and reqwest's blocking client,
-# and `mkit-server` uses `tokio::sync` alone. Nor is tower-http, reqwest's
-# redirect layer. This is a fast `cargo tree` model of the graph; the
+# Connect client (`mkit-transport-connect`) and reqwest's blocking client.
+# Nor is tower-http, reqwest's redirect layer. This is a fast `cargo tree` model of the graph; the
 # release build's compiler artifacts are checked separately by
 # scripts/check-release-artifact-features.sh.
 
@@ -53,19 +46,8 @@ for f in "${banned_features[@]}"; do
   fi
 done
 
-extra=$(printf '%s\n' "$features" \
-  | sed -n 's/^mkit-server feature "\([^"]*\)".*/\1/p' \
-  | sort -u | grep -vxE 'ssh|fs' || true)
-if [ -n "$extra" ]; then
-  err "mkit-cli enables mkit-server features beyond ssh, fs: $(printf '%s' "$extra" | tr '\n' ' ')"
-fi
-
-if grep -rn 'tokio' rust/crates/mkit-cli/src/commands/serve; then
-  err "\`mkit serve\` (rust/crates/mkit-cli/src/commands/serve/) names tokio; it must build no async runtime"
-fi
-
 if [ "$fail" -ne 0 ]; then
   echo "check-cli-baseline: FAILED (see docs/INVARIANTS.md, \"The default \`mkit\` CLI is server-free\")" >&2
   exit 1
 fi
-echo "check-cli-baseline: OK (no axum/SQLite/mkit-server-native, no server features; mkit-server: ssh, fs)"
+echo "check-cli-baseline: OK (no axum/SQLite/mkit-server-native, no server features)"
