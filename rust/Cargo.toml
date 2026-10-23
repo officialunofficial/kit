@@ -16,6 +16,7 @@ members = [
     "crates/mkit-cli",
     "fuzz",
     "benches",
+    "crates/mkit-formal-conformance",
 ]
 
 [workspace.package]
