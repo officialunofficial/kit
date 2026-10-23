@@ -459,12 +459,6 @@ fn build_additional_signer(
                     Algorithm::Ed25519 => p.clone_into(&mut cfg.signing_key),
                     Algorithm::Secp256k1 => p.clone_into(&mut cfg.attest.secp256k1_key_path),
                     Algorithm::P256 => p.clone_into(&mut cfg.attest.p256_key_path),
-                    #[cfg(feature = "bls-threshold")]
-                    Algorithm::Bls12381Threshold => {
-                        return Err(FactoryError::UnknownAlgorithm(
-                            "bls12381-thr key path is not yet configurable".to_owned(),
-                        ));
-                    }
                 }
             }
             attest_factory::build_signer(layout, spec.algorithm, "repo-key", &cfg)

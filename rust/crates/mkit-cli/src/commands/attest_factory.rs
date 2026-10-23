@@ -134,7 +134,7 @@ fn build_keystore_signer(
         .map_err(|error| FactoryError::Keystore(format!("key ref: {error}")))?;
     let store = open_backend(key_ref.backend())
         .map_err(|error| FactoryError::Keystore(error.to_string()))?;
-    let keystore_algorithm = to_keystore_algorithm(algorithm)?;
+    let keystore_algorithm = to_keystore_algorithm(algorithm);
     let backend = key_ref.backend().to_string();
     let label = key_ref.label().to_owned();
     let selector = KeySelector::new(label.clone(), Some(keystore_algorithm))
@@ -158,24 +158,14 @@ fn configured_key_ref(cfg: &Config, algorithm: Algorithm) -> &str {
         Algorithm::Ed25519 => cfg.key.ed25519_ref_or_fallback(),
         Algorithm::Secp256k1 => cfg.key.secp256k1_ref_or_fallback(),
         Algorithm::P256 => cfg.key.p256_ref_or_fallback(),
-        #[cfg(feature = "bls-threshold")]
-        Algorithm::Bls12381Threshold => "",
     }
 }
 
-// `Result` is necessary on the `bls-threshold` arm; without that
-// feature, clippy sees only infallible arms and flags the wrap.
-#[allow(clippy::unnecessary_wraps)]
-fn to_keystore_algorithm(algorithm: Algorithm) -> Result<mkit_keystore::Algorithm, FactoryError> {
+fn to_keystore_algorithm(algorithm: Algorithm) -> mkit_keystore::Algorithm {
     match algorithm {
-        Algorithm::Ed25519 => Ok(mkit_keystore::Algorithm::Ed25519),
-        Algorithm::Secp256k1 => Ok(mkit_keystore::Algorithm::Secp256k1),
-        Algorithm::P256 => Ok(mkit_keystore::Algorithm::P256),
-        #[cfg(feature = "bls-threshold")]
-        Algorithm::Bls12381Threshold => Err(FactoryError::UnknownAlgorithm(
-            "bls12381-thr keystore backend (issue #160) is not yet wired into the factory"
-                .to_owned(),
-        )),
+        Algorithm::Ed25519 => mkit_keystore::Algorithm::Ed25519,
+        Algorithm::Secp256k1 => mkit_keystore::Algorithm::Secp256k1,
+        Algorithm::P256 => mkit_keystore::Algorithm::P256,
     }
 }
 
@@ -263,10 +253,6 @@ fn build_repo_key_signer(
                 .map_err(|e| FactoryError::Signer(e.to_string()))?;
             Ok(Box::new(signer))
         }
-        #[cfg(feature = "bls-threshold")]
-        Algorithm::Bls12381Threshold => Err(FactoryError::UnknownAlgorithm(
-            "bls12381-thr repo-key signer (issue #160) awaits the release-party CLI".to_owned(),
-        )),
     }
 }
 

@@ -31,7 +31,7 @@ ignore = [
     # `paste` (macro crate) marked unmaintained 2024-10-07. Pulled
     # transitively by commonware-* (via blst/aws-lc-sys macro
     # expansion) when the optional `history-mmr` / `sparse-checkout`
-    # / `pack-shards` / `bls-threshold` features are enabled. No
+    # / `pack-shards` features are enabled. No
     # runtime exposure: paste expands at compile time, produces no
     # binary code we own. The dependency comes in via the commonware
     # crates (https://github.com/commonwarexyz/monorepo) — once

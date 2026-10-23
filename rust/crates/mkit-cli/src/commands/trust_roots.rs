@@ -17,14 +17,11 @@
 //! pubkey_hex = "..."
 //! ```
 //!
-//! * `kind` is one of `ed25519`, `secp256k1` (alias `secp256k1-sec1`),
-//!   `p256-sec1` (alias `p256`), or `bls12381-thr`. Anything else is
-//!   ignored.
-//! * `algorithm` is accepted as an alias for `kind` (per
-//!   `docs/specs/SPEC-RELEASE-THRESHOLD.md`); either field name works.
-//! * `pubkey_hex` is the raw public key bytes in lowercase hex. For
-//!   `bls12381-thr`, the bytes are the 96-byte G2 compressed
-//!   aggregated cohort public key (the `MinSig` variant).
+//! * `kind` is one of `ed25519`, `secp256k1` (alias `secp256k1-sec1`) or
+//!   `p256-sec1` (alias `p256`). Anything else is ignored.
+//! * `algorithm` is accepted as an alias for `kind`; either field name
+//!   works.
+//! * `pubkey_hex` is the raw public key bytes in lowercase hex.
 //!
 //! Lines outside a `[[trust_root]]` block, comments (`#`), and blank
 //! lines are ignored. A missing file parses to zero entries — the
@@ -209,13 +206,6 @@ fn add_entry_to_registry(reg: &mut Registry, e: &TrustEntry) {
         "secp256k1" | "secp256k1-sec1" => {
             reg.add(e.keyid.clone(), TrustRoot::Secp256k1PubKeySec1(pk_bytes));
         }
-        #[cfg(feature = "bls-threshold")]
-        "bls12381-thr" if pk_bytes.len() == mkit_attest::BLS_THRESHOLD_PUBLIC_KEY_SIZE => {
-            reg.add(
-                e.keyid.clone(),
-                TrustRoot::Bls12381ThresholdPubKey(pk_bytes),
-            );
-        }
         _ => {}
     }
 }
@@ -275,7 +265,7 @@ pub fn save(path: &Path, entries: &[TrustEntry]) -> Result<(), (String, u8)> {
 /// public key bytes. The canonical keyid shape is `<prefix>:<body>`:
 ///
 /// - `blake3:<hex>` — body is `blake3(pubkey)`; verify the digest.
-/// - `ed25519` / `secp256k1` / `p256` / `bls12381-thr:<hex>` — body is
+/// - `ed25519` / `secp256k1` / `p256` / `<hex>` — body is
 ///   the raw lowercase-hex pubkey; verify it equals `pubkey_hex`.
 /// - Anything else (unknown prefix, no `:` separator) is left
 ///   uncross-checked here — return `true` so forward-compatible
@@ -291,9 +281,7 @@ pub fn keyid_matches_pubkey(keyid: &str, pubkey: &[u8]) -> bool {
             let digest = mkit_core::hash::hash(pubkey);
             body == mkit_core::hash::to_hex(&digest)
         }
-        "ed25519" | "secp256k1" | "p256" | "bls12381-thr" => {
-            body == mkit_core::hash::to_hex_bytes(pubkey)
-        }
+        "ed25519" | "secp256k1" | "p256" => body == mkit_core::hash::to_hex_bytes(pubkey),
         _ => true,
     }
 }

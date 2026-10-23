@@ -123,8 +123,7 @@ build. Cap: 15 min per harness.
 | `software_key_record_decode_header_no_panic` | as above | 10, 11 B | pass | 119 s |
 | `software_key_record_decode_15b_no_panic` | as above | 15 B | pass | 58 s |
 | `software_key_record_roundtrip` | `decode(encode(r)) == r` | empty variable fields, any algorithm 1–3, attrs, nonce | pass | 27 s |
-| `software_key_record_rejects_algorithm_4` | §6.1.1 "MUST reject id `0x04`" | minimal record, symbolic attrs/nonce | pass (default features) | 27 s |
-| same, `--features bls-threshold` | as above | as above | pass after the MKIT-59 fix (FINDING 2; failed before) | 62 s |
+| `software_key_record_rejects_algorithm_4` | §6.1.1 "MUST reject id `0x04`" | minimal record, symbolic attrs/nonce | pass | 27 s |
 | `software_key_record_canary_trailing_byte_accepted` | canary: "valid record + 1 trailing byte still decodes" | 59 + 1 B | falsified (expected) | 21 s |
 
 ### mkit-rpc
@@ -151,19 +150,6 @@ build. Cap: 15 min per harness.
    in the code; the commonware cross-check draws `n >= 1` only). Regression
    test `merkle::tests::empty_tree_builders_refuse_position_zero`; the
    harness passes (2026-09-27: `0 of 4628 failed`, 1/1 cover, 7.5 s).
-2. **SPEC-KEYSTORE §6.1.1 algorithm id `0x04` under `bls-threshold`.**
-   The spec says a `MKITKSV1` decoder MUST reject id `0x04`.
-   `algorithm_from_id` maps `4 => Algorithm::Bls12381Threshold` when the
-   `bls-threshold` feature is on, so `EncryptedKeyRecord::decode` accepts
-   such a record; rejection only happens later, in `decrypt`'s plaintext
-   length check. `software_key_record_rejects_algorithm_4` held in the
-   default build and failed with `--features bls-threshold`. **Fixed
-   (MKIT-59):** §6.1.1 and §6.1.2 are explicit that shares use the separate
-   `MKITKSB1` record, so `algorithm_from_id` now rejects `4` in every build
-   (no spec change). Regression test
-   `encrypted_record::tests::encrypted_record_decode_rejects_reserved_algorithm_4`
-   (failed under `bls-threshold` before the fix); the harness passes in
-   both configurations (2026-09-27: `0 of 771 failed` each).
 
 ## Dropped or narrowed (did not finish within 15 min)
 

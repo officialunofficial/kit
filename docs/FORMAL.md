@@ -150,7 +150,7 @@ ones a spec reader is most likely to look for.
 | SPEC-OBJECTS §2 to §8, §11 | deserializers never panic; tree-name rule matches §4.1; blob round-trip | bounded (bodies up to 12 bytes) | `serialize_canary_trailing_byte_accepted` |
 | SPEC-MERKLE-OBJECTS §5.2 to §5.5 | proof decode, verify fold, builder round-trip; §5.4 builder refusal on the empty tree | bounded (0 to 2 siblings, leaf counts up to 8; any `u32` for `s0` and the empty-tree harness) | `merkle_canary_tampered_leaf_verifies` |
 | SPEC-PACKFILE §1 to §3, §6, §8, §11 | pack parsing never panics and honors the header, trailer and entry count; window cursor decode | bounded (entry areas of 5 and 10 bytes; one fixed cursor layout of 125 bytes) | `pack_canary_mutation_still_parses`, `pack_window_cursor_canary_flip_accepted` |
-| SPEC-KEYSTORE §6.1.1 | record decode never panics; round-trip; id `0x04` rejected in every build | bounded (inputs up to 15 bytes; default and `bls-threshold` builds) | `software_key_record_canary_trailing_byte_accepted` |
+| SPEC-KEYSTORE §6.1.1 | record decode never panics; round-trip; id `0x04` rejected | bounded (inputs up to 15 bytes) | `software_key_record_canary_trailing_byte_accepted` |
 | SPEC-RPC §1 | `read_frame` never panics; accepts iff full prefix, in-cap length, full body | bounded (streams up to 6 bytes) | `rpc_canary_over_cap_length_accepted` |
 
 ## Assumptions
@@ -201,7 +201,6 @@ after.
 | Empty-tree range proof | The range-proof builder returned the all-default proof for `0..=0` of the empty Tree; SPEC-MERKLE-OBJECTS §5.4 requires a refusal | Kani `merkle_builder_empty_tree_refuses` | `BmtTree::range_proof` refuses every range of the empty tree |
 | Scrub age boundary | The scrub took the window path at exactly 604800 s; SPEC-HISTORY-PROOF §4.5 says "fewer than" | `scrub::WindowOnlyWhenFresh` | `decide_chain` compares with `>=` |
 | Conflict readback | A push reported NonFastForward for a head write that landed but whose response was lost; SPEC-TRANSPORT §7 requires a `read_ref` first | `ordered2_oldConflict::ConflictHonest` | `head_conflict` reads the head back on `HeadConflict` and `RefConflict` |
-| Keystore algorithm refusal | With `bls-threshold`, the `MKITKSV1` decoder accepted algorithm id `0x04`; SPEC-KEYSTORE §6.1.1 says it MUST reject it | Kani `software_key_record_rejects_algorithm_4` | `algorithm_from_id` rejects `4` in every build |
 | Sweep refresh exclusion | A refresh between the age check and unlink could lose a reused object | `sweepSplit`, `sweepNoLock` | [`ObjectStore::prune_if_old_with_hook`](../rust/crates/mkit-core/src/store.rs) holds the exclusive format-file lock across the final metadata check and unlink; writers hold its shared counterpart. See SPEC-GC "Concurrent writers and the grace window". |
 | Cached-closure freshness | Cached git translations skipped refreshing the reachable objects | code reading; cached-reuse regressions | [`Importer::reuse_closure`](../rust/crates/mkit-git-bridge/src/import.rs) traverses the complete cached closure through `reuse_object` before memoizing it. |
 | Read-only reuse | Reused read-only object files failed the commit fsync with `EACCES` | read-only reuse regression | [`sync_reused_file`](../rust/crates/mkit-core/src/store.rs) opens reused files read-only on Unix before `sync_all`; platforms requiring write access retain that requirement. |

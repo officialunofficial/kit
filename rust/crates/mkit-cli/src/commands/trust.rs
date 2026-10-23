@@ -3,7 +3,7 @@
 //! against.
 //!
 //! ```text
-//! mkit trust add <keyid> <pubkey-hex> [--kind ed25519|p256-sec1|secp256k1|bls12381-thr]
+//! mkit trust add <keyid> <pubkey-hex> [--kind ed25519|p256-sec1|secp256k1]
 //!                [--trust-roots <path>] [--force]
 //! mkit trust list [--trust-roots <path>] [--json]
 //! mkit trust remove <keyid> [--trust-roots <path>] --yes
@@ -57,9 +57,7 @@ struct AddOpts {
     /// the canonical `<algorithm>:<hex-pubkey>` shape.
     keyid: String,
     /// Public key, lowercase hex. Ed25519 is 32 bytes; P-256/secp256k1
-    /// SEC1 are 33 (compressed) or 65 (uncompressed) bytes; the
-    /// BLS12-381 threshold cohort key (`bls-threshold` feature) is 96
-    /// bytes.
+    /// SEC1 are 33 (compressed) or 65 (uncompressed) bytes.
     pubkey_hex: String,
     /// Trust-root kind. Commit/remix/tag signing is Ed25519-only
     /// today, so this defaults to `ed25519`; other kinds only matter
@@ -253,8 +251,6 @@ fn remove(opts: &RemoveOpts) -> u8 {
 fn expected_pubkey_len(kind: &str) -> Option<usize> {
     match kind {
         "ed25519" => Some(32),
-        #[cfg(feature = "bls-threshold")]
-        "bls12381-thr" => Some(mkit_attest::BLS_THRESHOLD_PUBLIC_KEY_SIZE),
         // SEC1 p256/secp256k1 accept both 33 (compressed) and 65
         // (uncompressed) — length-checked by mkit-attest at verify
         // time instead of here.

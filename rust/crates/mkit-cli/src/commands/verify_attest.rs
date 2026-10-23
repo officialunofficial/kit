@@ -14,14 +14,11 @@
 //! pubkey_hex = "..."
 //! ```
 //!
-//! * `kind` is one of `ed25519`, `secp256k1` (alias `secp256k1-sec1`),
-//!   `p256-sec1` (alias `p256`), or `bls12381-thr`. Anything else is
-//!   ignored.
-//! * `algorithm` is accepted as an alias for `kind` (per
-//!   `docs/specs/SPEC-RELEASE-THRESHOLD.md`); either field name works.
-//! * `pubkey_hex` is the raw public key bytes in lowercase hex. For
-//!   `bls12381-thr`, the bytes are the 96-byte G2 compressed
-//!   aggregated cohort public key (the `MinSig` variant).
+//! * `kind` is one of `ed25519`, `secp256k1` (alias `secp256k1-sec1`) or
+//!   `p256-sec1` (alias `p256`). Anything else is ignored.
+//! * `algorithm` is accepted as an alias for `kind`; either field name
+//!   works.
+//! * `pubkey_hex` is the raw public key bytes in lowercase hex.
 //!
 //! Exit code is 0 iff every listed attestation is bound to the requested
 //! commit and has `any_verified = true`, nonzero otherwise.
@@ -605,81 +602,48 @@ mod tests {
         assert!(!keyid_matches_pubkey("ed25519:dead", &pk));
     }
 
-    /// `[[trust_root]]` blocks with `kind = "bls12381-thr"` (or the
-    /// `algorithm = "bls12381-thr"` alias) load into the registry as
-    /// `TrustRoot::Bls12381ThresholdPubKey` and verify-dispatch picks
-    /// them up. Pinned to the 96-byte `MinSig` G2 compressed length —
-    /// anything shorter is silently dropped (per the parser's
-    /// tolerate-and-skip policy).
-    #[cfg(feature = "bls-threshold")]
-    #[test]
-    fn load_trust_roots_parses_bls_threshold_block() {
-        let td = tempfile::tempdir().unwrap();
-        let path = td.path().join("tr.toml");
-        // 96 bytes of dummy hex — exact length matches MinSig G2
-        // compressed encoding.
-        let hex = "ab".repeat(96);
-        fs::write(
-            &path,
-            format!(
-                "[[trust_root]]\n\
-                 keyid = \"bls12381-thr:{hex}\"\n\
-                 kind = \"bls12381-thr\"\n\
-                 pubkey_hex = \"{hex}\"\n"
-            ),
-        )
-        .unwrap();
-        let reg = load_trust_roots(&path).unwrap();
-        let lookup = format!("bls12381-thr:{hex}");
-        assert!(reg.lookup(&lookup).is_some());
-    }
-
-    /// Spec wording in `docs/specs/SPEC-RELEASE-THRESHOLD.md` says
-    /// `algorithm = "bls12381-thr"`; the parser accepts that as an
-    /// alias for `kind` to keep both forms compatible.
-    #[cfg(feature = "bls-threshold")]
+    /// `[[trust_root]]` blocks load into the registry. The parser accepts
+    /// `algorithm` as an alias for `kind`.
     #[test]
     fn load_trust_roots_accepts_algorithm_alias() {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("tr.toml");
-        let hex = "cd".repeat(96);
+        let hex = "cd".repeat(32);
         fs::write(
             &path,
             format!(
                 "[[trust_root]]\n\
-                 keyid = \"bls12381-thr:{hex}\"\n\
-                 algorithm = \"bls12381-thr\"\n\
+                 keyid = \"ed25519:{hex}\"\n\
+                 algorithm = \"ed25519\"\n\
                  pubkey_hex = \"{hex}\"\n"
             ),
         )
         .unwrap();
         let reg = load_trust_roots(&path).unwrap();
-        assert!(reg.lookup(&format!("bls12381-thr:{hex}")).is_some());
+        assert!(reg.lookup(&format!("ed25519:{hex}")).is_some());
     }
 
-    /// Wrong-length BLS public key (e.g. someone mistakenly pasted a
-    /// G1 sig or a truncated key) is silently dropped — the
-    /// `verify-attest` run will then surface the keyid as
-    /// `UnknownKeyid` rather than panic on a malformed registry.
-    #[cfg(feature = "bls-threshold")]
+    /// A block of an unknown kind, such as the removed BLS threshold kind,
+    /// is silently dropped. The `verify-attest` run then reports the keyid
+    /// as `UnknownKeyid` instead of trusting it.
     #[test]
-    fn load_trust_roots_skips_wrong_length_bls_pubkey() {
+    fn load_trust_roots_skips_unknown_kind() {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("tr.toml");
-        let short = "ee".repeat(32); // 32 bytes, not 96
-        let keyid = "bls12381-thr:abc";
+        let hex = "ab".repeat(96);
+        let keyid = format!("bls12381-thr:{hex}");
         fs::write(
             &path,
             format!(
                 "[[trust_root]]\n\
                  keyid = \"{keyid}\"\n\
                  kind = \"bls12381-thr\"\n\
-                 pubkey_hex = \"{short}\"\n"
+                 pubkey_hex = \"{hex}\"\n"
             ),
         )
         .unwrap();
         let reg = load_trust_roots(&path).unwrap();
-        assert!(reg.lookup(keyid).is_none());
+        assert!(reg.lookup(&keyid).is_none());
     }
 
     #[test]

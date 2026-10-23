@@ -29,8 +29,6 @@ pub use backend_linux_secret_service::LinuxSecretServiceKeystore;
 #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
 pub use backend_macos_keychain::MacosKeychainKeystore;
 pub use error::{Error, Result};
-#[cfg(feature = "bls-threshold")]
-pub use software::{BlsShareMetadata, LoadedBlsShare};
 pub use software::{SoftwareKeystore, SoftwareRawKeystore, SoftwareSigner};
 pub use types::{
     Algorithm, BackendKind, Capabilities, GenerateOptions, ImportOptions, KeyAttrs, KeyId,

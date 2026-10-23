@@ -7,11 +7,9 @@ audience: implementers and integrators producing or verifying mkit release-party
 
 # SPEC-RELEASE-THRESHOLD &mdash; BLS12-381 threshold signatures for mkit releases
 
-Status: **Draft**. The signer/verifier pair and the keystore-backed share
-storage (issue #160) are implemented in `mkit-attest`/`mkit-keystore`
-behind the `bls-threshold` Cargo feature &mdash; see §6. The release-party
-ceremony CLI (`contrib/release-party/`) that drives the dealer/aggregator
-flow in §5 does not exist yet; this document stays draft until it does.
+Status: **Draft**. This repository does not implement this
+specification &mdash; see §6. The document fixes the wire bytes and the
+verifier path for a future implementation.
 
 This spec is normative for the wire bytes a threshold-signed release
 ships and the verifier path that consumes them. It is **not** a
@@ -324,41 +322,17 @@ design.
 
 ## 6. Implementation status
 
-The signer/verifier pair is implemented in `mkit-attest` behind the
-`bls-threshold` Cargo feature: the algorithm identifier
-(`Algorithm::ALGORITHM_BLS12381_THRESHOLD = 5` in `common.proto`),
-`mkit-attest::signer_bls_threshold`, the `ThresholdSigner` holder-side
-adapter, `bls_threshold_aggregate`, `bls_threshold_verify`, and
-`bls_threshold_trusted_dealer` all exist.
-
-The keystore backend is implemented in `mkit-keystore`: the
-`Bls12381Threshold` algorithm variant, `SoftwareKeystore::store_bls_share`/
-`load_bls_share`/`delete_bls_share`/`list_bls_shares`, the
-`BlsShareRecord` AEAD wire format (magic `MKITKSB1`), the
-`TrustRoot::Bls12381ThresholdPubKey` registry dispatch in
-`verify_envelope`, the trust-roots TOML schema for `bls12381-thr:`
-keyids, and `mkit key generate --algorithm bls12381-thr` all exist.
-
-Not yet implemented: DKG in place of the trusted dealer (§2.2); the
-`contrib/release-party/` CLI itself (`sign`/`aggregate`/`deal`, §5); its
-`.github/workflows/release.yml` integration; maintainer
-rotation/resharing tooling (§5.3); and multi-host distribution to
-replace the single-host trusted dealer.
+No code in this repository signs, aggregates or verifies a threshold
+signature. `mkit-attest` has no BLS algorithm variant. `mkit-keystore`
+stores no shares. A trust-roots file entry of kind `bls12381-thr` is
+ignored, so a keyid of that kind reports as unknown. The algorithm
+identifier `ALGORITHM_BLS12381_THRESHOLD = 5` stays reserved in
+`common.proto`.
 
 ---
 
 ## 7. Open questions
 
-- **Share serialization at rest.** The
-  software backend stores each share as a
-  `commonware_codec::Encode`-encoded `Share` wrapped in a
-  `BlsShareRecord` (magic `MKITKSB1`, `XChaCha20-Poly1305`,
-  protector-managed DEK). The record's AAD binds the share to the
-  cohort public key, holder index, M-of-N threshold, and total &mdash; so
-  a swapped 1-of-N share cannot be passed off as 3-of-N. Round-trip
-  through age/OpenBao is unblocked: those tools wrap arbitrary
-  bytes, and the wire format is opaque to them. See `SPEC-KEYSTORE.md`
-  §"BLS12-381 threshold share storage".
 - **Coordination channel.** Signal vs. GitHub issue comment vs.
   OpenBao audit log &mdash; each has different trust-root assumptions. The
   CLI implementation will pick one; the spec stays neutral.

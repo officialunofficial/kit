@@ -17,12 +17,6 @@ workspace = true
 [features]
 default = []
 attest = ["dep:mkit-attest"]
-# Enables encrypted-at-rest storage of BLS12-381 threshold signing shares
-# via the dedicated `SoftwareKeystore` BLS API (`store_bls_share`,
-# `load_bls_share`, `list_bls_shares`, etc.). Also makes the keystore's
-# `Algorithm`/type conversions aware of the BLS variant. Requires the
-# `attest` feature for the BLS share codec and crypto.
-bls-threshold = ["attest", "mkit-attest/bls-threshold"]
 backend-linux-secret-service = ["linux-secret-service"]
 backend-macos-keychain = ["macos-keychain"]
 fuzzing = []
@@ -56,12 +50,5 @@ libc = "0.2.186"
 
 [dev-dependencies]
 tempfile = "=3.27.0"
-# BLS share storage round-trip tests need access to the codec +
-# crypto crates so they can dealer/sign/aggregate alongside the
-# keystore. Same versions as mkit-attest pins.
-commonware-codec = "2026.9.0"
-commonware-cryptography = "2026.9.0"
-commonware-utils = "2026.9.0"
-
 [package.metadata.docs.rs]
-features = ["attest", "bls-threshold", "backend-linux-secret-service"]
+features = ["attest", "backend-linux-secret-service"]

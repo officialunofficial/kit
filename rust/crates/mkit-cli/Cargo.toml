@@ -169,21 +169,11 @@ flate2 = "1"
 tar = "0.4"
 # Used by `mkit keygen` to generate raw 32-byte secrets for non-ed25519
 # algorithms (secp256k1 / p256). Same version mkit-core already pulls in.
-# `sys_rng` provides `getrandom::SysRng`, the rand_core 0.10 `TryRng`
-# source the bls-threshold trusted-dealer path wraps in `UnwrapErr`.
+# `sys_rng` provides `getrandom::SysRng`, the rand_core 0.10 `TryRng`.
 getrandom = { version = "0.4", features = ["sys_rng"] }
 # Wraps the raw 32-byte secrets keygen pulls out of the RNG until they
 # land inside the algorithm signer (which has its own scrubbing).
 zeroize = "1"
-# Used by `mkit key generate --algorithm bls12381-thr` to feed the
-# trusted-dealer ceremony with `UnwrapErr(getrandom::SysRng)`. Gated on
-# `bls-threshold` so the default build doesn't pull rand_core. 0.10 to
-# match the rand_core edge commonware-cryptography 2026.9.0 depends on.
-rand_core = { version = "0.10", optional = true }
-# Wire-encodes `Share` values for storage in the keystore — same
-# compatible release range mkit-attest pulls. Cargo.lock records the
-# exact version for reproducible workspace builds.
-commonware-codec = { version = "2026.9.0", optional = true }
 
 # POSIX uid + O_NOFOLLOW for keygen.rs's raw-32 load/save paths
 # (secp256k1, p256). The Ed25519 path uses mkit_core::sign which has
@@ -263,11 +253,6 @@ assert_fs = "1"
 default = []
 # Enables `mkit+s3://` remotes through `mkit-transport-s3`. Off by default.
 s3 = ["dep:mkit-transport-s3"]
-# Compile-time exhaustiveness mirror of mkit-attest's bls-threshold —
-# pulls the BLS Algorithm variant into scope so the CLI's match arms
-# cover it (returning UNAVAILABLE per-site). The release-party signer
-# (issue #160) will later replace the inert arms.
-bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "dep:rand_core", "dep:commonware-codec"]
 # Enables `mkit mcp`'s modern serving path (MCP 2026-07-28, via the official
 # `rmcp` Rust SDK — see the doc comment above rmcp's Cargo.toml entry). Off by
 # default: rmcp brings a hyper server and a tokio runtime, and the default

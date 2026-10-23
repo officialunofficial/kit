@@ -680,8 +680,8 @@ Attestations:
   body (the `<algorithm>:<hex>` or `blake3:<hex>` shapes), that it
   matches the given pubkey &mdash; a mismatch is rejected, not silently
   dropped. `--kind` defaults to `ed25519` (commit/remix/tag signing is
-  Ed25519-only today); `p256-sec1`, `secp256k1`, and `bls12381-thr`
-  (with the `bls-threshold` feature) only matter to `verify-attest`.
+  Ed25519-only today); `p256-sec1` and `secp256k1`
+  only matter to `verify-attest`.
   `add` refuses to overwrite an existing keyid without `--force`;
   `remove` requires `--yes` and fails if the keyid isn't registered.
   `list --json` emits a JSON array of `{keyid, kind, pubkey_hex}`.

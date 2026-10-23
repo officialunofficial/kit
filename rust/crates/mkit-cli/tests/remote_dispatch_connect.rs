@@ -1779,10 +1779,7 @@ impl ResetBeforeAdvance<'_> {
             )
             .unwrap();
             let key = self.competing.read_ref(PACKMAP).unwrap().unwrap();
-            let bytes = self
-                .competing
-                .download_pack(&PackKey::new(key))
-                .unwrap();
+            let bytes = self.competing.download_pack(&PackKey::new(key)).unwrap();
             assert!(decode_packlist(&bytes).unwrap().prev.is_none());
         }
     }

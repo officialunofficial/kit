@@ -203,9 +203,6 @@ pub enum Algorithm {
     Ed25519,
     Secp256k1,
     P256,
-    /// Feature-gated behind `bls-threshold`. See §6.1.1 below.
-    #[cfg(feature = "bls-threshold")]
-    Bls12381Threshold,
 }
 ```
 
@@ -213,15 +210,8 @@ Requirements:
 
 - `Algorithm` must convert to and from `mkit_attest::Algorithm` when the
   `attest` integration feature is enabled.
-- Canonical string forms are exactly `ed25519`, `secp256k1`, `p256`, and
-  `bls12381-thr` (the BLS variant matches the same prefix as
-  `mkit_attest::Algorithm::Bls12381Threshold`).
+- Canonical string forms are exactly `ed25519`, `secp256k1` and `p256`.
 - The enum must not include backend-specific variants.
-- `Bls12381Threshold` is feature-gated behind `bls-threshold`. The
-  generic `KeyImporter` / `KeyExporter` traits MUST reject this variant
-  with `UnsupportedAlgorithm` &mdash; BLS shares are variable-length (≈52
-  bytes for `MinSig`) and the 32-byte `SecretKey` type cannot
-  represent them. See §6.1.1 for the dedicated BLS share storage API.
 
 ### 5.2 Key attributes
 
@@ -695,7 +685,7 @@ offset  size     field
 | `0x01` | Ed25519 |
 | `0x02` | Secp256k1 |
 | `0x03` | P256 |
-| `0x04` | *Reserved* &mdash; never appears in a canonical `EncryptedKeyRecord`. BLS12-381 threshold shares share this algorithm-id space conceptually but are encoded through the distinct `BlsShareRecord` format (magic `MKITKSB1`, §6.1.2), since a share's plaintext is a variable-length `commonware`-encoded structure, not a 32-byte scalar. A decoder MUST reject id `0x04` inside a `MKITKSV1` record. |
+| `0x04` | *Reserved* &mdash; never appears in a canonical `EncryptedKeyRecord`. A decoder MUST reject id `0x04` inside a `MKITKSV1` record. |
 
 `attrs_bits` registry (bit 0 = LSB):
 
@@ -744,60 +734,6 @@ adversary swapping one key's ciphertext/wrapped-DEK into another
 key's record slot, or changing the claimed algorithm/attrs after the
 fact) &mdash; decryption fails closed if any bound field doesn't match what
 was encrypted.
-
-#### 6.1.2 BLS12-381 threshold share storage
-
-The encrypted software backend stores BLS12-381 threshold shares (issue #160;
-see also §6 of `SPEC-RELEASE-THRESHOLD.md`). The contract:
-
-- BLS shares are **variable-length** (≈52 bytes for the `MinSig`
-  variant &mdash; the wire-encoded
-  `commonware_cryptography::bls12381::primitives::group::Share`) so
-  they cannot ride the generic `KeyImporter` / `KeyExporter` paths
-  (which are pinned at 32 bytes). The keystore exposes a dedicated
-  BLS-share API on `SoftwareKeystore`:
-  - `store_bls_share(label, share_bytes, cohort_public_key,
-    share_index, threshold, total, keyid, overwrite)`
-  - `load_bls_share(label) -> LoadedBlsShare`
-  - `delete_bls_share(label)`
-  - `list_bls_shares() -> Vec<(KeyLabel, BlsShareMetadata)>`
-  - `bls_share_metadata(label) -> BlsShareMetadata` (public metadata
-    only, no decryption)
-- The on-disk record is `BlsShareRecord`, a parallel format to
-  `EncryptedKeyRecord` with magic `MKITKSB1` (canonical
-  `EncryptedKeyRecord` uses `MKITKSV1`). It is XChaCha20-Poly1305
-  AEAD-encrypted with a DEK wrapped by the same OS-native protector
-  the canonical record uses.
-- The record's **AAD binds** all of:
-  - magic + version
-  - backend tag (`bls12381-thr`)
-  - label
-  - protector id
-  - cohort public key (the 96-byte G2 compressed aggregated pubkey)
-  - share index (`u32`)
-  - quorum threshold M (`u32`)
-  - cohort total N (`u32`)
-  - canonical keyid
-- The AAD binding defeats a substitution attack where an adversary
-  swaps a 1-of-N share for a 3-of-N share, or routes a share for one
-  cohort into the storage slot of another cohort.
-- Directory layout: `<root>/bls12381-thr/<hex(label)>.share`.
-- BLS shares are advertised in
-  `Capabilities { algorithms, .. }` of the `software` backend when
-  the `bls-threshold` feature is on. The `software-raw` backend MUST
-  NOT advertise BLS &mdash; raw storage cannot bind AAD.
-- Generic `KeyImporter` / `KeyExporter` / `KeyGenerator` calls with
-  `algorithm == Bls12381Threshold` MUST fail closed with
-  `UnsupportedAlgorithm` or `UnsupportedOperation`. Generation of
-  BLS shares flows through a separate trusted-dealer ceremony &mdash; see
-  `SPEC-RELEASE-THRESHOLD.md` §2.1 and `mkit-cli`'s `mkit key
-  generate --algorithm bls12381-thr --threshold M --total N --label
-  <base>` surface.
-- Hostile backends (`yubikey`, `macos-keychain`,
-  `linux-secret-service`, `systemd-creds`) MUST reject
-  `Bls12381Threshold` with `UnsupportedAlgorithm`. BLS share storage is
-  software-backend-only; extending it to native backends with their own
-  threshold-aware wire formats is out of scope unless this spec is amended.
 
 ### 6.2 Memory backend
 
@@ -1562,7 +1498,7 @@ here adds a new requirement.
 | Secret bytes never leak via Debug, logs, or implicit paths | `Zeroizing` storage, manual `Debug`, `expose_secret` naming, redacting `Display` (§5.5, §5.8, §13.3) |
 | Export happens only explicitly and only for extractable keys | `--unsafe-print-secret` gate; typed non-extractable error; non-exportable backends omit `KeyExporter` (§5.7, §9.4, §13.3) |
 | `software` keys are encrypted at rest under an OS protector, never a password | per-record DEK + AEAD, OS-wrapped, fail closed with no usable protector (§2.10–2.11, §6.1) |
-| An encrypted record cannot be re-bound to different metadata | AAD binds version/backend/label/algorithm/pubkey/keyid/attrs; BLS AAD additionally binds cohort pubkey + share index + M + N (§6.1, §6.1.1) |
+| An encrypted record cannot be re-bound to different metadata | AAD binds version/backend/label/algorithm/pubkey/keyid/attrs (§6.1, §6.1.1) |
 | `(label, algorithm)` is never silently overwritten, and delete removes exactly one key | overwrite requires `--force` / `overwrite: true`; no prefix deletes (§5.7, §9.1, §9.5) |
 | A configured full key ref's backend is authoritative | the ref routes to its backend; never reinterpreted via `key.backend` (§7, §8.1) |
 | Keystore signing is byte-equal to legacy signing where determinism allows | golden equivalence vectors for deterministic software backends; verification-equivalence otherwise (§2.8, §14.3) |

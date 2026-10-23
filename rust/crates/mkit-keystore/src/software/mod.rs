@@ -6,16 +6,12 @@ use std::sync::Arc;
 use zeroize::Zeroize;
 
 mod atomic_write;
-#[cfg(feature = "bls-threshold")]
-mod bls;
 mod crypto;
 mod protectors;
 #[cfg(test)]
 mod tests;
 
 use atomic_write::{cleanup_new_dek_after_write_failure, write_key_file};
-#[cfg(feature = "bls-threshold")]
-pub use bls::{BlsShareMetadata, LoadedBlsShare};
 use crypto::{
     public_key, random_valid_secret, sign_message, sign_prehash_recoverable_secp256k1,
     validate_secret,
@@ -28,8 +24,6 @@ use protectors::MacosKeychainProtector;
 #[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
 use protectors::linux_desktop_session_available;
 
-#[cfg(all(test, feature = "bls-threshold"))]
-use crate::encrypted_record;
 use crate::encrypted_record::{EncryptedKeyRecord, KeyProtector};
 
 use crate::{
@@ -367,18 +361,7 @@ impl KeyDeleter for SoftwareRawKeystore {
 
 impl Keystore for SoftwareKeystore {
     fn capabilities(&self) -> Capabilities {
-        // BLS12-381 threshold shares are advertised when the
-        // `bls-threshold` feature is on: the software backend can
-        // store and load them via `store_bls_share` /
-        // `load_bls_share`. (They do not flow through the generic
-        // `KeyImporter` / `KeyExporter` traits — those are pinned at
-        // 32-byte secrets — but the algorithm is supported.)
-        #[allow(unused_mut)]
-        let mut algorithms = vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256];
-        #[cfg(feature = "bls-threshold")]
-        if !self.is_raw() {
-            algorithms.push(Algorithm::Bls12381Threshold);
-        }
+        let algorithms = vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256];
         Capabilities {
             backend: self.backend,
             algorithms,
@@ -426,22 +409,6 @@ impl KeyGenerator for SoftwareKeystore {
         attrs: KeyAttrs,
         options: GenerateOptions,
     ) -> Result<Box<dyn KeySigner>> {
-        // BLS12-381 threshold shares are produced by a trusted dealer
-        // running `mkit_attest::signer_bls_threshold::trusted_dealer`,
-        // not by per-share RNG draws — a single share carries no
-        // meaning without the cohort's `Sharing`. Callers use
-        // `SoftwareKeystore::store_bls_share` to persist the dealt
-        // shares one by one. See `mkit-cli`'s `key generate
-        // --algorithm bls12381-thr --threshold M --total N`.
-        #[cfg(feature = "bls-threshold")]
-        if algorithm == Algorithm::Bls12381Threshold {
-            let _ = (label, attrs, options);
-            return Err(Error::UnsupportedOperation(
-                "BLS12-381 threshold shares must be generated via a trusted-dealer ceremony, \
-                 not the per-key `generate` trait — use `mkit key generate --algorithm \
-                 bls12381-thr --threshold M --total N`",
-            ));
-        }
         validate_attrs(&attrs)?;
         let mut secret = random_valid_secret(algorithm)?;
         let wrapped = SecretKey::new(algorithm, secret);

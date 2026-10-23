@@ -34,9 +34,8 @@
 //! *does* build, making `commonware-storage` (and therefore
 //! `commonware-cryptography`/`blst`) a mandatory dependency of `mkit-core`'s
 //! object-identity path would impose that C library's build/binary-size
-//! cost on every consumer, not just wasm callers — the same reason
-//! `mkit-attest` keeps `blst` behind an opt-in `bls-threshold` feature
-//! instead of pulling it in by default. So the vendored construction stays;
+//! cost on every consumer, not just wasm callers. So the vendored
+//! construction stays;
 //! the cross-check test is what keeps it honest against upstream.
 //!
 //! The construction (matching commonware):

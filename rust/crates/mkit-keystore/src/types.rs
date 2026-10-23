@@ -249,22 +249,6 @@ pub enum Algorithm {
     Secp256k1,
     /// P-256 ECDSA using raw 32-byte scalar material.
     P256,
-    /// BLS12-381 M-of-N threshold share (`MinSig` variant — signature
-    /// in G1, public key in G2). The stored secret material is a
-    /// commonware-codec wire-encoded `Share` (≈52 bytes), NOT a 32-byte
-    /// scalar — so the `KeyImporter` / `KeyExporter` paths, which
-    /// are pinned at 32 bytes, refuse this variant with
-    /// [`Error::UnsupportedAlgorithm`]. Software-backend storage flows
-    /// through the dedicated BLS-share API on
-    /// [`crate::SoftwareKeystore`]; see `docs/specs/SPEC-KEYSTORE.md` §"BLS
-    /// share storage".
-    ///
-    /// Feature-gated behind `bls-threshold` because the share producers
-    /// and verifiers live in `mkit-attest` under the same feature, and
-    /// we don't want every default `cargo add mkit-keystore` to pay for
-    /// the blst dep tree.
-    #[cfg(feature = "bls-threshold")]
-    Bls12381Threshold,
 }
 
 impl Algorithm {
@@ -275,11 +259,6 @@ impl Algorithm {
             Self::Ed25519 => "ed25519",
             Self::Secp256k1 => "secp256k1",
             Self::P256 => "p256",
-            // Matches the `KEYID_PREFIX` in
-            // `mkit_attest::signer_bls_threshold` (minus the trailing
-            // colon) and `mkit_attest::Algorithm::prefix()`.
-            #[cfg(feature = "bls-threshold")]
-            Self::Bls12381Threshold => "bls12381-thr",
         }
     }
 }
@@ -298,8 +277,6 @@ impl FromStr for Algorithm {
             "ed25519" => Ok(Self::Ed25519),
             "secp256k1" => Ok(Self::Secp256k1),
             "p256" => Ok(Self::P256),
-            #[cfg(feature = "bls-threshold")]
-            "bls12381-thr" => Ok(Self::Bls12381Threshold),
             other => Err(Error::Encoding(format!("unknown algorithm: {other}"))),
         }
     }
@@ -312,11 +289,6 @@ impl From<mkit_attest::Algorithm> for Algorithm {
             mkit_attest::Algorithm::Ed25519 => Self::Ed25519,
             mkit_attest::Algorithm::Secp256k1 => Self::Secp256k1,
             mkit_attest::Algorithm::P256 => Self::P256,
-            // Since issue #160 the keystore carries a dedicated BLS
-            // variant. Routes a BLS-flavoured signing algorithm into
-            // the keystore Algorithm space.
-            #[cfg(feature = "bls-threshold")]
-            mkit_attest::Algorithm::Bls12381Threshold => Self::Bls12381Threshold,
         }
     }
 }
@@ -328,8 +300,6 @@ impl From<Algorithm> for mkit_attest::Algorithm {
             Algorithm::Ed25519 => Self::Ed25519,
             Algorithm::Secp256k1 => Self::Secp256k1,
             Algorithm::P256 => Self::P256,
-            #[cfg(feature = "bls-threshold")]
-            Algorithm::Bls12381Threshold => Self::Bls12381Threshold,
         }
     }
 }

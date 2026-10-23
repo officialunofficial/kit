@@ -1,9 +1,7 @@
 //! Per-algorithm crypto dispatch for the in-process software signer.
 //!
 //! Validation, public-key derivation, and signing for the 32-byte
-//! scalar algorithms (Ed25519, secp256k1, P-256). BLS12-381 threshold
-//! shares are variable-length and do not flow through these paths; the
-//! BLS arms return [`Error::UnsupportedAlgorithm`].
+//! scalar algorithms (Ed25519, secp256k1, P-256).
 
 use ed25519_dalek::{Signer as _, SigningKey as Ed25519SigningKey};
 use k256::ecdsa::{Signature as K256Signature, SigningKey as K256SigningKey};
@@ -25,12 +23,6 @@ pub(super) fn validate_secret(algorithm: Algorithm, secret: &[u8; 32]) -> Result
         Algorithm::P256 => P256SigningKey::from_bytes(secret.into())
             .map(|_| ())
             .map_err(|_| invalid_key_material(algorithm, "invalid P-256 scalar")),
-        // BLS12-381 threshold shares are variable-length wire-encoded
-        // `Share` values (≈52 bytes), not 32-byte scalars. The
-        // SecretKey path is closed to BLS; software-backend BLS storage
-        // flows through `SoftwareKeystore::store_bls_share` instead.
-        #[cfg(feature = "bls-threshold")]
-        Algorithm::Bls12381Threshold => Err(Error::UnsupportedAlgorithm(algorithm)),
     }
 }
 
@@ -52,10 +44,6 @@ pub(super) fn public_key(algorithm: Algorithm, secret: &[u8; 32]) -> Result<Vec<
             .to_sec1_point(true)
             .as_bytes()
             .to_vec()),
-        // BLS shares carry their own group-public-key recovery; the
-        // 32-byte SecretKey path can't represent them.
-        #[cfg(feature = "bls-threshold")]
-        Algorithm::Bls12381Threshold => Err(Error::UnsupportedAlgorithm(algorithm)),
     }
 }
 
@@ -89,11 +77,6 @@ pub(super) fn sign_message(algorithm: Algorithm, secret: &[u8; 32], msg: &[u8]) 
             let sig = sig.normalize_s();
             Ok(sig.to_bytes().to_vec())
         }
-        // BLS shares use `mkit_attest::signer_bls_threshold::ThresholdSigner`
-        // which lives in the attest crate; the SoftwareSigner path is
-        // closed to BLS.
-        #[cfg(feature = "bls-threshold")]
-        Algorithm::Bls12381Threshold => Err(Error::UnsupportedAlgorithm(algorithm)),
     }
 }
 
