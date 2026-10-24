@@ -92,7 +92,7 @@ kit defends:
   default, not a guarantee against every key an attacker could produce:
   it proves the signature is well-formed over the object's own bytes,
   not that the signing key is one the user trusts (no trust-root /
-  authorized-signer binding yet &mdash; separate follow-up work). Opt-out is
+  authorized-signer binding exists yet). Opt-out is
   explicit and user-scoped only (`--no-verify-signatures` / the
   user-scoped `pull.require_signed = false` config, never settable from
   a cloned repo's own `.kit/config` &mdash; see §4).

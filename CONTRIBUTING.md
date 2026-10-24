@@ -51,6 +51,7 @@ cargo clippy --locked --all-targets --all-features --workspace -- -D warnings
 cargo test --locked --workspace
 cd ..
 bash scripts/check-writing.sh
+bash scripts/test-check-writing.sh
 bash scripts/check-unsafe-safety.sh
 bash scripts/check-doc-paths.sh
 ```

@@ -15,7 +15,8 @@ name: "CI: Rust"
 #   unsafe-baseline   cargo-geiger ceilings and a SAFETY comment on every
 #                     `unsafe` site
 #   generated         the checked-in protocol code matches the .proto files
-#   writing           no tracker ids, plan labels or tool names in the tree
+#   writing           no issue ids, plan labels or tool names in the tree
+#                     or in new commit messages; the check has its own test
 #   deny, audit       cargo-deny and cargo-audit: see rust-security.yml
 #
 # Left out on purpose: a coverage upload (it needs a third-party token) and a
@@ -290,8 +291,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - name: No tracker ids, plan labels or tool names
+        with:
+          fetch-depth: 0
+      - name: No issue ids, plan labels or tool names
         run: bash scripts/check-writing.sh
+      - name: The writing check catches each kind of leak
+        run: bash scripts/test-check-writing.sh
+      - name: New commit messages follow the writing rules
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # A new branch or a manual run has no base. Skip the commit scan.
+          if [ -z "${BASE//0/}" ]; then
+            echo 'no base commit: skipping the commit message scan'
+          else
+            bash scripts/check-writing.sh --commits "${BASE}..${HEAD}"
+          fi
       - name: Cited paths and links exist
         run: bash scripts/check-doc-paths.sh
       - name: The installer binds the signature to the requested tag
