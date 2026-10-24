@@ -521,7 +521,7 @@ fn merkle_id(obj: &Object) -> Option<Hash> {
 /// This is the bytes-reusing twin of [`Object::id`]; both share the same
 /// `merkle_id` dispatch, so a merkelized type keys identically whether
 /// addressed from the decoded struct (native store) or from bytes the caller
-/// already holds (the pack reader, the `kit-wasm` encoder).
+/// already holds (the pack reader, a wasm32 encoder).
 ///
 /// # Precondition
 /// For a byte-hashed (non-merkle) type, `bytes` MUST be `obj`'s canonical

@@ -12,7 +12,7 @@ address space:
 - **External signers** (`signer.proto`) &mdash; `kit-storage` ↔ a subprocess signer
   (file, `FIDO2`, TPM, future hardware backends). See
   `docs/specs/SPEC-EXTERNAL-SIGNER.md` and `contrib/signers/README.md`.
-- **SSH transport** (`ssh.proto`) &mdash; `kit-storage` ↔ a remote `kit-server` over
+- **SSH transport** (`ssh.proto`) &mdash; `kit-storage` ↔ a remote `kit serve` over
   an `ssh(1)` child process. See `docs/specs/SPEC-TRANSPORT.md`.
 - **Signature verification** (`verify.proto`) &mdash; the `VerifyRequest`/
   `VerifyResponse` contract `kit clone`/`pull`/`fetch` check every
@@ -21,8 +21,8 @@ address space:
   (`rust/crates/kit-storage/src/remote_dispatch/packmap.rs`) calls the Rust
   implementation directly (`kit_core::sign::{verify_commit,verify_remix,verify_tag}`);
   the schema is published so a future ConnectRPC-based transport
-  (`apps/repo-worker`) can bind the identical check to a service method
-  instead of reimplementing it.
+  can bind the identical check to a service method instead of
+  reimplementing it.
 
 Shared vocabulary (`common.proto`) &mdash; algorithms, key forms, error codes,
 protocol-version negotiation &mdash; is re-exported at the crate root for
@@ -43,8 +43,8 @@ regenerate it with `scripts/regen-rpc-proto.sh` after editing a schema.
 
 The opt-in `transport` feature owns the canonical `kit.transport.v1` and
 `grpc.health.v1` messages and Connect service traits in `kit_rpc::transport`.
-Both `kit-server` and `kit-transport-connect` re-export these shared types at
-their existing public paths. The feature uses ConnectRPC without its native
+`kit-transport-connect` re-exports these shared types at its existing
+public paths. The feature uses ConnectRPC without its native
 client or server runtime features and builds for wasm32. Default RPC consumers
 do not enable it. Refresh `generated/transport/` with
 `scripts/regen-transport-proto.sh`; ordinary builds require no protoc.

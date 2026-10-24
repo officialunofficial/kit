@@ -1048,11 +1048,8 @@ fn build_ssh_command(target: &SshTarget, options: &SshOptions) -> Command {
 
 #[cfg(test)]
 mod tests {
-    // The public surface is exercised against a real (or simulator)
-    // kit-server, which does not exist in-tree. Once a server impl
-    // lands, an integration test in tests/ can spawn it and drive
-    // SshTransport against it. For now, basic smoke tests of the
-    // helper functions live here.
+    // These smoke tests cover the helper functions. The public surface
+    // is exercised against `kit serve` in the kit-storage tests.
     use super::*;
     use kit_rpc::kit::common::v1::{RefEntry, RefExpectation};
     use kit_rpc::kit::rpc::v1::ssh::DownloadPackHeader;

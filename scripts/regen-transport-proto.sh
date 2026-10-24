@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
 # Regenerate the shared transport and health ConnectRPC bindings owned by
-# kit-rpc (feature transport), consumed by both kit-server and the native
+# kit-rpc (feature transport), consumed by the native
 # kit-transport-connect client. The canonical protos stay at the repo root;
 # ordinary builds use the committed generated/transport/ tree without protoc.
 # Requires protoc >= 27 on PATH (or PROTOC).

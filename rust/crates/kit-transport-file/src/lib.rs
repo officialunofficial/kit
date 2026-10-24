@@ -614,7 +614,7 @@ impl FileTransport {
 pub const SERVER_DIR: &str = ".kit/server";
 
 /// The marker, under a [`FileTransport`] root, that a SQLite-metadata
-/// `kit-server` deployment writes: the root's refs live in that server's
+/// server deployment writes: the root's refs live in that server's
 /// `SQLite` database, not in ref files. Every ref write through this
 /// transport refuses a marked root ([`RefFileError::MetaElsewhere`]), so a
 /// local push or `kit serve` cannot keep a second, diverging copy of the
@@ -641,7 +641,7 @@ pub enum RefFileError {
     /// I/O failed.
     Io(io::Error),
     /// The root carries [`SERVER_META_MARKER`]: its refs live in a
-    /// `kit-server` `SQLite` database, so no ref file may be written. The
+    /// server `SQLite` database, so no ref file may be written. The
     /// marker's path.
     MetaElsewhere(PathBuf),
 }
@@ -651,7 +651,7 @@ impl std::fmt::Display for RefFileError {
         match self {
             Self::MetaElsewhere(marker) => write!(
                 f,
-                "refusing to write ref files: this root's refs live in a kit-server SQLite \
+                "refusing to write ref files: this root's refs live in a server SQLite \
                  database (marker {}); push to that server instead",
                 marker.display()
             ),

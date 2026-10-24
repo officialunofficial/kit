@@ -62,7 +62,7 @@ history-mmr = ["kit-core/history-mmr"]
 client = ["dep:kit-client", "dep:futures-executor"]
 # `NativeHttp` + `NativeClock`: hyper/rustls on a current-thread runtime,
 # gzip only; with default features disabled, no `zstd-sys` anywhere in the
-# tree (`scripts/check-sync-native-deps.sh`).
+# tree.
 connect-native = [
     "client",
     "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls",

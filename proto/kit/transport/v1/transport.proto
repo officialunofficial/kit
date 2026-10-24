@@ -3,9 +3,9 @@
 // kit.transport.v1 — the canonical Connect remote protocol.
 //
 // TransportService is the single Connect service every remote kit
-// deployment target implements. `kit-server` and the native (non-wasm)
-// CLI client compile against this one proto, with no per-target dialect. It maps
-// one-to-one onto the verbs of the
+// server implements. Servers and the native CLI client compile against
+// this one proto, with no per-target dialect. It maps one-to-one onto
+// the verbs of the
 // `Transport` trait (rust/crates/kit-core/src/protocol.rs), the same
 // trait `kit-transport-s3` and `-ssh` already implement.
 // See docs/specs/SPEC-TRANSPORT-CONNECT.md for the full normative
@@ -16,17 +16,11 @@
 // only pack transfer streams). `PackChunk` is a byte-for-byte
 // duplicate of `kit.rpc.v1.ssh.PackChunk` (same field numbers, same
 // types) so the wire bytes a client streams are identical regardless
-// of which transport carries them — SSH, enc, or Connect. This is the
-// same "duplicate now, wire-numbers pinned, extract later" pattern
-// `kit.repo.v1.RefExpectation` already uses against `ssh.proto`
-// (apps/repo-worker/proto/kit/repo/v1/repo.proto); a future issue
-// (tracked as) extracts both into a shared
-// `kit/common/v1/refs.proto` once the buf workspace exists
-// to import across module boundaries.
+// of which transport carries them — SSH or Connect. The wire numbers of
+// `RefExpectation` are pinned to the copy in `ssh.proto`. The shared
+// definition lives in `kit/common/v1/refs.proto`.
 //
-// The service implementation is `kit-server`'s `connect` binding over
-// its pipeline; the
-// client is `kit-transport-connect`'s `ConnectTransport`.
+// The client is `kit-transport-connect`'s `ConnectTransport`.
 
 edition = "2023";
 
@@ -35,8 +29,7 @@ package kit.transport.v1;
 // ----------------------------------------------------------------------------
 // CAS semantics for UpdateRef / AdvanceRefs. Wire numbers are load-bearing
 // and match kit.rpc.v1.ssh.RefExpectation (rust/crates/kit-rpc/proto/
-// ssh.proto) and kit.repo.v1.RefExpectation (apps/repo-worker/proto/kit/
-// repo/v1/repo.proto) byte-for-byte — do NOT renumber; new variants append.
+// ssh.proto) byte-for-byte — do NOT renumber; new variants append.
 
 enum RefExpectation {
   // Protocol error if sent (the proto default). Servers MUST reject with

@@ -23,12 +23,9 @@ blake3 = "1"
 # Verified streaming (BLAKE3 tree hashing: outboard + slice proof) for
 # `verify::verify_blob_slice`/`verify_blob_len_proof` (SPEC-DISCLOSURE). Pure Rust, `std`-based but only via
 # `io::Cursor`-style in-memory use — no filesystem, no threads — so it
-# builds cleanly for wasm32 (already proven: `kit-wasm` depends on the
-# same version for its `/streaming` demo). Same major as that transitive
-# copy, and `blake3 = "1"` above is the same workspace pin `bao::Hash`
-# (a `blake3::Hash` re-export) resolves against, so no second major shows
-# up in the tree. Run `bash scripts/check-wasm-dep-graph.sh` after
-# touching this dependency.
+# builds cleanly for wasm32. `blake3 = "1"` above is the same workspace
+# pin `bao::Hash` (a `blake3::Hash` re-export) resolves against, so no
+# second major shows up in the tree.
 bao = "0.13"
 # `bytes::{Buf, BufMut}` back the `commonware-codec` Read/Write buffer
 # traits used by the packlist node codec (transfer.rs). Pure, wasm-clean.
@@ -43,7 +40,7 @@ bytes = "1"
 # merkle identity: a merkelized object's id is a Binary Merkle Tree root
 # (see `merkle.rs`). We do NOT use `commonware_storage::bmt` for it,
 # because `bmt` is gated behind `commonware-storage/std`, which drags in
-# `zstd-sys` (a C lib that cannot target wasm32) — and `kit-wasm` computes
+# `zstd-sys` (a C lib that cannot target wasm32) — and wasm32 builds compute
 # object ids. Instead `merkle.rs` vendors the identical BMT construction
 # over the `blake3` crate (wasm-clean) and a native-only test cross-verifies
 # it byte-for-byte against `commonware_storage::bmt` (see dev-dependencies).
@@ -80,7 +77,7 @@ zeroize = { version = "1", features = ["derive"] }
 # Per-entry pack payload compression (SPEC-PACKFILE v2).
 # `zstd-sys` is a C lib that cannot target wasm32 (see the comment on
 # `commonware-storage` above) — this is `optional = true`, gated by the
-# `pack-zstd` feature below, so `kit-wasm` (which needs `pack.rs` to
+# `pack-zstd` feature below, so a wasm32 consumer (which needs `pack.rs` to
 # compile but never calls into pack compression) can opt out via
 # `default-features = false`. 0.13.3 is already resolved transitively
 # via the commonware dependency stack. This direct dependency uses the
@@ -95,9 +92,8 @@ libc = "0.2"
 # (`KeyPair::generate`, ancestry ids). On wasm32-unknown-unknown the 0.4
 # crate needs `wasm_js` (`Crypto.getRandomValues` via wasm-bindgen);
 # without it, `cargo check -p kit-core --no-default-features --target
-# wasm32-unknown-unknown` fails even though `kit-wasm` builds — that
-# crate declares this feature on the root package, which unifies onto
-# this copy. Do not enable on native.
+# wasm32-unknown-unknown` fails. A wasm32 consumer enables this feature on its root package,
+# which unifies onto this copy. Do not enable on native.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 
@@ -107,9 +103,8 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 # entries per SPEC-PACKFILE v2 without any call-site changes. It is
 # the one default feature that pulls a dependency outside the
 # always-wasm-safe base, so every crate that targets
-# wasm32-unknown-unknown (`kit-wasm`; `apps/repo-worker`, built via
-# worker-build) opts out explicitly with `default-features = false`
-# on its `kit-core` dependency.
+# wasm32-unknown-unknown opts out explicitly with
+# `default-features = false` on its `kit-core` dependency.
 default = ["pack-zstd"]
 # SPEC-PACKFILE v2: zstd-compressed pack entries (`0x03`
 # zstd-raw, `0x04` zstd-delta). Disabling this feature does not make
@@ -144,9 +139,7 @@ pack-shards = [
 # `pack-zstd`, nothing about kit-core's own API needs it, so making it
 # default would cost every native consumer these extra dependencies
 # for no benefit, including ones with no reason to opt out the way
-# wasm32/Worker crates already do (e.g. `contrib/signers/*`, which
-# depend on `kit-core` with default features and never call
-# `verify_batch`). `kit-storage`, the one consumer that uses it, enables
+# wasm32 crates already do. `kit-storage`, the one consumer that uses it, enables
 # it explicitly on its `kit-core` dependency instead.
 batch-verify = ["ed25519-dalek/batch", "dep:curve25519-dalek"]
 

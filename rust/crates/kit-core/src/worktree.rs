@@ -1409,7 +1409,7 @@ pub fn store_file_object<S: ObjectSink + ?Sized>(sink: &S, data: &[u8]) -> Workt
 /// chunk Blob is stored under — and set `chunk_size = 0` (content-defined).
 ///
 /// This is the single source of the manifest recipe: [`hash_file_object`]
-/// (read-only change detection) and the `kit-wasm` encoder both build through
+/// (read-only change detection) and a wasm32 encoder both build through
 /// it, and [`store_file_object`] writes the chunk Blobs under these same ids,
 /// so every path agrees on the manifest — and thus on its merkle root.
 ///

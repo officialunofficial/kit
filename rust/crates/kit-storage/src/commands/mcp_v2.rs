@@ -279,9 +279,8 @@ async fn serve_http(allowed: Option<PathBuf>, addr: &str, auth: HttpAuth) -> Res
 
 /// Constant-time `Authorization: Bearer <token>` gate wrapped around
 /// `StreamableHttpService`, applied to every request before it reaches
-/// `rmcp`'s handler — mirrors `kit-server`'s constant-time bearer
-/// pre-check, implemented against `tower_service::Service` directly since
-/// this transport is raw hyper/tower, not connect-rpc.
+/// `rmcp`'s handler. It is implemented against `tower_service::Service`
+/// directly since this transport is raw hyper/tower, not connect-rpc.
 ///
 /// `expected: None` is the explicit `--unsafe-allow-any-http-peer` escape
 /// hatch (every request accepted unchecked); `resolve_http_auth` is the

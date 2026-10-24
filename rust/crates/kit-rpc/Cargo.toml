@@ -56,9 +56,9 @@ thiserror = "2"
 #
 # `default-features = false`: same wasm32-safety rationale as
 # kit-attest's edge to kit-core (see that crate's Cargo.toml) — this
-# crate sits on the kit-wasm -> kit-attest -> kit-rpc -> kit-core
-# path, and kit-core's default `pack-zstd` feature pulls
-# a non-wasm32-buildable C dependency. Every other consumer of
+# crate sits on the kit-attest -> kit-rpc -> kit-core path, and
+# kit-core's default `pack-zstd` feature pulls a non-wasm32-buildable
+# C dependency. Every other consumer of
 # kit-rpc (kit-storage, kit-attest,
 # kit-transport-ssh) also depends on kit-core directly with default
 # features on, so their builds still get `pack-zstd` via that edge.

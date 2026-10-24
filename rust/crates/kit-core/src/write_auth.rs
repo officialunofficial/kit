@@ -582,8 +582,8 @@ mod tests {
         );
     }
 
-    /// The reject cases of `kit-server`'s `verified_auth_rejects_noncanonical_fields`
-    /// keep their `Operation::canonical` messages.
+    /// Each reject case for a noncanonical field keeps its
+    /// `Operation::canonical` message.
     #[test]
     fn body_and_pack_parse_unchanged() {
         let digest = "cd".repeat(32);

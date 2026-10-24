@@ -12,10 +12,8 @@
 // check `kit verify <rev>` runs manually.
 //
 // This schema is defined here, message-only (no bound RPC method — see
-// "Contract shape" below), so a future ConnectRPC-based transport (the
-// anonymous-multiplayer repo-worker included, see
-// apps/repo-worker/proto/kit/repo/v1/repo.proto) can expose the identical
-// check over the wire instead of growing a divergent, per-transport
+// "Contract shape" below), so a future ConnectRPC-based transport can
+// expose the identical check over the wire instead of growing a divergent, per-transport
 // reimplementation. Nothing outside kit-storage's in-process call consumes
 // this schema yet; it is published ahead of that consumer so the wire
 // contract is fixed before a second implementation has to match it.

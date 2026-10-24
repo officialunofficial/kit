@@ -192,9 +192,7 @@ for a constrained host). Delta bases that are not in the same pack come from
 | off | Raw packs only. A compressed entry fails closed at runtime. |
 
 The default build contains no tokio, hyper,
-connectrpc, reqwest or zstd-sys; `scripts/check-wasm-dep-graph.sh` fails CI if
-one appears. CI builds the crate for `wasm32-unknown-unknown` with and without
-the default feature. With `pack-zstd` the writer compresses; the same feature
+connectrpc, reqwest or zstd-sys. With `pack-zstd` the writer compresses; the same feature
 choice and entry order are required to reproduce identical pack ids across
 restarts (a golden test pins the ids of a fixed plan).
 

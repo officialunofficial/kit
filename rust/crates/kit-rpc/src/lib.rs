@@ -9,7 +9,7 @@
 //! - **External signers** (`signer.proto`): kit-storage ↔ a subprocess
 //!   signer (file, FIDO2, TPM, future hardware backends).
 //! - **SSH transport** (`ssh.proto`): kit-storage ↔ a remote
-//!   `kit-server` over an `ssh(1)` child process.
+//!   `kit serve` over an `ssh(1)` child process.
 //! - **Signature verification** (`verify.proto`):
 //!   message-only contract for the post-fetch commit/remix/tag check
 //!   `clone`/`pull`/`fetch` run by default. No bound RPC method yet —

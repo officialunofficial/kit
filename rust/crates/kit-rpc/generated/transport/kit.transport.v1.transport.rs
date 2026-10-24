@@ -4,8 +4,7 @@
 /// ----------------------------------------------------------------------------
 /// CAS semantics for UpdateRef / AdvanceRefs. Wire numbers are load-bearing
 /// and match kit.rpc.v1.ssh.RefExpectation (rust/crates/kit-rpc/proto/
-/// ssh.proto) and kit.repo.v1.RefExpectation (apps/repo-worker/proto/kit/
-/// repo/v1/repo.proto) byte-for-byte — do NOT renumber; new variants append.
+/// ssh.proto) byte-for-byte — do NOT renumber; new variants append.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(i32)]
 pub enum RefExpectation {

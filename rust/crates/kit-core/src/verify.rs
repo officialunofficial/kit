@@ -103,9 +103,8 @@ use crate::sign::{verify_commit, verify_remix};
 use crate::store::MAX_TREE_DEPTH;
 
 /// Hard cap on a whole encoded disclosure bundle, checked before any
-/// decode work happens. `kit-wasm` additionally caps decoded objects at
-/// 16 MiB; this 64 MiB ceiling is the wasm32-agnostic bound this crate
-/// itself enforces.
+/// decode work happens. A caller can cap decoded objects lower; this
+/// 64 MiB ceiling is the bound this crate itself enforces.
 pub const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Fixed 4-byte magic at the start of every disclosure bundle.

@@ -41,11 +41,11 @@ grants = ["algo-ed25519", "algo-secp256k1", "algo-p256", "dep:sha3"]
 # `default-features = false`: kit-core's default set includes
 # `pack-zstd` (SPEC-PACKFILE v2 compression), which pulls
 # `zstd-sys` — not wasm32-buildable. kit-attest doesn't touch
-# `pack.rs`, but it IS a dependency of kit-wasm (wasm32 target), and
+# `pack.rs`, but a wasm32 consumer can depend on it, and
 # Cargo unifies a dependency's enabled features across every edge that
 # reaches it within one build — so leaving this edge on defaults would
-# silently drag `zstd-sys` back into kit-wasm's build even though
-# kit-wasm's own `kit-core` edge already opts out. Every OTHER
+# silently drag `zstd-sys` back into that build even though the
+# consumer's own `kit-core` edge already opts out. Every OTHER
 # consumer of kit-attest (kit-storage, kit-keystore)
 # also depends on kit-core directly with default features on, so
 # their builds are unaffected — the union still includes `pack-zstd`

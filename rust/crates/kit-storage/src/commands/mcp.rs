@@ -64,10 +64,9 @@ struct McpOpts {
     /// Bearer token required on every request's `Authorization: Bearer
     /// <token>` header when `--http` is used. Falls back to the
     /// `KIT_MCP_TOKEN` environment variable when omitted. CLI-only/
-    /// env-only — never read from repo-local `.kit/config`, matching
-    /// `kit-server`'s bearer-token sourcing. A dedicated env var
-    /// (not `kit-server`'s `KIT_API_TOKEN`) since the two surfaces
-    /// have different threat models — this one is a high-privilege,
+    /// env-only — never read from repo-local `.kit/config`. A dedicated env var
+    /// keeps this surface apart from any Git transport token, since the
+    /// threat models differ — this one is a high-privilege,
     /// agent-facing tool catalog, not a Git transport.
     #[cfg(feature = "mcp-v2")]
     #[arg(long, value_name = "TOKEN")]

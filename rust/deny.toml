@@ -136,7 +136,7 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# The publish=false crates (kit-wasm, benches, fuzz — plus the
+# The publish=false crates (benches, fuzz — plus the
 # out-of-tree contrib signers) depend on workspace siblings via bare
 # `path = "..."` without a version pin, which cargo-deny treats as a
 # wildcard. The 12 crates published to crates.io carry `version + path`

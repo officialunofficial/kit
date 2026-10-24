@@ -19,7 +19,7 @@ fn main() {
     let proto_dir = PathBuf::from("proto");
     // Shared ref types (kit.common.v1.RefExpectation / RefEntry), one repo
     // root up from rust/crates/kit-rpc — see kit/common/v1/refs.proto's
-    // header comment. Also used by apps/repo-worker's repo.proto.
+    // header comment.
     let common_dir = PathBuf::from("../../../proto");
     let common_refs_proto = common_dir.join("kit/common/v1/refs.proto");
 

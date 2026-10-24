@@ -118,7 +118,7 @@ if exe is None:
 elif os.path.realpath(exe) != os.path.realpath(binary):
     err(f"the log built `{bin_name}` at {exe}, but the scanned binary is {binary}")
 
-for banned in ("kit-server-native", "axum", "rusqlite", "libsqlite3-sys"):
+for banned in ("axum", "rusqlite", "libsqlite3-sys"):
     if banned in features:
         err(f"server-only package `{banned}` is in the kit build")
 # Server-side features of shared HTTP crates.

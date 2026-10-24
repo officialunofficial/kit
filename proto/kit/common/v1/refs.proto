@@ -1,18 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
 // Shared ref types used across kit's wire protocols. Used by
-// kit.rpc.v1.ssh (rust/crates/kit-rpc/proto/ssh.proto) and
-// kit.repo.v1 (apps/repo-worker/proto/kit/repo/v1/repo.proto), and
-// intended for the forthcoming kit.transport.v1 canonical remote
-// protocol.
+// kit.rpc.v1.ssh (rust/crates/kit-rpc/proto/ssh.proto) and by the
+// kit.transport.v1 remote protocol.
 //
-// Both `ssh.proto` and `repo.proto` previously carried verbatim,
-// hand-synced copies of these two types with a comment warning not to
-// renumber them independently. This file is now the single source of
-// truth; the wire numbers below are exactly the numbers both copies
-// already agreed on; extracting them here changed no serialized byte
-// (verified by a WIRE-level `buf breaking` check — see
-// scripts/check-refs-wire-breaking.sh).
+// This file is the single source of truth for these two types. The wire
+// numbers below are load-bearing. A change that renumbers a field or
+// removes a value breaks every consumer.
 //
 // Versioning: this file is v1 of the shared ref vocabulary.
 // Wire-compatible additions (new enum values, new fields with default

@@ -302,8 +302,8 @@ pub fn verify_signature(
 ///
 /// Returns [`Reason::Ok`] on success and [`Reason::SignatureMismatch`]
 /// on any failure (malformed `pk`, wrong `sig_bytes` length, or strict
-/// verification reject). Public so downstream consumers — notably the
-/// `kit-wasm` `ed25519_verify` export — can share this exact strict
+/// verification reject). Public so downstream consumers — notably
+/// wasm32 builds — can share this exact strict
 /// verifier instead of re-implementing it (and re-relitigating which
 /// malleability cases to reject).
 #[cfg(feature = "algo-ed25519")]

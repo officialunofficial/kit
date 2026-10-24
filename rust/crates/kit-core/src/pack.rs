@@ -661,7 +661,7 @@ thread_local! {
 
 #[cfg(not(feature = "pack-zstd"))]
 fn maybe_compress(_data: &[u8]) -> Option<Vec<u8>> {
-    // No compression backend compiled in (e.g. kit-wasm, which opts
+    // No compression backend compiled in (e.g. a wasm32 build, which opts
     // out of `pack-zstd` for wasm32-buildability — see kit-core's
     // Cargo.toml). Every pack this build writes is a valid v1 pack;
     // it just never uses the v2-only entry types.

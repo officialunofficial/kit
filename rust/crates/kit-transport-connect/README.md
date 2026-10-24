@@ -11,8 +11,7 @@ scheduling, and progress callbacks. The CLI lends its configured `ClientSource`
 through `ConnectTransport::with_source` for `kit+https` and `kit+http`
 push, fetch, pull, and clone. Other schemes use `TransportSource`.
 
-The server side is not in this crate. `kit-server`'s pipeline serves
-`kit.transport.v1`. The `server` Cargo
+The server side is not in this crate or in this repository. The `server` Cargo
 feature and its `serve`/`router`/`TransportServer`/`map_transport_error` API,
 which backed the removed `kit serve --http`, were removed in 0.5.
 

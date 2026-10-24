@@ -5,7 +5,7 @@
 # default `kit` CLI is server-free"). For the DEFAULT features of
 # `kit-storage`, on every target, the normal dependency graph must contain:
 #
-#   - no `axum`, `kit-server-native`, `rusqlite` or `libsqlite3-sys`;
+#   - no `axum`, `rusqlite` or `libsqlite3-sys`;
 #   - no hyper `server` feature, no hyper-util `server*` feature, and no
 #     connectrpc `server` or `axum` feature.
 #
@@ -32,7 +32,7 @@ err() {
 tree=$(cd rust && cargo tree --locked -p kit-storage -e normal --target all --prefix none)
 features=$(cd rust && cargo tree --locked -p kit-storage -e normal,features --target all --prefix none)
 
-for pkg in axum kit-server-native rusqlite libsqlite3-sys; do
+for pkg in axum rusqlite libsqlite3-sys; do
   if printf '%s\n' "$tree" | grep -q "^$pkg "; then
     err "the default kit-storage graph contains $pkg"
   fi
@@ -63,4 +63,4 @@ if [ "$fail" -ne 0 ]; then
   echo "check-cli-baseline: FAILED (see docs/INVARIANTS.md, \"The default \`kit\` CLI is server-free\")" >&2
   exit 1
 fi
-echo "check-cli-baseline: OK (no axum/SQLite/kit-server-native, no server features; kit-serve: no async runtime)"
+echo "check-cli-baseline: OK (no axum/SQLite, no server features; kit-serve: no async runtime)"

@@ -3,8 +3,7 @@
 //!
 //! The mapping table lives in `docs/specs/SPEC-TRANSPORT-CONNECT.md`. This
 //! module implements the client-side (Connect code -> `TransportError`)
-//! direction — the inverse of the server's table (`kit-server`'s Connect
-//! binding), with [`TransportError::RemoteError`] as the fallback arm for any
+//! direction — the inverse of the server's table, with [`TransportError::RemoteError`] as the fallback arm for any
 //! code the table does not otherwise list.
 //!
 //! One wrinkle the spec calls out explicitly: `invalid_argument` is raised
