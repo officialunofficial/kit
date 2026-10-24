@@ -140,7 +140,14 @@ fn workspace_definitions() -> Vec<Definition> {
 fn no_two_workspace_constants_share_a_tag_magic_or_predicate() {
     let defs = workspace_definitions();
     // The scan must see the known values, or it checks nothing.
-    for expected in ["kit.tree\\0", "kit-write:v2", "KIT\\0", "KITKSV1\\0"] {
+    for expected in [
+        "kit.tree\\0",
+        "kit-write:v2",
+        "KIT\\0",
+        "KITKSV1\\0",
+        "kit-fetch-head-v1",
+        "kit-history-transaction-v1",
+    ] {
         assert!(
             defs.iter().any(|def| def.value == expected),
             "the scan did not find {expected}"
