@@ -50,7 +50,6 @@
 #   --version <tag>          pin to a specific release tag.
 #   --prefix  <dir>          install prefix.
 #   --insecure-skip-cosign   skip cosign signature verification (DANGEROUS).
-#   --cosign                 deprecated; cosign is on by default. No-op.
 #   --help, -h               show this help text.
 #
 # For private-repo installs, use `gh release download` instead — it
@@ -91,8 +90,6 @@ Flags:
   --insecure-skip-cosign    Skip cosign signature verification. DANGEROUS — use
                             only when cosign is unavailable and you have
                             verified the binary by other means.
-  --cosign                  Deprecated alias. cosign verification is now ON by
-                            default; this flag is a no-op kept for back-compat.
   --help, -h                Show this help.
 
 Environment:
@@ -119,7 +116,6 @@ while [ $# -gt 0 ]; do
     --version)               [ $# -ge 2 ] || die "--version requires a tag (e.g. --version v0.5.0)"; version="$2"; shift 2 ;;
     --prefix)                [ $# -ge 2 ] || die "--prefix requires a directory (e.g. --prefix /usr/local/bin)"; install_dir="$2"; shift 2 ;;
     --insecure-skip-cosign)  skip_cosign="1"; shift ;;
-    --cosign)                shift ;;  # deprecated; cosign is default-on
     --help|-h)               print_help; exit 0 ;;
     *)                       die "unknown argument: $1 (try --help)" ;;
   esac
