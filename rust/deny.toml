@@ -71,8 +71,8 @@ ignore = [
     # RUSTSEC-2026-0370 / -0371 / -0372 (all reported 2026-10-16): upstream
     # folded the standalone zvariant, zvariant_derive and zbus_names crates
     # into zbus 6.0.0 (as `zbus::wire` / `zbus::names`) and filed these
-    # informational "unmaintained" advisories itself to push the migration
-    # (z-galaxy/zbus#2043). They reach us only through the optional
+    # informational "unmaintained" advisories itself to push the migration.
+    # They reach us only through the optional
     # `backend-linux-secret-service` keystore feature:
     #
     #   kit-storage / kit-fuzz (all-features) -> kit-keystore
