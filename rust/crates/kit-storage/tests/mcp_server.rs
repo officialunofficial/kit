@@ -664,16 +664,11 @@ fn attest_rejects_predicate_file_outside_repo() {
 }
 
 #[test]
-// JSON-RPC/MCP batching is legacy-client leniency the hand-rolled server
-// tolerated ("MCP 2025+ forbids it, but handling an array costs nothing" —
-// see mcp.rs). rmcp is a spec-compliant SDK for the CURRENT protocol
-// revision, which forbids batching outright, so it does not implement this
-// leniency — expected divergence, not a regression in the shared tool
-// catalog. See `mcp_v2.rs`'s module doc.
+// MCP forbids JSON-RPC batching. The hand-rolled server answers an array with
+// an invalid-request error. rmcp has its own framing, so this check does not
+// apply to the `mcp-v2` build.
 #[cfg(not(feature = "mcp-v2"))]
-fn batch_requests_get_a_single_array_response() {
-    // JSON-RPC 2.0: a batch request is answered with ONE array response;
-    // a batch of only notifications is answered with nothing at all.
+fn batch_requests_are_rejected() {
     let repo = tempfile::tempdir().unwrap();
     let mut child = Command::new(kit_bin())
         .args(["mcp", "--repository", repo.path().to_str().unwrap()])
@@ -685,44 +680,18 @@ fn batch_requests_get_a_single_array_response() {
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
 
-    // A notification-only batch first: must produce NO response line.
     writeln!(
         stdin,
-        r#"[{{"jsonrpc":"2.0","method":"notifications/initialized"}}]"#
-    )
-    .unwrap();
-    // Then a request batch: initialize + tools/list in one line.
-    writeln!(
-        stdin,
-        r#"[{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18"}}}},{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}]"#
+        r#"[{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18"}}}}]"#
     )
     .unwrap();
     stdin.flush().unwrap();
 
-    // The first line out must be the array for the second batch (the
-    // notification-only batch yields nothing).
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();
-    let resp: Value = serde_json::from_str(&line).expect("batch response is JSON");
-    let arr = resp
-        .as_array()
-        .expect("batch response must be a single JSON array");
-    assert_eq!(arr.len(), 2);
-    assert_eq!(
-        arr[0]
-            .pointer("/result/serverInfo/name")
-            .and_then(Value::as_str),
-        Some("kit-repo")
-    );
-    assert_eq!(
-        arr[1]
-            .pointer("/result/tools")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        21
-    );
+    let resp: Value = serde_json::from_str(&line).expect("error response is JSON");
+    assert_eq!(resp.pointer("/error/code").and_then(Value::as_i64), Some(-32600));
+    assert!(resp.get("result").is_none());
 
     drop(stdin);
     let _ = child.wait();

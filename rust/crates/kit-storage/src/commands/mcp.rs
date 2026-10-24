@@ -138,13 +138,20 @@ fn serve(allowed: Option<&Path>) -> u8 {
             continue;
         }
         let parsed: Result<Value, _> = serde_json::from_str(&line);
-        let (messages, is_batch): (Vec<Value>, bool) = match parsed {
-            // A few legacy clients batch; MCP 2025+ forbids it, but
-            // handling an array costs nothing. Per JSON-RPC 2.0, a batch
-            // request gets ONE batch (array) response — and a batch of
-            // only notifications gets no response at all.
-            Ok(Value::Array(batch)) => (batch, true),
-            Ok(v) => (vec![v], false),
+        let msg = match parsed {
+            // MCP forbids JSON-RPC batching, so an array is an invalid request.
+            Ok(Value::Array(_)) => {
+                write_msg(
+                    &mut stdout,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": null,
+                        "error": { "code": -32600, "message": "batch requests are not supported" }
+                    }),
+                );
+                continue;
+            }
+            Ok(v) => v,
             Err(_) => {
                 write_msg(
                     &mut stdout,
@@ -157,15 +164,7 @@ fn serve(allowed: Option<&Path>) -> u8 {
                 continue;
             }
         };
-        let responses: Vec<Value> = messages
-            .iter()
-            .filter_map(|msg| handle_message(msg, allowed, &mut initialized))
-            .collect();
-        if is_batch {
-            if !responses.is_empty() {
-                write_msg(&mut stdout, &Value::Array(responses));
-            }
-        } else if let Some(response) = responses.into_iter().next() {
+        if let Some(response) = handle_message(&msg, allowed, &mut initialized) {
             write_msg(&mut stdout, &response);
         }
     }
