@@ -644,7 +644,7 @@ fn stale_remote(head_read_fails: bool) -> (tempfile::TempDir, StaleListing) {
     (alice, tx)
 }
 
-/// D34 `ListRefs` is eventual: a branch listed after its delete has neither
+/// Sharded `ListRefs` is eventual: a branch listed after its delete has neither
 /// head nor packmap. The fetch skips it, still fetches the live branches and
 /// writes no tracking ref for it.
 #[test]
