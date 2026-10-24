@@ -86,8 +86,8 @@ from Git, read [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md).
 
 - **No shallow clone.** `kit clone --depth N` is rejected with a usage error.
   kit never silently makes a full clone when you ask for a shallow one.
-- **No `.mkit` import.** kit does not read repositories that an earlier tool
-  stored in `.mkit/`. To bring history in, use `kit git import` on a Git
+- **No import of older repository layouts.** kit reads only repositories in
+  its own `.kit/` layout. To bring history in, use `kit git import` on a Git
   upstream.
 - **No Windows build.** Use WSL.
 - **No transport fallback.** The URL scheme picks the transport. kit does not

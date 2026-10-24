@@ -70,7 +70,7 @@ transport                                 user
 
 Every stage validates the previous stage's output. Decoders refuse
 oversized allocations; the FastCDC chunker is fully deterministic
-(seed `MKITFCDC`); object readers re-hash bytes before returning.
+(frozen seed, SPEC-FASTCDC §3.1); object readers re-hash bytes before returning.
 
 ---
 

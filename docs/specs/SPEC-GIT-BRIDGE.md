@@ -120,7 +120,7 @@ manifest order. The concatenated length MUST equal the manifest's
 
 **Only canonical writer output translates.** Reconstruction (§9)
 re-chunks the flattened bytes with the pinned FastCDC parameters
-(SPEC-FASTCDC: seed `MKITFCDC`, 16/64/256 KiB, threshold 1 MiB); that
+(SPEC-FASTCDC: frozen seed, 16/64/256 KiB, threshold 1 MiB); that
 round-trips bit-exactly **iff** the source manifest is exactly what a
 conformant kit writer produces. A bridge MUST therefore refuse, with
 an actionable error naming the object, any manifest that:
