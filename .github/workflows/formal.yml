@@ -66,7 +66,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      # protoc: the mkit-rpc harnesses build mkit-rpc (buffa-build).
+      # protoc: the kit-rpc harnesses build kit-rpc (buffa-build).
       - name: Set up Rust and cache
         uses: ./.github/actions/setup-rust
         with:
@@ -98,4 +98,4 @@ jobs:
 
       - name: Replay the refs traces
         working-directory: rust
-        run: cargo test --locked -p mkit-formal-conformance
+        run: cargo test --locked -p kit-formal-conformance

@@ -1,34 +1,34 @@
 # quint-refs: ref CAS, lock order, server locks, served names
 
-Quint models of mkit's ref concurrency (formal verification effort), covering the server rules of SPEC-REFS v3 and
-SPEC-CONCURRENCY with `mkit-server`.
+Quint models of kit's ref concurrency (formal verification effort), covering the server rules of SPEC-REFS v3 and
+SPEC-CONCURRENCY with `kit-server`.
 
 | File | What it models |
 |------|----------------|
 | `refs.qnt` | SPEC-REFS §5 CAS (Any / Missing / Match, deletes), §5.1 atomicity per lock domain (local `refs-<ref>.lock`, file-transport `RefLock`, memory `Mutex`), SPEC-CONCURRENCY §4 lock order and deadlock freedom, §3.2 recovery-log record/expire, §3.1 cross-domain gap |
 | `refs_test.qnt` | Pinned interleavings for `refs.qnt`, mutants and witnesses included |
-| `serve.qnt` | `serveLocks`: `serve.lock` (shared by `mkit serve` and `mkit-server`), `server.lock` (exclusive, `mkit-server`), the startup sweep of crashed uploads under an exclusive `serve.lock`, the worktree probe (SPEC-CONCURRENCY §2, §3.1). `servedNames`: SPEC-REFS v3 §2 served names and the §3 512-byte bound, as far as they affect safety |
+| `serve.qnt` | `serveLocks`: `serve.lock` (shared by `kit serve` and `kit-server`), `server.lock` (exclusive, `kit-server`), the startup sweep of crashed uploads under an exclusive `serve.lock`, the worktree probe (SPEC-CONCURRENCY §2, §3.1). `servedNames`: SPEC-REFS v3 §2 served names and the §3 512-byte bound, as far as they affect safety |
 | `serve_test.qnt` | Pinned interleavings for `serve.qnt` (`serve_test`, `served_test`) |
 | `check.sh` | Runs every check below and compares each result with the expected one |
 
 ## Server rules covered
 
 - **`serve.lock` / `server.lock`** (SPEC-CONCURRENCY §2 table, §3.1):
-  every live server, `mkit serve` and any server embedding `mkit-server`'s filesystem layout, holds
-  `serve.lock` shared; `mkit-server` also holds `server.lock` exclusively.
-  Modelled in `serveLocks` (invariants `ServeLockRW`, `OneMkitServer`,
+  every live server, `kit serve` and any server embedding `kit-server`'s filesystem layout, holds
+  `serve.lock` shared; `kit-server` also holds `server.lock` exclusively.
+  Modelled in `serveLocks` (invariants `ServeLockRW`, `OneKitServer`,
   `UpServersHoldServeShared`, `NoMissedDetection`).
 - **Startup sweep** (§3.1, "The one exclusive hold"): a starting
-  `mkit serve` tries `serve.lock` exclusively without waiting, sweeps
+  `kit serve` tries `serve.lock` exclusively without waiting, sweeps
   stale upload temp files in `packs/` only while it holds it, then drops it
   and takes the shared lock; busy means skip. Modelled against concurrent
   uploads of other servers, including a stalled streaming upload whose temp
   file is older than the age bound (`SweepAlone`, `NoLiveUploadSwept`).
-- **Cross-domain gap covers `mkit-server`** (§3.1): a `mkit-server`
+- **Cross-domain gap covers `kit-server`** (§3.1): a `kit-server`
   fs-layout deployment writes refs through `FileTransport` under the same
   `<root>/.kit/refs/.lock` (`FsLayoutStore::apply` ->
   `FileTransport::with_ref_lock`), so in `refs.qnt` a `file` op is a CAS
-  from `mkit serve`, `mkit-server` or a `kit+file://` push alike. The
+  from `kit serve`, `kit-server` or a `kit+file://` push alike. The
   `WitnessCrossDomainGap` witness is still reachable, as documented.
 - **Served names, SPEC-REFS v3 §2**, and the **512-byte bound, §3**:
   `servedNames` checks that a server refuses a name outside `refs/`, or
@@ -40,10 +40,10 @@ SPEC-CONCURRENCY with `mkit-server`.
   `ListingServedOnly`). Names are abstract classes (served, outside
   `refs/`, over-long, grammar-invalid). **Which byte strings fall in which
   class is pure grammar, left to unit tests and conformance vectors**
-  (`mkit_core::refs` tests; `mkit-server` `pipeline/tests.rs` and
+  (`kit_core::refs` tests; `kit-server` `pipeline/tests.rs` and
   `ssh/tests.rs`), as are the derived local bounds (495 / 502 bytes) and
   prefix normalization (§4.2).
-- **Memory transport**: `mkit-transport-memory`'s `update_ref` holds its
+- **Memory transport**: `kit-transport-memory`'s `update_ref` holds its
   `Mutex` across read-check-write, and SPEC-REFS §5.1 says `atomic*`
   (in-process only). The Safety conjunct `NoLostUpdateMem` covers the race; the race survives as the
   `refs2_memNoMutex` mutant (also caught for Missing, which a HashMap
@@ -62,7 +62,7 @@ directly on the TLA+ that `quint compile --target tlaplus` produces (quint
 uses its bundled Apalache only to transpile; `quint verify` is not used);
 TLC is `tlc2.TLC` from the Apalache 0.62.2 jar; Java 21.
 
-Tool locations default to `${FV_HOME:-$HOME/.local/share/mkit-fv}/apalache-0.62.2/`
+Tool locations default to `${FV_HOME:-$HOME/.local/share/kit-fv}/apalache-0.62.2/`
 and can be overridden with `APALACHE_MC` and `TLA2TOOLS`; `JAVA_HOME`
 defaults to `/usr/libexec/java_home -v 21`, then Homebrew's `openjdk@21`.
 Memory: `TLC_HEAP` (default 4g), `TLC_WORKERS` (2), `APALACHE_HEAP` (4g).
@@ -108,11 +108,11 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 | `refs2_gcSkipTrees` | `ExpireHoldsSuperset`, `NoRecordExpireInterleave` | §3.2 superset rule |
 | `refs2_racyAcquire` | `LockOwnership` | broken flock |
 | `refs2_memNoMutex` | `NoLostUpdateMem` | the v1 "NOT atomic" memory row |
-| `refs3` | `WitnessCrossDomainGap` | documented §3.1 gap (local vs `mkit serve`/`mkit-server`, when the served root is the common dir) |
+| `refs3` | `WitnessCrossDomainGap` | documented §3.1 gap (local vs `kit serve`/`kit-server`, when the served root is the common dir) |
 | `serve2_sweepUnlocked` | `SweepAlone`, `NoLiveUploadSwept` | the sweep needs the exclusive hold |
 | `serve2_sweepUnderShared` | `SweepAlone`, `NoLiveUploadSwept` | a shared hold does not exclude other servers' uploads |
-| `serve2_serverSkipsServe` | `UpServersHoldServeShared`, `NoMissedDetection`, `NoLiveUploadSwept` | `mkit-server` must hold `serve.lock` |
-| `serve2_serverLockShared` | `OneMkitServer` | `server.lock` must be exclusive |
+| `serve2_serverSkipsServe` | `UpServersHoldServeShared`, `NoMissedDetection`, `NoLiveUploadSwept` | `kit-server` must hold `serve.lock` |
+| `serve2_serverLockShared` | `OneKitServer` | `server.lock` must be exclusive |
 | `serve2_ftSlow` | `NoLiveUploadSwept` | ASSUMPTION: lockless `kit+file://` uploads rely on the 1 h age bound |
 | `serve2` | `WitnessUndetectedLateServer` | documented §3.1 gap: detection is one-directional |
 | `served_checkAfterRead` | `RefuseBeforeStorage`, `ExplicitRefusal` | pre-v3 behaviour (answering `main` from storage / as absent) |
@@ -121,7 +121,7 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 
 Canaries (`Canary*`, `Witness*` reachability) confirm the interesting
 states are visited: a sweep removes a crashed upload's file, a start skips
-its sweep, `mkit serve` and `mkit-server` share a root, a `mkit serve`
+its sweep, `kit serve` and `kit-server` share a root, a `kit serve`
 starts during a stalled upload, refusals of each kind are reached, and a
 served AdvanceRefs succeeds.
 
@@ -139,13 +139,13 @@ cover the whole space to their bounds.
   is assumed never stale while live (the age-bound assumption in the
   `lock_and_sweep` comment); `serve2_ftSlow` drops it.
 - The probe's momentary exclusive hold is one atomic step; its other
-  effects (a starting `mkit serve` skips its sweep, a starting server waits)
+  effects (a starting `kit serve` skips its sweep, a starting server waits)
   are liveness only. Lock waits never time out (the 5 s timeout is
   abstracted, as in `refs.qnt`). Stop and crash are one action.
-- A SQLite-metadata `mkit-server` deployment keeps refs in SQLite (the root marker makes
+- A SQLite-metadata `kit-server` deployment keeps refs in SQLite (the root marker makes
   `FileTransport` refuse ref writes on that root) and is not modelled;
-  neither is `mkit-server`'s S3 spool sweep (under `server.lock`, used
-  only by `mkit-server`).
+  neither is `kit-server`'s S3 spool sweep (under `server.lock`, used
+  only by `kit-server`).
 - The git bridge locks (`git-<remote>.lock`, `git-import-key.lock`) that
   another track is adding to SPEC-CONCURRENCY §2/§4 are not in this model.
 
@@ -164,11 +164,11 @@ unrestricted `stepAll` must still reach the gap.
 `formal/scripts/gen-refs-traces.sh` draws the ITF traces
 (`quint run --mbt --out-itf`, one seed each, 60 steps), strips the
 variables the harness does not read, and writes them to
-`rust/crates/mkit-formal-conformance/tests/fixtures/formal_refs/`
+`rust/crates/kit-formal-conformance/tests/fixtures/formal_refs/`
 (`CHECK=1` regenerates into a temp dir and diffs). The Rust test
-`rust/crates/mkit-formal-conformance/tests/formal_refs_conformance.rs`
-(`cargo test -p mkit-formal-conformance`, offline, normal CI) replays each
-step against `mkit_core::refs`, `ops::recovery`, `FileTransport` and
+`rust/crates/kit-formal-conformance/tests/formal_refs_conformance.rs`
+(`cargo test -p kit-formal-conformance`, offline, normal CI) replays each
+step against `kit_core::refs`, `ops::recovery`, `FileTransport` and
 `MemoryTransport` on a temp repo and compares, after every step, the disk
 refs (through `refs::read_ref` and through `FileTransport`), the memory
 refs, the recovery log, and every commit's outcome (`ok` / `conflict` /

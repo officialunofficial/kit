@@ -2,10 +2,10 @@
 spec: SPEC-RELEASE-THRESHOLD
 version: 1
 status: draft-normative
-audience: implementers and integrators producing or verifying mkit release-party threshold signatures
+audience: implementers and integrators producing or verifying kit release-party threshold signatures
 ---
 
-# SPEC-RELEASE-THRESHOLD &mdash; BLS12-381 threshold signatures for mkit releases
+# SPEC-RELEASE-THRESHOLD &mdash; BLS12-381 threshold signatures for kit releases
 
 Status: **Draft**. This repository does not implement this
 specification &mdash; see §6. The document fixes the wire bytes and the
@@ -23,7 +23,7 @@ for M maintainers.
 
 ## 1. Motivation &mdash; "release party"
 
-mkit's release process today (`docs/RELEASE.md`) is cut by one human
+kit's release process today (`docs/RELEASE.md`) is cut by one human
 running `git tag -s vX.Y.Z`. The cosign keyless signatures come from
 GitHub Actions OIDC; the release-tag signature is one person.
 
@@ -69,7 +69,7 @@ end-to-end (§5) are the one piece not yet built.
 ### 2.1 Trusted dealer
 
 A single party (the project lead, in practice) runs
-`mkit_attest::bls_threshold_trusted_dealer(rng, n)` and hands each
+`kit_attest::bls_threshold_trusted_dealer(rng, n)` and hands each
 maintainer their `Share`, plus the cohort's public `Sharing<MinSig>`
 (which every holder also keeps a copy of for partial-verification).
 
@@ -116,7 +116,7 @@ A `PartialSignature<MinSig>` per `commonware-cryptography`:
 +---------------------+------------------------------+
 ```
 
-Total: 52 bytes on the wire. `mkit_attest::bls_threshold` ships this
+Total: 52 bytes on the wire. `kit_attest::bls_threshold` ships this
 via the `commonware_codec::Encode` impl on `PartialSignature`; the
 release-party ceremony CLI wraps it in a thin JSON envelope for
 human-friendly coordination-channel transport.
@@ -154,7 +154,7 @@ for the BLS verify step.
 
 ### 3.4 Algorithm wire identifier
 
-The mkit-rpc `Algorithm` proto enum has a fixed integer for this
+The kit-rpc `Algorithm` proto enum has a fixed integer for this
 algorithm:
 
 ```proto
@@ -195,21 +195,21 @@ Ulas map), and the proof-of-possession scheme (`POP_`, which requires
 each participating key to have a separately-verified proof of
 possession before it may contribute to an aggregate &mdash; closing the
 rogue-key attack that plain BLS aggregation is vulnerable to without
-one). This is a real, standard IETF ciphersuite; it is not an mkit- or
+one). This is a real, standard IETF ciphersuite; it is not an kit- or
 commonware-specific construction, and any BLS12-381 implementation
 conforming to that draft and RFC 9380 can be checked against it.
 
 ### 3.7 Namespace
 
 Layered *on top of* the ciphersuite in §3.6 (not a replacement for its
-hash-to-curve step) is an mkit-specific application namespace, fixed
+hash-to-curve step) is an kit-specific application namespace, fixed
 at:
 
 ```text
 NAMESPACE = b"kit-attest/dsse/v1"
 ```
 
-`mkit_attest::BLS_THRESHOLD_NAMESPACE` exposes the constant. Signing
+`kit_attest::BLS_THRESHOLD_NAMESPACE` exposes the constant. Signing
 and verification combine the namespace and the message (the DSSE PAE,
 §4) via a unique, unambiguous encoding &mdash; not bare concatenation &mdash; before
 that combined value is hash-to-curve'd per §3.6. The namespace separates
@@ -254,9 +254,9 @@ signature. Pass/fail is binary; there is no per-share verdict at the
 aggregated layer (that's a feature, not a bug &mdash; the aggregate is the
 unit of consensus).
 
-`mkit_attest::bls_threshold_verify` exposes this as a single function.
+`kit_attest::bls_threshold_verify` exposes this as a single function.
 `TrustRoot::Bls12381ThresholdPubKey` is wired into `verify_envelope`'s
-registry dispatch (`mkit-attest/src/verify.rs`, feature-gated behind
+registry dispatch (`kit-attest/src/verify.rs`, feature-gated behind
 `bls-threshold`), so callers verifying a full DSSE envelope get this
 check automatically without calling `bls_threshold_verify` directly.
 
@@ -323,7 +323,7 @@ design.
 ## 6. Implementation status
 
 No code in this repository signs, aggregates or verifies a threshold
-signature. `mkit-attest` has no BLS algorithm variant. `mkit-keystore`
+signature. `kit-attest` has no BLS algorithm variant. `kit-keystore`
 stores no shares. A trust-roots file entry of kind `bls12381-thr` is
 ignored, so a keyid of that kind reports as unknown. The algorithm
 identifier `ALGORITHM_BLS12381_THRESHOLD = 5` stays reserved in

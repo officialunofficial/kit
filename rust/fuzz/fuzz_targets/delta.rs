@@ -1,5 +1,5 @@
 //! cargo-fuzz target — `delta::decode`. Guardrail bodies live in
-//! `mkit-fuzz` (`src/lib.rs`); this file is the libfuzzer entry point
+//! `kit-fuzz` (`src/lib.rs`); this file is the libfuzzer entry point
 //! and enforces the 100-iteration / 100 ms / 64 KiB caps in-target so
 //! libfuzzer's own `loop {}` cannot overrun them.
 
@@ -9,7 +9,7 @@
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use mkit_fuzz::{MAX_ITER, delta_one_iteration, run_one};
+use kit_fuzz::{MAX_ITER, delta_one_iteration, run_one};
 
 static ITERS: AtomicU32 = AtomicU32::new(0);
 

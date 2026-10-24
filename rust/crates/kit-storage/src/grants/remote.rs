@@ -1,0 +1,383 @@
+//! Picking the remote a grant, epoch or visibility command talks to, the
+//! audience it signs for, and waiting for the server to finish.
+
+use std::time::Duration;
+
+use kit_attest::grant::{Namespace, is_loopback_origin};
+use kit_core::repo_identity::{RemoteNamespace, RepositoryIdentity};
+use kit_transport_connect::{
+    Completion, audience_from_url, remote_identity_from_url, repository_identity_from_url,
+};
+
+use crate::config::{self, LayeredConfig};
+
+/// A Connect remote resolved from a remote name or an `kit+https://` URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub name: String,
+    pub endpoint: String,
+    /// The repository config chose it, so the credential-trust gate applies.
+    pub repo_chosen: bool,
+}
+
+impl Target {
+    /// The auth v2 audience for this remote: its origin.
+    ///
+    /// # Errors
+    /// The endpoint is not an `kit+https://` or loopback `kit+http://` URL.
+    pub fn audience(&self) -> Result<String, String> {
+        audience_from_url(&self.endpoint).ok_or_else(|| {
+            format!(
+                "`{}` is not an kit+https:// (or loopback kit+http://) remote",
+                self.endpoint
+            )
+        })
+    }
+
+    /// The repository the URL names, if it names a full `<namespace>/<name>`.
+    #[must_use]
+    pub fn repository(&self) -> Option<RepositoryIdentity> {
+        repository_identity_from_url(&self.endpoint)
+            .ok()
+            .filter(|id| id.namespace().is_some())
+    }
+
+    /// The self-certifying namespace in the URL's repository, if any. `None`
+    /// also for an authority-mode namespace, so use it only on a target from
+    /// [`resolve_strict_target`].
+    #[must_use]
+    pub fn namespace(&self) -> Option<Namespace> {
+        self.repository().and_then(|id| id.namespace().copied())
+    }
+
+    /// Whether this is a loopback `kit+http://` remote: the one place a
+    /// loopback audience is acceptable (a development server).
+    #[must_use]
+    pub fn is_loopback_dev(&self) -> bool {
+        self.endpoint.starts_with("kit+http://")
+            && self.audience().is_ok_and(|a| is_loopback_origin(&a))
+    }
+}
+
+/// Resolve `arg` as a remote name, or take it as a URL if it starts with
+/// `kit+`. With no `arg`, the user's `trusted_remote_endpoint`.
+///
+/// # Errors
+/// An unknown remote, or nothing to fall back on.
+pub fn resolve_target(cfg: &LayeredConfig, arg: Option<&str>) -> Result<Target, String> {
+    resolve_target_unchecked(cfg, arg)
+}
+
+/// [`resolve_target`] for commands that are self-certifying-only (grants and
+/// grant epochs): a remote naming an authority-mode namespace is refused
+/// rather than ignored.
+///
+/// # Errors
+/// As [`resolve_target`], or an authority-mode namespace in the endpoint.
+pub fn resolve_strict_target(cfg: &LayeredConfig, arg: Option<&str>) -> Result<Target, String> {
+    let target = resolve_target_unchecked(cfg, arg)?;
+    refuse_authority_namespace(&target.endpoint)?;
+    Ok(target)
+}
+
+fn resolve_target_unchecked(cfg: &LayeredConfig, arg: Option<&str>) -> Result<Target, String> {
+    match arg {
+        Some(url) if url.starts_with("kit+") => Ok(Target {
+            name: url.to_owned(),
+            endpoint: url.to_owned(),
+            repo_chosen: false,
+        }),
+        Some(name) => {
+            let resolved = config::resolve_remote(cfg, name).ok_or_else(|| {
+                format!("no remote named `{name}` (add one with `kit remote add`, or pass an kit+https:// URL)")
+            })?;
+            Ok(Target {
+                name: resolved.name,
+                endpoint: resolved.endpoint,
+                repo_chosen: resolved.repo_chosen,
+            })
+        }
+        None => {
+            let trusted = cfg.user.trusted_remote_endpoint.trim();
+            if trusted.is_empty() {
+                return Err(
+                    "no remote given and no trusted remote configured (set one with `kit config trusted_remote_endpoint <url>`)"
+                        .to_owned(),
+                );
+            }
+            Ok(Target {
+                name: "trusted".to_owned(),
+                endpoint: trusted.to_owned(),
+                repo_chosen: false,
+            })
+        }
+    }
+}
+
+/// SPEC-WRITE-GRANTS §3.2: a loopback audience is refused unless the remote
+/// itself is a loopback `kit+http://` development remote. Every local
+/// deployment shares a loopback audience, so a statement signed for one
+/// would verify at all of them.
+///
+/// # Errors
+/// A loopback audience and a remote that isn't a loopback dev remote.
+pub fn check_audiences(audiences: &[String], remote: Option<&Target>) -> Result<(), String> {
+    for audience in audiences {
+        if is_loopback_origin(audience) && !remote.is_some_and(Target::is_loopback_dev) {
+            return Err(format!(
+                "audience {audience} is a loopback address, which every local server shares; \
+                 refusing to sign for it unless the remote is itself a loopback kit+http:// development remote"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// How [`drive`] ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Driven<T> {
+    Done(T),
+    /// The next wait would pass `timeout`; `waited` was spent.
+    TimedOut {
+        waited: Duration,
+    },
+    /// `sleep` returned false (Ctrl-C).
+    Cancelled,
+}
+
+/// Call `call` until it is [`Completion::Done`], waiting the server's
+/// `Retry-After` between calls. `call` sends the same request every time: the
+/// caller signs once and re-sends the identical statement bytes (SPEC-WRITE-GRANTS
+/// §5.2: the same epoch is a retry), never a fresh nonce.
+///
+/// `timeout` is a wall-clock bound measured from the first call: a re-send is
+/// not started when the time already spent plus the next delay would pass it.
+/// `sleep` may cancel (Ctrl-C). Cancellation is observed while waiting, not
+/// inside an RPC in flight (each RPC is bounded by the transport's own timeout).
+///
+/// # Errors
+/// Whatever `call` returns.
+pub fn drive<T, E>(
+    call: impl FnMut() -> Result<Completion<T>, E>,
+    timeout: Duration,
+    sleep: impl FnMut(Duration) -> bool,
+) -> Result<Driven<T>, E> {
+    let start = std::time::Instant::now();
+    drive_with_clock(call, timeout, sleep, || start.elapsed())
+}
+
+fn drive_with_clock<T, E>(
+    mut call: impl FnMut() -> Result<Completion<T>, E>,
+    timeout: Duration,
+    mut sleep: impl FnMut(Duration) -> bool,
+    elapsed: impl Fn() -> Duration,
+) -> Result<Driven<T>, E> {
+    loop {
+        match call()? {
+            Completion::Done(value) => return Ok(Driven::Done(value)),
+            Completion::Pending { retry_after } => {
+                let waited = elapsed();
+                if waited.saturating_add(retry_after) > timeout {
+                    return Ok(Driven::TimedOut { waited });
+                }
+                if !sleep(retry_after) {
+                    return Ok(Driven::Cancelled);
+                }
+            }
+        }
+    }
+}
+
+/// Sleep for `duration` in short slices so Ctrl-C is prompt. Returns false if
+/// the process was asked to shut down.
+#[must_use]
+pub fn interruptible_sleep(duration: Duration) -> bool {
+    let slice = Duration::from_millis(100);
+    let mut left = duration;
+    while !left.is_zero() {
+        if crate::signal::is_shutdown() {
+            return false;
+        }
+        let step = left.min(slice);
+        std::thread::sleep(step);
+        left -= step;
+    }
+    !crate::signal::is_shutdown()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(url: &str) -> Target {
+        Target {
+            name: "t".into(),
+            endpoint: url.into(),
+            repo_chosen: false,
+        }
+    }
+
+    #[test]
+    fn loopback_audiences_need_a_loopback_dev_remote() {
+        let audiences = |a: &str| vec![a.to_owned()];
+        let dev = target("kit+http://127.0.0.1:8080");
+        let prod = target("kit+https://git.example.com");
+        for loopback in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://127.9.9.9",
+            "http://[::1]:8080",
+        ] {
+            assert!(
+                check_audiences(&audiences(loopback), Some(&prod)).is_err(),
+                "{loopback}"
+            );
+            assert!(
+                check_audiences(&audiences(loopback), None).is_err(),
+                "{loopback}"
+            );
+        }
+        assert!(check_audiences(&audiences("http://127.0.0.1:8080"), Some(&dev)).is_ok());
+        assert!(check_audiences(&audiences("https://git.example.com"), Some(&prod)).is_ok());
+        assert!(target("kit+http://127.0.0.1:8080").is_loopback_dev());
+        assert!(!target("kit+https://git.example.com").is_loopback_dev());
+    }
+
+    #[test]
+    fn audience_and_namespace_come_from_the_url() {
+        let t =
+            target("kit+https://git.example.com/0x8ba1f109551bd432803012645ac136ddd64dba72/site");
+        assert_eq!(t.audience().unwrap(), "https://git.example.com");
+        assert_eq!(
+            t.namespace().unwrap().to_string(),
+            "0x8ba1f109551bd432803012645ac136ddd64dba72"
+        );
+        assert!(target("kit+https://git.example.com").namespace().is_none());
+        assert!(target("https://git.example.com").audience().is_err());
+    }
+
+    #[test]
+    fn drive_resends_until_done_and_sums_the_waits() {
+        let mut calls: u64 = 0;
+        let mut slept = Vec::new();
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let outcome: Result<Driven<u64>, ()> = drive_with_clock(
+            || {
+                calls += 1;
+                Ok(if calls < 4 {
+                    Completion::Pending {
+                        retry_after: Duration::from_secs(calls),
+                    }
+                } else {
+                    Completion::Done(9)
+                })
+            },
+            Duration::from_mins(1),
+            |d| {
+                slept.push(d);
+                clock.set(clock.get() + d);
+                true
+            },
+            || clock.get(),
+        );
+        assert_eq!(outcome, Ok(Driven::Done(9)));
+        assert_eq!(calls, 4);
+        assert_eq!(
+            slept,
+            [
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(3)
+            ]
+        );
+    }
+
+    #[test]
+    fn drive_stops_at_the_total_timeout_and_on_cancel() {
+        let pending = || -> Result<Completion<()>, ()> {
+            Ok(Completion::Pending {
+                retry_after: Duration::from_secs(4),
+            })
+        };
+        // 4 + 4 fit in 10 s; a third wait would end at 12 s.
+        let mut sleeps = 0;
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let outcome = drive_with_clock(
+            pending,
+            Duration::from_secs(10),
+            |d| {
+                sleeps += 1;
+                clock.set(clock.get() + d);
+                true
+            },
+            || clock.get(),
+        );
+        assert_eq!(
+            outcome,
+            Ok(Driven::TimedOut {
+                waited: Duration::from_secs(8)
+            })
+        );
+        assert_eq!(sleeps, 2);
+        let outcome = drive(pending, Duration::from_secs(10), |_| false);
+        assert_eq!(outcome, Ok(Driven::Cancelled));
+        // Time spent inside the calls counts: 7 s per call leaves no room for
+        // a 4 s wait inside a 10 s bound.
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let outcome = drive_with_clock(
+            || {
+                clock.set(clock.get() + Duration::from_secs(7));
+                pending()
+            },
+            Duration::from_secs(10),
+            |_| true,
+            || clock.get(),
+        );
+        assert_eq!(
+            outcome,
+            Ok(Driven::TimedOut {
+                waited: Duration::from_secs(7)
+            })
+        );
+        // Errors from the call pass straight through.
+        let outcome: Result<Driven<()>, &str> =
+            drive(|| Err("boom"), Duration::from_secs(1), |_| true);
+        assert_eq!(outcome, Err("boom"));
+    }
+}
+
+/// Grants, grant epochs and owner statements are self-certifying-only
+/// (SPEC-SERVER §6.2.2): refuse a URL naming an authority-mode namespace
+/// instead of falling back to the signer's own namespace.
+///
+/// # Errors
+/// The message to print.
+pub fn refuse_authority_namespace(endpoint: &str) -> Result<(), String> {
+    match remote_identity_from_url(endpoint)
+        .ok()
+        .as_ref()
+        .and_then(|id| id.namespace())
+    {
+        Some(RemoteNamespace::Opaque(ns)) => Err(format!(
+            "`{ns}` is an authority-mode namespace; grants, grant epochs and owner statements need a self-certifying `ed25519-`/`0x` namespace (SPEC-SERVER §6.2.2, SPEC-TRANSPORT-CONNECT §7.4)"
+        )),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod authority_namespace_tests {
+    use super::refuse_authority_namespace;
+
+    #[test]
+    fn opaque_namespace_urls_are_refused_and_strict_ones_pass() {
+        let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
+        let err = refuse_authority_namespace(&format!("kit+https://vcs.example/{uuid}/repo"))
+            .unwrap_err();
+        assert!(err.contains(uuid) && err.contains("§6.2.2"), "{err}");
+        let ed = format!("kit+https://vcs.example/ed25519-{}/repo", "ab".repeat(32));
+        assert!(refuse_authority_namespace(&ed).is_ok());
+        assert!(refuse_authority_namespace("kit+https://vcs.example/repo").is_ok());
+        assert!(refuse_authority_namespace("not a url").is_ok());
+    }
+}

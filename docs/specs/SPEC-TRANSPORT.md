@@ -5,23 +5,23 @@ status: stable-normative
 audience: implementers of compatible transport clients and servers
 ---
 
-# SPEC-TRANSPORT &mdash; mkit v1 transport protocols
+# SPEC-TRANSPORT &mdash; kit v1 transport protocols
 
-mkit talks to remote stores through a small set of pluggable
+kit talks to remote stores through a small set of pluggable
 transports (memory, file, Connect, S3, SSH). All implement the same
-[`Transport`](../../rust/crates/mkit-core/src/protocol.rs) trait &mdash;
+[`Transport`](../../rust/crates/kit-core/src/protocol.rs) trait &mdash;
 a small set of verbs over a synchronous, object-safe interface &mdash; but the
 wire shape and authentication model differ per scheme.
 
 There is no negotiation between transports and no scheme fallback.
 The URL scheme is part of the remote address; if the scheme is
 unsupported, the dispatcher returns an error rather than guessing
-([`mkit-cli`'s `remote_dispatch::open`](../../rust/crates/mkit-cli/src/remote_dispatch/mod.rs)
+([`kit-storage`'s `remote_dispatch::open`](../../rust/crates/kit-storage/src/remote_dispatch/mod.rs)
 performs the scheme switch).
 
 The SSH wire format is defined in
 [`SPEC-RPC`](SPEC-RPC.md) and lives in the generated
-[`ssh.proto`](../../rust/crates/mkit-rpc/proto/kit/rpc/v1/ssh/ssh.proto) bindings.
+[`ssh.proto`](../../rust/crates/kit-rpc/proto/kit/rpc/v1/ssh/ssh.proto) bindings.
 This document covers the cross-transport contract: verbs, URL
 parsing, authentication, the forced-command server pattern, size
 caps, retry policy, and the error taxonomy.
@@ -31,7 +31,7 @@ caps, retry policy, and the error taxonomy.
 ## 1. Verbs
 
 Every transport implements the verbs exposed by the
-[`Transport`](../../rust/crates/mkit-core/src/protocol.rs) trait. Method
+[`Transport`](../../rust/crates/kit-core/src/protocol.rs) trait. Method
 signatures are synchronous and take `&self`; transports that need
 interior mutability (connection pools, child-process stdio) use an
 internal `Mutex` so the trait object remains object-safe.
@@ -97,7 +97,7 @@ up a `RefConflict` with `read_ref` before treating it as a true conflict
 
 Implementations MAY wrap transport-specific errors internally but
 MUST surface one of the following variants at the trait boundary
-([`TransportError`](../../rust/crates/mkit-core/src/protocol.rs)):
+([`TransportError`](../../rust/crates/kit-core/src/protocol.rs)):
 
 ```rust
 TransportError::PackNotFound        // download_pack on missing digest
@@ -121,28 +121,28 @@ Programs MUST NOT pattern-match on the advisory message strings.
 
 | Scheme prefix | Transport | Notes |
 |---|---|---|
-| `kit+memory://…` | In-memory (`MemoryTransport`) | Test / fuzz only. Cannot be opened by `remote_dispatch::open` &mdash; the URL is accepted by `mkit remote add` for round-tripping, but actual construction happens in-process. |
+| `kit+memory://…` | In-memory (`MemoryTransport`) | Test / fuzz only. Cannot be opened by `remote_dispatch::open` &mdash; the URL is accepted by `kit remote add` for round-tripping, but actual construction happens in-process. |
 | `kit+file:///abs/path` | Filesystem (`FileTransport`) | Triple slash; everything after `kit+file://` is taken as the on-disk root path. |
-| `kit+https://host/project` | ConnectRPC (`mkit-transport-connect`'s `ConnectTransport`) &mdash; see [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) | The `kit+` prefix is stripped before the inner call; production uses `https://`. |
+| `kit+https://host/project` | ConnectRPC (`kit-transport-connect`'s `ConnectTransport`) &mdash; see [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) | The `kit+` prefix is stripped before the inner call; production uses `https://`. |
 | `kit+http://localhost…` | Same dispatch as above, plain HTTP for local dev | Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`, `localhost`) per `validate_http_scheme`; any other host returns `InsecureScheme`. |
 | `kit+s3://endpoint/bucket[/prefix]` | S3-compatible (`S3Transport`) | The endpoint becomes `https://<endpoint>`; R2 is the primary target, AWS S3 also works but its CAS semantics are weaker (see §6.3). |
-| `kit+ssh://user@host[:port]/path` | SSH child and `mkit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty/`.`/`..` segments. SCP-style `kit+ssh://user@host:path`/`kit+ssh://user@host:port:path` are also accepted (see [`mkit-transport-ssh/src/url.rs`](../../rust/crates/mkit-transport-ssh/src/url.rs)). |
+| `kit+ssh://user@host[:port]/path` | SSH child and `kit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty/`.`/`..` segments. SCP-style `kit+ssh://user@host:path`/`kit+ssh://user@host:port:path` are also accepted (see [`kit-transport-ssh/src/url.rs`](../../rust/crates/kit-transport-ssh/src/url.rs)). |
 
 Bare `ssh://`, `https://`, `http://`, `s3://`, `file://` URLs (without
 the `kit+` prefix) are deliberately rejected. The prefix marks a URL
-as something mkit recognizes; mkit does not silently extend the namespace
+as something kit recognizes; kit does not silently extend the namespace
 of any sibling tool.
 
 ---
 
 ## 4. SSH transport
 
-mkit's SSH transport spawns a long-lived `ssh(1)` child process and
-exchanges length-prefixed [`SshFrame`](../../rust/crates/mkit-rpc/proto/kit/rpc/v1/ssh/ssh.proto)
+kit's SSH transport spawns a long-lived `ssh(1)` child process and
+exchanges length-prefixed [`SshFrame`](../../rust/crates/kit-rpc/proto/kit/rpc/v1/ssh/ssh.proto)
 messages on its stdin/stdout. The framing layer is defined in
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing).
 
-The transport is implemented with `std::process::Command` &mdash; mkit does
+The transport is implemented with `std::process::Command` &mdash; kit does
 NOT ship its own SSH stack (no `russh`, no in-process crypto). See
 [`SSH-SECURITY.md`](../SSH-SECURITY.md) for the trade-offs that choice
 implies.
@@ -150,17 +150,17 @@ implies.
 ### 4.1 Forced-command server pattern
 
 Server-side, the user configures their `~/.ssh/authorized_keys` to
-force `mkit serve <repo-path>` on connection:
+force `kit serve <repo-path>` on connection:
 
 ```
-command="mkit serve /srv/mkit/myrepo",no-port-forwarding,no-X11-forwarding,no-agent-forwarding ecdsa-sha2-nistp256 AAAA…
+command="kit serve /srv/kit/myrepo",no-port-forwarding,no-X11-forwarding,no-agent-forwarding ecdsa-sha2-nistp256 AAAA…
 ```
 
 This binds an SSH key to a single repository on the server side. The
 server process never sees a shell prompt; sshd hands it an open
 stdin/stdout pair against the `authorized_keys`-resolved command.
 
-The client spawns `ssh` with `mkit serve <path>` as three separate
+The client spawns `ssh` with `kit serve <path>` as three separate
 argv tokens so sshd invokes the binary directly without an
 intervening `sh -c` (which broke the handshake on some sshd
 configurations). The path is already restricted to a safe ASCII
@@ -168,14 +168,14 @@ subset by `validate_ssh_path`, so passing it as a separate token is
 sound.
 
 **Root mode.** A server that hosts many repositories under one
-filesystem root can instead force `mkit serve --root <dir>`:
+filesystem root can instead force `kit serve --root <dir>`:
 
 ```
-command="mkit serve --root /srv/mkit --principal <hex>",restrict ssh-ed25519 AAAA…
+command="kit serve --root /srv/kit --principal <hex>",restrict ssh-ed25519 AAAA…
 ```
 
-sshd places the client's command in `SSH_ORIGINAL_COMMAND`, and `mkit
-serve` accepts only the exact form `mkit serve <path>` from it —
+sshd places the client's command in `SSH_ORIGINAL_COMMAND`, and `kit
+serve` accepts only the exact form `kit serve <path>` from it —
 three space-separated tokens, no flags, quoting, or shell syntax —
 reading the path as a `<NAMESPACE>/<NAME>` repository identity
 ([SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md#74-repository-addressing))
@@ -261,7 +261,7 @@ lies outside `refs/` is answered, before any storage access, with:
 | `UpdateRef`/`ReadRef` naming a grammar-valid ref outside `refs/` | `Error { code = ERROR_CODE_INVALID_REQUEST, message = "ref name must start with refs/ (…)" }`, empty `details` |
 
 Never with an absent-ref answer. Having empty `details`, it is not a
-CAS conflict; a client surfaces it as a remote error with its message. mkit is alpha
+CAS conflict; a client surfaces it as a remote error with its message. kit is alpha
 (pre-1.0) &mdash; clients and servers move together; there is no v0.x
 back-compatibility surface to preserve.
 
@@ -289,8 +289,8 @@ SSH transport security is delegated to the user's `ssh(1)` CLI:
 - Identity selection → `ssh-agent`/`~/.ssh/config`.
 - Kex / cipher / auth → `ssh(1)` / sshd.
 
-Three `.kit/config` keys override `ssh(1)` defaults for the mkit SSH
-child only (see [`SshOptions`](../../rust/crates/mkit-transport-ssh/src/lib.rs)):
+Three `.kit/config` keys override `ssh(1)` defaults for the kit SSH
+child only (see [`SshOptions`](../../rust/crates/kit-transport-ssh/src/lib.rs)):
 
 ```
 ssh.strict_host_key_checking = yes
@@ -310,9 +310,9 @@ See [`SSH-SECURITY.md`](../SSH-SECURITY.md) for the full trust model.
 
 ### 4.4 Resource caps
 
-The `mkit serve` server enforces per-connection budgets to bound a
+The `kit serve` server enforces per-connection budgets to bound a
 misbehaving or malicious client (see
-[`mkit-serve/src/budget.rs`](../../rust/crates/mkit-serve/src/budget.rs)):
+[`kit-serve/src/budget.rs`](../../rust/crates/kit-serve/src/budget.rs)):
 
 - `MAX_FRAMES_PER_CONN = 10_000` &mdash; hard cap on frames after `Hello`.
 - `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on cumulative request payload bytes.
@@ -326,7 +326,7 @@ frames at `MAX_FRAMES_PER_CONN`, so a client cannot bypass the outer
 frame loop by streaming unbounded chunks inside one upload request.
 
 The budgets bound how much a client can make the server do; an idle
-timeout bounds a client that goes silent. `mkit serve` ends a session after `--idle-timeout-secs`
+timeout bounds a client that goes silent. `kit serve` ends a session after `--idle-timeout-secs`
 seconds (default 60; `0` disables it) in which no byte arrives from the
 client, whether before `Hello`, between requests or inside an upload
 (whose partial pack is discarded). It answers, best effort, with
@@ -360,7 +360,7 @@ a frame-level I/O failure can leave the child's stdin/stdout pipe
 mid-message, so the transport marks that connection `closed` and
 resuming writes/reads on it would desync every subsequent frame.
 `SshTransport` therefore reconnects before it retries &mdash; every verb is
-driven through [`mkit_core::protocol::retrying`], and each attempt
+driven through [`kit_core::protocol::retrying`], and each attempt
 that finds the connection `closed` first respawns `ssh` from the
 original `target`/`options` and redoes the `Hello` handshake before
 re-issuing the verb against the fresh child. `upload_pack` is
@@ -383,7 +383,7 @@ transport carries it (§6.6).
 
 ## 6. S3 / R2 transport
 
-The S3 transport ([`mkit-transport-s3`](../../rust/crates/mkit-transport-s3/))
+The S3 transport ([`kit-transport-s3`](../../rust/crates/kit-transport-s3/))
 talks SigV4 against Cloudflare R2 (primary target) or AWS S3
 (works but with weaker CAS guarantees &mdash; see §6.3).
 
@@ -419,11 +419,11 @@ The ref body is the 65-byte wire form: 64 hex chars + `\n`.
 ### 6.2 Authentication
 
 Credentials from environment at `connect` time
-([`mkit-transport-s3::ENV_*`](../../rust/crates/mkit-transport-s3/src/lib.rs)):
+([`kit-transport-s3::ENV_*`](../../rust/crates/kit-transport-s3/src/lib.rs)):
 
-- `MKIT_R2_ACCESS_KEY_ID`
-- `MKIT_R2_SECRET_ACCESS_KEY`
-- `MKIT_R2_REGION` (optional; defaults to `auto` &mdash; R2 ignores region)
+- `KIT_R2_ACCESS_KEY_ID`
+- `KIT_R2_SECRET_ACCESS_KEY`
+- `KIT_R2_REGION` (optional; defaults to `auto` &mdash; R2 ignores region)
 
 Missing credentials do NOT fail `connect`. The first signed call
 surfaces `TransportError::AccessDenied`.
@@ -436,7 +436,7 @@ surfaces `TransportError::AccessDenied`.
 |---|---|---|
 | `Any`        | (none) | Last writer wins. |
 | `Missing`    | `If-None-Match: *` | R2 honors this for conditional create. |
-| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | R2 returns the body MD5 as the ETag on `PUT`; matching against that value is how mkit gets CAS without server-side hash awareness. AWS S3 also returns body MD5 as the ETag for simple PUTs, so `Match` works on S3 too &mdash; but multipart uploads break the equivalence (a multipart `ETag` is derived from the parts' ETags, not the body MD5), which is why §6.4's single-PUT cap gates `upload_pack` into the multipart path of §6.7 instead. |
+| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | R2 returns the body MD5 as the ETag on `PUT`; matching against that value is how kit gets CAS without server-side hash awareness. AWS S3 also returns body MD5 as the ETag for simple PUTs, so `Match` works on S3 too &mdash; but multipart uploads break the equivalence (a multipart `ETag` is derived from the parts' ETags, not the body MD5), which is why §6.4's single-PUT cap gates `upload_pack` into the multipart path of §6.7 instead. |
 
 `409` and `412` → `RefConflict`; never retried.
 
@@ -454,7 +454,7 @@ note on large packs.
 - `PACK_BODY_LIMIT = 4 GiB` &mdash; the absolute pack-body ceiling enforced
   on both `upload_pack` and `download_pack` (every transport that
   ingests or emits pack bytes shares this limit; see
-  [`mkit_core::protocol::PACK_BODY_LIMIT`](../../rust/crates/mkit-core/src/protocol.rs)).
+  [`kit_core::protocol::PACK_BODY_LIMIT`](../../rust/crates/kit-core/src/protocol.rs)).
   On a 64-bit target this is smaller than `S3_SINGLE_PUT_MAX`, so in
   today's builds it &mdash; not the single-PUT cap &mdash; is what actually bounds
   a pack's size; §6.7's multipart path exists for API correctness and
@@ -554,9 +554,9 @@ at 300 s. An `AdmissionRequired` error (HTTP 402; see
 [SPEC-TRANSPORT-CONNECT §5.1](SPEC-TRANSPORT-CONNECT.md#51-admission-challenges))
 is not a `ServerError` for this rule and is never retried by the
 ladder. The ladder is exposed via
-[`BackoffIterator`](../../rust/crates/mkit-core/src/protocol.rs), the
+[`BackoffIterator`](../../rust/crates/kit-core/src/protocol.rs), the
 classifier as [`is_retryable`], and the retry loop itself as
-[`retrying`](../../rust/crates/mkit-core/src/protocol.rs) &mdash; a single
+[`retrying`](../../rust/crates/kit-core/src/protocol.rs) &mdash; a single
 transport-agnostic driver every transport's client wraps, so the
 ladder/classification policy is defined once instead of per crate.
 Request-oriented transports (Connect, S3) satisfy this by re-issuing a
@@ -568,7 +568,7 @@ connection in a possibly-desynced state &mdash; see §4.5.
 idempotent across retries: a network timeout after the server applied
 the write looks identical to a write that never landed. The network
 transports' clients still send them through the ladder above (SSH
-and Connect through `mkit_core::protocol::retrying`; S3 through
+and Connect through `kit_core::protocol::retrying`; S3 through
 its own loop over `BackoffIterator` and `is_retryable`), so a call can be
 re-issued after its first attempt landed. The re-issue cannot apply the write twice: the
 landed attempt has already falsified the precondition the re-issue
@@ -591,7 +591,7 @@ caller obligations are therefore:
 The one case where a re-issue reports the true outcome is a Connect
 deployment that keeps the auth v2 replay ledger
 ([SPEC-TRANSPORT-CONNECT §7.1](SPEC-TRANSPORT-CONNECT.md#71-reference-worker)):
-`mkit-transport-connect` reuses one nonce and validity window for every
+`kit-transport-connect` reuses one nonce and validity window for every
 attempt of one logical call (`RetryIdentity`), so the server returns the
 committed attempt's stored result. That covers only re-issues within one
 call's ladder, inside the signed validity window. A caller that invokes
@@ -640,7 +640,7 @@ implementations MUST NOT inspect or rewrite pack bytes.
 
 `upload_blob`/`download_blob` move opaque **auxiliary** bytes &mdash;
 content-addressed transfer metadata that is NOT a packfile (today only
-packlist chain nodes; their format is defined in `mkit_core::transfer`,
+packlist chain nodes; their format is defined in `kit_core::transfer`,
 not SPEC-PACKFILE). They share the same digest-keyed content-addressed
 store as packs (the store is a general blob store; "pack" is just the
 primary content kind), so a transport MAY back both with one keyspace &mdash;
@@ -648,7 +648,7 @@ the default trait impls delegate the blob verbs to the pack verbs.
 Transports MUST NOT inspect or rewrite blob bytes either.
 
 The 32-byte digest is the BLAKE3 hash of the full bytes buffer, wrapped
-in [`PackKey`](../../rust/crates/mkit-core/src/protocol.rs) to keep digests
+in [`PackKey`](../../rust/crates/kit-core/src/protocol.rs) to keep digests
 and object hashes from silently crossing purposes at API boundaries.
 (The `PackKey` name predates the blob verbs; it addresses any
 content-addressed blob the transport stores, pack or auxiliary.)

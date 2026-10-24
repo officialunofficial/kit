@@ -2,16 +2,16 @@
 spec: SPEC-MERKLE-OBJECTS
 version: 2
 status: stable-normative
-audience: implementers of compatible mkit object stores
+audience: implementers of compatible kit object stores
 ---
 
 # SPEC-MERKLE-OBJECTS &mdash; merkelized Tree and ChunkedBlob identity
 
-Status: **Normative** for mkit v1.
+Status: **Normative** for kit v1.
 Scope: the Binary Merkle Tree construction used to compute `Tree` and
 `ChunkedBlob` object ids.
 
-mkit content-addresses two object types &mdash; `Tree` and `ChunkedBlob` &mdash; by a
+kit content-addresses two object types &mdash; `Tree` and `ChunkedBlob` &mdash; by a
 **Binary Merkle Tree (BMT) root** rather than by `BLAKE3` of their
 serialized bytes. Every other object type (`Blob`, `Commit`, `Remix`,
 `Tag`) keeps the flat scheme of [SPEC-OBJECTS](SPEC-OBJECTS.md) §10
@@ -30,7 +30,7 @@ not byte-compatible with pre-merkle repositories. See §7.
 
 The Merkle primitive is a **stateless Binary Merkle Tree** built with the
 canonical `BLAKE3` hasher, identical in construction to
-`commonware_storage::bmt` (the Commonware house primitive; mkit vendors
+`commonware_storage::bmt` (the Commonware house primitive; kit vendors
 the identical construction over the `blake3` crate so object identity has
 no `std`/`zstd` dependency and compiles to `wasm32` &mdash; a native test
 cross-verifies the two roots byte-for-byte).
@@ -294,16 +294,16 @@ and a trailing byte after the encoded proof.
 
 This wire format and sibling-selection algorithm are, deliberately,
 byte-identical to the upstream Binary Merkle Tree proof construction that
-mkit's BMT primitive already mirrors for root computation (§1), at the
-release train mkit currently cross-verifies against (pinned in
+kit's BMT primitive already mirrors for root computation (§1), at the
+release train kit currently cross-verifies against (pinned in
 `rust/Cargo.toml`'s workspace dependencies). A verifier already built
-against that upstream construction can decode an mkit proof with its own
+against that upstream construction can decode an kit proof with its own
 type directly and run its own verification unmodified — but that
 verification checks against the **bare folded value**, not the object
 id; a caller in that position MUST still apply this section's
 `domain_digest(TYPE_DOMAIN, folded)` wrap (§5.4) before comparing to an
-id, exactly as an mkit-native verifier does. A native-only cross-check
-test in `rust/crates/mkit-core/src/merkle.rs` pins this byte-identity and
+id, exactly as an kit-native verifier does. A native-only cross-check
+test in `rust/crates/kit-core/src/merkle.rs` pins this byte-identity and
 cross-acceptance claim across many tree sizes and proof shapes
 (single/range/multi), including that a mutated proof is rejected by
 both sides.

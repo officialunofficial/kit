@@ -1,4 +1,4 @@
-# cargo-about license-attribution policy for the mkit Rust workspace.
+# cargo-about license-attribution policy for the kit Rust workspace.
 #
 # `accepted` mirrors rust/deny.toml's [licenses] allow list — the two files
 # are the same policy expressed to two different tools (cargo-deny gates

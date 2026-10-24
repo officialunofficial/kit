@@ -2,23 +2,23 @@
 spec: SPEC-RPC
 version: 1
 status: stable-normative
-audience: integrators implementing an mkit external signer or mkit-server
+audience: integrators implementing an kit external signer or kit-server
 ---
 
-# SPEC-RPC &mdash; mkit cross-system wire protocol v1
+# SPEC-RPC &mdash; kit cross-system wire protocol v1
 
-mkit speaks to processes outside its address space &mdash; external signers
-running as subprocesses, and remote `mkit-server` instances reached
+kit speaks to processes outside its address space &mdash; external signers
+running as subprocesses, and remote `kit-server` instances reached
 over `ssh(1)` &mdash; using a single shared wire protocol.
 
-The schemas live in [`rust/crates/mkit-rpc/proto/`](../../rust/crates/mkit-rpc/proto/):
+The schemas live in [`rust/crates/kit-rpc/proto/`](../../rust/crates/kit-rpc/proto/):
 
 | File | Purpose |
 |---|---|
 | `common.proto` | Shared types: `Algorithm`, `KeyForm`, `ErrorCode`, `Error`, `ProtocolVersion` |
 | `signer.proto` | External-signer protocol (`SignerFrame` oneof). See [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) for prose. |
 | `ssh.proto` | SSH transport protocol (`SshFrame` oneof). See [SPEC-TRANSPORT](SPEC-TRANSPORT.md) for prose. |
-| `verify.proto` | Object-signature verification contract (`VerifyRequest`/`VerifyResponse`). **Not** a framed protocol under §1/§4 below &mdash; it is message-only, with no `oneof`-dispatched frame and no bound RPC method yet. `mkit-cli`'s local dispatch (`rust/crates/mkit-cli/src/remote_dispatch/packmap.rs`) calls the Rust implementation directly (`mkit_core::sign::{verify_commit,verify_remix,verify_tag}`); the schema exists so a future ConnectRPC transport (for example `apps/repo-worker`) can bind the identical check to a service method instead of reimplementing it. |
+| `verify.proto` | Object-signature verification contract (`VerifyRequest`/`VerifyResponse`). **Not** a framed protocol under §1/§4 below &mdash; it is message-only, with no `oneof`-dispatched frame and no bound RPC method yet. `kit-storage`'s local dispatch (`rust/crates/kit-storage/src/remote_dispatch/packmap.rs`) calls the Rust implementation directly (`kit_core::sign::{verify_commit,verify_remix,verify_tag}`); the schema exists so a future ConnectRPC transport (for example `apps/repo-worker`) can bind the identical check to a service method instead of reimplementing it. |
 
 `ssh.proto` imports the CAS enum (`RefExpectation`) and the ref-listing
 type (`RefEntry`) from
@@ -29,21 +29,21 @@ protocols cannot desync on CAS semantics. See that file's header
 comment for its own versioning contract.
 
 Protocol-version integer is `1` (`PROTOCOL_VERSION_1`) &mdash; the only
-value mkit currently speaks. Wire-breaking changes (renumbering or
+value kit currently speaks. Wire-breaking changes (renumbering or
 removing a field) are made by introducing a sibling `signer2.proto` /
 `ssh2.proto` package and bumping to a new `ProtocolVersion` value,
 never by silently reinterpreting `PROTOCOL_VERSION_1`'s existing wire
 shape (see §2).
 
 **Distribution.** These schemas are published as the
-`buf.build/officialunofficial/mkit-rpc` module on the Buf Schema
+`buf.build/officialunofficial/kit-rpc` module on the Buf Schema
 Registry on every tagged release (the named module at
-`rust/crates/mkit-rpc/proto` in the repo-root `buf.yaml` workspace,
+`rust/crates/kit-rpc/proto` in the repo-root `buf.yaml` workspace,
 pushed by the `buf-push` job in `.github/workflows/crates-publish.yml`;
 see [docs/RELEASE.md](../RELEASE.md#buf_token)). Integrators generate
 typed bindings in their own language with `buf generate` against a
 pinned module ref instead of vendoring this repo &mdash; the checked-in
-`rust/crates/mkit-rpc/proto/buf.gen.yaml` is the reference codegen
+`rust/crates/kit-rpc/proto/buf.gen.yaml` is the reference codegen
 recipe (Swift today; add other languages the same way).
 
 ---
@@ -67,7 +67,7 @@ Both protocols use the same length-prefixed framing:
   use the `buffa` runtime, but any protobuf 3/edition 2023 toolchain
   emitting the same wire bytes is conformant.
 - **Cap**: `MAX_FRAME_BYTES = 1 MiB` (`1024 * 1024`, exported from
-  `mkit-rpc` as a constant of the same name). Receivers MUST close
+  `kit-rpc` as a constant of the same name). Receivers MUST close
   the connection on a frame whose advertised length exceeds the cap,
   before reading the body. Senders MUST refuse to emit a frame whose
   body would exceed the cap. Bulk data flows that need more than
@@ -126,9 +126,9 @@ the next available number.
 | Name | Wire | Used by |
 |---|---|---|
 | `KEY_FORM_UNSPECIFIED` | 0 | &mdash; |
-| `KEY_FORM_RAW_BYTES` | 1 | `mkit-sign-file` (32-byte seed/scalar on disk). |
+| `KEY_FORM_RAW_BYTES` | 1 | `kit-sign-file` (32-byte seed/scalar on disk). |
 | `KEY_FORM_PKCS8_DER` | 2 | Reserved; no signer ships with v0.1.0. |
-| `KEY_FORM_OPAQUE_HANDLE` | 3 | `mkit-sign-tpm`, `mkit-sign-ctap`. The bytes in `key_ref` are interpreted by the signer (TPM persistent handle, CTAP credentialId, …). |
+| `KEY_FORM_OPAQUE_HANDLE` | 3 | `kit-sign-tpm`, `kit-sign-ctap`. The bytes in `key_ref` are interpreted by the signer (TPM persistent handle, CTAP credentialId, …). |
 
 ### 3.3 `ErrorCode`
 
@@ -157,7 +157,7 @@ on its contents.
 
 ## 4. Conformance
 
-A signer or server is mkit-rpc-compliant if and only if:
+A signer or server is kit-rpc-compliant if and only if:
 
 1. It speaks length-prefixed protobuf frames as in §1.
 2. The first frame it sends or expects is `Hello` with
@@ -170,35 +170,35 @@ A signer or server is mkit-rpc-compliant if and only if:
 
 Reference implementations (all in this repository):
 
-- [`contrib/signers/mkit-sign-file/`](../../contrib/signers/mkit-sign-file/) &mdash;
+- [`contrib/signers/kit-sign-file/`](../../contrib/signers/kit-sign-file/) &mdash;
   `KEY_FORM_RAW_BYTES`, Ed25519/secp256k1/P-256.
-- [`contrib/signers/mkit-sign-ctap/`](../../contrib/signers/mkit-sign-ctap/) &mdash;
+- [`contrib/signers/kit-sign-ctap/`](../../contrib/signers/kit-sign-ctap/) &mdash;
   FIDO2/WebAuthn signer, P-256/Ed25519-WebAuthn.
-- [`contrib/signers/mkit-sign-tpm/`](../../contrib/signers/mkit-sign-tpm/) &mdash;
+- [`contrib/signers/kit-sign-tpm/`](../../contrib/signers/kit-sign-tpm/) &mdash;
   TPM 2.0 P-256 signer.
-- [`rust/crates/mkit-cli/src/commands/serve/mod.rs`](../../rust/crates/mkit-cli/src/commands/serve/mod.rs) &mdash;
-  `mkit serve` SSH server (consumes `ssh.proto`).
+- [`rust/crates/kit-storage/src/commands/serve/mod.rs`](../../rust/crates/kit-storage/src/commands/serve/mod.rs) &mdash;
+  `kit serve` SSH server (consumes `ssh.proto`).
 
-The Swift `contrib/signers/mkit-sign-se/` (Apple Secure Enclave)
+The Swift `contrib/signers/kit-sign-se/` (Apple Secure Enclave)
 binary is a conforming v1 reference signer: it speaks the
 length-prefixed protobuf wire (its `Package.swift` depends on
 swift-protobuf, with generated `common.pb.swift`/`signer.pb.swift`),
 and is listed alongside the other reference signers in
 [`SPEC-EXTERNAL-SIGNER`](SPEC-EXTERNAL-SIGNER.md) §8. It wires through
-the `external` signer selector like any other mkit-rpc signer.
+the `external` signer selector like any other kit-rpc signer.
 
 ---
 
 ## 5. Why protobuf, not JSON
 
-mkit-rpc replaces an earlier line-JSON external-signer protocol and a
+kit-rpc replaces an earlier line-JSON external-signer protocol and a
 hand-rolled OP_HELLO byte format on the SSH transport. The protobuf
 choice is deliberate:
 
 - **Forward-compatible by default.** Edition 2023 fields are
   explicit-presence; adding optional fields or oneof variants is a
   wire-compatible patch-level change.
-- **Cross-language.** mkit ships in Rust, but external signers may
+- **Cross-language.** kit ships in Rust, but external signers may
   ship in any language with a protobuf 3/edition 2023
   implementation. JSON parsing edge cases (number precision, escape
   handling, key ordering) are not in the contract.
@@ -230,7 +230,7 @@ never by which codegen tool produced them.
 | A truncated frame is never mis-parsed as a shorter one | truncation is connection-fatal; the receiver MUST close the stream, no recovery (§1) |
 | No request is processed before version agreement | first frame MUST be `Hello` with `PROTOCOL_VERSION_1`; `HelloResponse` echoes it before any other processing (§2, §4) |
 | Every error is machine-actionable | `Error` frames MUST carry a known non-zero `ErrorCode` and non-empty `message`; `ERROR_CODE_UNSPECIFIED` is itself a protocol error (§3.3, §4) |
-| A receiver never mistakes a missing `ErrorCode` for an ordinary unmapped one | `mkit_rpc::helpers::rpc_error_to_transport` (shared by every `SshFrame`-based transport client) classifies `code = 0`/absent `code` as `TransportError::ProtocolError`, distinct from the generic `RemoteError` a legitimate-but-unmapped code produces (§3.3, §4) |
+| A receiver never mistakes a missing `ErrorCode` for an ordinary unmapped one | `kit_rpc::helpers::rpc_error_to_transport` (shared by every `SshFrame`-based transport client) classifies `code = 0`/absent `code` as `TransportError::ProtocolError`, distinct from the generic `RemoteError` a legitimate-but-unmapped code produces (§3.3, §4) |
 | Wire numbers never change meaning | `Algorithm`/`KeyForm`/`ErrorCode` integers are append-only, never renumbered; field renumbering/removal requires a sibling `*2.proto` + `ProtocolVersion` bump (§2, §3.1) |
 | v1 additions cannot break existing peers | new enum values fall back to unknown-variant handling; new oneof variants are rejected with `ERROR_CODE_INVALID_REQUEST` (§2) |
 | Bulk data never violates the frame cap | flows over 1 MiB use the streaming pattern (`PackChunk`) instead of a bigger frame (§1) |

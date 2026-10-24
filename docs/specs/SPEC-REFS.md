@@ -5,16 +5,16 @@ status: stable-normative
 audience: implementers of compatible ref stores and transports
 ---
 
-# SPEC-REFS &mdash; mkit v1 ref wire format and semantics
+# SPEC-REFS &mdash; kit v1 ref wire format and semantics
 
-Status: **Normative** and **Stable** for mkit v1 &mdash; the wire format,
+Status: **Normative** and **Stable** for kit v1 &mdash; the wire format,
 namespace layout, and CAS semantics below are settled and backed by
 shipped, tested transports (memory, file, s3, http, ssh). Every
 transport's `.missing` and `.match` CAS is atomic among the callers that
 share it, given the server support §5.1 requires for s3 and http; the
 in-process memory transport's atomicity is in-process only, because it
 is never shared across processes. The local
-`mkit-core` `refs::cas_write` helper used by commands that write refs
+`kit-core` `refs::cas_write` helper used by commands that write refs
 directly is serialized under a per-ref lock (§5.1). See
 SPEC-CONVENTIONS §2 for what draft/stable and normative/advisory mean.
 Scope: ref names, ref wire bytes, ref storage layout, and the exact
@@ -62,7 +62,7 @@ refs/remotes/<remote>/<name>       remote-tracking branch refs
 refs/kit/packmap/<name>           pack map of branch <name> (pushed with it)
 ```
 
-**Served names.** A transport server (`mkit serve`, `mkit-server`, the
+**Served names.** A transport server (`kit serve`, `kit-server`, the
 Workers server) MUST serve only ref names under `refs/`. It MUST refuse
 any other name that passes the §3 grammar (for example `main`,
 `heads/main`) on every read and write (`ReadRef`, `UpdateRef` and both
@@ -75,8 +75,8 @@ not restricted: a prefix outside `refs/` lists nothing. A name that
 fails the §3 grammar is refused as §3 says. The local and client-side
 transports (file, s3, memory) are not servers and are unaffected.
 
-*Informative.* Every mkit client writes only `refs/heads/`, `refs/tags/`
-and `refs/kit/packmap/` names. `mkit serve` before 0.5 stored any
+*Informative.* Every kit client writes only `refs/heads/`, `refs/tags/`
+and `refs/kit/packmap/` names. `kit serve` before 0.5 stored any
 grammar-valid name as a file at the served root (`main` as
 `<root>/main`), so a third-party client could have left such files; they
 are no longer served, and `docs/CLI.md` ("Refs outside `refs/`") says how
@@ -89,16 +89,16 @@ use the same path shape relative to the transport's root.
 `refs/remotes/<remote>/<name>` is local-only remote-tracking state. The
 single-remote CLI stores fetched branch tips under
 `refs/remotes/default/<name>` and never writes fetched tips directly to
-`refs/heads/<name>`. `mkit pull` may then fast-forward the current local
+`refs/heads/<name>`. `kit pull` may then fast-forward the current local
 branch from the matching remote-tracking ref.
 
-Named remotes (`mkit remote add <name> <url>`) store their tracking refs
-under `refs/remotes/<name>/<branch>`. `mkit push` uses the local
+Named remotes (`kit remote add <name> <url>`) store their tracking refs
+under `refs/remotes/<name>/<branch>`. `kit push` uses the local
 remote-tracking ref as its **CAS lease**: a default (current-branch)
 push writes the remote `refs/heads/<branch>` with a `Match(tracked)`
 condition (or `Missing` for a first push), so a remote that has moved
 past the last-seen tip rejects the update as non-fast-forward. On a
-successful push, mkit advances the local `refs/remotes/<remote>/<branch>`
+successful push, kit advances the local `refs/remotes/<remote>/<branch>`
 to the pushed tip. `--force-with-lease` keeps this lease; `--force`
 drops to an unconditional write.
 
@@ -142,24 +142,24 @@ Plus these rejections:
   `HEAD` pointer; for example `HEAD` and `refs/heads/HEAD` are rejected).
 - Longer than **512 bytes** → invalid. A ref name is ASCII, so this is
   also its length in characters. The bound keeps every ref inside a
-  server's storage key (`mkit-server` `store::keys`); the constant is
-  `mkit_core::refs::MAX_REF_NAME_BYTES`. A transport server MUST refuse
+  server's storage key (`kit-server` `store::keys`); the constant is
+  `kit_core::refs::MAX_REF_NAME_BYTES`. A transport server MUST refuse
   a longer name on a read or a write with an explicit "ref name too
   long" error, never as absent or a generic failure, and a client
-  SHOULD refuse it before sending (`mkit_rpc::MAX_REF_NAME`, the same
+  SHOULD refuse it before sending (`kit_rpc::MAX_REF_NAME`, the same
   value). A server's listing skips a stored ref whose name is longer
   (written before this bound existed) and logs it; it does not fail the
   listing. Locally, a new branch, tag or remote-tracking ref over the
   bound is refused with a message naming the limit, while an existing
   one stays readable, listable and deletable (and can be renamed with
-  `mkit branch -m`), so a repository with such a ref keeps working.
+  `kit branch -m`), so a repository with such a ref keeps working.
 
 *Informative: derived local bounds.* A local branch or tag name is
 short; its wire name adds a prefix. A push of branch `b` writes both
 `refs/heads/<b>` and `refs/kit/packmap/<b>`, so a new branch name is at
 most 512 − 17 = **495 bytes** (`MAX_BRANCH_NAME_BYTES`); a tag's wire
 name is `refs/tags/<t>`, so a new tag name is at most 512 − 10 = **502
-bytes** (`MAX_TAG_NAME_BYTES`). `mkit` refuses to create a longer one and
+bytes** (`MAX_TAG_NAME_BYTES`). `kit` refuses to create a longer one and
 says which bound applies. A branch created before these bounds, up to
 512 bytes, can still be committed to, renamed and deleted locally, but a
 push of it fails with "ref name too long", naming the wire name.
@@ -170,7 +170,7 @@ no length limit, and the ssh server accepted names of any length.
 
 **Notable divergences from Git ref naming:**
 
-- No `@` allowed (Git permits `@{reflog}`-style refs; mkit does not).
+- No `@` allowed (Git permits `@{reflog}`-style refs; kit does not).
 - No `+`, `:`, `~`, `^`, `?`, `*`, `[` allowed.
 - No Unicode in ref names.
 - Case-sensitive: `main` and `Main` are distinct.
@@ -188,8 +188,8 @@ or canonicalize.
 ## 4. Prefix semantics for `listRefs`
 
 This section is normative for **transport** implementations of
-`listRefs(prefix)`. The local `mkit-core` API (see `refs.rs`) exposes
-the simpler `list_refs(mkit_dir)`/`list_tags(mkit_dir)` which return
+`listRefs(prefix)`. The local `kit-core` API (see `refs.rs`) exposes
+the simpler `list_refs(kit_dir)`/`list_tags(kit_dir)` which return
 every ref under `refs/heads/` or `refs/tags/` respectively &mdash; the
 prefix has been pre-applied implicitly by the function choice. The
 algorithm below is what a transport server / a future
@@ -252,7 +252,7 @@ Callers MUST NOT assume `prefix` includes a trailing `/`; the transport
 normalizes either form.
 
 The spec pins the behavior above; transports MUST conform or fail
-conformance tests. `mkit-transport-memory` and `mkit-transport-s3`'s
+conformance tests. `kit-transport-memory` and `kit-transport-s3`'s
 `list_refs` are pinned against this exact rule by the regression test
 `list_refs_prefix_respects_path_component_boundary` (one per crate).
 
@@ -305,13 +305,13 @@ not exist or contains a different hash → `RefConflict`.
 | http      | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<hex-hash>"`                            | Worker-flavored server. Generic S3 and nginx do NOT conform. |
 | ssh       | atomic      | atomic (`OP_WRITE_REF_IF_ABSENT` path via condition byte) | atomic (`CONDITION_MATCH` with 32-byte expected hash)          | Server enforces CAS; client trusts `STATUS_ERROR`. |
 
-*memory CAS:* `mkit-transport-memory`'s `update_ref` reads the current
+*memory CAS:* `kit-transport-memory`'s `update_ref` reads the current
 value, checks the condition and writes the new value while holding the
 instance's single `Mutex`, so all three conditions are atomic for every
 thread sharing that instance. It provides no cross-process atomicity and
 needs none: the memory transport is an in-process test transport. The
 file transport's `.match` is atomic across processes via the OS lock
-above. As of, the local `mkit-core`
+above. As of, the local `kit-core`
 `refs::cas_write` helper used by commands that mutate refs directly on
 disk (without going through the file transport) is also atomic across
 processes: every write condition takes a dedicated `<common_dir>/refs-<ref>.lock`
@@ -340,11 +340,11 @@ of itself &mdash; it does not, on its own, coordinate against a `commit`,
 `worktrees.lock`/`worktree.lock`/`refs-history-<branch>.lock`/
 `refs-<ref>.lock` path. **There is no
 rule that closes this gap** &mdash; see SPEC-CONCURRENCY §3.1, which documents
-it as a real, currently unresolved coordination gap, and states mkit's
+it as a real, currently unresolved coordination gap, and states kit's
 supported deployment shape (a served root a worktree-owning process
 does not also mutate directly) rather than a locking fix. The server
 added detection (a stderr warning when a local command runs against a
-root a live `mkit serve` holds `serve.lock` on) without closing the
+root a live `kit serve` holds `serve.lock` on) without closing the
 gap &mdash; see SPEC-CONCURRENCY §3.1 for exactly what is and is not
 covered.
 
@@ -371,7 +371,7 @@ The `.match(H)` condition is serialized differently by transport:
   in-process, under the file transport's OS lock or the memory
   transport's `Mutex` (§5.1).
 
-Mkit v1 **does not** unify these encodings. The transport spec
+Kit v1 **does not** unify these encodings. The transport spec
 explicitly states which encoding to produce. Clients and servers for a
 single transport MUST agree on the transport's encoding; cross-transport
 compatibility is not in scope.
@@ -436,7 +436,7 @@ writes can survive a later error; the host owns abandonment and publication.
 The filesystem CLI retains its existing budgets and operation-state semantics.
 
 Resumable history operations persist their state under `.kit/` using
-Git-compatible names plus one documented mkit sidecar. These are not
+Git-compatible names plus one documented kit sidecar. These are not
 refs (they are not listed by `listRefs` and are not part of the ref
 namespace); they are operation scratch state consumed by
 `--continue`/`--abort`/`--skip`.
@@ -486,7 +486,7 @@ base/ours/theirs material lives only in this sidecar.
 5. **`.match` on file transport, exactly-one-winner**: two concurrent
    `.match` writers to the same ref &mdash; exactly one succeeds, the other
    returns `RefConflict` and the ref is left at the winner's value.
-   Enforced by the OS exclusive lock (§5.1); the local `mkit-core`
+   Enforced by the OS exclusive lock (§5.1); the local `kit-core`
    `refs::cas_write` helper (not the file transport) has the same
    exactly-one-winner property, proven by
    `cas_match_race_never_loses_an_update_across_uncoordinated_callers`.
@@ -522,6 +522,6 @@ The memory transport's CAS is atomic only among threads sharing one
 `MemoryTransport` instance; it gives no guarantee across processes or
 across separate instances, which never share state (§5.1). The file
 transport's own `.match` is race-free across processes (OS exclusive
-lock), and the local `mkit-core` `refs::cas_write` helper used by
+lock), and the local `kit-core` `refs::cas_write` helper used by
 commands that write refs directly rather than through the file transport
 is, as of, likewise serialized under a per-ref lock (§5.1).

@@ -1,0 +1,104 @@
+//! Integration tests for `kit serve` path-containment (finding A1).
+//!
+//! These are driven by spawning the real `kit` binary so we can set
+//! `KIT_SERVE_ROOT` in the child environment without mutating the
+//! parent process state. The parent crate has `#![forbid(unsafe_code)]`,
+//! so `std::env::set_var` (unsafe since edition 2024) is not available
+//! in-process tests.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
+
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+fn kit_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_kit")
+}
+
+/// A valid Hello frame the server expects before entering the loop.
+/// Encoded as a length-prefixed buffa `SshFrame` per
+/// `kit-rpc/proto/kit/rpc/v1/ssh/ssh.proto`.
+fn encode_hello_frame() -> Vec<u8> {
+    use buffa::Message;
+    use kit_rpc::kit::rpc::v1::ProtocolVersion;
+    use kit_rpc::kit::rpc::v1::ssh::{Hello, SshFrame, ssh_frame};
+    let frame = SshFrame {
+        body: Some(ssh_frame::Body::Hello(Box::new(Hello {
+            proto: Some(ProtocolVersion::ProtocolVersion1.into()),
+            client_id: Some("cli/test".into()),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let body = frame.encode_to_vec();
+    let mut out = Vec::with_capacity(4 + body.len());
+    out.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+fn run_serve(env: &[(&str, &Path)], arg: &str) -> std::process::ExitStatus {
+    let mut cmd = Command::new(kit_bin());
+    cmd.arg("serve").arg(arg);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn kit serve");
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(&encode_hello_frame());
+        drop(stdin);
+    }
+    let out = child.wait_with_output().expect("wait kit serve");
+    if !out.stderr.is_empty() {
+        eprintln!("kit serve stderr: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    out.status
+}
+
+#[test]
+fn serve_rejects_path_outside_serve_root() {
+    let root_td = tempfile::tempdir().unwrap();
+    let outside_td = tempfile::tempdir().unwrap();
+    fs::create_dir_all(outside_td.path().join(".kit")).unwrap();
+
+    let status = run_serve(
+        &[("KIT_SERVE_ROOT", root_td.path())],
+        outside_td.path().to_str().unwrap(),
+    );
+    // exit::NOPERM = 77 (sysexits EX_NOPERM).
+    assert_eq!(status.code(), Some(77));
+}
+
+#[test]
+fn serve_accepts_path_inside_serve_root() {
+    let root_td = tempfile::tempdir().unwrap();
+    let inside = root_td.path().join("repo");
+    fs::create_dir_all(inside.join(".kit")).unwrap();
+
+    let status = run_serve(
+        &[("KIT_SERVE_ROOT", root_td.path())],
+        inside.to_str().unwrap(),
+    );
+    // Handshake succeeds, client closes stdin → server exits OK(0).
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn serve_rejects_nonrepo_directory() {
+    let td = tempfile::tempdir().unwrap();
+    // No .kit/ subdir.
+    let status = run_serve(&[], td.path().to_str().unwrap());
+    // exit::DATAERR = 65.
+    assert_eq!(status.code(), Some(65));
+}
+
+#[test]
+fn serve_rejects_missing_path() {
+    let status = run_serve(&[], "/definitely/does/not/exist/xyzzy/kit-serve");
+    // exit::NOINPUT = 66.
+    assert_eq!(status.code(), Some(66));
+}

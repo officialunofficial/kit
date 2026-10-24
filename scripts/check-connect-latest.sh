@@ -7,7 +7,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root/rust"
 export CARGO_BUILD_JOBS=3 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
 cargo_cmd=(cargo)
-if [ "${MKIT_CARGO_CACHED:-0}" = 1 ]; then
+if [ "${KIT_CARGO_CACHED:-0}" = 1 ]; then
   cargo_cmd=(just --justfile "$root/justfile" --working-directory "$root" cargo-cached)
 fi
 
@@ -22,10 +22,10 @@ for package in lock['package']:
         print(f"{package['name']} {package['version']}")
 VERSIONS
 
-crates=(-p mkit-rpc -p mkit-transport-connect -p mkit-client)
-features='mkit-rpc/transport,mkit-rpc/transport-messages'
+crates=(-p kit-rpc -p kit-transport-connect -p kit-client)
+features='kit-rpc/transport,kit-rpc/transport-messages'
 "${cargo_cmd[@]}" build --locked "${crates[@]}" --features "$features"
 "${cargo_cmd[@]}" nextest run --locked "${crates[@]}" --features "$features" -j 3
-# Mirror both mkit-client wasm builds in rust.yml.
-"${cargo_cmd[@]}" build --locked -p mkit-client --target wasm32-unknown-unknown
-"${cargo_cmd[@]}" build --locked -p mkit-client --no-default-features --target wasm32-unknown-unknown
+# Mirror both kit-client wasm builds in rust.yml.
+"${cargo_cmd[@]}" build --locked -p kit-client --target wasm32-unknown-unknown
+"${cargo_cmd[@]}" build --locked -p kit-client --no-default-features --target wasm32-unknown-unknown

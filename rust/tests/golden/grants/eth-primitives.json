@@ -73,7 +73,7 @@
       "statement": "kit-write-grant:v1\n0x8ba1f109551bd432803012645ac136ddd64dba72\n0x8ba1f109551bd432803012645ac136ddd64dba72/website\n3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\nread,write\nhttps://git.example.com,https://git.example.org\nrefs/heads/main=cu;refs/heads/wip/*=cufd\n0\n1790000000000\n1792592000000\n9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
     }
   ],
-  "generator": "MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_eth",
+  "generator": "KIT_WRITE_GOLDEN=1 cargo test -p kit-attest --features grants --test golden_eth",
   "high_s": [
     {
       "expected": "HighS",
@@ -109,45 +109,45 @@
   ],
   "p256_der": [
     {
-      "der": "3046022100907b70536a3d9eb8726087f33ea2f8ffb76bc9ed5caa4aec4f60a857687f6ab8022100a7ce9054d0b2be95d8c96be889576d81de875aac7cb648ffb197cd7e68a813a4",
-      "message": "mkit eth-primitives p256 der vector",
+      "der": "3046022100b4ff65c2a44592fa97d110b78af95369558f23493c4d0846fda53d4c8a4834ce022100e42cd0f598a432db0cc56907020560d4d51fe84bef6fc5222b2ec642ca0e63dd",
+      "message": "kit eth-primitives p256 der vector",
       "name": "high-s",
       "public_key": "04ee643e013ac6e307cdc296c1b6214810a8f1bd4b0c67862b6b3c14672b0aa252ae431632d8194b34e257b08cd0414ff123a0dc11155ee384b801b7fc180c1bb7",
-      "raw_high_s": "907b70536a3d9eb8726087f33ea2f8ffb76bc9ed5caa4aec4f60a857687f6ab8a7ce9054d0b2be95d8c96be889576d81de875aac7cb648ffb197cd7e68a813a4",
-      "raw_low_s": "907b70536a3d9eb8726087f33ea2f8ffb76bc9ed5caa4aec4f60a857687f6ab858316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad"
+      "raw_high_s": "b4ff65c2a44592fa97d110b78af95369558f23493c4d0846fda53d4c8a4834cee42cd0f598a432db0cc56907020560d4d51fe84bef6fc5222b2ec642ca0e63dd",
+      "raw_low_s": "b4ff65c2a44592fa97d110b78af95369558f23493c4d0846fda53d4c8a4834ce1bd32f09675bcd25f33a96f8fdfa9f2ae7c71261b7a7d962c88b04803254c174"
     },
     {
-      "der": "3046022100907b70536a3d9eb8726087f33ea2f8ffb76bc9ed5caa4aec4f60a857687f6ab802210058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad",
+      "der": "3046022100b4ff65c2a44592fa97d110b78af95369558f23493c4d0846fda53d4c8a4834ce0221001bd32f09675bcd25f33a96f8fdfa9f2ae7c71261b7a7d962c88b04803254c174",
       "expected": "InvalidDer",
       "name": "non-minimal-integer"
     },
     {
-      "der": "3045022100907b70536a3d9eb8726087f33ea2f8ffb76bc9ed5caa4aec4f60a857687f6ab8022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad00",
+      "der": "3045022100b4ff65c2a44592fa97d110b78af95369558f23493c4d0846fda53d4c8a4834ce02201bd32f09675bcd25f33a96f8fdfa9f2ae7c71261b7a7d962c88b04803254c17400",
       "expected": "InvalidDer",
       "name": "trailing-byte"
     },
     {
-      "der": "3025020180022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad",
+      "der": "302502018002201bd32f09675bcd25f33a96f8fdfa9f2ae7c71261b7a7d962c88b04803254c174",
       "expected": "InvalidDer",
       "name": "negative-integer"
     },
     {
-      "der": "3045022101907b70536a3d9eb8726087f33ea2f8ffb76bc9ed5caa4aec4f60a857687f6ab8022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad",
+      "der": "3045022101b4ff65c2a44592fa97d110b78af95369558f23493c4d0846fda53d4c8a4834ce02201bd32f09675bcd25f33a96f8fdfa9f2ae7c71261b7a7d962c88b04803254c174",
       "expected": "InvalidDer",
       "name": "33-byte-integer"
     },
     {
-      "der": "3025020100022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad",
+      "der": "302502010002201bd32f09675bcd25f33a96f8fdfa9f2ae7c71261b7a7d962c88b04803254c174",
       "expected": "InvalidDer",
       "name": "r-zero"
     },
     {
-      "der": "3045022100ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad",
+      "der": "3045022100ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc63255102201bd32f09675bcd25f33a96f8fdfa9f2ae7c71261b7a7d962c88b04803254c174",
       "expected": "InvalidDer",
       "name": "r-equals-n"
     },
     {
-      "der": "308145022100907b70536a3d9eb8726087f33ea2f8ffb76bc9ed5caa4aec4f60a857687f6ab8022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad",
+      "der": "308145022100b4ff65c2a44592fa97d110b78af95369558f23493c4d0846fda53d4c8a4834ce02201bd32f09675bcd25f33a96f8fdfa9f2ae7c71261b7a7d962c88b04803254c174",
       "expected": "InvalidDer",
       "name": "long-form-length"
     }

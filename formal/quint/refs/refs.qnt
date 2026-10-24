@@ -1,5 +1,5 @@
 // -*- mode: Bluespec; -*-
-// Ref CAS and lock-order model for mkit (ref concurrency model).
+// Ref CAS and lock-order model for kit (ref concurrency model).
 //
 // Models (SPEC-REFS v3, SPEC-CONCURRENCY):
 //   - SPEC-REFS §5 updateRef conditions Any / Missing / Match(H) and deletes
@@ -7,17 +7,17 @@
 //   - SPEC-REFS §5.1 atomicity matrix for the three in-repo lock domains:
 //       local : direct on-disk mutation under `refs-<ref>.lock` (refs.rs RefMutation)
 //       file  : file transport under `<root>/.kit/refs/.lock` (RefLock). This
-//               is also the domain of every SERVER of a `.kit` root: `mkit
-//               serve` (ssh-frame) and a `mkit-server` fs-layout deployment
+//               is also the domain of every SERVER of a `.kit` root: `kit
+//               serve` (ssh-frame) and a `kit-server` fs-layout deployment
 //               write refs through `FileTransport` (`FsLayoutStore::apply` ->
 //               `FileTransport::with_ref_lock`), so a `file` op below stands
-//               for a CAS from `mkit serve`, `mkit-server` or a direct
-//               `kit+file://` push alike. (a SQLite-metadata `mkit-server` keeps
+//               for a CAS from `kit serve`, `kit-server` or a direct
+//               `kit+file://` push alike. (a SQLite-metadata `kit-server` keeps
 //               refs in SQLite; the root marker makes FileTransport refuse
 //               ref writes there, so that root has no on-disk ref domain; not
 //               modelled.)
 //       mem   : in-process memory transport. The code
-//               (mkit-transport-memory `update_ref`) holds its `Mutex` across
+//               (kit-transport-memory `update_ref`) holds its `Mutex` across
 //               read-check-write, so `.match` is ATOMIC (in-process only);
 //               SPEC-REFS §5.1 now says so ("atomic*: the read-check-write
 //               runs under the instance's one Mutex"; the v1 text said "NOT
@@ -28,8 +28,8 @@
 //     and in-class canonical order (main tree first, then ids; refs lexicographic).
 //   - SPEC-CONCURRENCY §3.2 recovery-log record/expire synchronisation by
 //     lock-superset containment (no dedicated lock).
-//   - SPEC-CONCURRENCY §3.1: the file-transport RefLock (hence `mkit serve` and
-//     `mkit-server`) is a separate domain that writes the SAME ref files as the
+//   - SPEC-CONCURRENCY §3.1: the file-transport RefLock (hence `kit serve` and
+//     `kit-server`) is a separate domain that writes the SAME ref files as the
 //     local chain; the cross-domain race is a documented, unresolved gap
 //     (witnessed below, not a bug). serve.lock / server.lock, the startup
 //     upload sweep and the served-name rule are in serve.qnt.
@@ -93,7 +93,7 @@ module refs {
   //               (checkout -b/-B: checkout.rs takes the registry lock, then
   //               its tree's lock, then write_ref_recording_history)
   //   gc        : worktrees.lock ≺ worktree.lock(0) ≺ worktree.lock(1), then recovery::expire
-  //   file      : file-transport RefLock only (mkit serve, mkit-server
+  //   file      : file-transport RefLock only (kit serve, kit-server
   //               fs-layout, kit+file:// push)
   //   mem       : memory transport, its in-process Mutex only
   // `del` = delete instead of write (branch only): Any = delete_ref,

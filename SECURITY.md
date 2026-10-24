@@ -5,7 +5,7 @@
 **Please do not file public GitHub issues for security vulnerabilities.**
 
 Preferred: open a private report through GitHub Security Advisories at
-<https://github.com/officialunofficial/mkit/security/advisories/new>.
+<https://github.com/officialunofficial/kit/security/advisories/new>.
 This routes the report to the maintainers privately, gives us a place to
 collaborate on a fix, and produces a CVE on request.
 
@@ -60,8 +60,8 @@ config. Briefly:
   written atomically (tmp plus fsync plus rename plus parent fsync), and
   owner-checked against the running euid. Parent directory is
   enforced `0700`.
-- **Trust roots scope-corrected.** `mkit verify-attest` defaults to
-  `$XDG_CONFIG_HOME/mkit/trust-roots.toml`, not a repo-local path,
+- **Trust roots scope-corrected.** `kit verify-attest` defaults to
+  `$XDG_CONFIG_HOME/kit/trust-roots.toml`, not a repo-local path,
   so a hostile clone cannot choose its own verifier.
 
 Full description, attacker models, and verification gates in
@@ -92,10 +92,10 @@ License Exception TSU). A §740.13(e) notification has been provided to BIS
 
 In scope:
 
-- The `mkit` binary and the Rust workspace under `rust/crates/` &mdash;
-  including the library crates published to crates.io (`mkit-core`,
-  `mkit-rpc`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, `mkit-sync`, the
-  `mkit-transport-*` crates).
+- The `kit` binary and the Rust workspace under `rust/crates/` &mdash;
+  including the library crates published to crates.io (`kit-core`,
+  `kit-rpc`, `kit-attest`, `kit-keystore`, `kit-git-bridge`, `kit-sync`, the
+  `kit-transport-*` crates).
 - The reference external signers under `contrib/signers/`.
 - Release pipeline integrity (signing, SBOM, reproducibility claims).
 - On-disk format parsers (v1 format documented in `docs/specs/SPEC-*.md`).

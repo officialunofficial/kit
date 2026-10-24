@@ -7,16 +7,16 @@
 # from scripts/release-smoke.sh, which additionally verifies a GitHub
 # Release ARCHIVE's cosign signature, SHA256SUMS entry, and bundled man
 # page/completions — those don't apply to a channel that installs just
-# the binary (cargo install, npm has no mkit binary at all, etc.).
+# the binary (cargo install, npm has no kit binary at all, etc.).
 #
-# Usage: scripts/basic-flow-smoke.sh <path-to-mkit-binary> <expected-version>
+# Usage: scripts/basic-flow-smoke.sh <path-to-kit-binary> <expected-version>
 
 set -euo pipefail
 
 bin="${1:-}"
 version="${2:-}"
 if [ -z "$bin" ] || [ -z "$version" ]; then
-  echo "usage: $0 <path-to-mkit-binary> <expected-version>" >&2
+  echo "usage: $0 <path-to-kit-binary> <expected-version>" >&2
   exit 2
 fi
 if [ ! -x "$bin" ]; then
@@ -25,7 +25,7 @@ if [ ! -x "$bin" ]; then
 fi
 
 out="$("$bin" version)"
-expected="mkit ${version}"
+expected="kit ${version}"
 if [ "$out" != "$expected" ]; then
   echo "basic-flow-smoke: version contract violated: got [$out], expected [$expected]" >&2
   exit 1

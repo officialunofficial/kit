@@ -1,4 +1,4 @@
-# clippy configuration for the mkit workspace.
+# clippy configuration for the kit workspace.
 
 msrv = "1.95"
 

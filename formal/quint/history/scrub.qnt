@@ -4,7 +4,7 @@
 // Models docs/specs/SPEC-HISTORY-PROOF.md §4.5 (scrub v2, generation-bound,
 // with the corrected 65-publish lap and the lost-write caveat) as implemented by
 // `decide_chain` / `advance` / `ScrubState` in
-// rust/crates/mkit-core/src/history/ancestry.rs, for one branch. Only the
+// rust/crates/kit-core/src/history/ancestry.rs, for one branch. Only the
 // verification SCHEDULE is modelled: the published chain is identical on
 // every path (history.qnt covers publication and recovery). Constants are
 // scaled down (see README.md); `realLap` below checks the real constants.

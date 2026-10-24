@@ -8,7 +8,7 @@ audience: implementers of kit.transport.v1 servers that restrict writes or serve
 # SPEC-WRITE-GRANTS &mdash; namespace owners delegate repository writes and reads
 
 Status: **Draft**. The grant, epoch and visibility statement codecs and
-the header encoding (`mkit_attest::grant`, feature `grants`), the
+the header encoding (`kit_attest::grant`, feature `grants`), the
 owner-scheme primitives of §4 (Keccak-256, the EIP-191 digest, secp256k1
 recovery, address derivation and the §4.4 low-`s` rules), all three
 owner schemes (`ed25519`, `secp256k1-eip191` and `webauthn-p256`, with
@@ -1160,7 +1160,7 @@ the workspace grant separator `kit-workspace-grant:v1`.
   crate), server enforcement, and the proto for `GetGrantEpoch`,
   `SetGrantEpoch`, `SetRepoVisibility` and `IssueObjectUrl`. They land
   with the grants implementation.
-- The CLI: `mkit grant create`, `list` and `revoke`, and `mkit epoch`.
+- The CLI: `kit grant create`, `list` and `revoke`, and `kit epoch`.
   Informative: the client grant store lives under the user config
   directory and is never repository-scoped, like the other credential
   and signing keys of [SPEC-CONFIG-SECURITY](SPEC-CONFIG-SECURITY.md).

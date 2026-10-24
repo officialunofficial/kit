@@ -2,12 +2,12 @@
 //
 // kit.transport.v1 — the canonical Connect remote protocol.
 //
-// TransportService is the single Connect service every remote mkit
-// deployment target implements. `mkit-server` and the native (non-wasm)
+// TransportService is the single Connect service every remote kit
+// deployment target implements. `kit-server` and the native (non-wasm)
 // CLI client compile against this one proto, with no per-target dialect. It maps
 // one-to-one onto the verbs of the
-// `Transport` trait (rust/crates/mkit-core/src/protocol.rs), the same
-// trait `mkit-transport-s3` and `-ssh` already implement.
+// `Transport` trait (rust/crates/kit-core/src/protocol.rs), the same
+// trait `kit-transport-s3` and `-ssh` already implement.
 // See docs/specs/SPEC-TRANSPORT-CONNECT.md for the full normative
 // contract (error-code mapping, CAS semantics, streaming design,
 // deployment-target consumption).
@@ -24,9 +24,9 @@
 // `kit/common/v1/refs.proto` once the buf workspace exists
 // to import across module boundaries.
 //
-// The service implementation is `mkit-server`'s `connect` binding over
+// The service implementation is `kit-server`'s `connect` binding over
 // its pipeline; the
-// client is `mkit-transport-connect`'s `ConnectTransport`.
+// client is `kit-transport-connect`'s `ConnectTransport`.
 
 edition = "2023";
 
@@ -34,8 +34,8 @@ package kit.transport.v1;
 
 // ----------------------------------------------------------------------------
 // CAS semantics for UpdateRef / AdvanceRefs. Wire numbers are load-bearing
-// and match kit.rpc.v1.ssh.RefExpectation (rust/crates/mkit-rpc/proto/
-// ssh.proto) and kit.repo.v1.RefExpectation (apps/repo-worker/proto/mkit/
+// and match kit.rpc.v1.ssh.RefExpectation (rust/crates/kit-rpc/proto/
+// ssh.proto) and kit.repo.v1.RefExpectation (apps/repo-worker/proto/kit/
 // repo/v1/repo.proto) byte-for-byte — do NOT renumber; new variants append.
 
 enum RefExpectation {
@@ -64,7 +64,7 @@ message RefEntry {
 }
 
 // Outcome of a two-ref AdvanceRefs call. Mirrors
-// mkit_core::protocol::AdvanceOutcome exactly (three variants, no
+// kit_core::protocol::AdvanceOutcome exactly (three variants, no
 // zero/UNSPECIFIED — a call either completes or returns a Connect error,
 // so there is no "unset" outcome on the wire).
 enum AdvanceOutcome {
@@ -103,7 +103,7 @@ message PackChunk {
 // `download_blob` / `write_ref` are NOT separate RPCs: they are
 // Transport-trait-level default methods that delegate to UploadPack /
 // DownloadPack / UpdateRef(ANY) before any transport is invoked (see
-// rust/crates/mkit-core/src/protocol.rs), so the wire never distinguishes
+// rust/crates/kit-core/src/protocol.rs), so the wire never distinguishes
 // "pack" from "auxiliary blob", or "unconditional write" from "CAS write
 // with expectation=ANY".
 
@@ -340,7 +340,7 @@ message DownloadPackHeader {
 
 // Alternative to header/chunks for an opted-in download (STC §6.2).
 message DownloadPackLocation {
-  // HTTPS URL for exactly the requested pack; fetch without mkit credentials.
+  // HTTPS URL for exactly the requested pack; fetch without kit credentials.
   string url = 1;
   // Expiry as Unix time in milliseconds, within the advertised lifetime bound.
   int64 expires_at_ms = 2;
@@ -562,7 +562,7 @@ message AdmissionChallenge {
 // One opaque admission challenge (SPEC-TRANSPORT-CONNECT §5.1).
 message Challenge {
   string scheme = 1; // lowercase token: [a-z0-9][a-z0-9.-]{0,63}
-  string value = 2;  // opaque to mkit; at most 8,192 bytes
+  string value = 2;  // opaque to kit; at most 8,192 bytes
 }
 
 // Detail on an `unavailable` AdvanceRefs whose consumed pack is still under

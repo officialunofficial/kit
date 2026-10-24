@@ -469,8 +469,8 @@ Negative span sidecars may describe byte-range copy and patch recipes over
 the accepted span containers; the check-mode test reconstructs the body and
 checks its pinned size and digest before applying the reference verifier.
 The independent test-local MKDS encoder and reference verifier are in
-[`golden_http_objects.rs`](../../rust/crates/mkit-core/tests/golden_http_objects.rs).
-`MKIT_WRITE_GOLDEN=1` regenerates the artifacts; check mode reads committed
+[`golden_http_objects.rs`](../../rust/crates/kit-core/tests/golden_http_objects.rs).
+`KIT_WRITE_GOLDEN=1` regenerates the artifacts; check mode reads committed
 vectors. Reject sidecars name the exact span rejection reason.
 
 An HTTP 451 body MUST be the canonical protobuf JSON of the newest
@@ -515,7 +515,7 @@ separate work.
 
 ## Conformance coverage
 
-The portable file cases in `mkit-server-conformance` exercise transport publication
+The portable file cases in `kit-server-conformance` exercise transport publication
 and exact object/ref HTTP bytes, empty GET/HEAD/range behavior, 100-directory
 lookup and byte-distinct NFC/NFD and case-only names. `files.path_limits` pins
 1024 accepted decoded bytes and rejection at 1025 and at a 256-byte component.

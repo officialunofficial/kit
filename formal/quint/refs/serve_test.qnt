@@ -13,7 +13,7 @@ module serve_test {
       serverSkipsServe: f == "serverSkipsServe", serverLockShared: f == "serverLockShared",
       ftSlow: f == "ftSlow" }
 
-  // A lone `mkit serve` gets serve.lock exclusively, sweeps the stale
+  // A lone `kit serve` gets serve.lock exclusively, sweeps the stale
   // orphan (not the fresh one), drops it and serves under the shared lock.
   run loneServeSweepsTest =
     initWith(Set("fresh", "stale"))
@@ -22,9 +22,9 @@ module serve_test {
       .then(sweep("s1")).then(drop("s1")).then(takeShared("s1"))
       .expect(and { Safety, orphans == Set("fresh"), sweptOrphan, serveSh == Set("s1") })
 
-  // The race the exclusive hold closes: `mkit-server` is up with a stalled
+  // The race the exclusive hold closes: `kit-server` is up with a stalled
   // streaming upload (its temp file is older than the age bound); a new
-  // `mkit serve` finds serve.lock busy and skips the sweep.
+  // `kit serve` finds serve.lock busy and skips the sweep.
   run stalledServerUploadSurvivesTest =
     initWith(Set("stale"))
       .then(startServer("s1")).then(takeShared("s1"))
@@ -37,7 +37,7 @@ module serve_test {
       .then(finishUpload("s1"))
       .expect(Safety)
 
-  // A starting server blocks on the shared lock while a `mkit serve` sweeps.
+  // A starting server blocks on the shared lock while a `kit serve` sweeps.
   run serverWaitsForSweepTest =
     initWith(Set())
       .then(startServe("s1"))
@@ -46,16 +46,16 @@ module serve_test {
       .then(sweep("s1")).then(drop("s1")).then(takeShared("s2")).then(takeShared("s1"))
       .expect(and { Safety, serveSh == Set("s1", "s2"), serverLock == Set("s2") })
 
-  // server.lock: a second mkit-server cannot start while one is live, and
+  // server.lock: a second kit-server cannot start while one is live, and
   // can once it stops (crash releases the kernel lock).
-  run oneMkitServerTest =
+  run oneKitServerTest =
     initWith(Set())
       .then(startServer("s1"))
       .expect(serverLock == Set("s1"))         // startServer(s2) disabled: server.lock held
       .then(takeShared("s1")).then(stop("s1")).then(startServer("s2"))
       .expect(and { Safety, serverLock == Set("s2") })
 
-  // A crash mid-upload leaves an orphan; the next lone `mkit serve` sweeps
+  // A crash mid-upload leaves an orphan; the next lone `kit serve` sweeps
   // it once stale.
   run crashedUploadSweptLaterTest =
     initWith(Set())
@@ -90,7 +90,7 @@ module serve_test {
       .then(startServer("s1")).then(takeShared("s1"))
       .expect(and { Safety, not(WitnessUndetectedLateServer) })
 
-  // MUTANT sweepUnlocked: a starting `mkit serve` sweeps although mkit-server
+  // MUTANT sweepUnlocked: a starting `kit serve` sweeps although kit-server
   // is up with a stalled upload, deleting its live temp file.
   run mutantSweepUnlockedTest =
     initFixed(withF("sweepUnlocked"), Set())
@@ -101,8 +101,8 @@ module serve_test {
       .then(sweep("s2"))
       .expect(and { not(NoLiveUploadSwept), upload.get("s1") == "lost" })
 
-  // MUTANT serverSkipsServe: mkit-server up without serve.lock -> a
-  // starting `mkit serve` gets it exclusively and sweeps the stalled upload;
+  // MUTANT serverSkipsServe: kit-server up without serve.lock -> a
+  // starting `kit serve` gets it exclusively and sweeps the stalled upload;
   // a local probe misses the server.
   run mutantServerSkipsServeTest =
     initFixed(withF("serverSkipsServe"), Set())
@@ -114,10 +114,10 @@ module serve_test {
       .then(startServe("s2")).then(sweep("s2"))
       .expect(not(NoLiveUploadSwept))
 
-  // MUTANT serverLockShared: two mkit-servers on one root.
+  // MUTANT serverLockShared: two kit-servers on one root.
   run mutantServerLockSharedTest =
     initFixed(withF("serverLockShared"), Set()).then(startServer("s1")).then(startServer("s2"))
-      .expect(not(OneMkitServer))
+      .expect(not(OneKitServer))
 
   // MUTANT sweepUnderShared: sweeping under the SHARED lock does not exclude
   // another server's stalled upload.
@@ -131,7 +131,7 @@ module serve_test {
       .expect(not(NoLiveUploadSwept))
 
   // ASSUMPTION WITNESS: a FileTransport write outliving the 1 h age bound
-  // (nothing locks it) would be swept by a lone `mkit serve`.
+  // (nothing locks it) would be swept by a lone `kit serve`.
   run ftSlowWitnessTest =
     initFixed(withF("ftSlow"), Set())
       .then(beginUpload(FT)).then(age(FT))

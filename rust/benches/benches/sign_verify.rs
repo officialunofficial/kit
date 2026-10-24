@@ -1,4 +1,4 @@
-//! Sign + verify throughput across the three algorithms mkit ships:
+//! Sign + verify throughput across the three algorithms kit ships:
 //! Ed25519 (RFC 8032), secp256k1 (Bitcoin curve), P-256 (NIST). Two
 //! charts per category — one for sign ops/s, one for verify ops/s —
 //! mirroring the buffa "encode vs decode" split.
@@ -7,7 +7,7 @@
 //! DSSE PAE wrapping an in-toto v1 statement; see SPEC-ATTESTATIONS).
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit, time_one};
+use kit_benches::{Sample, Unit, time_one};
 
 const PAYLOAD_SIZE: usize = 200;
 
@@ -143,7 +143,7 @@ fn bench_sign_verify(c: &mut Criterion) {
         });
     }
 
-    mkit_benches::write_summary("sign_verify", &samples);
+    kit_benches::write_summary("sign_verify", &samples);
 }
 
 criterion_group!(benches, bench_sign_verify);

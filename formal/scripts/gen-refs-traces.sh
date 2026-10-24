@@ -8,8 +8,8 @@
 # Model: formal/quint/refs/refs_mbt.qnt (instances refs_mbt2 / refs_mbt3 of
 # refs.qnt with NO_FAULTS and the linearizable scheduler `stepLin`; see that
 # file's header). Replayed by
-#   rust/crates/mkit-formal-conformance/tests/formal_refs_conformance.rs
-# (`cargo test -p mkit-formal-conformance`), which runs offline on the
+#   rust/crates/kit-formal-conformance/tests/formal_refs_conformance.rs
+# (`cargo test -p kit-formal-conformance`), which runs offline on the
 # checked-in fixtures; quint is needed only to regenerate them.
 #
 # Each fixture is the ITF trace `quint run --mbt --out-itf` wrote for one
@@ -30,7 +30,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 MODEL_DIR=$REPO/formal/quint/refs
-FIXTURES=${FIXTURES:-$REPO/rust/crates/mkit-formal-conformance/tests/fixtures/formal_refs}
+FIXTURES=${FIXTURES:-$REPO/rust/crates/kit-formal-conformance/tests/fixtures/formal_refs}
 STEPS=${STEPS:-60}
 SAMPLES=${SAMPLES:-2000}
 # instance:seed. Seeds were picked (greedy set cover over seeds 0x1..0x28 of

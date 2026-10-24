@@ -1,0 +1,31 @@
+[package]
+name = "kit-git-bridge"
+description = "Deterministic kit↔git bridge: export translation (SPEC-GIT-BRIDGE) and importer-signed import (SPEC-GIT-IMPORT)"
+keywords = ["kit", "git", "bridge", "export", "import"]
+categories = ["development-tools"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kit-core = { version = "0.5", path = "../kit-core" }
+# git object ids are SHA-1 over "type len\0" + body. This is git's
+# object-naming function, not a security boundary (SPEC-GIT-BRIDGE §2);
+# integrity rides on the carried BLAKE3 + Ed25519 material.
+sha1 = { version = "0.11", default-features = false }
+# loose-object zlib encoding; default backend is the pure-Rust miniz_oxide.
+flate2 = "1"
+
+[dev-dependencies]
+tempfile = "3"
+kit-test-util = { path = "../kit-test-util" }
+
+[package.metadata.docs.rs]
+all-features = true

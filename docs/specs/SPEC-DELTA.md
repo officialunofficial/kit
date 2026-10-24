@@ -5,9 +5,9 @@ status: stable
 audience: implementers of compatible packfile readers and writers
 ---
 
-# SPEC-DELTA &mdash; mkit v1 delta instruction format
+# SPEC-DELTA &mdash; kit v1 delta instruction format
 
-Status: **Normative** for mkit v1.
+Status: **Normative** for kit v1.
 Scope: the byte layout of the delta instruction stream referenced by
 packfile `0x02 delta` entries (see SPEC-PACKFILE §3.2).
 
@@ -43,7 +43,7 @@ future format they don't recognize.
 
 Readers MUST reject `stream_version != 0x01` with
 `UnsupportedDeltaVersion`. The Rust API surfaces this as
-`MkitError::UnsupportedObjectVersion`; the SPEC-level name refers to
+`KitError::UnsupportedObjectVersion`; the SPEC-level name refers to
 the same condition.
 
 `base_len` and `result_len` enable readers to validate the stream
@@ -58,17 +58,17 @@ MUST verify:
 - The sum of all emitted bytes equals `result_len` at end-of-stream.
 
 Mismatches yield `DeltaCorrupt`. The Rust implementation surfaces this
-as `MkitError::DeltaCorrupt(DeltaCorruption)` (earlier versions collapsed
+as `KitError::DeltaCorrupt(DeltaCorruption)` (earlier versions collapsed
 "COPY past base", "reserved bits set", "zero opcode", "zero-length
 COPY", "result_len overrun", and "result_len underrun at EOF" were all
-collapsed into the generic `MkitError::TrailingData`, which
+collapsed into the generic `KitError::TrailingData`, which
 `serialize.rs` also uses for the unrelated "trailing bytes after a
 complete object" condition — the two could not be told apart by
 matching on the variant). `DeltaCorruption` is a
 `#[non_exhaustive]` enum with one variant per condition below —
 `BaseLenMismatch`, `ReservedOpcodeBits`, `ZeroOpcode`, `ZeroLengthCopy`,
 `CopyPastBase`, `ResultLenOverrun`, `ResultLenUnderrun` — so callers can
-still coarsely match `MkitError::DeltaCorrupt(_)` for "structurally
+still coarsely match `KitError::DeltaCorrupt(_)` for "structurally
 corrupt" (as opposed to `UnexpectedEof` for "truncated input"), or
 match the specific `DeltaCorruption` variant when they need to.
 
@@ -153,7 +153,7 @@ Implementation note: the reference decoder also caps its initial
 hint is `min(result_len, stream.len() * 256)`; crucially `base.len()`
 does NOT scale the allocation, because a tiny crafted stream pointing
 at a huge base would otherwise trip a multi-gigabyte reservation
-(see `mkit-core` `delta::compute_cap_hint` and finding G5). This is
+(see `kit-core` `delta::compute_cap_hint` and finding G5). This is
 implementation guidance, not a wire-format requirement; conformant
 decoders are free to size their output buffer however they like
 provided behavior matches the pseudo-code above.
@@ -190,7 +190,7 @@ reconstructed bytes equal the target.
 
 - **Not a transport format.** Deltas are only meaningful inside pack
   entries. Any API that returned a raw delta stream would be
-  mis-designed; mkit does not expose one.
+  mis-designed; kit does not expose one.
 
 ---
 
@@ -210,8 +210,8 @@ reconstructed bytes equal the target.
 ## 8. Test vectors
 
 The vectors below are exercised in
-`rust/crates/mkit-core/tests/golden_pack.rs` and the unit tests in
-`rust/crates/mkit-core/src/delta.rs::tests`. The pinned vectors (2, 3)
+`rust/crates/kit-core/tests/golden_pack.rs` and the unit tests in
+`rust/crates/kit-core/src/delta.rs::tests`. The pinned vectors (2, 3)
 are inline byte arrays so any framing drift trips immediately.
 
 1. **Identity delta**: base = 64-byte string of "0123456789abcdef" × 4;
@@ -227,12 +227,12 @@ are inline byte arrays so any framing drift trips immediately.
    delta MUST be smaller than the target
    (`near_duplicate_yields_smaller_delta`).
 5. **Reject 0x00 opcode** → `DeltaCorrupt` /
-   `MkitError::DeltaCorrupt(DeltaCorruption::ZeroOpcode)`
+   `KitError::DeltaCorrupt(DeltaCorruption::ZeroOpcode)`
    (`rejects_zero_opcode`).
 6. **Reject COPY past base_len** → `DeltaCorrupt` /
    `DeltaCorruption::CopyPastBase` (`rejects_copy_past_base_end`).
 7. **Reject stream_version 0x02** → `UnsupportedDeltaVersion` /
-   `MkitError::UnsupportedObjectVersion` (`rejects_unknown_version`).
+   `KitError::UnsupportedObjectVersion` (`rejects_unknown_version`).
 8. **Reject result_len mismatch** (INSERT sums > declared result_len)
    → `DeltaCorrupt` / `DeltaCorruption::ResultLenOverrun`
    (`rejects_result_len_mismatch_at_end`). The v1 reader fails this as
@@ -261,8 +261,8 @@ are inline byte arrays so any framing drift trips immediately.
     well-defined error.
 16. **Corruption regression**: every corruption kind above (vectors 5, 6, 8,
     9, 10, 11, plus a mid-stream COPY result_len overrun) MUST come back
-    as `MkitError::DeltaCorrupt(_)`, never the generic
-    `MkitError::TrailingData` that `serialize.rs` reserves for the
+    as `KitError::DeltaCorrupt(_)`, never the generic
+    `KitError::TrailingData` that `serialize.rs` reserves for the
     unrelated trailing-bytes condition (`delta_corruption_is_not_reported_as_trailing_data`).
 
 ---

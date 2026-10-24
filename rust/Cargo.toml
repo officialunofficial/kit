@@ -1,25 +1,25 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/mkit-core",
-    "crates/mkit-test-util",
-    "crates/mkit-rpc",
-    "crates/mkit-attest",
-    "crates/mkit-keystore",
-    "crates/mkit-git-bridge",
-    "crates/mkit-transport-memory",
-    "crates/mkit-transport-file",
-    "crates/mkit-serve",
-    "crates/mkit-transport-ssh",
-    "crates/mkit-transport-s3",
-    "crates/mkit-client",
-    "crates/mkit-transport-connect",
-    "crates/mkit-sign-file",
-    "crates/mkit-sync",
-    "crates/mkit-cli",
+    "crates/kit-core",
+    "crates/kit-test-util",
+    "crates/kit-rpc",
+    "crates/kit-attest",
+    "crates/kit-keystore",
+    "crates/kit-git-bridge",
+    "crates/kit-transport-memory",
+    "crates/kit-transport-file",
+    "crates/kit-serve",
+    "crates/kit-transport-ssh",
+    "crates/kit-transport-s3",
+    "crates/kit-client",
+    "crates/kit-transport-connect",
+    "crates/kit-sign-file",
+    "crates/kit-sync",
+    "crates/kit-storage",
     "fuzz",
     "benches",
-    "crates/mkit-formal-conformance",
+    "crates/kit-formal-conformance",
 ]
 
 [workspace.package]
@@ -27,7 +27,7 @@ version = "0.5.0"
 edition = "2024"
 rust-version = "1.95.0"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/officialunofficial/mkit"
+repository = "https://github.com/officialunofficial/kit"
 authors = ["Official Unofficial, Inc."]
 
 # Commonware requirements allow compatible 2026.x releases so downstream
@@ -36,8 +36,8 @@ authors = ["Official Unofficial, Inc."]
 # by crate.
 [workspace.dependencies]
 commonware-macros = { version = "=2026.9.0", default-features = false }
-# default-features = false matches the strictest consumer (mkit-attest and
-# mkit-core). A consumer that needs the default feature set must use a direct
+# default-features = false matches the strictest consumer (kit-attest and
+# kit-core). A consumer that needs the default feature set must use a direct
 # dependency, because `workspace = true` cannot re-enable default features.
 commonware-storage = { version = "2026.9.0", default-features = false }
 commonware-cryptography = { version = "2026.9.0", default-features = false }

@@ -1,21 +1,21 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
-# mkit installer — downloads the signed release archive matching the
+# kit installer — downloads the signed release archive matching the
 # host OS + architecture from a public GitHub Release, verifies its
-# cosign signature, verifies its SHA256, and installs the `mkit` binary
-# atomically into $MKIT_INSTALL_DIR (default: ~/.local/bin).
+# cosign signature, verifies its SHA256, and installs the `kit` binary
+# atomically into $KIT_INSTALL_DIR (default: ~/.local/bin).
 #
 # This script targets Darwin and Linux (including WSL, which runs the real
 # Linux binary). Windows is not a supported target (see
-# docs/INVARIANTS.md) — Windows users should run mkit under WSL.
+# docs/INVARIANTS.md) — Windows users should run kit under WSL.
 #
 # Usage:
-#   curl mkit.sh | sh
-#   curl -sSfL https://mkit.sh/install.sh | sh
-#   curl -sSfL https://mkit.sh/install.sh | sh -s -- --version v0.5.0
+#   curl kit.storage | sh
+#   curl -sSfL https://kit.storage/install.sh | sh
+#   curl -sSfL https://kit.storage/install.sh | sh -s -- --version v0.5.0
 #   # The raw GitHub URL serves the same script as a fallback:
-#   #   curl -sSfL https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh | sh
+#   #   curl -sSfL https://raw.githubusercontent.com/officialunofficial/kit/main/install.sh | sh
 #
 # Trust model:
 #   * cosign keyless verification is REQUIRED by default. The script
@@ -30,20 +30,20 @@
 #     proceed without signature verification at your own risk.
 #
 # Version pinning:
-#   * MKIT_VERSION (or --version) pins the install to a specific tag.
+#   * KIT_VERSION (or --version) pins the install to a specific tag.
 #     RECOMMENDED for production use — it's the only way to get a
 #     repeatable install.
 #   * Without a version pin the script resolves the GitHub "latest"
 #     release. The resolved tag is recorded at
-#     ~/.local/state/mkit/installed-tag; subsequent unpinned installs
+#     ~/.local/state/kit/installed-tag; subsequent unpinned installs
 #     compare against this file and warn loudly on a silent downgrade.
 #
 # Environment overrides:
-#   MKIT_VERSION             explicit tag (e.g. v0.5.0). Default: 'latest'.
-#   MKIT_INSTALL_DIR         install prefix. Default: ~/.local/bin.
-#   MKIT_STATE_DIR           state dir for installed-tag bookkeeping.
-#                            Default: ~/.local/state/mkit.
-#   MKIT_SKIP_COSIGN         set to '1' to skip cosign verification
+#   KIT_VERSION             explicit tag (e.g. v0.5.0). Default: 'latest'.
+#   KIT_INSTALL_DIR         install prefix. Default: ~/.local/bin.
+#   KIT_STATE_DIR           state dir for installed-tag bookkeeping.
+#                            Default: ~/.local/state/kit.
+#   KIT_SKIP_COSIGN         set to '1' to skip cosign verification
 #                            (equivalent to --insecure-skip-cosign).
 #
 # Flags:
@@ -55,16 +55,16 @@
 #
 # For private-repo installs, use `gh release download` instead — it
 # handles auth natively:
-#   gh release download v0.5.0 --repo officialunofficial/mkit \
-#     --pattern 'mkit-[0-9]*-<target>.tar.gz' --dir .
-# (`mkit-[0-9]*`, not `mkit-*`, which would also match unrelated assets.)
+#   gh release download v0.5.0 --repo officialunofficial/kit \
+#     --pattern 'kit-[0-9]*-<target>.tar.gz' --dir .
+# (`kit-[0-9]*`, not `kit-*`, which would also match unrelated assets.)
 #
 # POSIX sh — runs under dash/ash/bash/zsh without bashisms.
 
 set -eu
 
 owner="officialunofficial"
-repo="mkit"
+repo="kit"
 api="https://api.github.com/repos/${owner}/${repo}"
 dl="https://github.com/${owner}/${repo}/releases/download"
 
@@ -77,11 +77,11 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 # text here.
 print_help() {
   cat <<'EOF'
-mkit installer
+kit installer
 
 Usage:
-  curl mkit.sh | sh
-  curl -sSfL https://mkit.sh/install.sh | sh
+  curl kit.storage | sh
+  curl -sSfL https://kit.storage/install.sh | sh
   sh install.sh [--version <tag>] [--prefix <dir>] [--insecure-skip-cosign]
 
 Flags:
@@ -96,11 +96,11 @@ Flags:
   --help, -h                Show this help.
 
 Environment:
-  MKIT_VERSION              Same as --version.
-  MKIT_INSTALL_DIR          Same as --prefix.
-  MKIT_STATE_DIR            State dir for downgrade bookkeeping.
-                            Default: ~/.local/state/mkit.
-  MKIT_SKIP_COSIGN=1        Same as --insecure-skip-cosign.
+  KIT_VERSION              Same as --version.
+  KIT_INSTALL_DIR          Same as --prefix.
+  KIT_STATE_DIR            State dir for downgrade bookkeeping.
+                            Default: ~/.local/state/kit.
+  KIT_SKIP_COSIGN=1        Same as --insecure-skip-cosign.
 
 Trust model:
   cosign keyless signature verification is REQUIRED by default. Install cosign
@@ -109,10 +109,10 @@ Trust model:
 EOF
 }
 
-version="${MKIT_VERSION:-}"
-install_dir="${MKIT_INSTALL_DIR:-$HOME/.local/bin}"
-state_dir="${MKIT_STATE_DIR:-$HOME/.local/state/mkit}"
-skip_cosign="${MKIT_SKIP_COSIGN:-}"
+version="${KIT_VERSION:-}"
+install_dir="${KIT_INSTALL_DIR:-$HOME/.local/bin}"
+state_dir="${KIT_STATE_DIR:-$HOME/.local/state/kit}"
+skip_cosign="${KIT_SKIP_COSIGN:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -174,7 +174,7 @@ target="${arch_part}-${os_part}"
 resolved_from_latest=0
 if [ -z "$version" ]; then
   log "resolving latest release tag (no --version pinned)"
-  warn "for reproducible installs, pin a tag with --version vX.Y.Z or MKIT_VERSION=vX.Y.Z"
+  warn "for reproducible installs, pin a tag with --version vX.Y.Z or KIT_VERSION=vX.Y.Z"
   version=$(fetch_stdout "${api}/releases/latest" \
     | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
     | head -n1)
@@ -200,7 +200,7 @@ esac
 #      install_dir rotation.
 #   2. $install_dir/.kit-installed-tag — local-to-binary record,
 #      survives state-dir clearance and catches the case where a user
-#      runs the installer with a different MKIT_STATE_DIR.
+#      runs the installer with a different KIT_STATE_DIR.
 # Both are written on every install; on a downgrade attempt, EITHER
 # file disagreeing causes the guard to fire.
 state_file="${state_dir}/installed-tag"
@@ -262,14 +262,14 @@ if [ -n "$prev_tag_global" ] && [ -n "$prev_tag_local" ] \
   die "installed-tag mismatch: $state_file says '$prev_tag_global' but $bin_state_file says '$prev_tag_local'. Refusing to install. Resolve manually."
 fi
 
-archive="mkit-${bare}-${target}.tar.gz"
+archive="kit-${bare}-${target}.tar.gz"
 archive_url="${dl}/${tag}/${archive}"
 sha_url="${archive_url}.sha256"
 bundle_url="${archive_url}.cosign.bundle"
 
-log "installing mkit $tag ($target) into $install_dir"
+log "installing kit $tag ($target) into $install_dir"
 
-tmp=$(mktemp -d -t mkit-install.XXXXXXXXXX)
+tmp=$(mktemp -d -t kit-install.XXXXXXXXXX)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 # ---- download ----
@@ -288,7 +288,7 @@ fetch "$sha_url" "$tmp/${archive}.sha256"
 # from the same origin as the archive. Cosign verifies that this archive
 # was produced by this repo's release.yml workflow at a strict-semver tag.
 if [ "$skip_cosign" = "1" ]; then
-  warn "cosign verification SKIPPED (--insecure-skip-cosign / MKIT_SKIP_COSIGN=1)"
+  warn "cosign verification SKIPPED (--insecure-skip-cosign / KIT_SKIP_COSIGN=1)"
   warn "the only authenticity check disabled. SHA256 alone proves nothing."
 else
   if ! command -v cosign >/dev/null 2>&1; then
@@ -302,7 +302,7 @@ the .sha256 file you just downloaded proves nothing about authenticity
   https://docs.sigstore.dev/cosign/installation/
 
 Or, if you have verified the binary by other means and accept the risk,
-re-run with --insecure-skip-cosign (or MKIT_SKIP_COSIGN=1).
+re-run with --insecure-skip-cosign (or KIT_SKIP_COSIGN=1).
 EOF
     exit 1
   fi
@@ -316,7 +316,7 @@ EOF
   # Accepts e.g. v0.1.0 and v1.2.3-rc.1 but rejects v.* glob matches,
   # branch refs, and rogue workflows in the same repo.
   cosign verify-blob \
-    --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+    --certificate-identity-regexp '^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
     --bundle "$tmp/${archive}.cosign.bundle" \
     "$tmp/$archive" \
@@ -342,12 +342,12 @@ fi
 log "extracting"
 tar -xzf "$archive"
 
-stage_dir="mkit-${bare}-${target}"
-bin_src="$tmp/$stage_dir/mkit"
-[ -x "$bin_src" ] || die "extracted archive missing expected binary at $stage_dir/mkit"
+stage_dir="kit-${bare}-${target}"
+bin_src="$tmp/$stage_dir/kit"
+[ -x "$bin_src" ] || die "extracted archive missing expected binary at $stage_dir/kit"
 
 mkdir -p "$install_dir"
-install_path="$install_dir/mkit"
+install_path="$install_dir/kit"
 
 # ---- install_dir permission check ----
 #

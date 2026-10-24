@@ -5,9 +5,9 @@ status: stable
 audience: implementers of compatible packfile readers and writers; transport implementers
 ---
 
-# SPEC-PACKFILE &mdash; mkit packfile format (v1 + v2)
+# SPEC-PACKFILE &mdash; kit packfile format (v1 + v2)
 
-Status: **Normative** for mkit v1 and v2.
+Status: **Normative** for kit v1 and v2.
 Scope: the byte layout of a `.kit`-produced packfile, used for
 transport upload/download and for bundle exchange.
 
@@ -87,7 +87,7 @@ allocate a buffer of that size.
 ## 3. Entry types
 
 ```
-0x00    raw          payload = serialized mkit object (see SPEC-OBJECTS)
+0x00    raw          payload = serialized kit object (see SPEC-OBJECTS)
 0x02    delta        payload = [32 base_hash] [instructions]  (see SPEC-DELTA)
 0x03    zstd-raw     v2 only. payload = [4 uncompressed_len][zstd frame]
 0x04    zstd-delta   v2 only. payload = [32 base_hash][4 uncompressed_len][zstd frame]
@@ -193,7 +193,7 @@ posture as the delta-preference heuristic in §3, mirrored here for
 consistency). A writer MUST NOT emit a `0x03` or `0x04` entry whose
 `uncompressed_len` would exceed `MAX_RAW_OBJECT_SIZE`; it writes such a
 payload uncompressed (`0x00` or `0x02`).
-mkit's own writer uses zstd compression level 3 (the
+kit's own writer uses zstd compression level 3 (the
 library default); this spec does not mandate a specific level, since
 the byte layout is level-independent &mdash; any level a compliant zstd
 decoder can read is valid.
@@ -201,7 +201,7 @@ decoder can read is valid.
 **Decoder bomb-guarding is normative, not a suggestion.** Before
 allocating a decompression buffer, a reader MUST check the claimed
 `uncompressed_len` against the object-store size cap
-(`mkit_core::store::MAX_RAW_OBJECT_SIZE`, 1 GiB) and reject
+(`kit_core::store::MAX_RAW_OBJECT_SIZE`, 1 GiB) and reject
 oversized claims before allocating anything for them. Decompression
 MUST then be bounded to at most `uncompressed_len` bytes (for example via a
 capacity-bounded decompress call, not an unbounded stream copy) so a
@@ -258,7 +258,7 @@ Writers MAY emit all-`raw` packs for simplicity; readers MUST handle
 both mixes. `PackWriter`'s raw-vs-delta choice is policy-free at the
 writer level &mdash; it accepts whatever entries the caller pushes and does
 not itself decide raw vs. delta. That choice lives in callers above
-the writer: mkit's own transfer-planning path (`transfer.rs`'s
+the writer: kit's own transfer-planning path (`transfer.rs`'s
 `try_delta`) already ships a "prefer delta when it is strictly smaller
 on the wire than raw" gate (`HASH_LEN + delta_stream.len() <
 target_bytes.len()`), so &mdash; correcting an earlier draft of this
@@ -352,7 +352,7 @@ splits.** `remote_dispatch::build_and_upload_packs` seals
 and uploads a new pack the moment the next entry would exceed the cap,
 chaining every pack one push produced onto a single packlist node
 (`PackListNode.packs: Vec<Hash>`, in apply/build order &mdash; see the
-packlist/packmap chain documentation in `mkit_core::transfer`). The
+packlist/packmap chain documentation in `kit_core::transfer`). The
 fetch side needs no pack-count-specific handling: it already resolves
 and unpacks every pack a node lists, in order, whether that's one pack
 or several. A push whose plan fits in one pack &mdash; the overwhelming
@@ -367,7 +367,7 @@ bump.
 
 ## 6. Parsing model
 
-mkit packfiles (v1 and v2 alike) are **buffered**, not streamed. The
+kit packfiles (v1 and v2 alike) are **buffered**, not streamed. The
 reader reads the entire packfile into memory and then walks entries.
 This is a deliberate simplification. Consequences:
 
@@ -472,7 +472,7 @@ decoded-byte budgets (a format-intrinsic per-object ceiling such as the
 decompression limit is a property of the bytes and permanent), an external base's depth, membership misses and every
 execution or acquisition failure are transient. The in-pack decoded-byte
 budget is a deployment limit and is transient. The reference classification is
-`FailureCode::persistence` in `mkit-primitives`; a membership miss is
+`FailureCode::persistence` in `kit-primitives`; a membership miss is
 retryable while the input's age is below the visibility bound and a content
 verdict afterwards (`classify_membership_miss`).
 
@@ -514,7 +514,7 @@ Readers MUST:
 
 Step 3 MUST happen before any entry is stored to the destination.
 
-Implementation note: the mkit-core `PackWriter::finish` writes the
+Implementation note: the kit-core `PackWriter::finish` writes the
 trailer over `header + entries`, and `PackReader::read` verifies it
 before touching the store (`pack.rs::PackReader::read` step 4, which
 runs after the magic+version checks but before any entry framing is
@@ -525,7 +525,7 @@ parsed). The check ordering means a corrupt trailer surfaces as
 
 ## 9. Backward compatibility rule
 
-mkit v1 is the first version. The format rule going forward is:
+kit v1 is the first version. The format rule going forward is:
 
 - First 4 bytes MUST be ASCII `"KIT\0"`. Forever. (The magic is the
   format family marker, not a version marker.)
@@ -552,8 +552,8 @@ mkit v1 is the first version. The format rule going forward is:
 ## 10. Test vectors
 
 The conformance vectors below are exercised in
-`rust/crates/mkit-core/tests/golden_pack.rs` and the unit tests in
-`rust/crates/mkit-core/src/pack.rs::tests` and `pack/zstd_tests.rs`.
+`rust/crates/kit-core/tests/golden_pack.rs` and the unit tests in
+`rust/crates/kit-core/src/pack.rs::tests` and `pack/zstd_tests.rs`.
 They are inline byte pins rather than on-disk goldens, so any framing
 drift fails the test suite immediately; vector 20 is the exception, a set of
 committed C-encoded packs that give decode-only builds real bytes.
@@ -638,13 +638,13 @@ surface; the spec-level names below stay protocol-neutral.
     short, correctly checksummed pack are interpreted without sign extension
     or wraparound. The general reader returns `UnexpectedEof`; an indexed
     reader may first refuse its smaller encoded-entry ceiling. Portable bytes
-    are in `mkit-primitives/fixtures/framing/payload-high-bit.bin` and
+    are in `kit-primitives/fixtures/framing/payload-high-bit.bin` and
     `payload-u32-max.bin`; `unsigned_payload_boundaries_do_not_wrap_or_allocate_claims`
     exercises the general reader.
 22. **Earlier reconstructed base:** raw A, delta B based on A, then delta C
     based on B resolves all three objects. Moving B after C fails base
     eligibility with `DeltaBaseMissing`. Portable bytes are in
-    `mkit-primitives/fixtures/framing/earlier-delta-base.bin` and
+    `kit-primitives/fixtures/framing/earlier-delta-base.bin` and
     `later-delta-base.bin`; `earlier_reconstructed_delta_is_an_eligible_base`
     exercises both orders.
 
@@ -678,7 +678,7 @@ publication path before the terminal acceptance step.
 
 | Invariant | Enforced by |
 |---|---|
-| A pack is unambiguously an mkit pack of a known version | `"KIT\0"` magic → `InvalidMagic`; unknown `version` → `UnsupportedPackVersion`, distinguishably (§1) |
+| A pack is unambiguously an kit pack of a known version | `"KIT\0"` magic → `InvalidMagic`; unknown `version` → `UnsupportedPackVersion`, distinguishably (§1) |
 | Any bit-flip or truncation before the trailer is detected | 32-byte BLAKE3 trailer, verified **before** any entry is stored (§8) |
 | No entry read past the pack tail | mandatory `payload_len` bounds-check against the remaining pre-trailer bytes → `UnexpectedEof` (§2) |
 | Only known entry types are processed | anything but `0x00`/`0x02`/`0x03`/`0x04` (incl. reserved `0x01`) → `InvalidEntryType`; `0x03`/`0x04` additionally require `version = 2` or the same error fires (§3) |

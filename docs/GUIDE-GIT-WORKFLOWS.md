@@ -1,6 +1,6 @@
-# Git workflows with mkit
+# Git workflows with kit
 
-How to live with git from mkit: migrate a repository, track a git
+How to live with git from kit: migrate a repository, track a git
 upstream while working natively, and send work back. Everything here
 needs a `git` on `PATH`. The default build includes the bridge; a build
 with `--no-default-features` omits it. The mechanics are specified in
@@ -15,18 +15,18 @@ the author identity field, and the original git bytes are retained
 for audit. Hashes are a function of (upstream, import key) &mdash; same
 key, same upstream, same hashes, on any machine.
 
-## 1. Migrate a git repository to mkit
+## 1. Migrate a git repository to kit
 
 ```console
-$ mkit git import git@github.com:org/repo.git repo
+$ kit git import git@github.com:org/repo.git repo
 $ cd repo
-$ mkit log -n 3        # readable original authorship
-$ mkit verify HEAD     # ordinary signed mkit history
+$ kit log -n 3        # readable original authorship
+$ kit verify HEAD     # ordinary signed kit history
 ```
 
-This initializes a fresh mkit repo in `repo/`, imports every branch
+This initializes a fresh kit repo in `repo/`, imports every branch
 and tag, and checks out the upstream default branch. From here it is
-a normal mkit repository &mdash; commit, branch, merge, push to mkit
+a normal kit repository &mdash; commit, branch, merge, push to kit
 remotes. The first import generates `.kit/keys/git-import.key` with
 a loud notice; backups of that key matter if you ever want to reuse
 or share the import mapping (see §4).
@@ -42,30 +42,30 @@ staging mirror is durable state, not a cache &mdash; keep it.
 ## 2. Track a git upstream
 
 ```console
-$ mkit git import https://github.com/org/repo.git work
+$ kit git import https://github.com/org/repo.git work
 $ cd work
-$ mkit keygen                          # your own signing key
+$ kit keygen                          # your own signing key
 # ... commit local work ...
-$ mkit git pull                        # upstream moved? fast-forward
-$ mkit git pull                        # diverged? it refuses:
+$ kit git pull                        # upstream moved? fast-forward
+$ kit git pull                        # diverged? it refuses:
 error: pull would not fast-forward branch 'main'; integrate with
-`mkit merge upstream/main` (or `mkit rebase upstream/main`)
-$ mkit merge upstream/main             # ordinary native merge
+`kit merge upstream/main` (or `kit rebase upstream/main`)
+$ kit merge upstream/main             # ordinary native merge
 ```
 
-`mkit git fetch` moves the `upstream/<branch>` tracking refs and
+`kit git fetch` moves the `upstream/<branch>` tracking refs and
 imported tags (a tag you moved locally is never clobbered); `pull`
 adds a fast-forward of the current branch and **never** merges on
-its own. Imported history is ordinary mkit history, so
-integration is the native `mkit merge` with full conflict handling.
+its own. Imported history is ordinary kit history, so
+integration is the native `kit merge` with full conflict handling.
 
 Upstream force-pushes move the tracking refs with a loud warning
 (rebase local work that built on the rewritten segment). Upstream
 branch deletions prune the tracking refs, like `git fetch --prune`;
 local tags are kept.
 
-`mkit git status` shows every bridge binding (direction, source,
-pinned key, tracking and lease positions). `mkit git verify` audits
+`kit git status` shows every bridge binding (direction, source,
+pinned key, tracking and lease positions). `kit git verify` audits
 the recorded state against the local store at any time.
 
 ## 3. Send work back to the git upstream
@@ -75,7 +75,7 @@ Two paths, by increasing setup:
 ### Patches (no fork needed)
 
 ```console
-$ mkit git format-patch upstream/main..HEAD -o patches/
+$ kit git format-patch upstream/main..HEAD -o patches/
 0001-Add-feature-file.patch
 0002-Extend-feature-file.patch
 ```
@@ -87,7 +87,7 @@ and merges are skipped; keep contribution branches linear.
 ### A real fork (PRs)
 
 ```console
-$ mkit git export --passthrough --remote-name upstream git@github.com:you/repo.git
+$ kit git export --passthrough --remote-name upstream git@github.com:you/repo.git
 ```
 
 Fork mode (SPEC-GIT-BRIDGE §14) re-emits imported objects as their
@@ -98,14 +98,14 @@ works. `--remote-name` must be the state that imported the upstream
 (its map carries the original objects); the state's direction
 upgrades to `fork` and sticks.
 
-Verification of a fork: `mkit git verify --fork-audit` deep-checks
+Verification of a fork: `kit git verify --fork-audit` deep-checks
 the bridge segment, checks every imported boundary object against
 its retained raw bytes and the pinned importer key, and re-derives
-all referenced content from the mkit twins (§14.3).
+all referenced content from the kit twins (§14.3).
 
 ### What is refused, and why
 
-- **Plain `mkit git export` toward an imported-from upstream** &mdash; the
+- **Plain `kit git export` toward an imported-from upstream** &mdash; the
   origin guard (§14.2). A plain export is a fresh translation that
   shares no sha1s with the upstream; pushing it there would replace
   the upstream's history with a disconnected mirror that happens to
@@ -113,19 +113,19 @@ all referenced content from the mkit twins (§14.3).
   supported path.
 - **Passthrough through a different state than the one that imported
   the destination** &mdash; same disconnection, same guard.
-- **Native `mkit push`/`pull` against `git+…` remotes** &mdash; the
-  dispatch matrix points at `mkit git` commands; the object models
+- **Native `kit push`/`pull` against `git+…` remotes** &mdash; the
+  dispatch matrix points at `kit git` commands; the object models
   do not interoperate silently.
 
 ## 4. Collaborating on an imported repository
 
 Per-key determinism means the import mapping is shared by sharing
 the **import key**, not the map file: a colleague with the same key
-and upstream reproduces identical mkit hashes independently. Without
-it they produce an unrelated fork (and `mkit git fetch` refuses a
+and upstream reproduces identical kit hashes independently. Without
+it they produce an unrelated fork (and `kit git fetch` refuses a
 mismatched key against pinned state). The usual setup is one
 designated importer (a person or CI job) whose imported history
-everyone else pulls over normal mkit transport &mdash; see SPEC-GIT-IMPORT
+everyone else pulls over normal kit transport &mdash; see SPEC-GIT-IMPORT
 §4 before sharing key material.
 
 ## 5. State, recovery, and hygiene
@@ -140,6 +140,6 @@ ownership and prune memory) &mdash; determinism makes the rebuild exact,
 including for fork-mode state. A missing or corrupt map without a
 marker triggers the same rebuild.
 
-`mkit remote rename` moves bridge state with the remote;
-`mkit remote remove` keeps it (raw bytes are audit evidence) and
+`kit remote rename` moves bridge state with the remote;
+`kit remote remove` keeps it (raw bytes are audit evidence) and
 tells you the path if you want it gone.

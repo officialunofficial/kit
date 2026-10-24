@@ -5,15 +5,15 @@
 // Module `serveLocks` models SPEC-CONCURRENCY §2 (lock inventory rows
 // `serve.lock`) and §3.1 ("the server now detects this case instead of
 // staying silent"):
-//   - every live server process on a root, `mkit serve` (ssh-frame) and
-//     a `mkit-server` fs-layout server, holds `serve.lock` SHARED for its whole lifetime;
-//   - `mkit-server` also holds `server.lock` EXCLUSIVELY (one per root),
+//   - every live server process on a root, `kit serve` (ssh-frame) and
+//     a `kit-server` fs-layout server, holds `serve.lock` SHARED for its whole lifetime;
+//   - `kit-server` also holds `server.lock` EXCLUSIVELY (one per root),
 //     taken without waiting before `serve.lock` (busy -> exit CONFIG_ERROR);
-//   - a starting `mkit serve` tries `serve.lock` EXCLUSIVELY without waiting
+//   - a starting `kit serve` tries `serve.lock` EXCLUSIVELY without waiting
 //     and, only while it holds it, sweeps the temp files crashed uploads left
 //     in `packs/` (`FsBlobStore::sweep_stale_uploads`, files at least
 //     STALE_UPLOAD_AGE = 1 h old), then drops it and takes the shared lock;
-//     busy -> skip the sweep (mkit-cli `serve::lock_and_sweep`);
+//     busy -> skip the sweep (kit-storage `serve::lock_and_sweep`);
 //   - `worktree.lock` / `worktrees.lock` acquisition probes `serve.lock`
 //     non-blocking-exclusive and warns (never refuses) when it is busy.
 // Safety modelled: server.lock exclusion, serve.lock reader/writer
@@ -24,19 +24,19 @@
 //   - Time is abstracted to "fresh" / "stale" (older than STALE_UPLOAD_AGE).
 //     A live server upload is a streaming upload that can STALL, so its temp
 //     file may go stale while live; only the lock protects it. A
-//     `FileTransport` writer (`mkit push kit+file://`, no lock at all)
+//     `FileTransport` writer (`kit push kit+file://`, no lock at all)
 //     writes its temp file in one go (`write_atomic`), so it is assumed never
 //     to be stale while live: that is the age-bound assumption the code
 //     comment in `lock_and_sweep` states; the `ftSlow` instance drops it and
 //     shows the sweep would then delete a live upload (documented assumption,
 //     not a bug; see README).
 //   - The probe's momentary exclusive hold is one atomic step. Its only
-//     other effect (a starting `mkit serve` then skips its sweep, or a
+//     other effect (a starting `kit serve` then skips its sweep, or a
 //     starting server's shared acquire waits) is liveness, not safety.
 //   - Lock waits block forever (the 5 s repo_lock timeout is abstracted).
 //   - Stopping and crashing are one action (the kernel drops every lock).
-//   - `mkit-server`'s own S3 spool sweep (under server.lock) is not
-//     modelled: only mkit-server uses that directory.
+//   - `kit-server`'s own S3 spool sweep (under server.lock) is not
+//     modelled: only kit-server uses that directory.
 //
 // Module `servedNames` models SPEC-REFS v3 §2 "Served names" and the §3
 // 512-byte bound as far as they affect safety: a server refuses a name
@@ -46,7 +46,7 @@
 // then head, so a late check of the head would leave a partial write). A
 // listing skips stored refs outside `refs/` or over the bound. Which byte
 // strings pass the §3 grammar is left to unit tests and conformance vectors
-// (`mkit_core::refs` tests, `mkit-server` `pipeline/tests.rs`,
+// (`kit_core::refs` tests, `kit-server` `pipeline/tests.rs`,
 // `ssh/tests.rs`); names here are abstract classes.
 //
 // Checks: ./check.sh (README.md lists each command and its expected outcome).
@@ -55,9 +55,9 @@ module serveLocks {
 
   // Mutation switches (non-vacuity only) and one assumption switch.
   type SFaults = {
-    sweepUnlocked: bool,     // `mkit serve` sweeps without the exclusive serve.lock
+    sweepUnlocked: bool,     // `kit serve` sweeps without the exclusive serve.lock
     sweepUnderShared: bool,  // ... sweeps after taking serve.lock SHARED
-    serverSkipsServe: bool,  // `mkit-server` holds server.lock but not serve.lock
+    serverSkipsServe: bool,  // `kit-server` holds server.lock but not serve.lock
     serverLockShared: bool,  // server.lock not exclusive
     ftSlow: bool,            // ASSUMPTION OFF: a lockless FileTransport upload can outlive the age bound
   }
@@ -67,14 +67,14 @@ module serveLocks {
   const FAULTS: SFaults
 
   pure val FREE: str = ""
-  pure val FT: str = "ft"  // the lockless FileTransport writer (mkit push kit+file://)
+  pure val FT: str = "ft"  // the lockless FileTransport writer (kit push kit+file://)
   pure val SFAULTS_NONE: SFaults = {
     sweepUnlocked: false, sweepUnderShared: false, serverSkipsServe: false,
     serverLockShared: false, ftSlow: false,
   }
 
   // --------------------------------------------------------------- state
-  var kind: Srv -> str        // "serve" (mkit serve) | "server" (mkit-server) | "" while down
+  var kind: Srv -> str        // "serve" (kit serve) | "server" (kit-server) | "" while down
   var spc: Srv -> str         // down | sweep | drop | wantShared | up | upSweep
   var serveEx: str            // exclusive holder of serve.lock, FREE if none
   var serveSh: Set[Srv]       // shared holders of serve.lock
@@ -134,7 +134,7 @@ module serveLocks {
 
   def serveLockFree: bool = serveEx == FREE and serveSh == Set()
 
-  // `mkit serve` start: repo_lock::acquire(serve.lock, Duration::ZERO), i.e.
+  // `kit serve` start: repo_lock::acquire(serve.lock, Duration::ZERO), i.e.
   // a non-blocking exclusive try. Held -> sweep; busy -> skip to shared.
   action startServe(s: Srv): bool = {
     val got = serveLockFree
@@ -181,7 +181,7 @@ module serveLocks {
     lastAction' = { name: "drop", who: s, outcome: "" },
   }
 
-  // `mkit-server` fs-layout server start: server.lock exclusively without waiting
+  // `kit-server` fs-layout server start: server.lock exclusively without waiting
   // (busy -> the process exits; no state change, so not a step here).
   action startServer(s: Srv): bool = all {
     spc.get(s) == "down",
@@ -195,7 +195,7 @@ module serveLocks {
   }
 
   // repo_lock::acquire_shared(serve.lock): blocks while an exclusive holder
-  // (a sweeping `mkit serve`) is in.
+  // (a sweeping `kit serve`) is in.
   action takeShared(s: Srv): bool = all {
     spc.get(s) == "wantShared",
     serveEx == FREE,
@@ -319,8 +319,8 @@ module serveLocks {
 
   // Kernel reader/writer lock: an exclusive holder excludes every shared one.
   val ServeLockRW: bool = serveEx != FREE implies serveSh == Set()
-  // SPEC-CONCURRENCY §3.1: "one `mkit-server` serves a root at a time".
-  val OneMkitServer: bool =
+  // SPEC-CONCURRENCY §3.1: "one `kit-server` serves a root at a time".
+  val OneKitServer: bool =
     SRVS.filter(s => kind.get(s) == "server" and spc.get(s) != "down").size() <= 1
   // §2/§3.1: every live server holds serve.lock shared for its whole life.
   val UpServersHoldServeShared: bool = SRVS.forall(s => isUp(s) implies serveSh.contains(s))
@@ -336,21 +336,21 @@ module serveLocks {
   val NoMissedDetection: bool = not(missedDetection)
 
   val Safety: bool = and {
-    ServeLockRW, OneMkitServer, UpServersHoldServeShared, SweepAlone,
+    ServeLockRW, OneKitServer, UpServersHoldServeShared, SweepAlone,
     NoLiveUploadSwept, NoMissedDetection,
   }
 
   // ------------------------------------------ canaries (expected FALSE)
   // The sweep does remove a crashed upload's temp file.
   val CanaryNoOrphanSwept: bool = not(sweptOrphan)
-  // A starting `mkit serve` finds the lock busy and skips its sweep.
+  // A starting `kit serve` finds the lock busy and skips its sweep.
   val CanaryNoSkippedSweep: bool =
     not(lastAction.name == "startServe" and lastAction.outcome == "skipSweep")
-  // `mkit serve` and `mkit-server` share one root at once.
+  // `kit serve` and `kit-server` share one root at once.
   val CanaryNoServeAndServer: bool =
     not(SRVS.exists(a => SRVS.exists(b =>
       isUp(a) and isUp(b) and kind.get(a) == "serve" and kind.get(b) == "server")))
-  // A stalled server upload (stale temp file) exists while a `mkit serve`
+  // A stalled server upload (stale temp file) exists while a `kit serve`
   // starts: the case only the lock protects.
   val CanaryNoStartDuringStalledUpload: bool =
     not(lastAction.name == "startServe" and SRVS.exists(t => upload.get(t) == "stale"))
@@ -367,7 +367,7 @@ module servedNames {
   // Abstract name classes (SPEC-REFS v3 §2, §3):
   //   "A" refs/heads/a           served
   //   "P" refs/kit/packmap/a    served (pushed with branch a)
-  //   "M" main                   grammar-valid, outside refs/ (pre-0.5 `mkit serve`
+  //   "M" main                   grammar-valid, outside refs/ (pre-0.5 `kit serve`
   //                              stored it as <root>/main)
   //   "L" refs/heads/<513 bytes> under refs/, over the 512-byte bound
   //   "X" grammar-invalid        refused as §3 says
@@ -584,7 +584,7 @@ module serve2_serverSkipsServe {  // UpServersHoldServeShared, NoLiveUploadSwept
   import serveLocks(SRVS = Set("s1", "s2"), LOCALS = Set("w"),
     FAULTS = { sweepUnlocked: false, sweepUnderShared: false, serverSkipsServe: true, serverLockShared: false, ftSlow: false }).*
 }
-module serve2_serverLockShared {  // OneMkitServer
+module serve2_serverLockShared {  // OneKitServer
   import serveLocks(SRVS = Set("s1", "s2"), LOCALS = Set("w"),
     FAULTS = { sweepUnlocked: false, sweepUnderShared: false, serverSkipsServe: false, serverLockShared: true, ftSlow: false }).*
 }

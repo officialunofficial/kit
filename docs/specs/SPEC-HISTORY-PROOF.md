@@ -44,9 +44,9 @@ merges at most one pair of peaks and creates at most one new internal node.
 An MMR append can cascade up to `O(log N)` merges (whenever a run of
 same-height peaks all collapse at once, e.g. crossing a power-of-two leaf
 count) — MMB bounds that worst case to a constant, which matters for
-`mkit commit`'s one-append-per-publish pattern. See
+`kit commit`'s one-append-per-publish pattern. See
 `commonware-storage::merkle::mmb`'s module documentation and
-<https://arxiv.org/abs/2511.13582> for the full construction; mkit uses only
+<https://arxiv.org/abs/2511.13582> for the full construction; kit uses only
 the base MMB structure with forward-fold bagging (what that paper calls
 F-MMB), not its "Pyramid" P-MMB bagging variant, which is not yet
 implemented in the pinned commonware release.
@@ -56,7 +56,7 @@ implemented in the pinned commonware release.
 ### 2.1 Digest
 
 All node digests are 32-byte **BLAKE3** outputs, identical in length
-and primitive to mkit's existing [`hash::Hash`](../../rust/crates/mkit-core/src/hash.rs).
+and primitive to kit's existing [`hash::Hash`](../../rust/crates/kit-core/src/hash.rs).
 
 The MMB's hashing schedule is *not* the same as `hash::hash()`:
 commonware's `Hasher` trait injects each node's MMB position into the
@@ -87,18 +87,18 @@ Its public fields, normatively:
 | Field            | Type                | Meaning                                   |
 | ---------------- | ------------------- | ----------------------------------------- |
 | `leaves`         | `Location` (u64)    | Total leaf count of the MMB at proof time |
-| `inactive_peaks` | `usize`             | Number of leading peaks the proof commits to as inactive; always `0` in mkit |
+| `inactive_peaks` | `usize`             | Number of leading peaks the proof commits to as inactive; always `0` in kit |
 | `digests`        | `Vec<Blake3Digest>` | Authentication path, fold-prefix layout   |
 
-mkit has no inactivity floor: producers (`CommitHistory::root`,
-`CommitHistory::prove`) pass zero inactive peaks, so every proof mkit
+kit has no inactivity floor: producers (`CommitHistory::root`,
+`CommitHistory::prove`) pass zero inactive peaks, so every proof kit
 emits has `inactive_peaks = 0`. A verifier MUST reject a proof whose
 `inactive_peaks` is nonzero. With commonware-storage 2026.9.0 this
 follows from the root computation rather than from a separate check:
 the decoder accepts any value, but a nonzero `inactive_peaks` adds
 `u64_be(inactive_peaks)` to the root preimage (commonware's
 `Hasher::root_with_folded_peaks`), so the reconstructed root can never
-equal an mkit root computed with zero inactive peaks (§2.3), and
+equal an kit root computed with zero inactive peaks (§2.3), and
 `verify_inclusion` returns `false`.
 
 The `digests` layout is the **fold-based** layout documented in
@@ -133,11 +133,11 @@ InclusionProof ::= varint(leaves)
 ```
 
 &mdash; where `varint` is the commonware-codec variable-length `u64` encoding
-and `digest32` is the raw 32 bytes of a BLAKE3 digest. Because mkit
+and `digest32` is the raw 32 bytes of a BLAKE3 digest. Because kit
 always writes `inactive_peaks = 0`, that field is the single byte `0x00`
 immediately after the `leaves` varint. For example, a proof of position
 0 in a 2-leaf history encodes as `02 00 01` followed by one 32-byte
-digest (35 bytes). Mkit does NOT re-frame this; consumers MUST use
+digest (35 bytes). Kit does NOT re-frame this; consumers MUST use
 commonware-codec at the same pinned version (2026.9.0, pinned in
 `rust/Cargo.toml`).
 
@@ -154,12 +154,12 @@ peaks taken in oldest-to-newest (non-increasing height) order &mdash; the
 same fold formula an MMR root used, just over an MMB's peaks. For an
 **empty** MMB (no commits appended yet) the iteration is empty and the
 root degenerates to `Blake3(u64::to_be_bytes(0))`. This value is
-deterministic and well-defined; `mkit-core::history::CommitHistory::open().root()`
+deterministic and well-defined; `kit-core::history::CommitHistory::open().root()`
 returns it. The formula is commonware's root with zero inactive peaks;
 a nonzero inactive-peak count would add a `u64_be(inactive_peaks)` term
-between the two parts, which mkit never uses (§2.2).
+between the two parts, which kit never uses (§2.2).
 
-mkit pins commonware's peak-bagging policy to `Bagging::ForwardFold`
+kit pins commonware's peak-bagging policy to `Bagging::ForwardFold`
 for both producers (`CommitHistory::root` / `CommitHistory::prove`) and
 verifiers (`verify_inclusion`). This policy defines the specified peak order.
 
@@ -167,8 +167,8 @@ verifiers (`verify_inclusion`). This policy defines the specified peak order.
 
 A commit's `Position(n)` is its **0-based leaf index** &mdash; the value
 returned by `CommitHistory::append`. It is NOT the MMB's internal node
-position (commonware calls that `Position`; mkit hides the distinction at
-the mkit boundary by exposing only leaf indices). The first append on
+position (commonware calls that `Position`; kit hides the distinction at
+the kit boundary by exposing only leaf indices). The first append on
 an empty history returns `Position(0)`; the *n*-th append returns
 `Position(n − 1)`. Positions are stable within a generation while its first-parent chain
 only extends. A rewrite establishes a different generation.
@@ -203,7 +203,7 @@ freshness policy require a separately specified trust mechanism and are not
 implemented by v1. The low-level `verify_inclusion` API only establishes an MMB
 mathematical relation and MUST NOT itself be called verified branch membership.
 
-`mkit reflog` remains a first-parent-chain view, not a Git event reflog. With the
+`kit reflog` remains a first-parent-chain view, not a Git event reflog. With the
 feature enabled its summary reports first-parent commits and cross-checks them
 against the trusted local snapshot. Missing or pending state yields
 no verified ancestry marker. Intermediate rebase commits are included when the

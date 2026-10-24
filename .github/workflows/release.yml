@@ -3,7 +3,7 @@ name: "Release: Artifacts"
 # Triggered by pushing a semver tag (v0.1.0, v1.2.3, etc.).
 #
 # This workflow:
-#   1. Builds mkit binaries for macOS (arm64/x86_64) and
+#   1. Builds kit binaries for macOS (arm64/x86_64) and
 #      Linux (x86_64/arm64; glibc, dynamically linked) with a pinned Rust
 #      toolchain (see rust/rust-toolchain.toml), one archive per target.
 #      Windows is not a supported target (see docs/INVARIANTS.md) —
@@ -51,7 +51,7 @@ permissions:
 
 env:
   RUST_VERSION: "1.95.0"
-  BINARY_NAME: mkit
+  BINARY_NAME: kit
 
 jobs:
   validate-release-tag:
@@ -76,7 +76,7 @@ jobs:
         shell: bash
         env:
           DISPATCH_TAG: ${{ inputs.tag }}
-          TRUSTED_FINGERPRINTS: ${{ vars.MKIT_RELEASE_GPG_FINGERPRINTS }}
+          TRUSTED_FINGERPRINTS: ${{ vars.KIT_RELEASE_GPG_FINGERPRINTS }}
         run: |
           set -euo pipefail
 
@@ -97,7 +97,7 @@ jobs:
           fi
 
           if [ -z "${TRUSTED_FINGERPRINTS}" ]; then
-            echo "ERROR: MKIT_RELEASE_GPG_FINGERPRINTS repo/org variable is required" >&2
+            echo "ERROR: KIT_RELEASE_GPG_FINGERPRINTS repo/org variable is required" >&2
             exit 1
           fi
           TRUSTED_FINGERPRINTS="$(printf '%s' "${TRUSTED_FINGERPRINTS}" | tr '[:lower:]' '[:upper:]')"
@@ -119,7 +119,7 @@ jobs:
           KEYSERVERS="hkps://keyserver.ubuntu.com hkps://keys.openpgp.org"
           for TRUSTED_FINGERPRINT in ${TRUSTED_FINGERPRINTS}; do
             if [[ ! "${TRUSTED_FINGERPRINT}" =~ ^[A-Fa-f0-9]{40}$ ]]; then
-              echo "ERROR: invalid GPG fingerprint in MKIT_RELEASE_GPG_FINGERPRINTS: ${TRUSTED_FINGERPRINT}" >&2
+              echo "ERROR: invalid GPG fingerprint in KIT_RELEASE_GPG_FINGERPRINTS: ${TRUSTED_FINGERPRINT}" >&2
               exit 1
             fi
             IMPORTED=0
@@ -173,7 +173,7 @@ jobs:
           case " ${TRUSTED_FINGERPRINTS} " in
             *" ${FINGERPRINT} "*) ;;
             *)
-              echo "ERROR: tag signer ${FINGERPRINT} is not allowlisted in MKIT_RELEASE_GPG_FINGERPRINTS" >&2
+              echo "ERROR: tag signer ${FINGERPRINT} is not allowlisted in KIT_RELEASE_GPG_FINGERPRINTS" >&2
               exit 1
               ;;
           esac
@@ -267,8 +267,8 @@ jobs:
           version: '31.0'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Select only mkit-cli with -p to avoid workspace feature unification.
-      - name: Build release mkit binary
+      # Select only kit-storage with -p to avoid workspace feature unification.
+      - name: Build release kit binary
         shell: bash
         working-directory: rust
         env:
@@ -280,24 +280,24 @@ jobs:
             --release \
             --locked \
             --target ${{ matrix.target }} \
-            -p mkit-cli \
+            -p kit-storage \
             --bin ${{ env.BINARY_NAME }} \
-            --message-format=json-render-diagnostics > "${RUNNER_TEMP}/mkit-build.jsonl"
+            --message-format=json-render-diagnostics > "${RUNNER_TEMP}/kit-build.jsonl"
 
-      # Checks what the mkit build really compiled (its compiler-artifact
+      # Checks what the kit build really compiled (its compiler-artifact
       # messages) and scans the stripped binary: only packages in
-      # scripts/release/mkit-packages.golden, no server-only package, no
+      # scripts/release/kit-packages.golden, no server-only package, no
       # hyper `server`, no connectrpc `server`/`axum`, tower-http only with
       # reqwest's features, no SQLite, no test seam. release-artifact-check.yml
       # runs the same builds and check on PRs to main for one Linux target.
-      - name: Check release mkit artifact
+      - name: Check release kit artifact
         shell: bash
         run: |
           bash scripts/check-release-artifact-features.sh \
-            "${RUNNER_TEMP}/mkit-build.jsonl" \
+            "${RUNNER_TEMP}/kit-build.jsonl" \
             "rust/target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
 
-      - name: Smoke-test release mkit binary
+      - name: Smoke-test release kit binary
         shell: bash
         working-directory: rust
         run: |
@@ -309,7 +309,7 @@ jobs:
           fi
           VERSION="${{ steps.meta.outputs.version }}"
           BIN_DIR="target/${{ matrix.target }}/release"
-          test "$("${BIN_DIR}/${{ env.BINARY_NAME }}" version)" = "mkit ${VERSION}"
+          test "$("${BIN_DIR}/${{ env.BINARY_NAME }}" version)" = "kit ${VERSION}"
       - name: Stage archive contents
         shell: bash
         run: |
@@ -327,10 +327,10 @@ jobs:
           # Optional artifacts — included when present.
           [ -f CHANGELOG.md ] && cp CHANGELOG.md "${STAGE}/" || true
           mkdir -p "${STAGE}/share/man/man1" "${STAGE}/share/completions"
-          cp man/mkit.1 "${STAGE}/share/man/man1/mkit.1"
-          cp completions/mkit.bash "${STAGE}/share/completions/mkit.bash"
-          cp completions/mkit.zsh "${STAGE}/share/completions/_mkit"
-          cp completions/mkit.fish "${STAGE}/share/completions/mkit.fish"
+          cp man/kit.1 "${STAGE}/share/man/man1/kit.1"
+          cp completions/kit.bash "${STAGE}/share/completions/kit.bash"
+          cp completions/kit.zsh "${STAGE}/share/completions/_kit"
+          cp completions/kit.fish "${STAGE}/share/completions/kit.fish"
 
       - name: Compute per-archive SHA256SUMS
         shell: bash
@@ -600,7 +600,7 @@ jobs:
         shell: bash
         run: |
           cp "${{ steps.attest-provenance.outputs.bundle-path }}" \
-            "dist/mkit-${{ steps.meta.outputs.version }}.provenance.jsonl"
+            "dist/kit-${{ steps.meta.outputs.version }}.provenance.jsonl"
 
       - name: Compute top-level SHA256SUMS
         shell: bash
@@ -633,7 +633,7 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          name: mkit ${{ steps.meta.outputs.version }}
+          name: kit ${{ steps.meta.outputs.version }}
           generate_release_notes: true
           draft: false
           prerelease: false
@@ -651,7 +651,7 @@ jobs:
             dist/SHA256SUMS.crt
             dist/SHA256SUMS.cosign.bundle
           body: |
-            ## mkit ${{ steps.meta.outputs.version }}
+            ## kit ${{ steps.meta.outputs.version }}
 
             Content-addressed VCS for creative work.
 
@@ -668,7 +668,7 @@ jobs:
 
             ```sh
             cosign verify-blob \
-              --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+              --certificate-identity-regexp '^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
               --bundle <archive>.cosign.bundle \
               <archive>
@@ -683,15 +683,15 @@ jobs:
             it with the GitHub CLI (no extra tooling required):
 
             ```sh
-            gh attestation verify <archive> --repo officialunofficial/mkit
+            gh attestation verify <archive> --repo officialunofficial/kit
             ```
 
             or with [`slsa-verifier`](https://github.com/slsa-framework/slsa-verifier):
 
             ```sh
             slsa-verifier verify-artifact <archive> \
-              --provenance-path mkit-${{ steps.meta.outputs.version }}.provenance.jsonl \
-              --source-uri github.com/officialunofficial/mkit \
+              --provenance-path kit-${{ steps.meta.outputs.version }}.provenance.jsonl \
+              --source-uri github.com/officialunofficial/kit \
               --source-tag ${{ steps.meta.outputs.tag }}
             ```
 
@@ -705,7 +705,7 @@ jobs:
             terminal works; double-clicking in Finder hits Gatekeeper.
 
             Windows is not a supported target. Windows users should run
-            mkit under WSL, which uses the Linux binary.
+            kit under WSL, which uses the Linux binary.
 
             ### SBOM
 

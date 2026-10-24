@@ -1,7 +1,0 @@
-
-```
-$ mkit add foo.txt
-? 1
-error: not a mkit repo: path is not an mkit repository (missing .kit/objects)
-
-```

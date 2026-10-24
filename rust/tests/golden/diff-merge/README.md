@@ -15,7 +15,7 @@ What gets pinned here &mdash; via regression tests &mdash; is the
 - For a fixed cherry-pick `(target, ours)` pair, the merged tree's
   hash is likewise deterministic.
 
-These hashes are baked into the test in `crates/mkit-core/tests/ops_integration.rs`
+These hashes are baked into the test in `crates/kit-core/tests/ops_integration.rs`
 (see the `merge_uses_find_merge_base_on_diamond` and
 `cherry_pick_target_then_diff_picks_only_target_changes` tests).
 

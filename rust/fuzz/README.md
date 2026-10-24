@@ -1,6 +1,6 @@
-# mkit-fuzz
+# kit-fuzz
 
-Bounded property tests for mkit-core, cargo-fuzz compatible. A workspace
+Bounded property tests for kit-core, cargo-fuzz compatible. A workspace
 member (not published), so `libfuzzer-sys` stays behind the optional
 `libfuzzer` feature and the default `cargo build` / `cargo test` never pulls
 it in.

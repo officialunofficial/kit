@@ -1,4 +1,4 @@
-# ARCHITECTURE &mdash; mkit code map
+# ARCHITECTURE &mdash; kit code map
 
 Status: **Informative**. Audience: contributors and integrators who
 need to find where something lives and how the pieces connect.
@@ -14,32 +14,32 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 
 | Crate                          | Path                                  | Purpose                                                                |
 |--------------------------------|---------------------------------------|------------------------------------------------------------------------|
-| `mkit-core`                    | `rust/crates/mkit-core/`              | Object store, packs, refs, index, worktree, ignore, repo lock, ops, signing, protocol framing, `verify`/`verify::closure` (partial/full disclosure) |
-| `mkit-attest`                  | `rust/crates/mkit-attest/`            | JCS canonical JSON, in-toto v1 Statement, DSSE envelope, signers, verifiers |
-| `mkit-keystore`                | `rust/crates/mkit-keystore/`          | Key vault interface and backends (`specs/SPEC-KEYSTORE.md`)                  |
-| `mkit-git-bridge`              | `rust/crates/mkit-git-bridge/`        | Git import/export bridge incl. fork mode (`specs/SPEC-GIT-BRIDGE.md`)        |
-| `mkit-rpc`                     | `rust/crates/mkit-rpc/`               | Shared stdio framing for subprocess protocols (`specs/SPEC-RPC.md`)          |
-| `mkit-transport-memory`        | `rust/crates/mkit-transport-memory/`  | In-process transport, used by tests                                    |
-| `mkit-transport-file`          | `rust/crates/mkit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
-| `mkit-transport-connect`       | `rust/crates/mkit-transport-connect/` | ConnectRPC client implementing `kit.transport.v1.TransportService` (`specs/SPEC-TRANSPORT-CONNECT.md`); the transport `mkit-cli` actually constructs for `kit+https://` / `kit+http://` |
-| `mkit-transport-s3`            | `rust/crates/mkit-transport-s3/`      | Hand-rolled SigV4 transport (R2 plus S3-compatible)                       |
-| `mkit-transport-ssh`           | `rust/crates/mkit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
-| `mkit-serve`                   | `rust/crates/mkit-serve/`             | Self-host server: the `kit.rpc.v1.ssh` frame session over a repository on disk; `mkit serve` is a thin wrapper |
-| `mkit-sync`                    | `rust/crates/mkit-sync/`              | Native clone/fetch/pull for `.kit` repositories as a library: typed reports, no printing, no ambient config; `mkit clone`/`fetch`/`pull` are thin wrappers over it |
-| `mkit-cli`                     | `rust/crates/mkit-cli/`               | The `mkit` binary; thin glue over the library crates                   |
-| `mkit-wasm`                    | `rust/crates/mkit-wasm/`              | WASM bindings for browsers and Cloudflare Workers                      |
-| `mkit-fuzz`                    | `rust/fuzz/`                          | cargo-fuzz harnesses (`docs/FUZZ.md`)                                  |
-| `mkit-sign-file` (contrib)     | `contrib/signers/mkit-sign-file/`     | Reference external signer; protocol conformance baseline               |
-| `mkit-sign-se` (contrib)       | `contrib/signers/mkit-sign-se/`       | Apple Secure Enclave signer (Swift / CryptoKit)                        |
-| `mkit-sign-tpm` (contrib)      | `contrib/signers/mkit-sign-tpm/`      | TPM 2.0 P-256 signer (Linux/Windows)                                   |
-| `mkit-sign-ctap` (contrib)     | `contrib/signers/mkit-sign-ctap/`     | FIDO2/WebAuthn roaming-authenticator signer                            |
+| `kit-core`                    | `rust/crates/kit-core/`              | Object store, packs, refs, index, worktree, ignore, repo lock, ops, signing, protocol framing, `verify`/`verify::closure` (partial/full disclosure) |
+| `kit-attest`                  | `rust/crates/kit-attest/`            | JCS canonical JSON, in-toto v1 Statement, DSSE envelope, signers, verifiers |
+| `kit-keystore`                | `rust/crates/kit-keystore/`          | Key vault interface and backends (`specs/SPEC-KEYSTORE.md`)                  |
+| `kit-git-bridge`              | `rust/crates/kit-git-bridge/`        | Git import/export bridge incl. fork mode (`specs/SPEC-GIT-BRIDGE.md`)        |
+| `kit-rpc`                     | `rust/crates/kit-rpc/`               | Shared stdio framing for subprocess protocols (`specs/SPEC-RPC.md`)          |
+| `kit-transport-memory`        | `rust/crates/kit-transport-memory/`  | In-process transport, used by tests                                    |
+| `kit-transport-file`          | `rust/crates/kit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
+| `kit-transport-connect`       | `rust/crates/kit-transport-connect/` | ConnectRPC client implementing `kit.transport.v1.TransportService` (`specs/SPEC-TRANSPORT-CONNECT.md`); the transport `kit-storage` actually constructs for `kit+https://` / `kit+http://` |
+| `kit-transport-s3`            | `rust/crates/kit-transport-s3/`      | Hand-rolled SigV4 transport (R2 plus S3-compatible)                       |
+| `kit-transport-ssh`           | `rust/crates/kit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
+| `kit-serve`                   | `rust/crates/kit-serve/`             | Self-host server: the `kit.rpc.v1.ssh` frame session over a repository on disk; `kit serve` is a thin wrapper |
+| `kit-sync`                    | `rust/crates/kit-sync/`              | Native clone/fetch/pull for `.kit` repositories as a library: typed reports, no printing, no ambient config; `kit clone`/`fetch`/`pull` are thin wrappers over it |
+| `kit-storage`                     | `rust/crates/kit-storage/`               | The `kit` binary; thin glue over the library crates                   |
+| `kit-wasm`                    | `rust/crates/kit-wasm/`              | WASM bindings for browsers and Cloudflare Workers                      |
+| `kit-fuzz`                    | `rust/fuzz/`                          | cargo-fuzz harnesses (`docs/FUZZ.md`)                                  |
+| `kit-sign-file` (contrib)     | `contrib/signers/kit-sign-file/`     | Reference external signer; protocol conformance baseline               |
+| `kit-sign-se` (contrib)       | `contrib/signers/kit-sign-se/`       | Apple Secure Enclave signer (Swift / CryptoKit)                        |
+| `kit-sign-tpm` (contrib)      | `contrib/signers/kit-sign-tpm/`      | TPM 2.0 P-256 signer (Linux/Windows)                                   |
+| `kit-sign-ctap` (contrib)     | `contrib/signers/kit-sign-ctap/`     | FIDO2/WebAuthn roaming-authenticator signer                            |
 
 The `contrib/signers/*` crates form a separate sibling Cargo
 workspace under `contrib/signers/` &mdash; they are **not** members of the
 `rust/` workspace (out-of-tree members break release-plz publishing).
 They share package metadata, lint config, and dependency pins by
 inheriting from `contrib/signers/Cargo.toml`, and they are not part of
-the `mkit` binary's link graph. They communicate over the protocol
+the `kit` binary's link graph. They communicate over the protocol
 defined in `specs/SPEC-EXTERNAL-SIGNER.md`.
 
 ---
@@ -83,7 +83,7 @@ not: their ID is the domain-bound root of a Binary Merkle Tree (BMT)
 built over their parts &mdash; one leaf per entry for a `Tree`, and a
 metadata leaf plus one leaf per chunk for a `ChunkedBlob`. The
 construction is normative in `docs/specs/SPEC-MERKLE-OBJECTS.md`; the
-vendored BMT lives in `rust/crates/mkit-core/src/merkle.rs`.
+vendored BMT lives in `rust/crates/kit-core/src/merkle.rs`.
 
 A flat digest names exact bytes and nothing more. Deriving the ID
 from a Merkle root over the object's parts adds two properties.
@@ -113,8 +113,8 @@ of it.
 
 **Verification.** The BMT inclusion proofs this section's identity
 scheme makes possible are exposed as a first-class capability, not just
-an internal read-time check: `mkit_core::merkle`'s id-based proof
-verifiers plus `mkit_core::verify`/`verify::closure` (partial and full
+an internal read-time check: `kit_core::merkle`'s id-based proof
+verifiers plus `kit_core::verify`/`verify::closure` (partial and full
 disclosure against a commit id, for an external party with no repository
 access &mdash; a DA provider, a light client, a browser) round out the
 picture the diagram above starts. See `docs/VERIFY.md` for the
@@ -137,7 +137,7 @@ predicate JSON  ── caller-supplied
 in-toto v1 Statement   (subject = commit BLAKE3, predicateType = URI)
        │   SPEC-ATTESTATIONS §4.2
        ▼
-JCS canonical bytes    (RFC 8785; mkit-attest hand-rolled writer)
+JCS canonical bytes    (RFC 8785; kit-attest hand-rolled writer)
        │
        ▼
 PAE("application/vnd.in-toto+json", payload)
@@ -160,9 +160,9 @@ DSSE envelope ─► JCS ─► BLAKE3 → attestation id
 transport (OP_UPLOAD_ATTESTATION / DOWNLOAD / LIST)
 ```
 
-`mkit verify-attest` walks the envelope, dispatches each signature
+`kit verify-attest` walks the envelope, dispatches each signature
 to a verifier keyed on `keyid`, and consults trust roots from
-`$XDG_CONFIG_HOME/mkit/trust-roots.toml` (see
+`$XDG_CONFIG_HOME/kit/trust-roots.toml` (see
 `THREAT-MODEL.md` §5).
 
 ---
@@ -173,7 +173,7 @@ The contract is `docs/specs/SPEC-EXTERNAL-SIGNER.md` (Protocol v1, v1.1
 adds optional WebAuthn wrapping). Shape:
 
 ```
-mkit attest ──► spawn binary at attest.external_signer_path
+kit attest ──► spawn binary at attest.external_signer_path
             ──► stdin:  one-line JSON {"pae_base64": …, "algorithm": …}
             ──► stdout: one-line JSON {"keyid": …, "sig_base64": …}
             ──► exit 0 on success
@@ -191,20 +191,20 @@ contract.
 Pick the closest match.
 
 ### "I'm modifying the parser for an on-disk object."
-Start at `rust/crates/mkit-core/src/serialize.rs`, then read
+Start at `rust/crates/kit-core/src/serialize.rs`, then read
 `docs/specs/SPEC-OBJECTS.md`. Update the matching golden vector under
 `rust/tests/golden/`. If you change the wire shape, version it.
 
 ### "I'm adding a new transport."
-Start at `rust/crates/mkit-core/src/protocol.rs` for the `Transport`
+Start at `rust/crates/kit-core/src/protocol.rs` for the `Transport`
 trait, then read `docs/specs/SPEC-TRANSPORT.md` for the verb set. Use
-`mkit-transport-memory` as the smallest implementation reference.
+`kit-transport-memory` as the smallest implementation reference.
 
 ### "I'm adding a new signer algorithm or implementation."
-For an in-tree algorithm, edit `mkit-attest`'s `Algorithm` enum and
+For an in-tree algorithm, edit `kit-attest`'s `Algorithm` enum and
 the verifier dispatch. For an out-of-tree signer (HSM, KMS, hardware
 token), implement `docs/specs/SPEC-EXTERNAL-SIGNER.md` and ship a binary &mdash;
-see `contrib/signers/mkit-sign-file/` for a minimal example.
+see `contrib/signers/kit-sign-file/` for a minimal example.
 
 ### "I'm changing the wire format."
 Bump the spec version in the relevant `docs/specs/SPEC-*.md`, write a

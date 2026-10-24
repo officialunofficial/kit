@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
 # Validates a CycloneDX SBOM file against the CycloneDX JSON schema via
-# `cyclonedx-cli validate`, plus a couple of mkit-specific sanity checks
+# `cyclonedx-cli validate`, plus a couple of kit-specific sanity checks
 # (non-empty component list, our own package present) that a schema-valid
 # but empty/wrong SBOM would still pass.
 #

@@ -3,7 +3,7 @@
 #
 # Mechanizes docs/RELEASE.md's "Smoke test" checklist for a Linux/macOS
 # release archive (`.tar.gz`): verify the cosign signature and the
-# SHA256SUMS entry, extract it, check the `mkit version` contract and the
+# SHA256SUMS entry, extract it, check the `kit version` contract and the
 # bundled man page/completions, run a basic init/keygen/add/commit flow.
 #
 # WHY: this checklist used to be run once per release, by a human, by hand.
@@ -13,7 +13,7 @@
 # pass against a downloaded GitHub Release archive.
 #
 # Usage:
-#   scripts/release-smoke.sh --archive <path/to/mkit-X.Y.Z-<triple>.tar.gz> \
+#   scripts/release-smoke.sh --archive <path/to/kit-X.Y.Z-<triple>.tar.gz> \
 #     --version X.Y.Z [--skip-cosign] [--skip-sha256sums]
 #
 # Looks for, alongside <archive> (all optional — a missing sidecar is
@@ -42,7 +42,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$archive" ] || [ -z "$version" ]; then
-  echo "usage: $0 --archive <path/to/mkit-X.Y.Z-<triple>.tar.gz> --version X.Y.Z [--skip-cosign] [--skip-sha256sums]" >&2
+  echo "usage: $0 --archive <path/to/kit-X.Y.Z-<triple>.tar.gz> --version X.Y.Z [--skip-cosign] [--skip-sha256sums]" >&2
   exit 2
 fi
 if [ ! -f "$archive" ]; then
@@ -83,7 +83,7 @@ elif ! command -v cosign >/dev/null 2>&1; then
 else
   note "verifying cosign signature for ${archive_name}"
   if cosign verify-blob \
-    --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+    --certificate-identity-regexp '^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
     --bundle "${archive}.cosign.bundle" \
     "$archive"; then
@@ -125,16 +125,16 @@ trap 'rm -rf "$work_dir"' EXIT
 note "extracting ${archive_name}"
 tar -xzf "$archive" -C "$work_dir"
 
-bin="$(find "$work_dir" -maxdepth 2 -type f -name mkit -perm -u+x | head -n1)"
+bin="$(find "$work_dir" -maxdepth 2 -type f -name kit -perm -u+x | head -n1)"
 if [ -z "$bin" ]; then
-  error "no 'mkit' executable found in the extracted archive"
+  error "no 'kit' executable found in the extracted archive"
   exit 1
 fi
 archive_root="$(dirname "$bin")"
 
 # ── version contract ────────────────────────────────────────────────────
 out="$("$bin" version)"
-expected="mkit ${version}"
+expected="kit ${version}"
 if [ "$out" != "$expected" ]; then
   error "version contract violated: got [$out], expected [$expected]"
 else
@@ -143,10 +143,10 @@ fi
 
 # ── man page / completions present ──────────────────────────────────────
 for f in \
-  "share/man/man1/mkit.1" \
-  "share/completions/mkit.bash" \
-  "share/completions/_mkit" \
-  "share/completions/mkit.fish"
+  "share/man/man1/kit.1" \
+  "share/completions/kit.bash" \
+  "share/completions/_kit" \
+  "share/completions/kit.fish"
 do
   if [ ! -f "${archive_root}/${f}" ]; then
     error "missing ${f} in extracted archive"

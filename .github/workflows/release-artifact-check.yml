@@ -1,6 +1,6 @@
 name: "CI: Release artifact check"
 
-# PR-time preview of the release mkit build and its artifact feature guard.
+# PR-time preview of the release kit build and its artifact feature guard.
 #
 # Triggers: PRs to main and pushes to main only. Nothing runs for feature
 # branches (feat/*), per the repository's CI policy. The release
@@ -18,7 +18,7 @@ on:
       - 'rust/Cargo.lock'
       - 'rust/Cargo.toml'
       - 'rust/crates/**/Cargo.toml'
-      - 'rust/crates/mkit-cli/**'
+      - 'rust/crates/kit-storage/**'
       - 'rust/rust-toolchain.toml'
   pull_request:
     branches: [main]
@@ -30,7 +30,7 @@ on:
       - 'rust/Cargo.lock'
       - 'rust/Cargo.toml'
       - 'rust/crates/**/Cargo.toml'
-      - 'rust/crates/mkit-cli/**'
+      - 'rust/crates/kit-storage/**'
       - 'rust/rust-toolchain.toml'
 
 permissions:
@@ -70,8 +70,8 @@ jobs:
           prefix-key: "rust-artifact-check"
           key: artifact-check-${{ env.TARGET }}
 
-      # Select only mkit-cli with -p to avoid workspace feature unification (D31).
-      - name: Build release mkit binary
+      # Select only kit-storage with -p to avoid workspace feature unification (D31).
+      - name: Build release kit binary
         shell: bash
         working-directory: rust
         env:
@@ -81,16 +81,16 @@ jobs:
             --release \
             --locked \
             --target "${TARGET}" \
-            -p mkit-cli \
-            --bin mkit \
-            --message-format=json-render-diagnostics > "${RUNNER_TEMP}/mkit-build.jsonl"
+            -p kit-storage \
+            --bin kit \
+            --message-format=json-render-diagnostics > "${RUNNER_TEMP}/kit-build.jsonl"
 
-      - name: Check release mkit artifact
+      - name: Check release kit artifact
         shell: bash
         run: |
           bash scripts/check-release-artifact-features.sh \
-            "${RUNNER_TEMP}/mkit-build.jsonl" \
-            "rust/target/${TARGET}/release/mkit"
+            "${RUNNER_TEMP}/kit-build.jsonl" \
+            "rust/target/${TARGET}/release/kit"
 
       # The golden package list must still match release.yml's targets
       # (`--update-golden` output is deterministic): catches a Cargo.lock or
@@ -99,9 +99,9 @@ jobs:
         shell: bash
         run: |
           bash scripts/check-release-artifact-features.sh --update-golden
-          if ! git diff --exit-code -- scripts/release/mkit-packages.golden; then
-            echo "ERROR: scripts/release/mkit-packages.golden is stale; run" >&2
+          if ! git diff --exit-code -- scripts/release/kit-packages.golden; then
+            echo "ERROR: scripts/release/kit-packages.golden is stale; run" >&2
             echo "  scripts/check-release-artifact-features.sh --update-golden" >&2
-            echo "review the diff (every new name is a new dependency of the shipped mkit CLI) and commit it." >&2
+            echo "review the diff (every new name is a new dependency of the shipped kit CLI) and commit it." >&2
             exit 1
           fi

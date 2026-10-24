@@ -1,5 +1,5 @@
 # SPEC-PACKFILE v2 fixtures, written by the C zstd encoder (pack-zstd)
-# Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-core --test golden_pack`
+# Produced by `KIT_WRITE_GOLDEN=1 cargo test -p kit-core --test golden_pack`
 # Format: <file> <blake3-hex-of-file-bytes>
 # See docs/specs/SPEC-PACKFILE.md section 10, vector 20.
 raw_4k_repeat.bin 2c20552b30b72cacdcc3bee52e6ee2b581341db33f9020af8729ce48e16ee621

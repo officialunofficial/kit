@@ -1,7 +1,7 @@
-# VERIFY &mdash; verifying an mkit commit hash
+# VERIFY &mdash; verifying an kit commit hash
 
 Audience: someone building a verifier or a data-availability (DA) provider
-who has an mkit commit id from an external anchor (a chain, a signed
+who has an kit commit id from an external anchor (a chain, a signed
 release, a timestamp) and bytes served by a party they do not trust. This
 guide stands alone with the specs and the golden vectors; it links to the
 specs for normative detail rather than restating it, and every command and
@@ -25,7 +25,7 @@ the code. This document explains how to *use* it.
 
 ## 1. What a commit id commits to
 
-An mkit commit id is a 32-byte BLAKE3 digest of a small (~250 byte)
+An kit commit id is a 32-byte BLAKE3 digest of a small (~250 byte)
 canonical commit object. Everything else &mdash; every file, every directory,
 every chunk of every large file in the repository at that commit &mdash; is
 reachable from that one id through an unbroken chain of content-addressed
@@ -115,7 +115,7 @@ manifest's equivalent, since a closure's root can itself be a signed
 `Commit`/`Remix`/`Tag`) report whether the commit's *embedded* public key
 produced its *embedded* signature. That is real cryptographic work, but it
 says nothing about who that public key belongs to &mdash; binding a key to a
-person or an organization is exactly what `mkit verify --trust-roots` (and
+person or an organization is exactly what `kit verify --trust-roots` (and
 `verify-proof --trusted --trust-roots`) layers on top, and it is the
 caller's responsibility to apply the same policy at the DA/verifier layer
 if identity matters there.
@@ -137,7 +137,7 @@ job to compare that returned value against whatever it originally asked
 for. A bundle that claims to disclose `secrets.env` but whose authenticated
 path says `README.md` is not a verification failure; it is the caller
 failing to check the one field this entire exercise exists to produce. See
-[`mkit verify-proof --expect-path`](CLI.md) for the CLI's version of that
+[`kit verify-proof --expect-path`](CLI.md) for the CLI's version of that
 check.
 
 ## 3. Full disclosure (closure profile)
@@ -158,7 +158,7 @@ a whole history:
 | **snapshot** (default) | the root object and its tree closure: every `Tree`, `Blob`, `ChunkedBlob` (manifest + chunks) reachable from the root's tree. Parents are *referenced*, not *included*. |
 | **history** | everything `snapshot` includes, plus every ancestor commit and *its* tree closure &mdash; identical to what `push`/`fetch` already ship |
 
-Both modes share one function, `children(obj, mode)` (`mkit_core::ops::graph`),
+Both modes share one function, `children(obj, mode)` (`kit_core::ops::graph`),
 as their single source of truth for "what does this object reference" &mdash; a
 `Commit`/`Remix`'s `parents` are followed only in history mode, a
 `Remix`'s `sources` (foreign-repo pointers) are **never** followed by
@@ -169,7 +169,7 @@ pack-internal encoding detail, not part of object identity).
 
 A closure is carried as one or more [SPEC-PACKFILE](specs/SPEC-PACKFILE.md)
 v1 packs containing **only raw (`0x00`) entries** &mdash; no compression, no
-deltas. This is deliberate: `mkit-wasm` is built with `default-features =
+deltas. This is deliberate: `kit-wasm` is built with `default-features =
 false` (no `pack-zstd`, keeping the wasm build blst/zstd-free per
 SPEC-MERKLE-OBJECTS' constraint), so a wasm-based verifier has no way to
 decompress a `0x03`/`0x04` entry and no store to resolve a delta base
@@ -181,7 +181,7 @@ first and fail there.
 ### `missing`, `corrupt`, `unreferenced`
 
 A closure check (`verify_closure` / `verify_closure_packs` /
-`verify_closure_manifest`, or `mkit closure verify`) returns a report with
+`verify_closure_manifest`, or `kit closure verify`) returns a report with
 three lists, not a single pass/fail bit, plus `unreferenced_checked`:
 
 - **`missing`** &mdash; an id the walk reached but nobody supplied bytes for.
@@ -211,7 +211,7 @@ land in `corrupt`. It deserializes fine, gets content-addressed under a
 *different* id than whatever filename or slot it was served under, and
 surfaces as **`missing`** (the id the walk actually wanted, still absent)
 **plus `unreferenced`** (the id the tampered bytes actually hash to, never
-visited). `corrupt` is reserved for bytes that don't even parse as an mkit
+visited). `corrupt` is reserved for bytes that don't even parse as an kit
 object. The local CLI's default (no `--from`, without
 `--show-unreferenced`) uses the pull-based store path, so a byte flip is
 reported directly as `corrupt` under the requested id; passing
@@ -225,18 +225,18 @@ from a separate directory (standing in for "downloaded from an untrusted
 party"):
 
 ```console
-$ mkit closure export HEAD -o snap.closure
+$ kit closure export HEAD -o snap.closure
 closure: snapshot, 4 objects in 1 pack(s), 3169 B -> snap.closure
 
 $ ls snap.closure
 495fe4e5dfda894cc4007402999261f7c7e7a36fe8164cef3f4befb46df88ab9.pack
 MANIFEST.mkcl
 
-$ mkit closure verify 767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519 \
+$ kit closure verify 767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519 \
     --from snap.closure
 ok: closure complete (4 objects, snapshot)
 
-$ mkit closure verify 767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519 \
+$ kit closure verify 767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519 \
     --from snap.closure --format=json
 {"root":"767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519","mode":"snapshot","verified":4,"complete":true,"unreferenced_checked":true,"missing":[],"corrupt":[],"unreferenced":[]}
 ```
@@ -244,7 +244,7 @@ $ mkit closure verify 767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02a
 `<commit-id>` with `--from` is **always** a trusted 64-hex id, never
 resolved as a revision (`HEAD`, a branch name, a short prefix) &mdash; that
 resolution would have to trust the very store whose output is being
-checked. Without `--from`, `mkit closure verify HEAD` checks the local
+checked. Without `--from`, `kit closure verify HEAD` checks the local
 repository instead and *does* accept a revision, since there the store is
 trusted by construction; the default local check is pull-based, while
 `--show-unreferenced` deliberately selects the enumerate-everything map path.
@@ -252,8 +252,8 @@ trusted by construction; the default local check is pull-based, while
 **Rust**, given the manifest and pack bytes from the export above:
 
 ```rust
-use mkit_core::hash::from_hex;
-use mkit_core::verify::verify_closure_manifest;
+use kit_core::hash::from_hex;
+use kit_core::verify::verify_closure_manifest;
 
 let expected_root = from_hex("767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519")?;
 let manifest = std::fs::read("snap.closure/MANIFEST.mkcl")?;
@@ -270,13 +270,13 @@ from the manifest &mdash; a manifest whose embedded `root` disagrees with
 touched. The manifest is a locator (which packs to fetch), never a trust
 anchor.
 
-**TypeScript**, with `@officialunofficial/mkit-wasm`. Packs travel as one
+**TypeScript**, with `@officialunofficial/kit-wasm`. Packs travel as one
 concatenated buffer plus a JSON array of their individual lengths, since
 `js_sys::Array<Uint8Array>` doesn't cross the wasm boundary as cheaply as a
 flat buffer:
 
 ```ts
-import { verify_closure_manifest } from "@officialunofficial/mkit-wasm";
+import { verify_closure_manifest } from "@officialunofficial/kit-wasm";
 
 const commitId =
   "767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519";
@@ -337,7 +337,7 @@ payload_kind: u8
 
 Every integer is big-endian, every length an LEB128 varint, arrays are raw
 &mdash; `commonware-codec` conventions, the same house style
-`mkit_core::transfer`'s packlist node already uses. Full byte-level detail,
+`kit_core::transfer`'s packlist node already uses. Full byte-level detail,
 every `Vec` bound, and the exact verification algorithm are normative in
 [SPEC-DISCLOSURE](specs/SPEC-DISCLOSURE.md) §3&ndash;§5; this section is the
 map, not the territory.
@@ -354,7 +354,7 @@ map, not the territory.
   which the verifier **recomputes itself**, never accepts as input &mdash;
   is proven with one multi-proof over BMT positions `{0, index + 1}`
   (position 0 is the metadata leaf; SPEC-MERKLE-OBJECTS §3.1). This is
-  `verify_chunk_with_meta` in `mkit_core::verify`.
+  `verify_chunk_with_meta` in `kit_core::verify`.
 - **`Range`** discloses a byte range, over a plain `Blob` leaf directly, or
   over one chunk of a `ChunkedBlob` leaf (`chunk: Some(hdr)`, same
   `{0, index + 1}` multi-proof as `Chunk` first, then the range within
@@ -396,10 +396,10 @@ set there is rejected the same way as on a plain `Blob` leaf
 against a trusted commit id, and recover exactly the disclosed bytes:
 
 ```console
-$ mkit prove HEAD src/lib.rs --range 100:40 -o p.bin
+$ kit prove HEAD src/lib.rs --range 100:40 -o p.bin
 proof: 684 B for src/lib.rs @ 64ccb22 (range)
 
-$ mkit verify-proof 64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93 \
+$ kit verify-proof 64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93 \
     p.bin --expect-path src/lib.rs --payload-out slice.bin
 ok: range src/lib.rs @ 64ccb22, 40 B, signer 0a486e59affe8fb5… (valid signature)
 
@@ -417,38 +417,38 @@ mismatch &mdash; it is not merely an informational filter.
 **JSON output**, from the same bundle:
 
 ```console
-$ mkit verify-proof 64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93 \
+$ kit verify-proof 64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93 \
     p.bin --expect-path src/lib.rs --format=json
 {"commit_id":"64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93","tree_hash":"15fa3e247b96d89c9504a8125be55b3de930ccc9e3a2f750fff0a25098cd7cf8","path":[{"name":"src","name_hex":"737263","mode":"tree"},{"name":"lib.rs","name_hex":"6c69622e7273","mode":"blob"}],"leaf_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","signer":"0a486e59affe8fb54af5fa3e31b3b49663970da1cba4140d538a72ffb12e2077","signature_valid":true,"payload":{"kind":"range","bytes_len":40,"bytes_blake3":"0b9523ef4483e7a5a1651f25553c85294f0bf872b689c840df3c9f4a494c5cf1","blob_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","chunk":null,"offset_in_blob":100,"absolute_offset":100},"step_inner_roots":["36b9b63b57ac62c1b0afee72d739e0d8aece1b17d0229b7a3d580b9e2c4cf955","7e837a5798b77529da077b0475cd370a2114c7c5dc99a654eecdc3559ac89ff4"],"chunk_inner_root":null,"signer_trusted":null}
 ```
 
-This is the same shape `mkit-wasm`'s `verify_disclosure` produces
+This is the same shape `kit-wasm`'s `verify_disclosure` produces
 (`signer_trusted` is the CLI's own trust-roots addition on top).
 
 **Rust:**
 
 ```rust
-use mkit_core::hash::from_hex;
-use mkit_core::verify::verify_disclosure;
+use kit_core::hash::from_hex;
+use kit_core::verify::verify_disclosure;
 
 let commit_id = from_hex("64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93")?;
 let bundle = std::fs::read("p.bin")?;
 
 let disclosed = verify_disclosure(&commit_id, &bundle)?;
 assert_eq!(disclosed.path, vec![
-    (b"src".to_vec(), mkit_core::object::EntryMode::Tree),
-    (b"lib.rs".to_vec(), mkit_core::object::EntryMode::Blob),
+    (b"src".to_vec(), kit_core::object::EntryMode::Tree),
+    (b"lib.rs".to_vec(), kit_core::object::EntryMode::Blob),
 ]);
 assert!(disclosed.signature_valid);
 ```
 
-**TypeScript**, with `@officialunofficial/mkit-wasm`:
+**TypeScript**, with `@officialunofficial/kit-wasm`:
 
 ```ts
 import {
   verify_disclosure,
   disclosure_payload_bytes,
-} from "@officialunofficial/mkit-wasm";
+} from "@officialunofficial/kit-wasm";
 
 const commitId =
   "64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93";
@@ -473,19 +473,19 @@ a failure of the whole disclosure &mdash; both independently re-verify.
 
 ## 5. Interop for commonware-based verifiers
 
-mkit's Binary Merkle Tree proofs (`mkit_core::merkle::Proof`) are,
+kit's Binary Merkle Tree proofs (`kit_core::merkle::Proof`) are,
 deliberately, **byte-identical** to `commonware_storage::bmt::Proof` at the
-release train mkit pins (`2026.9.0`, `rust/Cargo.toml`): same wire framing
+release train kit pins (`2026.9.0`, `rust/Cargo.toml`): same wire framing
 (`be32(leaf_count) || varint(n) || n * 32-byte digest`), same sibling
 selection algorithm, for single, range, and multi-leaf proofs alike. A verifier already built against the upstream
-`commonware-storage` crate (makechain, for instance) can decode an mkit
+`commonware-storage` crate (makechain, for instance) can decode an kit
 proof directly with the upstream type and run upstream's own
-`verify_*_inclusion` **unchanged** &mdash; no mkit-specific decoder, and no
-mkit dependency, needed for the proof-checking step itself. One thing sits
+`verify_*_inclusion` **unchanged** &mdash; no kit-specific decoder, and no
+kit dependency, needed for the proof-checking step itself. One thing sits
 outside that byte-identity, though: `Proof::verify_element_inclusion(leaf,
 position, root)` checks against an already-known *bare* inner root, not an
-mkit id (it doesn't recover or return the folded value, only accept/reject
-against a `root` the caller supplies), and an mkit repository never
+kit id (it doesn't recover or return the folded value, only accept/reject
+against a `root` the caller supplies), and an kit repository never
 publishes a bare inner root anywhere &mdash; only the domain-wrapped id. A
 commonware-native verifier therefore needs exactly one extra step around
 upstream's unmodified check: verify the wrap.
@@ -493,7 +493,7 @@ upstream's unmodified check: verify the wrap.
 ### Primary case: the prover supplies the inner root alongside the proof
 
 The most direct shape, and the one this section leads with because it
-needs no mkit code at all on the verifier's side: the prover hands the
+needs no kit code at all on the verifier's side: the prover hands the
 verifier the proof **and** the bare inner root it was built against. The
 verifier, in order:
 
@@ -502,7 +502,7 @@ verifier, in order:
    `TYPE_DOMAIN` is `"kit.tree\x00"` for a `Tree` or `"kit.chunked\x00"`
    for a `ChunkedBlob`, and `domain_digest(d, b) = BLAKE3(le16(len(d)) ||
    d || b)` &mdash; both normative, public spec constants (SPEC-MERKLE-OBJECTS
-   §2, SPEC-OBJECTS §9), not merely a detail of `mkit_core`'s own Rust
+   §2, SPEC-OBJECTS §9), not merely a detail of `kit_core`'s own Rust
    types. Because `domain_digest` is collision-resistant, a match proves
    `inner_root` is *exactly* the root `trusted_id` commits to &mdash; the
    prover cannot substitute a different tree/chunk set and still pass this
@@ -515,7 +515,7 @@ verifier, in order:
 use commonware_codec::Read as _;
 use commonware_cryptography::blake3::{Blake3, Digest};
 use commonware_storage::bmt::Proof as UpstreamProof;
-use mkit_core::hash::domain_digest;
+use kit_core::hash::domain_digest;
 
 // `trusted_tree_id` is the id the caller already trusts (a commit's
 // `tree_hash`, or the previous step's `child_id`). `prover_inner_root`,
@@ -527,7 +527,7 @@ assert_eq!(
     domain_digest(b"kit.tree\x00", &prover_inner_root), // or b"kit.chunked\x00"
     trusted_tree_id,
 );
-// A verifier with no mkit dependency at all computes the same check by
+// A verifier with no kit dependency at all computes the same check by
 // hand: BLAKE3(le16(9) || b"kit.tree\x00" || prover_inner_root) — 9 is
 // len(b"kit.tree\x00"); le16/le32 are 2/4-byte little-endian integers.
 
@@ -571,7 +571,7 @@ adds no trust surface.
 When the caller instead holds the full `Tree`/`ChunkedBlob` object &mdash; an
 `Object`-kind disclosure payload, or an object re-derived while walking a
 closure &mdash; it can compute the bare inner root itself, from that object's
-leaves, with `mkit_core::merkle::tree_inner_root` / `chunked_inner_root`.
+leaves, with `kit_core::merkle::tree_inner_root` / `chunked_inner_root`.
 These are byte-identical to building the same tree with
 `commonware_storage::bmt::Builder`
 (`merkle::tests::proofs_match_commonware` pins this cross-check), so the
@@ -585,7 +585,7 @@ A caller that has *only* `(leaf, position, proof)` against a trusted id,
 with no inner root available from anywhere, needs the same fold-up
 upstream's `verify_element_inclusion` performs internally before it can
 even begin &mdash; precisely the algorithm SPEC-MERKLE-OBJECTS §5.4 specifies
-in prose. `mkit_core::merkle`'s own id-based verifiers (`verify_tree_entry`,
+in prose. `kit_core::merkle`'s own id-based verifiers (`verify_tree_entry`,
 `verify_chunk`, and their range/multi counterparts) already do exactly
 that fold-then-wrap-then-compare, tested and golden-vector-pinned; reach
 for those directly (`merkle::wrap_id` / wasm's `wrap_object_id` apply the
@@ -593,8 +593,8 @@ same wrap step) rather than hand-rolling the fold loop.
 
 ### Leaf digest formulas
 
-The leaf digest formulas themselves are mkit-specific (they're what makes
-an mkit tree entry or chunked-blob metadata leaf what it is, not a generic
+The leaf digest formulas themselves are kit-specific (they're what makes
+an kit tree entry or chunked-blob metadata leaf what it is, not a generic
 BMT property) and are normative in
 [SPEC-MERKLE-OBJECTS](specs/SPEC-MERKLE-OBJECTS.md) §3:
 
@@ -607,7 +607,7 @@ BMT property) and are normative in
 outer wrap, §2), and `"kit-tree-entry-v1"` / `"kit-cblob-meta-v1"` (the
 leaf domains, §3) are all normative spec byte strings &mdash; any independent
 implementation may hardcode them. What's private is only
-`mkit_core::merkle`'s own Rust `const`s for these same strings (so they
+`kit_core::merkle`'s own Rust `const`s for these same strings (so they
 never become a de facto *Rust* ABI commitment, i.e. so the crate stays
 free to restructure how it stores them internally); that privacy says
 nothing about the byte strings' own status, which is public and pinned by
@@ -627,7 +627,7 @@ outside Rust:
    payload or length proof. The [`bao` reference implementation's
    format](https://github.com/oconnor663/bao) is public and has ports in
    several languages; the encoding is exactly "outboard tree hashes plus
-   1 KiB content leaves," nothing mkit-specific.
+   1 KiB content leaves," nothing kit-specific.
 
 ### Order of checks
 
@@ -717,13 +717,13 @@ expected `Disclosed` summary for an accept vector); a closure vector's
 vector's sidecar additionally carries `reject_reason`, a short
 human-readable note on *why* &mdash; useful for triage, but conformance only
 requires that your verifier reject it, not that it reject it for the
-identical reason mkit's own implementation does.
+identical reason kit's own implementation does.
 
 The procedure: for every vector, decode `<name>.bin` with your
 implementation, and check its outcome against `expect` (an accept vector's
 result must additionally match the sidecar's recorded summary fields; a
 reject vector just needs to fail, any typed way). This is exactly what
-`rust/crates/mkit-core/tests/golden_{proofs,disclosure,closure}.rs` do,
+`rust/crates/kit-core/tests/golden_{proofs,disclosure,closure}.rs` do,
 and they are written to read **only** the committed `.bin`/`.json` files,
 never the fixture generator &mdash; the same posture an independent verifier's
 own test harness should take.
@@ -731,13 +731,13 @@ own test harness should take.
 ## 7. Limits and non-goals
 
 - **Ranges cannot cross a chunk boundary**, in this (v1) profile of the
-  disclosure bundle. `mkit prove --range` rejects such a request outright
+  disclosure bundle. `kit prove --range` rejects such a request outright
   (`RangeCrossesChunkBoundary`) rather than silently splitting it into
   multiple chunk proofs.
 - **git SHA-1 hashes support full disclosure only.** A git blob is a flat
   SHA-1 digest with no sub-file structure to build a partial proof over; a
   client that already trusts a git SHA-1 verifies it with git's own
-  hashing, not this kit. Partial disclosure is an mkit-id-only capability.
+  hashing, not this kit. Partial disclosure is an kit-id-only capability.
 - **Ancestry (history MMB) proofs and pack-shard DA sampling are not part
   of this kit.** Both are real, separately-scoped capabilities (see
   SPEC-DISCLOSURE) that need a chain-side anchor beyond a single commit id
@@ -747,23 +747,23 @@ own test harness should take.
 - **Non-membership proofs** (proving a name is *absent* from a `Tree`) are
   reserved as disclosure `payload_kind 3` (`Absent`). A
   disclosure bundle only ever proves inclusion.
-- **wasm caps**, independent of the native crate's own bounds (`mkit_core::verify`,
-  which mkit-wasm builds on top of): objects 16 MiB
-  (`MAX_WORKSPACE_OBJECT_BYTES`, `mkit-wasm/src/objects.rs`); a disclosure
+- **wasm caps**, independent of the native crate's own bounds (`kit_core::verify`,
+  which kit-wasm builds on top of): objects 16 MiB
+  (`MAX_WORKSPACE_OBJECT_BYTES`, `kit-wasm/src/objects.rs`); a disclosure
   bundle 64 MiB (`verify::MAX_BUNDLE_BYTES`, shared with the native crate);
   concatenated closure packs 1 GiB (`MAX_CLOSURE_INPUT_BYTES`,
-  `mkit-wasm/src/verify.rs`, independent of the bundle cap &mdash; see §3).
+  `kit-wasm/src/verify.rs`, independent of the bundle cap &mdash; see §3).
 
 ## 8. Reference table
 
 | Surface | Purpose | Spec |
 |---|---|---|
 | **CLI** | | |
-| `mkit prove <rev> [<path>] [--chunk N \| --range OFF:LEN] [--with-offsets] [-o FILE] [--format=json]` | build a disclosure bundle | SPEC-DISCLOSURE §3 |
-| `mkit verify-proof <commit-id> <bundle\|-> [--expect-path P] [--trusted] [--trust-roots PATH] [--payload-out FILE] [--format=json]` | verify a disclosure bundle | SPEC-DISCLOSURE §4 |
-| `mkit closure export <rev> [--history] [-o DIR] [--force] [--format=json]` | write a closure (manifest + raw-only packs) | SPEC-DISCLOSURE §7.2/§7.3 |
-| `mkit closure verify <commit-id> [--from DIR] [--history] [--show-unreferenced] [--format=json]` | verify a closure, remote (`--from`) or local | SPEC-DISCLOSURE §7.4 |
-| **mkit-core (`mkit_core::verify`, `mkit_core::merkle`)** | | |
+| `kit prove <rev> [<path>] [--chunk N \| --range OFF:LEN] [--with-offsets] [-o FILE] [--format=json]` | build a disclosure bundle | SPEC-DISCLOSURE §3 |
+| `kit verify-proof <commit-id> <bundle\|-> [--expect-path P] [--trusted] [--trust-roots PATH] [--payload-out FILE] [--format=json]` | verify a disclosure bundle | SPEC-DISCLOSURE §4 |
+| `kit closure export <rev> [--history] [-o DIR] [--force] [--format=json]` | write a closure (manifest + raw-only packs) | SPEC-DISCLOSURE §7.2/§7.3 |
+| `kit closure verify <commit-id> [--from DIR] [--history] [--show-unreferenced] [--format=json]` | verify a closure, remote (`--from`) or local | SPEC-DISCLOSURE §7.4 |
+| **kit-core (`kit_core::verify`, `kit_core::merkle`)** | | |
 | `verify_object_id(bytes, expected) -> Object` | check one object's content-address | SPEC-OBJECTS §10 |
 | `verify_path(commit_id, commit_bytes, steps) -> PathVerified` | walk and verify a tree-entry step chain | SPEC-DISCLOSURE §4 steps 6&ndash;9 |
 | `verify_chunk_with_meta(chunked_id, total_size, chunk_size, chunk_hash, index, proof)` | verify one chunk + its manifest metadata | SPEC-MERKLE-OBJECTS §3.1 |
@@ -779,7 +779,7 @@ own test harness should take.
 | `export_closure(store, root, mode) -> ClosureExport` (native) | producer side of a closure | SPEC-DISCLOSURE §7.2/§7.3 |
 | `merkle::wrap_id(kind, inner_root) -> Hash` | apply the outer type-domain wrap (§5's step 1); a v2 `Step.inner_root` is wrap-checked with this before upstream BMT verify | SPEC-MERKLE-OBJECTS §2 |
 | `merkle::verify_tree_entry` / `verify_chunk` (+ `*_range` / `*_multi`) | single/range/multi-leaf BMT inclusion proofs, against the object id | SPEC-MERKLE-OBJECTS §5.4 |
-| **mkit-wasm** | | |
+| **kit-wasm** | | |
 | `verify_disclosure(commit_id_hex, bundle) -> json` | JS-facing bundle verify (no payload bytes) | SPEC-DISCLOSURE §3&ndash;§4 |
 | `disclosure_payload_bytes(commit_id_hex, bundle) -> bytes` | verified payload bytes (re-verifies) | SPEC-DISCLOSURE §4 |
 | `verify_closure_packs` / `verify_closure_manifest` | JS-facing closure verify | SPEC-DISCLOSURE §7 |
@@ -787,8 +787,8 @@ own test harness should take.
 | `chunked_blob_decode` | decode a `ChunkedBlob`'s manifest to JSON | SPEC-OBJECTS §7 |
 | `blob_bao_encode` / `blob_bao_slice` / `blob_bao_verify_slice` | Bao over **canonical** blob bytes | SPEC-DISCLOSURE §4 (Range) |
 | `wrap_object_id(kind, inner_root_hex) -> hex` | JS-facing `wrap_id`; v2 bundles carry `step_inner_roots` / `chunk_inner_root` on the `verify_disclosure` JSON | SPEC-MERKLE-OBJECTS §2 |
-| **MCP tools** (`mkit mcp`) | | |
-| `mkit_prove` / `mkit_verify_proof` / `mkit_closure_verify` | agent-facing equivalents of the CLI commands above | &mdash; |
+| **MCP tools** (`kit mcp`) | | |
+| `kit_prove` / `kit_verify_proof` / `kit_closure_verify` | agent-facing equivalents of the CLI commands above | &mdash; |
 
 ---
 

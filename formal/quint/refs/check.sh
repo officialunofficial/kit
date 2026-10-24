@@ -12,7 +12,7 @@
 # Pins: quint 0.32.0, Apalache 0.62.2 run directly on the
 # compiled TLA+ (not `quint verify`), TLC = tlc2.TLC from the Apalache 0.62.2
 # jar, Java 21. Tool locations (override any of them):
-#   FV_HOME     ${FV_HOME:-$HOME/.local/share/mkit-fv}
+#   FV_HOME     ${FV_HOME:-$HOME/.local/share/kit-fv}
 #   APALACHE_MC $FV_HOME/apalache-0.62.2/bin/apalache-mc
 #   TLA2TOOLS   $FV_HOME/apalache-0.62.2/lib/apalache.jar   (holds tlc2.TLC)
 #   JAVA_HOME   else `/usr/libexec/java_home -v 21`, else Homebrew's openjdk@21
@@ -27,7 +27,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 HERE=$PWD
 
-FV_HOME=${FV_HOME:-$HOME/.local/share/mkit-fv}
+FV_HOME=${FV_HOME:-$HOME/.local/share/kit-fv}
 APALACHE_MC=${APALACHE_MC:-$FV_HOME/apalache-0.62.2/bin/apalache-mc}
 TLA2TOOLS=${TLA2TOOLS:-$FV_HOME/apalache-0.62.2/lib/apalache.jar}
 APA_JAR=$(dirname "$APALACHE_MC")/../lib/apalache.jar
@@ -152,7 +152,7 @@ qrun serve.qnt serve2_sweepUnlocked SweepAlone violation
 qrun serve.qnt serve2_sweepUnderShared SweepAlone violation
 qrun serve.qnt serve2_serverSkipsServe UpServersHoldServeShared violation
 qrun serve.qnt serve2_serverSkipsServe NoMissedDetection violation
-qrun serve.qnt serve2_serverLockShared OneMkitServer violation
+qrun serve.qnt serve2_serverLockShared OneKitServer violation
 qrun serve.qnt served Safety ok
 for c in CanaryNoOutsideRefusal CanaryNoLongRefusal CanaryNoLegacySkipped CanaryNoAdvance; do
   qrun serve.qnt served "$c" violation
@@ -172,7 +172,7 @@ if [[ ${TLC:-1} == 1 ]]; then
   tlc serve.qnt serve2_sweepUnlocked NoLiveUploadSwept violation "" ""
   tlc serve.qnt serve2_sweepUnderShared NoLiveUploadSwept violation "" ""
   tlc serve.qnt serve2_serverSkipsServe NoLiveUploadSwept violation "" ""
-  tlc serve.qnt serve2_serverLockShared OneMkitServer violation "" ""
+  tlc serve.qnt serve2_serverLockShared OneKitServer violation "" ""
   tlc serve.qnt serve2_ftSlow NoLiveUploadSwept violation "" ""
   tlc serve.qnt serve2 CanaryNoStartDuringStalledUpload violation "" ""
   tlc serve.qnt served Safety ok "" ""
@@ -190,7 +190,7 @@ if [[ ${TLC:-1} == 1 ]]; then
   RV='<< @disk, @mem, @owner, @procs, @recLog, @nextEntry, @faults, @violations, @lostRecords, @recordDuringExpire >>'
   RC='@nextEntry <= 2'
   # Slice "domains": the three §5.1 lock domains on one ref: local updateRef
-  # (refs-<ref>.lock), file (RefLock: mkit serve / mkit-server / kit+file://)
+  # (refs-<ref>.lock), file (RefLock: kit serve / kit-server / kit+file://)
   # and mem (Mutex).
   DOMD=$'SliceKinds == {"updateRef", "file", "mem"}\nSliceRefs == {0}'
   DOMC=$'CONSTANT @KINDS <- SliceKinds\nCONSTANT @REFS <- SliceRefs'
@@ -218,7 +218,7 @@ if [[ ${APALACHE:-0} == 1 ]]; then
   apa serve.qnt serve2_sweepUnlocked NoLiveUploadSwept 6 violation
   apa serve.qnt serve2_sweepUnderShared NoLiveUploadSwept 7 violation
   apa serve.qnt serve2_serverSkipsServe NoLiveUploadSwept 6 violation
-  apa serve.qnt serve2_serverLockShared OneMkitServer 2 violation
+  apa serve.qnt serve2_serverLockShared OneKitServer 2 violation
   apa serve.qnt serve2_ftSlow NoLiveUploadSwept 4 violation
   apa serve.qnt served Safety 8 ok
   apa serve.qnt served_headCheckedLate RefusedWritesNothing 4 violation

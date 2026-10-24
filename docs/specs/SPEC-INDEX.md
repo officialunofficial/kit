@@ -5,7 +5,7 @@ status: stable-normative
 audience: implementers of durable local staging state
 ---
 
-# SPEC-INDEX &mdash; mkit repo-local index file
+# SPEC-INDEX &mdash; kit repo-local index file
 
 Status: **Stable, normative** for durable local staging state. Local-only;
 not exchanged between peers. See SPEC-CONVENTIONS §2.
@@ -125,7 +125,7 @@ mtime+size with different bytes. Readers MUST therefore treat as
 index file's own mtime. The window is judged PER ENTRY: the tight
 window (10ms) applies only when both the index file's mtime and the
 entry's recorded mtime show sub-second precision &mdash; this follows the
-common coarse-clock granularity on the platforms mkit targets; an
+common coarse-clock granularity on the platforms kit targets; an
 entry with a whole-second mtime (vfat/SMB mounts, tar/touch-truncated
 timestamps) keeps the conservative 1-second window. Racy entries are
 re-hashed on use; a later index write (whose file mtime is then newer)

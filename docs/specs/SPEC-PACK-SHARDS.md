@@ -7,7 +7,7 @@ audience: implementers of pack producers and consumers; transport implementers
 
 # SPEC-PACK-SHARDS &mdash; erasure-coded pack delivery
 
-Status: **Normative** for mkit v0.x &mdash; the in-process codec and the
+Status: **Normative** for kit v0.x &mdash; the in-process codec and the
 wire/transport delivery surface are both implemented.
 Scope: a wire-level encoding *of* a pack &mdash; the on-disk packfile format
 (SPEC-PACKFILE) is unchanged.
@@ -66,7 +66,7 @@ commitment        [u8; 32]     Commonware BMT root committing to all
 ### 2.1 v0 wire bytes
 
 All multi-byte integers are little-endian. The encoder /
-decoder live in `mkit_core::pack_shard::{encode_manifest,
+decoder live in `kit_core::pack_shard::{encode_manifest,
 decode_manifest}`.
 
 ```text
@@ -94,7 +94,7 @@ be reused for a different wire meaning: a `0x01` manifest's
 so a decoder that sees `0x01` MUST reject it with a version-specific
 error rather than the generic unrecognized-version error, so a caller
 stuck on an old producer gets an actionable message (re-shard with a
-current mkit) instead of an opaque failure.
+current kit) instead of an opaque failure.
 
 Decoders MUST:
 
@@ -126,7 +126,7 @@ bytes    Vec<u8>     Codec-serialized commonware `Chunk`. Opaque at
 
 The `bytes` field carries the commonware `Chunk` (shard payload +
 shard index + Merkle multi-proof) in its native
-`commonware_codec::Codec` form. mkit does **not** introduce a second
+`commonware_codec::Codec` form. kit does **not** introduce a second
 framing &mdash; the codec output is already self-describing.
 
 **Integrity:** before passing a shard to the decoder, the receiver
@@ -147,7 +147,7 @@ manifest's internal hashes alone.
 
 ## 4. Encoder/decoder algorithm
 
-The implementation lives in `mkit_core::pack_shard` and wraps
+The implementation lives in `kit_core::pack_shard` and wraps
 [`commonware-coding`](https://docs.rs/commonware-coding), pinned exactly
 to the commonware train fixed in `rust/Cargo.toml` (`=2026.9.0` as of this
 revision) (ALPHA stability &mdash; pinned exactly in `Cargo.toml`).
@@ -200,7 +200,7 @@ output: Vec<u8>  (the reconstructed pack)
 ```
 
 A failure at any step short-circuits with a typed `ShardError`. See
-the `mkit_core::pack_shard::ShardError` rustdoc for the full taxonomy.
+the `kit_core::pack_shard::ShardError` rustdoc for the full taxonomy.
 
 ---
 
@@ -210,7 +210,7 @@ This SPEC ships in two stages.
 
 ### In-process codec &mdash; shipped
 
-* `mkit-core::pack_shard` module behind the `pack-shards` feature
+* `kit-core::pack_shard` module behind the `pack-shards` feature
   flag (default off &mdash; the commonware dep stack is large)
 * `Config`, `Shard`, `ShardSet`, `ShardError`
 * `encode_pack_to_shards`/`decode_pack_from_shards`
@@ -220,14 +220,14 @@ This SPEC ships in two stages.
 ### Wire format and transport delivery &mdash; shipped (this surface)
 
 * **Manifest wire format pinned**: see §2.1.
-  `encode_manifest`/`decode_manifest` in `mkit_core::pack_shard`.
+  `encode_manifest`/`decode_manifest` in `kit_core::pack_shard`.
 * **Parallel fetch**: one std thread per shard URL, collect the first
   `minimum_shards` successful responses, drop stragglers. Up to
   `extra_shards` failures tolerated; `extra_shards + 1` failures
   short-circuit to `PackNotFound`.
 * **S3 transport**: same key shape on the bucket
   (`packs/<hex>/shards/<index>`, `packs/<hex>/shards.manifest`).
-  Behind `--features pack-shards` on `mkit-transport-s3`. The
+  Behind `--features pack-shards` on `kit-transport-s3`. The
   client unconditionally tries the manifest first; only a `404`
   (no manifest published) falls back to the monolithic pack key. A
   present-but-undecodable manifest &mdash; any other error status, or a
@@ -237,7 +237,7 @@ This SPEC ships in two stages.
 * **SSH transport**: explicitly skipped. SSH is a single ordered
   stream; the shard model does not fit and per-shard sigv4-style
   signing is meaningless over an authenticated tunnel.
-* **Producer pipeline**: `mkit pack-shard <hash>` reads a stored
+* **Producer pipeline**: `kit pack-shard <hash>` reads a stored
   pack from `ObjectStore`, runs the encoder, and writes:
   ```text
   <out>/packs/<hex>/shards.manifest

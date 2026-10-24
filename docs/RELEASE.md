@@ -1,4 +1,4 @@
-# Cutting an mkit release
+# Cutting an kit release
 
 This is the single release runbook. It consolidates what used to live under
 `docs/release/` (checklist, signing/verification, supply-chain policy,
@@ -26,10 +26,10 @@ A single `vX.Y.Z` tag drives four decoupled channels:
   [`.github/workflows/crates-publish.yml`](../.github/workflows/crates-publish.yml).
 - **Docs MCP corpus** via
   [`.github/workflows/mcp-release.yml`](../.github/workflows/mcp-release.yml),
-  which indexes the tagged tree for the mkit docs MCP server so the served
+  which indexes the tagged tree for the kit docs MCP server so the served
   corpus always matches the published crates.
-- **BSR proto modules** (`buf.build/officialunofficial/mkit-rpc` and
-  `buf.build/officialunofficial/mkit-repo`) via the `buf-push` job in
+- **BSR proto modules** (`buf.build/officialunofficial/kit-rpc` and
+  `buf.build/officialunofficial/kit-repo`) via the `buf-push` job in
   [`.github/workflows/crates-publish.yml`](../.github/workflows/crates-publish.yml),
   so third-party signer integrators and `RepoService` clients can `buf
   generate` typed bindings from a pinned tag without vendoring this repo.
@@ -40,7 +40,7 @@ it verifies that the tag is strict semver, annotated, GPG-signed by an
 allowlisted release fingerprint, and points at a commit reachable from
 `origin/main`. It then produces:
 
-1. **GitHub Release** with native `mkit` binaries for four
+1. **GitHub Release** with native `kit` binaries for four
    targets:
    - `aarch64-apple-darwin`
    - `x86_64-apple-darwin`
@@ -48,10 +48,10 @@ allowlisted release fingerprint, and points at a commit reachable from
    - `x86_64-unknown-linux-gnu`
 
    Windows is not a supported target (see `docs/INVARIANTS.md`).
-   Windows users should run mkit under WSL, which uses the Linux binary.
+   Windows users should run kit under WSL, which uses the Linux binary.
 
-   Each target ships one archive, `mkit-X.Y.Z-<target>.tar.gz`: the `mkit`
-   binary, licenses, README, optional changelog, `share/man/man1/mkit.1`, and
+   Each target ships one archive, `kit-X.Y.Z-<target>.tar.gz`: the `kit`
+   binary, licenses, README, optional changelog, `share/man/man1/kit.1`, and
    shell completions under `share/completions/`.
 
    Each archive is cosign-signed (keyless OIDC, Rekor logged) and ships
@@ -62,14 +62,14 @@ allowlisted release fingerprint, and points at a commit reachable from
    attestation verify` or `slsa-verifier` in addition to cosign. The SBOM
    and the notices cover the whole workspace.
 
-   The `mkit` binary is built with `-p mkit-cli --bin mkit`: a bare `--bin
-   mkit` selects every workspace member, and cargo unifies features across
+   The `kit` binary is built with `-p kit-storage --bin kit`: a bare `--bin
+   kit` selects every workspace member, and cargo unifies features across
    every selected package, so it would compile the shipped CLI with other
    members' features. After the build,
    [`scripts/check-release-artifact-features.sh`](../scripts/check-release-artifact-features.sh)
    reads cargo's compiler-artifact messages and scans the stripped binary.
-   `mkit` must compile only packages listed in
-   [`scripts/release/mkit-packages.golden`](../scripts/release/mkit-packages.golden),
+   `kit` must compile only packages listed in
+   [`scripts/release/kit-packages.golden`](../scripts/release/kit-packages.golden),
    no server-only package or feature, tower-http only with reqwest's
    features, no `SQLite`, and no test seam. A new CLI dependency fails the check until
    `scripts/check-release-artifact-features.sh --update-golden` is run and
@@ -80,10 +80,10 @@ allowlisted release fingerprint, and points at a commit reachable from
    to `main` (and pushes to it), and checks the golden list is current, so
    drift shows up before a tag rather than at it.
 
-2. **npm package** `@officialunofficial/mkit-wasm@X.Y.Z`. Built with
+2. **npm package** `@officialunofficial/kit-wasm@X.Y.Z`. Built with
    `wasm-pack --target bundler` and published with `npm publish --access
    public`. The pkg tarball is also attached to the GitHub Release as
-   `mkit-wasm-X.Y.Z-npm.tar.gz` for offline mirroring. npm provenance is
+   `kit-wasm-X.Y.Z-npm.tar.gz` for offline mirroring. npm provenance is
    enabled with `npm publish --provenance`; it binds the package to this
    GitHub Actions workflow run through GitHub OIDC.
 
@@ -105,7 +105,7 @@ Run top to bottom. Do not skip steps.
 - [ ] `main` is green in CI (build plus test).
 - [ ] `cd rust && cargo test --workspace` passes on a fresh clone.
 - [ ] The release build passes for each release target (the command
-      `release.yml` runs): `cargo build --release --locked -p mkit-cli --bin mkit`:
+      `release.yml` runs): `cargo build --release --locked -p kit-storage --bin kit`:
   - [ ] `--target=aarch64-apple-darwin`
   - [ ] `--target=x86_64-apple-darwin`
   - [ ] `--target=x86_64-unknown-linux-gnu`
@@ -116,12 +116,12 @@ Run top to bottom. Do not skip steps.
 - [ ] `CHANGELOG.md` has an entry for this version; move items from
       `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD`.
 - [ ] Version bumped wherever it is hard-coded: README install snippets,
-      `contrib/homebrew/mkit.rb`, `docs/INSTALL.md` (three sites: two
-      `VERSION=` snippets and the expected `mkit version` output), and the
+      `contrib/homebrew/kit.rb`, `docs/INSTALL.md` (three sites: two
+      `VERSION=` snippets and the expected `kit version` output), and the
       `vX.Y.Z` examples in `install.sh` usage text.
 - [ ] [Signing and verification](#signing-and-verification) and
       [Reproducibility](#reproducibility) still accurate for this release.
-- [ ] `MKIT_RELEASE_GPG_FINGERPRINTS` repo/org Actions variable contains the
+- [ ] `KIT_RELEASE_GPG_FINGERPRINTS` repo/org Actions variable contains the
       release tag signing key fingerprint.
 - [ ] The release tag signing public key is published to `keys.openpgp.org` or
       `keyserver.ubuntu.com` so the workflow can import it before
@@ -142,17 +142,17 @@ Run top to bottom. Do not skip steps.
 - [ ] `mcp-release.yml` succeeded (docs MCP corpus indexed for the tag).
 - [ ] GitHub Release created as a non-draft.
 - [ ] Archives present:
-      `mkit-X.Y.Z-aarch64-apple-darwin.tar.gz`,
-      `mkit-X.Y.Z-x86_64-apple-darwin.tar.gz`,
-      `mkit-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz`, and
-      `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`.
+      `kit-X.Y.Z-aarch64-apple-darwin.tar.gz`,
+      `kit-X.Y.Z-x86_64-apple-darwin.tar.gz`,
+      `kit-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz`, and
+      `kit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`.
 - [ ] `sbom.cdx.json` present.
 - [ ] `THIRD-PARTY-NOTICES` present.
 - [ ] `SHA256SUMS`, `SHA256SUMS.sig`, `SHA256SUMS.crt`,
       `SHA256SUMS.cosign.bundle` present.
 - [ ] Per-archive `.cosign.bundle` present for every archive.
-- [ ] `mkit-X.Y.Z.provenance.jsonl` (SLSA build provenance) present, and
-      `gh attestation verify <archive> --repo officialunofficial/mkit`
+- [ ] `kit-X.Y.Z.provenance.jsonl` (SLSA build provenance) present, and
+      `gh attestation verify <archive> --repo officialunofficial/kit`
       succeeds for at least one archive.
 
 ### Smoke test
@@ -163,14 +163,14 @@ hand:
 
 ```sh
 # Linux / macOS
-scripts/release-smoke.sh --archive mkit-X.Y.Z-<target>.tar.gz --version X.Y.Z
+scripts/release-smoke.sh --archive kit-X.Y.Z-<target>.tar.gz --version X.Y.Z
 ```
 
 The script covers every item below in one pass: cosign signature, the
-`SHA256SUMS` entry, `mkit version` against the tag, the bundled man page
-and completions, a basic `mkit init` → `mkit keygen` → add a file →
-`mkit commit` flow, and (unless `--skip-npm`) `npm view
-@officialunofficial/mkit-wasm@X.Y.Z` plus `npm audit signatures`. It's the
+`SHA256SUMS` entry, `kit version` against the tag, the bundled man page
+and completions, a basic `kit init` → `kit keygen` → add a file →
+`kit commit` flow, and (unless `--skip-npm`) `npm view
+@officialunofficial/kit-wasm@X.Y.Z` plus `npm audit signatures`. It's the
 same script used for a pre-flight dry run against a locally packaged
 archive before tagging (missing sidecars like the cosign bundle are
 skipped with a warning, not a failure, in that case) &mdash; this
@@ -180,18 +180,18 @@ disagree, fix the script:
 - [ ] Download the archive for your platform.
 - [ ] Verify the cosign signature (see [below](#verify-a-downloaded-archive)).
 - [ ] Verify `SHA256SUMS` matches the archive.
-- [ ] Extract and run `./mkit-X.Y.Z-<target>/mkit version` &mdash; version
+- [ ] Extract and run `./kit-X.Y.Z-<target>/kit version` &mdash; version
       string matches the tag.
-- [ ] Extracted archive contains `share/man/man1/mkit.1`,
-      `share/completions/mkit.bash`, `share/completions/_mkit`, and
-      `share/completions/mkit.fish`.
-- [ ] Basic flow: `mkit init` → add a file → `mkit commit`.
-- [ ] `npm view @officialunofficial/mkit-wasm@X.Y.Z` and `npm audit signatures`.
+- [ ] Extracted archive contains `share/man/man1/kit.1`,
+      `share/completions/kit.bash`, `share/completions/_kit`, and
+      `share/completions/kit.fish`.
+- [ ] Basic flow: `kit init` → add a file → `kit commit`.
+- [ ] `npm view @officialunofficial/kit-wasm@X.Y.Z` and `npm audit signatures`.
 
 ### Distribution and announce
 
-- [ ] In `officialunofficial/homebrew-tap`, copy `contrib/homebrew/mkit.rb`
-      into `Formula/mkit.rb`, update the version, and replace every
+- [ ] In `officialunofficial/homebrew-tap`, copy `contrib/homebrew/kit.rb`
+      into `Formula/kit.rb`, update the version, and replace every
       `PLACEHOLDER_SHA_*` with the matching archive hash from release
       `SHA256SUMS`.
 - [ ] Release notes reviewed (auto-generated by `softprops/action-gh-release`
@@ -204,11 +204,11 @@ disagree, fix the script:
       `cargo install`, `cargo binstall`, npm, the curl-pipe install
       script (Debian/Ubuntu/Fedora), and Homebrew. Not a substitute for the
       smoke test above (which verifies the archive itself); this verifies
-      every OTHER way a user actually gets `mkit` onto their machine.
+      every OTHER way a user actually gets `kit` onto their machine.
 
 ### Server compatibility gates
 
-On pushes to `main`, the Rust workflow runs library clippy for `mkit-server`
+On pushes to `main`, the Rust workflow runs library clippy for `kit-server`
 with `cargo hack --feature-powerset --depth 2`.
 The powerset covers no features, individual features and feature pairs.
 Separate checks cover default features across all targets and all features
@@ -239,18 +239,18 @@ the publish gate checks the server too, including that pinned baseline.
 3. Open a release-prep PR, merge it.
 4. Tag the merge commit on `main`:
    ```sh
-   git tag -s vX.Y.Z -m "mkit X.Y.Z"
+   git tag -s vX.Y.Z -m "kit X.Y.Z"
    git push origin vX.Y.Z
    ```
    Signed, annotated tags only. The signing key fingerprint must be listed in
-   the `MKIT_RELEASE_GPG_FINGERPRINTS` repository or organization variable and
+   the `KIT_RELEASE_GPG_FINGERPRINTS` repository or organization variable and
    its public key must be available from `keys.openpgp.org` or
    `keyserver.ubuntu.com`. Verify the exact fingerprint before pushing:
    ```sh
    git tag -v vX.Y.Z
    ```
    The release workflow rejects lightweight tags, invalid signatures,
-   fingerprints not listed in `MKIT_RELEASE_GPG_FINGERPRINTS`, tags outside the
+   fingerprints not listed in `KIT_RELEASE_GPG_FINGERPRINTS`, tags outside the
    strict `vX.Y.Z[-prerelease]` form, and tag targets not reachable from
    `origin/main`.
 5. Watch the workflows. `release.yml` job order is:
@@ -266,14 +266,14 @@ crates.io publishing is **tag-driven**, owned by
 On a pushed `v*.*.*` tag it runs `cargo publish --workspace --locked` to publish every
 workspace member without `publish = false` to crates.io in
 dependency order, waiting for each to index before the next. A guard refuses to
-publish if the tag does not match the workspace version (`mkit-core`'s version
+publish if the tag does not match the workspace version (`kit-core`'s version
 in `rust/Cargo.toml` at the tagged tree).
 
 ### What publishes vs. what doesn't
 
 | Publishes to crates.io | Stays off crates.io (`publish = false`) |
 |---|---|
-| The library crates (`mkit-core`, `mkit-rpc`, `mkit-client`, `mkit-sync`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, `mkit-serve`, `mkit-transport-{file,http,memory,s3,ssh,enc,connect}`) plus `mkit-cli` (so `cargo install mkit-cli` works) | `mkit-wasm` (npm-only), `mkit-repo-client`, `mkit-test-util`, `mkit-core-wasm-check`, `mkit-formal-conformance`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
+| The library crates (`kit-core`, `kit-rpc`, `kit-client`, `kit-sync`, `kit-attest`, `kit-keystore`, `kit-git-bridge`, `kit-serve`, `kit-transport-{file,http,memory,s3,ssh,enc,connect}`) plus `kit-storage` (so `cargo install kit-storage` works) | `kit-wasm` (npm-only), `kit-repo-client`, `kit-test-util`, `kit-core-wasm-check`, `kit-formal-conformance`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
 
 The published crates depend only on each other, forming a closed,
 dependency-ordered set; `cargo publish --workspace` computes that order and
@@ -281,46 +281,46 @@ skips any `publish = false` member.
 
 Notes on the published set:
 
-- **`mkit-server-conformance`** &mdash; the protocol conformance library and
+- **`kit-server-conformance`** &mdash; the protocol conformance library and
   runner join the next lockstep release. Package with default features;
   `test-host` remains debug-only test support. Before tagging, check its package
   contents and install the runner from the release candidate. Do not publish
   this crate separately from the dependency train.
 
-- **`mkit-server`** &mdash; the runtime-agnostic server core, first published at
-  0.5.0. `mkit-cli` depends on it (features `ssh` and `fs`, for the stdio
-  `mkit serve` session), so it must be on crates.io before `mkit-cli`;
+- **`kit-server`** &mdash; the runtime-agnostic server core, first published at
+  0.5.0. `kit-storage` depends on it (features `ssh` and `fs`, for the stdio
+  `kit serve` session), so it must be on crates.io before `kit-storage`;
   `cargo publish --workspace` orders the two from the dependency graph. There
   is no standalone server binary or container image; embedders host the
   reference implementation through its library API. 
 
-- **`mkit-cli`** &mdash; published so `cargo install mkit-cli` installs the `mkit`
+- **`kit-storage`** &mdash; published so `cargo install kit-storage` installs the `kit`
   binary; it also ships via the signed GitHub Release archives and `cargo
   install --git`. Its library surface is unstable CLI internals, deliberately
   **not** a public API &mdash; kept out of the pre-publish semver gate (the
-  `cargo semver-checks` step in `crates-publish.yml`). Depend on the `mkit-*`
-  library crates, not on `mkit_cli::…`.
-- **The crates.io `mkit` name** belongs to an unrelated project; the CLI is
-  published as **`mkit-cli`**. Do not run `cargo install mkit`.
+  `cargo semver-checks` step in `crates-publish.yml`). Depend on the `kit-*`
+  library crates, not on `kit_storage::…`.
+- **The crates.io `kit` name** belongs to an unrelated project; the CLI is
+  published as **`kit-storage`**. Do not run `cargo install kit`.
 
-### Publishing `mkit-primitives` (independent release)
+### Publishing `kit-primitives` (independent release)
 
-`mkit-primitives` is versioned on its own (`rust/crates/mkit-primitives/Cargo.toml`)
+`kit-primitives` is versioned on its own (`rust/crates/kit-primitives/Cargo.toml`)
 and is excluded from the train: `crates-publish.yml` runs `cargo publish
---workspace --exclude mkit-primitives`, and `rust/release-plz.toml` keeps it
+--workspace --exclude kit-primitives`, and `rust/release-plz.toml` keeps it
 `release = false` with no `version_group`. It is released by
 [`.github/workflows/primitives-publish.yml`](../.github/workflows/primitives-publish.yml)
-on a signed `mkit-primitives-vX.Y.Z` tag (same trust rules as `release.yml`:
+on a signed `kit-primitives-vX.Y.Z` tag (same trust rules as `release.yml`:
 annotated, allowlisted key, reachable from `main`), which does not match the
 `v*.*.*` train tags.
 
 Before tagging:
 
 - [ ] Rename the crate changelog's `## [Unreleased]` content to
-      `## [X.Y.Z] - YYYY-MM-DD` in `rust/crates/mkit-primitives/CHANGELOG.md`
+      `## [X.Y.Z] - YYYY-MM-DD` in `rust/crates/kit-primitives/CHANGELOG.md`
       and set `version` in its `Cargo.toml` (a literal, never
       `version.workspace`).
-- [ ] The `mkit-core` requirement in its `Cargo.toml` names a **published**
+- [ ] The `kit-core` requirement in its `Cargo.toml` names a **published**
       core release that contains every core API the crate uses (`cargo
       publish` verifies the package against the registry, with no workspace
       patches). Publish that core release first.
@@ -328,9 +328,9 @@ Before tagging:
 
 The workflow then, in order: validates the tag; runs
 `scripts/publish-primitives.py guard` (tag equals crate version, dated
-changelog section, train exclusion intact, the tree's `mkit-core` version live
+changelog section, train exclusion intact, the tree's `kit-core` version live
 and not yanked on crates.io); runs `cargo semver-checks` against the newest
-published `mkit-primitives` (its own baseline; skipped before the first
+published `kit-primitives` (its own baseline; skipped before the first
 release); rebuilds the packaged crates in the out-of-tree consumer; publishes;
 and finally resolves the published crate from the registry in the same
 consumer. Publishing is idempotent: an absent version is published, a present
@@ -339,20 +339,20 @@ different files fails the run and needs a version bump
 (`scripts/publish-primitives.py publish`; fixture tests in
 `scripts/test-publish-primitives.py`).
 
-**Release order.** `mkit-server` depends on `mkit-primitives`, and
-`mkit-primitives` depends on `mkit-core`. Until the train is staged so that
-`mkit-core` can be published before `mkit-server` in the same release, a
-release needs `mkit-core` on crates.io, then the primitives tag, then the
+**Release order.** `kit-server` depends on `kit-primitives`, and
+`kit-primitives` depends on `kit-core`. Until the train is staged so that
+`kit-core` can be published before `kit-server` in the same release, a
+release needs `kit-core` on crates.io, then the primitives tag, then the
 remaining train crates. Do not tag the train (`vX.Y.Z`) while the primitives
-version required by `mkit-server` is unpublished.
+version required by `kit-server` is unpublished.
 
 The consumer check (`scripts/check-primitives-consumer.py`, template in
-`scripts/primitives-consumer/`) packages `mkit-core` and
-`mkit-primitives`, extracts the two `.crate` files into a directory source
+`scripts/primitives-consumer/`) packages `kit-core` and
+`kit-primitives`, extracts the two `.crate` files into a directory source
 that replaces crates.io for a standalone crate, and runs its portable-fixture
 tests natively (default and raw-only) and on `wasm32-unknown-unknown` through
 `wasm-pack test --node`. The consumer has no path dependency, `[patch]` table
-or workspace; the script refuses a lock file in which an mkit crate does not
+or workspace; the script refuses a lock file in which an kit crate does not
 resolve from a registry source.
 
 ### Token
@@ -373,7 +373,7 @@ crates (via the `makechain` team). Migrating to crates.io Trusted Publishing
 > `main`, on the assumption that `release_always = false` in
 > `rust/release-plz.toml` would always no-op it ("commit is not from a
 > release PR"). That assumption broke on the v0.4.2 release (2026-09-02):
-> the mkit-release skill's own procedure merges release-plz's own PR as the
+> the kit-release skill's own procedure merges release-plz's own PR as the
 > release-prep PR, and release-plz recognized that merge commit as a real
 > release and actually ran `cargo publish` for every crate — racing (and
 > mostly winning against) the tag-driven `crates-publish.yml` publish, which
@@ -389,13 +389,13 @@ crates (via the `makechain` team). Migrating to crates.io Trusted Publishing
   can't be re-published. Re-runs must `--exclude` what landed (edit the publish
   step or publish the remainder by hand).
 - **Native deps**: `cargo publish` builds each crate with **default** features,
-  so no `libpcsclite` is needed (`mkit-keystore`'s `backend-yubikey` is off by
+  so no `libpcsclite` is needed (`kit-keystore`'s `backend-yubikey` is off by
   default); only `protoc` is required (installed in the workflow for
-  `mkit-rpc`).
+  `kit-rpc`).
 
 ## Signing and verification
 
-Every mkit release is signed with
+Every kit release is signed with
 [cosign](https://docs.sigstore.dev/cosign/overview/) using **keyless OIDC**: the
 signing identity is the GitHub Actions workflow itself
 (`.github/workflows/release.yml`), authenticated by GitHub's OIDC provider, and
@@ -409,14 +409,14 @@ release signature cannot be reused on any other artifact. The installer
 ### Artifacts attached to every release
 
 For each of the four targets, release archives build the production
-`mkit-cli` target for that platform. The CLI enables the matching keystore
+`kit-storage` target for that platform. The CLI enables the matching keystore
 software-protector feature so `software` keys are encrypted at rest on supported
-targets without changing the lean default feature set of the `mkit-keystore`
+targets without changing the lean default feature set of the `kit-keystore`
 library crate.
 
 | File | Purpose |
 | --- | --- |
-| `mkit-X.Y.Z-<triple>.tar.gz` | Binary, licenses, README, manpage, completions. |
+| `kit-X.Y.Z-<triple>.tar.gz` | Binary, licenses, README, manpage, completions. |
 | `...sha256` | SHA256 of the archive (convenience). Every archive has the full set of sidecars. |
 | `...sig` | Raw cosign signature (base64). |
 | `...crt` | Fulcio-issued code-signing certificate. |
@@ -430,7 +430,7 @@ Plus one top-level set for the aggregate:
 | `SHA256SUMS.{sig,crt,cosign.bundle}` | Cosign signature of `SHA256SUMS`. |
 | `sbom.cdx.json` | CycloneDX SBOM of the release. |
 | `THIRD-PARTY-NOTICES` | Consolidated third-party license attribution for the Rust dependency graph, generated by `cargo about generate` (see [`NOTICE`](../NOTICE)). |
-| `mkit-X.Y.Z.provenance.jsonl` | GitHub-native SLSA build provenance attestation (`actions/attest-build-provenance`) over the archives. Verified with `gh attestation verify` or `slsa-verifier`. |
+| `kit-X.Y.Z.provenance.jsonl` | GitHub-native SLSA build provenance attestation (`actions/attest-build-provenance`) over the archives. Verified with `gh attestation verify` or `slsa-verifier`. |
 
 ### Verify a downloaded archive
 
@@ -439,17 +439,17 @@ Install cosign: <https://docs.sigstore.dev/cosign/installation/>. Then:
 ```sh
 VERSION=X.Y.Z
 TARGET=aarch64-apple-darwin
-ARCHIVE="mkit-${VERSION}-${TARGET}.tar.gz"
+ARCHIVE="kit-${VERSION}-${TARGET}.tar.gz"
 
 cosign verify-blob \
-  --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+  --certificate-identity-regexp '^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   --bundle "${ARCHIVE}.cosign.bundle" \
   "${ARCHIVE}"
 ```
 
 Expected output: `Verified OK`. The `--certificate-identity-regexp` pins the
-signature to a tag build of mkit's release workflow; a signature produced by any
+signature to a tag build of kit's release workflow; a signature produced by any
 other workflow (a fork, a branch build, a locally-run cosign) fails
 verification.
 
@@ -474,7 +474,7 @@ itself cosign-signed. The chain is:
 
 ```sh
 cosign verify-blob \
-  --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+  --certificate-identity-regexp '^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   --bundle SHA256SUMS.cosign.bundle \
   SHA256SUMS
@@ -508,20 +508,20 @@ Every archive also carries a standard
 [SLSA build provenance](https://slsa.dev/spec/v1.0/provenance) attestation,
 generated by [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance)
 and recorded in the Sigstore public-good transparency log. Unlike the cosign
-signature above (an mkit-specific verification path), this attestation is
+signature above (an kit-specific verification path), this attestation is
 checkable with off-the-shelf, standards-aware tooling and requires no
-mkit-specific parsing:
+kit-specific parsing:
 
 ```sh
-gh attestation verify mkit-X.Y.Z-<target>.tar.gz --repo officialunofficial/mkit
+gh attestation verify kit-X.Y.Z-<target>.tar.gz --repo officialunofficial/kit
 ```
 
 or with [`slsa-verifier`](https://github.com/slsa-framework/slsa-verifier):
 
 ```sh
-slsa-verifier verify-artifact mkit-X.Y.Z-<target>.tar.gz \
-  --provenance-path mkit-X.Y.Z.provenance.jsonl \
-  --source-uri github.com/officialunofficial/mkit \
+slsa-verifier verify-artifact kit-X.Y.Z-<target>.tar.gz \
+  --provenance-path kit-X.Y.Z.provenance.jsonl \
+  --source-uri github.com/officialunofficial/kit \
   --source-tag vX.Y.Z
 ```
 
@@ -533,11 +533,11 @@ place and is independently verified above.
 macOS binaries are **not Developer ID-signed and not notarized**. The trust
 boundary is the cosign verification above, not Apple notarization. Users on
 Ventura+ may see a Gatekeeper warning when launching a freshly-downloaded binary
-from Finder. After you verify the archive, either run `mkit` from a terminal or
+from Finder. After you verify the archive, either run `kit` from a terminal or
 clear quarantine explicitly:
 
 ```sh
-xattr -d com.apple.quarantine /path/to/mkit
+xattr -d com.apple.quarantine /path/to/kit
 ```
 
 Notarization is future work: `release.yml` has no notarization step today
@@ -548,7 +548,7 @@ say so explicitly.
 
 ## Supply-chain policy
 
-mkit's supply chain is intentionally narrow. The binary users run traces back to
+kit's supply chain is intentionally narrow. The binary users run traces back to
 a small, auditable set of inputs. This section is the contract.
 
 ### Current state
@@ -562,9 +562,9 @@ a small, auditable set of inputs. This section is the contract.
   are off by default, platform-gated, and fail closed
   when the required service or device is unavailable. The Linux Secret Service
   feature selects the pure-Rust crypto runtime, not OpenSSL. Production
-  `mkit-cli` builds enable the target-appropriate software protector feature so
+  `kit-storage` builds enable the target-appropriate software protector feature so
   `software:<label>` stores encrypted records by default, while the
-  `mkit-keystore` library keeps an empty default feature set.
+  `kit-keystore` library keeps an empty default feature set.
 - **Build inputs:** the Rust toolchain (pinned in `rust-toolchain.toml`), the
   source tree at a tagged Git commit, and the `--target=` / profile flags
   documented under [Reproducibility](#reproducibility).
@@ -575,7 +575,7 @@ Every new direct dependency added to a workspace `Cargo.toml` must:
 
 1. Be **version-pinned** in `Cargo.toml` and reflected in `Cargo.lock`.
 2. Have its source reviewed by **two maintainers** (sign-off in the PR).
-3. Have a stated purpose &mdash; what does mkit gain, and what would implementing it
+3. Have a stated purpose &mdash; what does kit gain, and what would implementing it
    in-tree cost? The default answer should be "implement in-tree"; deps are the
    exception.
 4. Be compatible with **MIT OR Apache-2.0**. The CI dependency-review action
@@ -616,7 +616,7 @@ ok`. Remaining warnings are duplicate crate versions from ecosystem splits and
 optional YubiKey/RustCrypto prerelease transitive stacks; they are tracked as
 warnings, not release blockers, because they introduce no unapproved sources,
 yanked crates, or denied licenses. Live OS-native keystore tests are opt-in via
-`MKIT_RUN_NATIVE_KEYSTORE_TESTS=1`.
+`KIT_RUN_NATIVE_KEYSTORE_TESTS=1`.
 
 ### GitHub Actions dependencies
 
@@ -646,7 +646,7 @@ open a GitHub Security Advisory citing the CVE, update `CHANGELOG.md` under
 
 ## Reproducibility
 
-A mkit release binary is a function of a small, pinned set of inputs. If all of
+A kit release binary is a function of a small, pinned set of inputs. If all of
 them match, any machine that can run the same Rust toolchain will produce a
 byte-identical binary to the one published on GitHub Releases.
 
@@ -666,17 +666,17 @@ byte-identical binary to the one published on GitHub Releases.
 
 ```sh
 # 1. Clone at the release tag.
-git clone --depth 1 --branch vX.Y.Z https://github.com/officialunofficial/mkit.git
-cd mkit/rust
+git clone --depth 1 --branch vX.Y.Z https://github.com/officialunofficial/kit.git
+cd kit/rust
 # 2. rustup picks up rust-toolchain.toml on first `cargo` invocation.
-# 3. Build for your target with release.yml's command (`-p mkit-cli`
-#    selects only the CLI; a bare `--bin mkit` unifies other members'
+# 3. Build for your target with release.yml's command (`-p kit-storage`
+#    selects only the CLI; a bare `--bin kit` unifies other members'
 #    features and differs).
 export RUSTFLAGS="-C codegen-units=1 -C strip=symbols"
 TARGET=x86_64-unknown-linux-gnu
-cargo build --release --locked --target "$TARGET" -p mkit-cli --bin mkit
+cargo build --release --locked --target "$TARGET" -p kit-storage --bin kit
 # 4. Hash the binary.
-shasum -a 256 "target/$TARGET/release/mkit"
+shasum -a 256 "target/$TARGET/release/kit"
 # 5. Compare against the SHA256SUMS inside each release archive.
 ```
 
@@ -687,7 +687,7 @@ with your host OS, `rustc --version`, the sha256 you got, and the expected one.
 ### CI safety net and what is not guaranteed
 
 There is currently **no** automated reproducibility check: no CI job builds
-mkit twice and compares the outputs. The manual procedure above is the
+kit twice and compares the outputs. The manual procedure above is the
 verification path. Restoring an automated double-build job is an open
 follow-up. A divergence between two builds of the same commit means a
 non-deterministic input has crept in (embedded timestamps, random seeds,
@@ -703,14 +703,14 @@ x86_64 build is the most reliable reproducibility target for third parties.
 | Secret | Purpose | Required for |
 | --- | --- | --- |
 | `CRATES_PACKAGE_KEY` (org-level) | crates.io publish token (publish-new plus publish-update) | `crates-publish.yml` |
-| `BUF_TOKEN` | Buf Schema Registry API token (write access) &mdash; pushes the `mkit-rpc`/`mkit-repo` proto modules | `crates-publish.yml`'s `buf-push` job (see [`BUF_TOKEN`](#buf_token)) |
+| `BUF_TOKEN` | Buf Schema Registry API token (write access) &mdash; pushes the `kit-rpc`/`kit-repo` proto modules | `crates-publish.yml`'s `buf-push` job (see [`BUF_TOKEN`](#buf_token)) |
 
 cosign keyless and npm Trusted Publishing (auth plus provenance) both run on
 the GitHub OIDC token; no extra secrets are needed for those.
 
 | Variable | Purpose | Required for |
 | --- | --- | --- |
-| `MKIT_RELEASE_GPG_FINGERPRINTS` | Space-separated trusted 40-hex GPG fingerprints allowed to sign release tags (public keys must be on `keys.openpgp.org` or `keyserver.ubuntu.com`) | `release.yml` preflight |
+| `KIT_RELEASE_GPG_FINGERPRINTS` | Space-separated trusted 40-hex GPG fingerprints allowed to sign release tags (public keys must be on `keys.openpgp.org` or `keyserver.ubuntu.com`) | `release.yml` preflight |
 | `BUF_PUBLISH_ENABLED` | Set to `true` to arm the `buf-push` job (job-level `if:` cannot read `secrets`, so this variable &mdash; not `BUF_TOKEN`'s presence &mdash; is the gate) | `crates-publish.yml`'s `buf-push` job |
 
 ## One-time setup
@@ -718,41 +718,41 @@ the GitHub OIDC token; no extra secrets are needed for those.
 ### `CRATES_PACKAGE_KEY`
 
 Generate a crates.io API token (scopes: publish-new plus publish-update) on an
-account that owns the `mkit-*` crates (via the `makechain` team), and add it as
+account that owns the `kit-*` crates (via the `makechain` team), and add it as
 an **org-level** secret named `CRATES_PACKAGE_KEY` with this repo granted access.
 For the very first publish, ensure each crate name is available or already owned
 by the org; crates.io rejects deps on unpublished crates, so the dependency-order
 publish in `crates-publish.yml` handles a clean first release once the token and
 version are in place.
 
-### npm Trusted Publishing (OIDC) — `@officialunofficial/mkit-wasm`
+### npm Trusted Publishing (OIDC) — `@officialunofficial/kit-wasm`
 
-`@officialunofficial/mkit-wasm` is the npm package published by the release
+`@officialunofficial/kit-wasm` is the npm package published by the release
 workflow, under the `officialunofficial` npm org (matching the GitHub org —
-renamed from the earlier `@makechain/mkit-wasm` once the repo went public).
+renamed from the earlier `@makechain/kit-wasm` once the repo went public).
 `publish-wasm` authenticates via the GitHub Actions OIDC token directly (npm
 [Trusted Publishers](https://docs.npmjs.com/trusted-publishers)) &mdash; there is
-**no `MKIT_NPM_TOKEN`-equivalent secret to provision, rotate, leak, or
+**no `KIT_NPM_TOKEN`-equivalent secret to provision, rotate, leak, or
 revoke** for the automated path. This replaced the original
 Automation-token setup once the package had at least one successful
 token-based release behind it (0.1.0&ndash;0.3.0, published as
-`@makechain/mkit-wasm`).
+`@makechain/kit-wasm`).
 
 **One-time setup (npmjs.com, by an owner of the `officialunofficial` org):**
 
-1. If `@officialunofficial/mkit-wasm` has never been published, either cut a
+1. If `@officialunofficial/kit-wasm` has never been published, either cut a
    real tag (the workflow's first successful OIDC-authenticated publish
    claims the name) or publish a placeholder once from a maintainer
    workstation with a personal token:
    ```sh
    cd rust
-   wasm-pack build crates/mkit-wasm --release --target bundler --out-dir pkg
-   cd crates/mkit-wasm/pkg
-   npm pkg set name=@officialunofficial/mkit-wasm
+   wasm-pack build crates/kit-wasm --release --target bundler --out-dir pkg
+   cd crates/kit-wasm/pkg
+   npm pkg set name=@officialunofficial/kit-wasm
    npm version --no-git-tag-version --allow-same-version 0.0.0-init
    npm publish --access public --tag init
    ```
-   `wasm-pack`'s raw output is named unscoped `mkit-wasm`, hence the `npm pkg
+   `wasm-pack`'s raw output is named unscoped `kit-wasm`, hence the `npm pkg
    set` step. `--tag init` keeps the placeholder off the `latest` dist-tag
    once a real version publishes (it briefly holds `latest` too, being the
    only version, until the first real tag push supersedes it).
@@ -767,12 +767,12 @@ token-based release behind it (0.1.0&ndash;0.3.0, published as
 2. On the package's `npmjs.com` page &rarr; **Settings** &rarr; **Trusted
    Publisher**, add a GitHub Actions publisher:
    - Organization or user: `officialunofficial`
-   - Repository: `mkit`
+   - Repository: `kit`
    - Workflow filename: `release.yml` (filename only, not the full
      `.github/workflows/` path)
    - Environment: leave blank (the job doesn't use a GitHub environment)
    - Allowed actions: `npm publish`
-3. Verify with `npm view @officialunofficial/mkit-wasm` after the first
+3. Verify with `npm view @officialunofficial/kit-wasm` after the first
    OIDC-authenticated publish; confirm provenance with `npm audit
    signatures`.
 
@@ -782,9 +782,9 @@ Publishing as of this writing).
 
 ### `BUF_TOKEN`
 
-`buf.build/officialunofficial/mkit-rpc` (common.proto/signer.proto/ssh.proto/
-verify.proto, from the `rust/crates/mkit-rpc/proto` module) and
-`buf.build/officialunofficial/mkit-repo` (repo.proto, from the
+`buf.build/officialunofficial/kit-rpc` (common.proto/signer.proto/ssh.proto/
+verify.proto, from the `rust/crates/kit-rpc/proto` module) and
+`buf.build/officialunofficial/kit-repo` (repo.proto, from the
 `apps/repo-worker/proto` module) are the two named modules in the repo-root
 `buf.yaml` v2 workspace that the `buf-push` job in `crates-publish.yml`
 publishes on every tagged release. Both are pushed **private** &mdash;
@@ -796,7 +796,7 @@ deliberate decision, not a default.
 1. Sign in (or create an account) at <https://buf.build/> under the
    `officialunofficial` organization. **The BSR org name is assumed to match
    the GitHub org (`officialunofficial`) &mdash; confirm this before the first push,
-   or update the `name:` field on the `rust/crates/mkit-rpc/proto` and
+   or update the `name:` field on the `rust/crates/kit-rpc/proto` and
    `apps/repo-worker/proto` modules in the repo-root `buf.yaml` (and the `buf
    generate`/`buf push` references in this doc and the `buf-push` job) to the
    actual BSR org if it differs.**
@@ -811,7 +811,7 @@ deliberate decision, not a default.
 4. First push auto-creates both BSR repositories (`--create
    --create-visibility private`); no manual "create the module" step needed.
 5. Verify: after a release tag, `buf generate
-   buf.build/officialunofficial/mkit-repo:vX.Y.Z --template
+   buf.build/officialunofficial/kit-repo:vX.Y.Z --template
    apps/repo-worker/proto/buf.gen.yaml` (with `buf registry login` first, since
    the module is private) should produce TypeScript bindings without this repo
    checked out &mdash; this is exactly what the `buf-push` job's own smoke-test step
@@ -819,11 +819,11 @@ deliberate decision, not a default.
 
 ### Package name decision
 
-The Rust crate remains `mkit-wasm`, but the release workflow publishes the npm
-package as `@officialunofficial/mkit-wasm`, matching the GitHub org this repo
-lives under (renamed from `@makechain/mkit-wasm` once the repo went public —
-see [npm Trusted Publishing](#npm-trusted-publishing-oidc-officialunofficialmkit-wasm)
+The Rust crate remains `kit-wasm`, but the release workflow publishes the npm
+package as `@officialunofficial/kit-wasm`, matching the GitHub org this repo
+lives under (renamed from `@makechain/kit-wasm` once the repo went public —
+see [npm Trusted Publishing](#npm-trusted-publishing-oidc-officialunofficialkit-wasm)
 above). If the scope ever changes again, update
-`rust/crates/mkit-wasm/README.md`'s install snippet, the `publish-wasm` workflow
+`rust/crates/kit-wasm/README.md`'s install snippet, the `publish-wasm` workflow
 `npm pkg set name=...` line, the npm Trusted Publisher config on npmjs.com, and
 the `npm view` smoke-test references in this doc.

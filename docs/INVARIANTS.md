@@ -1,6 +1,6 @@
 # Invariants
 
-This enforcement index summarizes properties across the mkit monorepo. The
+This enforcement index summarizes properties across the kit monorepo. The
 linked specs remain authoritative; these entries add code and regression-test
 pointers, not a separate contract. Apply each entry only within its implemented
 profile; storage-only groundwork is labeled explicitly. The
@@ -133,7 +133,7 @@ can skip file-integrity obligations or erase a supplier dependency.
 **If violated:** an incomplete or corrupt consumed set could be accepted, or a
 caller could publish a truncated missing set as a complete diagnostic.
 
-**Enforced by:** `mkit_primitives::closure::ClosureWalker`, its independent seeded
+**Enforced by:** `kit_primitives::closure::ClosureWalker`, its independent seeded
 graph oracle, protocol/adversarial tests, and closure transition fuzz replay.
 Reference-server integration is separate; this primitive grants no visibility.
 ## Primitive framing authenticates before emitting provisional frames
@@ -320,7 +320,7 @@ from this implementation description.
 
 **Enforcement:** [SPEC-SERVER §9.9](specs/SPEC-SERVER.md#99-fork) defines the
 conditional protocol requirements. The
-[conformance coverage table](../rust/crates/mkit-server-conformance/README.md)
+[conformance coverage table](../rust/crates/kit-server-conformance/README.md)
 records exercised cases and remaining declared gaps; implementation alone does
 not establish a passing conformance result.
 
@@ -367,7 +367,7 @@ See [Performance measurements](operations/performance-metrics.md).
 
 ## Packmap advances preserve node bytes and live-ref leases
 
-**Always:** native repository pushes in `mkit-sync` and protocol-client pushes
+**Always:** native repository pushes in `kit-sync` and protocol-client pushes
 use the same pure planner. The CLI delegates repository push mechanics to sync.
 New pack ids retain apply order. Full overlap permits a head-only advance;
 partial overlap appends the full requested set. Resets clear the predecessor
@@ -379,7 +379,7 @@ still win its ref race before advertising the new closure.
 **If violated:** retries could append redundant nodes, change content ids, or
 replace a concurrent writer's packmap without its lease.
 
-**Enforced by:** `transfer::packmap::plan_advance`, `mkit-sync::push`, the protocol
+**Enforced by:** `transfer::packmap::plan_advance`, `kit-sync::push`, the protocol
 client push driver, and `packmap_planner`'s former-driver matrix and property
 tests. Sync's native push regressions and the CLI push goldens pin pack ids,
 ref moves, and output. Chain validation, reset authorization, upload, and
@@ -388,7 +388,7 @@ conflict handling remain driver boundaries. Connect repository operations use
 
 ## Connect retries preserve identity and durable acknowledgements
 
-**Always:** `mkit-client` owns Connect encoding and decoding. The host selects
+**Always:** `kit-client` owns Connect encoding and decoding. The host selects
 credentials, grants, admission helpers, retry scheduling, and receipt storage.
 Ambiguous writes retain their authenticated identity until expiry. A durable
 part receipt is stored before progress or the next part. Fresh clients reuse
@@ -713,9 +713,9 @@ introducing an existence oracle.
 **If violated:** a scanner can read foreign, expired or blocked staged content,
 or reveal whether a pack exists through error differences.
 
-**Enforced by:** `rust/crates/mkit-server/src/scanner_retrieval/` capability,
+**Enforced by:** `rust/crates/kit-server/src/scanner_retrieval/` capability,
 current-ticket and denial checks with shared call/response bounds;
-`rust/crates/mkit-server/src/takedown/denial.rs` prefetches at most eight
+`rust/crates/kit-server/src/takedown/denial.rs` prefetches at most eight
 first descriptor pages with at most 4 MiB of raw descriptor values plus
 bounded key, cursor and collection overhead; continuations and
 nested inventory/chunk/action proofs remain sequential with their existing
@@ -738,8 +738,8 @@ could make an otherwise complete push fail or replay a committed write.
 **If violated:** a push can strand content, publish an incomplete closure, or
 lose resumability after interruption.
 
-**Enforced by:** `mkit-transport-connect/src/client.rs` ticket mapping, part
-store and poll loop; `mkit-cli/src/remote_dispatch/packmap.rs` current commit
+**Enforced by:** `kit-transport-connect/src/client.rs` ticket mapping, part
+store and poll loop; `kit-storage/src/remote_dispatch/packmap.rs` current commit
 set; Connect client wire and CLI receipt-store tests; native FS end-to-end
 ticketed upload and resume tests.
 
@@ -789,7 +789,7 @@ other repositories' holdings.
 **If violated:** a writer can use receipts to evade detection, infer another
 repository's packs, or receive contradictory evidence for one operation.
 
-**Enforced by:** `rust/crates/mkit-server/tests/golden_receipts.rs` pins the
+**Enforced by:** `rust/crates/kit-server/tests/golden_receipts.rs` pins the
 format, subject and key-window checks. Runtime issuance, replay and field
 exclusion are specified in SPEC-SERVER §15 and await implementation
 and conformance coverage.
@@ -810,7 +810,7 @@ consuming the ticket, even when another repository already stored the pack.
 **If violated:** an advance could attach a globally present pack without an
 upload, or a ticketed stream could create business metadata or bypass revocation.
 
-**Enforced by:** `mkit-server` pipeline tests `ticketed_upload_no_metadata_and_marker`,
+**Enforced by:** `kit-server` pipeline tests `ticketed_upload_no_metadata_and_marker`,
 `ticketed_upload_failures_leave_no_marker`, and `upload::marker::tests::golden_upload_marker_v1`;
 wire cases `tickets.upload_pack_ticketed` and `repository.ticketed_upload_multi`.
 
@@ -821,11 +821,11 @@ from retained Git bytes and checked under the pinned public key. A head's
 provenance claim must match its exact subject, ref, source and versions.
 
 **Because:** valid signatures on unrelated twins do not authenticate a mutable
-Git-to-mkit mapping cache.
+Git-to-kit mapping cache.
 
 **If violated:** swapped mappings or unrelated attestations can pass an audit.
 
-**Enforced by:** `rust/crates/mkit-cli/tests/git_import_integration.rs` mapping
+**Enforced by:** `rust/crates/kit-storage/tests/git_import_integration.rs` mapping
 swap, unrelated attestation and private-key removal regressions; the full
 45-test integration suite passes. Golden translated bytes remain unchanged.
 
@@ -845,7 +845,7 @@ file object for a symlink produces an index that cannot be committed.
 
 **Enforced by:** core `worktree::blob::equality_tests`,
 `ops::diff::tests::equal_content_different_chunk_layout_is_clean`, and
-`rust/crates/mkit-cli/tests/content_representation_integration.rs`. Comparison
+`rust/crates/kit-storage/tests/content_representation_integration.rs`. Comparison
 holds at most one chunk per side plus manifests; rename fingerprints are
 memoized for one diff and confirmed by byte comparison.
 
@@ -948,10 +948,10 @@ restore an old name or charge duplicate upload quota.
 Reserving rejected operations also lets throttled authors keep growing replay
 storage after exhausting their write budget.
 
-**Enforced by:** `mkit-server` ref policy permanent-denial, lag-retry and
+**Enforced by:** `kit-server` ref policy permanent-denial, lag-retry and
 concurrent replay winner tests; shared core canonical/context tests; Connect retry tests;
 actual local Workers regressions in `apps/{repo-worker,keys-worker}/tests/`;
-quota and rate admission in `apps/mkit-worker-common/tests/quota_ledger.mjs`;
+quota and rate admission in `apps/kit-worker-common/tests/quota_ledger.mjs`;
 web/spammer envelope tests. Keys failure injection after name and result writes
 rolls back both; saved results survive a full Worker restart. Production builds
 omit `test-faults`. Only auth v2 is accepted. Names use SQLite exclusively.
@@ -1044,12 +1044,12 @@ declares them: `rust/`, `contrib/signers/`, and the `apps/*-worker`
 standalone packages.
 
 **Because:** several crates independently re-verify signatures/digests the
-same byte-for-byte way another crate already does — `mkit-wasm`'s raw
-Ed25519 exports vs. `mkit-core::sign`, and every `apps/*-worker`'s
-write-envelope strict-verify vs. `mkit-core`'s own `verify_strict` call —
+same byte-for-byte way another crate already does — `kit-wasm`'s raw
+Ed25519 exports vs. `kit-core::sign`, and every `apps/*-worker`'s
+write-envelope strict-verify vs. `kit-core`'s own `verify_strict` call —
 and the golden-vector and cross-impl-parity tests (e.g.
-`mkit-wasm::ed25519::cross_impl_parity_with_dalek`,
-`mkit-keystore`'s `*_matches_golden_vectors`) assert that stays true. A
+`kit-wasm::ed25519::cross_impl_parity_with_dalek`,
+`kit-keystore`'s `*_matches_golden_vectors`) assert that stays true. A
 drifted major/breaking version of the same crypto crate across workspaces
 can silently diverge in wire-visible behavior (ed25519-dalek 2->3 dropped
 the `std` feature and moved error types to `core::error::Error`; a future
@@ -1066,44 +1066,44 @@ cross-service inconsistency, not a build error.
 "Meta: crypto-stack version" workflow on any change to a `Cargo.toml` under
 `rust/`, `contrib/signers/`, or `apps/`.
 
-## A live `mkit serve` is detectable by local worktree commands
+## A live `kit serve` is detectable by local worktree commands
 
 **Always:** every live server process on a root holds a **shared** kernel
-lock (`mkit_core::repo_lock::acquire_shared`) on `<common_dir>/serve.lock`
-for its entire lifetime: `mkit serve <path>` (stdin SSH-frame, its only
-mode) and any other server process embedding `mkit-server`'s filesystem
+lock (`kit_core::repo_lock::acquire_shared`) on `<common_dir>/serve.lock`
+for its entire lifetime: `kit serve <path>` (stdin SSH-frame, its only
+mode) and any other server process embedding `kit-server`'s filesystem
 layout (which also holds `<common_dir>/server.lock` exclusively, so one
 server serves a root at a time). Every command that acquires `worktree.lock`
 or `worktrees.lock` immediately probes that same `serve.lock`
-non-blocking-exclusive (`mkit_core::repo_lock::probe_exclusive`) and, if it
+non-blocking-exclusive (`kit_core::repo_lock::probe_exclusive`) and, if it
 finds the lock busy, prints a warning to stderr naming the served root
-before proceeding. Most commands do this through `mkit-cli`'s
+before proceeding. Most commands do this through `kit-storage`'s
 `acquire_worktree_lock` / `acquire_worktrees_registry_lock`; the paths
 that take `worktree.lock` directly (the `fetch`/`pull` phases in
 `remote_dispatch` and `status`'s index refresh) call the same
 `warn_if_served` probe (SPEC-CONCURRENCY §3.1). The one exclusive holder: at startup
-`mkit serve` tries `serve.lock` exclusively without waiting, and only
+`kit serve` tries `serve.lock` exclusively without waiting, and only
 while it holds it (no other server is up) sweeps the temp files crashed
 uploads left in `packs/` (`.<hex>.tmp.<pid>.<seq>`, at least an hour
 old), then takes it shared as above.
 
-**Because:** `mkit-transport-file`'s only lock (`<root>/.kit/refs/.lock`)
+**Because:** `kit-transport-file`'s only lock (`<root>/.kit/refs/.lock`)
 serializes file-transport instances against *each other*, not against
-local worktree mutation or `gc` (SPEC-CONCURRENCY §3.1). Running `mkit
-gc` or a worktree-mutating command directly against a root a live `mkit
+local worktree mutation or `gc` (SPEC-CONCURRENCY §3.1). Running `kit
+gc` or a worktree-mutating command directly against a root a live `kit
 serve` is also operating on is unsupported and uncoordinated; without
 this invariant, nothing distinguishes that misuse from an ordinary,
 safe invocation, and the failure (a `gc` sweep racing a concurrent
 push's object write, or a lost ref update) surfaces only as
 after-the-fact corruption with no diagnostic pointing at the cause.
 
-**If violated:** a `gc` can silently sweep objects a concurrent `mkit
+**If violated:** a `gc` can silently sweep objects a concurrent `kit
 serve` client just uploaded, or a local commit/checkout can silently
 lose a race against a client push — both without any warning ever
 appearing, leaving an operator no reason to suspect the concurrent-serve
 misconfiguration until data is already gone. This is detection only,
-not coordination: a direct `mkit push kit+file:///path` (bypassing
-`mkit serve`) and a `serve` that starts *during* an already-in-flight
+not coordination: a direct `kit push kit+file:///path` (bypassing
+`kit serve`) and a `serve` that starts *during* an already-in-flight
 local critical section both remain undetected — see SPEC-CONCURRENCY
 §3.1 for the full statement of what this warning does and does not
 cover. Detection does not make a concurrent `gc` safe: SPEC-GC
@@ -1111,7 +1111,7 @@ cover. Detection does not make a concurrent `gc` safe: SPEC-GC
 writer outside gc's lock set must meet, which a dedup hit on an old
 unreachable object does not meet today.
 
-**Enforced by:** `mkit-cli/tests/serve_guard.rs`.
+**Enforced by:** `kit-storage/tests/serve_guard.rs`.
 
 ## Single commonware release train across every manifest and lockfile
 
@@ -1122,11 +1122,11 @@ The latest-release compatibility probe updates its disposable lockfile separatel
 
 **Because:** exact library requirements prevent downstream consumers from
 selecting a newer compatible release. Reproducibility belongs in lockfiles.
-Commonware-backed mkit wire encodings must retain their pinned bytes when the
+Commonware-backed kit wire encodings must retain their pinned bytes when the
 resolved dependency changes.
 
 **If violated:** an exact requirement can block downstream resolution, or a
-compatible release can silently change mkit bytes without an encoder regression.
+compatible release can silently change kit bytes without an encoder regression.
 
 **Enforced by:** `scripts/check-crypto-stack-version.sh` audits the baseline
 across manifests and committed lockfiles. The scheduled and manifest/lockfile PR
@@ -1137,7 +1137,7 @@ Build and test failures remain visible; the probe never restores an older pin.
 
 ## commonware `Strategy` cannot be spied on from outside commonware-parallel
 
-**Always:** `crates/mkit-core/src/pack_shard.rs`'s test suite does not
+**Always:** `crates/kit-core/src/pack_shard.rs`'s test suite does not
 attempt to assert that a caller-supplied `commonware_parallel::Strategy`
 was *invoked* by the encode/decode core (only that a real, non-default
 strategy compiles against the generic entry points and round-trips
@@ -1157,7 +1157,7 @@ the invocation-count assertion) will not compile against the pinned
 commonware-parallel train; if it is somehow worked around, treat the
 resulting test as unable to prove what its name claims.
 
-**Enforced by:** `crates/mkit-core/src/pack_shard.rs`'s
+**Enforced by:** `crates/kit-core/src/pack_shard.rs`'s
 `round_trip_with_explicit_parallel_strategy` (compiles + round-trips a
 real `Rayon` strategy) as the remaining guard; the comment block above it
 records why the invocation-count assertion cannot be rebuilt.
@@ -1172,40 +1172,40 @@ feature, no `install.ps1` or Scoop packaging, and no
 `BackendKind` has no Windows Credential Manager variant.
 
 **Because:** commonware-runtime 2026.9.0's storage-sync path calls
-`libc::sync()` on every non-Linux target (`mkit-core`'s
+`libc::sync()` on every non-Linux target (`kit-core`'s
 dev-dependencies pull it in) — `libc::sync()` does not exist on `x86_64-pc-windows-msvc`, so the
 workspace and its test suite no longer build there. Maintaining a Windows
 CI/release leg that cannot actually build or test the workspace would ship
 an untested binary, so Windows was dropped as a supported target
-rather than worked around. Windows users run mkit under WSL, which uses
+rather than worked around. Windows users run kit under WSL, which uses
 the Linux binary.
 
 **If violated:** a reintroduced Windows CI leg goes red on every PR (the
 workspace fails to build there); a reintroduced Windows release leg ships
 a binary no test ever exercised; a reintroduced
 `backend-windows-credential` feature reopens a semver-breaking
-`BackendKind` variant on a published crate (`mkit-keystore`) without the
+`BackendKind` variant on a published crate (`kit-keystore`) without the
 required major bump.
 
 **Enforced by:** `scripts/check-no-windows-target.sh`, run by the
 "Meta: actionlint" workflow on any change to the CI workflows, `justfile`,
 crate manifests, `install.sh`, or the web app's installer-staging scripts.
-`mkit-keystore`'s `windows_credential_backend_name_is_not_recognized` test
-(`crates/mkit-keystore/src/lib.rs`) pins that `"windows-credential"` is an
+`kit-keystore`'s `windows_credential_backend_name_is_not_recognized` test
+(`crates/kit-keystore/src/lib.rs`) pins that `"windows-credential"` is an
 unrecognized `BackendKind`/`KeyRef` backend string, not a fail-closed one.
 
 ## wasm32 dependency graphs contain no C-toolchain crates
 
 **Always:** the `wasm32-unknown-unknown` normal-dependency graphs of
-`mkit-wasm`, `apps/repo-worker`, and `mkit-server` contain none of `blst`,
-`zstd-sys`, `commonware-runtime` or `commonware-storage`; `mkit-wasm`'s also
-contains no `tokio`. Each crate depends on `mkit-core` with
+`kit-wasm`, `apps/repo-worker`, and `kit-server` contain none of `blst`,
+`zstd-sys`, `commonware-runtime` or `commonware-storage`; `kit-wasm`'s also
+contains no `tokio`. Each crate depends on `kit-core` with
 `default-features = false`, which keeps `pack-zstd` (and so `zstd-sys`) out.
-`mkit-wasm` stays raw-only (SPEC-DISCLOSURE §7.2).
+`kit-wasm` stays raw-only (SPEC-DISCLOSURE §7.2).
 
 **Because:** none of those crates build for `wasm32-unknown-unknown`.
-`mkit-wasm` ships to browsers, `apps/repo-worker` runs on Cloudflare
-Workers, and `mkit-server` is the runtime-agnostic reference implementation
+`kit-wasm` ships to browsers, `apps/repo-worker` runs on Cloudflare
+Workers, and `kit-server` is the runtime-agnostic reference implementation
 that supports wasm32 embedders. Cargo unifies features per
 dependency graph, so one manifest line that re-enables a default feature
 silently pulls a C library into every wasm build downstream.
@@ -1217,29 +1217,29 @@ the server at all.
 
 **Enforced by:** `scripts/check-wasm-dep-graph.sh` (a `cargo tree` check
 per crate) and the `cargo check --target wasm32-unknown-unknown`
-steps for `mkit-wasm` and `mkit-server`, all run by the CI workflow
+steps for `kit-wasm` and `kit-server`, all run by the CI workflow
 (`.github/workflows/rust.yml`).
 
-## The default `mkit` CLI is server-free
+## The default `kit` CLI is server-free
 
-**Always:** the normal dependency graph of `mkit-cli` with its default
-features, on every target, contains no `axum`, `mkit-server-native` (a removed crate, kept on the ban list),
+**Always:** the normal dependency graph of `kit-storage` with its default
+features, on every target, contains no `axum`, `kit-server-native` (a removed crate, kept on the ban list),
 `rusqlite` or `libsqlite3-sys`; it enables no hyper `server` feature, no
 hyper-util `server*` feature and no connectrpc `server` or `axum` feature;
-and it has `mkit-serve` (the engine of `mkit serve`), whose own graph has no
-`tokio` and no `futures` package. `mkit serve` builds no async runtime: it
+and it has `kit-serve` (the engine of `kit serve`), whose own graph has no
+`tokio` and no `futures` package. `kit serve` builds no async runtime: it
 runs the ssh session on the main thread, and its code names no tokio.
 tokio itself is allowed: it is the runtime of the Connect and reqwest
 *clients* in the default graph.
 
 **Because:** the CLI is what every user installs (`cargo install
-mkit-cli`, the release archives). The HTTP server, the
+kit-storage`, the release archives). The HTTP server, the
 `SQLite` metadata store and their dependencies belong outside the CLI. The
-CLI serves only over ssh, through the small `mkit-serve` crate. A server stack in the CLI
+CLI serves only over ssh, through the small `kit-serve` crate. A server stack in the CLI
 graph grows the published crate's supply chain, its build time and its
 binary, and invites serving code paths the CLI was never reviewed for.
 
-**If violated:** the published `mkit` compiles an HTTP server, a C
+**If violated:** the published `kit` compiles an HTTP server, a C
 `SQLite` build or a second async stack that no CLI command needs; the
 release check (`scripts/check-release-artifact-features.sh`) then fails
 only at release time, where this check fails at the PR.
@@ -1248,12 +1248,12 @@ only at release time, where this check fails at the PR.
 the graph plus a grep of `commands/serve/`), run by the CI workflow
 (`.github/workflows/rust.yml`); the release build's real compiler artifacts are
 checked by `scripts/check-release-artifact-features.sh` against
-`scripts/release/mkit-packages.golden`.
+`scripts/release/kit-packages.golden`.
 
 ## Every storage backend passes the storage-contract suite
 
 **Always:** every `NamespaceStore` and `BlobStore` a server can be deployed
-on passes `mkit-server-conformance`'s storage suite (`storage_suite!`),
+on passes `kit-server-conformance`'s storage suite (`storage_suite!`),
 including the durability cases (`dur.*`: cancellation mid-apply,
 crash/restart without shutdown, portable export/import) and the `NotAfter`
 commit-deadline cases (`kv.not_after_*`), and declares each case it skips,
@@ -1261,7 +1261,7 @@ for a capability the backend lacks (`StoreCapabilities`, or a reopen that
 an in-memory `SQLite` database cannot do). A declared skip that starts
 passing, or an undeclared one, fails the run.
 
-**Because:** `mkit-server`'s pipeline is written once against the storage
+**Because:** `kit-server`'s pipeline is written once against the storage
 traits (production server work §5.1) and trusts their contract: an atomic batch, a
 missed deadline that writes nothing, a crash that leaves either the old or
 the new state. A backend that bends one of these on a single path
@@ -1274,7 +1274,7 @@ replay or quota rows diverge from the effects they guard, or an upload is
 readable before it is complete, on one backend only.
 
 **Enforced by:** one test binary per backend in
-`rust/crates/mkit-server-conformance/tests/`: `memory_backends.rs`
+`rust/crates/kit-server-conformance/tests/`: `memory_backends.rs`
 (full-capability and `RefsOnly` memory stores, `MemoryBlobStore`),
 and `fs_backends.rs` (`FsLayoutStore`, `FsBlobStore`). The suite's own
 mutation tests (`suite_selftest.rs`) prove each case fails the store bug it
@@ -1294,16 +1294,16 @@ before enabling their repository RPCs.
 
 **If violated:** an unauthenticated repository RPC can mutate state or mint a token.
 
-**Enforced by:** `mkit-server/tests/connect_dispatch.rs`'s `m2_*` tests
+**Enforced by:** `kit-server/tests/connect_dispatch.rs`'s `m2_*` tests
 and the TODO and SECURITY comments in `connect/service.rs`. Implementing
 WPs replace their stub assertions with behavior and auth tests.
 
 ## The native HTTP host passes the black-box wire suite
 
 **Always:** the reference `kit.transport.v1` implementation passes
-`mkit-server-conformance`'s wire suite over HTTP through its in-process
+`kit-server-conformance`'s wire suite over HTTP through its in-process
 `TestHost`, enabled by the `test-host` feature. The suite speaks raw Connect
-with its own client, so it checks the wire independently of mkit's client library.
+with its own client, so it checks the wire independently of kit's client library.
 
 **Because:** HTTP bindings can change status codes, compression, streaming, or
 limits even when the pipeline stays unchanged. A fixed black-box suite catches
@@ -1312,7 +1312,7 @@ changes that a permissive client might hide.
 **If violated:** a deployment can answer with a different error code, drop a
 precondition or limit, or buffer a stream where the spec requires streaming.
 
-**Enforced by:** `rust/crates/mkit-server-conformance/tests/test_host.rs` and
+**Enforced by:** `rust/crates/kit-server-conformance/tests/test_host.rs` and
 `test_host_migrations.rs`, run with `--features test-host` by the Rust workflow's
 `native-wire-conformance` job. `baseline_pipeline_memory.rs` separately exercises
 the pipeline over memory stores and the store mutants each case must catch.
@@ -1342,7 +1342,7 @@ frame's content.
 The hand-written frame parsing assembles header fields in `u64`, never
 `usize`, so it behaves the same on 32-bit and 64-bit targets.
 
-**Enforced by:** `mkit_core::pack::zstd_tests` (`decoder_enforces_one_frame`,
+**Enforced by:** `kit_core::pack::zstd_tests` (`decoder_enforces_one_frame`,
 `rejects_adversarial_frames`, `rejects_reserved_sequence_mode_bits`,
 `enforces_window_and_block_limits` and
 `rejects_oversized_literals_and_block_bodies`), plus
@@ -1409,42 +1409,42 @@ or execute a command twice during recovery.
 
 ## BMT inclusion-proof bytes and sibling selection match commonware exactly
 
-**Always:** `mkit_core::merkle::Proof`'s wire bytes (`u32 BE leaf_count ‖
+**Always:** `kit_core::merkle::Proof`'s wire bytes (`u32 BE leaf_count ‖
 varint(n) ‖ n × 32-byte digest`) and its level-major, self-duplicate- and
 already-proven-sibling-omitting selection rule are byte-identical to
 `commonware_storage::bmt::Proof` at the pinned `2026.9.0` train, for
-single, range, and multi-leaf proofs alike — both directions: mkit
+single, range, and multi-leaf proofs alike — both directions: kit
 decodes and accepts upstream's proof bytes, and upstream decodes and
-accepts mkit's.
+accepts kit's.
 
 **Because:** SPEC-MERKLE-OBJECTS §5.7 makes this byte-identity a
 normative compatibility promise, so a commonware-based verifier (for
-example, makechain) can decode and verify an mkit proof with the
-upstream type directly, applying only mkit's outer type-domain wrap
-(`wrap_id`) on top. mkit cannot depend on `commonware-storage`'s `bmt`
+example, makechain) can decode and verify an kit proof with the
+upstream type directly, applying only kit's outer type-domain wrap
+(`wrap_id`) on top. kit cannot depend on `commonware-storage`'s `bmt`
 module directly for this (it drags in `commonware-cryptography`'s
 unconditional `blst` C dependency, which does not build for
 `wasm32-unknown-unknown` — see `merkle.rs`'s module docs), so the
 construction is vendored and the byte-identity claim has
 no compiler to enforce it.
 
-**If violated:** a proof mkit produces would fail to decode, or would
+**If violated:** a proof kit produces would fail to decode, or would
 decode but fail to verify, against an otherwise-correct commonware-based
 verifier (and vice versa) — silently breaking cross-implementation
-verification with no local test failure, since every mkit-only
+verification with no local test failure, since every kit-only
 round-trip test would still pass.
 
-**Enforced by:** `mkit_core::merkle::tests::proofs_match_commonware`
+**Enforced by:** `kit_core::merkle::tests::proofs_match_commonware`
 (native-only, dev-dependency on `commonware-storage`/`commonware-cryptography`),
 which builds many randomised trees and single/range/multi position sets,
-asserts mkit's encoded bytes equal upstream's `commonware_codec::Encode`
+asserts kit's encoded bytes equal upstream's `commonware_codec::Encode`
 output, cross-decodes each side's bytes with the other's type, and
 confirms both verifiers reject a mutated proof (flipped sibling byte,
 dropped/added sibling, wrong `leaf_count`).
 
 ## Disclosure verification is against object ids only
 
-**Always:** every check `mkit_core::verify` performs — a path step, a
+**Always:** every check `kit_core::verify` performs — a path step, a
 chunk, a byte range — is stated against an authenticated object id
 (a commit id, a step's `child_id`, a `ChunkedBlob`/chunk id). A v2
 bundle carries a bare inner root on each step and chunk header; that
@@ -1467,7 +1467,7 @@ actually proves — silently, since the disclosed bytes themselves might
 still be genuine content from *somewhere* in the repository, just not at
 the claimed location.
 
-**Enforced by:** `mkit_core::verify::tests` (`verify_path_rejects_*`,
+**Enforced by:** `kit_core::verify::tests` (`verify_path_rejects_*`,
 `verify_chunk_with_meta_bounds`, `commit_id_mismatch_is_rejected`) and
 `rust/tests/golden/disclosure/`'s negative vectors (swapped steps, a
 wrong-position proof, a forged `ChunkedBlob` meta pair) — SPEC-DISCLOSURE
@@ -1488,10 +1488,10 @@ cross-check, a bundle could declare a wrap-correct root while attaching
 a proof built for a different tree.
 
 **If violated:** an external verifier that trusted the field would
-accept content from the wrong tree, or mkit and a commonware-native
+accept content from the wrong tree, or kit and a commonware-native
 verifier would disagree on the same bundle.
 
-**Enforced by:** `rust/crates/mkit-core/tests/native_commonware_disclosure.rs`
+**Enforced by:** `rust/crates/kit-core/tests/native_commonware_disclosure.rs`
 (every accept golden verified with only bundle fields, upstream
 `commonware_storage::bmt::Proof`, and `hash::domain_digest`; the three
 v2 negatives fail at wrap or upstream verify) and
@@ -1526,9 +1526,9 @@ incomplete sum — or worse, silently receive `None` for a bundle that
 *looked* like it was trying to prove one, masking a builder bug or a
 malicious short-fill.
 
-**Enforced by:** `mkit_core::verify::tests::incomplete_length_proof_set_is_rejected`
+**Enforced by:** `kit_core::verify::tests::incomplete_length_proof_set_is_rejected`
 and `rust/tests/golden/disclosure/neg_incomplete_length_proof_set.*`;
-`mkit_core::verify::tests::len_proofs_on_chunk0_are_rejected` and
+`kit_core::verify::tests::len_proofs_on_chunk0_are_rejected` and
 `rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*` (SPEC-DISCLOSURE §4/§4.1).
 
 ## MKDS spans bind every chunk to one authenticated byte range
@@ -1549,9 +1549,9 @@ would not authenticate their concatenation as one requested range.
 **If violated:** a caller can receive bytes at the wrong absolute offset or
 from the wrong leaf, or accept an incomplete range as a valid disclosure.
 
-**Enforced by:** `mkit_core::verify::span` and its unit tests,
-`rust/crates/mkit-core/tests/golden_http_objects.rs` product/reference parity
-and builder byte-identity checks, and `rust/crates/mkit-wasm/tests/verify.rs`
+**Enforced by:** `kit_core::verify::span` and its unit tests,
+`rust/crates/kit-core/tests/golden_http_objects.rs` product/reference parity
+and builder byte-identity checks, and `rust/crates/kit-wasm/tests/verify.rs`
 (SPEC-DISCLOSURE §8 and SPEC-HTTP-OBJECTS §5.2).
 
 ## Closure walks share one `children` function
@@ -1576,11 +1576,11 @@ reverse) would silently drop or invent objects, and a wasm verifier
 walking a hand-rolled map would accept a different set than
 `reachable_objects`.
 
-**Enforced by:** `mkit_core::ops::graph::tests::children_snapshot_omits_parents_history_includes_them`,
+**Enforced by:** `kit_core::ops::graph::tests::children_snapshot_omits_parents_history_includes_them`,
 `reachable_snapshot_excludes_parent_commit`,
-`mkit_core::verify::closure::tests::history_on_snapshot_reports_parent_missing`
+`kit_core::verify::closure::tests::history_on_snapshot_reports_parent_missing`
 / `snapshot_on_history_reports_parent_unreferenced`, and
-`mkit_core::verify::push::tests::history_vs_snapshot` /
+`kit_core::verify::push::tests::history_vs_snapshot` /
 `remix_sources_never_followed`.
 
 ## Streaming closure verification reads only reachable objects, each once
@@ -1601,11 +1601,11 @@ O(store-size) memory operation, or a buggy mode walk can silently inspect
 foreign/unreachable objects and misrepresent what was verified.
 
 **Enforced by:**
-`mkit_core::verify::closure::tests::streaming_fetches_each_reachable_object_once_and_only`,
+`kit_core::verify::closure::tests::streaming_fetches_each_reachable_object_once_and_only`,
 which uses a counting source that panics on unknown ids and checks the exact
 snapshot/history fetch sets, and
-`mkit_core::verify::push::tests::each_object_fetched_once_across_multiple_tips`
-and `mkit_core::verify::closure::tests::repeated_child_ids_are_queued_once`.
+`kit_core::verify::push::tests::each_object_fetched_once_across_multiple_tips`
+and `kit_core::verify::closure::tests::repeated_child_ids_are_queued_once`.
 
 ## Push verification and delta bases resolve only within the pushing repository
 
@@ -1652,10 +1652,10 @@ content this repository never checked.
 or commits over guessed ids, or land a ref whose history includes unverified,
 unsigned or foreign objects.
 
-**Enforced by:** `mkit_core::verify::push::tests` (`frontier_stop` and
+**Enforced by:** `kit_core::verify::push::tests` (`frontier_stop` and
 `known_tip_is_noop`, whose source panics on any fetch past the frontier;
 `unsigned_commit_rejected`, `forged_tag_rejected`, `remix_signature_checked`,
-`wrong_bytes_for_id_is_corrupt`) and `mkit_core::pack::tests`
+`wrong_bytes_for_id_is_corrupt`) and `kit_core::pack::tests`
 (`external_base_outside_source_is_delta_base_missing`,
 `untrusted_source_returning_wrong_bytes_is_rejected`,
 `decode_with_no_external_bases_matches_reader`,
@@ -1672,7 +1672,7 @@ the cross-repository uniform-error conformance test belong to the server.
 `VerifyError::ClosureProfileViolation` after a type scan that does not
 decompress.
 
-**Because:** `mkit-wasm` builds `mkit-core` with `default-features =
+**Because:** `kit-wasm` builds `kit-core` with `default-features =
 false` (no zstd). A compressed or delta pack would be unreadable there,
 so the profile that a wasm verifier consumes has to be raw-only by
 construction.
@@ -1683,9 +1683,9 @@ hits the `pack-zstd` stub), splitting the verifier kit into two
 incompatible carriers. The type scan runs first, so a compressed entry is a profile violation,
 not a decoded object.
 
-**Enforced by:** `mkit_core::pack::tests::raw_only_writer_emits_v1_raw_for_compressible_payload`,
+**Enforced by:** `kit_core::pack::tests::raw_only_writer_emits_v1_raw_for_compressible_payload`,
 `raw_only_writer_rejects_deltas`,
-`mkit_core::verify::closure::tests::delta_pack_is_profile_violation`,
+`kit_core::verify::closure::tests::delta_pack_is_profile_violation`,
 and `rust/tests/golden/closure/neg_delta_entry.*` /
 `neg_compressed_entry.*`, and
 `golden_pack::pack_v2_fixtures::closure_profile_still_rejects_compressed_entries`
@@ -1734,9 +1734,9 @@ requirement before allocation.
 **If violated:** malformed packs or mismatched cursor/source pairs can publish
 partially verified data.
 
-**Enforced by:** `rust/crates/mkit-core/src/pack/window/tests.rs` differential,
+**Enforced by:** `rust/crates/kit-core/src/pack/window/tests.rs` differential,
 resume, cursor-binding, released-window, resource-budget, and trailer-split tests;
-the `mkit-core-wasm-check` v2 differential harness. Caller staging rollback and
+the `kit-core-wasm-check` v2 differential harness. Caller staging rollback and
 source immutability remain obligations of the caller; the core reader does not store objects.
 
 ## Cursor metadata preserves validation and private state
@@ -1772,7 +1772,7 @@ object membership.
 
 **Enforced by:** `pack::rewrite::tests` (128 property cases, chains of depth 1–5,
 external bases, duplicates, compressed fixtures and budget/error checks), plus
-`mkit-core-wasm-check/tests/pack_rewrite.rs` and the hostile-length wasm harness.
+`kit-core-wasm-check/tests/pack_rewrite.rs` and the hostile-length wasm harness.
 
 ## Repository addressing binds authentication and storage routing
 
@@ -1830,7 +1830,7 @@ cancellation must not hide a durable timer from a driver.
 
 **If violated:** effects can run twice or a committed timer can remain asleep.
 
-**Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests.
+**Enforced by:** `kit-server/src/timers/tests.rs` race and atomicity tests.
 
 ## Epoch lease acknowledgements describe durable shard state
 
@@ -1925,8 +1925,8 @@ index or lose membership while publishing refs.
 **If violated:** settlement can repeat, committed packs can disappear from
 repository membership, and backlog/caps can undercount durable obligations.
 
-**Enforced by:** `mkit-server/src/store/{tickets,outbox}.rs` pure planner tests,
-strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cases.rs`
+**Enforced by:** `kit-server/src/store/{tickets,outbox}.rs` pure planner tests,
+strict `store/codec.rs` decodes, and `kit-server-conformance/src/storage/kv_cases.rs`
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
 and SQLite. Tests exercise consumption and the defensive abort over native
 memory/SQLite and wire cases; the kind-2 expiry handler closes tickets with
@@ -2001,7 +2001,7 @@ from their membership writes, or newly queued rows lose their relay timer.
 Restoring an older source requires raising `os` above every target's `rh` for
 that source or re-keying it.
 
-**Enforced by:** `mkit-server/src/relay/tests.rs` crash, contention, ordering,
+**Enforced by:** `kit-server/src/relay/tests.rs` crash, contention, ordering,
 chunk-limit, wake-up and bounded-cycle fairness tests. Fires inspect up to four
 times their row delivery budget, persist bounded cycle progress in `rs 00`, and
 revisit blocked targets at the next cycle. Corruption stops delivery after its
@@ -2018,8 +2018,8 @@ produce identical index values. Launch runs no orphan-row collector.
 
 **Spec:** [SPEC-SERVER §§9.3–9.4](specs/SPEC-SERVER.md#93-verification-obligations)
 and [§18](specs/SPEC-SERVER.md#18-conformance-scope).
-**Enforced by:** [repository-scoped index lookups](../rust/crates/mkit-server/src/store/index.rs),
-[indexed pipeline tests](../rust/crates/mkit-server/src/pipeline/tests/indexed.rs)
+**Enforced by:** [repository-scoped index lookups](../rust/crates/kit-server/src/store/index.rs),
+[indexed pipeline tests](../rust/crates/kit-server/src/pipeline/tests/indexed.rs)
 (`ticketed_good_push_commits_after_index_and_bad_pack_leaves_refs_unmoved`,
 `begin_already_present_depends_on_membership_not_index_rows`).
 
@@ -2039,8 +2039,8 @@ live/published view and global denial.
 malformed hints an existence oracle.
 
 **Spec:** [SPEC-SERVER §§9.4, 10.3](specs/SPEC-SERVER.md#94-repository-isolated-membership-checks).
-**Enforced by:** [pipeline pack reads](../rust/crates/mkit-server/src/pipeline/mod.rs)
-and [indexed hint tests](../rust/crates/mkit-server/src/pipeline/tests/indexed.rs)
+**Enforced by:** [pipeline pack reads](../rust/crates/kit-server/src/pipeline/mod.rs)
+and [indexed hint tests](../rust/crates/kit-server/src/pipeline/tests/indexed.rs)
 (`d34_ref_hint_obeys_pending_and_held_views_before_membership_relay`), plus Multi
 wire membership cases.
 
@@ -2105,7 +2105,7 @@ can regain authority through an unexpired old shard lease, or revocation can
 complete while an old lease remains effective.
 
 **Enforced by:** the native CLI refuses an existing database;
-`mkit-server/src/store/restore.rs` checks every supplied target partition and
+`kit-server/src/store/restore.rs` checks every supplied target partition and
 validates and transforms the supplied set before import. Tests
 `missing_source_is_refused_or_reconstructed_above_target_watermark`,
 `missing_coordinator_requires_both_flags_and_is_recovered_before_ref`,
@@ -2113,7 +2113,7 @@ validates and transforms the supplied set before import. Tests
 and `fresh_restore_orders_root_and_rewrites_recovery_epoch_and_relay` enforce
 the memory invariants; native `export_restore_roundtrip_and_usage_refusals`
 enforces Fresh refusal and SQLite import.
-`mkit-server/src/relay/deliver.rs` guards target upserts and `rh` together.
+`kit-server/src/relay/deliver.rs` guards target upserts and `rh` together.
 In-place and Merge restore require another proof and are deferred.
 
 ## Deployment discovery is public and repository-independent
@@ -2169,7 +2169,7 @@ entry decompression or retained delta targets.
 
 **Enforced by:** `pack::tests` resident-peak, bomb, retention-equivalence and
 maximum-wire-length regressions; live wasm framing tests in
-`apps/web/src/lib/mkit.test.ts`.
+`apps/web/src/lib/kit.test.ts`.
 
 <a id="inspection-clearance-bounds-every-reader-surface-specified-implementation-pending"></a>
 
@@ -2182,11 +2182,11 @@ cannot enter replay. Async inspection and durable holds are future integration.
 
 **Spec:** [SPEC-SERVER §§10–11](specs/SPEC-SERVER.md#10-published-view), amended by
 [§18](specs/SPEC-SERVER.md#18-conformance-scope).
-**Enforced by:** [inspection regressions](../rust/crates/mkit-server/src/pipeline/tests/indexed/inspection.rs)
+**Enforced by:** [inspection regressions](../rust/crates/kit-server/src/pipeline/tests/indexed/inspection.rs)
 (`complete_set_deduplicates_and_every_inspector_receives_one_batch`,
 `reject_dominates_unavailability_and_does_not_publish`,
 `unavailable_has_no_replay_and_retry_reuses_inspection_id`), plus
-[publication regressions](../rust/crates/mkit-server/src/store/publication_tests.rs).
+[publication regressions](../rust/crates/kit-server/src/store/publication_tests.rs).
 
 <a id="takedown-denial-precedes-rewrites-specified-implementation-pending"></a>
 
@@ -2198,10 +2198,10 @@ rewrite, ref substitution, tombstones and completion notices are future work.
 
 **Spec:** [SPEC-SERVER §§14.2–14.7](specs/SPEC-SERVER.md#142-blocklist) and the
 [§18 launch subset](specs/SPEC-SERVER.md#18-conformance-scope).
-**Enforced by:** [denial](../rust/crates/mkit-server/src/takedown/denial.rs) and
-[activation regressions](../rust/crates/mkit-server/src/takedown/tests.rs)
+**Enforced by:** [denial](../rust/crates/kit-server/src/takedown/denial.rs) and
+[activation regressions](../rust/crates/kit-server/src/takedown/tests.rs)
 (`interrupted_activation_replays_pending_until_every_denial_is_active`), plus
-[preservation tests](../rust/crates/mkit-server/src/takedown/copy_tests.rs).
+[preservation tests](../rust/crates/kit-server/src/takedown/copy_tests.rs).
 
 ## Admin authority and audit continuity (launch foundations)
 
@@ -2213,13 +2213,13 @@ inspection review and audit pruning remain future work.
 
 **Spec:** [SPEC-SERVER §§16.1–16.7](specs/SPEC-SERVER.md#16-admin-api-and-audit-log)
 and [§18](specs/SPEC-SERVER.md#18-conformance-scope).
-**Enforced by:** [admin authentication](../rust/crates/mkit-server/src/admin/auth.rs),
-[ledger](../rust/crates/mkit-server/src/admin/ledger.rs) and
-[admin tests](../rust/crates/mkit-server/src/admin/tests.rs)
+**Enforced by:** [admin authentication](../rust/crates/kit-server/src/admin/auth.rs),
+[ledger](../rust/crates/kit-server/src/admin/ledger.rs) and
+[admin tests](../rust/crates/kit-server/src/admin/tests.rs)
 (`manual_purge_acceptance_is_durable_and_operation_replay_cannot_duplicate_work`,
 `authenticated_denials_and_audit_reads_extend_gapless_chain`,
 `forged_and_mixed_credentials_cannot_reserve_nonce_or_audit`), plus
-[restricted catalog tests](../rust/crates/mkit-server/src/takedown/admin_tests.rs)
+[restricted catalog tests](../rust/crates/kit-server/src/takedown/admin_tests.rs)
 (`every_operation_is_signed_role_checked_replayed_and_audited`).
 
 ## BeginUpload decisions and replay share the write batch
@@ -2237,13 +2237,13 @@ key rotation. Membership decisions in Multi may consult only the local repo row.
 **If violated:** a denied request allocates state, racing opens exceed the caps,
 retries charge admission again, or token results disappear with ticket rows.
 
-**Enforced by:** `mkit-server/tests/golden_ticket_token.rs`
-(`golden_ticket_token_v1`), `mkit-server/tests/begin_upload_codec.rs`, native
+**Enforced by:** `kit-server/tests/golden_ticket_token.rs`
+(`golden_ticket_token_v1`), `kit-server/tests/begin_upload_codec.rs`, native
 `tests/begin_upload.rs` (`lifecycle_*`, `caps_*`, `race_*`, `rejected_*`) over
 memory and SQLite (Single and D34), and the wire `tickets.*` cases.
 Kind-2 ticket expiry closes unconsumed tickets; current reconciliation and
-terminal delivery are enforced by the [outcome timer](../rust/crates/mkit-server/src/timers/outcome_delivery.rs)
-and [reservation reconciliation](../rust/crates/mkit-server/src/timers/reservation_reconcile.rs), under
+terminal delivery are enforced by the [outcome timer](../rust/crates/kit-server/src/timers/outcome_delivery.rs)
+and [reservation reconciliation](../rust/crates/kit-server/src/timers/reservation_reconcile.rs), under
 [SPEC-SERVER §5](specs/SPEC-SERVER.md#5-outcomes-lifecycle-events-and-the-outbox).
 
 ## Ticketed advance publishes only completed uploads
@@ -2261,8 +2261,8 @@ conflict must remain correctable while the ticket is live.
 **If violated:** a repository could claim another upload's pack, lose its
 payment outcome, or strand usable tickets after a CAS conflict.
 
-**Enforced by:** `mkit-server/src/pipeline/advance.rs`, native ticket advance
-flow/race tests, and `mkit-server-conformance` ticket wire cases.
+**Enforced by:** `kit-server/src/pipeline/advance.rs`, native ticket advance
+flow/race tests, and `kit-server-conformance` ticket wire cases.
 
 ## Multipart completion authenticates every part before publication
 
@@ -2288,8 +2288,8 @@ upload can bypass BeginUpload's authorization and admission.
 
 **If violated:** a stale receipt could select replaced bytes, or a crash could expose a partial pack or discard a live session.
 
-**Enforced by:** `mkit-server-conformance/src/storage/multipart.rs`, instantiated
-by `tests/memory_backends.rs` and `tests/fs_backends.rs`; `mkit-server/src/fs/tests.rs`
+**Enforced by:** `kit-server-conformance/src/storage/multipart.rs`, instantiated
+by `tests/memory_backends.rs` and `tests/fs_backends.rs`; `kit-server/src/fs/tests.rs`
 ticket-layout, restart, replacement and seven-day sweep tests. The native HTTP
 `TestHost` runs `Feature::Multipart` wire cases over `MemoryBlobStore` and
 `MemoryKv`; filesystem multipart behavior is covered by the storage suite.
@@ -2310,7 +2310,7 @@ and may change without changing the authenticated operation.
 expired identity, or a write can silently mint a new nonce.
 
 **Enforced by:** the Connect procedure classification and envelope tests,
-client retry tests, and `mkit_core::write_auth::verify_headers` checks over
+client retry tests, and `kit_core::write_auth::verify_headers` checks over
 captured request bodies.
 
 ## Implicit transport-identity membership is session-bound
@@ -2340,10 +2340,10 @@ oracle a ticket's signature otherwise prevents.
 upload, minting membership without possession and breaking repository
 isolation across sessions and repositories.
 
-**Enforced by:** `mkit-server/src/pipeline/mod.rs`
+**Enforced by:** `kit-server/src/pipeline/mod.rs`
 `check_implicit_packmap` and `update_packmap_consuming` unit tests,
-`mkit-server/src/ssh/tests.rs` pending/consume/reconnect/isolation
-cases, and `mkit-cli/tests/serve_golden.rs` session-3 wire goldens.
+`kit-server/src/ssh/tests.rs` pending/consume/reconnect/isolation
+cases, and `kit-storage/tests/serve_golden.rs` session-3 wire goldens.
 
 ## Private repositories are indistinguishable from missing ones
 
@@ -2380,7 +2380,7 @@ must retain the same repository authority as inline verification.
 **If violated:** an advance can accept an open closure, or storage damage can
 turn a monotone verification result into a contradictory persisted rejection.
 
-**Enforced by:** `mkit-server/src/indexed/job.rs` atomic closure checkpoints and
+**Enforced by:** `kit-server/src/indexed/job.rs` atomic closure checkpoints and
 state guards; the job-driver crash sweeps, satisfying-member removal test,
 Verified rebuild test, and Scheduled pipeline pending/delivery tests.
 
@@ -2449,13 +2449,13 @@ precedes published-view selection.
 
 **Spec:** [SPEC-SERVER §§10.1–10.3](specs/SPEC-SERVER.md#10-published-view) and
 [§18](specs/SPEC-SERVER.md#18-conformance-scope).
-**Enforced by:** [publication store](../rust/crates/mkit-server/src/store/publication.rs),
-[publication regressions](../rust/crates/mkit-server/src/store/publication_tests.rs)
+**Enforced by:** [publication store](../rust/crates/kit-server/src/store/publication.rs),
+[publication regressions](../rust/crates/kit-server/src/store/publication_tests.rs)
 (`out_of_order_membership_does_not_skip_the_pointer`,
 `deletion_and_recreation_preserve_sequence_and_old_membership`,
 `own_additions_never_satisfy_an_external_delta_dependency`,
 `d34_delayed_cross_ref_delta_relays_wake_durable_work_after_restart`), and
-[HTTP publication access tests](../rust/crates/mkit-server/src/pipeline/tests/http_objects/publication_access.rs).
+[HTTP publication access tests](../rust/crates/kit-server/src/pipeline/tests/http_objects/publication_access.rs).
 Async inspector scheduling and durable hold integration remain future work.
 
 ## Independent global denial and pending takedown intent
@@ -2469,10 +2469,10 @@ failed delivery remains owned by durable timer work.
 **Spec:** [SPEC-SERVER §§14.2, 14.7](specs/SPEC-SERVER.md#142-blocklist),
 [§16.7](specs/SPEC-SERVER.md#167-remote-cache-purge) and
 [§18](specs/SPEC-SERVER.md#18-conformance-scope).
-**Enforced by:** [denial](../rust/crates/mkit-server/src/takedown/denial.rs),
-[intent activation](../rust/crates/mkit-server/src/takedown/intent.rs),
-[late-owner tests](../rust/crates/mkit-server/src/takedown/late_owner_tests.rs) and
-[signed replay regressions](../rust/crates/mkit-server/src/takedown/tests.rs)
+**Enforced by:** [denial](../rust/crates/kit-server/src/takedown/denial.rs),
+[intent activation](../rust/crates/kit-server/src/takedown/intent.rs),
+[late-owner tests](../rust/crates/kit-server/src/takedown/late_owner_tests.rs) and
+[signed replay regressions](../rust/crates/kit-server/src/takedown/tests.rs)
 (`interrupted_activation_replays_pending_until_every_denial_is_active`,
 `timer15_restart_finalizes_interrupted_signed_acceptance`).
 
@@ -2486,11 +2486,11 @@ purge cannot delete another action's copy or lift denial.
 
 **Spec:** [SPEC-SERVER §14.7](specs/SPEC-SERVER.md#147-preservation-store) and
 [§18](specs/SPEC-SERVER.md#18-conformance-scope).
-**Enforced by:** [copy tests](../rust/crates/mkit-server/src/takedown/copy_tests.rs),
-[discovery regressions](../rust/crates/mkit-server/src/takedown/discovery_tests.rs)
+**Enforced by:** [copy tests](../rust/crates/kit-server/src/takedown/copy_tests.rs),
+[discovery regressions](../rust/crates/kit-server/src/takedown/discovery_tests.rs)
 (`finite_two_namespace_sweep_waits_for_undelivered_membership_then_unions_sources`,
 `any_streams_one_namespace_candidate_and_never_claims_discovery_complete`), and
-[admin regressions](../rust/crates/mkit-server/src/takedown/admin_tests.rs)
+[admin regressions](../rust/crates/kit-server/src/takedown/admin_tests.rs)
 (`status_keeps_acquisition_verification_discovery_hold_and_completion_separate`,
 `fresh_retry_roles_retention_and_ownership_never_replay_bytes`,
 `signed_hold_commits_with_audit_and_nonce_and_blocks_actual_purge`).
@@ -2539,8 +2539,8 @@ GC hold expires. Removing that protection can delete an object before its
 durable holder arrives.
 
 **Spec:** [SPEC-SERVER §13.4](specs/SPEC-SERVER.md#134-global-byte-deletion).
-**Enforced by:** [content-index safety](../rust/crates/mkit-server/src/store/content_index.rs)
-and [extraction holds](../rust/crates/mkit-server/src/indexed/extract.rs).
+**Enforced by:** [content-index safety](../rust/crates/kit-server/src/store/content_index.rs)
+and [extraction holds](../rust/crates/kit-server/src/indexed/extract.rs).
 `ContentIndex::protect_pending_holder` uses guarded fresh
 block/deleting observations and NotAfter. `collectable` checks one pending row
 and its final plan guards `c`; unknown pending state closes collection. The
@@ -2624,8 +2624,8 @@ private retrieval.
 an accepted request can exhaust its configured invocation budget.
 
 **Spec:** [SPEC-SERVER §§11, 18](specs/SPEC-SERVER.md#11-quarantine-and-inspection).
-**Enforced by:** [inspection code](../rust/crates/mkit-server/src/indexed/inspection.rs)
-and [inspection tests](../rust/crates/mkit-server/src/pipeline/tests/indexed/inspection.rs).
+**Enforced by:** [inspection code](../rust/crates/kit-server/src/indexed/inspection.rs)
+and [inspection tests](../rust/crates/kit-server/src/pipeline/tests/indexed/inspection.rs).
 The empty-store activation rule is a documented operator
 precondition of the supported launch profile, not a runtime existing-content
 check; there is no durable mode marker at launch. Inspector configuration,
@@ -2746,13 +2746,13 @@ configuration; startup refuses partial configuration.
 ## Native HTTPS extra trust
 
 **Always:** Native Connect HTTPS retains the compiled Mozilla roots and verifies
-both the certificate chain and hostname. `MKIT_SSL_CA_FILE` overrides the merged
+both the certificate chain and hostname. `KIT_SSL_CA_FILE` overrides the merged
 `http.sslCAInfo` path; selected invalid files fail before any request dispatch.
 **Because:** Extra local trust must authorize certificates explicitly without
 silently downgrading verification or losing the normal public trust store.
 **If violated:** A local trust option could admit an impersonated remote, or a
 bad file could silently use another trust configuration.
-**Enforcement:** `mkit-transport-connect::tls::client_config` builds rustls with
+**Enforcement:** `kit-transport-connect::tls::client_config` builds rustls with
 augmented roots and its standard verifier. Real TLS Connect/streaming tests
 cover trusted CA, hostname mismatch and default refusal; subprocess tests cover
 selection and CLI config layering. Browser clients keep browser-managed trust.
@@ -2767,8 +2767,8 @@ an operator precondition, not activation of this storage API.
 flag changes atomically bump the registry version, while identical installs do not.
 **Spec:** [SPEC-SERVER §11](specs/SPEC-SERVER.md#11-quarantine-and-inspection) and the
 [§18 integration boundary](specs/SPEC-SERVER.md#18-conformance-scope).
-**Enforced by:** [inspection mode tests](../rust/crates/mkit-server/src/store/tests/inspection_mode.rs)
-and [flag tests](../rust/crates/mkit-server/src/store/inspection_flags_tests.rs).
+**Enforced by:** [inspection mode tests](../rust/crates/kit-server/src/store/tests/inspection_mode.rs)
+and [flag tests](../rust/crates/kit-server/src/store/inspection_flags_tests.rs).
 
 ## Repository-wide inspection holds
 
@@ -2779,7 +2779,7 @@ or continuations; timer kind 14 remains reserved, with no runtime handler.
 removes only its own rows and fences delayed pages before removing the ref record.
 **Spec:** [SPEC-SERVER §§10–11](specs/SPEC-SERVER.md#10-published-view) and
 [§18](specs/SPEC-SERVER.md#18-conformance-scope).
-**Enforced by:** [hold regressions](../rust/crates/mkit-server/src/store/inspection_holds_tests.rs)
+**Enforced by:** [hold regressions](../rust/crates/kit-server/src/store/inspection_holds_tests.rs)
 (`repository_wide_cross_ref_holds_and_own_release_in_single_and_d34`,
 `release_fences_delayed_pages_and_preserves_fallback_until_cleanup_in_single_and_d34`).
 
@@ -2804,7 +2804,7 @@ unbounded seen state cannot travel in a bounded token.
 **If violated:** pages could repeat or drop commits, drift between
 implementations, or grow a continuation token without bound.
 
-**Enforced by:** `mkit-core::history_order` reference reducer and
+**Enforced by:** `kit-core::history_order` reference reducer and
 [SPEC-HISTORY-ORDER](specs/SPEC-HISTORY-ORDER.md); fixture, page-boundary,
 snapshot round-trip and explicit cap tests, plus proptest
 split-vs-single-run equivalence.
@@ -2872,14 +2872,14 @@ must not inherit a pack-transfer deadline.
 **If violated:** host attempt policy could be silently replaced, unsupported
 responses negotiated, or metadata connections held open for too long.
 
-**Enforced by:** `mkit-sync::NativeHttp::send_typed`, `request_headers`, and the
+**Enforced by:** `kit-sync::NativeHttp::send_typed`, `request_headers`, and the
 `native_http` header-preservation, negotiation-refusal and timeout tests.
 
 ## Local build output stays isolated and opt-in
 
 **Always:** local cache recipes give each workspace its own Cargo build directory
-under `~/.cache/mkit/build/{workspace-path-hash}` (overridable by
-`MKIT_BUILD_ROOT`). Never share `CARGO_TARGET_DIR` across worktrees. Tracked
+under `~/.cache/kit/build/{workspace-path-hash}` (overridable by
+`KIT_BUILD_ROOT`). Never share `CARGO_TARGET_DIR` across worktrees. Tracked
 TOML, Docker, and CI inputs never set `build-dir`; CI retains its own caches.
 GC defaults to dry run and runs only `cargo clean` for clean, merged/gone linked
 worktrees. It keeps main/current, detached, locked, and dirty checkouts and
@@ -2901,7 +2901,7 @@ Git status is rechecked but editors do not participate in a shared lock.
 
 ## Complete ref listings retain bounded, strictly ordered state
 
-**Always:** all three listing drivers use `mkit_core::ref_listing::RefListing`.
+**Always:** all three listing drivers use `kit_core::ref_listing::RefListing`.
 Names increase strictly within and across pages, including empty intervening
 pages. Each nonempty cursor is at most 4 KiB and appears once. Cursor history
 retains only BLAKE3 digests. A listing accepts at most 100,000 pages and charges
@@ -2933,7 +2933,7 @@ an unpublished or differently addressed checkpoint cannot establish local safety
 **If violated:** fetch could skip new content, fail to restore missing objects,
 or publish an unverified branch after a crash or concurrent operation.
 
-**Enforced by:** `mkit-sync::fetch`, checksummed `checkpoint` records, bounded
+**Enforced by:** `kit-sync::fetch`, checksummed `checkpoint` records, bounded
 `walk_pack_chain_until`, counting-source regressions on both backends, and crash,
 concurrent-pull, identity-change, and signature-failure regressions.
 
@@ -2952,7 +2952,7 @@ channel refusals must not become retryable connection failures.
 **If violated:** hosts lose recovery evidence or retry terminal refusals, and
 configured clients cannot be used through the sync adapter.
 
-**Enforced by:** `mkit-sync` source adapter tests for both backends, remote
+**Enforced by:** `kit-sync` source adapter tests for both backends, remote
 metadata/overload tests, and `observed_signed_client_composes_as_source`.
 CLI transport display parity and the existing CLI golden suites retain output
 and exit-code behavior. No authorization, wire, or stored-format boundary moves.
@@ -2977,7 +2977,7 @@ expiry, elapsed budget, completion, cancellation, replay, and concurrent CAS.
 
 ## Client source writes keep policy and receipt durability in the host
 
-**Always:** signed source writes use `mkit-client` per-RPC calls. The host
+**Always:** signed source writes use `kit-client` per-RPC calls. The host
 selects grants on each signed envelope and schedules typed failures through
 `WriteRecovery`. Ticket-consuming writes never run admission recovery. Each
 part receipt finishes caller-owned durable `put` before progress or the next
@@ -3111,7 +3111,7 @@ settlement would charge or consume the accepted operation twice.
 base could be treated as published because this advance added it, or recovery
 could create a second outcome.
 
-**Enforced by:** `mkit-primitives` clearance tests and the reference publication
+**Enforced by:** `kit-primitives` clearance tests and the reference publication
 prefix and deletion tests.
 
 ## Fork publication absorbs only exact witness replays
@@ -3157,7 +3157,7 @@ and denial-gate tests. See [bounds and latency model](operations/fork-waves.md).
 
 ## Primitive fork acceptance separates terminal settlement from visibility
 
-**Always:** `mkit-primitives::fork::decide_fork_acceptance` emits acceptance only
+**Always:** `kit-primitives::fork::decide_fork_acceptance` emits acceptance only
 for a complete bounded full-inventory plan, an exactly bound protected
 reservation and admission debit when granted/applicable, authoritative absence
 otherwise, phantom-safe destination emptiness, and a final
@@ -3342,8 +3342,8 @@ also straddle a reset back to the same content-addressed packmap value.
 advertised chain cannot reconstruct. Retry exhaustion must leave the competing
 writer's valid pair intact and return `PushError::PackmapContended`.
 
-**Enforced by:** `mkit-sync::push::force`, both Connect backend race and retry
-regressions in `mkit-sync/tests/push.rs`, HTTP atomic guard encoding tests, and
+**Enforced by:** `kit-sync::push::force`, both Connect backend race and retry
+regressions in `kit-sync/tests/push.rs`, HTTP atomic guard encoding tests, and
 `formal/quint/advance`. Non-atomic transports retain their existing behavior;
 the atomic-capable source must never lower these writes to an ordered fallback.
 

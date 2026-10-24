@@ -1,0 +1,68 @@
+[package]
+name = "kit-transport-s3"
+description = "S3-compatible transport for kit, with SigV4 signing over rustls, tuned for Cloudflare R2"
+keywords = ["kit", "transport", "s3", "r2", "sigv4"]
+categories = ["network-programming"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Publishable to crates.io. `publish` left unset (cargo default = true).
+
+[lints]
+workspace = true
+
+[dependencies]
+# Inter-workspace dep needs an explicit `version = ...` alongside the
+# path so `cargo publish` accepts it.
+kit-core = { version = "0.5", path = "../kit-core" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "blocking"] }
+sha2 = "0.11"
+hmac = "0.13"
+md-5 = "0.11"
+hex = "0.4"
+
+[features]
+default = []
+# Wire-level sparse-checkout fetch. Mirrors the
+# kit-core feature; both must be enabled together. Off by default.
+sparse-checkout = ["kit-core/sparse-checkout"]
+# Pack-Shards mirror on the S3 keyspace. Pulls
+# the same feature in kit-core (which in turn pulls the commonware
+# dep stack).
+pack-shards = ["kit-core/pack-shards"]
+# Test-only: shrinks `S3_SINGLE_PUT_MAX` and the internal
+# multipart part size to small values (single-digit MiB) so the
+# multipart-upload integration test can drive the real
+# CreateMultipartUpload -> UploadPart -> CompleteMultipartUpload flow
+# against a mockito server without allocating or transferring
+# multi-GiB buffers. MUST NOT be enabled in a production build — the
+# shrunk `S3_SINGLE_PUT_MAX` is not a valid S3/R2 API limit. Excluded
+# from the docs.rs feature set below for that reason.
+test-small-multipart-caps = []
+
+[dev-dependencies]
+mockito = "1"
+serde_json = "1"
+# tests/transport_minio.rs: a real MinIO container, proving this crate's
+# SigV4 signing is accepted by a genuine independent S3-API
+# implementation rather than only the in-process mockito stub
+# transport_mockito.rs uses. `blocking` on both: this crate's tests are
+# plain `#[test]`, not async.
+testcontainers = { version = "0.27", features = ["blocking"] }
+testcontainers-modules = { version = "0.15", features = ["minio", "blocking"] }
+
+# Multipart-upload round-trip test, gated behind `test-small-multipart-caps`
+# (see that feature's doc comment above) so a plain `cargo test` doesn't
+# need to move real multi-GiB buffers to exercise the multipart path.
+[[test]]
+name = "transport_multipart"
+required-features = ["test-small-multipart-caps"]
+
+[package.metadata.docs.rs]
+# Build docs with the real (non-test) feature set so docs.rs renders the
+# feature-gated API without advertising the test-only shrunk caps.
+features = ["sparse-checkout", "pack-shards"]

@@ -6,12 +6,12 @@
 # Pins: quint 0.32.0, Java 21, Apalache 0.62.2 (run directly on the TLA+ that
 # `quint compile` emits, never through `quint verify`), and TLC from the
 # tlc2.TLC class inside that Apalache jar. Tool locations default to
-# ${FV_HOME:-$HOME/.local/share/mkit-fv}/apalache-0.62.2 and can be overridden
+# ${FV_HOME:-$HOME/.local/share/kit-fv}/apalache-0.62.2 and can be overridden
 # with APALACHE_MC and TLA2TOOLS. Heaps: TLC ${TLC_HEAP:-4g} with
 # ${TLC_WORKERS:-4} workers, Apalache JVM_ARGS (default -Xmx4g).
 set -euo pipefail
 cd "$(dirname "$0")"
-FV_HOME=${FV_HOME:-$HOME/.local/share/mkit-fv}
+FV_HOME=${FV_HOME:-$HOME/.local/share/kit-fv}
 APALACHE_MC=${APALACHE_MC:-$FV_HOME/apalache-0.62.2/bin/apalache-mc}
 APA_JAR=$(dirname "$APALACHE_MC")/../lib/apalache.jar
 TLA2TOOLS=${TLA2TOOLS:-$APA_JAR}

@@ -18,8 +18,8 @@ kv=$(cargo kani --version 2>/dev/null) ||
 kv=${kv%%$'\n'*}
 [[ $kv == *" 0.68.0 "* ]] || { echo "error: $kv, the pin is Kani 0.68.0" >&2; exit 2; }
 
-files="crates/mkit-core/src/delta.rs crates/mkit-core/src/merkle.rs crates/mkit-core/src/pack.rs
-  crates/mkit-core/src/serialize.rs crates/mkit-keystore/src/encrypted_record.rs crates/mkit-rpc/src/framing.rs"
+files="crates/kit-core/src/delta.rs crates/kit-core/src/merkle.rs crates/kit-core/src/pack.rs
+  crates/kit-core/src/serialize.rs crates/kit-keystore/src/encrypted_record.rs crates/kit-rpc/src/framing.rs"
 
 harnesses() {
   awk '/#\[kani::proof\]/{p=1} p && /fn [a-z0-9_]+/{match($0,/fn [a-z0-9_]+/); print substr($0,RSTART+3,RLENGTH-3); p=0}' "$1"
@@ -47,12 +47,12 @@ for f in $files; do
   for h in $(harnesses "$f"); do
     [[ -n ${KANI_FILTER:-} && ! $h =~ $KANI_FILTER ]] && continue
     case $crate:$h in
-      mkit-core:merkle_verify_* | mkit-core:merkle_roundtrip_* | mkit-core:merkle_canary_* | mkit-core:pack_*)
+      kit-core:merkle_verify_* | kit-core:merkle_roundtrip_* | kit-core:merkle_canary_* | kit-core:pack_*)
         run "$crate::$h" -p "$crate" --no-default-features -Z stubbing --harness "$h" \
           -Z unstable-options --cbmc-args --unwindset memcmp.0:33 ;;
-      mkit-core:*)
+      kit-core:*)
         run "$crate::$h" -p "$crate" --no-default-features -Z stubbing --harness "$h" ;;
-      mkit-keystore:*)
+      kit-keystore:*)
         run "$crate::$h" -p "$crate" -Z stubbing --harness "$h" ;;
       *)
         run "$crate::$h" -p "$crate" --harness "$h" ;;

@@ -14,7 +14,7 @@ Scope: the common-dir / per-worktree state split, the linked-tree
 pointer-file format, the `worktrees/` registry, repository discovery,
 cross-worktree locking, and gc root-collection semantics.
 
-Reference implementation: `mkit-core/src/layout.rs` (the
+Reference implementation: `kit-core/src/layout.rs` (the
 `RepoLayout` type is the single path-resolution authority; every
 repo-state API takes it).
 
@@ -28,7 +28,7 @@ of two classes:
 | Class | Contents |
 |---|---|
 | **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `history-v1/`, `recovery-log`, `attestations/`, `applied-packs/`, `upload-parts/`, `git/`, `sparse/`, `pack-shards/`, `worktrees/`, `refs-history-<branch>.lock`, `refs-<ref>.lock`, `worktrees.lock`, `serve.lock` (SPEC-CONCURRENCY §2) |
-| **worktree state dir** (private to one tree) | `HEAD`, `index`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `MKIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock` |
+| **worktree state dir** (private to one tree) | `HEAD`, `index`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock` |
 
 In the classic single-worktree layout both directories are the same
 `<root>/.kit/`; the two-directory model is byte-identical there.
@@ -39,7 +39,7 @@ Divergences from git, both deliberate:
   per-worktree-adjacent in some git docs): it constrains the one object
   graph every tree reads.
 - **The stash is per-worktree.** git's stash is a shared ref
-  (`refs/stash`); mkit's is a worktree-state manifest, and
+  (`refs/stash`); kit's is a worktree-state manifest, and
   specifies tree-local stash semantics (`stash` in a linked tree never
   touches a sibling's entries).
 
@@ -52,7 +52,7 @@ checkpoints shared with the object store and remote-tracking refs. Each cache
 key binds the remote, branch, repository identity, and origin. A checkpoint
 follows verified object application and durable tracking publication under the
 existing worktree lock. It is never a GC root. Its advisory format and recovery
-rules are documented in the [sync README](../../rust/crates/mkit-sync/README.md#incremental-fetch-checkpoints).
+rules are documented in the [sync README](../../rust/crates/kit-sync/README.md#incremental-fetch-checkpoints).
 No wire, ref, or authoritative repository format changes.
 
 ## 2. On-disk model
@@ -107,7 +107,7 @@ sanitized (invalid bytes → `-`) and uniquified git-style
 
 ## 3. Discovery
 
-Given a working directory `W` (mkit treats the invocation directory as
+Given a working directory `W` (kit treats the invocation directory as
 the worktree root; there is no upward search):
 
 1. If `W/.kit` is a **directory** or **absent** → the single-worktree
@@ -155,7 +155,7 @@ the registry cannot be enumerated.
 
 This document originates the `worktree.lock`/`worktrees.lock` primitives
 and their per-command holder details below; the total lock order across
-*all* mkit locks (including `refs-history-<branch>.lock` and the
+*all* kit locks (including `refs-history-<branch>.lock` and the
 file-transport's `refs/.lock`), and the enumeration of every writer, is
 owned by SPEC-CONCURRENCY &mdash; see that document for the authoritative
 order. This section states only the two locks this document defines and how the
@@ -224,17 +224,17 @@ tree before the state dir for the same reason.
 ## 5. Out of scope (v1)
 
 `worktree move`/`lock`/`repair` (follow-ups), submodule interplay
-(submodules are a non-goal), and sharing a repository between mkit
+(submodules are a non-goal), and sharing a repository between kit
 versions with and without worktree support while linked trees exist.
 
 ## 6. Test anchors
 
-- `mkit-core/src/layout.rs` unit tests: accessor/classification
+- `kit-core/src/layout.rs` unit tests: accessor/classification
   goldens, discovery fail-closed matrix, pointer-file golden bytes,
   id grammar.
-- `mkit-cli/tests/layout_baseline_pin.rs`: the single-worktree `.kit`
+- `kit-storage/tests/layout_baseline_pin.rs`: the single-worktree `.kit`
   shape is a compatibility surface; it must never drift.
-- `mkit-cli/tests/linked_worktree_discovery.rs`,
+- `kit-storage/tests/linked_worktree_discovery.rs`,
   `worktree_command.rs`, `worktree_gc_cross_tree.rs`: shared-store,
   tree-locality, guard, gc-survival, and lock-contention behavior
   through the real binary.

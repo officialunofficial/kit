@@ -2,12 +2,12 @@
 spec: SPEC-OBJECTS
 version: 1
 status: stable
-audience: implementers of compatible tools producing or consuming mkit on-disk objects
+audience: implementers of compatible tools producing or consuming kit on-disk objects
 ---
 
-# SPEC-OBJECTS &mdash; mkit v1 on-disk object format
+# SPEC-OBJECTS &mdash; kit v1 on-disk object format
 
-Status: **Normative** for mkit v1.
+Status: **Normative** for kit v1.
 Scope: `.kit/objects/` content and the byte layout of every object type.
 Endianness: **little-endian** throughout. All hashes are 32-byte BLAKE3.
 
@@ -70,7 +70,7 @@ Readers MUST reject any of:
 - `magic` != `"MKT1"` → `InvalidMagic`
 - `schema_version` != `0x01` → `UnsupportedObjectVersion`
 
-There is no v0. mkit does not read mkit-era bytes.
+There is no v0. kit does not read kit-era bytes.
 
 ---
 
@@ -157,7 +157,7 @@ Any other mode byte → `InvalidEntryMode`.
 
 ### 4.3 Rename detection
 
-mkit detects **exact** renames: because every blob is named by its BLAKE3
+kit detects **exact** renames: because every blob is named by its BLAKE3
 content id, a deletion and an addition that share an object id are the same
 bytes at two paths &mdash; an exact move (git's `similarity index 100%`), found
 by an O(n) hash match with no heuristic and no false positives. `status`
@@ -165,7 +165,7 @@ and `diff` render these as `R` by default (`--no-renames` opts out),
 scoped per diff as git does.
 
 **Not yet detected:** rename-with-edits (similarity < 100%) and copy
-detection (`-C`). Those require git's content-similarity scoring; mkit's
+detection (`-C`). Those require git's content-similarity scoring; kit's
 chunked/merkle blobs give a natural shared-chunk similarity signal, so they
 are a tractable follow-up rather than a structural gap. `merge` still
 treats all moves as (delete, add) pairs. This differs from git.
@@ -190,7 +190,7 @@ repeat parent_count:
 [64 bytes signature]                      Ed25519, see SPEC-SIGNING
 ```
 
-Differences from mkit's legacy (pre-v1) commit encoding:
+Differences from kit's legacy (pre-v1) commit encoding:
 - `author_mid: u64` → `Identity` tagged union (§9).
 - `timestamp: u32` → `u64`. Avoids 2106 overflow.
 - Relative field order of `signer` and `message` is preserved.
@@ -231,7 +231,7 @@ repeat parent_count:
     [32 bytes parent_hash]
 [u32 LE source_count]                     0..=10_000
 repeat source_count:
-    [32 bytes upstream_id]                was project_id in mkit
+    [32 bytes upstream_id]                was project_id in kit
     [32 bytes commit_hash]
 [Identity author]                         see §9
 [u32 LE message_len]
@@ -262,7 +262,7 @@ interprets it.
 An **annotated / signed tag** object. Lightweight tags are
 *not* objects &mdash; they are a bare `refs/tags/<name>` ref pointing straight
 at a commit (see SPEC-REFS). A tag object is created only by
-`mkit tag -a` (annotated) or `mkit tag -s` (signed); in both cases the
+`kit tag -a` (annotated) or `kit tag -s` (signed); in both cases the
 `refs/tags/<name>` ref points at the **tag object hash**, and the tag
 object's `target` field points at the tagged object.
 
@@ -294,7 +294,7 @@ Rules:
 - An **annotated, unsigned** tag carries an all-zero `signature`
   (`0x00`×64). A verifier MUST treat an all-zero signature as
   "unsigned" &mdash; it does not verify as a valid Ed25519 signature, so
-  `mkit verify` on an unsigned annotated tag fails the signature check.
+  `kit verify` on an unsigned annotated tag fails the signature check.
 - A **signed** tag's `signature` is `Ed25519.sign(signer_seed,
   tag_signing_hash)` (SPEC-SIGNING §4a). `signer` is the verification
   key; `tagger` is an independent attribution claim (same separation as
@@ -458,7 +458,7 @@ This prevents trivial amplification and prologue-replay attacks.
 
 | Version | Released | Changes                                                          |
 |---------|----------|------------------------------------------------------------------|
-| `0x01`  | v1.0     | First mkit format. See §2 for prologue. No v0 compatibility.     |
+| `0x01`  | v1.0     | First kit format. See §2 for prologue. No v0 compatibility.     |
 
 `schema_version` stays at `0x01`. Adding the `tag` object type (`0x07`)
 is an **additive object-type allocation within v1**: it introduces
@@ -497,7 +497,7 @@ multi-version readers.
    b29117ce9b3d66ba98cd0a57145400f0bf6fff8b5c27c4552d80a38446f27ef7
    ```
 
-   (`mkit-core::merkle::TREE_EMPTY_ID`; the empty BMT root is
+   (`kit-core::merkle::TREE_EMPTY_ID`; the empty BMT root is
    `H(leaf_count ‖ H(""))`, not `H(0 ‖ 0)` &mdash; see SPEC-MERKLE-OBJECTS §4.)
 3. **Canonical single-file tree**: one entry `{name="README.md",
    mode=0x01, object_hash=<id of §13.1>}`. Record the serialized bytes,

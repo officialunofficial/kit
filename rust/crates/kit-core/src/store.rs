@@ -1,0 +1,1578 @@
+//! Local content-addressed object store.
+//!
+//! Layout (under the [`crate::layout::RepoLayout`] common dir passed to
+//! [`ObjectStore::open`] / [`ObjectStore::init`]):
+//!
+//! ```text
+//! .kit/
+//!   objects/
+//!     <2-hex>/<62-hex>   # raw canonical object bytes, BLAKE3-named
+//! ```
+//!
+//! Writes are atomic: bytes are first written to a sibling temp file
+//! (`<name>.tmp.<pid>.<rand>`), made durable, then renamed into place.
+//! A crash mid-write leaves only the temp file behind and never
+//! produces a visible object that fails the read-time hash check.
+//!
+//! Durability comes in three shapes (see [`crate::batch`] for the full
+//! contract): [`ObjectStore::write`] flushes per object
+//! ([`SyncPolicy::PerObject`]); [`ObjectStore::batch`] defers visibility
+//! and amortises durability to **one** full flush per batch — the write
+//! path used by every multi-object command (add, commit, pack unpack);
+//! and [`ObjectStore::bulk_writer`] fsyncs each object's contents before
+//! the rename and batches the dir fsyncs at commit (git import). In all
+//! three an object is never visible before its bytes are durable, so a
+//! ref or index written after the write/commit returns can never
+//! reference a non-durable object.
+//!
+//! Reads always verify integrity by recomputing BLAKE3 over the bytes
+//! and comparing against the requested hash; mismatch returns
+//! [`StoreError::HashMismatch`]. The one opt-in exception is
+//! [`ObjectStore::read_unverified`] (and the [`DisplaySource`] adapter
+//! built on it), reserved for display-only rendering where a corrupt
+//! object should surface as a bad render, never as durable state — see
+//! its doc for the full policy.
+//!
+//! See `docs/specs/SPEC-OBJECTS.md` §10 for the path-layout rule.
+
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use tempfile::NamedTempFile;
+
+use crate::batch::{RealSyncer, Syncer};
+pub use crate::batch::{SyncPolicy, WriteBatch};
+use crate::hash::{self, Hash, object_path, to_hex};
+use crate::layout::RepoLayout;
+use crate::object::{KitError, Object, object_id_from_bytes, verified_id_and_object};
+use crate::serialize;
+
+mod memory;
+mod memory_overlay;
+mod source;
+pub use memory::MemorySource;
+pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
+pub use source::{DisplaySource, EphemeralSink, ObjectSource};
+
+/// Top-level repository directory name.
+pub const KIT_DIR: &str = ".kit";
+/// Subdirectory under `.kit/` that holds raw object files.
+pub const OBJECTS_DIR: &str = "objects";
+/// File under `.kit/` declaring the object-addressing format. Written at
+/// [`ObjectStore::init`] and required (and matched) at [`ObjectStore::open`]
+/// so an older flat-hash-addressed repository is rejected loudly rather
+/// than silently mis-read once merkle addressing is in effect.
+pub const FORMAT_FILE: &str = "format";
+/// The only supported object-addressing format value (see
+/// `docs/specs/SPEC-MERKLE-OBJECTS.md`): Tree/ChunkedBlob keyed by BMT root.
+pub const FORMAT_VALUE: &str = "bmt-v1";
+/// Hard cap on raw object size, enforced on both [`ObjectStore::write`]
+/// and [`ObjectStore::read`].
+pub const MAX_RAW_OBJECT_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
+
+/// Hard cap on tree-walk recursion depth.
+///
+/// Every core tree-walker (`index::from_tree`, `ops::diff`, `ops::merge`,
+/// `ops::restore`) recurses one native stack frame per directory level.
+/// Content-addressing prevents true cycles (a child's hash can never equal
+/// its parent's), but a crafted untrusted repo can still nest a few thousand
+/// single-entry trees in a tiny pack and overflow the stack — a denial of
+/// service reachable from `clone`/`checkout`/`merge`/`diff`. Walkers thread a
+/// depth counter and abort with a typed `TreeTooDeep` error once
+/// `depth > MAX_TREE_DEPTH`.
+///
+/// 128 is far beyond any legitimately-deep source tree (Git's own working
+/// trees rarely exceed a couple dozen levels) while remaining comfortably
+/// within a default 8 MiB thread stack. Mirrors the `MAX_REF_DEPTH` cap on
+/// the ref-tree walker in `refs.rs`.
+pub const MAX_TREE_DEPTH: usize = 128;
+
+/// Errors raised by the [`ObjectStore`] surface. Distinct from
+/// [`KitError`] so callers can pattern-match on filesystem failures
+/// without losing the structured-decode-error variants.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error("path is not an kit repository (missing .kit/objects)")]
+    NotAKitRepository,
+    #[error(".kit already exists in this directory")]
+    AlreadyInitialized,
+    #[error(
+        "repository object-addressing format is {found:?}, expected \"{}\" — this repository predates merkle object addressing and is not readable by this kit (pre-1.0: no migration). See docs/specs/SPEC-MERKLE-OBJECTS.md.",
+        FORMAT_VALUE
+    )]
+    IncompatibleRepoFormat { found: Option<String> },
+    #[error("object {0} not found")]
+    ObjectNotFound(String),
+    #[error("object exceeds {} byte cap", MAX_RAW_OBJECT_SIZE)]
+    ObjectTooLarge,
+    #[error("tree nesting exceeds {} levels", MAX_TREE_DEPTH)]
+    TreeTooDeep,
+    /// A caller-selected in-memory operation budget was exhausted.
+    #[error("object operation exceeded {0} limit")]
+    OperationLimitExceeded(&'static str),
+    #[error("on-disk bytes hash to {actual}, expected {expected}")]
+    HashMismatch { expected: String, actual: String },
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Decode(#[from] KitError),
+    /// [`crate::transfer::plan_pack_with`]'s `encode_deltas` callback
+    /// returned a different number of results than the candidate slice it
+    /// was given — a contract violation by the caller (see that
+    /// function's docs), never a normal runtime condition. Reported as a
+    /// typed error rather than a panic: the built-in caller
+    /// (`kit-storage`'s push path) can never trigger this since rayon's
+    /// `IndexedParallelIterator::collect` always preserves length, but a
+    /// future or third-party `encode_deltas` with a bug should fail the
+    /// `push` cleanly rather than crash the process.
+    #[error("encode_deltas callback returned {actual} results for {expected} candidates")]
+    DeltaBatchLengthMismatch { expected: usize, actual: usize },
+}
+
+/// Deferred-fsync writer returned by [`ObjectStore::bulk_writer`].
+/// See that method for the crash-safety contract.
+#[derive(Debug)]
+pub struct BulkWriter<'a> {
+    store: &'a ObjectStore,
+    dirs: std::collections::HashSet<PathBuf>,
+    files: std::collections::HashSet<PathBuf>,
+    refreshed: std::collections::HashSet<Hash>,
+}
+
+impl BulkWriter<'_> {
+    /// Write one object durable-before-visible: contents are fsynced
+    /// before the rename publishes the object, and only the shard-dir
+    /// fsync (rename durability) is deferred to commit. This upholds the
+    /// store's global invariant (an object is never visible before its
+    /// bytes are durable), so another process's `contains()` dedup can
+    /// never reference a half-written object. An existing path is
+    /// byte-verified: matched objects are left in place with a refreshed
+    /// `mtime` (SPEC-GC "Concurrent writers and the grace window"; still fsynced at commit, see below), torn ones
+    /// are rewritten.
+    ///
+    /// # Panics
+    /// Never in practice: object paths always have a 2-hex shard
+    /// parent by construction.
+    pub fn write(&mut self, bytes: &[u8]) -> StoreResult<Hash> {
+        if bytes.len() > MAX_RAW_OBJECT_SIZE {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        let _guard = self.store.lock_writer()?;
+        let h = object_id_from_bytes(bytes);
+        let final_path = self.store.path_for(&h);
+        // VERIFY-skip an existing object: content addressing makes
+        // byte-equality the exact durability test — a good file (from
+        // a previously committed session, possibly referenced by
+        // native history) must NOT be replaced with an unsynced inode
+        // a power loss could tear, while a torn file from a crashed
+        // session fails the comparison and is healed by the rewrite.
+        let shard_dir = final_path
+            .parent()
+            .expect("object path always has a 2-hex parent");
+        // A match whose mtime cannot be refreshed (SPEC-GC "Concurrent writers and the grace window", see
+        // `refresh_mtime`) is rewritten like a torn file.
+        if let Ok(existing) = fs::read(&final_path)
+            && existing == bytes
+            && (self.refreshed.contains(&h) || refresh_mtime(&final_path).is_ok())
+        {
+            // The bytes may have matched out of the PAGE CACHE of a
+            // crashed session's unsynced write — byte equality is not a
+            // durability test, so this pre-existing file still needs a
+            // content fsync at commit.
+            self.dirs.insert(shard_dir.to_path_buf());
+            self.files.insert(final_path);
+            self.refreshed.insert(h);
+            return Ok(h);
+        }
+        // `self.dirs` already records every shard this session has
+        // touched — a shard present there was `create_dir_all`'d (or
+        // observed via the byte-match branch above, which also implies
+        // it exists) by an earlier `write` call in this same session,
+        // so a repeat `create_dir_all` here is a guaranteed-redundant
+        // mkdir + is_dir stat (std's fallback path on `AlreadyExists`).
+        // At most 256 shards exist, so memoizing saves ~2 syscalls per
+        // object on large bulk ingests (git-import) — the same
+        // `created_shards` memoization `WriteBatch::write_prehashed`
+        // already applies to the batched-add path.
+        if !self.dirs.contains(shard_dir) {
+            fs::create_dir_all(shard_dir)?;
+        }
+        // Content fsync happens BEFORE the rename, so the object is
+        // durable the instant it becomes visible. Only the rename's
+        // durability (the shard dir fsync) is deferred to commit.
+        crate::atomic::write_content_synced(&final_path, bytes)?;
+        self.dirs.insert(shard_dir.to_path_buf());
+        self.refreshed.insert(h);
+        Ok(h)
+    }
+
+    /// Refresh a cached object's grace window and return its immediate history
+    /// references without re-hashing it. The import map already identifies the
+    /// object; this is retention bookkeeping, not an integrity check.
+    /// Missing objects or malformed reference metadata refuse reuse. Visit the
+    /// returned references too, including chunks absent from the git map.
+    ///
+    /// # Panics
+    /// Object paths always have a shard parent; panics if that internal
+    /// path-layout invariant is violated.
+    pub fn reuse_object(&mut self, h: &Hash) -> StoreResult<Vec<Hash>> {
+        let _guard = self.store.lock_writer()?;
+        let children = self.store.cached_children(h)?;
+        let path = self.store.path_for(h);
+        if !self.refreshed.contains(h) {
+            refresh_mtime(&path)?;
+            self.refreshed.insert(*h);
+        }
+        self.dirs
+            .insert(path.parent().expect("object path has parent").to_path_buf());
+        self.files.insert(path);
+        Ok(children)
+    }
+
+    /// Make the session durable: fsync the CONTENTS of any pre-existing
+    /// objects this batch re-used (newly written objects were already
+    /// content-fsynced before their rename in [`write`](Self::write)),
+    /// then every touched shard directory (renames become durable).
+    pub fn commit(self) -> StoreResult<()> {
+        for file in &self.files {
+            sync_reused_file(file)?;
+        }
+        for dir in &self.dirs {
+            crate::atomic::sync_dir(dir)?;
+        }
+        Ok(())
+    }
+}
+
+/// Result alias used throughout this module.
+pub type StoreResult<T> = Result<T, StoreError>;
+
+// Tiny per-process counter for unique temp-file names. We use this
+// instead of pulling in `rand` because the temp name only needs to be
+// unique within the process; the atomic `rename` enforces global
+// correctness even if two processes collide on a name.
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Local content-addressed object store backed by the filesystem.
+#[derive(Debug, Clone)]
+pub struct ObjectStore {
+    /// Absolute path to `<root>/.kit/objects`.
+    objects_root: PathBuf,
+    /// Flush/rename primitive seam. Production code always uses
+    /// [`RealSyncer`]; unit tests inject a recording double to assert
+    /// flush ordering and counts (the O(1)-flushes-per-batch contract).
+    syncer: Arc<dyn Syncer>,
+    /// Policy handed out by [`Self::batch`]. Defaults to
+    /// [`SyncPolicy::Batch`]; the CLI maps the repo config key
+    /// `durability.objects = per-object` onto it for deployments that
+    /// want the strict historical schedule.
+    default_policy: SyncPolicy,
+    /// Test-only counter of physical reads (`read_raw` calls) this store
+    /// has performed. There is no read-side equivalent of `syncer` to
+    /// inject a recording double against, so this is a plain counter
+    /// instead — used to prove callers (e.g. the pack reader's delta-base
+    /// resolution) hit the store at most once per distinct
+    /// object rather than once per reference to it.
+    #[cfg(test)]
+    read_calls: Arc<AtomicU64>,
+}
+
+impl ObjectStore {
+    /// Open the existing repository described by `layout`. Returns
+    /// [`StoreError::NotAKitRepository`] if the layout's `objects/`
+    /// directory does not exist. The object store is common-dir
+    /// (shared) state — see [`crate::layout`].
+    pub fn open(layout: &RepoLayout) -> StoreResult<Self> {
+        let objects_root = layout.objects_dir();
+        if !objects_root.is_dir() {
+            return Err(StoreError::NotAKitRepository);
+        }
+        // Reject a repository that does not declare merkle object
+        // addressing — a pre-merkle repo would mis-read every Tree /
+        // ChunkedBlob (and thus every Commit) under the new id scheme.
+        let read_format = || -> io::Result<String> {
+            let mut file = File::open(layout.format_file())?;
+            file.lock_shared()?;
+            let mut value = String::new();
+            file.read_to_string(&mut value)?;
+            Ok(value)
+        };
+        match read_format() {
+            Ok(s) if s.trim() == FORMAT_VALUE => {}
+            Ok(s) => {
+                return Err(StoreError::IncompatibleRepoFormat {
+                    found: Some(s.trim().to_owned()),
+                });
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(StoreError::IncompatibleRepoFormat { found: None });
+            }
+            Err(e) => return Err(StoreError::Io(e)),
+        }
+        Ok(Self {
+            objects_root,
+            syncer: Arc::new(RealSyncer),
+            default_policy: SyncPolicy::Batch,
+            #[cfg(test)]
+            read_calls: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// Initialise a fresh common dir for the repository described by
+    /// `layout`. Returns [`StoreError::AlreadyInitialized`] if the
+    /// common dir already exists.
+    pub fn init(layout: &RepoLayout) -> StoreResult<Self> {
+        if layout.common_dir().exists() {
+            return Err(StoreError::AlreadyInitialized);
+        }
+        let objects_root = layout.objects_dir();
+        fs::create_dir_all(&objects_root)?;
+        // Declare the object-addressing format so a future open by an
+        // incompatible (older) kit fails loudly (SPEC-MERKLE-OBJECTS §7).
+        fs::write(layout.format_file(), format!("{FORMAT_VALUE}\n").as_bytes())?;
+        Ok(Self {
+            objects_root,
+            syncer: Arc::new(RealSyncer),
+            default_policy: SyncPolicy::Batch,
+            #[cfg(test)]
+            read_calls: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// Select the [`SyncPolicy`] that [`Self::batch`] hands out. The
+    /// CLI wires the repo config key `durability.objects` here so
+    /// deployments on filesystems where they prefer the strict
+    /// per-object schedule can opt into it (SPEC-OBJECTS §10.1).
+    pub fn set_sync_policy(&mut self, policy: SyncPolicy) {
+        self.default_policy = policy;
+    }
+
+    /// Replace the flush/rename primitives. Test-only seam — see the
+    /// `syncer` field. Not exposed publicly so the production sync
+    /// strategy cannot be silently weakened by downstream code.
+    #[cfg(test)]
+    pub(crate) fn set_syncer(&mut self, syncer: Arc<dyn Syncer>) {
+        self.syncer = syncer;
+    }
+
+    /// The active flush/rename primitives, shared with [`WriteBatch`].
+    pub(crate) fn syncer(&self) -> &Arc<dyn Syncer> {
+        &self.syncer
+    }
+
+    /// Test-only: number of physical filesystem reads this store has
+    /// performed (via [`Self::read`] or [`Self::read_unverified`]) since
+    /// creation. See the `read_calls` field doc for why this is a plain
+    /// counter rather than an injectable double like [`Self::set_syncer`].
+    #[cfg(test)]
+    pub(crate) fn read_call_count(&self) -> u64 {
+        self.read_calls.load(Ordering::Relaxed)
+    }
+
+    /// Start a batched write with the store's configured policy
+    /// (default [`SyncPolicy::Batch`]): objects staged by the batch
+    /// become durable and visible together at [`WriteBatch::commit`],
+    /// with O(1) full flushes per batch instead of per object.
+    #[must_use]
+    pub fn batch(&self) -> WriteBatch<'_> {
+        self.batch_with_policy(self.default_policy)
+    }
+
+    /// Start a batched write with an explicit [`SyncPolicy`].
+    #[must_use]
+    pub fn batch_with_policy(&self, policy: SyncPolicy) -> WriteBatch<'_> {
+        WriteBatch::new(self, policy)
+    }
+
+    /// Returns `true` when `root` contains a `.kit/objects` directory.
+    #[must_use]
+    pub fn is_repo_root(root: &Path) -> bool {
+        root.join(KIT_DIR).join(OBJECTS_DIR).is_dir()
+    }
+
+    /// Absolute path to the `objects/` directory.
+    #[must_use]
+    pub fn objects_root(&self) -> &Path {
+        &self.objects_root
+    }
+
+    /// Compute the on-disk path for `hash`, joined under `objects/`.
+    /// `pub(crate)` so [`WriteBatch`] shares the single layout rule.
+    pub(crate) fn path_for(&self, h: &Hash) -> PathBuf {
+        let p = object_path(h);
+        // Both halves are ASCII hex by construction in `object_path`.
+        let dir = std::str::from_utf8(&p.dir).expect("ascii hex");
+        let file = std::str::from_utf8(&p.file).expect("ascii hex");
+        self.objects_root.join(dir).join(file)
+    }
+
+    /// Returns `true` when the object `h` is present in the store. Does
+    /// **not** verify integrity — use [`Self::read`] for that.
+    #[must_use]
+    pub fn contains(&self, h: &Hash) -> bool {
+        self.path_for(h).is_file()
+    }
+
+    /// Write `bytes` to the store, returning their BLAKE3 hash. Atomic:
+    /// writes to a sibling temp file, `fsync`s, then renames into place.
+    /// Idempotent — re-writing the same bytes is a no-op (the temp file
+    /// is unlinked on the early-return path).
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal hash-to-path mapping produces a path
+    /// without a parent directory, which is impossible by construction.
+    pub fn write(&self, bytes: &[u8]) -> StoreResult<Hash> {
+        if bytes.len() > MAX_RAW_OBJECT_SIZE {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        let h = object_id_from_bytes(bytes);
+        let final_path = self.path_for(&h);
+        if final_path.exists() {
+            // Dedup hit: the object is visible, but if another process
+            // renamed it and has not yet flushed the dirent, it may not
+            // be durable — and our caller is about to reference it.
+            // The `mtime` is left alone: callers hold locks gc also
+            // takes, so gc's grace window does not apply to them (see
+            // `refresh_mtime`).
+            // Flush its shard dir before returning (SPEC-OBJECTS §10.1
+            // dedup rule, mirroring WriteBatch's touched_shards).
+            self.syncer()
+                .dir_sync(final_path.parent().expect("object path has parent"))?;
+            return Ok(h);
+        }
+        let shard_dir = final_path
+            .parent()
+            .expect("object path always has a 2-hex parent");
+        fs::create_dir_all(shard_dir)?;
+        write_atomic(&final_path, bytes, &**self.syncer())?;
+        Ok(h)
+    }
+
+    /// Begin a bulk-write session: each new object is written
+    /// durable-before-visible (contents fsynced, then renamed), and
+    /// [`BulkWriter::commit`] batches the directory fsyncs (rename
+    /// durability) plus a content fsync of any re-used pre-existing
+    /// objects once at the end, instead of fsyncing a dir per write.
+    ///
+    /// Because content is durable before the rename, the session upholds
+    /// the store's global invariant even under concurrent readers: an
+    /// object another process can `contains()`-dedup against is always
+    /// backed by durable bytes.
+    ///
+    /// Crash-safety contract (deliberately weaker than [`Self::write`]
+    /// only for the rename/dirent half, for callers whose whole
+    /// operation is idempotent — e.g. the deterministic git-import,
+    /// which re-runs from a retained source mirror): after a crash
+    /// BEFORE `commit`, a just-renamed object's dirent may be lost (the
+    /// shard dir is not yet fsynced), so objects may be missing — never
+    /// torn, since contents were fsynced first. Existing paths are
+    /// VERIFIED (byte compare)
+    /// rather than blindly rewritten or blindly trusted: a matching
+    /// file is left in place with only its `mtime` refreshed (it may be
+    /// durable and referenced by native history — replacing it with an
+    /// unsynced inode would put it at risk), a torn one is healed by
+    /// rewrite, and reads always
+    /// BLAKE3-verify. Callers MUST gate bulk sessions behind their
+    /// own crash marker and re-run on detection.
+    #[must_use]
+    pub fn bulk_writer(&self) -> BulkWriter<'_> {
+        BulkWriter {
+            store: self,
+            dirs: std::collections::HashSet::new(),
+            files: std::collections::HashSet::new(),
+            refreshed: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Open `h`'s on-disk file, cap its size at [`MAX_RAW_OBJECT_SIZE`],
+    /// and read it fully into a pre-sized buffer — the shared body of
+    /// [`Self::read`] and [`Self::read_unverified`]; neither hashes nor
+    /// verifies, that's each caller's job.
+    fn read_raw(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        #[cfg(test)]
+        self.read_calls.fetch_add(1, Ordering::Relaxed);
+        let path = self.path_for(h);
+        let mut file = File::open(&path).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
+            _ => StoreError::Io(e),
+        })?;
+        let meta = file.metadata()?;
+        let size = meta.len();
+        if u128::from(size) > MAX_RAW_OBJECT_SIZE as u128 {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        // We've already bounded `size` by `MAX_RAW_OBJECT_SIZE` (1 GiB),
+        // which fits in `usize` on every platform we support (32-bit
+        // included). Pre-size the buffer to avoid the doubling
+        // re-allocations of `read_to_end` for large objects.
+        let cap = usize::try_from(size).map_err(|_| StoreError::ObjectTooLarge)?;
+        let mut bytes = Vec::with_capacity(cap);
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Reads raw bytes for a verifier that must classify a hash mismatch
+    /// under the requested id. Unlike [`Self::read`], this deliberately
+    /// leaves identity verification to the caller; it is crate-private so
+    /// only verification code can use the raw bytes as data.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same store errors as [`Self::read_raw`].
+    pub(crate) fn read_raw_for_verification(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.read_raw(h)
+    }
+
+    /// Read raw bytes for `h`. Verifies that BLAKE3 of the on-disk
+    /// bytes equals `h` and returns [`StoreError::HashMismatch`] on
+    /// failure (the bytes are still discarded so callers cannot
+    /// accidentally use corrupt data).
+    pub fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        let bytes = self.read_raw(h)?;
+        check_hash(h, &object_id_from_bytes(&bytes))?;
+        Ok(bytes)
+    }
+
+    /// Read a verified pack base using the caller's budgeted allocator.
+    /// The same open handle supplies the size and bytes; growth is rejected
+    /// rather than letting `read_to_end` allocate outside that budget.
+    pub(crate) fn read_with_allocator<E: From<StoreError>>(
+        &self,
+        h: &Hash,
+        allocate: impl FnOnce(usize) -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<u8>, E> {
+        #[cfg(test)]
+        self.read_calls.fetch_add(1, Ordering::Relaxed);
+        let mut file = File::open(self.path_for(h)).map_err(|e| {
+            E::from(match e.kind() {
+                io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
+                _ => StoreError::Io(e),
+            })
+        })?;
+        let size = file.metadata().map_err(StoreError::Io)?.len();
+        if size > MAX_RAW_OBJECT_SIZE as u64 {
+            return Err(StoreError::ObjectTooLarge.into());
+        }
+        let len = usize::try_from(size).map_err(|_| StoreError::ObjectTooLarge)?;
+        let mut bytes = allocate(len)?;
+        bytes.resize(len, 0);
+        file.read_exact(&mut bytes).map_err(StoreError::Io)?;
+        let mut extra = [0];
+        if file.read(&mut extra).map_err(StoreError::Io)? != 0 {
+            return Err(StoreError::ObjectTooLarge.into());
+        }
+        check_hash(h, &object_id_from_bytes(&bytes))?;
+        Ok(bytes)
+    }
+
+    /// Read raw bytes for `h` WITHOUT the BLAKE3 integrity check that
+    /// [`Self::read`] performs — a [`StoreError::HashMismatch`] can
+    /// therefore never come out of this path.
+    ///
+    /// # Policy — display-only paths ONLY
+    /// This exists for hot read-only rendering (`diff`/`show`/commit
+    /// summaries formatting a diffstat or patch preview). It is the same
+    /// "cheap read" tradeoff [`Self::object_type`] already makes for shape
+    /// checks (see its doc and [`Self::verify_object_type`], which is the
+    /// *verifying* twin used by tree-publication paths) — extended here to
+    /// the full object body.
+    ///
+    /// NEVER use this for publication (commit/merge/rebase tree writes),
+    /// dedup, fetch/apply, or any path whose output is consumed as data
+    /// rather than displayed and discarded. kit never feeds unverified
+    /// bytes into state that kit itself writes, or into output that
+    /// kit's own tooling round-trips (e.g. `format-patch` piped into
+    /// `git am`). On corruption, callers of `read` get a loud, typed error
+    /// before anything downstream can act on bad bytes; callers of
+    /// `read_unverified` get whatever a decoder makes of the corrupt bytes
+    /// — a decode error, or in the worst case garbage in the *rendered
+    /// output* — but never durable state, because display paths write
+    /// nothing back to the store.
+    ///
+    /// Prefer wrapping the source with [`DisplaySource`] at the render
+    /// call site over calling this directly; that keeps the verify/
+    /// no-verify choice at the boundary instead of threading a flag
+    /// through render code.
+    pub fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.read_raw(h)
+    }
+
+    /// The object's type tag, from its 6-byte prologue — without
+    /// reading or hash-verifying the body. Backs cheap shape checks
+    /// (e.g. "is this staged hash blob-like?") that previously paid a
+    /// full read+BLAKE3 of every staged blob per status/commit; the
+    /// real read path still integrity-verifies at use time.
+    ///
+    /// # Errors
+    /// [`StoreError::ObjectNotFound`] if absent; [`StoreError::Decode`]
+    /// for a short file, bad magic/version, or unknown tag.
+    pub fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        let path = self.path_for(h);
+        let mut file = File::open(&path).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
+            _ => StoreError::Io(e),
+        })?;
+        let mut prologue = [0u8; 6];
+        file.read_exact(&mut prologue)
+            .map_err(|_| StoreError::Decode(KitError::EmptyData))?;
+        if prologue[1..5] != crate::object::MAGIC {
+            return Err(StoreError::Decode(KitError::InvalidMagic));
+        }
+        if prologue[5] != crate::object::SCHEMA_VERSION {
+            return Err(StoreError::Decode(KitError::UnsupportedObjectVersion));
+        }
+        crate::object::ObjectType::from_u8(prologue[0]).map_err(StoreError::Decode)
+    }
+
+    /// Convenience: read raw bytes and decode into a typed [`Object`].
+    ///
+    /// A merkelized type ([`Object::Tree`] / [`Object::ChunkedBlob`]) is
+    /// already decoded once by `verified_id_and_object` to compute its
+    /// BMT-root id for the integrity check below — reused directly here
+    /// instead of a second `deserialize` of the same bytes (the two
+    /// decodes this function used to pay for every tree/chunked-blob
+    /// read, once inside [`Self::read`]'s verification and once here).
+    /// Every other type was only ever decoded once (verification there is
+    /// a plain `BLAKE3(bytes)`, no decode), so this path is unchanged for
+    /// them.
+    pub fn read_object(&self, h: &Hash) -> StoreResult<Object> {
+        let bytes = self.read_raw(h)?;
+        let (actual, decoded) = verified_id_and_object(&bytes);
+        check_hash(h, &actual)?;
+        match decoded {
+            Some(obj) => Ok(obj),
+            None => Ok(serialize::deserialize(&bytes)?),
+        }
+    }
+
+    /// Hash-verifying variant of [`object_type`](Self::object_type): reads
+    /// the whole object and confirms its content hashes to `h` before
+    /// returning the declared type. This is the integrity guard for
+    /// tree-publication paths (commit, merge, rebase, …) — `object_type`
+    /// alone reads only the 6-byte prologue, so a staged object corrupted
+    /// after `add` would otherwise be published into a durable tree and
+    /// only fail at later read time. Use `object_type` on hot read-only
+    /// paths (status/diff snapshots) where nothing durable is published.
+    pub fn verify_object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        let bytes = self.read(h)?; // read() re-hashes and rejects on mismatch
+        if bytes.len() < 6 {
+            return Err(StoreError::Decode(KitError::EmptyData));
+        }
+        if bytes[1..5] != crate::object::MAGIC {
+            return Err(StoreError::Decode(KitError::InvalidMagic));
+        }
+        if bytes[5] != crate::object::SCHEMA_VERSION {
+            return Err(StoreError::Decode(KitError::UnsupportedObjectVersion));
+        }
+        crate::object::ObjectType::from_u8(bytes[0]).map_err(StoreError::Decode)
+    }
+
+    /// Enumerate every object hash currently in the store by walking
+    /// `objects/<2-hex>/<62-hex>`. Entries whose names are not the
+    /// expected hex shape (stray files, atomic-write temp files, unknown
+    /// dirs) are skipped — they are not objects. Used by `gc` to find
+    /// prune candidates.
+    ///
+    /// # Errors
+    /// [`StoreError::Io`] if a directory cannot be read (gc must then
+    /// fail closed rather than prune against a partial enumeration).
+    pub fn iter_object_hashes(&self) -> StoreResult<Vec<Hash>> {
+        let mut out = Vec::new();
+        let shards = match fs::read_dir(&self.objects_root) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(StoreError::Io(e)),
+        };
+        for shard in shards {
+            let shard = shard?;
+            if !shard.file_type()?.is_dir() {
+                continue;
+            }
+            let dir_name = shard.file_name();
+            let Some(dir) = dir_name.to_str() else {
+                continue;
+            };
+            if dir.len() != 2 || !dir.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            for entry in fs::read_dir(shard.path())? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let file_name = entry.file_name();
+                let Some(file) = file_name.to_str() else {
+                    continue;
+                };
+                if file.len() != 62 {
+                    continue;
+                }
+                // Reassemble the 64-hex id and parse it; skips non-objects.
+                if let Ok(h) = hash::from_hex(&format!("{dir}{file}")) {
+                    out.push(h);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Filesystem metadata for object `h` (size + mtime), for gc's
+    /// grace-window check.
+    ///
+    /// # Errors
+    /// [`StoreError::ObjectNotFound`] if absent, else [`StoreError::Io`].
+    pub fn object_metadata(&self, h: &Hash) -> StoreResult<fs::Metadata> {
+        fs::metadata(self.path_for(h)).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
+            _ => StoreError::Io(e),
+        })
+    }
+
+    // `format` is immutable after init and never unlinked. Reuse it as a
+    // kernel-lock anchor, so exclusion needs no new on-disk state. Each guard
+    // owns a separately opened handle; dropping it (including process death)
+    // releases the lock. Object bytes never leave their canonical path.
+    fn lock_writer(&self) -> io::Result<File> {
+        let file = File::open(self.objects_root.with_file_name(FORMAT_FILE))?;
+        file.lock_shared()?;
+        Ok(file)
+    }
+
+    fn cached_children(&self, h: &Hash) -> StoreResult<Vec<Hash>> {
+        use crate::object::ObjectType;
+        if matches!(self.object_type(h)?, ObjectType::Blob | ObjectType::Delta) {
+            return Ok(Vec::new());
+        }
+        let object = serialize::deserialize(&self.read_raw(h)?)?;
+        Ok(crate::ops::graph::children(
+            &object,
+            crate::ops::graph::ClosureMode::History,
+        ))
+    }
+
+    /// Final grace-window check and unlink, excluded from concurrent bulk
+    /// refreshes. Contention or uncertain age keeps the object. A crash before
+    /// unlink leaves the canonical file; afterwards only an old orphan is gone.
+    pub(crate) fn prune_if_old(&self, h: &Hash, now: u64, grace: u64) -> StoreResult<Option<u64>> {
+        self.prune_if_old_with_hook(h, now, grace, || {})
+    }
+
+    fn prune_if_old_with_hook(
+        &self,
+        h: &Hash,
+        now: u64,
+        grace: u64,
+        before_unlink: impl FnOnce(),
+    ) -> StoreResult<Option<u64>> {
+        let guard = File::open(self.objects_root.with_file_name(FORMAT_FILE))?;
+        if guard.try_lock().is_err() {
+            return Ok(None);
+        }
+        let Ok(meta) = self.object_metadata(h) else {
+            return Ok(None);
+        };
+        if !old_enough(&meta, now, grace) {
+            return Ok(None);
+        }
+        before_unlink();
+        self.remove_object(h)?;
+        Ok(Some(meta.len()))
+    }
+
+    /// Delete object `h` from the store. Idempotent: a missing object is
+    /// not an error (it may have been pruned already).
+    ///
+    /// # Errors
+    /// [`StoreError::Io`] on a filesystem failure other than not-found.
+    pub fn remove_object(&self, h: &Hash) -> StoreResult<()> {
+        match fs::remove_file(self.path_for(h)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(StoreError::Io(e)),
+        }
+    }
+}
+
+pub(crate) fn old_enough(meta: &fs::Metadata, now: u64, grace: u64) -> bool {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|mtime| now.saturating_sub(mtime.as_secs()) >= grace)
+}
+
+fn sync_reused_file(path: &Path) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    if cfg!(unix) {
+        options.read(true);
+    } else {
+        // Windows FlushFileBuffers requires GENERIC_WRITE. Do not silently
+        // accept a failed content flush or change object permissions.
+        options.write(true);
+    }
+    options.open(path)?.sync_all()
+}
+
+/// Shared by [`ObjectStore::read`] and [`ObjectStore::read_object`]: both
+/// compute an `actual` id from the on-disk bytes their own way (plain
+/// `object_id_from_bytes`, or the decode-reusing [`verified_id_and_object`])
+/// and then need the exact same requested-vs-actual check and
+/// [`StoreError::HashMismatch`] shape — kept in one place so the two can't
+/// drift apart.
+fn check_hash(expected: &Hash, actual: &Hash) -> StoreResult<()> {
+    if actual != expected {
+        return Err(StoreError::HashMismatch {
+            expected: to_hex(expected),
+            actual: to_hex(actual),
+        });
+    }
+    Ok(())
+}
+
+/// Create a uniquely-named sibling temp file in `parent` for the object
+/// file `file_name`. The `.{name}.tmp.{pid}.{seq}` shape is what
+/// [`ObjectStore::iter_object_hashes`] and the stale-temp tests rely on
+/// to skip non-objects.
+pub(crate) fn temp_file_in(parent: &Path, file_name: &str) -> io::Result<NamedTempFile> {
+    let pid = process::id();
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
+    NamedTempFile::with_prefix_in(tmp_name, parent)
+}
+
+/// Atomically write `bytes` to `final_path` with per-object durability
+/// ([`SyncPolicy::PerObject`]): temp file, full flush, rename into
+/// place, parent-dir flush. On Unix, `rename(2)` is atomic with respect
+/// to concurrent readers and replaces the destination. On Windows,
+/// [`NamedTempFile::persist`] uses `MOVEFILE_REPLACE_EXISTING`
+/// semantics so the replace-existing path works there too.
+///
+/// After a successful rename we flush the parent directory on Unix to
+/// commit the dirent update — without this, the rename can survive a
+/// power loss only in the page cache and the file appears missing on
+/// reboot.
+///
+/// All flush/rename primitives go through `syncer` so unit tests can
+/// assert ordering; [`RealSyncer`] preserves the historical behaviour
+/// exactly.
+fn write_atomic(final_path: &Path, bytes: &[u8], syncer: &dyn Syncer) -> io::Result<()> {
+    let parent = final_path.parent().expect("write_atomic: path has parent");
+    let file_name = final_path
+        .file_name()
+        .expect("write_atomic: path has file name")
+        .to_string_lossy();
+
+    let mut tmp = temp_file_in(parent, &file_name)?;
+    tmp.as_file_mut().write_all(bytes)?;
+    syncer.full(tmp.as_file(), tmp.path())?;
+
+    // NamedTempFile::persist uses a cross-platform atomic replace:
+    // rename(2) on Unix, MoveFileExW with MOVEFILE_REPLACE_EXISTING on Windows.
+    syncer.rename(tmp.into_temp_path(), final_path)?;
+
+    syncer.dir_sync(parent)?;
+    Ok(())
+}
+
+/// Write target shared by [`ObjectStore`] (per-object durability) and
+/// [`WriteBatch`] (batched durability), so ingest code can be written
+/// once against either sink.
+pub trait ObjectSink {
+    /// Store `bytes` as one object, returning its BLAKE3 hash.
+    fn put(&self, bytes: &[u8]) -> StoreResult<Hash>;
+    /// Store the concatenation of `parts` as one object without the
+    /// caller having to materialise the concatenated buffer.
+    fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash>;
+    /// True when the object is already present (or staged) in this sink.
+    fn has(&self, h: &Hash) -> bool;
+}
+
+impl ObjectSink for ObjectStore {
+    fn put(&self, bytes: &[u8]) -> StoreResult<Hash> {
+        self.write(bytes)
+    }
+
+    fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
+        // Per-object path is the legacy/rare sink; hot ingest paths use
+        // WriteBatch, whose put_parts is copy-free.
+        let total: usize = parts.iter().map(|p| p.len()).sum();
+        let mut bytes = Vec::with_capacity(total);
+        for p in parts {
+            bytes.extend_from_slice(p);
+        }
+        self.write(&bytes)
+    }
+
+    fn has(&self, h: &Hash) -> bool {
+        self.contains(h)
+    }
+}
+
+/// Reset an existing object file's `mtime` to now, on a dedup hit.
+///
+/// gc's grace window is measured from the object file's on-disk
+/// `mtime` (SPEC-GC "Concurrent writers and the grace window"). A
+/// writer outside gc's lock set that dedups against an OLD unreachable
+/// object and then publishes a ref over it would otherwise lose the
+/// object to a gc run in between (SPEC-GC "Concurrent writers and the grace window"). The only such writer into
+/// this store is git import, through [`BulkWriter`], so only
+/// [`BulkWriter::write`] calls this. [`ObjectStore::write`] and
+/// [`crate::batch::WriteBatch`] callers hold `worktree.lock`, which gc
+/// also takes, and refreshing there would dirty the inode right before
+/// their per-hit shard-dir fsync, turning a ~10 µs dedup hit into a
+/// journal commit (~3 ms on APFS). The caller treats an `Err` as "not
+/// refreshed" and falls back to rewriting the object, which gives it a
+/// fresh inode and `mtime`; it never reports a dedup hit whose `mtime`
+/// was not refreshed.
+///
+/// - Permissions: on Unix, setting an explicit time needs ownership,
+///   not write access, so a read-only fd works on a read-only object
+///   file; a non-owner gets `EPERM` and so rewrites. Windows needs a
+///   write-capable handle for `SetFileTime`.
+/// - Durability: the new `mtime` is not fsynced. It only has to hold
+///   between this dedup hit and the writer's ref publish, in the same
+///   boot, where gc reads it from the in-memory inode. A crash ends the
+///   writer: a ref it already published durably makes the object a gc
+///   root, and an unpublished one never needed it, so a reverted
+///   `mtime` after a crash cannot lose a reachable object.
+/// - Cost: one `open` + `futimens` (plus `close`) per dedup hit.
+///
+/// Callers hold the shared format-file lock until refresh or rewrite is
+/// complete; gc holds its exclusive counterpart over its final age check
+/// and unlink, so a successful refresh cannot target a detached inode.
+pub(crate) fn refresh_mtime(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if FAIL_REFRESH.get() {
+        return Err(io::ErrorKind::NotFound.into());
+    }
+    let mut opts = fs::OpenOptions::new();
+    if cfg!(unix) {
+        opts.read(true);
+    } else {
+        opts.write(true);
+    }
+    opts.open(path)?.set_modified(std::time::SystemTime::now())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: make [`refresh_mtime`] fail on this thread, as a
+    /// concurrent gc unlink (`NotFound`) would, to exercise the
+    /// callers' rewrite fallback.
+    static FAIL_REFRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// On Unix, fsync the directory holding the just-renamed file so the
+/// dirent update is durable. No-op on non-Unix (Windows does not expose
+/// a stable directory-fsync primitive via `std::fs`).
+#[cfg(unix)]
+pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+    match File::open(parent) {
+        Ok(dir) => dir.sync_all(),
+        // If the dir disappeared under us (race with external cleanup),
+        // the durability invariant is moot — propagate silently.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object::Blob;
+    use std::fs::OpenOptions;
+    use std::io::Seek;
+    use tempfile::TempDir;
+
+    fn fresh_store() -> (TempDir, ObjectStore) {
+        let dir = TempDir::new().expect("tempdir");
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("init");
+        (dir, store)
+    }
+
+    #[test]
+    fn init_creates_layout() {
+        let dir = TempDir::new().unwrap();
+        let _ = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        assert!(dir.path().join(KIT_DIR).is_dir());
+        assert!(dir.path().join(KIT_DIR).join(OBJECTS_DIR).is_dir());
+    }
+
+    #[test]
+    fn init_rejects_already_initialized() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        ObjectStore::init(&layout).unwrap();
+        let err = ObjectStore::init(&layout).unwrap_err();
+        assert!(matches!(err, StoreError::AlreadyInitialized));
+    }
+
+    #[test]
+    fn open_rejects_non_repo() {
+        let dir = TempDir::new().unwrap();
+        let err = ObjectStore::open(&RepoLayout::single(dir.path())).unwrap_err();
+        assert!(matches!(err, StoreError::NotAKitRepository));
+    }
+
+    #[test]
+    fn init_writes_format_marker_and_open_accepts_it() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        ObjectStore::init(&layout).unwrap();
+        let marker = fs::read_to_string(dir.path().join(KIT_DIR).join(FORMAT_FILE)).unwrap();
+        assert_eq!(marker.trim(), FORMAT_VALUE);
+        // A freshly-init'd repo opens cleanly.
+        ObjectStore::open(&layout).unwrap();
+    }
+
+    #[test]
+    fn open_rejects_repo_missing_or_wrong_format_marker() {
+        // A pre-merkle repo (objects dir present, no format marker) must be
+        // rejected loudly rather than silently mis-read.
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        ObjectStore::init(&layout).unwrap();
+        let marker_path = dir.path().join(KIT_DIR).join(FORMAT_FILE);
+
+        fs::remove_file(&marker_path).unwrap();
+        assert!(matches!(
+            ObjectStore::open(&layout),
+            Err(StoreError::IncompatibleRepoFormat { found: None })
+        ));
+
+        // A repo declaring some other (e.g. future) format is also rejected.
+        fs::write(&marker_path, b"flat-v0\n").unwrap();
+        assert!(matches!(
+            ObjectStore::open(&layout),
+            Err(StoreError::IncompatibleRepoFormat { found: Some(_) })
+        ));
+    }
+
+    #[test]
+    fn is_repo_root_predicate() {
+        let dir = TempDir::new().unwrap();
+        assert!(!ObjectStore::is_repo_root(dir.path()));
+        ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        assert!(ObjectStore::is_repo_root(dir.path()));
+    }
+
+    #[test]
+    fn write_then_read_roundtrip() {
+        let (_dir, store) = fresh_store();
+        let bytes = b"hello world".to_vec();
+        let h = store.write(&bytes).unwrap();
+        assert!(store.contains(&h));
+        let got = store.read(&h).unwrap();
+        assert_eq!(got, bytes);
+    }
+
+    #[test]
+    fn read_object_deserialises() {
+        let (_dir, store) = fresh_store();
+        let obj = Object::Blob(Blob {
+            data: b"object bytes".to_vec(),
+        });
+        let bytes = serialize::serialize(&obj).unwrap();
+        let h = store.write(&bytes).unwrap();
+        let parsed = store.read_object(&h).unwrap();
+        assert_eq!(parsed, obj);
+    }
+
+    /// `read_object` on a merkelized type (the path `verified_id_and_object`
+    /// added a decoded-object fast path for) round-trips correctly — the
+    /// non-merkle `read_object_deserialises` case above can't exercise the
+    /// `Some(obj)` branch at all.
+    #[test]
+    fn read_object_deserialises_tree() {
+        use crate::object::{EntryMode, Tree, TreeEntry};
+        let (_dir, store) = fresh_store();
+        let obj = Object::Tree(Tree {
+            entries: vec![
+                TreeEntry {
+                    name: b"a.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: crate::hash::hash(b"a"),
+                },
+                TreeEntry {
+                    name: b"b.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: crate::hash::hash(b"b"),
+                },
+            ],
+        });
+        let bytes = serialize::serialize(&obj).unwrap();
+        let h = store.write(&bytes).unwrap();
+        let parsed = store.read_object(&h).unwrap();
+        assert_eq!(parsed, obj);
+        // Every `S: ObjectSource + ?Sized` caller (diff/blame/worktree
+        // blob loading) resolves `read_object` through this trait impl,
+        // not the inherent method above — pin that it agrees.
+        let via_trait: &dyn ObjectSource = &store;
+        assert_eq!(via_trait.read_object(&h).unwrap(), obj);
+    }
+
+    /// Regression test for the double-decode fix: corrupting a stored
+    /// `Tree`'s bytes must still surface `HashMismatch` through
+    /// `read_object`'s merkle (`Some(obj)`-reusing) branch, not just
+    /// through `read`'s. Also exercises `read_object` via the
+    /// `ObjectSource` trait object — the actual call shape every
+    /// `S: ObjectSource + ?Sized` caller (`diff::load_tree`,
+    /// `LoadedBlob::load`) uses — to pin `impl ObjectSource for
+    /// ObjectStore`'s `read_object` override against regressing back to
+    /// the trait's double-decoding default.
+    #[test]
+    fn read_object_detects_tree_corruption_via_store_and_trait() {
+        use crate::object::{EntryMode, Tree, TreeEntry};
+        let (_dir, store) = fresh_store();
+        let obj = Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"a.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: crate::hash::hash(b"a"),
+            }],
+        });
+        let bytes = serialize::serialize(&obj).unwrap();
+        let h = store.write(&bytes).unwrap();
+
+        let path = store.path_for(&h);
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        f.seek(io::SeekFrom::Start(0)).unwrap();
+        f.write_all(&[bytes[0] ^ 0xFF]).unwrap();
+        f.sync_all().unwrap();
+
+        assert!(matches!(
+            store.read_object(&h).unwrap_err(),
+            StoreError::HashMismatch { .. }
+        ));
+        let via_trait: &dyn ObjectSource = &store;
+        assert!(matches!(
+            via_trait.read_object(&h).unwrap_err(),
+            StoreError::HashMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn write_is_idempotent() {
+        let (_dir, store) = fresh_store();
+        let bytes = b"duplicate".to_vec();
+        let h1 = store.write(&bytes).unwrap();
+        let h2 = store.write(&bytes).unwrap();
+        assert_eq!(h1, h2);
+        // Second write must not have produced any stray temp files.
+        let shard = store.path_for(&h1);
+        let parent = shard.parent().unwrap();
+        let entries: Vec<_> = fs::read_dir(parent).unwrap().collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "shard dir should contain exactly the final object, no temp leaks"
+        );
+    }
+
+    #[test]
+    fn read_missing_returns_not_found() {
+        let (_dir, store) = fresh_store();
+        let phony = hash::hash(b"never written");
+        let err = store.read(&phony).unwrap_err();
+        assert!(matches!(err, StoreError::ObjectNotFound(_)));
+        assert!(!store.contains(&phony));
+    }
+
+    #[test]
+    fn write_rejects_oversize() {
+        let (_dir, store) = fresh_store();
+        // A REAL cap+1 body: `vec![0u8; n]` is `alloc_zeroed`, so the
+        // 1 GiB+1 buffer costs lazily mapped zero pages, not RSS — and
+        // the guard rejects on `len()` before anything reads the bytes.
+        let oversize = vec![0u8; MAX_RAW_OBJECT_SIZE + 1];
+        let err = store.write(&oversize).unwrap_err();
+        assert!(matches!(err, StoreError::ObjectTooLarge), "got {err:?}");
+        drop(oversize);
+        // A realistic small write still works after the rejection.
+        let h = store.write(&[0u8; 16]).unwrap();
+        assert!(store.contains(&h));
+    }
+
+    #[test]
+    fn read_rejects_oversize_on_disk() {
+        // Construct an oversize on-disk blob by hand and confirm `read`
+        // refuses it. We use a sentinel size = MAX + 1 file padded with
+        // zeros; this allocates ~1 GiB of disk, which is unfriendly in
+        // unit tests, so instead we monkey-patch via a smaller-cap copy
+        // of the read path: we synthesise a too-large file by truncating
+        // a real one and verifying the comparison logic at the boundary.
+        //
+        // We exercise `MAX_RAW_OBJECT_SIZE` indirectly by writing a
+        // small object and then *replacing* the on-disk file with one
+        // whose `metadata().len()` exceeds the cap. We use sparse
+        // truncation so no real disk is consumed.
+        let (_dir, store) = fresh_store();
+        let h = store.write(b"seed").unwrap();
+        let path = store.path_for(&h);
+        let f = OpenOptions::new().write(true).open(&path).unwrap();
+        // Sparse extend to cap+1 bytes; allocates effectively no blocks.
+        f.set_len(MAX_RAW_OBJECT_SIZE as u64 + 1).unwrap();
+        drop(f);
+        let err = store.read(&h).unwrap_err();
+        assert!(matches!(err, StoreError::ObjectTooLarge));
+    }
+
+    #[test]
+    fn read_detects_corruption() {
+        let (_dir, store) = fresh_store();
+        let bytes = b"trustworthy".to_vec();
+        let h = store.write(&bytes).unwrap();
+        // Flip a single byte in the on-disk file and expect HashMismatch.
+        let path = store.path_for(&h);
+        {
+            let mut f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            f.seek(io::SeekFrom::Start(0)).unwrap();
+            f.write_all(&[bytes[0] ^ 0xFF]).unwrap();
+            f.sync_all().unwrap();
+        }
+        let err = store.read(&h).unwrap_err();
+        match err {
+            StoreError::HashMismatch { expected, actual } => {
+                assert_eq!(expected, to_hex(&h));
+                assert_ne!(actual, expected, "actual must differ once corrupted");
+            }
+            other => panic!("expected HashMismatch, got {other:?}"),
+        }
+    }
+
+    /// Flip the first byte of the on-disk object file for `h`, in place —
+    /// the "the bytes on disk no longer match `h`" setup for the
+    /// `read`-vs-`read_unverified` corruption split test below. (The
+    /// `DisplaySource` corruption tests carry their own copy in
+    /// `source.rs`.)
+    fn corrupt_first_byte(store: &ObjectStore, h: &Hash, first_byte: u8) {
+        let path = store.path_for(h);
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        f.seek(io::SeekFrom::Start(0)).unwrap();
+        f.write_all(&[first_byte ^ 0xFF]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    #[test]
+    fn read_unverified_returns_bytes_read_rejects_corruption() {
+        // The core split this whole feature exists for: `read` must still
+        // fail loudly on a corrupted object, while `read_unverified`
+        // returns the (corrupt) bytes as-is — display paths only ever get
+        // a bad render, never silently-wrong durable state.
+        let (_dir, store) = fresh_store();
+        let bytes = b"trustworthy".to_vec();
+        let h = store.write(&bytes).unwrap();
+        corrupt_first_byte(&store, &h, bytes[0]);
+
+        assert!(matches!(
+            store.read(&h).unwrap_err(),
+            StoreError::HashMismatch { .. }
+        ));
+
+        let mut corrupted = bytes.clone();
+        corrupted[0] ^= 0xFF;
+        assert_eq!(store.read_unverified(&h).unwrap(), corrupted);
+    }
+
+    #[test]
+    fn path_layout_is_2_then_62_hex() {
+        let (_dir, store) = fresh_store();
+        let bytes = b"layout test".to_vec();
+        let h = store.write(&bytes).unwrap();
+        let hex = to_hex(&h);
+        let path = store.path_for(&h);
+        let parent = path.parent().unwrap();
+        let parent_name = parent.file_name().unwrap().to_str().unwrap();
+        let file_name = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(parent_name.len(), 2);
+        assert_eq!(file_name.len(), 62);
+        assert_eq!(parent_name, &hex[..2]);
+        assert_eq!(file_name, &hex[2..]);
+        assert!(path.is_file(), "object file must exist at expected path");
+    }
+
+    #[test]
+    fn temp_file_left_behind_does_not_satisfy_contains() {
+        // Simulate a crash mid-write: drop a stale `.tmp.*` file in the
+        // shard dir without ever renaming. `contains()` must report the
+        // object as absent, and the shard dir must not contain a real
+        // entry that passes the hash check.
+        let (_dir, store) = fresh_store();
+        let target = hash::hash(b"never finalised");
+        let final_path = store.path_for(&target);
+        let shard = final_path.parent().unwrap();
+        fs::create_dir_all(shard).unwrap();
+        let stale = shard.join(format!(
+            ".{}.tmp.0.0",
+            final_path.file_name().unwrap().to_string_lossy()
+        ));
+        fs::write(&stale, b"partial").unwrap();
+        assert!(stale.is_file());
+        assert!(!store.contains(&target));
+        // No file in the shard dir should hash to `target`.
+        for entry in fs::read_dir(shard).unwrap() {
+            let p = entry.unwrap().path();
+            let bytes = fs::read(&p).unwrap();
+            assert_ne!(
+                hash::hash(&bytes),
+                target,
+                "stale temp file must not satisfy the target hash"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod bulk_writer_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn bulk_writer_reuses_read_only_object() {
+        let td = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(td.path())).unwrap();
+        let bytes = b"existing read-only object";
+        let h = store.write(bytes).unwrap();
+        let path = store.path_for(&h);
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+        let mut writer = store.bulk_writer();
+        assert_eq!(writer.write(bytes).unwrap(), h);
+        writer.commit().unwrap();
+        assert_eq!(store.read(&h).unwrap(), bytes);
+    }
+
+    #[test]
+    fn bulk_writer_round_trips_and_rewrites() {
+        let td = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(td.path())).unwrap();
+        let obj = crate::serialize::serialize(&crate::object::Object::Blob(crate::object::Blob {
+            data: b"bulk".to_vec(),
+        }))
+        .unwrap();
+        let mut bw = store.bulk_writer();
+        let h1 = bw.write(&obj).unwrap();
+        // No existence short-circuit: rewriting is fine and heals
+        // torn files on idempotent re-runs.
+        let h2 = bw.write(&obj).unwrap();
+        assert_eq!(h1, h2);
+        bw.commit().unwrap();
+        assert_eq!(store.read(&h1).unwrap(), obj);
+        // Interoperates with the normal (fsynced) writer.
+        assert_eq!(store.write(&obj).unwrap(), h1);
+    }
+}
+
+/// SPEC-GC "Concurrent writers and the grace window": a dedup hit must refresh the existing object's `mtime`, so
+/// a writer outside gc's lock set (git import) that is about to publish
+/// a ref over an old unreachable object does not lose it to a gc with a
+/// grace window (SPEC-GC "Concurrent writers and the grace window").
+#[cfg(test)]
+mod dedup_mtime_tests {
+    use super::*;
+    use crate::layout::RepoLayout;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    const DAY: u64 = 24 * 60 * 60;
+    /// gc's default grace window (SPEC-GC "Status").
+    const GRACE: u64 = 14 * DAY;
+
+    fn repo() -> (tempfile::TempDir, ObjectStore) {
+        let td = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(td.path())).unwrap();
+        crate::refs::init(&RepoLayout::single(td.path())).unwrap();
+        (td, store)
+    }
+
+    fn mtime(store: &ObjectStore, h: &Hash) -> SystemTime {
+        fs::metadata(store.path_for(h)).unwrap().modified().unwrap()
+    }
+
+    /// Age the object file past the grace window, as an object written
+    /// long ago and since orphaned (e.g. a superseded commit whose
+    /// recovery entry expired) would be.
+    fn backdate(store: &ObjectStore, h: &Hash) -> SystemTime {
+        let old = SystemTime::now() - Duration::from_secs(30 * DAY);
+        File::open(store.path_for(h))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(mtime(store, h) <= old + Duration::from_secs(1));
+        old
+    }
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// Write an object, age it, dedup-write it again through `rewrite`,
+    /// then run a gc with the default grace: the re-written object must
+    /// have a fresh `mtime` and survive, while an equally old orphan
+    /// nobody re-wrote is pruned (so the gc really sweeps).
+    fn assert_dedup_refreshes(rewrite: impl Fn(&ObjectStore, &[u8]) -> Hash) {
+        let (td, store) = repo();
+        let bytes = b"object the import is about to publish".to_vec();
+        let h = store.write(&bytes).unwrap();
+        let control = store.write(b"old orphan nobody writes again").unwrap();
+        backdate(&store, &h);
+        backdate(&store, &control);
+
+        let before = SystemTime::now() - Duration::from_secs(1);
+        assert_eq!(rewrite(&store, &bytes), h);
+        assert!(
+            mtime(&store, &h) >= before,
+            "dedup hit must refresh the object's mtime"
+        );
+
+        let report = crate::ops::gc::run_gc(
+            &store,
+            &RepoLayout::single(td.path()),
+            now_secs(),
+            GRACE,
+            false,
+        )
+        .unwrap();
+        assert!(store.contains(&h), "re-written object pruned: {report:?}");
+        assert_eq!(store.read(&h).unwrap(), bytes);
+        assert!(!store.contains(&control), "control orphan kept: {report:?}");
+    }
+
+    /// A failed refresh must not be reported as a dedup hit:
+    /// `BulkWriter` falls back to rewriting the object, which gives it
+    /// a fresh `mtime` too.
+    #[test]
+    fn failed_refresh_falls_back_to_rewrite() {
+        fn failing<T>(f: impl FnOnce() -> T) -> T {
+            FAIL_REFRESH.set(true);
+            let out = f();
+            FAIL_REFRESH.set(false);
+            out
+        }
+        assert_dedup_refreshes(|s, b| {
+            let mut bw = s.bulk_writer();
+            let h = failing(|| bw.write(b).unwrap());
+            bw.commit().unwrap();
+            h
+        });
+    }
+
+    #[test]
+    fn bulk_writer_dedup_refreshes_mtime() {
+        assert_dedup_refreshes(|s, b| {
+            let mut bw = s.bulk_writer();
+            let h = bw.write(b).unwrap();
+            bw.commit().unwrap();
+            h
+        });
+    }
+}
+
+#[cfg(test)]
+mod sweep_crash_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn sweep_crash_child() {
+        let Some(root) = std::env::var_os("KIT_SWEEP_CRASH_ROOT") else {
+            return;
+        };
+        let layout = RepoLayout::single(Path::new(&root));
+        let store = ObjectStore::open(&layout).unwrap();
+        let h = object_id_from_bytes(b"crash sweep candidate");
+        store
+            .prune_if_old_with_hook(&h, u64::MAX, 10, || {
+                fs::write(Path::new(&root).join("checked"), b"ready").unwrap();
+                loop {
+                    std::thread::park();
+                }
+            })
+            .unwrap();
+        panic!("child should be killed before unlink");
+    }
+
+    #[test]
+    fn crash_after_final_check_leaves_object_for_next_gc() {
+        let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        crate::refs::init(&layout).unwrap();
+        let bytes = b"crash sweep candidate";
+        let h = store.write(bytes).unwrap();
+        let control = store.write(b"unrefreshed crash orphan").unwrap();
+        for h in [h, control] {
+            File::open(store.path_for(&h))
+                .unwrap()
+                .set_modified(UNIX_EPOCH)
+                .unwrap();
+        }
+        let mut child = ChildGuard(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "store::sweep_crash_tests::sweep_crash_child"])
+                .env("KIT_SWEEP_CRASH_ROOT", td.path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let start = Instant::now();
+        while !td.path().join("checked").exists() {
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "child did not reach final check"
+            );
+            assert!(child.0.try_wait().unwrap().is_none(), "child exited early");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        let reopened = ObjectStore::open(&layout).unwrap();
+        assert_eq!(reopened.read(&h).unwrap(), bytes);
+        let mut writer = reopened.bulk_writer();
+        writer.write(bytes).unwrap();
+        writer.commit().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let report = crate::ops::gc::run_gc(&reopened, &layout, now, 10, false).unwrap();
+        assert!(reopened.contains(&h), "refreshed survivor lost: {report:?}");
+        assert!(!reopened.contains(&control));
+        assert_eq!(report.pruned, 1);
+    }
+}

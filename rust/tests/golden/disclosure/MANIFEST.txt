@@ -1,5 +1,5 @@
 # SPEC-DISCLOSURE golden vectors (deterministic)
-# Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-core --test golden_disclosure`
+# Produced by `KIT_WRITE_GOLDEN=1 cargo test -p kit-core --test golden_disclosure`
 # Format: <name> <blake3-hex-of-bin-bytes>
 # See docs/specs/SPEC-DISCLOSURE.md.
 root_tree a3057aa25f594d13db736e5f1a18f75630a4877a25fc8a1abec7f81f8f712991

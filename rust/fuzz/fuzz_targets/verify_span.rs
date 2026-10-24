@@ -3,8 +3,8 @@
 #![no_main]
 #![cfg(feature = "libfuzzer")]
 
+use kit_fuzz::{MAX_ITER, run_one, verify_span_one_iteration};
 use libfuzzer_sys::fuzz_target;
-use mkit_fuzz::{MAX_ITER, run_one, verify_span_one_iteration};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static ITERS: AtomicU32 = AtomicU32::new(0);

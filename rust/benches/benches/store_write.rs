@@ -9,10 +9,10 @@
 //! interesting signal is the per-object/batch ratio on one machine.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit, time_one};
-use mkit_core::layout::RepoLayout;
-use mkit_core::store::{ObjectStore, SyncPolicy};
-use mkit_core::worktree::store_file_object;
+use kit_benches::{Sample, Unit, time_one};
+use kit_core::layout::RepoLayout;
+use kit_core::store::{ObjectStore, SyncPolicy};
+use kit_core::worktree::store_file_object;
 
 const COUNTS: &[(usize, &str)] = &[(10, "10 x 10 KiB"), (100, "100 x 10 KiB")];
 // (No "none" series: SyncPolicy::None was removed — ephemeral snapshots
@@ -127,7 +127,7 @@ fn bench_store_write(c: &mut Criterion) {
         });
     }
 
-    mkit_benches::write_summary("store_write", &samples);
+    kit_benches::write_summary("store_write", &samples);
 }
 
 criterion_group!(benches, bench_store_write);

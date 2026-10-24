@@ -2,7 +2,7 @@
 # See https://nexte.st/docs/configuration/
 
 [profile.default]
-# Most mkit tests are sub-second; anything above 60 s is almost
+# Most kit tests are sub-second; anything above 60 s is almost
 # certainly a hang. Slow-test warnings fire at 10 s.
 slow-timeout = { period = "10s", terminate-after = 6 }
 # Don't retry on local runs — bugs should be reproducible, not papered
@@ -54,11 +54,11 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # large fixtures in the unoptimized profile. A loaded runner takes more than
 # a minute. They do not hang. Give them a longer ceiling, and no retry.
 [[profile.default.overrides]]
-filter = 'package(mkit-core) and (test(/history::ancestry::tests::/) or test(=worktree::tests::build_tree_parallel_fanout_assigns_each_hash_to_the_right_file))'
+filter = 'package(kit-core) and (test(/history::ancestry::tests::/) or test(=worktree::tests::build_tree_parallel_fanout_assigns_each_hash_to_the_right_file))'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
-filter = 'package(mkit-core) and (test(/history::ancestry::tests::/) or test(=worktree::tests::build_tree_parallel_fanout_assigns_each_hash_to_the_right_file))'
+filter = 'package(kit-core) and (test(/history::ancestry::tests::/) or test(=worktree::tests::build_tree_parallel_fanout_assigns_each_hash_to_the_right_file))'
 retries = 0
 slow-timeout = { period = "300s", terminate-after = 1 }
 
@@ -72,10 +72,10 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # The lane uses an explicit name filter, not a plain `--run-ignored
 # ignored-only`. The workspace has other `#[ignore]`d tests that CI runners
 # do not provision: the native keystore backends (they need
-# MKIT_RUN_NATIVE_KEYSTORE_TESTS), the Docker-based S3 test and the
+# KIT_RUN_NATIVE_KEYSTORE_TESTS), the Docker-based S3 test and the
 # recorders and profiling tools that run by hand. Some of these panic when
 # their gate is unset, so a plain run would fail.
-default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|wait_child_timeout_kills_stalled_child|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap/)'
+default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_kit_ssh_url|second_mutating_command_blocks_on_worktree_lock|wait_child_timeout_kills_stalled_child|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap/)'
 # Run the tests one at a time, so their real timers and sockets do not
 # contend. Only localhost networking is needed.
 test-threads = 1

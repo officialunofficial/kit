@@ -5,9 +5,9 @@ status: stable
 audience: implementers of compatible chunkers; anyone reproducing chunked_blob hashes across producers
 ---
 
-# SPEC-FASTCDC &mdash; mkit v1 content-defined chunking
+# SPEC-FASTCDC &mdash; kit v1 content-defined chunking
 
-Status: **Normative** for mkit v1 (content-defined chunking of large
+Status: **Normative** for kit v1 (content-defined chunking of large
 files).
 Scope: gear table derivation, chunking parameters, and the determinism
 contract that makes chunked_blob hashes stable across producers.
@@ -18,7 +18,7 @@ The gear seed is fixed, so chunking is deterministic.
 
 ## 1. Purpose
 
-For files larger than a fixed threshold, mkit uses FastCDC (Fast
+For files larger than a fixed threshold, kit uses FastCDC (Fast
 Content-Defined Chunking) to cut the file at content-defined
 boundaries, store each chunk as its own blob, and reference them from
 a `chunked_blob` object (SPEC-OBJECTS §7).
@@ -58,9 +58,9 @@ and can only be changed through a format-version bump.
 ## 3. Gear table seed
 
 The gear table is 256 `u64` entries, derived from a splitmix64 initial
-state seeded with an 8-byte ASCII literal. mkit does **not** use the
+state seeded with an 8-byte ASCII literal. kit does **not** use the
 gear table from the FastCDC paper (Xia et al., USENIX ATC '16); the
-table is mkit-specific and produced by the procedure below.
+table is kit-specific and produced by the procedure below.
 
 ```
 state = 0x4D4B495446434443        # ASCII "MKITFCDC" interpreted as big-endian u64
@@ -74,7 +74,7 @@ for each of 256 entries:
 ```
 
 The reference Rust implementation lives in
-`mkit-core::chunker::build_gear_table` and uses a `std::sync::OnceLock`
+`kit-core::chunker::build_gear_table` and uses a `std::sync::OnceLock`
 to memoise the 2 KiB table on first use. The exported constant `SEED`
 is the same `0x4D4B_4954_4643_4443` value.
 
@@ -109,13 +109,13 @@ max_size = 256 * 1024   =  256 KiB
 
 Normative constraint: `avg_size` MUST be a power of two (the mask
 derivation in §5 uses `log2(avg_size)`); `min_size < avg_size <
-max_size` MUST hold strictly. mkit's v1 constants satisfy "all three
+max_size` MUST hold strictly. kit's v1 constants satisfy "all three
 are powers of two", but the format only requires this of `avg_size`.
 
 Files of size ≤ `min_size` are NOT chunked &mdash; `cut` returns the full
 input length, so the caller stores the file as a single `blob`. The
 threshold for taking the chunked path is an implementer choice; in
-mkit-core the worktree picks `CHUNK_THRESHOLD = 1 MiB`
+kit-core the worktree picks `CHUNK_THRESHOLD = 1 MiB`
 (`worktree::CHUNK_THRESHOLD`). v1 specifies only that **once a file
 is chunked**, the parameters above MUST be used.
 
@@ -133,7 +133,7 @@ the path that computes it:
 
 - `worktree::{hash_file, build_tree}` &mdash; diff, status, tree, and the
   `rm`/`checkout` dirty-checks;
-- `mkit add` (`add_one` / `stage_tracked_changes`) &mdash; staging into the
+- `kit add` (`add_one` / `stage_tracked_changes`) &mdash; staging into the
   index;
 - `worktree::build_tree_from_index` &mdash; the commit/index tree build now
   accepts a `ChunkedBlob` under a regular-file (Blob/Executable) entry,
@@ -141,8 +141,8 @@ the path that computes it:
   error.
 
 Read-back is symmetric: `worktree::read_blob` reassembles a `Blob` or
-`ChunkedBlob` into the full byte stream, and backs `mkit cat`,
-`mkit diff`, and worktree restore (`mkit checkout`). `mkit cat` on a
+`ChunkedBlob` into the full byte stream, and backs `kit cat`,
+`kit diff`, and worktree restore (`kit checkout`). `kit cat` on a
 `ChunkedBlob` hash streams the reassembled content rather than an object
 placeholder.
 
@@ -151,7 +151,7 @@ worktree round-trip is covered by
 `worktree::tests::large_file_becomes_chunked_blob`, the index-path
 acceptance by `worktree::tests::from_index_accepts_chunked_blob_for_file_entry`,
 and the full add → commit → status/diff/rm → checkout → cat round-trip
-by the `chunked_blob_roundtrip` unit test in `mkit-core::serialize`.
+by the `chunked_blob_roundtrip` unit test in `kit-core::serialize`.
 
 ---
 
@@ -234,9 +234,9 @@ chunk lists across platforms.
 ## 8. Test vectors
 
 The vectors below are exercised by
-`rust/crates/mkit-core/tests/golden_pack.rs` (boundaries on disk under
+`rust/crates/kit-core/tests/golden_pack.rs` (boundaries on disk under
 `rust/tests/golden/fastcdc/`) plus the unit tests in
-`rust/crates/mkit-core/src/chunker.rs::tests`.
+`rust/crates/kit-core/src/chunker.rs::tests`.
 
 1. **Gear table hash**: `gear_table_digest()` returns
    `BLAKE3` of the 256 `u64` entries little-endian-encoded

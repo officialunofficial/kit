@@ -26,10 +26,10 @@ inputs:
     required: true
   protoc:
     description: >-
-      Install protoc. Required by any job that builds mkit-rpc (buffa-build
+      Install protoc. Required by any job that builds kit-rpc (buffa-build
       shells out to protoc; the .proto schemas use Edition 2023, needing
       protoc >= 25, newer than apt's protobuf-compiler). Set "false" for jobs
-      that never compile mkit-rpc (e.g. the keystore-only matrix).
+      that never compile kit-rpc (e.g. the keystore-only matrix).
     required: false
     default: "true"
   protoc-version:

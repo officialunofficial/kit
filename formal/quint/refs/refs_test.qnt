@@ -94,7 +94,7 @@ module refs_test {
       .expect(not(NoLostUpdateFile))
 
   // Memory transport: `update_ref` holds its Mutex across read-check-write
-  // (mkit-transport-memory), so two Match(1) CAS have exactly one winner.
+  // (kit-transport-memory), so two Match(1) CAS have exactly one winner.
   run memMatchAtomicTest =
     initFixed(SAFE_INIT, ABSENT, ABSENT, 1)
       .then(beginOp("p1", op("mem", 0, 0, Match(1), 2, false)))
@@ -126,7 +126,7 @@ module refs_test {
 
   // WITNESS — DOCUMENTED GAP (SPEC-CONCURRENCY §3.1): a local Match write
   // under refs-<ref>.lock and a file-transport write under RefLock (from
-  // `mkit serve`, `mkit-server` fs-layout or a kit+file:// push) hit the
+  // `kit serve`, `kit-server` fs-layout or a kit+file:// push) hit the
   // same file with no common lock. Safety (per-domain) still holds.
   run crossDomainGapWitnessTest =
     initFixed(SAFE_INIT, 1, 1, ABSENT)

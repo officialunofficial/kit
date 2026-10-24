@@ -1,0 +1,693 @@
+//! Move (`-M`) and copy (`-C`) detection for blame.
+//!
+//! The main blame pass ([`super::blame_file_with`]) attributes each line
+//! by replaying the line matcher: a line the matcher calls "new" is
+//! provisionally credited to the editing commit. This module reassigns
+//! those provisional lines when they are actually a **block moved within
+//! the file** (`-M`) or **copied from another file** (`-C`), crediting the
+//! block to its true origin — matching `git blame -M`/`-C`.
+//!
+//! Detection works over **normalized keys** (whitespace-stripped under
+//! `-w`, raw otherwise), so it agrees with the matcher and so `-w -C`
+//! detects a block copied with a whitespace change. Within a run of
+//! unmatched lines it finds, at each start position, the longest
+//! contiguous block that appears verbatim in a source and clears git's
+//! alphanumeric-character threshold, credits the longest such block in the
+//! run, and repeats on the lines before and after it — so a moved block
+//! adjacent to genuinely-new lines is still split out (git parity).
+//!
+//! Attribution is **positional**: a matched block at source offset `oi`
+//! credits child line `s + k` to the source's own per-line origin at
+//! `oi + k`. That keeps `-w` copies correct even when the copied bytes
+//! differ only in whitespace.
+//!
+//! Cost: a per-source index from a line's key to its offsets turns block
+//! search into ~`O(run · matches)` (an unmatched line absent from every
+//! source is an `O(1)` miss — the common "added a new block" case). A run
+//! longer than [`MAX_DETECT_RUN`] is searched only as a single whole block
+//! (a documented bound; the matcher already caps inputs at
+//! [`super::BLAME_MAX_LINES`]).
+//!
+//! **Merges.** At a merge the detector runs against **every real parent**,
+//! in commit order, first-found-wins (see [`super::walk::apply_detection`]).
+//! What each parent's `-C` search covers mirrors git's actual mechanism
+//! (`find_copy_in_parent` + `pass_blame` in git 2.50.1's `blame.c`),
+//! keyed on the parent's **porigin** — its version of the blamed path:
+//!
+//! * A parent HAS a porigin when it contains the blamed file AND no
+//!   earlier real parent brought the identical file blob (git dedups
+//!   same-blob porigins; the duplicate parent is treated as porigin-less).
+//! * **With a porigin** (`within_file` is `Some`): `-M` searches the
+//!   parent's version of the file, and `-C` candidates are the files whose
+//!   blobs *differ between that parent and the child* (the "modified in
+//!   the commit" channel, any `-C` level), excluding the blamed path.
+//! * **Without a porigin** (`within_file` is `None` — the parent lacks the
+//!   file, its blob was deduped, or the blamed file is newly added by this
+//!   commit): `-M` has no source, and at `-C` level >= 2 the copy search
+//!   widens to the parent's **entire tree** (git's `find_copies_harder`,
+//!   set when porigin is NULL — the commit that *creates* the file, git's
+//!   second `-C`). At level 1 the modified-files channel still applies,
+//!   with no path excluded.
+//!
+//! At **`-C` level >= 3** (git's third `-C`, "copies from other files in
+//! any commit") the whole-tree search fires at *every* step regardless of
+//! porigin, so a block copied into a persisting file from an unmodified
+//! source is still found; the blamed path stays excluded where the parent
+//! has a porigin.
+//!
+//! Everything previously described as a "first-parent carve-out" or an
+//! "interior vs boundary tie-break" falls out of these rules: at a typical
+//! merge the first parent keeps its porigin (so only its *modified* files
+//! are copy candidates — an unchanged source file on the first parent is
+//! invisible), while a later parent with the identical file blob is
+//! deduped and gets the whole-tree search. A file newly added by the merge
+//! leaves every parent porigin-less, so all real parents get whole-tree
+//! searches, first included. Pinned against git 2.50.1 by the
+//! `blame_c_merge_*` tests in `mod.rs`, each carrying its git recipe.
+
+use std::collections::HashMap;
+use std::ops::Range;
+
+use super::{
+    Attribution, BlameError, BlameOptions, BlameOutcome, CopyDetection, MoveDetection,
+    blame_file_with, line_key, load_blob_lines,
+};
+use crate::hash::Hash;
+use crate::object::{EntryMode, Object};
+use crate::ops::diff::diff_trees;
+use crate::ops::is_ancestor;
+use crate::store::ObjectStore;
+
+/// Past this many unmatched lines in one run, only the whole run is tried
+/// as a single block (no sub-block search). Bounds the worst case; the
+/// matcher already rejects inputs over [`super::BLAME_MAX_LINES`].
+const MAX_DETECT_RUN: usize = 10_000;
+
+/// Line-key → the offsets at which it occurs in a source, for `O(1)`
+/// "where could a block starting with this line be?" lookups.
+///
+/// `pub(super)` (rather than private): `--ignore-rev-precise`
+/// (`walk::precise_overrides`) reuses [`build_index`] to index a parent's
+/// unmatched-old lines by content, the same primitive `-M`/`-C` detection
+/// uses to index a move/copy source.
+pub(super) type KeyIndex = HashMap<Vec<u8>, Vec<usize>>;
+
+/// Inputs for one [`Detector::reassign`] call. Bundled to keep the entry
+/// point off the positional-argument hazard and to make the "what does
+/// this step see" surface explicit.
+pub(super) struct ReassignRequest<'r> {
+    /// Path being blamed (excluded from its own copy candidates when this
+    /// parent has a porigin — see `within_file`).
+    pub file_path: &'r str,
+    /// Parent revision: supplies `-C` candidate trees and their origins,
+    /// and is the commit the within-file `-M` source is taken from.
+    pub source_commit: Hash,
+    /// Child commit: the modified-files `-C` channel diffs `source_commit`
+    /// against it.
+    pub attributed_commit: Hash,
+    /// The child blob's lines (origins are written for these).
+    pub new_lines: &'r [Vec<u8>],
+    /// This parent's **porigin**: its version of the blamed file as a
+    /// `(lines, origins)` `-M` source. `None` when the parent lacks the
+    /// file, when its file blob was deduped against an earlier parent's,
+    /// or at a boundary commit (git's porigin-NULL cases). Besides gating
+    /// `-M`, this selects the `-C` channel: `Some` limits candidates to
+    /// files modified between parent and child (blamed path excluded);
+    /// `None` widens level >= 2 to the parent's entire tree, blamed path
+    /// included (git parity: `find_copies_harder` is set exactly when
+    /// porigin is NULL, and the same-path exclusion is porigin-based).
+    pub within_file: Option<(&'r [Vec<u8>], &'r [Attribution])>,
+}
+
+/// Stateful move/copy detector. Holds the per-blame caches so a source
+/// blob's keys/index are built at most once and a source file is blamed
+/// at most once, across every step and the boundary.
+pub(super) struct Detector<'a> {
+    store: &'a ObjectStore,
+    opts: &'a BlameOptions,
+    /// Source blob → its normalized line keys + key index (cheap).
+    keys_cache: HashMap<Hash, (Vec<Vec<u8>>, KeyIndex)>,
+    /// (commit, path) → that file's per-line origins, from blaming it
+    /// (expensive; built only once a candidate actually matches a block).
+    attrs_cache: HashMap<(Hash, String), Vec<Attribution>>,
+    /// (ancestor, descendant) → ancestry result, memoizing the copy
+    /// tie-break's `is_ancestor` DAG walks so a duplicated block that ties
+    /// at many start positions doesn't re-walk history each time.
+    ancestry_cache: HashMap<(Hash, Hash), bool>,
+}
+
+/// Where a matched block came from.
+enum BlockSource {
+    /// Same file, parent revision; offset into the within-file source.
+    WithinFile { offset: usize },
+    /// Another file at `source_commit`; offset into that file's lines.
+    Copy { path: String, offset: usize },
+}
+
+/// Per-`reassign` context, computed once. Borrows the caller's child lines
+/// and the within-file source; owns the per-call derived data. Never
+/// borrows the [`Detector`].
+struct Ctx<'c> {
+    source_commit: Hash,
+    new_keys: Vec<Vec<u8>>,
+    /// `alnum_prefix[i]` = alphanumeric byte count over `new_lines[..i]`,
+    /// so a block's count is `alnum_prefix[e] - alnum_prefix[s]` in `O(1)`.
+    alnum_prefix: Vec<usize>,
+    within_keys: Option<Vec<Vec<u8>>>,
+    within_index: Option<KeyIndex>,
+    within_attrs: Option<&'c [Attribution]>,
+    move_threshold: Option<usize>,
+    candidates: Vec<(String, Hash)>,
+    copy_threshold: Option<usize>,
+}
+
+impl Ctx<'_> {
+    /// Alphanumeric byte count of `new_lines[s..e]`, in `O(1)`.
+    fn alnum(&self, s: usize, e: usize) -> usize {
+        self.alnum_prefix[e] - self.alnum_prefix[s]
+    }
+}
+
+impl<'a> Detector<'a> {
+    pub(super) fn new(store: &'a ObjectStore, opts: &'a BlameOptions) -> Self {
+        Self {
+            store,
+            opts,
+            keys_cache: HashMap::new(),
+            attrs_cache: HashMap::new(),
+            ancestry_cache: HashMap::new(),
+        }
+    }
+
+    /// Memoized [`is_ancestor`] for the copy tie-break. An incomparable pair
+    /// (parallel branches) walks the whole reachable DAG to return `false`,
+    /// so caching matters when a duplicated block ties repeatedly.
+    fn is_ancestor_cached(&mut self, ancestor: Hash, descendant: Hash) -> BlameOutcome<bool> {
+        if let Some(&v) = self.ancestry_cache.get(&(ancestor, descendant)) {
+            return Ok(v);
+        }
+        let v = is_ancestor(self.store, ancestor, descendant)?;
+        self.ancestry_cache.insert((ancestor, descendant), v);
+        Ok(v)
+    }
+
+    /// Reassign moved/copied blocks among the still-unclaimed lines,
+    /// writing origins into `out` and marking each reassigned line `true`
+    /// in `claimed`. A no-op when detection is off or nothing qualifies —
+    /// note the porigin-less + copies-off combination is a *silent* no-op
+    /// (`-M` has no source without `within_file`), so callers skip the
+    /// call instead of relying on it.
+    ///
+    /// `claimed` is both input and output: lines already `true` (matched
+    /// positionally, or claimed by an earlier parent's detector pass —
+    /// first-parent-wins at a merge) are excluded from this pass's
+    /// candidate runs, and every line this pass reassigns is set `true`
+    /// so a later parent never reassigns it again.
+    pub(super) fn reassign(
+        &mut self,
+        req: &ReassignRequest,
+        out: &mut [Attribution],
+        claimed: &mut [bool],
+    ) -> BlameOutcome<()> {
+        let iw = self.opts.ignore_whitespace;
+        let move_threshold = match self.opts.effective_move() {
+            MoveDetection::On { threshold } => req.within_file.map(|_| threshold),
+            MoveDetection::Off => None,
+        };
+        let (copy_level, copy_threshold) = match self.opts.copies {
+            CopyDetection::On { level, threshold } => (level, Some(threshold)),
+            CopyDetection::Off => (0, None),
+        };
+        if move_threshold.is_none() && copy_threshold.is_none() {
+            return Ok(());
+        }
+
+        // Candidate runs first: when everything is already claimed there
+        // is nothing to detect, and the expensive setup below (candidate
+        // enumeration, per-line keying) must not run at all — at a merge
+        // this fires for every parent after the one that explained the
+        // last line.
+        let mut stack: Vec<Range<usize>> = unclaimed_runs(claimed);
+        if stack.is_empty() {
+            return Ok(());
+        }
+
+        let candidates = if copy_level > 0 {
+            copy_candidates(
+                self.store,
+                req.source_commit,
+                req.attributed_commit,
+                req.file_path,
+                copy_level,
+                req.within_file.is_some(),
+            )?
+        } else {
+            Vec::new()
+        };
+        let (within_keys, within_index) = match req.within_file {
+            Some((lines, _)) => {
+                let keys: Vec<Vec<u8>> = lines.iter().map(|l| line_key(l, iw)).collect();
+                let index = build_index(&keys);
+                (Some(keys), Some(index))
+            }
+            None => (None, None),
+        };
+        let ctx = Ctx {
+            source_commit: req.source_commit,
+            new_keys: req.new_lines.iter().map(|l| line_key(l, iw)).collect(),
+            alnum_prefix: alnum_prefix(req.new_lines),
+            within_keys,
+            within_index,
+            within_attrs: req.within_file.map(|(_, attrs)| attrs),
+            move_threshold,
+            candidates,
+            copy_threshold,
+        };
+
+        // Process each maximal run of unclaimed lines with an explicit
+        // work-stack (no recursion → no stack-overflow on a run of many
+        // independent single-line moves).
+        while let Some(region) = stack.pop() {
+            if region.is_empty() {
+                continue;
+            }
+            let Some((s, e, source)) = self.find_best_block(&region, &ctx)? else {
+                continue;
+            };
+            self.credit(s, e, &source, &ctx, out)?;
+            claimed[s..e].fill(true);
+            stack.push(region.start..s);
+            stack.push(e..region.end);
+        }
+        Ok(())
+    }
+
+    /// Write the origins for a matched block `[s, e)` into `out`.
+    fn credit(
+        &mut self,
+        s: usize,
+        e: usize,
+        source: &BlockSource,
+        ctx: &Ctx,
+        out: &mut [Attribution],
+    ) -> BlameOutcome<()> {
+        match source {
+            BlockSource::WithinFile { offset } => {
+                let attrs = ctx.within_attrs.expect("within-file source present");
+                // Within-file `-M`: the line stays in the blamed path, so no
+                // porcelain `filename` override.
+                copy_origins(out, s, e - s, attrs, *offset, None);
+            }
+            BlockSource::Copy { path, offset } => {
+                // Blame the winning source file once to get its origins.
+                // The cached slice and `out` never alias, so borrow it
+                // directly rather than cloning the whole vector per block.
+                let attrs = self.candidate_attrs(ctx.source_commit, path)?;
+                copy_origins(out, s, e - s, attrs, *offset, Some(path.as_str()));
+            }
+        }
+        Ok(())
+    }
+
+    /// The longest qualifying block in `region` (longest wins; earliest
+    /// start breaks length ties; within-file `-M` beats `-C` at the same
+    /// start and length). Returns `(start, end, source)`.
+    fn find_best_block(
+        &mut self,
+        region: &Range<usize>,
+        ctx: &Ctx,
+    ) -> BlameOutcome<Option<(usize, usize, BlockSource)>> {
+        // Cost bound: only try the whole run as one block past the limit.
+        if region.len() > MAX_DETECT_RUN {
+            return Ok(self
+                .longest_block_at(region.start, region.end, ctx)?
+                .filter(|(len, _)| region.start + len == region.end)
+                .map(|(len, src)| (region.start, region.start + len, src)));
+        }
+        let mut best: Option<(usize, usize, BlockSource)> = None;
+        for s in region.start..region.end {
+            if let Some((len, source)) = self.longest_block_at(s, region.end, ctx)? {
+                let longer = best.as_ref().is_none_or(|(bs, be, _)| be - bs < len);
+                if longer {
+                    best = Some((s, s + len, source));
+                }
+            }
+        }
+        Ok(best)
+    }
+
+    /// The longest contiguous block starting at `s` (bounded by `end`) that
+    /// appears in a source and clears that source's threshold, with its
+    /// source. `-M` is preferred over an equal-length `-C` match.
+    fn longest_block_at(
+        &mut self,
+        s: usize,
+        end: usize,
+        ctx: &Ctx,
+    ) -> BlameOutcome<Option<(usize, BlockSource)>> {
+        let needle = &ctx.new_keys[s..end];
+        let mut best: Option<(usize, BlockSource)> = None;
+
+        // -M: same file, parent revision.
+        let moved = match (ctx.move_threshold, &ctx.within_keys, &ctx.within_index) {
+            (Some(threshold), Some(keys), Some(index)) => longest_match(needle, keys, index)
+                .filter(|&(len, _)| ctx.alnum(s, s + len) >= threshold),
+            _ => None,
+        };
+        if let Some((len, offset)) = moved {
+            best = Some((len, BlockSource::WithinFile { offset }));
+        }
+
+        // -C: other files at the parent commit. A strictly-longer copy
+        // match wins outright. An equal-length copy tie is broken git's way
+        // — prefer the source that traces to the older (ancestor) commit —
+        // rather than by candidate order; an equal-length `-M` still wins
+        // (within-file move stays preferred).
+        if let Some(threshold) = ctx.copy_threshold {
+            for ci in 0..ctx.candidates.len() {
+                let blob = ctx.candidates[ci].1;
+                self.ensure_candidate(blob)?;
+                // Scope the `keys_cache` borrow so the ancestry tie-break
+                // below can take `&mut self` (it blames candidate sources).
+                let matched = {
+                    let (keys, index) = &self.keys_cache[&blob];
+                    longest_match(needle, keys, index)
+                };
+                let Some((len, offset)) = matched else {
+                    continue;
+                };
+                if ctx.alnum(s, s + len) < threshold {
+                    continue;
+                }
+                let take = match &best {
+                    None => true,
+                    Some((bl, _)) if len > *bl => true,
+                    Some((bl, _)) if len < *bl => false,
+                    // Equal length: keep `-M`, else prefer the older source.
+                    Some((_, BlockSource::WithinFile { .. })) => false,
+                    Some((
+                        _,
+                        BlockSource::Copy {
+                            path: cur_path,
+                            offset: cur_off,
+                        },
+                    )) => self.copy_source_is_older(
+                        ctx.source_commit,
+                        &ctx.candidates[ci].0,
+                        offset,
+                        cur_path,
+                        *cur_off,
+                    )?,
+                };
+                if take {
+                    best = Some((
+                        len,
+                        BlockSource::Copy {
+                            path: ctx.candidates[ci].0.clone(),
+                            offset,
+                        },
+                    ));
+                }
+            }
+        }
+        Ok(best)
+    }
+
+    /// Whether the copy source `(new_path, new_off)` traces to an older
+    /// (ancestor) commit than the incumbent `(cur_path, cur_off)`, both
+    /// blamed at `source_commit`. This is git's equal-length copy tie-break:
+    /// among equally-similar sources it credits the one that pushes blame
+    /// furthest back.
+    ///
+    /// Ordering is topological (kit commits can share a whole-second
+    /// timestamp, so ancestry — not time — is authoritative): the new source
+    /// wins iff its origin commit is a strict ancestor of the incumbent's.
+    /// Ties on the same commit keep the incumbent (deterministic, candidate
+    /// order); genuinely incomparable origins (parallel branches) fall back
+    /// to the older timestamp, then to keeping the incumbent.
+    fn copy_source_is_older(
+        &mut self,
+        source_commit: Hash,
+        new_path: &str,
+        new_off: usize,
+        cur_path: &str,
+        cur_off: usize,
+    ) -> BlameOutcome<bool> {
+        let Some(new_origin) = self.copy_origin(source_commit, new_path, new_off)? else {
+            return Ok(false);
+        };
+        let Some(cur_origin) = self.copy_origin(source_commit, cur_path, cur_off)? else {
+            return Ok(false);
+        };
+        if new_origin.commit_hash == cur_origin.commit_hash {
+            return Ok(false);
+        }
+        if self.is_ancestor_cached(new_origin.commit_hash, cur_origin.commit_hash)? {
+            return Ok(true);
+        }
+        if self.is_ancestor_cached(cur_origin.commit_hash, new_origin.commit_hash)? {
+            return Ok(false);
+        }
+        Ok(new_origin.timestamp < cur_origin.timestamp)
+    }
+
+    /// The origin [`Attribution`] of a copy source's line at `offset` —
+    /// which commit authored it — by blaming `path` at `commit`.
+    fn copy_origin(
+        &mut self,
+        commit: Hash,
+        path: &str,
+        offset: usize,
+    ) -> BlameOutcome<Option<Attribution>> {
+        let attrs = self.candidate_attrs(commit, path)?;
+        Ok(attrs.get(offset).cloned())
+    }
+
+    /// Ensure a source blob's keys + key index are cached.
+    fn ensure_candidate(&mut self, blob: Hash) -> BlameOutcome<()> {
+        if !self.keys_cache.contains_key(&blob) {
+            let iw = self.opts.ignore_whitespace;
+            let lines = load_blob_lines(self.store, blob)?;
+            let keys: Vec<Vec<u8>> = lines.iter().map(|l| line_key(l, iw)).collect();
+            let index = build_index(&keys);
+            self.keys_cache.insert(blob, (keys, index));
+        }
+        Ok(())
+    }
+
+    /// Per-line origins for a source file, by blaming it at `commit`
+    /// (cached; expensive).
+    ///
+    /// The source blame keeps the *active* `-w`, (effective) `-M`,
+    /// `--ignore-rev` set (including `--ignore-rev-precise`), and
+    /// first-parent mode so a copied block is credited through a prior
+    /// whitespace-only edit, same-file move, ignored noise commit, or merge
+    /// in the source — matching git. Only `-C` is dropped, which both
+    /// prevents unbounded recursion and matches git (a copy source is
+    /// blamed without further cross-file copy detection).
+    fn candidate_attrs(&mut self, commit: Hash, path: &str) -> BlameOutcome<&[Attribution]> {
+        let key = (commit, path.to_string());
+        if !self.attrs_cache.contains_key(&key) {
+            // Keep every active option except drop `-C` (prevents unbounded
+            // recursion and matches git) and pin the effective `-M`. Spread
+            // the rest from `self.opts` so a future `BlameOptions` field is
+            // carried through copy-source blame automatically instead of
+            // being silently defaulted — this PR (`ignore_rev_precise`) is
+            // itself the proof the hand-copied list was easy to miss.
+            let source_opts = BlameOptions {
+                moves: self.opts.effective_move(),
+                copies: CopyDetection::Off,
+                ..self.opts.clone()
+            };
+            let res = blame_file_with(self.store, commit, path, &source_opts)?;
+            let attrs = res.lines.into_iter().map(Attribution::from).collect();
+            self.attrs_cache.insert(key.clone(), attrs);
+        }
+        Ok(&self.attrs_cache[&key])
+    }
+}
+
+/// Copy `len` source origins starting at `src_off` into `out` at `dst`.
+/// When `source_path` is `Some` (a cross-file `-C` copy), each copied
+/// origin is tagged with that path so porcelain can emit `filename`; a
+/// within-file `-M` move passes `None` (the line stays in the blamed path).
+fn copy_origins(
+    out: &mut [Attribution],
+    dst: usize,
+    len: usize,
+    src: &[Attribution],
+    src_off: usize,
+    source_path: Option<&str>,
+) {
+    for k in 0..len {
+        if let Some(a) = src.get(src_off + k) {
+            let mut a = a.clone();
+            if let Some(path) = source_path {
+                a.source_path = Some(path.to_string());
+            }
+            out[dst + k] = a;
+        }
+    }
+}
+
+/// Longest prefix of `needle` that occurs contiguously in `hay`, using
+/// `index` (key → offsets) to find candidate starts, plus the offset.
+///
+/// Divergence: when an identical block occurs at several offsets in the
+/// **same** source file, the **earliest** offset wins the length tie
+/// (`build_index` records offsets ascending and this keeps the first
+/// maximal match). git tracks line identity through its diff and may land
+/// on a different offset within the file; for block-based detection the
+/// earliest deterministic offset is the documented choice. (Ties *across*
+/// candidate source files are resolved git's way — by ancestry — in
+/// [`Detector::copy_source_is_older`]; this note is only the
+/// within-one-file residue.)
+fn longest_match(needle: &[Vec<u8>], hay: &[Vec<u8>], index: &KeyIndex) -> Option<(usize, usize)> {
+    let first = needle.first()?;
+    let offsets = index.get(first)?;
+    let mut best: Option<(usize, usize)> = None;
+    for &oi in offsets {
+        let len = needle
+            .iter()
+            .zip(&hay[oi..])
+            .take_while(|(a, b)| a == b)
+            .count();
+        if best.is_none_or(|(bl, _)| len > bl) {
+            best = Some((len, oi));
+        }
+    }
+    best
+}
+
+/// Build a line-key → offsets index over `keys`. `pub(super)`: also used
+/// by `walk::precise_overrides` (`--ignore-rev-precise`).
+pub(super) fn build_index(keys: &[Vec<u8>]) -> KeyIndex {
+    let mut index: KeyIndex = HashMap::with_capacity(keys.len());
+    for (i, k) in keys.iter().enumerate() {
+        index.entry(k.clone()).or_default().push(i);
+    }
+    index
+}
+
+/// Alphanumeric-byte prefix sums over `lines` (`len + 1` entries).
+fn alnum_prefix(lines: &[Vec<u8>]) -> Vec<usize> {
+    let mut prefix = Vec::with_capacity(lines.len() + 1);
+    let mut acc = 0;
+    prefix.push(0);
+    for l in lines {
+        acc += l.iter().filter(|b| b.is_ascii_alphanumeric()).count();
+        prefix.push(acc);
+    }
+    prefix
+}
+
+/// Maximal runs of `false` in `claimed`, as `[start, end)` ranges — the
+/// regions still open for detection. Derived directly from the claimed
+/// mask so callers never maintain a separate (complementary) mask.
+fn unclaimed_runs(claimed: &[bool]) -> Vec<Range<usize>> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < claimed.len() {
+        if claimed[i] {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < claimed.len() && !claimed[i] {
+            i += 1;
+        }
+        runs.push(start..i);
+    }
+    runs
+}
+
+/// Source files to search for copies from one parent, mirroring git's
+/// `find_copy_in_parent` channel selection:
+///
+/// * **Modified-files channel** (any `-C` level): files whose blob differs
+///   between the parent (`older`) and child (`newer`) — git's "files
+///   modified in the same commit". When the parent has a porigin
+///   (`has_porigin`), the blamed path itself is excluded (`-M` owns it).
+/// * **Whole-tree channel** (level >= 2, porigin-less parent only): every
+///   file in the parent's tree, blamed path included — git sets
+///   `find_copies_harder` exactly when porigin is NULL, i.e. the parent
+///   lacks the file, its file blob was deduped against an earlier
+///   parent's, or the child newly adds the file.
+///
+/// Built on the canonical [`diff_trees`] differ, so it inherits the shared
+/// `MAX_TREE_DEPTH` guard and the hash-equal-subtree pruning (it does not
+/// re-flatten the whole tree on every ancestor step). The whole-tree arm
+/// diffs the parent tree against the empty tree, enumerating every parent
+/// blob as a `Removed` entry that carries its hash.
+fn copy_candidates(
+    store: &ObjectStore,
+    older: Hash,
+    newer: Hash,
+    target_path: &str,
+    level: u8,
+    has_porigin: bool,
+) -> BlameOutcome<Vec<(String, Hash)>> {
+    let older_tree = commit_tree(store, older)?;
+    // Whole-tree copy search (git's `find_copies_harder`) fires in two
+    // cases, matching git's `-C` levels: at level >= 2 when this parent is
+    // porigin-less — the commit that *creates* the blamed file (git's second
+    // `-C`); and at level >= 3 unconditionally — copies from other files in
+    // *any* commit, so every walk step whole-tree-searches its parent even
+    // for a persisting file (git's third `-C`). Otherwise only files
+    // modified between parent and child are copy candidates.
+    let whole_tree = (level >= 2 && !has_porigin) || level >= 3;
+    let entries = if whole_tree {
+        diff_trees(store, Some(older_tree), None)?.entries
+    } else {
+        let newer_tree = commit_tree(store, newer)?;
+        diff_trees(store, Some(older_tree), Some(newer_tree))?.entries
+    };
+    Ok(entries
+        .into_iter()
+        .filter_map(|e| {
+            // The copy source is the *parent* version: its content must be
+            // present in `older`, and on the modified-files channel it must
+            // actually differ in the child (a mode-only change is not a
+            // copy source). `diff_trees` doesn't emit renames, so `path`
+            // is the parent path.
+            let hash = e.old_hash?;
+            if !whole_tree && e.new_hash == Some(hash) {
+                return None;
+            }
+            // Only real file content is blamable (skip symlinks/submodules).
+            if !matches!(e.old_mode, Some(EntryMode::Blob | EntryMode::Executable)) {
+                return None;
+            }
+            // A non-UTF-8 name comes back lossy-converted (`�`) and can't
+            // round-trip through `find_blob_in_tree`, so drop it. The blamed
+            // path is excluded only when this parent has a porigin (git
+            // parity: `-M` owns the porigin path; a porigin-less parent's
+            // own copy of the path IS a valid `-C` source).
+            if e.path.contains('\u{FFFD}') || (has_porigin && e.path == target_path) {
+                return None;
+            }
+            Some((e.path, hash))
+        })
+        .collect())
+}
+
+/// All real parents of a commit, in commit order (empty for a root commit).
+/// Unlike [`super::walk::DagNode::parents`], this is not filtered to parents
+/// that still contain the blamed file — the `-M`/`-C` detection pass runs
+/// against every REAL parent (git parity: a parent that deleted or never
+/// had the file still gets a whole-tree `-C -C` search), so it needs the
+/// actual parent list straight from the commit object.
+pub(super) fn commit_parents(store: &ObjectStore, commit: Hash) -> BlameOutcome<Vec<Hash>> {
+    let Object::Commit(c) = store.read_object(&commit)? else {
+        return Err(BlameError::NotACommit);
+    };
+    Ok(c.parents.clone())
+}
+
+/// The tree a commit points at.
+fn commit_tree(store: &ObjectStore, commit: Hash) -> BlameOutcome<Hash> {
+    let Object::Commit(c) = store.read_object(&commit)? else {
+        return Err(BlameError::NotACommit);
+    };
+    Ok(c.tree_hash)
+}

@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
 # Regenerate the shared transport and health ConnectRPC bindings owned by
-# mkit-rpc (feature transport), consumed by both mkit-server and the native
-# mkit-transport-connect client. The canonical protos stay at the repo root;
+# kit-rpc (feature transport), consumed by both kit-server and the native
+# kit-transport-connect client. The canonical protos stay at the repo root;
 # ordinary builds use the committed generated/transport/ tree without protoc.
 # Requires protoc >= 27 on PATH (or PROTOC).
 
@@ -39,15 +39,15 @@ refresh() {
     ls "$gen_dir"
 }
 
-echo ">> mkit-rpc transport (wasm32 target)"
-MKIT_TRANSPORT_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p mkit-rpc \
+echo ">> kit-rpc transport (wasm32 target)"
+KIT_TRANSPORT_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p kit-rpc \
     --features transport --target wasm32-unknown-unknown
-refresh "mkit-rpc transport" \
-    "rust/crates/mkit-rpc/generated/transport" \
-    "rust/target/wasm32-unknown-unknown/debug/build/mkit-rpc-*/out" \
-    ".mkit-rpc-transport-codegen"
+refresh "kit-rpc transport" \
+    "rust/crates/kit-rpc/generated/transport" \
+    "rust/target/wasm32-unknown-unknown/debug/build/kit-rpc-*/out" \
+    ".kit-rpc-transport-codegen"
 
-generated_dirs=(rust/crates/mkit-rpc/generated/transport)
+generated_dirs=(rust/crates/kit-rpc/generated/transport)
 # `git status --porcelain`, not only `git diff`: a new module lands untracked.
 if ! git diff --quiet -- "${generated_dirs[@]}" \
     || [ -n "$(git status --porcelain -- "${generated_dirs[@]}")" ]; then

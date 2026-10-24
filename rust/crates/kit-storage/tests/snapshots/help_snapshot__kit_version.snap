@@ -1,0 +1,5 @@
+---
+source: crates/kit-storage/tests/help_snapshot.rs
+expression: stdout
+---
+kit [VERSION]

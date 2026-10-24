@@ -1,14 +1,14 @@
 # SPEC-WRITE-GRANTS grant codec and verifier golden vectors (deterministic)
-# Accept, signed and reject/verify-* vectors: `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_grants`
+# Accept, signed and reject/verify-* vectors: `KIT_WRITE_GOLDEN=1 cargo test -p kit-attest --features grants --test golden_grants`
 # Codec reject vectors: `python3 scripts/golden/grants_ref.py rust/tests/golden/grants --write-rejects`
 # Cross-checked by `python3 scripts/golden/grants_ref.py rust/tests/golden/grants`
-# eth-primitives.json: `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_eth`
+# eth-primitives.json: `KIT_WRITE_GOLDEN=1 cargo test -p kit-attest --features grants --test golden_eth`
 # Format: <path> <blake3-hex-of-file-bytes>
 epoch-ed25519.json 38cf5f243aa24ad844d39d649c2fa85a8d93156092a68c0c262838856046bbde
-eth-primitives.json adbfe6e6b773e1c37949abd1d7c69d1147e457655f8a29368cfaa52542487f56
+eth-primitives.json 25ee7aed37ba540d34a6b2dc9c3deacb35aaba970291e3fc5277b3c9e04229bb
 grant-ed25519.json bb7a1b1874eb2b8131a410f87d2205b0e5c68ce1d28b3894975f2cd3b9604d09
-grant-statements.json f59fd1c4479f24881fada42d9eaa8e508b53daf0cd450bcb1e98a5f1d1797056
-headers.json f5b0b1e35784b06866c46938cef51dcc4af07a2a1a4abe041f7e5033c15d426d
+grant-statements.json e381e8846d6bba649812567c8fcb04c66d34e8918d05308c8625297877570107
+headers.json f0c329300e7f60129423306205606cc22e92fdca9481239039155bb74380b0d8
 reject/audience-default-port.json af3c4a3eed3be8a3efed609ceaa6af21c38fbcf4edcc6f7f6f940bd02db8baaa
 reject/audience-path.json 0ea5a11961f14aee1ff842f160e77bf11a1bfc84621c4d3d723f22aa57ccf252
 reject/audience-trailing-dot.json 9b913a6c548ff44972b07d98af57f8862331297dd3ed9123050dfb1d9296f664

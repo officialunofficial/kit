@@ -1,0 +1,25 @@
+[package]
+name = "kit-transport-memory"
+description = "In-memory transport for kit, HashMap-backed, used in unit tests and fuzz harnesses"
+keywords = ["kit", "vcs", "transport", "in-memory", "testing"]
+categories = ["data-structures", "development-tools::testing"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Publishable to crates.io. `publish` left unset (cargo default = true).
+
+[lints]
+workspace = true
+
+[dependencies]
+# Inter-workspace dep needs an explicit `version = ...` alongside the
+# path so `cargo publish` accepts it.
+kit-core = { version = "0.5", path = "../kit-core" }
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

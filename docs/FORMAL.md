@@ -1,6 +1,6 @@
 # Formal verification
 
-mkit checks parts of its specifications with formal tools: model
+kit checks parts of its specifications with formal tools: model
 checkers for the concurrent and crash-recovery protocols, a proof
 assistant for two pure algorithms, a bounded model checker for the
 untrusted-input decoders, and a replay harness that ties one model back to
@@ -58,7 +58,7 @@ stops failing breaks the run just like an invariant that stops holding.
 | Model checking | Apalache 0.62.2, TLC (the `tlc2.TLC` class inside the Apalache jar), Java 21 | Bounded symbolic (Apalache) and exhaustive explicit-state (TLC) checks of the compiled Quint models, including TLC liveness under fairness | Apalache is run directly on the TLA+ `quint compile` emits, because `quint verify` bundles an older Apalache (0.56.1) that predates the FoldSet fixes the models rely on. |
 | Algorithm proofs | Lean 4 v4.34.0 (`formal/lean/lean-toolchain`), core library only | Merkle inclusion proofs (SPEC-MERKLE-OBJECTS) and the delta codec (SPEC-DELTA) | Pure functions over unbounded inputs need proofs, not state exploration. The Cedar-style pattern: an executable Lean model, theorems about it, and a differential test that replays Rust-exported vectors through the model. |
 | Decoders | Kani 0.68.0 (CBMC 6.11.0) | Panic freedom and spec agreement of `delta`, `merkle`, `pack`, `serialize`, the keystore record and RPC framing on small symbolic inputs | Checks the actual Rust, not a model, which is what matters for untrusted input. The fuzz targets ([FUZZ.md](FUZZ.md)) cover larger inputs by sampling. |
-| Conformance | Rust test replaying ITF traces | `refs_mbt.qnt` traces replayed step by step against `mkit_core::refs`, `ops::recovery`, `FileTransport` and `MemoryTransport` | Closes the loop from a model to the code for the ref layer: the same step must produce the same refs, recovery log and CAS outcome. |
+| Conformance | Rust test replaying ITF traces | `refs_mbt.qnt` traces replayed step by step against `kit_core::refs`, `ops::recovery`, `FileTransport` and `MemoryTransport` | Closes the loop from a model to the code for the ref layer: the same step must produce the same refs, recovery log and CAS outcome. |
 
 **Why no standalone TLA+.** The protocol models are written once, in
 Quint, and TLA+ is generated from them. Hand-written TLA+ would be a
@@ -83,7 +83,7 @@ ones a spec reader is most likely to look for.
 | SPEC-REFS §5, §5.1 (CAS per lock domain) | `NoLostUpdateLocal`, `NoLostUpdateFile`, `NoLostUpdateMem` | exhaustive on two slices of `refs2` (2 processes, one ref, 3.4M and 3.5M states); bounded (length 8) on the full op space | mutants `refs2_noRefLock`, `refs2_noFileLock`, `refs2_memNoMutex` |
 | SPEC-CONCURRENCY §4 (lock order) | `NoDeadlock`, `LockOrderRespected`, `LockOwnership` | as above | `refs3_misorder`, `refs2_racyAcquire` |
 | SPEC-CONCURRENCY §3.2 (recovery log) | `ExpireHoldsSuperset`, `NoRecordExpireInterleave` | as above | `refs2_gcSkipTrees` |
-| SPEC-CONCURRENCY §2, §3.1 (`serve.lock`, `server.lock`, startup sweep) | `SweepAlone`, `NoLiveUploadSwept`, `OneMkitServer`, `UpServersHoldServeShared`, `NoMissedDetection` | exhaustive (`serve2` 18,812 states, `serve3` 152,012) | `serve2_sweepUnlocked`, `serve2_sweepUnderShared`, `serve2_serverSkipsServe`, `serve2_serverLockShared` |
+| SPEC-CONCURRENCY §2, §3.1 (`serve.lock`, `server.lock`, startup sweep) | `SweepAlone`, `NoLiveUploadSwept`, `OneKitServer`, `UpServersHoldServeShared`, `NoMissedDetection` | exhaustive (`serve2` 18,812 states, `serve3` 152,012) | `serve2_sweepUnlocked`, `serve2_sweepUnderShared`, `serve2_serverSkipsServe`, `serve2_serverLockShared` |
 | SPEC-REFS v3 §2, §3 (served names, 512-byte bound) | `RefuseBeforeStorage`, `ExplicitRefusal`, `RefusedWritesNothing`, `ListingServedOnly` | exhaustive (`served`, 66,064 states) | `served_checkAfterRead`, `served_headCheckedLate`, `served_listNoSkip` |
 | SPEC-CONCURRENCY §3.1 (documented cross-domain gap) | `WitnessCrossDomainGap`, `WitnessUndetectedLateServer` | reached, as documented | - |
 | SPEC-REFS §5 (implementation conformance, ref conformance model) | 5 `refs_mbt.qnt` traces (300 steps, 41 commits) agree with the code after every step | tested | 5 injected adapter faults and 2 tampered traces are each caught; an independent adapter mutant was caught in review |
@@ -201,10 +201,10 @@ after.
 | Empty-tree range proof | The range-proof builder returned the all-default proof for `0..=0` of the empty Tree; SPEC-MERKLE-OBJECTS §5.4 requires a refusal | Kani `merkle_builder_empty_tree_refuses` | `BmtTree::range_proof` refuses every range of the empty tree |
 | Scrub age boundary | The scrub took the window path at exactly 604800 s; SPEC-HISTORY-PROOF §4.5 says "fewer than" | `scrub::WindowOnlyWhenFresh` | `decide_chain` compares with `>=` |
 | Conflict readback | A push reported NonFastForward for a head write that landed but whose response was lost; SPEC-TRANSPORT §7 requires a `read_ref` first | `ordered2_oldConflict::ConflictHonest` | `head_conflict` reads the head back on `HeadConflict` and `RefConflict` |
-| Sweep refresh exclusion | A refresh between the age check and unlink could lose a reused object | `sweepSplit`, `sweepNoLock` | [`ObjectStore::prune_if_old_with_hook`](../rust/crates/mkit-core/src/store.rs) holds the exclusive format-file lock across the final metadata check and unlink; writers hold its shared counterpart. See SPEC-GC "Concurrent writers and the grace window". |
-| Cached-closure freshness | Cached git translations skipped refreshing the reachable objects | code reading; cached-reuse regressions | [`Importer::reuse_closure`](../rust/crates/mkit-git-bridge/src/import.rs) traverses the complete cached closure through `reuse_object` before memoizing it. |
-| Read-only reuse | Reused read-only object files failed the commit fsync with `EACCES` | read-only reuse regression | [`sync_reused_file`](../rust/crates/mkit-core/src/store.rs) opens reused files read-only on Unix before `sync_all`; platforms requiring write access retain that requirement. |
-| Force-push packmap guard | Ordered `Any` fallback and head-only or appending force pushes could be stranded by a concurrent atomic re-baseline | `gapHttpAny2`, `gapNoopAny2`, `gapTwoAny3`, `gapAppendAny2`, `gapAppendTwoAny3`; ABA regression `gapAbaAny3` | [`push_step`](../rust/crates/mkit-sync/src/push/force.rs) guards publication with the planned packmap and replans incompatible changes; dependent packs also compare the planned head. See SPEC-TRANSPORT-CONNECT §4 and the [remote-advance model](../formal/quint/advance/README.md). |
+| Sweep refresh exclusion | A refresh between the age check and unlink could lose a reused object | `sweepSplit`, `sweepNoLock` | [`ObjectStore::prune_if_old_with_hook`](../rust/crates/kit-core/src/store.rs) holds the exclusive format-file lock across the final metadata check and unlink; writers hold its shared counterpart. See SPEC-GC "Concurrent writers and the grace window". |
+| Cached-closure freshness | Cached git translations skipped refreshing the reachable objects | code reading; cached-reuse regressions | [`Importer::reuse_closure`](../rust/crates/kit-git-bridge/src/import.rs) traverses the complete cached closure through `reuse_object` before memoizing it. |
+| Read-only reuse | Reused read-only object files failed the commit fsync with `EACCES` | read-only reuse regression | [`sync_reused_file`](../rust/crates/kit-core/src/store.rs) opens reused files read-only on Unix before `sync_all`; platforms requiring write access retain that requirement. |
+| Force-push packmap guard | Ordered `Any` fallback and head-only or appending force pushes could be stranded by a concurrent atomic re-baseline | `gapHttpAny2`, `gapNoopAny2`, `gapTwoAny3`, `gapAppendAny2`, `gapAppendTwoAny3`; ABA regression `gapAbaAny3` | [`push_step`](../rust/crates/kit-sync/src/push/force.rs) guards publication with the planned packmap and replans incompatible changes; dependent packs also compare the planned head. See SPEC-TRANSPORT-CONNECT §4 and the [remote-advance model](../formal/quint/advance/README.md). |
 
 ### Fixed in the spec
 
@@ -231,7 +231,7 @@ These findings and exclusions remain open within the stated model bounds.
 | transport model | doc drift | SPEC-PACK-SHARDS §5 still describes one thread per shard URL; SPEC-RELEASE-THRESHOLD's `ceil(2n/3)` differs from the code's N3f1 quorum for n = 3k | code reading; `quorumTableTest` |
 | transport model | hypothesis | The shard byte budget (`MAX_BUFFERED_SHARD_BYTES`) could turn valid shards into failures for packs near the size limit; not modelled or tested | code reading |
 | ref conformance model | coverage | The conformance fixtures reach no successful `amend` commit and no memory-transport `Any` write | fixture tally |
-| Conflict readback | doc drift | `AdvanceOutcome::HeadConflict`'s rustdoc still says callers treat it as NonFastForward | `mkit-core/src/protocol.rs` |
+| Conflict readback | doc drift | `AdvanceOutcome::HeadConflict`'s rustdoc still says callers treat it as NonFastForward | `kit-core/src/protocol.rs` |
 
 ## Limitations
 
@@ -271,7 +271,7 @@ checks run nightly and not on every pull request. Most of that time is the
 |---|---|---|
 | `bash formal/scripts/run-quint.sh` | every `formal/quint/*/check.sh` in its default mode: quint typecheck, test and run, plus TLC where the script runs it by default. `--all` adds the TLC runs that a script leaves off by default. | history 5 to 6 min, refs 26 to 40 min |
 | `bash formal/scripts/run-kani.sh` | every Kani harness, one at a time (`KANI_FILTER=regex` to pick some) | about 1.5 h |
-| `cargo test -p mkit-formal-conformance` (in `rust/`) | the conformance replay: offline, checked-in traces | seconds after the build |
+| `cargo test -p kit-formal-conformance` (in `rust/`) | the conformance replay: offline, checked-in traces | seconds after the build |
 | `CHECK=1 bash formal/scripts/gen-refs-traces.sh` | regenerate the conformance traces from the model and diff them | about 3 min |
 
 ### Install the tools
@@ -284,7 +284,7 @@ On macOS:
 ```sh
 brew install openjdk@21 jq node
 npm install -g @informalsystems/quint@0.32.0
-bash formal/scripts/setup-apalache.sh   # Apalache 0.62.2 into ~/.local/share/mkit-fv, sha256-checked
+bash formal/scripts/setup-apalache.sh   # Apalache 0.62.2 into ~/.local/share/kit-fv, sha256-checked
 cargo install --locked kani-verifier --version 0.68.0 && cargo kani setup
 ```
 
@@ -296,7 +296,7 @@ openjdk-21-jdk-headless`) and set `JAVA_HOME` to it, install Node.js and
 `jq`, then run the same `npm`, `setup-apalache.sh` and `cargo install`
 commands.
 
-`FV_HOME` (default `~/.local/share/mkit-fv`) moves the Apalache install;
+`FV_HOME` (default `~/.local/share/kit-fv`) moves the Apalache install;
 `APALACHE_MC` and `TLA2TOOLS` point at another copy. Each `check.sh`
 documents its own knobs (`ONLY`, `SEL`, `TLC_HEAP`, `*_DEPTH`).
 

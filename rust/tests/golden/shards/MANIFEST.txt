@@ -1,3 +1,3 @@
 # Shard mapping. <file> <blake3>
-# Regenerate: UPDATE_GOLDEN=1 cargo test -p mkit-server d34_mapping_golden
+# Regenerate: UPDATE_GOLDEN=1 cargo test -p kit-server d34_mapping_golden
 d34-mapping.json 3fccaa07d9f1dca001c41a9b7b4d5399191eea778bde8b83acfdf6fb92a39540

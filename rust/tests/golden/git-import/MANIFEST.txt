@@ -1,6 +1,6 @@
 # SPEC-GIT-IMPORT §9 vectors. <name> <git-sha1> <kit-object-id>
 # Fixed importer key seed [0x42;32]. Regenerate with:
-# UPDATE_GOLDEN=1 cargo test -p mkit-git-bridge --test golden_import
+# UPDATE_GOLDEN=1 cargo test -p kit-git-bridge --test golden_import
 commit_plain c9fb6bcdf6839c34bdabc8c4a69b138f0572048a f89833ab95800604b65eb92ca6d419d02f12c42a3040db2149c636908d3822b0
 commit_zones 15397de9d0588508ac820e58b4a8cebad9689542 6132197f90a8da25e1c0b5a060e72b403794cb187c4c1de7e379678be951d571
 commit_gpgsig 5ba19b4680e3222ea3e00beefc4f86029419ac86 25d7242484393f843a6d8295a4e22ab5c3cc2967d483b76f775a56152ec86c21

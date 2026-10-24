@@ -1,5 +1,5 @@
 # SPEC-DISCLOSURE closure-profile golden vectors (deterministic)
-# Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-core --test golden_closure`
+# Produced by `KIT_WRITE_GOLDEN=1 cargo test -p kit-core --test golden_closure`
 # Format: <name> <blake3-hex-of-manifest-bytes>
 # See docs/specs/SPEC-DISCLOSURE.md.
 snapshot 6e3da79ff869556f4d57e8298d353de3ab2279374b95648690862575c0f70bde

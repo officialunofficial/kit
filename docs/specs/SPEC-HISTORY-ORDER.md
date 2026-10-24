@@ -2,12 +2,12 @@
 spec: SPEC-HISTORY-ORDER
 version: 1
 status: draft-normative
-audience: mkit-server history continuation issuance/redemption, embedder page walkers, and implementers of mkit-core::history_order
+audience: kit-server history continuation issuance/redemption, embedder page walkers, and implementers of kit-core::history_order
 ---
 
 # SPEC-HISTORY-ORDER &mdash; bounded timestamp/discovery all-parent traversal
 
-Status: **Draft-normative** for mkit v1. Server and embedder
+Status: **Draft-normative** for kit v1. Server and embedder
 implementations that page all-parent history across stateless
 continuations MUST produce the orders and accept the bounds defined
 here; an order that differs anywhere is non-conformant.
@@ -20,7 +20,7 @@ specified elsewhere ([SPEC-SERVER](SPEC-SERVER.md),
 [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md)).
 Endianness: **little-endian** throughout. All ids are 32-byte BLAKE3
 hashes ([SPEC-OBJECTS](SPEC-OBJECTS.md) §10).
-Reference implementation: `rust/crates/mkit-core/src/history_order.rs`.
+Reference implementation: `rust/crates/kit-core/src/history_order.rs`.
 Authority: this file is the source of truth for the traversal order and
 snapshot format. If code, docs, or tests disagree with this file, fix
 the implementation or amend this spec in the same change.
@@ -190,7 +190,7 @@ produced by a conforming encoder is bit-for-bit reproducible:
 
 ## 8. Test anchors
 
-`mkit-core::history_order::tests` pins the conformance fixtures:
+`kit-core::history_order::tests` pins the conformance fixtures:
 `equal_time_asymmetric_merge_matches_design` /
 `equal_time_merge_page_state_matches_design` (whole order `M,A,B,X,C`
 and pages `[M,A],[B,X],[C]` with frontier `[B,X]`, emitted `{M,A}`),

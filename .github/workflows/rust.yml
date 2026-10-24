@@ -11,7 +11,7 @@ name: "CI: Rust"
 #                     libFuzzer target for a few seconds
 #   golden            spec status and the independent Python checks of the
 #                     golden vectors
-#   cli-baseline      the default `mkit` build stays free of server code
+#   cli-baseline      the default `kit` build stays free of server code
 #   unsafe-baseline   cargo-geiger ceilings and a SAFETY comment on every
 #                     `unsafe` site
 #   generated         the checked-in protocol code matches the .proto files
@@ -99,18 +99,18 @@ jobs:
       - name: cargo nextest
         working-directory: rust
         env:
-          MKIT_TEST_STRICT: "1"
+          KIT_TEST_STRICT: "1"
         run: cargo nextest run --locked --workspace --all-features --no-fail-fast --profile ci
       # nextest does not run doctests.
       - name: Doctests
         working-directory: rust
         run: cargo test --locked --doc --workspace --no-fail-fast
-      # `mkit version` must print exactly "mkit <X.Y.Z>".
+      # `kit version` must print exactly "kit <X.Y.Z>".
       - name: Version contract
         working-directory: rust
         run: |
-          out=$(./target/debug/mkit version)
-          expected="mkit $(awk -F'"' '/^version/ {print $2; exit}' Cargo.toml)"
+          out=$(./target/debug/kit version)
+          expected="kit $(awk -F'"' '/^version/ {print $2; exit}' Cargo.toml)"
           echo "stdout:   [$out]"
           echo "expected: [$expected]"
           test "$out" = "$expected"
@@ -118,7 +118,7 @@ jobs:
       - name: Ignored lane
         working-directory: rust
         env:
-          MKIT_TEST_STRICT: "1"
+          KIT_TEST_STRICT: "1"
         run: cargo nextest run --locked --workspace --all-features --profile ignored-lane --run-ignored ignored-only
 
   # macOS runs on `main` and on demand only. See the note at the top.
@@ -183,10 +183,10 @@ jobs:
       # docs/FUZZ.md: a fixed seed, an iteration cap and a time cap.
       - name: Fuzz bodies as unit tests
         working-directory: rust
-        run: cargo test --locked -p mkit-fuzz --no-fail-fast
+        run: cargo test --locked -p kit-fuzz --no-fail-fast
       - name: Every libFuzzer target builds
         working-directory: rust
-        run: cargo check --locked -p mkit-fuzz --features libfuzzer --bins
+        run: cargo check --locked -p kit-fuzz --features libfuzzer --bins
       # A short libFuzzer run of every target. The nightly workflow
       # (fuzz.yml) runs each target for longer.
       - name: Install Rust nightly

@@ -9,12 +9,12 @@ audience: config-key authors, config.rs reviewers, transport authors
 
 Status: **Normative.** Companion to `docs/THREAT-MODEL.md` §4 and
 `docs/specs/SPEC-KEYSTORE.md` §8.2. Audience: anyone adding a new config
-key, anyone reviewing a change that touches `mkit-cli/src/config.rs`,
+key, anyone reviewing a change that touches `kit-storage/src/config.rs`,
 and anyone writing a transport that consumes a config-derived
 endpoint, key path, or credential.
 
 This spec defines the per-key trust posture for every config knob
-mkit reads, and the enforcement contract that keeps a hostile cloned
+kit reads, and the enforcement contract that keeps a hostile cloned
 repo from escalating into the user's signing identity, ambient
 network credentials, or arbitrary process execution. It exists
 because the underlying constant &mdash; `REPO_FORBIDDEN_KEYS` &mdash; is easy to
@@ -28,7 +28,7 @@ review test "is the new key on this list?" a single canonical answer.
 The attacker is a hostile remote repo author (THREAT-MODEL §3.1).
 They control every byte in the cloned tree, including
 `<repo>/.kit/config`. They do NOT control
-`$XDG_CONFIG_HOME/mkit/config`.
+`$XDG_CONFIG_HOME/kit/config`.
 
 Without enforcement, any repo-scoped knob that names a file path,
 selects a process to spawn, points at a network endpoint that will
@@ -40,11 +40,11 @@ The defense is structural, not per-call: at the config READ site,
 every key is classified as either repo-safe (`SAFE`) or user-only
 (`UNSAFE`). UNSAFE keys appearing in `<repo>/.kit/config` are
 dropped with a stderr warning. They are only honored when read from
-`$XDG_CONFIG_HOME/mkit/config`.
+`$XDG_CONFIG_HOME/kit/config`.
 
 The trust boundary is anchored in
-`mkit-cli/src/config.rs::REPO_FORBIDDEN_KEYS`. That constant is the
-single source of truth &mdash; `mkit-cli` is the only crate that performs
+`kit-storage/src/config.rs::REPO_FORBIDDEN_KEYS`. That constant is the
+single source of truth &mdash; `kit-storage` is the only crate that performs
 config-file I/O, so there is exactly one place to fence.
 
 ---
@@ -52,7 +52,7 @@ config-file I/O, so there is exactly one place to fence.
 ## 2. Per-key audit
 
 The table below covers every key that `apply_kv` in
-`rust/crates/mkit-cli/src/config.rs` recognizes &mdash; the flat keys (in
+`rust/crates/kit-storage/src/config.rs` recognizes &mdash; the flat keys (in
 source order), the dotted-section families (`remote.<name>.*`,
 `branch.<name>.*`, allow-listed `core.<key>`) handled via
 `apply_section_kv` / `core_allowed_suffix`, and the `_url`-suffixed
@@ -76,14 +76,14 @@ including a matcher for a `remote.<name>.*` pattern key.
 | `signing_key`                        | **UNSAFE** | Legacy raw-file key path. If repo-controlled, doubles as an arbitrary-file overwrite primitive when paired with auto-keygen (auto-keygen has since been removed; the path is still UNSAFE for the read direction). |
 | `default_branch`                     | SAFE       | UX default. No security weight &mdash; the victim still verifies signed history regardless of which ref the repo nominates as default.                                                    |
 | `durability.objects`                 | SAFE       | Object-store durability/fsync mode. A pure local-performance/safety tunable with no credential-routing, signing-selection, or process-spawning behavior; round-tripped and serialized in repo config.                |
-| `remote_endpoint`                    | **SAFE** with runtime gate | A pure address. Repo-scoped endpoints are accepted, but `enforce_trusted_remote_endpoint` refuses to send ambient `MKIT_API_TOKEN` / `MKIT_R2_*` credentials unless the user has explicitly listed the same endpoint under `trusted_remote_endpoint`. |
+| `remote_endpoint`                    | **SAFE** with runtime gate | A pure address. Repo-scoped endpoints are accepted, but `enforce_trusted_remote_endpoint` refuses to send ambient `KIT_API_TOKEN` / `KIT_R2_*` credentials unless the user has explicitly listed the same endpoint under `trusted_remote_endpoint`. |
 | `remote_bucket`                      | SAFE       | Inert bucket-name slot. Not currently consumed by any transport; round-tripped only.                                                                                                |
 | `remote_type`                        | SAFE       | Dispatch hint (`file` / `http` / `s3` / `ssh`). The exfil channel is the endpoint URL, not the dispatch label.                                                                       |
-| `ssh.strict_host_key_checking`       | **UNSAFE** | Letting the repo disable host-key checking opens `mkit push` to MITM.                                                                                                              |
+| `ssh.strict_host_key_checking`       | **UNSAFE** | Letting the repo disable host-key checking opens `kit push` to MITM.                                                                                                              |
 | `ssh.user_known_hosts_file`          | **UNSAFE** | The source of trust for SSH host-key verification.                                                                                                                                  |
 | `ssh.identity_file`                  | **UNSAFE** | Selects which private key SSH presents. Same shape as `signing_key`.                                                                                                                |
 | `admission_helper` | **UNSAFE** | Names an executable the client runs when a remote answers with an admission challenge ([SPEC-TRANSPORT-CONNECT §5.1](SPEC-TRANSPORT-CONNECT.md#51-admission-challenges)). It spawns a process and can spend the user's money, so it is RCE plus a payment primitive if repo-controlled. Repository config MUST NOT set it. The client runs it only for a remote that passes the user-scoped `trusted_remote_endpoint` gate (§3.4). |
-| `remote.<name>.admission_headers` | **UNSAFE** | Adds header names to the admission-helper allowlist of remote `<name>`. If repo-controlled, it could widen what a helper may attach to requests. It can never add a hard-reserved header (the auth v2 envelope headers, `X-Write-Grant`, `X-Kit-*`, `X-Forwarded-*`, `Host`, `Content-*`, `Transfer-Encoding`, `Connect-*`, `Cookie`, `Idempotency-Key`, hop-by-hop headers; full list in SPEC-TRANSPORT-CONNECT §5.1); an entry naming one has no effect. `mkit config` SHOULD refuse to write a reserved name, and the load-time warning for one SHOULD use the fixed wording of SPEC-TRANSPORT-CONNECT §5.1. Unlike `remote.<name>.url`, this member of the `remote.<name>.*` family is user-scoped only. |
+| `remote.<name>.admission_headers` | **UNSAFE** | Adds header names to the admission-helper allowlist of remote `<name>`. If repo-controlled, it could widen what a helper may attach to requests. It can never add a hard-reserved header (the auth v2 envelope headers, `X-Write-Grant`, `X-Kit-*`, `X-Forwarded-*`, `Host`, `Content-*`, `Transfer-Encoding`, `Connect-*`, `Cookie`, `Idempotency-Key`, hop-by-hop headers; full list in SPEC-TRANSPORT-CONNECT §5.1); an entry naming one has no effect. `kit config` SHOULD refuse to write a reserved name, and the load-time warning for one SHOULD use the fixed wording of SPEC-TRANSPORT-CONNECT §5.1. Unlike `remote.<name>.url`, this member of the `remote.<name>.*` family is user-scoped only. |
 | `transport_auth` | **UNSAFE** | Selects whether network requests invoke the ambient signing identity. Repository config MUST NOT enable it. User-scoped envelope signing additionally requires exact `trusted_remote_endpoint` approval before signer resolution. |
 | `attest.default_algorithm`           | **UNSAFE** | Selector. Flipping from `ed25519` to `secp256k1` / `p256` routes attestation signing to whichever non-Ed25519 key the user happens to have set up (confused-deputy).               |
 | `attest.signer`                      | **UNSAFE** | Selector. Flipping from `repo-key` to `external` or `keystore` weaponizes a user-scoped binary/keystore against attacker-chosen content.                                          |
@@ -92,13 +92,13 @@ including a matcher for a `remote.<name>.*` pattern key.
 | `attest.external_signer_timeout_secs`| **UNSAFE** | Timeout for the spawned external signer. Listed in `REPO_FORBIDDEN_KEYS` alongside the other `attest.external_signer_*` keys: a repo-controlled value could keep a hostile signer subprocess alive (or starve a benign one) and only makes sense under the same trust scope as the path/argv it governs. |
 | `attest.secp256k1_key_path`          | **UNSAFE** | Legacy raw-file path for a secp256k1 signing key.                                                                                                                                   |
 | `attest.p256_key_path`               | **UNSAFE** | Legacy raw-file path for a P-256 signing key.                                                                                                                                       |
-| `grant.webauthn_rp` | **UNSAFE** | Pins the `WebAuthn` relying parties (`<rp_id> <origin>...`, repeatable) whose assertions `mkit grant create --webauthn-assertion` and the user grant store accept as an owner signature ([SPEC-WRITE-GRANTS §4.3](SPEC-WRITE-GRANTS.md)). If repo-controlled, the attacker would choose which relying party vouches for an owner. Without a pin a `webauthn-p256` import is refused, so this key fails closed. |
-| user grant store           | **not a key** | `$XDG_CONFIG_HOME/mkit/grants/<grant id>.grant` (directory 0700, files 0600). Its location derives from the XDG base directory alone: there is no config key, flag or repository path that relocates it, and the store never reads a repository path. Every file is re-parsed and its owner signature re-verified on load, at most 1,024 files of at most 16 KiB each; a bad file costs one warning and is skipped. A planted file therefore cannot forge a grant, only fail to load. |
-| `remote.<name>.url`                  | **SAFE** with runtime gate | Named-remote address. Same classification as `remote_endpoint`: each endpoint still flows through `enforce_trusted_remote_endpoint`, so a repo-controlled named remote cannot smuggle ambient `MKIT_API_TOKEN` / `MKIT_R2_*` credentials.       |
+| `grant.webauthn_rp` | **UNSAFE** | Pins the `WebAuthn` relying parties (`<rp_id> <origin>...`, repeatable) whose assertions `kit grant create --webauthn-assertion` and the user grant store accept as an owner signature ([SPEC-WRITE-GRANTS §4.3](SPEC-WRITE-GRANTS.md)). If repo-controlled, the attacker would choose which relying party vouches for an owner. Without a pin a `webauthn-p256` import is refused, so this key fails closed. |
+| user grant store           | **not a key** | `$XDG_CONFIG_HOME/kit/grants/<grant id>.grant` (directory 0700, files 0600). Its location derives from the XDG base directory alone: there is no config key, flag or repository path that relocates it, and the store never reads a repository path. Every file is re-parsed and its owner signature re-verified on load, at most 1,024 files of at most 16 KiB each; a bad file costs one warning and is skipped. A planted file therefore cannot forge a grant, only fail to load. |
+| `remote.<name>.url`                  | **SAFE** with runtime gate | Named-remote address. Same classification as `remote_endpoint`: each endpoint still flows through `enforce_trusted_remote_endpoint`, so a repo-controlled named remote cannot smuggle ambient `KIT_API_TOKEN` / `KIT_R2_*` credentials.       |
 | `remote.<name>.type`                 | SAFE       | Dispatch hint for a named remote (`file` / `http` / `s3` / `ssh`); same reasoning as `remote_type`.                                                                                  |
 | `branch.<name>.remote`               | SAFE       | Per-branch upstream remote name. A UX/tracking pointer with no credential-routing or signing weight; the named remote it points at is still gated per-endpoint.                       |
 | `branch.<name>.merge`                | SAFE       | Per-branch upstream ref. Inert tracking metadata; the victim still verifies signed history regardless of the recorded upstream.                                                      |
-| `core.<key>` (allow-listed)          | SAFE       | Inert git-compatibility keys. Only the allow-listed `core.*` suffixes are stored on read (dangerous ones are dropped like any unknown key); mkit never acts on them.                  |
+| `core.<key>` (allow-listed)          | SAFE       | Inert git-compatibility keys. Only the allow-listed `core.*` suffixes are stored on read (dangerous ones are dropped like any unknown key); kit never acts on them.                  |
 | Legacy: `author_mid`, `project_id`, `network` | SAFE | Silently dropped on read; retained for forward/back compatibility with old hand-edited files. None have a code path that consumes them.                                              |
 | Forward-compat: `*_url`              | SAFE       | Reserved slot; no current consumer. If a future key in this namespace gains credential-routing or process-spawning behavior, it MUST be promoted to UNSAFE in the same patch that introduces the consumer. |
 
@@ -116,7 +116,7 @@ including a matcher for a `remote.<name>.*` pattern key.
   `remote_type` applies &mdash; if a future S3 transport ever signs requests
   using `remote_bucket` independent of `remote_endpoint`, the key must
   be promoted to UNSAFE.
-- **`default_branch`**: SAFE because mkit verifies signed history
+- **`default_branch`**: SAFE because kit verifies signed history
   regardless of which ref is nominated as default. A hostile clone
   pointing `default_branch = main` at attacker-controlled commits
   does not bypass signature verification.
@@ -134,7 +134,7 @@ without needing to remember to check.
 
 ### 3.1 Read-site rule
 
-In `mkit-cli::config::apply_file_inner`:
+In `kit-storage::config::apply_file_inner`:
 
 ```text
 if scope == ConfigScope::Repo && REPO_FORBIDDEN_KEYS.contains(key) {
@@ -150,7 +150,7 @@ untouched.
 
 ### 3.2 Write-site rule
 
-In `mkit-cli::config::write`, only an explicit allow-list of
+In `kit-storage::config::write`, only an explicit allow-list of
 repo-safe keys is emitted:
 
 ```text
@@ -167,7 +167,7 @@ core.<key>                               (allow-listed git-compat keys)
 ```
 
 Any other field on the in-memory `Config` is suppressed when
-serializing `<repo>/.kit/config`. The `mkit config <key> <value>`
+serializing `<repo>/.kit/config`. The `kit config <key> <value>`
 command intercepts UNSAFE keys (`REPO_FORBIDDEN_KEYS.contains(key)`)
 and writes them to the user-scoped file instead.
 
@@ -180,13 +180,13 @@ warning: ignoring `<key>` from per-repo config at <path> \
 ```
 
 The exact text is snapshot-tested
-(`crates/mkit-cli/tests/snapshots/repo_config_forbidden_keys__repo_config_forbidden_warning.snap`).
+(`crates/kit-storage/tests/snapshots/repo_config_forbidden_keys__repo_config_forbidden_warning.snap`).
 Any wording change requires a reviewable `cargo insta` snapshot diff.
 
 ### 3.4 Runtime credential and request-signing gates
 
-`remote_endpoint` is repo-safe to *read*, but `mkit push`, `mkit pull`,
-and `mkit fetch` call `enforce_trusted_remote_endpoint` before
+`remote_endpoint` is repo-safe to *read*, but `kit push`, `kit pull`,
+and `kit fetch` call `enforce_trusted_remote_endpoint` before
 attaching ambient credentials. The gate fires when ALL of:
 
 - the merged endpoint is non-empty,
@@ -195,7 +195,7 @@ attaching ambient credentials. The gate fires when ALL of:
 - the user layer's `trusted_remote_endpoint` does NOT equal the
   merged endpoint,
 - the relevant ambient credential env var is set
-  (`MKIT_API_TOKEN` for HTTP, `MKIT_R2_*` for S3).
+  (`KIT_API_TOKEN` for HTTP, `KIT_R2_*` for S3).
 
 Independently, selecting user-scoped `transport_auth = envelope` for any
 HTTP(S) endpoint MUST require exact equality with user-scoped
@@ -205,7 +205,7 @@ URLs as well as configured remotes. Repository and CLI-supplied destination
 selection cannot confer signing trust on that destination.
 
 When the gate fires, the command exits with a typed error directing
-the user to `mkit config trusted_remote_endpoint <endpoint>`, which
+the user to `kit config trusted_remote_endpoint <endpoint>`, which
 writes to the user-scoped config. The repo-scoped knob can therefore
 NEVER unilaterally trust a remote &mdash; the user's hand is always
 required.
@@ -229,7 +229,7 @@ The fence is multiply-tested so a regression in any one layer cannot
 hide:
 
 1. **Per-key in-process drop test**
-   (`mkit_cli::config::tests::repo_*_is_rejected` and the meta-test
+   (`kit_storage::config::tests::repo_*_is_rejected` and the meta-test
    `every_forbidden_key_is_actually_dropped_from_repo_scope`). The
    meta-test iterates the entire `REPO_FORBIDDEN_KEYS` array, plants
    each key with a sentinel value in a repo-scoped file, and asserts
@@ -237,8 +237,8 @@ hide:
    to `REPO_FORBIDDEN_KEYS` without extending the meta-test causes a
    compile-fail-style panic with an actionable error message.
 2. **Per-key end-to-end CLI test**
-   (`crates/mkit-cli/tests/repo_config_forbidden_keys.rs`). For
-   every UNSAFE key, plants `.kit/config`, runs `mkit config
+   (`crates/kit-storage/tests/repo_config_forbidden_keys.rs`). For
+   every UNSAFE key, plants `.kit/config`, runs `kit config
    <key>`, and asserts the value did NOT propagate to stdout and
    that stderr emitted the named warning.
 3. **Warning-shape snapshot**
@@ -275,7 +275,7 @@ When you add a key to `Config`:
    - Add a repo-scoped acceptance test alongside any existing
      `roundtrip_repo_safe_keys`-style fixture.
 4. If the key carries a credential, file path, or process-spawn
-   primitive, also write a `mkit config` command path that routes
+   primitive, also write a `kit config` command path that routes
    the value to user-scoped storage (see `write_user_scoped` in
    `commands/config_cmd.rs`).
 
@@ -285,10 +285,10 @@ When you add a key to `Config`:
 
 - This spec does not defend against an attacker who already runs as
   the user's UID (THREAT-MODEL §3.3). Once code runs as the user,
-  it can edit `$XDG_CONFIG_HOME/mkit/config` directly and the
+  it can edit `$XDG_CONFIG_HOME/kit/config` directly and the
   scope split is moot.
 - This spec does not protect against a user who manually opts in to
-  a hostile remote by running `mkit config trusted_remote_endpoint
+  a hostile remote by running `kit config trusted_remote_endpoint
   <attacker>` after cloning. Local choice is the user's
   responsibility (THREAT-MODEL §3.1).
 - This spec does not cover trust-roots file selection &mdash; see
@@ -299,9 +299,9 @@ When you add a key to `Config`:
 
 ## 7. References
 
-- `rust/crates/mkit-cli/src/config.rs` &mdash; single source of truth for
+- `rust/crates/kit-storage/src/config.rs` &mdash; single source of truth for
   `REPO_FORBIDDEN_KEYS` and the enforcement code path.
-- `rust/crates/mkit-cli/tests/repo_config_forbidden_keys.rs` &mdash; per-key
+- `rust/crates/kit-storage/tests/repo_config_forbidden_keys.rs` &mdash; per-key
   CLI regression suite.
 - `docs/THREAT-MODEL.md` §4 &mdash; wider trust-boundary discussion.
 - `docs/specs/SPEC-KEYSTORE.md` §8.2 &mdash; the keystore-side requirement that
@@ -320,7 +320,7 @@ and where each guarantee is anchored.
 |---|---|
 | An UNSAFE key in `<repo>/.kit/config` never reaches `Config` | read-site drop in `apply_file_inner` before `apply_kv`; the field stays at its default (§3.1) |
 | Serializing repo config never emits an UNSAFE key | explicit write-site allow-list in `config::write` (§3.2) |
-| `mkit config <key> <value>` never writes an UNSAFE key repo-scoped | the command intercepts `REPO_FORBIDDEN_KEYS` and routes to the user-scoped file (§3.2) |
+| `kit config <key> <value>` never writes an UNSAFE key repo-scoped | the command intercepts `REPO_FORBIDDEN_KEYS` and routes to the user-scoped file (§3.2) |
 | A repo can NEVER unilaterally attach ambient credentials to its own endpoint | `enforce_trusted_remote_endpoint` requires the user-scoped `trusted_remote_endpoint` to match (§3.4) |
 | A repo can NEVER make the client run the admission helper or widen its header allowlist | both keys are UNSAFE, and the helper runs only for a remote matching `trusted_remote_endpoint` (§2, §3.4) |
 | Repo-scoped `user.name` / `user.email` never influence the signed author | both are inert; `commit::resolve_author` never reads them (§2) |

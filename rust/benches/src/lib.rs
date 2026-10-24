@@ -116,7 +116,7 @@ pub struct Sample {
     pub category: String,
     /// e.g. "1 KiB", "64 KiB", "Ed25519", "100 files".
     pub axis: String,
-    /// e.g. "BLAKE3 (mkit)", "SHA-1", "git2", "git CLI".
+    /// e.g. "BLAKE3 (kit)", "SHA-1", "git2", "git CLI".
     pub library: String,
     /// Throughput in MiB/s (for byte-stream benchmarks) or ops/s (for
     /// signature benchmarks). Renderer reads `unit` to label the axis.

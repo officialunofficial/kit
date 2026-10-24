@@ -17,8 +17,8 @@
 #   1. <= 100 iterations per target invocation.
 #   2. <= 64 KiB input per iteration.
 #   3. Bounded allocations: input cap (2) + per-op output caps inside
-#      mkit-core bound the worst-case heap to ~1 MiB per iteration.
-#      mkit-core uses the global allocator in production, so we do not
+#      kit-core bound the worst-case heap to ~1 MiB per iteration.
+#      kit-core uses the global allocator in production, so we do not
 #      swap in a custom allocator in the fuzz harness — that would make
 #      the harness diverge from production. See docs/FUZZ.md.
 #   4. 100 ms wall-clock cap per iteration.
@@ -26,7 +26,7 @@
 #   6. Seeded RNG so failures reproduce.
 
 [package]
-name = "mkit-fuzz"
+name = "kit-fuzz"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -38,12 +38,12 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = "1"
 buffa = "0.9.1"
-mkit-attest = { path = "../crates/mkit-attest", features = ["grants"] }
-mkit-core = { path = "../crates/mkit-core", features = ["sparse-checkout"] }
-mkit-git-bridge = { path = "../crates/mkit-git-bridge" }
-mkit-keystore = { path = "../crates/mkit-keystore", features = ["fuzzing"] }
-mkit-rpc = { path = "../crates/mkit-rpc", features = ["arbitrary"] }
-mkit-serve = { path = "../crates/mkit-serve" }
+kit-attest = { path = "../crates/kit-attest", features = ["grants"] }
+kit-core = { path = "../crates/kit-core", features = ["sparse-checkout"] }
+kit-git-bridge = { path = "../crates/kit-git-bridge" }
+kit-keystore = { path = "../crates/kit-keystore", features = ["fuzzing"] }
+kit-rpc = { path = "../crates/kit-rpc", features = ["arbitrary"] }
+kit-serve = { path = "../crates/kit-serve" }
 tempfile = "3"
 
 # libfuzzer-sys is gated on the `libfuzzer` feature so `cargo test`

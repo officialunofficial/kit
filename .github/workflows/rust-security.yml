@@ -14,7 +14,7 @@ name: "Security: Rust"
 # REMINDER: rust/deny.toml ignores RUSTSEC-2023-0071 (yubikey transitive RSA
 # decrypt timing leak). The `ignore-deadline` job fails when the
 # re-justification date in that file has passed. See also
-# rust/crates/mkit-keystore/tests/no_rsa_decrypt.rs.
+# rust/crates/kit-keystore/tests/no_rsa_decrypt.rs.
 
 on:
   push:
@@ -57,7 +57,7 @@ jobs:
           fi
           today=$(date -u +%Y-%m-%d)
           if [[ "$today" > "$deadline" || "$today" == "$deadline" ]]; then
-            echo "::error::RUSTSEC-2023-0071 ignore in rust/deny.toml expired on $deadline (today: $today). Re-justify or drop the ignore (see rust/deny.toml and rust/crates/mkit-keystore/tests/no_rsa_decrypt.rs)." >&2
+            echo "::error::RUSTSEC-2023-0071 ignore in rust/deny.toml expired on $deadline (today: $today). Re-justify or drop the ignore (see rust/deny.toml and rust/crates/kit-keystore/tests/no_rsa_decrypt.rs)." >&2
             exit 1
           fi
           echo "RUSTSEC-2023-0071 ignore still valid until $deadline (today: $today)."

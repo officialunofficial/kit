@@ -1,0 +1,7 @@
+
+```
+$ kit definitely-nonsense
+? 64
+error: unknown command 'definitely-nonsense' (run 'kit --help' for a list of commands)
+
+```

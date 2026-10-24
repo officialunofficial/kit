@@ -1,5 +1,5 @@
 //! Object commit roundtrip — wallclock for hash + write of a small
-//! commit blob, mkit vs git2 (libgit2) vs git CLI.
+//! commit blob, kit vs git2 (libgit2) vs git CLI.
 //!
 //! All three operate on a fresh empty repo and commit a fixed payload
 //! ("hello world\n" × N) at four sizes. Numbers are wallclock ms,
@@ -10,9 +10,9 @@ use std::path::Path;
 use std::process::Command;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit, time_one_with_setup};
-use mkit_core::layout::RepoLayout;
-use mkit_core::store::ObjectStore;
+use kit_benches::{Sample, Unit, time_one_with_setup};
+use kit_core::layout::RepoLayout;
+use kit_core::store::ObjectStore;
 
 const SIZES: &[(usize, &str)] = &[
     (1, "1 file"),
@@ -34,7 +34,7 @@ fn bench_object_commit(c: &mut Criterion) {
             .map(|i| format!("file {i}\n{}\n", "hello world\n".repeat(8)).into_bytes())
             .collect();
 
-        // --- mkit-core: hash + atomic-write each payload as a blob ------
+        // --- kit-core: hash + atomic-write each payload as a blob ------
         // Uses ObjectStore::batch(), the write path every multi-object
         // command (add, commit, pack unpack) actually takes — content is
         // still fsynced per object before it becomes visible, but the
@@ -49,14 +49,14 @@ fn bench_object_commit(c: &mut Criterion) {
         // store (like store_write.rs's iter_with_setup) so writes never
         // dedup against a payload already staged by a prior iteration.
         {
-            c.bench_function(&format!("commit/{axis}/mkit"), |b| {
+            c.bench_function(&format!("commit/{axis}/kit"), |b| {
                 b.iter_with_setup(
                     || {
                         let dir = tempfile::tempdir().unwrap();
                         let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
                         (dir, store)
                     },
-                    |(_dir, store)| commit_via_mkit(&store, &payloads),
+                    |(_dir, store)| commit_via_kit(&store, &payloads),
                 );
             });
             let t = time_one_with_setup(
@@ -67,12 +67,12 @@ fn bench_object_commit(c: &mut Criterion) {
                     let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
                     (dir, store)
                 },
-                |(_dir, store)| commit_via_mkit(&store, &payloads),
+                |(_dir, store)| commit_via_kit(&store, &payloads),
             );
             samples.push(Sample {
                 category: "object-commit".into(),
                 axis: axis.into(),
-                library: "mkit".into(),
+                library: "kit".into(),
                 value: t * 1000.0,
                 unit: Unit::Millis,
             });
@@ -81,7 +81,7 @@ fn bench_object_commit(c: &mut Criterion) {
         // --- git2 (libgit2 binding) -------------------------------------
         // Same fresh-repo-per-iteration treatment: libgit2's odb.write
         // is content-addressed too, so a reused repo would dedup from
-        // the second iteration onward exactly like mkit's store.
+        // the second iteration onward exactly like kit's store.
         {
             c.bench_function(&format!("commit/{axis}/git2"), |b| {
                 b.iter_with_setup(
@@ -115,7 +115,7 @@ fn bench_object_commit(c: &mut Criterion) {
         // --- git CLI ----------------------------------------------------
         // `git hash-object -w` is also content-addressed and skips the
         // write when the object already exists, so this needs a fresh
-        // repo per iteration for the same reason as mkit and git2 above.
+        // repo per iteration for the same reason as kit and git2 above.
         if git_available {
             c.bench_function(&format!("commit/{axis}/git-cli"), |b| {
                 b.iter_with_setup(
@@ -147,7 +147,7 @@ fn bench_object_commit(c: &mut Criterion) {
         }
     }
 
-    mkit_benches::write_summary("object_commit", &samples);
+    kit_benches::write_summary("object_commit", &samples);
 }
 
 /// `git init` a fresh repo and configure a commit identity so runs
@@ -164,7 +164,7 @@ fn init_git_repo(dir: &Path) {
         .output();
 }
 
-fn commit_via_mkit(store: &ObjectStore, payloads: &[Vec<u8>]) {
+fn commit_via_kit(store: &ObjectStore, payloads: &[Vec<u8>]) {
     // ObjectStore::batch() hashes each payload (BLAKE3) and atomically
     // writes it to <objects>/<2-hex-shard>/<62-hex-suffix> via
     // tmpfile + fsync + rename, same as ObjectStore::write; the
@@ -187,7 +187,7 @@ fn commit_via_git2(repo: &git2::Repository, payloads: &[Vec<u8>]) {
 
 fn commit_via_git_cli(repo: &Path, payloads: &[Vec<u8>]) {
     // hash-object writes a blob and prints its SHA-1. No staging, no
-    // commit object — apples-to-apples with mkit's hash() above.
+    // commit object — apples-to-apples with kit's hash() above.
     use std::io::Write;
     for p in payloads {
         let mut child = Command::new("git")

@@ -1,6 +1,6 @@
 name: "Release: verify distribution channels"
 
-# Manually dispatched verification that mkit actually installs and works
+# Manually dispatched verification that kit actually installs and works
 # from every distribution channel this project ships — crates.io,
 # the curl-pipe install script, cargo binstall, and Homebrew — each in an
 # isolated environment. This is the automated, multi-channel completion of
@@ -41,7 +41,7 @@ env:
 
 jobs:
   cargo-install:
-    name: cargo install mkit-cli (crates.io)
+    name: cargo install kit-storage (crates.io)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -52,15 +52,15 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
-      - name: cargo install mkit-cli
+      - name: cargo install kit-storage
         run: |
-          cargo install mkit-cli --version "${{ inputs.version }}" --locked --root "$RUNNER_TEMP/cargo-install"
+          cargo install kit-storage --version "${{ inputs.version }}" --locked --root "$RUNNER_TEMP/cargo-install"
 
       - name: Basic flow smoke
-        run: bash scripts/basic-flow-smoke.sh "$RUNNER_TEMP/cargo-install/bin/mkit" "${{ inputs.version }}"
+        run: bash scripts/basic-flow-smoke.sh "$RUNNER_TEMP/cargo-install/bin/kit" "${{ inputs.version }}"
 
   cargo-binstall:
-    name: cargo binstall mkit-cli
+    name: cargo binstall kit-storage
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -80,12 +80,12 @@ jobs:
       # 404s and it falls back to `cargo install` — see the limitation
       # note at the top of this file. Same command either way; only the
       # fetch path differs once the repo goes public.
-      - name: cargo binstall mkit-cli
+      - name: cargo binstall kit-storage
         run: |
-          cargo binstall mkit-cli --version "${{ inputs.version }}" --locked --no-confirm --root "$RUNNER_TEMP/cargo-binstall"
+          cargo binstall kit-storage --version "${{ inputs.version }}" --locked --no-confirm --root "$RUNNER_TEMP/cargo-binstall"
 
       - name: Basic flow smoke
-        run: bash scripts/basic-flow-smoke.sh "$RUNNER_TEMP/cargo-binstall/bin/mkit" "${{ inputs.version }}"
+        run: bash scripts/basic-flow-smoke.sh "$RUNNER_TEMP/cargo-binstall/bin/kit" "${{ inputs.version }}"
 
   install-script:
     name: install.sh (${{ matrix.image }})
@@ -94,12 +94,12 @@ jobs:
     # silently-green "expected failure" is worse than a red job someone
     # has to notice is stale once the repo goes public.
     # debian/ubuntu (apt, glibc) + fedora (dnf, glibc) — deliberately no
-    # Alpine leg: mkit's release archives are glibc-only
+    # Alpine leg: kit's release archives are glibc-only
     # (x86_64/aarch64-unknown-linux-gnu, see release.yml's build matrix),
     # and neither install.sh nor docs/INSTALL.md claims musl/Alpine
     # support. Testing it would need an undocumented `gcompat` shim just
     # to run the downloaded (glibc) binary, which would test a
-    # compatibility path mkit doesn't actually support rather than a
+    # compatibility path kit doesn't actually support rather than a
     # real distribution channel.
     strategy:
       fail-fast: false
@@ -120,23 +120,23 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # Runs the install.sh AT THIS COMMIT (not curl-piped from the live
-      # mkit.sh domain) so this tests the script content actually under
+      # kit.storage domain) so this tests the script content actually under
       # review, matching the "test what's in this tree"
       # principle used elsewhere in this repo's CI.
       - name: Run install.sh
         env:
-          MKIT_VERSION: "v${{ inputs.version }}"
+          KIT_VERSION: "v${{ inputs.version }}"
         run: bash install.sh
 
       - name: Basic flow smoke
         run: |
-          bin="$(command -v mkit || echo "$HOME/.local/bin/mkit")"
+          bin="$(command -v kit || echo "$HOME/.local/bin/kit")"
           bash scripts/basic-flow-smoke.sh "$bin" "${{ inputs.version }}"
 
   homebrew:
     name: brew install (macOS)
     # See the limitation note at the top of this file — expected to fail
-    # until officialunofficial/homebrew-tap has a real Formula/mkit.rb.
+    # until officialunofficial/homebrew-tap has a real Formula/kit.rb.
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -145,14 +145,14 @@ jobs:
       - name: brew tap + install
         run: |
           brew tap officialunofficial/tap https://github.com/officialunofficial/homebrew-tap
-          brew install officialunofficial/tap/mkit
+          brew install officialunofficial/tap/kit
 
-      # Homebrew's own `test do` block (contrib/homebrew/mkit.rb) is the
+      # Homebrew's own `test do` block (contrib/homebrew/kit.rb) is the
       # formula-idiomatic smoke test; run it in addition to the shared
       # basic-flow check so a formula-level regression surfaces even if
       # someone edits the formula without touching this workflow.
       - name: brew test
-        run: brew test officialunofficial/tap/mkit
+        run: brew test officialunofficial/tap/kit
 
       - name: Basic flow smoke
-        run: bash scripts/basic-flow-smoke.sh "$(command -v mkit)" "${{ inputs.version }}"
+        run: bash scripts/basic-flow-smoke.sh "$(command -v kit)" "${{ inputs.version }}"

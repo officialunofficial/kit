@@ -1,0 +1,25 @@
+[package]
+name = "kit-serve"
+description = "Self-host server for kit: the ssh frame session over a repository on disk"
+keywords = ["kit", "vcs", "server", "ssh"]
+categories = ["network-programming", "filesystem"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Inter-workspace deps need an explicit `version` next to the path so
+# `cargo publish` accepts them.
+kit-core = { version = "0.5", path = "../kit-core" }
+kit-rpc = { version = "0.5", path = "../kit-rpc" }
+kit-transport-file = { version = "0.5", path = "../kit-transport-file" }
+
+[dev-dependencies]
+tempfile = "3"

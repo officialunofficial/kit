@@ -36,11 +36,11 @@ check() {
 }
 
 check 'issue or pull request number' \
-    '(?<![\w&:/])#[0-9]+(?![0-9a-z-])|\b(?i:issues?|prs?|pull requests?) #?[0-9]+\b|\bmkit#[0-9]+'
+    '(?<![\w&:/])#[0-9]+(?![0-9a-z-])|\b(?i:issues?|prs?|pull requests?) #?[0-9]+\b|\bkit#[0-9]+'
 check 'reference to an issue or review that the text does not name' \
     '\b(?i:originating issue|this issue|the issue.s|sibling issues?|the review.s)\b'
 check 'tracker id' \
-    '\b(?:WP|MKIT|LIN|ENG|UNO)-[0-9]|\bWP[0-9]|\bR-[0-9]{2,}\b|\bred-team\b'
+    '\b(?:WP|KIT|LIN|ENG|UNO)-[0-9]|\bWP[0-9]|\bR-[0-9]{2,}\b|\bred-team\b'
 check 'phase, stage, part or work package label' \
     '\b[Pp]hase[ -]?-?[0-9]|\bStage [0-9]|\bPart [0-9]|\b[Ww]ork packages?\b|\bM[1-9]\b|\b[Ee]pic\b'
 check 'review finding label' \

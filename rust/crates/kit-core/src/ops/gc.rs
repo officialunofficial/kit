@@ -1,0 +1,910 @@
+//! GC retention roots — the complete set of object hashes that
+//! `kit gc` must treat as live, plus the live-object closure
+//! over them.
+//!
+//! Pruning is only safe if the root set is **complete**: anything gc can
+//! reach from a root is kept; everything else is reclaimable. Missing a
+//! root means deleting a live object, so this collector is deliberately
+//! exhaustive and **fails closed** — if any source can't be read, the
+//! whole collection errors and the caller must abort rather than prune
+//! against an under-counted root set.
+//!
+//! Roots, by source:
+//! - **HEAD** (incl. detached) and every `refs/heads`, `refs/tags`, and
+//!   `refs/remotes/<remote>` ref.
+//! - **Stash** entries — each stashed commit and its recorded parent.
+//! - **In-progress operations** — merge (`MERGE_HEAD`), cherry-pick
+//!   (`CHERRY_PICK_HEAD`), rebase (`onto` + every `todo`/`done` commit),
+//!   the `ORIG_HEAD` saved by those ops and by `reset`, and the conflict
+//!   sidecar's base/ours/theirs blob hashes.
+//! - **Attestations** — every `attestations/<commit>/` directory pins
+//!   its commit so an attested commit is never orphaned.
+//! - **Recovery log** — every commit recorded as superseded by a
+//!   history-rewriting op (see [`super::recovery`]); retained so it stays
+//!   recoverable until `recovery::expire` drops it past the window.
+//!
+//! RECOVERY: commits superseded by `commit --amend`, `reset`, or
+//! `rebase` are unrecoverable from the opaque-digest history journal, so
+//! [`super::recovery`] logs them (the commands record the old tip before
+//! moving the ref) and they are roots here.
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::io;
+use std::path::Path;
+
+use crate::hash::{self, Hash};
+use crate::index;
+use crate::layout::RepoLayout;
+use crate::store::{ObjectStore, StoreError};
+
+use super::conflict_state;
+use super::graph::reachable_closure_checked;
+use super::rebase;
+use super::recovery;
+use super::stash;
+use crate::refs::{self, HEADS_DIR, REMOTES_DIR, TAGS_DIR};
+
+/// Directory under `.kit/` holding per-commit attestation envelopes.
+/// Owned here (not in `kit-attest`) so the core collector stays free of
+/// a reverse crate dependency — it only reads directory *names*.
+const ATTESTATIONS_DIR: &str = "attestations";
+
+/// Depth cap for the strict ref walk. Refs nest by `/` in the name;
+/// anything deeper than this on disk is treated as an error (fail
+/// closed) rather than silently truncated.
+const MAX_REF_WALK_DEPTH: usize = 64;
+
+/// Errors from collecting the retention root set. Every underlying
+/// source error is wrapped so the collector can fail closed.
+///
+/// `#[non_exhaustive]`: new root sources (like the staging index, added
+/// in 0.2.0) come with new variants; downstream matches must keep a
+/// wildcard arm so those additions stay minor-version changes.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum GcRootsError {
+    #[error("refs: {0}")]
+    Refs(#[from] refs::RefError),
+    #[error("stash: {0}")]
+    Stash(#[from] stash::StashError),
+    #[error("conflict state: {0}")]
+    ConflictState(#[from] conflict_state::ConflictStateError),
+    #[error("rebase state: {0}")]
+    Rebase(#[from] rebase::RebaseError),
+    #[error("recovery log: {0}")]
+    Recovery(#[from] recovery::RecoveryError),
+    #[error("staging index: {0}")]
+    Index(#[from] index::IndexError),
+    #[error("object store: {0}")]
+    Store(#[from] StoreError),
+    #[error("malformed object id on disk: {0}")]
+    BadHash(#[from] hash::FromHexError),
+    #[error("io: {0}")]
+    Io(#[from] io::Error),
+    /// The reachable-object walk hit [`super::graph::MAX_REACHABLE`]
+    /// before completing. The live set is incomplete, so a caller must
+    /// abort rather than treat beyond-cap objects as prunable.
+    #[error("object graph exceeds the reachability cap; refusing to compute a partial keep-set")]
+    Truncated,
+    /// A ref directory nested deeper than `MAX_REF_WALK_DEPTH`.
+    #[error("ref tree too deep at {0} (fail closed)")]
+    RefTooDeep(String),
+    /// `.kit` or `.kit/objects` is a symlink. A deletion-capable gc
+    /// refuses, since pruning would follow the link and unlink files
+    /// outside the repo.
+    #[error("refusing to gc: {0} is a symlink (objects may live outside the repo)")]
+    SymlinkedStore(String),
+    /// The linked-worktree registry could not be enumerated. Root
+    /// collection must union EVERY tree's per-tree state;
+    /// a partial view would let a sibling's staged work be pruned.
+    #[error("worktree registry: {0}")]
+    Worktrees(#[from] crate::layout::DiscoverError),
+}
+
+/// Collect the complete set of GC retention roots for the repo at
+/// the repository described by `layout`. The returned hashes are roots,
+/// not the closure — feed them to `reachable_closure` (or use
+/// [`live_objects`]) to get the full keep-set.
+///
+/// The all-zero hash is filtered out (an unset ref / `ORIG_HEAD`).
+///
+/// # Errors
+///
+/// [`GcRootsError`] if any source (refs, stash, op state, attestation
+/// dir) cannot be read — the caller must then abort, never prune.
+pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError> {
+    let mut roots: BTreeSet<Hash> = BTreeSet::new();
+    let add = |h: Hash, set: &mut BTreeSet<Hash>| {
+        if h != hash::ZERO {
+            set.insert(h);
+        }
+    };
+
+    // Branches, tags, and remote-tracking refs. We deliberately do NOT
+    // use `refs::list_refs`/`list_tags`/`list_remote_refs` here: those
+    // are lenient (they yield `hash: None` for malformed content, skip
+    // unreadable files, and silently stop at a depth cap), which would
+    // let a corrupt ref drop out of the root set while collection still
+    // "succeeds" — exactly the fail-open hole gc cannot tolerate. The
+    // strict walk below errors on any unreadable / undecodable / too-deep
+    // ref instead.
+    for ns in [HEADS_DIR, TAGS_DIR, REMOTES_DIR] {
+        walk_ref_roots_strict(&layout.common_dir().join(ns), ns, 0, &mut roots)?;
+    }
+
+    // Per-tree sources, unioned over EVERY worktree of the repository
+    // the main tree plus each registered state dir —
+    // including prunable-but-unpruned ones, whose staged work stays
+    // pinned until `worktree prune` explicitly reaps it. Fail closed:
+    // a registry error or an unreadable sibling state aborts
+    // collection entirely.
+    for tree in crate::layout::all_state_layouts(layout)? {
+        collect_tree_roots(&tree, &add, &mut roots)?;
+    }
+
+    // Attested commits — pinned so an attestation never dangles.
+    for h in attested_commits(layout.common_dir())? {
+        add(h, &mut roots);
+    }
+
+    // A crash may leave a history intent before its target ref is published.
+    // Retain both sides even on builds without the history-mmr feature.
+    for h in refs::pending_history_roots(layout)? {
+        add(h, &mut roots);
+    }
+
+    // Recovery log — commits superseded by amend/reset/rebase, retained
+    // so they stay recoverable. Clock-free here: `recovery::expire` (a
+    // gc maintenance step) drops entries past the retention window so
+    // they stop pinning objects.
+    for h in recovery::roots(layout)? {
+        add(h, &mut roots);
+    }
+
+    Ok(roots)
+}
+
+/// One worktree's per-tree retention roots: HEAD, staging index,
+/// `ORIG_HEAD`, in-progress merge/cherry-pick/revert/rebase state,
+/// conflict sidecars, and the tree-local stash.
+fn collect_tree_roots(
+    tree: &crate::layout::RepoLayout,
+    add: &impl Fn(Hash, &mut BTreeSet<Hash>),
+    roots: &mut BTreeSet<Hash>,
+) -> Result<(), GcRootsError> {
+    // HEAD (covers a detached HEAD not present under refs/heads).
+    if let Some(h) = refs::resolve_head(tree)? {
+        add(h, roots);
+    }
+
+    // Stash: each stashed commit and the HEAD it was based on.
+    for entry in stash::list(tree)?.entries {
+        add(entry.commit_hash, roots);
+        add(entry.parent_hash, roots);
+    }
+
+    // Staging index — blobs recorded by `kit add` but not yet
+    // committed. They are reachable from no ref, so without this root
+    // staged work would be pruned once it ages past the grace window
+    // (or immediately under `--grace-secs 0`). `read_index` is strict
+    // (errors on corrupt/oversized index), so a damaged index aborts
+    // gc instead of silently dropping roots.
+    for entry in index::read_index(tree)?.entries {
+        add(entry.object_hash, roots);
+    }
+
+    // ORIG_HEAD (written by reset and by the in-progress ops below).
+    if let Some(h) = read_optional_hash(&tree.orig_head_file())? {
+        add(h, roots);
+    }
+
+    // In-progress merge / cherry-pick / revert.
+    if let Some(m) = conflict_state::read_merge_state(tree)? {
+        add(m.merge_head, roots);
+        add(m.orig_head, roots);
+    }
+    if let Some(c) = conflict_state::read_cherry_pick_state(tree)? {
+        add(c.cherry_pick_head, roots);
+        add(c.orig_head, roots);
+    }
+    if let Some(r) = conflict_state::read_revert_state(tree)? {
+        add(r.revert_head, roots);
+        add(r.orig_head, roots);
+    }
+
+    // In-progress rebase: target + every commit still to replay or
+    // already replayed onto the new base.
+    if rebase::is_rebase_in_progress(tree) {
+        let st = rebase::read_state(tree)?;
+        add(st.orig_head, roots);
+        add(st.onto, roots);
+        for h in st.todo.into_iter().chain(st.done) {
+            add(h, roots);
+        }
+    }
+
+    // Conflict sidecar: base/ours/theirs blobs needed to resolve an
+    // in-progress conflict. Merge/cherry-pick write `kit-conflicts`
+    // in the state dir; rebase writes its sidecar inside
+    // `rebase-apply/`. Both are empty/absent when no conflict is
+    // recorded.
+    for dir in [tree.worktree_state_dir().to_path_buf(), tree.rebase_dir()] {
+        for c in conflict_state::read_conflicts(&dir)? {
+            for h in [c.base_hash, c.ours_hash, c.theirs_hash]
+                .into_iter()
+                .flatten()
+            {
+                add(h, roots);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The full live-object keep-set for `kit gc`: the reachable closure
+/// over every retention root from [`collect_roots`].
+///
+/// Does not verify leaf (blob/delta) content integrity as part of the
+/// walk — see [`super::graph::reachable_closure`]'s "Content integrity
+/// of leaves" doc section. `gc` is therefore no longer an incidental
+/// corruption-detection pass over blob content the way it was before the
+/// object-type short-circuit; it still fails closed on a *missing* object, just not on a
+/// present-but-corrupted one.
+///
+/// # Errors
+///
+/// [`GcRootsError`] if roots cannot be collected, or a [`StoreError`]
+/// (e.g. a root or referenced object missing) during the walk.
+pub fn live_objects(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+) -> Result<BTreeSet<Hash>, GcRootsError> {
+    let roots = collect_roots(layout)?;
+    let (live, truncated) = reachable_closure_checked(store, roots.iter())?;
+    if truncated {
+        return Err(GcRootsError::Truncated);
+    }
+    Ok(live)
+}
+
+/// Outcome of a [`run_gc`] sweep.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GcReport {
+    /// Objects examined in the store.
+    pub scanned: usize,
+    /// Objects retained because they are reachable from a root.
+    pub live: usize,
+    /// Unreachable objects retained anyway — within the grace window, or
+    /// whose age could not be determined (kept fail-safe).
+    pub kept_recent: usize,
+    /// Unreachable objects pruned (or that *would* be pruned in a dry run).
+    pub pruned: usize,
+    /// Bytes reclaimed by the pruned objects.
+    pub bytes_reclaimed: u64,
+    /// True if this was a dry run (nothing deleted).
+    pub dry_run: bool,
+}
+
+/// Mark-and-sweep prune: keep every object reachable from the retention
+/// roots ([`live_objects`]) plus every unreachable object younger than
+/// `grace_secs` (relative to `now_secs`); delete the rest. With
+/// `dry_run`, computes the report without deleting anything.
+///
+/// **Fail closed / fail safe.** If the live set can't be computed (a
+/// missing/corrupt root, a malformed ref, or the reachability cap), this
+/// returns an error and deletes nothing. An object whose age can't be
+/// read is kept, never pruned. The caller MUST hold the repo lock so the
+/// live set can't shift mid-sweep (see [`super::recovery`]); `gc` runs
+/// `recovery::expire` then this, all under that lock.
+///
+/// # Errors
+/// [`GcRootsError`] from [`live_objects`], store enumeration, or a delete.
+pub fn run_gc(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    now_secs: u64,
+    grace_secs: u64,
+    dry_run: bool,
+) -> Result<GcReport, GcRootsError> {
+    run_gc_with_hook(store, layout, now_secs, grace_secs, dry_run, |_| {})
+}
+
+fn run_gc_with_hook(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    now_secs: u64,
+    grace_secs: u64,
+    dry_run: bool,
+    mut before_prune: impl FnMut(&Hash),
+) -> Result<GcReport, GcRootsError> {
+    // Refuse to delete through a symlinked store: if `.kit` or
+    // `.kit/objects` is a symlink, `remove_object` would unlink the
+    // link target's files — potentially outside the repo. (Dry runs are
+    // safe but we reject uniformly so a preview matches the real run.)
+    reject_symlink(layout.common_dir())?;
+    reject_symlink(store.objects_root())?;
+
+    // Compute the keep-set FIRST; if this fails we delete nothing.
+    let live = live_objects(store, layout)?;
+    let all = store.iter_object_hashes()?;
+
+    let mut report = GcReport {
+        dry_run,
+        ..GcReport::default()
+    };
+    for h in all {
+        report.scanned += 1;
+        if live.contains(&h) {
+            report.live += 1;
+            continue;
+        }
+        // Unreachable. Keep it if it is within the grace window, or if
+        // its age cannot be determined (fail safe — never delete when
+        // uncertain).
+        let Ok(meta) = store.object_metadata(&h) else {
+            report.kept_recent += 1;
+            continue;
+        };
+        let age_known_old = crate::store::old_enough(&meta, now_secs, grace_secs);
+        if !age_known_old {
+            report.kept_recent += 1;
+            continue;
+        }
+        let mut len = meta.len();
+        if !dry_run {
+            before_prune(&h);
+            let Some(reclaimed) = store.prune_if_old(&h, now_secs, grace_secs)? else {
+                report.kept_recent += 1;
+                continue;
+            };
+            len = reclaimed;
+        }
+        report.pruned += 1;
+        report.bytes_reclaimed += len;
+    }
+    Ok(report)
+}
+
+/// Strict, fail-closed walk of a ref namespace directory (e.g.
+/// `refs/heads`), inserting every ref's target hash into `roots`.
+///
+/// Unlike `refs::list_refs`, this errors instead of skipping on:
+/// unreadable files ([`io::Error`]), undecodable content
+/// ([`hash::FromHexError`]), and excessive nesting
+/// ([`GcRootsError::RefTooDeep`]). Dot-files are skipped (lock/temp
+/// cruft), and an absent namespace dir yields no roots. The all-zero
+/// hash (an unset ref) is excluded.
+fn walk_ref_roots_strict(
+    dir: &Path,
+    rel: &str,
+    depth: usize,
+    roots: &mut BTreeSet<Hash>,
+) -> Result<(), GcRootsError> {
+    if depth > MAX_REF_WALK_DEPTH {
+        return Err(GcRootsError::RefTooDeep(rel.to_owned()));
+    }
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in rd {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            walk_ref_roots_strict(&entry.path(), &format!("{rel}/{name}"), depth + 1, roots)?;
+            continue;
+        }
+        if !ft.is_file() || name.starts_with('.') {
+            // Skip non-files and lock/temp cruft (e.g. `*.lock`, dotfiles).
+            continue;
+        }
+        // Strict: read + decode, erroring (fail closed) on any failure.
+        let raw = fs::read_to_string(entry.path())?;
+        let h = hash::from_hex(raw.trim())?;
+        if h != hash::ZERO {
+            roots.insert(h);
+        }
+    }
+    Ok(())
+}
+
+/// Commit hashes that have at least one attestation envelope, taken from
+/// the `attestations/<commit-hex>/` directory names. Non-hex directory
+/// names are ignored (defensive); a missing dir yields an empty set.
+fn attested_commits(common_dir: &Path) -> Result<Vec<Hash>, io::Error> {
+    let dir = common_dir.join(ATTESTATIONS_DIR);
+    let mut out = Vec::new();
+    let rd = match fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e),
+    };
+    for entry in rd {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str()
+            && let Ok(h) = hash::from_hex(name)
+        {
+            out.push(h);
+        }
+    }
+    Ok(out)
+}
+
+/// Read a single 64-hex object id from `path`, trimming trailing
+/// whitespace. `Ok(None)` if the file is absent.
+fn read_optional_hash(path: &Path) -> Result<Option<Hash>, GcRootsError> {
+    let raw = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(hash::from_hex(trimmed)?))
+}
+
+// =====================================================================
+// Tests
+// =====================================================================
+
+/// Error if `path` is a symlink — a deletion-capable gc must not follow
+/// it (the target may be outside the repo). Absent path is fine.
+fn reject_symlink(path: &Path) -> Result<(), GcRootsError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            Err(GcRootsError::SymlinkedStore(path.display().to_string()))
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object::EntryMode;
+    use crate::object::{Blob, Commit, Identity, Object, Tree, TreeEntry};
+    use crate::serialize;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// A repo with an initialized `.kit` dir + object store.
+    fn repo() -> (TempDir, ObjectStore) {
+        let d = TempDir::new().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(d.path())).unwrap();
+        refs::init(&RepoLayout::single(d.path())).unwrap();
+        (d, store)
+    }
+
+    fn layout(d: &TempDir) -> RepoLayout {
+        RepoLayout::single(d.path())
+    }
+
+    /// Write a loose ref file (e.g. `refs/heads/main`) — the on-disk
+    /// form `list_refs`/`list_tags` read.
+    fn write_ref(md: &RepoLayout, rel: &str, h: &Hash) {
+        let path = md.common_dir().join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("{}\n", hash::to_hex(h))).unwrap();
+    }
+
+    fn write_blob(s: &ObjectStore, data: &[u8]) -> Hash {
+        s.write(
+            &serialize::serialize(&Object::Blob(Blob {
+                data: data.to_vec(),
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Commit a single-file tree; returns `(commit, blob)` hashes.
+    fn commit_one(s: &ObjectStore, name: &[u8], data: &[u8], parents: Vec<Hash>) -> (Hash, Hash) {
+        let blob = write_blob(s, data);
+        let tree = s
+            .write(
+                &serialize::serialize(&Object::Tree(Tree {
+                    entries: vec![TreeEntry {
+                        name: name.to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: blob,
+                    }],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let commit = s
+            .write(
+                &serialize::serialize(&Object::Commit(Commit {
+                    tree_hash: tree,
+                    parents,
+                    author: Identity::opaque(b"t".to_vec()),
+                    signer: [0u8; 32],
+                    message: name.to_vec(),
+                    // Per-commit divergence so distinct fixtures don't dedup.
+                    timestamp: name.len() as u64,
+                    message_hash: [0u8; 32],
+                    content_digest: [0u8; 32],
+                    signature: [0u8; 64],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        (commit, blob)
+    }
+
+    #[test]
+    fn collect_roots_includes_branches_and_tags() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (c1, _) = commit_one(&s, b"a", b"a", vec![]);
+        let (c2, _) = commit_one(&s, b"b", b"b", vec![]);
+        write_ref(&md, "refs/heads/main", &c1);
+        write_ref(&md, "refs/tags/v1", &c2);
+
+        let roots = collect_roots(&md).unwrap();
+        assert!(roots.contains(&c1), "branch tip must be a root");
+        assert!(roots.contains(&c2), "tag target must be a root");
+    }
+
+    #[test]
+    fn collect_roots_includes_orig_head_and_attested_commit() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (orig, _) = commit_one(&s, b"o", b"o", vec![]);
+        let (att, _) = commit_one(&s, b"x", b"x", vec![]);
+        fs::write(md.orig_head_file(), format!("{}\n", hash::to_hex(&orig))).unwrap();
+        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&att))).unwrap();
+
+        let roots = collect_roots(&md).unwrap();
+        assert!(roots.contains(&orig), "ORIG_HEAD must be a root");
+        assert!(roots.contains(&att), "attested commit must be a root");
+    }
+
+    #[test]
+    fn live_objects_keeps_only_reachable_closure() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, kept_blob) = commit_one(&s, b"keep", b"keep", vec![]);
+        // An unreferenced commit + blob: reachable from no root.
+        let (orphan, orphan_blob) = commit_one(&s, b"orphan", b"orphan", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+
+        let live = live_objects(&s, &md).unwrap();
+        assert!(
+            live.contains(&kept) && live.contains(&kept_blob),
+            "kept closure live"
+        );
+        assert!(
+            !live.contains(&orphan) && !live.contains(&orphan_blob),
+            "unreferenced objects must not be live"
+        );
+    }
+
+    /// Test-only mirror of [`live_objects`] with an injectable
+    /// reachability cap, so the `GcRootsError::Truncated` fail-closed
+    /// abort can be exercised without constructing `MAX_REACHABLE` (10
+    /// million) objects.
+    fn live_objects_with_cap(
+        store: &ObjectStore,
+        layout: &RepoLayout,
+        cap: usize,
+    ) -> Result<BTreeSet<Hash>, GcRootsError> {
+        let roots = collect_roots(layout)?;
+        let (live, truncated) =
+            super::super::graph::reachable_closure_checked_with_cap(store, roots.iter(), cap)?;
+        if truncated {
+            return Err(GcRootsError::Truncated);
+        }
+        Ok(live)
+    }
+
+    #[test]
+    fn live_objects_aborts_truncated_when_closure_exceeds_cap() {
+        // gc's fail-closed contract: beyond the reachability cap the
+        // "unreachable" verdict is unsound, so live_objects (and
+        // therefore run_gc) must abort rather than prune against a
+        // partial closure. Each commit_one call adds 3 objects
+        // (commit + tree + blob); two commits give 6 reachable objects,
+        // comfortably over an injected cap of 2.
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (c1, _) = commit_one(&s, b"a", b"a", vec![]);
+        let (c2, _) = commit_one(&s, b"b", b"b", vec![c1]);
+        write_ref(&md, "refs/heads/main", &c2);
+
+        let err = live_objects_with_cap(&s, &md, 2).unwrap_err();
+        assert!(matches!(err, GcRootsError::Truncated));
+
+        // Sanity: the same closure with a generous cap succeeds and
+        // contains every object from both commits.
+        let live = live_objects_with_cap(&s, &md, 1000).unwrap();
+        assert!(live.contains(&c1) && live.contains(&c2));
+    }
+
+    #[test]
+    fn reachable_closure_is_union_of_single_root_closures() {
+        let (_d, s) = repo();
+        let (c1, b1) = commit_one(&s, b"a", b"a", vec![]);
+        let (c2, b2) = commit_one(&s, b"b", b"b", vec![]);
+        let multi = super::super::graph::reachable_closure(&s, [&c1, &c2]).unwrap();
+        let single1 = super::super::graph::reachable_objects(&s, &c1).unwrap();
+        let single2 = super::super::graph::reachable_objects(&s, &c2).unwrap();
+        let union: BTreeSet<Hash> = single1.union(&single2).copied().collect();
+        assert_eq!(multi, union);
+        assert!([c1, b1, c2, b2].iter().all(|h| multi.contains(h)));
+    }
+
+    #[test]
+    fn strict_walk_picks_up_nested_remote_ref() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (c, _) = commit_one(&s, b"r", b"r", vec![]);
+        write_ref(&md, "refs/remotes/origin/main", &c);
+        assert!(
+            collect_roots(&md).unwrap().contains(&c),
+            "nested remote-tracking ref must be a root"
+        );
+    }
+
+    #[test]
+    fn run_gc_prunes_orphans_but_never_a_live_object() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        // Live: a branch commit + its tree + blob.
+        let (kept, kept_blob) = commit_one(&s, b"keep", b"keep", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        let live = live_objects(&s, &md).unwrap();
+        // Orphans: unreferenced commit + its tree + blob.
+        let (orphan, orphan_blob) = commit_one(&s, b"orphan", b"orphan", vec![]);
+
+        // grace=0 → all unreachable objects are old enough to prune.
+        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+
+        // The safety invariant: every live object still present.
+        for h in &live {
+            assert!(s.contains(h), "gc must never delete a live object");
+        }
+        // Orphan closure gone.
+        assert!(
+            !s.contains(&orphan) && !s.contains(&orphan_blob),
+            "orphans pruned"
+        );
+        assert_eq!(report.live, live.len());
+        assert!(
+            report.pruned >= 2,
+            "orphan commit + blob pruned: {report:?}"
+        );
+        // Sanity: kept objects accounted as live.
+        assert!(s.contains(&kept) && s.contains(&kept_blob));
+    }
+
+    #[test]
+    fn run_gc_keeps_staged_but_uncommitted_blobs() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        // A committed branch so the repo has a normal ref-side root.
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        // Stage a blob no commit references — what `kit add` leaves
+        // behind: the object in the store + an index entry.
+        let staged = write_blob(&s, b"staged-only");
+        let idx = index::Index::from_entries(vec![index::IndexEntry {
+            path: "staged.txt".into(),
+            status: index::EntryStatus::Blob,
+            object_hash: staged,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        }]);
+        index::write_index(&md, &idx).unwrap();
+
+        assert!(
+            collect_roots(&md).unwrap().contains(&staged),
+            "staged blob must be a retention root"
+        );
+        // grace=0 → anything unrooted is pruned immediately.
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert!(
+            s.contains(&staged),
+            "gc must never delete staged-but-uncommitted content"
+        );
+    }
+
+    #[test]
+    fn run_gc_grace_window_keeps_recent_orphans() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        let (orphan, _) = commit_one(&s, b"o", b"o", vec![]);
+
+        // Huge grace window with now=0 → nothing is "old", so the orphan
+        // is kept despite being unreachable.
+        let report = run_gc(&s, &md, 0, u64::MAX, false).unwrap();
+        assert!(s.contains(&orphan), "recent orphan kept by grace window");
+        assert_eq!(report.pruned, 0);
+        assert!(report.kept_recent >= 1, "{report:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_gc_refuses_symlinked_objects_dir() {
+        use std::os::unix::fs::symlink;
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+
+        // Replace `.kit/objects` with a symlink to an external dir. A
+        // deletion-capable gc must refuse rather than prune through it.
+        let external = d.path().join("external-objects");
+        let real_objects = md.objects_dir();
+        fs::create_dir_all(&external).unwrap();
+        // Move existing shards out so the symlink target holds them.
+        for entry in fs::read_dir(&real_objects).unwrap() {
+            let entry = entry.unwrap();
+            fs::rename(entry.path(), external.join(entry.file_name())).unwrap();
+        }
+        fs::remove_dir_all(&real_objects).unwrap();
+        symlink(&external, &real_objects).unwrap();
+
+        let err = run_gc(&s, &md, u64::MAX, 0, false).unwrap_err();
+        assert!(
+            matches!(err, GcRootsError::SymlinkedStore(_)),
+            "gc must refuse a symlinked objects dir, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn run_gc_dry_run_deletes_nothing() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        let (orphan, _) = commit_one(&s, b"o", b"o", vec![]);
+
+        let report = run_gc(&s, &md, u64::MAX, 0, true).unwrap();
+        assert!(report.dry_run && report.pruned >= 1, "{report:?}");
+        assert!(s.contains(&orphan), "dry run must not delete the orphan");
+    }
+
+    #[test]
+    fn run_gc_keeps_recovery_logged_orphan() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        // An orphan that is recorded in the recovery log must survive gc.
+        let (superseded, superseded_blob) = commit_one(&s, b"old", b"old", vec![]);
+        super::super::recovery::record(
+            &md,
+            &super::super::recovery::RecoveryEntry {
+                timestamp: 1,
+                op: "amend".into(),
+                superseded,
+                branch: "main".into(),
+            },
+        )
+        .unwrap();
+
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert!(
+            s.contains(&superseded) && s.contains(&superseded_blob),
+            "a recovery-logged commit must not be pruned"
+        );
+    }
+
+    #[test]
+    fn collect_roots_includes_recovery_log_entries() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (superseded, _) = commit_one(&s, b"old", b"old", vec![]);
+        super::super::recovery::record(
+            &md,
+            &super::super::recovery::RecoveryEntry {
+                timestamp: 1,
+                op: "amend".into(),
+                superseded,
+                branch: "main".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            collect_roots(&md).unwrap().contains(&superseded),
+            "a superseded commit in the recovery log must be a root"
+        );
+    }
+
+    #[test]
+    fn corrupt_or_truncated_staging_aborts_gc_before_sweep() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let staged = write_blob(&s, b"only staged copy");
+        for bytes in [
+            Vec::new(),
+            b"MKIX\x03\0\0\0\0".to_vec(),
+            b"MKIX\x04\0\0\0\0".to_vec(),
+        ] {
+            fs::write(md.index_file(), &bytes).unwrap();
+            assert!(run_gc(&s, &md, u64::MAX, 0, false).is_err());
+            assert!(s.contains(&staged));
+        }
+    }
+
+    #[test]
+    fn collect_roots_fails_closed_on_malformed_ref() {
+        let (d, _s) = repo();
+        let md = layout(&d);
+        // A corrupt ref file (not 64-hex) must error, never be silently
+        // dropped — else gc could prune the object it should pin.
+        let bad = md.heads_dir().join("corrupt");
+        fs::create_dir_all(bad.parent().unwrap()).unwrap();
+        fs::write(&bad, b"not-a-valid-object-id\n").unwrap();
+        assert!(
+            matches!(collect_roots(&md), Err(GcRootsError::BadHash(_))),
+            "malformed ref must fail closed"
+        );
+    }
+
+    #[test]
+    fn strict_walk_skips_lock_and_dotfile_cruft() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (c, _) = commit_one(&s, b"m", b"m", vec![]);
+        write_ref(&md, "refs/heads/main", &c);
+        // Atomic-write temp files are dotfiles; a stale one must not
+        // break collection.
+        fs::write(md.heads_dir().join(".main.tmp.123.4"), b"garbage").unwrap();
+        let roots = collect_roots(&md).unwrap();
+        assert!(roots.contains(&c), "real ref still collected past cruft");
+    }
+}
+
+#[cfg(test)]
+mod sweep_interleaving_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn refresh_between_candidate_check_and_unlink_is_kept() {
+        let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        crate::refs::init(&layout).unwrap();
+        let bytes = b"old orphan reused by concurrent import";
+        let h = store.write(bytes).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::File::open(store.path_for(&h))
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(now - 100))
+            .unwrap();
+        let report = run_gc_with_hook(&store, &layout, now, 10, false, |candidate| {
+            assert_eq!(candidate, &h);
+            let mut writer = store.bulk_writer();
+            writer.write(bytes).unwrap();
+            writer.commit().unwrap();
+        })
+        .unwrap();
+        assert!(
+            store.contains(&h),
+            "refreshed object was pruned: {report:?}"
+        );
+        assert_eq!(report.pruned, 0);
+        assert_eq!(report.kept_recent, 1);
+    }
+}

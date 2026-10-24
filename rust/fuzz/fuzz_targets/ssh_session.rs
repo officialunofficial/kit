@@ -1,11 +1,11 @@
-//! cargo-fuzz target for the ssh session of `mkit-serve`: arbitrary client
+//! cargo-fuzz target for the ssh session of `kit-serve`: arbitrary client
 //! bytes after a valid `Hello`.
 
 #![no_main]
 #![cfg(feature = "libfuzzer")]
 
+use kit_fuzz::{MAX_ITER, run_one, ssh_session_one_iteration};
 use libfuzzer_sys::fuzz_target;
-use mkit_fuzz::{MAX_ITER, run_one, ssh_session_one_iteration};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static ITERS: AtomicU32 = AtomicU32::new(0);

@@ -2,7 +2,7 @@
 spec: SPEC-TRANSPORT-CONNECT
 version: 2
 status: draft-normative
-audience: implementers of kit.transport.v1 Connect servers and clients (reference Worker, `mkit-server`, native CLI transport)
+audience: implementers of kit.transport.v1 Connect servers and clients (reference Worker, `kit-server`, native CLI transport)
 ---
 
 # SPEC-TRANSPORT-CONNECT &mdash; kit.transport.v1, the canonical Connect remote protocol
@@ -16,7 +16,7 @@ resumable parts (§7.6), ref deletion (§7.8), read consistency and
 paging (§7.9), admission challenges (§5.1),
 and the per-RPC upload lifecycle (§7.7). `kit.transport.v1` evolves
 additively: v2 adds RPCs and fields and never renumbers or removes one,
-so `buf breaking` stays green. The breaks are semantic only. mkit is
+so `buf breaking` stays green. The breaks are semantic only. kit is
 pre-production (CONTRIBUTING, "Pre-production compatibility policy"), so
 v2 has no v1 compatibility machinery: no v1 reader, no negotiation, and
 no fallback mode. The proto messages v2 names land with the version 2
@@ -30,7 +30,7 @@ proto shape, verb-to-trait mapping, CAS semantics, error-code mapping,
 pack-transfer streaming design, repository addressing, write
 authorization policy, upload tickets, admission challenges, and read
 consistency &mdash; and how
-the deployment targets (reference Worker, `mkit-server`, native CLI
+the deployment targets (reference Worker, `kit-server`, native CLI
 client) consume one generated codebase. It does not cover S3 multipart,
 the `WatchRefs` live-feed migration, pricing or admission verification,
 or any server/client implementation; those are separate changes (§8).
@@ -38,17 +38,17 @@ Write and read grants, epochs, signed reads, and private repositories
 are [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md)'s.
 
 Replaces the removed JSON HTTP transport (SPEC-TRANSPORT §5) behind
-`kit+https://`/`kit+http://` in `mkit-cli` &mdash;
-`mkit-transport-connect` is what `remote_dispatch` constructs for those
+`kit+https://`/`kit+http://` in `kit-storage` &mdash;
+`kit-transport-connect` is what `remote_dispatch` constructs for those
 schemes. The `sparse-checkout` and `pack-shards` extensions have no
 `kit.transport.v1` equivalent.
 
-Reference implementation: `mkit-transport-connect` (the native CLI
-client, §7.3) against `mkit-transport-connect/tests/roundtrip.rs`'s
+Reference implementation: `kit-transport-connect` (the native CLI
+client, §7.3) against `kit-transport-connect/tests/roundtrip.rs`'s
 in-process server &mdash; real HTTP, real protobuf framing, real Connect
-streaming, backed by `mkit-transport-memory` rather than R2/a Durable
-Object. The `mkit-server` library and its conformance host (§7.2) drive the same
-client end to end; they replaced `mkit serve --http`, which the CLI no longer has.
+streaming, backed by `kit-transport-memory` rather than R2/a Durable
+Object. The `kit-server` library and its conformance host (§7.2) drive the same
+client end to end; they replaced `kit serve --http`, which the CLI no longer has.
 [`apps/vcs-worker`](../../apps/vcs-worker)
 implements the unary and client-streaming RPCs
 (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`/`UploadPack`)
@@ -60,11 +60,11 @@ end-to-end delivery risk remain unverified by that implementation. Every
 RPC has been manually verified against a real local `wrangler dev`
 instance (real R2/DO emulation, real Ed25519-signed envelopes) &mdash; see
 `apps/vcs-worker/README.md` "Known limitations" for the trial writeup,
-including a SECOND pass driving the real `mkit` CLI (`push`/`clone`/
+including a SECOND pass driving the real `kit` CLI (`push`/`clone`/
 `pull`) end to end against this exact server through `ConnectTransport`'s
 new envelope-signing auth mode (§7.3). `ConnectTransport` now supports
 BOTH the bearer-token scheme (SPEC-TRANSPORT §5.2, unchanged, used by
-bearer-mode `mkit-server` deployments) and this server's Ed25519 write envelope (§7.1) as
+bearer-mode `kit-server` deployments) and this server's Ed25519 write envelope (§7.1) as
 independent, additive auth modes &mdash; see §7.3. No AUTOMATED test drives
 this client/server pair yet (the `wrangler dev` verification above is
 manual, matching `apps/vcs-worker`'s existing testing posture for
@@ -84,13 +84,13 @@ The proto lives at
 
 ```
 buf.yaml (repo root, v2, three-module workspace)
-├── rust/crates/mkit-rpc/proto         → kit.rpc.v1 (+ .signer, .ssh, .verify)
+├── rust/crates/kit-rpc/proto         → kit.rpc.v1 (+ .signer, .ssh, .verify)
 ├── apps/repo-worker/proto             → kit.repo.v1
 └── proto/kit/transport/v1/transport.proto   → kit.transport.v1
 ```
 
 This module shares the repo-root `buf.yaml` workspace ("buf
-workspace + proto path restructure") alongside `rust/crates/mkit-rpc/proto`
+workspace + proto path restructure") alongside `rust/crates/kit-rpc/proto`
 (`kit.rpc.v1`) and `apps/repo-worker/proto` (`kit.repo.v1`). `buf
 lint` / `buf breaking` run from the repo root against the whole
 workspace &mdash; see `CONTRIBUTING.md`'s "Protobuf schemas (buf)" section.
@@ -117,8 +117,8 @@ is the one package still pending the same move.
 ## 2. Verb-to-RPC mapping
 
 `TransportService` maps one-to-one onto the verbs of the
-[`Transport`](../../rust/crates/mkit-core/src/protocol.rs) trait &mdash; the
-same trait `mkit-transport-s3` and `-ssh` implement.
+[`Transport`](../../rust/crates/kit-core/src/protocol.rs) trait &mdash; the
+same trait `kit-transport-s3` and `-ssh` implement.
 
 | `Transport` trait method | RPC | Shape |
 |---|---|---|
@@ -278,7 +278,7 @@ unary call instead of an `SshFrame` or a JSON body:
 | `Match(h)` | `REF_EXPECTATION_MATCH` | 32-byte digest `h` | Current ref value MUST equal `h`. |
 
 A conforming server MUST reject `REF_EXPECTATION_UNSPECIFIED` (the
-proto zero value) with Connect code `invalid_argument` &mdash; mkit is
+proto zero value) with Connect code `invalid_argument` &mdash; kit is
 alpha (pre-1.0); there is no back-compat surface for a client that
 omits `expectation`.
 
@@ -339,7 +339,7 @@ message AdvanceRefsRequest {
 ```
 
 `AdvanceRefsResponse.outcome` mirrors
-[`AdvanceOutcome`](../../rust/crates/mkit-core/src/protocol.rs) exactly:
+[`AdvanceOutcome`](../../rust/crates/kit-core/src/protocol.rs) exactly:
 
 | `AdvanceOutcome` | `AdvanceOutcome` (proto) | Meaning |
 |---|---|---|
@@ -386,7 +386,7 @@ satisfy atomic acceptance under SPEC-SERVER §3.1, including both sides of an
 
 A server MAY require `packmap_ref` to be `refs/kit/packmap/<x>` when
 `head_ref` is `refs/heads/<x>` (SPEC-REFS §2), and answer any other pairing with
-`invalid_argument`; every mkit client already sends that pairing.
+`invalid_argument`; every kit client already sends that pairing.
 
 **Reference-server behavior.** The reference server limits
 `max_tickets_per_advance` to seven and rejects a larger `ticket_ids` list with
@@ -427,7 +427,7 @@ Connect carries structured errors natively (a code plus a message),
 so &mdash; unlike the SSH wire's hand-rolled `kit.rpc.v1.Error` message,
 needed because raw stdio framing has no ambient error channel &mdash; this
 service defines **no** custom error message type. Every
-[`TransportError`](../../rust/crates/mkit-core/src/protocol.rs) variant
+[`TransportError`](../../rust/crates/kit-core/src/protocol.rs) variant
 maps onto a standard Connect code:
 
 | `TransportError` | Connect code | Raised by |
@@ -527,7 +527,7 @@ because clients retry it on a backoff ladder. A plain
 caller nothing to act on. An admission challenge is a
 `permission_denied` error that tells the caller what to do.
 
-mkit registers no challenge schemes and interprets none. An external
+kit registers no challenge schemes and interprets none. An external
 protocol defines its own challenges, credentials, and receipts. This
 section defines only how they travel through `kit.transport.v1` and which
 headers a client may attach in reply. Pricing, admission verification, and
@@ -546,7 +546,7 @@ message AdmissionChallenge {
 
 message Challenge {
   string scheme = 1; // lowercase token: [a-z0-9][a-z0-9.-]{0,63}
-  string value = 2;  // opaque to mkit; at most 8,192 bytes
+  string value = 2;  // opaque to kit; at most 8,192 bytes
 }
 ```
 
@@ -568,7 +568,7 @@ and fails at once instead of retrying, because the code is
 challenge headers of the external protocols the deployment supports:
 one or more `WWW-Authenticate` fields and an `ADMISSION-REQUIRED` field.
 The server passes them through as
-the deployment's business layer produced them. mkit does not
+the deployment's business layer produced them. kit does not
 interpret them. A server SHOULD send each challenge-carrying pass-through
 field as its own field line. A platform that combines repeated
 `WWW-Authenticate` fields into one comma-separated value under
@@ -634,7 +634,7 @@ colocation alone does not establish an atomicity guarantee.
 **Binding (informative).** Binding a challenge to one request, for
 example an HMAC over the challenge parameters, an `opaque` value,
 or a `digest` over the unary `BeginUpload` body, is the deployment's
-job. mkit supplies the fingerprint to bind: the repository, the
+job. kit supplies the fingerprint to bind: the repository, the
 signer, the `pack_id`, and the byte count. A retry sends a
 byte-identical signed body (§7.1), so a `digest` binding holds across
 it.
@@ -734,7 +734,7 @@ name is on the remote's allowlist. Names compare case-insensitively.
 - The default allowlist is `Admission-Authorization`,
   `ADMISSION-SIGNATURE`, and `Authorization`. `Authorization` is on it
   only when the client does not already send `Authorization` to that
-  remote, that is, when no `MKIT_API_TOKEN` bearer token (§7.3) is
+  remote, that is, when no `KIT_API_TOKEN` bearer token (§7.3) is
   configured for it.
 - The user-scoped `remote.<name>.admission_headers` key adds header
   names to the allowlist of the remote `<name>`
@@ -758,10 +758,10 @@ effect, and the client warns naming it:
 - the hop-by-hop headers `Connection`, `Keep-Alive`, every `Proxy-*`
   header, `TE`, `Trailer`, and `Upgrade`.
 
-A later mkit specification that defines a request header MUST name it
+A later kit specification that defines a request header MUST name it
 `X-Kit-*` or add it to this list.
 
-`mkit config` SHOULD refuse to write a reserved name into
+`kit config` SHOULD refuse to write a reserved name into
 `remote.<name>.admission_headers`. When a client loads such an entry,
 it SHOULD warn with this fixed wording, where `<header>` is the entry
 and `<name>` the remote:
@@ -790,7 +790,7 @@ user.
 `UploadPack` (client-streaming) and `DownloadPack` (server-streaming)
 carry [`PackChunk`](../../proto/kit/transport/v1/transport.proto),
 which duplicates
-[`kit.rpc.v1.ssh.PackChunk`](../../rust/crates/mkit-rpc/proto/kit/rpc/v1/ssh/ssh.proto)'s
+[`kit.rpc.v1.ssh.PackChunk`](../../rust/crates/kit-rpc/proto/kit/rpc/v1/ssh/ssh.proto)'s
 field layout exactly (`pack_id`, `offset`, `data`, `last` &mdash; same
 numbers, same types). This is a deliberate wire-identical duplication,
 not a new chunking format: the bytes a client streams over Connect are
@@ -860,8 +860,8 @@ deployment MUST NOT claim a faster denial or takedown guarantee than that
 advertised bound. Providers that cannot enforce the bound MUST NOT advertise
 or issue locations.
 
-A client MUST fetch a location without mkit credentials. It MUST NOT send
-auth-v2 headers, mkit bearer tokens, grants, or other mkit authentication material
+A client MUST fetch a location without kit credentials. It MUST NOT send
+auth-v2 headers, kit bearer tokens, grants, or other kit authentication material
 to the location host, including through redirects. It MUST verify both the
 requested pack id (content address) and exact `total_bytes` before using any
 location bytes. The caller's pack-size limits still apply.
@@ -893,7 +893,7 @@ opt-in.
 credential-free HTTPS connector and rejects non-public destinations by default.
 Its filtering resolver checks connection addresses; IP literals pass the same
 policy. A local caller can allow private destinations with
-`mkit_sync::NativeHttp::allow_private_pack_locations(true)`. The channel does
+`kit_sync::NativeHttp::allow_private_pack_locations(true)`. The channel does
 not follow redirects, requires HTTP 200 and identity content encoding, and
 bounds response bytes before pack verification. `RequestPolicy::request_timeout`
 covers the initial RPC, location fetch, and any streaming fallback. The location
@@ -960,7 +960,7 @@ Cloudflare deployment, not only `wrangler dev`) before either is
 considered done &mdash; a proto/spec review is not a substitute for that
 runtime verification.
 
-`mkit-server` (§7.2) and the native CLI client (§7.3) run outside
+`kit-server` (§7.2) and the native CLI client (§7.3) run outside
 Workers (axum/hyper and Tokio respectively) and are not subject to the
 non-`'static` `WebSocket::events()` constraint at all &mdash; the bridge
 above is a Workers-specific workaround, not a general requirement of
@@ -980,7 +980,7 @@ dialect:
 A `connectrpc` and `workers-rs` service
 ([`apps/vcs-worker`](../../apps/vcs-worker)), reusing
 `apps/repo-worker`'s proven patterns: vendored `generated/` staged by
-`build.rs` (`MKIT_TRANSPORT_CODEGEN=1` to regenerate via
+`build.rs` (`KIT_TRANSPORT_CODEGEN=1` to regenerate via
 `connectrpc-build` against the canonical
 `proto/kit/transport/v1/transport.proto`, no protoc dependency on the
 default build path &mdash; Cloudflare Workers Builds and CI images lack a
@@ -1190,46 +1190,46 @@ unreachable ledger or failed quota read fails closed.
 **Reference-server behavior.** `AUTH_AUDIENCE` is explicitly configured for
 every deployment and local development origin.
 
-### 7.2 `mkit-server` (library and adapters)
+### 7.2 `kit-server` (library and adapters)
 
 **Reference-server behavior.**
 
-The same generated `TransportService` binding (`mkit-server`'s `connect`
-module over its pipeline) is served on Workers by the `mkit-server-worker`
+The same generated `TransportService` binding (`kit-server`'s `connect`
+module over its pipeline) is served on Workers by the `kit-server-worker`
 adapter (§7.1) and in process by the conformance host
-(`mkit-server-conformance`), one handler implementation over different
+(`kit-server-conformance`), one handler implementation over different
 storage backends (R2 and Durable Objects on Workers; the `.kit` on-disk
 layout, per [SPEC-WORKTREE](SPEC-WORKTREE.md)/[SPEC-CONCURRENCY](SPEC-CONCURRENCY.md),
 in process). There is no standalone self-hosted server binary: the former
-`mkit-server serve` deployment was removed.
+`kit-server serve` deployment was removed.
 
-`mkit serve <path>` (the CLI) is only the `kit+ssh://` forced-command
+`kit serve <path>` (the CLI) is only the `kit+ssh://` forced-command
 server, speaking the SSH-frame protocol on stdin/stdout. Its former HTTP
 mode (`--http`) and encrypted listener (`--listen-enc`) are gone,
 and with them the axum-hosted `TransportServer` of
-`mkit-transport-connect`'s former `server` feature.
+`kit-transport-connect`'s former `server` feature.
 
 ### 7.3 Native CLI Connect client
 
 **Reference-server behavior.**
 
-`mkit-client` owns the runtime-independent protocol implementation: canonical
+`kit-client` owns the runtime-independent protocol implementation: canonical
 messages, signed envelopes, Connect framing, and response decoding.
-`mkit-sync::ClientSource` drives native repository operations over its per-RPC
+`kit-sync::ClientSource` drives native repository operations over its per-RPC
 calls. The CLI routes `kit+https` and `kit+http` push, fetch, pull, and clone
 through that source.
 
-`mkit-transport-connect` retains the synchronous `Transport` API as a native
+`kit-transport-connect` retains the synchronous `Transport` API as a native
 host adapter. It supplies TLS, credentials, grants, admission recovery,
 scheduling, and progress callbacks. Its public epoch and visibility helpers
 also delegate to the protocol client. Native HTTP uses a current-thread runtime,
 HTTP/1.1, gzip or identity, and bounded streaming; the
-[adapter guide](../../rust/crates/mkit-transport-connect/README.md#native-behavior-differences)
+[adapter guide](../../rust/crates/kit-transport-connect/README.md#native-behavior-differences)
 records differences from the previous native driver. These are implementation
 choices and do not change the normative wire contract.
 
 The native CLI accepts additional trusted PEM certificates from
-`http.sslCAInfo`; `MKIT_SSL_CA_FILE` takes precedence over that configuration
+`http.sslCAInfo`; `KIT_SSL_CA_FILE` takes precedence over that configuration
 key. The selected file augments the Mozilla roots for all Connect HTTPS RPCs,
 including streaming uploads and downloads. Certificate-chain and hostname
 verification remain enabled. A missing, unreadable, empty, or malformed
@@ -1239,21 +1239,21 @@ excluded by design and S3 remotes are not yet covered. Wasm/browser clients
 retain browser-managed certificate trust; these native settings do not affect
 them. This changes no wire contract.
 
-This crate is the implementation `mkit-cli`'s `remote_dispatch`
+This crate is the implementation `kit-storage`'s `remote_dispatch`
 constructs for the `kit+https://` scheme (and loopback-only
 `kit+http://`) &mdash; see
-`rust/crates/mkit-cli/src/remote_dispatch/mod.rs`.
+`rust/crates/kit-storage/src/remote_dispatch/mod.rs`.
 
 **Auth modes** (closing the gap this document
 originally flagged in "Reference implementation" above):
 `ConnectTransport` supports two independent, additive auth modes &mdash;
 a deployment can require either, both, or neither:
 
-- **Bearer token**: `MKIT_API_TOKEN`, read from
+- **Bearer token**: `KIT_API_TOKEN`, read from
   the environment at `connect()` time, sent as `Authorization: Bearer
-  <token>` on every call. This is what bearer-mode `mkit-server`
+  <token>` on every call. This is what bearer-mode `kit-server`
   deployments (§7.2) expect.
-- **Ed25519 envelope**: `mkit-client` signs the auth v2 contract
+- **Ed25519 envelope**: `kit-client` signs the auth v2 contract
   in §7.1 for reads and writes, with an exact request body commitment for
   reads and unary writes, including the framed `DownloadPack` request, and
   the declared pack id and length for streaming `UploadPack` writes.
@@ -1263,7 +1263,7 @@ a deployment can require either, both, or neither:
   Ed25519 identity, independently of bearer-token presence. Domain separation
   alone does not grant a repository permission to invoke ambient signing.
 
-Verified live: real `mkit push`/`clone`/`pull` (envelope auth) against a
+Verified live: real `kit push`/`clone`/`pull` (envelope auth) against a
 local `wrangler dev` instance of `apps/vcs-worker` &mdash; see
 `apps/vcs-worker/README.md` "Known limitations".
 
@@ -1278,8 +1278,8 @@ re-baseline gate automatically; the gate still requires advertised atomicity
 before resetting a chain.
 
 Every `Transport` method `ConnectTransport` implements is driven through
-the same `mkit_core::protocol::retrying`/`BackoffIterator` ladder
-`mkit-transport-ssh` shares: a
+the same `kit_core::protocol::retrying`/`BackoffIterator` ladder
+`kit-transport-ssh` shares: a
 transient `ConnectionFailed` or the Connect codes §5 maps onto a
 5xx/429-equivalent (`unavailable`, `resource_exhausted`), or `aborted`
 (§5), is retried per
@@ -1297,12 +1297,12 @@ stored result for the reused nonce (§7.1). A CAS conflict itself is never
 retried here (`is_retryable` excludes `TransportError::RefConflict`, and
 `AdvanceRefs` reports conflicts as successful responses, §4); that stays
 caller-level policy. Against a deployment without the replay ledger
-(`mkit-server`'s `Open`, `Bearer` and `TransportIdentity` modes), a
+(`kit-server`'s `Open`, `Bearer` and `TransportIdentity` modes), a
 re-issue can report a conflict for a write that landed, so the caller
 follows SPEC-TRANSPORT §7's `read_ref` rule.
 
 The regression tests
-(`rust/crates/mkit-transport-connect/tests/roundtrip.rs`,
+(`rust/crates/kit-transport-connect/tests/roundtrip.rs`,
 `tests/retry.rs`) drive every `Transport` verb &mdash; including multi-chunk
 `UploadPack`/`DownloadPack` streaming, all three `AdvanceOutcome`
 variants, and the retry ladder itself (a flaky in-process server that
@@ -1422,8 +1422,8 @@ included, and in the signed `<repository>` field on writes.
 **ssh and enc (informative).** The ssh and enc transports carry no
 `X-Repository`; the listener, not the wire, chooses the repository. For
 ssh the addressing input is the path argument of the forced command.
-Plain `mkit serve <path>` serves the one repository under that path, as
-it always has. `mkit serve --root <DIR>` is the multi-repository form:
+Plain `kit serve <path>` serves the one repository under that path, as
+it always has. `kit serve --root <DIR>` is the multi-repository form:
 the path names a `<NAMESPACE>/<NAME>` resolved to the directory
 `<DIR>/<NAMESPACE>/<NAME>`, one repository per process, and writes run
 the `ed25519-` owner rule of §7.5 against the `--principal` key the
@@ -1802,7 +1802,7 @@ A deployment settles a charge on `Committed` and releases it on
 identity for deduplication, as [SPEC-SERVER](SPEC-SERVER.md) specifies. Repeated
 delivery does not create another terminal outcome or settlement.
 
-**Reference-server behavior.** The built-in default admission in mkit-server
+**Reference-server behavior.** The built-in default admission in kit-server
 retains its skipped paths and quota accounting: ticket consumption does not
 invoke it again. Non-default admission also covers the zero-byte ref effects.
 A transactional outbox retains pending outcome-delivery responsibility.
@@ -2044,7 +2044,7 @@ This document specifies the proto and its consumption pattern only.
 Explicitly deferred to later work:
 
 - The reference Worker implementation.
-- ~~`mkit serve`'s HTTP mode.~~ Implemented, then removed with the
+- ~~`kit serve`'s HTTP mode.~~ Implemented, then removed with the
   standalone server &mdash; see §7.2.
 - ~~The native CLI Connect client.~~ Implemented &mdash; see §7.3.
 - ~~The shared retry/backoff Connect interceptor.~~ Implemented
@@ -2073,7 +2073,7 @@ Explicitly deferred to later work:
   handling, `admission_helper`, and header allowlist (§5.1).
 - The remote-hook contract and outcome guarantees: see [SPEC-SERVER](SPEC-SERVER.md).
 - Pricing, admission verification, and settlement: deployment policy,
-  never mkit's (§5.1).
+  never kit's (§5.1).
 
 ---
 
@@ -2086,7 +2086,7 @@ Explicitly deferred to later work:
 | `2` (ListRepos) | draft | Additive §7.10 namespace listing RPC and new messages, atomic coordinator visibility indexes, bounded sorted pages and integrity-protected tokens; grants retain public listing rights only. |
 | `2` | draft | Additive namespace Get/SetAuthorityGeneration RPCs outside auth-v2, with deployment-authority statements and pending completion hints. |
 | `2` | draft | §7.9 states the client rule for stale listings: a listed branch whose packmap and head are both strongly absent is skipped without a tracking ref; a present head with no packmap and any transport error stay failures. |
-| `2` | draft | §7.4's ssh/enc paragraph gains ssh root mode (`mkit serve --root`, one repository per process addressed by `<NAMESPACE>/<NAME>`) and the enc `--enc-repository` listener binding, and notes the same-session implicit-membership rule transport-identity sessions use in place of upload tickets (informative). |
+| `2` | draft | §7.4's ssh/enc paragraph gains ssh root mode (`kit serve --root`, one repository per process addressed by `<NAMESPACE>/<NAME>`) and the enc `--enc-repository` listener binding, and notes the same-session implicit-membership rule transport-identity sessions use in place of upload tickets (informative). |
 | `2` | draft | §7.9 clarifies per-bucket ListRefs index lag and head/packmap age differences. |
 | `2` | draft | §5 and §7.6: a part receipt bound to another ticket is an invalid receipt (`invalid_argument`), with no cross-ticket oracle. |
 | `2` | draft | §5.1 permits order-preserving combined WWW-Authenticate challenge lists on platforms that fold response fields; servers SHOULD separate field lines and clients/helpers MUST parse challenge lists (RFC 9110). |
@@ -2112,14 +2112,14 @@ The acceptance gate for this document itself is static, not behavioral:
 
 - `buf lint` (`STANDARD` category) against `proto/kit/transport/v1/transport.proto` &mdash; zero errors, zero lint exceptions.
 - `buf breaking` initialized (`breaking.use: [FILE]` in `buf.yaml`, §1) as the baseline for every future change to this module.
-- The proto compiles cleanly through the real `buffa`/`connectrpc-build` codegen path (not just `protoc`) &mdash; verified by generating and compiling the full client and server stub set (`TransportService`, `TransportServiceClient`, every request/response/`oneof` message) against `buffa 0.9.1`/`connectrpc 0.9`/`connectrpc-build 0.9`, mirroring the exact `include_generated!()` pattern `mkit-repo-client`/`apps/repo-worker` use.
+- The proto compiles cleanly through the real `buffa`/`connectrpc-build` codegen path (not just `protoc`) &mdash; verified by generating and compiling the full client and server stub set (`TransportService`, `TransportServiceClient`, every request/response/`oneof` message) against `buffa 0.9.1`/`connectrpc 0.9`/`connectrpc-build 0.9`, mirroring the exact `include_generated!()` pattern `kit-repo-client`/`apps/repo-worker` use.
 - Explicit maintainer sign-off on the RPC shapes in this document.
 
 The reference Worker, the HTTP mode and the native client each own their
 own runtime test anchors (integration tests against a real or
 locally-hosted server); this document is not amended to list them. The
 native client (§7.3) is the first to land one:
-`rust/crates/mkit-transport-connect/tests/roundtrip.rs` runs a real
+`rust/crates/kit-transport-connect/tests/roundtrip.rs` runs a real
 in-process `TransportService` server and drives every `Transport` verb
 through it via the generated client &mdash; see §7.3 for what it does and
 does not prove (a memory-backed in-process server, not the R2/DO
@@ -2151,7 +2151,7 @@ reference Worker).
 
 **Reference-server behavior.**
 
-The mkit wasm binding ignores `connect-timeout-ms` and `grpc-timeout` before
+The kit wasm binding ignores `connect-timeout-ms` and `grpc-timeout` before
 Connect dispatch, and does not apply configured Connect deadline policies.
 Native bindings retain deadline enforcement. This runtime policy leaves body
 limits, streaming and authentication unchanged; hosts may bound work using their
@@ -2163,7 +2163,7 @@ platform clock and timer.
 **Reference-server behavior.**
 
 Complete ref listings in the Rust client, sync adapter, and Connect transport
-share a runtime-free accumulator in `mkit-core`. It rejects unordered or duplicate
+share a runtime-free accumulator in `kit-core`. It rejects unordered or duplicate
 names within and across pages, repeated nonempty cursors, cursors over 4 KiB,
 and listings exceeding 100,000 pages or a caller's lower cap.
 `ConnectTransport::list_refs_with_page_limit` lets a native caller lower this cap. Its 128 MiB
@@ -2172,9 +2172,9 @@ retained-state budget charges names, fixed ref metadata, collection overhead,
 and cursor-history budgets. The client page primitive also checks ordering and
 cursor length. These are local defensive limits; the wire format is unchanged.
 
-`mkit-client` implements the client side
+`kit-client` implements the client side
 of this protocol from public code, on native and wasm32 with no async runtime or
-C compression in its dependency graph. It shares the `mkit-rpc/transport-messages`
+C compression in its dependency graph. It shares the `kit-rpc/transport-messages`
 types and exposes one typed call per RPC: `GetServerInfo`, `ListRefs` (paged,
 response cap 2 MiB), `ReadRef`, `PackExists`, `DownloadPack` (caller size cap),
 `UpdateRef` (general CAS and delete), `BeginUpload`, `UploadPack`, `UploadPart`,
@@ -2221,16 +2221,16 @@ to retained requests; reconstructing a request with the same identity preserves
 its authenticated operation and body. No result claims eternal replay retention
 or proves
 that an earlier ambiguous attempt never wrote. Native repository push lives in
-`mkit-sync::push(dir, source, options)`, which returns `PushReport` or typed
+`kit-sync::push(dir, source, options)`, which returns `PushReport` or typed
 `PushError` and sends progress through `SyncObserver`. The CLI delegates the
 repository mechanics while retaining configuration, trust gates, grants,
 admission policy, output, and exit codes. Both push drivers use the pure
-`mkit-core::transfer::packmap` planner for node bytes, idempotency, and packmap
+`kit-core::transfer::packmap` planner for node bytes, idempotency, and packmap
 CAS conditions. Chain validation, rollover policy, upload, and conflict handling
-remain in the drivers; no wire or stored-format change results. See [the client guide](../../rust/crates/mkit-client/README.md)
+remain in the drivers; no wire or stored-format change results. See [the client guide](../../rust/crates/kit-client/README.md)
 for bounds and the API. This library adds no wire change.
 
-The native `mkit-sync` source adapters preserve per-RPC resumable outcomes in
+The native `kit-sync` source adapters preserve per-RPC resumable outcomes in
 backend-neutral `SourceError`, carried by `SyncError::Source`. Reads return
 these outcomes immediately; writes retry only through an installed host recovery
 callback. Raw Connect failures retain code, message, details, HTTP status,

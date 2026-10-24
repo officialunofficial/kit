@@ -1,5 +1,0 @@
----
-source: crates/mkit-cli/tests/help_snapshot.rs
-expression: stdout
----
-mkit [VERSION]

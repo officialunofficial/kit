@@ -7,7 +7,7 @@
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use mkit_fuzz::{MAX_ITER, run_one, tree_one_iteration};
+use kit_fuzz::{MAX_ITER, run_one, tree_one_iteration};
 
 static ITERS: AtomicU32 = AtomicU32::new(0);
 

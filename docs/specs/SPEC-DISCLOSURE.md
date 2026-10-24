@@ -2,7 +2,7 @@
 spec: SPEC-DISCLOSURE
 version: 4
 status: draft-normative
-audience: implementers of an mkit disclosure-bundle or closure-profile verifier (any language)
+audience: implementers of an kit disclosure-bundle or closure-profile verifier (any language)
 ---
 
 # SPEC-DISCLOSURE &mdash; partial-disclosure bundle and closure-profile verification
@@ -12,7 +12,7 @@ below are pinned by the golden vectors in §6, §7.6, and §8.3 and are not expe
 change incompatibly, but this document has not yet accumulated the
 implementation experience SPEC-CONVENTIONS §2.1 reserves `stable` for.
 Scope: proving that a single path, chunk, or byte range of a file belongs
-to a specific mkit commit id, with proof bytes on the order of a few KiB
+to a specific kit commit id, with proof bytes on the order of a few KiB
 regardless of repository size ("partial disclosure"), **and** proving that
 a served object set is the full content that commit id commits to
 ("closure profile" / full disclosure, §7), and a multi-chunk range
@@ -26,7 +26,7 @@ wasm bindings, CLI commands and the docs guide.
 A **disclosure bundle** lets an untrusted party (a data-availability
 provider, a light client, an auditor, a browser) hand a verifier three
 things &mdash; a trusted commit id, an encoded bundle, and nothing else &mdash; and
-receive back a [`Disclosed`](../../rust/crates/mkit-core/src/verify.rs)
+receive back a [`Disclosed`](../../rust/crates/kit-core/src/verify.rs)
 result whose `payload` bytes are **exactly** the content that commit id
 commits to, at the path the bundle discloses.
 
@@ -44,7 +44,7 @@ A verified disclosure does **not** prove:
   commit's (or remix's) embedded Ed25519 signature verifies against its
   embedded public key (SPEC-SIGNING §3). Binding that public key to a
   person, organization, or trust level is application policy, exactly as
-  [`sign::verify_commit`](../../rust/crates/mkit-core/src/sign.rs)
+  [`sign::verify_commit`](../../rust/crates/kit-core/src/sign.rs)
   already documents &mdash; this spec changes nothing about what a commit
   signature covers.
 
@@ -124,7 +124,7 @@ A version byte of `1` is a typed `UnsupportedBundleVersion(1)` error;
 there is no compatibility decoder.
 
 `Step` and `ChunkHdr`/`LenProof`'s `proof` fields decode with
-[`merkle::Proof::decode`](../../rust/crates/mkit-core/src/merkle.rs)'s
+[`merkle::Proof::decode`](../../rust/crates/kit-core/src/merkle.rs)'s
 `max_items` bound (SPEC-MERKLE-OBJECTS §5.2): 1 for a single-leaf proof,
 2 for a multi-proof over `{0, position}` (§4.3). Every `Vec` read is
 bounded with `read_range` before allocation (§5).
@@ -140,7 +140,7 @@ directly (they *are* the chunk's canonical bytes). For the `Range`
 payload kind on a `ChunkedBlob` leaf, only a byte range is disclosed &mdash;
 the verifier never sees the chunk's full bytes to hash &mdash; so the
 containing chunk's id MUST travel on the wire as its own field.
-`ChunkHdr.chunk_id` is exactly the value [`verify_chunk_with_meta`](../../rust/crates/mkit-core/src/verify.rs)'s
+`ChunkHdr.chunk_id` is exactly the value [`verify_chunk_with_meta`](../../rust/crates/kit-core/src/verify.rs)'s
 multi-proof authenticates against the leaf's `ChunkedBlob` id, so a
 forged `chunk_id` simply fails to fold to that id (§4.3) &mdash; carrying it
 explicitly costs nothing security-wise and closes an otherwise-unprovable
@@ -173,7 +173,7 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
    `store::MAX_TREE_DEPTH`).
 8. For each `Step` at index `i` (root first):
    1. **MUST** validate `name` against SPEC-OBJECTS §4.1's entry-name
-      rules ([`TreeEntry::validate_name`](../../rust/crates/mkit-core/src/object.rs)) &mdash;
+      rules ([`TreeEntry::validate_name`](../../rust/crates/kit-core/src/object.rs)) &mdash;
       an invalid name (trailing space, `.kit`, a reserved Windows device
       name, etc.) is rejected here, before its proof is even checked.
     2. **MUST** check `domain_digest(b"kit.tree\x00", inner_root) == expected_id`
@@ -187,7 +187,7 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
        value and compare to `expected_id` (SPEC-MERKLE-OBJECTS §5.4).
        A commonware-native verifier performs the wrap check itself and
        then runs upstream `bmt::Proof::verify_element_inclusion` against
-       `inner_root` unmodified, needing no mkit code beyond the public
+       `inner_root` unmodified, needing no kit code beyond the public
        domain constants.
    3. **MUST** reject the whole bundle if `i` is not the last step and
       `mode != Tree` &mdash; every step but the last MUST descend into a
@@ -316,7 +316,7 @@ after the declared body; and `commit_bytes` that decode to a `Tag` (a
 valid, signed object &mdash; just not one with a `tree_hash`). Accept
 sidecars record `step_inner_roots_hex` and `chunk_inner_root_hex`.
 
-`rust/crates/mkit-core/tests/golden_disclosure.rs` reads only the
+`rust/crates/kit-core/tests/golden_disclosure.rs` reads only the
 committed files, runs `verify::verify_disclosure`, and compares the
 result against each sidecar; it never calls the fixture generator.
 
@@ -445,7 +445,7 @@ pack-hash mismatch; the wrong root id; a manifest whose `root` differs
 from the caller's trusted root; manifest version 2; a trailing byte on
 the manifest.
 
-`rust/crates/mkit-core/tests/golden_closure.rs` reads only the committed
+`rust/crates/kit-core/tests/golden_closure.rs` reads only the committed
 files.
 
 ## 8. Multi-chunk span container (MKDS v1)

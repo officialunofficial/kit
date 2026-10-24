@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
-# Checks the release mkit compiler-artifact log and stripped binary.
-# The mkit check also allowlists the packages the CLI may compile:
-# scripts/release/mkit-packages.golden, the union over every release target
-# of `cargo tree -p mkit-cli` (normal + build dependencies, which matches
+# Checks the release kit compiler-artifact log and stripped binary.
+# The kit check also allowlists the packages the CLI may compile:
+# scripts/release/kit-packages.golden, the union over every release target
+# of `cargo tree -p kit-storage` (normal + build dependencies, which matches
 # the release build's compiler artifacts exactly). A package outside it
 # fails the check. If the new package is intended, run `--update-golden`
 # (it needs no toolchain for the other targets) and commit the diff with
@@ -14,7 +14,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/.." && pwd)"
-golden="$here/release/mkit-packages.golden"
+golden="$here/release/kit-packages.golden"
 
 case "${1:-}" in
   --update-golden)
@@ -27,13 +27,13 @@ case "${1:-}" in
     tmp="$(mktemp)"
     trap 'rm -f "$tmp"' EXIT
     {
-      echo "# Packages the release \`mkit\` build may compile: the union over"
-      echo "# release.yml's targets of \`cargo tree -p mkit-cli -e normal,build\`."
+      echo "# Packages the release \`kit\` build may compile: the union over"
+      echo "# release.yml's targets of \`cargo tree -p kit-storage -e normal,build\`."
       echo "# Checked by scripts/check-release-artifact-features.sh; regenerate with"
       echo "# \`scripts/check-release-artifact-features.sh --update-golden\` and review"
       echo "# the diff: every new name is a new dependency of the shipped CLI."
       for t in $targets; do
-        (cd "$root/rust" && cargo tree --locked -p mkit-cli --target "$t" \
+        (cd "$root/rust" && cargo tree --locked -p kit-storage --target "$t" \
           -e normal,build --prefix none -f '{p}') | awk '{print $1}'
       done | LC_ALL=C sort -u
     } > "$tmp"
@@ -111,16 +111,16 @@ for name, feats in sorted(features.items()):
             err(f"{name} was compiled with the `{seam}` test seam")
 
 # The binary being scanned must be the one this log built.
-bin_name = "mkit"
+bin_name = "kit"
 exe = executables.get(bin_name)
 if exe is None:
     err(f"the build did not produce the `{bin_name}` binary")
 elif os.path.realpath(exe) != os.path.realpath(binary):
     err(f"the log built `{bin_name}` at {exe}, but the scanned binary is {binary}")
 
-for banned in ("mkit-server-native", "axum", "rusqlite", "libsqlite3-sys"):
+for banned in ("kit-server-native", "axum", "rusqlite", "libsqlite3-sys"):
     if banned in features:
-        err(f"server-only package `{banned}` is in the mkit build")
+        err(f"server-only package `{banned}` is in the kit build")
 # Server-side features of shared HTTP crates.
 for name, banned in (
     ("hyper", {"server"}),
@@ -135,17 +135,17 @@ for name, banned in (
 tower_http_allowed = {"follow-redirect", "futures-util", "tower"}
 extra = features.get("tower-http", set()) - tower_http_allowed
 if extra:
-    err(f"tower-http was compiled with {sorted(extra)}; mkit allows only {sorted(tower_http_allowed)}")
+    err(f"tower-http was compiled with {sorted(extra)}; kit allows only {sorted(tower_http_allowed)}")
 # Package allowlist.
 with open(golden_path, encoding="utf-8") as f:
     golden = {l.strip() for l in f if l.strip() and not l.startswith("#")}
 new = sorted(set(features) - golden)
 if new:
     err(f"{len(new)} package(s) not in {os.path.relpath(golden_path)}: {', '.join(new)}. "
-        "If this dependency of the mkit CLI is intended, run "
+        "If this dependency of the kit CLI is intended, run "
         "`scripts/check-release-artifact-features.sh --update-golden` and commit "
         "the golden diff with the change that brought it in.")
-print(f"check-release-artifact-features: mkit: {len(features)} packages compiled "
+print(f"check-release-artifact-features: kit: {len(features)} packages compiled "
       f"(golden: {len(golden)}); "
       f"hyper={sorted(features.get('hyper', []))} "
       f"hyper-util={sorted(features.get('hyper-util', []))} "
@@ -166,9 +166,9 @@ scan() {
     fail=1
   fi
 }
-scan 'sqlite3_' 'SQLite linked into mkit'
+scan 'sqlite3_' 'SQLite linked into kit'
 scan 'x-kit-test-' 'test-faults seam compiled in'
-scan '/__mkit_test/' 'test-control routes compiled in'
+scan '/__kit_test/' 'test-control routes compiled in'
 scan 'TEST_OUTBOX_BACKLOG_ROWS' 'test-only Worker backlog var compiled in'
 scan 'TEST_TICKET_TTL_MS' 'test-only Worker ticket var compiled in'
 

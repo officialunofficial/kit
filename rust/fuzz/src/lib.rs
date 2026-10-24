@@ -8,7 +8,7 @@
 //! 1. `MAX_ITER = 100`               — iteration cap (in-target counter).
 //! 2. `MAX_INPUT = 64 * 1024`        — per-iteration input cap.
 //! 3. **Bounded allocations** — the input cap above plus per-op output
-//!    caps inside `mkit-core` (`delta::decode` caps initial capacity,
+//!    caps inside `kit-core` (`delta::decode` caps initial capacity,
 //!    `pack::PackReader` enforces `MAX_ENTRIES` and `MAX_PAYLOAD`)
 //!    keep the worst-case heap to ~1 MiB per iteration. Defensive
 //!    pre-checks in the harness refuse obviously-malicious headers
@@ -100,14 +100,14 @@ pub fn delta_one_iteration(input: &[u8]) {
     // unit of CPU (`MAX_INPUT * 4` matches the practical ceiling the
     // decoder can reach from a 64 KiB stream).
     if stream.len() < 9 {
-        let _ = mkit_core::delta::decode(base, stream);
+        let _ = kit_core::delta::decode(base, stream);
         return;
     }
     let claimed_result_len = u32::from_le_bytes([stream[5], stream[6], stream[7], stream[8]]);
     if claimed_result_len as usize > MAX_INPUT * 4 {
         return;
     }
-    let _ = mkit_core::delta::decode(base, stream);
+    let _ = kit_core::delta::decode(base, stream);
 }
 
 /// Shared pre-check for [`pack_one_iteration`] / [`pack_one_iteration_with_store`]:
@@ -142,12 +142,12 @@ pub fn pack_one_iteration(input: &[u8]) {
         Ok(d) => d,
         Err(_) => return,
     };
-    let layout = mkit_core::layout::RepoLayout::single(dir.path());
-    let store = match mkit_core::store::ObjectStore::init(&layout) {
+    let layout = kit_core::layout::RepoLayout::single(dir.path());
+    let store = match kit_core::store::ObjectStore::init(&layout) {
         Ok(s) => s,
         Err(_) => return,
     };
-    let _ = mkit_core::pack::PackReader::read(input, &store);
+    let _ = kit_core::pack::PackReader::read(input, &store);
 }
 
 /// As [`pack_one_iteration`], but against a caller-provided store
@@ -155,11 +155,11 @@ pub fn pack_one_iteration(input: &[u8]) {
 /// tempdir + `ObjectStore::init` cost across all `MAX_ITER` iterations
 /// instead of paying for 100 real filesystem inits per `cargo test`
 /// invocation.
-pub fn pack_one_iteration_with_store(input: &[u8], store: &mkit_core::store::ObjectStore) {
+pub fn pack_one_iteration_with_store(input: &[u8], store: &kit_core::store::ObjectStore) {
     let Some(input) = pack_validated_input(input) else {
         return;
     };
-    let _ = mkit_core::pack::PackReader::read(input, store);
+    let _ = kit_core::pack::PackReader::read(input, store);
 }
 
 /// Apply `serialize::deserialize` against `input` — covers the tree
@@ -167,16 +167,16 @@ pub fn pack_one_iteration_with_store(input: &[u8], store: &mkit_core::store::Obj
 /// dispatches on type byte).
 pub fn tree_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
-    let _ = mkit_core::serialize::deserialize(input);
+    let _ = kit_core::serialize::deserialize(input);
 }
 
 /// Apply the git-bridge import parsers against `input` — the
-/// untrusted-input boundary of `mkit git import` (SPEC-GIT-IMPORT §2).
+/// untrusted-input boundary of `kit git import` (SPEC-GIT-IMPORT §2).
 /// These accept arbitrary upstream bytes, so they must never panic,
 /// over-allocate, or hang on adversarial input.
 pub fn git_commit_parse_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
-    if let Ok(c) = mkit_git_bridge::gitparse::parse_commit(input) {
+    if let Ok(c) = kit_git_bridge::gitparse::parse_commit(input) {
         // Real invariant: the identity is a slice of the input, so it
         // can never exceed the input length.
         assert!(c.author.identity.len() <= input.len());
@@ -186,14 +186,14 @@ pub fn git_commit_parse_one_iteration(input: &[u8]) {
 /// Apply the git tag parser against `input`.
 pub fn git_tag_parse_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
-    let _ = mkit_git_bridge::gitparse::parse_tag(input);
+    let _ = kit_git_bridge::gitparse::parse_tag(input);
 }
 
 /// SPEC-WRITE-GRANTS grant codec (`grant_parse`): `Grant::parse` and
 /// `SignedHeader::parse` never panic, and anything they accept re-encodes to
 /// exactly the input bytes (one canonical encoding, so one grant id).
 pub fn grant_parse_one_iteration(input: &[u8]) {
-    use mkit_attest::grant::{Grant, SignedHeader};
+    use kit_attest::grant::{Grant, SignedHeader};
     let input = &input[..input.len().min(MAX_INPUT)];
     if let Ok(grant) = Grant::parse(input) {
         assert_eq!(
@@ -228,7 +228,7 @@ pub fn grant_parse_one_iteration(input: &[u8]) {
 /// bytes of the header. The input also drives the `webauthn-p256` parsers
 /// (see [`webauthn_assertion_checks`]).
 pub fn epoch_visibility_parse_one_iteration(input: &[u8]) {
-    use mkit_attest::grant::{
+    use kit_attest::grant::{
         AcceptedSchemes, Capability, EpochStatement, GrantRequest, OwnerScheme, RepoScope,
         RepositoryIdentity, SignedHeader, VerifierConfig, VisibilityStatement,
         verify_epoch_statement, verify_for_registration, verify_grant_owner,
@@ -299,8 +299,8 @@ pub fn epoch_visibility_parse_one_iteration(input: &[u8]) {
     }
 }
 
-fn fuzz_relying_party() -> mkit_attest::grant::RelyingParty {
-    mkit_attest::grant::RelyingParty::new("example.com", ["https://example.com"])
+fn fuzz_relying_party() -> kit_attest::grant::RelyingParty {
+    kit_attest::grant::RelyingParty::new("example.com", ["https://example.com"])
         .expect("fixed relying party is valid")
 }
 
@@ -312,7 +312,7 @@ fn fuzz_relying_party() -> mkit_attest::grant::RelyingParty {
 /// `example.com` with UP set), so the strict JSON walk sees arbitrary bytes.
 /// The signature `(1, 1)` never verifies, so neither may succeed.
 pub fn webauthn_assertion_checks(input: &[u8]) {
-    use mkit_attest::grant::{
+    use kit_attest::grant::{
         AcceptedSchemes, Namespace, OwnerScheme, VerifierConfig, WebAuthnAssertion,
         verify_owner_signature,
     };
@@ -338,7 +338,7 @@ pub fn webauthn_assertion_checks(input: &[u8]) {
     )
     .expect("fixed fuzz config is valid");
     let namespace = Namespace::Address(
-        mkit_attest::eth::address_p256(&G).expect("the generator is a P-256 point"),
+        kit_attest::eth::address_p256(&G).expect("the generator is a P-256 point"),
     );
     let statement = b"kit-write-grant:v1";
     let _ = verify_owner_signature(
@@ -383,9 +383,9 @@ pub fn webauthn_assertion_checks(input: &[u8]) {
 /// Apply the git tree parser + mode classifier against `input`.
 pub fn git_tree_parse_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
-    if let Ok(entries) = mkit_git_bridge::gitparse::parse_tree(input) {
+    if let Ok(entries) = kit_git_bridge::gitparse::parse_tree(input) {
         for e in entries {
-            let _ = mkit_git_bridge::gitparse::map_mode(&e.mode);
+            let _ = kit_git_bridge::gitparse::map_mode(&e.mode);
         }
     }
 }
@@ -393,10 +393,10 @@ pub fn git_tree_parse_one_iteration(input: &[u8]) {
 /// Apply the encrypted software-key record decoder against `input`.
 pub fn software_key_record_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
-    let _ = mkit_keystore::fuzz_decode_software_key_record(input);
+    let _ = kit_keystore::fuzz_decode_software_key_record(input);
 }
 
-/// Fuzz the mkit-rpc wire decoders. Two properties per iteration:
+/// Fuzz the kit-rpc wire decoders. Two properties per iteration:
 ///
 /// 1. **Decode never panics.** Both protocol roots (`SignerFrame`,
 ///    `SshFrame`) are decoded from the raw input, through the
@@ -404,7 +404,7 @@ pub fn software_key_record_one_iteration(input: &[u8]) {
 ///    decoder. Any input may fail to decode; none may panic.
 /// 2. **Wire roundtrip.** The input entropy drives
 ///    `arbitrary::Arbitrary` to build structurally valid frames
-///    (mkit-rpc's `arbitrary` feature, from buffa
+///    (kit-rpc's `arbitrary` feature, from buffa
 ///    `generate_arbitrary` codegen); encode → decode → re-encode must
 ///    reproduce the same wire bytes. (Value equality would not hold:
 ///    an `Arbitrary` open-enum `Unknown(v)` for a known wire value `v`
@@ -413,13 +413,13 @@ pub fn software_key_record_one_iteration(input: &[u8]) {
 pub fn rpc_decode_one_iteration(input: &[u8]) {
     use arbitrary::Arbitrary;
     use buffa::Message;
-    use mkit_rpc::kit::rpc::v1::signer::SignerFrame;
-    use mkit_rpc::kit::rpc::v1::ssh::SshFrame;
+    use kit_rpc::kit::rpc::v1::signer::SignerFrame;
+    use kit_rpc::kit::rpc::v1::ssh::SshFrame;
 
     let input = &input[..input.len().min(MAX_INPUT)];
 
-    let _ = mkit_rpc::frame_decode_options().decode_from_slice::<SignerFrame>(input);
-    let _ = mkit_rpc::frame_decode_options().decode_from_slice::<SshFrame>(input);
+    let _ = kit_rpc::frame_decode_options().decode_from_slice::<SignerFrame>(input);
+    let _ = kit_rpc::frame_decode_options().decode_from_slice::<SshFrame>(input);
     let _ = SignerFrame::decode_from_slice(input);
     let _ = SshFrame::decode_from_slice(input);
 
@@ -459,11 +459,11 @@ pub fn rpc_decode_one_iteration(input: &[u8]) {
 /// same node (encode∘decode stability over the codec body).
 pub fn merkle_packlist_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
-    if let Ok(node) = mkit_core::transfer::decode_packlist(input)
-        && let Ok(re) = mkit_core::transfer::encode_packlist(node.prev, &node.packs)
+    if let Ok(node) = kit_core::transfer::decode_packlist(input)
+        && let Ok(re) = kit_core::transfer::encode_packlist(node.prev, &node.packs)
     {
         assert_eq!(
-            mkit_core::transfer::decode_packlist(&re),
+            kit_core::transfer::decode_packlist(&re),
             Ok(node),
             "packlist re-encode must round-trip"
         );
@@ -475,8 +475,8 @@ pub fn merkle_packlist_one_iteration(input: &[u8]) {
 /// bytes; a freshly built proof must verify; and `verify_*` over
 /// adversarial proof bytes must reject cleanly (never panic).
 pub fn merkle_proof_one_iteration(input: &[u8]) {
-    use mkit_core::merkle;
-    use mkit_core::object::{ChunkedBlob, EntryMode, Tree, TreeEntry};
+    use kit_core::merkle;
+    use kit_core::object::{ChunkedBlob, EntryMode, Tree, TreeEntry};
     let input = &input[..input.len().min(MAX_INPUT)];
 
     // Build a ChunkedBlob from up to 64 chunk ids carved from `input`.
@@ -548,7 +548,7 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
 pub fn disclosure_decode_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
     let commit_id = [0u8; 32];
-    let _ = mkit_core::verify::verify_disclosure(&commit_id, input);
+    let _ = kit_core::verify::verify_disclosure(&commit_id, input);
 }
 
 const GOOD_SPAN: &[u8] = include_bytes!("../../tests/golden/http-objects/span_two_chunks.bin");
@@ -560,11 +560,11 @@ const GOOD_SPAN: &[u8] = include_bytes!("../../tests/golden/http-objects/span_tw
 pub fn span_decode_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
     let commit: [u8; 32] = GOOD_SPAN[5..37].try_into().expect("committed commit id");
-    let _ = mkit_core::verify::span::verify_disclosure_span(&commit, input);
+    let _ = kit_core::verify::span::verify_disclosure_span(&commit, input);
     if input.len() >= 37 && input.starts_with(b"MKDS\x01") {
         let mut patched = input.to_vec();
         patched[5..37].copy_from_slice(&commit);
-        let _ = mkit_core::verify::span::verify_disclosure_span(&commit, &patched);
+        let _ = kit_core::verify::span::verify_disclosure_span(&commit, &patched);
     }
 }
 
@@ -574,20 +574,20 @@ const SPAN_CHUNKS: usize = 4;
 /// A small chunked-file repository for [`verify_span_one_iteration_with`].
 pub struct SpanFixture {
     _dir: tempfile::TempDir,
-    store: mkit_core::store::ObjectStore,
+    store: kit_core::store::ObjectStore,
     commit_id: [u8; 32],
     plaintext: Vec<u8>,
 }
 
 /// Build a [`SpanFixture`]: one signed commit over a four-chunk file.
 pub fn build_span_fixture() -> SpanFixture {
-    use mkit_core::hash::ZERO;
-    use mkit_core::layout::RepoLayout;
-    use mkit_core::object::{
+    use kit_core::hash::ZERO;
+    use kit_core::layout::RepoLayout;
+    use kit_core::object::{
         Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, Tree, TreeEntry,
     };
-    use mkit_core::sign::{KeyPair, sign_commit};
-    use mkit_core::store::ObjectStore;
+    use kit_core::sign::{KeyPair, sign_commit};
+    use kit_core::store::ObjectStore;
 
     const CHUNK: usize = SPAN_CHUNK;
     const CHUNKS: usize = SPAN_CHUNKS;
@@ -599,7 +599,7 @@ pub fn build_span_fixture() -> SpanFixture {
     let chunk_ids: Vec<[u8; 32]> = plaintext
         .chunks(CHUNK)
         .map(|c| {
-            let bytes = mkit_core::serialize::serialize(&Object::Blob(Blob { data: c.to_vec() }))
+            let bytes = kit_core::serialize::serialize(&Object::Blob(Blob { data: c.to_vec() }))
                 .expect("serialize chunk");
             store.write(&bytes).expect("write chunk")
         })
@@ -610,7 +610,7 @@ pub fn build_span_fixture() -> SpanFixture {
         chunks: chunk_ids,
     };
     let leaf = store
-        .write(&mkit_core::serialize::serialize(&Object::ChunkedBlob(manifest)).expect("manifest"))
+        .write(&kit_core::serialize::serialize(&Object::ChunkedBlob(manifest)).expect("manifest"))
         .expect("write manifest");
     let tree = Tree {
         entries: vec![TreeEntry {
@@ -620,7 +620,7 @@ pub fn build_span_fixture() -> SpanFixture {
         }],
     };
     let tree_hash = store
-        .write(&mkit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
+        .write(&kit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
         .expect("write tree");
     let kp = KeyPair::from_seed([0x43; 32]);
     let mut commit = Commit {
@@ -636,7 +636,7 @@ pub fn build_span_fixture() -> SpanFixture {
     };
     commit.signature = sign_commit(&commit, &kp).expect("sign commit").0;
     let commit_id = store
-        .write(&mkit_core::serialize::serialize(&Object::Commit(commit)).expect("commit"))
+        .write(&kit_core::serialize::serialize(&Object::Commit(commit)).expect("commit"))
         .expect("write commit");
 
     SpanFixture {
@@ -657,7 +657,7 @@ pub fn verify_span_one_iteration(input: &[u8]) {
 /// file's true plaintext for the range it names. Raw bytes also go through
 /// the verifier against the fixture's real commit.
 pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
-    use mkit_core::verify::span::{RangeProof, build_range_proof_from};
+    use kit_core::verify::span::{RangeProof, build_range_proof_from};
 
     const CHUNK: usize = SPAN_CHUNK;
     const CHUNKS: usize = SPAN_CHUNKS;
@@ -683,25 +683,25 @@ pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
         [usize::try_from(offset).expect("offset")..usize::try_from(offset + len).expect("end")];
     let container = match proof {
         RangeProof::Mkdp(bytes) => {
-            let disclosed = mkit_core::verify::verify_disclosure(&commit_id, &bytes)
+            let disclosed = kit_core::verify::verify_disclosure(&commit_id, &bytes)
                 .expect("fresh MKDP must verify");
             assert!(matches!(
                 disclosed.payload,
-                mkit_core::verify::DisclosedPayload::Range { .. }
+                kit_core::verify::DisclosedPayload::Range { .. }
             ));
             return;
         }
         RangeProof::Mkds(bytes) => bytes,
         _ => unreachable!("non-exhaustive RangeProof"),
     };
-    let verified = mkit_core::verify::span::verify_disclosure_span(&commit_id, &container)
+    let verified = kit_core::verify::span::verify_disclosure_span(&commit_id, &container)
         .expect("fresh span must verify");
     assert_eq!(verified.bytes, expected);
 
     let mut mutated = container;
     let at = usize::try_from(word(5)).expect("position") % mutated.len();
     mutated[at] ^= input.get(7).copied().unwrap_or(1).max(1);
-    if let Ok(accepted) = mkit_core::verify::span::verify_disclosure_span(&commit_id, &mutated) {
+    if let Ok(accepted) = kit_core::verify::span::verify_disclosure_span(&commit_id, &mutated) {
         // A flipped header field may legitimately request another range, but
         // whatever verifies must be that range's true plaintext.
         let begin = usize::try_from(accepted.offset).expect("accepted offset");
@@ -711,7 +711,7 @@ pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
             "a mutated span verified bytes that are not the file's"
         );
     }
-    let _ = mkit_core::verify::span::verify_disclosure_span(&commit_id, input);
+    let _ = kit_core::verify::span::verify_disclosure_span(&commit_id, input);
 }
 
 /// A small native `ObjectStore`-backed fixture for
@@ -732,13 +732,13 @@ pub struct DisclosureFixture {
 /// genuine environment failure (no writable temp dir), same posture as
 /// [`pack_one_iteration_with_store`]'s `ObjectStore::init`.
 pub fn build_disclosure_fixture() -> DisclosureFixture {
-    use mkit_core::hash::ZERO;
-    use mkit_core::layout::RepoLayout;
-    use mkit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
-    use mkit_core::sign::{KeyPair, sign_commit};
-    use mkit_core::store::ObjectStore;
-    use mkit_core::verify::{self, Selector};
-    use mkit_core::worktree::store_file_object;
+    use kit_core::hash::ZERO;
+    use kit_core::layout::RepoLayout;
+    use kit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use kit_core::sign::{KeyPair, sign_commit};
+    use kit_core::store::ObjectStore;
+    use kit_core::verify::{self, Selector};
+    use kit_core::worktree::store_file_object;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
@@ -752,7 +752,7 @@ pub fn build_disclosure_fixture() -> DisclosureFixture {
         }],
     };
     let tree_hash = store
-        .write(&mkit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
+        .write(&kit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
         .expect("write tree");
     let kp = KeyPair::from_seed([0x42; 32]);
     let mut commit = Commit {
@@ -768,7 +768,7 @@ pub fn build_disclosure_fixture() -> DisclosureFixture {
     };
     commit.signature = sign_commit(&commit, &kp).expect("sign commit").0;
     let commit_bytes =
-        mkit_core::serialize::serialize(&Object::Commit(commit)).expect("serialize commit");
+        kit_core::serialize::serialize(&Object::Commit(commit)).expect("serialize commit");
     let commit_id = store.write(&commit_bytes).expect("write commit");
     let good_bundle = verify::build_disclosure(&store, &commit_id, &[b"f.txt"], Selector::Object)
         .expect("build disclosure");
@@ -798,7 +798,7 @@ pub fn verify_disclosure_one_iteration(input: &[u8]) {
 /// unit-test loop amortize the tempdir/store/signing cost across all
 /// `MAX_ITER` iterations.
 pub fn verify_disclosure_one_iteration_with(input: &[u8], fixture: &DisclosureFixture) {
-    use mkit_core::verify;
+    use kit_core::verify;
 
     let input = &input[..input.len().min(MAX_INPUT)];
 
@@ -808,7 +808,7 @@ pub fn verify_disclosure_one_iteration_with(input: &[u8], fixture: &DisclosureFi
     // it then requires the proof fold to equal the declared field. Re-check
     // the wrap of every authenticated root here so a builder/verifier
     // disagreement cannot slip through a successful round-trip.
-    use mkit_core::merkle::{self, ObjectKind};
+    use kit_core::merkle::{self, ObjectKind};
     if let Some(root) = disclosed.step_inner_roots.first() {
         assert_eq!(
             merkle::wrap_id(ObjectKind::Tree, root),
@@ -844,7 +844,7 @@ pub fn pack_entries_one_iteration(input: &[u8]) {
     let Some(input) = pack_validated_input(input) else {
         return;
     };
-    let parsed = mkit_core::pack::PackEntries::new(input);
+    let parsed = kit_core::pack::PackEntries::new(input);
     if let Ok(entries) = parsed {
         let mut n = 0usize;
         for item in entries {
@@ -860,21 +860,21 @@ pub fn pack_entries_one_iteration(input: &[u8]) {
         Ok(d) => d,
         Err(_) => return,
     };
-    let layout = mkit_core::layout::RepoLayout::single(dir.path());
-    let store = match mkit_core::store::ObjectStore::init(&layout) {
+    let layout = kit_core::layout::RepoLayout::single(dir.path());
+    let store = match kit_core::store::ObjectStore::init(&layout) {
         Ok(s) => s,
         Err(_) => return,
     };
-    let read = mkit_core::pack::PackReader::read(input, &store);
+    let read = kit_core::pack::PackReader::read(input, &store);
     // Into an empty store, the store-less decoder with no external bases
     // must accept exactly the packs the reader accepts, with the same
     // error and the same ids in pack order.
-    let decoded = mkit_core::pack::decode_entries_with(
+    let decoded = kit_core::pack::decode_entries_with(
         input,
-        &mut mkit_core::pack::NoExternalBases,
+        &mut kit_core::pack::NoExternalBases,
         // No budget: this body pins agreement with the reader, which has
-        // none. The budget itself is covered by mkit-core unit tests.
-        mkit_core::pack::DecodeLimits::default().with_max_decoded_bytes(u64::MAX),
+        // none. The budget itself is covered by kit-core unit tests.
+        kit_core::pack::DecodeLimits::default().with_max_decoded_bytes(u64::MAX),
         |_| Ok(()),
     );
     match (&read, &decoded) {
@@ -895,7 +895,7 @@ pub fn pack_entries_one_iteration(input: &[u8]) {
         ),
     }
     if let Ok(report) = read {
-        let entries = mkit_core::pack::PackEntries::new(input)
+        let entries = kit_core::pack::PackEntries::new(input)
             .expect("PackReader-accepted pack must parse as PackEntries");
         let got = entries.filter(|e| e.is_ok()).count();
         assert_eq!(
@@ -910,7 +910,7 @@ pub fn pack_entries_one_iteration(input: &[u8]) {
 /// committed file, exported as a snapshot closure.
 pub struct ClosureFixture {
     _dir: tempfile::TempDir,
-    store: mkit_core::store::ObjectStore,
+    store: kit_core::store::ObjectStore,
     root: [u8; 32],
     manifest: Vec<u8>,
     packs: Vec<Vec<u8>>,
@@ -919,14 +919,14 @@ pub struct ClosureFixture {
 /// Build a [`ClosureFixture`]. Panics only on a genuine environment
 /// failure (no writable temp dir).
 pub fn build_closure_fixture() -> ClosureFixture {
-    use mkit_core::ClosureMode;
-    use mkit_core::hash::ZERO;
-    use mkit_core::layout::RepoLayout;
-    use mkit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
-    use mkit_core::sign::{KeyPair, sign_commit};
-    use mkit_core::store::ObjectStore;
-    use mkit_core::verify::export_closure;
-    use mkit_core::worktree::store_file_object;
+    use kit_core::ClosureMode;
+    use kit_core::hash::ZERO;
+    use kit_core::layout::RepoLayout;
+    use kit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use kit_core::sign::{KeyPair, sign_commit};
+    use kit_core::store::ObjectStore;
+    use kit_core::verify::export_closure;
+    use kit_core::worktree::store_file_object;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
@@ -939,7 +939,7 @@ pub fn build_closure_fixture() -> ClosureFixture {
         }],
     };
     let tree_hash = store
-        .write(&mkit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
+        .write(&kit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
         .expect("write tree");
     let kp = KeyPair::from_seed([0x43; 32]);
     let mut commit = Commit {
@@ -955,7 +955,7 @@ pub fn build_closure_fixture() -> ClosureFixture {
     };
     commit.signature = sign_commit(&commit, &kp).expect("sign commit").0;
     let commit_bytes =
-        mkit_core::serialize::serialize(&Object::Commit(commit)).expect("serialize commit");
+        kit_core::serialize::serialize(&Object::Commit(commit)).expect("serialize commit");
     let root = store.write(&commit_bytes).expect("write commit");
     let export = export_closure(&store, &root, ClosureMode::Snapshot).expect("export closure");
     ClosureFixture {
@@ -977,7 +977,7 @@ pub fn verify_closure_one_iteration(input: &[u8]) {
 
 /// As [`verify_closure_one_iteration`], amortizing fixture construction.
 pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture) {
-    use mkit_core::verify;
+    use kit_core::verify;
 
     let input = &input[..input.len().min(MAX_INPUT)];
     let pack_refs: Vec<&[u8]> = fixture.packs.iter().map(Vec::as_slice).collect();
@@ -990,9 +990,9 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
     let mut objects = Vec::new();
     for pack in &fixture.packs {
         for entry in
-            mkit_core::pack::PackEntries::new(pack).expect("freshly exported closure must parse")
+            kit_core::pack::PackEntries::new(pack).expect("freshly exported closure must parse")
         {
-            let mkit_core::pack::PackEntry::Raw { bytes } =
+            let kit_core::pack::PackEntry::Raw { bytes } =
                 entry.expect("freshly exported closure entries must parse")
             else {
                 panic!("freshly exported closure must be raw-only");
@@ -1002,14 +1002,14 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
     }
     let map_report = verify::verify_closure(
         &fixture.root,
-        mkit_core::ClosureMode::Snapshot,
+        kit_core::ClosureMode::Snapshot,
         objects.iter().map(Vec::as_slice),
     )
     .expect("freshly exported closure map path must verify");
     let store_report = verify::verify_closure_store(
         &fixture.store,
         &fixture.root,
-        mkit_core::ClosureMode::Snapshot,
+        kit_core::ClosureMode::Snapshot,
     )
     .expect("freshly exported closure store path must verify");
     assert_eq!(map_report.missing, store_report.missing);
@@ -1022,8 +1022,8 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
         mutated[pos] ^= input[1].max(1);
         let _ = verify::verify_closure_manifest(&fixture.root, &mutated, &pack_refs);
     }
-    let _ = verify::verify_closure(&fixture.root, mkit_core::ClosureMode::Snapshot, [input]);
-    let _ = mkit_core::pack::PackEntries::new(input);
+    let _ = verify::verify_closure(&fixture.root, kit_core::ClosureMode::Snapshot, [input]);
+    let _ = kit_core::pack::PackEntries::new(input);
 
     // Feed raw fuzzer input directly as closure pack buffers (not wrapped
     // in valid PackEntries framing), both whole and split into two, so the
@@ -1032,11 +1032,9 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
     // could never produce. Any `Ok` report must still be internally
     // consistent.
     let single_pack: [&[u8]; 1] = [input];
-    if let Ok(report) = verify::verify_closure_packs(
-        &fixture.root,
-        mkit_core::ClosureMode::Snapshot,
-        &single_pack,
-    ) {
+    if let Ok(report) =
+        verify::verify_closure_packs(&fixture.root, kit_core::ClosureMode::Snapshot, &single_pack)
+    {
         assert_closure_report_consistent(&report);
     }
     if let Ok(report) =
@@ -1048,7 +1046,7 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
     let mid = input.len() / 2;
     let split_pack: [&[u8]; 2] = [&input[..mid], &input[mid..]];
     if let Ok(report) =
-        verify::verify_closure_packs(&fixture.root, mkit_core::ClosureMode::Snapshot, &split_pack)
+        verify::verify_closure_packs(&fixture.root, kit_core::ClosureMode::Snapshot, &split_pack)
     {
         assert_closure_report_consistent(&report);
     }
@@ -1061,7 +1059,7 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
 
 /// `is_complete()` must imply no `missing`/`corrupt` entries, for any
 /// report produced from adversarial pack bytes.
-fn assert_closure_report_consistent(report: &mkit_core::verify::ClosureReport) {
+fn assert_closure_report_consistent(report: &kit_core::verify::ClosureReport) {
     if report.is_complete() {
         assert!(
             report.missing.is_empty(),
@@ -1078,12 +1076,12 @@ fn assert_closure_report_consistent(report: &mkit_core::verify::ClosureReport) {
 /// `build_sparse` must never panic; a freshly built delivery must
 /// verify; and `verify_sparse` over adversarial proof/manifest bytes
 /// (garbage bitmap, wrong-length bitmap, mismatched filter) must
-/// reject cleanly — never panic. `mkit-core`'s `sparse-checkout`
+/// reject cleanly — never panic. `kit-core`'s `sparse-checkout`
 /// feature is enabled unconditionally on this crate's dependency (see
 /// `Cargo.toml`), so this needs no feature gate of its own.
 pub fn sparse_verify_one_iteration(input: &[u8]) {
-    use mkit_core::object::{EntryMode, Tree, TreeEntry};
-    use mkit_core::sparse::{SparseProof, build_sparse, verify_sparse};
+    use kit_core::object::{EntryMode, Tree, TreeEntry};
+    use kit_core::sparse::{SparseProof, build_sparse, verify_sparse};
     use std::path::PathBuf;
 
     let input = &input[..input.len().min(MAX_INPUT)];
@@ -1127,7 +1125,7 @@ pub fn sparse_verify_one_iteration(input: &[u8]) {
     let Ok(mut response) = build_sparse(&tree, &filter) else {
         return;
     };
-    let root = mkit_core::sparse::tree_hash(&tree);
+    let root = kit_core::sparse::tree_hash(&tree);
     assert!(
         verify_sparse(&root, &filter, &response).is_ok(),
         "fresh witness must verify"
@@ -1148,10 +1146,10 @@ pub fn sparse_verify_one_iteration(input: &[u8]) {
 /// upload temp file stays, and nothing exists outside `packs/`, `refs/` and
 /// `.kit/refs/`.
 pub fn ssh_session_one_iteration(input: &[u8]) {
-    use mkit_core::hash::{hash, to_hex};
-    use mkit_rpc::kit::rpc::v1::ProtocolVersion;
-    use mkit_rpc::kit::rpc::v1::ssh::{Hello, SshFrame, ssh_frame};
-    use mkit_serve::{ReadFrames, Repo, SessionConfig, WriteFrames, WritePolicy, serve_session};
+    use kit_core::hash::{hash, to_hex};
+    use kit_rpc::kit::rpc::v1::ProtocolVersion;
+    use kit_rpc::kit::rpc::v1::ssh::{Hello, SshFrame, ssh_frame};
+    use kit_serve::{ReadFrames, Repo, SessionConfig, WriteFrames, WritePolicy, serve_session};
 
     let input = &input[..input.len().min(MAX_INPUT)];
     let mut stream = Vec::new();
@@ -1161,7 +1159,7 @@ pub fn ssh_session_one_iteration(input: &[u8]) {
         ))),
         ..Default::default()
     };
-    mkit_rpc::write_frame(&mut stream, &hello).expect("encode Hello");
+    kit_rpc::write_frame(&mut stream, &hello).expect("encode Hello");
     stream.extend_from_slice(input);
 
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -1299,10 +1297,10 @@ mod tests {
             refs/heads/main=cu;refs/heads/wip/*=cufd\n\
             0\n1790000000000\n1792592000000\n\
             9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
-        assert!(mkit_attest::grant::Grant::parse(grant.as_bytes()).is_ok());
-        let header = mkit_attest::grant::SignedHeader {
+        assert!(kit_attest::grant::Grant::parse(grant.as_bytes()).is_ok());
+        let header = kit_attest::grant::SignedHeader {
             statement: grant.as_bytes().to_vec(),
-            scheme: mkit_attest::grant::OwnerScheme::Ed25519,
+            scheme: kit_attest::grant::OwnerScheme::Ed25519,
             blob: vec![7; 64],
         }
         .encode()
@@ -1323,7 +1321,7 @@ mod tests {
 
     #[test]
     fn unit_epoch_visibility_parse() {
-        use mkit_attest::grant::{OwnerScheme, SignedHeader};
+        use kit_attest::grant::{OwnerScheme, SignedHeader};
         run_iterated_unit(epoch_visibility_parse_one_iteration).unwrap();
         let epoch = "kit-write-epoch:v1\n\
             ed25519-3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\n\
@@ -1333,8 +1331,8 @@ mod tests {
             0x8ba1f109551bd432803012645ac136ddd64dba72/website\n\
             private\nhttps://git.example.com\n1790000000000\n1790086400000\n\
             9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
-        assert!(mkit_attest::grant::EpochStatement::parse(epoch.as_bytes()).is_ok());
-        assert!(mkit_attest::grant::VisibilityStatement::parse(visibility.as_bytes()).is_ok());
+        assert!(kit_attest::grant::EpochStatement::parse(epoch.as_bytes()).is_ok());
+        assert!(kit_attest::grant::VisibilityStatement::parse(visibility.as_bytes()).is_ok());
         let headers: Vec<String> = [epoch, visibility]
             .iter()
             .flat_map(|s| {
@@ -1387,7 +1385,7 @@ mod tests {
         // loop, which only cares whether the reader panics/UB's.
         let dir = tempfile::TempDir::new().expect("tempdir");
         let store =
-            mkit_core::store::ObjectStore::init(&mkit_core::layout::RepoLayout::single(dir.path()))
+            kit_core::store::ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path()))
                 .expect("store init");
         run_iterated_unit_with(&store, pack_one_iteration_with_store).expect("guardrails held");
     }
@@ -1602,14 +1600,14 @@ mod tests {
     #[test]
     fn rpc_decode_target_handles_fixed_cases() {
         use buffa::Message;
-        use mkit_rpc::kit::rpc::v1::signer::{SignerFrame, signer_frame};
+        use kit_rpc::kit::rpc::v1::signer::{SignerFrame, signer_frame};
 
         // Empty and truncated inputs.
         rpc_decode_one_iteration(&[]);
         rpc_decode_one_iteration(&[0x0A]);
         // A valid encoded frame must decode (and roundtrip) cleanly.
-        let frame = mkit_rpc::signer_error_frame(
-            mkit_rpc::kit::rpc::v1::ErrorCode::Internal,
+        let frame = kit_rpc::signer_error_frame(
+            kit_rpc::kit::rpc::v1::ErrorCode::Internal,
             "fuzz fixed case",
         );
         rpc_decode_one_iteration(&frame.encode_to_vec());

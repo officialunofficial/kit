@@ -1,0 +1,56 @@
+# kit-rpc
+
+Versioned wire protocols for kit cross-system speech: external signers
+(`signer.proto`), the SSH transport frames (`ssh.proto`), the object-
+signature verification contract (`verify.proto`), and shared types
+(`common.proto`). Schemas are defined in protobuf via `buffa`, with
+length-prefixed framing.
+
+`kit-rpc` owns the schemas kit uses to talk to processes outside its own
+address space:
+
+- **External signers** (`signer.proto`) &mdash; `kit-storage` ↔ a subprocess signer
+  (file, `FIDO2`, TPM, future hardware backends). See
+  `docs/specs/SPEC-EXTERNAL-SIGNER.md` and `contrib/signers/README.md`.
+- **SSH transport** (`ssh.proto`) &mdash; `kit-storage` ↔ a remote `kit-server` over
+  an `ssh(1)` child process. See `docs/specs/SPEC-TRANSPORT.md`.
+- **Signature verification** (`verify.proto`) &mdash; the `VerifyRequest`/
+  `VerifyResponse` contract `kit clone`/`pull`/`fetch` check every
+  newly-fetched commit/remix/tag against. Message-only today
+  (no bound RPC method): `kit-storage`'s local dispatch
+  (`rust/crates/kit-storage/src/remote_dispatch/packmap.rs`) calls the Rust
+  implementation directly (`kit_core::sign::{verify_commit,verify_remix,verify_tag}`);
+  the schema is published so a future ConnectRPC-based transport
+  (`apps/repo-worker`) can bind the identical check to a service method
+  instead of reimplementing it.
+
+Shared vocabulary (`common.proto`) &mdash; algorithms, key forms, error codes,
+protocol-version negotiation &mdash; is re-exported at the crate root for
+convenience.
+
+## Wire framing
+
+Both protocols use the same length-prefixed framing:
+
+```text
+[u32 LE length][N bytes protobuf-encoded Frame]
+```
+
+Generated code is vendored (not built fresh from `.proto` on every build);
+regenerate it with `scripts/regen-rpc-proto.sh` after editing a schema.
+
+## Shared Connect transport bindings
+
+The opt-in `transport` feature owns the canonical `kit.transport.v1` and
+`grpc.health.v1` messages and Connect service traits in `kit_rpc::transport`.
+Both `kit-server` and `kit-transport-connect` re-export these shared types at
+their existing public paths. The feature uses ConnectRPC without its native
+client or server runtime features and builds for wasm32. Default RPC consumers
+do not enable it. Refresh `generated/transport/` with
+`scripts/regen-transport-proto.sh`; ordinary builds require no protoc.
+
+For runtime-independent clients, enable `transport-messages` instead. It
+exposes the same message types at the same paths, without service bindings,
+ConnectRPC or tokio. The `transport` feature includes this feature. Both
+features stage the same generated files; the build script gates only the
+binding includes, including during regeneration. `kit-client` uses this surface.

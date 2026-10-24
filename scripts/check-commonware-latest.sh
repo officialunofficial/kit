@@ -7,7 +7,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root/rust"
 export CARGO_BUILD_JOBS=3 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
 cargo_cmd=(cargo)
-if [ "${MKIT_CARGO_CACHED:-0}" = 1 ]; then
+if [ "${KIT_CARGO_CACHED:-0}" = 1 ]; then
   cargo_cmd=(just --justfile "$root/justfile" --working-directory "$root" cargo-cached)
 fi
 
@@ -41,9 +41,9 @@ for package in lock['package']:
         print(f"{package['name']} {package['version']}")
 PY
 
-crates=(-p mkit-core -p mkit-attest)
-if [ -f crates/mkit-primitives/Cargo.toml ]; then
-  crates+=(-p mkit-primitives)
+crates=(-p kit-core -p kit-attest)
+if [ -f crates/kit-primitives/Cargo.toml ]; then
+  crates+=(-p kit-primitives)
 fi
 # All features exercise optional Commonware-backed formats, including BLS and
 # erasure-coded shards. Normal nextest runs execute the same golden tests.

@@ -3,7 +3,7 @@
 //
 // Models docs/specs/SPEC-HISTORY-PROOF.md §4.3-§4.4 for ONE branch under the
 // guards of SPEC-CONCURRENCY §3.3/§4, aligned with
-// rust/crates/mkit-core/src/history/ancestry.rs (`advance`, `finish`,
+// rust/crates/kit-core/src/history/ancestry.rs (`advance`, `finish`,
 // `recover`, `AncestrySnapshot::load`) and refs.rs / refs/ancestry_state.rs
 // (`RefMutation::{write,delete}`, `invalidate`, `pending_roots`).
 //

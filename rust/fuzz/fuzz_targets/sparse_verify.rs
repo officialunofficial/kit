@@ -1,4 +1,4 @@
-//! cargo-fuzz target — sparse-checkout build/verify (`mkit_core::sparse`).
+//! cargo-fuzz target — sparse-checkout build/verify (`kit_core::sparse`).
 //! See sibling `delta.rs` for guardrail rationale. `build_sparse` and
 //! `verify_sparse` must never panic on adversarial input.
 
@@ -8,7 +8,7 @@
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use mkit_fuzz::{MAX_ITER, run_one, sparse_verify_one_iteration};
+use kit_fuzz::{MAX_ITER, run_one, sparse_verify_one_iteration};
 
 static ITERS: AtomicU32 = AtomicU32::new(0);
 

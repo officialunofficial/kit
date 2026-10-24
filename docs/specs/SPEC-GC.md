@@ -7,14 +7,14 @@ audience: implementers of gc/recovery and reviewers of object pruning
 
 # SPEC-GC &mdash; garbage-collection retention roots and recovery
 
-Status: **Normative** for mkit v1; **implemented** (see below). See
+Status: **Normative** for kit v1; **implemented** (see below). See
 SPEC-CONVENTIONS §2 for the maturity/bindingness status vocabulary this
 frontmatter uses. Concurrency: see SPEC-CONCURRENCY (this document no
 longer states its own lock model). The recovery model &mdash; retention
 roots + live closure (`ops::gc`), the recovery log + retention
 policy (`ops::recovery`), and the producers (amend/reset/rebase record
-the superseded tip) &mdash; **and the `mkit gc` command itself** are all
-shipped. `mkit gc` runs `recovery::expire` → `ops::gc::run_gc`
+the superseded tip) &mdash; **and the `kit gc` command itself** are all
+shipped. `kit gc` runs `recovery::expire` → `ops::gc::run_gc`
 (`live_objects` then prune `store ∖ live`, skipping objects within the
 grace window) under the locks SPEC-CONCURRENCY §4 assigns to `gc`
 (the worktree registry lock, then every registered tree's per-tree
@@ -23,9 +23,9 @@ per-tree locks gc already holds are what serializes it, see §3.2).
 
 ## Why this spec exists
 
-mkit's object store is append-only and never prunes, so unreachable
+kit's object store is append-only and never prunes, so unreachable
 objects accumulate (notably the commits superseded by `commit --amend`,
-`reset`, and `rebase`). `mkit gc` reclaims them. Pruning is
+`reset`, and `rebase`). `kit gc` reclaims them. Pruning is
 safe **only** against a complete, exact retention root set: anything
 reachable from a root is live; everything else is reclaimable. An
 incomplete root set means deleting a live object &mdash; silent corruption.
@@ -33,7 +33,7 @@ This spec pins that root set so gc has one normative definition to honor.
 
 ## Retention roots
 
-`ops::gc::collect_roots(mkit_dir)` returns the complete set. A root is an
+`ops::gc::collect_roots(kit_dir)` returns the complete set. A root is an
 object hash that must be kept along with its full reachable closure. The
 all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 
@@ -60,7 +60,7 @@ before sweeping. An absent index alone means no staging roots. Only the current
 index format is supported (SPEC-INDEX).
 
 The live keep-set is the reachable closure over those roots:
-`ops::gc::live_objects(store, mkit_dir)` = `reachable_closure(store,
+`ops::gc::live_objects(store, kit_dir)` = `reachable_closure(store,
 collect_roots(...))`. Walk semantics match `reachable_objects`
 (commits/remixes → tree + parents, trees → entries, chunked-blobs →
 chunks, tags → target; blobs/deltas are leaves), capped at
@@ -111,7 +111,7 @@ record the superseded tip (op tokens `amend`/`reset`/`rebase`) before
 moving the ref, and `stash pop` records the popped commit (op token
 `stash-pop`) before restoring the worktree and dropping the manifest
 entry &mdash; each per the lock set SPEC-CONCURRENCY §4 assigns to that
-command &mdash; and the **`mkit gc` command** consumes them: under
+command &mdash; and the **`kit gc` command** consumes them: under
 gc's lock set (SPEC-CONCURRENCY §4) it expires the recovery log,
 computes `live_objects`, then prunes `store ∖ live`, keeping unreachable
 objects younger than the grace window (default 14 days; `--grace-secs 0`
@@ -130,19 +130,19 @@ write to its ref, index or recovery-log publication. Such a writer
 publishes either before gc collects its roots or after gc's sweep ends.
 Writers outside that lock set are not excluded, and for them the grace
 window is the only protection. The one such writer into the object store
-gc sweeps is the import phase of `mkit git import`/`fetch`/`pull`, which
+gc sweeps is the import phase of `kit git import`/`fetch`/`pull`, which
 writes objects and then tags and remote-tracking refs under
 `git-<remote>.lock` only (SPEC-CONCURRENCY §4).
 
-A push through the file transport (`mkit push kit+file://...`) or one
-received by `mkit serve` or `mkit-server` is not such a writer. It stores
+A push through the file transport (`kit push kit+file://...`) or one
+received by `kit serve` or `kit-server` is not such a writer. It stores
 packs as `<root>/packs/<hex>` and refs as `<root>/<name>` under the
 transport root, while gc sweeps only loose objects in
 `<common_dir>/objects` and takes roots only from `<common_dir>`. The two
 are disjoint, so gc cannot delete a pushed object, and a pushed ref is not
 a gc root.
 
-`mkit gc` reads its clock once, as `now`, after it takes its locks and
+`kit gc` reads its clock once, as `now`, after it takes its locks and
 before it expires the recovery log and computes `live_objects`. Its sweep
 deletes an unreachable object when `now - mtime >= grace`, where `mtime`
 is the object file's on-disk modification time, and keeps any object

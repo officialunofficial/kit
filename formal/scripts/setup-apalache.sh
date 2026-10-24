@@ -5,7 +5,7 @@
 # sha256 of the release archive and of the jar, and does nothing when the
 # verified jar is already there.
 #
-#   FV_HOME  install root (default: $HOME/.local/share/mkit-fv)
+#   FV_HOME  install root (default: $HOME/.local/share/kit-fv)
 #
 # The check.sh scripts under formal/quint find the jar at this path. TLC is
 # the tlc2.TLC class inside the Apalache jar, so every Quint check needs it.
@@ -15,7 +15,7 @@ version=0.62.2
 tgz_sha256=765f610537281a0f25b8c30f2554f19523e2859c824e80e62276653ee23c10e2
 jar_sha256=079b6c2320252469dcf79afec6886b8255d3dd1b34a9484433c88986752efaa8
 
-fv=${FV_HOME:-$HOME/.local/share/mkit-fv}
+fv=${FV_HOME:-$HOME/.local/share/kit-fv}
 
 sha256() {
   if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1

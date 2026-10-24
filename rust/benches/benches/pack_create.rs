@@ -1,12 +1,12 @@
-//! Pack creation — chunk + hash + store a synthetic blob set, mkit
+//! Pack creation — chunk + hash + store a synthetic blob set, kit
 //! (BLAKE3 + content-addressed write per blob) vs git's `pack-objects`
 //! over a real git repo.
 //!
-//! mkit does not have FastCDC chunking exposed at a stable public API
+//! kit does not have FastCDC chunking exposed at a stable public API
 //! yet, so this benchmark anchors on the steady-state "store N blobs
 //! in a content-addressed fashion" cost. Wallclock ms, smaller wins.
 //!
-//! mkit's side uses `ObjectStore::batch()`, the write path every
+//! kit's side uses `ObjectStore::batch()`, the write path every
 //! multi-object command (add, commit, pack unpack) actually takes —
 //! see `object_commit.rs`'s doc comment for why that matters: the raw
 //! `ObjectStore::write()` this bench used before pays a directory
@@ -18,9 +18,9 @@ use std::process::Command;
 use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit, time_one_with_setup};
-use mkit_core::layout::RepoLayout;
-use mkit_core::store::ObjectStore;
+use kit_benches::{Sample, Unit, time_one_with_setup};
+use kit_core::layout::RepoLayout;
+use kit_core::store::ObjectStore;
 
 const SIZES: &[(usize, usize, &str)] = &[
     // (file_count, file_size, axis_label)
@@ -41,20 +41,20 @@ fn bench_pack(c: &mut Criterion) {
     for &(count, size, axis) in SIZES {
         let blobs = build_blobs(count, size);
 
-        // --- mkit: hash + atomic-write each blob via ObjectStore -------
+        // --- kit: hash + atomic-write each blob via ObjectStore -------
         // Real on-disk writes via the batched path, not just hashing.
         // Every measured iteration gets a fresh tempdir + store (like
         // store_write.rs's iter_with_setup) so writes never dedup
         // against a blob already staged by a prior iteration.
         {
-            c.bench_function(&format!("pack/{axis}/mkit"), |b| {
+            c.bench_function(&format!("pack/{axis}/kit"), |b| {
                 b.iter_with_setup(
                     || {
                         let dir = tempfile::tempdir().unwrap();
                         let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
                         (dir, store)
                     },
-                    |(_dir, store)| pack_via_mkit(&store, &blobs),
+                    |(_dir, store)| pack_via_kit(&store, &blobs),
                 );
             });
             let t = time_one_with_setup(
@@ -65,12 +65,12 @@ fn bench_pack(c: &mut Criterion) {
                     let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
                     (dir, store)
                 },
-                |(_dir, store)| pack_via_mkit(&store, &blobs),
+                |(_dir, store)| pack_via_kit(&store, &blobs),
             );
             samples.push(Sample {
                 category: "pack-create".into(),
                 axis: axis.into(),
-                library: "mkit (BLAKE3)".into(),
+                library: "kit (BLAKE3)".into(),
                 value: t * 1000.0,
                 unit: Unit::Millis,
             });
@@ -79,7 +79,7 @@ fn bench_pack(c: &mut Criterion) {
         // --- git2 odb.write per blob
         // Same fresh-repo-per-iteration treatment: libgit2's odb.write
         // is content-addressed too, so a reused repo would dedup from
-        // the second iteration onward exactly like mkit's store.
+        // the second iteration onward exactly like kit's store.
         {
             c.bench_function(&format!("pack/{axis}/git2"), |b| {
                 b.iter_with_setup(
@@ -124,7 +124,7 @@ fn bench_pack(c: &mut Criterion) {
         }
     }
 
-    mkit_benches::write_summary("pack_create", &samples);
+    kit_benches::write_summary("pack_create", &samples);
 }
 
 fn build_blobs(count: usize, size: usize) -> Vec<Vec<u8>> {
@@ -145,7 +145,7 @@ fn build_blobs(count: usize, size: usize) -> Vec<Vec<u8>> {
     out
 }
 
-fn pack_via_mkit(store: &ObjectStore, blobs: &[Vec<u8>]) {
+fn pack_via_kit(store: &ObjectStore, blobs: &[Vec<u8>]) {
     let batch = store.batch();
     for b in blobs {
         let _h = batch.write(b).unwrap();

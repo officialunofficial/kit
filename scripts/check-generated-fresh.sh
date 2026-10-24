@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
 # Fail when the checked-in protocol code differs from what the .proto files
-# produce. The tree under rust/crates/mkit-rpc/generated/ is checked in
+# produce. The tree under rust/crates/kit-rpc/generated/ is checked in
 # because the code generator needs `protoc` and the schemas use protobuf
 # edition 2023 (see the README in that directory). This check keeps the copy
 # honest: it regenerates the code and compares the result with the checked-in
@@ -16,7 +16,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-dirs=(rust/crates/mkit-rpc/generated)
+dirs=(rust/crates/kit-rpc/generated)
 
 # Digest of every file under the generated trees. The digest does not use git
 # state, so the check also works with uncommitted edits.

@@ -1,5 +1,5 @@
 # BMT inclusion-proof golden vectors (deterministic)
-# Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-core --test golden_proofs`
+# Produced by `KIT_WRITE_GOLDEN=1 cargo test -p kit-core --test golden_proofs`
 # Format: <name> <blake3-hex-of-bin-bytes>
 # See docs/specs/SPEC-MERKLE-OBJECTS.md §5.
 tree_1entry_pos0 023a14bb4482dc2fb94463977df299bdc73dcc5cf7227b0f8a9772e18bce3e9a

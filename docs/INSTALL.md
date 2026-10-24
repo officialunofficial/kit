@@ -1,6 +1,6 @@
-# Installing mkit
+# Installing kit
 
-mkit ships through four distribution channels. This guide is the
+kit ships through four distribution channels. This guide is the
 long-form companion to the install section in
 [`README.md`](../README.md): pick a channel, follow its steps, then
 verify the result.
@@ -19,11 +19,11 @@ verify the result.
 
 | Use case                              | Channel                              | Command                                                                                              |
 |---------------------------------------|--------------------------------------|------------------------------------------------------------------------------------------------------|
-| CLI on a dev machine (Linux/macOS)    | Release archive or `cargo install --git` | `curl mkit.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
+| CLI on a dev machine (Linux/macOS)    | Release archive or `cargo install --git` | `curl kit.storage \| sh` *or* `cargo install --git https://github.com/officialunofficial/kit kit-storage` |
 | CLI on a dev machine (Windows)        | Not supported &mdash; use WSL         | run the above `install.sh` (or `cargo install`) inside WSL |
-| CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-<VERSION>-<target>.tar.gz && tar -xzf mkit-<VERSION>-<target>.tar.gz` |
-| Browser / Cloudflare Worker           | npm                                  | `bun add @officialunofficial/mkit-wasm`                                                                                  |
-| Library inside another Rust crate     | crates.io (or git dependency)        | `mkit-core = "0.3"`                                                                                  |
+| CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/kit-<VERSION>-<target>.tar.gz && tar -xzf kit-<VERSION>-<target>.tar.gz` |
+| Browser / Cloudflare Worker           | npm                                  | `bun add @officialunofficial/kit-wasm`                                                                                  |
+| Library inside another Rust crate     | crates.io (or git dependency)        | `kit-core = "0.3"`                                                                                  |
 
 Pick the leftmost channel that satisfies your constraints &mdash; release
 archives are the lowest-overhead path for end users, source builds the
@@ -32,7 +32,7 @@ right answer for contributors and air-gapped CI.
 ## From source
 
 Source builds are the right path for contributors and air-gapped CI. For
-everyday CLI use, `cargo install mkit-cli` from crates.io (see
+everyday CLI use, `cargo install kit-storage` from crates.io (see
 [`README.md`](../README.md)) is the shortest route.
 
 **Toolchain.** Rust 1.95, edition 2024, pinned by
@@ -42,18 +42,22 @@ auto-install on the first build.
 **Install the CLI:**
 
 ```sh
-cargo install mkit-cli                                                   # from crates.io
-cargo install --git https://github.com/officialunofficial/mkit mkit-cli  # from git HEAD
+cargo install kit-storage                                                   # from crates.io
+cargo install --git https://github.com/officialunofficial/kit kit-storage  # from git HEAD
 ```
 
-Drops `mkit` into `~/.cargo/bin/`. Make sure that directory is on your
+Drops `kit` into `~/.cargo/bin/`. Make sure that directory is on your
 `PATH`.
+
+The install also adds `mkit`, the former name of the tool. It prints a
+deprecation notice to stderr and runs `kit` with the same arguments. Use
+`kit` in new scripts.
 
 **Build modes.** From a checkout of the repository:
 
 ```sh
 cd rust
-cargo build --release        # mkit binary → rust/target/release/mkit
+cargo build --release        # kit binary → rust/target/release/kit
 cargo build                  # debug build, faster compile, slower runtime
 cargo test --workspace       # all crates, all tests
 ```
@@ -63,16 +67,16 @@ cargo test --workspace       # all crates, all tests
 
 | Crate                                | Role                                                       |
 |--------------------------------------|------------------------------------------------------------|
-| `mkit-core`                          | object model, store, chunker, packs, refs, transports, ops |
-| `mkit-attest`                        | DSSE plus in-toto v1, multi-algo signers                      |
-| `mkit-keystore`                      | key vault interface plus backends                             |
-| `mkit-git-bridge`                    | git import/export bridge                                   |
-| `mkit-sync`                          | native clone/fetch/pull as a library                       |
-| `mkit-rpc`                           | shared stdio framing for subprocess protocols              |
-| `mkit-serve`                         | self-host server: the ssh frame session over a repository  |
-| `mkit-cli`                           | the `mkit` binary                                          |
-| `mkit-transport-{memory,file,connect,s3,ssh}` | one crate per transport scheme                    |
-| `mkit-wasm`                          | wasm-bindgen surface for browsers / Workers (npm-only, not on crates.io) |
+| `kit-core`                          | object model, store, chunker, packs, refs, transports, ops |
+| `kit-attest`                        | DSSE plus in-toto v1, multi-algo signers                      |
+| `kit-keystore`                      | key vault interface plus backends                             |
+| `kit-git-bridge`                    | git import/export bridge                                   |
+| `kit-sync`                          | native clone/fetch/pull as a library                       |
+| `kit-rpc`                           | shared stdio framing for subprocess protocols              |
+| `kit-serve`                         | self-host server: the ssh frame session over a repository  |
+| `kit-storage`                           | the `kit` binary                                          |
+| `kit-transport-{memory,file,connect,s3,ssh}` | one crate per transport scheme                    |
+| `kit-wasm`                          | wasm-bindgen surface for browsers / Workers (npm-only, not on crates.io) |
 
 ## From GitHub Releases
 
@@ -81,11 +85,11 @@ strict-semver `v*.*.*` tags after verifying the tag is an annotated GPG-signed
 tag from an allowlisted release signer and points at a commit reachable from
 `main`. It then produces a per-target archive plus signing material:
 
-- `mkit-<version>-<target>.tar.gz` &mdash; the archive (binary, licenses,
-  README, optional changelog, `share/man/man1/mkit.1`, shell completions,
+- `kit-<version>-<target>.tar.gz` &mdash; the archive (binary, licenses,
+  README, optional changelog, `share/man/man1/kit.1`, shell completions,
   and per-archive `SHA256SUMS`).
-- `mkit-<version>-<target>.tar.gz.sha256` &mdash; archive-level checksum.
-- `mkit-<version>-<target>.tar.gz.cosign.bundle` &mdash; keyless OIDC
+- `kit-<version>-<target>.tar.gz.sha256` &mdash; archive-level checksum.
+- `kit-<version>-<target>.tar.gz.cosign.bundle` &mdash; keyless OIDC
   signature (Sigstore Fulcio plus Rekor).
 
 Targets shipped today:
@@ -96,7 +100,7 @@ Targets shipped today:
 - `aarch64-unknown-linux-gnu` (Linux arm64)
 
 Windows is not a supported target (see `docs/INVARIANTS.md`).
-Windows users should run mkit under WSL, which uses the Linux binary.
+Windows users should run kit under WSL, which uses the Linux binary.
 
 **Linux glibc requirement.** The published x86_64 and aarch64 Linux
 archives (v0.3.0 through v0.5.0) require **glibc 2.39 or newer**.
@@ -107,24 +111,24 @@ Check your glibc with `ldd --version | head -1`.
 | Run on | Ubuntu 24.04 or newer, Debian 13 or newer, Fedora 40 or newer |
 | Do not run on | Debian 12, Ubuntu 22.04, RHEL/Rocky/Alma 9, Fedora 39 |
 
-On older systems, build from source with `cargo install mkit-cli`, which
+On older systems, build from source with `cargo install kit-storage`, which
 links against your host's glibc, or use a newer distro/container.
 A future release will lower this floor.
 
 If you want "latest", use the hosted installer:
-`curl mkit.sh | sh` (Linux/macOS, including WSL; or the explicit
-`curl -sSfL https://mkit.sh/install.sh | sh`). It resolves the current
+`curl kit.storage | sh` (Linux/macOS, including WSL; or the explicit
+`curl -sSfL https://kit.storage/install.sh | sh`). It resolves the current
 tag, fetches the matching archive for your platform, and verifies cosign
 by default. Direct release URLs are best when you want a pinned artifact.
 
 > [!NOTE]
 > Like any `curl | sh`, the *installer script* is trusted on download
 > &mdash; cosign verifies the downloaded **binary**, not the script itself.
-> The script is served over HTTPS from `mkit.sh`; `https://mkit.sh/install.sh`
+> The script is served over HTTPS from `kit.storage`; `https://kit.storage/install.sh`
 > and the byte-identical
-> [`raw.githubusercontent.com/.../main/install.sh`](https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh)
+> [`raw.githubusercontent.com/.../main/install.sh`](https://raw.githubusercontent.com/officialunofficial/kit/main/install.sh)
 > are the same file. If you'd rather not trust the hosted script, read it
-> first (`curl -sSfL https://mkit.sh/install.sh | less`) or skip it and use
+> first (`curl -sSfL https://kit.storage/install.sh | less`) or skip it and use
 > the pinned release plus cosign steps below.
 
 **Download a pinned release for your platform:**
@@ -132,8 +136,8 @@ by default. Direct release URLs are best when you want a pinned artifact.
 ```sh
 VERSION=0.5.0
 TARGET=aarch64-apple-darwin
-curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/mkit-${VERSION}-${TARGET}.tar.gz"
-tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
+curl -LO "https://github.com/officialunofficial/kit/releases/download/v${VERSION}/kit-${VERSION}-${TARGET}.tar.gz"
+tar -xzf "kit-${VERSION}-${TARGET}.tar.gz"
 ```
 
 **Pin a version (recommended for CI):**
@@ -142,17 +146,17 @@ tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 VERSION=0.5.0
 TARGET=x86_64-unknown-linux-gnu
 TAG="v${VERSION}"
-URL="https://github.com/officialunofficial/mkit/releases/download/${TAG}/mkit-${VERSION}-${TARGET}.tar.gz"
+URL="https://github.com/officialunofficial/kit/releases/download/${TAG}/kit-${VERSION}-${TARGET}.tar.gz"
 curl -LO "$URL"
-tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
+tar -xzf "kit-${VERSION}-${TARGET}.tar.gz"
 ```
 
 **Verify the SHA256.** Each archive ships with a sibling `.sha256`:
 
 ```sh
 curl -LO "${URL}.sha256"
-sha256sum -c "mkit-${VERSION}-${TARGET}.tar.gz.sha256" || \
-  shasum -a 256 -c "mkit-${VERSION}-${TARGET}.tar.gz.sha256"
+sha256sum -c "kit-${VERSION}-${TARGET}.tar.gz.sha256" || \
+  shasum -a 256 -c "kit-${VERSION}-${TARGET}.tar.gz.sha256"
 ```
 
 **Verify the cosign signature.** Keyless OIDC, no public key needed.
@@ -163,10 +167,10 @@ this repo's `release.yml` workflow on a strict-semver tag. The sibling
 ```sh
 curl -LO "${URL}.cosign.bundle"
 cosign verify-blob \
-  --bundle "mkit-${VERSION}-${TARGET}.tar.gz.cosign.bundle" \
-  --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+  --bundle "kit-${VERSION}-${TARGET}.tar.gz.cosign.bundle" \
+  --certificate-identity-regexp '^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  "mkit-${VERSION}-${TARGET}.tar.gz"
+  "kit-${VERSION}-${TARGET}.tar.gz"
 ```
 
 Full reproducibility, signing, and supply-chain notes live under
@@ -174,21 +178,21 @@ Full reproducibility, signing, and supply-chain notes live under
 
 ## WASM / npm
 
-The `mkit-wasm` crate ([`rust/crates/mkit-wasm`](../rust/crates/mkit-wasm))
+The `kit-wasm` crate ([`rust/crates/kit-wasm`](../rust/crates/kit-wasm))
 is built with `wasm-pack` and published to npm as
-`@officialunofficial/mkit-wasm`.
+`@officialunofficial/kit-wasm`.
 
 **Install:**
 
 ```sh
-bun add @officialunofficial/mkit-wasm
+bun add @officialunofficial/kit-wasm
 # or
-npm i @officialunofficial/mkit-wasm
+npm i @officialunofficial/kit-wasm
 # or
-pnpm add @officialunofficial/mkit-wasm
+pnpm add @officialunofficial/kit-wasm
 ```
 
-**Why `wasm-pack` with `--target bundler`.** mkit-wasm targets the
+**Why `wasm-pack` with `--target bundler`.** kit-wasm targets the
 `bundler` output by default so Vite / Rspack / esbuild can consume the
 ESM entrypoint and tree-shake unused exports. For inline browser use
 without a bundler, build the same crate with `--target web`; for
@@ -198,7 +202,7 @@ wrangler's bundler will inline the `.wasm` import.
 **TypeScript usage:**
 
 ```ts
-import init, { hash, parse_envelope } from "@officialunofficial/mkit-wasm";
+import init, { hash, parse_envelope } from "@officialunofficial/kit-wasm";
 
 await init();
 const id = hash(new TextEncoder().encode("hello"));
@@ -208,8 +212,8 @@ console.log(id);
 **Cloudflare Workers (ESM modules format):**
 
 ```ts
-import init, { hash } from "@officialunofficial/mkit-wasm";
-import wasmModule from "@officialunofficial/mkit-wasm/mkit_wasm_bg.wasm";
+import init, { hash } from "@officialunofficial/kit-wasm";
+import wasmModule from "@officialunofficial/kit-wasm/kit_wasm_bg.wasm";
 
 export default {
   async fetch(req: Request): Promise<Response> {
@@ -224,7 +228,7 @@ export default {
 
 ```html
 <script type="module">
-  import init, { hash } from "https://esm.sh/@officialunofficial/mkit-wasm";
+  import init, { hash } from "https://esm.sh/@officialunofficial/kit-wasm";
   await init();
   console.log(hash(new TextEncoder().encode("hi")));
 </script>
@@ -232,7 +236,7 @@ export default {
 
 ## Hardware signers
 
-External signers are separate binaries that mkit drives over the
+External signers are separate binaries that kit drives over the
 [v1 stdio protocol](specs/SPEC-EXTERNAL-SIGNER.md). Wire one up with
 `attest.external_signer_path` in `.kit/config`. Each signer ships its
 own README with setup, hardware notes, and troubleshooting &mdash; the lines
@@ -246,61 +250,61 @@ canonical install path is `git clone` plus `cargo install --path .` from
 the signer directory rather than `cargo install --git URL --bin …`
 against the repository root.
 
-### `mkit-sign-file` &mdash; file-backed reference (any platform)
+### `kit-sign-file` &mdash; file-backed reference (any platform)
 
 Pure software signer for development and as the wire-protocol contract
 test:
 
 ```sh
-git clone https://github.com/officialunofficial/mkit
-cd mkit/contrib/signers/mkit-sign-file
+git clone https://github.com/officialunofficial/kit
+cd kit/contrib/signers/kit-sign-file
 cargo install --path .
 ```
 
-See [`contrib/signers/mkit-sign-file`](../contrib/signers/mkit-sign-file).
+See [`contrib/signers/kit-sign-file`](../contrib/signers/kit-sign-file).
 
-### `mkit-sign-se` &mdash; Apple Secure Enclave (macOS, Swift)
+### `kit-sign-se` &mdash; Apple Secure Enclave (macOS, Swift)
 
 P-256 only, optional biometric gate:
 
 ```sh
-cd contrib/signers/mkit-sign-se
+cd contrib/signers/kit-sign-se
 swift build -c release
-cp .build/release/mkit-sign-se /usr/local/bin/
+cp .build/release/kit-sign-se /usr/local/bin/
 ```
 
 Setup, biometric notes, and `attest.external_signer_path` wiring live
-in [`contrib/signers/mkit-sign-se/README.md`](../contrib/signers/mkit-sign-se/README.md).
+in [`contrib/signers/kit-sign-se/README.md`](../contrib/signers/kit-sign-se/README.md).
 
-### `mkit-sign-tpm` &mdash; TPM 2.0 persistent handle (Linux/Windows)
+### `kit-sign-tpm` &mdash; TPM 2.0 persistent handle (Linux/Windows)
 
 P-256, talks to the platform TPM via `tss-esapi`:
 
 ```sh
 # Debian / Ubuntu
 sudo apt install libtss2-dev
-git clone https://github.com/officialunofficial/mkit
-cd mkit/contrib/signers/mkit-sign-tpm
+git clone https://github.com/officialunofficial/kit
+cd kit/contrib/signers/kit-sign-tpm
 cargo install --path . --features tpm2
 ```
 
 Windows uses TBS via `tss-esapi`'s `tbs` feature; macOS has no TPM and
 the binary builds without `--features tpm2` for tooling/CI checks
 only. Full requirements and `swtpm` test recipe in
-[`contrib/signers/mkit-sign-tpm/README.md`](../contrib/signers/mkit-sign-tpm/README.md).
+[`contrib/signers/kit-sign-tpm/README.md`](../contrib/signers/kit-sign-tpm/README.md).
 
-### `mkit-sign-ctap` &mdash; FIDO2 / WebAuthn over CTAP-HID
+### `kit-sign-ctap` &mdash; FIDO2 / WebAuthn over CTAP-HID
 
 P-256, speaks Protocol **v1.1** (WebAuthn wrapping mode); works with
 YubiKey, Nitrokey, SoloKey, etc.:
 
 ```sh
-git clone https://github.com/officialunofficial/mkit
-cd mkit/contrib/signers/mkit-sign-ctap
+git clone https://github.com/officialunofficial/kit
+cd kit/contrib/signers/kit-sign-ctap
 cargo install --path .
 ```
 
-See [`contrib/signers/mkit-sign-ctap`](../contrib/signers/mkit-sign-ctap).
+See [`contrib/signers/kit-sign-ctap`](../contrib/signers/kit-sign-ctap).
 
 ## Verify your install
 
@@ -308,29 +312,29 @@ After any install path, confirm the binary speaks the expected
 version:
 
 ```sh
-$ mkit version
-mkit 0.5.0
+$ kit version
+kit 0.5.0
 ```
 
-The exact format `mkit <X.Y.Z>\n` (no extra whitespace, no banner) is
+The exact format `kit <X.Y.Z>\n` (no extra whitespace, no banner) is
 contract-tested in
 [`.github/workflows/rust.yml`](../.github/workflows/rust.yml) under the
 `Version contract` step &mdash; if you ever see anything else, the binary
 on your `PATH` is not a release build of this repo.
 
-Run `mkit --help` to enumerate subcommands, then jump into the
+Run `kit --help` to enumerate subcommands, then jump into the
 [CLI reference](CLI.md) or the
 [attestation spec](specs/SPEC-ATTESTATIONS.md).
 
 ## Updating
 
-If you installed via the install script (`curl mkit.sh | sh`), the
+If you installed via the install script (`curl kit.storage | sh`), the
 binary can update itself:
 
 ```sh
-mkit self update            # update to the latest release
-mkit self update --check    # just report whether an update exists
-mkit self update --version v0.5.0   # pin a specific release
+kit self update            # update to the latest release
+kit self update --check    # just report whether an update exists
+kit self update --version v0.5.0   # pin a specific release
 ```
 
 `self update` downloads the release archive for your platform and, when
@@ -343,10 +347,10 @@ receipts `install.sh` writes, so the two stay interchangeable.
 Installs it does **not** manage are refused with pointers to the right
 channel instead:
 
-- Homebrew: `brew upgrade mkit`
-- cargo: `cargo install --locked mkit-cli` (or `cargo binstall mkit-cli`)
+- Homebrew: `brew upgrade kit`
+- cargo: `cargo install --locked kit-storage` (or `cargo binstall kit-storage`)
 
-mkit never checks for updates in the background; `self update` acts
+kit never checks for updates in the background; `self update` acts
 only when you run it. Full details (receipts, downgrade policy,
 environment variables) are in [CLI.md](CLI.md); the release signing
 and verification model is in [RELEASE.md](RELEASE.md).

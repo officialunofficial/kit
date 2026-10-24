@@ -2,39 +2,39 @@
 spec: SPEC-KEYSTORE
 version: 1
 status: stable-normative
-audience: implementers and reviewers of the `mkit-keystore` crate, its CLI surface (`mkit key`), and the keystore-backed commit and attestation signers
+audience: implementers and reviewers of the `kit-keystore` crate, its CLI surface (`kit key`), and the keystore-backed commit and attestation signers
 ---
 
-# SPEC-KEYSTORE &mdash; mkit signing-key keystore
+# SPEC-KEYSTORE &mdash; kit signing-key keystore
 
-Status: **Normative** for `mkit-keystore` behavior. This file does not
+Status: **Normative** for `kit-keystore` behavior. This file does not
 specify wire formats; it specifies the keystore vault abstraction inside
-mkit. ("Vault" throughout this document refers to the mkit keystore vault
+kit. ("Vault" throughout this document refers to the kit keystore vault
 abstraction, **not** HashiCorp Vault or any external secret manager.)
 
-Authority: this file is the source of truth for `mkit-keystore` behavior.
+Authority: this file is the source of truth for `kit-keystore` behavior.
 If code, docs, or tests disagree with this file, update the implementation or
 amend this specification in the same change.
 
-Scope reminder: this spec covers the crate `rust/crates/mkit-keystore`, the
-`mkit key` CLI command, the keystore-backed `mkit_attest::Signer` adapter,
+Scope reminder: this spec covers the crate `rust/crates/kit-keystore`, the
+`kit key` CLI command, the keystore-backed `kit_attest::Signer` adapter,
 and the keystore-backed commit signer adapter. External signers are specified
 by SPEC-EXTERNAL-SIGNER, not here.
 
 ## 1. Purpose
 
-`mkit` treats signatures as trust anchors for commits, remix objects, and
+`kit` treats signatures as trust anchors for commits, remix objects, and
 DSSE-wrapped in-toto attestations. Today, long-term signing keys are raw
 32-byte files under `.kit/keys/`, protected by strict local filesystem
 hardening. That is a useful compatibility baseline, but it is not a
 cross-platform vault policy.
 
-`mkit-keystore` provides a generic signing-key vault abstraction over
+`kit-keystore` provides a generic signing-key vault abstraction over
 software, OS-native, and hardware-backed key stores. It is deliberately a
 signing keystore, not a protocol lifecycle system. It returns signer handles;
 callers decide what those signers are allowed to sign.
 
-`mkit-keystore` provides the crate, API, CLI, config, a software backend (both
+`kit-keystore` provides the crate, API, CLI, config, a software backend (both
 a deterministic raw-compatibility mode and an encrypted-at-rest mode), OS-native
 extractable storage backends where implemented, and keystore-backed
 commit/attestation signing, with honest capability reporting throughout. It
@@ -49,7 +49,7 @@ reading aid; the per-section requirements below remain the normative contract.
 
 Shipped against this spec:
 
-- `rust/crates/mkit-keystore` crate, public API (`Keystore`, `KeySigner`,
+- `rust/crates/kit-keystore` crate, public API (`Keystore`, `KeySigner`,
   `KeyGenerator`, `KeyImporter`, `KeyOpener`, `KeyLister`, `KeyExporter`,
   `KeyDeleter`), structured `Error` enum, typed wrappers (`KeyLabel`,
   `KeyRefLabel`, `KeyId`, `PublicKeyBytes`, `KeyRef`, `KeySelector`).
@@ -59,7 +59,7 @@ Shipped against this spec:
   XChaCha20-Poly1305 + length-prefixed AAD over backend/label/algorithm /
   public key/key ID/attrs/protector ID, wrapped DEK in an OS protector).
 - Software-raw compatibility backend (`software-raw:<label>`), reusing
-  `mkit_core::sign::{load_raw_32, save_raw_32}` hardening.
+  `kit_core::sign::{load_raw_32, save_raw_32}` hardening.
 - OS-native backends behind feature flags: `macos-keychain`,
   `linux-secret-service`, `systemd-creds`. (Windows is not a supported
   target &mdash; see §6.4.)
@@ -67,7 +67,7 @@ Shipped against this spec:
   and PIV signing slot (P-256). secp256k1 is reported `UnsupportedAlgorithm`;
   FIDO2/CTAP keys are not handled in this backend and remain on the external
   signer path.
-- `mkit key {generate,list,import,export,delete}` CLI with the flags and
+- `kit key {generate,list,import,export,delete}` CLI with the flags and
   defaults specified in §9.
 - Keystore-backed commit signing (`signer = keystore`) and attestation
   signing (`attest.signer = keystore`).
@@ -80,7 +80,7 @@ Not yet shipped against this spec:
   `MemoryKeystore` is implemented in this build).
 - External signer keystore bridge (`BackendKind::External`) &mdash; `open_backend`
   returns `BackendUnavailable`; external signing continues to live in
-  `mkit-rpc` per §12.
+  `kit-rpc` per §12.
 - Cloud KMS backend (`BackendKind::Cloud`) &mdash; same as above.
 - Secure Enclave, Windows TPM/CNG provider-backed keys, TPM/PCR-bound
   `systemd-creds` semantics, bounded PIN/touch prompt providers for YubiKey,
@@ -88,20 +88,20 @@ Not yet shipped against this spec:
 
 ## 2. Non-negotiable design decisions
 
-1. `mkit-core` must remain lean. It must not depend on platform keychain,
+1. `kit-core` must remain lean. It must not depend on platform keychain,
    credential-manager, D-Bus, TPM, Secure Enclave, YubiKey, or cloud KMS
    dependencies.
 2. Platform and vault dependencies live in a new crate,
-   `rust/crates/mkit-keystore`, behind feature flags where appropriate.
+   `rust/crates/kit-keystore`, behind feature flags where appropriate.
 3. Existing raw key files remain supported for compatibility. The current
-   `mkit keygen` command remains as a legacy compatibility surface unless a
+   `kit keygen` command remains as a legacy compatibility surface unless a
    future spec explicitly removes it.
-4. New keystore UX is exposed through `mkit key ...`, not by changing the
-   meaning of `mkit keygen` in-place.
+4. New keystore UX is exposed through `kit key ...`, not by changing the
+   meaning of `kit keygen` in-place.
 5. Repo-controlled config must never select a backend, label, key reference,
    signer binary, or signing algorithm. All such selectors are user-scoped.
 6. No signing command may silently generate or rotate a key. Key creation is
-   explicit through `mkit key generate` or legacy `mkit keygen`.
+   explicit through `kit key generate` or legacy `kit keygen`.
 7. Backend capabilities are explicit. A backend must not pretend to support
    export, import, user presence, hardware binding, or algorithm support that
    it cannot actually provide.
@@ -111,8 +111,8 @@ Not yet shipped against this spec:
 9. WASM builds must not depend on native keystore code. Browser integrations
    use an in-memory backend or a JS-side signer bridge, not yet implemented.
 10. `software:<label>` is the encrypted-at-rest software backend. Production
-    `mkit-cli` builds must enable the target-appropriate OS protector feature,
-    while `mkit-keystore` default features remain empty. Raw-file
+    `kit-storage` builds must enable the target-appropriate OS protector feature,
+    while `kit-keystore` default features remain empty. Raw-file
     compatibility is exposed only through the explicit `software-raw:<label>`
     backend token and must not be the secure default.
 11. The encrypted software backend must use OS-protected envelope encryption,
@@ -128,8 +128,8 @@ Not yet shipped against this spec:
   metadata lookup, and deletion.
 - A uniform signer handle abstraction that hides whether the key is software,
   OS-native, hardware-bound, or external.
-- `mkit-cli` integration through `mkit key {generate,list,import,export,delete}`.
-- `mkit-attest` integration through a keystore-backed implementation of its
+- `kit-storage` integration through `kit key {generate,list,import,export,delete}`.
+- `kit-attest` integration through a keystore-backed implementation of its
   existing `Signer` trait.
 - Ed25519 commit signing through a keystore signer handle.
 - Test vectors proving compatibility with current software signing semantics.
@@ -149,7 +149,7 @@ Not yet shipped against this spec:
 - PKCS#11/HSM support.
 - Secure Enclave, Windows TPM/CNG provider keys, or TPM/PCR-bound
   `systemd-creds` behavior unless implemented and capability-tested.
-- Replacing existing raw-key workflows (`mkit keygen`, `signing_key`) &mdash; they
+- Replacing existing raw-key workflows (`kit keygen`, `signing_key`) &mdash; they
   remain supported alongside the keystore.
 
 ## 4. Crate boundary
@@ -157,18 +157,18 @@ Not yet shipped against this spec:
 The new crate is:
 
 ```text
-rust/crates/mkit-keystore
+rust/crates/kit-keystore
 ```
 
 Workspace integration:
 
-- Add `crates/mkit-keystore` to `rust/Cargo.toml` workspace members.
+- Add `crates/kit-keystore` to `rust/Cargo.toml` workspace members.
 - The crate must use workspace package metadata, lints, edition, MSRV, and
   license policy.
 - Default features must build on Linux and macOS CI without native service
   daemons, TPM libraries, smartcard libraries, or OS-specific SDK setup beyond
   what the target already provides.
-- `mkit-keystore` default features remain empty/lean. Production `mkit-cli`
+- `kit-keystore` default features remain empty/lean. Production `kit-storage`
   builds, packages, and CI release gates must enable the platform-appropriate
   encrypted software protector feature so the configured `software` default is
   usable on supported targets while the library crate remains feature-gated.
@@ -182,8 +182,8 @@ Allowed dependencies:
 
 Forbidden dependencies:
 
-- `mkit-core` must not depend on `mkit-keystore`.
-- `mkit-wasm` must not depend on native `mkit-keystore` backends.
+- `kit-core` must not depend on `kit-keystore`.
+- `kit-wasm` must not depend on native `kit-keystore` backends.
 - Default workspace builds must not require Linux Secret Service, systemd,
   TPM libraries, YubiKey libraries, Windows APIs, or macOS GUI keychain access.
 
@@ -194,8 +194,8 @@ is updated in the same change.
 
 ### 5.1 Algorithm
 
-`mkit-keystore` must expose an algorithm enum equivalent to
-`mkit_attest::Algorithm`:
+`kit-keystore` must expose an algorithm enum equivalent to
+`kit_attest::Algorithm`:
 
 ```rust
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -208,7 +208,7 @@ pub enum Algorithm {
 
 Requirements:
 
-- `Algorithm` must convert to and from `mkit_attest::Algorithm` when the
+- `Algorithm` must convert to and from `kit_attest::Algorithm` when the
   `attest` integration feature is enabled.
 - Canonical string forms are exactly `ed25519`, `secp256k1` and `p256`.
 - The enum must not include backend-specific variants.
@@ -402,12 +402,12 @@ Requirements:
   handles, or child-process state. A concrete signer may still be `Sync`, but
   callers must not rely on concurrent signing through one handle.
 - `sign` signs the supplied message according to the selected algorithm's
-  existing mkit semantics. It must not invent additional protocol-level domain
+  existing kit semantics. It must not invent additional protocol-level domain
   separation.
 - Ed25519 signing signs the supplied bytes directly. DSSE passes the PAE bytes.
-  Commit signing passes the 32-byte `mkit-core` commit signing hash described
+  Commit signing passes the 32-byte `kit-core` commit signing hash described
   in section 10.
-- secp256k1/P-256 signing follows existing `mkit-attest` semantics: ECDSA over
+- secp256k1/P-256 signing follows existing `kit-attest` semantics: ECDSA over
   SHA-256 of the supplied bytes, compact `r || s`, low-S canonical. DSSE passes
   the PAE bytes.
 
@@ -549,7 +549,7 @@ Requirements:
 
 ### 5.8 Error taxonomy
 
-`mkit-keystore::Error` must distinguish at least:
+`kit-keystore::Error` must distinguish at least:
 
 - unavailable backend
 - unsupported algorithm
@@ -580,7 +580,7 @@ available through structured fields and developer/debug output.
 
 ### 6.1 Software backend
 
-`mkit-keystore` includes a software backend with two storage-security modes,
+`kit-keystore` includes a software backend with two storage-security modes,
 described below.
 
 Purpose:
@@ -595,8 +595,8 @@ Purpose:
 Storage:
 
 - Software keystore storage is user-scoped, not repo-scoped.
-- Default storage root is `$XDG_DATA_HOME/mkit/keys/` on Unix-like platforms,
-  falling back to `~/.local/share/mkit/keys/` when `XDG_DATA_HOME` is unset.
+- Default storage root is `$XDG_DATA_HOME/kit/keys/` on Unix-like platforms,
+  falling back to `~/.local/share/kit/keys/` when `XDG_DATA_HOME` is unset.
   Non-Unix platforms must use the platform's per-user application data
   directory or a documented equivalent.
 - `software:<label>` maps to exactly one encrypted key record under that
@@ -606,9 +606,9 @@ Storage:
   compatibility, and explicit migration work only. It must never be selected by
   default.
 - Legacy `.kit/keys/*` files remain supported only through legacy raw-file
-  flows such as `mkit keygen`, `signing_key`, and `repo-key` compatibility.
+  flows such as `kit keygen`, `signing_key`, and `repo-key` compatibility.
 - The software backend reuses the existing hardened raw-file functions,
-  behind the `mkit-keystore` abstraction.
+  behind the `kit-keystore` abstraction.
 - If it writes files, it must preserve or improve current hardening:
   - Unix `0600` key files.
   - Unix `0700` parent directories.
@@ -616,13 +616,13 @@ Storage:
   - no symlink final component.
   - symlink ancestor rejection.
   - atomic tmp + fsync + rename + parent fsync writes.
-- It must not weaken current `mkit_core::sign::{load_raw_32, save_raw_32}`
+- It must not weaken current `kit_core::sign::{load_raw_32, save_raw_32}`
   security properties.
 
 Storage-security modes:
 
 - **Compatibility raw-file mode** (`software-raw`) preserves the hardened
-  `0600` raw-key behavior of legacy `mkit keygen`. It does not satisfy the
+  `0600` raw-key behavior of legacy `kit keygen`. It does not satisfy the
   encrypted-at-rest software-backend acceptance criterion, and must never be
   the default.
 - **Encrypted software-file mode** owns the `software` backend token. It must
@@ -643,7 +643,7 @@ Storage-security modes:
     when no desktop Secret Service session is detected, and must fail closed if
     no usable protector is available.
   - Fail closed if no configured OS protection mechanism is available.
-  - Never derive the encryption key from an mkit-managed password, hidden
+  - Never derive the encryption key from an kit-managed password, hidden
     passphrase, repo data, or environment variable.
 - The software backend must be clearly reported as `BackendKind::Software` and
   documented as software-only, not hardware-bound.
@@ -754,8 +754,8 @@ Requirements:
 
 - Store extractable software keys as Keychain generic password or keychain key
   items under a stable service/account scheme.
-- Implement deterministic listing of keys created by the mkit service/account
-  scheme so `mkit key list --backend macos-keychain` works.
+- Implement deterministic listing of keys created by the kit service/account
+  scheme so `kit key list --backend macos-keychain` works.
 - create/import refuses existing `(label, algorithm)` values in the normal
   sequential case. Concurrent same-label create/import atomicity depends on the
   native Keychain primitive exposed by the selected dependency and is not a
@@ -773,7 +773,7 @@ Requirements:
 
 ### 6.4 Windows backend (removed)
 
-Windows is not a supported mkit target (see
+Windows is not a supported kit target (see
 `docs/INVARIANTS.md`): commonware-runtime 2026.9.0's non-Linux
 storage-sync path calls `libc::sync()`, which does not exist on
 `x86_64-pc-windows-msvc`, so the workspace and its test suite no longer
@@ -794,8 +794,8 @@ Default target: Linux desktop only.
 Requirements:
 
 - Use the Secret Service API through a reviewed dependency or a small adapter.
-- Implement deterministic listing of keys created by the mkit service/attribute
-  scheme so `mkit key list --backend linux-secret-service` works.
+- Implement deterministic listing of keys created by the kit service/attribute
+  scheme so `kit key list --backend linux-secret-service` works.
 - Must fail clearly when no service is available or the session is locked.
 - create/import refuses existing `(label, algorithm)` values in the normal
   sequential case. Concurrent same-attribute create/import atomicity depends on
@@ -828,7 +828,7 @@ Requirements:
 - Support may be split across OpenPGP, PIV, and FIDO2/CTAP implementations.
 - Backend must advertise the exact applet and algorithm support it can use.
 - FIDO2/WebAuthn signing must preserve the existing WebAuthn wrapping
-  semantics already used by `mkit-attest` and contrib CTAP signer. Fails
+  semantics already used by `kit-attest` and contrib CTAP signer. Fails
   closed through the keystore API for FIDO2/CTAP labels and routes users to
   the external CTAP signer unless a future keystore signer API can return the
   full WebAuthn assertion metadata.
@@ -865,7 +865,7 @@ amended.
 
 If implemented:
 
-- External signing should reuse `mkit-rpc` signer protocol where practical.
+- External signing should reuse `kit-rpc` signer protocol where practical.
 - Cloud KMS backends must clearly identify non-extractability, algorithm
   support, and signature encoding.
 - Cloud key refs must never be repo-controlled.
@@ -912,14 +912,14 @@ The syntax covers the full backend matrix in §6.
 
 A full key ref includes the backend. For signing integrations,
 `key.<algorithm>_ref = <backend>:<label>` is authoritative and must route to
-that backend. `key.backend` is only the default backend for `mkit key` commands
+that backend. `key.backend` is only the default backend for `kit key` commands
 when no explicit backend or configured key ref supplies one.
 
 ## 8. Config specification
 
 ### 8.1 New user-scoped keys
 
-`mkit-keystore` introduces these user-scoped config keys for keystore
+`kit-keystore` introduces these user-scoped config keys for keystore
 selection. Exact names are normative unless amended here:
 
 ```text
@@ -936,8 +936,8 @@ Interpretation:
 
 - `signer` selects the commit-signing source. Built-in default is `legacy`,
   which preserves existing raw-file `signing_key` behavior. Setting
-  `signer = keystore` opts commit signing into `mkit-keystore`.
-- `key.backend` is the default backend for `mkit key` commands when no backend
+  `signer = keystore` opts commit signing into `kit-keystore`.
+- `key.backend` is the default backend for `kit key` commands when no backend
   is provided and no full key ref is being used.
 - `key.default_ref` is the default key ref for generic commands.
 - Per-algorithm refs override generic refs.
@@ -970,7 +970,7 @@ Precedence:
 ### 8.2 Repo-forbidden keys
 
 Every config key in section 8.1 must be present in `REPO_FORBIDDEN_KEYS` in
-`rust/crates/mkit-cli/src/config.rs`. The `REPO_FORBIDDEN_KEYS` list may
+`rust/crates/kit-storage/src/config.rs`. The `REPO_FORBIDDEN_KEYS` list may
 include additional keys (for example `signing_key`,
 `attest.external_signer_path`, `attest.external_signer_args`,
 `attest.secp256k1_key_path`, `attest.p256_key_path`,
@@ -1012,18 +1012,18 @@ Compatibility behavior:
 The new command namespace is:
 
 ```text
-mkit key <subcommand>
+kit key <subcommand>
 ```
 
-`mkit keygen` remains as a legacy compatibility command and may internally
+`kit keygen` remains as a legacy compatibility command and may internally
 delegate to the old raw-file implementation.
 
-### 9.1 `mkit key generate`
+### 9.1 `kit key generate`
 
 Usage:
 
 ```text
-mkit key generate [--backend <backend>] [--label <label>]
+kit key generate [--backend <backend>] [--label <label>]
                   [--algorithm ed25519|secp256k1|p256]
                   [--extractable|--non-extractable]
                   [--device-bound]
@@ -1055,12 +1055,12 @@ Behavior:
   final line suitable for scripting.
 - Must not create repo config.
 
-### 9.2 `mkit key list`
+### 9.2 `kit key list`
 
 Usage:
 
 ```text
-mkit key list [--backend <backend>] [--json]
+kit key list [--backend <backend>] [--json]
 ```
 
 Behavior:
@@ -1072,12 +1072,12 @@ Behavior:
 - JSON output must be stable enough for downstream tooling and covered by
   tests if added.
 
-### 9.3 `mkit key import`
+### 9.3 `kit key import`
 
 Usage:
 
 ```text
-mkit key import --algorithm ed25519|secp256k1|p256
+kit key import --algorithm ed25519|secp256k1|p256
                 [--backend <backend>] [--label <label>]
                 (--hex <64-hex> | --file <path>)
                 [--extractable|--non-extractable]
@@ -1101,12 +1101,12 @@ Behavior:
 - Must refuse overwrite unless `--force` is provided.
 - Must zeroize local secret buffers.
 
-### 9.4 `mkit key export`
+### 9.4 `kit key export`
 
 Usage:
 
 ```text
-mkit key export [--backend <backend>] [--label <label>]
+kit key export [--backend <backend>] [--label <label>]
                 [--algorithm ed25519|secp256k1|p256]
                 --unsafe-print-secret
 ```
@@ -1123,12 +1123,12 @@ Behavior:
 - Export must never happen implicitly as part of signing, listing, or metadata
   lookup.
 
-### 9.5 `mkit key delete`
+### 9.5 `kit key delete`
 
 Usage:
 
 ```text
-mkit key delete [--backend <backend>] [--label <label>]
+kit key delete [--backend <backend>] [--label <label>]
                 [--algorithm ed25519|secp256k1|p256]
                 --yes
 ```
@@ -1147,17 +1147,17 @@ Behavior:
 
 ## 10. Commit signing integration
 
-Current commit signing lives in `mkit-core::sign` and signs Ed25519 over the
+Current commit signing lives in `kit-core::sign` and signs Ed25519 over the
 current domain-separated commit signing hash.
 
 Requirements:
 
-- `mkit-core` continues to own canonical commit/remix signing bytes and
+- `kit-core` continues to own canonical commit/remix signing bytes and
   verification.
-- `mkit-core` must expose enough public helpers to support keystore signing
-  without depending on `mkit-keystore`.
+- `kit-core` must expose enough public helpers to support keystore signing
+  without depending on `kit-keystore`.
 - The exact value handed to an Ed25519 keystore signer for commit signing is
-  `mkit_core::sign::commit_signing_hash(commit)`, a 32-byte digest currently
+  `kit_core::sign::commit_signing_hash(commit)`, a 32-byte digest currently
   defined as `BLAKE3(len_le16(COMMIT_DOMAIN) || COMMIT_DOMAIN ||
   commit_signing_bytes(commit))`.
 - Ed25519 keystore commit signing must produce the same commit signature as
@@ -1169,20 +1169,20 @@ Requirements:
 
 Implementation options:
 
-- Preferred: add a small adapter in `mkit-cli` that obtains the commit signing
-  hash through `mkit_core::sign::commit_signing_hash`, asks the Ed25519
+- Preferred: add a small adapter in `kit-storage` that obtains the commit signing
+  hash through `kit_core::sign::commit_signing_hash`, asks the Ed25519
   keystore signer to sign exactly those 32 bytes, then stores the resulting
   64-byte signature in `Commit.signature`.
-- Do not duplicate `domain_digest` construction in `mkit-cli` or
-  `mkit-keystore`.
+- Do not duplicate `domain_digest` construction in `kit-storage` or
+  `kit-keystore`.
 
 `docs/specs/SPEC-SIGNING.md` describes `BLAKE3(len_le16(domain) || domain ||
 signing_bytes)`, matching the implementation &mdash; see SPEC-SIGNING §3 for the
-canonical formula and `mkit_core::sign::domain_digest` for the implementation.
+canonical formula and `kit_core::sign::domain_digest` for the implementation.
 
 ## 11. Attestation integration
 
-Current attestation signing uses `mkit_attest::Signer`:
+Current attestation signing uses `kit_attest::Signer`:
 
 ```rust
 pub trait Signer {
@@ -1195,7 +1195,7 @@ pub trait Signer {
 Requirements:
 
 - Add a keystore-backed attestation signer adapter.
-- The adapter must implement the existing `mkit_attest::Signer` trait.
+- The adapter must implement the existing `kit_attest::Signer` trait.
 - It must sign DSSE PAE bytes using existing per-algorithm semantics:
   - Ed25519 signs PAE directly.
   - secp256k1 signs SHA-256(PAE), compact low-S ECDSA.
@@ -1204,7 +1204,7 @@ Requirements:
 - `attest_factory` must accept `attest.signer = keystore` only from user-scoped
   config or CLI arguments.
 - Keystore-backed signatures must verify through the existing
-  `mkit_attest::verify` registry when the trust root contains the emitted
+  `kit_attest::verify` registry when the trust root contains the emitted
   public key.
 
 Key ID compatibility:
@@ -1215,14 +1215,14 @@ Key ID compatibility:
 
 ## 12. External signer relationship
 
-`mkit-rpc` already defines a signer protocol with `KEY_FORM_OPAQUE_HANDLE`.
-`mkit-keystore` does not replace this protocol.
+`kit-rpc` already defines a signer protocol with `KEY_FORM_OPAQUE_HANDLE`.
+`kit-keystore` does not replace this protocol.
 
 Rules:
 
 - External signers remain valid for TPM, Secure Enclave, CTAP, and custom
   integrations.
-- `mkit-keystore` may later provide an external signer backend or bridge using
+- `kit-keystore` may later provide an external signer backend or bridge using
   the same RPC protocol.
 - Keystore work must not mutate the v1 RPC wire schema unless this spec is
   updated with a compatibility analysis.
@@ -1245,8 +1245,8 @@ Rules:
 
 - `commit`, `attest`, `merge`, `cherry-pick`, or any future signing command
   must not generate a key as a side effect.
-- Missing key errors must point users to `mkit key generate` or legacy
-  `mkit keygen`.
+- Missing key errors must point users to `kit key generate` or legacy
+  `kit keygen`.
 
 ### 13.3 Secret handling
 
@@ -1288,7 +1288,7 @@ If implemented:
 
 ### 14.1 Unit tests
 
-`mkit-keystore` must test:
+`kit-keystore` must test:
 
 - label validation
 - key ref parsing
@@ -1302,14 +1302,14 @@ If implemented:
 
 ### 14.2 Integration tests
 
-`mkit-cli` must test:
+`kit-storage` must test:
 
-- `mkit key generate` creates a key through the software backend.
-- `mkit key list` reports generated keys.
-- `mkit key import` imports a known Ed25519 seed.
-- `mkit key export --unsafe-print-secret` round-trips an imported extractable
+- `kit key generate` creates a key through the software backend.
+- `kit key list` reports generated keys.
+- `kit key import` imports a known Ed25519 seed.
+- `kit key export --unsafe-print-secret` round-trips an imported extractable
   key.
-- `mkit key delete --yes` deletes exactly the selected key.
+- `kit key delete --yes` deletes exactly the selected key.
 - Repo config cannot set keystore selectors.
 - User config can set keystore selectors.
 - Missing keys fail without generation.
@@ -1319,7 +1319,7 @@ If implemented:
 Required golden tests:
 
 - Imported Ed25519 seed through software keystore produces byte-identical
-  commit signatures to current `mkit_core::sign::KeyPair` for the same commit.
+  commit signatures to current `kit_core::sign::KeyPair` for the same commit.
 - Imported Ed25519 seed through software keystore produces byte-identical DSSE
   signatures to existing Ed25519 software signer for the same PAE, where key ID
   differences are accounted for separately.
@@ -1344,7 +1344,7 @@ Tests must not require developer-specific keychain state. They must create and
 delete unique test labels.
 
 Live OS-native backend tests are ignored by default and must fail loudly when
-explicitly invoked without `MKIT_RUN_NATIVE_KEYSTORE_TESTS=1`. CI jobs that
+explicitly invoked without `KIT_RUN_NATIVE_KEYSTORE_TESTS=1`. CI jobs that
 claim native backend coverage must run those ignored tests with the required
 environment gate set.
 
@@ -1352,7 +1352,7 @@ Hardware tests may be ignored by default and documented as manual tests.
 
 ### 14.5 CI gates
 
-`mkit-keystore` and its integrations must pass:
+`kit-keystore` and its integrations must pass:
 
 ```text
 cd rust
@@ -1373,40 +1373,40 @@ the per-section requirements above remain normative.
 
 ### Crate and core API
 
-- Add `mkit-keystore` crate. **Shipped.**
+- Add `kit-keystore` crate. **Shipped.**
 - Add core API, errors, label/key-ref parsing, capabilities. **Shipped.**
 - Add memory backend for tests. **Not shipped** &mdash; `BackendKind::Memory` is
   defined but no `MemoryKeystore` implementation exists. Software-raw with
   a `tempfile`-backed root is used in the test suite instead.
 - Add software backend reusing existing hardened raw-key behavior where
   practical. **Shipped** as `SoftwareRawKeystore`, which delegates to
-  `mkit_core::sign::{load_raw_32, save_raw_32, save_raw_32_create_new}`.
+  `kit_core::sign::{load_raw_32, save_raw_32, save_raw_32_create_new}`.
 - Add unit tests. **Shipped.**
 
 ### CLI surface
 
 - Add `commands/key.rs`. **Shipped** at
-  `rust/crates/mkit-cli/src/commands/key.rs`.
-- Wire `mkit key` in `mkit-cli/src/lib.rs`. **Shipped.**
-- Preserve `mkit keygen`. **Shipped.**
+  `rust/crates/kit-storage/src/commands/key.rs`.
+- Wire `kit key` in `kit-storage/src/lib.rs`. **Shipped.**
+- Preserve `kit keygen`. **Shipped.**
 - Add config keys and repo-forbidden tests. **Shipped** &mdash; see `KeyConfig` and
-  `REPO_FORBIDDEN_KEYS` in `mkit-cli/src/config.rs`.
+  `REPO_FORBIDDEN_KEYS` in `kit-storage/src/config.rs`.
 - Add CLI integration tests. **Shipped.**
 
 ### Attestation integration
 
-- Add keystore-backed `mkit_attest::Signer` adapter. **Shipped** as
+- Add keystore-backed `kit_attest::Signer` adapter. **Shipped** as
   `KeystoreAttestSigner` in `commands/attest_factory.rs`.
 - Extend `attest_factory` for `attest.signer = keystore`. **Shipped.**
 - Add DSSE signing and verification tests. **Shipped.**
 
 ### Commit integration
 
-- Add or expose the minimal `mkit-core` helper needed for keystore commit
+- Add or expose the minimal `kit-core` helper needed for keystore commit
   signing without creating a dependency cycle. **Shipped** &mdash;
-  `mkit_core::sign::commit_signing_hash` is exposed and used by
+  `kit_core::sign::commit_signing_hash` is exposed and used by
   `CommitSigner::Keystore` in `commands/commit.rs`.
-- Teach `mkit commit` to use a configured Ed25519 keystore key ref.
+- Teach `kit commit` to use a configured Ed25519 keystore key ref.
   **Shipped** behind `signer = keystore`.
 - Add golden equivalence tests. **Shipped** &mdash; see
   `keystore_commit_signature_matches_legacy_keypair_signature` in
@@ -1438,7 +1438,7 @@ the per-section requirements above remain normative.
 - Cross-platform CI for Linux desktop-compatible paths, Linux
   headless/server-compatible paths, and macOS (Windows is not a
   supported target): live OS-native backend tests are
-  gated by `MKIT_RUN_NATIVE_KEYSTORE_TESTS=1` per §14.4; not every CI runner
+  gated by `KIT_RUN_NATIVE_KEYSTORE_TESTS=1` per §14.4; not every CI runner
   currently exercises every backend.
 - Golden vectors and verification-equivalence tests: **shipped** for
   deterministic software/software-raw signers; hardware/OS ECDSA
@@ -1449,7 +1449,7 @@ the per-section requirements above remain normative.
 
 ## 16. Design decisions and defaults
 
-- `mkit-keystore` includes macOS Keychain, Linux Secret Service,
+- `kit-keystore` includes macOS Keychain, Linux Secret Service,
   `systemd-creds`, and YubiKey backends with capability
   reports limited to what they actually implement.
 - The encrypted software-file design is OS-protected envelope encryption. The
@@ -1462,10 +1462,10 @@ the per-section requirements above remain normative.
   per-algorithm `key.*_ref` defaults; attestation-only key refs are out of
   scope unless a future need is identified and this spec is amended.
 
-Open question: whether a future `mkit key export --file <path>` mode is
+Open question: whether a future `kit key export --file <path>` mode is
 worth adding. Out of scope for now.
 
-`mkit-keystore` uses these fixed conservative defaults:
+`kit-keystore` uses these fixed conservative defaults:
 
 - default backend: encrypted-at-rest software backend (`software`)
 - raw compatibility backend: explicit `software-raw`
@@ -1490,7 +1490,7 @@ here adds a new requirement.
 | Invariant | Enforced by |
 |---|---|
 | A repo can never choose the key, backend, label, signer, or algorithm that signs | every §8.1 selector (and the §8.3 legacy ones) is in `REPO_FORBIDDEN_KEYS` (§2.5, §8.2, §13.1) |
-| No signing command ever creates or rotates a key | explicit `mkit key generate` / legacy `mkit keygen` only; missing keys are hard errors (§2.6, §10, §13.2) |
+| No signing command ever creates or rotates a key | explicit `kit key generate` / legacy `kit keygen` only; missing keys are hard errors (§2.6, §10, §13.2) |
 | An unavailable backend never silently degrades to a weaker one | construction/operations return unavailable errors; Linux protector selection fails closed (§5.3, §6.1) |
 | Capabilities never overstate what a backend can do | operation booleans tied to trait availability; per-backend honesty rules (§2.7, §5.3, §13.4) |
 | Requested key attributes are honored or refused, never silently weakened | backends reject unsupported attribute combinations (§5.2, §13.4) |
@@ -1501,5 +1501,5 @@ here adds a new requirement.
 | `(label, algorithm)` is never silently overwritten, and delete removes exactly one key | overwrite requires `--force` / `overwrite: true`; no prefix deletes (§5.7, §9.1, §9.5) |
 | A configured full key ref's backend is authoritative | the ref routes to its backend; never reinterpreted via `key.backend` (§7, §8.1) |
 | Keystore signing is byte-equal to legacy signing where determinism allows | golden equivalence vectors for deterministic software backends; verification-equivalence otherwise (§2.8, §14.3) |
-| The keystore never invents protocol-level domain separation | `sign` signs the supplied bytes under existing mkit semantics (commit hash per §10, DSSE PAE per §11) (§5.6) |
+| The keystore never invents protocol-level domain separation | `sign` signs the supplied bytes under existing kit semantics (commit hash per §10, DSSE PAE per §11) (§5.6) |
 | FIDO2/CTAP labels fail closed through the keystore API | dedicated label guard returns `UnsupportedOperation`, routing to the external signer path (§6.7) |

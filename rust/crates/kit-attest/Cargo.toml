@@ -1,0 +1,113 @@
+[package]
+name = "kit-attest"
+description = "DSSE + in-toto v1 attestations for kit, with multi-algorithm signers (Ed25519, secp256k1, P-256) and an RFC 8785 JCS encoder"
+keywords = ["kit", "attestation", "in-toto", "dsse", "jcs"]
+categories = ["cryptography", "encoding"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Publishable to crates.io. The `publish` key is left unset (cargo
+# default = `true`) so a future `cargo publish -p kit-attest` works
+# without further metadata changes.
+
+[lints]
+workspace = true
+
+[features]
+# Default ships all three algorithms so a `cargo add kit-attest` client
+# gets ed25519 / secp256k1 / p256 support out of the box. Each feature
+# pulls in its own compile-time crypto backend and ships a real
+# signing/verification implementation (see signer_repo_key.rs,
+# signer_k256.rs, signer_p256.rs).
+default = ["algo-ed25519", "algo-secp256k1", "algo-p256"]
+algo-ed25519 = ["dep:ed25519-dalek"]
+algo-secp256k1 = ["dep:k256"]
+algo-p256 = ["dep:p256"]
+# SPEC-WRITE-GRANTS support (not a default feature; pure Rust and wasm32-safe):
+# the grant statement codec and `X-Write-Grant` header (`kit_attest::grant`)
+# and the §4 owner-signature primitives (`eth` module): Keccak-256, EIP-191
+# digests, strict secp256k1 recovery, curve-validated address derivation.
+grants = ["algo-ed25519", "algo-secp256k1", "algo-p256", "dep:sha3"]
+
+[dependencies]
+# Inter-workspace dep needs an explicit `version = ...` alongside the
+# path so `cargo publish` accepts it; path-only deps are rejected by
+# the registry. Track the workspace.package.version.
+#
+# `default-features = false`: kit-core's default set includes
+# `pack-zstd` (SPEC-PACKFILE v2 compression), which pulls
+# `zstd-sys` — not wasm32-buildable. kit-attest doesn't touch
+# `pack.rs`, but it IS a dependency of kit-wasm (wasm32 target), and
+# Cargo unifies a dependency's enabled features across every edge that
+# reaches it within one build — so leaving this edge on defaults would
+# silently drag `zstd-sys` back into kit-wasm's build even though
+# kit-wasm's own `kit-core` edge already opts out. Every OTHER
+# consumer of kit-attest (kit-storage, kit-keystore)
+# also depends on kit-core directly with default features on, so
+# their builds are unaffected — the union still includes `pack-zstd`
+# there via that direct edge.
+kit-core = { version = "0.5", path = "../kit-core", default-features = false }
+# kit-rpc owns signer.proto + framing helpers used by ExternalSigner.
+kit-rpc = { version = "0.5", path = "../kit-rpc" }
+buffa = "0.9.1"
+blake3 = "1"
+base64 = "0.23"
+thiserror = "2"
+# Used by the secp256k1/p256 signers to scrub raw 32-byte secrets
+# from stack memory before they leave the constructor frame.
+zeroize = { version = "1", features = ["derive"] }
+# `serde` + `serde_json` are used ONLY on the parsing side (envelope decode +
+# external-signer response). The canonical JCS encoder is hand-rolled per
+# RFC 8785 — `serde_json::to_string` does NOT satisfy JCS sort/escape rules.
+serde = { version = "1", features = ["derive"] }
+# `float_roundtrip`: correctly rounded number parsing. SPEC-WRITE-GRANTS
+# §4.3 rule 2 rejects a clientDataJSON number that is not finite as a
+# binary64 value; without it, values that round to f64::MAX (for example
+# 1.7976931348623158e308) overflow to infinity and are wrongly refused.
+# Cargo feature unification turns it on for every serde_json user in a
+# build that includes kit-attest (parsing only: no API change).
+serde_json = { version = "1", features = ["float_roundtrip"] }
+# Atomic-rename writes for `store::save`; mirrors kit-core::store.
+tempfile = "3"
+# Re-used directly so signer_repo_key + verify can talk to the SAME dalek
+# version kit-core::sign already pulls in. We inherit the same default-
+# features = false + alloc posture so the dep graph does not widen.
+# Gated behind `algo-ed25519`: when disabled, `RepoKeySigner` and the
+# Ed25519 verifier dispatch compile out cleanly.
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"], optional = true }
+# secp256k1 / ES256K (COSE -47) signer + verifier — gated behind
+# `algo-secp256k1`. Pinned to the `0.14` line shared across the
+# RustCrypto `ecdsa` ecosystem.
+k256 = { version = "0.14", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+# P-256 / secp256r1 / prime256v1 (COSE -7) — WebAuthn, Apple Secure
+# Enclave, Android Keystore, iOS CryptoKit, browser WebCrypto. Gated
+# behind `algo-p256`. Same `0.14` RustCrypto major as k256.
+p256 = { version = "0.14", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+# Unconditional (not feature-gated): ES256K/ES256 sign SHA256(pae) when
+# those signer features are on, and every in-toto Statement subject
+# emits a sha256 digest alongside blake3 (SPEC-ATTESTATIONS §4.2) so
+# cosign / `gh attestation verify` / the SLSA verifier can read it,
+# regardless of which signing algorithms are compiled in.
+sha2 = { version = "0.11", default-features = false }
+# Keccak-256 (the ORIGINAL Keccak, `0x01` padding) for the `grants`
+# feature's address derivation and EIP-191 digests (SPEC-WRITE-GRANTS
+# §4, §4.1). Same `digest 0.11` line as `sha2`; its only other
+# dependency, `keccak 0.2`, is already in the graph via ed25519-dalek.
+# Never use `sha3::Sha3_256` for these values.
+sha3 = { version = "0.11", default-features = false, optional = true }
+
+[dev-dependencies]
+hex = "0.4"
+# Roundtrip property tests over generated grants (`grant` module).
+proptest = "1"
+# Tests that hand-build signing keys need dalek unconditionally, so pull
+# it in as a dev-dep separate from the feature-gated runtime dep.
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

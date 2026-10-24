@@ -1,18 +1,18 @@
-# mkit Kani harnesses
+# kit Kani harnesses
 
-Bounded model checking of mkit's untrusted-input decoders with
+Bounded model checking of kit's untrusted-input decoders with
 [Kani](https://github.com/model-checking/kani) (pin: **Kani 0.68.0**,
 CBMC 6.11.0). The harnesses live next to the code they check,
 in `#[cfg(kani)] mod kani_proofs` blocks:
 
 | File | Spec |
 |---|---|
-| `rust/crates/mkit-core/src/delta.rs` | SPEC-DELTA §2, §4 |
-| `rust/crates/mkit-core/src/merkle.rs` | SPEC-MERKLE-OBJECTS §1.1, §2, §5.2–§5.5 |
-| `rust/crates/mkit-core/src/pack.rs` | SPEC-PACKFILE §1–§3, §6, §8, §11 |
-| `rust/crates/mkit-core/src/serialize.rs` | SPEC-OBJECTS §2–§8, §4.1, §11 |
-| `rust/crates/mkit-keystore/src/encrypted_record.rs` | SPEC-KEYSTORE §6.1.1 |
-| `rust/crates/mkit-rpc/src/framing.rs` | SPEC-RPC §1 (wire framing, `MAX_FRAME_BYTES`) |
+| `rust/crates/kit-core/src/delta.rs` | SPEC-DELTA §2, §4 |
+| `rust/crates/kit-core/src/merkle.rs` | SPEC-MERKLE-OBJECTS §1.1, §2, §5.2–§5.5 |
+| `rust/crates/kit-core/src/pack.rs` | SPEC-PACKFILE §1–§3, §6, §8, §11 |
+| `rust/crates/kit-core/src/serialize.rs` | SPEC-OBJECTS §2–§8, §4.1, §11 |
+| `rust/crates/kit-keystore/src/encrypted_record.rs` | SPEC-KEYSTORE §6.1.1 |
+| `rust/crates/kit-rpc/src/framing.rs` | SPEC-RPC §1 (wire framing, `MAX_FRAME_BYTES`) |
 
 Every result below is **bounded**: a harness checks every input up to the
 stated size (every byte symbolic unless said otherwise), not every input.
@@ -25,20 +25,20 @@ Nothing here is a proof for unbounded inputs; the fuzz targets
 cargo install --locked kani-verifier --version 0.68.0 && cargo kani setup
 cd rust
 
-# mkit-core: always --no-default-features (with the default `pack-zstd`
+# kit-core: always --no-default-features (with the default `pack-zstd`
 # feature the C zstd dependency is linked in and CBMC ran out of memory on
 # most harnesses). -Z stubbing is needed by every harness that uses
 # #[kani::stub] (harmless for the others).
-cargo kani -p mkit-core --no-default-features -Z stubbing --harness delta_decode_no_panic
+cargo kani -p kit-core --no-default-features -Z stubbing --harness delta_decode_no_panic
 
 # merkle_verify_*, merkle_roundtrip_*, merkle_canary_*, pack_*: add the
 # 32-byte digest/trailer comparison bound
-cargo kani -p mkit-core --no-default-features -Z stubbing \
+cargo kani -p kit-core --no-default-features -Z stubbing \
   --harness pack_entries_one_frame \
   -Z unstable-options --cbmc-args --unwindset memcmp.0:33
 
-cargo kani -p mkit-keystore -Z stubbing --harness software_key_record_roundtrip
-cargo kani -p mkit-rpc --harness rpc_read_frame_no_panic
+cargo kani -p kit-keystore -Z stubbing --harness software_key_record_roundtrip
+cargo kani -p kit-rpc --harness rpc_read_frame_no_panic
 ```
 
 Run **one harness at a time** (`--harness` is a substring match; every
@@ -60,7 +60,7 @@ properties satisfied`); they show the asserted `Ok` paths are reachable.
 Time is wall-clock per `cargo kani` invocation including the (cached)
 build. Cap: 15 min per harness.
 
-### mkit-core: delta (`--no-default-features -Z stubbing`)
+### kit-core: delta (`--no-default-features -Z stubbing`)
 
 | Harness | Property | Bound | Result | Time |
 |---|---|---|---|---|
@@ -71,7 +71,7 @@ build. Cap: 15 min per harness.
 | `delta_decode_canary_wrong_length` | canary: "output is one byte longer than declared" | stream ≤ 20 B | falsified (expected) | 51 s |
 | `delta_encode_decode_roundtrip` | `decode(b, encode(b, r)) == r` | `b`, `r` ≤ 3 B each (INSERT-only writer path) | pass | 37 s |
 
-### mkit-core: serialize
+### kit-core: serialize
 
 | Harness | Property | Bound | Result | Time |
 |---|---|---|---|---|
@@ -82,7 +82,7 @@ build. Cap: 15 min per harness.
 | `serialize_blob_roundtrip` | `deserialize(serialize(blob)) == blob` | blob ≤ 4 B | pass | 95 s |
 | `serialize_canary_trailing_byte_accepted` | canary: "one trailing byte still deserializes" | 1-B blob + 1 B | falsified (expected) | 40 s |
 
-### mkit-core: merkle (BLAKE3 stubbed by a deterministic mixer)
+### kit-core: merkle (BLAKE3 stubbed by a deterministic mixer)
 
 | Harness | Property | Bound | Result | Time |
 |---|---|---|---|---|
@@ -97,7 +97,7 @@ build. Cap: 15 min per harness.
 | `merkle_canary_tampered_leaf_verifies` | canary: "any leaf verifies under a genuine proof" | 2 chunks | falsified (expected) | 15 s |
 | `merkle_builder_empty_tree_refuses` | **new**: §5.4 builder rule: every single-leaf, multi-leaf and range request against the empty `Tree` is refused | any `u32` position/start/end | pass after the fix (FINDING 1; failed before with `start = end = 0`), 1/1 cover | 8 s |
 
-### mkit-core: pack (BLAKE3 → `toy_hash`, zstd decompression stubbed)
+### kit-core: pack (BLAKE3 → `toy_hash`, zstd decompression stubbed)
 
 | Harness | Property | Bound | Result | Time |
 |---|---|---|---|---|
@@ -109,7 +109,7 @@ build. Cap: 15 min per harness.
 | `pack_window_cursor_flip_rejected` | **new**: a concrete valid cursor decodes iff unmodified; every nonzero XOR of its `pack_len` low byte is rejected | 256 masks | pass | 589 s |
 | `pack_window_cursor_canary_flip_accepted` | canary: "a flipped `pack_len` byte still decodes" | 255 masks | falsified (expected) | 520 s |
 
-### mkit-keystore (`-Z stubbing`; `format!` and `from_utf8` stubbed)
+### kit-keystore (`-Z stubbing`; `format!` and `from_utf8` stubbed)
 
 | Harness | Property | Bound | Result | Time |
 |---|---|---|---|---|
@@ -125,7 +125,7 @@ build. Cap: 15 min per harness.
 | `software_key_record_rejects_algorithm_4` | §6.1.1 "MUST reject id `0x04`" | minimal record, symbolic attrs/nonce | pass | 27 s |
 | `software_key_record_canary_trailing_byte_accepted` | canary: "valid record + 1 trailing byte still decodes" | 59 + 1 B | falsified (expected) | 21 s |
 
-### mkit-rpc
+### kit-rpc
 
 | Harness | Property | Bound | Result | Time |
 |---|---|---|---|---|

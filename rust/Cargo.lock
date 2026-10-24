@@ -2885,6 +2885,362 @@ dependencies = [
 ]
 
 [[package]]
+name = "kit-attest"
+version = "0.5.0"
+dependencies = [
+ "base64 0.23.1",
+ "blake3",
+ "buffa",
+ "ed25519-dalek",
+ "hex",
+ "k256",
+ "kit-core",
+ "kit-rpc",
+ "p256",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sha3",
+ "tempfile",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "kit-benches"
+version = "0.5.0"
+dependencies = [
+ "blake2",
+ "blake3",
+ "criterion",
+ "ed25519-dalek",
+ "git2",
+ "k256",
+ "kit-core",
+ "p256",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "kit-client"
+version = "0.5.0"
+dependencies = [
+ "base64 0.22.1",
+ "buffa",
+ "ed25519-dalek",
+ "http",
+ "kit-core",
+ "kit-rpc",
+ "kit-test-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "kit-core"
+version = "0.5.0"
+dependencies = [
+ "bao",
+ "blake3",
+ "bytes",
+ "commonware-codec",
+ "commonware-coding",
+ "commonware-cryptography",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "hex",
+ "insta",
+ "libc",
+ "proptest",
+ "rustc-hash",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "zeroize",
+ "zstd 0.14.0",
+]
+
+[[package]]
+name = "kit-formal-conformance"
+version = "0.5.0"
+dependencies = [
+ "kit-core",
+ "kit-transport-file",
+ "kit-transport-memory",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "kit-fuzz"
+version = "0.0.0"
+dependencies = [
+ "arbitrary",
+ "buffa",
+ "commonware-invariants",
+ "kit-attest",
+ "kit-core",
+ "kit-git-bridge",
+ "kit-keystore",
+ "kit-rpc",
+ "kit-serve",
+ "libfuzzer-sys",
+ "tempfile",
+]
+
+[[package]]
+name = "kit-git-bridge"
+version = "0.5.0"
+dependencies = [
+ "flate2",
+ "kit-core",
+ "kit-test-util",
+ "sha1",
+ "tempfile",
+]
+
+[[package]]
+name = "kit-keystore"
+version = "0.5.0"
+dependencies = [
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "k256",
+ "keyring-core",
+ "kit-attest",
+ "kit-core",
+ "libc",
+ "p256",
+ "security-framework",
+ "sha2",
+ "tempfile",
+ "zbus-secret-service-keyring-store",
+ "zeroize",
+]
+
+[[package]]
+name = "kit-rpc"
+version = "0.5.0"
+dependencies = [
+ "arbitrary",
+ "buffa",
+ "buffa-build",
+ "connectrpc",
+ "connectrpc-build",
+ "hex",
+ "kit-core",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "kit-serve"
+version = "0.5.0"
+dependencies = [
+ "kit-core",
+ "kit-rpc",
+ "kit-transport-file",
+ "tempfile",
+]
+
+[[package]]
+name = "kit-sign-file"
+version = "0.5.0"
+dependencies = [
+ "buffa",
+ "kit-attest",
+ "kit-core",
+ "kit-rpc",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "kit-storage"
+version = "0.5.0"
+dependencies = [
+ "assert_cmd",
+ "assert_fs",
+ "base64 0.23.1",
+ "buffa",
+ "bytes",
+ "clap",
+ "connectrpc",
+ "ed25519-dalek",
+ "flate2",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "insta",
+ "k256",
+ "kit-attest",
+ "kit-core",
+ "kit-git-bridge",
+ "kit-keystore",
+ "kit-rpc",
+ "kit-serve",
+ "kit-sync",
+ "kit-test-util",
+ "kit-transport-connect",
+ "kit-transport-file",
+ "kit-transport-memory",
+ "kit-transport-s3",
+ "kit-transport-ssh",
+ "libc",
+ "mockito",
+ "p256",
+ "predicates",
+ "proptest",
+ "rayon",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook",
+ "subtle",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+ "trycmd",
+ "zeroize",
+]
+
+[[package]]
+name = "kit-sync"
+version = "0.5.0"
+dependencies = [
+ "base64 0.22.1",
+ "buffa",
+ "bytes",
+ "ed25519-dalek",
+ "flate2",
+ "futures-executor",
+ "getrandom 0.4.3",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "kit-client",
+ "kit-core",
+ "kit-test-util",
+ "kit-transport-connect",
+ "kit-transport-memory",
+ "proptest",
+ "rayon",
+ "rustls",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower-service",
+ "webpki-roots",
+]
+
+[[package]]
+name = "kit-test-util"
+version = "0.5.0"
+
+[[package]]
+name = "kit-transport-connect"
+version = "0.5.0"
+dependencies = [
+ "base64 0.22.1",
+ "buffa",
+ "bytes",
+ "connectrpc",
+ "ed25519-dalek",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "kit-client",
+ "kit-core",
+ "kit-rpc",
+ "kit-sync",
+ "kit-test-util",
+ "kit-transport-memory",
+ "log",
+ "pin-project-lite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+ "url",
+ "webpki-roots",
+]
+
+[[package]]
+name = "kit-transport-file"
+version = "0.5.0"
+dependencies = [
+ "kit-core",
+ "tempfile",
+]
+
+[[package]]
+name = "kit-transport-memory"
+version = "0.5.0"
+dependencies = [
+ "kit-core",
+]
+
+[[package]]
+name = "kit-transport-s3"
+version = "0.5.0"
+dependencies = [
+ "hex",
+ "hmac",
+ "kit-core",
+ "md-5",
+ "mockito",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "testcontainers",
+ "testcontainers-modules",
+]
+
+[[package]]
+name = "kit-transport-ssh"
+version = "0.5.0"
+dependencies = [
+ "buffa",
+ "hex",
+ "kit-core",
+ "kit-rpc",
+ "thiserror",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3028,362 +3384,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mkit-attest"
-version = "0.5.0"
-dependencies = [
- "base64 0.23.1",
- "blake3",
- "buffa",
- "ed25519-dalek",
- "hex",
- "k256",
- "mkit-core",
- "mkit-rpc",
- "p256",
- "proptest",
- "serde",
- "serde_json",
- "sha2",
- "sha3",
- "tempfile",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
-name = "mkit-benches"
-version = "0.5.0"
-dependencies = [
- "blake2",
- "blake3",
- "criterion",
- "ed25519-dalek",
- "git2",
- "k256",
- "mkit-core",
- "p256",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "mkit-cli"
-version = "0.5.0"
-dependencies = [
- "assert_cmd",
- "assert_fs",
- "base64 0.23.1",
- "buffa",
- "bytes",
- "clap",
- "connectrpc",
- "ed25519-dalek",
- "flate2",
- "futures",
- "getrandom 0.4.3",
- "hex",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "insta",
- "k256",
- "libc",
- "mkit-attest",
- "mkit-core",
- "mkit-git-bridge",
- "mkit-keystore",
- "mkit-rpc",
- "mkit-serve",
- "mkit-sync",
- "mkit-test-util",
- "mkit-transport-connect",
- "mkit-transport-file",
- "mkit-transport-memory",
- "mkit-transport-s3",
- "mkit-transport-ssh",
- "mockito",
- "p256",
- "predicates",
- "proptest",
- "rayon",
- "reqwest",
- "rmcp",
- "serde",
- "serde_json",
- "sha2",
- "signal-hook",
- "subtle",
- "tar",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-rustls",
- "tower-service",
- "trycmd",
- "zeroize",
-]
-
-[[package]]
-name = "mkit-client"
-version = "0.5.0"
-dependencies = [
- "base64 0.22.1",
- "buffa",
- "ed25519-dalek",
- "http",
- "mkit-core",
- "mkit-rpc",
- "mkit-test-util",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "mkit-core"
-version = "0.5.0"
-dependencies = [
- "bao",
- "blake3",
- "bytes",
- "commonware-codec",
- "commonware-coding",
- "commonware-cryptography",
- "commonware-parallel",
- "commonware-runtime",
- "commonware-storage",
- "commonware-utils",
- "curve25519-dalek",
- "ed25519-dalek",
- "getrandom 0.4.3",
- "hex",
- "insta",
- "libc",
- "proptest",
- "rustc-hash",
- "serde_json",
- "sha2",
- "subtle",
- "tempfile",
- "thiserror",
- "zeroize",
- "zstd 0.14.0",
-]
-
-[[package]]
-name = "mkit-formal-conformance"
-version = "0.5.0"
-dependencies = [
- "mkit-core",
- "mkit-transport-file",
- "mkit-transport-memory",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "mkit-fuzz"
-version = "0.0.0"
-dependencies = [
- "arbitrary",
- "buffa",
- "commonware-invariants",
- "libfuzzer-sys",
- "mkit-attest",
- "mkit-core",
- "mkit-git-bridge",
- "mkit-keystore",
- "mkit-rpc",
- "mkit-serve",
- "tempfile",
-]
-
-[[package]]
-name = "mkit-git-bridge"
-version = "0.5.0"
-dependencies = [
- "flate2",
- "mkit-core",
- "mkit-test-util",
- "sha1",
- "tempfile",
-]
-
-[[package]]
-name = "mkit-keystore"
-version = "0.5.0"
-dependencies = [
- "chacha20poly1305",
- "ed25519-dalek",
- "getrandom 0.4.3",
- "k256",
- "keyring-core",
- "libc",
- "mkit-attest",
- "mkit-core",
- "p256",
- "security-framework",
- "sha2",
- "tempfile",
- "zbus-secret-service-keyring-store",
- "zeroize",
-]
-
-[[package]]
-name = "mkit-rpc"
-version = "0.5.0"
-dependencies = [
- "arbitrary",
- "buffa",
- "buffa-build",
- "connectrpc",
- "connectrpc-build",
- "hex",
- "mkit-core",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "mkit-serve"
-version = "0.5.0"
-dependencies = [
- "mkit-core",
- "mkit-rpc",
- "mkit-transport-file",
- "tempfile",
-]
-
-[[package]]
-name = "mkit-sign-file"
-version = "0.5.0"
-dependencies = [
- "buffa",
- "mkit-attest",
- "mkit-core",
- "mkit-rpc",
- "tempfile",
- "zeroize",
-]
-
-[[package]]
-name = "mkit-sync"
-version = "0.5.0"
-dependencies = [
- "base64 0.22.1",
- "buffa",
- "bytes",
- "ed25519-dalek",
- "flate2",
- "futures-executor",
- "getrandom 0.4.3",
- "http",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "mkit-client",
- "mkit-core",
- "mkit-test-util",
- "mkit-transport-connect",
- "mkit-transport-memory",
- "proptest",
- "rayon",
- "rustls",
- "tempfile",
- "thiserror",
- "tokio",
- "tower-service",
- "webpki-roots",
-]
-
-[[package]]
-name = "mkit-test-util"
-version = "0.5.0"
-
-[[package]]
-name = "mkit-transport-connect"
-version = "0.5.0"
-dependencies = [
- "base64 0.22.1",
- "buffa",
- "bytes",
- "connectrpc",
- "ed25519-dalek",
- "futures",
- "getrandom 0.4.3",
- "hex",
- "http",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "log",
- "mkit-client",
- "mkit-core",
- "mkit-rpc",
- "mkit-sync",
- "mkit-test-util",
- "mkit-transport-memory",
- "pin-project-lite",
- "rustls",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "tower-service",
- "url",
- "webpki-roots",
-]
-
-[[package]]
-name = "mkit-transport-file"
-version = "0.5.0"
-dependencies = [
- "mkit-core",
- "tempfile",
-]
-
-[[package]]
-name = "mkit-transport-memory"
-version = "0.5.0"
-dependencies = [
- "mkit-core",
-]
-
-[[package]]
-name = "mkit-transport-s3"
-version = "0.5.0"
-dependencies = [
- "hex",
- "hmac",
- "md-5",
- "mkit-core",
- "mockito",
- "reqwest",
- "serde_json",
- "sha2",
- "testcontainers",
- "testcontainers-modules",
-]
-
-[[package]]
-name = "mkit-transport-ssh"
-version = "0.5.0"
-dependencies = [
- "buffa",
- "hex",
- "mkit-core",
- "mkit-rpc",
- "thiserror",
 ]
 
 [[package]]

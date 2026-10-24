@@ -1,7 +1,7 @@
 # Fuzzing
 
-mkit ships a small number of **bounded property tests** that exercise the
-binary parsers from adversarial inputs. They live in the `mkit-fuzz`
+kit ships a small number of **bounded property tests** that exercise the
+binary parsers from adversarial inputs. They live in the `kit-fuzz`
 crate at `rust/fuzz/` and run in two modes:
 
 - `cd rust && cargo test --manifest-path fuzz/Cargo.toml` &mdash; plain unit-test
@@ -24,11 +24,11 @@ from recurring.
 | `fuzz_targets/pack.rs`         | `pack::PackReader::read`    |
 | `fuzz_targets/tree.rs`         | `serialize::deserialize`    |
 | `fuzz_targets/software_key_record.rs` | `EncryptedKeyRecord::decode` |
-| `fuzz_targets/git_commit_parse.rs` | `mkit-git-bridge gitparse::parse_commit` (untrusted upstream bytes, SPEC-GIT-IMPORT §2) |
-| `fuzz_targets/git_tag_parse.rs` | `mkit-git-bridge gitparse::parse_tag` |
-| `fuzz_targets/git_tree_parse.rs` | `mkit-git-bridge gitparse::parse_tree` plus `map_mode` |
+| `fuzz_targets/git_commit_parse.rs` | `kit-git-bridge gitparse::parse_commit` (untrusted upstream bytes, SPEC-GIT-IMPORT §2) |
+| `fuzz_targets/git_tag_parse.rs` | `kit-git-bridge gitparse::parse_tag` |
+| `fuzz_targets/git_tree_parse.rs` | `kit-git-bridge gitparse::parse_tree` plus `map_mode` |
 | `fuzz_targets/rpc_decode.rs`   | `SignerFrame` / `SshFrame` wire decode (never panics) plus `Arbitrary`-driven encode/decode roundtrip |
-| `fuzz_targets/ssh_session.rs`  | `mkit_serve::serve_session` (arbitrary client bytes after a valid `Hello`; the session ends, every pack on disk hashes to its name, no temp file stays, nothing is written outside `packs/` and `refs/`) |
+| `fuzz_targets/ssh_session.rs`  | `kit_serve::serve_session` (arbitrary client bytes after a valid `Hello`; the session ends, every pack on disk hashes to its name, no temp file stays, nothing is written outside `packs/` and `refs/`) |
 | `fuzz_targets/sparse_verify.rs` | `sparse::build_sparse` / `sparse::verify_sparse` (never panics on adversarial manifest/proof bytes) |
 | `fuzz_targets/merkle_proof.rs` | `merkle::compute_{tree,chunked}_id` / `merkle::Proof::decode` / `merkle::verify_tree_entry` / `merkle::verify_chunk` (never panics; a freshly built proof verifies; adversarial proof bytes reject cleanly, whether at decode or at verify) |
 | `fuzz_targets/merkle_packlist.rs` | `transfer::decode_packlist` / `transfer::encode_packlist` (never panics; a decoded node re-encodes and re-decodes to the same node) |
@@ -41,7 +41,7 @@ from recurring.
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in
-`rust/fuzz/Cargo.toml`, as `software_key_record` does for `mkit-keystore`.
+`rust/fuzz/Cargo.toml`, as `software_key_record` does for `kit-keystore`.
 
 ## What is **not** fuzzed (deferred)
 
@@ -129,7 +129,7 @@ Every target body must satisfy all six:
 1. **At most 100 iterations per invocation.**
 2. **Every iteration's input is at most 64 KiB.**
 3. **Bounded allocations.** Input cap (2) plus per-op output caps inside
-   `mkit-core` keep the worst-case heap under ~1 MiB per iteration:
+   `kit-core` keep the worst-case heap under ~1 MiB per iteration:
    - `delta::decode` caps its initial `Vec::with_capacity` at
      `result_len.min(base.len() + 2 * stream.len())` so a 9-byte
      stream claiming `result_len = u32::MAX` cannot pre-allocate 4 GiB.

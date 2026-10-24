@@ -3,8 +3,8 @@
 // verification toolchain): `formal/scripts/gen-refs-traces.sh` runs
 //   quint run refs_mbt.qnt --main refs_mbt2 --init initLin --step stepLin --mbt --out-itf ...
 // and the Rust harness
-//   rust/crates/mkit-formal-conformance/tests/formal_refs_conformance.rs
-// replays every step of every trace against the real `mkit_core::refs`
+//   rust/crates/kit-formal-conformance/tests/formal_refs_conformance.rs
+// replays every step of every trace against the real `kit_core::refs`
 // functions, `FileTransport` and `MemoryTransport`.
 //
 // Additive only: this file changes nothing in refs.qnt. It instantiates

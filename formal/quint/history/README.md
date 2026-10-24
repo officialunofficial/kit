@@ -9,7 +9,7 @@ used for any result below.
 Quint models of first-parent ancestry publication, crash recovery and the
 scrub schedule in [SPEC-HISTORY-PROOF §4](../../../docs/specs/SPEC-HISTORY-PROOF.md),
 under the guards in [SPEC-CONCURRENCY §3.3/§4](../../../docs/specs/SPEC-CONCURRENCY.md).
-Each model is aligned with `rust/crates/mkit-core/src/history/ancestry.rs`
+Each model is aligned with `rust/crates/kit-core/src/history/ancestry.rs`
 (`advance`, `finish`, `recover`, `decide_chain`, `AncestrySnapshot::load`),
 `refs.rs` (`RefMutation::{write,delete}`, `update_ref_with_ancestry`,
 `delete_ref_with_ancestry`) and `refs/ancestry_state.rs` (`invalidate`,
@@ -164,7 +164,7 @@ publishes plus the full walk), and that bound holds only **when every
 advisory `scrub` write lands**; a lost write leaves the old cursor, the same
 window is re-read, and only the 7-day bound remains. The model's
 `LAP_FRACTION + 1` is the scaled 65. §2.2's `inactive_peaks` field is a
-wire-format detail of the inclusion proof (always 0 in mkit) and does not
+wire-format detail of the inclusion proof (always 0 in kit) and does not
 touch publication, recovery or the scrub, so no model change was needed.
 
 | Property | Result |
@@ -183,7 +183,7 @@ APALACHE=1 ./check.sh   # adds Apalache 0.62.2, Safety to HISTORY_DEPTH (default
 # final runs: HISTORY_DEPTH=8, "all checks as expected" (10m44s); length 10 run separately
 ```
 
-Tool locations default to `${FV_HOME:-$HOME/.local/share/mkit-fv}/apalache-0.62.2`
+Tool locations default to `${FV_HOME:-$HOME/.local/share/kit-fv}/apalache-0.62.2`
 (`APALACHE_MC`, `TLA2TOOLS` override; TLC defaults to the Apalache jar).
 `JAVA_HOME` defaults to `/usr/libexec/java_home -v 21`, then Homebrew's
 `openjdk@21`. Heaps: TLC `-Xmx4g`, 4 workers (`TLC_HEAP`, `TLC_WORKERS`);

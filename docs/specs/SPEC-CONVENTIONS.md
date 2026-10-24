@@ -88,7 +88,7 @@ Where a `SPEC-*.md` document specifies byte layout:
 
 ## 4. Domain-separator and namespace naming
 
-mkit's signing and hashing domain separators (for example, `kit.tag\0`,
+kit's signing and hashing domain separators (for example, `kit.tag\0`,
 BLS namespace strings like `dsse/v1`) are permanent, literal byte
 strings baked into the signing/hashing contract &mdash; not a version field
 and not a compatibility-era label that gets bumped in place. A
@@ -130,12 +130,12 @@ disclaimer.
 A `SPEC-*.md` document specifies behavior as an implementation-independent
 contract &mdash; a wire format, an algorithm, a predicate a verifier
 evaluates &mdash; not as a reference to a specific library function or crate
-API. Where a document needs to describe *how mkit happens to implement*
+API. Where a document needs to describe *how kit happens to implement*
 a requirement, that belongs in a doc comment on the code itself
 (cross-referenced by file/function name, not restated), not in the
 spec's normative text. This keeps a spec usable by an independent,
 non-Rust implementation and keeps it from silently going stale the
-moment mkit's own internal factoring changes without the contract
+moment kit's own internal factoring changes without the contract
 changing.
 
 ## 7. Requirement classification
@@ -157,10 +157,10 @@ limit and mechanism remain reference-server behavior. Optional-feature
 requirements MUST state the feature condition rather than assume a particular
 server orchestration. Other servers need only the protocol specifications,
 conformance tiers 1 and 2, and pure protocol primitives; they do not depend on
-mkit-server.
+kit-server.
 
 **Reference-server behavior.** A mechanism, storage layout, or implementation
-limit of mkit-server is reference-server behavior. It does not become a
+limit of kit-server is reference-server behavior. It does not become a
 protocol requirement merely because the reference server implements it.
 Reference details MUST NOT substitute for an observable safety requirement.
 For example, atomic acceptance is a protocol requirement; implementing it with

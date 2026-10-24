@@ -1,5 +1,5 @@
 # SPEC-GIT-BRIDGE §13 vectors. <name> <kit-object-id> <git-sha1>
-# Regenerate with: UPDATE_GOLDEN=1 cargo test -p mkit-git-bridge --test golden
+# Regenerate with: UPDATE_GOLDEN=1 cargo test -p kit-git-bridge --test golden
 blob 4eeff5f8341e5cfd4b517caca780e4a6f979c91f53f2ce5a6bf94536004b96fc af4a5f79625c2fd79e5a48db74a5617876bf4834
 tree_empty b29117ce9b3d66ba98cd0a57145400f0bf6fff8b5c27c4552d80a38446f27ef7 4b825dc642cb6eb9a060e54bf8d69288fbee4904
 tree_single 983be0b3c79796fa433791871db96419327d66084c249ce1df3ed9b755729aa1 c7791dcf047fc22d38fb5b906c4550b330c65f06

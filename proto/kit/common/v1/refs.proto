@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// Shared ref types used across mkit's wire protocols. Used by
-// kit.rpc.v1.ssh (rust/crates/mkit-rpc/proto/ssh.proto) and
+// Shared ref types used across kit's wire protocols. Used by
+// kit.rpc.v1.ssh (rust/crates/kit-rpc/proto/ssh.proto) and
 // kit.repo.v1 (apps/repo-worker/proto/kit/repo/v1/repo.proto), and
 // intended for the forthcoming kit.transport.v1 canonical remote
 // protocol.
@@ -25,7 +25,7 @@ edition = "2023";
 package kit.common.v1;
 
 // ----------------------------------------------------------------------------
-// CAS semantics for ref-update RPCs across every mkit wire protocol.
+// CAS semantics for ref-update RPCs across every kit wire protocol.
 // Wire numbers are load-bearing. Do NOT renumber; new variants append.
 
 enum RefExpectation {
@@ -46,6 +46,6 @@ enum RefExpectation {
 
 // A single ref and the object it points at.
 message RefEntry {
-  string name = 1;        // e.g. "refs/heads/main" (mkit ref-name grammar)
+  string name = 1;        // e.g. "refs/heads/main" (kit ref-name grammar)
   bytes object_id = 2;    // raw 32-byte BLAKE3 digest
 }

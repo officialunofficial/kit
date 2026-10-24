@@ -2,18 +2,18 @@
 spec: SPEC-CONCURRENCY
 version: 2
 status: draft-normative
-audience: implementers of any lock-taking mkit-core/mkit-cli code path; reviewers of concurrency-sensitive changes
+audience: implementers of any lock-taking kit-core/kit-storage code path; reviewers of concurrency-sensitive changes
 ---
 
-# SPEC-CONCURRENCY &mdash; the total mkit lock order
+# SPEC-CONCURRENCY &mdash; the total kit lock order
 
 Status: **Normative** for lock naming, location, and acquisition order.
 **Draft** because §3.1 documents an open coordination gap this document
 does not resolve. See SPEC-CONVENTIONS §2 for what draft/normative mean.
 
 Scope: this document is the single owner of the total lock order across
-*every* lock any mkit process takes &mdash; repo-local locks defined in
-SPEC-WORKTREE §4.3, the ref-history locks defined in `mkit-core::refs`,
+*every* lock any kit process takes &mdash; repo-local locks defined in
+SPEC-WORKTREE §4.3, the ref-history locks defined in `kit-core::refs`,
 and the file-transport's own CAS lock defined in SPEC-TRANSPORT. Any
 other `SPEC-*.md` document that mentions a lock cross-references this
 one rather than restating the order; this document does not restate
@@ -24,7 +24,7 @@ those other documents' non-locking content.
 ## 1. Why this document exists
 
 Nearly a dozen `SPEC-*.md` documents each independently described a
-slice of mkit's locking model, using inconsistent names for the same
+slice of kit's locking model, using inconsistent names for the same
 lock and never stating the total acquisition order a multi-lock caller
 must follow. That let deadlock-shaped bugs (two processes taking the
 same two locks in opposite order) hide in the gap between documents.
@@ -37,13 +37,13 @@ document points here.
 |---|---|---|---|---|
 | `worktree.lock` | each tree's state dir | per-tree | that tree's worktree/index read-modify-write | SPEC-WORKTREE §4.3 |
 | `worktrees.lock` | common dir | per-repo | linked-worktree registry mutations, branch-checked-out-elsewhere guard + HEAD write | SPEC-WORKTREE §4.3 |
-| `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ancestry intent + ref + descriptor publication for one branch (`mkit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
-| `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
-| `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
-| `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `mkit git import`/`fetch`/`pull` import phase or `mkit git export` against that remote's bridge state dir (`mkit-cli`'s `git_import::import_into`, `git::export`) | §4 (this document) |
+| `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ancestry intent + ref + descriptor publication for one branch (`kit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
+| `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`kit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
+| `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`kit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
+| `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-storage`'s `git_import::import_into`, `git::export`) | §4 (this document) |
 | shared/exclusive `format` handle | existing immutable common-dir `format` file | per-repo, short object-store critical section | shared during a bulk write or cached reuse and during format validation; exclusive during gc's final age check and unlink | SPEC-GC, §3.4 (this document) |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
-| `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `mkit serve` (stdin SSH-frame, its only mode) and any server embedding `mkit-server`'s filesystem layout (which also holds `server.lock` exclusively, so one such server serves a root at a time); taken exclusive without waiting by a starting `mkit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
+| `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `kit serve` (stdin SSH-frame, its only mode) and any server embedding `kit-server`'s filesystem layout (which also holds `server.lock` exclusively, so one such server serves a root at a time); taken exclusive without waiting by a starting `kit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
 
 The recovery log (`.kit/recovery-log`) has **no dedicated lock** &mdash; see
 §3.2.
@@ -69,8 +69,8 @@ concurrent conditional write. The two domains use different lock files:
 the file transport does not acquire the local full-ref lock, `worktree.lock`,
 `worktrees.lock`, or `refs-history-<branch>.lock`.
 
-The cross-domain gap remains: local `mkit commit`/`checkout`/`gc` against a
-directory simultaneously served by `mkit serve` or `mkit-server` is not coordinated with the
+The cross-domain gap remains: local `kit commit`/`checkout`/`gc` against a
+directory simultaneously served by `kit serve` or `kit-server` is not coordinated with the
 transport. When the served root is the repository's common dir (`.kit`),
 the transport's `<root>/refs/...` files are the local refs, so a local ref
 mutation can race a client CAS. When the served root is any other directory
@@ -79,48 +79,48 @@ delete a pushed object: pushes store packs under `<root>/packs/`, which gc
 neither sweeps nor roots (SPEC-GC "Concurrent writers and the grace
 window"). The supported file-transport deployment is a
 bare/shared remote that a worktree-owning process does not also mutate directly.
-Local worktree commands against a live `mkit serve` or `mkit-server` root remain unsupported.
+Local worktree commands against a live `kit serve` or `kit-server` root remain unsupported.
 
 **The server now detects this case instead of staying silent**, without closing
-it: every live server process on the root &mdash; `mkit serve <path>`
+it: every live server process on the root &mdash; `kit serve <path>`
 (stdin SSH-frame, its only mode) and any server embedding
-`mkit-server`'s filesystem layout &mdash; holds a **shared**
+`kit-server`'s filesystem layout &mdash; holds a **shared**
 kernel lock (`std::fs::File::lock_shared`, never exclusive &mdash;
 SPEC-TRANSPORT documents multiple concurrent `serve` processes against
 one root, e.g. one per SSH forced-command connection, as a supported
 deployment, so `serve` instances must not exclude each other) on
-`serve.lock` (in the common dir) for its whole lifetime. `mkit-server`
+`serve.lock` (in the common dir) for its whole lifetime. `kit-server`
 also holds `server.lock` (in the common dir) **exclusively**, so one
-`mkit-server` serves a root at a time; it shares `serve.lock` with any
-`mkit serve` processes on the same root. The one exclusive hold: at
-startup `mkit serve` tries `serve.lock` exclusively, without waiting, and
+`kit-server` serves a root at a time; it shares `serve.lock` with any
+`kit serve` processes on the same root. The one exclusive hold: at
+startup `kit serve` tries `serve.lock` exclusively, without waiting, and
 only while it holds it (so no other server is up) sweeps the temp files
 crashed uploads left in `packs/`, then drops it and takes the shared lock;
 if the lock is busy it skips the sweep. `worktree.lock`
-and `worktrees.lock` acquisition (`mkit-cli`'s `acquire_worktree_lock`
+and `worktrees.lock` acquisition (`kit-storage`'s `acquire_worktree_lock`
 and `acquire_worktrees_registry_lock`) each follow up with a
 non-blocking exclusive probe of that same `serve.lock`
-(`mkit_core::repo_lock::probe_exclusive`); when the probe finds it busy
+(`kit_core::repo_lock::probe_exclusive`); when the probe finds it busy
 (i.e. at least one `serve` is alive), the command prints a warning to
 stderr and proceeds anyway &mdash; it does not refuse or block. The paths that
 take `worktree.lock` without the helper call the same probe directly
-(`mkit-cli`'s `warn_if_served`) right after acquiring it: the per-branch
+(`kit-storage`'s `warn_if_served`) right after acquiring it: the per-branch
 unpack-and-publish phase of `fetch`/`pull` and the fast-forward phase of
 `pull` (`remote_dispatch::fetch_objects_inner` and `pull_all_with`), and
 `status`'s opportunistic index refresh. So every command that takes
 `worktree.lock` or `worktrees.lock` emits the warning: the
 worktree-mutating commands, `gc` (which takes both), `tag` (create),
-`attest`, `fetch`/`pull`, `clean`, and the fast-forward of `mkit git
+`attest`, `fetch`/`pull`, `clean`, and the fast-forward of `kit git
 pull`. Paths that take neither lock do not, including `push`, `tag -d`,
-and the import phase of `mkit git import`/`fetch`/`pull` and `mkit git
+and the import phase of `kit git import`/`fetch`/`pull` and `kit git
 export`, which hold only `git-<remote>.lock` (§4's per-command table).
 
 Residual gaps this warning does **not** close:
 
-- A push made directly against the file transport (`mkit push
-  kit+file:///path`, bypassing `mkit serve` entirely) is not detected
+- A push made directly against the file transport (`kit push
+  kit+file:///path`, bypassing `kit serve` entirely) is not detected
   &mdash; nothing takes `serve.lock` on that path.
-- Detection is one-directional: a `mkit serve` that starts *during* a
+- Detection is one-directional: a `kit serve` that starts *during* a
   local command's already-in-flight critical section is not itself
   warned, since `serve` does not probe the worktree locks.
 
@@ -135,7 +135,7 @@ dedicated lock of their own. Correctness instead relies on lock
   calls `record` while already holding *its own tree's* `worktree.lock`
   &mdash; the same lock it took for the read-modify-write the recovery entry
   is about.
-- `mkit gc` calls `expire` while holding `worktrees.lock` **and every
+- `kit gc` calls `expire` while holding `worktrees.lock` **and every
   registered tree's `worktree.lock`** (SPEC-WORKTREE §4.3's holder
   list) &mdash; a strict superset of any single producer's one lock.
 
@@ -198,7 +198,7 @@ an atomic multi-ref transaction.
 The git bridge locks nest only with the ref class of this chain:
 `git-<remote>.lock` ≺ `git-import-key.lock` ≺ `refs-<ref>.lock`(s). A
 process MUST NOT acquire either bridge lock while it holds `worktrees.lock`,
-a `worktree.lock`, a `refs-history-<branch>.lock`, or a `refs-<ref>.lock`. `mkit git pull`
+a `worktree.lock`, a `refs-history-<branch>.lock`, or a `refs-<ref>.lock`. `kit git pull`
 releases `git-<remote>.lock` when its import phase returns, before its
 fast-forward acquires `worktree.lock`.
 
@@ -237,9 +237,9 @@ the history lock):
 | `fetch`, and the fetch phase of `pull` | per remote branch: download with no lock held, then this tree's `worktree.lock` around unpack and the remote-tracking ref publish, then that ref's `refs-<ref>.lock`; released before the next branch (`remote_dispatch::fetch_objects_inner`). A retry after a concurrent re-baseline releases the lock for its download and acquires it again |
 | `pull` (fast-forward phase) | this tree's `worktree.lock` across the restore-safety check, the branch write and the worktree restore, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`remote_dispatch::pull_all_with`) |
 | `push` | no `worktree.lock`; each remote-tracking ref write takes its `refs-<ref>.lock` |
-| `mkit git import`/`fetch`/`pull` (import phase) | `git-<remote>.lock`, then (first import only) `git-import-key.lock`, then per written tag or remote-tracking ref its `refs-<ref>.lock`; no `worktree.lock` (`git_import::import_into`) |
-| `mkit git export` | `git-<remote>.lock` only; it reads local refs and writes no local ref (`git::export`) |
-| `mkit git pull` (fast-forward phase), after the import phase released `git-<remote>.lock` | this tree's `worktree.lock`, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`git_import::fast_forward_current`) |
+| `kit git import`/`fetch`/`pull` (import phase) | `git-<remote>.lock`, then (first import only) `git-import-key.lock`, then per written tag or remote-tracking ref its `refs-<ref>.lock`; no `worktree.lock` (`git_import::import_into`) |
+| `kit git export` | `git-<remote>.lock` only; it reads local refs and writes no local ref (`git::export`) |
+| `kit git pull` (fast-forward phase), after the import phase released `git-<remote>.lock` | this tree's `worktree.lock`, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`git_import::fast_forward_current`) |
 
 A process that violates this order and blocks on two locks acquired in
 opposite order by two racing processes normally time out independently

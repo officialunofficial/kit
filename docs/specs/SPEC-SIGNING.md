@@ -5,9 +5,9 @@ status: stable-normative
 audience: implementers of compatible commit/remix signers and verifiers
 ---
 
-# SPEC-SIGNING &mdash; mkit v1 signature domains
+# SPEC-SIGNING &mdash; kit v1 signature domains
 
-Status: **Normative** for mkit v1. See SPEC-CONVENTIONS §1 for the
+Status: **Normative** for kit v1. See SPEC-CONVENTIONS §1 for the
 RFC 2119/8174 boilerplate this document's MUST/SHOULD language relies
 on, and §6 for the no-vendor-references rule this document follows:
 verification is specified below as a mathematical predicate, not as a
@@ -24,9 +24,9 @@ separates signature domains.
 
 - **Hash:** BLAKE3 default mode (no keyed hashing, no derive-key at the
   signing layer). Output: 32 bytes.
-- **Signature:** Ed25519 per RFC 8032 only. mkit-core does NOT support
+- **Signature:** Ed25519 per RFC 8032 only. kit-core does NOT support
   any other signature algorithm; multi-algorithm signing (if any) lives
-  in `mkit-attest`/SPEC-ATTESTATIONS and is out of scope here.
+  in `kit-attest`/SPEC-ATTESTATIONS and is out of scope here.
   Public key 32 bytes, seed 32 bytes, signature 64 bytes.
 - **Signers sign a BLAKE3 digest of the signing bytes (§2.1), not the
   raw signing bytes.** This is PureEdDSA (RFC 8032's `Sign`/`Verify` as
@@ -36,7 +36,7 @@ separates signature domains.
   Ed25519ph runs the message through SHA-512 internally as part of the
   signature algorithm and prepends its own `dom2` domain-separation
   context, producing a different signature over the same bytes than
-  PureEdDSA would. mkit signs a 32-byte value with plain PureEdDSA; that
+  PureEdDSA would. kit signs a 32-byte value with plain PureEdDSA; that
   value happens to be `BLAKE3(domain ‖ signing_bytes)` rather than the
   object's raw signing bytes, purely so a signer implementation (in
   particular a hardware or remote signer, SPEC-EXTERNAL-SIGNER) only
@@ -90,7 +90,7 @@ separates signature domains.
 
 ## 2. Domain separation
 
-mkit defines three distinct signing domains. They MUST produce disjoint
+kit defines three distinct signing domains. They MUST produce disjoint
 signable byte strings for any possible input.
 
 ```
@@ -126,7 +126,7 @@ digest = BLAKE3(u16_le(domain.len) || domain || signing_bytes)
 ```
 
 Where `domain` is the full domain string *including* the trailing
-`\x00`. This is the shape mkit commits to on the wire and in test vectors.
+`\x00`. This is the shape kit commits to on the wire and in test vectors.
 
 The length prefix makes the `(domain, signing_bytes)` boundary explicit. A
 verifier MUST NOT use BLAKE3 `derive_key`, bare `BLAKE3(domain ||
@@ -236,11 +236,11 @@ signing_hash = BLAKE3(u16_le(8) || "kit.tag\x00" || signing_bytes)
 
 The tag's `signature` field is `Ed25519.sign(signer_seed, signing_hash)`.
 
-An **annotated, unsigned** tag (`mkit tag -a`) carries an all-zero
+An **annotated, unsigned** tag (`kit tag -a`) carries an all-zero
 `signature` (`0x00`×64). It is a valid object but not a valid signature:
 `verify_tag` over an all-zero signature fails the strict Ed25519 check.
-A **signed** tag (`mkit tag -s`) carries a real signature that
-`mkit verify <tag>` accepts.
+A **signed** tag (`kit tag -s`) carries a real signature that
+`kit verify <tag>` accepts.
 
 ---
 
@@ -301,19 +301,19 @@ invariant.
 
 The algorithm above proves only that `signer` produced `C.signature` &mdash;
 it says nothing about whether `signer` is a key the caller has any
-reason to accept. `mkit verify <rev>` implements exactly the five steps
+reason to accept. `kit verify <rev>` implements exactly the five steps
 above and nothing more: a signature from a freshly generated,
 never-seen-before key verifies identically to one from a key the caller
 actually trusts.
 
-`mkit verify --trusted` (and the equivalent `--trust-roots <path>`
+`kit verify --trusted` (and the equivalent `--trust-roots <path>`
 form) is the shipped instance of the "application policy" this section
 defers to: it runs the algorithm above unchanged, then additionally
 looks up `signer` in a caller-supplied trust-roots registry (the same
-`[[trust_root]]` TOML format `mkit verify-attest` reads, managed via
-`mkit trust add/list/remove`) and fails closed &mdash; a nonzero exit, distinct
+`[[trust_root]]` TOML format `kit verify-attest` reads, managed via
+`kit trust add/list/remove`) and fails closed &mdash; a nonzero exit, distinct
 from a bad-signature failure &mdash; when `signer` is not a registered
-Ed25519 key. See `rust/crates/mkit-cli/src/commands/verify.rs` and
+Ed25519 key. See `rust/crates/kit-storage/src/commands/verify.rs` and
 `docs/THREAT-MODEL.md` §5.
 
 
@@ -382,7 +382,7 @@ ACLs apply).
 ## 8. One key, many roles
 
 The Ed25519 seed in `.kit/keys/default.key` MAY be reused for other
-Ed25519 roles in the wider mkit ecosystem:
+Ed25519 roles in the wider kit ecosystem:
 
 - **Commit/remix/tag signing** (this document, §§3-4a) &mdash; the
   message signed is always `BLAKE3(domain ‖ signing_bytes)` for one of
@@ -394,13 +394,13 @@ Ed25519 roles in the wider mkit ecosystem:
 - **SSH transport authentication** when pushing to `kit+ssh://`
   servers &mdash; the message signed there is whatever byte string the SSH
   protocol itself defines for public-key authentication (RFC 4252
-  §7), entirely outside mkit's control.
+  §7), entirely outside kit's control.
 
 **Correction:** an earlier version of this section claimed "OpenSSH
 8.0+ accepts the same raw Ed25519 seed as its `id_ed25519` private
 key." This is not accurate: OpenSSH's private-key files use its own
 `openssh-key-v1` container format (a bcrypt-KDF-wrapped, base64,
-PEM-bracketed structure), not a bare 32-byte seed. Reusing an mkit
+PEM-bracketed structure), not a bare 32-byte seed. Reusing an kit
 seed as an SSH identity requires an explicit conversion step (wrapping
 the same 32 bytes into that container), which is outside this
 document's scope.

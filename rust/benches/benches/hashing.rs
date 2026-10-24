@@ -1,7 +1,7 @@
-//! Hashing throughput: BLAKE3 (mkit's primitive) vs SHA-1 (git's
+//! Hashing throughput: BLAKE3 (kit's primitive) vs SHA-1 (git's
 //! default) vs SHA-256 (git's experimental hash) vs BLAKE2b. All
 //! libraries hash the SAME random buffer at four sizes covering the
-//! object spectrum mkit sees in practice (small commits → blob).
+//! object spectrum kit sees in practice (small commits → blob).
 //!
 //! Output: `target/criterion/<bench>/<size>/estimates.json`. The
 //! `render-charts` binary reads these and emits SVGs.
@@ -11,7 +11,7 @@
 //! to re-implement criterion's dir layout discovery.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit, time_one};
+use kit_benches::{Sample, Unit, time_one};
 
 const SIZES: &[(usize, &str)] = &[
     (1024, "1 KiB"),
@@ -43,18 +43,18 @@ fn bench_hashing(c: &mut Criterion) {
         let mut group = c.benchmark_group(format!("hashing/{axis}"));
         group.throughput(Throughput::Bytes(n as u64));
 
-        // BLAKE3 — mkit's primitive.
-        group.bench_with_input(BenchmarkId::new("BLAKE3 (mkit)", n), &buf, |b, buf| {
-            b.iter(|| mkit_core::hash::hash(buf));
+        // BLAKE3 — kit's primitive.
+        group.bench_with_input(BenchmarkId::new("BLAKE3 (kit)", n), &buf, |b, buf| {
+            b.iter(|| kit_core::hash::hash(buf));
         });
         samples.push(Sample {
             category: "hashing".into(),
             axis: axis.into(),
-            library: "BLAKE3 (mkit)".into(),
+            library: "BLAKE3 (kit)".into(),
             value: throughput_mib(
                 n,
                 time_one(50, 200, || {
-                    let _ = mkit_core::hash::hash(&buf);
+                    let _ = kit_core::hash::hash(&buf);
                 }),
             ),
             unit: Unit::MibPerSec,
@@ -124,7 +124,7 @@ fn bench_hashing(c: &mut Criterion) {
         group.finish();
     }
 
-    mkit_benches::write_summary("hashing", &samples);
+    kit_benches::write_summary("hashing", &samples);
 }
 
 fn throughput_mib(bytes: usize, seconds_per_iter: f64) -> f64 {
