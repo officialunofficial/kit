@@ -33,6 +33,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::bounded_read;
 use crate::hash::{self, Hash};
 use crate::index;
 use crate::layout::RepoLayout;
@@ -49,6 +50,9 @@ use crate::refs::{self, HEADS_DIR, REMOTES_DIR, TAGS_DIR};
 /// Owned here (not in `kit-attest`) so the core collector stays free of
 /// a reverse crate dependency — it only reads directory *names*.
 const ATTESTATIONS_DIR: &str = "attestations";
+
+/// Longest ref or root file that gc reads: one hex hash plus whitespace.
+const HASH_FILE_MAX_BYTES: u64 = 128;
 
 /// Depth cap for the strict ref walk. Refs nest by `/` in the name;
 /// anything deeper than this on disk is treated as an error (fail
@@ -403,7 +407,7 @@ fn walk_ref_roots_strict(
             continue;
         }
         // Strict: read + decode, erroring (fail closed) on any failure.
-        let raw = fs::read_to_string(entry.path())?;
+        let raw = bounded_read::read_capped_string(&entry.path(), HASH_FILE_MAX_BYTES)?;
         let h = hash::from_hex(raw.trim())?;
         if h != hash::ZERO {
             roots.insert(h);
@@ -440,7 +444,7 @@ fn attested_commits(common_dir: &Path) -> Result<Vec<Hash>, io::Error> {
 /// Read a single 64-hex object id from `path`, trimming trailing
 /// whitespace. `Ok(None)` if the file is absent.
 fn read_optional_hash(path: &Path) -> Result<Option<Hash>, GcRootsError> {
-    let raw = match fs::read_to_string(path) {
+    let raw = match bounded_read::read_capped_string(path, HASH_FILE_MAX_BYTES) {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
@@ -855,6 +859,22 @@ mod tests {
         assert!(
             matches!(collect_roots(&md), Err(GcRootsError::BadHash(_))),
             "malformed ref must fail closed"
+        );
+    }
+
+    #[test]
+    fn collect_roots_fails_closed_on_oversized_ref_file() {
+        let (d, _s) = repo();
+        let md = layout(&d);
+        // A valid hash padded past the cap must error, not be read whole.
+        let big = md.heads_dir().join("big");
+        fs::create_dir_all(big.parent().unwrap()).unwrap();
+        let mut bytes = format!("{}\n", hash::to_hex(&[7u8; 32])).into_bytes();
+        bytes.resize(usize::try_from(HASH_FILE_MAX_BYTES).unwrap() + 1, b' ');
+        fs::write(&big, bytes).unwrap();
+        assert!(
+            matches!(collect_roots(&md), Err(GcRootsError::Io(_))),
+            "oversized ref must fail closed"
         );
     }
 

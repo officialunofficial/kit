@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{RefError, RefResult};
@@ -24,21 +24,13 @@ pub(crate) fn branch_dir(common: &Path, full_ref: &str) -> PathBuf {
 }
 
 /// Read a metadata file with a hard bound even if it grows after stat.
+/// A missing file returns `Ok(None)`.
 pub(crate) fn read_bounded(path: &Path, limit: u64) -> io::Result<Option<Vec<u8>>> {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "history metadata exceeds limit",
-        ));
+    match crate::bounded_read::read_capped(path, limit) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
-    Ok(Some(bytes))
 }
 
 /// A durable intent, independent of MMB storage or the history feature flag.

@@ -251,15 +251,7 @@ fn read_hex_file(path: &Path) -> ConflictStateResult<Option<Hash>> {
 }
 
 fn read_capped(path: &Path) -> io::Result<String> {
-    let meta = fs::metadata(path)?;
-    if meta.len() > MAX_STATE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "state too large",
-        ));
-    }
-    let raw = fs::read(path)?;
-    String::from_utf8(raw).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-utf8"))
+    crate::bounded_read::read_capped_string(path, MAX_STATE_BYTES)
 }
 
 /// Persisted state for an in-progress merge.

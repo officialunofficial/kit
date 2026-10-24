@@ -17,7 +17,6 @@
 //! New stashes are prepended (LIFO). SPEC-WORKTREE §4.6 specifies the format.
 
 use std::fmt::Write as _;
-use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -601,18 +600,17 @@ fn stash_path(layout: &RepoLayout) -> PathBuf {
 
 fn read_list(layout: &RepoLayout) -> StashResult<StashList> {
     let path = stash_path(layout);
-    let meta = match fs::metadata(&path) {
-        Ok(m) => m,
+    let data = match crate::bounded_read::read_capped(&path, MAX_MANIFEST_BYTES) {
+        Ok(data) => data,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(StashList::default()),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            return Err(StashError::ManifestTooLarge);
+        }
         Err(e) => return Err(StashError::Io(e)),
     };
-    if meta.len() == 0 {
+    if data.is_empty() {
         return Ok(StashList::default());
     }
-    if meta.len() > MAX_MANIFEST_BYTES {
-        return Err(StashError::ManifestTooLarge);
-    }
-    let data = fs::read(&path)?;
     deserialize_list(&data)
 }
 
@@ -741,6 +739,7 @@ mod tests {
     use crate::ops::diff::DiffKind;
     use crate::serialize;
     use crate::store::ObjectStore;
+    use std::fs;
     use tempfile::TempDir;
 
     fn fresh_store() -> (TempDir, ObjectStore) {

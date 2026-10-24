@@ -43,6 +43,13 @@ pub fn state_dir(layout: &RepoLayout, remote: &str) -> Result<PathBuf, BridgeErr
     Ok(layout.git_state_dir().join(remote))
 }
 
+/// Longest map file that kit reads (1 GiB). A line takes about 130 bytes, so
+/// the limit holds several million objects. A longer file is an error.
+const MAP_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+/// Longest ref-state file that kit reads (64 MiB).
+const REFS_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// Longest stamp file that kit reads. A stamp holds one short word.
+const STAMP_MAX_BYTES: u64 = 4096;
 const MAP_FILE: &str = "map";
 const REFS_FILE: &str = "refs";
 const IMPORT_REFS_FILE: &str = "refs-import";
@@ -79,7 +86,7 @@ impl Direction {
 }
 
 fn read_stamp(dir: &Path, name: &str) -> Result<Option<String>, BridgeError> {
-    match std::fs::read_to_string(dir.join(name)) {
+    match kit_core::bounded_read::read_capped_string(&dir.join(name), STAMP_MAX_BYTES) {
         Ok(v) => Ok(Some(v.trim().to_owned())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
@@ -217,7 +224,7 @@ pub fn bind_import_spec(dir: &Path, version: u32) -> Result<(), BridgeError> {
 /// rebuild rather than trust the surviving lines alone (§12.3).
 pub fn map_is_intact(dir: &Path) -> Result<bool, BridgeError> {
     let path = dir.join(MAP_FILE);
-    let data = match std::fs::read(&path) {
+    let data = match kit_core::bounded_read::read_capped(&path, MAP_MAX_BYTES) {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(e) => return Err(e.into()),
@@ -248,7 +255,7 @@ pub fn map_is_intact(dir: &Path) -> Result<bool, BridgeError> {
 /// sha1 and force a pointless re-translation every fetch.
 pub fn load_map_inverse(dir: &Path) -> Result<HashMap<Sha1Id, Hash>, BridgeError> {
     let path = dir.join(MAP_FILE);
-    let data = match std::fs::read(&path) {
+    let data = match kit_core::bounded_read::read_capped(&path, MAP_MAX_BYTES) {
         Ok(d) => String::from_utf8_lossy(&d).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
         Err(e) => return Err(e.into()),
@@ -279,7 +286,7 @@ pub fn load_map(dir: &Path) -> Result<HashMap<Hash, Sha1Id>, BridgeError> {
     let path = dir.join(MAP_FILE);
     // §12.3: corruption (including undecodable bytes) means "rebuild",
     // never an error — lossy decoding turns garbage into skipped lines.
-    let data = match std::fs::read(&path) {
+    let data = match kit_core::bounded_read::read_capped(&path, MAP_MAX_BYTES) {
         Ok(d) => String::from_utf8_lossy(&d).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
         Err(e) => return Err(e.into()),
@@ -349,7 +356,7 @@ pub fn load_import_ref_state(dir: &Path) -> Result<Vec<RefState>, BridgeError> {
 
 fn load_ref_state_file(dir: &Path, file: &str) -> Result<Vec<RefState>, BridgeError> {
     let path = dir.join(file);
-    let data = match std::fs::read(&path) {
+    let data = match kit_core::bounded_read::read_capped(&path, REFS_MAX_BYTES) {
         Ok(d) => String::from_utf8_lossy(&d).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),

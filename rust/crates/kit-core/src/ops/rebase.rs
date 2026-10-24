@@ -398,12 +398,7 @@ fn write_with_newline(path: &Path, content: &[u8]) -> io::Result<()> {
 }
 
 fn read_text_capped(path: &Path, cap: u64) -> io::Result<String> {
-    let meta = fs::metadata(path)?;
-    if meta.len() > cap {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "file too large"));
-    }
-    let raw = fs::read(path)?;
-    String::from_utf8(raw).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-utf8"))
+    crate::bounded_read::read_capped_string(path, cap)
 }
 
 fn trim_trailing(s: &str) -> &str {

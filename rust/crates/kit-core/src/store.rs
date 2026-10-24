@@ -70,6 +70,9 @@ pub const FORMAT_FILE: &str = "format";
 /// The only supported object-addressing format value (see
 /// `docs/specs/SPEC-MERKLE-OBJECTS.md`): Tree/ChunkedBlob keyed by BMT root.
 pub const FORMAT_VALUE: &str = "bmt-v1";
+
+/// Longest format marker that kit reads. The real value is a few bytes.
+const FORMAT_MAX_BYTES: u64 = 64;
 /// Hard cap on raw object size, enforced on both [`ObjectStore::write`]
 /// and [`ObjectStore::read`].
 pub const MAX_RAW_OBJECT_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
@@ -295,11 +298,11 @@ impl ObjectStore {
         // addressing — a pre-merkle repo would mis-read every Tree /
         // ChunkedBlob (and thus every Commit) under the new id scheme.
         let read_format = || -> io::Result<String> {
-            let mut file = File::open(layout.format_file())?;
+            let file = File::open(layout.format_file())?;
             file.lock_shared()?;
-            let mut value = String::new();
-            file.read_to_string(&mut value)?;
-            Ok(value)
+            let bytes = crate::bounded_read::read_capped_from(&file, FORMAT_MAX_BYTES)?;
+            String::from_utf8(bytes)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "format file is not UTF-8"))
         };
         match read_format() {
             Ok(s) if s.trim() == FORMAT_VALUE => {}

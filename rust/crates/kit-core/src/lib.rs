@@ -76,6 +76,7 @@ pub mod layout;
 
 // Refs, index, worktree, ignore, and repo_lock.
 pub(crate) mod atomic;
+pub mod bounded_read;
 pub mod ignore;
 pub mod index;
 pub mod ref_listing;

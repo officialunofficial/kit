@@ -79,6 +79,11 @@ use tempfile::NamedTempFile;
 use crate::error::SyncError;
 use crate::observer::{SyncEvent, SyncObserver};
 
+/// Longest applied-pack record that kit reads (64 MiB). The record is a
+/// cache. A longer file is an error, and the fetch path then starts from
+/// an empty record.
+const RECORD_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
 /// A local record of pack digests already unpacked into this repo's object
 /// store for one remote. See the module docs for the on-disk format and the
 /// self-heal contract.
@@ -104,7 +109,7 @@ impl AppliedPacks {
     pub fn load(layout: &RepoLayout, remote: &str) -> Result<Self, SyncError> {
         validate_remote_name(remote)?;
         let path = record_path(layout, remote);
-        let set = match fs::read(&path) {
+        let set = match kit_core::bounded_read::read_capped(&path, RECORD_MAX_BYTES) {
             Ok(bytes) => parse(&bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => HashSet::new(),
             Err(e) => return Err(SyncError::Io(e)),

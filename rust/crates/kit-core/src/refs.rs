@@ -39,6 +39,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::atomic::{write_atomic, write_create_new};
+use crate::bounded_read;
 use crate::hash::{HASH_LEN, HEX_LEN, Hash, to_hex};
 use crate::layout::RepoLayout;
 
@@ -64,7 +65,7 @@ const HEAD_MAX_BYTES: u64 = 4 * 1024;
 /// file. The wire form is always 65 bytes; a few more is fine if the
 /// file picked up extra whitespace, but anything pathological is
 /// rejected.
-const REF_FILE_MAX_BYTES: u64 = 128;
+pub const REF_FILE_MAX_BYTES: u64 = 128;
 /// Hard cap on `.kit/shallow` (1 MiB).
 const SHALLOW_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -521,15 +522,12 @@ pub fn init(layout: &RepoLayout) -> RefResult<()> {
 /// - [`RefError::InvalidHead`] for malformed content.
 pub fn read_head(layout: &RepoLayout) -> RefResult<Head> {
     let path = layout.head_file();
-    let meta = match fs::metadata(&path) {
-        Ok(m) => m,
+    let raw = match bounded_read::read_capped(&path, HEAD_MAX_BYTES) {
+        Ok(raw) => raw,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(RefError::NoHead),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => return Err(RefError::InvalidHead),
         Err(e) => return Err(RefError::Io(e)),
     };
-    if meta.len() > HEAD_MAX_BYTES {
-        return Err(RefError::InvalidHead);
-    }
-    let raw = fs::read(&path)?;
     let s = core::str::from_utf8(&raw).map_err(|_| RefError::InvalidHead)?;
     let trimmed = s.trim_end_matches(['\n', '\r', ' ', '\t']);
     if let Some(branch) = trimmed.strip_prefix(HEAD_REF_PREFIX) {
@@ -1020,18 +1018,17 @@ pub fn list_tags_with(
 /// if the file does not exist or is empty.
 pub fn load_shallow_boundaries(layout: &RepoLayout) -> RefResult<Option<Vec<Hash>>> {
     let path = layout.shallow_file();
-    let meta = match fs::metadata(&path) {
-        Ok(m) => m,
+    let bytes = match bounded_read::read_capped(&path, SHALLOW_MAX_BYTES) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            return Err(RefError::InvalidRef("shallow file too large".to_string()));
+        }
         Err(e) => return Err(RefError::Io(e)),
     };
-    if meta.len() == 0 {
+    if bytes.is_empty() {
         return Ok(None);
     }
-    if meta.len() > SHALLOW_MAX_BYTES {
-        return Err(RefError::InvalidRef("shallow file too large".to_string()));
-    }
-    let bytes = fs::read(&path)?;
     let s = core::str::from_utf8(&bytes).map_err(|_| RefError::InvalidHead)?;
     let mut out = Vec::new();
     for line in s.split('\n') {
@@ -1087,15 +1084,14 @@ fn remote_ref_dir(remote: &str) -> String {
 
 fn read_ref_under(common_dir: &Path, sub_dir: &str, name: &str) -> RefResult<Option<Hash>> {
     let path = ref_path(common_dir, sub_dir, name);
-    let meta = match fs::metadata(&path) {
-        Ok(m) => m,
+    let bytes = match bounded_read::read_capped(&path, REF_FILE_MAX_BYTES) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            return Err(RefError::InvalidRef(name.to_string()));
+        }
         Err(e) => return Err(RefError::Io(e)),
     };
-    if meta.len() > REF_FILE_MAX_BYTES {
-        return Err(RefError::InvalidRef(name.to_string()));
-    }
-    let bytes = fs::read(&path)?;
     let h = decode_ref_wire(&bytes).ok_or_else(|| RefError::InvalidRef(name.to_string()))?;
     Ok(Some(h))
 }
@@ -1126,11 +1122,14 @@ impl RefMutation {
     }
 
     pub(crate) fn current(&self) -> RefResult<Option<Hash>> {
-        match fs::read(&self.path) {
+        match bounded_read::read_capped(&self.path, REF_FILE_MAX_BYTES) {
             Ok(bytes) => decode_ref_wire(&bytes)
                 .map(Some)
                 .ok_or_else(|| RefError::InvalidRef(self.name.clone())),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                Err(RefError::InvalidRef(self.name.clone()))
+            }
             Err(e) => Err(RefError::Io(e)),
         }
     }
@@ -1252,8 +1251,8 @@ pub fn read_ref_candidate(candidate: &RefCandidate) -> RefReadOutcome {
     // to), so one `read` into a stack buffer sees the entire file. This is
     // open+read+close, versus `fs::read`'s extra size-hint `statx` and
     // EOF-probe `read` — the dominant per-ref cost when listing thousands.
-    // A file that fills the buffer is oversized and falls back to the
-    // unbounded `fs::read`, so the malformed-content policy is unchanged.
+    // A file that fills the buffer falls back to a capped read. An
+    // oversized file is malformed content, so it keeps `hash: None`.
     let mut buf = [0u8; 256];
     let read = fs::File::open(&candidate.path).and_then(|mut f| {
         loop {
@@ -1265,8 +1264,9 @@ pub fn read_ref_candidate(candidate: &RefCandidate) -> RefReadOutcome {
     });
     match read {
         Ok(n) if n < buf.len() => RefReadOutcome::Decoded(decode_ref_wire(&buf[..n])),
-        Ok(_) => match fs::read(&candidate.path) {
+        Ok(_) => match bounded_read::read_capped(&candidate.path, REF_FILE_MAX_BYTES) {
             Ok(bytes) => RefReadOutcome::Decoded(decode_ref_wire(&bytes)),
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => RefReadOutcome::Decoded(None),
             Err(_) => RefReadOutcome::Unreadable,
         },
         Err(_) => RefReadOutcome::Unreadable,

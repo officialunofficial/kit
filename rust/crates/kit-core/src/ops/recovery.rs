@@ -40,6 +40,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 
 use crate::atomic::{sync_parent_dir, write_atomic};
+use crate::bounded_read;
 use crate::hash::{self, Hash};
 use crate::layout::RepoLayout;
 
@@ -52,6 +53,11 @@ pub const RECOVERY_LOG: &str = "recovery-log";
 pub const DEFAULT_GRACE_SECS: u64 = 90 * 24 * 60 * 60;
 /// Default floor on retained entries regardless of age.
 pub const DEFAULT_KEEP_LAST: usize = 50;
+
+/// Longest recovery log that kit reads (64 MiB). A log of this size holds
+/// about 600,000 entries. A longer log is an error, not a reason to
+/// allocate without bound.
+const LOG_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Errors from the recovery log.
 #[derive(Debug, thiserror::Error)]
@@ -147,7 +153,7 @@ pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
 /// # Errors
 /// Strict: any unparseable line or bad hash errors (fail closed for gc).
 pub fn read_all(layout: &RepoLayout) -> Result<Vec<RecoveryEntry>> {
-    let raw = match fs::read_to_string(layout.recovery_log_file()) {
+    let raw = match bounded_read::read_capped_string(&layout.recovery_log_file(), LOG_MAX_BYTES) {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),

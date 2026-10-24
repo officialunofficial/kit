@@ -505,8 +505,13 @@ fn read_capped_line(path: &Path) -> Result<Option<String>, DiscoverError> {
     if meta.len() > MAX_POINTER_FILE_BYTES {
         return Err(DiscoverError::PointerTooLarge(path.to_path_buf()));
     }
-    let raw =
-        std::fs::read(path).map_err(|e| DiscoverError::PointerUnreadable(path.to_path_buf(), e))?;
+    let raw = crate::bounded_read::read_capped(path, MAX_POINTER_FILE_BYTES).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            DiscoverError::PointerTooLarge(path.to_path_buf())
+        } else {
+            DiscoverError::PointerUnreadable(path.to_path_buf(), e)
+        }
+    })?;
     let text = std::str::from_utf8(&raw)
         .map_err(|_| DiscoverError::PointerMalformed(path.to_path_buf()))?;
     let line = text

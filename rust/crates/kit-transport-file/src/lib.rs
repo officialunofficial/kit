@@ -46,11 +46,12 @@ use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
+use kit_core::bounded_read;
 use kit_core::hash::Hash;
 use kit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, TransportResult};
 use kit_core::refs::{
-    Ref, decode_ref_wire, encode_ref_wire, validate_ref_name, validate_ref_name_grammar,
-    validate_ref_prefix,
+    REF_FILE_MAX_BYTES, Ref, decode_ref_wire, encode_ref_wire, validate_ref_name,
+    validate_ref_name_grammar, validate_ref_prefix,
 };
 
 // We need write_atomic and write_create_new from kit_core's private `atomic`
@@ -477,11 +478,14 @@ impl FileTransport {
         if path.exists() {
             self.guard_ref_path(&path)?;
         }
-        match fs::read(&path) {
+        match bounded_read::read_capped(&path, REF_FILE_MAX_BYTES) {
             Ok(bytes) => decode_ref_wire(&bytes)
                 .map(Some)
                 .ok_or_else(|| RefFileError::Corrupt(name.to_owned())),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == ErrorKind::InvalidData => {
+                Err(RefFileError::Corrupt(name.to_owned()))
+            }
             Err(e) => Err(RefFileError::Io(e)),
         }
     }
@@ -531,8 +535,12 @@ impl FileTransport {
                 if !file_type.is_file() || !validate_ref_name_grammar(&name) {
                     continue; // a symlink, a temp or lock file, or no ref name
                 }
-                let bytes = fs::read(&path).map_err(RefFileError::Io)?;
-                out.push((name, decode_ref_wire(&bytes)));
+                match bounded_read::read_capped(&path, REF_FILE_MAX_BYTES) {
+                    Ok(bytes) => out.push((name, decode_ref_wire(&bytes))),
+                    // An oversized file is malformed content, like a bad hash.
+                    Err(e) if e.kind() == ErrorKind::InvalidData => out.push((name, None)),
+                    Err(e) => return Err(RefFileError::Io(e)),
+                }
             }
         }
         out.sort();
@@ -895,9 +903,11 @@ impl Transport for FileTransport {
 /// Read and decode the hash from a ref file. Returns `None` if the
 /// file does not exist; propagates other I/O errors.
 fn read_ref_raw(path: &Path) -> io::Result<Option<Hash>> {
-    match fs::read(path) {
+    match bounded_read::read_capped(path, REF_FILE_MAX_BYTES) {
         Ok(bytes) => Ok(decode_ref_wire(&bytes)),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        // An oversized file is malformed content, like a bad hash.
+        Err(e) if e.kind() == ErrorKind::InvalidData => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -944,7 +954,7 @@ fn collect_refs(root_dir: &Path, current_dir: &Path, out: &mut Vec<Ref>) -> Tran
                 continue;
             }
 
-            if let Ok(bytes) = fs::read(&path)
+            if let Ok(bytes) = bounded_read::read_capped(&path, REF_FILE_MAX_BYTES)
                 && let Some(hash) = decode_ref_wire(&bytes)
             {
                 out.push(Ref {
@@ -1870,6 +1880,32 @@ mod tests {
         }
         assert_eq!(t.read_ref_strict("refs/heads/a").unwrap(), None);
         assert_eq!(t.read_ref_strict("refs/heads/c").unwrap(), Some(h));
+    }
+
+    #[test]
+    fn oversized_ref_file_is_corrupt_and_is_not_read_whole() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"ok");
+        t.update_ref("refs/heads/ok", RefWriteCondition::Any, &h)
+            .unwrap();
+        // A valid hash followed by blanks past the cap is still malformed.
+        let mut big = format!("{}\n", kit_core::hash::to_hex(&h)).into_bytes();
+        big.resize(usize::try_from(REF_FILE_MAX_BYTES).unwrap() + 1, b' ');
+        fs::write(dir.path().join("refs/heads/big"), &big).unwrap();
+        assert_eq!(t.read_ref("refs/heads/big").unwrap(), None);
+        assert_eq!(t.list_refs("refs/").unwrap().len(), 1);
+        assert!(matches!(
+            t.read_ref_strict("refs/heads/big"),
+            Err(RefFileError::Corrupt(_))
+        ));
+        assert_eq!(
+            t.list_ref_files("refs/").unwrap(),
+            vec![
+                ("refs/heads/big".to_owned(), None),
+                ("refs/heads/ok".to_owned(), Some(h)),
+            ]
+        );
     }
 
     #[test]
