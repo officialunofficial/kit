@@ -100,17 +100,11 @@ module's first commit onward, so every subsequent change to
 `transport.proto` is checked against the immediately prior version &mdash;
 there is no grace period after this document merges.
 
-A follow-up (tracked as) extracts `RefExpectation` and
-`RefEntry` into a shared `kit/common/v1/refs.proto` imported by
-`kit.rpc.v1.ssh`, `kit.repo.v1`, and this package &mdash; the buf
-workspace (§1) now makes that cross-module import resolvable. Until
-that extraction lands, `kit.transport.v1.RefExpectation` and
-`RefEntry` are byte-for-byte duplicates of the `kit.rpc.v1.ssh`
-originals. `kit.rpc.v1.ssh` and `kit.repo.v1` have already completed
-this extraction and both import the shared `kit/common/v1/refs.proto`
-definitions rather than duplicating them (see the comment at
-`apps/repo-worker/proto/kit/repo/v1/repo.proto:20-23`); `kit.transport.v1`
-is the one package still pending the same move.
+`kit.transport.v1` defines its own `RefExpectation` and `RefEntry`. They
+are byte-for-byte duplicates of the types in `kit.rpc.v1.ssh` and
+`kit/common/v1/refs.proto`. The wire numbers are fixed. The buf workspace
+(§1) lets this package import the shared `refs.proto` instead of
+duplicating it.
 
 ---
 
