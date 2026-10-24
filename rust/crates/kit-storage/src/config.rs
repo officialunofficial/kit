@@ -1251,30 +1251,6 @@ fn real_getenv(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-/// Refuse to use ambient HTTP/S3 environment credentials with a
-/// repo-configured endpoint unless the user has explicitly trusted that
-/// exact remote in user-scoped config.
-///
-/// Retained as the back-compat entry point for the flat single-remote
-/// `remote_endpoint`. New, per-endpoint callers (named remotes, the
-/// shared transport-dispatch choke point) should use
-/// [`endpoint_credential_trust`], which is keyed on an explicit
-/// `repo_chosen` provenance flag rather than re-deriving it from the
-/// flat field.
-pub fn enforce_trusted_remote_endpoint(cfg: &LayeredConfig) -> Result<(), String> {
-    let endpoint = cfg.merged.remote_endpoint.trim();
-    let repo_chosen = cfg.repo.remote_endpoint.trim() == endpoint;
-    match trusted_remote_error_for(
-        endpoint,
-        repo_chosen,
-        cfg.user.trusted_remote_endpoint.trim(),
-        &real_getenv,
-    ) {
-        Some(msg) => Err(msg),
-        None => Ok(()),
-    }
-}
-
 /// Per-endpoint credential trust check for the shared dispatch choke
 /// point ([`crate::remote_dispatch::open_trusted`]) and named-remote
 /// callers. `repo_chosen` is `true` when the endpoint was selected by
@@ -2148,10 +2124,8 @@ mod tests {
         assert_eq!(cfg.signing_key, "/home/user/.kit/global.key");
     }
 
-    /// Helper mirroring the old `trusted_remote_error_with(cfg, ..)`
-    /// shape so the existing layered tests stay readable: derives
-    /// `repo_chosen` from the flat `remote_endpoint`, exactly as
-    /// `enforce_trusted_remote_endpoint` does.
+    /// Helper for the layered tests: derives `repo_chosen` from the flat
+    /// `remote_endpoint`.
     fn gate_for_flat<F>(cfg: &LayeredConfig, getenv: &F) -> Option<String>
     where
         F: Fn(&str) -> Option<String>,
