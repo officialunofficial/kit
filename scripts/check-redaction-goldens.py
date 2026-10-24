@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
-"""Verify SPEC-SERVER §14 fixtures without a server implementation."""
+"""Verify SPEC-SERVER §14 fixtures without a server implementation.
+
+The script needs only the Python standard library. BLAKE3 and Ed25519 come from
+the reference modules in scripts/golden. The protobuf messages are small, so the
+script encodes and decodes them by hand from proto/kit/transport/v1/transport.proto.
+"""
 
 import base64
 import json
-import os
 from pathlib import Path
 import re
-import subprocess
-import tempfile
+import struct
+import sys
 
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts/golden"))
+from blake3_subtree_ref import blake3  # noqa: E402
+import disclosure_ref  # noqa: E402
+import objects_ref  # noqa: E402
+import transport_ref  # noqa: E402
 GOLDEN = ROOT / "rust/tests/golden/redaction"
 DETAIL_TYPE = "kit.transport.v1.RedactionNotice"
 PAYLOAD_TYPE = "application/vnd.kit.redaction-notice.v1+json"
@@ -22,9 +31,75 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
-def run(*args, input_bytes=None):
-    result = subprocess.run(args, input=input_bytes, capture_output=True, check=True)
-    return result.stdout
+# Messages of proto/kit/transport/v1/transport.proto and proto/kit/common/v1/refs.proto
+# that the fixtures use: (field number, JSON name, kind). A kind is "bytes", "string",
+# "bool", a message name, or ("repeated", message name).
+SCHEMA = {
+    "RedactionNotice": [(1, "envelope", "bytes")],
+    "RefEntry": [(1, "name", "string"), (2, "objectId", "bytes")],
+    "RefRedaction": [(1, "ref", "string"), (2, "notice", "RedactionNotice")],
+    "ReadRefResponse": [
+        (1, "exists", "bool"),
+        (2, "objectId", "bytes"),
+        (3, "redactionNotices", ("repeated", "RedactionNotice")),
+    ],
+    "ListRefsResponse": [
+        (1, "refs", ("repeated", "RefEntry")),
+        (2, "nextPageToken", "string"),
+        (3, "refRedactions", ("repeated", "RefRedaction")),
+    ],
+}
+
+
+def proto_to_json(data, type_name):
+    """Decode a message to its proto3 JSON form. Default values are omitted."""
+    by_number = {number: (name, kind) for number, name, kind in SCHEMA[type_name]}
+    out = {}
+    for number, wire, value in transport_ref.fields(data):
+        name, kind = by_number[number]
+        repeated = isinstance(kind, tuple)
+        inner = kind[1] if repeated else kind
+        if inner == "bool":
+            assert wire == 0 and value in (0, 1)
+            decoded = bool(value)
+        else:
+            assert wire == 2
+            if inner == "bytes":
+                decoded = base64.b64encode(value).decode()
+            elif inner == "string":
+                decoded = value.decode("utf-8")
+            else:
+                decoded = proto_to_json(value, inner)
+        if repeated:
+            out.setdefault(name, []).append(decoded)
+        else:
+            assert name not in out
+            out[name] = decoded
+    return {name: out[name] for _, name, _ in SCHEMA[type_name] if name in out}
+
+
+def json_to_proto(value, type_name):
+    """Encode the proto3 JSON form of a message in field-number order."""
+    out = b""
+    for number, name, kind in SCHEMA[type_name]:
+        if name not in value:
+            continue
+        repeated = isinstance(kind, tuple)
+        inner = kind[1] if repeated else kind
+        for item in value[name] if repeated else [value[name]]:
+            if inner == "bool":
+                out += bytes([number << 3 | 0, int(item)])
+                continue
+            if inner == "bytes":
+                payload = base64.b64decode(item, validate=True)
+            elif inner == "string":
+                payload = item.encode("utf-8")
+            else:
+                payload = json_to_proto(item, inner)
+            assert len(payload) < 1 << 14
+            length = bytes([len(payload)]) if len(payload) < 128 else bytes([len(payload) & 127 | 128, len(payload) >> 7])
+            out += bytes([number << 3 | 2]) + length + payload
+    return out
 
 
 def read_json(name):
@@ -42,15 +117,14 @@ def verify_manifest():
     actual = {path.name for path in GOLDEN.iterdir() if path.name != "MANIFEST.txt"}
     assert set(listed) == actual, (set(listed) ^ actual)
     for name, digest in listed.items():
-        got = run("b3sum", str(GOLDEN / name)).decode().split()[0]
-        assert got == digest, name
+        assert blake3((GOLDEN / name).read_bytes()).hex() == digest, name
 
 
 def verify_signature(payload_bytes, envelope):
     seed = bytes.fromhex((GOLDEN / "test-seed.hex").read_text().strip())
     public = bytes.fromhex((GOLDEN / "test-public-key.hex").read_text().strip())
     assert len(seed) == len(public) == 32
-    key_id = run("b3sum", input_bytes=public).decode().split()[0]
+    key_id = blake3(public).hex()
     key_list = read_json("key-list.json")
     assert key_list["version"] == 1 and len(key_list["keys"]) == 1
     listed = key_list["keys"][0]
@@ -61,35 +135,23 @@ def verify_signature(payload_bytes, envelope):
     payload = json.loads(payload_bytes)
     assert payload["keyId"] == key_id
     assert int(listed["notBeforeMs"]) <= int(payload["issuedAtMs"]) < int(listed["notAfterMs"])
-    private_der = bytes.fromhex("302e020100300506032b657004220420") + seed
-    public_der = bytes.fromhex("302a300506032b6570032100") + public
-    derived = run("openssl", "pkey", "-inform", "DER", "-pubout", "-outform", "DER", input_bytes=private_der)
-    assert derived == public_der
+    assert objects_ref.ed25519_sign(seed, b"")[0] == public
     pae = (b"DSSEv1 " + str(len(PAYLOAD_TYPE)).encode() + b" " + PAYLOAD_TYPE.encode()
            + b" " + str(len(payload_bytes)).encode() + b" " + payload_bytes)
     signature = base64.b64decode(envelope["signatures"][0]["sig"], validate=True)
-    with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as temp:
-        temp = Path(temp)
-        (temp / "public.der").write_bytes(public_der)
-        (temp / "pae.bin").write_bytes(pae)
-        (temp / "signature.bin").write_bytes(signature)
-        run("openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(temp / "public.der"),
-            "-keyform", "DER", "-rawin", "-in", str(temp / "pae.bin"),
-            "-sigfile", str(temp / "signature.bin"))
+    assert disclosure_ref.ed25519_verify(public, pae, signature)
+    assert objects_ref.ed25519_sign(seed, pae)[1] == signature
 
 
 def verify_proto(name, type_name):
     json_path = GOLDEN / (name + ".json")
     bin_path = GOLDEN / (name + ".bin")
     expected_json = json.loads(json_path.read_bytes())
-    canonical_json = run("buf", "convert", "proto", "--type", "kit.transport.v1." + type_name,
-                         "--from", str(bin_path) + "#format=binpb", "--to", "-#format=json")
-    assert canonical_json == json_path.read_bytes(), name
-    got_json = json.loads(canonical_json)
+    got_json = proto_to_json(bin_path.read_bytes(), type_name)
     assert got_json == expected_json, name
-    got_bin = run("buf", "convert", "proto", "--type", "kit.transport.v1." + type_name,
-                  "--from", str(json_path) + "#format=json", "--to", "-#format=binpb")
-    assert got_bin == bin_path.read_bytes(), name
+    # The fixture file holds the compact JSON that a canonical encoder prints.
+    assert json.dumps(got_json, separators=(",", ":"), ensure_ascii=False).encode() == json_path.read_bytes(), name
+    assert json_to_proto(expected_json, type_name) == bin_path.read_bytes(), name
 
 
 def main():
