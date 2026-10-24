@@ -1,12 +1,14 @@
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 #![doc = include_str!("../README.md")]
 //!
-//! kit S3 / Cloudflare R2 transport.
+//! kit S3-compatible conditional-write transport.
 //!
 //! Implements the 7-verb [`Transport`] trait on top of a reqwest
-//! blocking client with our own SigV4 signer (see [`sigv4`]). Designed
-//! for Cloudflare R2 — AWS S3 also works, but CAS semantics only match
-//! the R2 behaviour of returning the body MD5 as the `ETag` on `PUT`.
+//! blocking client with our own SigV4 signer (see [`sigv4`]). The store
+//! must support `If-Match` and `If-None-Match` writes. A ref
+//! compare-and-swap sends the MD5 of the expected ref body as
+//! `If-Match`, so the store must return the body MD5 as the `ETag` of a
+//! single `PUT`.
 //!
 //! URL shape: `kit+s3://<endpoint>/<bucket>[/prefix]` — credentials are
 //! pulled from the `KIT_R2_ACCESS_KEY_ID` / `KIT_R2_SECRET_ACCESS_KEY`
@@ -20,7 +22,7 @@
 //! can't silently turn into duplicate PUTs.
 //!
 //! Packs whose byte length exceeds [`S3_SINGLE_PUT_MAX`] go through true
-//! S3/R2 multipart upload (`CreateMultipartUpload` -> `UploadPart` per
+//! S3 multipart upload (`CreateMultipartUpload` -> `UploadPart` per
 //! fixed-size part, each independently retried -> `CompleteMultipartUpload`)
 //! instead of a single `PUT`. Any terminal failure aborts the multipart
 //! upload so a transient error can't leak orphaned parts in the bucket.
@@ -1065,7 +1067,7 @@ fn extract_element(s: &str, tag: &str) -> Option<String> {
 
 /// Parse a full `ListObjectsV2` XML body into keys + pagination cursor.
 ///
-/// AWS S3 and Cloudflare R2 cap a single `ListObjectsV2` response at
+/// S3-compatible stores cap a single `ListObjectsV2` response at
 /// 1000 keys and signal more pages via
 /// `<IsTruncated>true</IsTruncated>` plus a `<NextContinuationToken>`.
 /// Ignoring those would silently truncate the ref list — see

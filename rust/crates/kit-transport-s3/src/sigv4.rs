@@ -1,7 +1,7 @@
 //! AWS Signature V4 signer.
 //!
-//! Minimal, deterministic SigV4 implementation used by the S3 /
-//! Cloudflare R2 transport. The golden vector at
+//! Minimal, deterministic SigV4 implementation used by the S3-compatible
+//! transport. The golden vector at
 //! `rust/tests/golden/transport/sigv4_basic.json` pins the exact bytes of
 //! the canonical request, string-to-sign, and final signature.
 //!
@@ -115,7 +115,7 @@ fn encode_uri_component(out: &mut String, s: &str) {
 /// This is the exact normalization AWS S3 re-derives server-side before
 /// recomputing the signature, so the bytes produced here MUST match the
 /// `query` component used both to sign and to build the request URL.
-/// Cloudflare R2 is lenient about encoding; real AWS S3 is not (an
+/// Some stores are lenient about encoding; real AWS S3 is not (an
 /// unencoded `/` in a value yields `403 SignatureDoesNotMatch`).
 #[must_use]
 pub fn canonical_query_string(pairs: &[(&str, &str)]) -> String {

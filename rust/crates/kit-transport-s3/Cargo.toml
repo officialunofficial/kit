@@ -1,7 +1,7 @@
 [package]
 name = "kit-transport-s3"
-description = "S3-compatible transport for kit, with SigV4 signing over rustls, tuned for Cloudflare R2"
-keywords = ["kit", "transport", "s3", "r2", "sigv4"]
+description = "S3-compatible conditional-write transport for kit, with SigV4 signing over rustls"
+keywords = ["kit", "transport", "s3", "sigv4"]
 categories = ["network-programming"]
 readme = "README.md"
 version.workspace = true
