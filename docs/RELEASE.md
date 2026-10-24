@@ -316,14 +316,14 @@ TARGET=aarch64-apple-darwin
 ARCHIVE="kit-${VERSION}-${TARGET}.tar.gz"
 
 cosign verify-blob \
-  --certificate-identity-regexp '^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+  --certificate-identity "https://github.com/officialunofficial/kit/.github/workflows/release.yml@refs/tags/v${VERSION}" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   --bundle "${ARCHIVE}.cosign.bundle" \
   "${ARCHIVE}"
 ```
 
-Expected output: `Verified OK`. The `--certificate-identity-regexp` pins the
-signature to a tag build of kit's release workflow; a signature produced by any
+Expected output: `Verified OK`. The `--certificate-identity` option pins the
+signature to the release workflow build of this exact tag; a signature produced by any
 other workflow (a fork, a branch build, a locally-run cosign) fails
 verification.
 
@@ -348,7 +348,7 @@ itself cosign-signed. The chain is:
 
 ```sh
 cosign verify-blob \
-  --certificate-identity-regexp '^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+  --certificate-identity "https://github.com/officialunofficial/kit/.github/workflows/release.yml@refs/tags/v${VERSION}" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   --bundle SHA256SUMS.cosign.bundle \
   SHA256SUMS

@@ -153,14 +153,14 @@ sha256sum -c "kit-${VERSION}-${TARGET}.tar.gz.sha256" || \
 
 **Verify the cosign signature.** Keyless OIDC, no public key needed.
 This is the real authenticity check: it proves the archive was signed by
-this repo's `release.yml` workflow on a strict-semver tag. The sibling
+this repo's `release.yml` workflow on the tag you requested. The sibling
 `.sha256` file is same-origin defense in depth only.
 
 ```sh
 curl -LO "${URL}.cosign.bundle"
 cosign verify-blob \
   --bundle "kit-${VERSION}-${TARGET}.tar.gz.cosign.bundle" \
-  --certificate-identity-regexp '^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+  --certificate-identity "https://github.com/officialunofficial/kit/.github/workflows/release.yml@refs/tags/v${VERSION}" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "kit-${VERSION}-${TARGET}.tar.gz"
 ```

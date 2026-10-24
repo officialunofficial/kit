@@ -188,6 +188,11 @@ case "$version" in
   *)  tag="v$version"; bare="$version" ;;
 esac
 
+# The tag names the signing identity below. Accept strict semver only, so the
+# tag holds no regex or path characters.
+printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+  || die "invalid release tag '$tag' (expected vMAJOR.MINOR.PATCH)"
+
 # ---- silent-downgrade guard ----
 #
 # We compare the previously-installed tag against the tag we're about
@@ -312,11 +317,10 @@ EOF
     || die "cosign bundle missing for $tag — refusing to install. Pass --insecure-skip-cosign to override."
 
   log "cosign verify-blob"
-  # Strict-semver regex on the tag, anchored to the exact workflow path.
-  # Accepts e.g. v0.1.0 and v1.2.3-rc.1 but rejects v.* glob matches,
-  # branch refs, and rogue workflows in the same repo.
+  # The certificate identity must name this exact tag. A valid signature
+  # from the release workflow at any other tag does not pass.
   cosign verify-blob \
-    --certificate-identity-regexp '^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+    --certificate-identity "https://github.com/officialunofficial/kit/.github/workflows/release.yml@refs/tags/${tag}" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
     --bundle "$tmp/${archive}.cosign.bundle" \
     "$tmp/$archive" \
