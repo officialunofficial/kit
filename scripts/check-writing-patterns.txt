@@ -14,9 +14,9 @@ both@@issue or pull request number@@(?<![\w&:/])#[0-9]+(?![0-9a-z-])|\b(?i:issue
 both@@external issue number such as org#123@@(?<![\w./-])[a-z][\w-]*(?:/[A-Za-z][\w-]*)?#[0-9]+(?![\w-])
 both@@reference to an issue or review that the text does not name@@\b(?i:originating issue|this issue|the issue.s|sibling issues?|the review.s)\b
 both@@pointer to later work in an issue@@\b(?i:follow-?ups? (?:issues?|tickets?|prs?|pull requests?|work|changes?)|tracked (?:as|in|by|under) (?:an? |the )?(?:issues?|tickets?|follow-?ups?|separate|future)|tracking (?:issue|ticket))\b
-both@@tracker id@@\b(?:WP|KIT|LIN|ENG|UNO)-[0-9]|\bWP[0-9]|\bR-[0-9]{2,}\b|\bred-team\b
-both@@phase, stage, part or work package label@@\b[Pp]hase[ -]?-?(?:[0-9]+|one|two|three|four|five|[A-D])\b|\bStage [0-9]|\bPart [0-9]|\b[Ww]ork packages?\b|\bM[1-9]\b|\b[Ee]pic\b
-both@@milestone or tracker word@@\b(?i:milestones?|trackers?)\b
+both@@work item id@@\b(?:WP|KIT|LIN|ENG|UNO)-[0-9]|\bWP[0-9]|\bR-[0-9]{2,}\b|\bred-team\b
+both@@plan label@@\b[Pp]hase[ -]?-?(?:[0-9]+|one|two|three|four|five|[A-D])\b|\bStage [0-9]|\bPart [0-9]|\b[Ww]ork packages?\b|\bM[1-9]\b|\b[Ee]pic\b
+both@@plan board word@@\b(?i:milestones?|trackers?)\b
 both@@review finding label@@\b[Ff]inding [0-9]|\bReview P[0-9]|\b[Rr]eviewer finding
 both@@tool or model name@@\b(?:Claude|Anthropic|Codex|ChatGPT|OpenAI|Copilot|Gemini|Codecov|LLMs?|GPT)\b|\bclaude\b
 both@@old product name@@(?i)mkit(?!fcdc)@@CHANGELOG.md install.sh scripts/test-install.sh
