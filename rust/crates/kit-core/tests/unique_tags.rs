@@ -145,6 +145,7 @@ fn no_two_workspace_constants_share_a_tag_magic_or_predicate() {
         "kit-write:v2",
         "KIT\\0",
         "KITKSV1\\0",
+        "MKST",
         "kit-fetch-head-v1",
         "kit-history-transaction-v1",
     ] {

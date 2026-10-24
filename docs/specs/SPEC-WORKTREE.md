@@ -221,6 +221,43 @@ A crash between (1) and (3) leaves a prunable registry orphan, never a
 live tree pointing at half-built state. `worktree remove` deletes the
 tree before the state dir for the same reason.
 
+### 4.6 Stash manifest
+
+The `stash` file in a worktree state dir holds the stash stack. It is a
+binary manifest. All integers are little-endian.
+
+```text
+magic   : 4 bytes   "MKST"
+count   : u32
+entries : count entries, newest first
+  commit_hash : 32 bytes
+  parent_hash : 32 bytes
+  timestamp   : u32   Unix seconds, saturating
+  msg_len     : u16
+  message     : msg_len bytes of UTF-8
+```
+
+`MKST` is a protocol constant. No other magic, tag or domain-separation
+value may equal it. A new stash is prepended, so the newest entry comes
+first.
+
+A writer MUST reject a message longer than 65535 bytes. A reader MUST
+reject the file with an invalid-format error in each of these cases:
+
+- the file is larger than 16 MiB (checked before the read);
+- the file is shorter than the 8-byte header, or the magic differs;
+- `count` times 70, the size of an entry with an empty message, is larger
+  than the file;
+- an entry is cut short, or a message is not valid UTF-8;
+- bytes remain after the last entry.
+
+A reader MUST NOT allocate from `count` before the `count` check passes.
+Each `commit_hash` and `parent_hash` is a gc root (SPEC-GC).
+
+Reference implementation: `kit-core/src/ops/stash.rs`
+(`serialize_list`, `deserialize_list`). The uniqueness test in
+`kit-core/tests/unique_tags.rs` covers the `MKST` constant.
+
 ## 5. Out of scope (v1)
 
 `worktree move`/`lock`/`repair` (follow-ups), submodule interplay
@@ -234,6 +271,8 @@ versions with and without worktree support while linked trees exist.
   id grammar.
 - `kit-storage/tests/layout_baseline_pin.rs`: the single-worktree `.kit`
   shape is a compatibility surface; it must never drift.
+- `kit-core/src/ops/stash.rs` unit tests: manifest round-trip, short
+  data, bad magic, oversized `count` and trailing bytes.
 - `kit-storage/tests/linked_worktree_discovery.rs`,
   `worktree_command.rs`, `worktree_gc_cross_tree.rs`: shared-store,
   tree-locality, guard, gc-survival, and lock-contention behavior

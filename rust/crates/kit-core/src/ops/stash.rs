@@ -14,7 +14,7 @@
 //!     message      : msg_len bytes
 //! ```
 //!
-//! New stashes are prepended (LIFO).
+//! New stashes are prepended (LIFO). SPEC-WORKTREE §4.6 specifies the format.
 
 use std::fmt::Write as _;
 use std::fs;
