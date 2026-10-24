@@ -3,7 +3,7 @@
 //!
 //! The file-restoration half calls
 //! `kit_core::ops::restore::restore_tree_to_worktree_with` (via
-//! `crate::restore_fanout::read_chunks_fanout`, this crate's rayon fan-out
+//! `crate::restore_fanout::read_chunks_fanout`, the `kit-sync` rayon fan-out
 //! for a `ChunkedBlob`'s per-chunk reads), which respects `.kitignore`
 //! and rejects symlinks that would escape the repo root.
 

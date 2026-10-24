@@ -387,8 +387,8 @@ fn add_whole_worktree(
 
     // The walk above only stats/validates paths (cheap); the expensive
     // part — open + read + BLAKE3, streaming through `FastCdc` for large
-    // files — happens in `hash_pending_batch`, sequentially or via
-    // rayon depending on how many files are pending (see
+    // files — happens in `hash_pending_batch`, sequentially or in
+    // parallel depending on how many files are pending (see
     // `hash_fanout_threshold`). Index mutation stays single-threaded and
     // in walk order below regardless of which path hashed the files, so
     // `remove_directory_conflicts`/`upsert_entry` (via `stage_hashed`)
@@ -433,11 +433,11 @@ fn add_whole_worktree(
 }
 
 /// Files-per-thread budget below which [`hash_pending_batch`] hashes
-/// sequentially instead of fanning out across rayon's thread pool, for
+/// sequentially instead of fanning out across a thread pool, for
 /// a pool of a given size.
 ///
 /// Measured with `cargo bench -p kit-benches --bench add_hash_fanout`
-/// on a 4-core box: rayon's pool-dispatch
+/// on a 4-core box: thread-pool dispatch
 /// overhead makes it 25-100% slower than a plain loop for 1-16 files,
 /// roughly ties a plain loop at 32, and wins clearly from 64 files up
 /// (the realistic-bulk-add case `add_staging`'s 10k/100k cases already
@@ -447,23 +447,11 @@ fn add_whole_worktree(
 /// stays meaningful on a CI runner or contributor machine with a
 /// different core count than the one this was measured on — the ratio
 /// is assumed to hold rather than re-measured per core count.
-///
-/// A `commonware_parallel::Rayon`-backed adaptive strategy (raised in
-/// the same Slack thread, see `kit-core/src/pack_shard.rs`'s
-/// `should_use_parallel_strategy`) was considered and rejected: that
-/// function is the same kind of static threshold as this one (a plain
-/// byte-length comparison), not commonware's learned-history policy,
-/// and it only needs `OnceLock`-memoized pool construction because it
-/// is forced to own a dedicated `commonware_parallel::Rayon` pool.
-/// Plain `rayon::prelude::*` (used here) already reuses rayon's own
-/// cached global pool across calls for free, so adopting
-/// commonware-parallel here would add its dependency weight to
-/// kit-storage for no benefit over what this file already does.
 const HASH_FANOUT_FILES_PER_THREAD: usize = 8;
 
 /// The pending-file count below which [`hash_pending_batch`] hashes
 /// sequentially — see [`HASH_FANOUT_FILES_PER_THREAD`] for where the
-/// budget comes from. Reads rayon's already-initialized global pool
+/// budget comes from. Reads the already-initialized global pool
 /// size (cheap: an atomic load after first use, no allocation).
 fn hash_fanout_threshold() -> usize {
     crate::fanout::threshold(HASH_FANOUT_FILES_PER_THREAD)
@@ -494,7 +482,7 @@ fn hash_one(
 }
 
 /// Hash every `pending` file — sequentially below
-/// [`hash_fanout_threshold`], via rayon's global thread pool at or
+/// [`hash_fanout_threshold`], via the global thread pool at or
 /// above it. Output mirrors `pending`'s order 1:1 either way, and both
 /// paths stop starting new hashes once one file has failed (see
 /// [`HashOutcome::Skipped`]) — nothing downstream uses a `Skipped`
@@ -509,8 +497,8 @@ fn hash_one(
 ///
 /// Passes `chunk_fanout = true` (allow [`hash_pending`]'s own intra-file
 /// chunk fan-out, see that function's doc) only on the sequential
-/// branch. On the `par_iter` branch every file is already hashed by one
-/// of up to `rayon::current_num_threads()` concurrently-busy workers;
+/// branch. On the parallel branch every file is already hashed by one
+/// of many concurrently-busy workers;
 /// letting each of those *also* fan its own large file's chunks out into
 /// the same global pool was measured (via `chunk_hash_fanout`, an idle
 /// pool) to help a single file, not validated under N-workers-already-

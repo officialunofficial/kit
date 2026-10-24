@@ -324,7 +324,7 @@ pub fn restore_tree_to_worktree(
 /// undo most of the point of fanning the read out in the first place.
 /// Both of this crate's own `read_chunks` implementations satisfy the
 /// contract by construction: `sequential_read_chunks`'s plain
-/// `iter().map().collect()` and `kit-storage`'s `rayon::par_iter().map().collect()`
+/// `iter().map().collect()` and `kit-sync`'s `rayon::par_iter().map().collect()`
 /// (the latter relies on rayon's `IndexedParallelIterator` guarantee that
 /// collecting into a `Vec` preserves input order regardless of which
 /// worker finishes a given index first) are both order-preserving, so

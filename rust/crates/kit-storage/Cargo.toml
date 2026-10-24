@@ -75,7 +75,7 @@ kit-transport-ssh = { version = "0.5", path = "../kit-transport-ssh" }
 # The engine of `kit serve`: the ssh frame session over a repository on disk.
 # It builds no async runtime.
 kit-serve = { version = "0.5", path = "../kit-serve" }
-# Optional: `kit+s3://` remotes on S3-compatible storage (R2). Off by
+# Optional: `kit+s3://` remotes on S3-compatible storage. Off by
 # default so the baseline build has no S3 client. Turn on via `--features s3`.
 kit-transport-s3 = { version = "0.5", path = "../kit-transport-s3", optional = true }
 # Optional: the tokio runtime `kit mcp --http` (the `mcp-v2` feature) runs
@@ -129,14 +129,6 @@ http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 kit-rpc = { version = "0.5", path = "../kit-rpc" }
 buffa = "0.9.1"
-# `kit add -A`/`add .` hashes untracked/modified worktree files in
-# parallel (commands/add.rs) — each file's read+BLAKE3 pass is
-# independent and `WriteBatch` (kit-core's batch.rs) was already built
-# to accept concurrent writers (short-locked staged-dedup check, file
-# I/O outside the lock). Native-only: kit-core stays wasm-clean, so
-# this lives in the CLI crate rather than kit-core.
-rayon = "1"
-
 # `wrap_help` is intentionally disabled so help-text output stays
 # deterministic across terminal widths. `derive` is enabled so the
 # per-command strangler migration (see clap_shim.rs) can use

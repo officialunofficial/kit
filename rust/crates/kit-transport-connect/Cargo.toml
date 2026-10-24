@@ -69,9 +69,6 @@ bytes = "1.6"
 futures = "0.3"
 url = "2"
 
-serde = { version = "1", features = ["derive"] }
-log = "0.4"
-
 # CSPRNG for the write-envelope idempotency key (`envelope::EnvelopeTransport`)
 # — same crate/version kit-core, kit-storage, and kit-keystore already pull in
 # for their own random-value needs (key generation).
