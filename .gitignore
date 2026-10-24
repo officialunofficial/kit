@@ -21,3 +21,7 @@
 .env.*
 secrets.*
 credentials.*
+
+# Python bytecode from the reference checks stays untracked.
+__pycache__/
+*.pyc
