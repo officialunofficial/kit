@@ -6,9 +6,18 @@
 //! ```
 //!
 //! Updates the running binary in place from GitHub Releases. The
-//! downloaded archive is checked against its sha256 sidecar asset
-//! when the release publishes one; verification is fully in-process:
-//! no `cosign`, no GitHub attestation API.
+//! update fails closed. Before it runs or installs any downloaded
+//! byte, it checks two things:
+//!
+//! * The cosign keyless bundle of the archive. `cosign verify-blob`
+//!   checks that the release workflow of this repository signed the
+//!   archive at a strict-semver tag. This is the authenticity check,
+//!   the same one `install.sh` makes. The `cosign` program must be on
+//!   `PATH`. There is no way to skip the check.
+//! * The sha256 sidecar of the archive. It comes from the same origin
+//!   as the archive, so it catches corruption only.
+//!
+//! A release that lacks the bundle or the sidecar is refused.
 //!
 //! Management contract (shared with `install.sh`):
 //!
@@ -62,10 +71,17 @@ const DEFAULT_API_BASE: &str = "https://api.github.com/repos/officialunofficial/
 /// Read caps, defense-in-depth against a hostile or broken origin.
 const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SHA256_BYTES: u64 = 4 * 1024;
+const MAX_BUNDLE_BYTES: u64 = 1024 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 /// Cap on the extracted binary (the archive is ~4 MB compressed today;
 /// 512 MB leaves room without letting a gzip bomb fill the disk).
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
+
+/// The signer that `cosign verify-blob` accepts: the release workflow
+/// of this repository at a strict-semver tag. `install.sh` uses the
+/// same values.
+const COSIGN_IDENTITY_REGEXP: &str = r"^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$";
+const COSIGN_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 /// Maximum redirects; https→http downgrades are refused outright.
 const MAX_REDIRECTS: usize = 5;
@@ -164,6 +180,8 @@ pub struct UpdateEnv {
     pub current_version: String,
     /// Archive-name target triple.
     pub target: String,
+    /// The `cosign` program that authenticates the archive.
+    pub cosign: PathBuf,
 }
 
 impl UpdateEnv {
@@ -196,6 +214,7 @@ impl UpdateEnv {
             state_dir,
             current_version: CLI_VERSION.to_owned(),
             target: TARGET_TRIPLE.to_owned(),
+            cosign: PathBuf::from("cosign"),
         })
     }
 }
@@ -397,14 +416,30 @@ pub fn run_update(opts: &Opts, env: &UpdateEnv) -> Result<Outcome, (String, u8)>
     let archive_bytes = download(&client, env, &archive_url, MAX_ARCHIVE_BYTES)?;
 
     // --- Verify. ------------------------------------------------------
-    // sha256 sidecar — same origin as the archive, so this is
-    // defense-in-depth rather than a strong authenticity guarantee;
-    // absence is tolerated, mismatch is not.
-    if let Some(sha_url) = asset_url(&release, &format!("{archive_name}.sha256")) {
-        let sha_body = download(&client, env, &sha_url, MAX_SHA256_BYTES)?;
-        verify_sha256_sidecar(&archive_bytes, &sha_body, &archive_name)
-            .map_err(|e| (e, exit::DATAERR))?;
-    }
+    // Both checks must pass before the code touches the archive
+    // contents. A missing asset is an error. The cosign bundle
+    // authenticates the archive. The sha256 sidecar shares the origin of
+    // the archive, so it detects corruption only.
+    let bundle_name = format!("{archive_name}.cosign.bundle");
+    let bundle_url = asset_url(&release, &bundle_name).ok_or_else(|| {
+        (
+            format!("release {target_tag} has no {bundle_name}; refusing to update"),
+            exit::UNAVAILABLE,
+        )
+    })?;
+    let bundle = download(&client, env, &bundle_url, MAX_BUNDLE_BYTES)?;
+    verify_cosign(&env.cosign, &archive_bytes, &bundle, &archive_name)?;
+
+    let sha_name = format!("{archive_name}.sha256");
+    let sha_url = asset_url(&release, &sha_name).ok_or_else(|| {
+        (
+            format!("release {target_tag} has no {sha_name}; refusing to update"),
+            exit::UNAVAILABLE,
+        )
+    })?;
+    let sha_body = download(&client, env, &sha_url, MAX_SHA256_BYTES)?;
+    verify_sha256_sidecar(&archive_bytes, &sha_body, &archive_name)
+        .map_err(|e| (e, exit::DATAERR))?;
 
     // --- Extract + pre-swap validation. -------------------------------
     let binary = extract_binary(&archive_bytes, &format!("kit-{target_bare}-{}", env.target))
@@ -705,6 +740,55 @@ fn download(
 }
 
 // --------------------------------------------------------- verification
+
+/// Authenticate the archive with `cosign verify-blob` and its keyless
+/// bundle. The two files go into a private temporary directory, which
+/// is removed on return.
+fn verify_cosign(
+    cosign: &Path,
+    archive: &[u8],
+    bundle: &[u8],
+    archive_name: &str,
+) -> Result<(), (String, u8)> {
+    let dir =
+        tempfile::tempdir().map_err(|e| (format!("create temp dir: {e}"), exit::CANTCREAT))?;
+    let archive_path = dir.path().join(archive_name);
+    let bundle_path = dir.path().join("archive.cosign.bundle");
+    std::fs::write(&archive_path, archive)
+        .and_then(|()| std::fs::write(&bundle_path, bundle))
+        .map_err(|e| (format!("write verification files: {e}"), exit::CANTCREAT))?;
+    let out = std::process::Command::new(cosign)
+        .args(["verify-blob", "--certificate-identity-regexp"])
+        .arg(COSIGN_IDENTITY_REGEXP)
+        .args(["--certificate-oidc-issuer", COSIGN_OIDC_ISSUER, "--bundle"])
+        .arg(&bundle_path)
+        .arg(&archive_path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "{} is not in PATH. The update needs cosign to check who signed the \
+                     release. Install it from https://docs.sigstore.dev/cosign/installation/",
+                    cosign.display()
+                )
+            } else {
+                format!("run {}: {e}", cosign.display())
+            };
+            (msg, exit::UNAVAILABLE)
+        })?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err((
+            format!(
+                "cosign verification failed for {archive_name}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            exit::DATAERR,
+        ))
+    }
+}
 
 fn verify_sha256_sidecar(archive: &[u8], sidecar: &[u8], archive_name: &str) -> Result<(), String> {
     let text =

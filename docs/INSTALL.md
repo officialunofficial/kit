@@ -217,10 +217,11 @@ kit self update --check    # just report whether an update exists
 kit self update --version v0.5.0   # pin a specific release
 ```
 
-`self update` downloads the release archive for your platform and, when
-the release publishes a sha256 sidecar for it, checks the archive
-against it before swapping the binary in &mdash; entirely in-process (no
-`cosign` needed, unlike the install script). It refuses silent
+`self update` downloads the release archive for your platform. It needs
+`cosign` on `PATH`, like the install script. It checks the cosign
+signature and the sha256 sidecar of the archive before it runs or
+installs any of the archive. It refuses a release that lacks either
+asset. It has no option to skip the checks. It refuses silent
 downgrades, swaps the binary atomically, and rewrites the same
 receipts `install.sh` writes, so the two stay interchangeable.
 

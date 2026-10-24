@@ -4,7 +4,8 @@
 //! mockito server standing in for the GitHub releases API and a
 //! tempdir standing in for the install dir. The "binaries" are shell
 //! scripts that honor the `kit version` output contract, which is
-//! all the pre-swap self-check needs.
+//! all the pre-swap self-check needs. The `cosign` program is a stub
+//! script that accepts or rejects the archive.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
@@ -19,6 +20,10 @@ const TEST_TARGET: &str = "x-test-triple";
 
 struct Install {
     _dir: tempfile::TempDir,
+    /// A stub `cosign` that accepts every archive.
+    cosign_ok: PathBuf,
+    /// A stub `cosign` that rejects every archive.
+    cosign_bad: PathBuf,
     exe: PathBuf,
     bin_dir: PathBuf,
     state_dir: PathBuf,
@@ -35,17 +40,47 @@ fn managed_install(tag: &str) -> Install {
     std::fs::write(&exe, script_binary(tag.trim_start_matches('v'))).unwrap();
     std::fs::write(bin_dir.join(".kit-installed-tag"), format!("{tag}\n")).unwrap();
     std::fs::write(state_dir.join("installed-tag"), format!("{tag}\n")).unwrap();
+    let cosign_ok = stub_cosign(dir.path(), "cosign-ok", 0);
+    let cosign_bad = stub_cosign(dir.path(), "cosign-bad", 1);
     Install {
         _dir: dir,
+        cosign_ok,
+        cosign_bad,
         exe,
         bin_dir,
         state_dir,
     }
 }
 
+/// A stub `cosign` that records its arguments and exits with `code`.
+fn stub_cosign(dir: &Path, name: &str, code: i32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = dir.join(name);
+    let args = dir.join(format!("{name}.args"));
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho 'bad signature' >&2\nexit {code}\n",
+            args.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
 /// A fake kit binary honoring the byte-exact `version` contract.
 fn script_binary(bare: &str) -> Vec<u8> {
     format!("#!/bin/sh\nif [ \"$1\" = version ]; then printf 'kit {bare}\\n'; fi\n").into_bytes()
+}
+
+/// A fake kit binary that also leaves a marker file when it runs.
+fn marker_binary(bare: &str, marker: &Path) -> Vec<u8> {
+    format!(
+        "#!/bin/sh\ntouch '{}'\nif [ \"$1\" = version ]; then printf 'kit {bare}\\n'; fi\n",
+        marker.display()
+    )
+    .into_bytes()
 }
 
 fn tgz_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -71,15 +106,25 @@ struct Origin {
 }
 
 fn origin_with_release(tag: &str, archive: &[u8]) -> Origin {
-    origin_with_release_and_sha256_body(tag, archive, None)
+    origin_with_assets(tag, archive, None, true, true)
 }
 
-/// `sha256_override` lets the tamper test serve a sidecar that does
-/// not match the served archive.
 fn origin_with_release_and_sha256_body(
     tag: &str,
     archive: &[u8],
     sha256_override: Option<&[u8]>,
+) -> Origin {
+    origin_with_assets(tag, archive, sha256_override, true, true)
+}
+
+/// `sha256_override` lets the tamper test serve a sidecar that does
+/// not match the served archive.
+fn origin_with_assets(
+    tag: &str,
+    archive: &[u8],
+    sha256_override: Option<&[u8]>,
+    with_sha256: bool,
+    with_bundle: bool,
 ) -> Origin {
     use sha2::Digest as _;
     let bare = tag.trim_start_matches('v');
@@ -92,12 +137,20 @@ fn origin_with_release_and_sha256_body(
 
     let mut server = mockito::Server::new();
     let url = server.url();
-    let release_json = format!(
-        r#"{{"tag_name":"{tag}","assets":[
-            {{"name":"{archive_name}","url":"{url}/assets/archive"}},
-            {{"name":"{archive_name}.sha256","url":"{url}/assets/sha256"}}
-        ]}}"#
-    );
+    let mut assets = vec![format!(
+        r#"{{"name":"{archive_name}","url":"{url}/assets/archive"}}"#
+    )];
+    if with_sha256 {
+        assets.push(format!(
+            r#"{{"name":"{archive_name}.sha256","url":"{url}/assets/sha256"}}"#
+        ));
+    }
+    if with_bundle {
+        assets.push(format!(
+            r#"{{"name":"{archive_name}.cosign.bundle","url":"{url}/assets/bundle"}}"#
+        ));
+    }
+    let release_json = format!(r#"{{"tag_name":"{tag}","assets":[{}]}}"#, assets.join(","));
     server
         .mock("GET", "/releases/latest")
         .with_body(&release_json)
@@ -114,6 +167,10 @@ fn origin_with_release_and_sha256_body(
         .mock("GET", "/assets/sha256")
         .with_body(&sha_body)
         .create();
+    server
+        .mock("GET", "/assets/bundle")
+        .with_body("{}")
+        .create();
     Origin { server }
 }
 
@@ -125,6 +182,7 @@ fn env_for(origin: &Origin, install: &Install, current: &str) -> UpdateEnv {
         state_dir: install.state_dir.clone(),
         current_version: current.to_owned(),
         target: TEST_TARGET.to_owned(),
+        cosign: install.cosign_ok.clone(),
     }
 }
 
@@ -330,44 +388,91 @@ fn check_reports_without_touching_anything() {
 }
 
 #[test]
-fn release_without_sha256_sidecar_still_updates() {
-    // The sha256 sidecar is defense-in-depth, not required: a release
-    // whose assets lack it must still install successfully.
-    let bare = "9.9.9";
-    let archive_name = format!("kit-{bare}-{TEST_TARGET}.tar.gz");
-    let new_binary = script_binary(bare);
+fn release_without_sha256_sidecar_is_refused() {
+    let new_binary = script_binary("9.9.9");
     let archive = tgz_with(&[(
-        &format!("kit-{bare}-{TEST_TARGET}/kit"),
+        &format!("kit-9.9.9-{TEST_TARGET}/kit"),
         new_binary.as_slice(),
     )]);
-    let mut server = mockito::Server::new();
-    let url = server.url();
-    let release_json = format!(
-        r#"{{"tag_name":"v{bare}","assets":[{{"name":"{archive_name}","url":"{url}/assets/archive"}}]}}"#
-    );
-    server
-        .mock("GET", "/releases/latest")
-        .with_body(&release_json)
-        .create();
-    server
-        .mock("GET", "/releases/tags/v9.9.9")
-        .with_body(&release_json)
-        .create();
-    server
-        .mock("GET", "/assets/archive")
-        .with_body(&archive)
-        .create();
-
+    let origin = origin_with_assets("v9.9.9", &archive, None, false, true);
     let install = managed_install("v0.3.0");
-    let env = UpdateEnv {
-        api_base: server.url(),
-        token: None,
-        exe_path: install.exe.clone(),
-        state_dir: install.state_dir.clone(),
-        current_version: "0.3.0".to_owned(),
-        target: TEST_TARGET.to_owned(),
-    };
-    let outcome = run_update(&opts(), &env).unwrap();
-    assert!(matches!(outcome, Outcome::Updated { .. }));
-    assert_eq!(std::fs::read(&install.exe).unwrap(), new_binary);
+    let before = std::fs::read(&install.exe).unwrap();
+
+    let (msg, _) = run_update(&opts(), &env_for(&origin, &install, "0.3.0")).unwrap_err();
+    assert!(msg.contains(".sha256"), "{msg}");
+    assert_eq!(std::fs::read(&install.exe).unwrap(), before);
+}
+
+#[test]
+fn release_without_cosign_bundle_is_refused() {
+    let new_binary = script_binary("9.9.9");
+    let archive = tgz_with(&[(
+        &format!("kit-9.9.9-{TEST_TARGET}/kit"),
+        new_binary.as_slice(),
+    )]);
+    let origin = origin_with_assets("v9.9.9", &archive, None, true, false);
+    let install = managed_install("v0.3.0");
+    let before = std::fs::read(&install.exe).unwrap();
+
+    let (msg, _) = run_update(&opts(), &env_for(&origin, &install, "0.3.0")).unwrap_err();
+    assert!(msg.contains(".cosign.bundle"), "{msg}");
+    assert_eq!(std::fs::read(&install.exe).unwrap(), before);
+}
+
+#[test]
+fn rejected_signature_runs_no_downloaded_code() {
+    let install = managed_install("v0.3.0");
+    let marker = install.bin_dir.join("ran-downloaded-code");
+    let new_binary = marker_binary("9.9.9", &marker);
+    let archive = tgz_with(&[(
+        &format!("kit-9.9.9-{TEST_TARGET}/kit"),
+        new_binary.as_slice(),
+    )]);
+    let origin = origin_with_release("v9.9.9", &archive);
+    let before = std::fs::read(&install.exe).unwrap();
+
+    let mut env = env_for(&origin, &install, "0.3.0");
+    env.cosign = install.cosign_bad.clone();
+    let (msg, code) = run_update(&opts(), &env).unwrap_err();
+    assert!(msg.contains("cosign verification failed"), "{msg}");
+    assert_eq!(code, 65, "DATAERR");
+    assert!(!marker.exists(), "downloaded code ran before verification");
+    assert_eq!(std::fs::read(&install.exe).unwrap(), before);
+    assert_eq!(
+        read(&install.bin_dir.join(".kit-installed-tag")),
+        "v0.3.0\n"
+    );
+}
+
+#[test]
+fn missing_cosign_program_is_refused() {
+    let archive = tgz_with(&[(&format!("kit-9.9.9-{TEST_TARGET}/kit"), b"x".as_slice())]);
+    let origin = origin_with_release("v9.9.9", &archive);
+    let install = managed_install("v0.3.0");
+
+    let mut env = env_for(&origin, &install, "0.3.0");
+    env.cosign = install.bin_dir.join("no-such-cosign");
+    let (msg, code) = run_update(&opts(), &env).unwrap_err();
+    assert!(msg.contains("cosign"), "{msg}");
+    assert_eq!(code, 69, "UNAVAILABLE");
+}
+
+#[test]
+fn cosign_gets_the_pinned_signer_identity() {
+    let new_binary = script_binary("9.9.9");
+    let archive = tgz_with(&[(
+        &format!("kit-9.9.9-{TEST_TARGET}/kit"),
+        new_binary.as_slice(),
+    )]);
+    let origin = origin_with_release("v9.9.9", &archive);
+    let install = managed_install("v0.3.0");
+
+    run_update(&opts(), &env_for(&origin, &install, "0.3.0")).unwrap();
+    let args = read(&install.cosign_ok.with_file_name("cosign-ok.args"));
+    assert!(args.contains("verify-blob"), "{args}");
+    assert!(args.contains("release\\.yml@refs/tags/v"), "{args}");
+    assert!(
+        args.contains("https://token.actions.githubusercontent.com"),
+        "{args}"
+    );
 }

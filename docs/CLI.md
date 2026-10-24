@@ -1484,10 +1484,12 @@ Config / keys / version:
     case-insensitively and canonicalize to lowercase, like git.
 - `kit self update [--version <tag>] [--check] [--allow-downgrade]
   [--format human|json]` &mdash; update this binary in place from a
-  GitHub Release. The downloaded archive is checked against its sha256
-  sidecar asset when the release publishes one; this runs entirely
-  in-process, no `cosign` and no GitHub attestation API are involved.
-  Only **installer-managed** binaries are updated:
+  GitHub Release. The update fails closed. It runs `cosign verify-blob`
+  on the archive with its `.cosign.bundle` asset. The bundle must come from
+  the release workflow of this repository at a strict-semver tag. It then
+  checks the `.sha256` asset. A release that lacks either asset is
+  refused. `cosign` must be on `PATH`. No option skips these checks. The
+  command runs no downloaded code before both checks pass. Only **installer-managed** binaries are updated:
   the `.kit-installed-tag` receipt written by `install.sh` must sit
   next to the (canonicalized) executable, and the global
   `$KIT_STATE_DIR/installed-tag` (default `~/.local/state/kit`) must
