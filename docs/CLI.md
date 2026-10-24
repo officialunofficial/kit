@@ -1932,25 +1932,3 @@ cp completions/kit.zsh /usr/local/share/zsh/site-functions/_kit
 Then restart your shell (or run `compinit` on zsh). Completion covers
 the full subcommand list plus common flags; per-argument completion
 (branch names, remote URLs) is deferred to a future release.
-
-### Using kit as `git` (opt-in shim)
-
-`kit` exposes a git-compatible CLI surface, so existing git habits &mdash; and
-automated agents that emit `git <cmd>` &mdash; can drive it. `contrib/git-shim/kit-git` is an
-**opt-in** forwarder (`git <args>` → `kit <args>`) that you install yourself;
-it is never installed automatically and **never shadows the real `git`**.
-
-```sh
-# simplest (interactive shells):
-alias git=kit
-
-# or, to also cover scripts/agents, put the shim on PATH as `git` for a
-# specific project/environment, ahead of the real git:
-ln -s "$PWD/contrib/git-shim/kit-git" ~/.local/kit-shim/git
-export PATH="$HOME/.local/kit-shim:$PATH"
-command -v git && git version   # verify it resolves to the shim
-```
-
-See `contrib/git-shim/README.md` for details. The shim is a pure forwarder:
-an unsupported command exits with kit's usage error rather than falling
-through to real git.
