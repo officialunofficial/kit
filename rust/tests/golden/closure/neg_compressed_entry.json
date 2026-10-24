@@ -1,6 +1,6 @@
 {
   "bin": "neg_compressed_entry.manifest.bin",
-  "blake3": "851b10703da816ae24edb2d822f927dd4655a557196e2c74c49aba160f7f00f0",
+  "blake3": "14b9b8af6db68bde5dfda2842efd0827691800f477903da5ee7b0bc59f7087ed",
   "description": "A pack written with the normal writer (pack-zstd) so the entry is 0x03.",
   "expect": "reject",
   "ids": [],
@@ -11,7 +11,7 @@
     "243826ef7b605021f22d9b77ceb532c1749843e2dbf86b6d40363d36e199e674"
   ],
   "reason": "profile violation (compressed)",
-  "root_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
+  "root_hex": "b5883843cb3b37b6251cde45118c37fff906ceb498a4a1089870dce546762061",
   "size": 71,
   "unreferenced": [],
   "verified": 0

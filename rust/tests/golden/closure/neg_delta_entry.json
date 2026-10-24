@@ -1,6 +1,6 @@
 {
   "bin": "neg_delta_entry.manifest.bin",
-  "blake3": "580e333093654918aa80888e469f78876a4ee888731b42c631aa692c653b77a7",
+  "blake3": "67298b0df0437dab2b77a5e69cd92ede5fc77d6fe03094f87f88ce90c53467d3",
   "description": "A pack written with the normal writer containing a delta entry.",
   "expect": "reject",
   "ids": [],
@@ -11,7 +11,7 @@
     "286c4e9422f1eb21048fbdcfd88f391579a82e9b7a336a24bc5325c0f154af83"
   ],
   "reason": "profile violation (delta)",
-  "root_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
+  "root_hex": "b5883843cb3b37b6251cde45118c37fff906ceb498a4a1089870dce546762061",
   "size": 71,
   "unreferenced": [],
   "verified": 0

@@ -2,14 +2,15 @@
 //!
 //! Two halves, same as `golden_disclosure.rs`:
 //!
-//! * [`write_all`] (`KIT_WRITE_GOLDEN=1`) builds vectors from the shared
+//! * [`write_all`] (`KIT_WRITE_GOLDEN=1`) builds vectors from a small
 //!   fixture repo and writes `.manifest.bin` / `.packN.bin` / `.json` /
 //!   `MANIFEST.txt` under `rust/tests/golden/closure/`.
 //! * `golden_closure_vectors_verify` reads ONLY the committed files.
 #![allow(
     clippy::unwrap_used,
     clippy::too_many_lines,
-    clippy::too_many_arguments
+    clippy::too_many_arguments,
+    clippy::needless_pass_by_value
 )]
 
 use std::borrow::Cow;
@@ -18,9 +19,11 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
+use kit_core::chunker::{ChunkIterator, FastCdc};
 use kit_core::hash::{Hash, ZERO, from_hex, hash, to_hex};
+use kit_core::layout::RepoLayout;
 use kit_core::object::{
-    Blob, Commit, EntryMode, Identity, Object, ObjectType, Tag, Tree, TreeEntry,
+    Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, ObjectType, Tag, Tree, TreeEntry,
 };
 use kit_core::pack::{PackEntries, PackEntry, PackWriter, pack_key};
 use kit_core::sign::{KeyPair, sign_commit, sign_tag};
@@ -194,8 +197,105 @@ fn tag_for(store: &ObjectStore, commit_id: Hash) -> Hash {
         .unwrap()
 }
 
+/// Size of the chunked file in the closure fixture. The file is above
+/// the `FastCDC` minimum chunk size (16 KiB) and splits into several
+/// chunks. It is far below the 1 MiB threshold the worktree uses,
+/// because the fixture writes the `ChunkedBlob` directly. This keeps the
+/// vectors small.
+const CHUNKED_FILE_LEN: usize = 80 * 1024;
+
+struct ClosureFixture {
+    _dir: tempfile::TempDir,
+    store: ObjectStore,
+    commit_id: Hash,
+    tree_hash: Hash,
+}
+
+fn write_object(store: &ObjectStore, object: Object) -> Hash {
+    store
+        .write(&kit_core::serialize::serialize(&object).unwrap())
+        .unwrap()
+}
+
+fn build_fixture() -> ClosureFixture {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+
+    let shallow = store_file_object(&store, b"shallow file content").unwrap();
+    let deep_file = store_file_object(&store, b"three levels deep, deterministic").unwrap();
+    let exec = store_file_object(&store, b"#!/bin/sh\necho hi\n").unwrap();
+
+    let chunked_bytes = common::prng_bytes(0x1234_5678_9abc_def0, CHUNKED_FILE_LEN);
+    let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), &chunked_bytes)
+        .map(|b| {
+            let data = chunked_bytes[b.offset..b.offset + b.length].to_vec();
+            write_object(&store, Object::Blob(Blob { data }))
+        })
+        .collect();
+    assert!(chunks.len() > 1, "fixture file must split into chunks");
+    let chunked_id = write_object(
+        &store,
+        Object::ChunkedBlob(ChunkedBlob {
+            total_size: CHUNKED_FILE_LEN as u64,
+            chunk_size: 0,
+            chunks,
+        }),
+    );
+
+    let entry = |name: &[u8], mode, object_hash| TreeEntry {
+        name: name.to_vec(),
+        mode,
+        object_hash,
+    };
+    let deep_tree_id = write_object(
+        &store,
+        Object::Tree(Tree {
+            entries: vec![entry(b"deep.txt", EntryMode::Blob, deep_file)],
+        }),
+    );
+    let mid_tree_id = write_object(
+        &store,
+        Object::Tree(Tree {
+            entries: vec![entry(b"deep", EntryMode::Tree, deep_tree_id)],
+        }),
+    );
+    let tree_hash = write_object(
+        &store,
+        Object::Tree(Tree {
+            entries: vec![
+                entry(b"chunked.bin", EntryMode::Blob, chunked_id),
+                entry(b"exec.sh", EntryMode::Executable, exec),
+                entry(b"shallow.txt", EntryMode::Blob, shallow),
+                entry(b"sub", EntryMode::Tree, mid_tree_id),
+            ],
+        }),
+    );
+
+    let kp = KeyPair::from_seed([0x07; 32]);
+    let mut commit = Commit {
+        tree_hash,
+        parents: vec![],
+        author: Identity::ed25519(kp.public.0),
+        signer: kp.public.0,
+        message: b"SPEC-DISCLOSURE closure fixture".to_vec(),
+        timestamp: 1_726_300_000,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0u8; 64],
+    };
+    commit.signature = sign_commit(&commit, &kp).unwrap().0;
+    let commit_id = write_object(&store, Object::Commit(commit));
+
+    ClosureFixture {
+        _dir: dir,
+        store,
+        commit_id,
+        tree_hash,
+    }
+}
+
 fn build_vectors() -> Vec<Vector> {
-    let f = common::build_fixture();
+    let f = build_fixture();
     let mut v = Vec::new();
 
     // snapshot

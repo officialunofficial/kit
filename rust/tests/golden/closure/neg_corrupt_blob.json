@@ -1,6 +1,6 @@
 {
   "bin": "neg_corrupt_blob.manifest.bin",
-  "blake3": "a18d6a8381df9f7cbcf25e3ee699541b2167babc51b8ada4e9fd2f2493d3418e",
+  "blake3": "1a7a04ab9cc01ff05bc498ca9fcb82ca037b211738baede76f9e7bbef0055983",
   "description": "One blob's magic byte flipped so deserialize fails.",
   "expect": "incomplete",
   "ids": [],
@@ -8,10 +8,10 @@
   "n_packs": 1,
   "name": "neg_corrupt_blob",
   "pack_hashes": [
-    "758be6efec8db333831f95a3eebc9eeebe6a525016f303c0441ff0dc747a2078"
+    "bf8845bd0fbf5720ad3510f4899af7d785262e43d2d4cac9325bb7a0e49da4fb"
   ],
   "reason": "corrupt",
-  "root_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
+  "root_hex": "b5883843cb3b37b6251cde45118c37fff906ceb498a4a1089870dce546762061",
   "size": 71,
   "unreferenced": [],
   "verified": 0
