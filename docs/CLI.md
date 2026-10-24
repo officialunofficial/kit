@@ -1661,7 +1661,7 @@ which routes them to the user scope automatically.
 | `remote_bucket` | name | empty | For s3 remotes |
 | `remote_type` | `file` / `http` / `s3` / `ssh` / `memory` | auto | |
 | `transport_auth` | `bearer` / `envelope` | `bearer` | Write-auth mode for `kit+https://`/`kit+http://`; `envelope` additionally Ed25519-signs writes with the commit-signing key (see `signer`/`signing_key`/`key.ed25519_ref`) |
-| `http.sslCAInfo` | PEM certificate file path | unset | Additional trust certificates for native Connect HTTPS remotes only; normal user/repository/`-c` configuration scopes apply. `KIT_SSL_CA_FILE` takes precedence. See [HTTPS certificate trust](#https-certificate-trust). |
+| `http.sslCAInfo` | PEM certificate file path | unset | User-scoped only. Additional trust certificates for native Connect HTTPS remotes only. `KIT_SSL_CA_FILE` takes precedence. See [HTTPS certificate trust](#https-certificate-trust). |
 | `admission_helper` | absolute executable path | unset | User-scoped; invoked once for a 402 on a trusted remote. Its stdin includes untrusted server challenge content. The helper decides whether and how much to spend. |
 | `remote.<name>.admission_headers` | comma-separated HTTP header names | empty | User-scoped additions to the admission helper's request allowlist; hard-reserved names are refused. |
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
@@ -1688,13 +1688,14 @@ For a private or local kit remote over Connect HTTPS (`kit+https://`),
 supply a PEM file containing the CA certificates you trust:
 
 ```sh
-kit config http.sslCAInfo /absolute/path/to/local-ca.pem
+kit config --global http.sslCAInfo /absolute/path/to/local-ca.pem
 # Override the configured file for one command:
 KIT_SSL_CA_FILE=/absolute/path/to/other-ca.pem kit fetch origin
 ```
 
-`http.sslCAInfo` follows the normal user, repository, and command-line `-c`
-configuration precedence. `KIT_SSL_CA_FILE` overrides the resulting value.
+`http.sslCAInfo` is user-scoped only. A repository file and a `-c` override
+cannot set it, because a repository must not add trust roots. `KIT_SSL_CA_FILE`
+overrides the configured value.
 Configured relative paths start at the repository root; `~/` expands against
 `HOME`. An environment file path is used as supplied.
 The selected file adds certificates to the bundled Mozilla roots; certificate-chain

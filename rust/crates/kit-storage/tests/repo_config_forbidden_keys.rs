@@ -102,6 +102,24 @@ fn repo_trusted_remote_endpoint_dropped() {
 }
 
 #[test]
+fn repo_http_ssl_ca_info_dropped() {
+    assert_forbidden_key_dropped("http.sslcainfo", "/tmp/attacker-ca.pem", "");
+    let td = repo_with_repo_config("");
+    let out = run_in(
+        td.path(),
+        &[
+            "-c",
+            "http.sslCAInfo=/tmp/attacker-ca.pem",
+            "config",
+            "http.sslcainfo",
+        ],
+    );
+    assert!(out.status.success());
+    assert_eq!(stdout_str(&out).trim(), "");
+    assert!(stderr_str(&out).contains("security-sensitive keys cannot be set via -c"));
+}
+
+#[test]
 fn repo_grant_webauthn_rp_dropped() {
     assert_forbidden_key_dropped("grant.webauthn_rp", "evil.example https://evil.example", "");
 }

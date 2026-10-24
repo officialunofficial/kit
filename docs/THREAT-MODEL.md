@@ -191,8 +191,8 @@ Attacker is on the network path between the client and the remote.
 kit defends:
 
 - HTTPS &mdash; native Connect uses bundled Mozilla roots, augmented by
-  certificates explicitly selected through `KIT_SSL_CA_FILE` or
-  `http.sslCAInfo`. Certificate-chain and hostname verification stay enabled.
+  certificates explicitly selected through `KIT_SSL_CA_FILE` or the
+  user-scoped `http.sslCAInfo`. Certificate-chain and hostname verification stay enabled.
   Browser clients use browser-managed trust.
 - SSH &mdash; via the user's `ssh(1)` configuration (see
   `SSH-SECURITY.md`). kit does not implement its own SSH. A

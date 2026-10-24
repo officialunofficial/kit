@@ -61,6 +61,8 @@ pub const DEFAULT_P256_KEY_REF: &str = "software:default-p256";
 /// * mark a repo-controlled HTTP/S3 remote as trusted for ambient
 ///   environment credentials,
 /// * disable SSH host-key verification on `kit push` (MITM),
+/// * add a certificate authority they control to the HTTPS trust roots
+///   (`http.sslcainfo`), so they can intercept a TLS connection,
 /// * disable post-fetch commit/remix/tag signature verification
 ///   (`pull.require_signed`) — a hostile repo must not be able
 ///   to switch off the one check that would otherwise reject its own
@@ -83,6 +85,7 @@ pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "ssh.strict_host_key_checking",
     "ssh.user_known_hosts_file",
     "ssh.identity_file",
+    "http.sslcainfo",
     "attest.signer",
     "attest.default_algorithm",
     "attest.external_signer_path",
@@ -1029,7 +1032,6 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("user.email", cfg.user_email.as_str()),
         ("default_branch", cfg.default_branch.as_str()),
         ("durability.objects", cfg.durability_objects.as_str()),
-        ("http.sslcainfo", cfg.http_ssl_ca_info.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),
@@ -1891,6 +1893,16 @@ mod tests {
         assert!(cfg.ssh_identity_file.is_empty());
     }
 
+    #[test]
+    fn repo_http_ssl_ca_info_is_rejected() {
+        let cfg = layer(Some("http.sslcainfo = /tmp/attacker-ca.pem\n"), None);
+        assert!(cfg.http_ssl_ca_info.is_empty());
+        let cfg = layer(Some("HTTP.sslCAInfo = /tmp/attacker-ca.pem\n"), None);
+        assert!(cfg.http_ssl_ca_info.is_empty());
+        let cfg = layer(None, Some("http.sslcainfo = /home/me/ca.pem\n"));
+        assert_eq!(cfg.http_ssl_ca_info, "/home/me/ca.pem");
+    }
+
     /// A hostile clone must not be able to switch off
     /// post-fetch signature verification via its own repo-scoped config —
     /// that would let it silently defang the exact check meant to reject
@@ -2002,6 +2014,7 @@ mod tests {
                 "ssh.strict_host_key_checking" => cfg.ssh_strict_host_key_checking.as_str(),
                 "ssh.user_known_hosts_file" => cfg.ssh_user_known_hosts_file.as_str(),
                 "ssh.identity_file" => cfg.ssh_identity_file.as_str(),
+                "http.sslcainfo" => cfg.http_ssl_ca_info.as_str(),
                 "attest.signer" => cfg.attest.signer.as_str(),
                 "attest.default_algorithm" => cfg.attest.default_algorithm.as_str(),
                 "attest.external_signer_path" => cfg.attest.external_signer_path.as_str(),

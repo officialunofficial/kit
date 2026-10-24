@@ -72,7 +72,8 @@ fn ca_key_round_trips_case_insensitively_and_is_listed_and_unset() {
     repo.ok(&["config", "HTTP.sslCAInfo", "certs/company ca.pem"]);
     assert_eq!(repo.get("http.sslcainfo"), "certs/company ca.pem");
     assert_eq!(repo.get("HTTP.SSLCAINFO"), "certs/company ca.pem");
-    let persisted = fs::read_to_string(repo.config_file()).unwrap();
+    let user_file = repo.user.path().join(".config/kit/config");
+    let persisted = fs::read_to_string(user_file).unwrap();
     assert!(persisted.contains("http.sslcainfo = certs/company ca.pem\n"));
     let json = repo.ok(&["config", "--format=json"]);
     let listing: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
@@ -80,14 +81,14 @@ fn ca_key_round_trips_case_insensitively_and_is_listed_and_unset() {
     repo.ok(&["config", "--unset", "Http.SslCaInfo"]);
     assert_eq!(repo.get("http.sslCAInfo"), "");
     assert!(
-        !fs::read_to_string(repo.config_file())
+        !fs::read_to_string(repo.user.path().join(".config/kit/config"))
             .unwrap()
             .contains("http.sslcainfo")
     );
 }
 
 #[test]
-fn ca_follows_user_repo_and_one_shot_layers_without_copying_user_value() {
+fn ca_is_user_scoped_and_repo_file_and_one_shot_values_are_refused() {
     let repo = Repo::new();
     repo.ok(&["config", "--global", "http.sslCAInfo", "global.pem"]);
     assert_eq!(repo.get("http.sslcainfo"), "global.pem");
@@ -97,13 +98,16 @@ fn ca_follows_user_repo_and_one_shot_layers_without_copying_user_value() {
             .unwrap()
             .contains("global.pem")
     );
-    repo.ok(&["config", "--local", "http.sslCAInfo", "local.pem"]);
-    assert_eq!(repo.get("http.sslCAInfo"), "local.pem");
-    let once = repo.ok(&["-c", "HTTP.sslCAInfo=once.pem", "config", "http.sslCAInfo"]);
-    assert_eq!(String::from_utf8(once.stdout).unwrap().trim(), "once.pem");
-    assert_eq!(repo.get("http.sslCAInfo"), "local.pem");
-    repo.ok(&["config", "--local", "--unset", "http.sslCAInfo"]);
+    // A repository cannot store the key, by flag or by a planted file.
+    let local = repo.run(&["config", "--local", "http.sslCAInfo", "local.pem"]);
+    assert!(!local.status.success());
+    let mut planted = fs::read_to_string(repo.config_file()).unwrap();
+    planted.push_str("http.sslcainfo = planted.pem\n");
+    fs::write(repo.config_file(), planted).unwrap();
     assert_eq!(repo.get("http.sslCAInfo"), "global.pem");
+    // The one-shot `-c` override is refused too.
+    let once = repo.ok(&["-c", "HTTP.sslCAInfo=once.pem", "config", "http.sslCAInfo"]);
+    assert_eq!(String::from_utf8(once.stdout).unwrap().trim(), "global.pem");
     repo.ok(&["config", "--global", "--unset", "http.sslCAInfo"]);
     assert_eq!(repo.get("http.sslCAInfo"), "");
 }
@@ -125,6 +129,7 @@ fn fetch_resolves_repo_relative_ca_after_explicit_directory_selection() {
     repo.https_remote();
     repo.ok(&[
         "config",
+        "--global",
         "http.sslCAInfo",
         "certs/repo-ca-does-not-exist.pem",
     ]);
@@ -146,7 +151,12 @@ fn fetch_resolves_repo_relative_ca_after_explicit_directory_selection() {
 fn environment_ca_wins_over_repository_ca_in_real_cli_process() {
     let repo = Repo::new();
     repo.https_remote();
-    repo.ok(&["config", "http.sslCAInfo", "repo-ca-does-not-exist.pem"]);
+    repo.ok(&[
+        "config",
+        "--global",
+        "http.sslCAInfo",
+        "repo-ca-does-not-exist.pem",
+    ]);
     let env_ca = repo.user.path().join("env-ca-does-not-exist.pem");
     let output = repo
         .command(&["fetch", "origin"])
@@ -162,6 +172,7 @@ fn configured_tilde_path_is_expanded_only_for_https_connection() {
     repo.https_remote();
     repo.ok(&[
         "config",
+        "--global",
         "http.sslCAInfo",
         "~/certs/tilde-ca-does-not-exist.pem",
     ]);
@@ -181,7 +192,7 @@ fn configured_tilde_path_is_expanded_only_for_https_connection() {
 fn environment_override_does_not_need_home_to_expand_ignored_fallback() {
     let repo = Repo::new();
     repo.https_remote();
-    repo.ok(&["config", "http.sslCAInfo", "~/ignored-ca.pem"]);
+    repo.ok(&["config", "--global", "http.sslCAInfo", "~/ignored-ca.pem"]);
     let env_ca = repo.user.path().join("env-ca-does-not-exist.pem");
     let output = repo
         .command(&["fetch", "origin"])
