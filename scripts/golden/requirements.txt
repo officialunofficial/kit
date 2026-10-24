@@ -3,6 +3,11 @@
 # result the same on every run.
 #
 #   python3 -m venv .venv && .venv/bin/pip install -r scripts/golden/requirements.txt
+#
+# pycryptodome and ecdsa check the grant vectors. zstandard decodes the zstd
+# frames of the pack vectors on a Python older than 3.14, which has no zstd
+# module of its own.
 pycryptodome==4.1.0
 ecdsa==0.19.2
 six==1.17.0
+zstandard==0.25.0
