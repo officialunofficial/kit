@@ -367,7 +367,7 @@ fn tagger_less_tag_import_hash_is_pinned() {
 
     assert_eq!(
         kit_core::to_hex(&blake3),
-        "4249c2149a73ec2dcb54cf1d10ff8b0f25b6a45a42b4a5deb836c956efad8e62",
+        "d14450517907902cd49c2cd0ad707178346ae98a0ad7d64d4bfe6a6c88605372",
         "tagger-less tag import hash drifted"
     );
 }

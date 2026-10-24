@@ -124,7 +124,11 @@ pub struct MemSink(pub HashMap<Hash, Vec<u8>>);
 
 impl ObjectSink for MemSink {
     fn write_object(&mut self, bytes: &[u8]) -> Result<Hash, BridgeError> {
-        let h = kit_core::hash::hash(bytes);
+        // Address the object as the real store does: a merkle root for a
+        // tree or chunked blob, the BLAKE3 digest of the bytes otherwise.
+        let h = kit_core::deserialize(bytes)
+            .and_then(|object| object.id())
+            .map_err(|e| BridgeError::Source(format!("memory sink object: {e}")))?;
         self.0.insert(h, bytes.to_vec());
         Ok(h)
     }
