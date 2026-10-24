@@ -219,6 +219,57 @@ pub fn grant_parse_one_iteration(input: &[u8]) {
     }
 }
 
+/// Config text parser (`config_parse`): `apply_text` never panics. A
+/// repo-scope parse accepts no forbidden key, so the sentinel values that a
+/// hostile repo plants never reach the merged config.
+pub fn config_parse_one_iteration(input: &[u8]) {
+    use kit_storage::config::{Config, ConfigScope, apply_text};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let path = std::path::Path::new("fuzz-config");
+    for scope in [ConfigScope::Repo, ConfigScope::User] {
+        let mut cfg = Config::default();
+        let _ = apply_text(&mut cfg, text, path, scope, false);
+        if scope == ConfigScope::Repo {
+            // A repo file must never set a user-scoped key.
+            assert!(cfg.trusted_remote_endpoint.is_empty());
+            assert!(cfg.http_ssl_ca_info.is_empty());
+            assert!(cfg.pull_require_signed.is_empty());
+        }
+    }
+}
+
+/// Stash manifest decoder (`stash_list`): `deserialize_list` never panics,
+/// and anything it accepts re-encodes to exactly the input bytes.
+pub fn stash_list_one_iteration(input: &[u8]) {
+    use kit_core::ops::stash::{deserialize_list, serialize_list};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(list) = deserialize_list(input) {
+        assert_eq!(
+            serialize_list(&list).expect("accepted list must re-encode"),
+            input,
+            "accepted stash list must re-encode byte for byte"
+        );
+    }
+}
+
+/// Git bridge map and ref-state files (`bridge_map`): the loaders never
+/// panic on any file content.
+pub fn bridge_map_one_iteration(input: &[u8]) {
+    use kit_git_bridge::map::{load_import_ref_state, load_map, load_map_inverse, map_is_intact};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let dir = tempfile::tempdir().expect("tempdir");
+    for name in ["map", "refs", "refs-import"] {
+        std::fs::write(dir.path().join(name), input).expect("write fixture");
+    }
+    let _ = map_is_intact(dir.path());
+    let _ = load_map(dir.path());
+    let _ = load_map_inverse(dir.path());
+    let _ = load_import_ref_state(dir.path());
+}
+
 /// SPEC-WRITE-GRANTS epoch and visibility statements and the stateless
 /// verifier (`epoch_visibility_parse`): `EpochStatement::parse` and
 /// `VisibilityStatement::parse` never panic, and anything they accept
@@ -1316,6 +1367,48 @@ mod tests {
             &[0xFF; 64][..],
         ] {
             run_one(case, grant_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_config_parse() {
+        run_iterated_unit(config_parse_one_iteration).unwrap();
+        for case in [
+            &b"default_branch = main\n"[..],
+            b"http.sslcainfo = /tmp/ca.pem\ntrusted_remote_endpoint = x\n",
+            b"pull.require_signed\n",
+            b"pull.require_signed = nope\n",
+            b"core.editor = vim\n",
+            b"remote.a.url = x\nbranch.b.merge = y\n",
+            b"\xff\xfe",
+            b"",
+        ] {
+            run_one(case, config_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_stash_list() {
+        run_iterated_unit(stash_list_one_iteration).unwrap();
+        let valid = kit_core::ops::stash::serialize_list(&kit_core::ops::stash::StashList {
+            entries: vec![kit_core::ops::stash::StashEntry {
+                commit_hash: [1; 32],
+                parent_hash: [2; 32],
+                timestamp: 7,
+                message: "wip".to_owned(),
+            }],
+        })
+        .unwrap();
+        for case in [&b""[..], b"\x00", &[0xFF; 64][..], &valid[..]] {
+            run_one(case, stash_list_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_bridge_map() {
+        run_iterated_unit(bridge_map_one_iteration).unwrap();
+        for case in [&b""[..], b"zz zz\n", b"\xff\xfe\n", &[b'a'; 200][..]] {
+            run_one(case, bridge_map_one_iteration).unwrap();
         }
     }
 

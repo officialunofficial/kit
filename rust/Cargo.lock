@@ -2997,6 +2997,7 @@ dependencies = [
  "kit-keystore",
  "kit-rpc",
  "kit-serve",
+ "kit-storage",
  "libfuzzer-sys",
  "tempfile",
 ]

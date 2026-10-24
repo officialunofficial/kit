@@ -9,7 +9,7 @@ it in.
 
 `delta`, `pack`, `tree`, `merkle_packlist`, `merkle_proof`,
 `software_key_record`, `rpc_decode`, `git_commit_parse`, `git_tag_parse`,
-`git_tree_parse`.
+`git_tree_parse`, `config_parse`, `stash_list`, `bridge_map`.
 
 ## Two execution paths
 
