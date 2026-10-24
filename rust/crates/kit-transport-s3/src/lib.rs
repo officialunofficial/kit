@@ -11,8 +11,9 @@
 //! single `PUT`.
 //!
 //! URL shape: `kit+s3://<endpoint>/<bucket>[/prefix]` — credentials are
-//! pulled from the `KIT_R2_ACCESS_KEY_ID` / `KIT_R2_SECRET_ACCESS_KEY`
-//! environment at `connect` time. An unset pair does not fail
+//! pulled from the `KIT_S3_ACCESS_KEY_ID` / `KIT_S3_SECRET_ACCESS_KEY`
+//! environment at `connect` time, and the signing region from
+//! `KIT_S3_REGION` (default `us-east-1`). An unset pair does not fail
 //! construction; the first signed call surfaces
 //! [`TransportError::AccessDenied`].
 //!
@@ -61,7 +62,7 @@ use crate::sigv4::{Credentials, SignedRequest, sign_request};
 /// Test-only override: under the `test-small-multipart-caps` feature this
 /// shrinks to a few MiB so the multipart integration test
 /// (`tests/transport_multipart.rs`) doesn't need to move a multi-GiB
-/// buffer through a mockito server. That shrunk value is NOT a valid S3/R2
+/// buffer through a mockito server. That shrunk value is NOT a valid S3
 /// API limit — the feature must never be enabled in a production build
 /// (see the feature's doc comment in `Cargo.toml`).
 #[cfg(not(feature = "test-small-multipart-caps"))]
@@ -70,12 +71,12 @@ pub const S3_SINGLE_PUT_MAX: u64 = 5 * 1024 * 1024 * 1024;
 pub const S3_SINGLE_PUT_MAX: u64 = 8 * 1024 * 1024;
 
 /// Fixed size of every multipart part except the last, which carries the
-/// remainder. S3/R2 require every non-last part to be at least 5 MiB;
+/// remainder. S3 requires every non-last part to be at least 5 MiB;
 /// 64 MiB keeps retry granularity and peak per-part memory bounded while
 /// staying well under the 10,000-parts-per-upload ceiling for any pack
 /// under [`kit_core::protocol::PACK_BODY_LIMIT`].
 ///
-/// Test-only override: shrinks to the S3/R2-mandated minimum (5 MiB) so
+/// Test-only override: shrinks to the S3-mandated minimum (5 MiB) so
 /// the multipart integration test moves single-digit-MiB bodies instead
 /// of tens of MiB. See [`S3_SINGLE_PUT_MAX`]'s doc comment.
 #[cfg(not(feature = "test-small-multipart-caps"))]
@@ -97,8 +98,12 @@ const REF_LIST_BODY_LIMIT: usize = 16 * 1024 * 1024;
 const SMALL_RESPONSE_LIMIT: usize = 4 * 1024;
 
 /// Environment variable names for credentials.
-pub const ENV_ACCESS_KEY: &str = "KIT_R2_ACCESS_KEY_ID";
-pub const ENV_SECRET_KEY: &str = "KIT_R2_SECRET_ACCESS_KEY";
+pub const ENV_ACCESS_KEY: &str = "KIT_S3_ACCESS_KEY_ID";
+pub const ENV_SECRET_KEY: &str = "KIT_S3_SECRET_ACCESS_KEY";
+/// Environment variable name for the signing region.
+pub const ENV_REGION: &str = "KIT_S3_REGION";
+/// Signing region used when [`ENV_REGION`] is unset.
+pub const DEFAULT_REGION: &str = "us-east-1";
 
 // ---------------------------------------------------------------------------
 // Connect / construction
@@ -157,7 +162,7 @@ impl S3Transport {
     /// returns [`TransportError::AccessDenied`].
     ///
     /// The endpoint is the host component in the URL; we rebuild it as
-    /// `https://<host>` because R2 only speaks HTTPS.
+    /// `https://<host>` because the transport only speaks HTTPS.
     pub fn connect(url: &str) -> Result<Self, TransportError> {
         let parsed = parse_s3_url(url)?;
         let endpoint = format!("https://{}", parsed.host);
@@ -165,7 +170,7 @@ impl S3Transport {
         let prefix = parsed.prefix;
         let access_key_id = env::var(ENV_ACCESS_KEY).unwrap_or_default();
         let secret_access_key = env::var(ENV_SECRET_KEY).unwrap_or_default();
-        let region = env::var("KIT_R2_REGION").unwrap_or_else(|_| "auto".into());
+        let region = env::var(ENV_REGION).unwrap_or_else(|_| DEFAULT_REGION.into());
 
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
@@ -216,7 +221,7 @@ impl S3Transport {
 
     /// Test-only: expose the resolved credentials so integration tests
     /// outside this crate can assert that [`Self::connect`] actually
-    /// read [`ENV_ACCESS_KEY`] / [`ENV_SECRET_KEY`] / `KIT_R2_REGION`,
+    /// read [`ENV_ACCESS_KEY`] / [`ENV_SECRET_KEY`] / [`ENV_REGION`],
     /// rather than merely asserting the constant names. Not exposed via
     /// `Debug` (deliberately, to avoid leaking secrets into logs).
     #[doc(hidden)]
@@ -299,7 +304,7 @@ impl S3Transport {
     /// The query is URI-encoded and key-sorted via
     /// [`sigv4::canonical_query_string`] so the bytes signed match what
     /// real AWS S3 re-derives server-side (a raw `/` in the prefix would
-    /// otherwise yield `403 SignatureDoesNotMatch`; R2 is lenient).
+    /// otherwise yield `403 SignatureDoesNotMatch`).
     #[must_use]
     pub fn build_list_query(prefix: &str) -> String {
         sigv4::canonical_query_string(&[("list-type", "2"), ("prefix", prefix)])
@@ -540,7 +545,7 @@ fn is_safe_s3_prefix_byte(b: u8) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// MD5 of wire-format ref — ETag for CAS on R2
+// MD5 of wire-format ref — ETag for CAS
 // ---------------------------------------------------------------------------
 
 /// Format a hash as the on-the-wire ref body: 64 hex chars + LF.
@@ -551,7 +556,7 @@ fn format_ref_wire(h: &Hash) -> Vec<u8> {
     out
 }
 
-/// Wrap `value` in double quotes to produce the `"<md5>"` ETag R2 returns.
+/// Wrap `value` in double quotes to produce the `"<md5>"` ETag the store returns.
 fn quoted_md5(wire: &[u8]) -> String {
     let mut h = Md5::new();
     h.update(wire);
@@ -750,7 +755,7 @@ impl S3Transport {
     /// race doesn't leave orphaned parts (and their storage cost)
     /// sitting in the bucket forever. Deliberately swallows its own
     /// error: this crate has no logging facility, and a failed abort
-    /// must never mask the real error that triggered it (R2/S3 also
+    /// must never mask the real error that triggered it (S3 stores also
     /// garbage-collect incomplete multipart uploads after a bucket
     /// lifecycle policy window, so a failed abort here is not the only
     /// backstop).
@@ -1252,8 +1257,8 @@ mod tests {
 
     #[test]
     fn url_parse_ok_no_prefix() {
-        let p = parse_s3_url("kit+s3://abc.r2.cloudflarestorage.com/bucket").unwrap();
-        assert_eq!(p.host, "abc.r2.cloudflarestorage.com");
+        let p = parse_s3_url("kit+s3://s3.example.com/bucket").unwrap();
+        assert_eq!(p.host, "s3.example.com");
         assert_eq!(p.bucket, "bucket");
         assert!(p.prefix.is_none());
     }

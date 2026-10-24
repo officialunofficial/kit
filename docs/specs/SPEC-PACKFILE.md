@@ -335,10 +335,10 @@ independently at decode time; it is not folded into `MAX_TOTAL_PAYLOAD`
 or `entry_count`.
 
 **The per-pack cap is a format choice, not a transport ceiling.**
-Earlier versions of this section justified the 4 GiB figure by AWS
-S3/Cloudflare R2's 5 GiB single-`PUT` limit, and flagged multipart
+Earlier versions of this section justified the 4 GiB figure by the
+5 GiB single-`PUT` limit of S3-compatible stores, and flagged multipart
 upload as a future-version candidate. That framing is
-stale: S3/R2 multipart upload shipped without a `version`
+stale: S3 multipart upload shipped without a `version`
 bump, because it turned out to be a purely transport-layer concern
 &mdash; `CreateMultipartUpload`/`UploadPart` against each backend's own
 single-`PUT` ceiling, resolved entirely inside the transport

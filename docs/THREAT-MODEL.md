@@ -308,7 +308,7 @@ config-derived endpoint, key path, or credential.
 `remote_endpoint`, `remote_bucket`, and `remote_type` are repo-safe
 to *read* (a clone needs to be able to nominate a default mirror),
 but `kit push`, `kit pull`, and `kit fetch` will refuse to attach
-ambient `KIT_API_TOKEN` or `KIT_R2_*` credentials to a
+ambient `KIT_API_TOKEN` or `KIT_S3_*` credentials to a
 repo-configured endpoint unless the user has explicitly listed that
 endpoint in user-scoped `trusted_remote_endpoint`. This closes the
 hostile-clone credential-exfiltration channel without breaking safe portable defaults for unauthenticated mirrors

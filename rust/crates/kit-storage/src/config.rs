@@ -1342,7 +1342,7 @@ where
             || getenv(kit_transport_s3::ENV_SECRET_KEY).is_some())
     {
         return Some(format!(
-            "refusing repo-configured remote `{endpoint}` with ambient S3/R2 credentials; trust it explicitly with `kit config trusted_remote_endpoint {endpoint}` (writes {})",
+            "refusing repo-configured remote `{endpoint}` with ambient S3 credentials; trust it explicitly with `kit config trusted_remote_endpoint {endpoint}` (writes {})",
             user_config_path().display()
         ));
     }
@@ -2195,7 +2195,7 @@ mod tests {
     #[test]
     fn repo_s3_remote_with_env_creds_requires_user_trust() {
         let cfg = layered(
-            Some("remote_endpoint = kit+s3://r2.example.com/bucket/proj\n"),
+            Some("remote_endpoint = kit+s3://s3.example.com/bucket/proj\n"),
             None,
         );
         let msg = gate_for_flat(&cfg, &|name| match name {

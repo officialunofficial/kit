@@ -352,14 +352,8 @@ mod tests {
 
     #[test]
     fn parse_host_strips_scheme() {
-        assert_eq!(
-            parse_host("https://abc.r2.cloudflarestorage.com"),
-            "abc.r2.cloudflarestorage.com"
-        );
-        assert_eq!(
-            parse_host("http://abc.r2.cloudflarestorage.com"),
-            "abc.r2.cloudflarestorage.com"
-        );
+        assert_eq!(parse_host("https://s3.example.com"), "s3.example.com");
+        assert_eq!(parse_host("http://s3.example.com"), "s3.example.com");
         assert_eq!(parse_host("localhost:9000"), "localhost:9000");
     }
 
@@ -367,7 +361,7 @@ mod tests {
         Credentials {
             access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
-            region: "auto".into(),
+            region: "us-east-1".into(),
         }
     }
 
@@ -379,11 +373,11 @@ mod tests {
             "/kit-storage/objects/abc123",
             "",
             b"hello world",
-            "https://abc123.r2.cloudflarestorage.com",
+            "https://s3.example.com",
             1_711_300_000,
         );
         assert!(sig.authorization.starts_with(
-            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240324/auto/s3/aws4_request"
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240324/us-east-1/s3/aws4_request"
         ));
         assert!(
             sig.authorization
@@ -402,7 +396,7 @@ mod tests {
             "/kit-storage/objects/abc123",
             "",
             b"",
-            "https://abc123.r2.cloudflarestorage.com",
+            "https://s3.example.com",
             1_711_300_000,
         );
         assert_eq!(
@@ -423,7 +417,7 @@ mod tests {
             "/kit-storage/obj",
             "",
             b"data",
-            "https://abc123.r2.cloudflarestorage.com",
+            "https://s3.example.com",
             1_711_300_000,
         );
         let b = sign_request(
@@ -432,7 +426,7 @@ mod tests {
             "/kit-storage/obj",
             "",
             b"data",
-            "https://abc123.r2.cloudflarestorage.com",
+            "https://s3.example.com",
             1_711_300_000,
         );
         assert_eq!(a.authorization, b.authorization);
@@ -445,7 +439,7 @@ mod tests {
         let creds = Credentials {
             access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
-            region: "auto".into(),
+            region: "us-east-1".into(),
         };
         let dbg = format!("{creds:?}");
         assert!(
@@ -455,7 +449,7 @@ mod tests {
         assert!(dbg.contains("<redacted>"), "Debug missing redaction: {dbg}");
         // Non-secret fields remain visible for diagnostics.
         assert!(dbg.contains("AKIAIOSFODNN7EXAMPLE"));
-        assert!(dbg.contains("auto"));
+        assert!(dbg.contains("us-east-1"));
     }
 
     #[test]
@@ -494,7 +488,7 @@ mod tests {
             "/kit-storage/",
             &query,
             b"",
-            "https://abc123.r2.cloudflarestorage.com",
+            "https://s3.example.com",
             1_711_300_000,
         );
         // Second line of the canonical request is the path; third line is
@@ -517,7 +511,7 @@ mod tests {
             "/kit-storage/",
             "list-type=2&prefix=refs/",
             b"",
-            "https://abc123.r2.cloudflarestorage.com",
+            "https://s3.example.com",
             1_711_300_000,
         );
         let without_q = sign_request(
@@ -526,7 +520,7 @@ mod tests {
             "/kit-storage/",
             "",
             b"",
-            "https://abc123.r2.cloudflarestorage.com",
+            "https://s3.example.com",
             1_711_300_000,
         );
         assert_eq!(with_q.x_amz_date, without_q.x_amz_date);
@@ -538,10 +532,7 @@ mod tests {
         let big = [7_u8; 4096];
         for (method, payload) in [("PUT", &b"hello world"[..]), ("GET", b""), ("PUT", &big)] {
             let sign = |hashed: bool| {
-                let (path, endpoint) = (
-                    "/kit-storage/packs/abc",
-                    "https://abc123.r2.cloudflarestorage.com",
-                );
+                let (path, endpoint) = ("/kit-storage/packs/abc", "https://s3.example.com");
                 if hashed {
                     let hash = sha256_hex(payload);
                     sign_request_with_payload_hash(

@@ -30,8 +30,8 @@ impl Repo {
             .env("HOME", self.user.path())
             .env_remove("KIT_SSL_CA_FILE")
             .env_remove("KIT_API_TOKEN")
-            .env_remove("KIT_R2_ACCESS_KEY_ID")
-            .env_remove("KIT_R2_SECRET_ACCESS_KEY");
+            .env_remove("KIT_S3_ACCESS_KEY_ID")
+            .env_remove("KIT_S3_SECRET_ACCESS_KEY");
         command
     }
 

@@ -125,7 +125,7 @@ Programs MUST NOT pattern-match on the advisory message strings.
 | `kit+file:///abs/path` | Filesystem (`FileTransport`) | Triple slash; everything after `kit+file://` is taken as the on-disk root path. |
 | `kit+https://host/project` | ConnectRPC (`kit-transport-connect`'s `ConnectTransport`) &mdash; see [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) | The `kit+` prefix is stripped before the inner call; production uses `https://`. |
 | `kit+http://localhost…` | Same dispatch as above, plain HTTP for local dev | Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`, `localhost`) per `validate_http_scheme`; any other host returns `InsecureScheme`. |
-| `kit+s3://endpoint/bucket[/prefix]` | S3-compatible (`S3Transport`) | The endpoint becomes `https://<endpoint>`; R2 is the primary target, AWS S3 also works but its CAS semantics are weaker (see §6.3). |
+| `kit+s3://endpoint/bucket[/prefix]` | S3-compatible (`S3Transport`) | The endpoint becomes `https://<endpoint>`. The store must honor conditional writes (see §6.3). |
 | `kit+ssh://user@host[:port]/path` | SSH child and `kit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty/`.`/`..` segments. SCP-style `kit+ssh://user@host:path`/`kit+ssh://user@host:port:path` are also accepted (see [`kit-transport-ssh/src/url.rs`](../../rust/crates/kit-transport-ssh/src/url.rs)). |
 
 Bare `ssh://`, `https://`, `http://`, `s3://`, `file://` URLs (without
@@ -381,11 +381,11 @@ transport carries it (§6.6).
 
 ---
 
-## 6. S3 / R2 transport
+## 6. S3 transport
 
 The S3 transport ([`kit-transport-s3`](../../rust/crates/kit-transport-s3/))
-talks SigV4 against Cloudflare R2 (primary target) or AWS S3
-(works but with weaker CAS guarantees &mdash; see §6.3).
+talks SigV4 against any S3-compatible store that honors conditional
+writes (see §6.3).
 
 ### 6.1 Object layout
 
@@ -421,9 +421,9 @@ The ref body is the 65-byte wire form: 64 hex chars + `\n`.
 Credentials from environment at `connect` time
 ([`kit-transport-s3::ENV_*`](../../rust/crates/kit-transport-s3/src/lib.rs)):
 
-- `KIT_R2_ACCESS_KEY_ID`
-- `KIT_R2_SECRET_ACCESS_KEY`
-- `KIT_R2_REGION` (optional; defaults to `auto` &mdash; R2 ignores region)
+- `KIT_S3_ACCESS_KEY_ID`
+- `KIT_S3_SECRET_ACCESS_KEY`
+- `KIT_S3_REGION` (optional; defaults to `us-east-1`)
 
 Missing credentials do NOT fail `connect`. The first signed call
 surfaces `TransportError::AccessDenied`.
@@ -435,8 +435,8 @@ surfaces `TransportError::AccessDenied`.
 | `RefWriteCondition` | Header | Comment |
 |---|---|---|
 | `Any`        | (none) | Last writer wins. |
-| `Missing`    | `If-None-Match: *` | R2 honors this for conditional create. |
-| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | R2 returns the body MD5 as the ETag on `PUT`; matching against that value is how kit gets CAS without server-side hash awareness. AWS S3 also returns body MD5 as the ETag for simple PUTs, so `Match` works on S3 too &mdash; but multipart uploads break the equivalence (a multipart `ETag` is derived from the parts' ETags, not the body MD5), which is why §6.4's single-PUT cap gates `upload_pack` into the multipart path of §6.7 instead. |
+| `Missing`    | `If-None-Match: *` | The store MUST honor this for conditional create. |
+| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | The store MUST return the body MD5 as the ETag on a single `PUT`; matching against that value is how kit gets CAS without server-side hash awareness. Multipart uploads break the equivalence (a multipart `ETag` is derived from the parts' ETags, not the body MD5), which is why §6.4's single-PUT cap gates `upload_pack` into the multipart path of §6.7 instead. |
 
 `409` and `412` → `RefConflict`; never retried.
 
@@ -527,7 +527,7 @@ the standard S3 multipart-upload API instead of a single `PUT`:
    on `CompleteMultipartUpload` also triggers the abort (the object
    was never materialized), but is not itself an error &mdash; see below.
 
-Every part except the last MUST be at least 5 MiB (an S3/R2 API
+Every part except the last MUST be at least 5 MiB (an S3 API
 requirement); the implementation's fixed part size (64 MiB in
 production) satisfies this for any part but the last.
 
@@ -611,7 +611,7 @@ concerns.
 |---|---|---|---|
 | Memory | `Mutex`-protected read-then-write | `Mutex`-protected | N/A (test only) |
 | File   | `link(2)` after `write_atomic` (atomic per POSIX) | OS exclusive file lock on `<root>/.kit/refs/.lock` (via `std::fs::File::lock`) wraps a read-then-`write_atomic`; an in-process `Mutex` keeps multi-threaded callers within one process from contending on the OS lock | Yes |
-| S3     | `If-None-Match: *` enforced by R2 | `If-Match: "<md5-of-wire>"` enforced by R2 | Yes (on R2; S3 multipart breaks `Match` &mdash; see §6.3) |
+| S3     | `If-None-Match: *` enforced by the store | `If-Match: "<md5-of-wire>"` enforced by the store | Yes (S3 multipart breaks `Match` &mdash; see §6.3) |
 | SSH    | Server-enforced via `expectation = REF_EXPECTATION_MISSING` | Server-enforced via `expectation = REF_EXPECTATION_MATCH` plus 32-byte `expected_id` | Depends on server-side ref-store atomicity |
 
 `upload_pack` itself carries no `RefWriteCondition` (it addresses
@@ -625,7 +625,7 @@ bytes or doesn't exist at all), while a multipart upload's
 `CompleteMultipartUpload` only supports `If-None-Match: *`
 (existence-only) &mdash; never `If-Match(h)` &mdash; because a multipart `ETag`
 is not the body MD5. This is an accepted downgrade specific to large
-S3/R2 packs; content-addressing (§8) makes it safe (see §6.7's
+S3 packs; content-addressing (§8) makes it safe (see §6.7's
 idempotency note).
 
 ---

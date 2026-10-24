@@ -300,7 +300,7 @@ not exist or contains a different hash → `RefConflict`.
 |-----------|-------------|---------------------------------------|----------------------------------------------------------------|-------|
 | memory    | atomic*     | atomic*                               | atomic* &mdash; the read-check-write runs under the instance's one `Mutex` | *In-process only: every verb of one `MemoryTransport` instance holds its `Mutex` for the whole operation, so concurrent threads sharing the instance cannot interleave. Never shared across processes. |
 | file      | atomic      | atomic (via `O_EXCL` create)          | atomic &mdash; OS exclusive file lock (`<root>/.kit/refs/.lock`) serializes the read-check-write across processes | Lock guard released on drop (including panic-unwind). |
-| s3        | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<md5-of-wire>"`                         | Requires server that supports conditional writes (R2 and post-2024 AWS S3 do; generic S3 may not). |
+| s3        | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<md5-of-wire>"`                         | Requires a store that supports conditional writes. |
 | http      | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<hex-hash>"`                            | Worker-flavored server. Generic S3 and nginx do NOT conform. |
 | ssh       | atomic      | atomic (`OP_WRITE_REF_IF_ABSENT` path via condition byte) | atomic (`CONDITION_MATCH` with 32-byte expected hash)          | Server enforces CAS; client trusts `STATUS_ERROR`. |
 

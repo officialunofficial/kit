@@ -1,4 +1,4 @@
-//! Integration tests for S3/R2 multipart upload.
+//! Integration tests for S3 multipart upload.
 //!
 //! `S3_SINGLE_PUT_MAX` and `MULTIPART_PART_SIZE` are only compiled to
 //! their real 5 GiB / 64 MiB values when `test-small-multipart-caps` is
@@ -21,7 +21,7 @@ fn demo_creds() -> Credentials {
     Credentials {
         access_key_id: "AKIA_TEST".into(),
         secret_access_key: "secret".into(),
-        region: "auto".into(),
+        region: "us-east-1".into(),
     }
 }
 

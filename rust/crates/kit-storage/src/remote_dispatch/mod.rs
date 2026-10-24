@@ -9,8 +9,8 @@
 //!
 //! Credentials / environment sources:
 //! - HTTP(S): optional `KIT_API_TOKEN` bearer.
-//! - S3/R2: `KIT_R2_ACCESS_KEY_ID` + `KIT_R2_SECRET_ACCESS_KEY` (plus
-//!   optional `KIT_R2_REGION`, default `auto`). Missing creds do NOT
+//! - S3: `KIT_S3_ACCESS_KEY_ID` + `KIT_S3_SECRET_ACCESS_KEY` (plus
+//!   optional `KIT_S3_REGION`, default `us-east-1`). Missing creds do NOT
 //!   fail at connect time; the first signed request returns
 //!   `TransportError::AccessDenied`.
 //! - SSH: spawns `ssh(1)` subprocess — inherits the user's agent / keys /
@@ -830,8 +830,8 @@ fn open_with_ssh_options(
     }
     #[cfg(feature = "s3")]
     if url.starts_with("kit+s3://") {
-        // S3Transport::connect reads KIT_R2_ACCESS_KEY_ID /
-        // KIT_R2_SECRET_ACCESS_KEY from the environment. Missing
+        // S3Transport::connect reads KIT_S3_ACCESS_KEY_ID /
+        // KIT_S3_SECRET_ACCESS_KEY from the environment. Missing
         // credentials surface as AccessDenied on the first signed call,
         // not at connect time.
         let tx = S3Transport::connect(url)?;

@@ -36,7 +36,7 @@ sparse-checkout = ["kit-core/sparse-checkout"]
 # CreateMultipartUpload -> UploadPart -> CompleteMultipartUpload flow
 # against a mockito server without allocating or transferring
 # multi-GiB buffers. MUST NOT be enabled in a production build — the
-# shrunk `S3_SINGLE_PUT_MAX` is not a valid S3/R2 API limit. Excluded
+# shrunk `S3_SINGLE_PUT_MAX` is not a valid S3 API limit. Excluded
 # from the docs.rs feature set below for that reason.
 test-small-multipart-caps = []
 

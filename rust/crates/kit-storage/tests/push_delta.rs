@@ -466,7 +466,7 @@ fn divergent_concurrent_push_leaves_cloneable_remote() {
 
 /// Wraps a [`MemoryTransport`] and makes `download_pack` report
 /// `PackNotFound` for a configurable set of keys — simulating a pack that
-/// the remote advertised but no longer holds (pruned / corrupt R2).
+/// the remote advertised but no longer holds (pruned / corrupt store).
 struct DropPackTransport {
     inner: MemoryTransport,
     dropped: std::sync::Mutex<std::collections::HashSet<PackKey>>,

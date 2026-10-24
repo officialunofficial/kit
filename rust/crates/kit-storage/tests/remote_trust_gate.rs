@@ -117,7 +117,7 @@ fn push_rejects_repo_configured_s3_remote_with_env_creds() {
     assert!(run_in_with_env(root, &["init"], &[], None).status.success());
     let add = run_in_with_env(
         root,
-        &["remote", "add", "kit+s3://r2.example.com/bucket/proj"],
+        &["remote", "add", "kit+s3://s3.example.com/bucket/proj"],
         &[],
         None,
     );
@@ -127,8 +127,8 @@ fn push_rejects_repo_configured_s3_remote_with_env_creds() {
         root,
         &["push"],
         &[
-            ("KIT_R2_ACCESS_KEY_ID", "test-key"),
-            ("KIT_R2_SECRET_ACCESS_KEY", "test-secret"),
+            ("KIT_S3_ACCESS_KEY_ID", "test-key"),
+            ("KIT_S3_SECRET_ACCESS_KEY", "test-secret"),
         ],
         None,
     );

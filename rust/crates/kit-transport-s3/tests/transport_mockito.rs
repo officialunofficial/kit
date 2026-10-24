@@ -24,7 +24,7 @@ fn demo_creds() -> Credentials {
     Credentials {
         access_key_id: "AKIA_TEST".into(),
         secret_access_key: "secret".into(),
-        region: "auto".into(),
+        region: "us-east-1".into(),
     }
 }
 

@@ -22,7 +22,7 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 | `kit-transport-memory`        | `rust/crates/kit-transport-memory/`  | In-process transport, used by tests                                    |
 | `kit-transport-file`          | `rust/crates/kit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
 | `kit-transport-connect`       | `rust/crates/kit-transport-connect/` | ConnectRPC client implementing `kit.transport.v1.TransportService` (`specs/SPEC-TRANSPORT-CONNECT.md`); the transport `kit-storage` actually constructs for `kit+https://` / `kit+http://` |
-| `kit-transport-s3`            | `rust/crates/kit-transport-s3/`      | Hand-rolled SigV4 transport (R2 plus S3-compatible)                       |
+| `kit-transport-s3`            | `rust/crates/kit-transport-s3/`      | Hand-rolled SigV4 transport (S3-compatible conditional writes)           |
 | `kit-transport-ssh`           | `rust/crates/kit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
 | `kit-serve`                   | `rust/crates/kit-serve/`             | Self-host server: the `kit.rpc.v1.ssh` frame session over a repository on disk; `kit serve` is a thin wrapper |
 | `kit-sync`                    | `rust/crates/kit-sync/`              | Native clone/fetch/pull for `.kit` repositories as a library: typed reports, no printing, no ambient config; `kit clone`/`fetch`/`pull` are thin wrappers over it |

@@ -76,7 +76,7 @@ including a matcher for a `remote.<name>.*` pattern key.
 | `signing_key`                        | **UNSAFE** | Legacy raw-file key path. If repo-controlled, doubles as an arbitrary-file overwrite primitive when paired with auto-keygen (auto-keygen has since been removed; the path is still UNSAFE for the read direction). |
 | `default_branch`                     | SAFE       | UX default. No security weight &mdash; the victim still verifies signed history regardless of which ref the repo nominates as default.                                                    |
 | `durability.objects`                 | SAFE       | Object-store durability/fsync mode. A pure local-performance/safety tunable with no credential-routing, signing-selection, or process-spawning behavior; round-tripped and serialized in repo config.                |
-| `remote_endpoint`                    | **SAFE** with runtime gate | A pure address. Repo-scoped endpoints are accepted, but `enforce_trusted_remote_endpoint` refuses to send ambient `KIT_API_TOKEN` / `KIT_R2_*` credentials unless the user has explicitly listed the same endpoint under `trusted_remote_endpoint`. |
+| `remote_endpoint`                    | **SAFE** with runtime gate | A pure address. Repo-scoped endpoints are accepted, but `enforce_trusted_remote_endpoint` refuses to send ambient `KIT_API_TOKEN` / `KIT_S3_*` credentials unless the user has explicitly listed the same endpoint under `trusted_remote_endpoint`. |
 | `remote_bucket`                      | SAFE       | Inert bucket-name slot. Not currently consumed by any transport; round-tripped only.                                                                                                |
 | `remote_type`                        | SAFE       | Dispatch hint (`file` / `http` / `s3` / `ssh`). The exfil channel is the endpoint URL, not the dispatch label.                                                                       |
 | `ssh.strict_host_key_checking`       | **UNSAFE** | Letting the repo disable host-key checking opens `kit push` to MITM.                                                                                                              |
@@ -95,7 +95,7 @@ including a matcher for a `remote.<name>.*` pattern key.
 | `attest.p256_key_path`               | **UNSAFE** | Legacy raw-file path for a P-256 signing key.                                                                                                                                       |
 | `grant.webauthn_rp` | **UNSAFE** | Pins the `WebAuthn` relying parties (`<rp_id> <origin>...`, repeatable) whose assertions `kit grant create --webauthn-assertion` and the user grant store accept as an owner signature ([SPEC-WRITE-GRANTS §4.3](SPEC-WRITE-GRANTS.md)). If repo-controlled, the attacker would choose which relying party vouches for an owner. Without a pin a `webauthn-p256` import is refused, so this key fails closed. |
 | user grant store           | **not a key** | `$XDG_CONFIG_HOME/kit/grants/<grant id>.grant` (directory 0700, files 0600). Its location derives from the XDG base directory alone: there is no config key, flag or repository path that relocates it, and the store never reads a repository path. Every file is re-parsed and its owner signature re-verified on load, at most 1,024 files of at most 16 KiB each; a bad file costs one warning and is skipped. A planted file therefore cannot forge a grant, only fail to load. |
-| `remote.<name>.url`                  | **SAFE** with runtime gate | Named-remote address. Same classification as `remote_endpoint`: each endpoint still flows through `enforce_trusted_remote_endpoint`, so a repo-controlled named remote cannot smuggle ambient `KIT_API_TOKEN` / `KIT_R2_*` credentials.       |
+| `remote.<name>.url`                  | **SAFE** with runtime gate | Named-remote address. Same classification as `remote_endpoint`: each endpoint still flows through `enforce_trusted_remote_endpoint`, so a repo-controlled named remote cannot smuggle ambient `KIT_API_TOKEN` / `KIT_S3_*` credentials.       |
 | `remote.<name>.type`                 | SAFE       | Dispatch hint for a named remote (`file` / `http` / `s3` / `ssh`); same reasoning as `remote_type`.                                                                                  |
 | `branch.<name>.remote`               | SAFE       | Per-branch upstream remote name. A UX/tracking pointer with no credential-routing or signing weight; the named remote it points at is still gated per-endpoint.                       |
 | `branch.<name>.merge`                | SAFE       | Per-branch upstream ref. Inert tracking metadata; the victim still verifies signed history regardless of the recorded upstream.                                                      |
@@ -195,7 +195,7 @@ attaching ambient credentials. The gate fires when ALL of:
 - the user layer's `trusted_remote_endpoint` does NOT equal the
   merged endpoint,
 - the relevant ambient credential env var is set
-  (`KIT_API_TOKEN` for HTTP, `KIT_R2_*` for S3).
+  (`KIT_API_TOKEN` for HTTP, `KIT_S3_*` for S3).
 
 Independently, selecting user-scoped `transport_auth = envelope` for any
 HTTP(S) endpoint MUST require exact equality with user-scoped

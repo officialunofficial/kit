@@ -7,7 +7,7 @@ use kit_storage::remote_dispatch::{DispatchError, open};
 
 #[test]
 fn s3_remote_needs_the_s3_feature() {
-    let err = open("kit+s3://r2.example.com/bucket/proj").err().unwrap();
+    let err = open("kit+s3://s3.example.com/bucket/proj").err().unwrap();
     assert!(
         matches!(err, DispatchError::UnsupportedScheme(_)),
         "{err:?}"
