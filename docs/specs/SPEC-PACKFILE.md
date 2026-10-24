@@ -704,6 +704,5 @@ pack payload buffer in the staging layer, plus bounded chain metadata; the
 cumulative disk budget is 64 GiB, with one million packs and 100,000 pack-list
 nodes. A lifetime-owned temporary directory cleans up on every return path.
 Application uses one pack and one pack's stored-object IDs at a time. Ref
-publication follows signature and closure checks. See SPEC-TRANSPORT for shard
-buffer accounting and cancellation; unpack/reconstruction allocations are
+publication follows signature and closure checks. Unpack allocations are
 additional one-pack working memory.

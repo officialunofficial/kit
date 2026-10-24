@@ -26,7 +26,7 @@ must update the spec in the same PR. The crate depends only on `std`: no
 - `ops` &mdash; the higher-level repository operations (`commit`, `merge`,
   `rebase`, `cherry-pick`, …) `kit-storage` drives.
 
-Optional features (`history-mmr`, `sparse-checkout`, `pack-shards`) gate
+Optional features (`history-mmr`, `sparse-checkout`) gate
 heavier `commonware-*`-backed paths &mdash; see the crate's `Cargo.toml` for what
 each pulls in.
 

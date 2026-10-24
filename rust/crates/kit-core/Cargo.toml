@@ -47,8 +47,6 @@ bytes = "1"
 commonware-codec = { workspace = true }
 commonware-storage = { workspace = true, features = ["std"], optional = true }
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
-commonware-coding = { workspace = true, optional = true }
-commonware-parallel = { workspace = true, optional = true, features = ["std"] }
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 # Direct dependency (already pulled in transitively by ed25519-dalek
 # regardless of features) needed only under `batch-verify`, to check a
@@ -117,13 +115,6 @@ pack-zstd = ["dep:zstd"]
 history-mmr = ["dep:commonware-storage", "dep:commonware-cryptography"]
 # Sparse witnesses use the canonical Tree codec and the base BLAKE3 hasher.
 sparse-checkout = []
-# Erasure-coded pack delivery via Reed-Solomon.
-pack-shards = [
-    "commonware-codec/std",
-    "dep:commonware-coding",
-    "dep:commonware-cryptography",
-    "dep:commonware-parallel",
-]
 # Ed25519 batch signature verification (`sign::verify_batch`): one
 # randomized-coefficient multiscalar-multiplication check across many
 # signatures instead of one scalar multiplication per signature —

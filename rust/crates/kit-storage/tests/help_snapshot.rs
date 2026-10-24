@@ -4,7 +4,7 @@
 //! These tests also assert man-page and shell-completion coverage of
 //! the documented subcommand list, so a new command can't silently ship
 //! without being added to `man/kit.1` and `completions/kit.{bash,zsh,
-//! fish}` (the drift that fixed for `pack-shard`).
+//! fish}`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -63,7 +63,6 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "diff",
     "stash",
     "sparse-checkout",
-    "pack-shard",
     "commit",
     "log",
     "reflog",

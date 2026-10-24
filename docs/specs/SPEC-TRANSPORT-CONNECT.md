@@ -39,8 +39,7 @@ are [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md)'s.
 Replaces the removed JSON HTTP transport (SPEC-TRANSPORT §5) behind
 `kit+https://`/`kit+http://` in `kit-storage` &mdash;
 `kit-transport-connect` is what `remote_dispatch` constructs for those
-schemes. The `sparse-checkout` and `pack-shards` extensions have no
-`kit.transport.v1` equivalent.
+schemes. The `sparse-checkout` extension has no `kit.transport.v1` equivalent.
 
 Reference implementation: `kit-transport-connect` (the native CLI
 client, §7.3) against `kit-transport-connect/tests/roundtrip.rs`'s

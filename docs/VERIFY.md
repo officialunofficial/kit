@@ -669,12 +669,10 @@ own test harness should take.
   SHA-1 digest with no sub-file structure to build a partial proof over; a
   client that already trusts a git SHA-1 verifies it with git's own
   hashing, not this kit. Partial disclosure is an kit-id-only capability.
-- **Ancestry (history MMB) proofs and pack-shard DA sampling are not part
-  of this kit.** Both are real, separately-scoped capabilities (see
-  SPEC-DISCLOSURE) that need a chain-side anchor beyond a single commit id
-  to be useful &mdash; "branch tip at block B extends tip at block A" and
-  "this shard is part of that committed erasure-coded set," respectively.
-  Neither is implemented here.
+- **Ancestry (history MMB) proofs are not part of this kit.** They are a real,
+  separately-scoped capability (see SPEC-DISCLOSURE) that needs a chain-side
+  anchor beyond a single commit id to be useful &mdash; "branch tip at block B
+  extends tip at block A." They are not implemented here.
 - **Non-membership proofs** (proving a name is *absent* from a `Tree`) are
   reserved as disclosure `payload_kind 3` (`Absent`). A
   disclosure bundle only ever proves inclusion.

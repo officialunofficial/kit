@@ -101,31 +101,15 @@ memoized for one diff and confirmed by byte comparison.
 
 ## Requested transport identities are checked before effects
 
-**Always:** fetched packs and metadata match their requested keys; shard
-manifests name the requested pack before reconstruction. Sparse selections are
+**Always:** fetched packs and metadata match their requested keys. Sparse selections are
 derived from canonical Tree witnesses verified against independently known IDs.
 
 **Because:** internally valid content can still be a substituted response.
 
 **If violated:** transports can publish unrequested objects or incomplete paths.
 
-**Enforced by:** packmap substitution tests, HTTP/S3 shard suites, core sparse
+**Enforced by:** packmap substitution tests, core sparse
 v2 mutation/completeness tests and `rust/tests/golden/sparse/response_v2.bin`.
-
-## Shard worker bounds do not delay an available quorum
-
-**Always:** HTTP and S3 shard downloads collect completed responses while
-admitting workers under the shared process-wide limit. Reaching quorum or the
-failure threshold cancels outstanding work without waiting for redundant shards.
-
-**Because:** bounded worker admission can otherwise block the collector even
-after enough shard responses have arrived to reconstruct the pack.
-
-**If violated:** slow redundant requests delay successful downloads until their
-network timeouts expire.
-
-**Enforced by:** HTTP and S3 `shard_quorum_does_not_wait_for_extra_worker_slots`
-regressions, which gate redundant responses until after the quorum returns.
 
 ## Every ref mutation participates in its lock protocol
 
@@ -305,33 +289,6 @@ workflow **commonware-latest.yml** runs `scripts/check-commonware-latest.sh`:
 it updates all resolved Commonware packages together, builds the consuming
 crates with all features, and runs their normal tests, including golden vectors.
 Build and test failures remain visible; the probe never restores an older pin.
-
-## commonware `Strategy` cannot be spied on from outside commonware-parallel
-
-**Always:** `crates/kit-core/src/pack_shard.rs`'s test suite does not
-attempt to assert that a caller-supplied `commonware_parallel::Strategy`
-was *invoked* by the encode/decode core (only that a real, non-default
-strategy compiles against the generic entry points and round-trips
-correctly — see `round_trip_with_explicit_parallel_strategy`).
-
-**Because:** commonware-parallel 2026.9.0 made `Strategy` impossible to
-implement from outside the `commonware-parallel` crate itself:
-`Strategy::manual` must return a `Manual<Self>`, and `Manual`'s fields are
-private with no public constructor left (`Manual::new` was removed). The
-`CountingStrategy` spy this test module used to define — an `impl
-Strategy` that counted `fold_init` calls to prove the supplied strategy
-was genuinely exercised, not merely accepted and discarded — can no
-longer be written.
-
-**If violated:** re-adding an external `impl Strategy` (e.g. to restore
-the invocation-count assertion) will not compile against the pinned
-commonware-parallel train; if it is somehow worked around, treat the
-resulting test as unable to prove what its name claims.
-
-**Enforced by:** `crates/kit-core/src/pack_shard.rs`'s
-`round_trip_with_explicit_parallel_strategy` (compiles + round-trips a
-real `Rayon` strategy) as the remaining guard; the comment block above it
-records why the invocation-count assertion cannot be rebuilt.
 
 ## Windows is not a build, test, or release target
 

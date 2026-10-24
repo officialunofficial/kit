@@ -194,18 +194,6 @@ fn upload_pack_rejects_over_pack_body_limit() {
 #[test]
 fn download_pack_200_returns_body() {
     let mut server = mockito::Server::new();
-    // pack-shards: scoped mocks. The manifest GET probes first; a 404
-    // signals "no shards published" so the transport falls through to
-    // the monolithic-body GET below. A bare `Matcher::Any` would feed
-    // the manifest path a body that fails `decode_manifest`, which —
-    // post-fix — surfaces as `InvalidResponse` rather than silently
-    // downgrading. Splitting the mocks by URL keeps the legacy
-    // happy-path behaviour explicit.
-    #[cfg(feature = "pack-shards")]
-    let _manifest_404 = server
-        .mock("GET", "/bucket/packs/4242424242424242424242424242424242424242424242424242424242424242/shards.manifest")
-        .with_status(404)
-        .create();
     let _m = server
         .mock("GET", mockito::Matcher::Any)
         .with_status(200)
@@ -702,15 +690,6 @@ fn list_refs_403_access_denied() {
 #[test]
 fn retry_429_then_200() {
     let mut server = mockito::Server::new();
-    // Scoped manifest 404 so the shard probe (under `--features
-    // pack-shards`) doesn't intercept the monolithic-body Matcher::Any
-    // mocks below. See `download_pack_200_returns_body` for the
-    // rationale.
-    #[cfg(feature = "pack-shards")]
-    let _manifest_404 = server
-        .mock("GET", "/bucket/packs/4242424242424242424242424242424242424242424242424242424242424242/shards.manifest")
-        .with_status(404)
-        .create();
     let _m429 = server
         .mock("GET", mockito::Matcher::Any)
         .with_status(429)
@@ -768,11 +747,9 @@ fn with_parts_rejects_invalid_url_prefixes() {
 fn retry_order_calls_server_enough_times() {
     // Thread-safe counter so we can confirm the transport makes EXACTLY
     // (1 + N) attempts before giving up — 1 initial + N retries (N = 5
-    // in the fast ladder we installed). This holds with or without the
-    // pack-shards feature: the first GET a `download_pack` issues (the
-    // shard manifest, or the monolithic pack body) is retried through
-    // the full ladder and its terminal 502 propagates without falling
-    // through to a second route.
+    // in the fast ladder we installed). The single GET that
+    // `download_pack` issues is retried through the full ladder and its
+    // terminal 502 propagates.
     static CALLS: AtomicU32 = AtomicU32::new(0);
     CALLS.store(0, Ordering::SeqCst);
 

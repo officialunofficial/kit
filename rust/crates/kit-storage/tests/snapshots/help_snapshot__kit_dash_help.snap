@@ -261,10 +261,6 @@ commands:
                     clients can drive this repository (status/diff/log/add/
                     commit/branch + verify/attest); --repository confines
                     tool calls to that path
-  pack-shard [--out <dir>] [--force] <hash>
-                    Encode a stored pack into Reed-Solomon shards (--out sets
-                    the output dir, default .kit/pack-shards; --force encodes
-                    below the size threshold) (feature: pack-shards)
   git export <dest>  Export refs to a git mirror, one-way; --passthrough
                     publishes an imported repo as a true git fork
   git import <url> [<dir>]  Import a git upstream as a signed downstream fork

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 /// Minimal deterministic xorshift64 PRNG, shared by every bench that needs
 /// reproducible pseudo-random bytes without pulling in the `rand` crate
-/// (`pack_shard_transfer.rs`'s jitter model, `delta_encode_scan.rs`'s
+/// (`delta_encode_scan.rs`'s
 /// low-similarity fixtures, and any future bench with the same need).
 #[derive(Debug, Clone, Copy)]
 pub struct Xorshift(u64);

@@ -706,10 +706,6 @@ publication. Applied-pack markers are rechecked under the lock; stale markers
 retain the existing object-closure recovery behavior. Stored-object ID lists
 are checked per pack and are not accumulated over the chain.
 
-S3 shard readers share a process-wide 4 GiB + 1 MiB encoded-buffer budget
-and 32-worker ceiling. Buffer reservations remain attached while queued and
-decoded. Completion or failure cancels the download group; blocked reads remain
-bounded by transport timeouts. Stragglers cannot obtain a fresh per-request
-budget. Reconstruction and unpack working memory remain bounded by one pack
-and its selected shard inputs, rather than total chain payload size. This is
-not a chunk-streaming pack parser and does not claim a small fixed RSS ceiling.
+Unpack working memory remains bounded by one pack, rather than total
+chain payload size. This is not a chunk-streaming pack parser and does not
+claim a small fixed RSS ceiling.

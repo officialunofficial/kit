@@ -266,13 +266,6 @@ sparse-checkout = [
     "kit-core/sparse-checkout",
     "kit-transport-s3?/sparse-checkout",
 ]
-# `kit pack-shard <hash>` producer subcommand and, when `s3` is on,
-# shard-aware S3 downloads. Default-off because the commonware dep stack is
-# large.
-pack-shards = [
-    "kit-core/pack-shards",
-    "kit-transport-s3?/pack-shards",
-]
 # Canonical first-parent ancestry snapshots and contextual proofs. Opt in for
 # commit/branch/merge/rebase/cherry-pick publication and verified reflog output.
 history-mmr = ["kit-core/history-mmr", "kit-sync/history-mmr"]

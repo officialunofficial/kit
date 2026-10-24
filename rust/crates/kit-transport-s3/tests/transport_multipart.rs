@@ -131,16 +131,6 @@ fn multipart_upload_round_trips_above_single_put_cap() {
 
     // Round-trip: a `download_pack` GET (simulating the now-materialized
     // multipart object) must return the exact bytes that were uploaded.
-    // When `pack-shards` is also enabled (e.g. under `--all-features`),
-    // `download_pack` probes the shard manifest first; a 404 there
-    // signals "no shards published" so it falls through to the
-    // monolithic GET below (mirrors `transport_mockito.rs`'s
-    // `download_pack_200_returns_body`).
-    #[cfg(feature = "pack-shards")]
-    let _m_manifest_404 = server
-        .mock("GET", format!("{object_path}/shards.manifest").as_str())
-        .with_status(404)
-        .create();
     let m_download = server
         .mock("GET", object_path.as_str())
         .with_status(200)

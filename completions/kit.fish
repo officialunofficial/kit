@@ -17,7 +17,7 @@ complete -c kit -f
 set -l __kit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean \
     tag config merge push pull fetch stash worktree clone remote key grant epoch visibility keygen \
-    cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame prove verify \
+    cherry-pick revert rebase bisect gc sparse-checkout serve mcp git blame prove verify \
     verify-proof closure attest verify-attest self version help
 
 # Subcommand list (only when no subcommand has been entered yet).
@@ -418,12 +418,6 @@ complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcomm
     -l show-unreferenced -d "Show unreferenced objects (local mode)"
 complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export verify" \
     -l format -d "Output format" -xa "default json"
-
-# pack-shard flags.
-complete -c kit -n "__fish_seen_subcommand_from pack-shard" \
-    -l out -d "Output directory" -r
-complete -c kit -n "__fish_seen_subcommand_from pack-shard" \
-    -l force -d "Overwrite existing shards"
 
 # git (bridge) flags.
 complete -c kit -n "__fish_seen_subcommand_from git" -a export -d "Export refs to a git mirror"

@@ -1159,16 +1159,6 @@ Remote / sync:
 
   `--http` and `--listen-enc` do not exist. `KIT_API_TOKEN` is sent as a
   bearer token by `kit+https://` remotes.
-- `kit pack-shard <hash> [--out <dir>] [--force]` &mdash; encode a stored
-  pack into Reed-Solomon shards plus a manifest, ready to publish to
-  an HTTP / S3 origin. Producer side of the SPEC-PACK-SHARDS
-  wire-format and transport-delivery stage. The
-  pack must already be in the local object store. Output layout:
-  `<out>/packs/<hex>/shards/<index>` and
-  `<out>/packs/<hex>/shards.manifest`. The manifest is written last
-  so racing readers either see "no manifest" (clean fall-through to
-  the monolithic pack) or "manifest plus all shards". Requires building
-  the binary with `--features pack-shards`.
 - `kit closure export <revision> [--history] [-o DIR] [--force]
   [--format=json]` &mdash; write a full-disclosure closure of `<revision>`
   as `DIR/MANIFEST.mkcl` plus `DIR/<pack_key hex>.pack` files (raw-only

@@ -57,7 +57,6 @@
 //! | `upload-parts/`          | common   | CLI remote dispatch (resumable receipt cache, never a gc root) |
 //! | `git/`                   | common   | `kit-git-bridge`       |
 //! | `sparse/`                | common   | CLI sparse witness cache |
-//! | `pack-shards/`           | common   | CLI pack-shard output   |
 //! | `HEAD`                   | worktree | [`crate::refs`]         |
 //! | `index`                  | worktree | [`crate::index`]        |
 //! | `ORIG_HEAD`              | worktree | [`crate::ops::conflict_state`] |
@@ -121,8 +120,6 @@ pub const UPLOAD_PARTS_DIR_NAME: &str = "upload-parts";
 pub const GIT_STATE_DIR_NAME: &str = "git";
 /// Sparse witness-cache directory name under the common dir.
 pub const SPARSE_CACHE_DIR_NAME: &str = "sparse";
-/// Default pack-shard output directory name under the common dir.
-pub const PACK_SHARDS_DIR_NAME: &str = "pack-shards";
 /// Directory under the common dir holding one per-tree state dir per
 /// linked worktree.
 pub const WORKTREES_DIR_NAME: &str = "worktrees";
@@ -335,12 +332,6 @@ impl RepoLayout {
     #[must_use]
     pub fn sparse_cache_dir(&self) -> PathBuf {
         self.common_dir.join(SPARSE_CACHE_DIR_NAME)
-    }
-
-    /// `pack-shards/` — default output directory for pack shards.
-    #[must_use]
-    pub fn pack_shards_dir(&self) -> PathBuf {
-        self.common_dir.join(PACK_SHARDS_DIR_NAME)
     }
 
     // ------------------------------------------------------------------
@@ -807,12 +798,6 @@ mod tests {
             ),
             ("git_state_dir", l.git_state_dir(), "git", Common),
             ("sparse_cache_dir", l.sparse_cache_dir(), "sparse", Common),
-            (
-                "pack_shards_dir",
-                l.pack_shards_dir(),
-                "pack-shards",
-                Common,
-            ),
             ("head_file", l.head_file(), "HEAD", Worktree),
             ("index_file", l.index_file(), "index", Worktree),
             ("orig_head_file", l.orig_head_file(), "ORIG_HEAD", Worktree),
@@ -942,7 +927,6 @@ mod tests {
         assert_eq!(UPLOAD_PARTS_DIR_NAME, "upload-parts");
         assert_eq!(GIT_STATE_DIR_NAME, "git");
         assert_eq!(SPARSE_CACHE_DIR_NAME, "sparse");
-        assert_eq!(PACK_SHARDS_DIR_NAME, "pack-shards");
         // Legacy prefix-embedding constants remain valid views of the
         // same locations.
         assert_eq!(

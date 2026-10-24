@@ -45,8 +45,6 @@ pub mod mcp_v2;
 pub mod merge;
 pub mod merge_base;
 pub mod mv;
-#[cfg(feature = "pack-shards")]
-pub mod pack_shard;
 pub mod prove;
 pub mod pull;
 pub mod push;

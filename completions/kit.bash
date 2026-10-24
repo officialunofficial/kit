@@ -14,7 +14,7 @@ _kit_complete() {
     local cur prev words cword
     _init_completion || return 0
 
-    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key grant epoch visibility keygen cherry-pick revert rebase bisect gc worktree sparse-checkout serve mcp pack-shard git blame prove verify verify-proof closure attest verify-attest self version help"
+    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key grant epoch visibility keygen cherry-pick revert rebase bisect gc worktree sparse-checkout serve mcp git blame prove verify verify-proof closure attest verify-attest self version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.
     local top_flags="--help -h --version -V"
 
@@ -147,9 +147,6 @@ _kit_complete() {
             ;;
         key)
             COMPREPLY=( $(compgen -W "generate list import export delete --help" -- "$cur") )
-            ;;
-        pack-shard)
-            COMPREPLY=( $(compgen -W "--out --force --help" -- "$cur") )
             ;;
         git)
             COMPREPLY=( $(compgen -W "export import fetch pull verify status format-patch --remote-name --ref --no-attest --algorithm --signer --key --json --passthrough --fork-audit --stdout -o --output-directory --help" -- "$cur") )

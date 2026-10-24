@@ -65,7 +65,6 @@ _kit() {
         'sparse-checkout:Manage sparse checkout patterns'
         'serve:Start SSH transport server (internal)'
         'mcp:Start a Model Context Protocol server on stdio for MCP clients'
-        'pack-shard:Encode a stored pack into Reed-Solomon shards'
         'git:Git-bridge subcommands (git export, feature-gated)'
         'blame:Show line-level commit attribution'
         'prove:Build a disclosure bundle for a path, chunk, or byte range'
@@ -513,13 +512,6 @@ _kit() {
                         'import[import a key into the keystore]' \
                         'export[export a key from the keystore]' \
                         'delete[delete a key from the keystore]'
-                    ;;
-                pack-shard)
-                    _arguments \
-                        '--out[output directory]:_files -/' \
-                        '--force[overwrite existing shards]' \
-                        '--help[show help]' \
-                        '1:hash:'
                     ;;
                 git)
                     _arguments \

@@ -21,7 +21,6 @@ baseline build lean:
 | `s3` | `kit+s3://` remotes on S3-compatible storage (`kit-transport-s3`). |
 | `git-bridge` (default) | `kit git …` (SPEC-GIT-BRIDGE/SPEC-GIT-IMPORT). |
 | `sparse-checkout` | Verifiable sparse-checkout. |
-| `pack-shards` | `kit pack-shard <hash>` and shard-aware HTTP/S3 downloads. |
 | `history-mmr` | Append-only Merkle Mountain Belt ref-write journal. |
 | `bls-threshold` | BLS12-381 threshold-signing exhaustiveness (compile-time only today). |
 

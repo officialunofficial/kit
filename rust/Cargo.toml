@@ -42,9 +42,7 @@ commonware-macros = { version = "=2026.9.0", default-features = false }
 commonware-storage = { version = "2026.9.0", default-features = false }
 commonware-cryptography = { version = "2026.9.0", default-features = false }
 commonware-runtime = { version = "2026.9.0" }
-commonware-coding = { version = "2026.9.0" }
 commonware-codec = { version = "2026.9.0", default-features = false }
-commonware-parallel = { version = "2026.9.0", default-features = false }
 commonware-utils = { version = "2026.9.0", default-features = false }
 
 [workspace.lints.rust]

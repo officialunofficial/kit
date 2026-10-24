@@ -969,25 +969,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "commonware-coding"
-version = "2026.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07145b2f348a8d3faa058dca684a5a37e0cede9f53ef123421c2227d40477afb"
-dependencies = [
- "bytes",
- "commonware-codec",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-math",
- "commonware-parallel",
- "commonware-storage",
- "commonware-utils",
- "num-rational",
- "rayon",
- "thiserror",
-]
-
-[[package]]
 name = "commonware-cryptography"
 version = "2026.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2949,9 +2930,7 @@ dependencies = [
  "blake3",
  "bytes",
  "commonware-codec",
- "commonware-coding",
  "commonware-cryptography",
- "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",

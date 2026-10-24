@@ -159,22 +159,6 @@ pub fn dispatch(argv: &[String]) -> u8 {
             exit::UNAVAILABLE
         }
         "sparse-checkout" => commands::sparse_checkout::run(&rest),
-        #[cfg(feature = "pack-shards")]
-        "pack-shard" => commands::pack_shard::run(&rest),
-        #[cfg(not(feature = "pack-shards"))]
-        "pack-shard" => {
-            // `pack-shard` is advertised in HELP_TEXT as a feature-gated
-            // command; mirror the `git` fallback so an advertised-but-
-            // disabled command fails with a clear "not compiled in"
-            // message rather than a misleading "unknown command".
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(
-                stderr,
-                "error: pack-shard is not compiled into this binary; \
-                 rebuild with `--features pack-shards`"
-            );
-            exit::UNAVAILABLE
-        }
         other => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(

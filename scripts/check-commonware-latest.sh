@@ -45,7 +45,7 @@ crates=(-p kit-core -p kit-attest)
 if [ -f crates/kit-primitives/Cargo.toml ]; then
   crates+=(-p kit-primitives)
 fi
-# All features exercise optional Commonware-backed formats, including BLS and
-# erasure-coded shards. Normal nextest runs execute the same golden tests.
+# All features exercise optional Commonware-backed formats, including BLS.
+# Normal nextest runs execute the same golden tests.
 "${cargo_cmd[@]}" build --locked "${crates[@]}" --all-features
 "${cargo_cmd[@]}" nextest run --locked "${crates[@]}" --all-features -j 3

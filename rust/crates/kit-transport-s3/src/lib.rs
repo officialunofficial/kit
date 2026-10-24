@@ -256,22 +256,6 @@ impl S3Transport {
         format!("packs/{}", to_hex(digest))
     }
 
-    /// Build the S3 object key for the shard manifest of a pack:
-    /// `packs/<64-char hex digest>/shards.manifest`. Mirrors the HTTP
-    /// transport's URL shape.
-    #[must_use]
-    pub fn shard_manifest_object_key(digest: &Hash) -> String {
-        format!("packs/{}/shards.manifest", to_hex(digest))
-    }
-
-    /// Build the S3 object key for one shard of a pack:
-    /// `packs/<64-char hex digest>/shards/<index>`. Mirrors the HTTP
-    /// transport's URL shape.
-    #[must_use]
-    pub fn shard_object_key(digest: &Hash, index: u16) -> String {
-        format!("packs/{}/shards/{}", to_hex(digest), index)
-    }
-
     /// Build the repository namespace key. Without a URL prefix this is
     /// the canonical repository-relative key; with a prefix it is
     /// `<prefix>/<canonical-key>`.
@@ -819,16 +803,6 @@ impl Transport for S3Transport {
     }
 
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        // Shard-aware path: when the pack-shards feature is on, try
-        // the manifest first. `Ok(None)` means the manifest is
-        // missing (producer never sharded this pack), so we fall
-        // through to the monolithic GET below. Any other error
-        // propagates as-is.
-        #[cfg(feature = "pack-shards")]
-        if let Some(bytes) = self.download_pack_via_shards(key)? {
-            return Ok(bytes);
-        }
-
         let object_key = Self::pack_object_key(key.as_bytes());
         let resp = self.http_request(
             &Method::GET,
@@ -1202,165 +1176,6 @@ impl HttpResponse {
     }
     pub(crate) fn body_pub(&self) -> &[u8] {
         &self.body
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Pack-Shards client (feature-gated)
-// ---------------------------------------------------------------------------
-
-/// Per-request timeout for a single shard GET.
-///
-/// Bounds a stalled straggler so a detached worker can never pin a
-/// thread for the process lifetime. See the HTTP transport's
-/// `SHARD_REQUEST_TIMEOUT` for the matching rationale.
-#[cfg(feature = "pack-shards")]
-const SHARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Fetch a single shard, retrying transient failures through the
-/// supplied backoff ladder.
-///
-/// Retries ONLY on `ConnectionFailed` / 429 / 5xx (per `is_retryable`).
-/// `AccessDenied` (401/403), `PackNotFound` (404), and `PayloadTooLarge`
-/// are terminal and return immediately. The shard object key is built
-/// from the EFFECTIVE PREFIX inside [`fetch_one_shard`], preserving
-/// namespace isolation across retries.
-#[cfg(feature = "pack-shards")]
-#[allow(clippy::too_many_arguments)]
-fn fetch_one_shard_with_retry(
-    client: &Client,
-    endpoint: &str,
-    bucket: &str,
-    prefix: Option<&str>,
-    creds: &Credentials,
-    digest: &Hash,
-    index: u16,
-    clock: fn() -> i64,
-    backoff: fn() -> BackoffIterator,
-    sleeper: fn(Duration),
-    cancel: &kit_core::pack_shard::download::Cancellation,
-) -> TransportResult<kit_core::pack_shard::download::DownloadedShard> {
-    let mut ladder = backoff();
-    loop {
-        cancel.check()?;
-        let ts = clock();
-        let err = match fetch_one_shard(
-            client, endpoint, bucket, prefix, creds, digest, index, ts, cancel,
-        ) {
-            Ok(bytes) => return Ok(bytes),
-            Err(e) => e,
-        };
-        if is_retryable(&err)
-            && let Some(delay) = ladder.next()
-        {
-            sleeper(delay);
-            continue;
-        }
-        return Err(err);
-    }
-}
-
-#[cfg(feature = "pack-shards")]
-#[allow(clippy::too_many_arguments)] // Worker request carries signing context and cancellation.
-fn fetch_one_shard(
-    client: &Client,
-    endpoint: &str,
-    bucket: &str,
-    prefix: Option<&str>,
-    creds: &Credentials,
-    digest: &Hash,
-    index: u16,
-    ts: i64,
-    cancel: &kit_core::pack_shard::download::Cancellation,
-) -> TransportResult<kit_core::pack_shard::download::DownloadedShard> {
-    let canonical_key = S3Transport::shard_object_key(digest, index);
-    let object_key = prefix.map_or_else(
-        || canonical_key.clone(),
-        |namespace| format!("{namespace}/{canonical_key}"),
-    );
-    let path = if bucket.is_empty() {
-        format!("/{object_key}")
-    } else {
-        format!("/{bucket}/{object_key}")
-    };
-    let signed = sign_request(creds, "GET", &path, "", &[], endpoint, ts);
-    let url = format!("{endpoint}{path}");
-    let resp = client
-        .request(Method::GET, &url)
-        .timeout(SHARD_REQUEST_TIMEOUT)
-        .header("Authorization", signed.authorization)
-        .header("x-amz-date", signed.x_amz_date)
-        .header("x-amz-content-sha256", signed.x_amz_content_sha256)
-        .send()
-        .map_err(|_| TransportError::ConnectionFailed)?;
-    let status = resp.status().as_u16();
-    match status {
-        200 => kit_core::pack_shard::download::DownloadedShard::read(index, resp, cancel),
-        404 => Err(TransportError::PackNotFound),
-        401 | 403 => Err(TransportError::AccessDenied),
-        s => Err(TransportError::ServerError { status: s }),
-    }
-}
-
-#[cfg(feature = "pack-shards")]
-impl S3Transport {
-    fn download_pack_via_shards(&self, key: &PackKey) -> TransportResult<Option<Vec<u8>>> {
-        use kit_core::pack_shard::download::{decode_downloaded_pack, download_shards};
-        use kit_core::pack_shard::{MANIFEST_MAX_BYTES, decode_manifest};
-
-        let manifest_key = Self::shard_manifest_object_key(key.as_bytes());
-        let manifest_resp = self.http_request(
-            &Method::GET,
-            &manifest_key,
-            "",
-            None,
-            &[],
-            Some(MANIFEST_MAX_BYTES),
-        )?;
-        match manifest_resp.status {
-            200 => {}
-            // 404 is the only legitimate "no shards published" signal —
-            // the producer never wrote a manifest, so the client must
-            // fall through to the monolithic GET. Every other status,
-            // including a malformed-body 200, propagates so the caller
-            // sees the bug rather than silently downgrading. This
-            // mirrors the Connect client's shard download posture.
-            404 => return Ok(None),
-            403 | 401 => return Err(TransportError::AccessDenied),
-            s => return Err(TransportError::ServerError { status: s }),
-        }
-        let manifest =
-            decode_manifest(&manifest_resp.body).map_err(|_| TransportError::InvalidResponse)?;
-        if manifest.pack_hash != *key.as_bytes() {
-            return Err(TransportError::InvalidResponse);
-        }
-
-        let digest = *key.as_bytes();
-        let endpoint = self.endpoint.clone();
-        let bucket = self.bucket.clone();
-        let prefix = self.prefix.clone();
-        let creds = self.creds.clone();
-        let client = self.client.clone();
-        let clock = self.clock;
-        let backoff = self.backoff;
-        let sleeper = self.sleeper;
-        let shards = download_shards(manifest.config, move |index, cancel| {
-            fetch_one_shard_with_retry(
-                &client,
-                &endpoint,
-                &bucket,
-                prefix.as_deref(),
-                &creds,
-                &digest,
-                index,
-                clock,
-                backoff,
-                sleeper,
-                cancel,
-            )
-        })?;
-
-        decode_downloaded_pack(&shards, &manifest, key).map(Some)
     }
 }
 

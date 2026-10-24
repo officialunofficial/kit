@@ -1343,22 +1343,6 @@ confines every tool call to the given path. The server runs no network
 operations and never overrides
 .Nm Ns 's
 data-loss guards.
-.It Cm pack-shard Oo Fl Fl out Ar dir Oc Oo Fl Fl force Oc Ar hash
-Encode a stored pack into Reed-Solomon shards plus a manifest, ready to
-publish to an HTTP or S3 origin (producer side of SPEC-PACK-SHARDS).
-The pack must already be in the local object store. Output lands
-under
-.Pa <out>/packs/<hex>/shards/<index>
-with the manifest written last, so racing readers see either no manifest
-(clean fall-through to the monolithic pack) or the manifest plus every
-shard.
-.Fl Fl out Ar dir
-sets the output directory
-.Pq default Pa .kit/pack-shards ;
-.Fl Fl force
-encodes even when the pack is below the size threshold. Requires building
-the binary with
-.Cm --features pack-shards .
 .It Cm git Cm export Oo Fl Fl remote-name Ar name Oc Oo Fl Fl ref Ar ref Oc Oo Fl Fl passthrough Oc Oo Fl Fl no-attest Oc Oo Fl Fl algorithm Ar alg Oc Oo Fl Fl signer Ar kind Oc Oo Fl Fl json Oc Ar dest
 Deterministic one-way export of branches and tags to a git mirror per
 SPEC-GIT-BRIDGE. kit-only fields ride in
