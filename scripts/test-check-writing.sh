@@ -138,12 +138,14 @@ commit_case 'commit body leak' fail "$(printf 'Add the parser\n\nThis closes the
 commit_case 'commit trailer' fail "$(printf 'Add the parser\n\nCo-authored-by: Someone <a@example.invalid>')" 'trailer'
 commit_case 'commit long subject' fail "$(printf 'Add %0100d' 0)" 'longer than 72'
 
-# A commit listed in the known commits file passes. An unlisted one fails.
+# A range with an old leaking commit and a clean new commit checks only the new one.
 new_repo
 printf 'change\n' >>"$repo/README.md"
 git -C "$repo" commit -q -a -m "Fix the parser (${hash}12)"
-git -C "$repo" rev-parse HEAD >"$repo/scripts/check-writing-known-commits.txt"
-if bash "$repo/scripts/check-writing.sh" --commits HEAD~1..HEAD >/dev/null 2>&1; then pass; else fail 'known commit'; fi
+printf 'more\n' >>"$repo/README.md"
+git -C "$repo" commit -q -a -m 'Reject unknown config keys'
+if bash "$repo/scripts/check-writing.sh" --commits HEAD~1..HEAD >/dev/null 2>&1; then pass; else fail 'range limit'; fi
+if bash "$repo/scripts/check-writing.sh" --commits HEAD~2..HEAD >/dev/null 2>&1; then fail 'range includes leak'; else pass; fi
 
 # An empty range passes.
 new_repo

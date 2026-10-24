@@ -10,8 +10,9 @@
 #   bash scripts/check-writing.sh --commits RANGE   scan the commit messages
 #                                                   in a git revision range
 #
-# The commit scan skips the hashes in scripts/check-writing-known-commits.txt.
-# A commit message also needs a subject of at most 72 characters.
+# The commit scan checks only the range that the caller passes. It has no list
+# of exempt commits. A commit message also needs a subject of at most 72
+# characters.
 # Needs git built with PCRE support (git grep -P).
 
 set -euo pipefail
@@ -19,7 +20,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PATTERNS=scripts/check-writing-patterns.txt
-KNOWN=scripts/check-writing-known-commits.txt
 
 # Paths that may name the banned words. AGENTS.md and CONTRIBUTING.md state
 # the rule itself. .gitignore keeps local tool state out of the tree.
@@ -70,9 +70,6 @@ scan_commits() {
     trap "rm -rf '$work'" EXIT
     while IFS= read -r commit; do
         [ -n "$commit" ] || continue
-        if [ -f "$KNOWN" ] && grep -qxF "$commit" "$KNOWN"; then
-            continue
-        fi
         msg=$work/message
         git log -1 --format=%B "$commit" >"$msg"
         subject=$(git log -1 --format=%s "$commit")
