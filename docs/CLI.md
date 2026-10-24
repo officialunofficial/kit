@@ -471,7 +471,7 @@ History / commits:
   application policy (trust roots). Default output mirrors `kit
   verify`: `ok: <kind> <path> @ <short id>, <bytes> B, signer <keyid>
   (valid|INVALID signature)[, signer trusted]` or `bad: <reason>`.
-  `--format=json` matches kit-wasm's `verify_disclosure` shape plus
+  `--format=json` prints the disclosure report plus
   `signer_trusted` (`true`/`false`/`null`), including `step_inner_roots`
   (hex array) and `chunk_inner_root` (hex or `null`). `--payload-out FILE`
   writes the verified payload bytes.
@@ -1196,7 +1196,7 @@ Remote / sync:
   mode only &mdash; is hidden unless `--show-unreferenced` is passed
   (the local store is expected to be a superset of any single commit,
   so a long unreferenced list is usually noise; `--from` always shows
-  it). JSON matches kit-wasm's `ClosureReport` shape (`root, mode,
+  it). JSON has these fields (`root, mode,
   verified, complete, missing[], corrupt[{id, reason}],
   unreferenced[], unreferenced_checked`); `unreferenced` is `[]` in local
   mode unless `--show-unreferenced` is passed, and the unchecked streaming
@@ -1771,8 +1771,8 @@ Accepted schemes:
 accepted (for shape-consistency with the other schemes) but currently
 has no wire effect: every RPC resolves to the fixed
 `/kit.transport.v1.TransportService/<Method>` path regardless.
-Write RPCs against a deployment that requires the Ed25519 write envelope
-(for example, an auth-v2 `kit-server` deployment) need
+Write RPCs against a server that requires the Ed25519 write envelope
+need
 `kit config transport_auth envelope` &mdash; see the config table above and
 SPEC-TRANSPORT-CONNECT §7.3.
 

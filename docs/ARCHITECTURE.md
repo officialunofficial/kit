@@ -27,7 +27,6 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 | `kit-serve`                   | `rust/crates/kit-serve/`             | Self-host server: the `kit.rpc.v1.ssh` frame session over a repository on disk; `kit serve` is a thin wrapper |
 | `kit-sync`                    | `rust/crates/kit-sync/`              | Native clone/fetch/pull for `.kit` repositories as a library: typed reports, no printing, no ambient config; `kit clone`/`fetch`/`pull` are thin wrappers over it |
 | `kit-storage`                     | `rust/crates/kit-storage/`               | The `kit` binary; thin glue over the library crates                   |
-| `kit-wasm`                    | `rust/crates/kit-wasm/`              | WASM bindings for browsers and Cloudflare Workers                      |
 | `kit-fuzz`                    | `rust/fuzz/`                          | cargo-fuzz harnesses (`docs/FUZZ.md`)                                  |
 | `kit-sign-file` (contrib)     | `contrib/signers/kit-sign-file/`     | Reference external signer; protocol conformance baseline               |
 | `kit-sign-se` (contrib)       | `contrib/signers/kit-sign-se/`       | Apple Secure Enclave signer (Swift / CryptoKit)                        |
@@ -36,7 +35,7 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 
 The `contrib/signers/*` crates form a separate sibling Cargo
 workspace under `contrib/signers/` &mdash; they are **not** members of the
-`rust/` workspace (out-of-tree members break release-plz publishing).
+`rust/` workspace.
 They share package metadata, lint config, and dependency pins by
 inheriting from `contrib/signers/Cargo.toml`, and they are not part of
 the `kit` binary's link graph. They communicate over the protocol
