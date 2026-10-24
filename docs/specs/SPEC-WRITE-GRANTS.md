@@ -398,7 +398,7 @@ Both ECDSA schemes therefore fix one form.
 
 Each namespace has an **epoch** at each deployment: an unsigned 64-bit
 integer that starts at 0. The namespace coordinator stores it
-authoritatively (D34), and it is persisted as durably as refs. It never
+authoritatively, and it is persisted as durably as refs. It never
 decreases. A grant is valid only while its `epoch` field **equals** the
 stored epoch. Raising the epoch therefore revokes every grant in the
 namespace at once. To revoke one grant, the owner raises the epoch and
@@ -1175,12 +1175,10 @@ the workspace grant separator `kit-workspace-grant:v1`.
 
 ### 13.1 Golden fixtures
 
-These fixtures under `rust/tests/golden/grants/` and
-`rust/tests/golden/url-token/` are this document's test vectors. Each
-directory's `MANIFEST.txt` pins the BLAKE3 of every file, and
-`scripts/golden/grants_ref.py` and `scripts/golden/url_token_ref.py`
-rebuild and check them from this document's rules, independently of the
-Rust code.
+These fixtures under `rust/tests/golden/grants/` are this document's test
+vectors. The directory's `MANIFEST.txt` pins the BLAKE3 of every file, and
+`scripts/golden/grants_ref.py` rebuilds and checks them from this
+document's rules, independently of the Rust code.
 
 - `grant-statements.json`: canonical grant statements, each with its
   field values and grant id (§3.2, §3.4). They cover every capability
@@ -1258,7 +1256,6 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Fixture | Pins |
 |---|---|
-| `rust/tests/golden/url-token/` | tokens (object, nested path, empty root path, 1,024-byte path, epochs 0 and 2^64−1), target fields, a rendered key set with an active and a retired key, and rejections (padding, standard alphabet, trailing bits, segment and field counts, domain, key id case, unknown key, foreign signature, issued ≥ expiry, `.`/`..`/`//`/edge slashes, 1,025-byte and non-UTF-8 paths), rebuilt by `scripts/golden/url_token_ref.py` (§9.4). |
 | `rust/tests/golden/grants/eth-primitives.json` | Keccak-256 of the empty string, `abc` and a 4,096-byte statement-shaped input, plus the differing SHA3-256 of the empty string (§4.1); two EIP-191 vectors (§4): the public `Some data` vector and the §3.4 example grant, each with its message, digest, private key, 65-byte `r‖s‖v` signature and recovered address; the high-`s` twin of each, which a verifier rejects and a client normalizes back (§4.4); the address, `x` and `y` of two secp256k1 and two P-256 keys, including `d = 1` on each curve (§4.1); one key per curve with `x ≥ p` whose reduction is on the curve, which a verifier rejects (§4.1); and a P-256 DER signature with high `s`, its low-`s` raw `r‖s`, and seven DER encodings a client rejects: a non-minimal integer, a trailing byte, a negative integer, a 33-byte integer, `r = 0`, `r = n` and a long-form length (§4.4). |
 
 ---
