@@ -22,7 +22,6 @@ w_milestone='mile''stone'
 w_tracker='tra''cker'
 w_tool='Cla''ude'
 w_old='m''kit'
-w_seed='MK''ITFCDC'
 w_tracked='tra''cked'
 w_follow='fol''low-up'
 w_wp='W''P'
@@ -104,9 +103,8 @@ tree_clean 'clean text' docs/a.md 'The code rejects unknown keys.'
 tree_clean 'anchor link' docs/a.md 'See [the spec](SPEC-A.md'"${hash}"'54-verification).'
 tree_clean 'standard name' docs/a.md 'Use PKCS'"${hash}"'11 and C'"${hash}"'.'
 tree_clean 'git tracked as a file' src/a.rs '// The path is tracked as a file.'
-tree_clean 'old name in the changelog' CHANGELOG.md "Renamed from $w_old."
-tree_clean 'old name in the installer' install.sh "# Move the old $w_old directory."
-tree_clean 'frozen seed' docs/a.md "The seed is $w_seed."
+tree_leaks 'old name in the changelog' CHANGELOG.md "Renamed from $w_old." 'old product name'
+tree_leaks 'old name in the installer' install.sh "# Move the old $w_old directory." 'old product name'
 
 tree_leaks 'bare issue number' docs/a.md "Fixes ${hash}123." 'issue or pull request number'
 tree_leaks 'external issue number' docs/a.md "See org${hash}123 for details." 'external issue number'
