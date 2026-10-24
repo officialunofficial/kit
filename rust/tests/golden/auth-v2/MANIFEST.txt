@@ -1,3 +1,7 @@
-# Auth v2 signed read vectors (BLAKE3 hash of file bytes)
-# Update the digests with `python3 scripts/golden/write_manifest.py rust/tests/golden/auth-v2`
+# Auth v2 envelope vectors (BLAKE3 hash of file bytes)
+# Update the digests with `python3 scripts/golden/write_manifest.py --add unary.json --add part.json rust/tests/golden/auth-v2`
+# Cross-checked by `python3 scripts/golden/auth_v2_ref.py rust/tests/golden`
+# and, for part.json, by `python3 scripts/golden/blake3_subtree_ref.py`
 read.json f0fe5d77fc66bb52297c40cc79d7216b182a97496440dccdd8297eeb73bd938f
+unary.json e9db47f06b1bc5132b3f00112cc1e7c0b22ed0f02a310a09275c9eee7e16ea98
+part.json 86a71f9ed7d35050ab1dbddc5e871d00fcf92536fb55dad396aa39a3dbc9042d
