@@ -236,20 +236,8 @@ jobs:
           protoc: "false"
       - name: Install b3sum
         run: cargo install --locked b3sum --version 1.8.7
-      - name: Part-upload vectors (BLAKE3 subtree merge)
-        run: >-
-          "$RUNNER_TEMP/ref-venv/bin/python" scripts/golden/blake3_subtree_ref.py
-          rust/tests/golden/uploads/subtree-merge.json
-          --part-json rust/tests/golden/auth-v2/part.json
-          --jobs 4
-      - name: Grant vectors
-        run: '"$RUNNER_TEMP/ref-venv/bin/python" scripts/golden/grants_ref.py rust/tests/golden/grants'
-      - name: Object, tag and chunker vectors
-        run: python3 -I -B scripts/golden/objects_ref.py rust/tests/golden
-      - name: Closure vectors
-        run: python3 -I -B scripts/golden/closure_ref.py rust/tests/golden
-      - name: Redaction vectors
-        run: python3 scripts/check-redaction-goldens.py
+      - name: Golden vector reference checks
+        run: PYTHON="$RUNNER_TEMP/ref-venv/bin/python" bash scripts/check-golden.sh
 
   cli-baseline:
     name: default CLI baseline

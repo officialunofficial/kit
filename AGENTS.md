@@ -16,6 +16,7 @@ kit is a content-addressed, signed version-control system. Security comes first.
 
 - A format change updates the spec and the golden vectors in the same commit.
 - Golden vectors must pass in the Rust code and in an independent reference check.
+- Run `scripts/check-golden.sh` when you change a golden vector or a spec. CI runs it.
 - Never change a published tag, magic or constant to fix a style issue.
 
 ## Code
