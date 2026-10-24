@@ -410,7 +410,7 @@ fn load_tree<S: ObjectSource + ?Sized>(store: &S, h: Hash) -> Result<Vec<TreeEnt
 /// names: we use `String` rather than `Path` to avoid platform-specific
 /// separator handling. Tree names are constrained at the object layer
 /// to forbid `/` and `\\`, so the only lossy case is non-UTF-8 byte
-/// sequences in legacy data — the caller's `path` field will then be
+/// sequences in stored data — the caller's `path` field will then be
 /// `String::from_utf8_lossy`'s replacement, which is acceptable for a
 /// diagnostic.
 fn join_path(prefix: &str, name: &[u8]) -> String {
@@ -1311,9 +1311,6 @@ pub enum StatusStaging {
     Unstaged,
     /// Change is staged (in the index, matching the worktree).
     Staged,
-    /// Change exists in both index and worktree with different content
-    /// (partially staged scenario).
-    PartiallyStaged,
 }
 
 /// One entry in the `kit status` output. Combines a [`DiffEntry`] with
@@ -1343,14 +1340,9 @@ pub enum DiffError {
 /// Compare HEAD ↔ index and index ↔ worktree, returning a list of
 /// [`StatusEntry`] grouped by staging state.
 ///
-/// Pre-fix this function diffed only HEAD↔worktree and annotated
-/// each entry with index-state. That hid one hazard: a path staged
-/// to the index whose worktree was later reverted to match HEAD
-/// would diff to nothing — but `kit commit` (which signs HEAD↔
-/// index post-fix) would still commit the staged content. The
-/// staged change was invisible to `kit status`.
-///
-/// New shape:
+/// A path staged to the index whose worktree was later reverted to match
+/// HEAD must still show as staged, because `kit commit` signs the
+/// HEAD↔index difference. So the function reports two legs:
 ///
 /// - `Staged` — path differs between HEAD and the index-built tree
 ///   (the change is what `kit commit` will sign).
@@ -1358,13 +1350,11 @@ pub enum DiffError {
 ///   worktree (changes the user has not yet `kit add`-ed).
 /// - When the same path appears in both legs (e.g. staged v2, then
 ///   worktree edited to v3), one entry is emitted per leg so callers
-///   render both sections — matching git's two-section layout. The
-///   `PartiallyStaged` enum variant is retained for back-compat but
-///   no longer produced by this function.
+///   render both sections — matching git's two-section layout.
 ///
-/// When `index` is `None`, falls back to the legacy HEAD↔worktree
-/// diff and labels every entry `Unstaged` — used by callers that
-/// haven't initialized a staging index yet.
+/// When `index` is `None`, compares HEAD↔worktree and labels every
+/// entry `Unstaged` — used by callers that haven't initialized a
+/// staging index yet.
 ///
 /// # Errors
 ///
@@ -1424,7 +1414,7 @@ pub fn status_diff_observed(
     )?;
 
     let Some(idx) = index else {
-        // Legacy fallback: HEAD↔worktree, everything labeled Unstaged.
+        // No index: HEAD↔worktree, everything labeled Unstaged.
         let diff = diff_worktree_trees(&snapshot, head_tree.copied(), Some(work_tree_hash))?;
         return Ok((
             diff.entries
@@ -1450,8 +1440,7 @@ pub fn status_diff_observed(
     // produces two entries — one `Staged` and one `Unstaged` — so the
     // status renderer shows it under BOTH "Changes to be committed"
     // and "Changes not staged for commit", matching git's two-section
-    // layout. The `PartiallyStaged` enum variant is retained for API
-    // back-compat but no longer produced.
+    // layout.
     let mut out: Vec<StatusEntry> =
         Vec::with_capacity(staged.entries.len() + unstaged.entries.len());
     for d in staged.entries {
@@ -2225,8 +2214,6 @@ mod tests {
     /// The HEAD↔index leg yields one Added (Staged) entry; the
     /// index↔worktree leg yields one Modified (Unstaged) entry. Same
     /// path appears in both sections — git's two-section layout.
-    /// Pre-fix this collapsed to a single `PartiallyStaged` entry
-    /// which hid the staged-vs-worktree distinction.
     #[test]
     fn status_partially_staged_entry_emits_both_legs() {
         use crate::index::{EntryStatus, Index, IndexEntry};

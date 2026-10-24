@@ -532,18 +532,9 @@ fn porcelain_code(staging: StatusStaging, kind: DiffKind) -> &'static str {
         (StatusStaging::Unstaged, DiffKind::Removed) => " D",
         (StatusStaging::Unstaged, DiffKind::Modified) => " M",
         (StatusStaging::Unstaged, DiffKind::ModeChanged) => " T",
-        // PartiallyStaged is documented as retained-for-back-compat
-        // and no longer produced by status_diff post-fix, but render
-        // defensively in case it ever resurfaces. `MM` matches git's
-        // double-mod indicator.
-        (StatusStaging::PartiallyStaged, DiffKind::Added) => "AM",
-        (StatusStaging::PartiallyStaged, DiffKind::Removed) => "MD",
-        (StatusStaging::PartiallyStaged, DiffKind::Modified) => "MM",
-        (StatusStaging::PartiallyStaged, DiffKind::ModeChanged) => "MT",
         // Renames are detected per staging leg, so they only ever appear
-        // as a clean staged (`R `) or unstaged (` R`) move; PartiallyStaged
-        // can't be produced for a rename but is rendered defensively.
-        (StatusStaging::Staged | StatusStaging::PartiallyStaged, DiffKind::Renamed) => "R ",
+        // as a clean staged (`R `) or unstaged (` R`) move.
+        (StatusStaging::Staged, DiffKind::Renamed) => "R ",
         (StatusStaging::Unstaged, DiffKind::Renamed) => " R",
     }
 }
@@ -587,10 +578,6 @@ fn render_human(layout: &RepoLayout, entries: &[StatusEntry]) -> u8 {
         .iter()
         .filter(|e| e.staging == StatusStaging::Staged)
         .collect();
-    let partial: Vec<_> = entries
-        .iter()
-        .filter(|e| e.staging == StatusStaging::PartiallyStaged)
-        .collect();
     let unstaged: Vec<_> = entries
         .iter()
         .filter(|e| e.staging == StatusStaging::Unstaged && e.diff.kind != DiffKind::Added)
@@ -607,12 +594,6 @@ fn render_human(layout: &RepoLayout, entries: &[StatusEntry]) -> u8 {
             "  (use \"kit restore --staged <file>...\" to unstage)"
         );
         for e in &staged {
-            let _ = writeln!(stderr, "	{:<12}{}", human_label(e.diff.kind), human_path(e));
-        }
-    }
-    if !partial.is_empty() {
-        let _ = writeln!(stderr, "\nChanges both staged and not staged:");
-        for e in &partial {
             let _ = writeln!(stderr, "	{:<12}{}", human_label(e.diff.kind), human_path(e));
         }
     }
@@ -642,7 +623,7 @@ fn render_human(layout: &RepoLayout, entries: &[StatusEntry]) -> u8 {
     }
 
     // Footer guidance, like git's.
-    if staged.is_empty() && partial.is_empty() {
+    if staged.is_empty() {
         if !unstaged.is_empty() {
             let _ = writeln!(
                 stderr,
@@ -716,8 +697,7 @@ fn detect_status_renames(
 fn staging_rank(s: StatusStaging) -> u8 {
     match s {
         StatusStaging::Staged => 0,
-        StatusStaging::PartiallyStaged => 1,
-        StatusStaging::Unstaged => 2,
+        StatusStaging::Unstaged => 1,
     }
 }
 
@@ -859,8 +839,8 @@ mod tests {
     #[test]
     fn porcelain_codes_are_two_chars() {
         use DiffKind::{Added, ModeChanged, Modified, Removed};
-        use StatusStaging::{PartiallyStaged, Staged, Unstaged};
-        for s in [Staged, Unstaged, PartiallyStaged] {
+        use StatusStaging::{Staged, Unstaged};
+        for s in [Staged, Unstaged] {
             for k in [Added, Removed, Modified, ModeChanged] {
                 assert_eq!(porcelain_code(s, k).len(), 2, "{s:?} + {k:?}");
             }
