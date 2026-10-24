@@ -1,7 +1,7 @@
 {
-  "name": "fastcdc_boundaries_256k",
-  "description": "256 KiB splitmix64 stream (seed 0xCAFE_BABE_1234_5678); chunk-end offsets as JSON",
   "bin": "fastcdc_boundaries_256k.bin",
-  "size": 25,
-  "blake3": "c558e3da6b4ef940298447910c0a7de444fb87389ec26a82a6e068b52f43a2bf"
+  "blake3": "9ad5d83cf3efb8e479c0080af45d29404f75baa4669a9c752efbb8bbd8ab528d",
+  "description": "256 KiB splitmix64 stream (seed 0xCAFE_BABE_1234_5678); chunk-end offsets as JSON",
+  "name": "fastcdc_boundaries_256k",
+  "size": 31
 }

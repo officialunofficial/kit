@@ -1,6 +1,6 @@
 {
   "bin": "neg_manifest_wrong_root.manifest.bin",
-  "blake3": "84bf7efcd1f29f5123ffaf21f79701f916f6a2919c7ed1ae2a915f0a06917692",
+  "blake3": "a9bf47651df9788c153226b0506265791a0475115e8f7e2b0375a5ec47ba2b5e",
   "description": "A valid snapshot export whose manifest root was replaced by another 32-byte value.",
   "expect": "reject",
   "ids": [],
@@ -8,10 +8,10 @@
   "n_packs": 1,
   "name": "neg_manifest_wrong_root",
   "pack_hashes": [
-    "19bb69cdabca4aa2d0d89d3636c342d633bc0b6cc834daa3ddf1070bb3b85a87"
+    "8511cb681291c8e156863a8aa467e21e531415681cc966bd657a66043ccb8e7b"
   ],
   "reason": "manifest root differs from the caller's trusted root",
-  "root_hex": "b5883843cb3b37b6251cde45118c37fff906ceb498a4a1089870dce546762061",
+  "root_hex": "ec29b09f12b3436bd4f2870552df398deadaf45713e93ad284713283569f821d",
   "size": 71,
   "unreferenced": [],
   "verified": 0

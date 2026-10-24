@@ -382,7 +382,7 @@ def ed25519_sign(seed, msg):
 
 # ------------------------------------------------------------- fastcdc
 
-GEAR_SEED = 0x4D4B495446434443  # ASCII "MKITFCDC", big-endian
+GEAR_SEED = 0x004B495446434443  # ASCII "KITFCDC", big-endian
 MASK64 = (1 << 64) - 1
 
 

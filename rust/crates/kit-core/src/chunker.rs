@@ -2,8 +2,8 @@
 //!
 //! Spec reference: `docs/specs/SPEC-FASTCDC.md`. Frozen v1 parameters:
 //!
-//! * Gear seed: ASCII `"MKITFCDC"` interpreted as a big-endian `u64`
-//!   (`0x4D4B_4954_4643_4443`). Splitmix64-derived 256-entry table.
+//! * Gear seed: ASCII `"KITFCDC"` interpreted as a big-endian `u64`
+//!   (`0x004B_4954_4643_4443`). Splitmix64-derived 256-entry table.
 //! * `MIN_SIZE = 16 KiB`, `AVG_SIZE = 64 KiB`, `MAX_SIZE = 256 KiB`.
 //! * `MASK_S = 0x0001_FFFF` (strict, used while `i < AVG_SIZE`).
 //! * `MASK   = 0x0000_FFFF` (informative; not used directly — we only
@@ -19,12 +19,11 @@
 //! constants above. Any change breaks `chunked_blob` reproducibility
 //! (see `SPEC-FASTCDC.md` §2 determinism contract).
 
-/// Frozen splitmix64 seed for v1 — ASCII `"MKITFCDC"` as big-endian u64.
+/// Frozen splitmix64 seed for v1 — ASCII `"KITFCDC"` as big-endian u64.
 ///
-/// The seed is a protocol constant, not a product name. It sets the chunk
-/// boundaries, so every chunked blob id depends on it. The seed keeps its
-/// original value when the other format names change. Do not rename it.
-pub const SEED: u64 = 0x4D4B_4954_4643_4443;
+/// The seed sets the chunk boundaries, so every chunked blob id depends on
+/// it. Do not change it.
+pub const SEED: u64 = 0x004B_4954_4643_4443;
 
 /// Minimum chunk size (`16 KiB`). `cut` will not return a value below
 /// this for non-final chunks.
@@ -685,9 +684,9 @@ mod tests {
     }
 
     /// Pinned v1 gear-table digest, harvested once from the splitmix64
-    /// derivation seeded with "MKITFCDC". Drift = a v2 break.
+    /// derivation seeded with "KITFCDC". Drift = a v2 break.
     const EXPECTED_GEAR_DIGEST_HEX: &str =
-        "7b238963a8bb10c4dea1bf678aa07d8c3ce94284209c440ca971ff3a97ee5ad4";
+        "2c8b776fb264316106cef8f45ebd30bf6c2cb7a704c095ce9adc4b4b84ab75ff";
 
     #[test]
     fn gear_table_digest_is_stable() {

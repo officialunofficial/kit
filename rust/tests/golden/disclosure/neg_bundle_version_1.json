@@ -1,7 +1,7 @@
 {
   "bin": "neg_bundle_version_1.bin",
-  "blake3": "c6a46a62f549b6c0e0fd44123485b33bd5dd42e3ac502b8c9342de15732181d2",
-  "commit_id_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
+  "blake3": "9c3a8f1c9e338516e3054e1aacab84c8c12ed464818c8caede72d843550a6750",
+  "commit_id_hex": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
   "description": "The version byte is 1; v2 is the only supported value and there is no compatibility decoder.",
   "expect": "reject",
   "name": "neg_bundle_version_1",

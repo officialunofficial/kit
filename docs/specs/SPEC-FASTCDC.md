@@ -63,7 +63,7 @@ gear table from the FastCDC paper (Xia et al., USENIX ATC '16); the
 table is kit-specific and produced by the procedure below.
 
 ```
-state = 0x4D4B495446434443        # ASCII "MKITFCDC" interpreted as big-endian u64
+state = 0x004B495446434443        # ASCII "KITFCDC" interpreted as big-endian u64
 for each of 256 entries:
     state = state +% 0x9e3779b97f4a7c15              # wrapping add (splitmix64 gamma)
     z = state
@@ -76,20 +76,19 @@ for each of 256 entries:
 The reference Rust implementation lives in
 `kit-core::chunker::build_gear_table` and uses a `std::sync::OnceLock`
 to memoise the 2 KiB table on first use. The exported constant `SEED`
-is the same `0x4D4B_4954_4643_4443` value.
+is the same `0x004B_4954_4643_4443` value.
 
 ### 3.1 Seed decision (v1)
 
-The seed ASCII is **`"MKITFCDC"`**, frozen for the lifetime of v1.
-The seed is not user-visible; it is 8 bytes inside the chunker.
+The seed ASCII is **`"KITFCDC"`**, frozen for the lifetime of v1.
+The seed is not user-visible. It is 7 bytes, read as a big-endian `u64`
+with one leading zero byte.
 
-The seed is a protocol constant, not a product name. It sets the chunk
-boundaries, so every chunked blob id depends on it. The seed keeps its
-original ASCII value when the domain-separation tags, magics and file
-names change. An implementation MUST NOT rename it.
+The seed sets the chunk boundaries, so every chunked blob id depends on
+it. An implementation MUST NOT change it.
 
 Future format versions that want to change chunking MUST bump the
-format version and publish a migration path. A future reader that
+format version. A future reader that
 needs to chunk for a different chunk-family MAY use a different seed
 and namespace the result accordingly, but v1 does NOT provide a
 mechanism for this.
@@ -241,7 +240,7 @@ The vectors below are exercised by
 1. **Gear table hash**: `gear_table_digest()` returns
    `BLAKE3` of the 256 `u64` entries little-endian-encoded
    (2 048 bytes total). Any implementation that derives the same table
-   for seed `"MKITFCDC"` will produce the same digest. Stability is
+   for seed `"KITFCDC"` will produce the same digest. Stability is
    asserted by `gear_table_digest_is_stable`; the table is also checked
    to be all-unique and non-zero by `gear_table_is_unique_and_nonzero`.
 2. **Small file fits in single chunk**: short input → `cut` returns
@@ -270,7 +269,7 @@ The vectors below are exercised by
    with `(8K, 32K, 128K)` does not produce the v1 boundaries
    (`different_avg_size_yields_different_boundaries`).
 10. **Seed misuse detector**: if an implementation is accidentally
-    built with any seed other than `"MKITFCDC"`, the gear-table-hash
+    built with any seed other than `"KITFCDC"`, the gear-table-hash
     pin and the boundary goldens both fail loudly at test time.
 
 ---
@@ -289,7 +288,7 @@ The vectors below are exercised by
 | Invariant | Enforced by |
 |---|---|
 | Chunk boundaries &mdash; and therefore `chunked_blob` hashes &mdash; are a pure function of the input bytes | frozen seed (§3), parameters (§4), and mask derivation (§5); any change requires a format-version bump (§2) |
-| Every implementation derives the identical gear table | the `"MKITFCDC"` + splitmix64 procedure (§3); gear-table digest pin and uniqueness/non-zero checks (§8.1) |
+| Every implementation derives the identical gear table | the `"KITFCDC"` + splitmix64 procedure (§3); gear-table digest pin and uniqueness/non-zero checks (§8.1) |
 | `avg_size` is a power of two; `min_size < avg_size < max_size` holds strictly | normative parameter constraint (§4) |
 | Input of ≤ `min_size` bytes is a single chunk, never a `chunked_blob` | `cut` returns the full input length (§4, §5) |
 | No chunk exceeds `max_size` | forced cut at `max_size` (§5) |

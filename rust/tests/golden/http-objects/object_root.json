@@ -1,13 +1,13 @@
 {
-  "blake3": "a3057aa25f594d13db736e5f1a18f75630a4877a25fc8a1abec7f81f8f712991",
-  "commit": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
+  "blake3": "7d1a3840b0e5f6e933c72170815b56e4b958e279f3167e05ff1970675349321d",
+  "commit": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
   "expect": {
     "accept": true,
     "disclosed": {
-      "bytes_blake3": "4c0a27b2628a147f4f66f8d6d6fb8c6a2f0a60b0e6ecaae92e103461bfbc30a2",
+      "bytes_blake3": "496258ef7f0caffa89b90ad38e19d76f2995738ff3e1be1c6f4d00ea3a6c308a",
       "bytes_len": 236,
-      "commit": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
-      "leaf": "bfb30fc54bf0bf25f170b83ae324509b402a90d55151d8914e77f468ac6ee289",
+      "commit": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
+      "leaf": "e88d20b32dc03ddeb3819c6d37171469797d85083f995efc5dbbf0d989e696bf",
       "path_hex": [],
       "payload": {
         "kind": "Object"

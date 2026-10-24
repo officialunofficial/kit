@@ -1,7 +1,7 @@
 {
   "bin": "neg_inner_root_forged.bin",
-  "blake3": "e7c6851882a66a6511d8d3b3b1c1341ec8ebdfd256df18dfde71e03840065587",
-  "commit_id_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
+  "blake3": "03f346e295fe3145d5bff2604ae396095c64f06f042ad1f3ae77811bde930c32",
+  "commit_id_hex": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
   "description": "The step's declared inner_root does not wrap to the parent Tree id.",
   "expect": "reject",
   "name": "neg_inner_root_forged",

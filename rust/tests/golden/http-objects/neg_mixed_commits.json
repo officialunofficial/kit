@@ -1,6 +1,6 @@
 {
-  "blake3": "1ae5bff1ac96105f57e47c53ba5ed3a3b7aa48e0bc00f3c49a4dc77d36fe540f",
-  "commit": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
+  "blake3": "81dd961737fe97cc5a773238c74b6bb71821cdbadb31408bebdf6eb47e1d3ab2",
+  "commit": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
   "expect": {
     "accept": false,
     "expand_to": null,
@@ -10,12 +10,12 @@
   "recipe": {
     "segments": [
       {
-        "length": 73276,
+        "length": 94867,
         "offset": 0,
         "source": "span_two_chunks.bin"
       },
       {
-        "hex": "6f387d6d3c73f95ab326e0c2b58afa66c6582896e373c65f85b7347e7d38ded3"
+        "hex": "0a32aa3c7f4de2dba7efe9116c5d22b2c919290a126ac09bf316e7938d4441ac"
       },
       {
         "length": 113,
@@ -31,15 +31,15 @@
         "source": "span_two_chunks.bin"
       },
       {
-        "hex": "55401702c61681a22e187d77a65a4fd4d468dedbb8ad7de5317a75627317652aa4bacd1264b4220c4c7cac9ca26af78d26a50a3fbb4574099300ad0094d93c02"
+        "hex": "b2be73c325e261a99577c9563339b57843eab0b72fad329897d2ac049ca2aeb32a6d466ff84af91004d83a7a3b97b93e35382013013ba14eb678f9c46633c20c"
       },
       {
-        "length": 74553,
-        "offset": 73589,
+        "length": 70361,
+        "offset": 95180,
         "source": "span_two_chunks.bin"
       }
     ]
   },
   "schema_version": 1,
-  "size": 148142
+  "size": 165541
 }

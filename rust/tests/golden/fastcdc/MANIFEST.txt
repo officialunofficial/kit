@@ -2,5 +2,5 @@
 # Format: <name> <blake3-hex-of-bin-bytes>
 # Update the digests with `python3 scripts/golden/write_manifest.py rust/tests/golden/fastcdc`
 # Cross-checked by `python3 scripts/golden/objects_ref.py rust/tests/golden`
-fastcdc_boundaries_1mib c075a28bc3f497a4bc538de05ae9168237684fe3627252566c0590020679d59d
-fastcdc_boundaries_256k c558e3da6b4ef940298447910c0a7de444fb87389ec26a82a6e068b52f43a2bf
+fastcdc_boundaries_1mib a5bc71f6a7108e12efd6789193e65ceb6a0ad55b09ac75afa99cf0950b216a0c
+fastcdc_boundaries_256k 9ad5d83cf3efb8e479c0080af45d29404f75baa4669a9c752efbb8bbd8ab528d

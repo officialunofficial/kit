@@ -1,11 +1,11 @@
 {
   "bin": "chunked_range_with_offsets.bin",
-  "blake3": "fdbb71d09073d0f6eef454dc441f4a2239e330c89344038daf442b03ad699ad1",
-  "commit_id_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
+  "blake3": "3fb90f77e0890597a531ce5f57274d67832838ad6d2f370e3e98f2d4d1374709",
+  "commit_id_hex": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
   "description": "The same range, with a complete chunk_len_proofs set proving the absolute file offset.",
   "disclosed": {
-    "chunk_inner_root_hex": "37f0cd15bd2cd57c5ed72934ac5a464112f544764de648b291c7be7097b939a2",
-    "leaf_id_hex": "69f95e10eb2328a843fc6a9efaa95cefc498cae175c355ab96dde9e06b71b109",
+    "chunk_inner_root_hex": "ccb23682a6b0b0a1f64ee3072cb69de5db180b3f941856d1f45d25348441b095",
+    "leaf_id_hex": "4247b88856da901974dc02ffe9d2c2c49545973ee57fc3139d45c8e394c92397",
     "path": [
       {
         "mode": 1,
@@ -13,9 +13,9 @@
       }
     ],
     "payload": {
-      "absolute_offset": 76156,
-      "blob_id_hex": "878c72682612b9fd051f6ef1a70dcb809b64682836bba63277538e6e80c4eabd",
-      "bytes_blake3": "86ce1a14a20a8bf8f3527cd0a7a5ca902d47c8af778452217ac0a774556394c7",
+      "absolute_offset": 80234,
+      "blob_id_hex": "ff17ef3bdb49c474f1b2cbed6b6ebd94b0c7cf6d66bec6e7a74f1a8f97ef9b21",
+      "bytes_blake3": "e09187e247cbf5bce2f4d26033e7335502624bb554971567148120c3a076316f",
       "chunk": {
         "chunk_size": 0,
         "index": 1,
@@ -28,15 +28,15 @@
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
     "step_inner_roots_hex": [
-      "c149fa07c55d52c24875498999f7b54abb81dbf1694d5e209d9c2038dac2d0fa"
+      "3efe0325dbdc1bdacbc90e03d55563dbdff21a59d52d85d1adcdae53856c3c10"
     ],
-    "tree_hash_hex": "bfb30fc54bf0bf25f170b83ae324509b402a90d55151d8914e77f468ac6ee289"
+    "tree_hash_hex": "e88d20b32dc03ddeb3819c6d37171469797d85083f995efc5dbbf0d989e696bf"
   },
   "expect": "accept",
   "name": "chunked_range_with_offsets",
   "path_hex": [
     "6368756e6b65642e62696e"
   ],
-  "selector": "range(offset=76156,len=64,with_offsets=true)",
+  "selector": "range(offset=80234,len=64,with_offsets=true)",
   "size": 3994
 }
