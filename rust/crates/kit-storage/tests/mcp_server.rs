@@ -690,7 +690,10 @@ fn batch_requests_are_rejected() {
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();
     let resp: Value = serde_json::from_str(&line).expect("error response is JSON");
-    assert_eq!(resp.pointer("/error/code").and_then(Value::as_i64), Some(-32600));
+    assert_eq!(
+        resp.pointer("/error/code").and_then(Value::as_i64),
+        Some(-32600)
+    );
     assert!(resp.get("result").is_none());
 
     drop(stdin);
