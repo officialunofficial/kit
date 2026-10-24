@@ -100,7 +100,7 @@ Windows is not a supported target (see `docs/INVARIANTS.md`).
 Windows users should run kit under WSL, which uses the Linux binary.
 
 **Linux glibc requirement.** The published x86_64 and aarch64 Linux
-archives (v0.3.0 through v0.5.0) require **glibc 2.39 or newer**.
+archives require **glibc 2.39 or newer**.
 Check your glibc with `ldd --version | head -1`.
 
 | Release archives | Distributions |
@@ -110,7 +110,6 @@ Check your glibc with `ldd --version | head -1`.
 
 On older systems, build from source with `cargo install kit-storage`, which
 links against your host's glibc, or use a newer distro/container.
-A future release will lower this floor.
 
 If you want "latest", use the hosted installer:
 `curl kit.storage | sh` (Linux/macOS, including WSL; or the explicit
