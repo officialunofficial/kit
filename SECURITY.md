@@ -29,8 +29,8 @@ Only the latest minor line receives security fixes.
 
 | Version | Supported                            |
 | ------- | ------------------------------------ |
-| 0.3.x   | Yes (current)                        |
-| < 0.3   | No                                   |
+| 0.5.x   | Yes (current)                        |
+| < 0.5   | No                                   |
 
 Pre-1.0 releases may ship breaking format changes alongside security
 fixes. Read the CHANGELOG before upgrading.
@@ -47,14 +47,13 @@ fixes. Read the CHANGELOG before upgrading.
 We will not pursue legal action against researchers who follow this
 process in good faith, including accidental disclosure during testing.
 
-## Local attack surface &mdash; initial posture
+## Local attack surface
 
-The initial release narrows the local attack surface around keys and
-config. Briefly:
+kit narrows the local attack surface around keys and config:
 
 - **Per-repo config attack surface partitioned.** Security-sensitive
   keys (key paths, external-signer path/argv, SSH trust knobs) are
-  now user-scoped only. A `<repo>/.kit/config` that tries to set
+  user-scoped only. A `<repo>/.kit/config` that tries to set
   them is rejected with a warning and the value is ignored.
 - **Key file handling.** Key files are opened with `O_NOFOLLOW`,
   written atomically (tmp plus fsync plus rename plus parent fsync), and
@@ -80,24 +79,17 @@ initial advisory and we'll arrange an out-of-band channel.
 We do not currently offer a paid bug bounty. Researchers will be
 credited in the published advisory and in `CHANGELOG.md`.
 
-## Export control
-
-This project contains cryptographic software (BLAKE3, Ed25519, secp256k1,
-P-256, AES, rustls/TLS). Source code distribution is covered under the
-publicly-available open-source exemption (US EAR §740.13(e); ECCN 5D002.c.1;
-License Exception TSU). A §740.13(e) notification has been provided to BIS
-(crypt@bis.doc.gov) and ENC (enc@bis.doc.gov) at the time of public launch.
-
 ## Scope
 
 In scope:
 
 - The `kit` binary and the Rust workspace under `rust/crates/` &mdash;
-  including the library crates published to crates.io (`kit-core`,
-  `kit-rpc`, `kit-attest`, `kit-keystore`, `kit-git-bridge`, `kit-sync`, the
-  `kit-transport-*` crates).
-- The reference external signers under `contrib/signers/`.
+  including the library crates (`kit-core`, `kit-rpc`, `kit-attest`,
+  `kit-keystore`, `kit-git-bridge`, `kit-sync`, `kit-client`, `kit-serve`
+  and the `kit-transport-*` crates).
+- The reference external signer `kit-sign-file` under `rust/crates/kit-sign-file/`.
 - Release pipeline integrity (signing, SBOM, reproducibility claims).
+- The installer script `install.sh`.
 - On-disk format parsers (v1 format documented in `docs/specs/SPEC-*.md`).
 
 Out of scope (please report to upstream instead):
