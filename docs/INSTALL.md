@@ -1,6 +1,6 @@
 # Installing kit
 
-kit ships through four distribution channels. This guide is the
+kit ships through three distribution channels. This guide is the
 long-form companion to the install section in
 [`README.md`](../README.md): pick a channel, follow its steps, then
 verify the result.
@@ -10,10 +10,9 @@ verify the result.
 1. [Pick your channel](#pick-your-channel)
 2. [From source](#from-source)
 3. [From GitHub Releases](#from-github-releases)
-4. [WASM / npm](#wasm--npm)
-5. [Hardware signers](#hardware-signers)
-6. [Verify your install](#verify-your-install)
-7. [Updating](#updating)
+4. [Hardware signers](#hardware-signers)
+5. [Verify your install](#verify-your-install)
+6. [Updating](#updating)
 
 ## Pick your channel
 
@@ -22,8 +21,7 @@ verify the result.
 | CLI on a dev machine (Linux/macOS)    | Release archive or `cargo install --git` | `curl kit.storage \| sh` *or* `cargo install --git https://github.com/officialunofficial/kit kit-storage` |
 | CLI on a dev machine (Windows)        | Not supported &mdash; use WSL         | run the above `install.sh` (or `cargo install`) inside WSL |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/kit-<VERSION>-<target>.tar.gz && tar -xzf kit-<VERSION>-<target>.tar.gz` |
-| Browser / Cloudflare Worker           | npm                                  | `bun add @officialunofficial/kit-wasm`                                                                                  |
-| Library inside another Rust crate     | crates.io (or git dependency)        | `kit-core = "0.3"`                                                                                  |
+| Library inside another Rust crate     | crates.io (or git dependency)        | `kit-core = "0.5"`                                                                                  |
 
 Pick the leftmost channel that satisfies your constraints &mdash; release
 archives are the lowest-overhead path for end users, source builds the
@@ -76,7 +74,6 @@ cargo test --workspace       # all crates, all tests
 | `kit-serve`                         | self-host server: the ssh frame session over a repository  |
 | `kit-storage`                           | the `kit` binary                                          |
 | `kit-transport-{memory,file,connect,s3,ssh}` | one crate per transport scheme                    |
-| `kit-wasm`                          | wasm-bindgen surface for browsers / Workers (npm-only, not on crates.io) |
 
 ## From GitHub Releases
 
@@ -176,135 +173,23 @@ cosign verify-blob \
 Full reproducibility, signing, and supply-chain notes live under
 [`docs/RELEASE.md`](RELEASE.md).
 
-## WASM / npm
-
-The `kit-wasm` crate ([`rust/crates/kit-wasm`](../rust/crates/kit-wasm))
-is built with `wasm-pack` and published to npm as
-`@officialunofficial/kit-wasm`.
-
-**Install:**
-
-```sh
-bun add @officialunofficial/kit-wasm
-# or
-npm i @officialunofficial/kit-wasm
-# or
-pnpm add @officialunofficial/kit-wasm
-```
-
-**Why `wasm-pack` with `--target bundler`.** kit-wasm targets the
-`bundler` output by default so Vite / Rspack / esbuild can consume the
-ESM entrypoint and tree-shake unused exports. For inline browser use
-without a bundler, build the same crate with `--target web`; for
-Cloudflare Workers' ESM modules format, `bundler` is correct because
-wrangler's bundler will inline the `.wasm` import.
-
-**TypeScript usage:**
-
-```ts
-import init, { hash, parse_envelope } from "@officialunofficial/kit-wasm";
-
-await init();
-const id = hash(new TextEncoder().encode("hello"));
-console.log(id);
-```
-
-**Cloudflare Workers (ESM modules format):**
-
-```ts
-import init, { hash } from "@officialunofficial/kit-wasm";
-import wasmModule from "@officialunofficial/kit-wasm/kit_wasm_bg.wasm";
-
-export default {
-  async fetch(req: Request): Promise<Response> {
-    await init(wasmModule);
-    const body = new Uint8Array(await req.arrayBuffer());
-    return new Response(hash(body));
-  },
-};
-```
-
-**Plain browser (no bundler):**
-
-```html
-<script type="module">
-  import init, { hash } from "https://esm.sh/@officialunofficial/kit-wasm";
-  await init();
-  console.log(hash(new TextEncoder().encode("hi")));
-</script>
-```
-
 ## Hardware signers
 
 External signers are separate binaries that kit drives over the
 [v1 stdio protocol](specs/SPEC-EXTERNAL-SIGNER.md). Wire one up with
-`attest.external_signer_path` in `.kit/config`. Each signer ships its
-own README with setup, hardware notes, and troubleshooting &mdash; the lines
-below cover only how to install the binary.
+`attest.external_signer_path` in `.kit/config`.
 
-The signer crates live under
-[`contrib/signers/`](../contrib/signers/), outside the top-level
-Cargo workspace at `rust/`. They inherit workspace settings via
-`workspace = "../../../rust"` in their own `Cargo.toml`, so the
-canonical install path is `git clone` plus `cargo install --path .` from
-the signer directory rather than `cargo install --git URL --bin …`
-against the repository root.
-
-### `kit-sign-file` &mdash; file-backed reference (any platform)
-
-Pure software signer for development and as the wire-protocol contract
-test:
+This repository ships one signer: `kit-sign-file`. It is a pure software
+signer. Use it for development and as the contract test for the protocol.
 
 ```sh
 git clone https://github.com/officialunofficial/kit
-cd kit/contrib/signers/kit-sign-file
-cargo install --path .
+cd kit/rust
+cargo install --path crates/kit-sign-file
 ```
 
-See [`contrib/signers/kit-sign-file`](../contrib/signers/kit-sign-file).
-
-### `kit-sign-se` &mdash; Apple Secure Enclave (macOS, Swift)
-
-P-256 only, optional biometric gate:
-
-```sh
-cd contrib/signers/kit-sign-se
-swift build -c release
-cp .build/release/kit-sign-se /usr/local/bin/
-```
-
-Setup, biometric notes, and `attest.external_signer_path` wiring live
-in [`contrib/signers/kit-sign-se/README.md`](../contrib/signers/kit-sign-se/README.md).
-
-### `kit-sign-tpm` &mdash; TPM 2.0 persistent handle (Linux/Windows)
-
-P-256, talks to the platform TPM via `tss-esapi`:
-
-```sh
-# Debian / Ubuntu
-sudo apt install libtss2-dev
-git clone https://github.com/officialunofficial/kit
-cd kit/contrib/signers/kit-sign-tpm
-cargo install --path . --features tpm2
-```
-
-Windows uses TBS via `tss-esapi`'s `tbs` feature; macOS has no TPM and
-the binary builds without `--features tpm2` for tooling/CI checks
-only. Full requirements and `swtpm` test recipe in
-[`contrib/signers/kit-sign-tpm/README.md`](../contrib/signers/kit-sign-tpm/README.md).
-
-### `kit-sign-ctap` &mdash; FIDO2 / WebAuthn over CTAP-HID
-
-P-256, speaks Protocol **v1.1** (WebAuthn wrapping mode); works with
-YubiKey, Nitrokey, SoloKey, etc.:
-
-```sh
-git clone https://github.com/officialunofficial/kit
-cd kit/contrib/signers/kit-sign-ctap
-cargo install --path .
-```
-
-See [`contrib/signers/kit-sign-ctap`](../contrib/signers/kit-sign-ctap).
+Hardware signers for the Secure Enclave, TPM 2.0 and FIDO2 are not part of
+this repository. Any program that speaks the protocol works.
 
 ## Verify your install
 
