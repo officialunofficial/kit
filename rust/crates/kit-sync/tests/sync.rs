@@ -834,7 +834,7 @@ fn staging_honours_the_configured_directory() {
 /// A signed one-commit history whose pack carries a zstd entry
 /// (`examples/gen_zstd_fixture.rs` regenerates it).
 const ZSTD_PACK: &[u8] = include_bytes!("fixtures/zstd.pack");
-const ZSTD_TIP: &str = "37816ba6489d3d08f664c1c4b2e547efd4017653e7979bc3d3b6865248b7fd57";
+const ZSTD_TIP: &str = "0eff1297629ad4ada20ef655fd38808b4f64187ac64940a12722d6a0ef4e8e8f";
 
 fn remote_with_zstd_pack() -> Remote {
     // The blob alone is about 9.7 KB; the pack is far smaller only because an
@@ -883,7 +883,7 @@ fn a_zstd_compressed_pack_is_cloned() {
     clone_into(&remote, &target);
 
     let text = std::fs::read_to_string(target.join("big.txt")).unwrap();
-    assert_eq!(text, "mkit compresses repetitive text well. ".repeat(256));
+    assert_eq!(text, "kit compresses repetitive text well. ".repeat(256));
 }
 
 include!("support/counting.rs");

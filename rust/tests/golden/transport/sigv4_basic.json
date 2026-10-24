@@ -2,6 +2,6 @@
   "name": "sigv4_basic",
   "description": "SigV4 canonical_request + string_to_sign + signature for fixed PUT inputs (SPEC-TRANSPORT §6)",
   "bin": "sigv4_basic.bin",
-  "size": 1011,
-  "blake3": "a642c3f98c7e2c14b5c381026babe2b4416d4439f58e14c4534e94ee6134b30e"
+  "size": 1008,
+  "blake3": "d3187132e2f1e7cb293aecabcbd3d16e3e606bf407028020c66c22d7612ad421"
 }

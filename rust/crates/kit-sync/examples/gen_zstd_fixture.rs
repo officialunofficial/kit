@@ -11,7 +11,7 @@ use kit_core::sign::{KeyPair, sign_commit};
 fn main() {
     let key = KeyPair::from_seed([0x11; 32]);
     let blob = Object::Blob(Blob {
-        data: "mkit compresses repetitive text well. "
+        data: "kit compresses repetitive text well. "
             .repeat(256)
             .into_bytes(),
     });

@@ -9,14 +9,14 @@
       "type": 0
     },
     {
-      "blake3_of_bytes": "cca51ff50cfa41e6be29f2d8324ab16d241ff107f3b2ce936d58f358a08a6f75",
-      "decoded_blake3": "cca51ff50cfa41e6be29f2d8324ab16d241ff107f3b2ce936d58f358a08a6f75",
-      "frame_len": 55,
+      "blake3_of_bytes": "fb8dfc5f940c9d6b7830aaa1cdd01ca73e602b7565c9d0fb8f009eb65f4d3373",
+      "decoded_blake3": "fb8dfc5f940c9d6b7830aaa1cdd01ca73e602b7565c9d0fb8f009eb65f4d3373",
+      "frame_len": 54,
       "frame_offset": 236,
-      "id": "cca51ff50cfa41e6be29f2d8324ab16d241ff107f3b2ce936d58f358a08a6f75",
-      "len": 3130,
+      "id": "fb8dfc5f940c9d6b7830aaa1cdd01ca73e602b7565c9d0fb8f009eb65f4d3373",
+      "len": 3010,
       "type": 3,
-      "uncompressed_len": 3130
+      "uncompressed_len": 3010
     },
     {
       "blake3_of_bytes": "3ab6793e2631e265b73b55e46eae4cc79e7900f85491413d369e4314002251fd",
@@ -28,7 +28,7 @@
       "blake3_of_bytes": "fd7ea6140978665ecaefa638955311399ec066d3f897066691742eb3951db7c9",
       "decoded_blake3": "95343a32ae90008f76c471581100015272509a15574b7be89354349af45107a4",
       "frame_len": 60,
-      "frame_offset": 395,
+      "frame_offset": 394,
       "id": "fd7ea6140978665ecaefa638955311399ec066d3f897066691742eb3951db7c9",
       "len": 4306,
       "type": 4,
@@ -36,7 +36,7 @@
     }
   ],
   "name": "mixed",
-  "pack_key": "80ac47d159288fd8ffe430aa24ea33427d59e2738825cc1b426f1f6dd4b492d3",
-  "size": 487,
+  "pack_key": "02b73e03bb6248130d2dffcc997b2903d32a17a8df46131e99feccf3d23b635b",
+  "size": 486,
   "version": 2
 }

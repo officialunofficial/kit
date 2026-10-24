@@ -536,7 +536,7 @@ mod pack_v2_fixtures {
             // is the 0x02 entry's target (an in-pack delta chain).
             let a_data = noise(7, 200);
             let a = raw(&blob(a_data.clone()));
-            let b = raw(&blob(b"mkit pack v2 fixture line\n".repeat(120)));
+            let b = raw(&blob(b"kit pack v2 fixture line\n".repeat(120)));
             let mut c_data = a_data;
             c_data[100] ^= 0xFF;
             let c = delta_of(&a, &blob(c_data.clone()));

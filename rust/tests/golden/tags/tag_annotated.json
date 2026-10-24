@@ -2,6 +2,6 @@
   "name": "tag_annotated",
   "description": "annotated (unsigned) tag object: target commit, ed25519 tagger, message, zero signature",
   "bin": "tag_annotated.bin",
-  "size": 210,
-  "blake3": "a2ef146c953f9eea246f6eb48a2106a3791f8644cd483932e3b8f89814f61023"
+  "size": 209,
+  "blake3": "dee4cd10b6953255c7fb1017142a1bb618c6b49d4043ba2804bbd3cbe1b36dbb"
 }

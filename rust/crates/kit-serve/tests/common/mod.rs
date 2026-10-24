@@ -27,7 +27,7 @@ use kit_serve::{
 pub type Body = ssh_frame::Body;
 
 /// The `server_id` that the captured golden sessions carry.
-pub const SERVER_ID: &str = "mkit serve/0.4.2";
+pub const SERVER_ID: &str = "kit serve/0.4.2";
 
 /// A scripted frame source. Once the script runs out it reports a clean end
 /// of stream.

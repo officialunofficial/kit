@@ -30,7 +30,7 @@ const SESSION_2_IN: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/sess
 const SESSION_2_OUT: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-2.bin");
 const SESSION_3_IN: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-3.in.bin");
 const SESSION_3_OUT: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-3.bin");
-const GOLDEN_SERVER_ID: &str = "mkit serve/0.4.2";
+const GOLDEN_SERVER_ID: &str = "kit serve/0.4.2";
 
 fn kit_serve(root: &Path, input: &[u8]) -> Output {
     kit_serve_args(

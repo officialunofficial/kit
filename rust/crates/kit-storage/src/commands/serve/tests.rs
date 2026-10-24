@@ -22,7 +22,7 @@ use crate::exit;
 const GOLDEN_IN: &[u8] = include_bytes!("../../../../../tests/golden/ssh-serve/session-1.in.bin");
 const GOLDEN_OUT: &[u8] = include_bytes!("../../../../../tests/golden/ssh-serve/session-1.bin");
 /// The `server_id` the golden sessions were captured with.
-const GOLDEN_SERVER_ID: &str = "mkit serve/0.4.2";
+const GOLDEN_SERVER_ID: &str = "kit serve/0.4.2";
 
 type Body = ssh_frame::Body;
 

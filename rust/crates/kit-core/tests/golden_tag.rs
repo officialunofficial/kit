@@ -71,7 +71,7 @@ fn annotated_tag() -> Tag {
         name: b"v1.0.0".to_vec(),
         tagger: Identity::ed25519([0xAA; 32]),
         signer: [0xAA; 32],
-        message: b"mkit 1.0.0 release".to_vec(),
+        message: b"kit 1.0.0 release".to_vec(),
         timestamp: TS,
         signature: [0u8; 64],
     }
@@ -87,7 +87,7 @@ fn signed_tag() -> Tag {
         name: b"v1.0.0".to_vec(),
         tagger: Identity::ed25519(kp.public.0),
         signer: kp.public.0,
-        message: b"mkit 1.0.0 release".to_vec(),
+        message: b"kit 1.0.0 release".to_vec(),
         timestamp: TS,
         signature: [0u8; 64],
     };

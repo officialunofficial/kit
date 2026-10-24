@@ -117,7 +117,7 @@ fn identity_opaque_matches_golden() {
 #[test]
 fn blob_matches_golden() {
     let obj = Object::Blob(Blob {
-        data: b"hello mkit\n".to_vec(),
+        data: b"hello kit\n".to_vec(),
     });
     assert_object_matches("blob", &obj);
 }
