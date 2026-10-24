@@ -2,7 +2,7 @@
 spec: SPEC-TRANSPORT-CONNECT
 version: 2
 status: draft-normative
-audience: implementers of kit.transport.v1 Connect servers and clients (reference Worker, `kit-server`, native CLI transport)
+audience: implementers of kit.transport.v1 Connect servers and clients (any server, the native CLI transport)
 ---
 
 # SPEC-TRANSPORT-CONNECT &mdash; kit.transport.v1, the canonical Connect remote protocol
@@ -16,7 +16,7 @@ resumable parts (§7.6), ref deletion (§7.8), read consistency and
 paging (§7.9), admission challenges (§5.1),
 and the per-RPC upload lifecycle (§7.7). `kit.transport.v1` evolves
 additively: v2 adds RPCs and fields and never renumbers or removes one,
-so `buf breaking` stays green. The breaks are semantic only. kit is
+so no wire break occurs. The breaks are semantic only. kit is
 pre-production (CONTRIBUTING, "Pre-production compatibility policy"), so
 v2 has no v1 compatibility machinery: no v1 reader, no negotiation, and
 no fallback mode. The proto messages v2 names land with the version 2
@@ -30,8 +30,7 @@ proto shape, verb-to-trait mapping, CAS semantics, error-code mapping,
 pack-transfer streaming design, repository addressing, write
 authorization policy, upload tickets, admission challenges, and read
 consistency &mdash; and how
-the deployment targets (reference Worker, `kit-server`, native CLI
-client) consume one generated codebase. It does not cover S3 multipart,
+servers and the native CLI client consume one generated codebase. It does not cover S3 multipart,
 the `WatchRefs` live-feed migration, pricing or admission verification,
 or any server/client implementation; those are separate changes (§8).
 Write and read grants, epochs, signed reads, and private repositories
@@ -46,65 +45,31 @@ schemes. The `sparse-checkout` and `pack-shards` extensions have no
 Reference implementation: `kit-transport-connect` (the native CLI
 client, §7.3) against `kit-transport-connect/tests/roundtrip.rs`'s
 in-process server &mdash; real HTTP, real protobuf framing, real Connect
-streaming, backed by `kit-transport-memory` rather than R2/a Durable
-Object. The `kit-server` library and its conformance host (§7.2) drive the same
-client end to end; they replaced `kit serve --http`, which the CLI no longer has.
-[`apps/vcs-worker`](../../apps/vcs-worker)
-implements the unary and client-streaming RPCs
-(`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`/`UploadPack`)
-against this proto over R2 and a Durable Object; `DownloadPack`
-(server-streaming) conforms to the wire shape but whole-pack-buffers
-rather than incrementally streaming &mdash; see its README "Known
-limitations" &mdash; so §6.3's owned-mpsc-channel bridge and its unresolved
-end-to-end delivery risk remain unverified by that implementation. Every
-RPC has been manually verified against a real local `wrangler dev`
-instance (real R2/DO emulation, real Ed25519-signed envelopes) &mdash; see
-`apps/vcs-worker/README.md` "Known limitations" for the trial writeup,
-including a SECOND pass driving the real `kit` CLI (`push`/`clone`/
-`pull`) end to end against this exact server through `ConnectTransport`'s
-new envelope-signing auth mode (§7.3). `ConnectTransport` now supports
-BOTH the bearer-token scheme (SPEC-TRANSPORT §5.2, unchanged, used by
-bearer-mode `kit-server` deployments) and this server's Ed25519 write envelope (§7.1) as
-independent, additive auth modes &mdash; see §7.3. No AUTOMATED test drives
-this client/server pair yet (the `wrangler dev` verification above is
-manual, matching `apps/vcs-worker`'s existing testing posture for
-wasm-only glue) &mdash; that remains the open item on the testing axis.
-`apps/repo-worker`
-remains the closest OTHER existing analog (a Connect service on
-Cloudflare Workers) but implements the unrelated `kit.repo.v1.RepoService`
-anonymous-demo contract, not this one; this document borrows its proven
-patterns (§1, §7) without sharing its proto.
+streaming, backed by `kit-transport-memory`. No server for this protocol
+lives in this repository. `ConnectTransport` supports both the
+bearer-token scheme (SPEC-TRANSPORT §5.2) and the Ed25519 write envelope
+(§7.1) as independent, additive auth modes &mdash; see §7.3.
 
 The proto lives at
 [`proto/kit/transport/v1/transport.proto`](../../proto/kit/transport/v1/transport.proto).
 
 ---
 
-## 1. Buf module and package layout
+## 1. Proto module and package layout
 
 ```
-buf.yaml (repo root, v2, three-module workspace)
-├── rust/crates/kit-rpc/proto         → kit.rpc.v1 (+ .signer, .ssh, .verify)
-├── apps/repo-worker/proto             → kit.repo.v1
-└── proto/kit/transport/v1/transport.proto   → kit.transport.v1
+rust/crates/kit-rpc/proto         → kit.rpc.v1 (+ .signer, .ssh, .verify)
+proto/kit/transport/v1/transport.proto   → kit.transport.v1
+proto/kit/common/v1/refs.proto           → kit.common.v1
 ```
 
-This module shares the repo-root `buf.yaml` workspace ("buf
-workspace + proto path restructure") alongside `rust/crates/kit-rpc/proto`
-(`kit.rpc.v1`) and `apps/repo-worker/proto` (`kit.repo.v1`). `buf
-lint` / `buf breaking` run from the repo root against the whole
-workspace &mdash; see `CONTRIBUTING.md`'s "Protobuf schemas (buf)" section.
-
-`buf breaking` is configured with `breaking.use: [FILE]` from this
-module's first commit onward, so every subsequent change to
-`transport.proto` is checked against the immediately prior version &mdash;
-there is no grace period after this document merges.
+Every change to `transport.proto` MUST keep the wire format compatible
+with the previous version. There is no grace period for a published
+field number or enum value.
 
 `kit.transport.v1` defines its own `RefExpectation` and `RefEntry`. They
 are byte-for-byte duplicates of the types in `kit.rpc.v1.ssh` and
-`kit/common/v1/refs.proto`. The wire numbers are fixed. The buf workspace
-(§1) lets this package import the shared `refs.proto` instead of
-duplicating it.
+`kit/common/v1/refs.proto`. The wire numbers are fixed.
 
 ---
 
@@ -901,96 +866,27 @@ client at `control_url`, which may differ from the wire origin. A host without
 the required controls receives a declared control skip for those cases; absence
 of controls is not feature-based `NotApplicable`.
 
-### 6.3 Streaming on Cloudflare Workers &mdash; design answer and open risk
-
-**Reference-server behavior.**
-
-The reference Worker (§7.1) is the one deployment target where
-Connect streaming has a known, previously-hit failure mode:
-`apps/repo-worker/README.md` §"WatchRefs / streaming (building on the spike)"
-documents that `worker::WebSocket::events()` returns a **borrowed**
-`EventStream<'ws>`, which cannot satisfy a generated server-streaming
-trait method's `'static + Send` `ServiceStream<T>` bound &mdash; that
-constraint is why `kit.repo.v1.RepoService.WatchRefs` is served over
-a hand-rolled WebSocket instead of Connect server-streaming today.
-
-`DownloadPack` faces the identical shape of problem (server-to-client
-streaming on Workers), and an earlier spike prototyped
-the design answer this document specifies: bridge the source of
-events (there, a Durable Object `/watch` WebSocket; for `DownloadPack`,
-a chunked read from R2/filesystem) into an **owned**
-`futures_channel::mpsc` channel, drained by a
-`wasm_bindgen_futures::spawn_local` task, so the channel's `Receiver`
-&mdash; not the borrowed source stream &mdash; is what gets boxed into the
-generated trait's `ServiceStream<PackChunk>`. Because the channel is
-owned (no borrowed lifetime), it satisfies `'static + Send` with zero
-`unsafe` code. A conforming reference-Worker implementation of
-`DownloadPack` MUST use this bridge pattern (or an equivalent owned
-intermediate channel) rather than attempting to box a borrowed stream
-directly.
-
-The spike also identified a companion requirement: a Worker's fetch
-handler that buffers the entire response body before returning it
-(`http_resp.into_body().collect().await.to_bytes()`, the pattern
-`apps/repo-worker`'s unary path uses today) defeats streaming
-end-to-end regardless of how the RPC handler itself produces chunks &mdash;
-the response construction MUST use a true streaming response
-(`Response::from_stream` or equivalent) instead of collect-then-return.
-
-**Known risk, not yet resolved:** the spike verified the bridge
-mechanically (the DO WebSocket opens, drains real events, and
-translates them correctly inside `wasm_bindgen_futures::spawn_local`)
-and verified `cargo check --target wasm32-unknown-unknown` compiles
-clean, but did **not** verify client-visible delivery end-to-end over
-HTTP &mdash; a test client received zero bytes even after the bridge
-processed a real event, against a local `wrangler dev` run, with the
-root cause (a `wrangler dev` limitation vs. a remaining adapter bug)
-not isolated. This document specifies the bridge as the correct
-*design*, informed by the mechanical proof; it does not claim the
-design is proven to deliver bytes to a real client yet. The reference
-Worker and the streaming pack transfer
-MUST re-verify end-to-end delivery (ideally against a real
-Cloudflare deployment, not only `wrangler dev`) before either is
-considered done &mdash; a proto/spec review is not a substitute for that
-runtime verification.
-
-`kit-server` (§7.2) and the native CLI client (§7.3) run outside
-Workers (axum/hyper and Tokio respectively) and are not subject to the
-non-`'static` `WebSocket::events()` constraint at all &mdash; the bridge
-above is a Workers-specific workaround, not a general requirement of
-this protocol.
-
 ---
 
 ## 7. Deployment targets
 
-One proto, one generated codebase, three consumers &mdash; no per-target
-dialect:
+One proto, one generated codebase &mdash; no per-target dialect.
 
-### 7.1 Reference Worker
+### 7.1 Reference server
 
 **Reference-server behavior.**
 
-A `connectrpc` and `workers-rs` service
-([`apps/vcs-worker`](../../apps/vcs-worker)), reusing
-`apps/repo-worker`'s proven patterns: vendored `generated/` staged by
-`build.rs` (`KIT_TRANSPORT_CODEGEN=1` to regenerate via
-`connectrpc-build` against the canonical
-`proto/kit/transport/v1/transport.proto`, no protoc dependency on the
-default build path &mdash; Cloudflare Workers Builds and CI images lack a
-protoc new enough for `edition = "2023"`), R2 for pack storage, and a
-single global Durable Object for ref CAS. That is a single-repository
-deployment in §7.4's terms. A multi-repository deployment shards its
+A reference server stores packs in an object store and keeps ref CAS in
+one strongly consistent store. A deployment with one global ref store is
+a single-repository deployment in §7.4's terms. A multi-repository deployment shards its
 state instead: one namespace coordinator per namespace, one strongly
 consistent ref shard per (repository, ref), and eventually consistent
-repository index shards (§7.9). Unlike `repo-worker`'s
-open-write demo, all mutating procedures require the versioned signed-write
+repository index shards (§7.9). All mutating procedures require the versioned signed-write
 contract below. This verifies the writer's identity. Write authorization,
 which decides whether that identity may write to the repository, is §7.5.
 The deployment config supplies `AUTH_AUDIENCE` (exact canonical
 HTTP(S) origin) and, on a single-repository deployment, `AUTH_REPOSITORY`
-(the configured repository identity, §7.4). Repo Worker instead obtains
-the repository identity from the decoded room; Keys Worker uses `keys`.
+(the configured repository identity, §7.4).
 **Protocol requirement.** Host or forwarded request headers MUST NOT establish the server's
 trusted audience.
 
@@ -1184,18 +1080,14 @@ unreachable ledger or failed quota read fails closed.
 **Reference-server behavior.** `AUTH_AUDIENCE` is explicitly configured for
 every deployment and local development origin.
 
-### 7.2 `kit-server` (library and adapters)
+### 7.2 Server implementations
 
 **Reference-server behavior.**
 
-The same generated `TransportService` binding (`kit-server`'s `connect`
-module over its pipeline) is served on Workers by the `kit-server-worker`
-adapter (§7.1) and in process by the conformance host
-(`kit-server-conformance`), one handler implementation over different
-storage backends (R2 and Durable Objects on Workers; the `.kit` on-disk
-layout, per [SPEC-WORKTREE](SPEC-WORKTREE.md)/[SPEC-CONCURRENCY](SPEC-CONCURRENCY.md),
-in process). There is no standalone self-hosted server binary: the former
-`kit-server serve` deployment was removed.
+No server for `kit.transport.v1` lives in this repository. A server binds
+the generated `TransportService` and chooses its own storage backend. A
+filesystem backend uses the `.kit` on-disk layout, per
+[SPEC-WORKTREE](SPEC-WORKTREE.md)/[SPEC-CONCURRENCY](SPEC-CONCURRENCY.md).
 
 `kit serve <path>` (the CLI) is only the `kit+ssh://` forced-command
 server, speaking the SSH-frame protocol on stdin/stdout. Its former HTTP
@@ -1245,7 +1137,7 @@ a deployment can require either, both, or neither:
 
 - **Bearer token**: `KIT_API_TOKEN`, read from
   the environment at `connect()` time, sent as `Authorization: Bearer
-  <token>` on every call. This is what bearer-mode `kit-server`
+  <token>` on every call. This is what bearer-mode
   deployments (§7.2) expect.
 - **Ed25519 envelope**: `kit-client` signs the auth v2 contract
   in §7.1 for reads and writes, with an exact request body commitment for
@@ -1257,17 +1149,13 @@ a deployment can require either, both, or neither:
   Ed25519 identity, independently of bearer-token presence. Domain separation
   alone does not grant a repository permission to invoke ambient signing.
 
-Verified live: real `kit push`/`clone`/`pull` (envelope auth) against a
-local `wrangler dev` instance of `apps/vcs-worker` &mdash; see
-`apps/vcs-worker/README.md` "Known limitations".
-
 `ConnectTransport::supports_atomic_advance()` lazily reads `atomic_advance`
 from `GetServerInfo` (§2.1) and caches discovery for the transport instance's
 lifetime. It reports `true` only when a validated v2 advertisement explicitly
 sets `atomic_advance = true`. Servers that return `unimplemented`, failed
 discovery after the retry ladder, and invalid advertisements retain the
-conservative `false` default. There is no local opt-in. Transactional SQLite
-and Durable Object deployments can therefore enable the existing packmap
+conservative `false` default. There is no local opt-in. Servers with a
+transactional ref store can therefore enable the existing packmap
 re-baseline gate automatically; the gate still requires advertised atomicity
 before resetting a chain.
 
@@ -1291,7 +1179,7 @@ stored result for the reused nonce (§7.1). A CAS conflict itself is never
 retried here (`is_retryable` excludes `TransportError::RefConflict`, and
 `AdvanceRefs` reports conflicts as successful responses, §4); that stays
 caller-level policy. Against a deployment without the replay ledger
-(`kit-server`'s `Open`, `Bearer` and `TransportIdentity` modes), a
+(the `Open`, `Bearer` and `TransportIdentity` modes), a
 re-issue can report a conflict for a write that landed, so the caller
 follows SPEC-TRANSPORT §7's `read_ref` rule.
 
@@ -1302,7 +1190,7 @@ The regression tests
 variants, and the retry ladder itself (a flaky in-process server that
 fails the first N calls with a retryable error class, and a
 non-retryable-error/ladder-exhaustion pair) &mdash; through a real in-process
-`TransportService` server (memory-backed, not R2/DO): a real server, not a mock standing in for one.
+`TransportService` server (memory-backed): a real server, not a mock standing in for one.
 
 ### 7.4 Repository addressing
 
@@ -1379,7 +1267,7 @@ object serving instead selects the repository by path and MUST ignore
 one repository identity. It MAY be a bare name. A request without
 `X-Repository` resolves to that identity on unsigned RPCs; a signed
 request without `X-Repository` is `unauthenticated` (§7.1). A request that carries any
-other well-formed identity is `not_found`. The §7.1 reference Worker is
+other well-formed identity is `not_found`. The §7.1 reference server is
 a single-repository deployment.
 
 **Multi-repository deployments.** The deployment routes each RPC by
@@ -1796,7 +1684,7 @@ A deployment settles a charge on `Committed` and releases it on
 identity for deduplication, as [SPEC-SERVER](SPEC-SERVER.md) specifies. Repeated
 delivery does not create another terminal outcome or settlement.
 
-**Reference-server behavior.** The built-in default admission in kit-server
+**Reference-server behavior.** The built-in default admission
 retains its skipped paths and quota accounting: ticket consumption does not
 invoke it again. Non-default admission also covers the zero-byte ref effects.
 A transactional outbox retains pending outcome-delivery responsibility.
@@ -2025,10 +1913,9 @@ Public scans use fan-out at most two and fetch
 at most 101 records per scan. Short backend pages, including empty pages with a
 continuation, resume using that range's backend cursor before merging. The
 reference server permits 102 top-level storage calls per listing; full listings
-reserve one for a batched visibility read. Worker stores perform that read in
+reserve one for a batched visibility read. Object-store backends perform that read in
 one call; the default storage adapter performs at most 201 primitive calls.
-Its atomic writes retain 100-operation and 1-MiB limits, and Worker requests
-retain their shared call budgets. These are reference-server bounds, not
+Its atomic writes retain 100-operation and 1-MiB limits. These are reference-server bounds, not
 protocol limits.
 
 
@@ -2037,7 +1924,7 @@ protocol limits.
 This document specifies the proto and its consumption pattern only.
 Explicitly deferred to later work:
 
-- The reference Worker implementation.
+- A server implementation.
 - ~~`kit serve`'s HTTP mode.~~ Implemented, then removed with the
   standalone server &mdash; see §7.2.
 - ~~The native CLI Connect client.~~ Implemented &mdash; see §7.3.
@@ -2045,14 +1932,7 @@ Explicitly deferred to later work:
   directly in `ConnectTransport` &mdash; see §7.3.
 - S3 multipart upload (unrelated transport; not superseded by this
   document at all).
-- Migrating `kit.repo.v1.WatchRefs` to real Connect server-streaming
-  using the bridge pattern in §6.3 (a `kit.repo.v1` change, not a
-  `kit.transport.v1` one &mdash; tracked separately).
-- End-to-end runtime verification of the `DownloadPack` streaming
-  bridge (§6.3's known risk) &mdash; this is a proto/design review gate, not
-  a working-server acceptance gate.
-- Generated TypeScript (`connect-es`) clients for this service
-  (tracked separately).
+- Generated TypeScript (`connect-es`) clients for this service.
 - Implementing version 2: multi-repository routing, the namespace
   and write policies, sharded server metadata, `GetServerInfo`, upload
   tickets and resumable parts, ref deletion, and `ListRefs` paging, with
@@ -2104,20 +1984,15 @@ Explicitly deferred to later work:
 
 The acceptance gate for this document itself is static, not behavioral:
 
-- `buf lint` (`STANDARD` category) against `proto/kit/transport/v1/transport.proto` &mdash; zero errors, zero lint exceptions.
-- `buf breaking` initialized (`breaking.use: [FILE]` in `buf.yaml`, §1) as the baseline for every future change to this module.
-- The proto compiles cleanly through the real `buffa`/`connectrpc-build` codegen path (not just `protoc`) &mdash; verified by generating and compiling the full client and server stub set (`TransportService`, `TransportServiceClient`, every request/response/`oneof` message) against `buffa 0.9.1`/`connectrpc 0.9`/`connectrpc-build 0.9`, mirroring the exact `include_generated!()` pattern `kit-repo-client`/`apps/repo-worker` use.
+- The proto compiles cleanly through the real `buffa`/`connectrpc-build` codegen path (not just `protoc`) &mdash; verified by generating and compiling the full client and server stub set (`TransportService`, `TransportServiceClient`, every request/response/`oneof` message) against `buffa 0.9.1`/`connectrpc 0.9`/`connectrpc-build 0.9`, using the `include_generated!()` pattern.
 - Explicit maintainer sign-off on the RPC shapes in this document.
 
-The reference Worker, the HTTP mode and the native client each own their
-own runtime test anchors (integration tests against a real or
-locally-hosted server); this document is not amended to list them. The
-native client (§7.3) is the first to land one:
+The native client (§7.3) owns its runtime test anchors.
 `rust/crates/kit-transport-connect/tests/roundtrip.rs` runs a real
 in-process `TransportService` server and drives every `Transport` verb
 through it via the generated client &mdash; see §7.3 for what it does and
-does not prove (a memory-backed in-process server, not the R2/DO
-reference Worker).
+does not prove (a memory-backed in-process server, not a production
+server).
 
 ---
 
@@ -2126,7 +2001,7 @@ reference Worker).
 | Invariant | Enforced by |
 |---|---|
 | Every `Transport` trait verb has exactly one corresponding wire RPC, or is a documented client-side default-impl delegation with no independent wire shape. | §2's mapping table; `protocol.rs`'s default-impl doc comments. |
-| `RefExpectation`'s wire numbers (`ANY=1`, `MISSING=2`, `MATCH=3`) never change, even after a shared proto is extracted. | `buf breaking` (`FILE` category, §1); the `RefExpectation` doc comment matching `ssh.proto`'s "do NOT renumber" contract. |
+| `RefExpectation`'s wire numbers (`ANY=1`, `MISSING=2`, `MATCH=3`) never change, even after a shared proto is extracted. | The `RefExpectation` doc comment matching `ssh.proto`'s "do NOT renumber" contract. |
 | A rejected `UploadPack` stream never creates or overwrites the destination pack. | §6.1's server-side rejection checks, mirroring SPEC-TRANSPORT §4.2's SSH requirement. |
 | `DownloadPack` either completes its stream with `chunk.last = true`, returns one negotiated location, or fails the whole call before any message is sent. Location bytes are verified before use, with one streaming fallback on failure. | §6.2. |
 | Every `TransportError` variant a server can raise has exactly one Connect code it maps to; a client's inverse mapping is mechanical, not heuristic. | §5's table. |
@@ -2139,18 +2014,6 @@ reference Worker).
 | Every admitted reservation gets exactly one outcome: `Committed`, `Aborted`, or `Expired`. | §7.7. |
 | A stock multi-repository deployment never runs `write_policy = open`. | §7.5 write policy. |
 | An `AdvanceRefs` conflict is a typed response value, never a Connect error. | §4 &mdash; matches `AdvanceOutcome`'s three-variant, no-error-variant shape in `protocol.rs`. |
-| The `DownloadPack` Workers-streaming design is documented as unverified end-to-end until a later change proves real client-visible delivery. | §6.3's "Known risk" paragraph; re-verification requirement. |
-
-## Wasm server deadline policy
-
-**Reference-server behavior.**
-
-The kit wasm binding ignores `connect-timeout-ms` and `grpc-timeout` before
-Connect dispatch, and does not apply configured Connect deadline policies.
-Native bindings retain deadline enforcement. This runtime policy leaves body
-limits, streaming and authentication unchanged; hosts may bound work using their
-platform clock and timer.
-
 
 ## Runtime-independent client (informative)
 
