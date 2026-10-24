@@ -22,17 +22,23 @@ static LARGEST: AtomicUsize = AtomicUsize::new(0);
 // pointer, so `System`'s contract holds. The counter update has no effect
 // on the allocation itself.
 unsafe impl GlobalAlloc for CountingAlloc {
+    // SAFETY: the caller upholds the `GlobalAlloc::alloc` contract. The call
+    // forwards the same layout to `System`.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         LARGEST.fetch_max(layout.size(), Ordering::Relaxed);
         // SAFETY: the caller upholds the `GlobalAlloc::alloc` contract for `layout`.
         unsafe { System.alloc(layout) }
     }
 
+    // SAFETY: the caller passes a pointer and layout from a matching `alloc`.
+    // The call forwards both to `System` unchanged.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         // SAFETY: the caller passes a pointer and layout from a matching `alloc`.
         unsafe { System.dealloc(ptr, layout) }
     }
 
+    // SAFETY: the caller passes a pointer and layout from a matching `alloc`.
+    // The call forwards them with the new size to `System` unchanged.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         LARGEST.fetch_max(new_size, Ordering::Relaxed);
         // SAFETY: the caller passes a pointer and layout from a matching `alloc`.
