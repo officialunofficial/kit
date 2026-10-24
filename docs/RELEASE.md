@@ -18,22 +18,12 @@ Contents:
 
 ## What gets published
 
-A single `vX.Y.Z` tag drives four decoupled channels:
+A single `vX.Y.Z` tag drives two decoupled channels:
 
-- **Binaries plus npm wasm** via
+- **Binaries** via
   [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 - **crates.io** via
   [`.github/workflows/crates-publish.yml`](../.github/workflows/crates-publish.yml).
-- **Docs MCP corpus** via
-  [`.github/workflows/mcp-release.yml`](../.github/workflows/mcp-release.yml),
-  which indexes the tagged tree for the kit docs MCP server so the served
-  corpus always matches the published crates.
-- **BSR proto modules** (`buf.build/officialunofficial/kit-rpc` and
-  `buf.build/officialunofficial/kit-repo`) via the `buf-push` job in
-  [`.github/workflows/crates-publish.yml`](../.github/workflows/crates-publish.yml),
-  so third-party signer integrators and `RepoService` clients can `buf
-  generate` typed bindings from a pinned tag without vendoring this repo.
-  Dormant until [`BUF_TOKEN`](#buf_token) is provisioned.
 
 All are gated on the same signed tag. Before `release.yml` publishes anything,
 it verifies that the tag is strict semver, annotated, GPG-signed by an
@@ -80,14 +70,7 @@ allowlisted release fingerprint, and points at a commit reachable from
    to `main` (and pushes to it), and checks the golden list is current, so
    drift shows up before a tag rather than at it.
 
-2. **npm package** `@officialunofficial/kit-wasm@X.Y.Z`. Built with
-   `wasm-pack --target bundler` and published with `npm publish --access
-   public`. The pkg tarball is also attached to the GitHub Release as
-   `kit-wasm-X.Y.Z-npm.tar.gz` for offline mirroring. npm provenance is
-   enabled with `npm publish --provenance`; it binds the package to this
-   GitHub Actions workflow run through GitHub OIDC.
-
-3. **crates.io** &mdash; every workspace crate without `publish = false`, in
+2. **crates.io** &mdash; every workspace crate without `publish = false`, in
    dependency order. See [Publishing to crates.io](#publishing-to-cratesio).
 
 ## Pre-release checklist
@@ -169,8 +152,7 @@ scripts/release-smoke.sh --archive kit-X.Y.Z-<target>.tar.gz --version X.Y.Z
 The script covers every item below in one pass: cosign signature, the
 `SHA256SUMS` entry, `kit version` against the tag, the bundled man page
 and completions, a basic `kit init` → `kit keygen` → add a file →
-`kit commit` flow, and (unless `--skip-npm`) `npm view
-@officialunofficial/kit-wasm@X.Y.Z` plus `npm audit signatures`. It's the
+`kit commit` flow. It's the
 same script used for a pre-flight dry run against a locally packaged
 archive before tagging (missing sidecars like the cosign bundle are
 skipped with a warning, not a failure, in that case) &mdash; this
@@ -186,7 +168,6 @@ disagree, fix the script:
       `share/completions/kit.bash`, `share/completions/_kit`, and
       `share/completions/kit.fish`.
 - [ ] Basic flow: `kit init` → add a file → `kit commit`.
-- [ ] `npm view @officialunofficial/kit-wasm@X.Y.Z` and `npm audit signatures`.
 
 ### Distribution and announce
 
@@ -201,29 +182,15 @@ disagree, fix the script:
       [`release-verify.yml`](../.github/workflows/release-verify.yml)
       (`gh workflow run release-verify.yml -f version=X.Y.Z`) to check
       every distribution channel end to end in an isolated environment —
-      `cargo install`, `cargo binstall`, npm, the curl-pipe install
+      `cargo install`, `cargo binstall`, the curl-pipe install
       script (Debian/Ubuntu/Fedora), and Homebrew. Not a substitute for the
       smoke test above (which verifies the archive itself); this verifies
       every OTHER way a user actually gets `kit` onto their machine.
-
-### Server compatibility gates
-
-On pushes to `main`, the Rust workflow runs library clippy for `kit-server`
-with `cargo hack --feature-powerset --depth 2`.
-The powerset covers no features, individual features and feature pairs.
-Separate checks cover default features across all targets and all features
-for the library. Library checks avoid dev-dependency feature unification;
-the default check also catches test-only warnings. Each crate has a 30-minute
-job limit. PRs enforce the server's API compatibility against 0.5.0 as the 0.6 release (a breaking-capable 0.x minor) while main accumulates it;
-the publish gate checks the server too, including that pinned baseline.
 
 ### Post-release
 
 - [ ] Verify the release-prep PR left a fresh `## [Unreleased]` heading at
       the top of `CHANGELOG.md`.
-- [ ] After 0.6.0 is tagged, restore the `server-semver` job in
-      `.github/workflows/rust.yml` to `--release-type patch` against the
-      0.6.0 baseline (it checks the 0.6 release class against 0.5.0 until then).
 - [ ] After a crate's first publish, add co-owners:
       `cargo owner --add github:officialunofficial:makechain <crate>`, then
       `cargo owner --add <maintainer> <crate>` for each maintainer. Confirm
@@ -255,7 +222,7 @@ the publish gate checks the server too, including that pinned baseline.
    `origin/main`.
 5. Watch the workflows. `release.yml` job order is:
    `validate-release-tag` → `build` (× 4 archs) → `sbom` / `third-party-notices` (parallel) →
-   `release` → `publish-wasm`. `crates-publish.yml` runs `cargo
+   `release`. `crates-publish.yml` runs `cargo
    publish --workspace --locked` in dependency order.
 6. Run the [smoke test](#smoke-test).
 
@@ -273,26 +240,13 @@ in `rust/Cargo.toml` at the tagged tree).
 
 | Publishes to crates.io | Stays off crates.io (`publish = false`) |
 |---|---|
-| The library crates (`kit-core`, `kit-rpc`, `kit-client`, `kit-sync`, `kit-attest`, `kit-keystore`, `kit-git-bridge`, `kit-serve`, `kit-transport-{file,http,memory,s3,ssh,enc,connect}`) plus `kit-storage` (so `cargo install kit-storage` works) | `kit-wasm` (npm-only), `kit-repo-client`, `kit-test-util`, `kit-core-wasm-check`, `kit-formal-conformance`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
+| The library crates (`kit-core`, `kit-rpc`, `kit-client`, `kit-sync`, `kit-attest`, `kit-keystore`, `kit-git-bridge`, `kit-serve`, `kit-transport-{file,memory,s3,ssh,connect}`) plus `kit-storage` (so `cargo install kit-storage` works) | `kit-test-util`, `kit-formal-conformance`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
 
 The published crates depend only on each other, forming a closed,
 dependency-ordered set; `cargo publish --workspace` computes that order and
 skips any `publish = false` member.
 
 Notes on the published set:
-
-- **`kit-server-conformance`** &mdash; the protocol conformance library and
-  runner join the next lockstep release. Package with default features;
-  `test-host` remains debug-only test support. Before tagging, check its package
-  contents and install the runner from the release candidate. Do not publish
-  this crate separately from the dependency train.
-
-- **`kit-server`** &mdash; the runtime-agnostic server core, first published at
-  0.5.0. `kit-storage` depends on it (features `ssh` and `fs`, for the stdio
-  `kit serve` session), so it must be on crates.io before `kit-storage`;
-  `cargo publish --workspace` orders the two from the dependency graph. There
-  is no standalone server binary or container image; embedders host the
-  reference implementation through its library API. 
 
 - **`kit-storage`** &mdash; published so `cargo install kit-storage` installs the `kit`
   binary; it also ships via the signed GitHub Release archives and `cargo
@@ -651,15 +605,12 @@ x86_64 build is the most reliable reproducibility target for third parties.
 | Secret | Purpose | Required for |
 | --- | --- | --- |
 | `CRATES_PACKAGE_KEY` (org-level) | crates.io publish token (publish-new plus publish-update) | `crates-publish.yml` |
-| `BUF_TOKEN` | Buf Schema Registry API token (write access) &mdash; pushes the `kit-rpc`/`kit-repo` proto modules | `crates-publish.yml`'s `buf-push` job (see [`BUF_TOKEN`](#buf_token)) |
 
-cosign keyless and npm Trusted Publishing (auth plus provenance) both run on
-the GitHub OIDC token; no extra secrets are needed for those.
+cosign keyless signing runs on the GitHub OIDC token. It needs no extra secret.
 
 | Variable | Purpose | Required for |
 | --- | --- | --- |
 | `KIT_RELEASE_GPG_FINGERPRINTS` | Space-separated trusted 40-hex GPG fingerprints allowed to sign release tags (public keys must be on `keys.openpgp.org` or `keyserver.ubuntu.com`) | `release.yml` preflight |
-| `BUF_PUBLISH_ENABLED` | Set to `true` to arm the `buf-push` job (job-level `if:` cannot read `secrets`, so this variable &mdash; not `BUF_TOKEN`'s presence &mdash; is the gate) | `crates-publish.yml`'s `buf-push` job |
 
 ## One-time setup
 
@@ -672,106 +623,3 @@ For the very first publish, ensure each crate name is available or already owned
 by the org; crates.io rejects deps on unpublished crates, so the dependency-order
 publish in `crates-publish.yml` handles a clean first release once the token and
 version are in place.
-
-### npm Trusted Publishing (OIDC) — `@officialunofficial/kit-wasm`
-
-`@officialunofficial/kit-wasm` is the npm package published by the release
-workflow, under the `officialunofficial` npm org (matching the GitHub org —
-renamed from the earlier `@makechain/kit-wasm` once the repo went public).
-`publish-wasm` authenticates via the GitHub Actions OIDC token directly (npm
-[Trusted Publishers](https://docs.npmjs.com/trusted-publishers)) &mdash; there is
-**no `KIT_NPM_TOKEN`-equivalent secret to provision, rotate, leak, or
-revoke** for the automated path. This replaced the original
-Automation-token setup once the package had at least one successful
-token-based release behind it (0.1.0&ndash;0.3.0, published as
-`@makechain/kit-wasm`).
-
-**One-time setup (npmjs.com, by an owner of the `officialunofficial` org):**
-
-1. If `@officialunofficial/kit-wasm` has never been published, either cut a
-   real tag (the workflow's first successful OIDC-authenticated publish
-   claims the name) or publish a placeholder once from a maintainer
-   workstation with a personal token:
-   ```sh
-   cd rust
-   wasm-pack build crates/kit-wasm --release --target bundler --out-dir pkg
-   cd crates/kit-wasm/pkg
-   npm pkg set name=@officialunofficial/kit-wasm
-   npm version --no-git-tag-version --allow-same-version 0.0.0-init
-   npm publish --access public --tag init
-   ```
-   `wasm-pack`'s raw output is named unscoped `kit-wasm`, hence the `npm pkg
-   set` step. `--tag init` keeps the placeholder off the `latest` dist-tag
-   once a real version publishes (it briefly holds `latest` too, being the
-   only version, until the first real tag push supersedes it).
-
-   The npm registry's CDN edge cache can serve a stale 404 for a
-   brand-new scope/package for a few minutes after a successful publish,
-   even though `npm dist-tag ls`, `npm access list packages`, and
-   `npm install` (corgi-format endpoint) already see it — don't diagnose a
-   fresh publish as failed from a bare `npm view`/`curl` 404, and don't
-   re-query the same URL repeatedly (it just refreshes the negative-cache
-   TTL). Wait a few minutes and recheck.
-2. On the package's `npmjs.com` page &rarr; **Settings** &rarr; **Trusted
-   Publisher**, add a GitHub Actions publisher:
-   - Organization or user: `officialunofficial`
-   - Repository: `kit`
-   - Workflow filename: `release.yml` (filename only, not the full
-     `.github/workflows/` path)
-   - Environment: leave blank (the job doesn't use a GitHub environment)
-   - Allowed actions: `npm publish`
-3. Verify with `npm view @officialunofficial/kit-wasm` after the first
-   OIDC-authenticated publish; confirm provenance with `npm audit
-   signatures`.
-
-Requires npm CLI &ge;11.5.1 (the workflow pins this explicitly) and
-GitHub-hosted runners (self-hosted runners aren't supported for Trusted
-Publishing as of this writing).
-
-### `BUF_TOKEN`
-
-`buf.build/officialunofficial/kit-rpc` (common.proto/signer.proto/ssh.proto/
-verify.proto, from the `rust/crates/kit-rpc/proto` module) and
-`buf.build/officialunofficial/kit-repo` (repo.proto, from the
-`apps/repo-worker/proto` module) are the two named modules in the repo-root
-`buf.yaml` v2 workspace that the `buf-push` job in `crates-publish.yml`
-publishes on every tagged release. Both are pushed **private** &mdash;
-`signer.proto` is the security-critical external-signer wire contract
-([SPEC-EXTERNAL-SIGNER.md](specs/SPEC-EXTERNAL-SIGNER.md)) and `repo.proto` is
-this repo's internal `RepoService` contract; flip a module to public only as a
-deliberate decision, not a default.
-
-1. Sign in (or create an account) at <https://buf.build/> under the
-   `officialunofficial` organization. **The BSR org name is assumed to match
-   the GitHub org (`officialunofficial`) &mdash; confirm this before the first push,
-   or update the `name:` field on the `rust/crates/kit-rpc/proto` and
-   `apps/repo-worker/proto` modules in the repo-root `buf.yaml` (and the `buf
-   generate`/`buf push` references in this doc and the `buf-push` job) to the
-   actual BSR org if it differs.**
-2. Generate a BSR API token (`buf.build` → Settings → API Tokens) scoped to
-   that organization, with write access.
-3. Add it as an **org-level** (or repo) secret named `BUF_TOKEN`, and set the
-   `BUF_PUBLISH_ENABLED` repo/org **variable** to `true`. Until the variable is
-   `true`, `buf-push` is a clean skip (`if: vars.BUF_PUBLISH_ENABLED ==
-   'true'`) &mdash; same dormant-until-provisioned pattern as `RELEASE_PLZ_ENABLED`.
-   Two knobs, not one, because a job-level `if:` cannot read the `secrets`
-   context to gate on `BUF_TOKEN`'s presence directly.
-4. First push auto-creates both BSR repositories (`--create
-   --create-visibility private`); no manual "create the module" step needed.
-5. Verify: after a release tag, `buf generate
-   buf.build/officialunofficial/kit-repo:vX.Y.Z --template
-   apps/repo-worker/proto/buf.gen.yaml` (with `buf registry login` first, since
-   the module is private) should produce TypeScript bindings without this repo
-   checked out &mdash; this is exactly what the `buf-push` job's own smoke-test step
-   does on every tagged release.
-
-### Package name decision
-
-The Rust crate remains `kit-wasm`, but the release workflow publishes the npm
-package as `@officialunofficial/kit-wasm`, matching the GitHub org this repo
-lives under (renamed from `@makechain/kit-wasm` once the repo went public —
-see [npm Trusted Publishing](#npm-trusted-publishing-oidc-officialunofficialkit-wasm)
-above). If the scope ever changes again, update
-`rust/crates/kit-wasm/README.md`'s install snippet, the `publish-wasm` workflow
-`npm pkg set name=...` line, the npm Trusted Publisher config on npmjs.com, and
-the `npm view` smoke-test references in this doc.
