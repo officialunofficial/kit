@@ -362,27 +362,19 @@ fn restore_entry(
     // the entry removal last means a failure in the index rewrite leaves the
     // stash in place for a normal retry, rather than dropping it with the
     // index half-restored.
-    let snapshot_index = match stash::entry_index(store, layout, index) {
+    let restored = match stash::entry_index(store, layout, index) {
         Ok(i) => i,
         Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
     };
     if let Err(e) = stash::apply(store, layout, index) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }
-    if let Some(restored) = snapshot_index {
-        // Write the exact recorded index — preserving staged deletions, which
-        // a tree round-trip would drop.
-        if let Err(e) = kit_core::index::write_index(layout, &restored) {
-            return emit_err(
-                &format!("stash {verb}: restore index: {e}"),
-                exit::GENERAL_ERROR,
-            );
-        }
-    } else {
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(
-            stderr,
-            "note: this stash has no recorded index state; --index had no effect"
+    // Write the exact recorded index — preserving staged deletions, which
+    // a tree round-trip would drop.
+    if let Err(e) = kit_core::index::write_index(layout, &restored) {
+        return emit_err(
+            &format!("stash {verb}: restore index: {e}"),
+            exit::GENERAL_ERROR,
         );
     }
     if drop_entry && let Err(e) = stash::pop_finalize(layout, index) {
