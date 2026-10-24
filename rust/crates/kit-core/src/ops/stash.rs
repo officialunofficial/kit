@@ -721,6 +721,9 @@ pub fn deserialize_list(data: &[u8]) -> StashResult<StashList> {
             message: msg,
         });
     }
+    if pos != data.len() {
+        return Err(StashError::InvalidFormat);
+    }
     Ok(StashList { entries })
 }
 
@@ -1154,6 +1157,25 @@ mod tests {
     fn deserialize_rejects_bad_magic() {
         assert!(matches!(
             deserialize_list(&[b'X', b'Y', b'Z', b'W', 0, 0, 0, 0]),
+            Err(StashError::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn deserialize_rejects_trailing_bytes() {
+        let list = StashList {
+            entries: vec![StashEntry {
+                commit_hash: hash::hash(b"commit"),
+                parent_hash: ZERO,
+                timestamp: 7,
+                message: "wip".to_string(),
+            }],
+        };
+        let mut bytes = serialize_list(&list).unwrap();
+        assert_eq!(deserialize_list(&bytes).unwrap(), list);
+        bytes.push(0);
+        assert!(matches!(
+            deserialize_list(&bytes),
             Err(StashError::InvalidFormat)
         ));
     }
