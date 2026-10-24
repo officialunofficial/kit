@@ -614,13 +614,9 @@ pub trait Transport: Send + Sync {
         if total_bytes > PACK_BODY_LIMIT {
             return Err(TransportError::PayloadTooLarge(PACK_BODY_LIMIT_USIZE));
         }
-        // `total_bytes <= PACK_BODY_LIMIT` was just checked, and
-        // `PACK_BODY_LIMIT_USIZE as u64 == PACK_BODY_LIMIT` is asserted
-        // at the constant's definition, so this conversion never
-        // truncates — `try_from` (rather than `as`) makes that provable
-        // to clippy instead of asserted in a comment.
-        let initial = usize::try_from(total_bytes).unwrap_or(PACK_BODY_LIMIT_USIZE);
-        let mut buf = Vec::with_capacity(initial);
+        // `total_bytes` comes from the peer. Do not size the buffer from it.
+        // The buffer grows as chunks arrive, under the checked limit below.
+        let mut buf = Vec::new();
         let mut saw_last = false;
         for chunk in chunks {
             let c = chunk?;
