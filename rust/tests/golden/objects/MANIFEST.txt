@@ -1,5 +1,5 @@
 # Object golden vectors (deterministic)
-# Produced by scripts/harvest-golden-vectors.sh
+# Checked by `cargo test -p kit-core --test golden` and `python3 scripts/golden/objects_ref.py`
 # Format: <name> <blake3-hex-of-bin-bytes>
 identity_ed25519 0e4105b396214ae3a593f1a564766f7ad0fbc71fc045c6a62fdd128401ea4bb6
 identity_opaque 6bbae9c0b99e12256d561acda3af4860c112595b6f565f04220a4d45a1287105
