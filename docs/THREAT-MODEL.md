@@ -223,6 +223,36 @@ kit does NOT defend:
 - A compromise of the GitHub Actions OIDC issuer or Sigstore root.
   Defense is transitive.
 
+### 3.6 Hostile download path for the installer
+
+Attacker controls the network path or the host that serves release
+archives. The attacker does not control the host that serves `install.sh`.
+
+`install.sh` defends:
+
+- Authenticity of the archive. The script requires `cosign` and verifies the
+  archive against its `.cosign.bundle`. The pinned certificate identity is the
+  `release.yml` workflow of `officialunofficial/kit` at a strict semver tag.
+  The pinned issuer is the GitHub Actions OIDC issuer. The script exits when
+  `cosign` or the bundle is missing. Only `--insecure-skip-cosign` or
+  `KIT_SKIP_COSIGN=1` turns this off.
+- Integrity of the archive. The script checks the SHA256 sum after the cosign
+  check. The sum comes from the same origin as the archive, so it detects
+  corruption only.
+- Silent downgrade. The script records the installed tag in two files. It
+  refuses a downgrade through "latest". It refuses to run when the two files
+  disagree.
+- A replaced binary. The script refuses an install directory that is group or
+  world writable. It installs with an atomic rename.
+
+`install.sh` does NOT defend:
+
+- A compromise of the host that serves `install.sh`. The user trusts the
+  script on download. Cosign verifies the binary, not the script. A user who
+  needs more reads the script first, or downloads a pinned archive and
+  verifies it by hand (`docs/INSTALL.md`).
+- A compromise of the release workflow or of the Sigstore roots (see 3.5).
+
 ---
 
 ## 4. Configuration scope split
