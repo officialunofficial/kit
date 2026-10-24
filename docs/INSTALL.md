@@ -47,10 +47,6 @@ cargo install --git https://github.com/officialunofficial/kit kit-storage  # fro
 Drops `kit` into `~/.cargo/bin/`. Make sure that directory is on your
 `PATH`.
 
-The install also adds `mkit`, the former name of the tool. It prints a
-deprecation notice to stderr and runs `kit` with the same arguments. Use
-`kit` in new scripts.
-
 **Build modes.** From a checkout of the repository:
 
 ```sh

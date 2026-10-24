@@ -48,11 +48,6 @@ workspace = true
 name = "kit"
 path = "src/main.rs"
 
-# Deprecated alias. It prints a notice and runs `kit`.
-[[bin]]
-name = "mkit"
-path = "src/bin/mkit.rs"
-
 [dependencies]
 # Inter-workspace deps need explicit `version = ...` alongside the
 # path so `cargo publish` accepts them; path-only deps are rejected by
