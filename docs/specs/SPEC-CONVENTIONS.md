@@ -157,10 +157,10 @@ limit and mechanism remain reference-server behavior. Optional-feature
 requirements MUST state the feature condition rather than assume a particular
 server orchestration. Other servers need only the protocol specifications,
 conformance tiers 1 and 2, and pure protocol primitives; they do not depend on
-kit-server.
+the reference server.
 
 **Reference-server behavior.** A mechanism, storage layout, or implementation
-limit of kit-server is reference-server behavior. It does not become a
+limit of the reference server is reference-server behavior. It does not become a
 protocol requirement merely because the reference server implements it.
 Reference details MUST NOT substitute for an observable safety requirement.
 For example, atomic acceptance is a protocol requirement; implementing it with

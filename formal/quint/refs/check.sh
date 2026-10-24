@@ -190,7 +190,7 @@ if [[ ${TLC:-1} == 1 ]]; then
   RV='<< @disk, @mem, @owner, @procs, @recLog, @nextEntry, @faults, @violations, @lostRecords, @recordDuringExpire >>'
   RC='@nextEntry <= 2'
   # Slice "domains": the three §5.1 lock domains on one ref: local updateRef
-  # (refs-<ref>.lock), file (RefLock: kit serve / kit-server / kit+file://)
+  # (refs-<ref>.lock), file (RefLock: kit serve / a layout server / kit+file://)
   # and mem (Mutex).
   DOMD=$'SliceKinds == {"updateRef", "file", "mem"}\nSliceRefs == {0}'
   DOMC=$'CONSTANT @KINDS <- SliceKinds\nCONSTANT @REFS <- SliceRefs'

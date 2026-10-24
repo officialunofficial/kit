@@ -22,7 +22,7 @@ module serve_test {
       .then(sweep("s1")).then(drop("s1")).then(takeShared("s1"))
       .expect(and { Safety, orphans == Set("fresh"), sweptOrphan, serveSh == Set("s1") })
 
-  // The race the exclusive hold closes: `kit-server` is up with a stalled
+  // The race the exclusive hold closes: a layout server is up with a stalled
   // streaming upload (its temp file is older than the age bound); a new
   // `kit serve` finds serve.lock busy and skips the sweep.
   run stalledServerUploadSurvivesTest =
@@ -46,7 +46,7 @@ module serve_test {
       .then(sweep("s1")).then(drop("s1")).then(takeShared("s2")).then(takeShared("s1"))
       .expect(and { Safety, serveSh == Set("s1", "s2"), serverLock == Set("s2") })
 
-  // server.lock: a second kit-server cannot start while one is live, and
+  // server.lock: a second layout server cannot start while one is live, and
   // can once it stops (crash releases the kernel lock).
   run oneKitServerTest =
     initWith(Set())
@@ -90,7 +90,7 @@ module serve_test {
       .then(startServer("s1")).then(takeShared("s1"))
       .expect(and { Safety, not(WitnessUndetectedLateServer) })
 
-  // MUTANT sweepUnlocked: a starting `kit serve` sweeps although kit-server
+  // MUTANT sweepUnlocked: a starting `kit serve` sweeps although a layout server
   // is up with a stalled upload, deleting its live temp file.
   run mutantSweepUnlockedTest =
     initFixed(withF("sweepUnlocked"), Set())
@@ -101,7 +101,7 @@ module serve_test {
       .then(sweep("s2"))
       .expect(and { not(NoLiveUploadSwept), upload.get("s1") == "lost" })
 
-  // MUTANT serverSkipsServe: kit-server up without serve.lock -> a
+  // MUTANT serverSkipsServe: a layout server up without serve.lock -> a
   // starting `kit serve` gets it exclusively and sweeps the stalled upload;
   // a local probe misses the server.
   run mutantServerSkipsServeTest =
@@ -114,7 +114,7 @@ module serve_test {
       .then(startServe("s2")).then(sweep("s2"))
       .expect(not(NoLiveUploadSwept))
 
-  // MUTANT serverLockShared: two kit-servers on one root.
+  // MUTANT serverLockShared: two layout servers on one root.
   run mutantServerLockSharedTest =
     initFixed(withF("serverLockShared"), Set()).then(startServer("s1")).then(startServer("s2"))
       .expect(not(OneKitServer))

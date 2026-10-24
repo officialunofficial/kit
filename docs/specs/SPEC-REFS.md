@@ -62,8 +62,7 @@ refs/remotes/<remote>/<name>       remote-tracking branch refs
 refs/kit/packmap/<name>           pack map of branch <name> (pushed with it)
 ```
 
-**Served names.** A transport server (`kit serve`, `kit-server`, the
-Workers server) MUST serve only ref names under `refs/`. It MUST refuse
+**Served names.** A transport server (`kit serve` or any Connect server) MUST serve only ref names under `refs/`. It MUST refuse
 any other name that passes the §3 grammar (for example `main`,
 `heads/main`) on every read and write (`ReadRef`, `UpdateRef` and both
 names of `AdvanceRefs`), before touching storage, with an explicit error:
@@ -142,7 +141,7 @@ Plus these rejections:
   `HEAD` pointer; for example `HEAD` and `refs/heads/HEAD` are rejected).
 - Longer than **512 bytes** → invalid. A ref name is ASCII, so this is
   also its length in characters. The bound keeps every ref inside a
-  server's storage key (`kit-server` `store::keys`); the constant is
+  server's storage key; the constant is
   `kit_core::refs::MAX_REF_NAME_BYTES`. A transport server MUST refuse
   a longer name on a read or a write with an explicit "ref name too
   long" error, never as absent or a generic failure, and a client

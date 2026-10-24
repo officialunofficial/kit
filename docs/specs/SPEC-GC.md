@@ -135,7 +135,7 @@ writes objects and then tags and remote-tracking refs under
 `git-<remote>.lock` only (SPEC-CONCURRENCY §4).
 
 A push through the file transport (`kit push kit+file://...`) or one
-received by `kit serve` or `kit-server` is not such a writer. It stores
+received by `kit serve` or a layout server is not such a writer. It stores
 packs as `<root>/packs/<hex>` and refs as `<root>/<name>` under the
 transport root, while gc sweeps only loose objects in
 `<common_dir>/objects` and takes roots only from `<common_dir>`. The two

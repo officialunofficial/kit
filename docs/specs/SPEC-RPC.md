@@ -2,13 +2,13 @@
 spec: SPEC-RPC
 version: 1
 status: stable-normative
-audience: integrators implementing an kit external signer or kit-server
+audience: integrators implementing a kit external signer or a kit serve peer
 ---
 
 # SPEC-RPC &mdash; kit cross-system wire protocol v1
 
 kit speaks to processes outside its address space &mdash; external signers
-running as subprocesses, and remote `kit-server` instances reached
+running as subprocesses, and remote `kit serve` instances reached
 over `ssh(1)` &mdash; using a single shared wire protocol.
 
 The schemas live in [`rust/crates/kit-rpc/proto/`](../../rust/crates/kit-rpc/proto/):
@@ -18,13 +18,12 @@ The schemas live in [`rust/crates/kit-rpc/proto/`](../../rust/crates/kit-rpc/pro
 | `common.proto` | Shared types: `Algorithm`, `KeyForm`, `ErrorCode`, `Error`, `ProtocolVersion` |
 | `signer.proto` | External-signer protocol (`SignerFrame` oneof). See [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) for prose. |
 | `ssh.proto` | SSH transport protocol (`SshFrame` oneof). See [SPEC-TRANSPORT](SPEC-TRANSPORT.md) for prose. |
-| `verify.proto` | Object-signature verification contract (`VerifyRequest`/`VerifyResponse`). **Not** a framed protocol under §1/§4 below &mdash; it is message-only, with no `oneof`-dispatched frame and no bound RPC method yet. `kit-storage`'s local dispatch (`rust/crates/kit-storage/src/remote_dispatch/packmap.rs`) calls the Rust implementation directly (`kit_core::sign::{verify_commit,verify_remix,verify_tag}`); the schema exists so a future ConnectRPC transport (for example `apps/repo-worker`) can bind the identical check to a service method instead of reimplementing it. |
+| `verify.proto` | Object-signature verification contract (`VerifyRequest`/`VerifyResponse`). **Not** a framed protocol under §1/§4 below &mdash; it is message-only, with no `oneof`-dispatched frame and no bound RPC method yet. `kit-storage`'s local dispatch (`rust/crates/kit-storage/src/remote_dispatch/packmap.rs`) calls the Rust implementation directly (`kit_core::sign::{verify_commit,verify_remix,verify_tag}`); the schema exists so a future ConnectRPC transport can bind the identical check to a service method instead of reimplementing it. |
 
 `ssh.proto` imports the CAS enum (`RefExpectation`) and the ref-listing
 type (`RefEntry`) from
 [`kit/common/v1/refs.proto`](../../proto/kit/common/v1/refs.proto) at
-the repo root &mdash; a vocabulary shared with `kit.repo.v1` (the
-`apps/repo-worker` multiplayer demo protocol), so the two wire
+the repo root &mdash; a vocabulary shared with `kit.transport.v1`, so the two wire
 protocols cannot desync on CAS semantics. See that file's header
 comment for its own versioning contract.
 

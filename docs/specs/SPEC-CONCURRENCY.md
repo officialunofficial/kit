@@ -43,7 +43,7 @@ document points here.
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-storage`'s `git_import::import_into`, `git::export`) | §4 (this document) |
 | shared/exclusive `format` handle | existing immutable common-dir `format` file | per-repo, short object-store critical section | shared during a bulk write or cached reuse and during format validation; exclusive during gc's final age check and unlink | SPEC-GC, §3.4 (this document) |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
-| `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `kit serve` (stdin SSH-frame, its only mode) and any server embedding `kit-server`'s filesystem layout (which also holds `server.lock` exclusively, so one such server serves a root at a time); taken exclusive without waiting by a starting `kit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
+| `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `kit serve` (stdin SSH-frame, its only mode) and any layout server, meaning a server that embeds the `.kit` filesystem layout (which also holds `server.lock` exclusively, so one layout server serves a root at a time); taken exclusive without waiting by a starting `kit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
 
 The recovery log (`.kit/recovery-log`) has **no dedicated lock** &mdash; see
 §3.2.
@@ -70,7 +70,7 @@ the file transport does not acquire the local full-ref lock, `worktree.lock`,
 `worktrees.lock`, or `refs-history-<branch>.lock`.
 
 The cross-domain gap remains: local `kit commit`/`checkout`/`gc` against a
-directory simultaneously served by `kit serve` or `kit-server` is not coordinated with the
+directory simultaneously served by `kit serve` or a layout server is not coordinated with the
 transport. When the served root is the repository's common dir (`.kit`),
 the transport's `<root>/refs/...` files are the local refs, so a local ref
 mutation can race a client CAS. When the served root is any other directory
@@ -79,19 +79,19 @@ delete a pushed object: pushes store packs under `<root>/packs/`, which gc
 neither sweeps nor roots (SPEC-GC "Concurrent writers and the grace
 window"). The supported file-transport deployment is a
 bare/shared remote that a worktree-owning process does not also mutate directly.
-Local worktree commands against a live `kit serve` or `kit-server` root remain unsupported.
+Local worktree commands against a live `kit serve` or layout-server root remain unsupported.
 
 **The server now detects this case instead of staying silent**, without closing
 it: every live server process on the root &mdash; `kit serve <path>`
-(stdin SSH-frame, its only mode) and any server embedding
-`kit-server`'s filesystem layout &mdash; holds a **shared**
+(stdin SSH-frame, its only mode) and any layout server (a server
+that embeds the `.kit` filesystem layout) &mdash; holds a **shared**
 kernel lock (`std::fs::File::lock_shared`, never exclusive &mdash;
 SPEC-TRANSPORT documents multiple concurrent `serve` processes against
 one root, e.g. one per SSH forced-command connection, as a supported
 deployment, so `serve` instances must not exclude each other) on
-`serve.lock` (in the common dir) for its whole lifetime. `kit-server`
+`serve.lock` (in the common dir) for its whole lifetime. A layout server
 also holds `server.lock` (in the common dir) **exclusively**, so one
-`kit-server` serves a root at a time; it shares `serve.lock` with any
+layout server serves a root at a time; it shares `serve.lock` with any
 `kit serve` processes on the same root. The one exclusive hold: at
 startup `kit serve` tries `serve.lock` exclusively, without waiting, and
 only while it holds it (so no other server is up) sweeps the temp files

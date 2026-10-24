@@ -183,7 +183,7 @@ Allowed dependencies:
 Forbidden dependencies:
 
 - `kit-core` must not depend on `kit-keystore`.
-- `kit-wasm` must not depend on native `kit-keystore` backends.
+- A wasm32 build must not depend on native `kit-keystore` backends.
 - Default workspace builds must not require Linux Secret Service, systemd,
   TPM libraries, YubiKey libraries, Windows APIs, or macOS GUI keychain access.
 

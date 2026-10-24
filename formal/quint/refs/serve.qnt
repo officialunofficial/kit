@@ -6,8 +6,8 @@
 // `serve.lock`) and §3.1 ("the server now detects this case instead of
 // staying silent"):
 //   - every live server process on a root, `kit serve` (ssh-frame) and
-//     a `kit-server` fs-layout server, holds `serve.lock` SHARED for its whole lifetime;
-//   - `kit-server` also holds `server.lock` EXCLUSIVELY (one per root),
+//     a layout server, holds `serve.lock` SHARED for its whole lifetime;
+//   - a layout server also holds `server.lock` EXCLUSIVELY (one per root),
 //     taken without waiting before `serve.lock` (busy -> exit CONFIG_ERROR);
 //   - a starting `kit serve` tries `serve.lock` EXCLUSIVELY without waiting
 //     and, only while it holds it, sweeps the temp files crashed uploads left
@@ -35,8 +35,8 @@
 //     starting server's shared acquire waits) is liveness, not safety.
 //   - Lock waits block forever (the 5 s repo_lock timeout is abstracted).
 //   - Stopping and crashing are one action (the kernel drops every lock).
-//   - `kit-server`'s own S3 spool sweep (under server.lock) is not
-//     modelled: only kit-server uses that directory.
+//   - a layout server's own S3 spool sweep (under server.lock) is not
+//     modelled: only a layout server uses that directory.
 //
 // Module `servedNames` models SPEC-REFS v3 §2 "Served names" and the §3
 // 512-byte bound as far as they affect safety: a server refuses a name
@@ -46,8 +46,7 @@
 // then head, so a late check of the head would leave a partial write). A
 // listing skips stored refs outside `refs/` or over the bound. Which byte
 // strings pass the §3 grammar is left to unit tests and conformance vectors
-// (`kit_core::refs` tests, `kit-server` `pipeline/tests.rs`,
-// `ssh/tests.rs`); names here are abstract classes.
+// (`kit_core::refs` tests, the `kit-serve` ssh tests); names here are abstract classes.
 //
 // Checks: ./check.sh (README.md lists each command and its expected outcome).
 module serveLocks {
@@ -57,7 +56,7 @@ module serveLocks {
   type SFaults = {
     sweepUnlocked: bool,     // `kit serve` sweeps without the exclusive serve.lock
     sweepUnderShared: bool,  // ... sweeps after taking serve.lock SHARED
-    serverSkipsServe: bool,  // `kit-server` holds server.lock but not serve.lock
+    serverSkipsServe: bool,  // a layout server holds server.lock but not serve.lock
     serverLockShared: bool,  // server.lock not exclusive
     ftSlow: bool,            // ASSUMPTION OFF: a lockless FileTransport upload can outlive the age bound
   }
@@ -74,7 +73,7 @@ module serveLocks {
   }
 
   // --------------------------------------------------------------- state
-  var kind: Srv -> str        // "serve" (kit serve) | "server" (kit-server) | "" while down
+  var kind: Srv -> str        // "serve" (kit serve) | "server" (layout server) | "" while down
   var spc: Srv -> str         // down | sweep | drop | wantShared | up | upSweep
   var serveEx: str            // exclusive holder of serve.lock, FREE if none
   var serveSh: Set[Srv]       // shared holders of serve.lock
@@ -181,7 +180,7 @@ module serveLocks {
     lastAction' = { name: "drop", who: s, outcome: "" },
   }
 
-  // `kit-server` fs-layout server start: server.lock exclusively without waiting
+  // Layout server start: server.lock exclusively without waiting
   // (busy -> the process exits; no state change, so not a step here).
   action startServer(s: Srv): bool = all {
     spc.get(s) == "down",
@@ -319,7 +318,7 @@ module serveLocks {
 
   // Kernel reader/writer lock: an exclusive holder excludes every shared one.
   val ServeLockRW: bool = serveEx != FREE implies serveSh == Set()
-  // SPEC-CONCURRENCY §3.1: "one `kit-server` serves a root at a time".
+  // SPEC-CONCURRENCY §3.1: "one layout server serves a root at a time".
   val OneKitServer: bool =
     SRVS.filter(s => kind.get(s) == "server" and spc.get(s) != "down").size() <= 1
   // §2/§3.1: every live server holds serve.lock shared for its whole life.
@@ -346,7 +345,7 @@ module serveLocks {
   // A starting `kit serve` finds the lock busy and skips its sweep.
   val CanaryNoSkippedSweep: bool =
     not(lastAction.name == "startServe" and lastAction.outcome == "skipSweep")
-  // `kit serve` and `kit-server` share one root at once.
+  // `kit serve` and a layout server share one root at once.
   val CanaryNoServeAndServer: bool =
     not(SRVS.exists(a => SRVS.exists(b =>
       isUp(a) and isUp(b) and kind.get(a) == "serve" and kind.get(b) == "server")))

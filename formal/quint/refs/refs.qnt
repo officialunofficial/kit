@@ -8,11 +8,11 @@
 //       local : direct on-disk mutation under `refs-<ref>.lock` (refs.rs RefMutation)
 //       file  : file transport under `<root>/.kit/refs/.lock` (RefLock). This
 //               is also the domain of every SERVER of a `.kit` root: `kit
-//               serve` (ssh-frame) and a `kit-server` fs-layout deployment
+//               serve` (ssh-frame) and a layout server
 //               write refs through `FileTransport` (`FsLayoutStore::apply` ->
 //               `FileTransport::with_ref_lock`), so a `file` op below stands
-//               for a CAS from `kit serve`, `kit-server` or a direct
-//               `kit+file://` push alike. (a SQLite-metadata `kit-server` keeps
+//               for a CAS from `kit serve`, a layout server or a direct
+//               `kit+file://` push alike. (a SQLite-metadata layout server keeps
 //               refs in SQLite; the root marker makes FileTransport refuse
 //               ref writes there, so that root has no on-disk ref domain; not
 //               modelled.)
@@ -29,7 +29,7 @@
 //   - SPEC-CONCURRENCY §3.2 recovery-log record/expire synchronisation by
 //     lock-superset containment (no dedicated lock).
 //   - SPEC-CONCURRENCY §3.1: the file-transport RefLock (hence `kit serve` and
-//     `kit-server`) is a separate domain that writes the SAME ref files as the
+//     layout server) is a separate domain that writes the SAME ref files as the
 //     local chain; the cross-domain race is a documented, unresolved gap
 //     (witnessed below, not a bug). serve.lock / server.lock, the startup
 //     upload sweep and the served-name rule are in serve.qnt.
@@ -93,7 +93,7 @@ module refs {
   //               (checkout -b/-B: checkout.rs takes the registry lock, then
   //               its tree's lock, then write_ref_recording_history)
   //   gc        : worktrees.lock ≺ worktree.lock(0) ≺ worktree.lock(1), then recovery::expire
-  //   file      : file-transport RefLock only (kit serve, kit-server
+  //   file      : file-transport RefLock only (kit serve, a layout server
   //               fs-layout, kit+file:// push)
   //   mem       : memory transport, its in-process Mutex only
   // `del` = delete instead of write (branch only): Any = delete_ref,

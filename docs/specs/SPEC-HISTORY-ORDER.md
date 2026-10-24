@@ -2,7 +2,7 @@
 spec: SPEC-HISTORY-ORDER
 version: 1
 status: draft-normative
-audience: kit-server history continuation issuance/redemption, embedder page walkers, and implementers of kit-core::history_order
+audience: server history continuation issuance/redemption, embedder page walkers, and implementers of kit-core::history_order
 ---
 
 # SPEC-HISTORY-ORDER &mdash; bounded timestamp/discovery all-parent traversal

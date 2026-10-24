@@ -126,7 +126,7 @@ module refs_test {
 
   // WITNESS — DOCUMENTED GAP (SPEC-CONCURRENCY §3.1): a local Match write
   // under refs-<ref>.lock and a file-transport write under RefLock (from
-  // `kit serve`, `kit-server` fs-layout or a kit+file:// push) hit the
+  // `kit serve`, a layout server or a kit+file:// push) hit the
   // same file with no common lock. Safety (per-domain) still holds.
   run crossDomainGapWitnessTest =
     initFixed(SAFE_INIT, 1, 1, ABSENT)

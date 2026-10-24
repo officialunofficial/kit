@@ -1,21 +1,21 @@
 # quint-refs: ref CAS, lock order, server locks, served names
 
 Quint models of kit's ref concurrency (formal verification effort), covering the server rules of SPEC-REFS v3 and
-SPEC-CONCURRENCY with `kit-server`.
+SPEC-CONCURRENCY with a layout server. A layout server is a server that embeds the `.kit` filesystem layout.
 
 | File | What it models |
 |------|----------------|
 | `refs.qnt` | SPEC-REFS §5 CAS (Any / Missing / Match, deletes), §5.1 atomicity per lock domain (local `refs-<ref>.lock`, file-transport `RefLock`, memory `Mutex`), SPEC-CONCURRENCY §4 lock order and deadlock freedom, §3.2 recovery-log record/expire, §3.1 cross-domain gap |
 | `refs_test.qnt` | Pinned interleavings for `refs.qnt`, mutants and witnesses included |
-| `serve.qnt` | `serveLocks`: `serve.lock` (shared by `kit serve` and `kit-server`), `server.lock` (exclusive, `kit-server`), the startup sweep of crashed uploads under an exclusive `serve.lock`, the worktree probe (SPEC-CONCURRENCY §2, §3.1). `servedNames`: SPEC-REFS v3 §2 served names and the §3 512-byte bound, as far as they affect safety |
+| `serve.qnt` | `serveLocks`: `serve.lock` (shared by `kit serve` and a layout server), `server.lock` (exclusive, a layout server), the startup sweep of crashed uploads under an exclusive `serve.lock`, the worktree probe (SPEC-CONCURRENCY §2, §3.1). `servedNames`: SPEC-REFS v3 §2 served names and the §3 512-byte bound, as far as they affect safety |
 | `serve_test.qnt` | Pinned interleavings for `serve.qnt` (`serve_test`, `served_test`) |
 | `check.sh` | Runs every check below and compares each result with the expected one |
 
 ## Server rules covered
 
 - **`serve.lock` / `server.lock`** (SPEC-CONCURRENCY §2 table, §3.1):
-  every live server, `kit serve` and any server embedding `kit-server`'s filesystem layout, holds
-  `serve.lock` shared; `kit-server` also holds `server.lock` exclusively.
+  every live server, `kit serve` and any layout server, holds
+  `serve.lock` shared; a layout server also holds `server.lock` exclusively.
   Modelled in `serveLocks` (invariants `ServeLockRW`, `OneKitServer`,
   `UpServersHoldServeShared`, `NoMissedDetection`).
 - **Startup sweep** (§3.1, "The one exclusive hold"): a starting
@@ -24,11 +24,11 @@ SPEC-CONCURRENCY with `kit-server`.
   and takes the shared lock; busy means skip. Modelled against concurrent
   uploads of other servers, including a stalled streaming upload whose temp
   file is older than the age bound (`SweepAlone`, `NoLiveUploadSwept`).
-- **Cross-domain gap covers `kit-server`** (§3.1): a `kit-server`
+- **Cross-domain gap covers layout server** (§3.1): a layout server
   fs-layout deployment writes refs through `FileTransport` under the same
   `<root>/.kit/refs/.lock` (`FsLayoutStore::apply` ->
   `FileTransport::with_ref_lock`), so in `refs.qnt` a `file` op is a CAS
-  from `kit serve`, `kit-server` or a `kit+file://` push alike. The
+  from `kit serve`, a layout server or a `kit+file://` push alike. The
   `WitnessCrossDomainGap` witness is still reachable, as documented.
 - **Served names, SPEC-REFS v3 §2**, and the **512-byte bound, §3**:
   `servedNames` checks that a server refuses a name outside `refs/`, or
@@ -40,8 +40,7 @@ SPEC-CONCURRENCY with `kit-server`.
   `ListingServedOnly`). Names are abstract classes (served, outside
   `refs/`, over-long, grammar-invalid). **Which byte strings fall in which
   class is pure grammar, left to unit tests and conformance vectors**
-  (`kit_core::refs` tests; `kit-server` `pipeline/tests.rs` and
-  `ssh/tests.rs`), as are the derived local bounds (495 / 502 bytes) and
+  (`kit_core::refs` tests; the `kit-serve` ssh tests), as are the derived local bounds (495 / 502 bytes) and
   prefix normalization (§4.2).
 - **Memory transport**: `kit-transport-memory`'s `update_ref` holds its
   `Mutex` across read-check-write, and SPEC-REFS §5.1 says `atomic*`
@@ -108,10 +107,10 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 | `refs2_gcSkipTrees` | `ExpireHoldsSuperset`, `NoRecordExpireInterleave` | §3.2 superset rule |
 | `refs2_racyAcquire` | `LockOwnership` | broken flock |
 | `refs2_memNoMutex` | `NoLostUpdateMem` | the v1 "NOT atomic" memory row |
-| `refs3` | `WitnessCrossDomainGap` | documented §3.1 gap (local vs `kit serve`/`kit-server`, when the served root is the common dir) |
+| `refs3` | `WitnessCrossDomainGap` | documented §3.1 gap (local vs `kit serve` or a layout server, when the served root is the common dir) |
 | `serve2_sweepUnlocked` | `SweepAlone`, `NoLiveUploadSwept` | the sweep needs the exclusive hold |
 | `serve2_sweepUnderShared` | `SweepAlone`, `NoLiveUploadSwept` | a shared hold does not exclude other servers' uploads |
-| `serve2_serverSkipsServe` | `UpServersHoldServeShared`, `NoMissedDetection`, `NoLiveUploadSwept` | `kit-server` must hold `serve.lock` |
+| `serve2_serverSkipsServe` | `UpServersHoldServeShared`, `NoMissedDetection`, `NoLiveUploadSwept` | a layout server must hold `serve.lock` |
 | `serve2_serverLockShared` | `OneKitServer` | `server.lock` must be exclusive |
 | `serve2_ftSlow` | `NoLiveUploadSwept` | ASSUMPTION: lockless `kit+file://` uploads rely on the 1 h age bound |
 | `serve2` | `WitnessUndetectedLateServer` | documented §3.1 gap: detection is one-directional |
@@ -121,7 +120,7 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 
 Canaries (`Canary*`, `Witness*` reachability) confirm the interesting
 states are visited: a sweep removes a crashed upload's file, a start skips
-its sweep, `kit serve` and `kit-server` share a root, a `kit serve`
+its sweep, `kit serve` and a layout server share a root, a `kit serve`
 starts during a stalled upload, refusals of each kind are reached, and a
 served AdvanceRefs succeeds.
 
@@ -142,10 +141,10 @@ cover the whole space to their bounds.
   effects (a starting `kit serve` skips its sweep, a starting server waits)
   are liveness only. Lock waits never time out (the 5 s timeout is
   abstracted, as in `refs.qnt`). Stop and crash are one action.
-- A SQLite-metadata `kit-server` deployment keeps refs in SQLite (the root marker makes
+- A SQLite-metadata layout server deployment keeps refs in SQLite (the root marker makes
   `FileTransport` refuse ref writes on that root) and is not modelled;
-  neither is `kit-server`'s S3 spool sweep (under `server.lock`, used
-  only by `kit-server`).
+  neither is a layout server's S3 spool sweep (under `server.lock`, used
+  only by a layout server).
 - The git bridge locks (`git-<remote>.lock`, `git-import-key.lock`) that
   another track is adding to SPEC-CONCURRENCY §2/§4 are not in this model.
 
