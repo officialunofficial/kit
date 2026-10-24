@@ -58,6 +58,11 @@ testcontainers-modules = { version = "0.15", features = ["minio", "blocking"] }
 # Multipart-upload round-trip test, gated behind `test-small-multipart-caps`
 # (see that feature's doc comment above) so a plain `cargo test` doesn't
 # need to move real multi-GiB buffers to exercise the multipart path.
+# cargo-machete matches the crate name `md-5` to the identifier `md_5`.
+# The library of that crate is named `md5`, and src/lib.rs has `use md5::...`.
+[package.metadata.cargo-machete]
+ignored = ["md-5"]
+
 [[test]]
 name = "transport_multipart"
 required-features = ["test-small-multipart-caps"]

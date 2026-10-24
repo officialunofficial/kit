@@ -2912,7 +2912,6 @@ name = "kit-benches"
 version = "0.5.0"
 dependencies = [
  "blake2",
- "blake3",
  "criterion",
  "ed25519-dalek",
  "git2",
@@ -2960,7 +2959,6 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hex",
- "insta",
  "libc",
  "proptest",
  "rustc-hash",
@@ -3042,7 +3040,6 @@ dependencies = [
  "buffa-build",
  "connectrpc",
  "connectrpc-build",
- "hex",
  "kit-core",
  "serde",
  "thiserror",
@@ -3232,7 +3229,6 @@ name = "kit-transport-ssh"
 version = "0.5.0"
 dependencies = [
  "buffa",
- "hex",
  "kit-core",
  "kit-rpc",
  "thiserror",
