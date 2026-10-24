@@ -451,6 +451,11 @@ the manifest.
 `rust/crates/kit-core/tests/golden_closure.rs` reads only the committed
 files.
 
+`scripts/golden/closure_ref.py` is an independent check in Python. It shares
+no code with the Rust crates. It decodes the manifest and the packs, derives
+every object id, walks the closure from the trusted root, and compares the
+result with each sidecar.
+
 ## 8. Multi-chunk span container (MKDS v1)
 
 MKDS proves a content range crossing chunk boundaries of one ChunkedBlob.

@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Independent reference check of the closure-profile golden vectors:
+#   rust/tests/golden/closure/
+#
+# The check shares no code with the Rust crates. It reads only SPEC-DISCLOSURE
+# section 7, SPEC-PACKFILE and SPEC-OBJECTS. It reuses the pure-Python BLAKE3
+# and the strict object parsers of objects_ref.py, which are themselves
+# written from the specs.
+#
+# For each vector the check:
+#   * compares the manifest and pack bytes with the BLAKE3 values in the
+#     sidecar and in MANIFEST.txt;
+#   * decodes the manifest strictly (magic, version, mode, no trailing byte);
+#   * decodes each pack as a raw-only pack and checks its trailer;
+#   * derives every object id with the type-dependent rule;
+#   * walks the closure from the trusted root with the mode of the manifest;
+#   * compares the outcome (accept, incomplete or reject) with the sidecar,
+#     including the verified count, the sorted id list and the unreferenced
+#     ids.
+#
+# Usage:
+#   python3 -I -B scripts/golden/closure_ref.py rust/tests/golden
+#
+# Exit 0 and print "OK" when every check passes; exit 1 otherwise.
+
+import json
+import os
+import struct
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import objects_ref as o  # noqa: E402
+from objects_ref import blake3  # noqa: E402
+
+MANIFEST_MAGIC = b"MKCL"
+PACK_MAGIC = b"KIT\x00"
+SNAPSHOT, HISTORY = 0, 1
+
+
+class Reject(Exception):
+    """The input breaks the closure profile or the manifest format."""
+
+
+def varint(r):
+    """Minimal unsigned LEB128, at most 32 bits."""
+    value = 0
+    for shift in range(0, 35, 7):
+        b = r.u8()
+        value |= (b & 0x7F) << shift
+        if not b & 0x80:
+            if b == 0 and shift > 0:
+                raise Reject("non-minimal varint")
+            if value >= 1 << 32:
+                raise Reject("varint too large")
+            return value
+    raise Reject("varint too long")
+
+
+def decode_manifest(data):
+    try:
+        r = o.Reader(data)
+        if r.take(4) != MANIFEST_MAGIC:
+            raise Reject("bad manifest magic")
+        if r.u8() != 1:
+            raise Reject("unsupported version")
+        root = r.take(32)
+        mode = r.u8()
+        if mode not in (SNAPSHOT, HISTORY):
+            raise Reject("unknown mode")
+        count = varint(r)
+        if count > 65_536:
+            raise Reject("too many packs")
+        packs = [r.take(32) for _ in range(count)]
+        r.end()
+    except ValueError as e:
+        raise Reject(f"manifest: {e}")
+    return root, mode, packs
+
+
+def decode_pack(data):
+    """Return the raw object payloads of a raw-only pack (SPEC-PACKFILE)."""
+    if len(data) < 12 + 32:
+        raise Reject("pack too short")
+    body, trailer = data[:-32], data[-32:]
+    if blake3(body) != trailer:
+        raise Reject("pack trailer mismatch")
+    r = o.Reader(body)
+    if r.take(4) != PACK_MAGIC:
+        raise Reject("bad pack magic")
+    version = r.u32()
+    if version not in (1, 2):
+        raise Reject("unsupported pack version")
+    count = r.u32()
+    payloads = []
+    for i in range(count):
+        kind = r.u8()
+        n = r.u32()
+        payload = r.take(n)
+        if kind != 0:
+            raise Reject(f"profile violation: entry {i} has type {kind:#04x}")
+        payloads.append(payload)
+    r.end()
+    if version != 1:
+        raise Reject("closure pack must declare version 1")
+    return payloads
+
+
+def object_id(data):
+    """SPEC-OBJECTS section 10. Raises ValueError when the bytes are not an object."""
+    kind = data[0] if data else 0
+    if kind == o.TREE:
+        return o.tree_id(o.parse_tree(data)["entries"])
+    if kind == o.CHUNKED:
+        c = o.parse_chunked(data)
+        return o.chunked_id(c["total"], c["chunk_size"], c["chunks"])
+    parse = {
+        o.BLOB: o.parse_blob,
+        o.COMMIT: o.parse_commit,
+        o.REMIX: o.parse_remix,
+        o.TAG: o.parse_tag,
+    }.get(kind)
+    if parse is None:
+        raise ValueError("unknown object type")
+    parse(data)
+    return blake3(data)
+
+
+def children(data, mode):
+    """SPEC-DISCLOSURE section 7.1."""
+    kind = data[0]
+    if kind in (o.COMMIT, o.REMIX):
+        r = o.Reader(data)
+        r.take(6)
+        out = [r.take(32)]
+        parents = [r.take(32) for _ in range(r.u32())]
+        if mode == HISTORY:
+            out += parents
+        return out
+    if kind == o.TREE:
+        return [h for _, _, h in o.parse_tree(data)["entries"]]
+    if kind == o.CHUNKED:
+        return o.parse_chunked(data)["chunks"]
+    if kind == o.TAG:
+        return [data[6:38]]
+    return []
+
+
+def walk(root, mode, payloads):
+    """Return (visited ids, missing ids, corrupt count, unreferenced ids)."""
+    objects = {}
+    corrupt = 0
+    for payload in payloads:
+        try:
+            objects[object_id(payload)] = payload
+        except ValueError:
+            corrupt += 1
+    visited, missing, queue = set(), [], [root]
+    while queue:
+        oid = queue.pop(0)
+        if oid in visited:
+            continue
+        visited.add(oid)
+        data = objects.get(oid)
+        if data is None:
+            missing.append(oid)
+            continue
+        if oid == root and data[0] not in (o.COMMIT, o.REMIX, o.TAG):
+            raise Reject("root is not a commit, remix or tag")
+        queue.extend(children(data, mode))
+    unreferenced = sorted(set(objects) - visited)
+    return sorted(visited - set(missing)), missing, corrupt, unreferenced
+
+
+def check_vector(root_dir, sidecar_name, man):
+    d = "closure"
+    meta = json.loads(o.read(root_dir, d, sidecar_name))
+    name = meta["name"]
+    manifest_bytes = o.read(root_dir, d, meta["bin"])
+    o.expect(blake3(manifest_bytes).hex() == meta["blake3"], f"{name}: manifest blake3")
+    o.expect(len(manifest_bytes) == meta["size"], f"{name}: manifest size")
+    o.expect(man.get(name) == meta["blake3"], f"{name}: MANIFEST.txt entry")
+    trusted = bytes.fromhex(meta["root_hex"])
+    expect = meta["expect"]
+    try:
+        m_root, mode, pack_keys = decode_manifest(manifest_bytes)
+        o.expect(len(pack_keys) == meta["n_packs"], f"{name}: pack count")
+        o.expect(mode == (HISTORY if meta["mode"] == "history" else SNAPSHOT), f"{name}: mode")
+        if m_root != trusted:
+            raise Reject("manifest root differs from the trusted root")
+        packs = []
+        for i, key in enumerate(pack_keys):
+            pack = o.read(root_dir, d, f"{name}.pack{i}.bin")
+            if blake3(pack) != key:
+                raise Reject("pack-hash mismatch")
+            packs.append(pack)
+        payloads = [p for pack in packs for p in decode_pack(pack)]
+        ids, missing, corrupt, unreferenced = walk(trusted, mode, payloads)
+    except Reject as e:
+        o.expect(expect == "reject", f"{name}: unexpected reject ({e}); sidecar says {expect}")
+        return "reject"
+    if missing or corrupt:
+        o.expect(expect == "incomplete", f"{name}: incomplete but sidecar says {expect}")
+        if meta.get("reason") == "corrupt":
+            o.expect(corrupt > 0, f"{name}: expected a corrupt object")
+        if meta.get("reason") == "missing":
+            o.expect(len(missing) > 0, f"{name}: expected a missing object")
+        if meta.get("reason") == "missing root":
+            o.expect(missing == [trusted], f"{name}: expected the root to be missing")
+        return "incomplete"
+    o.expect(expect == "accept", f"{name}: complete but sidecar says {expect}")
+    o.expect(len(ids) == meta["verified"], f"{name}: verified {len(ids)} != {meta['verified']}")
+    o.expect([i.hex() for i in ids] == meta["ids"], f"{name}: id list")
+    o.expect([u.hex() for u in unreferenced] == meta["unreferenced"], f"{name}: unreferenced")
+    return "accept"
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit("usage: closure_ref.py <rust/tests/golden>")
+    root_dir = sys.argv[1]
+    man = o.manifest(root_dir, "closure")
+    seen = {}
+    for fn in sorted(os.listdir(os.path.join(root_dir, "closure"))):
+        if fn.endswith(".json"):
+            seen[fn] = check_vector(root_dir, fn, man)
+    o.expect(len(seen) == len(man), "every MANIFEST.txt entry has a sidecar")
+    kinds = set(seen.values())
+    o.expect(kinds == {"accept", "incomplete", "reject"}, "vectors cover all three outcomes")
+    if o.FAILURES:
+        sys.exit(1)
+    print("OK")
+
+
+if __name__ == "__main__":
+    main()

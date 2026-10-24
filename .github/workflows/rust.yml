@@ -246,6 +246,8 @@ jobs:
         run: '"$RUNNER_TEMP/ref-venv/bin/python" scripts/golden/grants_ref.py rust/tests/golden/grants'
       - name: Object, tag and chunker vectors
         run: python3 -I -B scripts/golden/objects_ref.py rust/tests/golden
+      - name: Closure vectors
+        run: python3 -I -B scripts/golden/closure_ref.py rust/tests/golden
       - name: Redaction vectors
         run: python3 scripts/check-redaction-goldens.py
 
