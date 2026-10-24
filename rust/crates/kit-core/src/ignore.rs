@@ -36,7 +36,7 @@
 //! (`core.excludesFile`), and escaped trailing spaces.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read as _};
 use std::path::Path;
 
 /// Hard cap on a single ignore file (1 MiB).
@@ -263,16 +263,32 @@ pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
 }
 
 /// Read and parse a single ignore file, or `None` if it is absent.
+///
+/// The file must be a regular file. A symlink, device or FIFO is an
+/// error: `/dev/zero` reports length 0 and would never end. The read
+/// itself is capped, so a file that grows after the check stays bounded.
 fn load_one(path: &Path) -> Result<Option<IgnoreList>, IgnoreError> {
-    let meta = match fs::metadata(path) {
+    let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(IgnoreError::Io(e)),
     };
+    if !meta.file_type().is_file() {
+        return Err(IgnoreError::Io(io::Error::other(
+            "ignore file is not a regular file",
+        )));
+    }
     if meta.len() > MAX_IGNORE_FILE_BYTES {
         return Err(IgnoreError::FileTooLarge);
     }
-    Ok(Some(parse(&fs::read_to_string(path)?)))
+    let mut text = String::new();
+    fs::File::open(path)?
+        .take(MAX_IGNORE_FILE_BYTES + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_IGNORE_FILE_BYTES {
+        return Err(IgnoreError::FileTooLarge);
+    }
+    Ok(Some(parse(&text)))
 }
 
 /// Parse ignore-file content into a list of patterns. Never fails:
@@ -693,6 +709,15 @@ mod tests {
         std::fs::write(dir.path().join(".kitignore"), oversized).unwrap();
         let err = load(dir.path()).unwrap_err();
         assert!(matches!(err, IgnoreError::FileTooLarge));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_symlinked_file() {
+        let dir = TempDir::new().unwrap();
+        std::os::unix::fs::symlink("/dev/zero", dir.path().join(".kitignore")).unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(matches!(err, IgnoreError::Io(_)));
     }
 
     // --- glob_match public helper --------------------------------------
