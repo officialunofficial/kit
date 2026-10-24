@@ -86,7 +86,7 @@ pub enum Reason {
     /// `--no-default-features --features algo-ed25519`).
     AlgorithmNotEnabled,
     /// The keyid's prefix did not match any known algorithm and is not
-    /// the legacy `blake3:` compatibility form.
+    /// the `blake3:` repo-key form.
     UnknownKeyidPrefix,
 }
 
@@ -599,7 +599,7 @@ mod tests {
     }
 
     /// A keyid with an entirely unknown prefix (not one of `ed25519:`,
-    /// `secp256k1:`, `p256:`, or the legacy `blake3:`) and not present
+    /// `secp256k1:`, `p256:`, or `blake3:`) and not present
     /// in the registry must surface as `UnknownKeyidPrefix`, not
     /// `UnknownKeyid`. The distinction lets callers render a useful
     /// diagnostic ("what kind of key is this?") vs. the plain
@@ -617,13 +617,12 @@ mod tests {
         assert_eq!(r.signatures[0].reason, Reason::UnknownKeyidPrefix);
     }
 
-    /// Legacy-compat path: a `blake3:<hex>` keyid must continue to
-    /// verify as Ed25519, because that's the shape existing
-    /// attestations on disk carry. Gated on `algo-ed25519` because the
+    /// A `blake3:<hex>` keyid verifies as Ed25519, because that is the
+    /// shape the repo-key signer emits. Gated on `algo-ed25519` because the
     /// crypto step needs the backend compiled in.
     #[cfg(feature = "algo-ed25519")]
     #[test]
-    fn legacy_blake3_keyid_still_verifies_as_ed25519() {
+    fn blake3_keyid_verifies_as_ed25519() {
         let seed = [0x77; 32];
         let keyid = "blake3:abc123";
         let commit_hex = "f".repeat(64);

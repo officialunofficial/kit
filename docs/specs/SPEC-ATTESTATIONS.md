@@ -19,8 +19,7 @@ GitHub, a user's build server, etc.).
 
 This spec is normative for the wire bytes and on-disk layout that the
 `kit-attest` crate produces and the `kit attest` / `kit verify-attest`
-CLI consume. Items marked **(planned)** are spec'd here for forward
-compatibility but are not implemented in the current `kit-attest`
+CLI consume. Items marked **(planned)** are specified here but are not implemented in the current `kit-attest`
 crate or CLI; consumers MUST NOT rely on them.
 
 ---
@@ -511,9 +510,8 @@ Free-form UTF-8. Strongly recommended canonical shapes:
 - Ed25519 `repo-key` &mdash; `blake3:<hex>` where `<hex>` is the 64-char
   lowercase hex of `BLAKE3(pubkey_bytes)` (32 bytes → 64 hex chars).
   The full keyid string is 71 bytes long (`blake3:` + 64 hex). The
-  legacy `blake3:` prefix is preserved for backward compatibility
-  with attestations produced before the multi-algorithm split; the
-  verifier maps it to Ed25519 via `Algorithm::from_keyid`.
+  verifier maps the `blake3:` prefix to Ed25519 via
+  `Algorithm::from_keyid`.
 - secp256k1/P-256 `repo-key` &mdash; `secp256k1:<hex>` / `p256:<hex>` of
   the SEC1-encoded compressed pubkey (33 bytes → 66 hex chars).
 - Keystore-backed keys &mdash; whatever the keystore backend returns from
@@ -527,7 +525,7 @@ Free-form UTF-8. Strongly recommended canonical shapes:
 The keyid is purely a dispatch key into the verifier registry. It is
 NOT authoritative &mdash; the signature itself is the only thing that
 proves identity. `Algorithm::from_keyid` recognizes the prefixes
-`ed25519:`, `secp256k1:`, `p256:`, and the legacy `blake3:`;
+`ed25519:`, `secp256k1:`, `p256:`, and `blake3:`;
 anything else surfaces `Reason::UnknownKeyidPrefix` on the verify
 side.
 

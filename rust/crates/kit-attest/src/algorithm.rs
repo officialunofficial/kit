@@ -12,10 +12,9 @@
 //!   Secure Enclave and `WebAuthn` clients.
 //!
 //! The canonical `keyid` shape is `"<prefix>:<hex-pubkey>"` where
-//! `<prefix>` is per-algorithm ([`Algorithm::prefix`]). The legacy
-//! `blake3:` prefix is accepted by [`Algorithm::from_keyid`] and maps
-//! to `Ed25519` for backward compatibility with attestations produced
-//! before the multi-algorithm split.
+//! `<prefix>` is per-algorithm ([`Algorithm::prefix`]). The repo-key
+//! signer uses the `blake3:` prefix. [`Algorithm::from_keyid`] accepts it
+//! and maps it to `Ed25519`.
 
 use core::fmt;
 use core::str::FromStr;
@@ -65,9 +64,8 @@ impl Algorithm {
     /// Parse the algorithm out of a `"<prefix>:..."` keyid string.
     ///
     /// Accepts the canonical per-algorithm prefixes returned by
-    /// [`Self::prefix`] and, for backward compatibility with
-    /// attestations produced before the multi-algorithm split, the
-    /// legacy `blake3:` prefix (which maps to `Ed25519`).
+    /// [`Self::prefix`] and the `blake3:` prefix of the repo-key
+    /// signer (which maps to `Ed25519`).
     ///
     /// Returns `None` if the keyid has no `':'` separator or if the
     /// prefix before the first `':'` is unknown.
@@ -173,10 +171,8 @@ mod tests {
     }
 
     #[test]
-    fn from_keyid_legacy_blake3_maps_to_ed25519() {
-        // Backward compat with attestations produced before the
-        // multi-algorithm split. repo-key signer still emits
-        // `blake3:<hex>` as its keyid.
+    fn from_keyid_blake3_maps_to_ed25519() {
+        // The repo-key signer emits `blake3:<hex>` as its keyid.
         assert_eq!(
             Algorithm::from_keyid("blake3:deadbeef"),
             Some(Algorithm::Ed25519)
