@@ -99,9 +99,8 @@ including a matcher for a `remote.<name>.*` pattern key.
 | `remote.<name>.type`                 | SAFE       | Dispatch hint for a named remote (`file` / `http` / `s3` / `ssh`); same reasoning as `remote_type`.                                                                                  |
 | `branch.<name>.remote`               | SAFE       | Per-branch upstream remote name. A UX/tracking pointer with no credential-routing or signing weight; the named remote it points at is still gated per-endpoint.                       |
 | `branch.<name>.merge`                | SAFE       | Per-branch upstream ref. Inert tracking metadata; the victim still verifies signed history regardless of the recorded upstream.                                                      |
-| `core.<key>` (allow-listed)          | SAFE       | Inert git-compatibility keys. Only the allow-listed `core.*` suffixes are stored on read (dangerous ones are dropped like any unknown key); kit never acts on them.                  |
-| Legacy: `author_mid`, `project_id`, `network` | SAFE | Silently dropped on read; retained for forward/back compatibility with old hand-edited files. None have a code path that consumes them.                                              |
-| Forward-compat: `*_url`              | SAFE       | Reserved slot; no current consumer. If a future key in this namespace gains credential-routing or process-spawning behavior, it MUST be promoted to UNSAFE in the same patch that introduces the consumer. |
+| `core.<key>` (allow-listed)          | SAFE       | Inert git-compatibility keys. Only the allow-listed `core.*` suffixes are accepted. Any other `core.*` key is a load error. kit never acts on the accepted keys.                  |
+| Any other key | **rejected** | An unknown key is a load error, not a dropped line. See §3.5. |
 
 ### 2.1 Borderline cases
 
@@ -135,7 +134,7 @@ without needing to remember to check.
 
 ### 3.1 Read-site rule
 
-In `kit-storage::config::apply_file_inner`:
+In `kit-storage::config::apply_text`:
 
 ```text
 if scope == ConfigScope::Repo && REPO_FORBIDDEN_KEYS.contains(key) {
@@ -221,6 +220,28 @@ repository-configured or CLI-supplied remote therefore cannot trigger the
 helper without the user's exact trust entry. Every header the helper returns
 passes the allowlist and the hard-reserved set of SPEC-TRANSPORT-CONNECT §5.1
 before the client attaches it, and the client never logs the helper's output.
+
+### 3.5 Parse failures
+
+Config fails closed. The loader returns an error, with the file and the
+line number, for each of these:
+
+- an unknown key, including every removed or misspelled key;
+- a line that has no `=`;
+- a malformed value: a control character in any value, a `pull.require_signed`
+  value that is not a boolean word, a `durability.objects`, `transport_auth`,
+  `signer`, `attest.signer`, `attest.default_algorithm` or
+  `ssh.strict_host_key_checking` value outside its list, a non-numeric
+  `attest.external_signer_timeout_secs`, and an invalid remote or branch name;
+- a file larger than 1 MiB, or text that is not UTF-8.
+
+An empty value is allowed. It leaves the key unset.
+
+The same rules apply to the user file and to `-c` overrides. One case is
+not an error: a forbidden key in the repo file is dropped with the §3.3
+warning, and the loader does not parse its value. A typo in a security key
+such as `pull.require_signd` is therefore an error. It never turns the
+check off.
 
 ---
 
@@ -319,7 +340,7 @@ and where each guarantee is anchored.
 
 | Invariant | Enforced by |
 |---|---|
-| An UNSAFE key in `<repo>/.kit/config` never reaches `Config` | read-site drop in `apply_file_inner` before `apply_kv`; the field stays at its default (§3.1) |
+| An UNSAFE key in `<repo>/.kit/config` never reaches `Config` | read-site drop in `apply_text` before `apply_kv`; the field stays at its default (§3.1) |
 | Serializing repo config never emits an UNSAFE key | explicit write-site allow-list in `config::write` (§3.2) |
 | `kit config <key> <value>` never writes an UNSAFE key repo-scoped | the command intercepts `REPO_FORBIDDEN_KEYS` and routes to the user-scoped file (§3.2) |
 | A repo can NEVER unilaterally attach ambient credentials to its own endpoint | `enforce_trusted_remote_endpoint` requires the user-scoped `trusted_remote_endpoint` to match (§3.4) |
@@ -327,6 +348,7 @@ and where each guarantee is anchored.
 | Repo-scoped `user.name` / `user.email` never influence the signed author | both are inert; `commit::resolve_author` never reads them (§2) |
 | The classification cannot silently drift from the code | `REPO_FORBIDDEN_KEYS` is the single source of truth (§1); the meta-test iterates the whole array and panics on a missing arm (§4) |
 | Every drop is user-visible with pinned wording | stderr warning, snapshot-tested (§3.3) |
+| A config file never loads with an unknown key, a line without `=` or a malformed value | the loader returns an error that names the line (§3.5); the `config_parse` fuzz target covers the parser |
 | A hostile repo cannot authorize itself as an encrypted-transport peer or swap identity keys | no repo config knob exists for those values &mdash; CLI flags, env var, or user-scoped path only (§6) |
 
 Every new key defaults to UNSAFE until argued SAFE on the §2 table

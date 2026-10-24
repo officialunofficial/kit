@@ -362,9 +362,8 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "user.email" => value.clone_into(&mut cfg.user_email),
         "default_branch" => value.clone_into(&mut cfg.default_branch),
         // SPEC-OBJECTS §10.1 durability escape hatch. Validated at the
-        // set boundary (unlike the lenient config-load fallback) so a
-        // typo can't silently leave the user on the batched default when
-        // they asked for the strict per-object schedule.
+        // set boundary, so a typo can't silently leave the user on the
+        // batched default when they asked for the strict per-object schedule.
         "durability.objects" => match value.trim().to_ascii_lowercase().as_str() {
             "" | "batch" | "per-object" | "per_object" => {
                 value.clone_into(&mut cfg.durability_objects);
@@ -383,11 +382,9 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "remote_type" => value.clone_into(&mut cfg.remote_type),
         "http.sslcainfo" => value.clone_into(&mut cfg.http_ssl_ca_info),
         // Write-auth mode for `kit+https://`/`kit+http://` remotes — see
-        // `Config::transport_auth`'s doc comment. Validated here (unlike
-        // the lenient config-load fallback in `config::apply_kv`, which
-        // tolerates unknown values for forward-compat with hand-edited
-        // files) so a typo doesn't silently leave `kit push` on
-        // bearer-only auth when the user asked for signed envelopes.
+        // `Config::transport_auth`'s doc comment. Validated here, as the
+        // config loader does, so a typo doesn't silently leave `kit push`
+        // on bearer-only auth when the user asked for signed envelopes.
         "transport_auth" => match value.trim().to_ascii_lowercase().as_str() {
             "" | "bearer" | "envelope" => value.clone_into(&mut cfg.transport_auth),
             _ => {

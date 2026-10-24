@@ -24,6 +24,7 @@
 //! warning and otherwise ignored. See `docs/THREAT-MODEL.md` for the
 //! threat model that motivates the split.
 
+use kit_core::bounded_read;
 use kit_core::layout::RepoLayout;
 use std::fmt::Write as _;
 use std::fs;
@@ -34,6 +35,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub const CONFIG_FILE: &str = ".kit/config";
+/// Longest config file that kit reads (1 MiB).
+pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub const USER_CONFIG_SUBPATH: &str = "kit/config";
 pub const DEFAULT_SIGNING_KEY: &str = ".kit/keys/default.key";
 pub const DEFAULT_BRANCH: &str = "main";
@@ -423,8 +426,13 @@ pub enum ConfigError {
     Io(#[from] io::Error),
     #[error("invalid config value — control characters are not permitted")]
     InvalidValue,
-    #[error("unknown config key: {0}")]
-    UnknownKey(String),
+    /// A config line, or a `-c` override, that kit refuses. Config fails
+    /// closed: an unknown key, a line without `=` and a malformed value are
+    /// all errors, so a typo in a security key never turns the check off.
+    #[error("{location}: {reason}")]
+    Rejected { location: String, reason: String },
+    #[error("config file {0} exceeds the size limit")]
+    TooLarge(String),
     #[error("invalid user.identity: {0}")]
     InvalidUserIdentity(&'static str),
     #[error("invalid http.sslCAInfo path: {0}")]
@@ -674,7 +682,7 @@ pub fn read_or_default(layout: &RepoLayout) -> Result<Config, ConfigError> {
     // `-c <key>=<val>` one-shot overrides apply to BOTH the layered and the
     // flat read path, so `kit -c … <any-command>` is honored uniformly
     // (commit/merge/etc. read through here). Same forbidden-key enforcement.
-    apply_cli_overrides(&mut cfg);
+    apply_cli_overrides(&mut cfg)?;
     Ok(cfg)
 }
 
@@ -692,7 +700,7 @@ pub fn read_layered(layout: &RepoLayout) -> Result<LayeredConfig, ConfigError> {
     // as a per-repo file: security-sensitive keys (`REPO_FORBIDDEN_KEYS`)
     // and dangerous `core.*` (`CORE_DENIED_KEYS`) are refused, so `-c`
     // cannot spoof the signed author or redirect signing/transport trust.
-    apply_cli_overrides(&mut merged);
+    apply_cli_overrides(&mut merged)?;
 
     let mut user = Config::default();
     apply_file_inner(&mut user, &user_path, ConfigScope::User, false)?;
@@ -719,13 +727,15 @@ pub fn set_cli_overrides(overrides: Vec<(String, String)>) {
 }
 
 /// Apply the recorded `-c` overrides to `cfg`, enforcing the same
-/// forbidden-key / denied-`core.*` rules a per-repo file gets.
-fn apply_cli_overrides(cfg: &mut Config) {
+/// forbidden-key / denied-`core.*` rules a per-repo file gets. A forbidden
+/// key is dropped with a warning. An unknown key or a malformed value is
+/// an error.
+fn apply_cli_overrides(cfg: &mut Config) -> Result<(), ConfigError> {
     let Some(slot) = CLI_OVERRIDES.get() else {
-        return;
+        return Ok(());
     };
     let Ok(overrides) = slot.lock() else {
-        return;
+        return Ok(());
     };
     for (raw_key, val) in overrides.iter() {
         let key = normalize_config_key(raw_key.trim());
@@ -738,22 +748,18 @@ fn apply_cli_overrides(cfg: &mut Config) {
             );
             continue;
         }
-        // Reject control characters in the value (defense in depth — same
-        // check `kit config` applies before persisting).
-        if validate_value(val.trim()).is_err() {
-            let mut stderr = io::stderr().lock();
-            let _ = writeln!(
-                stderr,
-                "warning: ignoring `-c {key}=…` (value contains control characters)"
-            );
-            continue;
-        }
-        apply_kv(cfg, &key, val.trim());
+        apply_kv(cfg, &key, val.trim()).map_err(|reason| ConfigError::Rejected {
+            location: format!("-c {key}"),
+            reason,
+        })?;
     }
+    Ok(())
 }
 
 /// Apply a single config file to `cfg` under the given scope. Missing
-/// file → no-op (returns `Ok`). Malformed lines are tolerated.
+/// file → no-op (returns `Ok`). Config fails closed: an unknown key, a
+/// line without `=` and a malformed value are errors. A forbidden key in
+/// the repo scope is the one exception: it is dropped with a warning.
 ///
 /// Public-in-crate so tests can drive layering without mutating the
 /// process's `XDG_CONFIG_HOME` env var (which would race with parallel
@@ -766,24 +772,60 @@ pub(crate) fn apply_file(
     apply_file_inner(cfg, path, scope, true)
 }
 
+/// Read a config file, capped at [`MAX_CONFIG_BYTES`]. `Ok(None)` when absent.
+fn read_config_text(path: &Path) -> Result<Option<String>, ConfigError> {
+    let bytes = match bounded_read::read_capped(path, MAX_CONFIG_BYTES) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            return Err(ConfigError::TooLarge(path.display().to_string()));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| ConfigError::Rejected {
+            location: path.display().to_string(),
+            reason: "config file is not valid UTF-8".to_owned(),
+        })
+}
+
 fn apply_file_inner(
     cfg: &mut Config,
     path: &Path,
     scope: ConfigScope,
     warn_on_forbidden: bool,
 ) -> Result<(), ConfigError> {
-    let text = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
+    let Some(text) = read_config_text(path)? else {
+        return Ok(());
     };
-    for raw_line in text.lines() {
+    apply_text(cfg, &text, path, scope, warn_on_forbidden)
+}
+
+/// Apply config `text` to `cfg` under the given scope. `origin` names the
+/// source in errors and warnings. Config fails closed: see [`apply_file`].
+///
+/// # Errors
+/// [`ConfigError::Rejected`] for the first unknown key, line without `=`
+/// or malformed value, with its line number.
+pub fn apply_text(
+    cfg: &mut Config,
+    text: &str,
+    origin: &Path,
+    scope: ConfigScope,
+    warn_on_forbidden: bool,
+) -> Result<(), ConfigError> {
+    for (index, raw_line) in text.lines().enumerate() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        let rejected = |reason: String| ConfigError::Rejected {
+            location: format!("{}:{}", origin.display(), index + 1),
+            reason,
+        };
         let Some((k, v)) = line.split_once('=') else {
-            continue;
+            return Err(rejected("expected `key = value`".to_owned()));
         };
         // Git matches config section + variable names case-insensitively,
         // so a hand-edited `User.Name` / `Core.AutoCRLF` must resolve like
@@ -797,11 +839,11 @@ fn apply_file_inner(
         let val = v.trim();
         if scope == ConfigScope::Repo && is_repo_forbidden_key(key) {
             if warn_on_forbidden {
-                warn_forbidden_repo_key(path, key);
+                warn_forbidden_repo_key(origin, key);
             }
             continue;
         }
-        apply_kv(cfg, key, val);
+        apply_kv(cfg, key, val).map_err(rejected)?;
     }
     Ok(())
 }
@@ -818,14 +860,24 @@ fn warn_forbidden_repo_key(path: &Path, key: &str) {
     );
 }
 
-/// Apply one parsed key/value pair to `cfg`. Unknown / legacy keys are
-/// tolerated (silent) for forward compat with hand-edited files.
-fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
-    // Inert git-compat `core.*` keys: store only the allowlisted ones
-    // (dangerous keys are dropped on read, like any other unknown key).
+/// Apply one parsed key/value pair to `cfg`. Config fails closed: an
+/// unknown key or a malformed value returns the reason it is refused.
+fn apply_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
+    validate_value(val).map_err(|_| "value contains control characters".to_owned())?;
+    // Inert git-compat `core.*` keys: store only the allowlisted ones.
     if let Some(suffix) = core_allowed_suffix(key) {
         cfg.core.insert(suffix, val.to_string());
-        return;
+        return Ok(());
+    }
+    if is_core_section(key) {
+        let name = key.split_once('.').map_or("", |(_, n)| n);
+        return Err(
+            if CORE_DENIED_KEYS.contains(&name.to_ascii_lowercase().as_str()) {
+                format!("config key `{key}` is not honored by kit and is rejected for safety")
+            } else {
+                format!("unknown config key `{key}`")
+            },
+        );
     }
     match key {
         "user.identity" => val.clone_into(&mut cfg.user_identity),
@@ -835,8 +887,18 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "user.email" => val.clone_into(&mut cfg.user_email),
         "trusted_remote_endpoint" => val.clone_into(&mut cfg.trusted_remote_endpoint),
         "admission_helper" => val.clone_into(&mut cfg.admission_helper),
-        "signer" => val.clone_into(&mut cfg.signer),
-        "pull.require_signed" => val.clone_into(&mut cfg.pull_require_signed),
+        "signer" => {
+            expect_one_of(key, val, &["legacy", "keystore"])?;
+            val.clone_into(&mut cfg.signer);
+        }
+        "pull.require_signed" => {
+            expect_one_of(
+                key,
+                val,
+                &["true", "1", "yes", "on", "false", "0", "no", "off"],
+            )?;
+            val.clone_into(&mut cfg.pull_require_signed);
+        }
         "key.backend" => val.clone_into(&mut cfg.key.backend),
         "key.default_ref" => val.clone_into(&mut cfg.key.default_ref),
         "key.ed25519_ref" => val.clone_into(&mut cfg.key.ed25519_ref),
@@ -844,29 +906,47 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "key.p256_ref" => val.clone_into(&mut cfg.key.p256_ref),
         "signing_key" => val.clone_into(&mut cfg.signing_key),
         "default_branch" => val.clone_into(&mut cfg.default_branch),
-        "durability.objects" => val.clone_into(&mut cfg.durability_objects),
+        "durability.objects" => {
+            expect_one_of(key, val, &["batch", "per-object", "per_object"])?;
+            val.clone_into(&mut cfg.durability_objects);
+        }
         "remote_endpoint" => val.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => val.clone_into(&mut cfg.remote_bucket),
         "remote_type" => val.clone_into(&mut cfg.remote_type),
-        "ssh.strict_host_key_checking" => val.clone_into(&mut cfg.ssh_strict_host_key_checking),
+        "ssh.strict_host_key_checking" => {
+            expect_one_of(key, val, &["yes", "no", "accept-new"])?;
+            val.clone_into(&mut cfg.ssh_strict_host_key_checking);
+        }
         "ssh.user_known_hosts_file" => val.clone_into(&mut cfg.ssh_user_known_hosts_file),
         "ssh.identity_file" => val.clone_into(&mut cfg.ssh_identity_file),
         "http.sslcainfo" => val.clone_into(&mut cfg.http_ssl_ca_info),
-        "transport_auth" => val.clone_into(&mut cfg.transport_auth),
+        "transport_auth" => {
+            expect_one_of(key, val, &["bearer", "envelope"])?;
+            val.clone_into(&mut cfg.transport_auth);
+        }
         "grant.webauthn_rp" => cfg
             .grant_webauthn_rp
             .extend(parse_pipe_list(val).into_iter().filter(|e| !e.is_empty())),
-        "attest.default_algorithm" => val.clone_into(&mut cfg.attest.default_algorithm),
-        "attest.signer" => val.clone_into(&mut cfg.attest.signer),
+        "attest.default_algorithm" => {
+            expect_one_of(key, val, &["ed25519", "secp256k1", "p256"])?;
+            val.clone_into(&mut cfg.attest.default_algorithm);
+        }
+        "attest.signer" => {
+            expect_one_of(key, val, &["repo-key", "keystore", "external"])?;
+            val.clone_into(&mut cfg.attest.signer);
+        }
         "attest.external_signer_path" => val.clone_into(&mut cfg.attest.external_signer_path),
         "attest.external_signer_args" => {
             cfg.attest.external_signer_args = parse_pipe_list(val);
         }
         "attest.external_signer_timeout_secs" => {
-            // Tolerate a malformed value on read (mirrors the rest of
-            // this parser): an unparseable number leaves the default in
-            // effect rather than aborting config load.
-            cfg.attest.external_signer_timeout_secs = val.trim().parse::<u64>().ok();
+            cfg.attest.external_signer_timeout_secs = if val.is_empty() {
+                None
+            } else {
+                Some(val.parse::<u64>().map_err(|_| {
+                    format!("invalid value for `{key}`: expected a whole number of seconds")
+                })?)
+            };
         }
         "attest.secp256k1_key_path" => val.clone_into(&mut cfg.attest.secp256k1_key_path),
         "attest.p256_key_path" => val.clone_into(&mut cfg.attest.p256_key_path),
@@ -875,12 +955,22 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         // upstream). Each remote endpoint still flows through the
         // per-endpoint gate, so a named remote cannot smuggle ambient
         // creds.
-        _ if apply_section_kv(cfg, key, val) => {}
-        // Legacy keys — silently ignored.
-        "author_mid" | "project_id" | "network" => {}
-        _ if key.ends_with("_url") => {}
-        _ => {} // unknown keys: tolerate on read
+        _ if apply_section_kv(cfg, key, val)? => {}
+        _ => return Err(format!("unknown config key `{key}`")),
     }
+    Ok(())
+}
+
+/// Accept an empty value (the key is unset) or one of `allowed`, compared
+/// without regard to case. Any other value is an error.
+fn expect_one_of(key: &str, val: &str, allowed: &[&str]) -> Result<(), String> {
+    if val.is_empty() || allowed.iter().any(|a| val.eq_ignore_ascii_case(a)) {
+        return Ok(());
+    }
+    Err(format!(
+        "invalid value `{val}` for `{key}` (expected one of: {})",
+        allowed.join(", ")
+    ))
 }
 
 /// `true` if `key` is in the `core` section (`core.<x>`), matched
@@ -940,65 +1030,41 @@ pub fn normalize_config_key(key: &str) -> String {
 }
 
 /// Apply a `<section>.<name>.<field>` key (named remotes, branch
-/// upstreams). Returns `true` if the key matched a known section/field
-/// (regardless of whether the name validated), so the caller's match
-/// arm can treat it as handled.
-fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> bool {
+/// upstreams). Returns `Ok(true)` if the key matched a known section/field,
+/// `Ok(false)` if it did not, and an error if the name is not valid.
+fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> Result<bool, String> {
     let mut parts = key.splitn(3, '.');
     let (Some(section), Some(name), Some(field)) = (parts.next(), parts.next(), parts.next())
     else {
-        return false;
+        return Ok(false);
     };
+    if !matches!(
+        (section, field),
+        ("remote", "admission_headers" | "url" | "type") | ("branch", "remote" | "merge")
+    ) {
+        return Ok(false);
+    }
     // Only flat, ref-safe names (no further dots) are accepted.
     // The grammar only: an existing config entry is never dropped for a
     // name longer than SPEC-REFS §3's bound; `remote add` checks it.
-    let valid_name = !name.is_empty() && kit_core::refs::validate_ref_name_grammar(name);
+    if name.is_empty() || !kit_core::refs::validate_ref_name_grammar(name) {
+        return Err(format!("invalid name `{name}` in config key `{key}`"));
+    }
+    let name = name.to_owned();
     match (section, field) {
         ("remote", "admission_headers") => {
-            if valid_name {
-                cfg.remote_admission_headers
-                    .insert(name.to_owned(), val.to_owned());
-            }
-            true
+            cfg.remote_admission_headers.insert(name, val.to_owned());
         }
-        ("remote", "url") => {
-            if valid_name {
-                val.clone_into(&mut cfg.remotes.entry(name.to_owned()).or_default().url);
-            }
-            true
-        }
+        ("remote", "url") => val.clone_into(&mut cfg.remotes.entry(name).or_default().url),
         ("remote", "type") => {
-            if valid_name {
-                val.clone_into(&mut cfg.remotes.entry(name.to_owned()).or_default().remote_type);
-            }
-            true
+            val.clone_into(&mut cfg.remotes.entry(name).or_default().remote_type);
         }
         ("branch", "remote") => {
-            if valid_name {
-                val.clone_into(
-                    &mut cfg
-                        .branch_upstreams
-                        .entry(name.to_owned())
-                        .or_default()
-                        .remote,
-                );
-            }
-            true
+            val.clone_into(&mut cfg.branch_upstreams.entry(name).or_default().remote);
         }
-        ("branch", "merge") => {
-            if valid_name {
-                val.clone_into(
-                    &mut cfg
-                        .branch_upstreams
-                        .entry(name.to_owned())
-                        .or_default()
-                        .branch,
-                );
-            }
-            true
-        }
-        _ => false,
+        _ => val.clone_into(&mut cfg.branch_upstreams.entry(name).or_default().branch),
     }
+    Ok(true)
 }
 
 /// Write the given `Config` to `<root>/.kit/config`. Only repo-scoped
@@ -1297,7 +1363,7 @@ pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let existing = read_config_text(&path)?.unwrap_or_default();
     let mut out = String::new();
     let mut replaced = false;
     for raw_line in existing.lines() {
@@ -1347,10 +1413,8 @@ pub fn remove_user_kv(key: &str) -> Result<bool, ConfigError> {
     let key = normalize_config_key(key);
     let key = key.as_str();
     let path = user_config_path();
-    let existing = match fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(ConfigError::Io(e)),
+    let Some(existing) = read_config_text(&path)? else {
+        return Ok(false);
     };
     let mut out = String::new();
     let mut removed = false;
@@ -1605,11 +1669,11 @@ mod tests {
     #[test]
     fn durability_objects_key_selects_sync_policy() {
         // The SPEC-OBJECTS §10.1 escape hatch must be reachable from
-        // config: `per-object` selects the strict schedule, everything
-        // else (unset, "batch", junk) falls back to the batched default.
+        // config: `per-object` selects the strict schedule, and unset or
+        // "batch" selects the batched default. Junk is a parse error.
         let mut cfg = Config::with_defaults();
         assert_eq!(cfg.object_sync_policy(), kit_core::store::SyncPolicy::Batch);
-        apply_kv(&mut cfg, "durability.objects", "per-object");
+        apply_kv(&mut cfg, "durability.objects", "per-object").unwrap();
         assert_eq!(
             cfg.object_sync_policy(),
             kit_core::store::SyncPolicy::PerObject
@@ -1619,7 +1683,8 @@ mod tests {
         write(&RepoLayout::single(dir.path()), &cfg).unwrap();
         let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
         assert!(text.contains("durability.objects = per-object"));
-        apply_kv(&mut cfg, "durability.objects", "bogus");
+        assert!(apply_kv(&mut cfg, "durability.objects", "bogus").is_err());
+        apply_kv(&mut cfg, "durability.objects", "batch").unwrap();
         assert_eq!(cfg.object_sync_policy(), kit_core::store::SyncPolicy::Batch);
     }
 
@@ -1627,19 +1692,23 @@ mod tests {
     /// `XDG_CONFIG_HOME` — the env-var dance races other tests and
     /// trips the `disallowed-methods` clippy lint we configured.
     fn layer(repo_text: Option<&str>, user_text: Option<&str>) -> Config {
+        try_layer(repo_text, user_text).unwrap()
+    }
+
+    fn try_layer(repo_text: Option<&str>, user_text: Option<&str>) -> Result<Config, ConfigError> {
         let td = TempDir::new().unwrap();
         let mut cfg = Config::with_defaults();
         if let Some(text) = user_text {
             let upath = td.path().join("user_config");
             fs::write(&upath, text).unwrap();
-            apply_file(&mut cfg, &upath, ConfigScope::User).unwrap();
+            apply_file(&mut cfg, &upath, ConfigScope::User)?;
         }
         if let Some(text) = repo_text {
             let rpath = td.path().join("repo_config");
             fs::write(&rpath, text).unwrap();
-            apply_file(&mut cfg, &rpath, ConfigScope::Repo).unwrap();
+            apply_file(&mut cfg, &rpath, ConfigScope::Repo)?;
         }
-        cfg
+        Ok(cfg)
     }
 
     fn layered(repo_text: Option<&str>, user_text: Option<&str>) -> LayeredConfig {
@@ -1928,8 +1997,9 @@ mod tests {
     #[test]
     fn pull_require_signed_defaults_to_true_and_rejects_typos() {
         assert!(Config::default().pull_require_signed_or_default());
-        let cfg = layer(None, Some("pull.require_signed = nope\n"));
-        assert!(cfg.pull_require_signed_or_default());
+        // A typo is a load error, never a silent choice either way.
+        assert!(try_layer(None, Some("pull.require_signed = nope\n")).is_err());
+        assert!(try_layer(None, Some("pull.require_signd = false\n")).is_err());
         for falsy in ["false", "0", "no", "off", "FALSE", "Off"] {
             let cfg = layer(None, Some(&format!("pull.require_signed = {falsy}\n")));
             assert!(
@@ -2332,9 +2402,122 @@ mod tests {
     }
 
     #[test]
-    fn legacy_keys_are_ignored_in_repo() {
-        let cfg = layer(Some("project_id = xyz\nauthor_mid = 5\n"), None);
-        assert_eq!(cfg.signing_key, DEFAULT_SIGNING_KEY);
+    fn removed_keys_are_unknown_keys() {
+        for line in [
+            "project_id = xyz",
+            "author_mid = 5",
+            "network = x",
+            "a_url = b",
+        ] {
+            assert!(
+                matches!(
+                    try_layer(Some(&format!("{line}\n")), None),
+                    Err(ConfigError::Rejected { .. })
+                ),
+                "{line}"
+            );
+        }
+    }
+
+    fn rejection(repo_text: Option<&str>, user_text: Option<&str>) -> String {
+        match try_layer(repo_text, user_text) {
+            Err(ConfigError::Rejected { location, reason }) => format!("{location}: {reason}"),
+            other => panic!("expected a rejected config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_key_is_an_error_with_its_line() {
+        let msg = rejection(Some("default_branch = main\nbogus.key = 1\n"), None);
+        assert!(msg.contains("repo_config:2"), "{msg}");
+        assert!(msg.contains("unknown config key `bogus.key`"), "{msg}");
+        // The same holds for the user scope.
+        assert!(rejection(None, Some("bogus.key = 1\n")).contains("unknown config key"));
+    }
+
+    #[test]
+    fn line_without_equals_is_an_error() {
+        let msg = rejection(Some("# comment\n\npull.require_signed\n"), None);
+        assert!(msg.contains("repo_config:3"), "{msg}");
+        assert!(msg.contains("expected `key = value`"), "{msg}");
+        assert!(rejection(None, Some("[core]\n")).contains("expected `key = value`"));
+    }
+
+    #[test]
+    fn malformed_values_are_errors() {
+        for line in [
+            "durability.objects = sometimes",
+            "transport_auth = bearer-ish",
+            "signer = maybe",
+            "attest.signer = remote",
+            "attest.default_algorithm = rsa",
+            "ssh.strict_host_key_checking = ask-me",
+            "attest.external_signer_timeout_secs = soon",
+            "attest.external_signer_timeout_secs = -1",
+            "pull.require_signed = disabled",
+            "default_branch = a\u{1}b",
+        ] {
+            assert!(
+                matches!(
+                    try_layer(None, Some(&format!("{line}\n"))),
+                    Err(ConfigError::Rejected { .. })
+                ),
+                "{line:?} must be rejected"
+            );
+        }
+        for line in [
+            "durability.objects = per-object",
+            "transport_auth = ENVELOPE",
+            "signer = keystore",
+            "attest.signer = external",
+            "attest.default_algorithm = p256",
+            "ssh.strict_host_key_checking = accept-new",
+            "attest.external_signer_timeout_secs = 30",
+            "attest.external_signer_timeout_secs =",
+            "pull.require_signed = false",
+        ] {
+            assert!(
+                try_layer(None, Some(&format!("{line}\n"))).is_ok(),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn denied_core_and_bad_names_are_errors() {
+        assert!(rejection(Some("core.editor = vim\n"), None).contains("rejected for safety"));
+        assert!(rejection(Some("core.nonsense = 1\n"), None).contains("unknown config key"));
+        assert!(try_layer(Some("core.autocrlf = true\n"), None).is_ok());
+    }
+
+    #[test]
+    fn invalid_remote_names_and_fields_are_errors() {
+        assert!(rejection(Some("remote..url = x\n"), None).contains("invalid name"));
+        assert!(rejection(Some("remote.a b.url = x\n"), None).contains("invalid name"));
+        assert!(rejection(Some("remote.origin.bogus = x\n"), None).contains("unknown config key"));
+        assert!(rejection(Some("branch.main.bogus = x\n"), None).contains("unknown config key"));
+    }
+
+    #[test]
+    fn forbidden_repo_key_with_a_bad_value_is_still_only_dropped() {
+        // The forbidden-key rule runs first: the repo layer never parses
+        // the value of a key it will not honor.
+        let cfg = layer(Some("pull.require_signed = nope\n"), None);
+        assert!(cfg.pull_require_signed.is_empty());
+    }
+
+    #[test]
+    fn oversized_config_file_is_an_error() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("repo_config");
+        let mut text = String::from("default_branch = main\n");
+        text.push_str(&"#".repeat(usize::try_from(MAX_CONFIG_BYTES).unwrap()));
+        fs::write(&path, text).unwrap();
+        let mut cfg = Config::with_defaults();
+        assert!(matches!(
+            apply_file(&mut cfg, &path, ConfigScope::Repo),
+            Err(ConfigError::TooLarge(_))
+        ));
     }
 
     /// `write_user_kv` is exercised via `apply_file` round-tripping

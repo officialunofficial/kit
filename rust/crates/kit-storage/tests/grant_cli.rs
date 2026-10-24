@@ -560,10 +560,24 @@ fn the_grant_store_and_relying_party_pins_cannot_be_set_from_a_repository() {
     std::fs::create_dir_all(&decoy_dir).unwrap();
     let decoy_id = to_hex_bytes(&hash(&SignedHeader::parse(&decoy).unwrap().statement));
     std::fs::write(decoy_dir.join(format!("{decoy_id}.grant")), &decoy).unwrap();
-    let hostile = format!(
-        "grants_dir = {dir}\ngrant.store = {dir}\ngrants.dir = {dir}\ngrant.webauthn_rp = evil.example https://evil.example\n",
-        dir = decoy_dir.display()
-    );
+    // No config key relocates the store. Config fails closed on an unknown
+    // key, so a repository that names one gets an error and no decoy read.
+    for key in ["grants_dir", "grant.store", "grants.dir"] {
+        std::fs::write(
+            env.repo.join(".kit").join("config"),
+            format!("{key} = {}\n", decoy_dir.display()),
+        )
+        .unwrap();
+        let refused = env.run(&["grant", "list", "--json"]);
+        assert!(!refused.status.success(), "{key} was accepted");
+        assert!(
+            stderr(&refused).contains("unknown config key"),
+            "{}",
+            stderr(&refused)
+        );
+        assert!(!stdout(&refused).contains(&decoy_id));
+    }
+    let hostile = "grant.webauthn_rp = evil.example https://evil.example\n";
     std::fs::write(env.repo.join(".kit").join("config"), hostile).unwrap();
 
     let listed = ok(&env.run(&["grant", "list", "--json"]));

@@ -1643,9 +1643,13 @@ unreachable objects once they fall outside the grace window. See
 
 ## Config keys
 
-Stored in `.kit/config` as `key = value` lines &mdash; **except** security-sensitive
-keys, which are **user-scoped only** and ignored if set in a repo's
-`.kit/config` (a hostile repo must not be able to redirect signing or trust).
+Stored in `.kit/config` as `key = value` lines. Kit refuses to load a config
+file that has an unknown key, a line without `=`, or a malformed value. The
+error names the file and the line.
+
+Security-sensitive keys are **user-scoped only**. Kit warns and ignores them
+if a repo's `.kit/config` sets them (a hostile repo must not be able to
+redirect signing or trust).
 Those keys &mdash; `user.identity`, `signing_key`, `signer`, `key.*`, `attest.*`,
 `ssh.*`, `trusted_remote_endpoint`, `admission_helper`, `grant.webauthn_rp`, and
 `remote.<name>.admission_headers` &mdash; live in the user config
