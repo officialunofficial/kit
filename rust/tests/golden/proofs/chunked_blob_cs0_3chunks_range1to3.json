@@ -1,6 +1,6 @@
 {
   "bin": "chunked_blob_cs0_3chunks_range1to3.bin",
-  "blake3": "5f143108d9a33ae56c9928446090b96ba7f383fee6cf265128a75b36f2aedcf2",
+  "blake3": "3ef104b3df0ff73e10f0e5be99cdcdc5e462a35fa2616772a4d42810c1cfbe0b",
   "chunk_hashes_hex": [
     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
     "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
@@ -12,7 +12,7 @@
   "kind": "chunk",
   "max_items": 3,
   "name": "chunked_blob_cs0_3chunks_range1to3",
-  "object_id_hex": "00a63a562fc5b0fbe3eda18138923dfff4f94f0ca60ef869e32825028199d63d",
+  "object_id_hex": "afbb936cbd2702c2628f188e38cd91284aa0d1d90197587935e5c04787d3674c",
   "proof_kind": "range",
   "size": 37,
   "start": 1,

@@ -4,7 +4,7 @@ use mkit_core::{Hash, layout::RepoLayout, store::ObjectStore};
 use mkit_git_bridge::gitobj::{Sha1Id, sha1_hex};
 use serde::Deserialize;
 
-const PREDICATE: &str = "https://github.com/officialunofficial/mkit/spec/predicate/git-import/v1";
+use crate::commands::git_import::PREDICATE_TYPE;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,7 +85,7 @@ impl Context<'_> {
                 return false;
             };
             claim.statement_type == mkit_attest::statement::IN_TOTO_TYPE
-                && claim.predicate_type == PREDICATE
+                && claim.predicate_type == PREDICATE_TYPE
                 && subject.name == mkit_ref
                 && subject.digest.blake3 == mkit_core::to_hex(twin)
                 && subject.digest.sha256.as_ref().is_none_or(|h| *h == sha256)

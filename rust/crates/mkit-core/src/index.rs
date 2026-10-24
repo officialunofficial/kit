@@ -21,7 +21,7 @@
 //! any other magic.
 //!
 //! Path rules (SPEC-INDEX §2): non-empty, no leading `/`, no `.`/`..`
-//! segments, no NULs/backslashes, and never under `.mkit/` or `.git/`.
+//! segments, no NULs/backslashes, and never under `.kit/` or `.git/`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -44,7 +44,7 @@ pub const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PATH_LEN: usize = 4096;
 
 /// Default location of the index file relative to the worktree root.
-pub const INDEX_FILE: &str = ".mkit/index";
+pub const INDEX_FILE: &str = ".kit/index";
 
 /// Status byte for an index entry. Values match SPEC-INDEX §3.
 #[repr(u8)]
@@ -700,7 +700,7 @@ pub fn index_path(layout: &RepoLayout) -> PathBuf {
 }
 
 /// Validate a staged path: non-empty, relative, no traversal, no NUL,
-/// no backslash, never under `.mkit/` or `.git/`.
+/// no backslash, never under `.kit/` or `.git/`.
 #[must_use]
 pub fn validate_index_path(path: &str) -> bool {
     if path.is_empty() {
@@ -712,10 +712,10 @@ pub fn validate_index_path(path: &str) -> bool {
     if path.len() > MAX_PATH_LEN {
         return false;
     }
-    if path == ".mkit" || path == ".git" {
+    if path == ".kit" || path == ".git" {
         return false;
     }
-    if path.starts_with(".mkit/") || path.starts_with(".git/") {
+    if path.starts_with(".kit/") || path.starts_with(".git/") {
         return false;
     }
     for part in path.split('/') {
@@ -1294,7 +1294,7 @@ mod tests {
     #[test]
     fn write_and_read_round_trip_via_disk() {
         let dir = TempDir::new().unwrap();
-        fs::create_dir_all(dir.path().join(".mkit")).unwrap();
+        fs::create_dir_all(dir.path().join(".kit")).unwrap();
         let mut idx = Index::new();
         idx.entries.push(IndexEntry {
             path: "test.txt".into(),
@@ -1321,7 +1321,7 @@ mod tests {
     #[test]
     fn read_zero_length_file_rejects_corruption() {
         let dir = TempDir::new().unwrap();
-        fs::create_dir_all(dir.path().join(".mkit")).unwrap();
+        fs::create_dir_all(dir.path().join(".kit")).unwrap();
         fs::write(dir.path().join(INDEX_FILE), b"").unwrap();
         assert!(matches!(
             read_index(&RepoLayout::single(dir.path())),
@@ -1332,7 +1332,7 @@ mod tests {
     #[test]
     fn read_oversize_file_rejected() {
         let dir = TempDir::new().unwrap();
-        fs::create_dir_all(dir.path().join(".mkit")).unwrap();
+        fs::create_dir_all(dir.path().join(".kit")).unwrap();
         let path = dir.path().join(INDEX_FILE);
         // Sparse-extend beyond the cap; allocates effectively no blocks.
         let f = fs::OpenOptions::new()
@@ -1399,14 +1399,14 @@ mod tests {
     fn validate_path_basic() {
         assert!(validate_index_path("a.txt"));
         assert!(validate_index_path("src/main.rs"));
-        assert!(validate_index_path(".mkitignore"));
+        assert!(validate_index_path(".kitignore"));
         assert!(!validate_index_path(""));
         assert!(!validate_index_path("/abs"));
         assert!(!validate_index_path("../escape"));
         assert!(!validate_index_path("a/../b"));
-        assert!(!validate_index_path(".mkit"));
+        assert!(!validate_index_path(".kit"));
         assert!(!validate_index_path(".git"));
-        assert!(!validate_index_path(".mkit/objects"));
+        assert!(!validate_index_path(".kit/objects"));
         assert!(!validate_index_path(".git/HEAD"));
         assert!(!validate_index_path("a\\b"));
         assert!(!validate_index_path("a//b"));

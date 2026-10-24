@@ -8,7 +8,7 @@
 //! unless `-x` (also remove ignored) or `-X` (remove *only* ignored).
 //!
 //! Ignore matching uses the shared path-aware matcher (`.gitignore` +
-//! `.mkitignore`), so `-x`/`-X` honor anchored/`**`/multi-segment
+//! `.kitignore`), so `-x`/`-X` honor anchored/`**`/multi-segment
 //! patterns and a file under an ignored directory counts as ignored.
 
 use std::io::Write;
@@ -146,7 +146,7 @@ pub fn run(args: &[String]) -> u8 {
 /// individual removable entries within it.
 ///
 /// Matches git: a **nested repository** (a subdirectory containing
-/// `.mkit`/`.git`) is left untouched — git only removes one with the
+/// `.kit`/`.git`) is left untouched — git only removes one with the
 /// double-force `-ff`, which mkit doesn't offer. **Ignored files are
 /// kept** (unless `-x`) and keep their parent directory alive. So a
 /// directory is removed wholesale only when every entry under it is itself
@@ -160,9 +160,9 @@ fn collect_dir(
     ignore: &IgnoreList,
     opts: &CleanOpts,
 ) -> std::io::Result<(bool, Vec<Victim>)> {
-    // Nested-repo protection. The repo root always has its own `.mkit`, so
+    // Nested-repo protection. The repo root always has its own `.kit`, so
     // only guard SUBdirectories (prefix non-empty).
-    if !prefix.is_empty() && (dir.join(".mkit").exists() || dir.join(".git").exists()) {
+    if !prefix.is_empty() && (dir.join(".kit").exists() || dir.join(".git").exists()) {
         return Ok((false, Vec::new()));
     }
     let read = match std::fs::read_dir(dir) {
@@ -179,7 +179,7 @@ fn collect_dir(
             fully_removable = false;
             continue;
         };
-        if name.eq_ignore_ascii_case(".mkit") || name.eq_ignore_ascii_case(".git") {
+        if name.eq_ignore_ascii_case(".kit") || name.eq_ignore_ascii_case(".git") {
             fully_removable = false; // repo metadata stays
             continue;
         }

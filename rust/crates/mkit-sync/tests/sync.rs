@@ -130,7 +130,7 @@ impl Remote {
             prev.map_or(RefWriteCondition::Missing, RefWriteCondition::Match)
         };
         self.tx
-            .update_ref("refs/mkit/packmap/main", condition, &node_key)
+            .update_ref("refs/kit/packmap/main", condition, &node_key)
             .unwrap();
         *self.packmap_head.borrow_mut() = Some(node_key);
         let head = self.tx.read_ref("refs/heads/main").unwrap();
@@ -213,7 +213,7 @@ fn clone_into(remote: &Remote, dir: &Path) -> mkit_sync::CloneReport {
     clone(
         dir,
         &remote.source(),
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &SyncOptions::default(),
         &NoopObserver,
     )
@@ -256,22 +256,22 @@ fn clone_refuses_values_that_would_inject_config_lines() {
     for remote in [
         CloneRemote {
             name: "default".to_owned(),
-            url: "mkit+file:///x\nremote.evil.url = y".to_owned(),
+            url: "kit+file:///x\nremote.evil.url = y".to_owned(),
             kind: "file".to_owned(),
         },
         CloneRemote {
             name: "up\nstream".to_owned(),
-            url: "mkit+file:///x".to_owned(),
+            url: "kit+file:///x".to_owned(),
             kind: "file".to_owned(),
         },
         CloneRemote {
             name: "dotted.name".to_owned(),
-            url: "mkit+file:///x".to_owned(),
+            url: "kit+file:///x".to_owned(),
             kind: "file".to_owned(),
         },
         CloneRemote {
             name: "default".to_owned(),
-            url: "mkit+file:///x".to_owned(),
+            url: "kit+file:///x".to_owned(),
             kind: "fi\rle".to_owned(),
         },
     ] {
@@ -289,22 +289,22 @@ fn clone_refuses_values_that_would_inject_config_lines() {
 fn clone_writes_the_flat_and_named_remote_config() {
     let dir = tempfile::tempdir().unwrap();
     let flat = dir.path().join("flat");
-    let layout = init_clone_dir(&flat, &default_remote("mkit+memory://x")).unwrap();
+    let layout = init_clone_dir(&flat, &default_remote("kit+memory://x")).unwrap();
     assert_eq!(
         std::fs::read_to_string(layout.config_file()).unwrap(),
-        "default_branch = main\nremote_endpoint = mkit+memory://x\nremote_type = memory\n"
+        "default_branch = main\nremote_endpoint = kit+memory://x\nremote_type = memory\n"
     );
 
     let named = dir.path().join("named");
     let remote = CloneRemote {
         name: "upstream".to_owned(),
-        url: "mkit+file:///srv/r".to_owned(),
+        url: "kit+file:///srv/r".to_owned(),
         kind: "file".to_owned(),
     };
     let layout = init_clone_dir(&named, &remote).unwrap();
     assert_eq!(
         std::fs::read_to_string(layout.config_file()).unwrap(),
-        "default_branch = main\nremote.upstream.url = mkit+file:///srv/r\nremote.upstream.type = file\n"
+        "default_branch = main\nremote.upstream.url = kit+file:///srv/r\nremote.upstream.type = file\n"
     );
 }
 
@@ -423,7 +423,7 @@ fn an_unsigned_commit_is_rejected_by_default_and_publishes_nothing() {
     let err = clone(
         &target,
         &remote.source(),
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &SyncOptions::default(),
         &NoopObserver,
     )
@@ -452,7 +452,7 @@ fn the_explicit_opt_out_accepts_an_unsigned_commit() {
     let report = clone(
         &target,
         &remote.source(),
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &options,
         &NoopObserver,
     )
@@ -475,7 +475,7 @@ fn a_missing_target_branch_is_an_error_not_a_fallback() {
     let err = clone(
         &target,
         &remote.source(),
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &options,
         &NoopObserver,
     )
@@ -499,7 +499,7 @@ fn cancellation_is_polled_and_reported_as_interrupted() {
     let err = clone(
         &target,
         &remote.source(),
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &SyncOptions::default(),
         &observer,
     )
@@ -526,7 +526,7 @@ fn progress_arrives_as_events_not_output() {
     clone(
         &dir.path().join("work"),
         &remote.source(),
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &SyncOptions::default(),
         &observer,
     )
@@ -589,7 +589,7 @@ fn a_listed_branch_deleted_since_the_listing_is_skipped_not_fetched() {
     let tip = remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    init_clone_dir(&target, &default_remote("mkit+memory://x")).unwrap();
+    init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
     let mut listing = remote.tx.list_refs("refs/heads/").unwrap();
     listing.push(mkit_core::refs::Ref {
         name: "ghost".to_owned(),
@@ -636,7 +636,7 @@ fn a_concurrent_rebaseline_is_retried_once_with_the_fresh_tip() {
     let fresh_tip = remote.publish_reset(&[("b.txt", b"rebaselined\n")]);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    init_clone_dir(&target, &default_remote("mkit+memory://x")).unwrap();
+    init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
     let source = StaleListing {
         inner: remote.source(),
         listing: stale,
@@ -747,7 +747,7 @@ fn cancellation_after_the_first_checkpoint_stops_before_publishing() {
     remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    init_clone_dir(&target, &default_remote("mkit+memory://x")).unwrap();
+    init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
     let observer = Recorder::default();
     observer.cancel_after.set(Some(1));
 
@@ -811,7 +811,7 @@ fn staging_honours_the_configured_directory() {
     clone(
         &dir.path().join("work"),
         &remote.source(),
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &options,
         &NoopObserver,
     )
@@ -823,7 +823,7 @@ fn staging_honours_the_configured_directory() {
     let err = clone(
         &dir.path().join("work2"),
         &remote.source(),
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &missing,
         &NoopObserver,
     )
@@ -834,7 +834,7 @@ fn staging_honours_the_configured_directory() {
 /// A signed one-commit history whose pack carries a zstd entry
 /// (`examples/gen_zstd_fixture.rs` regenerates it).
 const ZSTD_PACK: &[u8] = include_bytes!("fixtures/zstd.pack");
-const ZSTD_TIP: &str = "8c6b7803b11c2e4325369f93927a180c80cb97bdec7708cf30c0f541d2ae8787";
+const ZSTD_TIP: &str = "37816ba6489d3d08f664c1c4b2e547efd4017653e7979bc3d3b6865248b7fd57";
 
 fn remote_with_zstd_pack() -> Remote {
     // The blob alone is about 9.7 KB; the pack is far smaller only because an
@@ -858,7 +858,7 @@ fn remote_with_zstd_pack() -> Remote {
     remote
         .tx
         .update_ref(
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &node_key,
         )
@@ -919,7 +919,7 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
     clone(
         &target,
         &counted,
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &SyncOptions::default(),
         &NoopObserver,
     )
@@ -936,7 +936,7 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
     .unwrap();
     assert_eq!(
         counted.take(),
-        ["ListRefs", "ReadRef refs/mkit/packmap/main"]
+        ["ListRefs", "ReadRef refs/kit/packmap/main"]
     );
     assert_eq!(report.fetch.objects_unpacked, 0);
     assert_eq!(report.fetch.packs_already_applied, 2);
@@ -952,7 +952,7 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
     .unwrap();
     assert_eq!(
         counted.take(),
-        ["ListRefs", "ReadRef refs/mkit/packmap/main"]
+        ["ListRefs", "ReadRef refs/kit/packmap/main"]
     );
 
     let third = remote.publish(Some(second), &[("a", b"3")], true);
@@ -1003,7 +1003,7 @@ fn checkpoint_corruption_absence_and_identity_changes_walk_the_full_chain() {
     clone(
         &target,
         &counted,
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &SyncOptions::default(),
         &NoopObserver,
     )
@@ -1054,7 +1054,7 @@ fn checkpoint_self_heals_a_missing_prefix_and_verifies_new_signatures() {
     clone(
         &target,
         &counted,
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &SyncOptions::default(),
         &NoopObserver,
     )
@@ -1126,7 +1126,7 @@ fn omitted_prefix_restores_delta_bases_when_applied_record_is_missing() {
     clone(
         &target,
         &counted,
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &SyncOptions::default(),
         &NoopObserver,
     )
@@ -1199,7 +1199,7 @@ fn omitted_prefix_restores_delta_bases_when_applied_record_is_missing() {
     .unwrap();
     assert_eq!(
         counted.take(),
-        ["ListRefs", "ReadRef refs/mkit/packmap/main"]
+        ["ListRefs", "ReadRef refs/kit/packmap/main"]
     );
 }
 
@@ -1214,7 +1214,7 @@ fn crash_between_tracking_publication_and_checkpoint_rewalks_safely() {
     clone(
         &target,
         &counted,
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &SyncOptions::default(),
         &NoopObserver,
     )
@@ -1272,7 +1272,7 @@ fn concurrent_pulls_publish_consistent_checkpoints_under_the_lock() {
     clone(
         &target,
         &counted,
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &SyncOptions::default(),
         &NoopObserver,
     )
@@ -1333,7 +1333,7 @@ fn checkpoints_are_per_branch_and_unchanged_heads_still_publish_listed_tips() {
     clone(
         &target,
         &counted,
-        &default_remote("mkit+memory://x"),
+        &default_remote("kit+memory://x"),
         &SyncOptions::default(),
         &NoopObserver,
     )
@@ -1375,7 +1375,7 @@ fn checkpoints_are_per_branch_and_unchanged_heads_still_publish_listed_tips() {
     remote
         .tx
         .update_ref(
-            "refs/mkit/packmap/topic",
+            "refs/kit/packmap/topic",
             RefWriteCondition::Missing,
             &remote.packmap_head.borrow().unwrap(),
         )
@@ -1414,7 +1414,7 @@ fn checkpoint_directory_does_not_collide_with_a_remote_named_heads() {
     let counted = identified(&source);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    let mut named = default_remote("mkit+memory://x");
+    let mut named = default_remote("kit+memory://x");
     named.name = "heads".into();
     clone(
         &target,

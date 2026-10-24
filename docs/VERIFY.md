@@ -499,7 +499,7 @@ verifier, in order:
 
 1. **Checks the wrap first, before trusting `inner_root` for anything else:**
    `domain_digest(TYPE_DOMAIN, inner_root) == trusted_id`, where
-   `TYPE_DOMAIN` is `"mkit.tree\x00"` for a `Tree` or `"mkit.chunked\x00"`
+   `TYPE_DOMAIN` is `"kit.tree\x00"` for a `Tree` or `"kit.chunked\x00"`
    for a `ChunkedBlob`, and `domain_digest(d, b) = BLAKE3(le16(len(d)) ||
    d || b)` &mdash; both normative, public spec constants (SPEC-MERKLE-OBJECTS
    §2, SPEC-OBJECTS §9), not merely a detail of `mkit_core`'s own Rust
@@ -524,12 +524,12 @@ use mkit_core::hash::domain_digest;
 
 // Step 1: the wrap check. Reject before step 2 even runs on a mismatch.
 assert_eq!(
-    domain_digest(b"mkit.tree\x00", &prover_inner_root), // or b"mkit.chunked\x00"
+    domain_digest(b"kit.tree\x00", &prover_inner_root), // or b"kit.chunked\x00"
     trusted_tree_id,
 );
 // A verifier with no mkit dependency at all computes the same check by
-// hand: BLAKE3(le16(9) || b"mkit.tree\x00" || prover_inner_root) — 9 is
-// len(b"mkit.tree\x00"); le16/le32 are 2/4-byte little-endian integers.
+// hand: BLAKE3(le16(9) || b"kit.tree\x00" || prover_inner_root) — 9 is
+// len(b"kit.tree\x00"); le16/le32 are 2/4-byte little-endian integers.
 
 // Step 2: upstream's own check, unmodified, against the now-trusted root.
 let mut r: &[u8] = proof_bytes;
@@ -549,7 +549,7 @@ bundle and runs the two-step sequence above with no out-of-band channel:
 // After decoding a v2 `Step` (SPEC-DISCLOSURE §3):
 let trusted_tree_id = /* commit.tree_hash, or the previous step's child_id */;
 assert_eq!(
-    domain_digest(b"mkit.tree\x00", &step.inner_root),
+    domain_digest(b"kit.tree\x00", &step.inner_root),
     trusted_tree_id,
 );
 let mut r: &[u8] = &step.proof.encode();
@@ -598,13 +598,13 @@ an mkit tree entry or chunked-blob metadata leaf what it is, not a generic
 BMT property) and are normative in
 [SPEC-MERKLE-OBJECTS](specs/SPEC-MERKLE-OBJECTS.md) §3:
 
-- **Tree entry leaf**: `domain_digest("mkit-tree-entry-v1", le32(len(name)) || name || u8(mode) || object_hash)`.
-- **ChunkedBlob metadata leaf** (position 0): `domain_digest("mkit-cblob-meta-v1", le64(total_size) || le32(chunk_size))`.
+- **Tree entry leaf**: `domain_digest("kit-tree-entry-v1", le32(len(name)) || name || u8(mode) || object_hash)`.
+- **ChunkedBlob metadata leaf** (position 0): `domain_digest("kit-cblob-meta-v1", le64(total_size) || le32(chunk_size))`.
 - **ChunkedBlob chunk leaf** (position `i + 1`): the chunk's own 32-byte
   `Blob` id, raw &mdash; no further wrapping.
 
-`domain_digest` itself, `"mkit.tree\x00"` / `"mkit.chunked\x00"` (the
-outer wrap, §2), and `"mkit-tree-entry-v1"` / `"mkit-cblob-meta-v1"` (the
+`domain_digest` itself, `"kit.tree\x00"` / `"kit.chunked\x00"` (the
+outer wrap, §2), and `"kit-tree-entry-v1"` / `"kit-cblob-meta-v1"` (the
 leaf domains, §3) are all normative spec byte strings &mdash; any independent
 implementation may hardcode them. What's private is only
 `mkit_core::merkle`'s own Rust `const`s for these same strings (so they

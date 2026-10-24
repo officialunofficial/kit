@@ -24,7 +24,7 @@ The stdin/stdout of that child process carry the mkit wire protocol
 - read `~/.ssh/known_hosts` directly,
 - negotiate kex, ciphers, MACs, or HostKeyAlgorithms,
 - select credentials, talk to `ssh-agent`, or introspect agent state,
-- pin a host-key fingerprint from `.mkit/config`,
+- pin a host-key fingerprint from `.kit/config`,
 - detect or rotate known-hosts entries without a process restart.
 
 Everything listed above is the user's `ssh` CLI's job. **mkit's security
@@ -62,9 +62,9 @@ with write credentials on a shared host):
 
 ---
 
-## 3. Per-repo pinning via `.mkit/config`
+## 3. Per-repo pinning via `.kit/config`
 
-Three optional keys in `.mkit/config` override the user's SSH defaults
+Three optional keys in `.kit/config` override the user's SSH defaults
 for mkit's SSH child process only (they do not affect other `ssh`
 invocations). All default to empty, which means "inherit the user's
 default":
@@ -108,7 +108,7 @@ affected, not every SSH session on your machine.
   mkit's control.
 - **No fingerprint pinning in config.** You can point at a
   `UserKnownHostsFile`, but the file itself is the source of truth &mdash;
-  mkit does not store a hash in `.mkit/config`.
+  mkit does not store a hash in `.kit/config`.
 - **No known-hosts auto-rotation.** If the upstream rotates its host
   key, the user's ssh will prompt or reject depending on
   `StrictHostKeyChecking`. mkit has no custom path here.
@@ -134,7 +134,7 @@ affected, not every SSH session on your machine.
 
 ## 5. Push authorization (server side)
 
-mkit core does not define a push-auth protocol. For `mkit+ssh://` the
+mkit core does not define a push-auth protocol. For `kit+ssh://` the
 idiomatic integration is the same one Git forges have used for a
 decade:
 
@@ -229,7 +229,7 @@ Candidate future work (non-binding):
 
 - A native SSH implementation (for example, via `russh`), so mkit owns
   host-key verification and can ship fingerprint pinning in
-  `.mkit/config`.
+  `.kit/config`.
 - `mkit fingerprint` CLI for verifying and storing remote host keys.
 
 Until then: rely on `ssh(1)` and the pinning keys above.

@@ -15,9 +15,9 @@ use std::process::{Command, Output, Stdio};
 
 use mkit_core::hash::hash;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport as _};
-use mkit_rpc::mkit::common::v1::RefExpectation;
-use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
-use mkit_rpc::mkit::rpc::v1::ssh::{
+use mkit_rpc::kit::common::v1::RefExpectation;
+use mkit_rpc::kit::rpc::v1::ProtocolVersion;
+use mkit_rpc::kit::rpc::v1::ssh::{
     Close, Hello, HelloResponse, PackChunk, ReadRef, SshFrame, UpdateRef, UploadPack, ssh_frame,
 };
 use mkit_transport_file::FileTransport;
@@ -69,7 +69,7 @@ fn mkit_serve_args(args: &[String], input: &[u8]) -> Output {
 
 fn repo_root() -> tempfile::TempDir {
     let td = tempfile::tempdir().unwrap();
-    fs::create_dir_all(td.path().join(".mkit")).unwrap();
+    fs::create_dir_all(td.path().join(".kit")).unwrap();
     td
 }
 
@@ -215,7 +215,7 @@ fn session_3_fixture() -> (tempfile::TempDir, Vec<String>) {
     let root = tempfile::tempdir().unwrap();
     let owner_ns = format!("ed25519-{}", "0a".repeat(32));
     let repo = root.path().join(&owner_ns).join("room-a");
-    fs::create_dir_all(repo.join(".mkit")).unwrap();
+    fs::create_dir_all(repo.join(".kit")).unwrap();
     seed(&repo, &[("refs/heads/main", [0x44; 32])], &[]);
     let args = vec![
         "serve".to_owned(),

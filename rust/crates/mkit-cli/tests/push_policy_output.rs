@@ -17,7 +17,7 @@ fn rejected_tracked_push_does_not_print_unused_policy_warning() {
         .unwrap()
         .unwrap();
     let remote = tempfile::tempdir().unwrap();
-    let endpoint = format!("mkit+file://{}", remote.path().display());
+    let endpoint = format!("kit+file://{}", remote.path().display());
     repo.ok(&["remote", "add", "origin", &endpoint]);
     repo.ok_env(&["push", "origin"], &[("MKIT_PACK_REBASELINE_DEPTH", "64")]);
     repo.commit_file("file.txt", b"later\n", "later");
@@ -41,7 +41,7 @@ fn mirror_push_prints_policy_warning_once_per_branch() {
     repo.commit_file("file.txt", b"base\n", "base");
     repo.ok(&["branch", "feature"]);
     let remote = tempfile::tempdir().unwrap();
-    let endpoint = format!("mkit+file://{}", remote.path().display());
+    let endpoint = format!("kit+file://{}", remote.path().display());
     repo.ok(&["remote", "add", "origin", &endpoint]);
 
     let out = repo.ok_env(&["push", "origin", "--all"], INVALID_DEPTH);

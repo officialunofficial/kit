@@ -1,6 +1,6 @@
 //! SPEC-REFS §3's 512-byte ref-name bound, end to end through the real
 //! binary. A new branch name must leave `refs/heads/<b>` and
-//! `refs/mkit/packmap/<b>` within it (494 bytes), and a new tag
+//! `refs/kit/packmap/<b>` within it (495 bytes), and a new tag
 //! `refs/tags/<t>` (502 bytes); longer ones are refused with a message
 //! naming the limit. A branch over the bound that predates it keeps the
 //! repository usable: it is listed, `mkit branch -m`/`-D` get rid of it,
@@ -60,7 +60,7 @@ fn branches(root: &Path, x: &Path) -> String {
 
 /// Plant a branch file the way a pre-bound mkit wrote it.
 fn plant_branch(root: &Path, name: &str) -> PathBuf {
-    let heads = root.join(".mkit/refs/heads");
+    let heads = root.join(".kit/refs/heads");
     let main = fs::read_dir(&heads)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -74,17 +74,17 @@ fn plant_branch(root: &Path, name: &str) -> PathBuf {
 }
 
 #[test]
-fn new_branch_over_494_or_tag_over_502_bytes_is_refused_naming_the_limit() {
+fn new_branch_over_495_or_tag_over_502_bytes_is_refused_naming_the_limit() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    let branch = long_name(495, 'b');
+    let branch = long_name(496, 'b');
     for args in [vec!["branch", &branch], vec!["switch", "-c", &branch]] {
         let out = run_in(root, x, &args);
         assert!(!out.status.success(), "{:?} must fail", args[0]);
         let err = stderr(&out);
         assert!(
-            err.contains("branch name too long (495 bytes; at most 494")
-                && err.contains("refs/mkit/packmap/<name>"),
+            err.contains("branch name too long (496 bytes; at most 495")
+                && err.contains("refs/kit/packmap/<name>"),
             "{:?}: the message names the limit and why: {err}",
             args[0]
         );
@@ -100,7 +100,7 @@ fn new_branch_over_494_or_tag_over_502_bytes_is_refused_naming_the_limit() {
     // At the bounds exactly, both are created.
     let out = run_in(root, x, &["tag", &long_name(502, 't')]);
     assert!(out.status.success(), "{}", stderr(&out));
-    let out = run_in(root, x, &["branch", &long_name(494, 'b')]);
+    let out = run_in(root, x, &["branch", &long_name(495, 'b')]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
 
@@ -108,10 +108,10 @@ fn new_branch_over_494_or_tag_over_502_bytes_is_refused_naming_the_limit() {
 fn branch_of_494_bytes_pushes_over_mkit_file() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    let branch = long_name(494, 'p');
+    let branch = long_name(495, 'p');
     assert!(run_in(root, x, &["branch", &branch]).status.success());
     let bare = tempfile::tempdir().unwrap();
-    let url = format!("mkit+file://{}", bare.path().display());
+    let url = format!("kit+file://{}", bare.path().display());
     assert!(
         run_in(root, x, &["remote", "add", "origin", &url])
             .status
@@ -122,21 +122,21 @@ fn branch_of_494_bytes_pushes_over_mkit_file() {
     let pushed = format!("refs/heads/{branch}")
         .split('/')
         .fold(bare.path().to_path_buf(), |p, s| p.join(s));
-    assert!(pushed.is_file(), "the remote holds refs/heads/<494 bytes>");
+    assert!(pushed.is_file(), "the remote holds refs/heads/<495 bytes>");
 }
 
 #[test]
 fn existing_branch_over_the_bound_is_usable_but_not_pushable() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    // 500 bytes: fits 512 locally, but refs/mkit/packmap/<b> is 518.
+    // 500 bytes: fits 512 locally, but refs/kit/packmap/<b> is 517.
     let old = long_name(500, 'o');
     plant_branch(root, &old);
     assert!(branches(root, x).contains(&old));
     let log = run_in(root, x, &["log", "--oneline", &old]);
     assert!(log.status.success(), "it still resolves: {}", stderr(&log));
     let bare = tempfile::tempdir().unwrap();
-    let url = format!("mkit+file://{}", bare.path().display());
+    let url = format!("kit+file://{}", bare.path().display());
     assert!(
         run_in(root, x, &["remote", "add", "origin", &url])
             .status
@@ -145,7 +145,7 @@ fn existing_branch_over_the_bound_is_usable_but_not_pushable() {
     let out = run_in(root, x, &["push", "origin", "--all"]);
     assert!(!out.status.success(), "a push of it fails");
     assert!(
-        stderr(&out).contains("ref name too long (518 bytes; at most 512"),
+        stderr(&out).contains("ref name too long (517 bytes; at most 512"),
         "the push error names the limit: {}",
         stderr(&out)
     );

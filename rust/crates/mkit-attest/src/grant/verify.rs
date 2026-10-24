@@ -230,8 +230,8 @@ impl VerifiedGrant {
     /// [`Capability::Write`].
     ///
     /// The no-direct-packmap rule holds here: a ref under
-    /// `refs/mkit/packmap/` always gets [`RefFlags::EMPTY`], even under
-    /// `refs/*` or `refs/mkit/*`. Callers derive packmap coverage from the
+    /// `refs/kit/packmap/` always gets [`RefFlags::EMPTY`], even under
+    /// `refs/*` or `refs/kit/*`. Callers derive packmap coverage from the
     /// head (§8.3): map the packmap ref to its branch with
     /// [`super::packmap_head`], take the head's flags from this method, and
     /// allow the packmap write only together with that head in one

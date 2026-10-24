@@ -14,7 +14,7 @@ pub mod grpc {
     }
 }
 #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception, impl_trait_redundant_captures)]
-pub mod mkit {
+pub mod kit {
     use super::*;
     #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception, impl_trait_redundant_captures)]
     pub mod transport {
@@ -22,7 +22,7 @@ pub mod mkit {
         #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception, impl_trait_redundant_captures)]
         pub mod v1 {
             use super::*;
-            include!(concat!(env!("OUT_DIR"), "/mkit.transport.v1.mod.rs"));
+            include!(concat!(env!("OUT_DIR"), "/kit.transport.v1.mod.rs"));
         }
     }
 }

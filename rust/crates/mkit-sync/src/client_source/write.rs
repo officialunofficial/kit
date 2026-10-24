@@ -276,7 +276,7 @@ fn remote_is(error: &SourceError, code: &str) -> bool {
 }
 
 fn valid_info(info: &GetServerInfoResponse) -> bool {
-    info.protocol.as_deref() == Some("mkit.transport.v1")
+    info.protocol.as_deref() == Some("kit.transport.v1")
         && info.spec_version.is_some_and(|version| version >= 2)
         && info
             .part_size
@@ -352,7 +352,7 @@ impl<
         deadline: Option<i64>,
         mut call: impl FnMut(Option<&Identity>) -> Result<V, Error>,
     ) -> Result<V, SourceError> {
-        let full_procedure = format!("/mkit.transport.v1.TransportService/{procedure}");
+        let full_procedure = format!("/kit.transport.v1.TransportService/{procedure}");
         if let Some(recovery) = self.recovery {
             recovery.before_call(&full_procedure)?;
         }
@@ -920,7 +920,7 @@ impl<
             && head
                 .strip_prefix("refs/heads/")
                 .filter(|branch| !branch.is_empty())
-                .is_none_or(|branch| packmap != format!("refs/mkit/packmap/{branch}"))
+                .is_none_or(|branch| packmap != format!("refs/kit/packmap/{branch}"))
         {
             return Err(SourceError::InvalidRef(
                 "ticketed advance requires paired head and packmap refs".into(),
@@ -1202,7 +1202,7 @@ mod tests {
             head_ref: Some("refs/heads/main".into()),
             head_expectation: Some(proto::RefExpectation::Missing.into()),
             head_new_id: Some(vec![4; 32]),
-            packmap_ref: Some("refs/mkit/packmap/main".into()),
+            packmap_ref: Some("refs/kit/packmap/main".into()),
             packmap_expectation: Some(proto::RefExpectation::Missing.into()),
             packmap_new_id: Some(vec![5; 32]),
             ticket_ids: vec![vec![7; 32]],
@@ -1351,7 +1351,7 @@ mod tests {
                     "refs/heads/main",
                     RefWriteCondition::Missing,
                     &[4; 32],
-                    "refs/mkit/packmap/main",
+                    "refs/kit/packmap/main",
                     RefWriteCondition::Missing,
                     &[5; 32],
                     &[key]

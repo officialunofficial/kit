@@ -45,7 +45,7 @@ use super::recovery;
 use super::stash;
 use crate::refs::{self, HEADS_DIR, REMOTES_DIR, TAGS_DIR};
 
-/// Directory under `.mkit/` holding per-commit attestation envelopes.
+/// Directory under `.kit/` holding per-commit attestation envelopes.
 /// Owned here (not in `mkit-attest`) so the core collector stays free of
 /// a reverse crate dependency — it only reads directory *names*.
 const ATTESTATIONS_DIR: &str = "attestations";
@@ -90,7 +90,7 @@ pub enum GcRootsError {
     /// A ref directory nested deeper than `MAX_REF_WALK_DEPTH`.
     #[error("ref tree too deep at {0} (fail closed)")]
     RefTooDeep(String),
-    /// `.mkit` or `.mkit/objects` is a symlink. A deletion-capable gc
+    /// `.kit` or `.kit/objects` is a symlink. A deletion-capable gc
     /// refuses, since pruning would follow the link and unlink files
     /// outside the repo.
     #[error("refusing to gc: {0} is a symlink (objects may live outside the repo)")]
@@ -225,7 +225,7 @@ fn collect_tree_roots(
     }
 
     // Conflict sidecar: base/ours/theirs blobs needed to resolve an
-    // in-progress conflict. Merge/cherry-pick write `mkit-conflicts`
+    // in-progress conflict. Merge/cherry-pick write `kit-conflicts`
     // in the state dir; rebase writes its sidecar inside
     // `rebase-apply/`. Both are empty/absent when no conflict is
     // recorded.
@@ -318,8 +318,8 @@ fn run_gc_with_hook(
     dry_run: bool,
     mut before_prune: impl FnMut(&Hash),
 ) -> Result<GcReport, GcRootsError> {
-    // Refuse to delete through a symlinked store: if `.mkit` or
-    // `.mkit/objects` is a symlink, `remove_object` would unlink the
+    // Refuse to delete through a symlinked store: if `.kit` or
+    // `.kit/objects` is a symlink, `remove_object` would unlink the
     // link target's files — potentially outside the repo. (Dry runs are
     // safe but we reject uniformly so a preview matches the real run.)
     reject_symlink(layout.common_dir())?;
@@ -478,7 +478,7 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    /// A repo with an initialized `.mkit` dir + object store.
+    /// A repo with an initialized `.kit` dir + object store.
     fn repo() -> (TempDir, ObjectStore) {
         let d = TempDir::new().unwrap();
         let store = ObjectStore::init(&RepoLayout::single(d.path())).unwrap();
@@ -747,7 +747,7 @@ mod tests {
         let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
         write_ref(&md, "refs/heads/main", &kept);
 
-        // Replace `.mkit/objects` with a symlink to an external dir. A
+        // Replace `.kit/objects` with a symlink to an external dir. A
         // deletion-capable gc must refuse rather than prune through it.
         let external = d.path().join("external-objects");
         let real_objects = md.objects_dir();

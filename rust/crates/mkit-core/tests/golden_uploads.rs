@@ -190,7 +190,7 @@ fn vector_json(name: &str, test_geometry: bool, part_size: u64, total: u64) -> V
 
 const SEED: [u8; 32] = [7; 32];
 const AUDIENCE: &str = "https://api.example.test";
-const PROCEDURE: &str = "/mkit.transport.v1.TransportService/UploadPart";
+const PROCEDURE: &str = "/kit.transport.v1.TransportService/UploadPart";
 const CREATED_AT: i64 = 1_700_000_000_000;
 const EXPIRES_AT: i64 = 1_700_000_300_000;
 const TICKET: [u8; 32] = [0x5a; 32];

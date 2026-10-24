@@ -24,7 +24,7 @@
 //   - Time is abstracted to "fresh" / "stale" (older than STALE_UPLOAD_AGE).
 //     A live server upload is a streaming upload that can STALL, so its temp
 //     file may go stale while live; only the lock protects it. A
-//     `FileTransport` writer (`mkit push mkit+file://`, no lock at all)
+//     `FileTransport` writer (`mkit push kit+file://`, no lock at all)
 //     writes its temp file in one go (`write_atomic`), so it is assumed never
 //     to be stale while live: that is the age-bound assumption the code
 //     comment in `lock_and_sweep` states; the `ftSlow` instance drops it and
@@ -67,7 +67,7 @@ module serveLocks {
   const FAULTS: SFaults
 
   pure val FREE: str = ""
-  pure val FT: str = "ft"  // the lockless FileTransport writer (mkit push mkit+file://)
+  pure val FT: str = "ft"  // the lockless FileTransport writer (mkit push kit+file://)
   pure val SFAULTS_NONE: SFaults = {
     sweepUnlocked: false, sweepUnderShared: false, serverSkipsServe: false,
     serverLockShared: false, ftSlow: false,
@@ -366,7 +366,7 @@ module serveLocks {
 module servedNames {
   // Abstract name classes (SPEC-REFS v3 §2, §3):
   //   "A" refs/heads/a           served
-  //   "P" refs/mkit/packmap/a    served (pushed with branch a)
+  //   "P" refs/kit/packmap/a    served (pushed with branch a)
   //   "M" main                   grammar-valid, outside refs/ (pre-0.5 `mkit serve`
   //                              stored it as <root>/main)
   //   "L" refs/heads/<513 bytes> under refs/, over the 512-byte bound

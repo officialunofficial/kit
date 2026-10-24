@@ -78,7 +78,7 @@ const SERVE_MARKER: &str = "is currently being served by `mkit serve`";
 fn serve_holds_shared_lock_while_alive() {
     let td = tempfile::tempdir().unwrap();
     init_repo(td.path());
-    let mkit_dir = td.path().join(".mkit");
+    let mkit_dir = td.path().join(".kit");
 
     let mut child = spawn_serve_blocked_in_handshake(td.path());
 
@@ -107,7 +107,7 @@ fn serve_holds_shared_lock_while_alive() {
 fn commit_warns_when_root_is_being_served() {
     let td = tempfile::tempdir().unwrap();
     init_repo(td.path());
-    let mkit_dir = td.path().join(".mkit");
+    let mkit_dir = td.path().join(".kit");
 
     let mut child = spawn_serve_blocked_in_handshake(td.path());
     assert!(
@@ -137,7 +137,7 @@ fn gc_warns_when_root_is_being_served() {
     let td = tempfile::tempdir().unwrap();
     init_repo(td.path());
     make_commit(td.path(), "a.txt", b"hello\n", "c1");
-    let mkit_dir = td.path().join(".mkit");
+    let mkit_dir = td.path().join(".kit");
 
     // No subprocess needed: hold the shared lock directly, exactly as a
     // live `mkit serve` would.
@@ -193,7 +193,7 @@ fn pull_warns_when_root_is_being_served() {
     init_repo(upstream.path());
     make_commit(upstream.path(), "a.txt", b"hello\n", "c1");
     let bare = tempfile::tempdir().unwrap();
-    let url = format!("mkit+file://{}", bare.path().display());
+    let url = format!("kit+file://{}", bare.path().display());
     assert!(
         run_in(upstream.path(), &["remote", "add", &url])
             .status
@@ -208,7 +208,7 @@ fn pull_warns_when_root_is_being_served() {
             .status
             .success()
     );
-    let mkit_dir = sink.path().join(".mkit");
+    let mkit_dir = sink.path().join(".kit");
 
     // No subprocess needed: hold the shared lock directly, exactly as a
     // live `mkit serve` would (mirrors `gc_warns_when_root_is_being_served`).

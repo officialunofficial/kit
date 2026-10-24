@@ -54,11 +54,11 @@ pub use visibility::{Visibility, VisibilityStatement};
 pub use webauthn::{MAX_CLIENT_DATA_DEPTH, RelyingParty, WebAuthnAssertion, webauthn_challenge};
 
 /// Domain separator and first field of a grant statement (§12.1).
-pub const DOMAIN_GRANT: &str = "mkit-write-grant:v1";
+pub const DOMAIN_GRANT: &str = "kit-write-grant:v1";
 /// Domain separator and first field of an epoch statement (§12.1).
-pub const DOMAIN_EPOCH: &str = "mkit-write-epoch:v1";
+pub const DOMAIN_EPOCH: &str = "kit-write-epoch:v1";
 /// Domain separator and first field of a visibility statement (§12.1).
-pub const DOMAIN_VISIBILITY: &str = "mkit-repo-visibility:v1";
+pub const DOMAIN_VISIBILITY: &str = "kit-repo-visibility:v1";
 
 /// Longest grant lifetime: 30 days (§1.1).
 pub const GRANT_MAX_LIFETIME_MS: i64 = 2_592_000_000;

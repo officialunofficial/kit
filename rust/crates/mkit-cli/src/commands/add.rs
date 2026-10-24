@@ -1,5 +1,5 @@
 //! `mkit add <path>` / `mkit add .` — stage a file (or the whole
-//! worktree) into `.mkit/index`. `add -p` additionally stages individual
+//! worktree) into `.kit/index`. `add -p` additionally stages individual
 //! hunks interactively (see `run_patch`).
 
 use std::collections::HashSet;
@@ -43,7 +43,7 @@ struct AddOpts {
     update: bool,
 
     /// Allow staging an explicitly-named path that is ignored by
-    /// `.gitignore`/`.mkitignore` (git refuses these without `-f`).
+    /// `.gitignore`/`.kitignore` (git refuses these without `-f`).
     #[arg(short = 'f', long)]
     force: bool,
 

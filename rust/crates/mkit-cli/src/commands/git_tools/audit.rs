@@ -434,7 +434,7 @@ pub(super) fn run(args: &VerifyArgs) -> CmdResult<()> {
         let _ = write!(summary, ", {} content-derived", c.derived);
     }
     if audit.failures.is_empty() && c.unsigned > 0 {
-        // §10: an all-zero mkit-signature FAILS both verification
+        // §10: an all-zero kit-signature FAILS both verification
         // modes — reported as unsigned (never "tampered"), but never
         // as success either.
         return Err((

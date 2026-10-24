@@ -46,7 +46,7 @@ fn pack_location_fetch_never_sends_rpc_defaults_or_credentials() {
     let mut headers = http::HeaderMap::new();
     headers.insert("authorization", "Bearer secret".parse().unwrap());
     headers.insert("cookie", "session=secret".parse().unwrap());
-    headers.insert("x-mkit-signature", "secret".parse().unwrap());
+    headers.insert("x-kit-signature", "secret".parse().unwrap());
     headers.insert("x-host-default", "secret".parse().unwrap());
     let transport = NativeHttp::new()
         .unwrap()
@@ -66,7 +66,7 @@ fn pack_location_fetch_never_sends_rpc_defaults_or_credentials() {
     assert!(!request.contains("secret"));
     assert!(!request.contains("authorization:"));
     assert!(!request.contains("cookie:"));
-    assert!(!request.contains("x-mkit-"));
+    assert!(!request.contains("x-kit-"));
     assert!(!request.contains("x-host-default:"));
 }
 

@@ -85,7 +85,7 @@ impl Repo {
         self.commit(msg);
     }
     fn mkit_dir(&self) -> std::path::PathBuf {
-        self.path().join(".mkit")
+        self.path().join(".kit")
     }
     fn layout(&self) -> RepoLayout {
         RepoLayout::single(self.path())
@@ -148,7 +148,7 @@ fn merge_text_conflict_continue_uses_resolved_index() {
     // State files exist.
     assert!(repo.mkit_dir().join("MERGE_HEAD").exists());
     assert!(repo.mkit_dir().join("ORIG_HEAD").exists());
-    assert!(repo.mkit_dir().join("mkit-conflicts").exists());
+    assert!(repo.mkit_dir().join("kit-conflicts").exists());
 
     // Worktree file has classic 2-way markers.
     let content = fs::read_to_string(repo.path().join("a.txt")).unwrap();
@@ -172,7 +172,7 @@ fn merge_text_conflict_continue_uses_resolved_index() {
 
     // State cleared.
     assert!(!repo.mkit_dir().join("MERGE_HEAD").exists());
-    assert!(!repo.mkit_dir().join("mkit-conflicts").exists());
+    assert!(!repo.mkit_dir().join("kit-conflicts").exists());
 
     // Committed tree blob is exactly the resolved content.
     assert_eq!(repo.head_tree_blob("a.txt"), b"resolved-third\n");
@@ -199,7 +199,7 @@ fn merge_abort_restores_everything() {
     ok(repo.path(), repo.xdg(), &["merge", "--abort"]);
 
     assert!(!repo.mkit_dir().join("MERGE_HEAD").exists());
-    assert!(!repo.mkit_dir().join("mkit-conflicts").exists());
+    assert!(!repo.mkit_dir().join("kit-conflicts").exists());
     let head_after = refs::resolve_head(&repo.layout()).unwrap().unwrap();
     assert_eq!(head_before, head_after, "HEAD must be restored");
     // Semantic restore: same paths, statuses, and object hashes. The
@@ -286,7 +286,7 @@ fn merge_add_add_conflict() {
     let content = fs::read_to_string(repo.path().join("new.txt")).unwrap();
     assert!(content.contains("<<<<<<< ours"), "content: {content}");
     // Sidecar records addadd.
-    let sidecar = fs::read_to_string(repo.mkit_dir().join("mkit-conflicts")).unwrap();
+    let sidecar = fs::read_to_string(repo.mkit_dir().join("kit-conflicts")).unwrap();
     assert!(sidecar.contains("addadd"), "sidecar: {sidecar}");
 
     repo.write("new.txt", b"merged-add\n");
@@ -313,7 +313,7 @@ fn merge_delete_modify_conflict() {
     repo.commit("ours deletes");
 
     fail(repo.path(), repo.xdg(), &["merge", "feature"]);
-    let sidecar = fs::read_to_string(repo.mkit_dir().join("mkit-conflicts")).unwrap();
+    let sidecar = fs::read_to_string(repo.mkit_dir().join("kit-conflicts")).unwrap();
     assert!(sidecar.contains("deletemodify"), "sidecar: {sidecar}");
     // Surviving (modified) content present.
     let content = fs::read_to_string(repo.path().join("a.txt")).unwrap();
@@ -375,7 +375,7 @@ fn merge_exec_mode_conflict_records_sidecar() {
     repo.commit_file("script.sh", b"echo ours\n", "ours change");
 
     fail(repo.path(), repo.xdg(), &["merge", "feature"]);
-    assert!(repo.mkit_dir().join("mkit-conflicts").exists());
+    assert!(repo.mkit_dir().join("kit-conflicts").exists());
     // Resolve and continue.
     repo.write("script.sh", b"echo resolved\n");
     repo.add("script.sh");
@@ -404,8 +404,8 @@ fn merge_symlink_conflict_no_markers() {
     // state in the sidecar.
     fail(repo.path(), repo.xdg(), &["merge", "feature"]);
     assert!(repo.mkit_dir().join("MERGE_HEAD").exists());
-    assert!(repo.mkit_dir().join("mkit-conflicts").exists());
-    let sidecar = fs::read_to_string(repo.mkit_dir().join("mkit-conflicts")).unwrap();
+    assert!(repo.mkit_dir().join("kit-conflicts").exists());
+    let sidecar = fs::read_to_string(repo.mkit_dir().join("kit-conflicts")).unwrap();
     assert!(sidecar.contains("link"), "sidecar: {sidecar}");
     // "No markers": the conflicted path must NOT have text conflict
     // markers injected. It stays a symlink (ours preserved), so check
@@ -451,8 +451,8 @@ fn merge_file_vs_dir_conflict() {
     // conflicted path, and abort cleanly.
     fail(repo.path(), repo.xdg(), &["merge", "feature"]);
     assert!(repo.mkit_dir().join("MERGE_HEAD").exists());
-    assert!(repo.mkit_dir().join("mkit-conflicts").exists());
-    let sidecar = fs::read_to_string(repo.mkit_dir().join("mkit-conflicts")).unwrap();
+    assert!(repo.mkit_dir().join("kit-conflicts").exists());
+    let sidecar = fs::read_to_string(repo.mkit_dir().join("kit-conflicts")).unwrap();
     assert!(
         sidecar.lines().any(|l| l.ends_with("\tx")),
         "sidecar must record path 'x': {sidecar}"
@@ -578,11 +578,7 @@ fn rebase_continue_consumes_resolved_tree_and_skip_drops_commit() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        repo.path()
-            .join(".mkit/rebase-apply/mkit-conflicts")
-            .exists()
-    );
+    assert!(repo.path().join(".kit/rebase-apply/kit-conflicts").exists());
 
     // Resolve to a third value and continue.
     let content = fs::read_to_string(repo.path().join("a.txt")).unwrap();
@@ -593,7 +589,7 @@ fn rebase_continue_consumes_resolved_tree_and_skip_drops_commit() {
 
     // Rebase finished: state cleared, b.txt replayed, a.txt is the
     // resolved content (not the conflict-time ours-wins value).
-    assert!(!repo.path().join(".mkit/rebase-apply").exists());
+    assert!(!repo.path().join(".kit/rebase-apply").exists());
     assert_eq!(repo.head_tree_blob("a.txt"), b"rebase-resolved\n");
     assert_eq!(repo.head_tree_blob("b.txt"), b"feature-b\n");
 }
@@ -613,7 +609,7 @@ fn rebase_skip_drops_conflicting_commit() {
     // Skip the conflicting commit.
     ok(repo.path(), repo.xdg(), &["rebase", "--skip"]);
 
-    assert!(!repo.path().join(".mkit/rebase-apply").exists());
+    assert!(!repo.path().join(".kit/rebase-apply").exists());
     // a.txt keeps main's value (the skipped commit was dropped); c.txt
     // was still replayed.
     assert_eq!(repo.head_tree_blob("a.txt"), b"main-change\n");
@@ -633,7 +629,7 @@ fn rebase_abort_restores_head() {
     fail(repo.path(), repo.xdg(), &["rebase", "main"]);
     ok(repo.path(), repo.xdg(), &["rebase", "--abort"]);
 
-    assert!(!repo.path().join(".mkit/rebase-apply").exists());
+    assert!(!repo.path().join(".kit/rebase-apply").exists());
     let feature_after = refs::read_ref(&repo.layout(), "feature").unwrap().unwrap();
     assert_eq!(
         feature_before, feature_after,

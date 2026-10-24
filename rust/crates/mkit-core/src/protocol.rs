@@ -7,7 +7,7 @@
 //! exactly one place instead of being reimplemented per crate.
 //!
 //! The SSH wire format is defined in `mkit-rpc`'s `ssh.proto` and
-//! lives in `mkit_rpc::mkit::rpc::v1::ssh`; transport-ssh consumes
+//! lives in `mkit_rpc::kit::rpc::v1::ssh`; transport-ssh consumes
 //! the schema directly. The hand-rolled `OP_HELLO` byte format that
 //! used to live in this module has been retired.
 
@@ -479,7 +479,7 @@ pub fn retrying<T>(
 ///
 /// Mirrors the wire-level `PackChunk` shape shared by the SSH and enc
 /// transports (`offset`, `data`, `last` — see
-/// `mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto`) and the `mkit.transport.v1`
+/// `mkit-rpc/proto/kit/rpc/v1/ssh/ssh.proto`) and the `kit.transport.v1`
 /// Connect proto used by HTTP servers, without this crate depending on any
 /// protobuf-generated type: `mkit-core` is the dependency root that
 /// `mkit-rpc` builds on, not the reverse (see this module's header

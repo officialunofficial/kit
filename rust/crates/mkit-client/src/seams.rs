@@ -18,12 +18,12 @@ use crate::connect::Error;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use mkit_core::{hash::Hash, refs::RefWriteCondition, write_auth::ContentCommitment};
 
-/// Full procedure names of the `mkit.transport.v1` write RPCs.
+/// Full procedure names of the `kit.transport.v1` write RPCs.
 pub mod procedures {
     macro_rules! procedure {
         ($name:ident, $method:literal) => {
             #[doc = concat!("`", $method, "`.")]
-            pub const $name: &str = concat!("/mkit.transport.v1.TransportService/", $method);
+            pub const $name: &str = concat!("/kit.transport.v1.TransportService/", $method);
         };
     }
     procedure!(BEGIN_UPLOAD, "BeginUpload");
@@ -332,10 +332,10 @@ const RESERVED_EXACT: &[&str] = &[
     "trailer",
     "upgrade",
 ];
-const RESERVED_PREFIX: &[&str] = &["x-mkit-", "x-forwarded-", "content-", "connect-", "proxy-"];
+const RESERVED_PREFIX: &[&str] = &["x-kit-", "x-forwarded-", "content-", "connect-", "proxy-"];
 
 /// Hard-reserved request headers (SPEC-TRANSPORT-CONNECT section 5.1): the
-/// auth v2 envelope, `X-Mkit-*`, `X-Forwarded-*`, framing and hop-by-hop
+/// auth v2 envelope, `X-Kit-*`, `X-Forwarded-*`, framing and hop-by-hop
 /// headers. `Authorization` is refused as well, because the client cannot know
 /// whether its transport already sends one.
 #[must_use]

@@ -59,7 +59,7 @@ fn add_creates_branch_named_after_path_and_shares_store() {
 
     // Materialized, discovered, and NOT a second store.
     assert_eq!(std::fs::read(tree.join("a.txt")).unwrap(), b"one\n");
-    assert!(tree.join(".mkit").is_file(), "pointer file expected");
+    assert!(tree.join(".kit").is_file(), "pointer file expected");
     let branches = repo.ok(&["branch"]);
     assert!(String::from_utf8_lossy(&branches.stdout).contains("topic"));
 
@@ -80,7 +80,7 @@ fn add_creates_branch_named_after_path_and_shares_store() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(object_count(&repo.mkit_dir()) > before);
-    assert!(!tree.join(".mkit").is_dir());
+    assert!(!tree.join(".kit").is_dir());
 
     common::check_invariants(repo.path(), "after linked-tree commit").unwrap();
 }

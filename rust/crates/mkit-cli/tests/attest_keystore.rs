@@ -128,7 +128,7 @@ fn attest_with_keystore_ed25519_roundtrip() {
         .to_bytes();
     let public_hex = hex_lower(&public_key);
     fs::write(
-        repo.join(".mkit/attest-trust-roots.toml"),
+        repo.join(".kit/attest-trust-roots.toml"),
         format!(
             "[[trust_root]]\nkeyid = \"ed25519:{public_hex}\"\nkind = \"ed25519\"\npubkey_hex = \"{public_hex}\"\n"
         ),
@@ -140,7 +140,7 @@ fn attest_with_keystore_ed25519_roundtrip() {
         &[
             "verify-attest",
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(
@@ -169,7 +169,7 @@ fn attest_ignores_repo_controlled_attest_signer_and_key_ref() {
     )
     .expect("user config");
     fs::write(
-        td.path().join("repo/.mkit/config"),
+        td.path().join("repo/.kit/config"),
         "attest.signer = keystore\nattest.default_algorithm = ed25519\nkey.default_ref = software-raw:repo-attacker\nkey.ed25519_ref = software-raw:repo-attacker\n",
     )
     .expect("repo config");
@@ -185,7 +185,7 @@ fn attest_ignores_repo_controlled_attest_signer_and_key_ref() {
     let (public_key, trust_kind) = public_key_and_trust_kind("ed25519", &user_secret);
     let public_hex = hex_lower(&public_key);
     fs::write(
-        repo.join(".mkit/attest-trust-roots.toml"),
+        repo.join(".kit/attest-trust-roots.toml"),
         format!(
             "[[trust_root]]\nkeyid = \"ed25519:{public_hex}\"\nkind = \"{trust_kind}\"\npubkey_hex = \"{public_hex}\"\n"
         ),
@@ -197,7 +197,7 @@ fn attest_ignores_repo_controlled_attest_signer_and_key_ref() {
         &[
             "verify-attest",
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(
@@ -264,7 +264,7 @@ fn attest_with_software_raw_keystore_all_algorithms_roundtrip() {
         let (public_key, trust_kind) = public_key_and_trust_kind(algorithm, &secret);
         let public_hex = hex_lower(&public_key);
         fs::write(
-            repo.join(".mkit/attest-trust-roots.toml"),
+            repo.join(".kit/attest-trust-roots.toml"),
             format!(
                 "[[trust_root]]\nkeyid = \"{algorithm}:{public_hex}\"\nkind = \"{trust_kind}\"\npubkey_hex = \"{public_hex}\"\n"
             ),
@@ -276,7 +276,7 @@ fn attest_with_software_raw_keystore_all_algorithms_roundtrip() {
             &[
                 "verify-attest",
                 "--trust-roots",
-                ".mkit/attest-trust-roots.toml",
+                ".kit/attest-trust-roots.toml",
             ],
         );
         assert!(

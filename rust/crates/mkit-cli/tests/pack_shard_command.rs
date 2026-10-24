@@ -78,7 +78,7 @@ fn pack_shard_produces_decodable_shards() {
 
         let pack_dir = dir
             .path()
-            .join(".mkit")
+            .join(".kit")
             .join("pack-shards")
             .join("packs")
             .join(to_hex(&h));

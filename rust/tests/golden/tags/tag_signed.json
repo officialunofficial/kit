@@ -1,7 +1,7 @@
 {
   "name": "tag_signed",
-  "description": "signed tag object: same shape as tag_annotated, signed with seed [0x07;32] over the mkit.tag domain",
+  "description": "signed tag object: same shape as tag_annotated, signed with seed [0x07;32] over the kit.tag domain",
   "bin": "tag_signed.bin",
   "size": 210,
-  "blake3": "e9ff9757b3aa43994bad18a19ca2c190d8a71134eaaa058eb8ac3dc90483298c"
+  "blake3": "4dddbb23af62c50ad82ab54aacf07b4af0a17a0cdae9d4985bd101e143782043"
 }

@@ -8,7 +8,7 @@ audience: implementers of compatible tools producing or consuming mkit on-disk o
 # SPEC-OBJECTS &mdash; mkit v1 on-disk object format
 
 Status: **Normative** for mkit v1.
-Scope: `.mkit/objects/` content and the byte layout of every object type.
+Scope: `.kit/objects/` content and the byte layout of every object type.
 Endianness: **little-endian** throughout. All hashes are 32-byte BLAKE3.
 
 This document defines the on-disk object byte layout and the identity /
@@ -119,7 +119,7 @@ Normative:
   silently strips these, which would alias one entry onto another of the
   same bare name. Applies to the last byte of `name` only &mdash; interior
   dots and spaces are accepted.
-- Forbidden case-insensitively: the bare names `.mkit` and `.git`. ASCII
+- Forbidden case-insensitively: the bare names `.kit` and `.git`. ASCII
   case-folding only; names containing non-ASCII bytes are not folded
   (they remain constrained by every other rule above). This is a
   Git CVE-2021-21300 family defense.
@@ -398,7 +398,7 @@ which is why the `len` field is always explicit.
 
 ## 10. Storage
 
-Objects are stored at `.mkit/objects/<dd>/<rrrrrrrrr...r>` where `<dd>`
+Objects are stored at `.kit/objects/<dd>/<rrrrrrrrr...r>` where `<dd>`
 is the lowercase-hex first byte of the **object id** and `<r...>` is the
 remaining 62 hex chars.
 
@@ -411,12 +411,12 @@ not match the path (for a merkelized type this re-derives and re-checks the
 root, which proves the whole child set is present and correctly ordered).
 Objects > 1 GiB MUST be rejected.
 
-`.mkit/` directory: presence of `.mkit/objects` is the repository marker.
-A conforming repository MUST also carry a `.mkit/format` file declaring
+`.kit/` directory: presence of `.kit/objects` is the repository marker.
+A conforming repository MUST also carry a `.kit/format` file declaring
 the object-addressing format (`bmt-v1`); an implementation MUST refuse to
 open a repository whose marker is absent or unrecognized
 (`IncompatibleRepoFormat`) rather than mis-read a pre-merkle store under
-the current id rule. See SPEC-INDEX for the `.mkit/index` sidecar.
+the current id rule. See SPEC-INDEX for the `.kit/index` sidecar.
 
 ### 10.1 Durability
 
@@ -472,7 +472,7 @@ Merkle object addressing (`Tree`/`ChunkedBlob` keyed by BMT root,
 type's **bytes** unchanged &mdash; only the bytes→id function changes &mdash; so
 `schema_version` is NOT bumped. The break it does introduce (every
 `Tree`/`ChunkedBlob` and thus every `Commit` re-addresses) is guarded
-instead by the mandatory `.mkit/format` = `bmt-v1` repository marker
+instead by the mandatory `.kit/format` = `bmt-v1` repository marker
 (§10): a pre-merkle store has no marker and is refused at open. Pre-1.0,
 no migration is provided.
 
@@ -494,7 +494,7 @@ multi-version readers.
    bytes. The empty tree's id is pinned as a real, common object:
 
    ```
-   1ab8d0788b29fe5992011e64d6c922ec93f4248b3755b92b15b07e664cb15652
+   b29117ce9b3d66ba98cd0a57145400f0bf6fff8b5c27c4552d80a38446f27ef7
    ```
 
    (`mkit-core::merkle::TREE_EMPTY_ID`; the empty BMT root is
@@ -522,7 +522,7 @@ multi-version readers.
    message, all-zero signature): `Tag` is a flat type &mdash; record
    serialized bytes + `BLAKE3` of those bytes as the id.
 9. **Signed tag** (same shape, signed with seed `[0x07;32]` over the
-   `mkit.tag\0` domain &mdash; a permanent domain separator per
+   `kit.tag\0` domain &mdash; a permanent domain separator per
    SPEC-CONVENTIONS §4): record serialized bytes, the canonical tag
    signing bytes, the signing hash, and the 64-byte Ed25519 signature.
 10. **Tree entry inclusion proof**: a single-leaf BMT inclusion proof
@@ -564,7 +564,7 @@ mechanism that enforces or detects each:
 | A tag targets only a storable object, with an unambiguous name | `target_type` whitelist → `TagTargetTypeInvalid`; name floor → `TagNameInvalid` (§6a) |
 | Delta objects never appear in the object store | pack-only rule (§1, §8) |
 | Reassembled `ChunkedBlob` content is exactly `total_size` bytes | reassembly length check (§7) |
-| A merkle-addressing reader never mis-reads a pre-merkle store | mandatory `.mkit/format` = `bmt-v1` marker → `IncompatibleRepoFormat` (§10, §12) |
+| A merkle-addressing reader never mis-reads a pre-merkle store | mandatory `.kit/format` = `bmt-v1` marker → `IncompatibleRepoFormat` (§10, §12) |
 | A visible object is durable; refs/index/log entries reference only durable objects | atomic temp-file and rename write and the ordering invariant (§10.1) |
 
 These are format-level guarantees. Signature guarantees are specified in

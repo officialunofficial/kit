@@ -1,7 +1,7 @@
 {
   "bin": "neg_non_tree_intermediate_mode.bin",
-  "blake3": "8629ba66a06ce84b92e03bd5429d0826807df717b7112ad0667c93e6087031c4",
-  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "blake3": "9104907c23353bb14fa8f0749fbe0ab43734e0e693e7e396a5f8fa2e350320cb",
+  "commit_id_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
   "description": "The 2nd of 3 steps has mode Blob though it is not the final step.",
   "expect": "reject",
   "name": "neg_non_tree_intermediate_mode",

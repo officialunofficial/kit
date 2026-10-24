@@ -27,7 +27,7 @@ $ mkit verify HEAD     # ordinary signed mkit history
 This initializes a fresh mkit repo in `repo/`, imports every branch
 and tag, and checks out the upstream default branch. From here it is
 a normal mkit repository &mdash; commit, branch, merge, push to mkit
-remotes. The first import generates `.mkit/keys/git-import.key` with
+remotes. The first import generates `.kit/keys/git-import.key` with
 a loud notice; backups of that key matter if you ever want to reuse
 or share the import mapping (see §4).
 
@@ -36,7 +36,7 @@ window, this is journey 2 &mdash; pull from it until the cutover, then
 stop.
 
 Disk expectation: roughly 2–3× the upstream `.git` (a staging mirror
-under `.mkit/git/<name>/repo.git` plus the translated store). The
+under `.kit/git/<name>/repo.git` plus the translated store). The
 staging mirror is durable state, not a cache &mdash; keep it.
 
 ## 2. Track a git upstream
@@ -130,7 +130,7 @@ everyone else pulls over normal mkit transport &mdash; see SPEC-GIT-IMPORT
 
 ## 5. State, recovery, and hygiene
 
-Everything per-remote lives in `.mkit/git/<name>/`: the staging
+Everything per-remote lives in `.kit/git/<name>/`: the staging
 mirror (durable), the blake3↔sha1 map (rebuildable cache), recorded
 ref state, direction/source/dest/key bindings, and retained raw git
 bytes (`raw/`, audit evidence). An interrupted import/fetch leaves a

@@ -109,7 +109,7 @@ fn extra_ca_trusts_real_rpc_and_streamed_pack_transfers() {
     let (port, shutdown, server) = super::spawn_server();
     let proxy = proxy(port);
     let client = client(
-        &format!("mkit+https://localhost:{}/default", proxy.port),
+        &format!("kit+https://localhost:{}/default", proxy.port),
         Some(&fixture("ca.crt")),
     );
     assert!(client.list_refs("").unwrap().is_empty());
@@ -134,7 +134,7 @@ fn custom_ca_keeps_hostname_verification_and_default_rejects_untrusted_ca() {
     let proxy = proxy(port);
     for (host, ca) in [("127.0.0.1", Some(fixture("ca.crt"))), ("localhost", None)] {
         let client = client(
-            &format!("mkit+https://{host}:{}/default", proxy.port),
+            &format!("kit+https://{host}:{}/default", proxy.port),
             ca.as_deref(),
         );
         assert!(
@@ -148,7 +148,7 @@ fn custom_ca_keeps_hostname_verification_and_default_rejects_untrusted_ca() {
     // Same address and server certificate work with the proper name and CA.
     assert!(
         client(
-            &format!("mkit+https://localhost:{}/default", proxy.port),
+            &format!("kit+https://localhost:{}/default", proxy.port),
             Some(&fixture("ca.crt"))
         )
         .list_refs("")
@@ -165,7 +165,7 @@ fn env_probe() {
     let fallback = std::env::var_os("MKIT_TEST_CA_FALLBACK").unwrap();
     let expected_success = std::env::var("MKIT_TEST_CA_SUCCESS").unwrap() == "true";
     let result = ConnectTransport::connect_with_signer_and_ca_file(
-        "mkit+https://localhost/default",
+        "kit+https://localhost/default",
         None,
         Some(Path::new(&fallback)),
     );

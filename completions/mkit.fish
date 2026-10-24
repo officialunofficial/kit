@@ -114,7 +114,7 @@ complete -c mkit -n "__fish_seen_subcommand_from ls-files" \
 complete -c mkit -n "__fish_seen_subcommand_from ls-files" \
     -l ignored -d "Show only ignored files"
 complete -c mkit -n "__fish_seen_subcommand_from ls-files" \
-    -l exclude-standard -d "Drop .mkitignore-ignored files"
+    -l exclude-standard -d "Drop .kitignore-ignored files"
 complete -c mkit -n "__fish_seen_subcommand_from rev-parse" \
     -l verify -d "Error on an unresolvable revision"
 complete -c mkit -n "__fish_seen_subcommand_from rev-parse" \

@@ -10,7 +10,7 @@ fn pending(value: Option<u32>, header: Option<&str>) -> RemoteError {
         code: "unavailable".into(),
         message: String::new(),
         details: vec![Detail {
-            type_url: "type.googleapis.com/mkit.transport.v1.PendingVerification".into(),
+            type_url: "type.googleapis.com/kit.transport.v1.PendingVerification".into(),
             value: Some(STANDARD_NO_PAD.encode(detail)),
         }],
         status: 503,
@@ -136,7 +136,7 @@ impl HttpTransport for ScriptTransport {
                 }
                 .encode_to_vec();
                 let error = serde_json::json!({"code":"unavailable", "details":[{
-                    "type":"mkit.transport.v1.PendingVerification", "value":STANDARD_NO_PAD.encode(detail)
+                    "type":"kit.transport.v1.PendingVerification", "value":STANDARD_NO_PAD.encode(detail)
                 }]});
                 (503, "application/json", error.to_string().into_bytes())
             }
@@ -201,7 +201,7 @@ fn advance_script(
             head_ref: Some("refs/heads/main".into()),
             head_expectation: Some(crate::proto::RefExpectation::Missing.into()),
             head_new_id: Some(vec![7; 32]),
-            packmap_ref: Some("refs/mkit/packmap/main".into()),
+            packmap_ref: Some("refs/kit/packmap/main".into()),
             packmap_expectation: Some(crate::proto::RefExpectation::Missing.into()),
             packmap_new_id: Some(vec![8; 32]),
             ticket_ids: vec![vec![9; 32]],
@@ -329,8 +329,8 @@ fn lag(code: &str, message: &str, type_urls: &[&str]) -> RemoteError {
 #[test]
 fn membership_lag_is_classified_by_the_typed_detail_alone() {
     for url in [
-        "mkit.transport.v1.MembershipNotVisible",
-        "type.googleapis.com/mkit.transport.v1.MembershipNotVisible",
+        "kit.transport.v1.MembershipNotVisible",
+        "type.googleapis.com/kit.transport.v1.MembershipNotVisible",
     ] {
         // Whatever the message says, the detail decides.
         let error = lag("unavailable", "something else", &[url]);
@@ -358,14 +358,10 @@ fn membership_lag_needs_unavailable_and_a_matching_signal() {
         lag(
             "failed_precondition",
             MEMBERSHIP_LAG,
-            &["mkit.transport.v1.MembershipNotVisible"],
+            &["kit.transport.v1.MembershipNotVisible"],
         ),
         lag("unavailable", "repository membership not yet visible.", &[]),
-        lag(
-            "unavailable",
-            "",
-            &["mkit.transport.v1.PendingVerification"],
-        ),
+        lag("unavailable", "", &["kit.transport.v1.PendingVerification"]),
     ] {
         assert!(!membership_lag(&error), "{error:?}");
     }

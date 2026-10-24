@@ -726,7 +726,7 @@ regression suites. Embedders configure and mount scanner retrieval explicitly.
 
 **Always:** a Connect push opens a signed ticket for each pack that needs one,
 uploads that ticket's bytes, and commits at most seven distinct ticket ids in
-an advance pairing `refs/heads/<branch>` with `refs/mkit/packmap/<branch>`.
+an advance pairing `refs/heads/<branch>` with `refs/kit/packmap/<branch>`.
 Only the current data packs and current MKPL node contribute ids. Multipart
 receipts are durable before the next part begins and remain until the advance
 commits. An ambiguous advance retry retains its nonce until the envelope
@@ -1087,7 +1087,7 @@ while it holds it (no other server is up) sweeps the temp files crashed
 uploads left in `packs/` (`.<hex>.tmp.<pid>.<seq>`, at least an hour
 old), then takes it shared as above.
 
-**Because:** `mkit-transport-file`'s only lock (`<root>/.mkit/refs/.lock`)
+**Because:** `mkit-transport-file`'s only lock (`<root>/.kit/refs/.lock`)
 serializes file-transport instances against *each other*, not against
 local worktree mutation or `gc` (SPEC-CONCURRENCY §3.1). Running `mkit
 gc` or a worktree-mutating command directly against a root a live `mkit
@@ -1102,7 +1102,7 @@ serve` client just uploaded, or a local commit/checkout can silently
 lose a race against a client push — both without any warning ever
 appearing, leaving an operator no reason to suspect the concurrent-serve
 misconfiguration until data is already gone. This is detection only,
-not coordination: a direct `mkit push mkit+file:///path` (bypassing
+not coordination: a direct `mkit push kit+file:///path` (bypassing
 `mkit serve`) and a `serve` that starts *during* an already-in-flight
 local critical section both remain undetected — see SPEC-CONCURRENCY
 §3.1 for the full statement of what this warning does and does not
@@ -1300,7 +1300,7 @@ WPs replace their stub assertions with behavior and auth tests.
 
 ## The native HTTP host passes the black-box wire suite
 
-**Always:** the reference `mkit.transport.v1` implementation passes
+**Always:** the reference `kit.transport.v1` implementation passes
 `mkit-server-conformance`'s wire suite over HTTP through its in-process
 `TestHost`, enabled by the `test-host` feature. The suite speaks raw Connect
 with its own client, so it checks the wire independently of mkit's client library.
@@ -1799,7 +1799,7 @@ membership. The coordinator repository registry owns existence.
 ## Branch shards preserve atomic advances and registered repository state
 
 **Always:** D34 accepts only matching `refs/heads/<x>` and
-`refs/mkit/packmap/<x>` for `AdvanceRefs`, before storage or replay access,
+`refs/kit/packmap/<x>` for `AdvanceRefs`, before storage or replay access,
 and commits their effects and replay state in one ref partition. Multi writes
 observe creation after replay lookup and commit coordinator registration only
 after authorization and admission allow them, before committing refs. A
@@ -2027,7 +2027,7 @@ and [§18](specs/SPEC-SERVER.md#18-conformance-scope).
 
 **Always:** Multi PackExists and DownloadPack authorize and check repository
 existence, then consult the repository's membership index before opening a
-blob. An optional X-Mkit-Ref checks only the same repository's ref shard;
+blob. An optional X-Kit-Ref checks only the same repository's ref shard;
 invalid, unserved, unknown or overlong hints never cause a public error.
 The hint is outside the auth v2 canonical string. Single's membership helper
 accepts stored packs; Multi indexed reads and hints enforce the caller's current

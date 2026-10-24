@@ -1,7 +1,7 @@
 //! Fault injection — multi-process lock contention.
 //!
 //! mkit serialises worktree mutations under a `flock`-backed lock file
-//! (`.mkit/worktree.lock`, 5s acquire timeout → exit `TEMPFAIL`/75). Per
+//! (`.kit/worktree.lock`, 5s acquire timeout → exit `TEMPFAIL`/75). Per
 //! INV-16, the lock's sentinel file is never unlinked and carries no
 //! meaning by itself — only the kernel lock does — so a lockfile left behind
 //! by a killed process does not block later commands (the kernel already

@@ -19,7 +19,7 @@ pub use connect::{
 /// Challenge types carried by [`Error::AdmissionRequired`].
 pub use mkit_core::protocol::{AdmissionChallengeEntry, AdmissionRequired};
 /// Canonical messages, shared with the native client and server.
-pub use mkit_rpc::transport::mkit::transport::v1 as proto;
+pub use mkit_rpc::transport::kit::transport::v1 as proto;
 pub use plan::{Entry, Limits, Plan};
 pub use push::{Outcome, PackmapMode, Push};
 pub use read::{MemorySink, ObjectSink, UnpackOptions, Unpacked, Verification, unpack};

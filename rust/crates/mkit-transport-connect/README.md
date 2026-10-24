@@ -1,6 +1,6 @@
 # mkit-transport-connect
 
-The native host adapter for `mkit.transport.v1.TransportService`
+The native host adapter for `kit.transport.v1.TransportService`
 ([SPEC-TRANSPORT-CONNECT](../../../docs/specs/SPEC-TRANSPORT-CONNECT.md)).
 `mkit-client` owns request construction, signatures, framing, and decoding.
 `ClientSource` in `mkit-sync` owns bounded native uploads and ref advances.
@@ -8,11 +8,11 @@ The native host adapter for `mkit.transport.v1.TransportService`
 `ConnectTransport` retains the synchronous `Transport` API and native host
 configuration: TLS trust, bearer credentials, grants, admission helpers,
 scheduling, and progress callbacks. The CLI lends its configured `ClientSource`
-through `ConnectTransport::with_source` for `mkit+https` and `mkit+http`
+through `ConnectTransport::with_source` for `kit+https` and `kit+http`
 push, fetch, pull, and clone. Other schemes use `TransportSource`.
 
 The server side is not in this crate. `mkit-server`'s pipeline serves
-`mkit.transport.v1`. The `server` Cargo
+`kit.transport.v1`. The `server` Cargo
 feature and its `serve`/`router`/`TransportServer`/`map_transport_error` API,
 which backed the removed `mkit serve --http`, were removed in 0.5.
 
@@ -28,7 +28,7 @@ Connect-code mapping (the client direction is `src/error.rs`), and the
 `mkit-rpc` owns the generated messages and Connect bindings behind its opt-in
 `transport` feature. This client re-exports the shared types at `proto` and
 `generated`; its native runtime features stay here. Both the client and server
-use the canonical `<repo-root>/proto/mkit/transport/v1/transport.proto`.
+use the canonical `<repo-root>/proto/kit/transport/v1/transport.proto`.
 
 - **Default path**: `mkit-rpc` stages committed sources from
   `generated/transport/` into `$OUT_DIR`; consumers and docs.rs need no `protoc`.

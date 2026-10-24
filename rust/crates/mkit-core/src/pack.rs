@@ -3,7 +3,7 @@
 //! Layout (SPEC-PACKFILE §1, §2, §3, §8):
 //!
 //! ```text
-//! [4B  magic            "MKIT"]                       offset 0
+//! [4B  magic            "KIT\0"]                       offset 0
 //! [4B  version u32 LE  == 1 or 2]
 //! [4B  entry_count u32 LE     ]
 //!   for each entry:
@@ -77,8 +77,8 @@ use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// ASCII magic ("MKIT") at the start of every pack, v1 or v2.
-pub const MAGIC: &[u8; 4] = b"MKIT";
+/// ASCII magic ("KIT\0") at the start of every pack, v1 or v2.
+pub const MAGIC: &[u8; 4] = b"KIT\0";
 /// Packfile version emitted when a pack contains no compressed
 /// (`0x03`/`0x04`) entries. Also the minimum version any reader
 /// accepts.
@@ -135,7 +135,7 @@ const ZSTD_LEN_PREFIX: usize = 4;
 pub enum PackError {
     #[error("packfile is shorter than the {HEADER_LEN}-byte header + {TRAILER_LEN}-byte trailer")]
     PackfileTooShort,
-    #[error("first 4 bytes are not ASCII \"MKIT\"")]
+    #[error("first 4 bytes are not ASCII \"KIT\\0\"")]
     InvalidMagic,
     #[error("version {0} is not supported (v1 or v2 only)")]
     UnsupportedVersion(u32),

@@ -564,7 +564,7 @@ fn the_grant_store_and_relying_party_pins_cannot_be_set_from_a_repository() {
         "grants_dir = {dir}\ngrant.store = {dir}\ngrants.dir = {dir}\ngrant.webauthn_rp = evil.example https://evil.example\n",
         dir = decoy_dir.display()
     );
-    std::fs::write(env.repo.join(".mkit").join("config"), hostile).unwrap();
+    std::fs::write(env.repo.join(".kit").join("config"), hostile).unwrap();
 
     let listed = ok(&env.run(&["grant", "list", "--json"]));
     assert!(

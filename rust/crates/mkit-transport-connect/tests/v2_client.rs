@@ -74,7 +74,7 @@ impl AdmissionResponder for TestAdmission {
 
 fn info(atomic: Option<bool>) -> generated::GetServerInfoResponse {
     generated::GetServerInfoResponse {
-        protocol: Some("mkit.transport.v1".into()),
+        protocol: Some("kit.transport.v1".into()),
         spec_version: Some(2),
         part_size: Some(8 << 20),
         max_parts: Some(512),
@@ -183,7 +183,7 @@ impl TestService {
         state.requests.push(Captured {
             rpc,
             repository: header("x-repository"),
-            hint: header("x-mkit-ref"),
+            hint: header("x-kit-ref"),
             list: None,
             signed: header("x-signature").map(|signature| {
                 [
@@ -377,7 +377,7 @@ impl generated::TransportService for TestService {
             return Err(
                 ConnectError::unavailable("verification pending").with_detail(
                     connectrpc::ErrorDetail {
-                        type_url: "mkit.transport.v1.PendingVerification".into(),
+                        type_url: "kit.transport.v1.PendingVerification".into(),
                         value: Some(base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)),
                         debug: None,
                     },
@@ -394,7 +394,7 @@ impl generated::TransportService for TestService {
                 return Err(
                     ConnectError::unavailable("verification pending").with_detail(
                         connectrpc::ErrorDetail::from_message(
-                            "mkit.transport.v1.PendingVerification",
+                            "kit.transport.v1.PendingVerification",
                             &generated::PendingVerification {
                                 retry_after_ms: Some(61_000),
                                 ..Default::default()
@@ -790,7 +790,7 @@ fn begin_upload_ticket_and_advance_commit_set() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"head"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"map"),
             &[key],
@@ -817,7 +817,7 @@ fn begin_upload_ticket_and_advance_commit_set() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"head"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"map"),
             &[key],
@@ -839,7 +839,7 @@ fn begin_upload_ticket_and_advance_commit_set() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"head"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"map"),
             &[stale],
@@ -876,7 +876,7 @@ fn ticket_is_retained_after_typed_conflict() {
                     "refs/heads/main",
                     RefWriteCondition::Missing,
                     &hash(b"head"),
-                    "refs/mkit/packmap/main",
+                    "refs/kit/packmap/main",
                     RefWriteCondition::Missing,
                     &hash(b"map"),
                     &[key],
@@ -955,15 +955,15 @@ fn ticketed_advance_rejects_bad_local_commit_sets_and_classifies_server_errors()
         )
     };
     assert!(matches!(
-        advance(("refs/heads/main", "refs/mkit/packmap/other"), &[key]),
+        advance(("refs/heads/main", "refs/kit/packmap/other"), &[key]),
         Err(TransportError::InvalidRef(_))
     ));
     assert!(matches!(
-        advance(("refs/heads/main", "refs/mkit/packmap/main"), &[key, key]),
+        advance(("refs/heads/main", "refs/kit/packmap/main"), &[key, key]),
         Err(TransportError::InvalidRef(_))
     ));
     assert!(matches!(
-        advance(("refs/heads/main", "refs/mkit/packmap/main"), &[key; 8]),
+        advance(("refs/heads/main", "refs/kit/packmap/main"), &[key; 8]),
         Err(TransportError::InvalidRef(_))
     ));
     assert_eq!(served.calls("AdvanceRefs"), 0);
@@ -991,7 +991,7 @@ fn ticketed_advance_rejects_bad_local_commit_sets_and_classifies_server_errors()
             .advance_errors
             .push_back((code, message.into()));
         assert_eq!(
-            advance(("refs/heads/main", "refs/mkit/packmap/main"), &[key]).unwrap(),
+            advance(("refs/heads/main", "refs/kit/packmap/main"), &[key]).unwrap(),
             expected
         );
     }
@@ -1318,7 +1318,7 @@ fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"tip"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"node"),
             &[key],
@@ -1357,7 +1357,7 @@ fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"tip"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"node"),
             &[key],
@@ -1387,7 +1387,7 @@ fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
                 "refs/heads/main",
                 RefWriteCondition::Missing,
                 &hash(b"tip"),
-                "refs/mkit/packmap/main",
+                "refs/kit/packmap/main",
                 RefWriteCondition::Missing,
                 &hash(b"node"),
                 &[key],
@@ -1435,7 +1435,7 @@ fn advance_deadline_uses_earliest_ticket_expiry() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"tip"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"node"),
             &[first, second],
@@ -1478,7 +1478,7 @@ fn non_owner_grant_survives_begin_parts_pending_poll_and_resign() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"head"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"map"),
             &[key],
@@ -1910,7 +1910,7 @@ fn ticketed_advance_challenge_never_runs_admission_helper() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"tip"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"node"),
             &[key],
@@ -1971,7 +1971,7 @@ fn expired_ticket_rejects_before_first_advance_poll() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"tip"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"node"),
             &[key],
@@ -2012,7 +2012,7 @@ fn lag_bound_clears_after_pending_reply() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"tip"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"node"),
             &[key],
@@ -2044,7 +2044,7 @@ fn eight_distinct_ticket_ids_fail_before_advance() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"tip"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"node"),
             &keys,
@@ -2107,7 +2107,7 @@ fn legacy_upload_and_advance_hooks_are_ticketless() {
             "refs/heads/main",
             RefWriteCondition::Missing,
             &hash(b"tip"),
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &hash(b"node"),
             &[key],

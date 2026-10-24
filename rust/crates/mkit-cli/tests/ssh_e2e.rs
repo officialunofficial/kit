@@ -1,9 +1,9 @@
-//! End-to-end coverage for the `mkit+ssh://` transport and the trust-pinning
+//! End-to-end coverage for the `kit+ssh://` transport and the trust-pinning
 //! wiring.
 //!
 //! ## What this proves
 //!
-//! 1. A full `mkit clone mkit+ssh://…` moves real data through the SSH
+//! 1. A full `mkit clone kit+ssh://…` moves real data through the SSH
 //!    transport: the `Hello` handshake, ref negotiation, and upload-pack
 //!    all run against a real `mkit serve` on the far side. The cloned
 //!    repo's HEAD ref and object content MATCH the source.
@@ -165,7 +165,7 @@ fn build_source(root: &Path, xdg: &Path) -> std::path::PathBuf {
 /// repo path.
 ///
 /// mkit's transfer dialect is packmap-only: a branch tip is only
-/// fetchable once a push has advertised `refs/mkit/packmap/<branch>`. A
+/// fetchable once a push has advertised `refs/kit/packmap/<branch>`. A
 /// repo that was merely committed-to (never pushed) advertises no
 /// packmap, so cloning it yields zero refs. We therefore serve a
 /// push-populated remote, exactly as a real deployment would.
@@ -178,7 +178,7 @@ fn build_and_push_source(root: &Path, xdg: &Path) -> std::path::PathBuf {
         run_in(&remote, xdg, &["init"], &[]).status.success(),
         "init remote"
     );
-    let remote_url = format!("mkit+file://{}", remote.display());
+    let remote_url = format!("kit+file://{}", remote.display());
     assert!(
         run_in(&source, xdg, &["remote", "add", "origin", &remote_url], &[])
             .status
@@ -247,12 +247,12 @@ fn ssh_clone_moves_data_and_delivers_pinned_options() {
     let argv_log = root.join("ssh_argv.log");
     let wrapper = write_ssh_wrapper(root);
 
-    // --- Clone over mkit+ssh:// -----------------------------------------
+    // --- Clone over kit+ssh:// -----------------------------------------
     // We serve the push-populated `remote` repo (it carries the packmap
     // refs `clone` reconstructs from). The path must satisfy the strict
     // ssh-path charset (`[A-Za-z0-9._-/]`); tempdir paths qualify.
     let remote_path = remote.to_str().unwrap();
-    let url = format!("mkit+ssh://e2euser@localhost{remote_path}");
+    let url = format!("kit+ssh://e2euser@localhost{remote_path}");
     let dest = root.join("dest");
     let dest_str = dest.to_str().unwrap();
 
@@ -490,7 +490,7 @@ fn push_over_ssh(source: &Path, xdg: &Path, url: &str, env: &[(String, String)])
     run_in(source, xdg, &["push", "origin"], &env)
 }
 
-/// The owner pushes over `mkit+ssh://` — sshd's forced command asserting
+/// The owner pushes over `kit+ssh://` — sshd's forced command asserting
 /// the principal over `SSH_ORIGINAL_COMMAND` — and a clone of the same
 /// `<namespace>/<name>` address reconstructs the repo.
 #[test]
@@ -508,7 +508,7 @@ fn ssh_root_mode_owner_pushes_and_clones() {
     let source = build_source(root, xdg.path());
     let wrapper = write_root_ssh_wrapper(root);
     let env = root_env(&wrapper, &serve_root, Some(&hex('a')), true);
-    let url = format!("mkit+ssh://e2euser@localhost/{owner_ns}/room-a");
+    let url = format!("kit+ssh://e2euser@localhost/{owner_ns}/room-a");
 
     let push = push_over_ssh(&source, xdg.path(), &url, &env);
     assert!(
@@ -559,7 +559,7 @@ fn ssh_root_mode_non_owner_push_is_refused() {
     let wrapper = write_root_ssh_wrapper(root);
     // 'b' is not 'a': the forced command asserts a non-owner key.
     let env = root_env(&wrapper, &serve_root, Some(&hex('b')), false);
-    let url = format!("mkit+ssh://e2euser@localhost/{owner_ns}/room-a");
+    let url = format!("kit+ssh://e2euser@localhost/{owner_ns}/room-a");
 
     let push = push_over_ssh(&source, xdg.path(), &url, &env);
     assert!(!push.status.success(), "non-owner push must fail: {push:?}");
@@ -602,7 +602,7 @@ fn ssh_root_mode_without_principal_reads_but_cannot_write() {
     let serve_root = serve_root_with_rooms(root, xdg.path(), &owner_ns, &["room-a"]);
     let source = build_source(root, xdg.path());
     let wrapper = write_root_ssh_wrapper(root);
-    let url = format!("mkit+ssh://e2euser@localhost/{owner_ns}/room-a");
+    let url = format!("kit+ssh://e2euser@localhost/{owner_ns}/room-a");
 
     // Seed the repo as the owner so the read side has content.
     let owner_env = root_env(&wrapper, &serve_root, Some(&hex('a')), false);
@@ -676,8 +676,8 @@ fn ssh_root_mode_isolates_repositories() {
     let source = build_source(root, xdg.path());
     let wrapper = write_root_ssh_wrapper(root);
     let env = root_env(&wrapper, &serve_root, Some(&hex('a')), false);
-    let url_a = format!("mkit+ssh://e2euser@localhost/{owner_ns}/room-a");
-    let url_b = format!("mkit+ssh://e2euser@localhost/{owner_ns}/room-b");
+    let url_a = format!("kit+ssh://e2euser@localhost/{owner_ns}/room-a");
+    let url_b = format!("kit+ssh://e2euser@localhost/{owner_ns}/room-b");
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
     let push = push_over_ssh(&source, xdg.path(), &url_a, &env);

@@ -106,7 +106,7 @@ fn branch_default_list_omits_id_verbose_shows_id_and_subject() {
 fn branch_rename_two_args_moves_ref() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    let mkit = root.join(".mkit");
+    let mkit = root.join(".kit");
 
     // Create a non-current branch and rename it.
     assert!(run_in(root, x, &["branch", "feature"]).status.success());
@@ -129,7 +129,7 @@ fn branch_rename_two_args_moves_ref() {
 fn branch_rename_current_moves_head() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    let mkit = root.join(".mkit");
+    let mkit = root.join(".kit");
     let current = head_branch(&mkit);
 
     let out = run_in(root, x, &["branch", "-m", "renamed-main"]);
@@ -153,8 +153,8 @@ fn branch_rename_refuses_existing_destination() {
 
     let out = run_in(root, x, &["branch", "-m", "feature", "other"]);
     assert!(!out.status.success(), "must refuse clobbering 'other'");
-    assert!(root.join(".mkit/refs/heads/feature").exists());
-    assert!(root.join(".mkit/refs/heads/other").exists());
+    assert!(root.join(".kit/refs/heads/feature").exists());
+    assert!(root.join(".kit/refs/heads/other").exists());
 }
 
 #[test]
@@ -162,11 +162,11 @@ fn branch_force_delete_removes_branch() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
     assert!(run_in(root, x, &["branch", "feature"]).status.success());
-    assert!(root.join(".mkit/refs/heads/feature").exists());
+    assert!(root.join(".kit/refs/heads/feature").exists());
 
     let out = run_in(root, x, &["branch", "-D", "feature"]);
     assert!(out.status.success(), "-D failed: {out:?}");
-    assert!(!root.join(".mkit/refs/heads/feature").exists());
+    assert!(!root.join(".kit/refs/heads/feature").exists());
 }
 
 #[test]
@@ -194,13 +194,13 @@ fn branch_delete_absent_errors_for_both_d_and_force() {
 fn branch_force_delete_refuses_current() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    let current = head_branch(&root.join(".mkit"));
+    let current = head_branch(&root.join(".kit"));
     let out = run_in(root, x, &["branch", "-D", &current]);
     assert!(
         !out.status.success(),
         "even -D must refuse the checked-out branch"
     );
-    assert!(root.join(".mkit/refs/heads").join(&current).exists());
+    assert!(root.join(".kit/refs/heads").join(&current).exists());
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +208,7 @@ fn branch_force_delete_refuses_current() {
 // ---------------------------------------------------------------------------
 
 fn read_config(root: &Path) -> String {
-    fs::read_to_string(root.join(".mkit/config")).unwrap_or_default()
+    fs::read_to_string(root.join(".kit/config")).unwrap_or_default()
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn remote_remove_drops_named_remote() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
     assert!(
-        run_in(root, x, &["remote", "add", "origin", "mkit+file:///tmp/r"])
+        run_in(root, x, &["remote", "add", "origin", "kit+file:///tmp/r"])
             .status
             .success()
     );
@@ -239,13 +239,13 @@ fn remote_rename_updates_config_and_upstream() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
     assert!(
-        run_in(root, x, &["remote", "add", "origin", "mkit+file:///tmp/r"])
+        run_in(root, x, &["remote", "add", "origin", "kit+file:///tmp/r"])
             .status
             .success()
     );
     // Hand-wire a branch upstream pointing at `origin` so we can prove
     // rename repoints it.
-    let cfg_path = root.join(".mkit/config");
+    let cfg_path = root.join(".kit/config");
     let mut cfg = read_config(root);
     cfg.push_str("branch.main.remote = origin\nbranch.main.merge = main\n");
     fs::write(&cfg_path, cfg).unwrap();
@@ -267,12 +267,12 @@ fn remote_rename_refuses_existing_destination() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
     assert!(
-        run_in(root, x, &["remote", "add", "a", "mkit+file:///tmp/a"])
+        run_in(root, x, &["remote", "add", "a", "kit+file:///tmp/a"])
             .status
             .success()
     );
     assert!(
-        run_in(root, x, &["remote", "add", "b", "mkit+file:///tmp/b"])
+        run_in(root, x, &["remote", "add", "b", "kit+file:///tmp/b"])
             .status
             .success()
     );
@@ -287,7 +287,7 @@ fn remote_rename_refuses_existing_destination() {
 fn remote_remove_preserves_trusted_endpoint() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    let url = "mkit+https://example.test/r";
+    let url = "kit+https://example.test/r";
     assert!(
         run_in(root, x, &["remote", "add", "origin", url])
             .status

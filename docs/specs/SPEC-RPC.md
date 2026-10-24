@@ -22,8 +22,8 @@ The schemas live in [`rust/crates/mkit-rpc/proto/`](../../rust/crates/mkit-rpc/p
 
 `ssh.proto` imports the CAS enum (`RefExpectation`) and the ref-listing
 type (`RefEntry`) from
-[`mkit/common/v1/refs.proto`](../../proto/mkit/common/v1/refs.proto) at
-the repo root &mdash; a vocabulary shared with `mkit.repo.v1` (the
+[`kit/common/v1/refs.proto`](../../proto/kit/common/v1/refs.proto) at
+the repo root &mdash; a vocabulary shared with `kit.repo.v1` (the
 `apps/repo-worker` multiplayer demo protocol), so the two wire
 protocols cannot desync on CAS semantics. See that file's header
 comment for its own versioning contract.

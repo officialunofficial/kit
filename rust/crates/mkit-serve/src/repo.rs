@@ -1,7 +1,7 @@
 //! One served repository: its refs, its packs and who may write.
 //!
 //! The refs are the files that [`FileTransport`] reads and writes. Every ref
-//! write takes its ref lock, so `mkit+file://` remotes and this server
+//! write takes its ref lock, so `kit+file://` remotes and this server
 //! serialize on the same lock. Reads take no lock, because every write is one
 //! atomic rename.
 
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn a_root_that_keeps_refs_elsewhere_is_refused() {
         let td = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(td.path().join(".mkit")).unwrap();
+        std::fs::create_dir_all(td.path().join(".kit")).unwrap();
         std::fs::write(td.path().join(SERVER_META_MARKER), b"").unwrap();
         let err = Repo::open(td.path(), WritePolicy::Open).unwrap_err();
         assert!(matches!(err, OpenError::RefsElsewhere(_)));

@@ -25,7 +25,7 @@
   "spec": "SPEC-WRITE-GRANTS §4, §4.1, §4.3, §4.4, §7",
   "vectors": [
     {
-      "blob_hex": "0a32d6a820f45e4bd814e366136c224bbf7929c9a9a9e5a340005c419c164d024e3cb6f234cf53e141e7b05c81a4405c9bbfc63c8a42bbfff5e3f40c43646a9d1c",
+      "blob_hex": "d937ceb608b9840bcf95c6f9cde1c7a535a21a32fd772534953f15b892157bc3534817936751db03b11939899f5e3b0e3453047c91ebae308fee516bf296e19e1c",
       "contexts": [
         {
           "audience": "https://git.example.com",
@@ -82,7 +82,7 @@
           "signer": "0101010101010101010101010101010101010101010101010101010101010101"
         }
       ],
-      "eip191_digest": "43ef1bfcbf5b059a1dfdd7eb95413e7dc1979e0b38086f501189c389b5e65a21",
+      "eip191_digest": "42aee704dd896cf75516ac6532952c3d3f4eb79a5f30d52bb47b2335a0876977",
       "fields": {
         "audiences": [
           "https://git.example.com",
@@ -107,14 +107,14 @@
         ],
         "scope": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23/website"
       },
-      "header": "bWtpdC13cml0ZS1ncmFudDp2MQoweDJjNzUzNmUzNjA1ZDljMTZhN2EzZDdiMTg5OGU1MjkzOTZhNjVjMjMKMHgyYzc1MzZlMzYwNWQ5YzE2YTdhM2Q3YjE4OThlNTI5Mzk2YTY1YzIzL3dlYnNpdGUKZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYwpyZWFkLHdyaXRlCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tLGh0dHBzOi8vZ2l0LmV4YW1wbGUub3JnCnJlZnMvaGVhZHMvbWFpbj1jdTtyZWZzL2hlYWRzL3dpcC8qPWN1ZmQKMAoxNzkwMDAwMDAwMDAwCjE3OTAwODY0MDAwMDAKYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMQ.secp256k1-eip191.CjLWqCD0XkvYFONmE2wiS795KcmpqeWjQABcQZwWTQJOPLbyNM9T4UHnsFyBpEBcm7_GPIpCu__14_QMQ2RqnRw",
-      "id": "8da0a5e92701420ec740cfa05f025f0f35dbb668adda9da3e26db96c64f859a2",
+      "header": "a2l0LXdyaXRlLWdyYW50OnYxCjB4MmM3NTM2ZTM2MDVkOWMxNmE3YTNkN2IxODk4ZTUyOTM5NmE2NWMyMwoweDJjNzUzNmUzNjA1ZDljMTZhN2EzZDdiMTg5OGU1MjkzOTZhNjVjMjMvd2Vic2l0ZQplYTRhNmM2M2UyOWM1MjBhYmVmNTUwN2IxMzJlYzVmOTk1NDc3NmFlYmViZTdiOTI0MjFlZWE2OTE0NDZkMjJjCnJlYWQsd3JpdGUKaHR0cHM6Ly9naXQuZXhhbXBsZS5jb20saHR0cHM6Ly9naXQuZXhhbXBsZS5vcmcKcmVmcy9oZWFkcy9tYWluPWN1O3JlZnMvaGVhZHMvd2lwLyo9Y3VmZAowCjE3OTAwMDAwMDAwMDAKMTc5MDA4NjQwMDAwMAphMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWEx.secp256k1-eip191.2TfOtgi5hAvPlcb5zeHHpTWiGjL9dyU0lT8VuJIVe8NTSBeTZ1HbA7EZOYmfXjsONFMEfJHrrjCP7lFr8pbhnhw",
+      "id": "2c72d9c267e89c8d56bd2e5a4809d4858622107dce347a48f317191fca09707a",
       "kind": "grant",
       "name": "grant-read-write",
-      "statement": "mkit-write-grant:v1\n0x2c7536e3605d9c16a7a3d7b1898e529396a65c23\n0x2c7536e3605d9c16a7a3d7b1898e529396a65c23/website\nea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\nread,write\nhttps://git.example.com,https://git.example.org\nrefs/heads/main=cu;refs/heads/wip/*=cufd\n0\n1790000000000\n1790086400000\na1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+      "statement": "kit-write-grant:v1\n0x2c7536e3605d9c16a7a3d7b1898e529396a65c23\n0x2c7536e3605d9c16a7a3d7b1898e529396a65c23/website\nea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\nread,write\nhttps://git.example.com,https://git.example.org\nrefs/heads/main=cu;refs/heads/wip/*=cufd\n0\n1790000000000\n1790086400000\na1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     },
     {
-      "blob_hex": "278eef6b9f998072007ff862543a35f5b497931fdc6f3ebeb09fb6c8bf204d6178b2219720951778f39423f69f969e7589a658abf4939fc78b830455ec4ad9ca1c",
+      "blob_hex": "e404ad73fb44d1b6ff710a1b9bc1cf8abd43456121ecd19fdb4567c2c914eb2938c6794438923340fbe67ef49d7d52706e3a840aee32adb9fed5759d979585521c",
       "contexts": [
         {
           "audience": "https://git.example.com",
@@ -135,7 +135,7 @@
           "now": 1790000000000
         }
       ],
-      "eip191_digest": "7eaf04d3fbae865b5d113afa70141d05c127f5a789ed1239f73f26f09536b7f6",
+      "eip191_digest": "e1c390102a5269a207afe507078c626f19cb612371f922e876f115dcb4530e9f",
       "fields": {
         "audiences": [
           "https://git.example.com"
@@ -146,14 +146,14 @@
         "new_epoch": 1,
         "nonce": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
       },
-      "header": "bWtpdC13cml0ZS1lcG9jaDp2MQoweDJjNzUzNmUzNjA1ZDljMTZhN2EzZDdiMTg5OGU1MjkzOTZhNjVjMjMKMQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoxNzkwMDAwMDAwMDAwCjE3OTAwMDM2MDAwMDAKYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMg.secp256k1-eip191.J47va5-ZgHIAf_hiVDo19bSXkx_cbz6-sJ-2yL8gTWF4siGXIJUXePOUI_aflp51iaZYq_STn8eLgwRV7ErZyhw",
-      "id": "cd51b34545cd56406bd32e2c21698c47548b83ba9ffa83dce11c860e30359807",
+      "header": "a2l0LXdyaXRlLWVwb2NoOnYxCjB4MmM3NTM2ZTM2MDVkOWMxNmE3YTNkN2IxODk4ZTUyOTM5NmE2NWMyMwoxCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tCjE3OTAwMDAwMDAwMDAKMTc5MDAwMzYwMDAwMAphMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEyYTJhMmEy.secp256k1-eip191.5AStc_tE0bb_cQobm8HPir1DRWEh7NGf20VnwskU6yk4xnlEOJIzQPvmfvSdfVJwbjqECu4yrbn-1XWdl5WFUhw",
+      "id": "f0e230756ea3a87a19353882565178ebaa08124c26f87699aadbf4f4d2d00f6c",
       "kind": "epoch",
       "name": "epoch-1",
-      "statement": "mkit-write-epoch:v1\n0x2c7536e3605d9c16a7a3d7b1898e529396a65c23\n1\nhttps://git.example.com\n1790000000000\n1790003600000\na2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+      "statement": "kit-write-epoch:v1\n0x2c7536e3605d9c16a7a3d7b1898e529396a65c23\n1\nhttps://git.example.com\n1790000000000\n1790003600000\na2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
     },
     {
-      "blob_hex": "30f63cf7b36cbfaffcae3564251cc6b24c7c4e4a4b64d274cc9ab9e70281526f220a1faa14e9d6f0129790a0c642f88111df995a023527b4c15fde1f0455a6661c",
+      "blob_hex": "c3ef064561175b0c8c50be9837abce01d16643caf77541061d5014d5510568ad2fd7ececc07a995ca9fb09238aa16e54fb042f0a8133bcaf0154edf3882960971c",
       "contexts": [
         {
           "audience": "https://git.example.com",
@@ -170,7 +170,7 @@
           "repository": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23/blog"
         }
       ],
-      "eip191_digest": "c68d44dc6260e99cf56fd090c32eaaa23e28d34db751a87b07170c789edb2e8a",
+      "eip191_digest": "4bfa485aa1b1eec7c6fe6ed3decae94e4bb1ab3c7b4d5de16d1644dcd8ccdce9",
       "fields": {
         "audiences": [
           "https://git.example.com"
@@ -181,11 +181,11 @@
         "repository": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23/website",
         "visibility": "private"
       },
-      "header": "bWtpdC1yZXBvLXZpc2liaWxpdHk6djEKMHgyYzc1MzZlMzYwNWQ5YzE2YTdhM2Q3YjE4OThlNTI5Mzk2YTY1YzIzL3dlYnNpdGUKcHJpdmF0ZQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoxNzkwMDAwMDAwMDAwCjE3OTAwMDM2MDAwMDAKYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhMw.secp256k1-eip191.MPY897Nsv6_8rjVkJRzGskx8TkpLZNJ0zJq55wKBUm8iCh-qFOnW8BKXkKDGQviBEd-ZWgI1J7TBX94fBFWmZhw",
-      "id": "e2a0049145acb22d5dfd05ba3d7646ce1ac36017697680d6fcdda9b9748f436f",
+      "header": "a2l0LXJlcG8tdmlzaWJpbGl0eTp2MQoweDJjNzUzNmUzNjA1ZDljMTZhN2EzZDdiMTg5OGU1MjkzOTZhNjVjMjMvd2Vic2l0ZQpwcml2YXRlCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tCjE3OTAwMDAwMDAwMDAKMTc5MDAwMzYwMDAwMAphM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2EzYTNhM2Ez.secp256k1-eip191.w-8GRWEXWwyMUL6YN6vOAdFmQ8r3dUEGHVAU1VEFaK0v1-zswHqZXKn7CSOKoW5U-wQvCoEzvK8BVO3ziClglxw",
+      "id": "69964224317df53900d41a4c9cb2632e0bb50fdc2069bcf53c58aa72b91601c6",
       "kind": "visibility",
       "name": "visibility-private",
-      "statement": "mkit-repo-visibility:v1\n0x2c7536e3605d9c16a7a3d7b1898e529396a65c23/website\nprivate\nhttps://git.example.com\n1790000000000\n1790003600000\na3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+      "statement": "kit-repo-visibility:v1\n0x2c7536e3605d9c16a7a3d7b1898e529396a65c23/website\nprivate\nhttps://git.example.com\n1790000000000\n1790003600000\na3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
     }
   ]
 }

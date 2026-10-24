@@ -10,7 +10,7 @@
 //!   signature).
 //! * **Signed** (`mkit tag -s <name> [-m <msg>] [<commit>]`): an
 //!   annotated tag whose 64-byte field is an Ed25519 signature over the
-//!   canonical tag signing bytes under the distinct `mkit.tag\0` domain
+//!   canonical tag signing bytes under the distinct `kit.tag\0` domain
 //!   (SPEC-SIGNING §4a). Verify with `mkit verify <name>`.
 
 use std::io::Write;

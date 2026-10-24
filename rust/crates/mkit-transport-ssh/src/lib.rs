@@ -6,7 +6,7 @@
 //! Implements [`mkit_core::protocol::Transport`] over a long-lived
 //! system `ssh(1)` child process, exchanging the seven mkit verbs as
 //! length-prefixed protobuf [`SshFrame`] messages defined in
-//! `mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto` (buffa is the Rust runtime mkit uses;
+//! `mkit-rpc/proto/kit/rpc/v1/ssh/ssh.proto` (buffa is the Rust runtime mkit uses;
 //! the wire is plain protobuf 3 / edition 2023).
 //!
 //! # Design choice: `std::process::Command`, NOT `russh`
@@ -51,15 +51,15 @@ use std::time::{Duration, Instant};
 
 use mkit_core::hash::Hash;
 use mkit_core::protocol::{BackoffIterator, PackKey, Transport, TransportError, TransportResult};
-// Aliased: `mkit_rpc::mkit::rpc::v1::ssh::PackChunk` (the wire protobuf
+// Aliased: `mkit_rpc::kit::rpc::v1::ssh::PackChunk` (the wire protobuf
 // message) is imported unaliased below for the existing frame-building
 // code; `CorePackChunk` is the transport-agnostic streaming type the
 // `Transport::upload_pack_streaming`/`download_pack_streaming` trait
 // methods speak.
 use mkit_core::protocol::PackChunk as CorePackChunk;
 use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
-use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
-use mkit_rpc::mkit::rpc::v1::ssh::{
+use mkit_rpc::kit::rpc::v1::ProtocolVersion;
+use mkit_rpc::kit::rpc::v1::ssh::{
     DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame, UpdateRef, UploadPack,
     ssh_frame,
 };
@@ -80,7 +80,7 @@ const CLIENT_ID: &str = concat!("mkit ", env!("CARGO_PKG_VERSION"));
 /// Default timeout for SSH handshake replies, verb responses, and child shutdown.
 pub const DEFAULT_SSH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Optional SSH CLI knobs threaded from `.mkit/config`. All fields default
+/// Optional SSH CLI knobs threaded from `.kit/config`. All fields default
 /// to empty, which means "inherit the user's `ssh(1)` defaults". See
 /// SPEC-TRANSPORT §4.3 for the canonical field list.
 #[derive(Debug, Default, Clone)]
@@ -145,7 +145,7 @@ pub struct SshTransport {
     /// Remote target, retained so a dropped connection can be
     /// transparently re-dialed on retry.
     target: SshTarget,
-    /// `.mkit/config` SSH options, retained for the same reason.
+    /// `.kit/config` SSH options, retained for the same reason.
     options: SshOptions,
     /// Retry-delay ladder factory. Production uses the spec ladder;
     /// tests inject a shorter ladder so retry assertions stay fast.
@@ -179,7 +179,7 @@ impl SshTransport {
     }
 
     /// Spawn `ssh` from a pre-parsed [`SshTarget`] with explicit
-    /// `.mkit/config` SSH options. Callers that already resolved
+    /// `.kit/config` SSH options. Callers that already resolved
     /// config should use this entry point; `connect` is the
     /// convenience form.
     pub fn connect_with_options(
@@ -1054,9 +1054,9 @@ mod tests {
     // SshTransport against it. For now, basic smoke tests of the
     // helper functions live here.
     use super::*;
-    use mkit_rpc::mkit::common::v1::{RefEntry, RefExpectation};
-    use mkit_rpc::mkit::rpc::v1::ssh::DownloadPackHeader;
-    use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode};
+    use mkit_rpc::kit::common::v1::{RefEntry, RefExpectation};
+    use mkit_rpc::kit::rpc::v1::ssh::DownloadPackHeader;
+    use mkit_rpc::kit::rpc::v1::{Error as RpcError, ErrorCode};
 
     /// A CAS mismatch — `InvalidRequest` with the current id in
     /// `details` under a precondition write — maps to `RefConflict`.

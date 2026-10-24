@@ -1,6 +1,6 @@
 //! External signer — subprocess-based [`Signer`] impl driven over
 //! the mkit-rpc signer protocol (length-prefixed buffa frames on
-//! stdin/stdout). See `rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto` and
+//! stdin/stdout). See `rust/crates/mkit-rpc/proto/kit/rpc/v1/signer/signer.proto` and
 //! `docs/specs/SPEC-EXTERNAL-SIGNER.md`.
 //!
 //! Conversation per sign call:
@@ -38,10 +38,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mkit_rpc::mkit::rpc::v1::signer::{
+use mkit_rpc::kit::rpc::v1::signer::{
     Hello, PinPrompt, PinResponse, SignRequest, SignResponse, SignerFrame, signer_frame,
 };
-use mkit_rpc::mkit::rpc::v1::{Algorithm as RpcAlgorithm, KeyForm, ProtocolVersion};
+use mkit_rpc::kit::rpc::v1::{Algorithm as RpcAlgorithm, KeyForm, ProtocolVersion};
 use mkit_rpc::{FrameError, read_frame, write_frame};
 
 use crate::Error;
@@ -1176,13 +1176,13 @@ fn frame_name(b: &Option<signer_frame::Body>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mkit_rpc::mkit::rpc::v1::Algorithm as RpcAlgorithm;
-    use mkit_rpc::mkit::rpc::v1::signer::WebAuthnData;
+    use mkit_rpc::kit::rpc::v1::Algorithm as RpcAlgorithm;
+    use mkit_rpc::kit::rpc::v1::signer::WebAuthnData;
 
     const PAE: &[u8] = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
 
-    fn compatible_hello() -> mkit_rpc::mkit::rpc::v1::signer::HelloResponse {
-        use mkit_rpc::mkit::rpc::v1::signer::{Capabilities, HelloResponse};
+    fn compatible_hello() -> mkit_rpc::kit::rpc::v1::signer::HelloResponse {
+        use mkit_rpc::kit::rpc::v1::signer::{Capabilities, HelloResponse};
         HelloResponse {
             protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
             capabilities: Some(Capabilities {
@@ -1261,7 +1261,7 @@ mod tests {
     fn handshake_error_is_terminal_without_capabilities() {
         let frame = SignerFrame {
             body: Some(signer_frame::Body::Error(Box::new(
-                mkit_rpc::mkit::rpc::v1::Error::default().with_message("signer unavailable"),
+                mkit_rpc::kit::rpc::v1::Error::default().with_message("signer unavailable"),
             ))),
             ..Default::default()
         };
@@ -1272,7 +1272,7 @@ mod tests {
 
     #[test]
     fn new_rejects_relative_path() {
-        let err = ExternalSigner::new("mkit-signer").unwrap_err();
+        let err = ExternalSigner::new("kit-signer").unwrap_err();
         assert!(matches!(err, Error::ExternalSignerRelativePath(_)));
     }
 
@@ -1828,7 +1828,7 @@ mod tests {
                 &mut terminal,
                 &SignerFrame {
                     body: Some(signer_frame::Body::Error(Box::new(
-                        mkit_rpc::mkit::rpc::v1::Error::default()
+                        mkit_rpc::kit::rpc::v1::Error::default()
                             .with_message("opaque request accepted"),
                     ))),
                     ..Default::default()
@@ -1856,7 +1856,7 @@ mod tests {
 
         #[test]
         fn incompatible_capabilities_reject_before_signing() {
-            use mkit_rpc::mkit::rpc::v1::signer::{Capabilities, HelloResponse};
+            use mkit_rpc::kit::rpc::v1::signer::{Capabilities, HelloResponse};
             let dir = tempfile::tempdir().unwrap();
             let response = valid_response_frames_file(dir.path());
             let original = std::fs::read(&response).unwrap();

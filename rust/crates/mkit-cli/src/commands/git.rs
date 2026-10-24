@@ -2,7 +2,7 @@
 //! deterministic export to git mirrors (SPEC-GIT-BRIDGE) and importer-signed import (SPEC-GIT-IMPORT).
 //!
 //! Translation happens into a local bare staging repo under
-//! `.mkit/git/<remote>/repo.git`, then a single `git push` with
+//! `.kit/git/<remote>/repo.git`, then a single `git push` with
 //! per-ref `--force-with-lease` moves the mirror. Per-ref refusals
 //! (remix ancestry, git-illegal ref names, non-canonical chunking)
 //! skip that ref with an actionable warning and export the rest
@@ -27,11 +27,10 @@ use crate::exit;
 use crate::format;
 
 /// SPEC-GIT-BRIDGE §11 predicate type.
-const PREDICATE_TYPE: &str =
-    "https://github.com/officialunofficial/mkit/spec/predicate/git-bridge/v1";
+const PREDICATE_TYPE: &str = "https://kit.storage/spec/predicate/git-bridge/v1";
 
 /// Mirror-side ref carrying published bridge attestations (§11).
-const ATTESTATIONS_REF: &str = "refs/mkit/attestations";
+const ATTESTATIONS_REF: &str = "refs/kit/attestations";
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit git", about = "Git-bridge subcommands (SPEC-GIT-BRIDGE).")]
@@ -59,7 +58,7 @@ struct ExportArgs {
     /// Destination: a git URL or a local path (a missing local path
     /// is initialized as a bare repository).
     dest: String,
-    /// Name for the per-remote bridge state under `.mkit/git/<name>/`.
+    /// Name for the per-remote bridge state under `.kit/git/<name>/`.
     #[arg(long = "remote-name", value_name = "NAME", default_value = "mirror")]
     remote_name: String,
     /// Export only these refs (full names, e.g. `refs/heads/main`).
@@ -387,7 +386,7 @@ fn export(layout: &RepoLayout, opts: &ExportArgs) -> CmdResult<u8> {
                 // import mirror's own refs (upstream state) stay
                 // untouched; the push refspec maps it back.
                 let local_ref = if opts.passthrough {
-                    format!("refs/mkit-export/{ref_name}")
+                    format!("refs/kit-export/{ref_name}")
                 } else {
                     ref_name.clone()
                 };
@@ -579,7 +578,7 @@ fn export(layout: &RepoLayout, opts: &ExportArgs) -> CmdResult<u8> {
     push_args.push(push_dest.clone());
     for (name, _) in &to_push {
         if opts.passthrough && *name != ATTESTATIONS_REF {
-            push_args.push(format!("refs/mkit-export/{name}:{name}"));
+            push_args.push(format!("refs/kit-export/{name}:{name}"));
         } else {
             push_args.push(format!("{name}:{name}"));
         }
@@ -591,7 +590,7 @@ fn export(layout: &RepoLayout, opts: &ExportArgs) -> CmdResult<u8> {
         }
         let hint = if e.contains("stale info") {
             "\nhint: the mirror moved since the last export; if that \
-             change is yours/expected, remove .mkit/git/<name>/refs to \
+             change is yours/expected, remove .kit/git/<name>/refs to \
              reseed leases from the mirror and re-run"
         } else {
             ""
@@ -704,7 +703,7 @@ fn collect_refs(layout: &RepoLayout, explicit: &[String]) -> CmdResult<Vec<(Stri
 /// Mint one DSSE attestation per exported head (subject = mkit hash,
 /// predicate carries the git locator), save it locally like `mkit
 /// attest` does, and publish the set on the staging repo's
-/// `refs/mkit/attestations` flat tree. Returns the staging ref's
+/// `refs/kit/attestations` flat tree. Returns the staging ref's
 /// resulting head — unchanged trees return the existing commit, so a
 /// previously failed push retries with the same refspec instead of
 /// silently dropping the attestations ref.
@@ -845,14 +844,14 @@ fn publish_attestations(
         return Ok(*old);
     }
 
-    let person = format!("mkit-git-bridge <bridge@mkit.invalid> {max_ts} +0000");
+    let person = format!("kit-git-bridge <bridge@kit.invalid> {max_ts} +0000");
     let mut body = Vec::new();
     body.extend_from_slice(format!("tree {}\n", sha1_hex(&tree_id)).as_bytes());
     if let Some(old) = &old_commit {
         body.extend_from_slice(format!("parent {}\n", sha1_hex(old)).as_bytes());
     }
     body.extend_from_slice(format!("author {person}\ncommitter {person}\n").as_bytes());
-    body.extend_from_slice(b"\nmkit git-bridge attestations\n");
+    body.extend_from_slice(b"\nkit git-bridge attestations\n");
     let commit = GitObject {
         gtype: GitType::Commit,
         body,

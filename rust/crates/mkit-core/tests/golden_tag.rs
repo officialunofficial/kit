@@ -2,7 +2,7 @@
 //!
 //! Pins the canonical byte layout of [`Tag`] objects (SPEC-OBJECTS §6a)
 //! and the tag signing bytes + signing hash + Ed25519 signature under
-//! the distinct `mkit.tag\0` domain (SPEC-SIGNING §4a).
+//! the distinct `kit.tag\0` domain (SPEC-SIGNING §4a).
 //!
 //! For each fixture we:
 //!

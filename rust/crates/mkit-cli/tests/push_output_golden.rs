@@ -11,7 +11,7 @@ fn push_output_stays_byte_identical() {
     let repo = Repo::new();
     repo.commit_file("file.txt", b"first\n", "first");
     let remote = tempfile::tempdir().unwrap();
-    let endpoint = format!("mkit+file://{}", remote.path().display());
+    let endpoint = format!("kit+file://{}", remote.path().display());
     repo.ok(&["remote", "add", "origin", &endpoint]);
 
     let first = repo.ok(&["push", "origin"]);

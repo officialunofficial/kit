@@ -1,5 +1,5 @@
 # Native Transport and host-policy adapter over mkit-client's canonical
-# mkit.transport.v1 per-RPC implementation. The CLI lends ClientSource for
+# kit.transport.v1 per-RPC implementation. The CLI lends ClientSource for
 # repository operations; remaining Transport callers keep this facade.
 # Generated bindings and pooled HTTP utilities remain public compatibility APIs.
 [package]

@@ -3,7 +3,7 @@
 //! Spec: `docs/specs/SPEC-SPARSE-CHECKOUT.md` §6. Cache layout:
 //!
 //! ```text
-//! <repo-root>/.mkit/sparse/<tree-hex>.witness
+//! <repo-root>/.kit/sparse/<tree-hex>.witness
 //! ```
 //!
 //! One file per (`tree_hash`) — the per-filter binding lives inside the
@@ -214,7 +214,7 @@ mod tests {
     fn round_trip_load_returns_stored_payload() {
         let td = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(td.path());
-        // Need a .mkit directory shape so cache_path's parent is
+        // Need a .kit directory shape so cache_path's parent is
         // creatable from the helper.
         fs::create_dir_all(td.path().join(mkit_core::MKIT_DIR)).unwrap();
         let tree = Tree {

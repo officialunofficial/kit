@@ -232,7 +232,7 @@ fn replay_safe(request: &Request<ClientBody>) -> bool {
     let Some(method) = request
         .uri()
         .path()
-        .strip_prefix("/mkit.transport.v1.TransportService/")
+        .strip_prefix("/kit.transport.v1.TransportService/")
     else {
         return false;
     };

@@ -40,18 +40,18 @@ fn repo_with_commit(content: &[u8]) -> tempfile::TempDir {
 }
 
 fn file_url(dir: &Path) -> String {
-    format!("mkit+file://{}", dir.display())
+    format!("kit+file://{}", dir.display())
 }
 
 fn local_main(repo: &Path) -> String {
-    fs::read_to_string(repo.join(".mkit/refs/heads/main"))
+    fs::read_to_string(repo.join(".kit/refs/heads/main"))
         .unwrap()
         .trim()
         .to_string()
 }
 
 fn remote_tracking(repo: &Path, remote: &str, branch: &str) -> Option<String> {
-    fs::read_to_string(repo.join(format!(".mkit/refs/remotes/{remote}/{branch}")))
+    fs::read_to_string(repo.join(format!(".kit/refs/remotes/{remote}/{branch}")))
         .ok()
         .map(|s| s.trim().to_string())
 }
@@ -61,7 +61,7 @@ fn remote_tracking(repo: &Path, remote: &str, branch: &str) -> Option<String> {
 #[test]
 fn fetch_all_syncs_every_configured_remote() {
     // Two independent upstream histories, each pushed to its own bare
-    // `mkit+file://` store.
+    // `kit+file://` store.
     let upstream_a = repo_with_commit(b"hello a");
     let upstream_b = repo_with_commit(b"hello b");
     let bare_a = tempfile::tempdir().unwrap();
@@ -109,7 +109,7 @@ fn fetch_all_syncs_every_configured_remote() {
     );
 
     // Neither pushed a local branch (fetch never moves HEAD/branches).
-    assert!(!sink.path().join(".mkit/refs/heads/main").exists());
+    assert!(!sink.path().join(".kit/refs/heads/main").exists());
 
     // Per-remote summary: both endpoints get their own `From <url>`
     // report line, reusing fetch's existing single-remote report shape.

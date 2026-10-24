@@ -872,7 +872,7 @@ fn default_storage_root() -> Result<PathBuf> {
         let Some(home) = std::env::var_os("HOME") else {
             return Err(Error::BackendUnavailable("HOME is unset".into()));
         };
-        Ok(PathBuf::from(home).join(".mkit").join("keys"))
+        Ok(PathBuf::from(home).join(".kit").join("keys"))
     }
 }
 

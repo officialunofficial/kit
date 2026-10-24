@@ -33,7 +33,7 @@ fn managed_install(tag: &str) -> Install {
     std::fs::create_dir_all(&state_dir).unwrap();
     let exe = bin_dir.join("mkit");
     std::fs::write(&exe, script_binary(tag.trim_start_matches('v'))).unwrap();
-    std::fs::write(bin_dir.join(".mkit-installed-tag"), format!("{tag}\n")).unwrap();
+    std::fs::write(bin_dir.join(".kit-installed-tag"), format!("{tag}\n")).unwrap();
     std::fs::write(state_dir.join("installed-tag"), format!("{tag}\n")).unwrap();
     Install {
         _dir: dir,
@@ -170,7 +170,7 @@ fn full_update_swaps_binary_and_receipts() {
     );
     assert_eq!(std::fs::read(&install.exe).unwrap(), new_binary);
     assert_eq!(
-        read(&install.bin_dir.join(".mkit-installed-tag")),
+        read(&install.bin_dir.join(".kit-installed-tag")),
         "v9.9.9\n"
     );
     assert_eq!(read(&install.state_dir.join("installed-tag")), "v9.9.9\n");
@@ -213,7 +213,7 @@ fn latest_downgrade_refused() {
     let (msg, _) = run_update(&opts(), &env_for(&origin, &install, "0.3.0")).unwrap_err();
     assert!(msg.contains("silently downgrade"), "{msg}");
     assert_eq!(
-        read(&install.bin_dir.join(".mkit-installed-tag")),
+        read(&install.bin_dir.join(".kit-installed-tag")),
         "v0.3.0\n"
     );
 }
@@ -247,7 +247,7 @@ fn pinned_downgrade_with_allow_flag_proceeds() {
     assert!(matches!(outcome, Outcome::Updated { .. }));
     assert_eq!(std::fs::read(&install.exe).unwrap(), old_binary);
     assert_eq!(
-        read(&install.bin_dir.join(".mkit-installed-tag")),
+        read(&install.bin_dir.join(".kit-installed-tag")),
         "v0.2.0\n"
     );
 }
@@ -278,7 +278,7 @@ fn tampered_archive_rejected_before_swap() {
         "binary must be untouched"
     );
     assert_eq!(
-        read(&install.bin_dir.join(".mkit-installed-tag")),
+        read(&install.bin_dir.join(".kit-installed-tag")),
         "v0.3.0\n"
     );
 }
@@ -288,7 +288,7 @@ fn unmanaged_install_refused_with_guidance() {
     let archive = tgz_with(&[(&format!("mkit-9.9.9-{TEST_TARGET}/mkit"), b"x".as_slice())]);
     let origin = origin_with_release("v9.9.9", &archive);
     let install = managed_install("v0.3.0");
-    std::fs::remove_file(install.bin_dir.join(".mkit-installed-tag")).unwrap();
+    std::fs::remove_file(install.bin_dir.join(".kit-installed-tag")).unwrap();
 
     let (msg, code) = run_update(&opts(), &env_for(&origin, &install, "0.3.0")).unwrap_err();
     assert!(msg.contains("not installer-managed"), "{msg}");
@@ -313,7 +313,7 @@ fn check_reports_without_touching_anything() {
     // --check needs no receipts at all: strip the whole install down to
     // a bare binary.
     let install = managed_install("v0.3.0");
-    std::fs::remove_file(install.bin_dir.join(".mkit-installed-tag")).unwrap();
+    std::fs::remove_file(install.bin_dir.join(".kit-installed-tag")).unwrap();
     let before = std::fs::read(&install.exe).unwrap();
 
     let mut check = opts();

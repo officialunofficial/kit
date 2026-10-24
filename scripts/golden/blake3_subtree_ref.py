@@ -241,7 +241,7 @@ def check_part_json(path, merge_fixture):
     assert commitment == fx["commitment"], commitment
     # SPEC-TRANSPORT-CONNECT §7.1: eight newline-separated fields, no final newline.
     canonical = "\n".join([
-        "mkit-write:v2", fx["audience"], fx["repository"], fx["procedure"],
+        "kit-write:v2", fx["audience"], fx["repository"], fx["procedure"],
         commitment, str(fx["created_at"]), str(fx["expires_at"]), fx["nonce"],
     ])
     assert canonical == fx["canonical"], "canonical string"

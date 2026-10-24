@@ -3,7 +3,7 @@
 //! `git-bridge`).
 //!
 //! Import clones a `--mirror` staging repo under
-//! `.mkit/git/<remote>/repo.git`, translates through the
+//! `.kit/git/<remote>/repo.git`, translates through the
 //! mkit-git-bridge engine under a DEDICATED import key (pinned in the
 //! state dir), lands branches in `refs/remotes/<remote>/*` (plus
 //! `refs/heads/<default>` + worktree checkout in the fresh-clone
@@ -36,8 +36,7 @@ use crate::exit;
 use crate::format;
 
 /// SPEC-GIT-IMPORT §5 predicate type.
-const PREDICATE_TYPE: &str =
-    "https://github.com/officialunofficial/mkit/spec/predicate/git-import/v1";
+pub(crate) const PREDICATE_TYPE: &str = "https://kit.storage/spec/predicate/git-import/v1";
 
 /// Default dedicated import key path (SPEC-GIT-IMPORT §4).
 const IMPORT_KEY_FILE: &str = "keys/git-import.key";
@@ -54,11 +53,11 @@ pub struct ImportArgs {
     /// Directory for the fresh-clone form (omit to import into the
     /// current mkit repository as tracking refs only).
     pub dir: Option<String>,
-    /// Bridge state name under `.mkit/git/<name>/`.
+    /// Bridge state name under `.kit/git/<name>/`.
     #[arg(long = "remote-name", value_name = "NAME", default_value = "upstream")]
     pub remote_name: String,
     /// Path to the import signing key (32-byte seed file). Default:
-    /// `.mkit/keys/git-import.key`, generated on first use.
+    /// `.kit/keys/git-import.key`, generated on first use.
     #[arg(long = "key", value_name = "PATH")]
     pub key: Option<String>,
     /// Machine-readable JSON on stdout.
@@ -68,7 +67,7 @@ pub struct ImportArgs {
 
 #[derive(Debug, Parser)]
 pub struct FetchArgs {
-    /// Bridge state name under `.mkit/git/<name>/`.
+    /// Bridge state name under `.kit/git/<name>/`.
     #[arg(long = "remote-name", value_name = "NAME", default_value = "upstream")]
     pub remote_name: String,
     /// Path to the import signing key (default: the pinned key file).
@@ -286,7 +285,7 @@ fn import_into(layout: &RepoLayout, opts: &ImportArgs, require_repo: bool) -> Cm
     if staging.join("objects").is_dir() {
         // Explicit refspecs (not the mirror's +refs/*:refs/*) so
         // --prune is scoped to upstream namespaces: fork-mode export
-        // state living in this repo (refs/mkit-export/*, the
+        // state living in this repo (refs/kit-export/*, the
         // attestation chain ref) must survive an upstream fetch.
         super::git::git_in(
             &staging,

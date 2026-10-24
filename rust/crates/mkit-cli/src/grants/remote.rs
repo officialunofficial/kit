@@ -11,7 +11,7 @@ use mkit_transport_connect::{
 
 use crate::config::{self, LayeredConfig};
 
-/// A Connect remote resolved from a remote name or an `mkit+https://` URL.
+/// A Connect remote resolved from a remote name or an `kit+https://` URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     pub name: String,
@@ -24,11 +24,11 @@ impl Target {
     /// The auth v2 audience for this remote: its origin.
     ///
     /// # Errors
-    /// The endpoint is not an `mkit+https://` or loopback `mkit+http://` URL.
+    /// The endpoint is not an `kit+https://` or loopback `kit+http://` URL.
     pub fn audience(&self) -> Result<String, String> {
         audience_from_url(&self.endpoint).ok_or_else(|| {
             format!(
-                "`{}` is not an mkit+https:// (or loopback mkit+http://) remote",
+                "`{}` is not an kit+https:// (or loopback kit+http://) remote",
                 self.endpoint
             )
         })
@@ -50,17 +50,17 @@ impl Target {
         self.repository().and_then(|id| id.namespace().copied())
     }
 
-    /// Whether this is a loopback `mkit+http://` remote: the one place a
+    /// Whether this is a loopback `kit+http://` remote: the one place a
     /// loopback audience is acceptable (a development server).
     #[must_use]
     pub fn is_loopback_dev(&self) -> bool {
-        self.endpoint.starts_with("mkit+http://")
+        self.endpoint.starts_with("kit+http://")
             && self.audience().is_ok_and(|a| is_loopback_origin(&a))
     }
 }
 
 /// Resolve `arg` as a remote name, or take it as a URL if it starts with
-/// `mkit+`. With no `arg`, the user's `trusted_remote_endpoint`.
+/// `kit+`. With no `arg`, the user's `trusted_remote_endpoint`.
 ///
 /// # Errors
 /// An unknown remote, or nothing to fall back on.
@@ -82,14 +82,14 @@ pub fn resolve_strict_target(cfg: &LayeredConfig, arg: Option<&str>) -> Result<T
 
 fn resolve_target_unchecked(cfg: &LayeredConfig, arg: Option<&str>) -> Result<Target, String> {
     match arg {
-        Some(url) if url.starts_with("mkit+") => Ok(Target {
+        Some(url) if url.starts_with("kit+") => Ok(Target {
             name: url.to_owned(),
             endpoint: url.to_owned(),
             repo_chosen: false,
         }),
         Some(name) => {
             let resolved = config::resolve_remote(cfg, name).ok_or_else(|| {
-                format!("no remote named `{name}` (add one with `mkit remote add`, or pass an mkit+https:// URL)")
+                format!("no remote named `{name}` (add one with `mkit remote add`, or pass an kit+https:// URL)")
             })?;
             Ok(Target {
                 name: resolved.name,
@@ -115,7 +115,7 @@ fn resolve_target_unchecked(cfg: &LayeredConfig, arg: Option<&str>) -> Result<Ta
 }
 
 /// SPEC-WRITE-GRANTS §3.2: a loopback audience is refused unless the remote
-/// itself is a loopback `mkit+http://` development remote. Every local
+/// itself is a loopback `kit+http://` development remote. Every local
 /// deployment shares a loopback audience, so a statement signed for one
 /// would verify at all of them.
 ///
@@ -126,7 +126,7 @@ pub fn check_audiences(audiences: &[String], remote: Option<&Target>) -> Result<
         if is_loopback_origin(audience) && !remote.is_some_and(Target::is_loopback_dev) {
             return Err(format!(
                 "audience {audience} is a loopback address, which every local server shares; \
-                 refusing to sign for it unless the remote is itself a loopback mkit+http:// development remote"
+                 refusing to sign for it unless the remote is itself a loopback kit+http:// development remote"
             ));
         }
     }
@@ -220,8 +220,8 @@ mod tests {
     #[test]
     fn loopback_audiences_need_a_loopback_dev_remote() {
         let audiences = |a: &str| vec![a.to_owned()];
-        let dev = target("mkit+http://127.0.0.1:8080");
-        let prod = target("mkit+https://git.example.com");
+        let dev = target("kit+http://127.0.0.1:8080");
+        let prod = target("kit+https://git.example.com");
         for loopback in [
             "http://localhost:8080",
             "http://127.0.0.1:8080",
@@ -239,20 +239,20 @@ mod tests {
         }
         assert!(check_audiences(&audiences("http://127.0.0.1:8080"), Some(&dev)).is_ok());
         assert!(check_audiences(&audiences("https://git.example.com"), Some(&prod)).is_ok());
-        assert!(target("mkit+http://127.0.0.1:8080").is_loopback_dev());
-        assert!(!target("mkit+https://git.example.com").is_loopback_dev());
+        assert!(target("kit+http://127.0.0.1:8080").is_loopback_dev());
+        assert!(!target("kit+https://git.example.com").is_loopback_dev());
     }
 
     #[test]
     fn audience_and_namespace_come_from_the_url() {
         let t =
-            target("mkit+https://git.example.com/0x8ba1f109551bd432803012645ac136ddd64dba72/site");
+            target("kit+https://git.example.com/0x8ba1f109551bd432803012645ac136ddd64dba72/site");
         assert_eq!(t.audience().unwrap(), "https://git.example.com");
         assert_eq!(
             t.namespace().unwrap().to_string(),
             "0x8ba1f109551bd432803012645ac136ddd64dba72"
         );
-        assert!(target("mkit+https://git.example.com").namespace().is_none());
+        assert!(target("kit+https://git.example.com").namespace().is_none());
         assert!(target("https://git.example.com").audience().is_err());
     }
 
@@ -372,12 +372,12 @@ mod authority_namespace_tests {
     #[test]
     fn opaque_namespace_urls_are_refused_and_strict_ones_pass() {
         let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
-        let err = refuse_authority_namespace(&format!("mkit+https://vcs.example/{uuid}/repo"))
+        let err = refuse_authority_namespace(&format!("kit+https://vcs.example/{uuid}/repo"))
             .unwrap_err();
         assert!(err.contains(uuid) && err.contains("§6.2.2"), "{err}");
-        let ed = format!("mkit+https://vcs.example/ed25519-{}/repo", "ab".repeat(32));
+        let ed = format!("kit+https://vcs.example/ed25519-{}/repo", "ab".repeat(32));
         assert!(refuse_authority_namespace(&ed).is_ok());
-        assert!(refuse_authority_namespace("mkit+https://vcs.example/repo").is_ok());
+        assert!(refuse_authority_namespace("kit+https://vcs.example/repo").is_ok());
         assert!(refuse_authority_namespace("not a url").is_ok());
     }
 }

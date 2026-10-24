@@ -16,25 +16,25 @@
 .Nm
 is a git-like command-line tool that produces signed, content-addressed
 objects and exchanges them over pluggable transports
-.Pq Cm mkit+file , Cm mkit+https , Cm mkit+s3 , Cm mkit+ssh .
+.Pq Cm kit+file , Cm kit+https , Cm kit+s3 , Cm kit+ssh .
 Every commit is Ed25519-signed and identified by its BLAKE3 hash, so
 chains of objects are self-verifying independent of the store they live
 in.
 .Pp
 The on-disk layout under
-.Pa .mkit/
+.Pa .kit/
 is deliberately similar to
 .Pa .git/ :
 objects are stored under
-.Pa .mkit/objects/ ,
+.Pa .kit/objects/ ,
 refs under
-.Pa .mkit/refs/ ,
+.Pa .kit/refs/ ,
 and the current branch is recorded in
-.Pa .mkit/HEAD .
+.Pa .kit/HEAD .
 A user-level config at
 .Pa $XDG_CONFIG_HOME/mkit/config
 provides cross-repo defaults; repo-local values in
-.Pa .mkit/config
+.Pa .kit/config
 win over it for ordinary keys, but security-sensitive keys
 .Pq Cm signing_key , Cm user.identity , Cm signer , Cm key.* , Cm attest.* , Cm ssh.* , Cm grant.webauthn_rp , No and Cm trusted_remote_endpoint
 are user-scoped only and are ignored if set repo-locally.
@@ -77,7 +77,7 @@ repository in the current directory.
 Stage files for the next commit. Respects
 .Pa .gitignore
 and
-.Pa .mkitignore .
+.Pa .kitignore .
 Multiple pathspecs may be given;
 .Ql .
 stages every non-ignored file under the current directory.
@@ -260,13 +260,13 @@ or
 .Fl X
 .Pq remove only ignored .
 Ignore matching uses mkit's
-.Pa .mkitignore
+.Pa .kitignore
 matcher (basename/root-only subset).
 .It Cm hash Ar file
 Hash
 .Ar file
 as a blob, store it under
-.Pa .mkit/objects/ ,
+.Pa .kit/objects/ ,
 and print the resulting BLAKE3 hash on stdout.
 .It Cm cat Ar hash
 Decode and print the object identified by
@@ -317,7 +317,7 @@ instead of the patch for commits and remixes.
 .It Cm tree
 Snapshot the working directory as a tree object and print the tree hash.
 Honors
-.Pa .mkitignore
+.Pa .kitignore
 the same way
 .Cm add
 does.
@@ -340,7 +340,7 @@ adds stage info
 lists untracked files instead;
 .Fl Fl exclude-standard
 drops
-.Pa .mkitignore Ns -ignored
+.Pa .kitignore Ns -ignored
 files and
 .Fl Fl ignored
 shows only those
@@ -462,7 +462,7 @@ is given,
 opens
 .Ev EDITOR
 on
-.Pa .mkit/COMMIT_EDITMSG ;
+.Pa .kit/COMMIT_EDITMSG ;
 lines starting with
 .Ql #
 are stripped, and an empty message aborts the commit.
@@ -760,7 +760,7 @@ timestamp);
 .Fl s
 creates a signed annotated tag whose 64-byte field is an Ed25519
 signature over the canonical tag bytes under the distinct
-.Sy mkit.tag
+.Sy kit.tag
 domain.
 .Fl m
 supplies the message; without it
@@ -773,7 +773,7 @@ deletes the named tag. Verify a signed tag with
 .Cm mkit verify Ar name .
 .It Cm sparse-checkout Cm set | Cm list | Cm disable | Cm reapply Op Ar pattern ...
 Manage the sparse-checkout pattern set at
-.Pa .mkit/sparse-checkout .
+.Pa .kit/sparse-checkout .
 .Cm set
 overwrites the pattern list,
 .Cm list
@@ -848,7 +848,7 @@ adds the flat default remote
 or a named remote
 .Pq Cm remote add Ar name url ;
 URLs MUST use the strict
-.Ql mkit+<scheme>://
+.Ql kit+<scheme>://
 form.
 .Cm remove Ar name
 .Pq alias Cm rm
@@ -1279,7 +1279,7 @@ the destination depends on it:
 writes the signing key to the
 .Cm signing_key
 path
-.Pq default Pa .mkit/keys/default.key ,
+.Pq default Pa .kit/keys/default.key ,
 while
 .Cm secp256k1
 and
@@ -1287,7 +1287,7 @@ and
 write attestation keys to the
 .Cm attest. Ns Ar algo Ns Cm _key_path
 paths
-.Pq default Pa .mkit/keys/secp256k1.key No / Pa .mkit/keys/p256.key .
+.Pq default Pa .kit/keys/secp256k1.key No / Pa .kit/keys/p256.key .
 .Fl Fl force
 overwrites an existing key file at the target path; and
 .Fl Fl print-pubkey
@@ -1323,7 +1323,7 @@ at
 .Cm user.identity .
 .It Cm serve Oo Fl Fl idle-timeout-secs Ar secs Oc Oo Fl Fl max-session-secs Ar secs Oc Ar path
 Internal subcommand: act as the server end of an
-.Cm mkit+ssh://
+.Cm kit+ssh://
 transport, speaking the SSH-frame protocol on stdin and stdout.
 .Fl Fl idle-timeout-secs
 .Pq default 60 ; 0 disables it
@@ -1358,7 +1358,7 @@ with the manifest written last, so racing readers see either no manifest
 shard.
 .Fl Fl out Ar dir
 sets the output directory
-.Pq default Pa .mkit/pack-shards ;
+.Pq default Pa .kit/pack-shards ;
 .Fl Fl force
 encodes even when the pack is below the size threshold. Requires building
 the binary with
@@ -1372,7 +1372,7 @@ untranslatable refs are skipped per-ref with a warning. Pushes use
 per-ref
 .Fl Fl force-with-lease
 from state recorded under
-.Pa .mkit/git/<name>/ .
+.Pa .kit/git/<name>/ .
 The default
 .Fl Fl remote-name
 is
@@ -1388,7 +1388,7 @@ each exported head gets a signed git-bridge/v1 DSSE attestation
 .Fl Fl algorithm / Fl Fl signer
 flags, else config defaults),
 published on the mirror's
-.Ql refs/mkit/attestations
+.Ql refs/kit/attestations
 ref. With
 .Fl Fl passthrough
 (fork mode, SPEC-GIT-BRIDGE \(sc14), an imported repository publishes
@@ -1451,7 +1451,7 @@ or GitHub attestation API required. Only installer-managed binaries
 (installed via
 .Ql curl mkit.sh | sh ,
 which writes the
-.Pa .mkit-installed-tag
+.Pa .kit-installed-tag
 receipt) are updated; Homebrew and cargo installs are refused with
 channel-specific guidance instead.
 .Fl Fl check
@@ -1463,7 +1463,7 @@ never downgrades; an explicit
 pin may only downgrade together with
 .Fl Fl allow-downgrade .
 Receipts
-.Pq Pa .mkit-installed-tag , MKIT_STATE_DIR/installed-tag
+.Pq Pa .kit-installed-tag , MKIT_STATE_DIR/installed-tag
 are rewritten after a successful swap, in the installer's format.
 There is no background update check; the command only ever acts when
 invoked.
@@ -1511,7 +1511,7 @@ emits ANSI color even when stdout is not a terminal.
 overrides this.
 .It Ev SSH_AUTH_SOCK
 Standard OpenSSH agent socket; used when pushing or cloning via
-.Cm mkit+ssh:// .
+.Cm kit+ssh:// .
 .It Ev XDG_CONFIG_HOME , Ev XDG_DATA_HOME , Ev XDG_CACHE_HOME , Ev XDG_STATE_HOME
 Locations of user-level config, keystore, cache, and state
 respectively. See
@@ -1536,23 +1536,23 @@ For tests and mirrors.
 .El
 .Sh FILES
 .Bl -tag -width "~/.local/state/mkit/"
-.It Pa .mkit/
+.It Pa .kit/
 Repo-local state dir (analogous to
 .Pa .git/ ).
-.It Pa .mkit/config
+.It Pa .kit/config
 Repo-local config; overrides user-level values for ordinary keys. Security-
 sensitive keys
 .Pq Cm signing_key , Cm user.identity , Cm signer , Cm key.* , Cm attest.* , Cm ssh.* , No and Cm trusted_remote_endpoint
 are user-scoped only and ignored here.
-.It Pa .mkit/keys/default.key
+.It Pa .kit/keys/default.key
 Repo-local Ed25519 signing key.
-.It Pa .mkit/index
+.It Pa .kit/index
 Staged-change index.
-.It Pa .mkit/index.lock
+.It Pa .kit/index.lock
 Lockfile held by
 .Cm commit , Cm checkout , Cm merge , Cm rebase
 to serialize concurrent invocations.
-.It Pa .mkit/COMMIT_EDITMSG
+.It Pa .kit/COMMIT_EDITMSG
 Scratch file written before
 .Ev EDITOR
 is invoked by

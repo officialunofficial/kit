@@ -145,8 +145,8 @@ fn reset_hard_refuses_discarding_mode_only_change_to_ignored_tracked_dropped_fil
             .status
             .success()
     );
-    fs::write(root.join(".mkitignore"), b"*.sh\n").unwrap();
-    assert!(run_in(root, x, &["add", ".mkitignore"]).status.success());
+    fs::write(root.join(".kitignore"), b"*.sh\n").unwrap();
+    assert!(run_in(root, x, &["add", ".kitignore"]).status.success());
     assert!(
         run_in(root, x, &["commit", "-m", "ignore sh"])
             .status
@@ -247,7 +247,7 @@ fn clean_fd_keeps_ignored_files_inside_untracked_dir() {
     // an ignored file (git keeps the ignored file and the dir around it).
     let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
     let (root, x) = (td.path(), xdg.path());
-    fs::write(root.join(".mkitignore"), b"*.log\n").unwrap();
+    fs::write(root.join(".kitignore"), b"*.log\n").unwrap();
     fs::create_dir(root.join("tmp")).unwrap();
     fs::write(root.join("tmp/debug.log"), b"ignored\n").unwrap();
     fs::write(root.join("tmp/normal.txt"), b"untracked\n").unwrap();
@@ -273,13 +273,13 @@ fn clean_fd_protects_nested_repository() {
     // -fd must not delete a nested repository's metadata.
     let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
     let (root, x) = (td.path(), xdg.path());
-    fs::create_dir_all(root.join("nested/.mkit")).unwrap();
+    fs::create_dir_all(root.join("nested/.kit")).unwrap();
     fs::write(root.join("nested/file.txt"), b"inner\n").unwrap();
 
     let out = run_in(root, x, &["clean", "-f", "-d"]);
     assert!(out.status.success(), "clean -fd failed: {out:?}");
     assert!(
-        root.join("nested/.mkit").exists(),
+        root.join("nested/.kit").exists(),
         "nested repository metadata must be protected from clean -fd"
     );
     assert!(
@@ -332,8 +332,8 @@ fn reset_hard_refuses_discarding_modified_ignored_but_tracked_dropped_file() {
             .success()
     );
     // Now add an ignore rule matching the already-tracked file.
-    fs::write(root.join(".mkitignore"), b"*.key\n").unwrap();
-    assert!(run_in(root, x, &["add", ".mkitignore"]).status.success());
+    fs::write(root.join(".kitignore"), b"*.key\n").unwrap();
+    assert!(run_in(root, x, &["add", ".kitignore"]).status.success());
     assert!(
         run_in(root, x, &["commit", "-m", "ignore keys"])
             .status
@@ -366,7 +366,7 @@ fn reset_hard_refuses_discarding_modified_ignored_but_tracked_dropped_file() {
 fn clean_respects_ignore_unless_x() {
     let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
     let (root, x) = (td.path(), xdg.path());
-    fs::write(root.join(".mkitignore"), b"*.log\n").unwrap();
+    fs::write(root.join(".kitignore"), b"*.log\n").unwrap();
     fs::write(root.join("debug.log"), b"ignored\n").unwrap();
     fs::write(root.join("untracked.txt"), b"u\n").unwrap();
 

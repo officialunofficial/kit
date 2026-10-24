@@ -30,7 +30,7 @@ impl Limits {
         payload_bytes: u64,
         max_staged_bytes: u64,
     ) -> Result<Self, Error> {
-        if info.protocol.as_deref() != Some("mkit.transport.v1")
+        if info.protocol.as_deref() != Some("kit.transport.v1")
             || info.spec_version != Some(2)
             || info.atomic_advance != Some(true)
         {

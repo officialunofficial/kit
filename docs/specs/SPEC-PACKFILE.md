@@ -8,7 +8,7 @@ audience: implementers of compatible packfile readers and writers; transport imp
 # SPEC-PACKFILE &mdash; mkit packfile format (v1 + v2)
 
 Status: **Normative** for mkit v1 and v2.
-Scope: the byte layout of a `.mkit`-produced packfile, used for
+Scope: the byte layout of a `.kit`-produced packfile, used for
 transport upload/download and for bundle exchange.
 
 This spec defines the pack format and its magic.
@@ -22,7 +22,7 @@ semantics from v1 &mdash; only two new entry types.
 
 ```
 offset  size          field
-0       4             magic               "MKIT"   (0x4D 0x4B 0x49 0x54)
+0       4             magic               "KIT\0"   (0x4B 0x49 0x54 0x00)
 4       4             version             u32 LE, == 1 or 2
 8       4             entry_count         u32 LE
 12      …             entries             entry_count entries
@@ -34,12 +34,12 @@ everything written before the trailer itself. It is not a signature.
 Its purpose is defense-in-depth against bit-rot on transports that do
 not guarantee byte-exact delivery (for example S3 after a proxy).
 
-The first four bytes MUST be the ASCII literal `"MKIT"`. Any reader
+The first four bytes MUST be the ASCII literal `"KIT\0"`. Any reader
 encountering something else MUST fail with `InvalidMagic`.
 
-**Version byte rule:** the first four bytes MUST remain `"MKIT"` in
+**Version byte rule:** the first four bytes MUST remain `"KIT\0"` in
 every future version. Format evolution is signaled by the `version`
-field. A reader seeing `"MKIT"` plus unknown version MUST fail
+field. A reader seeing `"KIT\0"` plus unknown version MUST fail
 `UnsupportedPackVersion` (not `InvalidMagic`), so clients can
 distinguish "wrong tool" from "too-new pack".
 
@@ -119,7 +119,7 @@ only.
 Payload is exactly the bytes you would get from SPEC-OBJECTS
 serialization, starting with the object prologue. Unpackers insert
 these bytes into the object store verbatim (writing
-`.mkit/objects/<dd>/<rr...>`) after verifying the object's id &mdash; computed
+`.kit/objects/<dd>/<rr...>`) after verifying the object's id &mdash; computed
 per the type-dependent rule in SPEC-OBJECTS §10 (a flat BLAKE3 digest of
 the serialized bytes for most object types; the domain-wrapped Merkle
 root of SPEC-MERKLE-OBJECTS for `Tree` and `ChunkedBlob`) &mdash; matches the
@@ -527,7 +527,7 @@ parsed). The check ordering means a corrupt trailer surfaces as
 
 mkit v1 is the first version. The format rule going forward is:
 
-- First 4 bytes MUST be ASCII `"MKIT"`. Forever. (The magic is the
+- First 4 bytes MUST be ASCII `"KIT\0"`. Forever. (The magic is the
   format family marker, not a version marker.)
 - Format changes MUST bump the `version` u32.
 - `version` values are monotonically assigned; gaps are allowed but
@@ -567,7 +567,7 @@ surface; the spec-level names below stay protocol-neutral.
    `PackWriter` + `PackReader`; pinned by `pack_basic_pin_bytes_roundtrip`.
 3. **Two-entry pack with delta**: raw base blob + delta entry resolving
    in the same pack. Covered by `raw_then_delta_resolves_in_pack`.
-4. **Pack with non-`MKIT` magic** → reader returns `InvalidMagic`
+4. **Pack with non-`KIT\0` magic** → reader returns `InvalidMagic`
    (`rejects_invalid_magic`).
 5. **Pack with version = 99** → reader returns `UnsupportedVersion(99)`
    (`rejects_unknown_version`). The Rust API spells the error
@@ -678,7 +678,7 @@ publication path before the terminal acceptance step.
 
 | Invariant | Enforced by |
 |---|---|
-| A pack is unambiguously an mkit pack of a known version | `"MKIT"` magic → `InvalidMagic`; unknown `version` → `UnsupportedPackVersion`, distinguishably (§1) |
+| A pack is unambiguously an mkit pack of a known version | `"KIT\0"` magic → `InvalidMagic`; unknown `version` → `UnsupportedPackVersion`, distinguishably (§1) |
 | Any bit-flip or truncation before the trailer is detected | 32-byte BLAKE3 trailer, verified **before** any entry is stored (§8) |
 | No entry read past the pack tail | mandatory `payload_len` bounds-check against the remaining pre-trailer bytes → `UnexpectedEof` (§2) |
 | Only known entry types are processed | anything but `0x00`/`0x02`/`0x03`/`0x04` (incl. reserved `0x01`) → `InvalidEntryType`; `0x03`/`0x04` additionally require `version = 2` or the same error fires (§3) |

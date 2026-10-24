@@ -83,6 +83,11 @@ is the same `0x4D4B_4954_4643_4443` value.
 The seed ASCII is **`"MKITFCDC"`**, frozen for the lifetime of v1.
 The seed is not user-visible; it is 8 bytes inside the chunker.
 
+The seed is a protocol constant, not a product name. It sets the chunk
+boundaries, so every chunked blob id depends on it. The seed keeps its
+original ASCII value when the domain-separation tags, magics and file
+names change. An implementation MUST NOT rename it.
+
 Future format versions that want to change chunking MUST bump the
 format version and publish a migration path. A future reader that
 needs to chunk for a different chunk-family MAY use a different seed

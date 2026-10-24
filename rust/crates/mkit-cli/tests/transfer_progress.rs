@@ -1,6 +1,6 @@
 //! Honest transfer-progress reporting for `clone`/`push`/`pull`/`fetch`.
 //!
-//! Driven end-to-end through the real binary against a `mkit+file://`
+//! Driven end-to-end through the real binary against a `kit+file://`
 //! bare-directory remote, mirroring `push_named_remote.rs`'s pattern.
 //! `MKIT_PROGRESS=always` forces progress on despite the subprocess's
 //! piped (non-tty) stderr — see `crate::progress`'s override
@@ -37,7 +37,7 @@ fn run_in_with_env(cwd: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Out
 }
 
 fn file_url(dir: &Path) -> String {
-    format!("mkit+file://{}", dir.display())
+    format!("kit+file://{}", dir.display())
 }
 
 /// Init a repo with a signing key and a single commit containing `n`

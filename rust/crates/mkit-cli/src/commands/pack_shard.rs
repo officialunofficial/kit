@@ -39,7 +39,7 @@ struct ShardOpts {
     /// Hex-encoded BLAKE3 hash of the pack object to shard.
     hash: String,
 
-    /// Output directory. Defaults to `<repo>/.mkit/pack-shards`.
+    /// Output directory. Defaults to `<repo>/.kit/pack-shards`.
     /// Shards are written under `<out>/packs/<hex>/`.
     #[arg(long)]
     out: Option<PathBuf>,

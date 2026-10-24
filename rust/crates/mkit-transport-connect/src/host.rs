@@ -349,7 +349,7 @@ impl<'a> HostPolicy<'a> {
             procedure,
             mkit_client::procedures::UPLOAD_PACK
                 | mkit_client::procedures::UPLOAD_PART
-                | "/mkit.transport.v1.TransportService/DownloadPack"
+                | "/kit.transport.v1.TransportService/DownloadPack"
         ) {
             self.host.pack_transfer_timeout
         } else {
@@ -430,7 +430,7 @@ impl RequestPolicy for HostPolicy<'_> {
         true
     }
     fn response_limit(&self, procedure: &str, default: usize) -> usize {
-        if procedure == "/mkit.transport.v1.TransportService/DownloadPack" {
+        if procedure == "/kit.transport.v1.TransportService/DownloadPack" {
             default
         } else {
             LEGACY_MESSAGE_LIMIT
@@ -1005,7 +1005,7 @@ mod tests {
                 SourceError::MembershipNotVisible,
             ),
             (
-                "/mkit.transport.v1.TransportService/ReadRef",
+                "/kit.transport.v1.TransportService/ReadRef",
                 SourceError::PendingVerification {
                     retry_after: Duration::from_secs(2),
                 },

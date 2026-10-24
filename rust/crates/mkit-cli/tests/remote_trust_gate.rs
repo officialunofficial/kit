@@ -38,7 +38,7 @@ fn push_rejects_repo_configured_http_remote_with_token() {
     assert!(run_in_with_env(root, &["init"], &[], None).status.success());
     let add = run_in_with_env(
         root,
-        &["remote", "add", "mkit+https://example.invalid/repo"],
+        &["remote", "add", "kit+https://example.invalid/repo"],
         &[],
         None,
     );
@@ -70,7 +70,7 @@ fn push_does_not_refuse_user_scoped_endpoint_with_token() {
         root,
         &["push"],
         &[("MKIT_API_TOKEN", "secret-xyz")],
-        Some("remote_endpoint = mkit+https://example.invalid/repo\n"),
+        Some("remote_endpoint = kit+https://example.invalid/repo\n"),
     );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
@@ -90,7 +90,7 @@ fn push_allows_repo_remote_when_user_trusts_endpoint() {
     assert!(run_in_with_env(root, &["init"], &[], None).status.success());
     let add = run_in_with_env(
         root,
-        &["remote", "add", "mkit+https://example.invalid/repo"],
+        &["remote", "add", "kit+https://example.invalid/repo"],
         &[],
         None,
     );
@@ -100,7 +100,7 @@ fn push_allows_repo_remote_when_user_trusts_endpoint() {
         root,
         &["push"],
         &[("MKIT_API_TOKEN", "secret-xyz")],
-        Some("trusted_remote_endpoint = mkit+https://example.invalid/repo\n"),
+        Some("trusted_remote_endpoint = kit+https://example.invalid/repo\n"),
     );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
@@ -117,7 +117,7 @@ fn push_rejects_repo_configured_s3_remote_with_env_creds() {
     assert!(run_in_with_env(root, &["init"], &[], None).status.success());
     let add = run_in_with_env(
         root,
-        &["remote", "add", "mkit+s3://r2.example.com/bucket/proj"],
+        &["remote", "add", "kit+s3://r2.example.com/bucket/proj"],
         &[],
         None,
     );

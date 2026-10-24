@@ -137,12 +137,12 @@ impl FailKind {
             FailKind::NotFound => ConnectError::not_found("flaky not-found failure"),
             FailKind::Pending(delay) => ConnectError::unavailable("verification pending")
                 .with_detail(connectrpc::ErrorDetail::from_message(
-                    "mkit.transport.v1.PendingVerification",
+                    "kit.transport.v1.PendingVerification",
                     &generated::PendingVerification::default().with_retry_after_ms(delay),
                 )),
             FailKind::PendingMalformed => ConnectError::unavailable("verification pending")
                 .with_detail(connectrpc::ErrorDetail {
-                    type_url: "mkit.transport.v1.PendingVerification".to_owned(),
+                    type_url: "kit.transport.v1.PendingVerification".to_owned(),
                     value: Some("%%%".to_owned()),
                     debug: None,
                 }),
@@ -168,7 +168,7 @@ impl FailKind {
             }
             FailKind::Admission => ConnectError::permission_denied("admission required")
                 .with_detail(connectrpc::ErrorDetail::from_message(
-                    "mkit.transport.v1.AdmissionChallenge",
+                    "kit.transport.v1.AdmissionChallenge",
                     &generated::AdmissionChallenge {
                         challenges: vec![generated::Challenge {
                             scheme: Some("test".into()),
@@ -236,7 +236,7 @@ impl FlakyService {
                 audience,
                 repository: "default",
             },
-            &format!("/mkit.transport.v1.TransportService/{method}"),
+            &format!("/kit.transport.v1.TransportService/{method}"),
             Some(commitment),
             now,
             &headers,
@@ -1653,7 +1653,7 @@ fn pending_reuses_signed_identity_then_renews_at_margin() {
                 audience,
                 repository,
             },
-            "/mkit.transport.v1.TransportService/AdvanceRefs",
+            "/kit.transport.v1.TransportService/AdvanceRefs",
             Some(commitment),
             at,
             &auth,

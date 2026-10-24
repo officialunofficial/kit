@@ -1,7 +1,7 @@
 //! On-disk store for DSSE attestation envelopes.
 //!
 //! See `docs/specs/SPEC-ATTESTATIONS.md` §3. Layout (rooted at `<root>` —
-//! typically `.mkit/`, NOT the `attestations/` subdir):
+//! typically `.kit/`, NOT the `attestations/` subdir):
 //!
 //! ```text
 //! <root>/
@@ -49,7 +49,7 @@ pub const MAX_ENVELOPE_SIZE: usize = 1024 * 1024;
 
 /// Build the path for a given commit + att-id under `root`.
 ///
-/// `root` is the `.mkit/` directory (the `attestations/` subdir is
+/// `root` is the `.kit/` directory (the `attestations/` subdir is
 /// appended internally).
 #[must_use]
 pub fn envelope_path(layout: &RepoLayout, commit: &Hash, att_id: &Hash) -> PathBuf {

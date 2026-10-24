@@ -144,8 +144,8 @@ fn golden_head_symbolic_parses() {
 
 #[test]
 fn cas_any_works_against_object_store_repo() {
-    // Repo built atop the ObjectStore (which owns .mkit/objects/);
-    // the refs subsystem co-tenants that .mkit/ root.
+    // Repo built atop the ObjectStore (which owns .kit/objects/);
+    // the refs subsystem co-tenants that .kit/ root.
     let dir = tempfile::TempDir::new().unwrap();
     let mkit = RepoLayout::single(dir.path());
     let _store = ObjectStore::init(&mkit).expect("init store");
@@ -211,7 +211,7 @@ fn list_refs_returns_sorted_unique_entries() {
 fn refs_init_creates_layout() {
     let dir = tempfile::TempDir::new().unwrap();
     let layout = RepoLayout::single(dir.path());
-    let mkit = dir.path().join(".mkit");
+    let mkit = dir.path().join(".kit");
     fs::create_dir_all(&mkit).unwrap();
     refs::init(&layout).unwrap();
     assert!(mkit.join(REFS_DIR).is_dir());
@@ -238,7 +238,7 @@ fn validate_ref_name_examples_from_spec() {
 #[test]
 fn repo_lock_blocks_concurrent_acquire() {
     let dir = tempfile::TempDir::new().unwrap();
-    let mkit = dir.path().join(".mkit");
+    let mkit = dir.path().join(".kit");
     fs::create_dir_all(&mkit).unwrap();
     let _held = repo_lock::acquire_default(&mkit, "index.lock").unwrap();
     // The lock is already held, so `acquire` must reject it
@@ -252,7 +252,7 @@ fn repo_lock_blocks_concurrent_acquire() {
 #[test]
 fn index_round_trip_via_disk() {
     let dir = tempfile::TempDir::new().unwrap();
-    fs::create_dir_all(dir.path().join(".mkit")).unwrap();
+    fs::create_dir_all(dir.path().join(".kit")).unwrap();
     let mut idx = Index::new();
     idx.entries.push(IndexEntry {
         path: "README.md".into(),

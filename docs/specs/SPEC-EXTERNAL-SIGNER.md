@@ -94,7 +94,7 @@ drive only fast software signers MAY tighten it via the user-scoped
 config key `attest.external_signer_timeout_secs` (an unsigned integer
 number of seconds; `0` means "deadline already passed" &mdash; a hard
 fail-fast). Like `attest.external_signer_path`, this key is **user-scoped
-only** and is rejected from per-repo `.mkit/config`: a hostile repo must
+only** and is rejected from per-repo `.kit/config`: a hostile repo must
 not be able to set a multi-hour hang or a `0`-second denial-of-service.
 
 Signers SHOULD therefore make progress promptly once any required human
@@ -112,7 +112,7 @@ toolchain emitting the same wire bytes is conformant. See
 prefix, endianness, and the `MAX_FRAME_BYTES = 1 MiB` cap (frames
 exceeding the cap are a connection-fatal error).
 
-Schema: [`rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto).
+Schema: [`rust/crates/mkit-rpc/proto/kit/rpc/v1/signer/signer.proto`](../../rust/crates/mkit-rpc/proto/kit/rpc/v1/signer/signer.proto).
 
 ---
 
@@ -283,7 +283,7 @@ Raw-bytes signer. Reads a 32-byte seed/scalar from disk. Unix
 permission bits MUST be `0600`; otherwise the binary refuses to start.
 
 ```
-$ mkit-sign-file --key /home/alice/.mkit/keys/default.key
+$ mkit-sign-file --key /home/alice/.kit/keys/default.key
 ```
 
 ```

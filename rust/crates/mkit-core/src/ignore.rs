@@ -1,4 +1,4 @@
-//! `.mkitignore` / `.gitignore` glob patterns.
+//! `.kitignore` / `.gitignore` glob patterns.
 //!
 //! Matching is **path-relative** (git-faithful), not basename-only: callers
 //! pass a path relative to the repository root and the matcher honors the
@@ -23,13 +23,13 @@
 //!   behaves like a single `*`.
 //! - Trailing unescaped spaces are trimmed.
 //!
-//! `.mkit` and `.git` are *always* ignored (matched on the path's basename,
-//! ASCII case-insensitively, so `.MKIT` can't bypass on case-insensitive
+//! `.kit` and `.git` are *always* ignored (matched on the path's basename,
+//! ASCII case-insensitively, so `.KIT` can't bypass on case-insensitive
 //! filesystems — the Git CVE-2021-21300 family).
 //!
-//! Both `.gitignore` and `.mkitignore` are read from the repository root;
-//! `.gitignore` patterns are applied first and `.mkitignore` last, so a
-//! repo's own `.mkitignore` takes precedence under last-match-wins.
+//! Both `.gitignore` and `.kitignore` are read from the repository root;
+//! `.gitignore` patterns are applied first and `.kitignore` last, so a
+//! repo's own `.kitignore` takes precedence under last-match-wins.
 //!
 //! **Deferred (documented non-goals for this pass):** nested per-directory
 //! ignore files (only the root is read), global excludes
@@ -160,7 +160,7 @@ impl Pattern {
     }
 }
 
-/// Parsed ignore-list (the merged `.gitignore` + `.mkitignore` patterns).
+/// Parsed ignore-list (the merged `.gitignore` + `.kitignore` patterns).
 #[derive(Debug, Default, Clone)]
 pub struct IgnoreList {
     patterns: Vec<Pattern>,
@@ -168,7 +168,7 @@ pub struct IgnoreList {
 
 impl IgnoreList {
     /// Construct an empty list (matches nothing user-defined; the
-    /// hard-coded `.mkit` / `.git` ignores still apply).
+    /// hard-coded `.kit` / `.git` ignores still apply).
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -195,7 +195,7 @@ impl IgnoreList {
         let trimmed = rel_path.trim_matches('/');
         // Hard-coded ignores key off the basename at any depth.
         let base = trimmed.rsplit('/').next().unwrap_or(trimmed);
-        if base.eq_ignore_ascii_case(".mkit") || base.eq_ignore_ascii_case(".git") {
+        if base.eq_ignore_ascii_case(".kit") || base.eq_ignore_ascii_case(".git") {
             return true;
         }
         let path: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
@@ -243,10 +243,10 @@ impl IgnoreList {
     }
 }
 
-/// Load and merge `.gitignore` then `.mkitignore` from `dir`. Returns an
+/// Load and merge `.gitignore` then `.kitignore` from `dir`. Returns an
 /// empty list if neither file is present.
 ///
-/// `.gitignore` patterns come first so a repo's own `.mkitignore` wins under
+/// `.gitignore` patterns come first so a repo's own `.kitignore` wins under
 /// last-match-wins.
 ///
 /// # Errors
@@ -254,7 +254,7 @@ impl IgnoreList {
 /// - [`IgnoreError::Io`] for other filesystem failures.
 pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
     let mut patterns = Vec::new();
-    for name in [".gitignore", ".mkitignore"] {
+    for name in [".gitignore", ".kitignore"] {
         if let Some(list) = load_one(&dir.join(name))? {
             patterns.extend(list.patterns);
         }
@@ -530,9 +530,9 @@ mod tests {
     #[test]
     fn default_ignores() {
         let il = parse("");
-        assert!(il.is_ignored(".mkit", true));
+        assert!(il.is_ignored(".kit", true));
         assert!(il.is_ignored(".git", true));
-        assert!(il.is_ignored(".mkit", false));
+        assert!(il.is_ignored(".kit", false));
         assert!(il.is_ignored(".git", false));
         // ...at any depth.
         assert!(il.is_ignored("sub/.git", true));
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn load_with_mkitignore() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join(".mkitignore"), "*.log\nbuild/\n").unwrap();
+        std::fs::write(dir.path().join(".kitignore"), "*.log\nbuild/\n").unwrap();
         let il = load(dir.path()).unwrap();
         assert_eq!(il.patterns().len(), 2);
         assert!(il.is_ignored("test.log", false));
@@ -679,8 +679,8 @@ mod tests {
     fn mkitignore_overrides_gitignore_last_match_wins() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".gitignore"), "*.log\n").unwrap();
-        // .mkitignore is applied last, so its re-include wins.
-        std::fs::write(dir.path().join(".mkitignore"), "!keep.log\n").unwrap();
+        // .kitignore is applied last, so its re-include wins.
+        std::fs::write(dir.path().join(".kitignore"), "!keep.log\n").unwrap();
         let il = load(dir.path()).unwrap();
         assert!(il.is_ignored("other.log", false));
         assert!(!il.is_ignored("keep.log", false));
@@ -690,7 +690,7 @@ mod tests {
     fn load_rejects_oversize_file() {
         let dir = TempDir::new().unwrap();
         let oversized = vec![b'#'; usize::try_from(MAX_IGNORE_FILE_BYTES + 1).unwrap()];
-        std::fs::write(dir.path().join(".mkitignore"), oversized).unwrap();
+        std::fs::write(dir.path().join(".kitignore"), oversized).unwrap();
         let err = load(dir.path()).unwrap_err();
         assert!(matches!(err, IgnoreError::FileTooLarge));
     }

@@ -20,7 +20,7 @@ use mkit_core::refs::{self, RefError, RefWriteCondition};
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree as core_worktree;
 
-/// Rewrite `.mkit/index` so it exactly mirrors `tree_hash`.
+/// Rewrite `.kit/index` so it exactly mirrors `tree_hash`.
 ///
 /// `mkit commit` now signs the index, so commands that move HEAD and
 /// materialize a committed tree must keep the index aligned with that
@@ -56,7 +56,7 @@ pub fn sync_index_to_tree(
     mkit_core::index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))
 }
 
-/// Materialise `tree_hash` and align the index while preserving `.mkitignore` entries.
+/// Materialise `tree_hash` and align the index while preserving `.kitignore` entries.
 pub fn restore_worktree_and_index(
     layout: &RepoLayout,
     store: &ObjectStore,
@@ -164,7 +164,7 @@ pub fn ensure_restore_safe_with_options(
         && let Some(path) = worktree_paths.iter().find(|path| {
             !index_tracks_path_or_descendant(&idx, path)
                 && restore_affects_path(options, path)
-                && *path != ".mkitignore"
+                && *path != ".kitignore"
                 && *path != ".gitignore"
                 && !is_ignored_worktree_path(root, &ignore, path)
         })
@@ -202,7 +202,7 @@ pub fn collect_worktree_paths(
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.eq_ignore_ascii_case(".mkit") || name.eq_ignore_ascii_case(".git") {
+        if name.eq_ignore_ascii_case(".kit") || name.eq_ignore_ascii_case(".git") {
             continue;
         }
         let path = if prefix.is_empty() {

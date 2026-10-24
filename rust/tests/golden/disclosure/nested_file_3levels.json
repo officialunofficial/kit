@@ -1,7 +1,7 @@
 {
   "bin": "nested_file_3levels.bin",
-  "blake3": "0c2c1301fe65f1fb1db25df84c38764c5943d61a7c5e5ce45f2cd404d9b2e7ee",
-  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "blake3": "d3518f6494d61b077ecf27b690caa7f5c6febe6f81f068b5b5542e06be5177cd",
+  "commit_id_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
   "description": "A file 3 directory levels deep.",
   "disclosed": {
     "chunk_inner_root_hex": null,
@@ -28,11 +28,11 @@
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
     "step_inner_roots_hex": [
-      "1b1e50529b155e441db663c397e82660032e3344c5203c314c303b80d9da397c",
-      "02cd3ea6504eb9e39469fe8b61f5e2ed7d5c41737fd443eb252e5ba53a85a25e",
-      "e65ffa1eb49ff4bc6fb06936c6977551b36667f24da1c8d35cdf0f0aa9986f11"
+      "c149fa07c55d52c24875498999f7b54abb81dbf1694d5e209d9c2038dac2d0fa",
+      "cb3161f1791a414a4c2df7d9698663be04580778c92b1a69bd8f6a285e39fbb3",
+      "e0fc3b81e69cfd42f7655b24574c8926119ff7b7a14695ea6546f8d87b23504b"
     ],
-    "tree_hash_hex": "cece38b8a6a76cbdbba11ed1de928916c9d201808755fd9bbb9b8d3414999f20"
+    "tree_hash_hex": "bfb30fc54bf0bf25f170b83ae324509b402a90d55151d8914e77f468ac6ee289"
   },
   "expect": "accept",
   "name": "nested_file_3levels",

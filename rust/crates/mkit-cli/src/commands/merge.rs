@@ -10,7 +10,7 @@
 //! 4. Otherwise run a 3-way tree merge. On conflict, materialise the
 //!    conflict material (markers for text, ours-side for binary/special)
 //!    into the worktree + index, persist `MERGE_HEAD`/`MERGE_MSG`/
-//!    `ORIG_HEAD` and the `mkit-conflicts` sidecar, and exit non-zero
+//!    `ORIG_HEAD` and the `kit-conflicts` sidecar, and exit non-zero
 //!    with resolve instructions. The user resolves, `mkit add`s, then
 //!    runs `mkit merge --continue`.
 //! 5. Clean merge: sign a new merge commit with two parents and advance

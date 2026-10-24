@@ -53,7 +53,7 @@ impl Transaction {
     pub(crate) fn encode(&self) -> Vec<u8> {
         let optional = |h: Option<Hash>| h.map_or_else(|| "-".into(), |h| hash::to_hex(&h));
         let mut text = format!(
-            "mkit-history-transaction-v1\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            "kit-history-transaction-v1\n{}\n{}\n{}\n{}\n{}\n{}\n",
             hash::to_hex(&self.repository),
             self.full_ref,
             optional(self.previous),
@@ -73,7 +73,7 @@ impl Transaction {
         let malformed = || RefError::InvalidRef("corrupt pending history transaction".into());
         let raw = std::str::from_utf8(&bytes).map_err(|_| malformed())?;
         let lines: Vec<_> = raw.split('\n').collect();
-        if lines.len() != 9 || lines[0] != "mkit-history-transaction-v1" || !lines[8].is_empty() {
+        if lines.len() != 9 || lines[0] != "kit-history-transaction-v1" || !lines[8].is_empty() {
             return Err(malformed());
         }
         let parse_hash = |text: &str| -> RefResult<Hash> {

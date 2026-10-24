@@ -31,8 +31,8 @@ fi
 
 rm -f "$GEN_DIR"/*.rs
 mkdir -p "$GEN_DIR"
-cp "$out_dir"/_includes.rs "$out_dir"/mkit.rpc.*.rs \
-    "$out_dir"/mkit.common.*.rs "$GEN_DIR/"
+cp "$out_dir"/_includes.rs "$out_dir"/kit.rpc.*.rs \
+    "$out_dir"/kit.common.*.rs "$GEN_DIR/"
 
 echo "refreshed $GEN_DIR from $out_dir:"
 ls "$GEN_DIR"

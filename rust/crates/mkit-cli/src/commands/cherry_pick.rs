@@ -5,7 +5,7 @@
 //! the original commit's message. On conflict we materialise the
 //! conflict material into the worktree + index, persist
 //! `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`/`ORIG_HEAD` and the
-//! `mkit-conflicts` sidecar, and exit non-zero. The user resolves,
+//! `kit-conflicts` sidecar, and exit non-zero. The user resolves,
 //! `mkit add`s, then runs `mkit cherry-pick --continue`.
 //!
 //! `--continue` refuses unless `CHERRY_PICK_HEAD` exists and no

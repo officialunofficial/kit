@@ -1,7 +1,7 @@
 //! Walking a branch's packmap chain.
 //!
 //! A branch's transfer history is a content-addressed singly-linked list of
-//! packlist nodes, advertised through the `refs/mkit/packmap/<branch>`
+//! packlist nodes, advertised through the `refs/kit/packmap/<branch>`
 //! metadata ref. Each push appends one node (a `prev` pointer plus the packs
 //! it added); a fetch walks the chain oldest-first so every delta's base is
 //! already in the store when its pack is unpacked.
@@ -16,11 +16,11 @@ use crate::source::RemoteSource;
 
 /// Ref under which a branch's transfer packlist key is advertised. The value
 /// is the BLAKE3 of the packlist chain head, an auxiliary content-addressed
-/// blob (not a packfile). It lives in the `refs/mkit/` metadata namespace so
+/// blob (not a packfile). It lives in the `refs/kit/` metadata namespace so
 /// it never collides with real heads or tags. See [`mkit_core::transfer`].
 #[must_use]
 pub fn packmap_ref(branch: &str) -> String {
-    format!("refs/mkit/packmap/{branch}")
+    format!("refs/kit/packmap/{branch}")
 }
 
 /// Push and fetch callers may carry a short branch name or its full ref name.

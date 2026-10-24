@@ -267,7 +267,7 @@ contract and independently version any changed auxiliary bytes.
 UTF-8, exactly eight LF-terminated lines (no extra whitespace):
 
 ```text
-mkit-history-transaction-v1
+kit-history-transaction-v1
 <repository lower-hex>
 <full ref name>
 <previous ref lower-hex or ->

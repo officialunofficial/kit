@@ -1,6 +1,6 @@
 {
   "bin": "tree_9entry_multi_0_4_8.bin",
-  "blake3": "ab6741fe3c5a2f63e147a85e8232ab1a04fb4199ee12729c17ee316007c179c9",
+  "blake3": "3e84381949af227800c6274588a355e7dc5ef93e9fe3f433c829a7744cfcaf16",
   "description": "9-entry tree, multi-leaf proof over positions {0, 4, 8}.",
   "entries": [
     {
@@ -23,7 +23,7 @@
   "kind": "tree_entry",
   "max_items": 3,
   "name": "tree_9entry_multi_0_4_8",
-  "object_id_hex": "f7b4fac9b95763b06dce55551fb08e1303d059d5215f010b4bfce36298af2433",
+  "object_id_hex": "39433535dfc3a02579762e91e718bfebe10da0f9a85b16894a62bf77935a0882",
   "positions": [
     0,
     4,

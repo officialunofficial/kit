@@ -2,7 +2,7 @@
 spec: SPEC-WRITE-GRANTS
 version: 1
 status: draft-normative
-audience: implementers of mkit.transport.v1 servers that restrict writes or serve private repositories, of the ssh and enc serve paths, and of clients, wallets and CLIs that issue, store or present grants
+audience: implementers of kit.transport.v1 servers that restrict writes or serve private repositories, of the ssh and enc serve paths, and of clients, wallets and CLIs that issue, store or present grants
 ---
 
 # SPEC-WRITE-GRANTS &mdash; namespace owners delegate repository writes and reads
@@ -153,7 +153,7 @@ the same text rules:
 A grant is eleven fields:
 
 ```text
-mkit-write-grant:v1
+kit-write-grant:v1
 <namespace>
 <repository scope>
 <grantee>
@@ -168,7 +168,7 @@ mkit-write-grant:v1
 
 | Field | Rule |
 |---|---|
-| domain | The literal `mkit-write-grant:v1`. |
+| domain | The literal `kit-write-grant:v1`. |
 | `namespace` | A self-certifying namespace (§2). |
 | `repository scope` | Either one repository in `namespace`, written `<namespace>/<name>` with `name` from the §7.4 grammar, or the whole namespace, written `<namespace>/*`. No other wildcard exists. |
 | `grantee` | The grantee's Ed25519 public key as 64 lowercase hexadecimal digits. |
@@ -202,7 +202,7 @@ flag       = "c" / "u" / "f" / "d"
 - A **prefix pattern** is a valid ref name `P` followed by `/*`. It
   matches every ref whose name begins with `P/`, at any depth. The single
   trailing `*` is the only wildcard; a bare `*` is not a pattern.
-- A pattern MUST NOT be, or begin with, `refs/mkit/packmap/`. Packmap
+- A pattern MUST NOT be, or begin with, `refs/kit/packmap/`. Packmap
   refs are never matched directly; §8.3 covers them through their
   branch.
 - Flags: `c` create, `u` update, `f` force, `d` delete. §8 defines what
@@ -228,7 +228,7 @@ grant the signer chose.
 An example grant (illustrative, not a test vector):
 
 ```text
-mkit-write-grant:v1
+kit-write-grant:v1
 0x8ba1f109551bd432803012645ac136ddd64dba72
 0x8ba1f109551bd432803012645ac136ddd64dba72/website
 3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29
@@ -248,7 +248,7 @@ repair it:
 
 - a field count other than eleven, an empty field, a final line feed,
   a carriage return, or a byte outside the §3.1 range;
-- a domain other than `mkit-write-grant:v1`;
+- a domain other than `kit-write-grant:v1`;
 - a namespace or repository identity outside the §7.4 grammar, or a
   repository scope in another namespace;
 - a decimal with a sign, a leading zero, or a value out of range;
@@ -259,13 +259,13 @@ repair it:
   duplicated;
 - ref scopes that are not `-` for a `read` grant, or `-` for a grant with
   `write`;
-- a pattern outside §3.3, a pattern under `refs/mkit/packmap/`, an
+- a pattern outside §3.3, a pattern under `refs/kit/packmap/`, an
   unknown flag, flags out of the `cufd` order or repeated, more than 16
   entries, entries out of order, or two entries with one pattern;
 - `expiry <= created`, or a lifetime above `GRANT_MAX_LIFETIME_MS`;
 - a statement longer than `MAX_STATEMENT_BYTES`.
 
-`mkit-write-grant:v1` is a new domain separator
+`kit-write-grant:v1` is a new domain separator
 ([SPEC-CONVENTIONS §4](SPEC-CONVENTIONS.md#4-domain-separator-and-namespace-naming)).
 §12.1 lists every separator this document introduces.
 
@@ -418,7 +418,7 @@ The owner raises the epoch with an epoch statement of seven fields,
 encoded by the §3.1 rules:
 
 ```text
-mkit-write-epoch:v1
+kit-write-epoch:v1
 <namespace>
 <new epoch>
 <audiences>
@@ -439,7 +439,7 @@ mkit-write-epoch:v1
 
 The owner signs it with any scheme valid for the namespace (§4), and it
 travels in the §4.2 encoding `<statement>.<scheme>.<blob>`.
-`mkit-write-epoch:v1` is a new domain separator. The §3.5 rejections
+`kit-write-epoch:v1` is a new domain separator. The §3.5 rejections
 apply with the field count seven.
 
 ### 5.2 Acceptance
@@ -749,14 +749,14 @@ determines the required flag from the request and the ref's state at
 
 A branch's packmap ref travels with its head. For a grantee:
 
-- A scope that matches `refs/heads/<x>` covers `refs/mkit/packmap/<x>`.
+- A scope that matches `refs/heads/<x>` covers `refs/kit/packmap/<x>`.
 - An `AdvanceRefs` is authorized only when its head ref is
   `refs/heads/<x>` and its packmap ref is exactly
-  `refs/mkit/packmap/<x>`. The flags are evaluated on the head change
+  `refs/kit/packmap/<x>`. The flags are evaluated on the head change
   only.
 - Packmap writes are allowed only together with the covered head, in
   one `AdvanceRefs`. A direct `UpdateRef` on any ref under
-  `refs/mkit/packmap/` is `permission_denied`.
+  `refs/kit/packmap/` is `permission_denied`.
 - A head-only `UpdateRef` on `refs/heads/<x>` is authorized under the
   head's flags. It consumes no ticket and needs no packmap scope.
 
@@ -799,7 +799,7 @@ repositories. Operators should set this default at deployment creation.
   statement is seven fields, encoded by the §3.1 rules:
 
   ```text
-  mkit-repo-visibility:v1
+  kit-repo-visibility:v1
   <repository>
   <visibility>
   <audiences>
@@ -916,7 +916,7 @@ subject for its lease receipts; this exception grants no content read.
 An unauthorized read of a private repository MUST be indistinguishable
 from a read of a repository that does not exist: the same Connect code,
 message, details and response headers. Its timing SHOULD NOT differ
-measurably. `X-Mkit-Ref`
+measurably. `X-Kit-Ref`
 ([SPEC-TRANSPORT-CONNECT §7.9](SPEC-TRANSPORT-CONNECT.md#79-consistency-and-paging))
 follows the same rule.
 
@@ -946,7 +946,7 @@ above 24 hours.
 **Token statement.** Eight fields, encoded by the §3.1 rules:
 
 ```text
-mkit-url-token:v1
+kit-url-token:v1
 <audience>
 <repository>
 <target>
@@ -969,7 +969,7 @@ mkit-url-token:v1
 `<statement>.<signature>`: the unpadded base64url of the statement, a
 `.`, and the unpadded base64url of a 64-byte Ed25519 signature over the
 32-byte BLAKE3 of the statement. Verification uses the strict predicate
-of [SPEC-SIGNING §1](SPEC-SIGNING.md#1-signing-primitives). `mkit-url-token:v1` is a new
+of [SPEC-SIGNING §1](SPEC-SIGNING.md#1-signing-primitives). `kit-url-token:v1` is a new
 domain separator.
 
 **Key.** A token is signed by a **dedicated deployment URL-token key**:
@@ -977,7 +977,7 @@ an Ed25519 key used for nothing else. It MUST NOT be the receipt key,
 the hook key, the admin key, or any key that signs auth v2. The
 deployment rotates it by key id. It keeps a retired key in its
 verification set for at least `url_token_ttl` after retirement, and
-publishes the set with key ids at `GET /.well-known/mkit-url-token-keys.json`,
+publishes the set with key ids at `GET /.well-known/kit-url-token-keys.json`,
 with `Cache-Control: public, max-age=300`, using SPEC-SERVER §7.2's key-list
 JSON shape and this section's 32hex `keyId`, as
 [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) requires.
@@ -1011,7 +1011,7 @@ and MUST NOT substitute for the visibility change time. A repository with no
 stored visibility has never changed, so its tokens carry no such bound. The
 time is read in the same strong read as the visibility, so it adds no storage
 round trip. This is a
-verification rule only: the `mkit-url-token:v1` statement is unchanged.
+verification rule only: the `kit-url-token:v1` statement is unchanged.
 
 **Response.** `IssueObjectUrl` returns the token and its expiry. The URL
 form MUST carry it only in a `token=` query parameter. Header and cookie
@@ -1022,7 +1022,7 @@ query redaction are specified in [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md).
 
 ## 10. ssh and enc principals
 
-The frozen `mkit.rpc.v1.ssh` protocol, and the enc transport, carry no
+The frozen `kit.rpc.v1.ssh` protocol, and the enc transport, carry no
 `X-Write-Grant` header, and this document does not change them. Grants
 for their principals are registered server-side instead.
 
@@ -1143,13 +1143,13 @@ Each is the literal first field of its statement and is permanent:
 
 | Separator | Statement |
 |---|---|
-| `mkit-write-grant:v1` | Grant (§3). |
-| `mkit-write-epoch:v1` | Epoch statement (§5.1). |
-| `mkit-repo-visibility:v1` | Visibility statement (§9.1). |
-| `mkit-url-token:v1` | URL token (§9.4). |
+| `kit-write-grant:v1` | Grant (§3). |
+| `kit-write-epoch:v1` | Epoch statement (§5.1). |
+| `kit-repo-visibility:v1` | Visibility statement (§9.1). |
+| `kit-url-token:v1` | URL token (§9.4). |
 
-They are distinct from the auth v2 separator `mkit-write:v2` and from
-the workspace grant separator `mkit-workspace-grant:v1`.
+They are distinct from the auth v2 separator `kit-write:v2` and from
+the workspace grant separator `kit-workspace-grant:v1`.
 
 ---
 
@@ -1170,7 +1170,7 @@ the workspace grant separator `mkit-workspace-grant:v1`.
   view contains.
 - Owners that no single key controls, for example multisig or contract
   accounts.
-- The workspace grant (`mkit-workspace-grant:v1`). It grants workspace
+- The workspace grant (`kit-workspace-grant:v1`). It grants workspace
   permissions, not repository access, and stays separate.
 
 ### 13.1 Golden fixtures

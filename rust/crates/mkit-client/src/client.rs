@@ -1265,7 +1265,7 @@ mod unsigned_write_tests {
             assert!(
                 failure
                     .procedure
-                    .starts_with("/mkit.transport.v1.TransportService/")
+                    .starts_with("/kit.transport.v1.TransportService/")
             );
             self.0.borrow_mut().push((
                 failure.kind,
@@ -1343,9 +1343,9 @@ mod unsigned_write_tests {
                 .page_size,
             Some(7)
         );
-        assert!(requests[3].headers().get("x-mkit-ref").is_none());
-        assert!(requests[4].headers().get("x-mkit-ref").is_none());
-        assert_eq!(requests[5].headers()["x-mkit-ref"], "refs/heads/main");
+        assert!(requests[3].headers().get("x-kit-ref").is_none());
+        assert!(requests[4].headers().get("x-kit-ref").is_none());
+        assert_eq!(requests[5].headers()["x-kit-ref"], "refs/heads/main");
     }
 
     #[test]

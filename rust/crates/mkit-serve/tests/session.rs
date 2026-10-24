@@ -10,9 +10,9 @@ use common::*;
 use mkit_core::hash::hash;
 use mkit_core::protocol::{PackKey, Transport as _, TransportError};
 use mkit_core::refs::RefWriteCondition;
-use mkit_rpc::mkit::common::v1::RefExpectation;
-use mkit_rpc::mkit::rpc::v1::ErrorCode;
-use mkit_rpc::mkit::rpc::v1::ssh::DownloadPackHeader;
+use mkit_rpc::kit::common::v1::RefExpectation;
+use mkit_rpc::kit::rpc::v1::ErrorCode;
+use mkit_rpc::kit::rpc::v1::ssh::DownloadPackHeader;
 use mkit_serve::{
     DOWNLOAD_CHUNK_MAX, FrameIoError, MAX_BYTES_PER_CONN, MAX_FRAMES_PER_CONN, MAX_REF_NAME_BYTES,
     REF_NAME_OUTSIDE_REFS, ReadFrames, SessionConfig, SessionEnd, UploadLimits,
@@ -364,7 +364,7 @@ fn read_and_list_refs() {
         list_refs(Some("/bad")),
     ]);
     assert_eq!(end, SessionEnd::Clean);
-    let read = |f: &mkit_rpc::mkit::rpc::v1::ssh::SshFrame| match &f.body {
+    let read = |f: &mkit_rpc::kit::rpc::v1::ssh::SshFrame| match &f.body {
         Some(Body::ReadRefResponse(r)) => r.object_id.clone(),
         other => panic!("expected ReadRefResponse, got {other:?}"),
     };
@@ -707,7 +707,7 @@ fn ref_names_outside_refs_are_refused_by_name() {
     assert!(
         fx.files()
             .iter()
-            .all(|p| p.starts_with(".mkit") || p.starts_with("refs"))
+            .all(|p| p.starts_with(".kit") || p.starts_with("refs"))
     );
 }
 
@@ -859,7 +859,7 @@ fn session_writes_only_packs_and_refs() {
         fx.files(),
         [
             // The ref lock.
-            std::path::PathBuf::from(".mkit/refs/.lock"),
+            std::path::PathBuf::from(".kit/refs/.lock"),
             std::path::PathBuf::from("packs").join(hex),
             std::path::PathBuf::from("refs/heads/main"),
         ],

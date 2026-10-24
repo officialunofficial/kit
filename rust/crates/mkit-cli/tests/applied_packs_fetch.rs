@@ -212,7 +212,7 @@ fn self_heal_recovers_when_object_store_is_wiped_but_record_survives() {
     // Wipe bob's object store contents out-of-band, but keep the
     // applied-packs record — exactly the staleness scenario the self-heal
     // path exists for.
-    let bob_mkit = bob.path().join(".mkit");
+    let bob_mkit = bob.path().join(".kit");
     let objects_dir = bob_mkit.join("objects");
     assert!(objects_dir.is_dir(), "precondition: objects dir exists");
     fs::remove_dir_all(&objects_dir).unwrap();
@@ -262,7 +262,7 @@ fn self_heal_recovers_when_object_store_is_wiped_but_record_survives() {
 /// an expected set to compare the applied-packs record against.
 fn packmap_chain_packs(tx: &dyn Transport, branch: &str) -> HashSet<Hash> {
     let mut out = HashSet::new();
-    let mut cursor = tx.read_ref(&format!("refs/mkit/packmap/{branch}")).unwrap();
+    let mut cursor = tx.read_ref(&format!("refs/kit/packmap/{branch}")).unwrap();
     while let Some(key) = cursor {
         let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();
         let node = transfer::decode_packlist(&bytes).unwrap();
@@ -325,7 +325,7 @@ fn multi_branch_fetch_persists_the_union_of_every_branchs_pack_digests() {
     let n = fetch_all(bob.path(), &tx, "default").expect("single fetch across all branches");
     assert_eq!(n, 3, "fetch must report all three branches");
 
-    let record_path = bob.path().join(".mkit/applied-packs/default");
+    let record_path = bob.path().join(".kit/applied-packs/default");
     let got = parse_record(&record_path);
     assert_eq!(
         got, expected,
@@ -386,7 +386,7 @@ fn cross_branch_fetch_persists_progress_before_a_later_branchs_failure_propagate
     // Delete the remote's packmap ref for "zzz" only — its branch head ref
     // stays advertised, so `fetch_all` still lists it, but resolving its
     // packmap now returns `None`, which is `DispatchError::PackmapMissing`.
-    let zzz_packmap_path = remote.path().join("refs/mkit/packmap/zzz");
+    let zzz_packmap_path = remote.path().join("refs/kit/packmap/zzz");
     assert!(
         zzz_packmap_path.exists(),
         "precondition: zzz's packmap ref exists on the remote"
@@ -405,7 +405,7 @@ fn cross_branch_fetch_persists_progress_before_a_later_branchs_failure_propagate
     // Despite the fetch failing on "zzz", the single end-of-fetch persist
     // must still have durably recorded the packs applied for "aaa" (which
     // was processed first, by construction).
-    let record_path = bob.path().join(".mkit/applied-packs/default");
+    let record_path = bob.path().join(".kit/applied-packs/default");
     assert!(
         record_path.exists(),
         "the applied-packs record must have been persisted despite the later failure"
@@ -459,7 +459,7 @@ fn multi_branch_fetch_loads_the_record_exactly_once() {
     use std::os::unix::fs::PermissionsExt;
 
     let remote = three_branch_file_remote();
-    let url = format!("mkit+file://{}", remote.path().display());
+    let url = format!("kit+file://{}", remote.path().display());
 
     let bob = tempfile::tempdir().unwrap();
     init_repo(bob.path());
@@ -467,7 +467,7 @@ fn multi_branch_fetch_loads_the_record_exactly_once() {
 
     // Pre-create an UNREADABLE record so every load attempt fails (and
     // warns) deterministically.
-    let record_dir = bob.path().join(".mkit").join("applied-packs");
+    let record_dir = bob.path().join(".kit").join("applied-packs");
     fs::create_dir_all(&record_dir).unwrap();
     let record_path = record_dir.join("origin");
     fs::write(&record_path, b"").unwrap();
@@ -525,7 +525,7 @@ fn multi_branch_fetch_persists_the_record_at_most_once() {
     use std::os::unix::fs::PermissionsExt;
 
     let remote = three_branch_file_remote();
-    let url = format!("mkit+file://{}", remote.path().display());
+    let url = format!("kit+file://{}", remote.path().display());
 
     let bob = tempfile::tempdir().unwrap();
     init_repo(bob.path());
@@ -534,7 +534,7 @@ fn multi_branch_fetch_persists_the_record_at_most_once() {
     // Pre-create the applied-packs DIRECTORY read-only: the record file is
     // absent (a clean, warning-free empty load) but any persist fails to
     // create its sibling tmp file.
-    let record_dir = bob.path().join(".mkit").join("applied-packs");
+    let record_dir = bob.path().join(".kit").join("applied-packs");
     fs::create_dir_all(&record_dir).unwrap();
     fs::set_permissions(&record_dir, fs::Permissions::from_mode(0o555)).unwrap();
     if fs::write(record_dir.join("probe"), b"").is_ok() {

@@ -85,7 +85,7 @@ impl Repo {
         self.commit(msg);
     }
     fn mkit_dir(&self) -> std::path::PathBuf {
-        self.path().join(".mkit")
+        self.path().join(".kit")
     }
 }
 

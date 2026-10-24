@@ -20,6 +20,10 @@
 //! (see `SPEC-FASTCDC.md` §2 determinism contract).
 
 /// Frozen splitmix64 seed for v1 — ASCII `"MKITFCDC"` as big-endian u64.
+///
+/// The seed is a protocol constant, not a product name. It sets the chunk
+/// boundaries, so every chunked blob id depends on it. The seed keeps its
+/// original value when the other format names change. Do not rename it.
 pub const SEED: u64 = 0x4D4B_4954_4643_4443;
 
 /// Minimum chunk size (`16 KiB`). `cut` will not return a value below

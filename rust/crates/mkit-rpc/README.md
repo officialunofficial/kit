@@ -41,7 +41,7 @@ regenerate it with `scripts/regen-rpc-proto.sh` after editing a schema.
 
 ## Shared Connect transport bindings
 
-The opt-in `transport` feature owns the canonical `mkit.transport.v1` and
+The opt-in `transport` feature owns the canonical `kit.transport.v1` and
 `grpc.health.v1` messages and Connect service traits in `mkit_rpc::transport`.
 Both `mkit-server` and `mkit-transport-connect` re-export these shared types at
 their existing public paths. The feature uses ConnectRPC without its native

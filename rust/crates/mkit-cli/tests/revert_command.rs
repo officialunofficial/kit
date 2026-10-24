@@ -41,7 +41,7 @@ fn commit(root: &Path, name: &str, content: &[u8], msg: &str) {
 }
 
 fn main_tip(root: &Path) -> String {
-    fs::read_to_string(root.join(".mkit/refs/heads/main"))
+    fs::read_to_string(root.join(".kit/refs/heads/main"))
         .unwrap()
         .trim()
         .to_owned()
@@ -93,7 +93,7 @@ fn revert_conflict_records_state_and_abort_restores() {
     let out = run_in(root, &["revert", &target]);
     assert!(!out.status.success(), "revert should conflict");
     assert!(
-        root.join(".mkit/REVERT_HEAD").exists(),
+        root.join(".kit/REVERT_HEAD").exists(),
         "conflict must record REVERT_HEAD"
     );
 
@@ -102,7 +102,7 @@ fn revert_conflict_records_state_and_abort_restores() {
     assert!(ab.status.success(), "revert --abort: {ab:?}");
     assert_eq!(main_tip(root), before, "abort restores HEAD");
     assert!(
-        !root.join(".mkit/REVERT_HEAD").exists(),
+        !root.join(".kit/REVERT_HEAD").exists(),
         "abort clears REVERT_HEAD"
     );
     assert_eq!(

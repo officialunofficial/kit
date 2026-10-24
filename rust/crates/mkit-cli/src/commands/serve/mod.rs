@@ -1,9 +1,9 @@
-//! `mkit serve <path>` — the `mkit+ssh://` forced-command server: the
-//! `mkit.rpc.v1.ssh` frame protocol (SPEC-TRANSPORT §4.2) on stdin/stdout
+//! `mkit serve <path>` — the `kit+ssh://` forced-command server: the
+//! `kit.rpc.v1.ssh` frame protocol (SPEC-TRANSPORT §4.2) on stdin/stdout
 //! against a local repository.
 //!
 //! The engine is [`mkit_serve::serve_session`] over a [`Repo`]. The refs and
-//! packs are the files that `FileTransport` and `mkit+file://` remotes read
+//! packs are the files that `FileTransport` and `kit+file://` remotes read
 //! and write. The server builds no async runtime. A reader thread feeds
 //! stdin frames to the session and enforces the idle timeout
 //! (`--idle-timeout-secs`, `stdio.rs`).
@@ -15,7 +15,7 @@ use std::time::Duration;
 use clap::Parser;
 use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
 use mkit_core::repo_lock::{self, LockError, RepoLock};
-use mkit_rpc::mkit::rpc::v1::ErrorCode;
+use mkit_rpc::kit::rpc::v1::ErrorCode;
 use mkit_serve::{Repo, SessionConfig, SessionEnd, WriteFrames, WritePolicy, serve_session};
 
 use crate::clap_shim;
@@ -36,7 +36,7 @@ const MAX_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
 #[command(
     name = "mkit serve",
     about = "Speak the mkit-rpc SSH-frame protocol on stdin/stdout (the \
-             mkit+ssh:// forced-command server). It has no network listener."
+             kit+ssh:// forced-command server). It has no network listener."
 )]
 struct ServeOpts {
     /// Path to the repository to serve. Under `--root` it is the
@@ -149,7 +149,7 @@ fn resolve_root_repo(root: &Path, path: &str) -> Result<(PathBuf, WritePolicy), 
     if resolved != expected {
         return Err(exit::NOPERM);
     }
-    if !resolved.is_dir() || !resolved.join(".mkit").is_dir() {
+    if !resolved.is_dir() || !resolved.join(".kit").is_dir() {
         return Err(exit::DATAERR);
     }
     if let Ok(pinned) = std::env::var("MKIT_SERVE_ROOT") {
@@ -269,7 +269,7 @@ pub(crate) fn resolve_repo_path(path: &str) -> Result<PathBuf, u8> {
     if !resolved.is_dir() {
         return Err(exit::DATAERR);
     }
-    if !resolved.join(".mkit").is_dir() {
+    if !resolved.join(".kit").is_dir() {
         return Err(exit::DATAERR);
     }
     if let Ok(root) = std::env::var("MKIT_SERVE_ROOT") {
@@ -289,11 +289,11 @@ pub(crate) fn resolve_repo_path(path: &str) -> Result<PathBuf, u8> {
 /// for its whole life, so while it is held exclusively no streaming upload
 /// of theirs can be in flight, and a busy lock (another server is up)
 /// skips the sweep. `FileTransport` writers (`mkit push` to a
-/// `mkit+file://` remote) take no such lock, but write each temp file in
+/// `kit+file://` remote) take no such lock, but write each temp file in
 /// one go, so the age bound keeps theirs safe. The exclusive hold is then
 /// released and the shared one taken, as before.
 fn lock_and_sweep(target: &ServeTarget) -> Result<RepoLock, LockError> {
-    let dot_mkit = target.root.join(".mkit");
+    let dot_mkit = target.root.join(".kit");
     if let Ok(exclusive) =
         repo_lock::acquire(&dot_mkit, crate::commands::SERVE_LOCK, Duration::ZERO)
     {

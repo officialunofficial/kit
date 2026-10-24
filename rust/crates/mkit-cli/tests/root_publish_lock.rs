@@ -53,7 +53,7 @@ fn repo_with_commit() -> (tempfile::TempDir, tempfile::TempDir) {
 /// with a lock diagnostic — i.e. the command acquired the lock.
 fn assert_blocks_on_held_lock(args: &[&str]) {
     let (td, xdg) = repo_with_commit();
-    let mkit_dir = td.path().join(".mkit");
+    let mkit_dir = td.path().join(".kit");
 
     // Hold the same lock gc/the publishers use.
     let guard = mkit_core::repo_lock::acquire_default(&mkit_dir, "worktree.lock")

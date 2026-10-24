@@ -59,7 +59,7 @@ impl Checkpoint {
             return None;
         }
         let mut fields = body.split('\n');
-        if fields.next()? != "mkit-fetch-head-v1" {
+        if fields.next()? != "kit-fetch-head-v1" {
             return None;
         }
         let head = parse_lowercase_hash(fields.next()?.as_bytes())?;
@@ -83,7 +83,7 @@ impl Checkpoint {
 
     pub(crate) fn persist(self, path: &std::path::Path) -> std::io::Result<()> {
         let body = format!(
-            "mkit-fetch-head-v1\n{}\n{}\n{}\n{}",
+            "kit-fetch-head-v1\n{}\n{}\n{}\n{}",
             to_hex(&self.head),
             to_hex(&self.tip),
             self.packs,

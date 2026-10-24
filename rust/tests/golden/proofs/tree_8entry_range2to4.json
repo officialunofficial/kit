@@ -1,6 +1,6 @@
 {
   "bin": "tree_8entry_range2to4.bin",
-  "blake3": "0dc7e396230e5dd29ae35f36ceb6cc0b9ccc0ae2f1459dff3d71df19ab95be60",
+  "blake3": "d7045c53d833bf4575f18d199e1c91a0b5e5e480c5ae7b689f7a93896cd5351f",
   "description": "8-entry tree, range proof over positions 2..=4.",
   "entries": [
     {
@@ -23,7 +23,7 @@
   "kind": "tree_entry",
   "max_items": 3,
   "name": "tree_8entry_range2to4",
-  "object_id_hex": "968a4670cdb49a0d3d543772a5787ef2cdbd66b6e067e1420d37e1a9bd94cc08",
+  "object_id_hex": "c91df594a6760b965b3b44022d9116e80aecb1b8f2a321194107a46bfd067290",
   "proof_kind": "range",
   "size": 101,
   "start": 2

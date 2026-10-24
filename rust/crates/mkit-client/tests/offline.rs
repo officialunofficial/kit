@@ -194,7 +194,7 @@ fn challenge_body() -> String {
     serde_json::json!({
         "code": "permission_denied",
         "message": "admission required",
-        "details": [{"type": "mkit.transport.v1.AdmissionChallenge", "value": STANDARD.encode(detail)}],
+        "details": [{"type": "kit.transport.v1.AdmissionChallenge", "value": STANDARD.encode(detail)}],
     })
     .to_string()
 }
@@ -253,14 +253,14 @@ fn malformed_or_duplicated_challenge_details_are_invalid() {
     let bad_scheme = encode_admission_challenge(&[("Bad Scheme", "v")], "");
     let single = |detail: &[u8]| {
         serde_json::json!({"code":"permission_denied","details":[
-            {"type":"mkit.transport.v1.AdmissionChallenge","value":STANDARD.encode(detail)}]})
+            {"type":"kit.transport.v1.AdmissionChallenge","value":STANDARD.encode(detail)}]})
         .to_string()
     };
     let doubled = {
         let good = STANDARD.encode(encode_admission_challenge(&[("challenge-a", "v")], ""));
         serde_json::json!({"code":"permission_denied","details":[
-            {"type":"mkit.transport.v1.AdmissionChallenge","value":good},
-            {"type":"mkit.transport.v1.AdmissionChallenge","value":good}]})
+            {"type":"kit.transport.v1.AdmissionChallenge","value":good},
+            {"type":"kit.transport.v1.AdmissionChallenge","value":good}]})
         .to_string()
     };
     for body in [single(&bad_scheme), single(&[]), doubled] {
@@ -278,7 +278,7 @@ fn valid_advance() -> proto::AdvanceRefsRequest {
         head_ref: Some("refs/heads/main".into()),
         head_expectation: Some(proto::RefExpectation::Missing.into()),
         head_new_id: Some([1; 32].to_vec()),
-        packmap_ref: Some("refs/mkit/packmap/main".into()),
+        packmap_ref: Some("refs/kit/packmap/main".into()),
         packmap_expectation: Some(proto::RefExpectation::Missing.into()),
         packmap_new_id: Some([2; 32].to_vec()),
         ..Default::default()
@@ -294,7 +294,7 @@ fn per_rpc_calls_return_typed_resumable_outcomes_without_waiting() {
         }
         .encode_to_vec();
         serde_json::json!({"code":"unavailable","details":[
-            {"type":"type.googleapis.com/mkit.transport.v1.PendingVerification","value":STANDARD.encode(detail)}]})
+            {"type":"type.googleapis.com/kit.transport.v1.PendingVerification","value":STANDARD.encode(detail)}]})
         .to_string()
     };
     let cases: Vec<(u16, Vec<(&str, &str)>, String)> = vec![
@@ -307,7 +307,7 @@ fn per_rpc_calls_return_typed_resumable_outcomes_without_waiting() {
         (
             503,
             vec![],
-            r#"{"code":"unavailable","message":"lag","details":[{"type":"mkit.transport.v1.MembershipNotVisible"}]}"#.into(),
+            r#"{"code":"unavailable","message":"lag","details":[{"type":"kit.transport.v1.MembershipNotVisible"}]}"#.into(),
         ),
         (
             503,
@@ -454,7 +454,7 @@ fn anonymous_reads_carry_no_credentials() {
         )
     });
     let found =
-        block_on(anonymous(&script).pack_exists(&[5; 32], Some("refs/mkit/packmap/main"), None))
+        block_on(anonymous(&script).pack_exists(&[5; 32], Some("refs/kit/packmap/main"), None))
             .unwrap();
     assert!(found.value);
     assert!(found.identity.is_none());
@@ -464,7 +464,7 @@ fn anonymous_reads_carry_no_credentials() {
         assert!(!headers.contains_key(name), "{name}");
     }
     assert_eq!(headers["x-repository"], "default");
-    assert_eq!(headers["x-mkit-ref"], "refs/mkit/packmap/main");
+    assert_eq!(headers["x-kit-ref"], "refs/kit/packmap/main");
 }
 
 // ---- listing -------------------------------------------------------------
@@ -581,14 +581,14 @@ fn the_packmap_chain_walks_oldest_first_and_lists_each_pack_once() {
         download_reply(&key, bytes.len() as u64, bytes, 1024)
     });
     let order =
-        block_on(anonymous(&script).resolve_pack_chain(second, "refs/mkit/packmap/main")).unwrap();
+        block_on(anonymous(&script).resolve_pack_chain(second, "refs/kit/packmap/main")).unwrap();
     assert_eq!(order, [a, b, c]);
     assert!(
         script
             .seen
             .borrow()
             .iter()
-            .all(|(request, _)| request.headers()["x-mkit-ref"] == "refs/mkit/packmap/main")
+            .all(|(request, _)| request.headers()["x-kit-ref"] == "refs/kit/packmap/main")
     );
 }
 
@@ -695,7 +695,7 @@ fn a_stream_end_frame_challenge_is_a_typed_admission_required() {
         let mut body = Vec::new();
         let detail = encode_admission_challenge(&[("challenge-a", "v")], "admit");
         let end = serde_json::json!({"error": {"code":"permission_denied","details":[
-            {"type":"mkit.transport.v1.AdmissionChallenge","value":STANDARD.encode(detail)}]}})
+            {"type":"kit.transport.v1.AdmissionChallenge","value":STANDARD.encode(detail)}]}})
         .to_string();
         body.push(2);
         body.extend_from_slice(&u32::try_from(end.len()).unwrap().to_be_bytes());

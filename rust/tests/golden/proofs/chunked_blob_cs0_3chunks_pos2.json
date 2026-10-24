@@ -1,6 +1,6 @@
 {
   "bin": "chunked_blob_cs0_3chunks_pos2.bin",
-  "blake3": "86e27e7e9ec4e8987d5243aef8839855f3aac8aec9fdead2a438b794120a52c6",
+  "blake3": "e8ff0b96301233ae23ce2fa983a886472fe4651c73aad5fcaf5ce0a45d098834",
   "chunk_hashes_hex": [
     "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
   ],
@@ -10,7 +10,7 @@
   "kind": "chunk",
   "max_items": 1,
   "name": "chunked_blob_cs0_3chunks_pos2",
-  "object_id_hex": "00a63a562fc5b0fbe3eda18138923dfff4f94f0ca60ef869e32825028199d63d",
+  "object_id_hex": "afbb936cbd2702c2628f188e38cd91284aa0d1d90197587935e5c04787d3674c",
   "position": 2,
   "proof_kind": "single",
   "size": 69,

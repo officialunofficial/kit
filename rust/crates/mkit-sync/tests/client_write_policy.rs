@@ -67,7 +67,7 @@ impl EnvelopeSigner for Envelope {
 }
 fn transport(origin: &str, repository: &str, seed: u8) -> ConnectTransport {
     ConnectTransport::connect_with_signer(
-        &format!("mkit+{origin}/{repository}"),
+        &format!("kit+{origin}/{repository}"),
         Some(Arc::new(Envelope(SigningKey::from_bytes(&[seed; 32])))),
     )
     .unwrap()
@@ -143,7 +143,7 @@ fn challenge() -> WireResponse {
         status: 402,
         content_type: "application/json",
         body: format!(
-            r#"{{"code":"permission_denied","message":"admission required","details":[{{"type":"mkit.transport.v1.AdmissionChallenge","value":"{detail}"}}]}}"#
+            r#"{{"code":"permission_denied","message":"admission required","details":[{{"type":"kit.transport.v1.AdmissionChallenge","value":"{detail}"}}]}}"#
         ).into_bytes(),
     }
 }
@@ -495,7 +495,7 @@ fn ticketed_upload_402_never_runs_admission_helper_on_either_backend() {
             0 => {
                 assert!(request.path.contains("GetServerInfo"));
                 ok(&proto::GetServerInfoResponse {
-                    protocol: Some("mkit.transport.v1".into()),
+                    protocol: Some("kit.transport.v1".into()),
                     spec_version: Some(2),
                     max_pack_bytes: Some(32 << 20),
                     part_size: Some(8 << 20),
@@ -621,7 +621,7 @@ fn unsigned_admission_recovery_matches_both_backends_without_synthetic_signer() 
                 .unwrap();
             assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
         } else {
-            let tx = ConnectTransport::connect(&format!("mkit+{}/default", server.origin))
+            let tx = ConnectTransport::connect(&format!("kit+{}/default", server.origin))
                 .unwrap()
                 .with_admission(AdmissionPolicy::new(host.clone()));
             TransportSource::new(&tx)

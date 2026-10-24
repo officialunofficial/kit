@@ -1,4 +1,4 @@
-//! End-to-end coverage for the path-aware `.gitignore`/`.mkitignore` matcher.
+//! End-to-end coverage for the path-aware `.gitignore`/`.kitignore` matcher.
 //! The unit-level grammar is exercised in `mkit_core::ignore`; these
 //! tests prove the upgraded semantics actually flow through the real
 //! commands that consume the matcher — `add` (worktree tree-builder) and
@@ -42,7 +42,7 @@ fn anchored_pattern_ignores_root_only_through_add() {
     // `secret.txt` at the top level but NOT `sub/secret.txt`.
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    fs::write(root.join(".mkitignore"), "/secret.txt\n").unwrap();
+    fs::write(root.join(".kitignore"), "/secret.txt\n").unwrap();
     fs::write(root.join("secret.txt"), b"top\n").unwrap();
     fs::create_dir(root.join("sub")).unwrap();
     fs::write(root.join("sub/secret.txt"), b"nested\n").unwrap();
@@ -65,7 +65,7 @@ fn double_star_dir_pattern_ignores_at_any_depth() {
     // contents never get staged.
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    fs::write(root.join(".mkitignore"), "**/build/\n").unwrap();
+    fs::write(root.join(".kitignore"), "**/build/\n").unwrap();
     fs::create_dir_all(root.join("a/build")).unwrap();
     fs::write(root.join("a/build/out.o"), b"x\n").unwrap();
     fs::write(root.join("a/keep.txt"), b"k\n").unwrap();
@@ -84,7 +84,7 @@ fn double_star_dir_pattern_ignores_at_any_depth() {
 
 #[test]
 fn gitignore_is_read_too() {
-    // With no `.mkitignore`, a `.gitignore` must still be honored by `add`.
+    // With no `.kitignore`, a `.gitignore` must still be honored by `add`.
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
     fs::write(root.join(".gitignore"), "*.log\n").unwrap();
@@ -102,12 +102,12 @@ fn gitignore_is_read_too() {
 
 #[test]
 fn mkitignore_reinclude_overrides_gitignore() {
-    // `.mkitignore` is applied last, so its re-include (`!`) wins over a
+    // `.kitignore` is applied last, so its re-include (`!`) wins over a
     // `.gitignore` exclusion under last-match-wins.
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
     fs::write(root.join(".gitignore"), "*.log\n").unwrap();
-    fs::write(root.join(".mkitignore"), "!keep.log\n").unwrap();
+    fs::write(root.join(".kitignore"), "!keep.log\n").unwrap();
     fs::write(root.join("keep.log"), b"k\n").unwrap();
     fs::write(root.join("drop.log"), b"d\n").unwrap();
 
@@ -130,7 +130,7 @@ fn ls_files_others_excludes_files_under_ignored_dir() {
     // though the file's own name matches no pattern.
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    fs::write(root.join(".mkitignore"), "node_modules/\n").unwrap();
+    fs::write(root.join(".kitignore"), "node_modules/\n").unwrap();
     fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
     fs::write(root.join("node_modules/pkg/index.js"), b"x\n").unwrap();
     fs::write(root.join("main.rs"), b"y\n").unwrap();
@@ -167,7 +167,7 @@ fn clean_fd_keeps_files_under_ignored_dir_without_x() {
     // removed. Guards against the ancestor-ignore propagation gap.
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    fs::write(root.join(".mkitignore"), "node_modules/\n").unwrap();
+    fs::write(root.join(".kitignore"), "node_modules/\n").unwrap();
     fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
     fs::write(root.join("node_modules/pkg/index.js"), b"x\n").unwrap();
     fs::create_dir(root.join("junk")).unwrap();
@@ -190,7 +190,7 @@ fn clean_fdx_removes_ignored_dir() {
     // everything under it, even though the children match no pattern.
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    fs::write(root.join(".mkitignore"), "node_modules/\n").unwrap();
+    fs::write(root.join(".kitignore"), "node_modules/\n").unwrap();
     fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
     fs::write(root.join("node_modules/pkg/index.js"), b"x\n").unwrap();
     fs::write(root.join("keep.txt"), b"k\n").unwrap();
@@ -265,7 +265,7 @@ fn tracked_ignored_file_not_deleted_in_status_without_index_file() {
     );
     fs::write(root.join(".gitignore"), "*.log\n").unwrap();
     // Simulate a fresh checkout: remove the staging index file entirely.
-    let _ = fs::remove_file(root.join(".mkit").join("index"));
+    let _ = fs::remove_file(root.join(".kit").join("index"));
 
     let status = out_str(&run_in(root, x, &["status", "--porcelain"]));
     assert!(
@@ -316,7 +316,7 @@ fn add_explicit_ignored_path_refused_without_force() {
     // git refuses an explicitly-named ignored path unless `-f`.
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    fs::write(root.join(".mkitignore"), "*.secret\n").unwrap();
+    fs::write(root.join(".kitignore"), "*.secret\n").unwrap();
     fs::write(root.join("app.secret"), b"s\n").unwrap();
     fs::write(root.join("app.txt"), b"t\n").unwrap();
 

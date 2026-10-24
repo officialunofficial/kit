@@ -290,7 +290,7 @@ fn assert_before_sink_rejection(pack: &[u8], limits: DecodeLimits) {
 
 #[test]
 fn compressed_claim_rejected_before_decompression() {
-    let mut body = b"MKIT".to_vec();
+    let mut body = b"KIT\0".to_vec();
     body.extend_from_slice(&2u32.to_le_bytes());
     body.extend_from_slice(&1u32.to_le_bytes());
     body.push(0x03);

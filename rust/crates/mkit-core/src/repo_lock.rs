@@ -12,7 +12,7 @@
 //! kernel already knows the difference, because it releases the
 //! process's `flock` the moment its file descriptors close (including on
 //! sudden process death). A waiter that actually blocks on that kernel
-//! lock therefore never confuses the two: `ls .mkit/*.lock` will show
+//! lock therefore never confuses the two: `ls .kit/*.lock` will show
 //! the file whether or not anyone holds it — use `lsof`/`fuser` (or a
 //! bounded acquire attempt) to check liveness, not existence.
 //!
@@ -47,7 +47,7 @@
 //! locking is closer to POSIX semantics but still depends on
 //! server/client support and is not something this module verifies at
 //! runtime. The same caution applies to SMB/CIFS mounts and to most
-//! FUSE-backed network filesystems. A `.mkit/` directory served from
+//! FUSE-backed network filesystems. A `.kit/` directory served from
 //! such a mount can silently lose the mutual-exclusion property this
 //! module documents above: two processes on different hosts (or even
 //! the same host, depending on client/server behavior) may both believe
@@ -55,7 +55,7 @@
 //! underlying filesystem type and has no fallback locking strategy for
 //! this case — repositories that must be shared across hosts should use
 //! one of mkit's network transports (see `docs/specs/SPEC-TRANSPORT.md`)
-//! rather than a shared network-mounted `.mkit/` directory. See
+//! rather than a shared network-mounted `.kit/` directory. See
 //! `docs/THREAT-MODEL.md` §7 for how this affects mkit's fail-closed
 //! locking claims.
 
@@ -150,7 +150,7 @@ impl Drop for RepoLock {
 /// (no polling) rather than spinning. Returns a guard that `Drop`s into
 /// a release.
 ///
-/// `dir` is usually the `.mkit/` directory (not the worktree root).
+/// `dir` is usually the `.kit/` directory (not the worktree root).
 /// `name` is the lockfile basename, e.g. `"index.lock"`.
 ///
 /// # Errors

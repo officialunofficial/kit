@@ -18,15 +18,15 @@ use mkit_core::{
 use serde::Deserialize;
 use std::time::Duration;
 
-const SERVICE: &str = "/mkit.transport.v1.TransportService/";
-const DOWNLOAD_PACK: &str = "/mkit.transport.v1.TransportService/DownloadPack";
+const SERVICE: &str = "/kit.transport.v1.TransportService/";
+const DOWNLOAD_PACK: &str = "/kit.transport.v1.TransportService/DownloadPack";
 /// Default cap on one buffered HTTP response.
 pub(crate) const RESPONSE_LIMIT: usize = 1024 * 1024;
 /// A `ListRefs` page is at most 2 MiB when encoded (SPEC-TRANSPORT-CONNECT §7.9).
 pub(crate) const LIST_REFS_LIMIT: usize = 2 * 1024 * 1024;
-const CHALLENGE_TYPE: &str = "mkit.transport.v1.AdmissionChallenge";
-const PENDING_TYPE: &str = "mkit.transport.v1.PendingVerification";
-const MEMBERSHIP_TYPE: &str = "mkit.transport.v1.MembershipNotVisible";
+const CHALLENGE_TYPE: &str = "kit.transport.v1.AdmissionChallenge";
+const PENDING_TYPE: &str = "kit.transport.v1.PendingVerification";
+const MEMBERSHIP_TYPE: &str = "kit.transport.v1.MembershipNotVisible";
 /// Public message older servers send for a membership lag without the typed
 /// detail. Only the fallback in [`membership_lag`] reads it.
 const MEMBERSHIP_LAG: &str = "repository membership not yet visible";
@@ -494,7 +494,7 @@ pub(crate) struct Rpc<'a, T, S, C, O = NoObserver, P: ?Sized = NoRequestPolicy> 
     pub(crate) location_lifetime: Option<&'a std::sync::OnceLock<Option<u64>>>,
 }
 
-/// Per-call options: a caller-owned identity, an optional `X-Mkit-Ref` hint
+/// Per-call options: a caller-owned identity, an optional `X-Kit-Ref` hint
 /// (STC §7.9) and the response cap.
 #[derive(Clone, Copy)]
 pub(crate) struct Opts<'a> {
@@ -854,7 +854,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         });
         if let Some(hint) = hint {
             request.headers_mut().insert(
-                "x-mkit-ref",
+                "x-kit-ref",
                 HeaderValue::from_str(hint).map_err(|_| Error::Invalid("ref hint"))?,
             );
         }
@@ -1893,7 +1893,7 @@ mod channel_tests {
             Ok(crate::RequestHeaders::new())
         }
         fn request_timeout(&self, procedure: &str) -> Option<Duration> {
-            assert_eq!(procedure, "/mkit.transport.v1.TransportService/ReadRef");
+            assert_eq!(procedure, "/kit.transport.v1.TransportService/ReadRef");
             Some(self.0)
         }
     }

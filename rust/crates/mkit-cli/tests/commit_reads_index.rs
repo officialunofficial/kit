@@ -1,5 +1,5 @@
 //! Verifies that `mkit commit` builds its tree from the staging index
-//! (`.mkit/index`), NOT from a recursive walk of the working tree.
+//! (`.kit/index`), NOT from a recursive walk of the working tree.
 //!
 //! Before this contract, `mkit add` wrote to the index
 //! but `mkit commit` ignored it and snapshotted the entire worktree.
@@ -73,7 +73,7 @@ fn tree_of_commit(cwd: &Path, commit: &str) -> String {
 fn head_commit(cwd: &Path) -> String {
     // refs/heads/<branch> contains the commit hash. Default branch
     // after `mkit init` is `main`.
-    let head_path = cwd.join(".mkit/refs/heads/main");
+    let head_path = cwd.join(".kit/refs/heads/main");
     fs::read_to_string(&head_path).unwrap().trim().to_string()
 }
 
@@ -185,7 +185,7 @@ fn commit_reports_invalid_index_instead_of_nothing_staged() {
         ino: 0,
         ctime_ns: 0,
     });
-    fs::write(p.join(".mkit/index"), idx.serialize()).unwrap();
+    fs::write(p.join(".kit/index"), idx.serialize()).unwrap();
 
     let out = run(p, &["commit", "-m", "should fail"]);
     assert!(!out.status.success(), "commit must reject invalid index");
@@ -554,7 +554,7 @@ fn add_dot_respects_mkitignore_before_commit() {
     let td = init_repo();
     let p = td.path();
 
-    fs::write(p.join(".mkitignore"), b"secret.txt\n").unwrap();
+    fs::write(p.join(".kitignore"), b"secret.txt\n").unwrap();
     fs::write(p.join("public.txt"), b"safe").unwrap();
     fs::write(p.join("secret.txt"), b"do not commit").unwrap();
 
@@ -563,7 +563,7 @@ fn add_dot_respects_mkitignore_before_commit() {
 
     let body = head_tree_body(p);
     assert!(body.contains("public.txt"));
-    assert!(body.contains(".mkitignore"));
+    assert!(body.contains(".kitignore"));
     assert!(
         !body.contains("secret.txt"),
         "ignored file was committed by add .: {body}"
@@ -580,13 +580,13 @@ fn add_dot_keeps_existing_tracked_file_that_is_now_ignored() {
     ok(p, &["add", "."]);
     ok(p, &["commit", "-m", "track secret"]);
 
-    fs::write(p.join(".mkitignore"), b"secret.txt\n").unwrap();
+    fs::write(p.join(".kitignore"), b"secret.txt\n").unwrap();
     ok(p, &["add", "."]);
     ok(p, &["commit", "-m", "ignore future secrets"]);
 
     let body = head_tree_body(p);
     assert!(body.contains("public.txt"));
-    assert!(body.contains(".mkitignore"));
+    assert!(body.contains(".kitignore"));
     assert!(
         body.contains("secret.txt"),
         "add . staged deletion for an existing tracked ignored file: {body}"
@@ -602,13 +602,13 @@ fn add_dot_removes_tracked_ignored_file_when_it_is_missing() {
     ok(p, &["add", "."]);
     ok(p, &["commit", "-m", "track secret"]);
 
-    fs::write(p.join(".mkitignore"), b"secret.txt\n").unwrap();
+    fs::write(p.join(".kitignore"), b"secret.txt\n").unwrap();
     fs::remove_file(p.join("secret.txt")).unwrap();
     ok(p, &["add", "."]);
     ok(p, &["commit", "-m", "drop secret"]);
 
     let body = head_tree_body(p);
-    assert!(body.contains(".mkitignore"));
+    assert!(body.contains(".kitignore"));
     assert!(
         !body.contains("secret.txt"),
         "add . failed to stage an actual tracked deletion: {body}"
@@ -967,7 +967,7 @@ fn add_with_missing_index_seeds_from_head_before_commit() {
     ok(p, &["add", "."]);
     ok(p, &["commit", "-m", "first"]);
 
-    fs::remove_file(p.join(".mkit/index")).unwrap();
+    fs::remove_file(p.join(".kit/index")).unwrap();
     fs::write(p.join("a.txt"), b"alpha v2").unwrap();
     ok(p, &["add", "a.txt"]);
     ok(p, &["commit", "-m", "update a"]);

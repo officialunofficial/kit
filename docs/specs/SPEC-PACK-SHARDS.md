@@ -243,7 +243,7 @@ This SPEC ships in two stages.
   <out>/packs/<hex>/shards.manifest
   <out>/packs/<hex>/shards/<index>
   ```
-  Default `<out>` is `<repo>/.mkit/pack-shards/`. Operators publish
+  Default `<out>` is `<repo>/.kit/pack-shards/`. Operators publish
   the directory to whichever HTTP / S3 target their clients hit.
   Size gate per §6 enforced; bypass with `--force`.
 * **Bench**: `rust/benches/benches/pack_shard_transfer.rs` measures

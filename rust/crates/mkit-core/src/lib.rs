@@ -70,7 +70,7 @@ pub mod verify;
 pub mod write_auth;
 
 // Repository path layout: the single authority
-// for resolving state under `.mkit/`, splitting shared (common-dir)
+// for resolving state under `.kit/`, splitting shared (common-dir)
 // from per-worktree state.
 pub mod layout;
 

@@ -258,7 +258,7 @@ mod tests {
         AdmissionContext {
             origin: "https://example.invalid",
             repository: "default",
-            procedure: "/mkit.transport.v1.TransportService/UpdateRef",
+            procedure: "/kit.transport.v1.TransportService/UpdateRef",
             required,
         }
     }
@@ -317,7 +317,7 @@ mod tests {
             serde_json::json!({
                 "origin": "https://example.invalid",
                 "repository": "default",
-                "procedure": "/mkit.transport.v1.TransportService/UpdateRef",
+                "procedure": "/kit.transport.v1.TransportService/UpdateRef",
                 "description": "untrusted",
                 "challenges": [{"scheme": "admit", "value": "opaque"}],
                 "headers": {"www-authenticate": ["Admission id=\"a,b\", request=\"x,y\", Basic realm=\"other\""], "admission-required": ["invoice"]}

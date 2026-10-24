@@ -67,7 +67,7 @@ const V1: &str = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\n"
 const V2: &str = "l1\nL2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nL13\nl14\n";
 
 fn head_commit(cwd: &Path) -> String {
-    fs::read_to_string(cwd.join(".mkit/refs/heads/main"))
+    fs::read_to_string(cwd.join(".kit/refs/heads/main"))
         .unwrap()
         .trim()
         .to_string()
@@ -286,7 +286,7 @@ fn patch_conflicts_with_all() {
 fn patch_refuses_ignored_path_without_force() {
     let td = init_repo();
     let p = td.path();
-    fs::write(p.join(".mkitignore"), b"secret.txt\n").unwrap();
+    fs::write(p.join(".kitignore"), b"secret.txt\n").unwrap();
     fs::write(p.join("secret.txt"), "topsecret\n").unwrap();
 
     // Without -f, an ignored untracked path must be refused (matching `add`).
@@ -309,7 +309,7 @@ fn patch_stages_ignored_path_with_force() {
     ok(p, &["add", "."]);
     ok(p, &["commit", "-m", "seed"]);
 
-    fs::write(p.join(".mkitignore"), b"secret.txt\n").unwrap();
+    fs::write(p.join(".kitignore"), b"secret.txt\n").unwrap();
     fs::write(p.join("secret.txt"), "topsecret\n").unwrap();
 
     // With -f, the ignored path can be patched in.

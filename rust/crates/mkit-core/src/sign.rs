@@ -17,7 +17,7 @@
 //! only) — see SPEC §3.
 //!
 //! Keys live on disk as the raw 32-byte Ed25519 seed at
-//! `.mkit/keys/default.key`, mode 0600. Public-key derivation is
+//! `.kit/keys/default.key`, mode 0600. Public-key derivation is
 //! deterministic from the seed.
 
 use crate::hash::{HASH_LEN, Hash};
@@ -49,11 +49,11 @@ pub fn effective_uid() -> u32 {
 
 /// Domain separator used when signing commit objects. The trailing
 /// `\x00` is load-bearing — see `docs/specs/SPEC-SIGNING.md` §2. Twelve bytes.
-pub const COMMIT_DOMAIN: &[u8] = b"mkit.commit\x00";
+pub const COMMIT_DOMAIN: &[u8] = b"kit.commit\x00";
 
 /// Domain separator used when signing remix objects. Eleven bytes
 /// including the trailing `\x00`.
-pub const REMIX_DOMAIN: &[u8] = b"mkit.remix\x00";
+pub const REMIX_DOMAIN: &[u8] = b"kit.remix\x00";
 
 /// Domain separator used when signing annotated/signed tag objects.
 /// Nine bytes including the trailing `\x00`.
@@ -61,7 +61,7 @@ pub const REMIX_DOMAIN: &[u8] = b"mkit.remix\x00";
 /// DELIBERATELY DISTINCT from [`COMMIT_DOMAIN`] / [`REMIX_DOMAIN`] so a
 /// tag signature can never be replayed as a commit/remix signature, or
 /// vice versa — see `docs/specs/SPEC-SIGNING.md` §2 and §4a.
-pub const TAG_DOMAIN: &[u8] = b"mkit.tag\x00";
+pub const TAG_DOMAIN: &[u8] = b"kit.tag\x00";
 
 /// 32-byte Ed25519 public key.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,7 +77,7 @@ impl fmt::Debug for PublicKey {
 ///
 /// This is **not** the expanded RFC 8032 secret key; it is the raw
 /// 32-byte input to `SHA512(seed)` from which the scalar and prefix are
-/// derived. We deliberately mirror what `.mkit/keys/default.key` stores.
+/// derived. We deliberately mirror what `.kit/keys/default.key` stores.
 ///
 /// The wrapped bytes are zeroed on drop.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -595,11 +595,11 @@ pub fn verify_object_signature(obj: &Object) -> Result<(), MkitError> {
 }
 
 // -------------------------------------------------------------------
-// Key file I/O — `.mkit/keys/default.key`
+// Key file I/O — `.kit/keys/default.key`
 // -------------------------------------------------------------------
 //
 // The on-disk contract (SPEC-SIGNING §7):
-// - Path: caller-provided, conventionally `<repo>/.mkit/keys/default.key`.
+// - Path: caller-provided, conventionally `<repo>/.kit/keys/default.key`.
 // - Contents: raw 32-byte Ed25519 seed (NOT the expanded secret key).
 // - Permissions: file 0600, parent directory 0700.
 // - Owner: must equal the calling process's effective uid.
@@ -786,7 +786,7 @@ fn create_secure_dir_all(parent: &Path) -> Result<(), MkitError> {
 /// 5. `fsync` the parent directory so the rename itself is durable.
 ///
 /// On Windows the file is written with default ACLs; users should keep
-/// `.mkit/keys/` inside `%USERPROFILE%` (SPEC-SIGNING §7).
+/// `.kit/keys/` inside `%USERPROFILE%` (SPEC-SIGNING §7).
 pub fn save_key(path: &Path, kp: &KeyPair) -> Result<(), MkitError> {
     save_raw_32(path, &kp.secret.0)
 }
@@ -1639,7 +1639,7 @@ mod tests {
         let kp = KeyPair::from_seed([0xCD; 32]);
         save_key(&p, &kp).unwrap();
         // save_key just tightened the dir to 0o700; loosen it again
-        // to simulate a host where `.mkit/keys/` was created via a
+        // to simulate a host where `.kit/keys/` was created via a
         // non-mkit tool that ignored the mode.
         let mut perm = std::fs::metadata(&dir).unwrap().permissions();
         perm.set_mode(0o755);

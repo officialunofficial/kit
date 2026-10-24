@@ -6,7 +6,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{Algorithm, Error, KeyAttrs, Result, SecretKey};
 
-const MAGIC: &[u8; 8] = b"MKITKSV1";
+const MAGIC: &[u8; 8] = b"KITKSV1\0";
 const VERSION: u8 = 1;
 const DEK_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
@@ -275,7 +275,7 @@ fn algorithm_from_id(id: u8) -> Result<Algorithm> {
         2 => Ok(Algorithm::Secp256k1),
         3 => Ok(Algorithm::P256),
         // 4 (BLS12-381 threshold) is reserved and MUST be rejected inside
-        // a `MKITKSV1` record (§6.1.1).
+        // a `KITKSV1\0` record (§6.1.1).
         other => Err(Error::Encoding(format!("unknown algorithm id: {other}"))),
     }
 }
@@ -561,7 +561,7 @@ mod tests {
     }
 
     /// SPEC-KEYSTORE §6.1.1: id `0x04` is reserved and a decoder MUST
-    /// reject it inside a `MKITKSV1` record.
+    /// reject it inside a `KITKSV1\0` record.
     #[test]
     fn encrypted_record_decode_rejects_reserved_algorithm_4() {
         let mut encoded = stable_record().encode().expect("encode stable record");
@@ -601,7 +601,7 @@ mod tests {
     }
 
     fn stable_record_hex() -> &'static str {
-        "4d4b49544b53563101010104000000746573742000000024242424242424242424242424242424242424242424242424242424242424240e000000656432353531393a737461626c651800000022222222222222222222222222222222222222222222222220000000f9fffde0ffe7e285b5bcb4b4b4c7dbd2c0c3d5c6d1b3b4b4b4d0d1d2d5c1d8c030000000c125a54e1efba6d6a70f5689ff3be3a070d5819657dcb8a6220934a533a21b67791eb2cb0db7cbdd4815ce51b3ea5ae0"
+        "4b49544b5356310001010104000000746573742000000024242424242424242424242424242424242424242424242424242424242424240e000000656432353531393a737461626c651800000022222222222222222222222222222222222222222222222220000000fffde0ffe7e285b4b5bcb4b4b4c7dbd2c0c3d5c6d1b3b4b4b4d0d1d2d5c1d8c030000000c125a54e1efba6d6a70f5689ff3be3a070d5819657dcb8a6220934a533a21b67f5d431c5ce8294ae3de45124fbce7b24"
     }
 
     fn hex_lower(bytes: &[u8]) -> String {
@@ -788,7 +788,7 @@ mod kani_proofs {
     }
 
     /// SPEC-KEYSTORE §6.1.1: "A decoder MUST reject id `0x04` inside a
-    /// `MKITKSV1` record."
+    /// `KITKSV1\0` record."
     #[kani::proof]
     #[kani::stub(std::fmt::format, no_format)]
     #[kani::unwind(26)]

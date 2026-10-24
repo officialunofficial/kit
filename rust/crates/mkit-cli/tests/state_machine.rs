@@ -15,7 +15,7 @@
 //!     `ORIG_HEAD`, in-progress op state, conflict sidecars, attestations,
 //!     recovery roots, and their closure — is present), valid signatures over
 //!     signed refs, operation-state coherence (a successful `--abort`/
-//!     `--continue` leaves no in-progress marker or `mkit-conflicts` residue),
+//!     `--continue` leaves no in-progress marker or `kit-conflicts` residue),
 //!     no leaked lock files, and clean process-exit hygiene.
 //!   * **Drive level = CLI subprocess** — the corruption-prone orchestration
 //!     (merge/rebase/reset/`--continue`/`--abort` + conflict sidecars + locks)
@@ -293,7 +293,7 @@ fn pick_branch(layout: &RepoLayout, a: u8) -> String {
 /// like `CheckoutNew` make two), so the caller can run exit hygiene on each.
 /// Pure-filesystem ops return an empty vec.
 fn apply(op: &Op, root: &Path, xdg: &Path, ctr: &mut u32) -> Vec<Output> {
-    let mkit_dir = root.join(".mkit");
+    let mkit_dir = root.join(".kit");
     let layout = RepoLayout::single(root);
     match op {
         Op::Write(a, b) => {
@@ -365,11 +365,11 @@ fn apply(op: &Op, root: &Path, xdg: &Path, ctr: &mut u32) -> Vec<Output> {
 
 /// Operation-state-coherence invariant (the conflict-sidecar half of the
 /// oracle). A successful `--abort` or `--continue` *concludes* the operation
-/// and must leave no residue — no in-progress marker AND no `mkit-conflicts`
+/// and must leave no residue — no in-progress marker AND no `kit-conflicts`
 /// sidecar. This holds for rebase too: `rebase --continue`/`--abort` returns
 /// exit 0 only on full completion (a re-pause returns non-zero), so a 0 exit
 /// means the rebase state must be gone. This is exactly the class of bug —
-/// "abort returns success but forgets to delete `MERGE_HEAD`/`mkit-conflicts`"
+/// "abort returns success but forgets to delete `MERGE_HEAD`/`kit-conflicts`"
 /// — that pure reachability/signature checks miss.
 fn check_op_state(
     op: &Op,
@@ -422,7 +422,7 @@ fn run_scenario(ops: &[Op]) -> Result<(), String> {
     let mut ctr = 0u32;
     for (i, op) in ops.iter().enumerate() {
         let label = format!("op{i} `{op}`");
-        let mkit_dir = root.join(".mkit");
+        let mkit_dir = root.join(".kit");
         let pre_verb = in_progress(&mkit_dir);
         let outputs = apply(op, root, xdgp, &mut ctr);
         for out in &outputs {
@@ -514,7 +514,7 @@ mod unit {
     #[test]
     fn op_state_invariant_detects_stale_marker() {
         let dir = tempfile::tempdir().unwrap();
-        let mkit_dir = dir.path().join(".mkit");
+        let mkit_dir = dir.path().join(".kit");
         fs::create_dir_all(&mkit_dir).unwrap();
         let merge_head = mkit_dir.join("MERGE_HEAD");
 
@@ -561,9 +561,9 @@ mod unit {
         }
     }
 
-    /// Walk `.mkit/objects/<2>/<62>` and return the first loose object file.
+    /// Walk `.kit/objects/<2>/<62>` and return the first loose object file.
     fn first_object_file(root: &Path) -> std::path::PathBuf {
-        let objects = root.join(".mkit").join("objects");
+        let objects = root.join(".kit").join("objects");
         for shard in fs::read_dir(&objects).unwrap().flatten() {
             if !shard.path().is_dir() {
                 continue;

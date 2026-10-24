@@ -16,12 +16,12 @@ use super::{GrantError, MAX_REF_SCOPES};
 
 /// No pattern may be, or begin with, this prefix (§3.3). §8.3 covers packmap
 /// refs through their branch instead.
-pub const PACKMAP_PREFIX: &str = "refs/mkit/packmap/";
+pub const PACKMAP_PREFIX: &str = "refs/kit/packmap/";
 /// The branch prefix a packmap ref travels with (§8.3).
 const HEADS_PREFIX: &str = "refs/heads/";
 
 /// §8.3: the head ref `refs/heads/<x>` whose flags cover the packmap ref
-/// `refs/mkit/packmap/<x>`. `None` for anything else, including a name
+/// `refs/kit/packmap/<x>`. `None` for anything else, including a name
 /// outside SPEC-REFS §3. The server authorizes a packmap write only
 /// together with this head, in one `AdvanceRefs`, under the head's
 /// [`RefScopes::effective_flags`].
@@ -31,7 +31,7 @@ pub fn packmap_head(ref_name: &str) -> Option<String> {
     validate_ref_name(ref_name).then(|| format!("{HEADS_PREFIX}{branch}"))
 }
 
-/// §8.3: the packmap ref `refs/mkit/packmap/<x>` of the head ref
+/// §8.3: the packmap ref `refs/kit/packmap/<x>` of the head ref
 /// `refs/heads/<x>`, the inverse of [`packmap_head`]. `None` for anything
 /// else.
 #[must_use]
@@ -253,7 +253,7 @@ impl RefScopes {
     /// gets [`RefFlags::EMPTY`], so every change to it is denied.
     ///
     /// A packmap ref (under [`PACKMAP_PREFIX`]) always gets
-    /// [`RefFlags::EMPTY`], even under `refs/*` or `refs/mkit/*`: §3.3 never
+    /// [`RefFlags::EMPTY`], even under `refs/*` or `refs/kit/*`: §3.3 never
     /// matches packmap refs directly. §8.3 covers one through its head; see
     /// [`packmap_head`].
     #[must_use]
@@ -376,8 +376,8 @@ mod tests {
             Ok(RefPattern::Prefix("refs/heads/wip".into()))
         );
         assert_eq!(RefPattern::parse("refs/*").unwrap().to_string(), "refs/*");
-        // `refs/mkit/packmap` itself is not under the prefix.
-        assert!(RefPattern::parse("refs/mkit/packmap").is_ok());
+        // `refs/kit/packmap` itself is not under the prefix.
+        assert!(RefPattern::parse("refs/kit/packmap").is_ok());
         for bad in [
             "*",
             "/*",
@@ -400,9 +400,9 @@ mod tests {
             );
         }
         for packmap in [
-            "refs/mkit/packmap/*",
-            "refs/mkit/packmap/main",
-            "refs/mkit/packmap/a/*",
+            "refs/kit/packmap/*",
+            "refs/kit/packmap/main",
+            "refs/kit/packmap/a/*",
         ] {
             assert_eq!(RefPattern::parse(packmap), Err(GrantError::PackmapPattern));
         }
@@ -471,7 +471,7 @@ mod tests {
         );
         assert_eq!(
             RefScopes::new(vec![(
-                RefPattern::Prefix("refs/mkit/packmap".into()),
+                RefPattern::Prefix("refs/kit/packmap".into()),
                 RefFlags::CREATE
             )]),
             Err(GrantError::PackmapPattern)
@@ -541,37 +541,33 @@ mod tests {
     /// patterns that textually cover them.
     #[test]
     fn packmap_refs_get_no_flags() {
-        for field in [
-            "refs/*=cufd",
-            "refs/mkit/*=cufd",
-            "refs/*=cufd;refs/mkit/*=u",
-        ] {
+        for field in ["refs/*=cufd", "refs/kit/*=cufd", "refs/*=cufd;refs/kit/*=u"] {
             let s = scopes(field);
-            assert_eq!(s.effective_flags("refs/mkit/packmap/main"), RefFlags::EMPTY);
-            assert_eq!(s.effective_flags("refs/mkit/packmap/a/b"), RefFlags::EMPTY);
+            assert_eq!(s.effective_flags("refs/kit/packmap/main"), RefFlags::EMPTY);
+            assert_eq!(s.effective_flags("refs/kit/packmap/a/b"), RefFlags::EMPTY);
         }
         // Siblings of the packmap namespace are still ordinary refs.
-        let s = scopes("refs/mkit/*=u");
-        assert_eq!(s.effective_flags("refs/mkit/other"), RefFlags::UPDATE);
-        assert_eq!(s.effective_flags("refs/mkit/packmap"), RefFlags::UPDATE);
+        let s = scopes("refs/kit/*=u");
+        assert_eq!(s.effective_flags("refs/kit/other"), RefFlags::UPDATE);
+        assert_eq!(s.effective_flags("refs/kit/packmap"), RefFlags::UPDATE);
     }
 
     #[test]
     fn packmap_head_maps_to_the_branch_and_back() {
         for (packmap, head) in [
-            ("refs/mkit/packmap/main", "refs/heads/main"),
-            ("refs/mkit/packmap/wip/a/b", "refs/heads/wip/a/b"),
+            ("refs/kit/packmap/main", "refs/heads/main"),
+            ("refs/kit/packmap/wip/a/b", "refs/heads/wip/a/b"),
         ] {
             assert_eq!(packmap_head(packmap).as_deref(), Some(head));
             assert_eq!(head_packmap(head).as_deref(), Some(packmap));
         }
         for not_packmap in [
-            "refs/mkit/packmap/",
-            "refs/mkit/packmap",
-            "refs/mkit/packmap/.x",
-            "refs/mkit/packmap/HEAD",
+            "refs/kit/packmap/",
+            "refs/kit/packmap",
+            "refs/kit/packmap/.x",
+            "refs/kit/packmap/HEAD",
             "refs/heads/main",
-            "refs/mkit/packmapx/main",
+            "refs/kit/packmapx/main",
         ] {
             assert_eq!(packmap_head(not_packmap), None, "{not_packmap}");
         }
@@ -585,11 +581,8 @@ mod tests {
         }
         // The head's flags cover the packmap (§8.3); its own flags are empty.
         let s = scopes("refs/heads/wip/*=cu");
-        let head = packmap_head("refs/mkit/packmap/wip/x").unwrap();
+        let head = packmap_head("refs/kit/packmap/wip/x").unwrap();
         assert_eq!(s.effective_flags(&head), RefFlags::parse("cu").unwrap());
-        assert_eq!(
-            s.effective_flags("refs/mkit/packmap/wip/x"),
-            RefFlags::EMPTY
-        );
+        assert_eq!(s.effective_flags("refs/kit/packmap/wip/x"), RefFlags::EMPTY);
     }
 }

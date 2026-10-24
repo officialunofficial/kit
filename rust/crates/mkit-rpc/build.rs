@@ -17,17 +17,17 @@ fn main() {
     #[cfg(any(feature = "transport", feature = "transport-messages"))]
     transport::stage();
     let proto_dir = PathBuf::from("proto");
-    // Shared ref types (mkit.common.v1.RefExpectation / RefEntry), one repo
-    // root up from rust/crates/mkit-rpc — see mkit/common/v1/refs.proto's
+    // Shared ref types (kit.common.v1.RefExpectation / RefEntry), one repo
+    // root up from rust/crates/mkit-rpc — see kit/common/v1/refs.proto's
     // header comment. Also used by apps/repo-worker's repo.proto.
     let common_dir = PathBuf::from("../../../proto");
-    let common_refs_proto = common_dir.join("mkit/common/v1/refs.proto");
+    let common_refs_proto = common_dir.join("kit/common/v1/refs.proto");
 
     let files = [
-        proto_dir.join("mkit/rpc/v1/common.proto"),
-        proto_dir.join("mkit/rpc/v1/signer/signer.proto"),
-        proto_dir.join("mkit/rpc/v1/ssh/ssh.proto"),
-        proto_dir.join("mkit/rpc/v1/verify/verify.proto"),
+        proto_dir.join("kit/rpc/v1/common.proto"),
+        proto_dir.join("kit/rpc/v1/signer/signer.proto"),
+        proto_dir.join("kit/rpc/v1/ssh/ssh.proto"),
+        proto_dir.join("kit/rpc/v1/verify/verify.proto"),
         common_refs_proto.clone(),
     ];
 
@@ -105,7 +105,7 @@ mod transport {
                     .join("../../../proto")
                     .canonicalize()
                     .expect("canonical proto root not found: expected proto/ at repo root");
-                let transport = root.join("mkit/transport/v1/transport.proto");
+                let transport = root.join("kit/transport/v1/transport.proto");
                 let health = root.join("grpc/health/v1/health.proto");
                 println!("cargo:rerun-if-changed={}", transport.display());
                 println!("cargo:rerun-if-changed={}", health.display());
@@ -148,15 +148,15 @@ mod transport {
     // Keep a single generated message tree, while allowing consumers to omit
     // the Connect runtime. Codegen and staging use exactly the same gate.
     fn gate_bindings(out_dir: &Path) {
-        for module in ["mkit.transport.v1.mod.rs", "grpc.health.v1.mod.rs"] {
+        for module in ["kit.transport.v1.mod.rs", "grpc.health.v1.mod.rs"] {
             let path = out_dir.join(module);
             let source = std::fs::read_to_string(&path).expect("read generated module");
             if source.contains("#[cfg(feature = \"transport\")]\ninclude!") {
                 continue;
             }
             let source = source.replace(
-                "include!(\"mkit.transport.v1.transport.__connect.rs\");",
-                "#[cfg(feature = \"transport\")]\ninclude!(\"mkit.transport.v1.transport.__connect.rs\");",
+                "include!(\"kit.transport.v1.transport.__connect.rs\");",
+                "#[cfg(feature = \"transport\")]\ninclude!(\"kit.transport.v1.transport.__connect.rs\");",
             ).replace(
                 "include!(\"grpc.health.v1.health.__connect.rs\");",
                 "#[cfg(feature = \"transport\")]\ninclude!(\"grpc.health.v1.health.__connect.rs\");",

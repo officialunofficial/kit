@@ -27,7 +27,7 @@ review test "is the new key on this list?" a single canonical answer.
 
 The attacker is a hostile remote repo author (THREAT-MODEL §3.1).
 They control every byte in the cloned tree, including
-`<repo>/.mkit/config`. They do NOT control
+`<repo>/.kit/config`. They do NOT control
 `$XDG_CONFIG_HOME/mkit/config`.
 
 Without enforcement, any repo-scoped knob that names a file path,
@@ -38,7 +38,7 @@ in GHSA-001.
 
 The defense is structural, not per-call: at the config READ site,
 every key is classified as either repo-safe (`SAFE`) or user-only
-(`UNSAFE`). UNSAFE keys appearing in `<repo>/.mkit/config` are
+(`UNSAFE`). UNSAFE keys appearing in `<repo>/.kit/config` are
 dropped with a stderr warning. They are only honored when read from
 `$XDG_CONFIG_HOME/mkit/config`.
 
@@ -83,7 +83,7 @@ including a matcher for a `remote.<name>.*` pattern key.
 | `ssh.user_known_hosts_file`          | **UNSAFE** | The source of trust for SSH host-key verification.                                                                                                                                  |
 | `ssh.identity_file`                  | **UNSAFE** | Selects which private key SSH presents. Same shape as `signing_key`.                                                                                                                |
 | `admission_helper` | **UNSAFE** | Names an executable the client runs when a remote answers with an admission challenge ([SPEC-TRANSPORT-CONNECT §5.1](SPEC-TRANSPORT-CONNECT.md#51-admission-challenges)). It spawns a process and can spend the user's money, so it is RCE plus a payment primitive if repo-controlled. Repository config MUST NOT set it. The client runs it only for a remote that passes the user-scoped `trusted_remote_endpoint` gate (§3.4). |
-| `remote.<name>.admission_headers` | **UNSAFE** | Adds header names to the admission-helper allowlist of remote `<name>`. If repo-controlled, it could widen what a helper may attach to requests. It can never add a hard-reserved header (the auth v2 envelope headers, `X-Write-Grant`, `X-Mkit-*`, `X-Forwarded-*`, `Host`, `Content-*`, `Transfer-Encoding`, `Connect-*`, `Cookie`, `Idempotency-Key`, hop-by-hop headers; full list in SPEC-TRANSPORT-CONNECT §5.1); an entry naming one has no effect. `mkit config` SHOULD refuse to write a reserved name, and the load-time warning for one SHOULD use the fixed wording of SPEC-TRANSPORT-CONNECT §5.1. Unlike `remote.<name>.url`, this member of the `remote.<name>.*` family is user-scoped only. |
+| `remote.<name>.admission_headers` | **UNSAFE** | Adds header names to the admission-helper allowlist of remote `<name>`. If repo-controlled, it could widen what a helper may attach to requests. It can never add a hard-reserved header (the auth v2 envelope headers, `X-Write-Grant`, `X-Kit-*`, `X-Forwarded-*`, `Host`, `Content-*`, `Transfer-Encoding`, `Connect-*`, `Cookie`, `Idempotency-Key`, hop-by-hop headers; full list in SPEC-TRANSPORT-CONNECT §5.1); an entry naming one has no effect. `mkit config` SHOULD refuse to write a reserved name, and the load-time warning for one SHOULD use the fixed wording of SPEC-TRANSPORT-CONNECT §5.1. Unlike `remote.<name>.url`, this member of the `remote.<name>.*` family is user-scoped only. |
 | `transport_auth` | **UNSAFE** | Selects whether network requests invoke the ambient signing identity. Repository config MUST NOT enable it. User-scoped envelope signing additionally requires exact `trusted_remote_endpoint` approval before signer resolution. |
 | `attest.default_algorithm`           | **UNSAFE** | Selector. Flipping from `ed25519` to `secp256k1` / `p256` routes attestation signing to whichever non-Ed25519 key the user happens to have set up (confused-deputy).               |
 | `attest.signer`                      | **UNSAFE** | Selector. Flipping from `repo-key` to `external` or `keystore` weaponizes a user-scoped binary/keystore against attacker-chosen content.                                          |
@@ -167,7 +167,7 @@ core.<key>                               (allow-listed git-compat keys)
 ```
 
 Any other field on the in-memory `Config` is suppressed when
-serializing `<repo>/.mkit/config`. The `mkit config <key> <value>`
+serializing `<repo>/.kit/config`. The `mkit config <key> <value>`
 command intercepts UNSAFE keys (`REPO_FORBIDDEN_KEYS.contains(key)`)
 and writes them to the user-scoped file instead.
 
@@ -191,7 +191,7 @@ attaching ambient credentials. The gate fires when ALL of:
 
 - the merged endpoint is non-empty,
 - the repo layer's `remote_endpoint` equals the merged endpoint
-  (that is, it came from `<repo>/.mkit/config`, not user config),
+  (that is, it came from `<repo>/.kit/config`, not user config),
 - the user layer's `trusted_remote_endpoint` does NOT equal the
   merged endpoint,
 - the relevant ambient credential env var is set
@@ -238,7 +238,7 @@ hide:
    compile-fail-style panic with an actionable error message.
 2. **Per-key end-to-end CLI test**
    (`crates/mkit-cli/tests/repo_config_forbidden_keys.rs`). For
-   every UNSAFE key, plants `.mkit/config`, runs `mkit config
+   every UNSAFE key, plants `.kit/config`, runs `mkit config
    <key>`, and asserts the value did NOT propagate to stdout and
    that stderr emitted the named warning.
 3. **Warning-shape snapshot**
@@ -318,7 +318,7 @@ and where each guarantee is anchored.
 
 | Invariant | Enforced by |
 |---|---|
-| An UNSAFE key in `<repo>/.mkit/config` never reaches `Config` | read-site drop in `apply_file_inner` before `apply_kv`; the field stays at its default (§3.1) |
+| An UNSAFE key in `<repo>/.kit/config` never reaches `Config` | read-site drop in `apply_file_inner` before `apply_kv`; the field stays at its default (§3.1) |
 | Serializing repo config never emits an UNSAFE key | explicit write-site allow-list in `config::write` (§3.2) |
 | `mkit config <key> <value>` never writes an UNSAFE key repo-scoped | the command intercepts `REPO_FORBIDDEN_KEYS` and routes to the user-scoped file (§3.2) |
 | A repo can NEVER unilaterally attach ambient credentials to its own endpoint | `enforce_trusted_remote_endpoint` requires the user-scoped `trusted_remote_endpoint` to match (§3.4) |

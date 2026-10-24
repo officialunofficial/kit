@@ -90,7 +90,7 @@ struct CreateOpts {
     /// Don't contact a remote; the epoch defaults to 0.
     #[arg(long)]
     offline: bool,
-    /// Remote (name or mkit+https:// URL) supplying the default audience and
+    /// Remote (name or kit+https:// URL) supplying the default audience and
     /// epoch. Default: the trusted remote.
     #[arg(long, value_name = "REMOTE")]
     remote: Option<String>,
@@ -105,7 +105,7 @@ struct CreateOpts {
 struct AddOpts {
     /// File holding a grant header, or `-` for stdin.
     file: String,
-    /// Remote (name or mkit+https:// URL) to compare the grant's epoch with.
+    /// Remote (name or kit+https:// URL) to compare the grant's epoch with.
     /// Default: the trusted remote.
     #[arg(long, value_name = "REMOTE")]
     remote: Option<String>,
@@ -120,7 +120,7 @@ struct ListOpts {
     /// mark grants `stale epoch` or `future epoch`.
     #[arg(long)]
     check: bool,
-    /// Remote (name or mkit+https:// URL) for --check. Default: the trusted
+    /// Remote (name or kit+https:// URL) for --check. Default: the trusted
     /// remote.
     #[arg(long, value_name = "REMOTE")]
     remote: Option<String>,
@@ -131,7 +131,7 @@ struct ListOpts {
 
 #[derive(Debug, Args)]
 struct RevokeOpts {
-    /// Remote name or mkit+https:// URL.
+    /// Remote name or kit+https:// URL.
     remote: Option<String>,
     /// Namespace to advance (default: the remote URL's, else the signing key's).
     #[arg(long, value_name = "NS")]
@@ -593,7 +593,7 @@ fn list(o: &ListOpts) -> u8 {
         let _ = writeln!(stdout, "  expires    {}", date(g.grant.expiry_ms));
     }
     if o.check && check_audience.is_none() && check_error.is_none() {
-        eprintln!("note: --check needs a remote with an mkit+https:// URL");
+        eprintln!("note: --check needs a remote with an kit+https:// URL");
     }
     exit::OK
 }

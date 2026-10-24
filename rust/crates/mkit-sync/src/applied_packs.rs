@@ -8,7 +8,7 @@
 //!
 //! # Format
 //!
-//! One file per remote: `.mkit/applied-packs/<record>` (the `applied-packs/`
+//! One file per remote: `.kit/applied-packs/<record>` (the `applied-packs/`
 //! directory is created on first write). Contents are a lowercase 64-hex
 //! BLAKE3 pack digest per line, LF-terminated, with no header. Unknown or
 //! malformed lines are ignored on load, for forward compatibility. Writes
@@ -33,7 +33,7 @@
 //! writes, full digest re-verification), so skipping a recorded pack is
 //! purely a performance win, never a correctness risk *on its own*. The one
 //! hazard this record introduces is staleness relative to the object store
-//! (e.g. `.mkit/objects` wiped out-of-band while `applied-packs/` survives);
+//! (e.g. `.kit/objects` wiped out-of-band while `applied-packs/` survives);
 //! the fetch-side self-heal path in `apply_fetched_chain` handles that by
 //! clearing the record and retrying once with a full re-download whenever a
 //! run that skipped at least one pack also hits an error.
@@ -90,7 +90,7 @@ pub struct AppliedPacks {
 }
 
 impl AppliedPacks {
-    /// Load the record for `remote` under `mkit_dir` (the `.mkit/`
+    /// Load the record for `remote` under `mkit_dir` (the `.kit/`
     /// directory). A missing file yields an empty set — this is the normal
     /// state for a fresh clone, not an error.
     ///

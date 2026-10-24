@@ -174,7 +174,7 @@ fn add(layout: &RepoLayout, cwd: &Path, path: &str, commit_ish: Option<&str>) ->
 fn check_add_target(layout: &RepoLayout, target: &Path) -> Result<(), u8> {
     // Containment: never nest a linked tree inside an existing
     // worktree of this repository — the tree walkers treat a nested
-    // `.mkit` as a foreign-repo boundary, which would make the outer
+    // `.kit` as a foreign-repo boundary, which would make the outer
     // tree silently skip the inner one.
     let siblings =
         super::all_worktree_layouts(layout).map_err(|e| super::error(&e, exit::DATAERR))?;

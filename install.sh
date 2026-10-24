@@ -198,13 +198,13 @@ esac
 # Two records are consulted:
 #   1. $state_dir/installed-tag — global per-user record, survives
 #      install_dir rotation.
-#   2. $install_dir/.mkit-installed-tag — local-to-binary record,
+#   2. $install_dir/.kit-installed-tag — local-to-binary record,
 #      survives state-dir clearance and catches the case where a user
 #      runs the installer with a different MKIT_STATE_DIR.
 # Both are written on every install; on a downgrade attempt, EITHER
 # file disagreeing causes the guard to fire.
 state_file="${state_dir}/installed-tag"
-bin_state_file="${install_dir}/.mkit-installed-tag"
+bin_state_file="${install_dir}/.kit-installed-tag"
 
 read_state_file() {
   if [ -f "$1" ]; then

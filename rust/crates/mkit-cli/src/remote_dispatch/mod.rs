@@ -1,8 +1,8 @@
 //! URL-scheme → `Transport` dispatch for `mkit push` / `mkit pull`.
 //!
-//! The Rust binary wires all five shipping schemes here: `mkit+file://`,
-//! `mkit+https://` (and `mkit+http://` for local dev), `mkit+s3://`, and
-//! `mkit+ssh://`. The memory transport is in-process only, so it is
+//! The Rust binary wires all five shipping schemes here: `kit+file://`,
+//! `kit+https://` (and `kit+http://` for local dev), `kit+s3://`, and
+//! `kit+ssh://`. The memory transport is in-process only, so it is
 //! reached via [`push_all`] / [`pull_all`] with an `Arc<MemoryTransport>`
 //! constructed in-process rather than URL-based construction. Integration
 //! tests in the `mkit-cli` crate exercise the memory path directly.
@@ -14,7 +14,7 @@
 //!   fail at connect time; the first signed request returns
 //!   `TransportError::AccessDenied`.
 //! - SSH: spawns `ssh(1)` subprocess — inherits the user's agent / keys /
-//!   `~/.ssh/config`. Per-repo `.mkit/config` SSH options (host-key
+//!   `~/.ssh/config`. Per-repo `.kit/config` SSH options (host-key
 //!   checking, known-hosts path, identity file) are wired through via
 //!   `SshTransport::connect_with_options` when config is loaded.
 
@@ -139,7 +139,7 @@ pub enum DispatchError {
         source: Option<mkit_sync::SourceError>,
     },
     /// The remote advertised a branch ref but no packmap
-    /// (`refs/mkit/packmap/<branch>`) for it. mkit speaks a single,
+    /// (`refs/kit/packmap/<branch>`) for it. mkit speaks a single,
     /// packmap-only transfer dialect: the push path ALWAYS advertises a
     /// packmap before moving the branch ref, so a branch with a tip but no
     /// packmap is a corrupt/incomplete remote, not a format we degrade to.
@@ -192,7 +192,7 @@ pub enum DispatchError {
     /// ref name (per [`mkit_core::refs::validate_ref_name`]). A remote name
     /// *is* a ref name, so this should never occur for a config-registered
     /// remote; it is defence-in-depth against a malformed name being used as
-    /// a raw path component under `.mkit/applied-packs/`.
+    /// a raw path component under `.kit/applied-packs/`.
     #[error("invalid remote name for applied-packs record: '{0}'")]
     InvalidRemoteName(String),
     /// One advance would need more data packs than the server permits per
@@ -456,7 +456,7 @@ pub(crate) fn open_trusted_for_push(
 }
 
 /// The single chokepoint that resolves SSH trust-pinning and
-/// `mkit+https://` envelope-signing config from `cfg` and opens a
+/// `kit+https://` envelope-signing config from `cfg` and opens a
 /// transport. Every config-bearing caller — [`open_trusted`] (push /
 /// fetch / pull) and `clone` — routes through here, so both are resolved
 /// and threaded in exactly ONE place. A new remote command physically
@@ -490,7 +490,7 @@ fn open_with_config_for_remote(
 }
 
 fn is_connect_url(url: &str) -> bool {
-    url.starts_with("mkit+https://") || url.starts_with("mkit+http://")
+    url.starts_with("kit+https://") || url.starts_with("kit+http://")
 }
 
 /// [`open_trusted`] for a Connect endpoint, returning the concrete
@@ -514,7 +514,7 @@ pub(crate) fn open_connect_trusted(
         .map_err(DispatchError::UntrustedRemote)?;
     if !is_connect_url(endpoint) {
         return Err(DispatchError::UnsupportedScheme(format!(
-            "`{endpoint}` is not an mkit+https:// or mkit+http:// remote; grant epochs and repository visibility are served over Connect"
+            "`{endpoint}` is not an kit+https:// or kit+http:// remote; grant epochs and repository visibility are served over Connect"
         )));
     }
     open_connect_with_config(endpoint, &cfg.merged, layout, Some(remote_name), sign)
@@ -566,7 +566,7 @@ fn open_connect_parts(
         .map(|signer| signer.public_key_hex());
     // Resolve only the selected config fallback: an authoritative environment
     // path must not be defeated by an ignored fallback's tilde/HOME error.
-    let ca_file = if url.starts_with("mkit+https://")
+    let ca_file = if url.starts_with("kit+https://")
         && std::env::var_os(mkit_transport_connect::tls::CA_FILE_ENV).is_none()
     {
         cfg.ssl_ca_file_path(layout).map_err(|error| {
@@ -776,12 +776,12 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
     open_with_ssh_options(url, &SshOptions::default(), None)
 }
 
-/// Scheme dispatch with explicit SSH options and an optional `mkit+https://`
-/// / `mkit+http://` envelope signer. Identical to [`open`] for every
-/// non-SSH, non-Connect scheme; the `mkit+ssh://` branch threads
+/// Scheme dispatch with explicit SSH options and an optional `kit+https://`
+/// / `kit+http://` envelope signer. Identical to [`open`] for every
+/// non-SSH, non-Connect scheme; the `kit+ssh://` branch threads
 /// `ssh_options` into the spawned `ssh(1)` child via
-/// [`SshTransport::connect_with_options`], and the `mkit+https://`/
-/// `mkit+http://` branch threads `envelope_signer`
+/// [`SshTransport::connect_with_options`], and the `kit+https://`/
+/// `kit+http://` branch threads `envelope_signer`
 /// into [`ConnectTransport::connect_with_signer`]. Reached via [`open`]
 /// (no config — both `None`/default) and [`open_with_config`] for non-Connect
 /// schemes; `open_with_config` handles Connect URLs itself, so the Connect
@@ -798,24 +798,24 @@ fn open_with_ssh_options(
              `mkit git pull` (feature git-bridge)"
         )));
     }
-    if let Some(rest) = url.strip_prefix("mkit+file://") {
-        // mkit+file:///abs/path -> /abs/path
+    if let Some(rest) = url.strip_prefix("kit+file://") {
+        // kit+file:///abs/path -> /abs/path
         let path = Path::new(rest);
         return Ok(Arc::new(FileTransport::new(path)));
     }
-    if url.starts_with("mkit+memory://") {
+    if url.starts_with("kit+memory://") {
         // Memory transport is in-process; the URL-based path is not
         // useful on its own but we accept it so `mkit remote add`
         // round-trips cleanly.
         return Err(DispatchError::UnsupportedScheme(
-            "mkit+memory:// must be driven via in-process harness (see tests)".to_string(),
+            "kit+memory:// must be driven via in-process harness (see tests)".to_string(),
         ));
     }
-    if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
+    if url.starts_with("kit+https://") || url.starts_with("kit+http://") {
         validate_connect_repository(url)?;
-        // ConnectTransport::connect_with_signer strips the `mkit+` prefix
+        // ConnectTransport::connect_with_signer strips the `kit+` prefix
         // itself and reads MKIT_API_TOKEN from the environment (the native
-        // mkit.transport.v1 ConnectRPC client). Only the config-less `open`
+        // kit.transport.v1 ConnectRPC client). Only the config-less `open`
         // reaches this branch (`open_with_config` returns early for Connect
         // URLs), so `envelope_signer` is always `None` here; bearer token and
         // envelope signing are independent, additive auth modes.
@@ -823,13 +823,13 @@ fn open_with_ssh_options(
         return Ok(Arc::new(tx));
     }
     #[cfg(not(feature = "s3"))]
-    if url.starts_with("mkit+s3://") {
+    if url.starts_with("kit+s3://") {
         return Err(DispatchError::UnsupportedScheme(format!(
             "'{url}' needs S3 support — rebuild with `--features s3`"
         )));
     }
     #[cfg(feature = "s3")]
-    if url.starts_with("mkit+s3://") {
+    if url.starts_with("kit+s3://") {
         // S3Transport::connect reads MKIT_R2_ACCESS_KEY_ID /
         // MKIT_R2_SECRET_ACCESS_KEY from the environment. Missing
         // credentials surface as AccessDenied on the first signed call,
@@ -837,7 +837,7 @@ fn open_with_ssh_options(
         let tx = S3Transport::connect(url)?;
         return Ok(Arc::new(tx));
     }
-    if url.starts_with("mkit+ssh://") {
+    if url.starts_with("kit+ssh://") {
         // Parse the URL, then spawn `ssh(1)` with the caller-supplied
         // trust-pinning options. `connect_with_options`
         // performs the `Hello` / `HelloResponse` handshake. Any failure
@@ -860,7 +860,7 @@ fn open_with_ssh_options(
             rest
         };
         return Err(DispatchError::UnsupportedScheme(format!(
-            "`{scheme}://{shown}` is not a sync remote: at a server's origin, plain HTTP(S) serves objects by repository path (SPEC-HTTP-OBJECTS); sync remotes use `mkit+https://`, for example `mkit+https://{shown}`"
+            "`{scheme}://{shown}` is not a sync remote: at a server's origin, plain HTTP(S) serves objects by repository path (SPEC-HTTP-OBJECTS); sync remotes use `kit+https://`, for example `kit+https://{shown}`"
         )));
     }
     Err(DispatchError::MalformedUrl(url.to_string()))
@@ -873,7 +873,7 @@ fn validate_connect_repository(url: &str) -> Result<(), DispatchError> {
         // credential text.
         if url.contains(['@', '?', '#']) {
             return DispatchError::MalformedUrl(
-                "the remote URL is not a valid mkit+https:// remote; use mkit+https://<host>/<namespace>/<name> without userinfo or a query".to_owned(),
+                "the remote URL is not a valid kit+https:// remote; use kit+https://<host>/<namespace>/<name> without userinfo or a query".to_owned(),
             );
         }
         let path = url
@@ -889,7 +889,7 @@ fn validate_connect_repository(url: &str) -> Result<(), DispatchError> {
 /// Push every ref under `refs/heads/` to the remote. Returns the count of
 /// refs pushed. Each branch is published with [`push_branch`], which sends
 /// one delta-compressed pack of the objects the remote lacks, advertises it
-/// via the `refs/mkit/packmap/<branch>` ref, then moves the branch ref.
+/// via the `refs/kit/packmap/<branch>` ref, then moves the branch ref.
 pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {
     push_all_with(cwd, tx, None, false, None).map(|pushed| pushed.refs)
 }
@@ -1690,11 +1690,11 @@ mod tests {
     fn envelope_destination_trust_precedes_missing_key_resolution() {
         let directory = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(directory.path());
-        for endpoint in ["mkit+https://untrusted.example", "mkit+http://127.0.0.1:1"] {
+        for endpoint in ["kit+https://untrusted.example", "kit+http://127.0.0.1:1"] {
             let mut cfg = Config {
                 transport_auth: "envelope".into(),
                 signer: "legacy".into(),
-                signing_key: ".mkit/keys/missing-signing-key".into(),
+                signing_key: ".kit/keys/missing-signing-key".into(),
                 ..Config::default()
             };
             let error = super::open_with_config(endpoint, &cfg, &layout)
@@ -1717,7 +1717,7 @@ mod tests {
     fn configured_connect_open_reports_malformed_repository_identity() {
         let directory = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(directory.path());
-        let url = "mkit+https://host/Uppercase";
+        let url = "kit+https://host/Uppercase";
         let error = super::open_with_config(url, &Config::default(), &layout)
             .expect_err("uppercase repository identity must be rejected");
         assert!(
@@ -1740,8 +1740,8 @@ mod tests {
         );
         let message = error.to_string();
         assert!(
-            message.contains(&format!("mkit+{url}")),
-            "{message} must suggest the mkit+ spelling"
+            message.contains(&format!("kit+{url}")),
+            "{message} must suggest the kit+ spelling"
         );
         assert!(message.contains("SPEC-HTTP-OBJECTS"), "{message}");
 
@@ -1757,18 +1757,18 @@ mod tests {
             !message.contains("q1") && !message.contains("#f"),
             "{message}"
         );
-        assert!(message.contains("mkit+https://"), "{message}");
+        assert!(message.contains("kit+https://"), "{message}");
         let error = super::open(&format!("http://vcs.example/{uuid}/repo?k=q1"))
             .err()
             .expect("plain http must fail");
         let message = error.to_string();
         assert!(!message.contains("q1"), "{message}");
         assert!(
-            message.contains(&format!("mkit+https://vcs.example/{uuid}/repo")),
+            message.contains(&format!("kit+https://vcs.example/{uuid}/repo")),
             "{message}"
         );
         // A rejected identity does not echo the URL's userinfo or query.
-        let error = super::open("mkit+https://user:secret@vcs.example/Bad/repo?k=q1")
+        let error = super::open("kit+https://user:secret@vcs.example/Bad/repo?k=q1")
             .err()
             .expect("bad namespace must fail");
         let message = error.to_string();
@@ -1777,8 +1777,8 @@ mod tests {
             "{message}"
         );
         for url in [
-            "mkit+https://user:pa/ss@vcs.example/Bad/repo",
-            "mkit+https://user:12/ss@vcs.example/Bad/repo",
+            "kit+https://user:pa/ss@vcs.example/Bad/repo",
+            "kit+https://user:12/ss@vcs.example/Bad/repo",
         ] {
             let message = super::open(url).err().expect("must fail").to_string();
             assert!(
@@ -1792,7 +1792,7 @@ mod tests {
     fn connect_url_validation_names_the_offending_segment() {
         let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
         for (path, offending) in [("/Bad/repo", "`Bad`"), ("/repo/Name", "`Name`")] {
-            let url = format!("mkit+https://vcs.example{path}");
+            let url = format!("kit+https://vcs.example{path}");
             let error = super::open(&url)
                 .err()
                 .unwrap_or_else(|| panic!("{url} must fail"));
@@ -1802,7 +1802,7 @@ mod tests {
         }
         // An opaque authority-mode namespace validates under the union
         // grammar and builds a transport.
-        assert!(super::open(&format!("mkit+https://vcs.example/{uuid}/repo")).is_ok());
+        assert!(super::open(&format!("kit+https://vcs.example/{uuid}/repo")).is_ok());
     }
 
     #[test]

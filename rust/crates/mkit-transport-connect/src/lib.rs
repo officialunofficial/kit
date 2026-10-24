@@ -28,9 +28,9 @@ mod receipt;
 mod status;
 pub mod tls;
 
-/// Shared generated `mkit.transport.v1` messages and Connect service types.
+/// Shared generated `kit.transport.v1` messages and Connect service types.
 pub mod proto {
-    pub use mkit_rpc::transport::mkit;
+    pub use mkit_rpc::transport::kit;
 }
 
 pub use client::{
@@ -49,5 +49,5 @@ pub use receipt::{AdmissionReceipt, ReceiptValue};
 // `proto` module.
 #[doc(hidden)]
 pub mod generated {
-    pub use crate::proto::mkit::transport::v1::*;
+    pub use crate::proto::kit::transport::v1::*;
 }

@@ -22,7 +22,7 @@
 //!    a soak test mirroring `lock_contention.rs`'s
 //!    `publisher_vs_gc_never_corrupts` (the original regression test)
 //!    but for `fetch` instead of `tag -a`, driving the real subprocesses
-//!    against a `mkit+file://` remote over many iterations.
+//!    against a `kit+file://` remote over many iterations.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
@@ -303,8 +303,8 @@ fn pull_all_does_not_hold_repo_lock_during_pack_download() {
     assert_eq!(n, 1, "expected exactly one branch fetched");
 
     // Fast-forward landed: bob's local `main` now matches alice's tip.
-    let alice_main = fs::read_to_string(alice.path().join(".mkit/refs/heads/main")).unwrap();
-    let bob_main = fs::read_to_string(bob.path().join(".mkit/refs/heads/main")).unwrap();
+    let alice_main = fs::read_to_string(alice.path().join(".kit/refs/heads/main")).unwrap();
+    let bob_main = fs::read_to_string(bob.path().join(".kit/refs/heads/main")).unwrap();
     assert_eq!(alice_main.trim(), bob_main.trim());
 }
 
@@ -447,7 +447,7 @@ fn concurrent_fetch_and_aggressive_gc_never_lose_fetched_objects() {
 
     let bob = Repo::new();
     let remote = tempfile::tempdir().unwrap();
-    let url = format!("mkit+file://{}", remote.path().display());
+    let url = format!("kit+file://{}", remote.path().display());
     bob.ok(&["remote", "add", "origin", &url]);
 
     let file_tx = FileTransport::new(remote.path());

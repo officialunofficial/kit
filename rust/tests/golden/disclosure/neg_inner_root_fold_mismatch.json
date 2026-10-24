@@ -1,7 +1,7 @@
 {
   "bin": "neg_inner_root_fold_mismatch.bin",
-  "blake3": "65176942d21f0843779dcbffc8abba4a7344eb79c7f45e33c576a8fce8debe54",
-  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "blake3": "a4428da074611739d6a36b26e96487fffd34b836adc254ba54487e6bafa69691",
+  "commit_id_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
   "description": "The declared inner_root wraps to the parent id, but the proof was built for a different tree so the fold disagrees.",
   "expect": "reject",
   "name": "neg_inner_root_fold_mismatch",

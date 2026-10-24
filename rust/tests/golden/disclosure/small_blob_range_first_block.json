@@ -1,7 +1,7 @@
 {
   "bin": "small_blob_range_first_block.bin",
-  "blake3": "37d49ae68e243a8307b5c7652a057e9ef665137c82df2ec5c9a11c090af1f146",
-  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "blake3": "996665b5b31b889e0e824da35db72c936b60b2459741bf1494f367b41d679f63",
+  "commit_id_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
   "description": "The first 1 KiB Bao block of a 1536-byte blob.",
   "disclosed": {
     "chunk_inner_root_hex": null,
@@ -24,9 +24,9 @@
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
     "step_inner_roots_hex": [
-      "1b1e50529b155e441db663c397e82660032e3344c5203c314c303b80d9da397c"
+      "c149fa07c55d52c24875498999f7b54abb81dbf1694d5e209d9c2038dac2d0fa"
     ],
-    "tree_hash_hex": "cece38b8a6a76cbdbba11ed1de928916c9d201808755fd9bbb9b8d3414999f20"
+    "tree_hash_hex": "bfb30fc54bf0bf25f170b83ae324509b402a90d55151d8914e77f468ac6ee289"
   },
   "expect": "accept",
   "name": "small_blob_range_first_block",

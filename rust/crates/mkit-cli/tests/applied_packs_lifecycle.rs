@@ -107,11 +107,11 @@ impl Transport for CountingTransport {
 /// note plus retry is the spurious-path marker that this lifecycle removes).
 #[test]
 fn remove_deletes_record_and_readd_fetch_has_no_self_heal() {
-    // Origin publishes a two-pack chain over mkit+file://.
+    // Origin publishes a two-pack chain over kit+file://.
     let origin = Repo::new();
     let store_dir = origin.path().join("store");
     fs::create_dir_all(&store_dir).unwrap();
-    let url = format!("mkit+file://{}", store_dir.display());
+    let url = format!("kit+file://{}", store_dir.display());
     origin.ok(&["remote", "add", &url]);
     origin.commit_file("a.txt", b"v1\n", "c1");
     origin.ok(&["push", "--all"]);
@@ -183,7 +183,7 @@ fn stale_record_surviving_remove_trips_self_heal_note() {
     let origin = Repo::new();
     let store_dir = origin.path().join("store");
     fs::create_dir_all(&store_dir).unwrap();
-    let url = format!("mkit+file://{}", store_dir.display());
+    let url = format!("kit+file://{}", store_dir.display());
     origin.ok(&["remote", "add", &url]);
     origin.commit_file("a.txt", b"v1\n", "c1");
     origin.ok(&["push", "--all"]);
@@ -259,7 +259,7 @@ fn rename_moves_record_and_next_fetch_reuses_it() {
 
     // Rename via the real binary (the remote must exist in config for the
     // command to operate on it; the URL itself is never dialed here).
-    bob.ok(&["remote", "add", "team/upstream", "mkit+memory://unused"]);
+    bob.ok(&["remote", "add", "team/upstream", "kit+memory://unused"]);
     bob.ok(&["remote", "rename", "team/upstream", "archive/upstream"]);
 
     // The record moved: exactly one flat, percent-encoded file, no orphan.
@@ -305,7 +305,7 @@ fn remove_default_remote_deletes_its_record() {
     let record = bob.mkit_dir().join("applied-packs").join("default");
     assert!(record.is_file(), "precondition: default record exists");
 
-    bob.ok(&["remote", "add", "mkit+memory://unused"]); // flat default
+    bob.ok(&["remote", "add", "kit+memory://unused"]); // flat default
     bob.ok(&["remote", "remove", "default"]);
     assert!(
         !record.exists(),
@@ -318,14 +318,14 @@ fn remove_default_remote_deletes_its_record() {
 #[test]
 fn remove_and_rename_are_non_fatal_when_record_missing() {
     let r = Repo::new();
-    r.ok(&["remote", "add", "up", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "up", "kit+file:///tmp/nowhere"]);
     let out = r.ok(&["remote", "remove", "up"]);
     assert!(
         !String::from_utf8_lossy(&out.stderr).contains("applied-packs"),
         "missing record must not warn on remove"
     );
 
-    r.ok(&["remote", "add", "old", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "old", "kit+file:///tmp/nowhere"]);
     let out = r.ok(&["remote", "rename", "old", "new"]);
     assert!(
         !String::from_utf8_lossy(&out.stderr).contains("applied-packs"),

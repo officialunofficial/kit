@@ -6,7 +6,7 @@
 
 use std::io::{Read, Write};
 
-use mkit_rpc::mkit::rpc::v1::ssh::SshFrame;
+use mkit_rpc::kit::rpc::v1::ssh::SshFrame;
 
 use crate::session::{FrameIoError, FrameSink, FrameSource};
 

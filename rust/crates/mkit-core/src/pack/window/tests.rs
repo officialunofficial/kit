@@ -2120,7 +2120,7 @@ fn exact_cursor_encoding_is_digest_pinned() {
     assert_eq!(encoded.len(), 263);
     assert_eq!(
         hash::to_hex(&hash::hash(&encoded)),
-        "379bc66d6ceba26c1199d3222fd05afff32adef2fb76b26cd0be31628d3a7c1b"
+        "20da9f79b09ed00c10f9d666fb786f48a85ff931255d141b6b16aae2d770d075"
     );
     assert_eq!(
         WindowCursor::from_bytes(&encoded).unwrap().to_bytes(),

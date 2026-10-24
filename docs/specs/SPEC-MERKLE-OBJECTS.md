@@ -69,8 +69,8 @@ where `domain_digest(d, b) = BLAKE3(le16(len(d)) ‖ d ‖ b)` (SPEC-OBJECTS
 
 | Type        | `TYPE_DOMAIN`        |
 |-------------|----------------------|
-| ChunkedBlob | `b"mkit.chunked\x00"` |
-| Tree        | `b"mkit.tree\x00"`    |
+| ChunkedBlob | `b"kit.chunked\x00"` |
+| Tree        | `b"kit.tree\x00"`    |
 
 The outer domain wrap makes the id **type-distinct**. A bare BMT root over
 identical leaf streams would collide across types (the prologue type byte
@@ -87,7 +87,7 @@ bytes.
 Leaves, in order:
 
 ```
-L[0]        = domain_digest(b"mkit-cblob-meta-v1", le64(total_size) ‖ le32(chunk_size))
+L[0]        = domain_digest(b"kit-cblob-meta-v1", le64(total_size) ‖ le32(chunk_size))
 L[1..=N]    = chunks[0], chunks[1], ..., chunks[N-1]   (raw 32-byte chunk ids)
 ```
 
@@ -104,7 +104,7 @@ the existing lex-by-name canonical order (SPEC-OBJECTS §4). One leaf per
 entry:
 
 ```
-L[i] = domain_digest(b"mkit-tree-entry-v1", le32(len(name)) ‖ name ‖ u8(mode) ‖ object_hash)
+L[i] = domain_digest(b"kit-tree-entry-v1", le32(len(name)) ‖ name ‖ u8(mode) ‖ object_hash)
 ```
 
 - The `le32(len(name))` prefix is the anti-ambiguity guard so
@@ -116,7 +116,7 @@ L[i] = domain_digest(b"mkit-tree-entry-v1", le32(len(name)) ‖ name ‖ u8(mode
 ## 4. Empty objects
 
 The empty `Tree` (`entries = []`, common) has the fixed id
-`domain_digest(b"mkit.tree\x00", BLAKE3(be32(0) ‖ BLAKE3("")))`. This
+`domain_digest(b"kit.tree\x00", BLAKE3(be32(0) ‖ BLAKE3("")))`. This
 constant is pinned from a real computation (`merkle::TREE_EMPTY_ID`),
 never transcribed by hand. The empty `ChunkedBlob` (`N = 0`, a meta-only
 1-leaf tree) is well-defined but not produced in practice.

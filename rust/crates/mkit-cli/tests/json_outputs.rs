@@ -108,7 +108,7 @@ fn remote_json_emits_empty_stdout_when_unset() {
 fn remote_json_emits_url_and_transport_when_set() {
     let td = init_with_commit(b"hello");
     assert!(
-        run_in(td.path(), &["remote", "add", "mkit+file:///tmp/example"])
+        run_in(td.path(), &["remote", "add", "kit+file:///tmp/example"])
             .status
             .success()
     );
@@ -116,7 +116,7 @@ fn remote_json_emits_url_and_transport_when_set() {
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.contains("\"url\":\"mkit+file:///tmp/example\""),
+        stdout.contains("\"url\":\"kit+file:///tmp/example\""),
         "missing url: {stdout:?}"
     );
     assert!(

@@ -1,6 +1,6 @@
 {
   "bin": "neg_truncated.bin",
-  "blake3": "1b2f3d9b20f984564363cd88f424673cab2511e16955f3950adc93fa8b8e8e0e",
+  "blake3": "4046580776f035b3f5e001eb80ffefd1d3ebaf1621dbbfe24eea7fc7244cc02b",
   "description": "A valid tree_7entry proof with its last sibling digest chopped off. Must fail to decode, not merely fail to verify.",
   "entries": [
     {
@@ -13,7 +13,7 @@
   "kind": "tree_entry",
   "max_items": 1,
   "name": "neg_truncated",
-  "object_id_hex": "daaa5ae863925303757ff5a4d364ef34fff20900c20b428f7e69d8a264779b6e",
+  "object_id_hex": "2094127e00f529c2b1eeaf253b88380425536c72d49de3c6e081bbe4b6f1db37",
   "position": 6,
   "proof_kind": "single",
   "reject_reason": "proof bytes are truncated (decode must fail)",

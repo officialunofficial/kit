@@ -1,6 +1,6 @@
 //! Stash.
 //!
-//! On-disk format (`<repo_root>/.mkit/stash`) is a tagged binary
+//! On-disk format (`<repo_root>/.kit/stash`) is a tagged binary
 //! manifest:
 //!
 //! ```text
@@ -38,7 +38,7 @@ use crate::worktree;
 pub const MAGIC: [u8; 4] = *b"MKST";
 
 /// Stash manifest path under the repo root.
-pub const STASH_FILE: &str = ".mkit/stash";
+pub const STASH_FILE: &str = ".kit/stash";
 
 /// Hard cap on manifest size (16 MiB).
 pub const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -103,7 +103,7 @@ pub type StashResult<T> = Result<T, StashError>;
 /// Save the worktree as a stash entry, then reset the worktree to
 /// HEAD:
 ///
-/// 1. Build a tree from `repo_root` (skipping `.mkit/`).
+/// 1. Build a tree from `repo_root` (skipping `.kit/`).
 /// 2. Resolve HEAD to a parent (or none for first commit).
 /// 3. Create an unsigned `Commit` over that tree with `Ed25519` zero
 ///    pubkey author and zeroed signer/signature.
@@ -146,7 +146,7 @@ pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashRes
     //
     // The authoritative index was read before the worktree walk; pass the
     // discovered layout's staging state rather than guessing a single-worktree
-    // .mkit directory (linked worktrees have a pointer file there).
+    // .kit directory (linked worktrees have a pointer file there).
     let staged_tree = worktree::build_tree_from_index_with(store, &batch, &staged, true)?;
     let index_blob = batch.write(&serialize::serialize(&Object::Blob(Blob {
         data: staged.serialize(),

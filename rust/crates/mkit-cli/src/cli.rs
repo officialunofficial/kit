@@ -19,10 +19,10 @@ usage: mkit <command> [args]
 commands:
   init              Create a new mkit repository
   add [-A|-u] [-f] <path>...  Stage files for the next commit
-  add .             Stage all files under cwd (respects .gitignore/.mkitignore)
+  add .             Stage all files under cwd (respects .gitignore/.kitignore)
   add -A            Stage all changes incl. deletions (no path args)
   add -u            Restage only already-tracked files (no path args)
-  add -f <path>     Stage an ignored path (overrides .gitignore/.mkitignore)
+  add -f <path>     Stage an ignored path (overrides .gitignore/.kitignore)
   add -p <path>...  Interactively choose hunks to stage (y/n/q/a/d per hunk)
   rm [--cached] [-r] [-f] <path>...  Remove path(s) and stage the deletion
   rm --cached       Stage the removal only; keep the worktree file(s)
@@ -223,7 +223,7 @@ commands:
                     -o names the cloned remote <name> instead of `default`)
   remote [-v|--verbose] [--format=json]  List remotes (names only; -v adds
                     `<name>\t<url> (fetch)`/`(push)`; JSON with --format=json)
-  remote add [<name>] <url>  Add a remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
+  remote add [<name>] <url>  Add a remote (kit+file://, kit+https://, kit+s3://, kit+ssh://)
   remote set [<name>] <url>  Alias for 'remote add'
   remote remove <name>  Remove a named remote (`default` clears the flat remote)
   remote rename <old> <new>  Rename a named remote
@@ -275,7 +275,7 @@ commands:
                     tool calls to that path
   pack-shard [--out <dir>] [--force] <hash>
                     Encode a stored pack into Reed-Solomon shards (--out sets
-                    the output dir, default .mkit/pack-shards; --force encodes
+                    the output dir, default .kit/pack-shards; --force encodes
                     below the size threshold) (feature: pack-shards)
   git export <dest>  Export refs to a git mirror, one-way; --passthrough
                     publishes an imported repo as a true git fork

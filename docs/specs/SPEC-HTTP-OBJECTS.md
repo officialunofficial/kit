@@ -105,7 +105,7 @@ Every 400 MUST depend only on URL text and the deployment's route grammar,
 never on stored state. An HTTP `Range` parse failure MUST NOT produce 400.
 
 The mandatory `/-/` segment, which RPC service paths never contain,
-distinguishes this namespace from `/.well-known/`, `/mkit.transport.v1.*`,
+distinguishes this namespace from `/.well-known/`, `/kit.transport.v1.*`,
 and `/grpc.*`. Routers MUST dispatch HTTP object routes by that segment,
 or RPCs by exact service path, never by a `/grpc.*` prefix glob. The key
 document in §6 is a separate well-known route. Routers MUST retain the
@@ -255,13 +255,13 @@ Content-Type and Content-Disposition need not be repeated. Validators, bytes,
 ranges, caching, admission and token bindings are unchanged.
 
 Other object types MUST carry
-canonical object bytes with `Content-Type: application/vnd.mkit.object`.
+canonical object bytes with `Content-Type: application/vnd.kit.object`.
 Pack-only Delta objects MUST NOT be served (SPEC-OBJECTS §1).
 
 200 and 206 MUST carry `ETag: "<64hex leaf id>"`, `Accept-Ranges: bytes`,
-`X-Mkit-Object: <64hex leaf id>`, and `X-Mkit-Object-Type` using the
+`X-Kit-Object: <64hex leaf id>`, and `X-Kit-Object-Type` using the
 SPEC-OBJECTS §1 lowercase type name. Ref-path responses MUST also carry
-`X-Mkit-Commit: <64hex resolved commit id>`. Content-Length MUST describe
+`X-Kit-Commit: <64hex resolved commit id>`. Content-Length MUST describe
 the selected body, including for HEAD (the GET body length).
 
 An ordinary single byte range MUST produce 206 with
@@ -291,8 +291,8 @@ clipped: any endpoint outside content is 416. The inclusive query becomes
 `offset=a, len=b-a+1` using checked arithmetic; overflow is 416.
 Non-blob leaves do not support proof ranges and yield 416.
 
-MKDP uses `application/vnd.mkit.disclosure`; MKDS uses
-`application/vnd.mkit.disclosure-span`. Proofs MUST carry
+MKDP uses `application/vnd.kit.disclosure`; MKDS uses
+`application/vnd.kit.disclosure-span`. Proofs MUST carry
 `Accept-Ranges: none`, MUST ignore every HTTP Range/If-Range header, and
 MUST use 200 rather than 206. The 64 MiB encoded bundle cap applies.
 A deployment SHOULD configure a lower requested-content cap, for example
@@ -336,7 +336,7 @@ Error no-store takes precedence.
 | Any success where read Admission ran, or a receipt is returned | MUST be `private`; a public id URL retains `max-age=31536000, immutable`, a public ref path retains `no-cache`, and a public commit-pinned proof retains `max-age=31536000, immutable` |
 | Every HTTP-objects response in a bearer-gated deployment | MUST be `private`, including OPTIONS and 304, except the separately published key-set document; errors use `private, no-store` |
 | 402 and every error | `no-store`, or `private, no-store` in a bearer-gated deployment |
-| 304 | MUST repeat the selected 200's ETag, Cache-Control, `X-Mkit-Object`, `X-Mkit-Object-Type`, and `X-Mkit-Commit` whenever the selected 200 carries it (ref paths and proofs); select the same private policy when read Admission is configured, without actually calling it |
+| 304 | MUST repeat the selected 200's ETag, Cache-Control, `X-Kit-Object`, `X-Kit-Object-Type`, and `X-Kit-Commit` whenever the selected 200 carries it (ref paths and proofs); select the same private policy when read Admission is configured, without actually calling it |
 
 Every serving response MUST carry `X-Content-Type-Options: nosniff`,
 `Content-Security-Policy: sandbox; default-src 'none'`, and
@@ -347,9 +347,9 @@ bytes from becoming active content under a privileged application origin.
 ## 6. URL tokens and key publication
 
 [SPEC-WRITE-GRANTS §9.4](SPEC-WRITE-GRANTS.md#94-signed-url-tokens) owns
-`mkit-url-token:v1` statements, signatures, audience, epoch, expiry, and
+`kit-url-token:v1` statements, signatures, audience, epoch, expiry, and
 key retirement. A token MUST appear only in the `token=` query parameter.
-Header and cookie carriage is deferred (a future `X-Mkit-Url-Token`).
+Header and cookie carriage is deferred (a future `X-Kit-Url-Token`).
 Implementations MUST redact the token parameter from logs and traces,
 including raw request URLs and redirect/error diagnostics.
 Informative: CDN edge logs are outside this server-side redaction rule;
@@ -374,7 +374,7 @@ repository, including an unknown key, MUST produce the uniform 404. Public
 repositories MUST ignore the precheck result and all other token claims,
 and MUST still redact the supplied token.
 
-The deployment MUST publish `GET /.well-known/mkit-url-token-keys.json`
+The deployment MUST publish `GET /.well-known/kit-url-token-keys.json`
 using SPEC-SERVER §7.2's key-list JSON shape (`version`, `keys`, `keyId`,
 `alg`, `publicKey`, `notBeforeMs`, `notAfterMs`). Here `keyId` MUST be the
 32hex URL-token key id from SPEC-WRITE-GRANTS §9.4, and `alg` is `ed25519`.
@@ -383,7 +383,7 @@ The document MUST carry `Content-Type: application/json` and
 URL-token authentication nor admission, and MUST include the active and
 retained verification keys. The read CORS policy applies to this document.
 The separate storage receipt-and-notice key list at
-`/.well-known/mkit-receipt-keys.json` follows SPEC-SERVER §15.5: it is
+`/.well-known/kit-receipt-keys.json` follows SPEC-SERVER §15.5: it is
 likewise public without bearer, URL-token authentication, or admission,
 and permits every CORS origin.
 
@@ -391,7 +391,7 @@ and permits every CORS origin.
 
 For both Authorizer and Admission, the principal MUST be `anonymous`,
 including bearer and URL-token holders. `procedure` MUST be
-`/mkit.http.v1/GetObject` or `/mkit.http.v1/GetRefPath` according to route.
+`/kit.http.v1/GetObject` or `/kit.http.v1/GetRefPath` according to route.
 The operation MUST identify the selected repository and audience; it MUST
 NOT manufacture a signer, write grant, ref change, or idempotency key.
 No object-id field or token principal is added to the hook schema here.
@@ -414,7 +414,7 @@ the `AdmissionChallenge` message using canonical protobuf JSON, with
 `Content-Type: application/json` (HEAD omits the body). A success MUST pass
 through `Admission-Receipt` and `ADMISSION-RESPONSE` when supplied and MUST
 be private. Challenge and deny MUST allocate no reservation or replay state.
-A 402 MUST NOT carry `ETag`, any `X-Mkit-*` header, or `Content-Range`.
+A 402 MUST NOT carry `ETag`, any `X-Kit-*` header, or `Content-Range`.
 Informative: because 304 and 416 precede Admission, a caller without admission
 can confirm a guessed ETag or learn the size N of admission-gated public content. This is
 accepted by design: revalidation and unsatisfiable ranges are never charged.
@@ -451,7 +451,7 @@ Preflight MUST use 204 without auth or admission and allow these values:
 |---|---|
 | `Access-Control-Allow-Methods` | `GET, HEAD, OPTIONS` |
 | `Access-Control-Allow-Headers` | `Range, If-None-Match, If-Range, Admission-Authorization, ADMISSION-SIGNATURE, Authorization, Accept-Admission` |
-| `Access-Control-Expose-Headers` | `ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Admission-Receipt, ADMISSION-REQUIRED, ADMISSION-RESPONSE, Link` |
+| `Access-Control-Expose-Headers` | `ETag, Content-Range, Accept-Ranges, Content-Length, X-Kit-Commit, X-Kit-Object, X-Kit-Object-Type, WWW-Authenticate, Admission-Receipt, ADMISSION-REQUIRED, ADMISSION-RESPONSE, Link` |
 
 ## 9. Vectors and deferred work
 
@@ -474,12 +474,12 @@ The independent test-local MKDS encoder and reference verifier are in
 vectors. Reject sidecars name the exact span rejection reason.
 
 An HTTP 451 body MUST be the canonical protobuf JSON of the newest
-applicable reader-view `mkit.transport.v1.RedactionNotice`
+applicable reader-view `kit.transport.v1.RedactionNotice`
 (SPEC-SERVER §14.6), with
 `Content-Type: application/json`, `Cache-Control: no-store` (or
 `private, no-store` under a bearer gate), and
 `Link: <origin>; rel="blocked-by"`. It MUST omit `ETag`, every
-`X-Mkit-*` header, and `Content-Range`; HEAD sends no body. The
+`X-Kit-*` header, and `Content-Range`; HEAD sends no body. The
 `response-cases.json` rows pin 404 for a blocked but not yet
 tombstoned id ahead of 304, and 451 precedence against 304 and
 Admission, including the tombstoned-manifest chunk case.

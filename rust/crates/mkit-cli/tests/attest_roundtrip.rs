@@ -1,7 +1,7 @@
 //! End-to-end tests for `mkit attest` + `mkit verify-attest`.
 //!
 //! For each supported algorithm we:
-//! 1. Generate a raw 32-byte secret, write it to `.mkit/keys/<algo>.key`.
+//! 1. Generate a raw 32-byte secret, write it to `.kit/keys/<algo>.key`.
 //! 2. Init a fresh repo, stage a file, commit.
 //! 3. Shell out to `mkit attest --algorithm <X> --signer repo-key`.
 //! 4. Build a trust-roots TOML with the matching pubkey.
@@ -55,7 +55,7 @@ fn run_in(cwd: &Path, args: &[&str]) -> Output {
 /// the developer's real user config does not leak into the test, and
 /// optionally seed a `mkit/config` under that tempdir. Mirrors the
 /// split: security-sensitive keys live in user-scoped
-/// config and per-repo `.mkit/config` cannot set them.
+/// config and per-repo `.kit/config` cannot set them.
 fn run_in_with_user_config(cwd: &Path, args: &[&str], user_cfg: Option<&str>) -> Output {
     let xdg_root = tempfile::tempdir().expect("xdg tempdir");
     if let Some(text) = user_cfg {
@@ -129,7 +129,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 fn head_commit_hex(cwd: &Path) -> String {
-    fs::read_to_string(cwd.join(".mkit/refs/heads/main"))
+    fs::read_to_string(cwd.join(".kit/refs/heads/main"))
         .expect("read main ref")
         .trim()
         .to_owned()
@@ -152,7 +152,7 @@ fn commit_file(cwd: &Path, path: &str, body: &[u8], message: &str) {
 }
 
 fn repo_key_public_key(cwd: &Path) -> Vec<u8> {
-    let secret_bytes = fs::read(cwd.join(".mkit/keys/default.key")).unwrap();
+    let secret_bytes = fs::read(cwd.join(".kit/keys/default.key")).unwrap();
     let mut secret = [0u8; 32];
     secret.copy_from_slice(&secret_bytes);
     ed25519_pubkey(&secret)
@@ -168,7 +168,7 @@ fn write_repo_key_trust_roots(cwd: &Path) {
         blake3_keyid(&pk),
         hex_lower(&pk)
     );
-    fs::write(cwd.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+    fs::write(cwd.join(".kit/attest-trust-roots.toml"), toml).unwrap();
 }
 
 fn save_test_envelope_payload(cwd: &Path, payload: &[u8]) {
@@ -225,7 +225,7 @@ fn verify_attest_rejects_envelope_replayed_under_another_commit() {
             "--commit",
             &commit_a,
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(
@@ -238,8 +238,8 @@ fn verify_attest_rejects_envelope_replayed_under_another_commit() {
     commit_file(root, "README.md", b"hello again\n", "second");
     let commit_b = head_commit_hex(root);
 
-    let src_dir = root.join(".mkit/attestations").join(&commit_a);
-    let dst_dir = root.join(".mkit/attestations").join(&commit_b);
+    let src_dir = root.join(".kit/attestations").join(&commit_a);
+    let dst_dir = root.join(".kit/attestations").join(&commit_b);
     fs::create_dir_all(&dst_dir).unwrap();
     for entry in fs::read_dir(&src_dir).unwrap() {
         let entry = entry.unwrap();
@@ -253,7 +253,7 @@ fn verify_attest_rejects_envelope_replayed_under_another_commit() {
             "--commit",
             &commit_b,
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(!verify_b.status.success(), "replayed attestation verified");
@@ -278,7 +278,7 @@ fn verify_attest_rejects_malformed_statement_payload() {
         &[
             "verify-attest",
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(!out.status.success(), "malformed statement verified");
@@ -324,7 +324,7 @@ fn verify_attest_rejects_statement_subject_errors() {
             &[
                 "verify-attest",
                 "--trust-roots",
-                ".mkit/attest-trust-roots.toml",
+                ".kit/attest-trust-roots.toml",
             ],
         );
         assert!(!out.status.success(), "invalid subject payload verified");
@@ -342,9 +342,9 @@ fn attest_and_verify_ed25519_roundtrip() {
     let root = td.path();
     init_repo_with_commit(root);
 
-    // For ed25519 repo-key signer, mkit uses the existing `.mkit/keys/default.key`
+    // For ed25519 repo-key signer, mkit uses the existing `.kit/keys/default.key`
     // (already created by `commit`). Read it to derive the pubkey.
-    let key_path = root.join(".mkit/keys/default.key");
+    let key_path = root.join(".kit/keys/default.key");
     let secret_bytes = fs::read(&key_path).unwrap();
     let mut secret = [0u8; 32];
     secret.copy_from_slice(&secret_bytes);
@@ -376,7 +376,7 @@ fn attest_and_verify_ed25519_roundtrip() {
         pk_hash,
         hex_lower(&pk)
     );
-    let trust_path = root.join(".mkit/attest-trust-roots.toml");
+    let trust_path = root.join(".kit/attest-trust-roots.toml");
     fs::write(&trust_path, toml).unwrap();
 
     let out = run_in(
@@ -384,7 +384,7 @@ fn attest_and_verify_ed25519_roundtrip() {
         &[
             "verify-attest",
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(
@@ -419,14 +419,14 @@ fn attest_and_verify_secp256k1_roundtrip() {
     };
     let keyid = format!("secp256k1:{}", hex_lower(&pk));
 
-    let key_path = root.join(".mkit/keys/secp256k1.key");
+    let key_path = root.join(".kit/keys/secp256k1.key");
     write_key(&key_path, &secret);
 
     // Configure the secp256k1 key path.
-    fs::create_dir_all(root.join(".mkit")).unwrap();
+    fs::create_dir_all(root.join(".kit")).unwrap();
     fs::write(
-        root.join(".mkit/config"),
-        b"attest.secp256k1_key_path = .mkit/keys/secp256k1.key\n",
+        root.join(".kit/config"),
+        b"attest.secp256k1_key_path = .kit/keys/secp256k1.key\n",
     )
     .unwrap();
 
@@ -450,14 +450,14 @@ fn attest_and_verify_secp256k1_roundtrip() {
         keyid,
         hex_lower(&pk)
     );
-    fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+    fs::write(root.join(".kit/attest-trust-roots.toml"), toml).unwrap();
 
     let out = run_in(
         root,
         &[
             "verify-attest",
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(
@@ -490,13 +490,13 @@ fn attest_and_verify_p256_roundtrip() {
     };
     let keyid = format!("p256:{}", hex_lower(&pk));
 
-    let key_path = root.join(".mkit/keys/p256.key");
+    let key_path = root.join(".kit/keys/p256.key");
     write_key(&key_path, &secret);
 
-    fs::create_dir_all(root.join(".mkit")).unwrap();
+    fs::create_dir_all(root.join(".kit")).unwrap();
     fs::write(
-        root.join(".mkit/config"),
-        b"attest.p256_key_path = .mkit/keys/p256.key\n",
+        root.join(".kit/config"),
+        b"attest.p256_key_path = .kit/keys/p256.key\n",
     )
     .unwrap();
 
@@ -520,14 +520,14 @@ fn attest_and_verify_p256_roundtrip() {
         keyid,
         hex_lower(&pk)
     );
-    fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+    fs::write(root.join(".kit/attest-trust-roots.toml"), toml).unwrap();
 
     let out = run_in(
         root,
         &[
             "verify-attest",
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(
@@ -554,8 +554,8 @@ fn attest_missing_keyfile_errors_cleanly() {
 
     // Force secp256k1 path at a file that doesn't exist.
     fs::write(
-        root.join(".mkit/config"),
-        b"attest.secp256k1_key_path = .mkit/keys/does-not-exist.key\n",
+        root.join(".kit/config"),
+        b"attest.secp256k1_key_path = .kit/keys/does-not-exist.key\n",
     )
     .unwrap();
 
@@ -630,7 +630,7 @@ fn write_ed25519_key(path: &Path, secret: &[u8; 32]) -> Vec<u8> {
 }
 
 /// Shared skeleton for all three pass-through tests: init a repo with a
-/// commit, write a 32-byte ed25519 key outside .mkit/ (so the CLI has to
+/// commit, write a 32-byte ed25519 key outside .kit/ (so the CLI has to
 /// reach it via argv), and return `(root, key_path, pubkey)`.
 fn fixture_for_external_ed25519() -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
     let td = tempfile::tempdir().unwrap();
@@ -698,13 +698,13 @@ fn attest_external_cli_flag_passes_argv() {
         blake3_keyid(&pk),
         hex_lower(&pk)
     );
-    fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+    fs::write(root.join(".kit/attest-trust-roots.toml"), toml).unwrap();
     let out = run_in(
         root,
         &[
             "verify-attest",
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(
@@ -752,13 +752,13 @@ fn attest_external_config_args_pass_through() {
         blake3_keyid(&pk),
         hex_lower(&pk)
     );
-    fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+    fs::write(root.join(".kit/attest-trust-roots.toml"), toml).unwrap();
     let out = run_in(
         root,
         &[
             "verify-attest",
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(out.status.success());
@@ -773,9 +773,9 @@ fn attest_additional_signer_args_clause_pass_through() {
     let root = td.path();
     let signer_bin = mkit_sign_file_bin();
 
-    // Primary (repo-key) ed25519 is whatever `.mkit/keys/default.key`
+    // Primary (repo-key) ed25519 is whatever `.kit/keys/default.key`
     // the commit step created. Read it to derive its pubkey.
-    let primary_secret = fs::read(root.join(".mkit/keys/default.key")).unwrap();
+    let primary_secret = fs::read(root.join(".kit/keys/default.key")).unwrap();
     let mut primary = [0u8; 32];
     primary.copy_from_slice(&primary_secret);
     let pk_primary = ed25519_pubkey(&primary);
@@ -827,13 +827,13 @@ fn attest_additional_signer_args_clause_pass_through() {
         blake3_keyid(&pk_ext),
         hex_lower(&pk_ext),
     );
-    fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+    fs::write(root.join(".kit/attest-trust-roots.toml"), toml).unwrap();
     let out = run_in(
         root,
         &[
             "verify-attest",
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(

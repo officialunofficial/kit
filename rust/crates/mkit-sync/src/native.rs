@@ -66,7 +66,7 @@ impl tower_service::Service<Uri> for CountingConnector {
     }
 }
 
-/// Read RPCs of `mkit.transport.v1.TransportService`: signed reads (no replay
+/// Read RPCs of `kit.transport.v1.TransportService`: signed reads (no replay
 /// entry is recorded, SPEC-TRANSPORT-CONNECT "Signed reads") and the unsigned
 /// server-info and grant-epoch reads. Resending one has no effect beyond the
 /// answer.
@@ -95,7 +95,7 @@ fn is_resend_safe(method: &http::Method, uri: &Uri) -> bool {
     method == http::Method::POST
         && uri
             .path()
-            .strip_prefix("/mkit.transport.v1.TransportService/")
+            .strip_prefix("/kit.transport.v1.TransportService/")
             .is_some_and(|name| READ_PROCEDURES.contains(&name))
 }
 
@@ -353,7 +353,7 @@ impl NativeHttp {
         match uri.path() {
             mkit_client::procedures::UPLOAD_PACK
             | mkit_client::procedures::UPLOAD_PART
-            | "/mkit.transport.v1.TransportService/DownloadPack" => self.transfer_timeout,
+            | "/kit.transport.v1.TransportService/DownloadPack" => self.transfer_timeout,
             _ => self.metadata_timeout,
         }
     }
@@ -1413,7 +1413,7 @@ mod tests {
         let post = |name: &str| {
             is_resend_safe(
                 &http::Method::POST,
-                &format!("http://h/mkit.transport.v1.TransportService/{name}")
+                &format!("http://h/kit.transport.v1.TransportService/{name}")
                     .parse()
                     .unwrap(),
             )
@@ -1460,14 +1460,14 @@ mod tests {
             "AdvanceRefs",
         ] {
             let uri =
-                format!("https://example.invalid/mkit.transport.v1.TransportService/{procedure}")
+                format!("https://example.invalid/kit.transport.v1.TransportService/{procedure}")
                     .parse::<Uri>()
                     .expect("uri");
             assert_eq!(http.request_timeout(&uri), DEFAULT_METADATA_TIMEOUT);
         }
         for procedure in ["DownloadPack", "UploadPack", "UploadPart"] {
             let uri =
-                format!("https://example.invalid/mkit.transport.v1.TransportService/{procedure}")
+                format!("https://example.invalid/kit.transport.v1.TransportService/{procedure}")
                     .parse::<Uri>()
                     .expect("uri");
             assert_eq!(http.request_timeout(&uri), DEFAULT_TRANSFER_TIMEOUT);
@@ -1475,7 +1475,7 @@ mod tests {
         let metadata: Uri = "https://example.invalid/other/UploadPack"
             .parse()
             .expect("uri");
-        let transfer: Uri = "https://example.invalid/mkit.transport.v1.TransportService/UploadPart"
+        let transfer: Uri = "https://example.invalid/kit.transport.v1.TransportService/UploadPart"
             .parse()
             .expect("uri");
         let http = http

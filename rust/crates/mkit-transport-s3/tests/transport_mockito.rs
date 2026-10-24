@@ -729,7 +729,7 @@ fn retry_429_then_200() {
 fn connect_reads_env_credentials() {
     // `connect` must parse a well-formed URL; empty env is fine at
     // construction, but `connect` rejects malformed URLs outright.
-    let err = S3Transport::connect("mkit+s3://").unwrap_err();
+    let err = S3Transport::connect("kit+s3://").unwrap_err();
     match err {
         TransportError::InvalidRef(_) => {}
         other => panic!("expected InvalidRef, got {other:?}"),
@@ -737,7 +737,7 @@ fn connect_reads_env_credentials() {
     // Valid URL builds successfully even with no env credentials — the
     // first signed request is what surfaces AccessDenied from the real
     // server.
-    let ok = S3Transport::connect("mkit+s3://host.example/my-bucket");
+    let ok = S3Transport::connect("kit+s3://host.example/my-bucket");
     assert!(ok.is_ok());
 }
 

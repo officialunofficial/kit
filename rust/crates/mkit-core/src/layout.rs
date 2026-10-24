@@ -1,5 +1,5 @@
 //! Repository path layout: the single authority for resolving on-disk
-//! state under `.mkit/`.
+//! state under `.kit/`.
 //!
 //! Every piece of repository state is classified into exactly one of two
 //! directories:
@@ -13,31 +13,31 @@
 //!   lock.
 //!
 //! In the classic single-worktree layout both directories are the same
-//! `<root>/.mkit/`, so [`RepoLayout::single`] produces byte-identical
+//! `<root>/.kit/`, so [`RepoLayout::single`] produces byte-identical
 //! paths to the historical ad-hoc joins. In a **linked** working tree
 //! they differ: the linked tree's per-tree state lives
-//! under the main repository's `.mkit/worktrees/<id>/`, and the linked
-//! tree's own `.mkit` is a plain FILE — the pointer file — instead of
+//! under the main repository's `.kit/worktrees/<id>/`, and the linked
+//! tree's own `.kit` is a plain FILE — the pointer file — instead of
 //! a directory. Nothing outside this module may assume the two
 //! directories coincide.
 //!
 //! # Linked-worktree on-disk model
 //!
 //! ```text
-//! <main>/.mkit/                       # common dir (shared state)
+//! <main>/.kit/                       # common dir (shared state)
 //!   worktrees/<id>/                   # one per linked tree
 //!     commondir                       # path to the common dir, `../..`
-//!     mkitdir                         # abs path of the tree's pointer file
+//!     kitdir                         # abs path of the tree's pointer file
 //!     HEAD, index, ORIG_HEAD, ...     # per-tree state, as classified below
-//! <linked-tree>/.mkit                 # pointer FILE, not a directory:
-//!     `mkitdir: <path to .mkit/worktrees/<id>>\n`
+//! <linked-tree>/.kit                 # pointer FILE, not a directory:
+//!     `kitdir: <path to .kit/worktrees/<id>>\n`
 //! ```
 //!
 //! The pointer path may be absolute or relative to the linked tree
 //! root; `commondir` may be absolute or relative to the state dir.
 //! Both files are UTF-8, single-line, LF-terminated, and capped at
 //! [`MAX_POINTER_FILE_BYTES`]. Discovery ([`discover`]) fails closed on
-//! any malformed or dangling pointer; a `.mkit` DIRECTORY (every
+//! any malformed or dangling pointer; a `.kit` DIRECTORY (every
 //! repository without linked worktrees) always resolves to the single-worktree
 //! layout, byte-identical to before.
 //!
@@ -64,7 +64,7 @@
 //! | `MERGE_HEAD`/`MERGE_MSG` | worktree | [`crate::ops::conflict_state`] |
 //! | `CHERRY_PICK_HEAD`/`_MSG`| worktree | [`crate::ops::conflict_state`] |
 //! | `REVERT_HEAD`/`_MSG`     | worktree | [`crate::ops::conflict_state`] |
-//! | `mkit-conflicts`         | worktree | [`crate::ops::conflict_state`] |
+//! | `kit-conflicts`         | worktree | [`crate::ops::conflict_state`] |
 //! | `MKIT_OP_RESULT`         | worktree | [`crate::ops::conflict_state`] |
 //! | `rebase-apply/`          | worktree | [`crate::ops::rebase`]  |
 //! | `bisect`                 | worktree | [`crate::ops::bisect`]  |
@@ -80,13 +80,13 @@
 //!
 //! # Invariants
 //!
-//! - Both directories always end in a final `.mkit` component (a linked
-//!   tree's state dir will live *under* the main `.mkit`; that still
+//! - Both directories always end in a final `.kit` component (a linked
+//!   tree's state dir will live *under* the main `.kit`; that still
 //!   satisfies the prefix rule below).
 //! - Every accessor resolves strictly inside `common_dir()` or
 //!   `worktree_state_dir()`; no accessor ever escapes them.
 //! - [`RepoLayout::single`] guarantees `common_dir() ==
-//!   worktree_state_dir() == worktree_root().join(".mkit")`.
+//!   worktree_state_dir() == worktree_root().join(".kit")`.
 
 use std::path::{Path, PathBuf};
 
@@ -126,9 +126,9 @@ pub const PACK_SHARDS_DIR_NAME: &str = "pack-shards";
 /// Directory under the common dir holding one per-tree state dir per
 /// linked worktree.
 pub const WORKTREES_DIR_NAME: &str = "worktrees";
-/// Prefix of the linked-tree pointer file (`<tree>/.mkit` as a FILE):
-/// `mkitdir: <path>\n` — the analog of git's `gitdir:` file.
-pub const POINTER_PREFIX: &str = "mkitdir: ";
+/// Prefix of the linked-tree pointer file (`<tree>/.kit` as a FILE):
+/// `kitdir: <path>\n` — the analog of git's `gitdir:` file.
+pub const POINTER_PREFIX: &str = "kitdir: ";
 /// File inside a per-tree state dir recording the path back to the
 /// common dir (relative to the state dir, or absolute). Written as
 /// `../..` by `worktree add`.
@@ -136,7 +136,7 @@ pub const COMMONDIR_FILE_NAME: &str = "commondir";
 /// File inside a per-tree state dir recording the absolute path of the
 /// linked tree's pointer file — the back-pointer `worktree prune`
 /// checks before deleting a state dir.
-pub const BACKPOINTER_FILE_NAME: &str = "mkitdir";
+pub const BACKPOINTER_FILE_NAME: &str = "kitdir";
 /// Hard cap on the pointer, `commondir`, and back-pointer files. Far
 /// above any real path, small enough that a corrupt or hostile file
 /// cannot balloon discovery.
@@ -148,10 +148,10 @@ pub const MAX_POINTER_FILE_BYTES: u64 = 4096;
 /// Cheap to clone; construction never touches the filesystem.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoLayout {
-    /// Directory containing the working files (the parent of `.mkit`
+    /// Directory containing the working files (the parent of `.kit`
     /// in the single-worktree layout).
     worktree_root: PathBuf,
-    /// Shared state directory (`<main root>/.mkit`).
+    /// Shared state directory (`<main root>/.kit`).
     common_dir: PathBuf,
     /// Per-worktree state directory. Equal to `common_dir` in the
     /// single-worktree layout.
@@ -161,7 +161,7 @@ pub struct RepoLayout {
 impl RepoLayout {
     /// Layout of a classic single-worktree repository rooted at
     /// `worktree_root`: common dir and worktree state dir are both
-    /// `<worktree_root>/.mkit`.
+    /// `<worktree_root>/.kit`.
     #[must_use]
     pub fn single(worktree_root: impl Into<PathBuf>) -> Self {
         let worktree_root = worktree_root.into();
@@ -401,7 +401,7 @@ impl RepoLayout {
         self.worktree_state_dir.join(REVERT_MSG)
     }
 
-    /// `mkit-conflicts` — conflict sidecar for the in-progress op.
+    /// `kit-conflicts` — conflict sidecar for the in-progress op.
     #[must_use]
     pub fn conflicts_file(&self) -> PathBuf {
         self.worktree_state_dir.join(CONFLICTS_FILE)
@@ -440,9 +440,9 @@ impl RepoLayout {
 
 /// Errors surfaced by [`discover`] on a broken linked-worktree setup.
 ///
-/// A repository whose `.mkit` is a directory (every single-worktree
+/// A repository whose `.kit` is a directory (every single-worktree
 /// repository) can never produce one of these — discovery only engages
-/// the fail-closed path once `.mkit` is a pointer FILE.
+/// the fail-closed path once `.kit` is a pointer FILE.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DiscoverError {
@@ -486,7 +486,7 @@ pub fn validate_worktree_id(id: &str) -> bool {
 }
 
 /// Read a single-line, LF-terminated, size-capped pointer-style file
-/// (`.mkit` pointer, `commondir`, back-pointer). Returns the line
+/// (`.kit` pointer, `commondir`, back-pointer). Returns the line
 /// without its trailing newline. `Ok(None)` when the file is absent.
 fn read_capped_line(path: &Path) -> Result<Option<String>, DiscoverError> {
     let meta = match std::fs::symlink_metadata(path) {
@@ -495,7 +495,7 @@ fn read_capped_line(path: &Path) -> Result<Option<String>, DiscoverError> {
         Err(e) => return Err(DiscoverError::PointerUnreadable(path.to_path_buf(), e)),
     };
     // Reject symlinks outright: `symlink_metadata` sizes the LINK
-    // itself, so a hostile `.mkit -> /dev/zero` in an untarred tree
+    // itself, so a hostile `.kit -> /dev/zero` in an untarred tree
     // would sail past the byte cap while `fs::read` follows the link
     // into an unbounded read. Pointer-style files are plain regular
     // files by spec (SPEC-WORKTREE §2).
@@ -518,8 +518,8 @@ fn read_capped_line(path: &Path) -> Result<Option<String>, DiscoverError> {
     Ok(Some(line.to_owned()))
 }
 
-/// Write the linked-tree pointer file: `<tree>/.mkit` containing
-/// `mkitdir: <state_dir>\n`. Used by `worktree add`;
+/// Write the linked-tree pointer file: `<tree>/.kit` containing
+/// `kitdir: <state_dir>\n`. Used by `worktree add`;
 /// public now so the format has exactly one writer and one reader.
 ///
 /// # Errors
@@ -532,12 +532,12 @@ pub fn write_pointer_file(tree_root: &Path, state_dir: &Path) -> std::io::Result
 /// Resolve the [`RepoLayout`] for the repository whose working tree is
 /// rooted at `worktree_root` (discovery).
 ///
-/// - `.mkit` is a directory, or absent: the classic single-worktree
+/// - `.kit` is a directory, or absent: the classic single-worktree
 ///   layout ([`RepoLayout::single`]) — absence is NOT an error here so
 ///   the store-open path keeps producing today's "not a repository"
 ///   diagnostics unchanged.
-/// - `.mkit` is a FILE: a linked worktree. The pointer is parsed
-///   (`mkitdir: <path>`, absolute or relative to `worktree_root`), the
+/// - `.kit` is a FILE: a linked worktree. The pointer is parsed
+///   (`kitdir: <path>`, absolute or relative to `worktree_root`), the
 ///   per-tree state dir must exist, and the common dir is resolved via
 ///   the state dir's `commondir` file (defaulting to `../..` when the
 ///   file is absent, matching what `worktree add` writes) and must
@@ -556,7 +556,7 @@ pub fn discover(worktree_root: &Path) -> Result<RepoLayout, DiscoverError> {
         return Ok(RepoLayout::single(worktree_root));
     }
 
-    // `.mkit` exists and is not a directory: pointer file (or garbage).
+    // `.kit` exists and is not a directory: pointer file (or garbage).
     let Some(line) = read_capped_line(&dot_mkit)? else {
         // Raced away between the two stats; treat like absent.
         return Ok(RepoLayout::single(worktree_root));
@@ -617,7 +617,7 @@ pub struct WorktreeEntry {
     /// The per-tree state dir (`<common>/worktrees/<id>`).
     pub state_dir: PathBuf,
     /// The linked tree's root, derived from the back-pointer file
-    /// (its parent, since the back-pointer names `<tree>/.mkit`).
+    /// (its parent, since the back-pointer names `<tree>/.kit`).
     /// `None` when the entry is broken — see `prunable`.
     pub tree_root: Option<PathBuf>,
     /// `Some(reason)` when the entry no longer corresponds to a live
@@ -761,7 +761,7 @@ fn paths_refer_to_same(a: &Path, b: &Path) -> bool {
 mod tests {
     use super::*;
 
-    /// Every accessor, paired with its expected `.mkit`-relative path in
+    /// Every accessor, paired with its expected `.kit`-relative path in
     /// the single-worktree layout and its class. The golden strings are
     /// the exact historical joins — the single-worktree layout must be byte-identical.
     fn accessor_table(l: &RepoLayout) -> Vec<(&'static str, PathBuf, &'static str, Class)> {
@@ -845,7 +845,7 @@ mod tests {
             (
                 "conflicts_file",
                 l.conflicts_file(),
-                "mkit-conflicts",
+                "kit-conflicts",
                 Worktree,
             ),
             (
@@ -873,7 +873,7 @@ mod tests {
     }
 
     /// Golden invariant: in the single-worktree layout every
-    /// accessor equals the historical `<root>/.mkit/<relative>` join,
+    /// accessor equals the historical `<root>/.kit/<relative>` join,
     /// byte for byte.
     #[test]
     fn single_layout_paths_match_legacy_joins() {
@@ -891,12 +891,12 @@ mod tests {
         let l = RepoLayout::single("/repo");
         assert!(l.is_single());
         assert_eq!(l.common_dir(), l.worktree_state_dir());
-        assert_eq!(l.common_dir(), Path::new("/repo/.mkit"));
+        assert_eq!(l.common_dir(), Path::new("/repo/.kit"));
         assert_eq!(l.worktree_root(), Path::new("/repo"));
     }
 
     /// Containment invariant: every accessor resolves strictly inside
-    /// the directory its class prescribes — nothing escapes `.mkit`.
+    /// the directory its class prescribes — nothing escapes `.kit`.
     #[test]
     fn accessors_stay_inside_their_class_dir() {
         let l = RepoLayout::single("/repo");
@@ -957,7 +957,7 @@ mod tests {
         let l = RepoLayout::single("/definitely/not/a/real/path");
         assert_eq!(
             l.objects_dir(),
-            Path::new("/definitely/not/a/real/path/.mkit/objects")
+            Path::new("/definitely/not/a/real/path/.kit/objects")
         );
     }
 
@@ -968,12 +968,12 @@ mod tests {
     fn linked_layout_splits_accessors_by_class() {
         let l = RepoLayout::linked(
             "/trees/feature-x",
-            "/main/.mkit/worktrees/feature-x",
-            "/main/.mkit",
+            "/main/.kit/worktrees/feature-x",
+            "/main/.kit",
         );
         assert!(!l.is_single());
         // NOTE: the state dir deliberately nests UNDER the common dir
-        // (`.mkit/worktrees/<id>`), so "under the common dir" is
+        // (`.kit/worktrees/<id>`), so "under the common dir" is
         // trivially true for everything; the leak checks that matter
         // are (a) worktree-class accessors resolve under the state
         // dir, and (b) common-class accessors do NOT.
@@ -1001,7 +1001,7 @@ mod tests {
         // common dir's worktrees/, not under this tree's state dir.
         assert_eq!(
             l.worktree_state_dir_for("other"),
-            Path::new("/main/.mkit/worktrees/other")
+            Path::new("/main/.kit/worktrees/other")
         );
     }
 
@@ -1030,8 +1030,8 @@ mod tests {
     fn scaffold_linked(tmp: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let main = tmp.join("main");
         let tree = tmp.join("tree");
-        let state = main.join(".mkit/worktrees/tree");
-        std::fs::create_dir_all(main.join(".mkit/objects")).unwrap();
+        let state = main.join(".kit/worktrees/tree");
+        std::fs::create_dir_all(main.join(".kit/objects")).unwrap();
         std::fs::create_dir_all(&state).unwrap();
         std::fs::create_dir_all(&tree).unwrap();
         write_pointer_file(&tree, &state).unwrap();
@@ -1041,14 +1041,14 @@ mod tests {
     #[test]
     fn discover_dir_and_absent_yield_single() {
         let tmp = tempfile::tempdir().unwrap();
-        // Absent .mkit: single (store open reports not-a-repo later).
+        // Absent .kit: single (store open reports not-a-repo later).
         let l = discover(tmp.path()).unwrap();
         assert!(l.is_single());
-        // Directory .mkit: single, byte-identical to the historical layout.
-        std::fs::create_dir_all(tmp.path().join(".mkit")).unwrap();
+        // Directory .kit: single, byte-identical to the historical layout.
+        std::fs::create_dir_all(tmp.path().join(".kit")).unwrap();
         let l = discover(tmp.path()).unwrap();
         assert!(l.is_single());
-        assert_eq!(l.common_dir(), tmp.path().join(".mkit"));
+        assert_eq!(l.common_dir(), tmp.path().join(".kit"));
     }
 
     #[test]
@@ -1067,7 +1067,7 @@ mod tests {
         // commondir file absent => ../.. default, canonicalized.
         assert_eq!(
             l.common_dir(),
-            main.join(".mkit").canonicalize().unwrap().as_path()
+            main.join(".kit").canonicalize().unwrap().as_path()
         );
         // The seam in action: HEAD is per-tree, refs are shared.
         assert_eq!(l.head_file(), state.canonicalize().unwrap().join("HEAD"));
@@ -1082,18 +1082,18 @@ mod tests {
         let l = discover(&tree).unwrap();
         assert_eq!(
             l.common_dir(),
-            main.join(".mkit").canonicalize().unwrap().as_path()
+            main.join(".kit").canonicalize().unwrap().as_path()
         );
         // Absolute commondir works too.
         std::fs::write(
             state.join(COMMONDIR_FILE_NAME),
-            format!("{}\n", main.join(".mkit").display()),
+            format!("{}\n", main.join(".kit").display()),
         )
         .unwrap();
         let l = discover(&tree).unwrap();
         assert_eq!(
             l.common_dir(),
-            main.join(".mkit").canonicalize().unwrap().as_path()
+            main.join(".kit").canonicalize().unwrap().as_path()
         );
     }
 
@@ -1101,15 +1101,11 @@ mod tests {
     fn discover_accepts_relative_pointer_target() {
         let tmp = tempfile::tempdir().unwrap();
         let (_main, tree, state) = scaffold_linked(tmp.path());
-        std::fs::write(
-            tree.join(MKIT_DIR),
-            "mkitdir: ../main/.mkit/worktrees/tree\n",
-        )
-        .unwrap();
+        std::fs::write(tree.join(MKIT_DIR), "kitdir: ../main/.kit/worktrees/tree\n").unwrap();
         let l = discover(&tree).unwrap();
         assert_eq!(
             l.worktree_state_dir(),
-            tree.join("../main/.mkit/worktrees/tree")
+            tree.join("../main/.kit/worktrees/tree")
                 .canonicalize()
                 .unwrap()
         );
@@ -1138,7 +1134,7 @@ mod tests {
             Err(DiscoverError::PointerMalformed(_))
         ));
         // Multi-line.
-        std::fs::write(&pointer, "mkitdir: /a\nmkitdir: /b\n").unwrap();
+        std::fs::write(&pointer, "kitdir: /a\nmkitdir: /b\n").unwrap();
         assert!(matches!(
             discover(&tree),
             Err(DiscoverError::PointerMalformed(_))
@@ -1153,7 +1149,7 @@ mod tests {
         std::fs::write(
             &pointer,
             format!(
-                "mkitdir: /{}\n",
+                "kitdir: /{}\n",
                 "x".repeat(usize::try_from(MAX_POINTER_FILE_BYTES).unwrap())
             ),
         )
@@ -1169,7 +1165,7 @@ mod tests {
         {
             std::fs::remove_file(&pointer).unwrap();
             let huge = tmp.path().join("huge");
-            std::fs::write(&huge, format!("mkitdir: /{}\n", "x".repeat(8192))).unwrap();
+            std::fs::write(&huge, format!("kitdir: /{}\n", "x".repeat(8192))).unwrap();
             std::os::unix::fs::symlink(&huge, &pointer).unwrap();
             assert!(matches!(
                 discover(&tree),
@@ -1204,8 +1200,8 @@ mod tests {
     #[test]
     fn pointer_file_golden_bytes() {
         let tmp = tempfile::tempdir().unwrap();
-        write_pointer_file(tmp.path(), Path::new("/main/.mkit/worktrees/w1")).unwrap();
+        write_pointer_file(tmp.path(), Path::new("/main/.kit/worktrees/w1")).unwrap();
         let bytes = std::fs::read(tmp.path().join(MKIT_DIR)).unwrap();
-        assert_eq!(bytes, b"mkitdir: /main/.mkit/worktrees/w1\n");
+        assert_eq!(bytes, b"kitdir: /main/.kit/worktrees/w1\n");
     }
 }

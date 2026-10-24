@@ -65,7 +65,7 @@ support, a `FORMAT_VERSION_V1`-style fallback) follows directly from
 - **`advisory`** documents may describe disposable, reconstructible caches.
   Whether state can be rebuilt is determined by its contents and source of
   truth, not whether it crosses a network. Staged paths, selected object hashes,
-  mode choices and deletion tombstones in `.mkit/index` are authoritative:
+  mode choices and deletion tombstones in `.kit/index` are authoritative:
   neither HEAD nor current working files can recreate them. SPEC-INDEX therefore
   rejects unsupported versions without rewriting those selections. The current
   pre-release index format deliberately provides no legacy reader or migration
@@ -88,7 +88,7 @@ Where a `SPEC-*.md` document specifies byte layout:
 
 ## 4. Domain-separator and namespace naming
 
-mkit's signing and hashing domain separators (for example, `mkit.tag\0`,
+mkit's signing and hashing domain separators (for example, `kit.tag\0`,
 BLS namespace strings like `dsse/v1`) are permanent, literal byte
 strings baked into the signing/hashing contract &mdash; not a version field
 and not a compatibility-era label that gets bumped in place. A
@@ -97,6 +97,10 @@ distinctly-named domain/namespace constant rather than repurpose an
 existing one for a second meaning; there is no in-place migration path
 for a domain separator's bytes.
 
+Every domain separator, magic and predicate URI MUST have a value that
+no other one has. The reference implementation checks this: a test scans
+the source of every crate and fails when two constants share a value.
+
 A registry (informative, not itself normative) of the domain
 separators and namespace strings currently in use is maintained inline
 in each format's own spec (SPEC-OBJECTS §10 for object-hash domains,
@@ -104,7 +108,7 @@ SPEC-SIGNING for the commit/remix signing domain, SPEC-RELEASE-THRESHOLD
 §3 for the BLS namespace); this document does not duplicate that list,
 only the naming rule.
 
-`mkit-authority-generation:v1` is the dedicated deployment-authority statement
+`kit-authority-generation:v1` is the dedicated deployment-authority statement
 domain for namespace authority generation changes (SPEC-SERVER §6.2.1), distinct
 from grants, hook requests, write envelopes and admin statements.
 

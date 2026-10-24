@@ -299,7 +299,7 @@ fn identical_repush_transfers_nothing() {
     );
 }
 
-/// A transport that fails every CAS write to the `refs/mkit/` (packmap)
+/// A transport that fails every CAS write to the `refs/kit/` (packmap)
 /// namespace, simulating sustained contention on the packmap pointer.
 /// Everything else delegates to an inner [`MemoryTransport`].
 struct PackmapBlockingTransport {
@@ -330,7 +330,7 @@ impl Transport for PackmapBlockingTransport {
         condition: RefWriteCondition,
         hash: &hash::Hash,
     ) -> TransportResult<()> {
-        if name.starts_with("refs/mkit/") {
+        if name.starts_with("refs/kit/") {
             return Err(TransportError::RefConflict); // always contended
         }
         self.inner.update_ref(name, condition, hash)
@@ -511,7 +511,7 @@ impl Transport for DropPackTransport {
 fn packmap_head_pack(tx: &dyn Transport, branch: &str) -> PackKey {
     // Read the branch's packmap head node and return the pack it lists.
     let pm = tx
-        .read_ref(&format!("refs/mkit/packmap/{branch}"))
+        .read_ref(&format!("refs/kit/packmap/{branch}"))
         .unwrap()
         .unwrap();
     let node_bytes = tx.download_blob(&PackKey::from_hash(pm)).unwrap();
@@ -567,12 +567,8 @@ fn push_blocks_on_a_corrupt_prior_packmap_without_moving_head() {
         .unwrap();
 
     // Corrupt the packmap: point it at a node that does not exist.
-    tx.update_ref(
-        "refs/mkit/packmap/main",
-        RefWriteCondition::Any,
-        &[0xEE; 32],
-    )
-    .unwrap();
+    tx.update_ref("refs/kit/packmap/main", RefWriteCondition::Any, &[0xEE; 32])
+        .unwrap();
 
     // Edit + commit v2, then push the branch (fast-forward off v1).
     let mut v2 = big_buffer();
@@ -615,12 +611,8 @@ fn self_contained_push_resets_a_corrupt_packmap_chain() {
     let tx = MemoryTransport::new();
     push_all(alice.path(), &tx).expect("push alice v1");
     // Corrupt the packmap chain head.
-    tx.update_ref(
-        "refs/mkit/packmap/main",
-        RefWriteCondition::Any,
-        &[0xEE; 32],
-    )
-    .unwrap();
+    tx.update_ref("refs/kit/packmap/main", RefWriteCondition::Any, &[0xEE; 32])
+        .unwrap();
 
     // carol: a *fresh root* commit (no parents, complete local closure) that
     // does not share alice's objects → the push diffs against a remote tip it
@@ -667,14 +659,14 @@ fn push_blocks_on_a_corrupt_deeper_packmap_node() {
     fs::write(alice.path().join("big.bin"), &data).unwrap();
     commit_all(alice.path(), "v1");
     push_all(alice.path(), &tx).expect("push v1");
-    let n1 = tx.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
+    let n1 = tx.read_ref("refs/kit/packmap/main").unwrap().unwrap();
 
     // v2 → head node N2 (prev = N1).
     data[400_000] ^= 0xFF;
     fs::write(alice.path().join("big.bin"), &data).unwrap();
     commit_all(alice.path(), "v2");
     push_all(alice.path(), &tx).expect("push v2");
-    let n2 = tx.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
+    let n2 = tx.read_ref("refs/kit/packmap/main").unwrap().unwrap();
     assert_ne!(n1, n2, "v2 must chain a new head node");
     let v2_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
         .unwrap()
@@ -720,7 +712,7 @@ fn advance_refs_default_distinguishes_packmap_and_head_conflicts() {
     use mkit_core::protocol::AdvanceOutcome;
     let tx = MemoryTransport::new();
     let head = "refs/heads/main";
-    let pm = "refs/mkit/packmap/main";
+    let pm = "refs/kit/packmap/main";
     let (a, b, c, d, wrong) = ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [9u8; 32]);
 
     // Both fresh → Committed; both refs land.

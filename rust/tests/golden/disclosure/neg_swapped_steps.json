@@ -1,7 +1,7 @@
 {
   "bin": "neg_swapped_steps.bin",
-  "blake3": "88fce7fb03aacadde9e763ad47e7dfcabd4c0ff6163b18e79b9ca1d9e508c047",
-  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "blake3": "de88e47b8ae72d672ce04970071089ee7fb414c0c875779cd04612aa760b1d10",
+  "commit_id_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
   "description": "The first two of three path steps are swapped.",
   "expect": "reject",
   "name": "neg_swapped_steps",

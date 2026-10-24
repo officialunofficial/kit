@@ -39,13 +39,13 @@ document points here.
 | `worktrees.lock` | common dir | per-repo | linked-worktree registry mutations, branch-checked-out-elsewhere guard + HEAD write | SPEC-WORKTREE §4.3 |
 | `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ancestry intent + ref + descriptor publication for one branch (`mkit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
 | `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
-| `<root>/.mkit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
+| `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `mkit git import`/`fetch`/`pull` import phase or `mkit git export` against that remote's bridge state dir (`mkit-cli`'s `git_import::import_into`, `git::export`) | §4 (this document) |
 | shared/exclusive `format` handle | existing immutable common-dir `format` file | per-repo, short object-store critical section | shared during a bulk write or cached reuse and during format validation; exclusive during gc's final age check and unlink | SPEC-GC, §3.4 (this document) |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
 | `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `mkit serve` (stdin SSH-frame, its only mode) and any server embedding `mkit-server`'s filesystem layout (which also holds `server.lock` exclusively, so one such server serves a root at a time); taken exclusive without waiting by a starting `mkit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
 
-The recovery log (`.mkit/recovery-log`) has **no dedicated lock** &mdash; see
+The recovery log (`.kit/recovery-log`) has **no dedicated lock** &mdash; see
 §3.2.
 
 In the schematic names above, `<ref>` MUST be the lowercase hexadecimal BLAKE3
@@ -60,7 +60,7 @@ only the current lock naming contract is supported.
 
 ### 3.1 File-transport CAS vs. local worktree operations (detected, not coordinated)
 
-`<root>/.mkit/refs/.lock` serializes all file-transport Any, Missing and
+`<root>/.kit/refs/.lock` serializes all file-transport Any, Missing and
 Match writes against other file-transport instances pointed at the same root.
 Direct local ref mutations instead share the full-ref
 `<common_dir>/refs-<ref>.lock`, including unconditional writes and deletes.
@@ -71,7 +71,7 @@ the file transport does not acquire the local full-ref lock, `worktree.lock`,
 
 The cross-domain gap remains: local `mkit commit`/`checkout`/`gc` against a
 directory simultaneously served by `mkit serve` or `mkit-server` is not coordinated with the
-transport. When the served root is the repository's common dir (`.mkit`),
+transport. When the served root is the repository's common dir (`.kit`),
 the transport's `<root>/refs/...` files are the local refs, so a local ref
 mutation can race a client CAS. When the served root is any other directory
 the two sets of refs are separate files. In either layout a GC sweep cannot
@@ -118,7 +118,7 @@ export`, which hold only `git-<remote>.lock` (§4's per-command table).
 Residual gaps this warning does **not** close:
 
 - A push made directly against the file transport (`mkit push
-  mkit+file:///path`, bypassing `mkit serve` entirely) is not detected
+  kit+file:///path`, bypassing `mkit serve` entirely) is not detected
   &mdash; nothing takes `serve.lock` on that path.
 - Detection is one-directional: a `mkit serve` that starts *during* a
   local command's already-in-flight critical section is not itself
@@ -207,7 +207,7 @@ both chains. Holders acquire no further repository locks; gc never waits
 for its exclusive acquisition. Per-command sets below omit this implicit
 object-store lock.
 
-The file transport's `<root>/.mkit/refs/.lock` serializes every write condition
+The file transport's `<root>/.kit/refs/.lock` serializes every write condition
 within that transport. It is not composed with the local chain above; the
 served-root/local-worktree deployment restriction in §3.1 still applies.
 

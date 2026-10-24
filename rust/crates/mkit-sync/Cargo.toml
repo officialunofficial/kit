@@ -1,6 +1,6 @@
 [package]
 name = "mkit-sync"
-description = "Native clone, fetch, pull and push for .mkit repositories, as a library that returns typed reports and prints nothing"
+description = "Native clone, fetch, pull and push for .kit repositories, as a library that returns typed reports and prints nothing"
 readme = "README.md"
 keywords = ["mkit", "vcs", "clone", "fetch", "sync"]
 categories = ["development-tools", "filesystem"]
@@ -58,7 +58,7 @@ pack-zstd = ["mkit-core/pack-zstd"]
 history-mmr = ["mkit-core/history-mmr"]
 
 # `ClientSource`, the `RemoteSource` over `mkit_client::Client` (anonymous or
-# with an injected signer), for `mkit+https` / `mkit+http` remotes.
+# with an injected signer), for `kit+https` / `kit+http` remotes.
 client = ["dep:mkit-client", "dep:futures-executor"]
 # `NativeHttp` + `NativeClock`: hyper/rustls on a current-thread runtime,
 # gzip only; with default features disabled, no `zstd-sys` anywhere in the

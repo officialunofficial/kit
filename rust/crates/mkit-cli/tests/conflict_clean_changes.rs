@@ -43,7 +43,7 @@ fn commit_all(root: &Path, msg: &str) {
     );
 }
 fn branch_tip(root: &Path, branch: &str) -> String {
-    fs::read_to_string(root.join(format!(".mkit/refs/heads/{branch}")))
+    fs::read_to_string(root.join(format!(".kit/refs/heads/{branch}")))
         .unwrap()
         .trim()
         .to_owned()

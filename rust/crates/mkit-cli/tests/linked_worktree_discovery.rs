@@ -2,8 +2,8 @@
 //!
 //! These tests hand-build the exact on-disk shape that `mkit worktree add`
 //! produces — a
-//! `worktrees/<id>/` state dir under the main `.mkit` and a
-//! `mkitdir: …` pointer file — and then drive the REAL binary from
+//! `worktrees/<id>/` state dir under the main `.kit` and a
+//! `kitdir: …` pointer file — and then drive the REAL binary from
 //! inside the linked tree. This pins the discovery contract:
 //!
 //! - a linked tree shares the main repository's object store and refs;
@@ -21,7 +21,7 @@ use mkit_core::layout::RepoLayout;
 
 /// Hand-build a linked worktree of `repo` in its own tempdir, the way
 /// `worktree add` does: state dir + commondir + back-pointer
-/// under the main `.mkit`, pointer file in the new tree, HEAD on
+/// under the main `.kit`, pointer file in the new tree, HEAD on
 /// `branch`, and the tree's files materialized by `checkout` run from
 /// the linked tree itself. Returns the tempdir (keep it alive) and the
 /// tree root inside it.
@@ -33,8 +33,8 @@ fn link_worktree(repo: &Repo, name: &str, branch: &str) -> (tempfile::TempDir, P
     std::fs::write(state.join("commondir"), b"../..\n").expect("write commondir");
     std::fs::create_dir_all(&tree).expect("create tree");
     std::fs::write(
-        state.join("mkitdir"),
-        format!("{}\n", tree.join(".mkit").display()),
+        state.join("kitdir"),
+        format!("{}\n", tree.join(".kit").display()),
     )
     .expect("write back-pointer");
     mkit_core::layout::write_pointer_file(&tree, &state).expect("write pointer");
@@ -107,8 +107,8 @@ fn linked_tree_shares_store_and_keeps_state_local() {
         "linked-tree commit must write into the shared object store"
     );
     assert!(
-        !tree.join(".mkit").is_dir(),
-        "the linked tree must not grow its own .mkit directory"
+        !tree.join(".kit").is_dir(),
+        "the linked tree must not grow its own .kit directory"
     );
 
     // The shared ref moved; the main tree sees the commit.
@@ -156,7 +156,7 @@ fn stash_in_linked_tree_is_tree_local() {
     );
 
     // The stash manifest lives in the linked tree's state dir, not the
-    // main `.mkit` (stash is per-worktree state per).
+    // main `.kit` (stash is per-worktree state per).
     assert!(
         repo.mkit_dir().join("worktrees/wt1/stash").is_file(),
         "stash must land in the linked tree's state dir"
@@ -182,7 +182,7 @@ fn broken_pointer_fails_closed_with_clear_error() {
     std::fs::create_dir_all(&tree).unwrap();
 
     // Garbage pointer.
-    std::fs::write(tree.join(".mkit"), b"gitdir: /somewhere\n").unwrap();
+    std::fs::write(tree.join(".kit"), b"gitdir: /somewhere\n").unwrap();
     let out = mkit(&tree, repo.xdg(), &["status"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -193,9 +193,9 @@ fn broken_pointer_fails_closed_with_clear_error() {
 
     // Dangling pointer (state dir never created / pruned).
     std::fs::write(
-        tree.join(".mkit"),
+        tree.join(".kit"),
         format!(
-            "mkitdir: {}\n",
+            "kitdir: {}\n",
             repo.mkit_dir().join("worktrees/gone").display()
         ),
     )

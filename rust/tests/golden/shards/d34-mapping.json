@@ -12,7 +12,7 @@
     {
       "namespace": "root",
       "repo": "a",
-      "ref_name": "refs/mkit/packmap/main",
+      "ref_name": "refs/kit/packmap/main",
       "ref_partition_hex": "72726f6f74006100726566732f68656164732f6d61696e00",
       "ref_index_partition_hex": "78726f6f74006100313100"
     },
@@ -33,7 +33,7 @@
     {
       "namespace": "root",
       "repo": "a",
-      "ref_name": "refs/mkit/packmap/a/b",
+      "ref_name": "refs/kit/packmap/a/b",
       "ref_partition_hex": "72726f6f74006100726566732f68656164732f612f6200",
       "ref_index_partition_hex": "78726f6f74006100313500"
     },

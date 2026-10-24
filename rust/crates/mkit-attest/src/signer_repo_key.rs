@@ -1,7 +1,7 @@
 //! Repo-key signer — the default `Signer` impl.
 //!
 //! Wraps the same Ed25519 [`KeyPair`] that signs commits. The caller
-//! loads the key from `.mkit/keys/default.key` (this module does no
+//! loads the key from `.kit/keys/default.key` (this module does no
 //! I/O) and hands us the [`KeyPair`]. `sign` signs the DSSE PAE bytes
 //! directly: no extra domain prefix, because the PAE's own `"DSSEv1 "`
 //! prefix is the domain separator per SPEC-ATTESTATIONS §7.2 and §2.1.

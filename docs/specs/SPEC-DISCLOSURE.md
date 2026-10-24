@@ -174,9 +174,9 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
 8. For each `Step` at index `i` (root first):
    1. **MUST** validate `name` against SPEC-OBJECTS §4.1's entry-name
       rules ([`TreeEntry::validate_name`](../../rust/crates/mkit-core/src/object.rs)) &mdash;
-      an invalid name (trailing space, `.mkit`, a reserved Windows device
+      an invalid name (trailing space, `.kit`, a reserved Windows device
       name, etc.) is rejected here, before its proof is even checked.
-    2. **MUST** check `domain_digest(b"mkit.tree\x00", inner_root) == expected_id`
+    2. **MUST** check `domain_digest(b"kit.tree\x00", inner_root) == expected_id`
        first, where `expected_id` is the previous step's `child_id` (step 0
        against `tree_hash` itself). A mismatch is a typed `InnerRootMismatch`.
        The field is never a second trust anchor (wrap-check-first,
@@ -202,7 +202,7 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
       content-address (BLAKE3, or the BMT root for a `Tree`/`ChunkedBlob`
       &mdash; SPEC-MERKLE-OBJECTS §2) equals the leaf id.
     - **`Chunk`**: **MUST** first check
-       `domain_digest(b"mkit.chunked\x00", inner_root) == leaf_id`, else
+       `domain_digest(b"kit.chunked\x00", inner_root) == leaf_id`, else
        reject with `InnerRootMismatch`. **MUST** then require that the
        multi-proof folds to exactly `inner_root`. **MUST** hash `bytes`
        (its BLAKE3 IS the chunk's Blob id, SPEC-OBJECTS §3) and verify, in

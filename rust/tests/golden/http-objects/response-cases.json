@@ -87,8 +87,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -112,8 +112,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -137,8 +137,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -162,8 +162,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -187,8 +187,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -212,8 +212,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -237,8 +237,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -262,8 +262,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -287,8 +287,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -312,8 +312,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -337,8 +337,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -362,8 +362,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -387,8 +387,8 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-Object",
-          "X-Mkit-Commit"
+          "X-Kit-Object",
+          "X-Kit-Commit"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -430,7 +430,7 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-*",
+          "X-Kit-*",
           "Content-Range"
         ],
         "body_bytes": 1583,
@@ -460,7 +460,7 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-*",
+          "X-Kit-*",
           "Content-Range"
         ],
         "body_bytes": 0,
@@ -487,7 +487,7 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-*"
+          "X-Kit-*"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -512,7 +512,7 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-*"
+          "X-Kit-*"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -538,7 +538,7 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-*"
+          "X-Kit-*"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -562,7 +562,7 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-*"
+          "X-Kit-*"
         ],
         "body_equivalence_group": "uniform_404",
         "headers": {
@@ -597,9 +597,9 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 304
       },
@@ -626,8 +626,8 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 304
       },
@@ -652,9 +652,9 @@
           "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.object\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "chunked_blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "chunked_blob"
         },
         "status": 304
       },
@@ -715,8 +715,8 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 200
       },
@@ -834,10 +834,10 @@
       "expect": {
         "absent_headers": [
           "ETag",
-          "X-Mkit-*",
-          "X-Mkit-Object",
-          "X-Mkit-Object-Type",
-          "X-Mkit-Commit",
+          "X-Kit-*",
+          "X-Kit-Object",
+          "X-Kit-Object-Type",
+          "X-Kit-Commit",
           "Content-Range"
         ],
         "body_json": {
@@ -850,11 +850,11 @@
           "description": "Admission required"
         },
         "headers": {
+          "ADMISSION-REQUIRED": "opaque-challenge",
           "Access-Control-Allow-Origin": "*",
           "Cache-Control": "no-store",
           "Content-Security-Policy": "sandbox; default-src 'none'",
           "Content-Type": "application/json",
-          "ADMISSION-REQUIRED": "opaque-challenge",
           "Referrer-Policy": "no-referrer",
           "WWW-Authenticate": "Admission example",
           "X-Content-Type-Options": "nosniff"
@@ -909,8 +909,8 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 200
       },
@@ -937,9 +937,9 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 200
       },
@@ -965,8 +965,8 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 200
       },
@@ -994,9 +994,9 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 200
       },
@@ -1022,8 +1022,8 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 200
       },
@@ -1051,9 +1051,9 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 200
       },
@@ -1081,8 +1081,8 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "outcome": {
           "bytes_served": 0,
@@ -1114,8 +1114,8 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "chunked_blob"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "chunked_blob"
         },
         "status": 200
       },
@@ -1137,12 +1137,12 @@
           "Cache-Control": "public, max-age=31536000, immutable",
           "Content-Length": "100",
           "Content-Security-Policy": "sandbox; default-src 'none'",
-          "Content-Type": "application/vnd.mkit.object",
+          "Content-Type": "application/vnd.kit.object",
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "tree"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "tree"
         },
         "status": 200
       },
@@ -1168,8 +1168,8 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 206
       },
@@ -1196,8 +1196,8 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 206
       },
@@ -1224,8 +1224,8 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 200
       },
@@ -1252,8 +1252,8 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 200
       },
@@ -1274,13 +1274,13 @@
           "Access-Control-Allow-Origin": "*",
           "Cache-Control": "public, max-age=31536000, immutable",
           "Content-Security-Policy": "sandbox; default-src 'none'",
-          "Content-Type": "application/vnd.mkit.disclosure",
+          "Content-Type": "application/vnd.kit.disclosure",
           "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.object\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "chunked_blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "chunked_blob"
         },
         "status": 200
       },
@@ -1307,13 +1307,13 @@
           "Access-Control-Allow-Origin": "*",
           "Cache-Control": "public, no-cache",
           "Content-Security-Policy": "sandbox; default-src 'none'",
-          "Content-Type": "application/vnd.mkit.disclosure",
+          "Content-Type": "application/vnd.kit.disclosure",
           "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.object\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "chunked_blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "chunked_blob"
         },
         "status": 200
       },
@@ -1340,13 +1340,13 @@
           "Access-Control-Allow-Origin": "*",
           "Cache-Control": "public, no-cache",
           "Content-Security-Policy": "sandbox; default-src 'none'",
-          "Content-Type": "application/vnd.mkit.disclosure",
+          "Content-Type": "application/vnd.kit.disclosure",
           "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.range-10-19\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 200
       },
@@ -1373,13 +1373,13 @@
           "Access-Control-Allow-Origin": "*",
           "Cache-Control": "public, max-age=31536000, immutable",
           "Content-Security-Policy": "sandbox; default-src 'none'",
-          "Content-Type": "application/vnd.mkit.disclosure-span",
+          "Content-Type": "application/vnd.kit.disclosure-span",
           "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.range-10-19\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "chunked_blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "chunked_blob"
         },
         "status": 200
       },
@@ -1406,13 +1406,13 @@
           "Access-Control-Allow-Origin": "*",
           "Cache-Control": "private, max-age=60, immutable",
           "Content-Security-Policy": "sandbox; default-src 'none'",
-          "Content-Type": "application/vnd.mkit.disclosure",
+          "Content-Type": "application/vnd.kit.disclosure",
           "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.object\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "chunked_blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "chunked_blob"
         },
         "status": 200
       },
@@ -1439,13 +1439,13 @@
           "Access-Control-Allow-Origin": "*",
           "Cache-Control": "private, max-age=31536000, immutable",
           "Content-Security-Policy": "sandbox; default-src 'none'",
-          "Content-Type": "application/vnd.mkit.disclosure-span",
+          "Content-Type": "application/vnd.kit.disclosure-span",
           "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.range-10-19\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "chunked_blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "chunked_blob"
         },
         "status": 200
       },
@@ -1466,11 +1466,11 @@
       "expect": {
         "absent_headers": [],
         "headers": {
+          "ADMISSION-RESPONSE": "opaque-response",
           "Access-Control-Allow-Origin": "*",
+          "Admission-Receipt": "opaque-receipt",
           "Cache-Control": "private, max-age=31536000, immutable",
           "Content-Security-Policy": "sandbox; default-src 'none'",
-          "ADMISSION-RESPONSE": "opaque-response",
-          "Admission-Receipt": "opaque-receipt",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff"
         },
@@ -1516,9 +1516,9 @@
           "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
-          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
-          "X-Mkit-Object-Type": "blob"
+          "X-Kit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Kit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Kit-Object-Type": "blob"
         },
         "status": 200
       },
@@ -1539,7 +1539,7 @@
         ],
         "headers": {
           "Access-Control-Allow-Origin": "https://viewer.example",
-          "Access-Control-Expose-Headers": "ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Admission-Receipt, ADMISSION-REQUIRED, ADMISSION-RESPONSE, Link",
+          "Access-Control-Expose-Headers": "ETag, Content-Range, Accept-Ranges, Content-Length, X-Kit-Commit, X-Kit-Object, X-Kit-Object-Type, WWW-Authenticate, Admission-Receipt, ADMISSION-REQUIRED, ADMISSION-RESPONSE, Link",
           "Content-Security-Policy": "sandbox; default-src 'none'",
           "Referrer-Policy": "no-referrer",
           "Vary": "Origin",
@@ -1570,7 +1570,7 @@
       "request": {
         "bearer_required": true,
         "method": "GET",
-        "route": "/.well-known/mkit-url-token-keys.json"
+        "route": "/.well-known/kit-url-token-keys.json"
       }
     }
   ],

@@ -59,7 +59,7 @@ Refs live under `refs/`, in these namespaces:
 refs/heads/<name>                  branch refs
 refs/tags/<name>                   tag refs
 refs/remotes/<remote>/<name>       remote-tracking branch refs
-refs/mkit/packmap/<name>           pack map of branch <name> (pushed with it)
+refs/kit/packmap/<name>           pack map of branch <name> (pushed with it)
 ```
 
 **Served names.** A transport server (`mkit serve`, `mkit-server`, the
@@ -76,14 +76,14 @@ fails the §3 grammar is refused as §3 says. The local and client-side
 transports (file, s3, memory) are not servers and are unaffected.
 
 *Informative.* Every mkit client writes only `refs/heads/`, `refs/tags/`
-and `refs/mkit/packmap/` names. `mkit serve` before 0.5 stored any
+and `refs/kit/packmap/` names. `mkit serve` before 0.5 stored any
 grammar-valid name as a file at the served root (`main` as
 `<root>/main`), so a third-party client could have left such files; they
 are no longer served, and `docs/CLI.md` ("Refs outside `refs/`") says how
 an operator finds and moves them. Version 3 added this rule.
 
-On local disk (`.mkit/refs/heads/<name>`, `.mkit/refs/tags/<name>`,
-`.mkit/refs/remotes/<remote>/<name>`). On transports, branch and tag refs
+On local disk (`.kit/refs/heads/<name>`, `.kit/refs/tags/<name>`,
+`.kit/refs/remotes/<remote>/<name>`). On transports, branch and tag refs
 use the same path shape relative to the transport's root.
 
 `refs/remotes/<remote>/<name>` is local-only remote-tracking state. The
@@ -102,7 +102,7 @@ successful push, mkit advances the local `refs/remotes/<remote>/<branch>`
 to the pushed tip. `--force-with-lease` keeps this lease; `--force`
 drops to an unconditional write.
 
-`HEAD` is a special file at `.mkit/HEAD` containing either:
+`HEAD` is a special file at `.kit/HEAD` containing either:
 
 ```
 ref: refs/heads/<name>\n
@@ -110,7 +110,7 @@ ref: refs/heads/<name>\n
 
 or a bare 64-char lowercase hex hash + `\n` (detached HEAD).
 
-The file `.mkit/shallow` contains one `<64-hex>\n` per line denoting
+The file `.kit/shallow` contains one `<64-hex>\n` per line denoting
 commits beyond which the local repo does not have history.
 
 ---
@@ -156,8 +156,8 @@ Plus these rejections:
 
 *Informative: derived local bounds.* A local branch or tag name is
 short; its wire name adds a prefix. A push of branch `b` writes both
-`refs/heads/<b>` and `refs/mkit/packmap/<b>`, so a new branch name is at
-most 512 − 18 = **494 bytes** (`MAX_BRANCH_NAME_BYTES`); a tag's wire
+`refs/heads/<b>` and `refs/kit/packmap/<b>`, so a new branch name is at
+most 512 − 17 = **495 bytes** (`MAX_BRANCH_NAME_BYTES`); a tag's wire
 name is `refs/tags/<t>`, so a new tag name is at most 512 − 10 = **502
 bytes** (`MAX_TAG_NAME_BYTES`). `mkit` refuses to create a longer one and
 says which bound applies. A branch created before these bounds, up to
@@ -300,7 +300,7 @@ not exist or contains a different hash → `RefConflict`.
 | Transport | `.any`      | `.missing`                            | `.match`                                                       | Notes |
 |-----------|-------------|---------------------------------------|----------------------------------------------------------------|-------|
 | memory    | atomic*     | atomic*                               | atomic* &mdash; the read-check-write runs under the instance's one `Mutex` | *In-process only: every verb of one `MemoryTransport` instance holds its `Mutex` for the whole operation, so concurrent threads sharing the instance cannot interleave. Never shared across processes. |
-| file      | atomic      | atomic (via `O_EXCL` create)          | atomic &mdash; OS exclusive file lock (`<root>/.mkit/refs/.lock`) serializes the read-check-write across processes | Lock guard released on drop (including panic-unwind). |
+| file      | atomic      | atomic (via `O_EXCL` create)          | atomic &mdash; OS exclusive file lock (`<root>/.kit/refs/.lock`) serializes the read-check-write across processes | Lock guard released on drop (including panic-unwind). |
 | s3        | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<md5-of-wire>"`                         | Requires server that supports conditional writes (R2 and post-2024 AWS S3 do; generic S3 may not). |
 | http      | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<hex-hash>"`                            | Worker-flavored server. Generic S3 and nginx do NOT conform. |
 | ssh       | atomic      | atomic (`OP_WRITE_REF_IF_ABSENT` path via condition byte) | atomic (`CONDITION_MATCH` with 32-byte expected hash)          | Server enforces CAS; client trusts `STATUS_ERROR`. |
@@ -316,7 +316,7 @@ above. As of, the local `mkit-core`
 disk (without going through the file transport) is also atomic across
 processes: every write condition takes a dedicated `<common_dir>/refs-<ref>.lock`
 OS exclusive lock (distinct from the file transport's
-`<root>/.mkit/refs/.lock`, but the same blocking-kernel-lock primitive)
+`<root>/.kit/refs/.lock`, but the same blocking-kernel-lock primitive)
 around the read-check-write, so two uncoordinated callers on the same
 repo &mdash; for example `branch -m` and `commit`, or `update-ref` from two linked
 worktrees &mdash; can no longer both observe a stale `current` value and both
@@ -333,7 +333,7 @@ The complete nesting order, including history → ref mutation locks, is
 SPEC-CONCURRENCY §4. `every_ref_mutation_waits_for_the_cas_guard` and
 `every_write_condition_waits_for_the_file_cas_guard` enforce participation.
 
-*Coordination with local worktree operations:* `<root>/.mkit/refs/.lock`
+*Coordination with local worktree operations:* `<root>/.kit/refs/.lock`
 by itself only serializes the file transport against concurrent instances
 of itself &mdash; it does not, on its own, coordinate against a `commit`,
 `checkout`, or `gc` running locally against the same directory via the
@@ -389,10 +389,10 @@ Clients requiring CAS MUST use `.match` explicitly.
 ## 6. Ref storage (local disk)
 
 ```
-.mkit/refs/heads/<name>     65 bytes wire (HEADS_DIR = "refs/heads")
-.mkit/refs/tags/<name>      65 bytes wire (TAGS_DIR  = "refs/tags")
-.mkit/HEAD                  symbolic ("ref: refs/heads/<name>\n") or detached (64-hex + '\n')
-.mkit/shallow               concatenation of N × 65-byte ref-wire blobs (one hash per line)
+.kit/refs/heads/<name>     65 bytes wire (HEADS_DIR = "refs/heads")
+.kit/refs/tags/<name>      65 bytes wire (TAGS_DIR  = "refs/tags")
+.kit/HEAD                  symbolic ("ref: refs/heads/<name>\n") or detached (64-hex + '\n')
+.kit/shallow               concatenation of N × 65-byte ref-wire blobs (one hash per line)
 ```
 
 `HEAD` content size is capped at 4 KiB; a single ref file at 128 bytes;
@@ -408,7 +408,7 @@ edited file does not brick a repo; ref-file reads tolerate the same
 trailing whitespace plus the optional `\r` before the terminating
 `\n`. Fresh writes always emit the strict 65-byte form.
 
-Listing `.mkit/refs/heads/` is recursive (nested directories like
+Listing `.kit/refs/heads/` is recursive (nested directories like
 `feature/x/y` are supported), with a hard depth cap of 32 levels to
 defeat adversarial nesting. Files that fail `validate_ref_name` or
 whose bytes do not decode to a valid ref wire are silently skipped
@@ -435,27 +435,27 @@ These are work/retention budgets, not a hard process heap ceiling. Earlier
 writes can survive a later error; the host owns abandonment and publication.
 The filesystem CLI retains its existing budgets and operation-state semantics.
 
-Resumable history operations persist their state under `.mkit/` using
+Resumable history operations persist their state under `.kit/` using
 Git-compatible names plus one documented mkit sidecar. These are not
 refs (they are not listed by `listRefs` and are not part of the ref
 namespace); they are operation scratch state consumed by
 `--continue`/`--abort`/`--skip`.
 
 ```
-.mkit/MERGE_HEAD           64-hex plus '\n'  — other parent of an in-progress merge
-.mkit/CHERRY_PICK_HEAD     64-hex plus '\n'  — commit being applied by a cherry-pick
-.mkit/ORIG_HEAD            64-hex plus '\n'  — HEAD before the operation (for --abort)
-.mkit/MERGE_MSG            raw bytes      — pending merge commit message
-.mkit/CHERRY_PICK_MSG      raw bytes      — pending cherry-pick commit message
-.mkit/mkit-conflicts       sidecar (below)
-.mkit/rebase-apply/        rebase state dir; holds a mkit-conflicts sidecar when paused
+.kit/MERGE_HEAD           64-hex plus '\n'  — other parent of an in-progress merge
+.kit/CHERRY_PICK_HEAD     64-hex plus '\n'  — commit being applied by a cherry-pick
+.kit/ORIG_HEAD            64-hex plus '\n'  — HEAD before the operation (for --abort)
+.kit/MERGE_MSG            raw bytes      — pending merge commit message
+.kit/CHERRY_PICK_MSG      raw bytes      — pending cherry-pick commit message
+.kit/kit-conflicts       sidecar (below)
+.kit/rebase-apply/        rebase state dir; holds a kit-conflicts sidecar when paused
 ```
 
 Presence of `MERGE_HEAD` ⇒ a merge is in progress; `CHERRY_PICK_HEAD` ⇒
 a cherry-pick; `rebase-apply/` ⇒ a rebase. Starting any of the three
 while one is already in progress is refused.
 
-The `mkit-conflicts` sidecar is line-oriented, one line per conflicting
+The `kit-conflicts` sidecar is line-oriented, one line per conflicting
 path, tab-separated, with the path last (so it may not contain a tab):
 
 ```
@@ -466,7 +466,7 @@ where `<kind>` ∈ {`modify`, `addadd`, `deletemodify`}, a missing side is
 encoded as a single `-`, and `<path>` is validated with the same rules
 as a staged index path (SPEC-INDEX §2). Hash files tolerate trailing
 whitespace on read. The whole sidecar is capped at 1 MiB. This sidecar
-does **not** change the `.mkit/index` format: the index remains a
+does **not** change the `.kit/index` format: the index remains a
 single-stage **resolved** staging area (no unmerged stages); conflict
 base/ours/theirs material lives only in this sidecar.
 

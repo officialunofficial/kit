@@ -193,7 +193,7 @@ impl TreeEntry {
     /// bytes), this rejects names that alias repo metadata or exploit
     /// platform quirks:
     ///
-    /// - `.mkit` / `.git` case-insensitively (Git CVE-2021-21300 family).
+    /// - `.kit` / `.git` case-insensitively (Git CVE-2021-21300 family).
     /// - Trailing `.` or space, which Windows strips, causing aliasing.
     /// - Reserved Windows device names (`CON`, `PRN`, `AUX`, `NUL`,
     ///   `COM1`-`COM9`, `LPT1`-`LPT9`), with or without an extension,
@@ -218,8 +218,8 @@ impl TreeEntry {
         if matches!(name.last(), Some(b'.' | b' ')) {
             return false;
         }
-        // Case-insensitive `.mkit` / `.git`.
-        if name.eq_ignore_ascii_case(b".mkit") || name.eq_ignore_ascii_case(b".git") {
+        // Case-insensitive `.kit` / `.git`.
+        if name.eq_ignore_ascii_case(b".kit") || name.eq_ignore_ascii_case(b".git") {
             return false;
         }
         // Reserved Windows device names — the stem (before the first `.`)
@@ -668,7 +668,7 @@ pub enum MkitError {
     #[error("key file owner uid {actual} does not match process euid {euid}")]
     InsecureKeyOwner { actual: u32, euid: u32 },
     /// Parent directory of the key file is group/world-accessible.
-    /// `.mkit/keys/` MUST be 0700 to keep `inotify`-style swap attacks
+    /// `.kit/keys/` MUST be 0700 to keep `inotify`-style swap attacks
     /// out of reach.
     #[error("key directory mode {actual:#o} is broader than 0700")]
     InsecureKeyDir { actual: u32 },
@@ -880,15 +880,15 @@ mod tests {
     #[test]
     fn tree_entry_name_rejects_dot_mkit_and_dot_git_case_insensitive() {
         // Exact-case basics
-        assert!(!TreeEntry::validate_name(b".mkit"));
+        assert!(!TreeEntry::validate_name(b".kit"));
         assert!(!TreeEntry::validate_name(b".git"));
         // Mixed/upper case — must also be rejected on case-insensitive FS.
-        assert!(!TreeEntry::validate_name(b".MKIT"));
-        assert!(!TreeEntry::validate_name(b".Mkit"));
+        assert!(!TreeEntry::validate_name(b".KIT"));
+        assert!(!TreeEntry::validate_name(b".Kit"));
         assert!(!TreeEntry::validate_name(b".GIT"));
         assert!(!TreeEntry::validate_name(b".Git"));
         // Unrelated names starting with `.m` or `.g` are fine.
-        assert!(TreeEntry::validate_name(b".mkitignore"));
+        assert!(TreeEntry::validate_name(b".kitignore"));
         assert!(TreeEntry::validate_name(b".gitignore"));
     }
 

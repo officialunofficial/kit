@@ -251,8 +251,8 @@ fn tool_call_round_trip_over_http_operates_the_real_repo() {
     );
     assert!(!is_tool_error(&status), "{status}");
     assert!(
-        repo.path().join(".mkit").is_dir(),
-        "mkit_init actually created .mkit/ on disk"
+        repo.path().join(".kit").is_dir(),
+        "mkit_init actually created .kit/ on disk"
     );
 }
 

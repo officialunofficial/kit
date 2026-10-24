@@ -45,7 +45,7 @@ fn head_hash(td: &Path) -> String {
 }
 
 fn ref_hash(td: &Path, branch: &str) -> String {
-    fs::read_to_string(td.join(".mkit/refs/heads").join(branch))
+    fs::read_to_string(td.join(".kit/refs/heads").join(branch))
         .unwrap()
         .trim()
         .to_string()
@@ -68,7 +68,7 @@ fn clone_errors_on_missing_url() {
 #[test]
 fn clone_from_file_url_roundtrips() {
     // FileTransport expects a bare-ish layout with `refs/heads/...` and
-    // `packs/...` directly under its root URL — NOT the in-repo `.mkit/`
+    // `packs/...` directly under its root URL — NOT the in-repo `.kit/`
     // layout. We set up a bare directory, push alice's refs into it,
     // then clone from the bare URL.
     let alice = tempfile::tempdir().unwrap();
@@ -76,7 +76,7 @@ fn clone_from_file_url_roundtrips() {
     make_commit(alice.path(), "a.txt", b"hi from alice\n", "first");
 
     let bare = tempfile::tempdir().unwrap();
-    let url = format!("mkit+file://{}", bare.path().display());
+    let url = format!("kit+file://{}", bare.path().display());
     // Publish alice's main ref into the bare remote.
     assert!(
         run_in(alice.path(), &["remote", "add", &url])
@@ -94,12 +94,12 @@ fn clone_from_file_url_roundtrips() {
         .expect("spawn");
     assert!(out.status.success(), "clone failed: {out:?}");
     let bob = parent.path().join("bob");
-    assert!(bob.join(".mkit/refs/heads/main").is_file());
+    assert!(bob.join(".kit/refs/heads/main").is_file());
     assert_eq!(
-        fs::read_to_string(alice.path().join(".mkit/refs/heads/main"))
+        fs::read_to_string(alice.path().join(".kit/refs/heads/main"))
             .unwrap()
             .trim(),
-        fs::read_to_string(bob.join(".mkit/refs/heads/main"))
+        fs::read_to_string(bob.join(".kit/refs/heads/main"))
             .unwrap()
             .trim(),
     );
@@ -151,7 +151,7 @@ fn merge_preserves_ignored_untracked_files() {
     make_commit(td.path(), "a.txt", b"2\n", "c2");
     assert!(run_in(td.path(), &["checkout", "main"]).status.success());
 
-    fs::write(td.path().join(".mkitignore"), "local.txt\n").unwrap();
+    fs::write(td.path().join(".kitignore"), "local.txt\n").unwrap();
     fs::write(td.path().join("local.txt"), b"local only\n").unwrap();
 
     let out = run_in(td.path(), &["merge", "feature"]);
@@ -161,7 +161,7 @@ fn merge_preserves_ignored_untracked_files() {
         b"local only\n"
     );
     assert_eq!(
-        fs::read_to_string(td.path().join(".mkitignore")).unwrap(),
+        fs::read_to_string(td.path().join(".kitignore")).unwrap(),
         "local.txt\n"
     );
 }
@@ -241,13 +241,13 @@ fn rebase_abort_restores_original_branch_ref_and_worktree() {
     assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
     let rebase = run_in(td.path(), &["rebase", "main"]);
     assert!(!rebase.status.success(), "rebase should pause on conflict");
-    assert!(td.path().join(".mkit/rebase-apply").exists());
+    assert!(td.path().join(".kit/rebase-apply").exists());
 
     let abort = run_in(td.path(), &["rebase", "--abort"]);
     assert!(abort.status.success(), "abort failed: {abort:?}");
     assert_eq!(ref_hash(td.path(), "feature"), feature_before);
     assert_eq!(fs::read(td.path().join("a.txt")).unwrap(), b"feature\n");
-    assert!(!td.path().join(".mkit/rebase-apply").exists());
+    assert!(!td.path().join(".kit/rebase-apply").exists());
 }
 
 // ---------- bisect --------------------------------------------------------
@@ -267,7 +267,7 @@ fn bisect_start_creates_state_file() {
     make_commit(td.path(), "a.txt", b"1\n", "c1");
     let out = run_in(td.path(), &["bisect", "start"]);
     assert!(out.status.success(), "bisect start failed: {out:?}");
-    assert!(td.path().join(".mkit/bisect").is_file());
+    assert!(td.path().join(".kit/bisect").is_file());
     // Clean up so the repo can be dropped cleanly.
     assert!(run_in(td.path(), &["bisect", "reset"]).status.success());
 }
@@ -1904,7 +1904,7 @@ fn sparse_checkout_set_refuses_dirty_tracked_file_inside_sparse_set() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("restore would overwrite local changes"));
     assert_eq!(fs::read(td.path().join("a.txt")).unwrap(), b"local edit\n");
-    assert!(!td.path().join(".mkit/sparse-checkout").exists());
+    assert!(!td.path().join(".kit/sparse-checkout").exists());
 }
 
 #[test]
@@ -1922,7 +1922,7 @@ fn sparse_checkout_set_allows_dirty_tracked_file_outside_sparse_set() {
     assert!(out.status.success(), "sparse set failed: {out:?}");
     assert_eq!(fs::read(td.path().join("b.txt")).unwrap(), b"local b\n");
     assert_eq!(
-        fs::read_to_string(td.path().join(".mkit/sparse-checkout")).unwrap(),
+        fs::read_to_string(td.path().join(".kit/sparse-checkout")).unwrap(),
         "a.txt\n"
     );
 }
@@ -1949,7 +1949,7 @@ fn sparse_checkout_disable_refuses_untracked_file_that_full_restore_would_remove
         b"local notes\n"
     );
     assert_eq!(
-        fs::read_to_string(td.path().join(".mkit/sparse-checkout")).unwrap(),
+        fs::read_to_string(td.path().join(".kit/sparse-checkout")).unwrap(),
         "a.txt\n"
     );
 }

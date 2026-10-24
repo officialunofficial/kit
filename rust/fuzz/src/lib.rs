@@ -340,7 +340,7 @@ pub fn webauthn_assertion_checks(input: &[u8]) {
     let namespace = Namespace::Address(
         mkit_attest::eth::address_p256(&G).expect("the generator is a P-256 point"),
     );
-    let statement = b"mkit-write-grant:v1";
+    let statement = b"kit-write-grant:v1";
     let _ = verify_owner_signature(
         &cfg,
         OwnerScheme::WebAuthnP256,
@@ -413,8 +413,8 @@ pub fn software_key_record_one_iteration(input: &[u8]) {
 pub fn rpc_decode_one_iteration(input: &[u8]) {
     use arbitrary::Arbitrary;
     use buffa::Message;
-    use mkit_rpc::mkit::rpc::v1::signer::SignerFrame;
-    use mkit_rpc::mkit::rpc::v1::ssh::SshFrame;
+    use mkit_rpc::kit::rpc::v1::signer::SignerFrame;
+    use mkit_rpc::kit::rpc::v1::ssh::SshFrame;
 
     let input = &input[..input.len().min(MAX_INPUT)];
 
@@ -1146,11 +1146,11 @@ pub fn sparse_verify_one_iteration(input: &[u8]) {
 /// as the raw byte stream of the client. The session must end. Afterwards the
 /// repository holds only complete files: every pack hashes to its name, no
 /// upload temp file stays, and nothing exists outside `packs/`, `refs/` and
-/// `.mkit/refs/`.
+/// `.kit/refs/`.
 pub fn ssh_session_one_iteration(input: &[u8]) {
     use mkit_core::hash::{hash, to_hex};
-    use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
-    use mkit_rpc::mkit::rpc::v1::ssh::{Hello, SshFrame, ssh_frame};
+    use mkit_rpc::kit::rpc::v1::ProtocolVersion;
+    use mkit_rpc::kit::rpc::v1::ssh::{Hello, SshFrame, ssh_frame};
     use mkit_serve::{ReadFrames, Repo, SessionConfig, WriteFrames, WritePolicy, serve_session};
 
     let input = &input[..input.len().min(MAX_INPUT)];
@@ -1192,7 +1192,7 @@ pub fn ssh_session_one_iteration(input: &[u8]) {
                 assert_eq!(name, to_hex(&hash(&bytes)), "a pack must hash to its name");
             } else {
                 assert!(
-                    top.as_os_str() == "refs" || rel.starts_with(".mkit/refs"),
+                    top.as_os_str() == "refs" || rel.starts_with(".kit/refs"),
                     "unexpected file {}",
                     rel.display()
                 );
@@ -1290,7 +1290,7 @@ mod tests {
     fn unit_grant_parse() {
         run_iterated_unit(grant_parse_one_iteration).unwrap();
         // The SPEC-WRITE-GRANTS §3.4 example, a near miss, and its header.
-        let grant = "mkit-write-grant:v1\n\
+        let grant = "kit-write-grant:v1\n\
             0x8ba1f109551bd432803012645ac136ddd64dba72\n\
             0x8ba1f109551bd432803012645ac136ddd64dba72/website\n\
             3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\n\
@@ -1325,11 +1325,11 @@ mod tests {
     fn unit_epoch_visibility_parse() {
         use mkit_attest::grant::{OwnerScheme, SignedHeader};
         run_iterated_unit(epoch_visibility_parse_one_iteration).unwrap();
-        let epoch = "mkit-write-epoch:v1\n\
+        let epoch = "kit-write-epoch:v1\n\
             ed25519-3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\n\
             5\nhttps://git.example.com\n1790000000000\n1790086400000\n\
             9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
-        let visibility = "mkit-repo-visibility:v1\n\
+        let visibility = "kit-repo-visibility:v1\n\
             0x8ba1f109551bd432803012645ac136ddd64dba72/website\n\
             private\nhttps://git.example.com\n1790000000000\n1790086400000\n\
             9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
@@ -1471,7 +1471,7 @@ mod tests {
         run_iterated_unit(pack_entries_one_iteration).expect("guardrails held");
         for case in [
             &b""[..],
-            b"MKIT\x01\x00\x00\x00\x00\x00\x00\x00",
+            b"KIT\0\x01\x00\x00\x00\x00\x00\x00\x00",
             &[0xFF; 64][..],
         ] {
             run_one(case, pack_entries_one_iteration).expect("guardrails held");
@@ -1573,7 +1573,7 @@ mod tests {
         // Empty.
         pack_one_iteration(&[]);
         // Bogus count below the defensive cap.
-        pack_one_iteration(b"MKIT\x01\x00\x00\x00\xFF\xFF\x00\x00");
+        pack_one_iteration(b"KIT\0\x01\x00\x00\x00\xFF\xFF\x00\x00");
     }
 
     #[test]
@@ -1588,12 +1588,12 @@ mod tests {
     #[test]
     fn software_key_record_target_handles_fixed_cases() {
         let valid = hex_to_bytes(
-            "4d4b49544b53563101010104000000746573742000000024242424242424242424242424242424242424242424242424242424242424240e000000656432353531393a737461626c651800000022222222222222222222222222222222222222222222222220000000f9fffde0ffe7e285b5bcb4b4b4c7dbd2c0c3d5c6d1b3b4b4b4d0d1d2d5c1d8c030000000c125a54e1efba6d6a70f5689ff3be3a070d5819657dcb8a6220934a533a21b67791eb2cb0db7cbdd4815ce51b3ea5ae0",
+            "4b49544b5356310001010104000000746573742000000024242424242424242424242424242424242424242424242424242424242424240e000000656432353531393a737461626c651800000022222222222222222222222222222222222222222222222220000000fffde0ffe7e285b4b5bcb4b4b4c7dbd2c0c3d5c6d1b3b4b4b4d0d1d2d5c1d8c030000000c125a54e1efba6d6a70f5689ff3be3a070d5819657dcb8a6220934a533a21b67f5d431c5ce8294ae3de45124fbce7b24",
         );
         software_key_record_one_iteration(&valid);
         software_key_record_one_iteration(&[]);
-        software_key_record_one_iteration(b"MKITKSV1\x01\x01\x01");
-        let mut bad = b"MKITKSV1".to_vec();
+        software_key_record_one_iteration(b"KITKSV1\0\x01\x01\x01");
+        let mut bad = b"KITKSV1\0".to_vec();
         bad.extend_from_slice(&[1, 1, 1]);
         bad.extend_from_slice(&u32::MAX.to_le_bytes());
         software_key_record_one_iteration(&bad);
@@ -1602,14 +1602,14 @@ mod tests {
     #[test]
     fn rpc_decode_target_handles_fixed_cases() {
         use buffa::Message;
-        use mkit_rpc::mkit::rpc::v1::signer::{SignerFrame, signer_frame};
+        use mkit_rpc::kit::rpc::v1::signer::{SignerFrame, signer_frame};
 
         // Empty and truncated inputs.
         rpc_decode_one_iteration(&[]);
         rpc_decode_one_iteration(&[0x0A]);
         // A valid encoded frame must decode (and roundtrip) cleanly.
         let frame = mkit_rpc::signer_error_frame(
-            mkit_rpc::mkit::rpc::v1::ErrorCode::Internal,
+            mkit_rpc::kit::rpc::v1::ErrorCode::Internal,
             "fuzz fixed case",
         );
         rpc_decode_one_iteration(&frame.encode_to_vec());

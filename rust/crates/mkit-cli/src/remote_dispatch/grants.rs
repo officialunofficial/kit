@@ -354,7 +354,7 @@ mod tests {
         key: &str,
     ) -> String {
         let statement = format!(
-            "mkit-write-grant:v1\n{NS}\n{scope}\n{key}\n{cap}\n{audience}\n{refs}\n0\n{created}\n{expiry}\n{}",
+            "kit-write-grant:v1\n{NS}\n{scope}\n{key}\n{cap}\n{audience}\n{refs}\n0\n{created}\n{expiry}\n{}",
             "ab".repeat(32)
         );
         SignedHeader {
@@ -573,7 +573,7 @@ mod tests {
             );
         }
         let refs = [GrantRef::new(
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             GrantCondition::Match,
         )];
         // A packmap write without its head is never sent with a grant (§8.3).
@@ -583,7 +583,7 @@ mod tests {
         );
         let refs = [
             GrantRef::new("refs/heads/main", GrantCondition::Match),
-            GrantRef::new("refs/mkit/packmap/main", GrantCondition::Match),
+            GrantRef::new("refs/kit/packmap/main", GrantCondition::Match),
         ];
         assert_eq!(
             source.select_at(&request(GrantOperation::Write { refs: &refs }), NOW),
@@ -637,7 +637,7 @@ mod tests {
             );
             let refs = [
                 GrantRef::new("refs/heads/main", head_condition),
-                GrantRef::new("refs/mkit/packmap/main", packmap_condition),
+                GrantRef::new("refs/kit/packmap/main", packmap_condition),
             ];
             assert_eq!(
                 LocalGrants::from_headers(vec![grant.clone()])
@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn the_owner_key_needs_no_grant() {
         let transport =
-            ConnectTransport::connect(&format!("mkit+http://127.0.0.1:9/ed25519-{KEY}/photos"))
+            ConnectTransport::connect(&format!("kit+http://127.0.0.1:9/ed25519-{KEY}/photos"))
                 .unwrap();
         let authority = ConnectAuthority {
             transport: Arc::new(transport),

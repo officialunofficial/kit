@@ -454,7 +454,7 @@ fn commit_can_use_keystore_signer_without_legacy_keygen() {
         String::from_utf8_lossy(&commit.stderr)
     );
     assert!(
-        !td.path().join("repo/.mkit/keys/default.key").exists(),
+        !td.path().join("repo/.kit/keys/default.key").exists(),
         "keystore commit must not silently create the legacy key"
     );
 
@@ -486,7 +486,7 @@ fn commit_ignores_repo_controlled_signing_key_ref() {
     )
     .expect("user config");
     std::fs::write(
-        td.path().join("repo/.mkit/config"),
+        td.path().join("repo/.kit/config"),
         "signer = keystore\nkey.default_ref = software-raw:repo-attacker\nkey.ed25519_ref = software-raw:repo-attacker\n",
     )
     .expect("repo config");
@@ -521,13 +521,13 @@ fn commit_with_corrupt_head_does_not_fallback_to_main() {
     .expect("user config");
     std::fs::write(td.path().join("repo/README.md"), b"hello\n").expect("README");
     assert!(run(td.path(), &["add", "README.md"]).status.success());
-    std::fs::write(td.path().join("repo/.mkit/HEAD"), b"ref: ").expect("corrupt HEAD");
+    std::fs::write(td.path().join("repo/.kit/HEAD"), b"ref: ").expect("corrupt HEAD");
 
     let commit = run(td.path(), &["commit", "-m", "corrupt head"]);
     assert!(!commit.status.success());
     assert!(String::from_utf8_lossy(&commit.stderr).contains("read HEAD"));
     assert!(
-        !td.path().join("repo/.mkit/refs/heads/main").exists(),
+        !td.path().join("repo/.kit/refs/heads/main").exists(),
         "corrupt HEAD must not advance refs/heads/main"
     );
 }
@@ -614,7 +614,7 @@ fn keystore_commit_missing_key_fails_without_generation() {
         "stderr must not leak keystore label or key ref: {stderr}"
     );
     assert!(
-        !td.path().join("repo/.mkit/keys/default.key").exists(),
+        !td.path().join("repo/.kit/keys/default.key").exists(),
         "keystore commit must not silently create the legacy key"
     );
     assert!(
@@ -798,18 +798,18 @@ fn keystore_rebase_missing_key_fails_without_generation() {
     configure_keystore_signer(td.path(), "software-raw:missing");
 
     let repo = td.path().join("repo");
-    let head_before = std::fs::read_to_string(repo.join(".mkit/HEAD")).expect("HEAD before");
+    let head_before = std::fs::read_to_string(repo.join(".kit/HEAD")).expect("HEAD before");
     let resolved_head_before = resolve_head(&repo);
-    let index_before = std::fs::read(repo.join(".mkit/index")).expect("index before");
+    let index_before = std::fs::read(repo.join(".kit/index")).expect("index before");
 
     let rebase = run(td.path(), &["rebase", "main"]);
     assert_missing_history_key_failure(td.path(), &rebase);
     assert!(
-        !repo.join(".mkit/rebase-apply").exists(),
+        !repo.join(".kit/rebase-apply").exists(),
         "missing signer must fail before writing rebase state"
     );
     assert_eq!(
-        std::fs::read_to_string(repo.join(".mkit/HEAD")).expect("HEAD after"),
+        std::fs::read_to_string(repo.join(".kit/HEAD")).expect("HEAD after"),
         head_before,
         "missing signer must not detach HEAD"
     );
@@ -819,7 +819,7 @@ fn keystore_rebase_missing_key_fails_without_generation() {
         "missing signer must not move the current branch"
     );
     assert_eq!(
-        std::fs::read(repo.join(".mkit/index")).expect("index after"),
+        std::fs::read(repo.join(".kit/index")).expect("index after"),
         index_before,
         "missing signer must not rewrite the index"
     );
@@ -913,7 +913,7 @@ fn assert_missing_history_key_failure(root: &std::path::Path, output: &Output) {
         "stderr should point to key generation: {stderr}"
     );
     assert!(
-        !root.join("repo/.mkit/keys/default.key").exists(),
+        !root.join("repo/.kit/keys/default.key").exists(),
         "history command must not silently create the legacy key"
     );
     assert!(
@@ -925,10 +925,10 @@ fn assert_missing_history_key_failure(root: &std::path::Path, output: &Output) {
 }
 
 fn resolve_head(root: &std::path::Path) -> String {
-    let head = std::fs::read_to_string(root.join(".mkit/HEAD")).expect("HEAD");
+    let head = std::fs::read_to_string(root.join(".kit/HEAD")).expect("HEAD");
     let head = head.trim();
     if let Some(refname) = head.strip_prefix("ref: ") {
-        std::fs::read_to_string(root.join(".mkit").join(refname))
+        std::fs::read_to_string(root.join(".kit").join(refname))
             .expect("ref")
             .trim()
             .to_owned()

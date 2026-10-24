@@ -159,7 +159,7 @@ PY
 
 # The binary itself: the stripped release binary has no symbol table, so
 # scan its bytes (a superset of `strings`). `sqlite3_` names come from the
-# bundled SQLite; `x-mkit-test-` headers exist only under `test-faults`.
+# bundled SQLite; `x-kit-test-` headers exist only under `test-faults`.
 scan() {
   if LC_ALL=C grep -a -q -- "$1" "$binary"; then
     echo "check-release-artifact-features: ERROR: $(basename "$binary") contains \`$1\` ($2)" >&2
@@ -167,7 +167,7 @@ scan() {
   fi
 }
 scan 'sqlite3_' 'SQLite linked into mkit'
-scan 'x-mkit-test-' 'test-faults seam compiled in'
+scan 'x-kit-test-' 'test-faults seam compiled in'
 scan '/__mkit_test/' 'test-control routes compiled in'
 scan 'TEST_OUTBOX_BACKLOG_ROWS' 'test-only Worker backlog var compiled in'
 scan 'TEST_TICKET_TTL_MS' 'test-only Worker ticket var compiled in'

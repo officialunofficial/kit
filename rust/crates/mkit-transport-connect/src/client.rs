@@ -8,9 +8,9 @@ use crate::grant::{GrantCondition, GrantSource};
 #[cfg(test)]
 use crate::grant::{GrantOperation, GrantRequest};
 use crate::part_receipts::{MemoryPartReceiptStore, PartReceiptStore};
-use crate::proto::mkit::transport::v1::GetServerInfoResponse;
+use crate::proto::kit::transport::v1::GetServerInfoResponse;
 #[cfg(test)]
-use crate::proto::mkit::transport::v1::{
+use crate::proto::kit::transport::v1::{
     PackChunk, RefExpectation, UploadPackHeader, UploadPackRequest,
 };
 #[cfg(test)]
@@ -34,12 +34,12 @@ use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 use url::{Host, Url};
-/// The auth v2 audience of a `mkit+https://` / `mkit+http://` URL: its
+/// The auth v2 audience of a `kit+https://` / `kit+http://` URL: its
 /// origin, exactly as [`ConnectTransport`] signs requests for it. `None` for
 /// a URL [`ConnectTransport::connect`] would refuse.
 #[must_use]
 pub fn audience_from_url(url: &str) -> Option<String> {
-    let parsed = Url::parse(url.strip_prefix("mkit+")?).ok()?;
+    let parsed = Url::parse(url.strip_prefix("kit+")?).ok()?;
     validate_http_scheme(&parsed).ok()?;
     Some(parsed.origin().ascii_serialization())
 }
@@ -71,7 +71,7 @@ pub enum VisibilityRequest<'a> {
     /// A signed auth v2 write by the repository owner. Needs an envelope
     /// signer on the transport; a grant never authorizes it.
     Envelope(VisibilityChoice),
-    /// An owner-signed `mkit-repo-visibility:v1` statement in the §4.2
+    /// An owner-signed `kit-repo-visibility:v1` statement in the §4.2
     /// encoding. Sent with no auth v2 envelope, and with `X-Repository`.
     Statement(&'a str),
 }
@@ -163,11 +163,11 @@ impl std::error::Error for UrlIdentityError {
     }
 }
 
-/// The literal repository path text of `url`: the `mkit+` prefix stripped,
+/// The literal repository path text of `url`: the `kit+` prefix stripped,
 /// no non-empty query or fragment, and a path URL parsing leaves unchanged.
 /// An empty path spells `default`.
 fn repository_path_from_url(url: &str) -> Result<&str, UrlIdentityError> {
-    let stripped = url.strip_prefix("mkit+").unwrap_or(url);
+    let stripped = url.strip_prefix("kit+").unwrap_or(url);
     let parsed = Url::parse(stripped).map_err(UrlIdentityError::Url)?;
     if parsed.query().is_some_and(|s| !s.is_empty())
         || parsed.fragment().is_some_and(|s| !s.is_empty())
@@ -453,19 +453,19 @@ fn build_upload_requests(
 }
 
 impl ConnectTransport {
-    /// Parse `mkit+https://host/project` (or loopback-only
-    /// `mkit+http://…`), strip the `mkit+` prefix, and build the transport.
+    /// Parse `kit+https://host/project` (or loopback-only
+    /// `kit+http://…`), strip the `kit+` prefix, and build the transport.
     ///
     /// The token is sourced from `MKIT_API_TOKEN` at connect time. A missing variable is fine —
     /// public read endpoints remain accessible.
     ///
-    /// RPCs use the fixed `/mkit.transport.v1.TransportService/<Method>`
+    /// RPCs use the fixed `/kit.transport.v1.TransportService/<Method>`
     /// paths. The URL path is validated as a repository identity and sent
     /// as `X-Repository` on every RPC; an empty path names `default`.
     ///
     /// # Errors
     ///
-    /// - [`TransportError::InvalidResponse`] — URL has no `mkit+` prefix,
+    /// - [`TransportError::InvalidResponse`] — URL has no `kit+` prefix,
     ///   is otherwise unparseable, uses a scheme other than `http`/`https`,
     ///   or its path, query or fragment is not a valid remote identity;
     ///   [`remote_identity_from_url`] reports which.
@@ -509,7 +509,7 @@ impl ConnectTransport {
         ca_file: Option<&std::path::Path>,
     ) -> TransportResult<Self> {
         let stripped = url
-            .strip_prefix("mkit+")
+            .strip_prefix("kit+")
             .ok_or(TransportError::InvalidResponse)?;
         let parsed = Url::parse(stripped).map_err(|_| TransportError::InvalidResponse)?;
         validate_http_scheme(&parsed)?;
@@ -575,7 +575,7 @@ impl ConnectTransport {
         }
     }
     /// Test-only constructor pointing at a plaintext base URI with no
-    /// `mkit+` prefix stripping (mirrors
+    /// `kit+` prefix stripping (mirrors
     /// `HttpTransport::new_for_test`) — used by the in-process
     /// integration test to target a locally bound server.
     #[doc(hidden)]
@@ -930,7 +930,7 @@ impl ConnectTransport {
         self.retrying(|| self.get_grant_epoch_once(namespace))
     }
     /// `SetGrantEpoch` (SPEC-WRITE-GRANTS §5.3) with an owner-signed
-    /// `mkit-write-epoch:v1` statement in the §4.2 encoding. Unsigned (no
+    /// `kit-write-epoch:v1` statement in the §4.2 encoding. Unsigned (no
     /// auth v2 envelope) and with no `X-Repository`. The server returns the
     /// stored epoch once revocation completed, or `Pending`; send the
     /// identical statement again after `retry_after` (§5.2: the same epoch is
@@ -1211,10 +1211,10 @@ mod tests {
     #[test]
     fn audience_from_url_matches_the_transport_audience() {
         for url in [
-            "mkit+https://git.example.com/0x8ba1f109551bd432803012645ac136ddd64dba72/site",
-            "mkit+https://Git.Example.com:443/x",
-            "mkit+https://git.example.com:8443",
-            "mkit+http://127.0.0.1:8080/default",
+            "kit+https://git.example.com/0x8ba1f109551bd432803012645ac136ddd64dba72/site",
+            "kit+https://Git.Example.com:443/x",
+            "kit+https://git.example.com:8443",
+            "kit+http://127.0.0.1:8080/default",
         ] {
             let tx = ConnectTransport::connect(url).unwrap();
             assert_eq!(
@@ -1225,9 +1225,9 @@ mod tests {
         }
         for bad in [
             "https://git.example.com",
-            "mkit+ftp://x",
-            "mkit+http://example.com",
-            "mkit+",
+            "kit+ftp://x",
+            "kit+http://example.com",
+            "kit+",
         ] {
             assert_eq!(audience_from_url(bad), None, "{bad}");
         }
@@ -1241,19 +1241,19 @@ mod tests {
 
     #[test]
     fn connect_rejects_unknown_scheme() {
-        let err = ConnectTransport::connect("mkit+ftp://example.com/proj").unwrap_err();
+        let err = ConnectTransport::connect("kit+ftp://example.com/proj").unwrap_err();
         assert!(matches!(err, TransportError::InvalidResponse));
     }
 
     #[test]
     fn connect_rejects_plain_http_to_non_loopback_host() {
-        let err = ConnectTransport::connect("mkit+http://example.com/proj").unwrap_err();
+        let err = ConnectTransport::connect("kit+http://example.com/proj").unwrap_err();
         assert!(matches!(err, TransportError::InsecureScheme));
     }
 
     #[test]
     fn connect_accepts_plain_http_for_loopback() {
-        let t = ConnectTransport::connect("mkit+http://127.0.0.1:9/proj").unwrap();
+        let t = ConnectTransport::connect("kit+http://127.0.0.1:9/proj").unwrap();
         assert!(t.server_info.get().is_none());
     }
 
@@ -1263,19 +1263,19 @@ mod tests {
         // no crypto provider is installed and more than one backend
         // feature is linked in the process — this exercises
         // exactly that path. Construction does not make a network call.
-        let t = ConnectTransport::connect("mkit+https://example.invalid/proj").unwrap();
+        let t = ConnectTransport::connect("kit+https://example.invalid/proj").unwrap();
         assert!(t.server_info.get().is_none());
     }
 
     #[test]
     fn connect_strips_url_path_from_the_connect_base_uri() {
         // SPEC-TRANSPORT-CONNECT §2: every RPC resolves to the FIXED path
-        // `/mkit.transport.v1.TransportService/<Method>` — a `/project`
-        // path segment on the `mkit+https://` URL must NOT become a
+        // `/kit.transport.v1.TransportService/<Method>` — a `/project`
+        // path segment on the `kit+https://` URL must NOT become a
         // prefix on the Connect base URI (regression: an earlier
         // version of this code folded the path in, breaking every call
         // against a server mounted at the standard root path).
-        let t = ConnectTransport::connect("mkit+https://example.invalid/myproj").unwrap();
+        let t = ConnectTransport::connect("kit+https://example.invalid/myproj").unwrap();
         assert_eq!(
             t.client.config().base_uri().to_string(),
             "https://example.invalid/"
@@ -1313,7 +1313,7 @@ mod tests {
                 format!("{ns}/{}", "a".repeat(100)),
             ),
         ] {
-            let url = format!("mkit+https://example.invalid{path}");
+            let url = format!("kit+https://example.invalid{path}");
             assert_eq!(
                 repository_identity_from_url(&url).unwrap().to_string(),
                 expected
@@ -1321,7 +1321,7 @@ mod tests {
         }
         // `ns` is a valid authority-mode namespace, so the strict identity
         // parser refuses it while the union address parser accepts it.
-        let opaque_url = "mkit+https://example.invalid/ns/name";
+        let opaque_url = "kit+https://example.invalid/ns/name";
         assert!(repository_identity_from_url(opaque_url).is_err());
         assert!(remote_identity_from_url(opaque_url).is_ok());
         assert!(ConnectTransport::connect(opaque_url).is_ok());
@@ -1336,7 +1336,7 @@ mod tests {
             "/a\\name".into(),
             "/a/%2e%2e/name".into(),
         ] {
-            let url = format!("mkit+https://example.invalid{path}");
+            let url = format!("kit+https://example.invalid{path}");
             assert!(repository_identity_from_url(&url).is_err(), "{url}");
             assert!(matches!(
                 ConnectTransport::connect(&url),
@@ -1347,9 +1347,9 @@ mod tests {
         // Extra or missing slashes after the scheme move the path under WHATWG
         // parsing; the literal spelling is refused instead of reinterpreted.
         for url in [
-            "mkit+http:///localhost/",
-            "mkit+https:///myproj",
-            "mkit+https:/host/x://y",
+            "kit+http:///localhost/",
+            "kit+https:///myproj",
+            "kit+https:/host/x://y",
         ] {
             assert!(
                 matches!(
@@ -1360,11 +1360,11 @@ mod tests {
             );
         }
         assert!(
-            repository_identity_from_url(&format!("mkit+https:/0x{}/name", "cd".repeat(20)))
+            repository_identity_from_url(&format!("kit+https:/0x{}/name", "cd".repeat(20)))
                 .is_err()
         );
         assert_eq!(
-            repository_identity_from_url("mkit+https://example.invalid/name?#")
+            repository_identity_from_url("kit+https://example.invalid/name?#")
                 .unwrap()
                 .name(),
             "name"
@@ -1381,7 +1381,7 @@ mod tests {
             (format!("/{uuid}/public/"), format!("{uuid}/public")),
             (format!("/{ns}/name"), format!("{ns}/name")),
         ] {
-            let url = format!("mkit+https://example.invalid{path}");
+            let url = format!("kit+https://example.invalid{path}");
             let remote = remote_identity_from_url(&url).unwrap();
             assert_eq!(remote.to_string(), expected);
             assert_eq!(
@@ -1390,13 +1390,13 @@ mod tests {
             );
         }
         // The union is also the identity grammar for `connect`.
-        let t = ConnectTransport::connect(&format!("mkit+https://example.invalid/{uuid}/public"))
+        let t = ConnectTransport::connect(&format!("kit+https://example.invalid/{uuid}/public"))
             .unwrap();
         assert_eq!(t.remote_identity().to_string(), format!("{uuid}/public"));
         assert!(t.repository().is_none());
         assert_eq!(t.repository_text, format!("{uuid}/public"));
         let t =
-            ConnectTransport::connect(&format!("mkit+https://example.invalid/{ns}/name")).unwrap();
+            ConnectTransport::connect(&format!("kit+https://example.invalid/{ns}/name")).unwrap();
         assert_eq!(
             t.repository().map(ToString::to_string),
             Some(format!("{ns}/name"))
@@ -1406,20 +1406,20 @@ mod tests {
     #[test]
     fn url_remote_identity_errors_name_the_offending_segment() {
         let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
-        let err = remote_identity_from_url("mkit+https://example.invalid/Bad/repo")
+        let err = remote_identity_from_url("kit+https://example.invalid/Bad/repo")
             .unwrap_err()
             .to_string();
         for needle in ["`Bad`", "ed25519-", "[a-z0-9][a-z0-9._-]{0,71}", "§7.4"] {
             assert!(err.contains(needle), "{err} missing {needle}");
         }
-        let err = remote_identity_from_url(&format!("mkit+https://example.invalid/{uuid}/Repo"))
+        let err = remote_identity_from_url(&format!("kit+https://example.invalid/{uuid}/Repo"))
             .unwrap_err()
             .to_string();
         for needle in ["`Repo`", "§7.4"] {
             assert!(err.contains(needle), "{err} missing {needle}");
         }
         // Offending bytes URL parsing preserves are escaped, not echoed raw.
-        let err = remote_identity_from_url("mkit+https://example.invalid/a'b/repo")
+        let err = remote_identity_from_url("kit+https://example.invalid/a'b/repo")
             .unwrap_err()
             .to_string();
         assert!(err.contains("a\\'b"), "{err}");
@@ -1430,7 +1430,7 @@ mod tests {
 
     #[test]
     fn timeouts_default_to_the_named_constants() {
-        let t = ConnectTransport::connect("mkit+http://127.0.0.1:9/proj").unwrap();
+        let t = ConnectTransport::connect("kit+http://127.0.0.1:9/proj").unwrap();
         assert_eq!(t.unary_timeout, UNARY_TIMEOUT);
         assert_eq!(t.pack_transfer_timeout, PACK_TRANSFER_TIMEOUT);
         assert!(
@@ -1441,7 +1441,7 @@ mod tests {
 
     #[test]
     fn with_unary_timeout_and_with_pack_transfer_timeout_override_independently() {
-        let t = ConnectTransport::connect("mkit+http://127.0.0.1:9/proj")
+        let t = ConnectTransport::connect("kit+http://127.0.0.1:9/proj")
             .unwrap()
             .with_unary_timeout(Duration::from_millis(5))
             .with_pack_transfer_timeout(Duration::from_secs(600));

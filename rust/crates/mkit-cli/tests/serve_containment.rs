@@ -18,11 +18,11 @@ fn mkit_bin() -> &'static str {
 
 /// A valid Hello frame the server expects before entering the loop.
 /// Encoded as a length-prefixed buffa `SshFrame` per
-/// `mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto`.
+/// `mkit-rpc/proto/kit/rpc/v1/ssh/ssh.proto`.
 fn encode_hello_frame() -> Vec<u8> {
     use buffa::Message;
-    use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
-    use mkit_rpc::mkit::rpc::v1::ssh::{Hello, SshFrame, ssh_frame};
+    use mkit_rpc::kit::rpc::v1::ProtocolVersion;
+    use mkit_rpc::kit::rpc::v1::ssh::{Hello, SshFrame, ssh_frame};
     let frame = SshFrame {
         body: Some(ssh_frame::Body::Hello(Box::new(Hello {
             proto: Some(ProtocolVersion::ProtocolVersion1.into()),
@@ -66,7 +66,7 @@ fn run_serve(env: &[(&str, &Path)], arg: &str) -> std::process::ExitStatus {
 fn serve_rejects_path_outside_serve_root() {
     let root_td = tempfile::tempdir().unwrap();
     let outside_td = tempfile::tempdir().unwrap();
-    fs::create_dir_all(outside_td.path().join(".mkit")).unwrap();
+    fs::create_dir_all(outside_td.path().join(".kit")).unwrap();
 
     let status = run_serve(
         &[("MKIT_SERVE_ROOT", root_td.path())],
@@ -80,7 +80,7 @@ fn serve_rejects_path_outside_serve_root() {
 fn serve_accepts_path_inside_serve_root() {
     let root_td = tempfile::tempdir().unwrap();
     let inside = root_td.path().join("repo");
-    fs::create_dir_all(inside.join(".mkit")).unwrap();
+    fs::create_dir_all(inside.join(".kit")).unwrap();
 
     let status = run_serve(
         &[("MKIT_SERVE_ROOT", root_td.path())],
@@ -93,7 +93,7 @@ fn serve_accepts_path_inside_serve_root() {
 #[test]
 fn serve_rejects_nonrepo_directory() {
     let td = tempfile::tempdir().unwrap();
-    // No .mkit/ subdir.
+    // No .kit/ subdir.
     let status = run_serve(&[], td.path().to_str().unwrap());
     // exit::DATAERR = 65.
     assert_eq!(status.code(), Some(65));

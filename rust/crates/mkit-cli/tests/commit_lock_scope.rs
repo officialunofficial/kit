@@ -72,7 +72,7 @@ fn editor_window_does_not_hold_the_write_lock() {
     std::thread::sleep(Duration::from_millis(400));
 
     // Try to take the SAME lock `mkit commit` itself takes
-    // (`.mkit/worktree.lock`, see `acquire_worktree_lock` in
+    // (`.kit/worktree.lock`, see `acquire_worktree_lock` in
     // `commands/mod.rs`), with a short timeout so the test stays fast.
     // Success here means nothing currently holds it.
     let acquire_result = mkit_core::repo_lock::acquire(

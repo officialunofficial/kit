@@ -1,6 +1,6 @@
 //! Named-remote + upstream-tracking + CAS-safe push tests.
 //!
-//! Driven end-to-end through the real binary against a `mkit+file://`
+//! Driven end-to-end through the real binary against a `kit+file://`
 //! bare-directory remote (the file transport is URL-reachable and
 //! honours CAS `update_ref`, so non-fast-forward rejection is exercised
 //! for real).
@@ -38,11 +38,11 @@ fn repo_with_commit(content: &[u8]) -> tempfile::TempDir {
 }
 
 fn file_url(dir: &Path) -> String {
-    format!("mkit+file://{}", dir.display())
+    format!("kit+file://{}", dir.display())
 }
 
 fn local_main(repo: &Path) -> String {
-    fs::read_to_string(repo.join(".mkit/refs/heads/main"))
+    fs::read_to_string(repo.join(".kit/refs/heads/main"))
         .unwrap()
         .trim()
         .to_string()
@@ -201,7 +201,7 @@ fn default_push_rejects_divergent_tip_even_when_lease_holds() {
     // (parent = c1), so c1' is NOT a descendant of c2. The remote-tracking
     // ref still says c2 and the remote still holds c2, so a bare CAS
     // Match(c2) would PASS — only the ancestry check stops the clobber.
-    fs::write(td.path().join(".mkit/refs/heads/main"), format!("{c1}\n")).unwrap();
+    fs::write(td.path().join(".kit/refs/heads/main"), format!("{c1}\n")).unwrap();
     fs::write(td.path().join("a.txt"), b"hi3").unwrap();
     assert!(run_in(td.path(), &["add", "a.txt"]).status.success());
     assert!(
@@ -283,9 +283,9 @@ fn push_all_mirrors_every_branch() {
 fn named_repo_remote_with_token_is_still_gated() {
     let td = repo_with_commit(b"hi");
     // Plant a repo-scoped named remote pointing at an HTTP endpoint.
-    let cfg = "remote.evil.url = mkit+https://attacker.invalid/repo\n\
+    let cfg = "remote.evil.url = kit+https://attacker.invalid/repo\n\
                remote.evil.type = http\n";
-    fs::write(td.path().join(".mkit/config"), cfg).unwrap();
+    fs::write(td.path().join(".kit/config"), cfg).unwrap();
 
     let xdg = tempfile::tempdir().unwrap();
     let out = Command::new(mkit_bin())
@@ -317,11 +317,11 @@ fn named_repo_remote_with_token_is_still_gated() {
 fn bare_push_to_repo_planted_upstream_is_still_gated() {
     let td = repo_with_commit(b"hi");
     // Repo-scoped config: named HTTP remote + branch upstream redirect.
-    let cfg = "remote.evil.url = mkit+https://attacker.invalid/repo\n\
+    let cfg = "remote.evil.url = kit+https://attacker.invalid/repo\n\
                remote.evil.type = http\n\
                branch.main.remote = evil\n\
                branch.main.merge = main\n";
-    fs::write(td.path().join(".mkit/config"), cfg).unwrap();
+    fs::write(td.path().join(".kit/config"), cfg).unwrap();
 
     let xdg = tempfile::tempdir().unwrap();
     let out = Command::new(mkit_bin())
@@ -349,9 +349,9 @@ fn bare_push_to_repo_planted_upstream_is_still_gated() {
 #[test]
 fn named_repo_s3_remote_with_creds_is_still_gated() {
     let td = repo_with_commit(b"hi");
-    let cfg = "remote.evil.url = mkit+s3://r2.attacker.invalid/bucket/proj\n\
+    let cfg = "remote.evil.url = kit+s3://r2.attacker.invalid/bucket/proj\n\
                remote.evil.type = s3\n";
-    fs::write(td.path().join(".mkit/config"), cfg).unwrap();
+    fs::write(td.path().join(".kit/config"), cfg).unwrap();
 
     let xdg = tempfile::tempdir().unwrap();
     let out = Command::new(mkit_bin())

@@ -1,8 +1,8 @@
 //! The session driver: `Hello`, then the verb loop under the per-connection
 //! budgets (SPEC-TRANSPORT §4.2, SPEC-RPC §4).
 
-use mkit_rpc::mkit::rpc::v1::ssh::{HelloResponse, SshFrame, ssh_frame};
-use mkit_rpc::mkit::rpc::v1::{ErrorCode, ProtocolVersion};
+use mkit_rpc::kit::rpc::v1::ssh::{HelloResponse, SshFrame, ssh_frame};
+use mkit_rpc::kit::rpc::v1::{ErrorCode, ProtocolVersion};
 
 use crate::budget::Budget;
 use crate::repo::Repo;

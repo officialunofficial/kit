@@ -12,8 +12,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 GOLDEN = ROOT / "rust/tests/golden/redaction"
-DETAIL_TYPE = "mkit.transport.v1.RedactionNotice"
-PAYLOAD_TYPE = "application/vnd.mkit.redaction-notice.v1+json"
+DETAIL_TYPE = "kit.transport.v1.RedactionNotice"
+PAYLOAD_TYPE = "application/vnd.kit.redaction-notice.v1+json"
 
 
 def canonical(value):
@@ -82,12 +82,12 @@ def verify_proto(name, type_name):
     json_path = GOLDEN / (name + ".json")
     bin_path = GOLDEN / (name + ".bin")
     expected_json = json.loads(json_path.read_bytes())
-    canonical_json = run("buf", "convert", "proto", "--type", "mkit.transport.v1." + type_name,
+    canonical_json = run("buf", "convert", "proto", "--type", "kit.transport.v1." + type_name,
                          "--from", str(bin_path) + "#format=binpb", "--to", "-#format=json")
     assert canonical_json == json_path.read_bytes(), name
     got_json = json.loads(canonical_json)
     assert got_json == expected_json, name
-    got_bin = run("buf", "convert", "proto", "--type", "mkit.transport.v1." + type_name,
+    got_bin = run("buf", "convert", "proto", "--type", "kit.transport.v1." + type_name,
                   "--from", str(json_path) + "#format=json", "--to", "-#format=binpb")
     assert got_bin == bin_path.read_bytes(), name
 

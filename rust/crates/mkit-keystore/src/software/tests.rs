@@ -352,7 +352,7 @@ fn software_backend_writes_encrypted_record_not_raw_seed() {
 
     let path = store.path_for("encrypted", Algorithm::Ed25519).unwrap();
     let encoded = std::fs::read(path).expect("record bytes");
-    assert!(encoded.starts_with(b"MKITKSV1"));
+    assert!(encoded.starts_with(b"KITKSV1\0"));
     assert_ne!(encoded, seed);
     assert_eq!(store.list().unwrap()[0].label, "encrypted");
 }

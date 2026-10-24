@@ -207,7 +207,7 @@ _mkit() {
                         '-z[NUL-terminate records, raw paths]' \
                         '--others[list untracked worktree files]' \
                         '--ignored[show only ignored files]' \
-                        '--exclude-standard[drop .mkitignore-ignored files]' \
+                        '--exclude-standard[drop .kitignore-ignored files]' \
                         '--help[show help]'
                     ;;
                 rev-parse)

@@ -18,7 +18,7 @@ baseline build lean:
 
 | Feature | Adds |
 |---|---|
-| `s3` | `mkit+s3://` remotes on S3-compatible storage (`mkit-transport-s3`). |
+| `s3` | `kit+s3://` remotes on S3-compatible storage (`mkit-transport-s3`). |
 | `git-bridge` (default) | `mkit git …` (SPEC-GIT-BRIDGE/SPEC-GIT-IMPORT). |
 | `sparse-checkout` | Verifiable sparse-checkout. |
 | `pack-shards` | `mkit pack-shard <hash>` and shard-aware HTTP/S3 downloads. |
@@ -28,6 +28,6 @@ baseline build lean:
 See the top-level README and `docs/CLI.md` for the full command reference
 and agent-integration notes (`mkit mcp`).
 
-`mkit serve <path>` is only the `mkit+ssh://` forced-command server. It has
+`mkit serve <path>` is only the `kit+ssh://` forced-command server. It has
 no network listener, which keeps the HTTP server stack and `SQLite` out of
 this crate.

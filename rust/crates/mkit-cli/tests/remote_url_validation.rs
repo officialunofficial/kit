@@ -1,7 +1,7 @@
 //! `remote add` / `clone` URL + name control-char validation.
 //!
 //! A URL (or remote name) containing a newline would inject extra
-//! `key = value` lines into `.mkit/config` via `config::write`, which
+//! `key = value` lines into `.kit/config` via `config::write`, which
 //! emits values raw. Both commands must reject control characters before
 //! persisting. Driven end-to-end through the real binary.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
@@ -36,15 +36,15 @@ fn init_repo() -> tempfile::TempDir {
 fn remote_add_rejects_newline_in_url() {
     let td = init_repo();
     // A URL with an embedded newline + a forbidden key would, before the
-    // fix, be written verbatim into `.mkit/config`.
-    let evil = "mkit+https://example.com/p\nuser.identity = ed25519:deadbeef";
+    // fix, be written verbatim into `.kit/config`.
+    let evil = "kit+https://example.com/p\nuser.identity = ed25519:deadbeef";
     let out = run_in(td.path(), &["remote", "add", evil]);
     assert!(
         !out.status.success(),
         "remote add must reject a URL with control characters"
     );
     // The config must not have been written with the injected line.
-    let cfg = fs::read_to_string(td.path().join(".mkit/config")).unwrap_or_default();
+    let cfg = fs::read_to_string(td.path().join(".kit/config")).unwrap_or_default();
     assert!(
         !cfg.contains("user.identity"),
         "injected key leaked into config: {cfg}"
@@ -56,7 +56,7 @@ fn remote_add_rejects_newline_in_name() {
     let td = init_repo();
     let out = run_in(
         td.path(),
-        &["remote", "add", "bad\nname", "mkit+https://example.com/p"],
+        &["remote", "add", "bad\nname", "kit+https://example.com/p"],
     );
     assert!(
         !out.status.success(),
@@ -67,7 +67,7 @@ fn remote_add_rejects_newline_in_name() {
 #[test]
 fn clone_rejects_newline_in_url() {
     let parent = tempfile::tempdir().unwrap();
-    let evil = "mkit+https://example.com/p\nuser.identity = ed25519:deadbeef";
+    let evil = "kit+https://example.com/p\nuser.identity = ed25519:deadbeef";
     let out = run_in(parent.path(), &["clone", evil, "dest"]);
     assert!(
         !out.status.success(),
@@ -75,7 +75,7 @@ fn clone_rejects_newline_in_url() {
     );
     // If a destination was created, its config must not carry the
     // injected line.
-    let cfg = fs::read_to_string(parent.path().join("dest/.mkit/config")).unwrap_or_default();
+    let cfg = fs::read_to_string(parent.path().join("dest/.kit/config")).unwrap_or_default();
     assert!(
         !cfg.contains("user.identity"),
         "injected key leaked into clone config: {cfg}"
@@ -87,7 +87,7 @@ fn remote_add_accepts_clean_url() {
     let td = init_repo();
     let out = run_in(
         td.path(),
-        &["remote", "add", "mkit+https://example.com/project"],
+        &["remote", "add", "kit+https://example.com/project"],
     );
     assert!(
         out.status.success(),

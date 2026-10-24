@@ -18,7 +18,7 @@ pub trait RemoteSource {
     /// Every branch (`refs/heads/*`) with its tip, named without the prefix.
     fn list_branches(&self) -> Result<Vec<Ref>, SourceError>;
     /// A strong read of one ref by its full name (`refs/heads/main`,
-    /// `refs/mkit/packmap/main`).
+    /// `refs/kit/packmap/main`).
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError>;
     /// Download a packmap node blob. `ref_name` is the branch hint.
     fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError>;
@@ -395,7 +395,7 @@ mod tests {
                     "refs/heads/main",
                     RefWriteCondition::Missing,
                     &[1; 32],
-                    "refs/mkit/packmap/main",
+                    "refs/kit/packmap/main",
                     RefWriteCondition::Missing,
                     &[2; 32],
                     &[key],

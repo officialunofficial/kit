@@ -1,4 +1,4 @@
-//! The `mkit-write-epoch:v1` statement (SPEC-WRITE-GRANTS §5.1) and the
+//! The `kit-write-epoch:v1` statement (SPEC-WRITE-GRANTS §5.1) and the
 //! pure §5.2 check 7 ([`epoch_transition`]).
 
 use mkit_core::repo_identity::Namespace;
@@ -12,7 +12,7 @@ use super::{DOMAIN_EPOCH, EPOCH_STATEMENT_MAX_LIFETIME_MS, GrantError, MAX_EPOCH
 /// Field count of an epoch statement.
 const EPOCH_FIELDS: usize = 7;
 
-/// A parsed `mkit-write-epoch:v1` statement: the owner raises the namespace's
+/// A parsed `kit-write-epoch:v1` statement: the owner raises the namespace's
 /// epoch to `new_epoch`, revoking every grant at a lower epoch (§5).
 ///
 /// [`EpochStatement::parse`] accepts exactly the canonical encoding (the
@@ -189,8 +189,8 @@ mod tests {
         let mut empty = fields();
         empty[2] = String::new();
         rejects(empty.join("\n").as_bytes(), GrantError::EmptyField);
-        rejects(&with(0, "mkit-write-grant:v1"), GrantError::Domain);
-        rejects(&with(0, "mkit-write-epoch:v2"), GrantError::Domain);
+        rejects(&with(0, "kit-write-grant:v1"), GrantError::Domain);
+        rejects(&with(0, "kit-write-epoch:v2"), GrantError::Domain);
         rejects(&with(1, &NS.to_uppercase()), GrantError::Namespace);
         rejects(&with(1, &format!("{NS}/repo")), GrantError::Namespace);
         rejects(&with(2, "+5"), GrantError::Decimal);

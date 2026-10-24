@@ -1,6 +1,6 @@
 //! `mkit config` — show or set values.
 //!
-//! Most keys live in the per-repo `<repo>/.mkit/config`. Security-
+//! Most keys live in the per-repo `<repo>/.kit/config`. Security-
 //! sensitive keys (see [`config::REPO_FORBIDDEN_KEYS`]) live in the
 //! user-scoped `$XDG_CONFIG_HOME/mkit/config` and are written there
 //! when set via this command. Unknown keys are rejected.
@@ -34,7 +34,7 @@ struct ConfigOpts {
     /// `--global`. Takes no positional arguments.
     #[arg(long, value_name = "KEY")]
     unset: Option<String>,
-    /// Force the repo-scoped layer (`<repo>/.mkit/config`) for `--unset`
+    /// Force the repo-scoped layer (`<repo>/.kit/config`) for `--unset`
     /// or a `<key> <value>` set. Refused for a `REPO_FORBIDDEN_KEYS` key
     /// — those must never be storable in a clone-traveling repo config.
     #[arg(long, conflicts_with = "global")]
@@ -66,7 +66,7 @@ pub fn run(args: &[String]) -> u8 {
     // Read both layers: the merged view drives `show`, but a write must
     // persist ONLY the repo layer — serializing the merged config would
     // copy user-scoped values (e.g. a private `user.email`) into
-    // `.mkit/config`, which travels with clones.
+    // `.kit/config`, which travels with clones.
     let layered = match config::read_layered(&layout) {
         Ok(l) => l,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
@@ -382,7 +382,7 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "remote_bucket" => value.clone_into(&mut cfg.remote_bucket),
         "remote_type" => value.clone_into(&mut cfg.remote_type),
         "http.sslcainfo" => value.clone_into(&mut cfg.http_ssl_ca_info),
-        // Write-auth mode for `mkit+https://`/`mkit+http://` remotes — see
+        // Write-auth mode for `kit+https://`/`kit+http://` remotes — see
         // `Config::transport_auth`'s doc comment. Validated here (unlike
         // the lenient config-load fallback in `config::apply_kv`, which
         // tolerates unknown values for forward-compat with hand-edited

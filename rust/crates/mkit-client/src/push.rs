@@ -72,7 +72,7 @@ impl Push {
         deadline_ms: i64,
     ) -> Result<Self, Error> {
         let head_ref = format!("refs/heads/{branch}");
-        let packmap_ref = format!("refs/mkit/packmap/{branch}");
+        let packmap_ref = format!("refs/kit/packmap/{branch}");
         if !refs::validate_ref_name(&head_ref) || !refs::validate_ref_name(&packmap_ref) {
             return Err(Error::Invalid("ref name"));
         }

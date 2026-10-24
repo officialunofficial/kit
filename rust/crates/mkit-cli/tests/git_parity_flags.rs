@@ -400,8 +400,8 @@ fn config_preserves_remote_subsection_case_across_reload() {
     // a capitalized name would be lost.
     let repo = Repo::new();
     repo.commit_file("a.txt", b"x\n", "c0");
-    repo.ok(&["remote", "add", "Origin", "mkit+file:///tmp/xyz"]);
-    // A fresh `mkit remote` process re-parses .mkit/config.
+    repo.ok(&["remote", "add", "Origin", "kit+file:///tmp/xyz"]);
+    // A fresh `mkit remote` process re-parses .kit/config.
     let listed = stdout(&repo.ok(&["remote"]));
     assert!(
         listed.contains("Origin"),

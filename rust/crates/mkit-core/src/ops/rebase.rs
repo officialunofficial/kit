@@ -1,6 +1,6 @@
 //! Rebase state machine.
 //!
-//! Persists rebase state under `.mkit/rebase-apply/` as six files:
+//! Persists rebase state under `.kit/rebase-apply/` as six files:
 //!
 //! - `head-name`  : symbolic name of the branch being rebased
 //! - `orig-head`  : 64-hex BLAKE3 of the tip before rebase started
@@ -29,7 +29,7 @@ use crate::layout::RepoLayout;
 use crate::object::Object;
 use crate::store::ObjectStore;
 
-/// Directory under `.mkit/` that holds the persisted rebase state.
+/// Directory under `.kit/` that holds the persisted rebase state.
 pub const REBASE_DIR: &str = "rebase-apply";
 
 const HEAD_NAME_FILE: &str = "head-name";
@@ -52,7 +52,7 @@ const MAX_ANCESTORS: usize = 10_000;
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
 pub enum RebaseError {
-    /// `read_state` was called but `.mkit/rebase-apply/` does not exist.
+    /// `read_state` was called but `.kit/rebase-apply/` does not exist.
     #[error("no rebase in progress")]
     NoRebaseInProgress,
     /// On-disk state is malformed (bad hex, missing file, etc.).

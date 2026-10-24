@@ -53,7 +53,7 @@ impl Repo {
     }
 
     fn config_file(&self) -> PathBuf {
-        self.root.path().join(".mkit/config")
+        self.root.path().join(".kit/config")
     }
 
     fn https_remote(&self) {
@@ -61,7 +61,7 @@ impl Repo {
             "remote",
             "add",
             "origin",
-            "mkit+https://ca-fixture.example/default",
+            "kit+https://ca-fixture.example/default",
         ]);
     }
 }

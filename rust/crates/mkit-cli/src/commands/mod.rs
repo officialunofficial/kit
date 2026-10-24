@@ -185,9 +185,9 @@ pub(crate) fn read_object_bytes(store: &ObjectStore, hash: &Hash) -> Result<Vec<
 }
 
 /// Resolve the [`RepoLayout`] a command operates on:
-/// pointer-following discovery. A `.mkit` DIRECTORY (or none at all)
+/// pointer-following discovery. A `.kit` DIRECTORY (or none at all)
 /// resolves to the classic single-worktree layout exactly as before; a
-/// `.mkit` pointer FILE resolves to the linked tree's split layout. On
+/// `.kit` pointer FILE resolves to the linked tree's split layout. On
 /// a broken pointer the error has already been printed and the
 /// returned code is the exit status to propagate — a broken linked
 /// tree must never silently operate on the wrong directory. Command
@@ -304,7 +304,7 @@ pub use mkit_sync::WORKTREE_LOCK;
 ///
 /// Hold the returned guard across the whole read-modify-write so a
 /// second mutating `mkit` blocks (then times out) instead of racing on
-/// the worktree + `.mkit/index`. On failure, the lock message has
+/// the worktree + `.kit/index`. On failure, the lock message has
 /// already been printed to stderr and the returned [`u8`] is the exit
 /// code to propagate.
 ///

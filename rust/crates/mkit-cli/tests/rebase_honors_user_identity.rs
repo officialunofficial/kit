@@ -47,10 +47,10 @@ fn commit_file(cwd: &std::path::Path, xdg: &std::path::Path, path: &str, body: &
 }
 
 fn resolve_head(root: &std::path::Path) -> String {
-    let head = fs::read_to_string(root.join(".mkit/HEAD")).expect("HEAD");
+    let head = fs::read_to_string(root.join(".kit/HEAD")).expect("HEAD");
     let head = head.trim();
     if let Some(refname) = head.strip_prefix("ref: ") {
-        fs::read_to_string(root.join(".mkit").join(refname))
+        fs::read_to_string(root.join(".kit").join(refname))
             .expect("ref")
             .trim()
             .to_owned()
@@ -117,7 +117,7 @@ fn rebase_preserves_original_author_despite_user_identity() {
             .success()
     );
     // Capture the original authorship before the replay.
-    let mkit_dir = td.path().join(".mkit");
+    let mkit_dir = td.path().join(".kit");
     let layout = RepoLayout::single(td.path());
     let store = ObjectStore::open(&layout).unwrap();
     let orig_tip = refs::read_ref(&layout, "feature").unwrap().unwrap();
@@ -208,7 +208,7 @@ fn rebase_ignores_invalid_user_identity_on_replay() {
             .status
             .success()
     );
-    let head_before = fs::read_to_string(td.path().join(".mkit/HEAD")).expect("HEAD before");
+    let head_before = fs::read_to_string(td.path().join(".kit/HEAD")).expect("HEAD before");
     let resolved_head_before = resolve_head(td.path());
 
     // Capture the original feature-tip authorship before the replay so
@@ -229,7 +229,7 @@ fn rebase_ignores_invalid_user_identity_on_replay() {
         "rebase must ignore user.identity entirely: {out:?}"
     );
     assert!(
-        !td.path().join(".mkit/rebase-apply").exists(),
+        !td.path().join(".kit/rebase-apply").exists(),
         "completed rebase must clear its state"
     );
     assert!(
@@ -238,7 +238,7 @@ fn rebase_ignores_invalid_user_identity_on_replay() {
     );
     // HEAD still points at the feature branch (rebase never detaches
     // it), and the branch actually moved to a new replayed commit.
-    let head_after = fs::read_to_string(td.path().join(".mkit/HEAD")).expect("HEAD after");
+    let head_after = fs::read_to_string(td.path().join(".kit/HEAD")).expect("HEAD after");
     assert_eq!(head_after, head_before, "rebase must not re-point HEAD");
     assert_ne!(
         resolve_head(td.path()),

@@ -455,7 +455,7 @@ fn build_vectors() -> Vec<Vector> {
     // decompressing).
     {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"MKIT");
+        buf.extend_from_slice(b"KIT\0");
         buf.extend_from_slice(&2u32.to_le_bytes());
         buf.extend_from_slice(&1u32.to_le_bytes());
         buf.push(0x03);

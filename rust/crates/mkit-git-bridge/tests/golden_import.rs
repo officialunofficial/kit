@@ -5,7 +5,7 @@
 //!
 //! Layout per vector `<name>`: `<name>.git.bin` (source git body),
 //! `<name>.mkit.bin` (imported mkit object bytes), `<name>.json`
-//! (ids), `MANIFEST.txt` (`<name> <git-sha1> <mkit-object-id>`). The
+//! (ids), `MANIFEST.txt` (`<name> <git-sha1> <kit-object-id>`). The
 //! `big_blob` vector pins ids only (content regenerates).
 //!
 //! `UPDATE_GOLDEN=1` rewrites after a deliberate, spec-versioned
@@ -220,7 +220,7 @@ fn golden_import_vectors_match() {
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         std::fs::create_dir_all(&dir).unwrap();
         let mut manifest = String::from(
-            "# SPEC-GIT-IMPORT §9 vectors. <name> <git-sha1> <mkit-object-id>\n\
+            "# SPEC-GIT-IMPORT §9 vectors. <name> <git-sha1> <kit-object-id>\n\
              # Fixed importer key seed [0x42;32]. Regenerate with:\n\
              # UPDATE_GOLDEN=1 cargo test -p mkit-git-bridge --test golden_import\n",
         );
@@ -368,7 +368,7 @@ fn tagger_less_tag_import_hash_is_pinned() {
 
     assert_eq!(
         mkit_core::to_hex(&blake3),
-        "d27c7e45a7d0241437f17927c96fc9235ccbffe84763d62185e9dd81397e6811",
+        "4249c2149a73ec2dcb54cf1d10ff8b0f25b6a45a42b4a5deb836c956efad8e62",
         "tagger-less tag import hash drifted"
     );
 }

@@ -23,8 +23,8 @@ use std::process::{Command, Stdio};
 
 use buffa::Message;
 use mkit_attest::{Algorithm, verify_signature};
-use mkit_rpc::mkit::rpc::v1::signer::{Hello, SignRequest, SignerFrame, signer_frame};
-use mkit_rpc::mkit::rpc::v1::{Algorithm as RpcAlgorithm, ErrorCode, KeyForm, ProtocolVersion};
+use mkit_rpc::kit::rpc::v1::signer::{Hello, SignRequest, SignerFrame, signer_frame};
+use mkit_rpc::kit::rpc::v1::{Algorithm as RpcAlgorithm, ErrorCode, KeyForm, ProtocolVersion};
 
 /// Resolve the built `mkit-sign-file` binary path. Cargo sets
 /// `CARGO_BIN_EXE_<name>` for each `[[bin]]` in the current package
@@ -116,8 +116,8 @@ fn sign_one(
     key: &Path,
     alg: RpcAlgorithm,
 ) -> (
-    mkit_rpc::mkit::rpc::v1::signer::HelloResponse,
-    mkit_rpc::mkit::rpc::v1::signer::SignResponse,
+    mkit_rpc::kit::rpc::v1::signer::HelloResponse,
+    mkit_rpc::kit::rpc::v1::signer::SignResponse,
 ) {
     let frames = vec![
         SignerFrame {

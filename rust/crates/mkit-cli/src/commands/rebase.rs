@@ -18,7 +18,7 @@
 //!
 //! On conflict the loop **pauses**: it materialises conflict material
 //! into the worktree + index (via the shared `conflict` helper) and
-//! writes a `mkit-conflicts` sidecar inside `.mkit/rebase-apply/`.
+//! writes a `kit-conflicts` sidecar inside `.kit/rebase-apply/`.
 //!
 //! `--continue` does NOT re-run cherry-pick on the paused commit. Instead it builds the rewritten commit's tree from the
 //! resolved index/worktree, creates the commit, moves `todo[0]` to

@@ -1,4 +1,4 @@
-//! Native clone, fetch, pull and push for `.mkit` repositories.
+//! Native clone, fetch, pull and push for `.kit` repositories.
 //!
 //! `mkit-sync` is the filesystem layer behind the `mkit` command line's
 //! `clone`, `fetch`, `pull` and `push`, as a library. Every call returns a typed
@@ -19,7 +19,7 @@
 //! The fetch engine reads through the [`RemoteSource`] trait. The always-on
 //! backend, [`TransportSource`], wraps mkit-core's synchronous `Transport`, so
 //! every transport scheme keeps working. With the `client` feature,
-//! `ClientSource` accesses `mkit+https` and `mkit+http` remotes through
+//! `ClientSource` accesses `kit+https` and `kit+http` remotes through
 //! `mkit_client::Client` with an injected signer; with `connect-native`,
 //! `NativeHttp` is a small native HTTP channel (gzip only, adding no zstd) for it.
 

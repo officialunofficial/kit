@@ -1,11 +1,11 @@
 {
-  "blake3": "3f4b8bfd231755ec06e658a538c98d9105ab83cb3692c9603fc7801b80cbff3b",
-  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "blake3": "3099ca4a2167b45e6fcd06e1e3c7c5928433f579707857c1984ae1817acd0f48",
+  "commit": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
   "expect": {
     "accept": true,
     "bytes_blake3": "e400727846aab13b573e75c59923bd17db3a25a4512ff29aa792641a8ac0d642",
     "bytes_len": 68475,
-    "leaf": "5a9c8cd1b91ef17dd9290f6c6c0dfb4888fad33b46cef2589a086318b3741a39",
+    "leaf": "69f95e10eb2328a843fc6a9efaa95cefc498cae175c355ab96dde9e06b71b109",
     "offset": 76114,
     "path_hex": [
       "6368756e6b65642e62696e"

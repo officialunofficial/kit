@@ -3,7 +3,7 @@
 //! One remote client drives a session. Bounding its total work stops a
 //! misbehaving client from pinning the serving process.
 
-use mkit_rpc::mkit::rpc::v1::ssh::{SshFrame, ssh_frame};
+use mkit_rpc::kit::rpc::v1::ssh::{SshFrame, ssh_frame};
 
 use crate::upload::UploadLimits;
 

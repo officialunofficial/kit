@@ -33,9 +33,9 @@ use buffa::Message as _;
 use connectrpc::{ConnectError, ErrorCode};
 use mkit_core::protocol::{AdmissionChallengeEntry, AdmissionRequired, TransportError};
 
-use crate::proto::mkit::transport::v1::AdmissionChallenge;
+use crate::proto::kit::transport::v1::AdmissionChallenge;
 #[cfg(test)]
-use crate::proto::mkit::transport::v1::PendingVerification;
+use crate::proto::kit::transport::v1::PendingVerification;
 use crate::status::STATUS_MARKER;
 
 // Known gap: use mkit_core::admission bounds once the server admission bundle lands.
@@ -44,7 +44,7 @@ const MAX_SCHEME: usize = 64;
 const MAX_VALUE: usize = 8_192;
 const MAX_DESCRIPTION: usize = 512;
 const MAX_DETAIL_BASE64: usize = 88_836;
-const CHALLENGE_TYPE: &str = "mkit.transport.v1.AdmissionChallenge";
+const CHALLENGE_TYPE: &str = "kit.transport.v1.AdmissionChallenge";
 
 fn visible_header_values(
     err: &ConnectError,
@@ -150,7 +150,7 @@ pub(crate) fn pending_verification_delay(err: &ConnectError) -> Option<std::time
             .type_url
             .strip_prefix("type.googleapis.com/")
             .unwrap_or(&detail.type_url)
-            == "mkit.transport.v1.PendingVerification"
+            == "kit.transport.v1.PendingVerification"
     })?;
     let value = detail.value.as_deref().unwrap_or("");
     let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
@@ -174,7 +174,7 @@ pub(crate) fn is_membership_lag(err: &ConnectError) -> bool {
                 .type_url
                 .strip_prefix("type.googleapis.com/")
                 .unwrap_or(&detail.type_url)
-                == "mkit.transport.v1.MembershipNotVisible"
+                == "kit.transport.v1.MembershipNotVisible"
         }) || err.message.as_deref() == Some("repository membership not yet visible"))
 }
 
@@ -268,7 +268,7 @@ pub(crate) fn map_connect_error(err: ConnectError, ctx: ErrorContext) -> Transpo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::mkit::transport::v1::Challenge;
+    use crate::proto::kit::transport::v1::Challenge;
     use connectrpc::ErrorDetail;
 
     fn admission_error(challenge: AdmissionChallenge) -> ConnectError {
@@ -476,7 +476,7 @@ mod tests {
             TransportError::AccessDenied
         ));
         let notice = ErrorDetail {
-            type_url: "mkit.transport.v1.RedactionNotice".into(),
+            type_url: "kit.transport.v1.RedactionNotice".into(),
             value: None,
             debug: None,
         };
@@ -541,7 +541,7 @@ mod tests {
 
     fn pending_error(value: Option<String>) -> ConnectError {
         ConnectError::unavailable("verification pending").with_detail(connectrpc::ErrorDetail {
-            type_url: "mkit.transport.v1.PendingVerification".to_owned(),
+            type_url: "kit.transport.v1.PendingVerification".to_owned(),
             value,
             debug: None,
         })
@@ -584,8 +584,8 @@ mod tests {
         };
         // The detail alone decides, bare or prefixed, whatever the message.
         for url in [
-            "mkit.transport.v1.MembershipNotVisible",
-            "type.googleapis.com/mkit.transport.v1.MembershipNotVisible",
+            "kit.transport.v1.MembershipNotVisible",
+            "type.googleapis.com/kit.transport.v1.MembershipNotVisible",
         ] {
             let typed = ConnectError::unavailable("other").with_detail(detail(url));
             assert!(is_membership_lag(&typed), "{url}");
@@ -596,7 +596,7 @@ mod tests {
         // Neither signal, or a different code, is not a lag.
         assert!(!is_membership_lag(&ConnectError::unavailable("other")));
         let wrong_code = ConnectError::new(ErrorCode::Internal, "other")
-            .with_detail(detail("mkit.transport.v1.MembershipNotVisible"));
+            .with_detail(detail("kit.transport.v1.MembershipNotVisible"));
         assert!(!is_membership_lag(&wrong_code));
     }
 
@@ -617,7 +617,7 @@ mod tests {
         malformed.code = ErrorCode::Aborted;
         assert_eq!(pending_verification_delay(&malformed), None);
         let mut other_type = pending_error(None);
-        other_type.details[0].type_url = "mkit.transport.v1.SomethingElse".to_owned();
+        other_type.details[0].type_url = "kit.transport.v1.SomethingElse".to_owned();
         assert_eq!(pending_verification_delay(&other_type), None);
         let mut prefixed = pending_error(None);
         prefixed.details[0].type_url = PendingVerification::TYPE_URL.to_owned();

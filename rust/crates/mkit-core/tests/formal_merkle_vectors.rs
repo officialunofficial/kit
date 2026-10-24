@@ -72,14 +72,14 @@ fn tree_leaf(e: &TreeEntry) -> Hash {
     body.extend_from_slice(&e.name);
     body.push(e.mode as u8);
     body.extend_from_slice(&e.object_hash);
-    domain_digest(b"mkit-tree-entry-v1", &body)
+    domain_digest(b"kit-tree-entry-v1", &body)
 }
 
 fn meta_leaf(cb: &ChunkedBlob) -> Hash {
     let mut body = Vec::new();
     body.extend_from_slice(&cb.total_size.to_le_bytes());
     body.extend_from_slice(&cb.chunk_size.to_le_bytes());
-    domain_digest(b"mkit-cblob-meta-v1", &body)
+    domain_digest(b"kit-cblob-meta-v1", &body)
 }
 
 enum Obj {
@@ -459,7 +459,7 @@ fn export_formal_merkle_vectors() {
         PathBuf::from,
     );
     let mut rng = Rng(seed);
-    let mut out = format!("MKIT-MERKLE-VECTORS 1 seed={seed:#x}\n");
+    let mut out = format!("KIT-MERKLE-VECTORS 1 seed={seed:#x}\n");
 
     // Golden: §4 empty Tree (pinned id), then every position of every small
     // tree, both kinds (chunked covers the §5.5 position-0 rejection), every

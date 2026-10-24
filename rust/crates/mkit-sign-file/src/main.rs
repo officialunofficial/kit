@@ -40,10 +40,10 @@ use mkit_attest::signer_k256::Secp256k1Signer;
 use mkit_attest::signer_p256::P256Signer;
 use mkit_attest::signer_repo_key::RepoKeySigner;
 use mkit_core::sign::KeyPair;
-use mkit_rpc::mkit::rpc::v1::signer::{
+use mkit_rpc::kit::rpc::v1::signer::{
     Capabilities, HelloResponse, SignResponse, SignerFrame, signer_frame,
 };
-use mkit_rpc::mkit::rpc::v1::{Algorithm as RpcAlgorithm, ErrorCode, KeyForm, ProtocolVersion};
+use mkit_rpc::kit::rpc::v1::{Algorithm as RpcAlgorithm, ErrorCode, KeyForm, ProtocolVersion};
 use mkit_rpc::{FrameError, read_frame, signer_error_frame, write_frame};
 use zeroize::Zeroizing;
 
@@ -196,7 +196,7 @@ fn serve<R: Read, W: Write>(
 }
 
 fn handle_sign(
-    req: &mkit_rpc::mkit::rpc::v1::signer::SignRequest,
+    req: &mkit_rpc::kit::rpc::v1::signer::SignRequest,
     secret: &Zeroizing<[u8; 32]>,
     algorithm_override: Option<&str>,
 ) -> SignerFrame {
@@ -394,7 +394,7 @@ USAGE:
     mkit-sign-file --key <path> [--algorithm <ed25519|secp256k1|p256>]
 
 Speaks the mkit-rpc signer protocol over stdin/stdout — see
-docs/specs/SPEC-EXTERNAL-SIGNER.md and rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto.
+docs/specs/SPEC-EXTERNAL-SIGNER.md and rust/crates/mkit-rpc/proto/kit/rpc/v1/signer/signer.proto.
 
 Setup-phase errors (no key, bad permissions, bad argv) exit non-zero
 with a stderr message. Per-request errors are returned as protobuf

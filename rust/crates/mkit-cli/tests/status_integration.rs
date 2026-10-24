@@ -109,7 +109,7 @@ fn status_reports_invalid_index_instead_of_falling_back_to_worktree() {
         ino: 0,
         ctime_ns: 0,
     });
-    fs::write(p.join(".mkit/index"), idx.serialize()).unwrap();
+    fs::write(p.join(".kit/index"), idx.serialize()).unwrap();
 
     let out = run_in(p, &["status", "--porcelain"]);
     assert!(!out.status.success(), "status must reject invalid index");
@@ -287,7 +287,7 @@ fn staged_change_remains_visible_after_worktree_revert() {
 #[test]
 fn missing_index_with_clean_head_is_reported_clean() {
     let td = init_with_commit(&[("a.txt", b"v1")]);
-    fs::remove_file(td.path().join(".mkit/index")).unwrap();
+    fs::remove_file(td.path().join(".kit/index")).unwrap();
 
     let (stdout, _) = status_porcelain(td.path());
     assert!(

@@ -33,11 +33,11 @@ use crate::exit;
 
 type CmdResult<T> = Result<T, (String, u8)>;
 
-const ATTESTATIONS_REF: &str = "refs/mkit/attestations";
+const ATTESTATIONS_REF: &str = "refs/kit/attestations";
 
 #[derive(Debug, Parser)]
 pub(super) struct VerifyArgs {
-    /// Bridge state name under `.mkit/git/`. Optional when exactly
+    /// Bridge state name under `.kit/git/`. Optional when exactly
     /// one state dir exists.
     #[arg(long = "remote-name", value_name = "NAME")]
     pub remote_name: Option<String>,
@@ -590,7 +590,7 @@ mod tests {
     }
 
     /// Regression test: a `.rename.tmp.<pid>.0`
-    /// orphan under `.mkit/git/` — the crash debris `remote.rs`'s
+    /// orphan under `.kit/git/` — the crash debris `remote.rs`'s
     /// `rename_state_dir` can leave behind between its two renames —
     /// must not count as a second bridge state. Before the
     /// dot-leading-segment rejection in `validate_ref_name`, `state_names`

@@ -1396,7 +1396,7 @@ mod kani_proofs {
             return false;
         }
         let up: Vec<u8> = n.iter().map(u8::to_ascii_uppercase).collect();
-        if up == b".MKIT" || up == b".GIT" {
+        if up == b".KIT" || up == b".GIT" {
             return false;
         }
         let stem = match up.iter().position(|&b| b == b'.') {
@@ -1418,7 +1418,7 @@ mod kani_proofs {
     }
 
     /// `TreeEntry::validate_name` agrees with the §4.1 model on every
-    /// name of 0..=6 bytes (enough for `.mkit`, `COM1`, `LPT9.x`,
+    /// name of 0..=6 bytes (enough for `.kit`, `COM1`, `LPT9.x`,
     /// `con.txt`-style stems and every trailing-byte rule).
     #[kani::proof]
     #[kani::unwind(8)]

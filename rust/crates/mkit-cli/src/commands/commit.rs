@@ -5,12 +5,12 @@
 //! 1. Accept `-m <msg>` OR spawn `$EDITOR` on a tempfile pre-filled
 //! with `editor::COMMIT_EDITMSG_TEMPLATE`. An empty message
 //! aborts.
-//! 2. Read `.mkit/index` and build a tree via
+//! 2. Read `.kit/index` and build a tree via
 //! [`worktree::build_tree_from_index`]. An empty / missing index is
 //! an error — `mkit add <path>` (or `mkit add .`) must come first.
 //! 3. Resolve the author identity in this order:
 //! a. `--author <spec>` CLI flag (overrides everything).
-//! b. `config.user_identity` in `.mkit/config`.
+//! b. `config.user_identity` in `.kit/config`.
 //! c. Derived from the signing key's public key (default).
 //! 4. Sign the commit, write the `Commit` object, advance
 //! `refs/heads/<current>` and `HEAD`.

@@ -65,7 +65,7 @@ module serve_test {
       .then(ageOrphan).then(startServe("s2")).then(sweep("s2"))
       .expect(and { Safety, orphans == Set(), sweptOrphan })
 
-  // A lockless FileTransport writer (mkit+file:// push) is protected only by
+  // A lockless FileTransport writer (kit+file:// push) is protected only by
   // the age bound: its one-shot write never goes stale here, so the sweep
   // leaves it alone.
   run fileTransportUploadKeptTest =

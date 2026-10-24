@@ -1,10 +1,10 @@
-//! Integration coverage for the `mkit+https` / `mkit+http` dispatch
+//! Integration coverage for the `kit+https` / `kit+http` dispatch
 //! branch in [`mkit_cli::remote_dispatch::open`], backed by
 //! [`mkit_transport_connect::ConnectTransport`], the native
-//! `mkit.transport.v1` `ConnectRPC` client.
+//! `kit.transport.v1` `ConnectRPC` client.
 //!
 //! The tests drive full push and pull round trips against a real
-//! in-process `mkit.transport.v1.TransportService` server (a `connectrpc`
+//! in-process `kit.transport.v1.TransportService` server (a `connectrpc`
 //! hyper server, memory-backed), not a mock standing in for one.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
@@ -151,7 +151,7 @@ impl TestService {
         self.calls.lock().unwrap().push(CapturedCall {
             procedure,
             repository: header("x-repository"),
-            ref_hint: header("x-mkit-ref"),
+            ref_hint: header("x-kit-ref"),
             part_index: None,
         });
         if self.admission_required
@@ -161,7 +161,7 @@ impl TestService {
             return Err(
                 ConnectError::permission_denied("admission required").with_detail(
                     connectrpc::ErrorDetail::from_message(
-                        "mkit.transport.v1.AdmissionChallenge",
+                        "kit.transport.v1.AdmissionChallenge",
                         &generated::AdmissionChallenge {
                             challenges: vec![generated::Challenge {
                                 scheme: Some("test".into()),
@@ -211,7 +211,7 @@ impl generated::TransportService for TestService {
         self.capture(&ctx, "GetServerInfo")?;
         if self.ticketed {
             Ok(Response::new(generated::GetServerInfoResponse {
-                protocol: Some("mkit.transport.v1".into()),
+                protocol: Some("kit.transport.v1".into()),
                 spec_version: Some(2),
                 part_size: Some(8 << 20),
                 max_parts: Some(512),
@@ -402,7 +402,7 @@ impl generated::TransportService for TestService {
             return Err(
                 ConnectError::unavailable("verification pending").with_detail(
                     connectrpc::ErrorDetail::from_message(
-                        "mkit.transport.v1.PendingVerification",
+                        "kit.transport.v1.PendingVerification",
                         &generated::PendingVerification::default().with_retry_after_ms(5_000),
                     ),
                 ),
@@ -758,27 +758,27 @@ fn spawn_server_options(
 fn open_accepts_mkit_http_url_and_returns_transport() {
     // Construction does NOT make a network call — nothing needs to be
     // listening on port 1 for this to succeed.
-    let tx = remote_dispatch::open("mkit+http://127.0.0.1:1/proj")
-        .expect("mkit+http:// must dispatch to ConnectTransport");
+    let tx = remote_dispatch::open("kit+http://127.0.0.1:1/proj")
+        .expect("kit+http:// must dispatch to ConnectTransport");
     drop(tx);
 }
 
 #[test]
 fn open_accepts_mkit_https_url() {
-    let tx = remote_dispatch::open("mkit+https://example.invalid/p")
-        .expect("mkit+https:// must dispatch to ConnectTransport");
+    let tx = remote_dispatch::open("kit+https://example.invalid/p")
+        .expect("kit+https:// must dispatch to ConnectTransport");
     drop(tx);
 }
 
 #[test]
 fn open_rejects_malformed_mkit_http_url() {
-    let Err(err) = remote_dispatch::open("mkit+http://") else {
-        panic!("expected error for empty mkit+http URL");
+    let Err(err) = remote_dispatch::open("kit+http://") else {
+        panic!("expected error for empty kit+http URL");
     };
     let msg = err.to_string();
     assert!(
         msg.contains("transport") || msg.contains("malformed"),
-        "unexpected error for empty mkit+http URL: {msg}"
+        "unexpected error for empty kit+http URL: {msg}"
     );
 }
 
@@ -794,7 +794,7 @@ fn source_repo_with_one_commit() -> (tempfile::TempDir, String) {
     assert!(run_in(td.path(), &["add", "hello.txt"]).status.success());
     let out = run_in(td.path(), &["commit", "-m", "init"]);
     assert!(out.status.success(), "commit failed: {out:?}");
-    let tip_hex = std::fs::read_to_string(td.path().join(".mkit/refs/heads/main"))
+    let tip_hex = std::fs::read_to_string(td.path().join(".kit/refs/heads/main"))
         .unwrap()
         .trim()
         .to_owned();
@@ -807,8 +807,8 @@ fn cli_push_uses_begin_upload_and_ticketed_advance() {
     let backend = Arc::new(MemoryTransport::new());
     let (port, shutdown, handle, calls) =
         spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
-    let url = format!("mkit+http://127.0.0.1:{port}/myproj");
-    let config_path = src.path().join(".mkit/config");
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let config_path = src.path().join(".kit/config");
     let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
     config.push_str("\nremote.origin.url = ");
     config.push_str(&url);
@@ -859,10 +859,10 @@ fn push_then_pull_roundtrip_through_real_connect_server() {
 
     let backend = Arc::new(MemoryTransport::new());
     let (port, shutdown, handle, calls) = spawn_server(backend);
-    let url = format!("mkit+http://127.0.0.1:{port}/myproj");
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
 
     // -- push --------------------------------------------------------
-    let tx = remote_dispatch::open(&url).expect("open mkit+http (push)");
+    let tx = remote_dispatch::open(&url).expect("open kit+http (push)");
     let n = remote_dispatch::push_all(src.path(), tx.as_ref()).expect("push must succeed");
     assert_eq!(n, 1, "exactly one branch (main) must be pushed");
     drop(tx);
@@ -870,12 +870,12 @@ fn push_then_pull_roundtrip_through_real_connect_server() {
     // -- pull into a fresh repo ---------------------------------------
     let dst = tempfile::tempdir().unwrap();
     assert!(run_in(dst.path(), &["init"]).status.success());
-    let tx = remote_dispatch::open(&url).expect("open mkit+http (pull)");
+    let tx = remote_dispatch::open(&url).expect("open kit+http (pull)");
     let n = remote_dispatch::pull_all(dst.path(), tx.as_ref(), "default", None).expect("pull");
     assert_eq!(n, 1, "one remote branch must be fetched");
     drop(tx);
 
-    let local_tip = std::fs::read_to_string(dst.path().join(".mkit/refs/heads/main")).unwrap();
+    let local_tip = std::fs::read_to_string(dst.path().join(".kit/refs/heads/main")).unwrap();
     assert_eq!(
         local_tip.trim(),
         tip_hex,
@@ -941,10 +941,10 @@ fn cli_pending_interrupt_uses_configured_observer_and_exits_75() {
     let (src, _) = source_repo_with_one_commit();
     let (port, shutdown, handle, calls) =
         spawn_server_with_behavior(Arc::new(MemoryTransport::new()), Vec::new(), true);
-    let url = format!("mkit+http://127.0.0.1:{port}/myproj");
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
     // `remote add` intentionally restricts saved URLs to public schemes;
     // this loopback-only fixture writes the same repo-scoped config shape.
-    let config_path = src.path().join(".mkit/config");
+    let config_path = src.path().join(".kit/config");
     let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
     config.push_str("\nremote.origin.url = ");
     config.push_str(&url);
@@ -1017,7 +1017,7 @@ fn open_rejects_invalid_repository_path_before_connecting() {
         "some/project/path",
         "repo%20name",
     ] {
-        let url = format!("mkit+http://127.0.0.1:1/{path}");
+        let url = format!("kit+http://127.0.0.1:1/{path}");
         let Err(err) = remote_dispatch::open(&url) else {
             panic!("invalid repository path accepted: {path}");
         };
@@ -1038,7 +1038,7 @@ fn list_refs_not_found_names_the_repository_and_origin() {
     let (port, shutdown, handle, _) =
         spawn_server_with_errors(Arc::new(MemoryTransport::new()), vec!["ListRefs"]);
     let origin = format!("http://127.0.0.1:{port}");
-    let tx = remote_dispatch::open(&format!("mkit+{origin}/myproj")).unwrap();
+    let tx = remote_dispatch::open(&format!("kit+{origin}/myproj")).unwrap();
     let error = remote_dispatch::fetch_all(repo.path(), tx.as_ref(), "default").unwrap_err();
     let remote_dispatch::DispatchError::RepositoryNotFound {
         identity,
@@ -1060,7 +1060,7 @@ fn list_refs_not_found_names_the_repository_and_origin() {
 fn read_ref_not_found_is_an_absent_ref() {
     let (port, shutdown, handle, calls) =
         spawn_server_with_errors(Arc::new(MemoryTransport::new()), vec!["ReadRef"]);
-    let tx = remote_dispatch::open(&format!("mkit+http://127.0.0.1:{port}/myproj")).unwrap();
+    let tx = remote_dispatch::open(&format!("kit+http://127.0.0.1:{port}/myproj")).unwrap();
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), None);
     assert_eq!(
         calls.lock().unwrap().len(),
@@ -1079,7 +1079,7 @@ fn push_not_found_names_the_repository_for_each_write() {
         let (port, shutdown, handle, calls) =
             spawn_server_with_errors(Arc::new(MemoryTransport::new()), vec![procedure]);
         let origin = format!("http://127.0.0.1:{port}");
-        let tx = remote_dispatch::open(&format!("mkit+{origin}/myproj")).unwrap();
+        let tx = remote_dispatch::open(&format!("kit+{origin}/myproj")).unwrap();
         if procedure == "UpdateRef" {
             // The first push publishes its refs through AdvanceRefs. An unchanged
             // second push reaches the head-only UpdateRef path.
@@ -1125,8 +1125,8 @@ fn cli_admission_helper_trust_filter_json_and_exit_codes() {
         let (src, _) = source_repo_with_one_commit();
         let (port, shutdown, handle, calls) =
             spawn_server_admission(Arc::new(MemoryTransport::new()), Vec::new(), false, true);
-        let url = format!("mkit+http://127.0.0.1:{port}/myproj");
-        let config_path = src.path().join(".mkit/config");
+        let url = format!("kit+http://127.0.0.1:{port}/myproj");
+        let config_path = src.path().join(".kit/config");
         let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
         write!(
             config,
@@ -1139,7 +1139,7 @@ fn cli_admission_helper_trust_filter_json_and_exit_codes() {
         let helper = xdg.path().join("helper.sh");
         let marker = xdg.path().join("ran");
         let header = if case == "reserved" {
-            "X-Mkit-Ref"
+            "X-Kit-Ref"
         } else {
             "Admission-Authorization"
         };
@@ -1150,7 +1150,7 @@ fn cli_admission_helper_trust_filter_json_and_exit_codes() {
             std::fs::set_permissions(&helper, perms).unwrap();
         }
         let trusted = if case == "untrusted" {
-            "mkit+http://127.0.0.1:1/other"
+            "kit+http://127.0.0.1:1/other"
         } else {
             &url
         };
@@ -1196,7 +1196,7 @@ fn cli_admission_helper_trust_filter_json_and_exit_codes() {
             }
             "reserved" => {
                 assert_eq!(output.status.code(), Some(78), "{stderr}");
-                assert!(stderr.contains("X-Mkit-Ref"));
+                assert!(stderr.contains("X-Kit-Ref"));
                 assert!(marker.exists());
             }
             "no-helper" => {
@@ -1260,8 +1260,8 @@ fn cli_part_upload_interrupts_with_exit_75_and_resumes_from_file_receipts() {
         true,
         Some(Arc::clone(&gate)),
     );
-    let url = format!("mkit+http://127.0.0.1:{port}/myproj");
-    let config_path = src.path().join(".mkit/config");
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let config_path = src.path().join(".kit/config");
     let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
     config.push_str("\nremote.origin.url = ");
     config.push_str(&url);
@@ -1366,7 +1366,7 @@ fn cli_with_test_ca(
         .env_remove("MKIT_API_TOKEN")
         .env_remove("MKIT_SSL_CA_FILE")
         .env_remove("MKIT_PACK_REBASELINE_DEPTH");
-    if endpoint.starts_with("mkit+https://") {
+    if endpoint.starts_with("kit+https://") {
         command.env("MKIT_SSL_CA_FILE", https::ca_file());
     }
     command.output().unwrap()
@@ -1390,7 +1390,7 @@ fn endpoint_transcript(
 
 fn published_pack_bytes(transport: &dyn Transport) -> BTreeMap<mkit_core::Hash, Vec<u8>> {
     let mut bytes = BTreeMap::new();
-    let mut node = transport.read_ref("refs/mkit/packmap/main").unwrap();
+    let mut node = transport.read_ref("refs/kit/packmap/main").unwrap();
     while let Some(id) = node {
         let body = transport
             .download_blob_via_ref(&PackKey::from(id), "refs/heads/main")
@@ -1437,10 +1437,10 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         let (port, shutdown, server, _) = spawn_server(Arc::clone(&backend));
         let proxy = (scheme == "https").then(|| https::Proxy::new(port));
         let endpoint = match scheme {
-            "file" => format!("mkit+file://{}", remote.path().display()),
-            "http" => format!("mkit+http://127.0.0.1:{port}/parity"),
+            "file" => format!("kit+file://{}", remote.path().display()),
+            "http" => format!("kit+http://127.0.0.1:{port}/parity"),
             _ => format!(
-                "mkit+https://localhost:{}/parity",
+                "kit+https://localhost:{}/parity",
                 proxy.as_ref().unwrap().port
             ),
         };
@@ -1454,7 +1454,7 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         if scheme == "http" {
             // The development HTTP scheme is configured directly, as in the
             // existing Connect CLI tests; remote add accepts secure schemes.
-            let config_path = source.path().join(".mkit/config");
+            let config_path = source.path().join(".kit/config");
             let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
             config.push_str("\nremote.origin.url = ");
             config.push_str(&endpoint);
@@ -1637,15 +1637,15 @@ fn cli_https_latency_comparison() {
             let backend = Arc::new(MemoryTransport::new());
             let (port, shutdown, server, _) = spawn_server(Arc::clone(&backend));
             let proxy = https::Proxy::with_latency(port, one_way);
-            let endpoint = format!("mkit+https://localhost:{}/latency", proxy.port);
-            let seed_endpoint = format!("mkit+http://127.0.0.1:{port}/latency");
+            let endpoint = format!("kit+https://localhost:{}/latency", proxy.port);
+            let seed_endpoint = format!("kit+http://127.0.0.1:{port}/latency");
             let source = common::Repo::new();
             let source_layout = RepoLayout::single(source.path());
             let source_store = ObjectStore::open(&source_layout).unwrap();
             for (id, bytes) in &objects {
                 assert_eq!(source_store.write(bytes).unwrap(), *id);
             }
-            let config_path = source.path().join(".mkit/config");
+            let config_path = source.path().join(".kit/config");
             let base_config = std::fs::read_to_string(&config_path).unwrap_or_default();
             let configure = |url: &str| {
                 std::fs::write(
@@ -1676,7 +1676,7 @@ fn cli_https_latency_comparison() {
             }
             // Assert that clone really follows six independently published
             // packmap nodes, rather than accidentally benchmarking one snapshot.
-            let mut node = backend.read_ref("refs/mkit/packmap/main").unwrap();
+            let mut node = backend.read_ref("refs/kit/packmap/main").unwrap();
             let mut depth = 0;
             while let Some(id) = node {
                 let bytes = backend
@@ -1776,7 +1776,7 @@ fn cli_https_latency_comparison() {
 // Force push re-baseline race
 // ---------------------------------------------------------------------------
 
-const PACKMAP: &str = "refs/mkit/packmap/main";
+const PACKMAP: &str = "refs/kit/packmap/main";
 
 /// Runs a competing push, once, just before the wrapped transport writes
 /// refs. The competing push resets the pack chain under the force push.
@@ -1917,7 +1917,7 @@ fn run_rebaseline_race(appending: bool) {
     let backend = Arc::new(MemoryTransport::new());
     let (port, shutdown, handle, calls) =
         spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
-    let url = format!("mkit+http://127.0.0.1:{port}/myproj");
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let transport = signed_transport(&url);
     let competing = signed_transport(&url);
     assert!(transport.supports_atomic_advance());

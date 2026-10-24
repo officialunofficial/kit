@@ -8,7 +8,7 @@
 //! - `--verify` — error if a revision does not resolve (the default error
 //!   behavior already matches, but the flag is accepted for parity);
 //! - `--show-toplevel` — print the repository root (the dir holding
-//!   `.mkit`).
+//!   `.kit`).
 //!
 //! Resolution reuses the shared revspec grammar (refs, full/short hashes,
 //! `HEAD~n`/`^`). The abbreviated id is a BLAKE3 prefix, not a SHA-1 one.
@@ -130,7 +130,7 @@ fn abbrev_ref(layout: &RepoLayout, spec: &str) -> Result<String, u8> {
     Ok(short.to_string())
 }
 
-/// Walk up from `start` to the directory that contains `.mkit`.
+/// Walk up from `start` to the directory that contains `.kit`.
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let mut cur = start;
     loop {

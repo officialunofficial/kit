@@ -99,7 +99,7 @@ pub enum SyncError {
     #[error("object {hash} failed signature verification: {reason}")]
     UnsignedOrInvalidObject { hash: String, reason: String },
     /// A remote name is not a legal ref name, so it cannot name a record
-    /// under `.mkit/applied-packs/`.
+    /// under `.kit/applied-packs/`.
     #[error("invalid remote name for applied-packs record: '{0}'")]
     InvalidRemoteName(String),
 }

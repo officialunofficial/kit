@@ -4,7 +4,7 @@
 //! [`ObjectStore::open`] / [`ObjectStore::init`]):
 //!
 //! ```text
-//! .mkit/
+//! .kit/
 //!   objects/
 //!     <2-hex>/<62-hex>   # raw canonical object bytes, BLAKE3-named
 //! ```
@@ -59,10 +59,10 @@ pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
 pub use source::{DisplaySource, EphemeralSink, ObjectSource};
 
 /// Top-level repository directory name.
-pub const MKIT_DIR: &str = ".mkit";
-/// Subdirectory under `.mkit/` that holds raw object files.
+pub const MKIT_DIR: &str = ".kit";
+/// Subdirectory under `.kit/` that holds raw object files.
 pub const OBJECTS_DIR: &str = "objects";
-/// File under `.mkit/` declaring the object-addressing format. Written at
+/// File under `.kit/` declaring the object-addressing format. Written at
 /// [`ObjectStore::init`] and required (and matched) at [`ObjectStore::open`]
 /// so an older flat-hash-addressed repository is rejected loudly rather
 /// than silently mis-read once merkle addressing is in effect.
@@ -96,9 +96,9 @@ pub const MAX_TREE_DEPTH: usize = 128;
 /// without losing the structured-decode-error variants.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("path is not an mkit repository (missing .mkit/objects)")]
+    #[error("path is not an mkit repository (missing .kit/objects)")]
     NotAMkitRepository,
-    #[error(".mkit already exists in this directory")]
+    #[error(".kit already exists in this directory")]
     AlreadyInitialized,
     #[error(
         "repository object-addressing format is {found:?}, expected \"{}\" — this repository predates merkle object addressing and is not readable by this mkit (pre-1.0: no migration). See docs/specs/SPEC-MERKLE-OBJECTS.md.",
@@ -260,7 +260,7 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Local content-addressed object store backed by the filesystem.
 #[derive(Debug, Clone)]
 pub struct ObjectStore {
-    /// Absolute path to `<root>/.mkit/objects`.
+    /// Absolute path to `<root>/.kit/objects`.
     objects_root: PathBuf,
     /// Flush/rename primitive seam. Production code always uses
     /// [`RealSyncer`]; unit tests inject a recording double to assert
@@ -388,7 +388,7 @@ impl ObjectStore {
         WriteBatch::new(self, policy)
     }
 
-    /// Returns `true` when `root` contains a `.mkit/objects` directory.
+    /// Returns `true` when `root` contains a `.kit/objects` directory.
     #[must_use]
     pub fn is_repo_root(root: &Path) -> bool {
         root.join(MKIT_DIR).join(OBJECTS_DIR).is_dir()

@@ -9,7 +9,7 @@
 //! Key material layout on disk (per `docs/specs/SPEC-ATTESTATIONS.md` §6.1):
 //!
 //! * Ed25519 — path resolved from `cfg.signing_key`
-//! (default `.mkit/keys/default.key`). Shared with the commit signer.
+//! (default `.kit/keys/default.key`). Shared with the commit signer.
 //! **Not** auto-generated — the caller must run
 //! `mkit keygen` first, matching `mkit commit`'s contract. This is
 //! the same property that closes the C1 attack surface (see
@@ -17,7 +17,7 @@
 //! from a path the config could control.
 //! * secp256k1 / p256 — path resolved from
 //! `attest.{secp256k1,p256}_key_path` (user-scoped only; default
-//! `.mkit/keys/<algo>.key`). Raw 32-byte secret, mode 0600. Same
+//! `.kit/keys/<algo>.key`). Raw 32-byte secret, mode 0600. Same
 //! no-auto-generate contract; absent file → clear error.
 //!
 //! The `external` signer kind handles all three algorithms via a single
@@ -263,7 +263,7 @@ fn build_external_signer(
     if config.external_signer_path.is_empty() {
         return Err(FactoryError::ExternalSignerPath(
             "empty — set `attest.external_signer_path` in user-scoped \
-             config ($XDG_CONFIG_HOME/mkit/config). Per-repo .mkit/config \
+             config ($XDG_CONFIG_HOME/mkit/config). Per-repo .kit/config \
              cannot set this key (security)."
                 .into(),
         ));
@@ -391,7 +391,7 @@ mod tests {
             Ok(_) => panic!("unexpected success"),
         }
         assert!(
-            !td.path().join(".mkit/keys/default.key").exists(),
+            !td.path().join(".kit/keys/default.key").exists(),
             "factory must not silently create the key file"
         );
     }
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn repo_key_ed25519_loads_existing_key() {
         let td = tempfile::tempdir().unwrap();
-        let key_path = td.path().join(".mkit/keys/default.key");
+        let key_path = td.path().join(".kit/keys/default.key");
         write_ed25519_key(&key_path, &[0xCDu8; 32]);
         let cfg = Config::with_defaults();
         let signer = build_signer(
@@ -417,10 +417,10 @@ mod tests {
     #[test]
     fn repo_key_ed25519_honours_signing_key_config() {
         let td = tempfile::tempdir().unwrap();
-        let key_path = td.path().join(".mkit/keys/custom-global.key");
+        let key_path = td.path().join(".kit/keys/custom-global.key");
         write_ed25519_key(&key_path, &[0xEFu8; 32]);
         let mut cfg = Config::with_defaults();
-        cfg.signing_key = ".mkit/keys/custom-global.key".into();
+        cfg.signing_key = ".kit/keys/custom-global.key".into();
         let signer = build_signer(
             &RepoLayout::single(td.path()),
             Algorithm::Ed25519,
@@ -453,12 +453,12 @@ mod tests {
     #[test]
     fn repo_key_p256_loads_existing_raw_secret() {
         let td = tempfile::tempdir().unwrap();
-        fs::create_dir_all(td.path().join(".mkit/keys")).unwrap();
+        fs::create_dir_all(td.path().join(".kit/keys")).unwrap();
         let mut secret = [0u8; 32];
         secret[31] = 3;
-        fs::write(td.path().join(".mkit/keys/p256.key"), secret).unwrap();
-        set_secure_mode(&td.path().join(".mkit/keys/p256.key"), 0o600);
-        set_secure_mode(&td.path().join(".mkit/keys"), 0o700);
+        fs::write(td.path().join(".kit/keys/p256.key"), secret).unwrap();
+        set_secure_mode(&td.path().join(".kit/keys/p256.key"), 0o600);
+        set_secure_mode(&td.path().join(".kit/keys"), 0o700);
 
         let cfg = Config::with_defaults();
         let signer = build_signer(
@@ -474,10 +474,10 @@ mod tests {
     #[test]
     fn repo_key_wrong_length_key_errors() {
         let td = tempfile::tempdir().unwrap();
-        fs::create_dir_all(td.path().join(".mkit/keys")).unwrap();
-        fs::write(td.path().join(".mkit/keys/secp256k1.key"), b"short").unwrap();
-        set_secure_mode(&td.path().join(".mkit/keys/secp256k1.key"), 0o600);
-        set_secure_mode(&td.path().join(".mkit/keys"), 0o700);
+        fs::create_dir_all(td.path().join(".kit/keys")).unwrap();
+        fs::write(td.path().join(".kit/keys/secp256k1.key"), b"short").unwrap();
+        set_secure_mode(&td.path().join(".kit/keys/secp256k1.key"), 0o600);
+        set_secure_mode(&td.path().join(".kit/keys"), 0o700);
 
         let cfg = Config::with_defaults();
         match build_signer(

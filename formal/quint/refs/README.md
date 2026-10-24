@@ -26,9 +26,9 @@ SPEC-CONCURRENCY with `mkit-server`.
   file is older than the age bound (`SweepAlone`, `NoLiveUploadSwept`).
 - **Cross-domain gap covers `mkit-server`** (§3.1): a `mkit-server`
   fs-layout deployment writes refs through `FileTransport` under the same
-  `<root>/.mkit/refs/.lock` (`FsLayoutStore::apply` ->
+  `<root>/.kit/refs/.lock` (`FsLayoutStore::apply` ->
   `FileTransport::with_ref_lock`), so in `refs.qnt` a `file` op is a CAS
-  from `mkit serve`, `mkit-server` or a `mkit+file://` push alike. The
+  from `mkit serve`, `mkit-server` or a `kit+file://` push alike. The
   `WitnessCrossDomainGap` witness is still reachable, as documented.
 - **Served names, SPEC-REFS v3 §2**, and the **512-byte bound, §3**:
   `servedNames` checks that a server refuses a name outside `refs/`, or
@@ -41,7 +41,7 @@ SPEC-CONCURRENCY with `mkit-server`.
   `refs/`, over-long, grammar-invalid). **Which byte strings fall in which
   class is pure grammar, left to unit tests and conformance vectors**
   (`mkit_core::refs` tests; `mkit-server` `pipeline/tests.rs` and
-  `ssh/tests.rs`), as are the derived local bounds (494 / 502 bytes) and
+  `ssh/tests.rs`), as are the derived local bounds (495 / 502 bytes) and
   prefix normalization (§4.2).
 - **Memory transport**: `mkit-transport-memory`'s `update_ref` holds its
   `Mutex` across read-check-write, and SPEC-REFS §5.1 says `atomic*`
@@ -113,7 +113,7 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 | `serve2_sweepUnderShared` | `SweepAlone`, `NoLiveUploadSwept` | a shared hold does not exclude other servers' uploads |
 | `serve2_serverSkipsServe` | `UpServersHoldServeShared`, `NoMissedDetection`, `NoLiveUploadSwept` | `mkit-server` must hold `serve.lock` |
 | `serve2_serverLockShared` | `OneMkitServer` | `server.lock` must be exclusive |
-| `serve2_ftSlow` | `NoLiveUploadSwept` | ASSUMPTION: lockless `mkit+file://` uploads rely on the 1 h age bound |
+| `serve2_ftSlow` | `NoLiveUploadSwept` | ASSUMPTION: lockless `kit+file://` uploads rely on the 1 h age bound |
 | `serve2` | `WitnessUndetectedLateServer` | documented §3.1 gap: detection is one-directional |
 | `served_checkAfterRead` | `RefuseBeforeStorage`, `ExplicitRefusal` | pre-v3 behaviour (answering `main` from storage / as absent) |
 | `served_headCheckedLate` | `RefuseBeforeStorage`, `RefusedWritesNothing` | both AdvanceRefs names must be checked before the first write |

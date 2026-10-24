@@ -1,6 +1,6 @@
 //! `mkit commit` must honour `config.user_identity` when set, falling
 //! back to the pubkey-derived Identity otherwise. Integration test:
-//! seed `.mkit/config` with a known identity, commit, then read the
+//! seed `.kit/config` with a known identity, commit, then read the
 //! commit object back and assert `author.bytes` match.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
@@ -85,8 +85,8 @@ fn commit_uses_config_user_identity_when_set() {
     )
     .unwrap();
     fs::write(
-        td.path().join(".mkit/config"),
-        "signing_key = .mkit/keys/default.key\ndefault_branch = main\n",
+        td.path().join(".kit/config"),
+        "signing_key = .kit/keys/default.key\ndefault_branch = main\n",
     )
     .unwrap();
 
@@ -131,9 +131,9 @@ fn commit_ignores_repo_scoped_user_identity() {
     let attacker_identity = [0xAAu8; 32];
     let hex = encode_ed25519_user_identity(&attacker_identity);
     fs::write(
-        td.path().join(".mkit/config"),
+        td.path().join(".kit/config"),
         format!(
-            "signing_key = .mkit/keys/default.key\ndefault_branch = main\nuser.identity = {hex}\n"
+            "signing_key = .kit/keys/default.key\ndefault_branch = main\nuser.identity = {hex}\n"
         ),
     )
     .unwrap();

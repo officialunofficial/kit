@@ -99,7 +99,7 @@ enum ProcedureAuth {
 /// Exhaustive for the generated service. Future client methods must be
 /// classified here before they can send authenticated requests.
 fn procedure_auth(procedure: &str) -> Option<ProcedureAuth> {
-    let method = procedure.strip_prefix("/mkit.transport.v1.TransportService/")?;
+    let method = procedure.strip_prefix("/kit.transport.v1.TransportService/")?;
     Some(match method {
         "ListRefs" | "ListRepos" | "ReadRef" | "PackExists" | "DownloadPack" | "IssueObjectUrl"
         | "GetReceipt" | "UpdateRef" | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => {
@@ -123,7 +123,7 @@ fn procedure_auth(procedure: &str) -> Option<ProcedureAuth> {
 /// mode and signed: a statement that slipped through that way is refused by
 /// the server ("statement mode with an envelope"), never accepted unsigned.
 fn is_statement_mode(body: &[u8]) -> bool {
-    use crate::proto::mkit::transport::v1::{
+    use crate::proto::kit::transport::v1::{
         SetRepoVisibilityRequest, set_repo_visibility_request::Mode,
     };
     use buffa::Message as _;
@@ -454,7 +454,7 @@ mod tests {
                 return false;
             }
             let canonical = format!(
-                "mkit-write:v2\n{audience}\n{repository}\n{procedure}\nbody:{digest}\n{created_at}\n{expires}\n{idem}"
+                "kit-write:v2\n{audience}\n{repository}\n{procedure}\nbody:{digest}\n{created_at}\n{expires}\n{idem}"
             );
             let signing_digest = hash(canonical.as_bytes());
 
@@ -495,7 +495,7 @@ mod tests {
                 return false;
             }
             let canonical = format!(
-                "mkit-write:v2\n{audience}\n{repository}\n{procedure}\n{commitment}\n{created_at}\n{expires}\n{idem}"
+                "kit-write:v2\n{audience}\n{repository}\n{procedure}\n{commitment}\n{created_at}\n{expires}\n{idem}"
             );
             let signing_digest = hash(canonical.as_bytes());
 
@@ -545,20 +545,20 @@ mod tests {
             );
 
             let req = build_request(
-                "/mkit.transport.v1.TransportService/UpdateRef",
+                "/kit.transport.v1.TransportService/UpdateRef",
                 b"serialized-protobuf-update-ref-body",
             );
             futures::executor::block_on(transport.send(req)).expect("send ok");
 
             let got = captured.lock().unwrap().take().expect("request captured");
             assert!(verify_unary_from_headers(
-                "/mkit.transport.v1.TransportService/UpdateRef",
+                "/kit.transport.v1.TransportService/UpdateRef",
                 &got.headers,
                 &got.body,
             ));
             // Tampering the body must break verification (digest mismatch).
             assert!(!verify_unary_from_headers(
-                "/mkit.transport.v1.TransportService/UpdateRef",
+                "/kit.transport.v1.TransportService/UpdateRef",
                 &got.headers,
                 b"tampered body",
             ));
@@ -580,14 +580,14 @@ mod tests {
             );
 
             let req = build_request(
-                "/mkit.transport.v1.TransportService/AdvanceRefs",
+                "/kit.transport.v1.TransportService/AdvanceRefs",
                 b"serialized-advance-refs-body",
             );
             futures::executor::block_on(transport.send(req)).expect("send ok");
 
             let got = captured.lock().unwrap().take().expect("request captured");
             assert!(verify_unary_from_headers(
-                "/mkit.transport.v1.TransportService/AdvanceRefs",
+                "/kit.transport.v1.TransportService/AdvanceRefs",
                 &got.headers,
                 &got.body,
             ));
@@ -609,14 +609,14 @@ mod tests {
             );
 
             let req = build_request(
-                "/mkit.transport.v1.TransportService/UploadPack",
+                "/kit.transport.v1.TransportService/UploadPack",
                 b"pack-header-message-bytes",
             );
             futures::executor::block_on(transport.send(req)).expect("send ok");
 
             let got = captured.lock().unwrap().take().expect("request captured");
             assert!(verify_stream_from_headers(
-                "/mkit.transport.v1.TransportService/UploadPack",
+                "/kit.transport.v1.TransportService/UploadPack",
                 &got.headers,
             ));
         }
@@ -637,11 +637,11 @@ mod tests {
             );
 
             for procedure in [
-                "/mkit.transport.v1.TransportService/ListRefs",
-                "/mkit.transport.v1.TransportService/ListRepos",
-                "/mkit.transport.v1.TransportService/ReadRef",
-                "/mkit.transport.v1.TransportService/PackExists",
-                "/mkit.transport.v1.TransportService/DownloadPack",
+                "/kit.transport.v1.TransportService/ListRefs",
+                "/kit.transport.v1.TransportService/ListRepos",
+                "/kit.transport.v1.TransportService/ReadRef",
+                "/kit.transport.v1.TransportService/PackExists",
+                "/kit.transport.v1.TransportService/DownloadPack",
             ] {
                 let body: &'static [u8] = if procedure.ends_with("/DownloadPack") {
                     b"\0\0\0\0\x03abc"
@@ -695,12 +695,12 @@ mod tests {
         #[test]
         fn generated_procedures_are_all_classified() {
             let generated = include_str!(
-                "../../mkit-rpc/generated/transport/mkit.transport.v1.transport.__connect.rs"
+                "../../mkit-rpc/generated/transport/kit.transport.v1.transport.__connect.rs"
             );
             let procedures: std::collections::HashSet<_> = generated
                 .lines()
                 .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
-                .filter(|path| path.starts_with("/mkit.transport.v1.TransportService/"))
+                .filter(|path| path.starts_with("/kit.transport.v1.TransportService/"))
                 .collect();
             assert_eq!(procedures.len(), 19);
             for procedure in procedures {
@@ -722,15 +722,15 @@ mod tests {
                 assert_eq!(procedure_auth(procedure), Some(expected), "{procedure}");
             }
             assert_eq!(
-                procedure_auth("/mkit.transport.v1.TransportService/GetGrantEpoch"),
+                procedure_auth("/kit.transport.v1.TransportService/GetGrantEpoch"),
                 Some(ProcedureAuth::Unsigned { repository: false })
             );
             assert_eq!(
-                procedure_auth("/mkit.transport.v1.TransportService/SetGrantEpoch"),
+                procedure_auth("/kit.transport.v1.TransportService/SetGrantEpoch"),
                 Some(ProcedureAuth::Unsigned { repository: false })
             );
             assert_eq!(
-                procedure_auth("/mkit.transport.v1.TransportService/IssueObjectUrl"),
+                procedure_auth("/kit.transport.v1.TransportService/IssueObjectUrl"),
                 Some(ProcedureAuth::Body)
             );
         }
@@ -749,7 +749,7 @@ mod tests {
         #[test]
         fn set_repo_visibility_is_signed_in_envelope_mode_and_unsigned_in_statement_mode() {
             use crate::generated::{RepoVisibility, set_repo_visibility_request::Mode};
-            const PROCEDURE: &str = "/mkit.transport.v1.TransportService/SetRepoVisibility";
+            const PROCEDURE: &str = "/kit.transport.v1.TransportService/SetRepoVisibility";
             let signer: Arc<dyn EnvelopeSigner> =
                 Arc::new(DalekSigner(SigningKey::from_bytes(&[19u8; 32])));
             let send = |body: &[u8]| {
@@ -815,7 +815,7 @@ mod tests {
                     "0x8ba1f109551bd432803012645ac136ddd64dba72/website".into(),
                 );
                 let mut req = build_request(
-                    &format!("/mkit.transport.v1.TransportService/{method}"),
+                    &format!("/kit.transport.v1.TransportService/{method}"),
                     b"epoch-body",
                 );
                 // A stale header set by a caller must not survive.
@@ -928,7 +928,7 @@ mod tests {
                 "DownloadPack",
                 "GetServerInfo",
             ] {
-                let procedure = format!("/mkit.transport.v1.TransportService/{method}");
+                let procedure = format!("/kit.transport.v1.TransportService/{method}");
                 let mut req = build_request(&procedure, b"read-body");
                 req.headers_mut()
                     .insert("x-repository", HeaderValue::from_static("wrong"));
@@ -952,7 +952,7 @@ mod tests {
                 "default".into(),
             );
             for method in ["GetServerInfo", "GetGrantEpoch", "SetGrantEpoch"] {
-                let procedure = format!("/mkit.transport.v1.TransportService/{method}");
+                let procedure = format!("/kit.transport.v1.TransportService/{method}");
                 let mut request = build_request(&procedure, b"");
                 // The shared builder seeds a pack commitment for streaming
                 // tests; discovery and epoch calls do not supply one.
@@ -986,15 +986,15 @@ mod tests {
                 "https://example.invalid".into(),
                 NAMESPACED.into(),
             );
-            let procedure = "/mkit.transport.v1.TransportService/UpdateRef";
+            let procedure = "/kit.transport.v1.TransportService/UpdateRef";
             let mut req = build_request(procedure, b"write-body");
             req.headers_mut()
-                .insert("x-mkit-ref", HeaderValue::from_static("refs/heads/main"));
+                .insert("x-kit-ref", HeaderValue::from_static("refs/heads/main"));
             req.headers_mut()
                 .insert("x-write-grant", HeaderValue::from_static("grant-one"));
             futures::executor::block_on(transport.send(req)).unwrap();
             let mut got = captured.lock().unwrap().take().unwrap();
-            assert_eq!(got.headers["x-mkit-ref"], "refs/heads/main");
+            assert_eq!(got.headers["x-kit-ref"], "refs/heads/main");
             assert_eq!(got.headers.get_all("x-repository").iter().count(), 1);
             assert!(verify_unary_from_headers(
                 procedure,
@@ -1002,7 +1002,7 @@ mod tests {
                 &got.body
             ));
             got.headers
-                .insert("x-mkit-ref", HeaderValue::from_static("refs/heads/other"));
+                .insert("x-kit-ref", HeaderValue::from_static("refs/heads/other"));
             got.headers
                 .insert("x-write-grant", HeaderValue::from_static("grant-two"));
             assert!(verify_unary_from_headers(
@@ -1035,7 +1035,7 @@ mod tests {
             );
 
             let req = build_request(
-                "/mkit.transport.v1.TransportService/UpdateRef",
+                "/kit.transport.v1.TransportService/UpdateRef",
                 b"unsigned-body",
             );
             futures::executor::block_on(transport.send(req)).expect("send ok");

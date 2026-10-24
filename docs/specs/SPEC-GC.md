@@ -39,21 +39,21 @@ all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 
 | Source | On-disk | Roots contributed |
 |--------|---------|-------------------|
-| HEAD | `.mkit/HEAD` | current tip (covers a detached HEAD) |
-| Branches | `.mkit/refs/heads/*` | each branch tip |
-| Tags | `.mkit/refs/tags/*` | each tag target |
-| Remote-tracking | `.mkit/refs/remotes/<remote>/*` | each remote ref |
-| Staging index | `.mkit/index` | each entry's `object_hash` (staged-but-uncommitted content) |
-| Stash | `.mkit/stash` | each entry's `commit_hash` + `parent_hash` |
-| Reset/op backup | `.mkit/ORIG_HEAD` | the saved pre-op HEAD |
-| Merge in progress | `.mkit/MERGE_HEAD` (+`ORIG_HEAD`) | `merge_head`, `orig_head` |
-| Cherry-pick in progress | `.mkit/CHERRY_PICK_HEAD` (+`ORIG_HEAD`) | `cherry_pick_head`, `orig_head` |
-| Revert in progress | `.mkit/REVERT_HEAD` (+`ORIG_HEAD`) | `revert_head`, `orig_head` |
-| Rebase in progress | `.mkit/rebase-apply/{orig-head,onto,todo,done}` | `orig_head`, `onto`, every `todo` + `done` commit |
-| Conflict sidecar | `.mkit/mkit-conflicts` and `.mkit/rebase-apply/mkit-conflicts` | each record's `base`/`ours`/`theirs` blob (when present) |
-| Attestations | `.mkit/attestations/<commit-hex>/` | each attested commit (dir name) |
-| Pending history publication | `.mkit/history-v1/branches/<ref-key>/transaction` | previous and target ref values; strict parse even without `history-mmr` |
-| Recovery log | `.mkit/recovery-log` | each superseded commit (until expired) |
+| HEAD | `.kit/HEAD` | current tip (covers a detached HEAD) |
+| Branches | `.kit/refs/heads/*` | each branch tip |
+| Tags | `.kit/refs/tags/*` | each tag target |
+| Remote-tracking | `.kit/refs/remotes/<remote>/*` | each remote ref |
+| Staging index | `.kit/index` | each entry's `object_hash` (staged-but-uncommitted content) |
+| Stash | `.kit/stash` | each entry's `commit_hash` + `parent_hash` |
+| Reset/op backup | `.kit/ORIG_HEAD` | the saved pre-op HEAD |
+| Merge in progress | `.kit/MERGE_HEAD` (+`ORIG_HEAD`) | `merge_head`, `orig_head` |
+| Cherry-pick in progress | `.kit/CHERRY_PICK_HEAD` (+`ORIG_HEAD`) | `cherry_pick_head`, `orig_head` |
+| Revert in progress | `.kit/REVERT_HEAD` (+`ORIG_HEAD`) | `revert_head`, `orig_head` |
+| Rebase in progress | `.kit/rebase-apply/{orig-head,onto,todo,done}` | `orig_head`, `onto`, every `todo` + `done` commit |
+| Conflict sidecar | `.kit/kit-conflicts` and `.kit/rebase-apply/kit-conflicts` | each record's `base`/`ours`/`theirs` blob (when present) |
+| Attestations | `.kit/attestations/<commit-hex>/` | each attested commit (dir name) |
+| Pending history publication | `.kit/history-v1/branches/<ref-key>/transaction` | previous and target ref values; strict parse even without `history-mmr` |
+| Recovery log | `.kit/recovery-log` | each superseded commit (until expired) |
 
 A present empty, corrupt, oversized or unsupported staging index MUST abort GC
 before sweeping. An absent index alone means no staging roots. Only the current
@@ -86,7 +86,7 @@ set. In particular:
 ## Recovery log
 
 Commits superseded by `commit --amend`, `reset`, or `rebase` remain recoverable
-through the **recovery log** (`.mkit/recovery-log`, `ops::recovery`). Each rewrite
+through the **recovery log** (`.kit/recovery-log`, `ops::recovery`). Each rewrite
 appends the superseded tip (`<unix_ts>\t<op>\t<64-hex>\t<branch>`), every
 logged hash is a GC root (clock-free, strict/fail-closed parse), and
 `recovery::expire(now, policy)` drops entries past the retention policy
@@ -134,7 +134,7 @@ gc sweeps is the import phase of `mkit git import`/`fetch`/`pull`, which
 writes objects and then tags and remote-tracking refs under
 `git-<remote>.lock` only (SPEC-CONCURRENCY §4).
 
-A push through the file transport (`mkit push mkit+file://...`) or one
+A push through the file transport (`mkit push kit+file://...`) or one
 received by `mkit serve` or `mkit-server` is not such a writer. It stores
 packs as `<root>/packs/<hex>` and refs as `<root>/<name>` under the
 transport root, while gc sweeps only loose objects in
@@ -219,7 +219,7 @@ delete an object at the boundary (the model's `mutBoundedLax` mutant and
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable &mdash; strict ref walk, no lenient skips &mdash; and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |
-| A superseded tip stays recoverable until the retention policy expires it | amend/reset/rebase/stash-pop append to `.mkit/recovery-log` before moving the ref or dropping the stash entry; every logged hash is a root ("Recovery log") |
+| A superseded tip stays recoverable until the retention policy expires it | amend/reset/rebase/stash-pop append to `.kit/recovery-log` before moving the ref or dropping the stash entry; every logged hash is a root ("Recovery log") |
 | A crash cannot persist a ref rewrite while losing its recovery entry | `record` fsyncs the log file and its parent directory before returning ("Recovery log") |
 | A producer append cannot race an `expire` rewrite and vanish | callers hold the repo lock; gc runs expire → collect roots → prune under the same lock ("Recovery log") |
 | Recently-orphaned objects survive a gc run | unreachable objects younger than the grace window (default 14 days) are skipped ("Status") |

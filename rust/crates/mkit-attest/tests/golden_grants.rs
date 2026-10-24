@@ -39,7 +39,7 @@ mod signed;
 mod ecdsa;
 
 /// The §3.4 example statement (illustrative in the spec; pinned here).
-const SPEC_EXAMPLE: &str = "mkit-write-grant:v1
+const SPEC_EXAMPLE: &str = "kit-write-grant:v1
 0x8ba1f109551bd432803012645ac136ddd64dba72
 0x8ba1f109551bd432803012645ac136ddd64dba72/website
 3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29
@@ -143,8 +143,8 @@ const SIXTEEN_SCOPES: [&str; 16] = [
     "refs/heads/release-1.0=d",
     "refs/heads/wip/*=cufd",
     "refs/heads/wip/a_b=u",
-    "refs/mkit/*=f",
-    "refs/mkit/packmap=c",
+    "refs/kit/*=f",
+    "refs/kit/packmap=c",
     "refs/notes/*=cu",
     "refs/notes/commits=d",
     "refs/pull/1/head=u",

@@ -14,7 +14,7 @@ must update the spec in the same PR. The crate depends only on `std`: no
   blobs, trees, commits, remixes, and chunked blobs.
 - `pack` / `index` &mdash; packfile format and the index over it.
 - `refs` &mdash; ref storage semantics shared by every transport.
-- `store` &mdash; the on-disk object store (worktree, `.mkit/` layout, `ignore`,
+- `store` &mdash; the on-disk object store (worktree, `.kit/` layout, `ignore`,
   `repo_lock`).
 - `sign` &mdash; Ed25519 signing/verification for commits and remixes (see
   `docs/specs/SPEC-SIGNING.md`).

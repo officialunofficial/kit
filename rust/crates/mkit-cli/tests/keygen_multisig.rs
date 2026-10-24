@@ -56,7 +56,7 @@ fn keygen_secp256k1_writes_32_byte_key_with_mode_0600() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let key_path = root.join(".mkit/keys/secp256k1.key");
+    let key_path = root.join(".kit/keys/secp256k1.key");
     assert!(key_path.exists(), "secp256k1 key file not created");
     let bytes = fs::read(&key_path).unwrap();
     assert_eq!(bytes.len(), 32, "secp256k1 secret must be 32 bytes");
@@ -74,7 +74,7 @@ fn keygen_p256_writes_to_custom_config_path() {
     // `attest.p256_key_path` is user-scoped only — a per-repo
     // value would let a hostile clone redirect where keys land. We
     // honour it from `$XDG_CONFIG_HOME/mkit/config` and ignore it
-    // from `<repo>/.mkit/config` (with a stderr warning).
+    // from `<repo>/.kit/config` (with a stderr warning).
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
     let xdg = tempfile::tempdir().unwrap();
@@ -83,11 +83,11 @@ fn keygen_p256_writes_to_custom_config_path() {
     fs::create_dir_all(&cfg_dir).unwrap();
     fs::write(
         cfg_dir.join("config"),
-        b"attest.p256_key_path = .mkit/keys/custom-p256.key\n",
+        b"attest.p256_key_path = .kit/keys/custom-p256.key\n",
     )
     .unwrap();
 
-    // init + keygen (ed25519 default, populates .mkit/keys/default.key
+    // init + keygen (ed25519 default, populates .kit/keys/default.key
     // for the upcoming commit).
     assert!(
         Command::new(mkit_bin())
@@ -141,17 +141,17 @@ fn keygen_p256_writes_to_custom_config_path() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    assert!(root.join(".mkit/keys/custom-p256.key").exists());
-    assert!(!root.join(".mkit/keys/p256.key").exists());
+    assert!(root.join(".kit/keys/custom-p256.key").exists());
+    assert!(!root.join(".kit/keys/p256.key").exists());
 }
 
 #[test]
 fn keygen_default_ed25519_behavior_preserved() {
     // `mkit keygen` with no flag must still generate the ed25519 key at
-    // `.mkit/keys/default.key` — backward compat.
+    // `.kit/keys/default.key` — backward compat.
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
-    fs::create_dir_all(root.join(".mkit")).unwrap();
+    fs::create_dir_all(root.join(".kit")).unwrap();
     // Don't use init_repo_with_commit (that creates default.key via commit).
 
     let out = run_in(root, &["keygen"]);
@@ -160,7 +160,7 @@ fn keygen_default_ed25519_behavior_preserved() {
         "default keygen failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(root.join(".mkit/keys/default.key").exists());
+    assert!(root.join(".kit/keys/default.key").exists());
     // Without `--print-pubkey` the pubkey line is human prose on
     // stderr. With `--print-pubkey` it would be on stdout.
     let stderr = String::from_utf8(out.stderr).unwrap();
@@ -202,7 +202,7 @@ fn keygen_force_overwrites_existing_key() {
             .status
             .success()
     );
-    let first = fs::read(root.join(".mkit/keys/secp256k1.key")).unwrap();
+    let first = fs::read(root.join(".kit/keys/secp256k1.key")).unwrap();
 
     let out = run_in(root, &["keygen", "--algorithm", "secp256k1", "--force"]);
     assert!(
@@ -210,7 +210,7 @@ fn keygen_force_overwrites_existing_key() {
         "forced keygen failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let second = fs::read(root.join(".mkit/keys/secp256k1.key")).unwrap();
+    let second = fs::read(root.join(".kit/keys/secp256k1.key")).unwrap();
     assert_eq!(second.len(), 32);
     assert_ne!(first, second, "forced keygen should produce fresh bytes");
 }
@@ -332,14 +332,14 @@ fn keygen_secp256k1_produces_usable_key_for_attest() {
          kind = \"secp256k1\"\n\
          pubkey_hex = \"{pubkey_hex}\"\n"
     );
-    fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+    fs::write(root.join(".kit/attest-trust-roots.toml"), toml).unwrap();
 
     let v = run_in(
         root,
         &[
             "verify-attest",
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(
@@ -382,7 +382,7 @@ fn attest_three_way_envelope_ed25519_secp256k1_p256() {
     // Capture all three keyids for the trust-roots file.
     let ed25519_kid = {
         // ed25519 repo-key signer emits `blake3:<hex>` keyid.
-        let secret_bytes = fs::read(root.join(".mkit/keys/default.key")).unwrap();
+        let secret_bytes = fs::read(root.join(".kit/keys/default.key")).unwrap();
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&secret_bytes);
         let sk = SigningKey::from_bytes(&secret);
@@ -447,7 +447,7 @@ fn attest_three_way_envelope_ed25519_secp256k1_p256() {
 
     // Verify the envelope has three signatures.
     let commit_hash = resolve_head(root);
-    let att_dir = root.join(format!(".mkit/attestations/{commit_hash}"));
+    let att_dir = root.join(format!(".kit/attestations/{commit_hash}"));
     let entries: Vec<_> = fs::read_dir(&att_dir)
         .unwrap()
         .filter_map(std::result::Result::ok)
@@ -488,14 +488,14 @@ fn attest_three_way_envelope_ed25519_secp256k1_p256() {
         p256_kid.0,
         hex_encode(&p256_kid.1),
     );
-    fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+    fs::write(root.join(".kit/attest-trust-roots.toml"), toml).unwrap();
 
     let v = run_in(
         root,
         &[
             "verify-attest",
             "--trust-roots",
-            ".mkit/attest-trust-roots.toml",
+            ".kit/attest-trust-roots.toml",
         ],
     );
     assert!(
@@ -558,7 +558,7 @@ fn attest_one_additional_signer_failure_aborts_no_partial_envelope() {
     assert!(!out.status.success(), "attest should have failed");
 
     // No envelope should have been written.
-    let att_dir = root.join(format!(".mkit/attestations/{commit_hash}"));
+    let att_dir = root.join(format!(".kit/attestations/{commit_hash}"));
     if att_dir.exists() {
         let entries: Vec<_> = fs::read_dir(&att_dir)
             .unwrap()
@@ -581,7 +581,7 @@ fn attest_additional_signer_ed25519_from_separate_keyfile() {
     init_repo_with_commit(root);
 
     // Create a backup ed25519 key at a custom path — just 32 bytes 0600.
-    let backup_key = root.join(".mkit/keys/backup.key");
+    let backup_key = root.join(".kit/keys/backup.key");
     fs::create_dir_all(backup_key.parent().unwrap()).unwrap();
     let backup_secret: [u8; 32] = [0x42; 32];
     fs::write(&backup_key, backup_secret).unwrap();
@@ -600,7 +600,7 @@ fn attest_additional_signer_ed25519_from_separate_keyfile() {
             "--algorithm",
             "ed25519",
             "--additional-signer",
-            "algorithm=ed25519,signer=repo-key,path=.mkit/keys/backup.key",
+            "algorithm=ed25519,signer=repo-key,path=.kit/keys/backup.key",
         ],
     );
     assert!(
@@ -611,7 +611,7 @@ fn attest_additional_signer_ed25519_from_separate_keyfile() {
 
     // Find the envelope, decode, assert 2 sigs.
     let commit_hash = resolve_head(root);
-    let att_dir = root.join(format!(".mkit/attestations/{commit_hash}"));
+    let att_dir = root.join(format!(".kit/attestations/{commit_hash}"));
     let entries: Vec<_> = fs::read_dir(&att_dir)
         .unwrap()
         .filter_map(std::result::Result::ok)
@@ -630,13 +630,13 @@ fn attest_additional_signer_ed25519_from_separate_keyfile() {
 // helpers
 // ---------------------------------------------------------------------------
 
-/// Read `.mkit/HEAD` (which is `ref: refs/heads/<name>`) and follow
+/// Read `.kit/HEAD` (which is `ref: refs/heads/<name>`) and follow
 /// to the raw commit hash.
 fn resolve_head(root: &Path) -> String {
-    let head = fs::read_to_string(root.join(".mkit/HEAD")).unwrap();
+    let head = fs::read_to_string(root.join(".kit/HEAD")).unwrap();
     let head = head.trim();
     if let Some(refname) = head.strip_prefix("ref: ") {
-        let path = root.join(".mkit").join(refname);
+        let path = root.join(".kit").join(refname);
         fs::read_to_string(path).unwrap().trim().to_owned()
     } else {
         head.to_owned()

@@ -93,7 +93,7 @@ fn user_name_is_repo_scoped_not_user_scoped() {
 
     // Unlike `user.identity` (a REPO_FORBIDDEN_KEY routed to user scope),
     // the non-authoritative alias is written to the repo config.
-    let repo_cfg = fs::read_to_string(root.join(".mkit/config")).unwrap();
+    let repo_cfg = fs::read_to_string(root.join(".kit/config")).unwrap();
     assert!(
         repo_cfg.contains("user.name = Repo Local"),
         "user.name should persist in the repo config: {repo_cfg:?}"
@@ -115,7 +115,7 @@ fn unrelated_repo_write_does_not_leak_user_scoped_aliases() {
             .status
             .success()
     );
-    let repo_cfg = fs::read_to_string(root.join(".mkit/config")).unwrap();
+    let repo_cfg = fs::read_to_string(root.join(".kit/config")).unwrap();
     assert!(
         !repo_cfg.contains("private@example.com"),
         "user-scoped user.email leaked into repo config: {repo_cfg:?}"
@@ -135,11 +135,11 @@ fn remote_add_does_not_leak_user_scoped_aliases() {
     // repo layer, not the merged view, so the user-scoped email stays out
     // of the clone-traveling repo config.
     assert!(
-        run_in(root, x, &["remote", "add", "origin", "mkit+file:///tmp/r"])
+        run_in(root, x, &["remote", "add", "origin", "kit+file:///tmp/r"])
             .status
             .success()
     );
-    let repo_cfg = fs::read_to_string(root.join(".mkit/config")).unwrap();
+    let repo_cfg = fs::read_to_string(root.join(".kit/config")).unwrap();
     assert!(
         !repo_cfg.contains("private@example.com"),
         "user-scoped user.email leaked into repo config via remote add: {repo_cfg:?}"

@@ -110,7 +110,7 @@ fn fetch_all_does_not_move_bob_head() {
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
 
     // Read bob's HEAD before fetch.
-    let bob_mkit = bob.path().join(".mkit");
+    let bob_mkit = bob.path().join(".kit");
     let head_before = fs::read_to_string(bob_mkit.join("HEAD")).unwrap_or_default();
 
     let n = fetch_all(bob.path(), tx.as_ref(), "default").expect("fetch");
@@ -356,7 +356,7 @@ fn pull_all_ref_update_failure_does_not_restore_worktree() {
     );
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
 
-    let bob_mkit = bob.path().join(".mkit");
+    let bob_mkit = bob.path().join(".kit");
     let bob_layout = RepoLayout::single(bob.path());
     let bob_tip = refs::read_ref(&bob_layout, "main").unwrap().unwrap();
     let heads_dir = bob_mkit.join("refs/heads");
@@ -411,7 +411,7 @@ fn pull_all_preserves_ignored_untracked_files() {
     );
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
 
-    fs::write(bob.path().join(".mkitignore"), "local.txt\n").unwrap();
+    fs::write(bob.path().join(".kitignore"), "local.txt\n").unwrap();
     fs::write(bob.path().join("local.txt"), b"local only\n").unwrap();
 
     pull_all(bob.path(), tx.as_ref(), "default", None).expect("fast-forward pull");
@@ -422,7 +422,7 @@ fn pull_all_preserves_ignored_untracked_files() {
         b"local only\n"
     );
     assert_eq!(
-        fs::read_to_string(bob.path().join(".mkitignore")).unwrap(),
+        fs::read_to_string(bob.path().join(".kitignore")).unwrap(),
         "local.txt\n"
     );
 }

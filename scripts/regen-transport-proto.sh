@@ -33,7 +33,7 @@ refresh() {
     mkdir -p "$gen_dir"
     # The owning crate also stages RPC schemas at OUT_DIR's root. Select
     # only this Connect generation's transport/health files and wrapper.
-    cp "$out"/_connectrpc.rs "$out"/mkit.transport.*.rs \
+    cp "$out"/_connectrpc.rs "$out"/kit.transport.*.rs \
         "$out"/grpc.health.*.rs "$gen_dir/"
     echo "refreshed $gen_dir from $out:"
     ls "$gen_dir"

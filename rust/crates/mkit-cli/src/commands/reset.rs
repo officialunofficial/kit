@@ -6,7 +6,7 @@
 //! - **`--soft`** — move HEAD / the current branch only. The index and
 //!   the worktree are left exactly as they are, so the difference between
 //!   the old tip and the new target shows up as staged changes.
-//! - **`--mixed`** (the default) — move HEAD *and* rewrite `.mkit/index`
+//! - **`--mixed`** (the default) — move HEAD *and* rewrite `.kit/index`
 //!   to mirror the target commit's tree. The worktree is untouched, so
 //!   changes relative to the target appear as un-staged worktree edits.
 //!

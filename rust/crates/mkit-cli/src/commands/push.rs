@@ -68,7 +68,7 @@ struct PushOpts {
 }
 
 fn interrupted_hint(endpoint: &str, limits: UploadLimits) -> &'static str {
-    let connect = endpoint.starts_with("mkit+https://") || endpoint.starts_with("mkit+http://");
+    let connect = endpoint.starts_with("kit+https://") || endpoint.starts_with("kit+http://");
     if connect
         && limits.tickets_per_advance.is_some()
         && limits.ticket_threshold_bytes != Some(u64::MAX)
@@ -559,7 +559,7 @@ fn record_upstream(
     // Re-read the on-disk REPO config (not the merged view) and add the
     // upstream entry without disturbing the existing remotes / flat
     // fields. Using the repo layer ensures user-scoped values (e.g. a
-    // private `user.email`) are never materialized into `.mkit/config`.
+    // private `user.email`) are never materialized into `.kit/config`.
     let Ok(layered) = config::read_layered(layout) else {
         return;
     };
@@ -588,11 +588,11 @@ mod interrupted_hint_tests {
             ..UploadLimits::default()
         };
         assert!(
-            interrupted_hint("mkit+https://example.test/repo", ticketing).contains("BeginUpload")
+            interrupted_hint("kit+https://example.test/repo", ticketing).contains("BeginUpload")
         );
         assert!(!interrupted_hint("file:///repo", ticketing).contains("BeginUpload"));
         assert!(
-            !interrupted_hint("mkit+https://example.test/repo", UploadLimits::default())
+            !interrupted_hint("kit+https://example.test/repo", UploadLimits::default())
                 .contains("BeginUpload")
         );
     }

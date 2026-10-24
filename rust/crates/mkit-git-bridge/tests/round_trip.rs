@@ -593,7 +593,7 @@ fn shallow_verify_reports_failed_on_tampered_signature() {
     let body = String::from_utf8(minimal_signed_commit_body()).unwrap();
 
     // Flip one hex digit of the signature value.
-    let sig_line_start = body.find("mkit-signature ").unwrap() + "mkit-signature ".len();
+    let sig_line_start = body.find("kit-signature ").unwrap() + "kit-signature ".len();
     let mut tampered = body.clone();
     let old = tampered.as_bytes()[sig_line_start];
     let new = if old == b'0' { '1' } else { '0' };
@@ -606,14 +606,14 @@ fn shallow_verify_reports_failed_on_tampered_signature() {
 }
 
 /// Split from the former `shallow_verify_reports_failed_on_tamper`
-/// mega-test. §10: a tampered carried `mkit-tree` (signed bytes change)
+/// mega-test. §10: a tampered carried `kit-tree` (signed bytes change)
 /// reports Failed — never Unsigned, never Verified.
 #[test]
 fn shallow_verify_reports_failed_on_tampered_tree() {
     let body = String::from_utf8(minimal_signed_commit_body()).unwrap();
 
-    // Flip one hex digit of the carried mkit-tree (signed bytes change).
-    let tree_start = body.find("mkit-tree ").unwrap() + "mkit-tree ".len();
+    // Flip one hex digit of the carried kit-tree (signed bytes change).
+    let tree_start = body.find("kit-tree ").unwrap() + "kit-tree ".len();
     let mut tampered = body.clone();
     let old = tampered.as_bytes()[tree_start];
     let new = if old == b'0' { '1' } else { '0' };
@@ -621,54 +621,54 @@ fn shallow_verify_reports_failed_on_tampered_tree() {
     assert_eq!(
         shallow_verify(&as_commit(tampered.into_bytes())).unwrap(),
         ShallowVerdict::Failed,
-        "tampered mkit-tree"
+        "tampered kit-tree"
     );
 }
 
 /// Split from the former table-driven `reconstruct_fail_closed_branches`
 /// mega-test (also switched off the >1 MiB `build_fixture` fixture — see
 /// `minimal_signed_commit_body`) so each fail-closed branch below is its
-/// own localizable test. §1.2/§9: a schema bump (`mkit-schema 2`) refuses.
+/// own localizable test. §1.2/§9: a schema bump (`kit-schema 2`) refuses.
 #[test]
 fn reconstruct_fail_closed_schema_bump() {
     assert_fail_closed(&minimal_signed_commit_body(), |body| {
-        body.replace("mkit-schema 1", "mkit-schema 2")
+        body.replace("kit-schema 1", "kit-schema 2")
     });
 }
 
-/// §1.2/§9: a missing `mkit-schema` header refuses.
+/// §1.2/§9: a missing `kit-schema` header refuses.
 #[test]
 fn reconstruct_fail_closed_schema_missing() {
     assert_fail_closed(&minimal_signed_commit_body(), |body| {
-        body.replace("mkit-schema 1\n", "")
+        body.replace("kit-schema 1\n", "")
     });
 }
 
-/// §1.2/§9: an unexpected reserved header (`mkit-remix-source` on a
+/// §1.2/§9: an unexpected reserved header (`kit-remix-source` on a
 /// plain commit) refuses.
 #[test]
 fn reconstruct_fail_closed_reserved_header() {
     assert_fail_closed(&minimal_signed_commit_body(), |body| {
-        body.replace("mkit-schema 1\n", "mkit-schema 1\nmkit-remix-source 00\n")
+        body.replace("kit-schema 1\n", "kit-schema 1\nmkit-remix-source 00\n")
     });
 }
 
-/// §1.2/§9: a duplicated `mkit-signer` header refuses.
+/// §1.2/§9: a duplicated `kit-signer` header refuses.
 #[test]
 fn reconstruct_fail_closed_duplicate_signer() {
     assert_fail_closed(&minimal_signed_commit_body(), |body| {
-        let line_start = body.find("mkit-signer ").unwrap();
+        let line_start = body.find("kit-signer ").unwrap();
         let line_end = body[line_start..].find('\n').unwrap() + line_start + 1;
         let line = &body[line_start..line_end];
         format!("{}{}{}", &body[..line_end], line, &body[line_end..])
     });
 }
 
-/// §1.2/§9: a continuation line on the `mkit-schema` header refuses.
+/// §1.2/§9: a continuation line on the `kit-schema` header refuses.
 #[test]
 fn reconstruct_fail_closed_continuation_line() {
     assert_fail_closed(&minimal_signed_commit_body(), |body| {
-        body.replace("mkit-schema 1\n", "mkit-schema 1\n continuation\n")
+        body.replace("kit-schema 1\n", "kit-schema 1\n continuation\n")
     });
 }
 
@@ -676,7 +676,7 @@ fn reconstruct_fail_closed_continuation_line() {
 #[test]
 fn reconstruct_fail_closed_unknown_header() {
     assert_fail_closed(&minimal_signed_commit_body(), |body| {
-        body.replace("mkit-schema 1\n", "mkit-schema 1\nmkit-unknown x\n")
+        body.replace("kit-schema 1\n", "kit-schema 1\nmkit-unknown x\n")
     });
 }
 

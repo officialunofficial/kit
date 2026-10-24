@@ -11,7 +11,7 @@
 //!   an un-staged edit.
 //! - **`--staged`** — restore the index entry for each path from
 //!   `HEAD` (i.e. unstage it), leaving the worktree file exactly as it
-//!   is. This touches only `.mkit/index`, never the worktree, so it
+//!   is. This touches only `.kit/index`, never the worktree, so it
 //!   needs no dirty guard and no `--force`.
 //! - **`--staged --worktree`** (both) — unstage AND discard the worktree
 //!   edit in one step (worktree restored from `HEAD` since the staged

@@ -63,8 +63,8 @@ fn write_blob_golden_into_store() {
     assert_eq!(written, expected_hash);
     assert!(store.contains(&written));
 
-    // Confirm the .mkit/objects/<dd>/<62-hex> layout.
-    let objects_root = dir.path().join(".mkit").join("objects");
+    // Confirm the .kit/objects/<dd>/<62-hex> layout.
+    let objects_root = dir.path().join(".kit").join("objects");
     let shard = objects_root.join(&expected_hex[..2]);
     let final_path = shard.join(&expected_hex[2..]);
     assert!(

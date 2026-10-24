@@ -1,10 +1,10 @@
 //! Conflict / operation state sidecar.
 //!
-//! mkit's `.mkit/index` stays a single-stage **resolved** staging area
+//! mkit's `.kit/index` stays a single-stage **resolved** staging area
 //! (see SPEC-INDEX — no unmerged stages 1/2/3). When a merge,
 //! cherry-pick, or rebase pauses on a conflict we instead persist the
 //! state needed to resume or abort in a small set of files under
-//! `.mkit/`, using Git-compatible names where they exist plus one
+//! `.kit/`, using Git-compatible names where they exist plus one
 //! documented mkit sidecar:
 //!
 //! - `MERGE_HEAD`        — 64-hex of the other parent (merge: theirs).
@@ -15,16 +15,16 @@
 //!   Presence ⇒ a revert is in progress.
 //! - `ORIG_HEAD`         — 64-hex of HEAD before the op (for `--abort`).
 //! - `MERGE_MSG` / `CHERRY_PICK_MSG` / `REVERT_MSG` — pending commit message bytes.
-//! - `mkit-conflicts`    — the sidecar: one line per conflicting path,
+//! - `kit-conflicts`    — the sidecar: one line per conflicting path,
 //!   recording the conflict kind and the base/ours/theirs blob hashes.
 //!   Used by `--abort` cleanup and by the "unresolved conflicts remain"
 //!   gate on `--continue`.
 //!
-//! Rebase reuses the existing `.mkit/rebase-apply/` directory and writes
-//! the same `mkit-conflicts` sidecar **inside** that directory when it
+//! Rebase reuses the existing `.kit/rebase-apply/` directory and writes
+//! the same `kit-conflicts` sidecar **inside** that directory when it
 //! pauses.
 //!
-//! `mkit-conflicts` line format (tab-separated, one per path):
+//! `kit-conflicts` line format (tab-separated, one per path):
 //!
 //! ```text
 //! <kind>\t<base_hex|->\t<ours_hex|->\t<theirs_hex|->\t<path>
@@ -60,7 +60,7 @@ pub const REVERT_HEAD: &str = "REVERT_HEAD";
 /// File name: pending revert commit message.
 pub const REVERT_MSG: &str = "REVERT_MSG";
 /// File name: the conflict sidecar (also used inside `rebase-apply/`).
-pub const CONFLICTS_FILE: &str = "mkit-conflicts";
+pub const CONFLICTS_FILE: &str = "kit-conflicts";
 /// File name: the operation's full result tree (clean changes + ours-at-
 /// conflict) recorded when a conflict pauses, so `--abort` can distinguish
 /// operation-authored paths from genuine user work.
@@ -148,7 +148,7 @@ fn parse_hex_or_dash(field: &str) -> Result<Option<Hash>, ConflictStateError> {
         .map_err(|_| ConflictStateError::Invalid)
 }
 
-/// Serialise conflict records to the `mkit-conflicts` line format.
+/// Serialise conflict records to the `kit-conflicts` line format.
 #[must_use]
 pub fn serialize_conflicts(records: &[ConflictRecord]) -> Vec<u8> {
     let mut out = String::new();
@@ -167,7 +167,7 @@ pub fn serialize_conflicts(records: &[ConflictRecord]) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Parse the `mkit-conflicts` line format. Rejects malformed lines.
+/// Parse the `kit-conflicts` line format. Rejects malformed lines.
 ///
 /// # Errors
 /// [`ConflictStateError::Invalid`] on any malformed line (bad field
@@ -204,7 +204,7 @@ pub fn deserialize_conflicts(data: &[u8]) -> ConflictStateResult<Vec<ConflictRec
 }
 
 /// Persist the operation's full result tree under `dir` (the per-op state
-/// directory: `.mkit` for merge/cherry-pick/revert, the rebase dir for
+/// directory: `.kit` for merge/cherry-pick/revert, the rebase dir for
 /// rebase). Used by `--abort` to treat operation-authored paths as
 /// discardable. Best-effort cleanup is done by the per-op clear functions
 /// (or by removing the rebase dir).
@@ -432,8 +432,8 @@ pub fn read_cherry_pick_state(layout: &RepoLayout) -> ConflictStateResult<Option
     }))
 }
 
-/// Read the conflict sidecar from `dir` (either `.mkit/` for merge /
-/// cherry-pick or `.mkit/rebase-apply/` for rebase). Returns an empty
+/// Read the conflict sidecar from `dir` (either `.kit/` for merge /
+/// cherry-pick or `.kit/rebase-apply/` for rebase). Returns an empty
 /// vector when the file is absent.
 ///
 /// # Errors

@@ -57,7 +57,7 @@ pub enum GrantError {
     RefScopesMissing,
     /// A ref-scope pattern outside §3.3 (or an entry without `=`).
     RefPattern,
-    /// A pattern that is, or begins with, `refs/mkit/packmap/`.
+    /// A pattern that is, or begins with, `refs/kit/packmap/`.
     PackmapPattern,
     /// A flag other than `c`, `u`, `f`, `d`.
     UnknownRefFlag,

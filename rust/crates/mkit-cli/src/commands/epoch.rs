@@ -2,7 +2,7 @@
 //! grant epoch at a deployment (SPEC-WRITE-GRANTS §5).
 //!
 //! Both RPCs are unsigned transport: no auth v2 envelope and no
-//! `X-Repository`. `bump` signs a `mkit-write-epoch:v1` statement with the
+//! `X-Repository`. `bump` signs a `kit-write-epoch:v1` statement with the
 //! owner key and re-sends the identical bytes while the server answers
 //! `unavailable` + `Retry-After`, so a retry never starts a second
 //! revocation.
@@ -46,7 +46,7 @@ enum EpochCommand {
 
 #[derive(Debug, Args)]
 struct ShowOpts {
-    /// Remote name or mkit+https:// URL (default: the trusted remote).
+    /// Remote name or kit+https:// URL (default: the trusted remote).
     remote: Option<String>,
     /// Namespace to read (default: the remote URL's, else the signing key's).
     #[arg(long, value_name = "NS")]
@@ -59,7 +59,7 @@ struct ShowOpts {
 /// Flags of `mkit epoch bump`, also driving `mkit grant revoke`.
 #[derive(Debug, Clone, Args)]
 pub(crate) struct BumpOpts {
-    /// Remote name or mkit+https:// URL.
+    /// Remote name or kit+https:// URL.
     pub remote: Option<String>,
     /// Namespace to advance (default: the remote URL's, else the signing key's).
     #[arg(long, value_name = "NS")]
@@ -218,7 +218,7 @@ pub(crate) fn bump(opts: &BumpOpts, revoke: Option<&RevokeExtras>) -> u8 {
         ));
     }
     let Some(remote) = opts.remote.as_deref() else {
-        return usage_error("mkit epoch bump needs a remote (name or mkit+https:// URL)");
+        return usage_error("mkit epoch bump needs a remote (name or kit+https:// URL)");
     };
     let target = match resolve_strict_target(&ctx.layered, Some(remote)) {
         Ok(target) => target,

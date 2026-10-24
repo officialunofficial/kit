@@ -25,7 +25,7 @@ by SPEC-EXTERNAL-SIGNER, not here.
 
 `mkit` treats signatures as trust anchors for commits, remix objects, and
 DSSE-wrapped in-toto attestations. Today, long-term signing keys are raw
-32-byte files under `.mkit/keys/`, protected by strict local filesystem
+32-byte files under `.kit/keys/`, protected by strict local filesystem
 hardening. That is a useful compatibility baseline, but it is not a
 cross-platform vault policy.
 
@@ -362,7 +362,7 @@ impl core::fmt::Debug for SecretKey {
 Requirements:
 
 - Ed25519 bytes are the raw 32-byte seed, matching current
-  `.mkit/keys/default.key` semantics.
+  `.kit/keys/default.key` semantics.
 - secp256k1 bytes are a raw 32-byte scalar accepted by the existing k256
   signer.
 - P-256 bytes are a raw 32-byte scalar accepted by the existing p256 signer.
@@ -605,7 +605,7 @@ Storage:
   a raw-specific storage subtree. It exists for deterministic tests,
   compatibility, and explicit migration work only. It must never be selected by
   default.
-- Legacy `.mkit/keys/*` files remain supported only through legacy raw-file
+- Legacy `.kit/keys/*` files remain supported only through legacy raw-file
   flows such as `mkit keygen`, `signing_key`, and `repo-key` compatibility.
 - The software backend reuses the existing hardened raw-file functions,
   behind the `mkit-keystore` abstraction.
@@ -665,7 +665,7 @@ than a bare 24-byte slice, for uniformity with every other field.
 
 ```
 offset  size     field
-0       8        magic              "MKITKSV1"
+0       8        magic              "KITKSV1\0"
 8       1        version            0x01
 9       1        algorithm_id       registry below
 10      1        attrs_bits         key-attribute bitflags (extractable, etc.)
@@ -684,7 +684,7 @@ offset  size     field
 | `0x01` | Ed25519 |
 | `0x02` | Secp256k1 |
 | `0x03` | P256 |
-| `0x04` | *Reserved* &mdash; never appears in a canonical `EncryptedKeyRecord`. A decoder MUST reject id `0x04` inside a `MKITKSV1` record. |
+| `0x04` | *Reserved* &mdash; never appears in a canonical `EncryptedKeyRecord`. A decoder MUST reject id `0x04` inside a `KITKSV1\0` record. |
 
 `attrs_bits` registry (bit 0 = LSB):
 

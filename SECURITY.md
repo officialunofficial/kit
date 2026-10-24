@@ -54,7 +54,7 @@ config. Briefly:
 
 - **Per-repo config attack surface partitioned.** Security-sensitive
   keys (key paths, external-signer path/argv, SSH trust knobs) are
-  now user-scoped only. A `<repo>/.mkit/config` that tries to set
+  now user-scoped only. A `<repo>/.kit/config` that tries to set
   them is rejected with a warning and the value is ignored.
 - **Key file handling.** Key files are opened with `O_NOFOLLOW`,
   written atomically (tmp plus fsync plus rename plus parent fsync), and

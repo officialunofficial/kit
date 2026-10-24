@@ -75,7 +75,7 @@ mkit-transport-ssh = { version = "0.5", path = "../mkit-transport-ssh" }
 # The engine of `mkit serve`: the ssh frame session over a repository on disk.
 # It builds no async runtime.
 mkit-serve = { version = "0.5", path = "../mkit-serve" }
-# Optional: `mkit+s3://` remotes on S3-compatible storage (R2). Off by
+# Optional: `kit+s3://` remotes on S3-compatible storage (R2). Off by
 # default so the baseline build has no S3 client. Turn on via `--features s3`.
 mkit-transport-s3 = { version = "0.5", path = "../mkit-transport-s3", optional = true }
 # Optional: the tokio runtime `mkit mcp --http` (the `mcp-v2` feature) runs
@@ -225,9 +225,9 @@ insta = { version = "1", features = ["filters"] }
 # raises PROPTEST_CASES under the `state-machine` nextest profile.
 proptest = "1"
 # tests/remote_dispatch_connect.rs: drives push_all/pull_all
-# against a REAL in-process mkit.transport.v1.TransportService server
+# against a REAL in-process kit.transport.v1.TransportService server
 # (connectrpc's hyper server, memory-backed) rather than a mockito stub —
-# the regression gate proving `mkit+http://` round-trips through the
+# the regression gate proving `kit+http://` round-trips through the
 # generated Connect codebase end-to-end. `server` is additive on top of
 # `mkit-transport-connect`'s own `client`/`client-tls` feature set (Cargo
 # unions dependency features across dependency kinds).
@@ -254,7 +254,7 @@ assert_fs = "1"
 
 [features]
 default = ["git-bridge"]
-# Enables `mkit+s3://` remotes through `mkit-transport-s3`. Off by default.
+# Enables `kit+s3://` remotes through `mkit-transport-s3`. Off by default.
 s3 = ["dep:mkit-transport-s3"]
 # Enables `mkit mcp`'s modern serving path (MCP 2026-07-28, via the official
 # `rmcp` Rust SDK — see the doc comment above rmcp's Cargo.toml entry). Off by

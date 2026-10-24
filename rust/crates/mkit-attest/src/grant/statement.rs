@@ -1,4 +1,4 @@
-//! The `mkit-write-grant:v1` statement (SPEC-WRITE-GRANTS §3.2–§3.5).
+//! The `kit-write-grant:v1` statement (SPEC-WRITE-GRANTS §3.2–§3.5).
 
 use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
 
@@ -119,7 +119,7 @@ impl RepoScope {
     }
 }
 
-/// A parsed `mkit-write-grant:v1` statement.
+/// A parsed `kit-write-grant:v1` statement.
 ///
 /// [`Grant::parse`] accepts exactly the canonical encoding and
 /// [`Grant::encode`] reproduces it, so `encode(parse(b)) == b` for every
@@ -266,7 +266,7 @@ mod tests {
     /// The §3.4 example as fields, which each test edits.
     fn fields() -> Vec<String> {
         [
-            "mkit-write-grant:v1",
+            "kit-write-grant:v1",
             ADDR,
             &format!("{ADDR}/website"),
             KEY,
@@ -330,9 +330,9 @@ mod tests {
         let mut empty = fields();
         empty[7] = String::new();
         rejects(empty.join("\n").as_bytes(), GrantError::EmptyField);
-        rejects(&with(0, "mkit-write-grant:v2"), GrantError::Domain);
-        rejects(&with(0, "mkit-write-epoch:v1"), GrantError::Domain);
-        rejects(&with(0, "mkit-write-grant:v1 "), GrantError::ByteOutOfRange);
+        rejects(&with(0, "kit-write-grant:v2"), GrantError::Domain);
+        rejects(&with(0, "kit-write-epoch:v1"), GrantError::Domain);
+        rejects(&with(0, "kit-write-grant:v1 "), GrantError::ByteOutOfRange);
     }
 
     #[test]
@@ -461,12 +461,9 @@ mod tests {
         rejects(&with(6, "refs/heads/.x=c"), GrantError::RefPattern);
         rejects(&with(6, "*=c"), GrantError::RefPattern);
         rejects(&with(6, "refs/heads/*x=c"), GrantError::RefPattern);
+        rejects(&with(6, "refs/kit/packmap/*=u"), GrantError::PackmapPattern);
         rejects(
-            &with(6, "refs/mkit/packmap/*=u"),
-            GrantError::PackmapPattern,
-        );
-        rejects(
-            &with(6, "refs/mkit/packmap/main=u"),
+            &with(6, "refs/kit/packmap/main=u"),
             GrantError::PackmapPattern,
         );
         rejects(&with(6, "refs/heads/main=x"), GrantError::UnknownRefFlag);

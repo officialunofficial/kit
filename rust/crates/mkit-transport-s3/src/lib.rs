@@ -8,7 +8,7 @@
 //! for Cloudflare R2 — AWS S3 also works, but CAS semantics only match
 //! the R2 behaviour of returning the body MD5 as the `ETag` on `PUT`.
 //!
-//! URL shape: `mkit+s3://<endpoint>/<bucket>[/prefix]` — credentials are
+//! URL shape: `kit+s3://<endpoint>/<bucket>[/prefix]` — credentials are
 //! pulled from the `MKIT_R2_ACCESS_KEY_ID` / `MKIT_R2_SECRET_ACCESS_KEY`
 //! environment at `connect` time. An unset pair does not fail
 //! construction; the first signed call surfaces
@@ -148,7 +148,7 @@ fn default_sleeper(d: Duration) {
 }
 
 impl S3Transport {
-    /// Parse a `mkit+s3://<endpoint>/<bucket>[/prefix]` URL and build a
+    /// Parse a `kit+s3://<endpoint>/<bucket>[/prefix]` URL and build a
     /// transport. Credentials come from the environment (see
     /// [`ENV_ACCESS_KEY`] / [`ENV_SECRET_KEY`]); if either is unset the
     /// credentials default to empty strings and the first signed call
@@ -491,19 +491,19 @@ struct ParsedS3Url {
     prefix: Option<String>,
 }
 
-/// Accept `mkit+s3://<host>/<bucket>[/prefix]` and return host/bucket/prefix.
+/// Accept `kit+s3://<host>/<bucket>[/prefix]` and return host/bucket/prefix.
 /// The host component stays intact so we can rebuild the HTTPS endpoint.
 fn parse_s3_url(url: &str) -> Result<ParsedS3Url, TransportError> {
     let rest = url
-        .strip_prefix("mkit+s3://")
-        .ok_or_else(|| TransportError::InvalidRef(format!("not an mkit+s3 URL: {url}")))?;
+        .strip_prefix("kit+s3://")
+        .ok_or_else(|| TransportError::InvalidRef(format!("not an kit+s3 URL: {url}")))?;
     let Some((host, tail)) = rest.split_once('/') else {
         return Err(TransportError::InvalidRef(
-            "mkit+s3 URL missing bucket".into(),
+            "kit+s3 URL missing bucket".into(),
         ));
     };
     if host.is_empty() {
-        return Err(TransportError::InvalidRef("mkit+s3 URL empty host".into()));
+        return Err(TransportError::InvalidRef("kit+s3 URL empty host".into()));
     }
     let (bucket, raw_prefix) = match tail.split_once('/') {
         Some((b, p)) if !p.is_empty() => (b, Some(p.to_owned())),
@@ -511,9 +511,7 @@ fn parse_s3_url(url: &str) -> Result<ParsedS3Url, TransportError> {
         None => (tail, None),
     };
     if bucket.is_empty() {
-        return Err(TransportError::InvalidRef(
-            "mkit+s3 URL empty bucket".into(),
-        ));
+        return Err(TransportError::InvalidRef("kit+s3 URL empty bucket".into()));
     }
     Ok(ParsedS3Url {
         host: host.to_owned(),
@@ -1103,7 +1101,7 @@ fn parse_list_page(xml: &[u8]) -> ListPage {
 // - Object key: `sparse/<tree-hash-hex>/<filter-hash-hex>`. A server
 //   that wants to offer sparse delivery pre-builds the manifest under
 //   that key. Clients GET it; the response body IS the
-//   `application/x-mkit-sparse` envelope.
+//   `application/x-kit-sparse` envelope.
 // - The `?sparse=<filter-hash-hex>` query is a no-op on S3 (the
 //   content-addressed key already encodes it) — we accept it for URL
 //   parity with the HTTP transport but ignore it.
@@ -1437,7 +1435,7 @@ mod tests {
 
     #[test]
     fn url_parse_ok_no_prefix() {
-        let p = parse_s3_url("mkit+s3://abc.r2.cloudflarestorage.com/bucket").unwrap();
+        let p = parse_s3_url("kit+s3://abc.r2.cloudflarestorage.com/bucket").unwrap();
         assert_eq!(p.host, "abc.r2.cloudflarestorage.com");
         assert_eq!(p.bucket, "bucket");
         assert!(p.prefix.is_none());
@@ -1445,13 +1443,13 @@ mod tests {
 
     #[test]
     fn url_parse_ok_with_prefix() {
-        let p = parse_s3_url("mkit+s3://host.example/bucket/project-a").unwrap();
+        let p = parse_s3_url("kit+s3://host.example/bucket/project-a").unwrap();
         assert_eq!(p.prefix.as_deref(), Some("project-a"));
     }
 
     #[test]
     fn url_parse_ok_with_nested_safe_prefix() {
-        let p = parse_s3_url("mkit+s3://host.example/bucket/team_1/project.a-2").unwrap();
+        let p = parse_s3_url("kit+s3://host.example/bucket/team_1/project.a-2").unwrap();
         assert_eq!(p.prefix.as_deref(), Some("team_1/project.a-2"));
     }
 
@@ -1465,7 +1463,7 @@ mod tests {
             "project%2Fother",
             "project+other",
         ] {
-            let url = format!("mkit+s3://host.example/bucket/{prefix}");
+            let url = format!("kit+s3://host.example/bucket/{prefix}");
             assert!(
                 matches!(parse_s3_url(&url), Err(TransportError::InvalidRef(_))),
                 "prefix should be rejected: {prefix}"
@@ -1484,7 +1482,7 @@ mod tests {
     #[test]
     fn url_parse_rejects_empty_bucket() {
         assert!(matches!(
-            parse_s3_url("mkit+s3://host.example"),
+            parse_s3_url("kit+s3://host.example"),
             Err(TransportError::InvalidRef(_))
         ));
     }

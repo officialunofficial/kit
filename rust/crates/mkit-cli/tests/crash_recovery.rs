@@ -30,7 +30,7 @@ use common::{
 const SIDECAR_OPS: &[(&str, &[&str])] = &[
     (
         "merge",
-        &["MERGE_HEAD", "ORIG_HEAD", "MERGE_MSG", "mkit-conflicts"],
+        &["MERGE_HEAD", "ORIG_HEAD", "MERGE_MSG", "kit-conflicts"],
     ),
     (
         "cherry-pick",
@@ -38,12 +38,12 @@ const SIDECAR_OPS: &[(&str, &[&str])] = &[
             "CHERRY_PICK_HEAD",
             "ORIG_HEAD",
             "CHERRY_PICK_MSG",
-            "mkit-conflicts",
+            "kit-conflicts",
         ],
     ),
     (
         "revert",
-        &["REVERT_HEAD", "ORIG_HEAD", "REVERT_MSG", "mkit-conflicts"],
+        &["REVERT_HEAD", "ORIG_HEAD", "REVERT_MSG", "kit-conflicts"],
     ),
 ];
 
@@ -126,10 +126,10 @@ fn garbled_sidecar_crashes_do_not_panic() {
 fn partial_rebase_state_recovers() {
     // A representative member of each rebase-apply parsing shape: a text file
     // (`head-name`), a single-hash file (`onto`), a hash-list file (`todo`), and
-    // the conflict sidecar (`mkit-conflicts`) — distinct because it governs
+    // the conflict sidecar (`kit-conflicts`) — distinct because it governs
     // whether `--continue` consumes resolved material or replays. The remaining
     // state members (orig-head/actions/done) parse like one of the first three.
-    let rebase_files = ["head-name", "onto", "todo", "mkit-conflicts"];
+    let rebase_files = ["head-name", "onto", "todo", "kit-conflicts"];
     // Remove or garble one rebase-apply file at a time, then drive each rebase
     // recovery flag. rebase-apply existing makes mkit see "rebase in progress",
     // so a missing/garbled member must yield a clean error, never a panic.
@@ -168,7 +168,7 @@ fn stray_cleanup_residue_does_not_corrupt() {
         "MERGE_MSG",
         "CHERRY_PICK_MSG",
         "REVERT_MSG",
-        "mkit-conflicts",
+        "kit-conflicts",
         "ORIG_HEAD",
     ];
     for stray in strays {

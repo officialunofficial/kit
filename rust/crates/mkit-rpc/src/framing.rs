@@ -127,8 +127,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkit::rpc::v1::signer::{SignerFrame, signer_frame};
-    use crate::mkit::rpc::v1::{Error, ErrorCode};
+    use crate::kit::rpc::v1::signer::{SignerFrame, signer_frame};
+    use crate::kit::rpc::v1::{Error, ErrorCode};
     use std::io::Cursor;
 
     fn err_frame(code: ErrorCode, msg: &str) -> SignerFrame {
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn decode_options_reject_oversized_body_even_without_framing() {
-        use crate::mkit::rpc::v1::signer::SignRequest;
+        use crate::kit::rpc::v1::signer::SignRequest;
 
         // A frame whose encoding exceeds MAX_FRAME_BYTES. read_frame
         // never sees one (the length prefix is checked first), but

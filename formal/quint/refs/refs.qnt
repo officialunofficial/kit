@@ -6,13 +6,13 @@
 //     (unconditional `delete_ref`, conditional `delete_ref_if_matches`).
 //   - SPEC-REFS §5.1 atomicity matrix for the three in-repo lock domains:
 //       local : direct on-disk mutation under `refs-<ref>.lock` (refs.rs RefMutation)
-//       file  : file transport under `<root>/.mkit/refs/.lock` (RefLock). This
-//               is also the domain of every SERVER of a `.mkit` root: `mkit
+//       file  : file transport under `<root>/.kit/refs/.lock` (RefLock). This
+//               is also the domain of every SERVER of a `.kit` root: `mkit
 //               serve` (ssh-frame) and a `mkit-server` fs-layout deployment
 //               write refs through `FileTransport` (`FsLayoutStore::apply` ->
 //               `FileTransport::with_ref_lock`), so a `file` op below stands
 //               for a CAS from `mkit serve`, `mkit-server` or a direct
-//               `mkit+file://` push alike. (a SQLite-metadata `mkit-server` keeps
+//               `kit+file://` push alike. (a SQLite-metadata `mkit-server` keeps
 //               refs in SQLite; the root marker makes FileTransport refuse
 //               ref writes there, so that root has no on-disk ref domain; not
 //               modelled.)
@@ -79,7 +79,7 @@ module refs {
   //   1 worktree.lock(main)      2 worktree.lock(linked id 1)
   //   3 refs-history-<a>.lock    4 refs-history-<b>.lock
   //   5 refs-<refs/heads/a>.lock 6 refs-<refs/heads/b>.lock
-  //   7 <root>/.mkit/refs/.lock  (file-transport RefLock; separate domain,
+  //   7 <root>/.kit/refs/.lock  (file-transport RefLock; separate domain,
   //     never composed with 0..6 — §3.1, §4 "not composed")
   //   8 MemoryTransport's in-process Mutex (its own domain)
   type Lock = int
@@ -94,7 +94,7 @@ module refs {
   //               its tree's lock, then write_ref_recording_history)
   //   gc        : worktrees.lock ≺ worktree.lock(0) ≺ worktree.lock(1), then recovery::expire
   //   file      : file-transport RefLock only (mkit serve, mkit-server
-  //               fs-layout, mkit+file:// push)
+  //               fs-layout, kit+file:// push)
   //   mem       : memory transport, its in-process Mutex only
   // `del` = delete instead of write (branch only): Any = delete_ref,
   // Match(e) = delete_ref_if_matches(e).
@@ -215,7 +215,7 @@ module refs {
   var mem: int -> int           // memory-transport refs
   var owner: Lock -> Proc       // kernel lock holder, FREE if unheld
   var procs: Proc -> PState
-  var recLog: Set[int]          // .mkit/recovery-log entry ids
+  var recLog: Set[int]          // .kit/recovery-log entry ids
   var nextEntry: int
   var faults: Faults
   // ghost / observation

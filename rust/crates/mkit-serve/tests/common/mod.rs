@@ -13,12 +13,12 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use mkit_core::hash::{Hash, hash};
-use mkit_rpc::mkit::common::v1::RefExpectation;
-use mkit_rpc::mkit::rpc::v1::ssh::{
+use mkit_rpc::kit::common::v1::RefExpectation;
+use mkit_rpc::kit::rpc::v1::ssh::{
     DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame, UpdateRef, UploadPack,
     ssh_frame,
 };
-use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode, ProtocolVersion};
+use mkit_rpc::kit::rpc::v1::{Error as RpcError, ErrorCode, ProtocolVersion};
 use mkit_serve::{
     FrameIoError, FrameSink, FrameSource, Repo, SessionConfig, SessionEnd, WritePolicy,
     serve_session,

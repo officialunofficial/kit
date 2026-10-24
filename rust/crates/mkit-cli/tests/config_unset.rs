@@ -75,10 +75,10 @@ fn unset_removes_a_repo_scoped_key() {
         "",
         "user.email should be empty after --unset"
     );
-    let cfg = fs::read_to_string(td.path().join(".mkit/config")).unwrap_or_default();
+    let cfg = fs::read_to_string(td.path().join(".kit/config")).unwrap_or_default();
     assert!(
         !cfg.contains("user.email"),
-        ".mkit/config still contains user.email: {cfg}"
+        ".kit/config still contains user.email: {cfg}"
     );
 }
 
@@ -123,7 +123,7 @@ fn unset_removes_a_user_scoped_forbidden_key() {
         "user-scoped config still contains user.identity: {user_cfg}"
     );
     // Never written to the repo layer.
-    let repo_cfg = fs::read_to_string(td.path().join(".mkit/config")).unwrap_or_default();
+    let repo_cfg = fs::read_to_string(td.path().join(".kit/config")).unwrap_or_default();
     assert!(!repo_cfg.contains("user.identity"));
 }
 
@@ -202,7 +202,7 @@ fn global_forces_a_repo_safe_key_to_user_scope() {
     assert!(set.status.success(), "--global set failed: {set:?}");
 
     // Not written to the repo layer.
-    let repo_cfg = fs::read_to_string(td.path().join(".mkit/config")).unwrap_or_default();
+    let repo_cfg = fs::read_to_string(td.path().join(".kit/config")).unwrap_or_default();
     assert!(
         !repo_cfg.contains("default_branch"),
         "repo config should not contain default_branch when --global forced user scope: {repo_cfg}"

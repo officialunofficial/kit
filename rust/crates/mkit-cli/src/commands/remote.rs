@@ -1,6 +1,6 @@
 //! `mkit remote` — show / add / set the configured remote.
 //!
-//! URL validation: only `mkit+<scheme>://` is accepted. Recognised
+//! URL validation: only `kit+<scheme>://` is accepted. Recognised
 //! schemes: `file`, `https`, `s3`, `ssh`, `memory`.
 
 use std::collections::BTreeMap;
@@ -17,11 +17,11 @@ use crate::format;
 use mkit_sync::AppliedPacks;
 
 const ACCEPTED_SCHEMES: &[(&str, &str)] = &[
-    ("mkit+file://", "file"),
-    ("mkit+https://", "http"),
-    ("mkit+s3://", "s3"),
-    ("mkit+ssh://", "ssh"),
-    ("mkit+memory://", "memory"),
+    ("kit+file://", "file"),
+    ("kit+https://", "http"),
+    ("kit+s3://", "s3"),
+    ("kit+ssh://", "ssh"),
+    ("kit+memory://", "memory"),
     // Git-bridge remotes (SPEC-GIT-BRIDGE / SPEC-GIT-IMPORT). Native
     // push/pull/fetch/clone REFUSE these with a pointer to the
     // `mkit git` subcommands — the transports are not interchangeable.
@@ -55,7 +55,7 @@ enum RemoteCmd {
     /// Configure a remote. With one argument, sets the flat default
     /// remote (`mkit remote add <url>`). With two, adds/updates a named
     /// remote (`mkit remote add <name> <url>`). The URL must be
-    /// `mkit+<scheme>://...`.
+    /// `kit+<scheme>://...`.
     Add {
         name_or_url: String,
         url: Option<String>,
@@ -104,7 +104,7 @@ pub fn run(args: &[String]) -> u8 {
     // `show` reflects the merged view; every mutating subcommand operates
     // on and persists ONLY the repo layer, so a user-scoped value (e.g. a
     // private `user.email`) is never materialized into the clone-traveling
-    // `.mkit/config` by `config::write`.
+    // `.kit/config` by `config::write`.
     if opts.sub.is_none() {
         return show(
             &layered.merged,
@@ -127,7 +127,7 @@ pub fn run(args: &[String]) -> u8 {
             // Reject control characters (newline et al.) before the URL
             // ever reaches `config::write`, which emits values raw — a
             // newline would inject extra `key = value` lines into
-            // `.mkit/config` (config injection).
+            // `.kit/config` (config injection).
             if config::validate_value(&url).is_err() {
                 return emit_err(
                     &format!("invalid remote URL '{url}': contains control characters"),
@@ -137,8 +137,8 @@ pub fn run(args: &[String]) -> u8 {
             let Some(scheme) = validate_url(&url) else {
                 return emit_err(
                     &format!(
-                        "invalid remote URL '{url}': must start with 'mkit+<scheme>://'\n\
-                         hint: URL must start with mkit+<scheme>:// (e.g. mkit+https://, mkit+ssh://, mkit+file://, mkit+s3://)",
+                        "invalid remote URL '{url}': must start with 'kit+<scheme>://'\n\
+                         hint: URL must start with kit+<scheme>:// (e.g. kit+https://, kit+ssh://, kit+file://, kit+s3://)",
                     ),
                     exit::PROTOCOL_ERROR,
                 );
@@ -264,7 +264,7 @@ pub fn run(args: &[String]) -> u8 {
             }
             let Some(scheme) = validate_url(&url) else {
                 return emit_err(
-                    &format!("invalid remote URL '{url}': must start with 'mkit+<scheme>://'"),
+                    &format!("invalid remote URL '{url}': must start with 'kit+<scheme>://'"),
                     exit::PROTOCOL_ERROR,
                 );
             };
@@ -311,7 +311,7 @@ fn move_tracking_refs(layout: &RepoLayout, old: &str, new: &str, siblings: &[Str
     }
 }
 
-/// Bridge state under `.mkit/git/<name>/` follows a rename so leases,
+/// Bridge state under `.kit/git/<name>/` follows a rename so leases,
 /// maps, and the staging mirror stay bound to the same remote name.
 ///
 /// `siblings` lists the configured remote names nested under `old`
@@ -683,7 +683,7 @@ fn warn_orphaned_bridge_state(layout: &RepoLayout, name: &str) {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
-            "note: git-bridge state for '{name}' remains at .mkit/git/{name}/ \
+            "note: git-bridge state for '{name}' remains at .kit/git/{name}/ \
              (staging mirror + provenance); delete it manually if unwanted"
         );
     }

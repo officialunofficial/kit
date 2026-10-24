@@ -44,7 +44,7 @@ fn repo_with_commit() -> tempfile::TempDir {
 }
 
 fn read_tag_ref(root: &std::path::Path, name: &str) -> String {
-    let p = root.join(".mkit/refs/tags").join(name);
+    let p = root.join(".kit/refs/tags").join(name);
     fs::read_to_string(p)
         .expect("tag ref file")
         .trim()
@@ -114,7 +114,7 @@ fn tampered_signed_tag_fails_verify() {
     );
     let h = read_tag_ref(td.path(), "v3.0.0");
     let (shard, rest) = h.split_at(2);
-    let obj_path = td.path().join(".mkit/objects").join(shard).join(rest);
+    let obj_path = td.path().join(".kit/objects").join(shard).join(rest);
 
     // Flip a byte inside the message region (before the 64-byte
     // signature trailer) so the embedded signature no longer matches.
@@ -128,7 +128,7 @@ fn tampered_signed_tag_fails_verify() {
     // with the same primitive mkit uses.
     let new_hash = mkit_core::hash::to_hex(&mkit_core::hash::hash(&bytes));
     let (nshard, nrest) = new_hash.split_at(2);
-    let new_dir = td.path().join(".mkit/objects").join(nshard);
+    let new_dir = td.path().join(".kit/objects").join(nshard);
     fs::create_dir_all(&new_dir).unwrap();
     fs::write(new_dir.join(nrest), &bytes).unwrap();
 

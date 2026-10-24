@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use mkit_rpc::mkit::rpc::v1::ssh::SshFrame;
+use mkit_rpc::kit::rpc::v1::ssh::SshFrame;
 use mkit_serve::{FrameIoError, FrameSource};
 
 /// When the client last sent a byte, as milliseconds since `base`.

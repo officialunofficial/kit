@@ -1,6 +1,6 @@
 //! Per-key end-to-end regression tests for the hostile-clone config
 //! attack surface of GHSA-001. Each test plants a
-//! `.mkit/config` containing exactly one forbidden key, runs `mkit
+//! `.kit/config` containing exactly one forbidden key, runs `mkit
 //! config <key>` against the repo, and asserts:
 //!
 //! 1. the value did NOT propagate to the effective config (stdout),
@@ -37,12 +37,12 @@ fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
     out
 }
 
-/// Seed a repo with a `.mkit/config` containing exactly the one
+/// Seed a repo with a `.kit/config` containing exactly the one
 /// `key = value` line under test, then return the temp dir holding it.
 fn repo_with_repo_config(line: &str) -> tempfile::TempDir {
     let td = tempfile::tempdir().unwrap();
-    fs::create_dir_all(td.path().join(".mkit")).unwrap();
-    fs::write(td.path().join(".mkit/config"), line).unwrap();
+    fs::create_dir_all(td.path().join(".kit")).unwrap();
+    fs::write(td.path().join(".kit/config"), line).unwrap();
     td
 }
 
@@ -96,7 +96,7 @@ fn repo_user_identity_dropped() {
 fn repo_trusted_remote_endpoint_dropped() {
     assert_forbidden_key_dropped(
         "trusted_remote_endpoint",
-        "mkit+https://attacker.invalid/repo",
+        "kit+https://attacker.invalid/repo",
         "",
     );
 }
@@ -132,7 +132,7 @@ fn admission_warning_snapshot() {
     assert!(out.status.success());
     let stderr = stderr_str(&out);
     insta::with_settings!({filters => vec![
-        (r"at [^ ]+/\.mkit/config", "at <REPO>/.mkit/config"),
+        (r"at [^ ]+/\.kit/config", "at <REPO>/.kit/config"),
         (r"see [^ ]+/mkit/config", "see <XDG>/mkit/config"),
     ]}, {
         insta::assert_snapshot!("repo_config_admission_warning", stderr);
@@ -165,13 +165,13 @@ fn admission_config_routes_to_user_and_refuses_reserved_names() {
     assert!(user.contains("admission_helper = /usr/bin/true"));
     assert!(user.contains("remote.origin.admission_headers = X-Admission"));
     assert!(
-        !fs::read_to_string(td.path().join(".mkit/config"))
+        !fs::read_to_string(td.path().join(".kit/config"))
             .unwrap()
             .contains("admission")
     );
-    let invalid = run(&["config", "remote.origin.admission_headers", "X-Mkit-Ref"]);
+    let invalid = run(&["config", "remote.origin.admission_headers", "X-Kit-Ref"]);
     assert_eq!(invalid.status.code(), Some(78));
-    assert!(stderr_str(&invalid).contains("reserved admission header `X-Mkit-Ref`"));
+    assert!(stderr_str(&invalid).contains("reserved admission header `X-Kit-Ref`"));
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn repo_signing_key_dropped() {
     assert_forbidden_key_dropped(
         "signing_key",
         "../../../etc/passwd",
-        ".mkit/keys/default.key",
+        ".kit/keys/default.key",
     );
 }
 
@@ -261,7 +261,7 @@ fn repo_attest_secp256k1_key_path_dropped() {
     assert_forbidden_key_dropped(
         "attest.secp256k1_key_path",
         "/home/victim/.wallet/seed",
-        ".mkit/keys/secp256k1.key",
+        ".kit/keys/secp256k1.key",
     );
 }
 
@@ -270,7 +270,7 @@ fn repo_attest_p256_key_path_dropped() {
     assert_forbidden_key_dropped(
         "attest.p256_key_path",
         "/home/victim/.ssh/id_ecdsa",
-        ".mkit/keys/p256.key",
+        ".kit/keys/p256.key",
     );
 }
 
@@ -288,8 +288,8 @@ fn warning_message_snapshot() {
     assert!(out.status.success());
     let stderr = stderr_str(&out);
     insta::with_settings!({filters => vec![
-        // Absolute path to the planted `.mkit/config` — varies per machine.
-        (r"at [^ ]+/\.mkit/config", "at <REPO>/.mkit/config"),
+        // Absolute path to the planted `.kit/config` — varies per machine.
+        (r"at [^ ]+/\.kit/config", "at <REPO>/.kit/config"),
         // Absolute path to the user-scoped config under XDG_CONFIG_HOME.
         (r"see [^ ]+/mkit/config", "see <XDG>/mkit/config"),
     ]}, {

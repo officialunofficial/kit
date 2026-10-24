@@ -50,7 +50,7 @@ fn init_with_commit(content: &[u8]) -> tempfile::TempDir {
 }
 
 fn file_url(dir: &Path) -> String {
-    format!("mkit+file://{}", dir.display())
+    format!("kit+file://{}", dir.display())
 }
 
 // -----------------------------------------------------------------------
@@ -285,7 +285,7 @@ fn cherry_pick_json_success() {
             .status
             .success()
     );
-    let picked = fs::read_to_string(td.path().join(".mkit/refs/heads/feature"))
+    let picked = fs::read_to_string(td.path().join(".kit/refs/heads/feature"))
         .unwrap()
         .trim()
         .to_string();
@@ -306,7 +306,7 @@ fn cherry_pick_json_success() {
 fn cherry_pick_json_reports_conflict() {
     let td = tempfile::tempdir().unwrap();
     init_two_branches_with_conflict(td.path());
-    let picked = fs::read_to_string(td.path().join(".mkit/refs/heads/feature"))
+    let picked = fs::read_to_string(td.path().join(".kit/refs/heads/feature"))
         .unwrap()
         .trim()
         .to_string();
@@ -326,7 +326,7 @@ fn cherry_pick_json_reports_conflict() {
 #[test]
 fn revert_json_success() {
     let td = init_with_commit(b"hi");
-    let head = fs::read_to_string(td.path().join(".mkit/refs/heads/main"))
+    let head = fs::read_to_string(td.path().join(".kit/refs/heads/main"))
         .unwrap()
         .trim()
         .to_string();

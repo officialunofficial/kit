@@ -17,11 +17,11 @@
 //!   helpers are transport-independent; the advisory string baked into
 //!   a `RemoteError` is parameterised via a `&str` label (e.g. `"ssh"`).
 
-use crate::mkit::common::v1::{RefEntry, RefExpectation};
-use crate::mkit::rpc::v1::Error as RpcError;
-use crate::mkit::rpc::v1::ErrorCode;
-use crate::mkit::rpc::v1::signer::{SignerFrame, signer_frame};
-use crate::mkit::rpc::v1::ssh::{SshFrame, ssh_frame};
+use crate::kit::common::v1::{RefEntry, RefExpectation};
+use crate::kit::rpc::v1::Error as RpcError;
+use crate::kit::rpc::v1::ErrorCode;
+use crate::kit::rpc::v1::signer::{SignerFrame, signer_frame};
+use crate::kit::rpc::v1::ssh::{SshFrame, ssh_frame};
 
 use mkit_core::hash::Hash;
 use mkit_core::protocol::{TransportError, TransportResult};

@@ -57,7 +57,7 @@ fn head_hash(dir: &Path) -> Hash {
 }
 
 fn file_url(dir: &Path) -> String {
-    format!("mkit+file://{}", dir.display())
+    format!("kit+file://{}", dir.display())
 }
 
 /// Walk `<remote>`'s packlist chain for `branch` newest-first via the
@@ -66,7 +66,7 @@ fn file_url(dir: &Path) -> String {
 /// about a transport's on-disk layout.
 fn packmap_chain(tx: &dyn Transport, branch: &str) -> Vec<PackListNode> {
     let mut nodes = Vec::new();
-    let mut cursor = tx.read_ref(&format!("refs/mkit/packmap/{branch}")).unwrap();
+    let mut cursor = tx.read_ref(&format!("refs/kit/packmap/{branch}")).unwrap();
     while let Some(key) = cursor {
         let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();
         let node = transfer::decode_packlist(&bytes).unwrap();
@@ -101,10 +101,10 @@ fn all_ancestor_commit_hashes(store: &ObjectStore, tip: Hash) -> HashSet<Hash> {
 
 // ---------------------------------------------------------------------------
 // Depth-threshold behaviour, driven through the real binary against a
-// `mkit+file://` remote (env-var injection via subprocess, see module docs).
+// `kit+file://` remote (env-var injection via subprocess, see module docs).
 // ---------------------------------------------------------------------------
 
-/// Force-push safety: `mkit+file://` (`FileTransport`) uses the DEFAULT,
+/// Force-push safety: `kit+file://` (`FileTransport`) uses the DEFAULT,
 /// non-transactional `advance_refs` (packmap-then-head) — it does not
 /// override [`Transport::supports_atomic_advance`], so it inherits `false`.
 /// A proactive re-baseline reset writes a fresh node with `prev = None`,

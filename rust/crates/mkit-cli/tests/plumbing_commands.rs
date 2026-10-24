@@ -307,7 +307,7 @@ fn ls_files_lists_tracked_with_stage_info() {
 fn ls_files_others_and_ignored_filters() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    fs::write(root.join(".mkitignore"), b"*.log\n").unwrap();
+    fs::write(root.join(".kitignore"), b"*.log\n").unwrap();
     fs::write(root.join("new.txt"), b"n\n").unwrap();
     fs::write(root.join("debug.log"), b"d\n").unwrap();
     // --others lists every untracked file (ignored ones included).

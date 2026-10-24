@@ -4,7 +4,7 @@
 //! The design keeps refs as plain loose files rather
 //! than migrating them to a denser storage primitive, but that decision
 //! only holds up if "ls-able" is satisfied by a stable command surface
-//! rather than by shelling out to `ls`/`cat` on `.mkit/refs/`. These two
+//! rather than by shelling out to `ls`/`cat` on `.kit/refs/`. These two
 //! commands are that surface, modeled on git's `for-each-ref`/`show-ref`
 //! plumbing:
 //!

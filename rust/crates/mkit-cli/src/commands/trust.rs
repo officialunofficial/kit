@@ -107,13 +107,13 @@ pub fn run(args: &[String]) -> u8 {
 fn resolve_path(flag: Option<&str>) -> Result<PathBuf, u8> {
     let path = flag.map_or_else(default_trust_roots_path, PathBuf::from);
     // `mkit trust` has no repo context of its own (unlike `verify` /
-    // `verify-attest`, which resolve a `.mkit` dir to fence against) —
+    // `verify-attest`, which resolve a `.kit` dir to fence against) —
     // it only needs to refuse an explicit-looking-but-actually-default
     // in-repo path when the CWD happens to be a repo. Fence against
-    // `.mkit` under the current directory if one exists; otherwise
+    // `.kit` under the current directory if one exists; otherwise
     // there is nothing to fence.
     let cwd = std::env::current_dir().unwrap_or_default();
-    let mkit_dir = cwd.join(".mkit");
+    let mkit_dir = cwd.join(".kit");
     warn_if_unsafe_trust_roots(&path, &mkit_dir, flag.is_some())?;
     Ok(path)
 }

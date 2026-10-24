@@ -4,8 +4,8 @@
 //! **Not an import path.** Every function here is defined only on git
 //! objects the v1 mapping can emit. Two mechanisms enforce that, and
 //! it matters which catches what: a handful of parse-time rejections
-//! (the reserved `mkit-remix-source` carrier, a malformed
-//! `mkit-object-type`) surface as [`BridgeError::NotBridgeObject`];
+//! (the reserved `kit-remix-source` carrier, a malformed
+//! `kit-object-type`) surface as [`BridgeError::NotBridgeObject`];
 //! EVERYTHING ELSE — header order, duplicate or unknown `mkit-*`
 //! headers, foreign modes (`160000`), any off-spec shape — fails
 //! closed through the *re-translation equality check* (rebuild the
@@ -175,7 +175,7 @@ pub fn reconstruct_commit(body: &[u8]) -> Result<Reconstructed, BridgeError> {
     let timestamp = author::parse_timestamp(author_line)
         .ok_or_else(|| not_bridge("author line is not bridge-synthesized"))?;
     let identity = headers::parse_identity(parsed.required_str(headers::MKIT_AUTHOR)?)
-        .ok_or_else(|| not_bridge("mkit-author header malformed"))?;
+        .ok_or_else(|| not_bridge("kit-author header malformed"))?;
     let commit = Commit {
         tree_hash: parsed.required_hash(headers::MKIT_TREE)?,
         parents: parsed.all_hashes(headers::MKIT_PARENT)?,
@@ -192,7 +192,7 @@ pub fn reconstruct_commit(body: &[u8]) -> Result<Reconstructed, BridgeError> {
         signature: parsed.required_signature(headers::MKIT_SIGNATURE)?,
     };
     if commit.parents.len() != parent_ids.len() {
-        return Err(not_bridge("parent / mkit-parent count mismatch"));
+        return Err(not_bridge("parent / kit-parent count mismatch"));
     }
     let probe = mkit_core::hash::ZERO; // hash input unused by translate_commit checks
     let retrans = translate::translate_commit(&probe, &commit, &tree_id, &parent_ids)?;
@@ -214,10 +214,10 @@ pub fn reconstruct_tag(body: &[u8]) -> Result<Reconstructed, BridgeError> {
     let timestamp = author::parse_timestamp(tagger_line)
         .ok_or_else(|| not_bridge("tagger line is not bridge-synthesized"))?;
     let tagger = headers::parse_identity(parsed.required_str(headers::MKIT_TAGGER)?)
-        .ok_or_else(|| not_bridge("mkit-tagger header malformed"))?;
+        .ok_or_else(|| not_bridge("kit-tagger header malformed"))?;
     let tt_hex = parsed.required_str(headers::MKIT_TARGET_TYPE)?;
     let tt_byte = crate::gitobj::bytes_from_hex(tt_hex, 1)
-        .ok_or_else(|| not_bridge("mkit-target-type malformed"))?[0];
+        .ok_or_else(|| not_bridge("kit-target-type malformed"))?[0];
     // Only target types the v1 mapping can emit (§7.1): remix/delta
     // targets are refused at translation time and unknown bytes are
     // future formats.
@@ -227,7 +227,7 @@ pub fn reconstruct_tag(body: &[u8]) -> Result<Reconstructed, BridgeError> {
         0x03 => ObjectType::Commit,
         0x05 => ObjectType::ChunkedBlob,
         0x07 => ObjectType::Tag,
-        _ => return Err(not_bridge("mkit-target-type not bridge-emittable")),
+        _ => return Err(not_bridge("kit-target-type not bridge-emittable")),
     };
     let tag = Tag {
         target: parsed.required_hash(headers::MKIT_TARGET)?,
@@ -305,9 +305,9 @@ impl<'a> ParsedBody<'a> {
         match self.required_str(headers::MKIT_SCHEMA) {
             Ok(v) if v == headers::SCHEMA_VALUE => Ok(()),
             Ok(v) => Err(not_bridge(&format!(
-                "mkit-schema {v} is not covered by bridge mapping v1"
+                "kit-schema {v} is not covered by bridge mapping v1"
             ))),
-            Err(_) => Err(not_bridge("missing mkit-schema header")),
+            Err(_) => Err(not_bridge("missing kit-schema header")),
         }
     }
 

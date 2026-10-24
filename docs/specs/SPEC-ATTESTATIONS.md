@@ -114,7 +114,7 @@ PAE("t",     "")      ==  b"DSSEv1 1 t 0 "
 ## 3. On-disk layout
 
 ```
-.mkit/
+.kit/
   attestations/
     <commit-hash-hex>/                      ← one directory per subject
       <attestation-id-hex>.dsse              ← one DSSE envelope per file
@@ -137,7 +137,7 @@ PAE("t",     "")      ==  b"DSSEv1 1 t 0 "
   and `rename(2)`d into place, and on Unix the parent directory is
   `fsync`ed after the rename to make the dirent update durable.
 
-There is no index file, no central manifest. `ls .mkit/attestations/<commit-hash>/`
+There is no index file, no central manifest. `ls .kit/attestations/<commit-hash>/`
 lists every attestation attached to that commit. This is the same
 discoverability model as `refs/`.
 
@@ -293,7 +293,7 @@ possible "what you wrote is what came back" guarantee.)
    envelope's `signatures[]` array in that same order.
 5. Envelope assembled (§4.1), JCS-canonicalized, BLAKE3-hashed for
    the attestation id.
-6. Envelope written to `.mkit/attestations/<commit>/<att-id>.dsse`.
+6. Envelope written to `.kit/attestations/<commit>/<att-id>.dsse`.
 
 Multi-signature envelopes are produced in a single `mkit attest`
 invocation by repeating `--additional-signer` (§8). Any signer
@@ -348,7 +348,7 @@ For each envelope attached to the commit:
    signature-valid envelope whose subject digest does not match the
    commit actually being queried MUST NOT be treated as an attestation
    *for that commit* &mdash; the attestation directory name
-   (`.mkit/attestations/<commit-hex>/`) is not itself proof of what a
+   (`.kit/attestations/<commit-hex>/`) is not itself proof of what a
    given envelope attests to, since it is ordinary repo-tree state any
    process with write access to the repo can populate.
 
@@ -370,7 +370,7 @@ performing the same check internally; this document stays **Draft**
 until that lands.
 
 The `mkit verify-attest` CLI enumerates every envelope under
-`.mkit/attestations/<commit>/`, prints a per-signature verdict, and
+`.kit/attestations/<commit>/`, prints a per-signature verdict, and
 exits 0 iff every envelope has at least one verifying signature whose
 subject binds to that commit.
 
@@ -413,18 +413,18 @@ flag or the `attest.signer` config key.
 
 | Signer name | What it signs with | Where the trust root lives |
 |---|---|---|
-| `repo-key` (default) | Ed25519/secp256k1/P-256 over a raw 32-byte secret on disk under `.mkit/keys/` | The corresponding public key, registered by `keyid` in the trust-roots file. |
+| `repo-key` (default) | Ed25519/secp256k1/P-256 over a raw 32-byte secret on disk under `.kit/keys/` | The corresponding public key, registered by `keyid` in the trust-roots file. |
 | `keystore` | A user-scoped `mkit-keystore` key reference (the keystore performs the signing) | The keystore backend's canonical key id. |
 | `external` | Subprocess wire conversation per [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) | Whatever the external signer's trust model is. |
 | `sigstore` *(scaffold)* | &mdash; | &mdash; &mdash; `Error::SigstoreNotImplemented` is returned. Not selectable from the CLI factory. |
 
 `repo-key` covers all three algorithms:
 - Ed25519 reuses the existing commit-signing keypair at
-  `.mkit/keys/default.key` (path is configurable via
+  `.kit/keys/default.key` (path is configurable via
   `signing_key`).
 - secp256k1 and P-256 each read a raw 32-byte secret from
   `attest.secp256k1_key_path` / `attest.p256_key_path` (defaults
-  `.mkit/keys/secp256k1.key`, `.mkit/keys/p256.key`). Neither path
+  `.kit/keys/secp256k1.key`, `.kit/keys/p256.key`). Neither path
   is auto-generated &mdash; `mkit keygen --algorithm <alg>` must run
   first.
 
@@ -548,9 +548,9 @@ into):
 
 - `https://slsa.dev/provenance/v1` &mdash; SLSA build provenance.
 - `https://in-toto.io/attestation/vuln/v0.1` &mdash; vuln-scan results.
-- `https://github.com/officialunofficial/mkit/spec/predicate/review/v1`
+- `https://kit.storage/spec/predicate/review/v1`
   &mdash; code review sign-off **(planned; not yet defined)**.
-- `https://github.com/officialunofficial/mkit/spec/predicate/storage-receipt/v1`
+- `https://kit.storage/spec/predicate/storage-receipt/v1`
   &mdash; server-signed evidence of a committed live advance or lease
   change ([SPEC-SERVER §15](SPEC-SERVER.md#15-storage-receipts)).
 - Third-party predicates (for example, a Makechain settlement predicate at
@@ -568,7 +568,7 @@ user-scoped trust-roots file. By default this lives at
 
 **An in-repo trust-roots file is REJECTED unless `--trust-roots` is
 explicitly passed.** A hostile clone could otherwise ship
-`.mkit/attest-trust-roots.toml` listing attacker keys and the verify
+`.kit/attest-trust-roots.toml` listing attacker keys and the verify
 loop would print "ok" against attacker-controlled signatures.
 
 Schema (a strict subset of TOML &mdash; the parser is hand-rolled and
@@ -607,13 +607,13 @@ attestations are indistinguishable at the commit layer.
 ### 7.2 Signing code (`SPEC-SIGNING.md`)
 
 The Ed25519 DSSE signer for `repo-key` reuses `ed25519-dalek` and the
-same `.mkit/keys/default.key` as commit signing. It signs the DSSE
+same `.kit/keys/default.key` as commit signing. It signs the DSSE
 PAE per §2.1 &mdash; note this is a DIFFERENT signed-bytes domain from
 commit signing:
 
 ```
-COMMIT_DOMAIN       = "mkit.commit\x00"      (SPEC-SIGNING §2)
-REMIX_DOMAIN        = "mkit.remix\x00"       (SPEC-SIGNING §2)
+COMMIT_DOMAIN       = "kit.commit\x00"      (SPEC-SIGNING §2)
+REMIX_DOMAIN        = "kit.remix\x00"       (SPEC-SIGNING §2)
 DSSE signing        = "DSSEv1 ..." (PAE, §2.1)
 ```
 
@@ -635,7 +635,7 @@ When that revision lands it MUST:
 
 - Allow uploading an envelope as `(commit-hash, envelope-bytes)`,
   with the server computing `<att-id> = BLAKE3(envelope-bytes)` and
-  writing `.mkit/attestations/<commit>/<att-id>.dsse`.
+  writing `.kit/attestations/<commit>/<att-id>.dsse`.
 - Allow downloading by `<att-id>` (returning envelope bytes).
 - Allow listing every `<att-id>` attached to a given `<commit>`,
   returning the same sorted-by-att-id order `store::list` produces.
@@ -676,7 +676,7 @@ Defaults:
   `ed25519`.
 - `--signer` &mdash; `attest.signer` from config, else `repo-key`.
 - `--predicate-type` &mdash;
-  `https://github.com/officialunofficial/mkit/spec/predicate/empty/v1`
+  `https://kit.storage/spec/predicate/empty/v1`
   (placeholder; real callers pass their own URI).
 - `--predicate-file` &mdash; omitted ⇒ predicate body is `{}`.
 - `--trust-roots` &mdash; `$XDG_CONFIG_HOME/mkit/trust-roots.toml`.
@@ -686,7 +686,7 @@ implemented**:
 
 - `mkit attest verify` &mdash; folded into the top-level `mkit verify-attest`.
 - `mkit attest ls` / `show` / `rm` &mdash; list/inspect/delete by
-  hand against `.mkit/attestations/<commit>/<att-id>.dsse`.
+  hand against `.kit/attestations/<commit>/<att-id>.dsse`.
 - `mkit attest --add-signature <att-id>` &mdash; see §5.2; multi-signer
   envelopes must currently be produced in a single invocation.
 - `--require-predicate` / `--require-signer` filters on
@@ -698,7 +698,7 @@ implemented**:
 
 ## 9. Config
 
-Keys in the merged config (`.mkit/config` repo-local + user-scoped
+Keys in the merged config (`.kit/config` repo-local + user-scoped
 `$XDG_CONFIG_HOME/mkit/config`). Security-sensitive keys are
 **user-scoped only**: setting them in repo-local config is rejected
 with a stderr warning. See `THREAT-MODEL.md` for the motivation.
@@ -710,8 +710,8 @@ signer               = "repo-key" | "external" | "keystore"  (user-scoped)
 external_signer_path = /abs/path/to/binary               (user-scoped; required when signer = external)
 external_signer_args = a|b|c                             (user-scoped; pipe-separated argv, optional)
 external_signer_timeout_secs = 120                       (user-scoped; whole-conversation deadline, default 120)
-secp256k1_key_path   = .mkit/keys/secp256k1.key          (user-scoped; default shown)
-p256_key_path        = .mkit/keys/p256.key               (user-scoped; default shown)
+secp256k1_key_path   = .kit/keys/secp256k1.key          (user-scoped; default shown)
+p256_key_path        = .kit/keys/p256.key               (user-scoped; default shown)
 
 [key]                                                    # see SPEC-KEYSTORE
 ed25519_ref     = "<backend>:<label>"                    (user-scoped)
@@ -747,7 +747,7 @@ Protects against:
 - **Predicate-type sprawl.** mkit doesn't parse predicates, so a
   future unsafe predicate-type can't subvert mkit's invariants.
 - **In-repo trust-roots planting.** `mkit verify-attest` refuses to
-  read a trust-roots file under the repo's `.mkit/` directory unless
+  read a trust-roots file under the repo's `.kit/` directory unless
   the user passes `--trust-roots` explicitly.
 - **Ed25519 malleability.** Verify uses `verify_strict` (rejects
   non-canonical R/A and s ≥ ℓ), so honest verifiers reach the same

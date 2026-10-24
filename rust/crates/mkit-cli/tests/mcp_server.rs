@@ -528,12 +528,12 @@ fn verify_attest_rejects_in_repo_trust_roots() {
     let mut client = McpClient::spawn(Some(root.path()));
     ok(&mut client, "mkit_init", &json!({ "repo_path": repo }));
     // Plant an attacker trust-roots inside the repo.
-    std::fs::write(root.path().join(".mkit/attest-trust-roots.toml"), "x").unwrap();
+    std::fs::write(root.path().join(".kit/attest-trust-roots.toml"), "x").unwrap();
 
     let text = err(
         &mut client,
         "mkit_verify_attest",
-        &json!({ "repo_path": repo, "trust_roots": ".mkit/attest-trust-roots.toml" }),
+        &json!({ "repo_path": repo, "trust_roots": ".kit/attest-trust-roots.toml" }),
     );
     assert!(text.contains("inside the repository"), "{text}");
 }
@@ -620,12 +620,12 @@ fn verify_rejects_in_repo_trust_roots() {
     let repo = root.path().to_str().unwrap().to_string();
     let mut client = McpClient::spawn(Some(root.path()));
     ok(&mut client, "mkit_init", &json!({ "repo_path": repo }));
-    std::fs::write(root.path().join(".mkit/trust-roots.toml"), "x").unwrap();
+    std::fs::write(root.path().join(".kit/trust-roots.toml"), "x").unwrap();
 
     let text = err(
         &mut client,
         "mkit_verify",
-        &json!({ "repo_path": repo, "revision": "HEAD", "trust_roots": ".mkit/trust-roots.toml" }),
+        &json!({ "repo_path": repo, "revision": "HEAD", "trust_roots": ".kit/trust-roots.toml" }),
     );
     assert!(text.contains("inside the repository"), "{text}");
 }

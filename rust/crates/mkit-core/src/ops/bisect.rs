@@ -1,6 +1,6 @@
 //! Bisect.
 //!
-//! Stores state in `.mkit/bisect` (a single file, NOT a directory). The
+//! Stores state in `.kit/bisect` (a single file, NOT a directory). The
 //! on-disk format is a plain-text manifest:
 //!
 //! ```text

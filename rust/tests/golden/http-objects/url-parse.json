@@ -755,7 +755,7 @@
       "name": "metadata_entry",
       "request": {
         "single_repository": true,
-        "url": "/-/refs/heads/main/-/.mkit"
+        "url": "/-/refs/heads/main/-/.kit"
       }
     },
     {

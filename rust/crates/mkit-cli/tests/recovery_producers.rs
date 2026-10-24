@@ -1,6 +1,6 @@
 //! The history-rewriting commands (`commit --amend`,
 //! `reset`, `rebase`) must record the superseded tip in
-//! `.mkit/recovery-log` so `mkit gc` keeps it recoverable. Spawns the
+//! `.kit/recovery-log` so `mkit gc` keeps it recoverable. Spawns the
 //! real binary and asserts the old tip's full hash lands in the log.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
@@ -46,14 +46,14 @@ fn commit(root: &Path, name: &str, content: &[u8], msg: &str) {
 
 /// Full 64-hex tip of `refs/heads/main`.
 fn main_tip(root: &Path) -> String {
-    fs::read_to_string(root.join(".mkit/refs/heads/main"))
+    fs::read_to_string(root.join(".kit/refs/heads/main"))
         .expect("read main ref")
         .trim()
         .to_owned()
 }
 
 fn recovery_log(root: &Path) -> String {
-    fs::read_to_string(root.join(".mkit/recovery-log")).unwrap_or_default()
+    fs::read_to_string(root.join(".kit/recovery-log")).unwrap_or_default()
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn reset_aborts_and_does_not_move_a_corrupt_current_ref() {
 
     // Corrupt the current branch ref. `resolve_head` then errors, so
     // reset must abort BEFORE move_head clobbers it unlogged.
-    let main_ref = root.join(".mkit/refs/heads/main");
+    let main_ref = root.join(".kit/refs/heads/main");
     fs::write(&main_ref, b"not-a-valid-ref\n").unwrap();
 
     let out = run_in(root, &["reset", "--soft", &c1]);
@@ -182,7 +182,7 @@ fn rebase_records_original_tip() {
 }
 
 fn main_tip_of(root: &Path, branch: &str) -> String {
-    fs::read_to_string(root.join(format!(".mkit/refs/heads/{branch}")))
+    fs::read_to_string(root.join(format!(".kit/refs/heads/{branch}")))
         .expect("read branch ref")
         .trim()
         .to_owned()

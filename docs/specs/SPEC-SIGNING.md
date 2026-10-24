@@ -94,9 +94,9 @@ mkit defines three distinct signing domains. They MUST produce disjoint
 signable byte strings for any possible input.
 
 ```
-COMMIT_DOMAIN   = "mkit.commit\x00"       (12 bytes)
-REMIX_DOMAIN    = "mkit.remix\x00"        (11 bytes)
-TAG_DOMAIN      = "mkit.tag\x00"          (9 bytes)
+COMMIT_DOMAIN   = "kit.commit\x00"       (12 bytes)
+REMIX_DOMAIN    = "kit.remix\x00"        (11 bytes)
+TAG_DOMAIN      = "kit.tag\x00"          (9 bytes)
 ```
 
 The terminal `\x00` is part of the domain string. Disjointness here does
@@ -180,7 +180,7 @@ struct fields excluded from signing bytes.
 The **signing hash** is then:
 
 ```
-signing_hash = BLAKE3(u16_le(12) || "mkit.commit\x00" || signing_bytes)
+signing_hash = BLAKE3(u16_le(11) || "kit.commit\x00" || signing_bytes)
 ```
 
 And the commit's `signature` field is `Ed25519.sign(signer_seed,
@@ -206,7 +206,7 @@ signing_bytes = PROLOGUE                   // object_type=0x04
 Excluded: `signature`.
 
 ```
-signing_hash = BLAKE3(u16_le(11) || "mkit.remix\x00" || signing_bytes)
+signing_hash = BLAKE3(u16_le(10) || "kit.remix\x00" || signing_bytes)
 ```
 
 ---
@@ -231,7 +231,7 @@ field is covered, so flipping the `target`, `target_type`, `name`,
 `tagger`, `message`, `timestamp`, or `signer` invalidates the signature.
 
 ```
-signing_hash = BLAKE3(u16_le(9) || "mkit.tag\x00" || signing_bytes)
+signing_hash = BLAKE3(u16_le(8) || "kit.tag\x00" || signing_bytes)
 ```
 
 The tag's `signature` field is `Ed25519.sign(signer_seed, signing_hash)`.
@@ -246,19 +246,19 @@ A **signed** tag (`mkit tag -s`) carries a real signature that
 
 ## 5. Cross-domain collision proof sketch
 
-Commit signing input always begins with `u16_le(12)` followed by the 12-byte
-domain string `"mkit.commit\x00"`; remix signing input begins with
-`u16_le(11)` followed by the 11-byte string `"mkit.remix\x00"`; tag
-signing input begins with `u16_le(9)` followed by the 9-byte string
-`"mkit.tag\x00"`.
+Commit signing input always begins with `u16_le(11)` followed by the 11-byte
+domain string `"kit.commit\x00"`; remix signing input begins with
+`u16_le(10)` followed by the 10-byte string `"kit.remix\x00"`; tag
+signing input begins with `u16_le(8)` followed by the 8-byte string
+`"kit.tag\x00"`.
 
-- All three domain *lengths* (12/11/9) differ, so the 2-byte LE
+- All three domain *lengths* (11/10/8) differ, so the 2-byte LE
   length prefix alone already distinguishes them before any domain byte
   is read.
-- All three domain strings share the 5-byte prefix `"mkit."` (bytes
-  0–4) and then diverge at byte index 5 &mdash; `'c'` (0x63) for
-  `"mkit.commit\x00"`, `'r'` (0x72) for `"mkit.remix\x00"`, and `'t'`
-  (0x74) for `"mkit.tag\x00"` &mdash; giving a second, independent separator
+- All three domain strings share the 4-byte prefix `"kit."` (bytes
+  0–3) and then diverge at byte index 4 &mdash; `'c'` (0x63) for
+  `"kit.commit\x00"`, `'r'` (0x72) for `"kit.remix\x00"`, and `'t'`
+  (0x74) for `"kit.tag\x00"` &mdash; giving a second, independent separator
   once the length check is bypassed (for example by a hypothetical
   length-collision in some future fourth domain).
 
@@ -286,7 +286,7 @@ Given a commit C retrieved from the store:
 2. Re-build signing bytes per §3. (It's the caller's responsibility to
    retrieve the exact `signer` field from C; the verifier does not
    accept a public key from elsewhere.)
-3. Compute `signing_hash = BLAKE3(u16_le(12) || "mkit.commit\x00" || signing_bytes)`.
+3. Compute `signing_hash = BLAKE3(u16_le(11) || "kit.commit\x00" || signing_bytes)`.
 4. Parse `signer` as an Ed25519 public key. Invalid point → verify fails.
 5. `Ed25519.verify(signer, signing_hash, C.signature)`. Any failure →
    verify fails.
@@ -322,7 +322,7 @@ Ed25519 key. See `rust/crates/mkit-cli/src/commands/verify.rs` and
 ## 7. Key file format
 
 ```
-Path:           caller-provided; the convention is .mkit/keys/default.key
+Path:           caller-provided; the convention is .kit/keys/default.key
 Contents:       raw 32 bytes (Ed25519 SEED — NOT expanded secret key)
 File mode:      0600 (mandatory on POSIX)
 Parent-dir mode: 0700 (mandatory on POSIX)
@@ -381,7 +381,7 @@ ACLs apply).
 
 ## 8. One key, many roles
 
-The Ed25519 seed in `.mkit/keys/default.key` MAY be reused for other
+The Ed25519 seed in `.kit/keys/default.key` MAY be reused for other
 Ed25519 roles in the wider mkit ecosystem:
 
 - **Commit/remix/tag signing** (this document, §§3-4a) &mdash; the
@@ -391,7 +391,7 @@ Ed25519 roles in the wider mkit ecosystem:
   (`SPEC-ATTESTATIONS.md` §6.2) &mdash; the message signed there is the raw
   DSSE pre-authentication-encoding (PAE) byte string, not a domain
   digest from this document.
-- **SSH transport authentication** when pushing to `mkit+ssh://`
+- **SSH transport authentication** when pushing to `kit+ssh://`
   servers &mdash; the message signed there is whatever byte string the SSH
   protocol itself defines for public-key authentication (RFC 4252
   §7), entirely outside mkit's control.
@@ -433,7 +433,7 @@ cross-protocol analysis above is complete.
 3. **Verify tampered message**: flip one bit in the message, verify
    MUST fail.
 4. **Domain confusion negative test**: attempt to verify a signed commit
-   using `"mkit.remix\x00"` domain (or any other string). MUST fail.
+   using `"kit.remix\x00"` domain (or any other string). MUST fail.
 5. **Zero `message_hash`/`content_digest` do not affect signing hash**:
    two commits differing only in those fields MUST produce identical
    signing_hash bytes.
@@ -447,7 +447,7 @@ cross-protocol analysis above is complete.
    with seed `[0x07;32]`) the 64-byte signature. Pinned under
    `rust/tests/golden/tags/`.
 9. **Tag cross-domain negative**: a tag-domain signature MUST NOT verify
-   under `"mkit.commit\x00"` or `"mkit.remix\x00"`, and vice versa.
+   under `"kit.commit\x00"` or `"kit.remix\x00"`, and vice versa.
 
 ---
 

@@ -14,7 +14,7 @@ use std::sync::{
     mpsc,
 };
 
-const SERVICE: &str = "mkit.transport.v1.TransportService";
+const SERVICE: &str = "kit.transport.v1.TransportService";
 struct Fixture {
     client: ConnectTransport,
     calls: Arc<AtomicUsize>,
@@ -70,7 +70,7 @@ impl Fixture {
                                             "verification pending",
                                         )
                                         .with_detail(connectrpc::ErrorDetail::from_message(
-                                            "mkit.transport.v1.PendingVerification",
+                                            "kit.transport.v1.PendingVerification",
                                             &generated::PendingVerification::default()
                                                 .with_retry_after_ms(1_000),
                                         )));
@@ -204,7 +204,7 @@ fn advance_receipts_require_a_valid_committed_outcome_on_both_facade_paths() {
                             "refs/heads/main",
                             RefWriteCondition::Missing,
                             &[1; 32],
-                            "refs/mkit/packmap/main",
+                            "refs/kit/packmap/main",
                             RefWriteCondition::Missing,
                             &[2; 32],
                             &[],
@@ -219,7 +219,7 @@ fn advance_receipts_require_a_valid_committed_outcome_on_both_facade_paths() {
                         "refs/heads/main",
                         RefWriteCondition::Missing,
                         &[1; 32],
-                        "refs/mkit/packmap/main",
+                        "refs/kit/packmap/main",
                         RefWriteCondition::Missing,
                         &[2; 32],
                     )
@@ -310,7 +310,7 @@ fn invalid_advance_after_pending_finishes_progress_as_failed_without_receipts() 
             "refs/heads/main",
             RefWriteCondition::Missing,
             &[1; 32],
-            "refs/mkit/packmap/main",
+            "refs/kit/packmap/main",
             RefWriteCondition::Missing,
             &[2; 32]
         ),
@@ -366,7 +366,7 @@ fn advance_renews_for_the_configured_unary_attempt_budget_after_pending() {
                 "refs/heads/main",
                 RefWriteCondition::Missing,
                 &[1; 32],
-                "refs/mkit/packmap/main",
+                "refs/kit/packmap/main",
                 RefWriteCondition::Missing,
                 &[2; 32]
             )
@@ -432,7 +432,7 @@ fn receipt_observer_can_reenter_the_same_transport() {
                 "refs/heads/main",
                 RefWriteCondition::Missing,
                 &[1; 32],
-                "refs/mkit/packmap/main",
+                "refs/kit/packmap/main",
                 RefWriteCondition::Missing,
                 &[2; 32],
             )

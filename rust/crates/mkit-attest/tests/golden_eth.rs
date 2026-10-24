@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 use sha3::{Digest, Sha3_256};
 
 /// SPEC-WRITE-GRANTS §3.4's example grant, byte for byte (no final LF).
-const SPEC_EXAMPLE_GRANT: &str = "mkit-write-grant:v1
+const SPEC_EXAMPLE_GRANT: &str = "kit-write-grant:v1
 0x8ba1f109551bd432803012645ac136ddd64dba72
 0x8ba1f109551bd432803012645ac136ddd64dba72/website
 3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29

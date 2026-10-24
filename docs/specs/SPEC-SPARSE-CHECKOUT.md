@@ -29,7 +29,7 @@ local entry when it equals that entry's name. For a directory, a filter starting
 with its name followed by `/` also selects that directory for traversal.
 
 A filter permits at most 100,000 paths and 1 MiB total UTF-8 bytes. Its commitment
-is BLAKE3 over `mkit-sparse-filter-v2\0`, followed by sorted, deduplicated raw
+is BLAKE3 over `kit-sparse-filter-v2\0`, followed by sorted, deduplicated raw
 UTF-8 paths, each preceded by its byte length as u64 little-endian. The NUL in
 the domain string is one byte. Invalid filters MUST be rejected before fetching.
 
@@ -73,7 +73,7 @@ and reserialize byte-for-byte identically. Declared lengths MUST exactly match
 the remaining bytes. Trailing bytes, unsupported versions and noncanonical witnesses
 MUST be rejected. The selected-entry list is absent from the envelope.
 
-Cache files are disposable `.mkit/sparse/<tree-hex>.witness` files containing
+Cache files are disposable `.kit/sparse/<tree-hex>.witness` files containing
 current Tree metadata. Readers MUST validate the full witness and compare both
 Tree ID and filter commitment with caller expectations on every hit. Filename
 identity alone is insufficient. Invalid cache entries are misses and may be
@@ -82,7 +82,7 @@ overwritten after a verified rebuild. No older cache paths are read or migrated.
 ## 5. Transport and fallback
 
 HTTP uses `POST /<project>/trees/<tree-hex>/sparse?sparse=<filter-hex>` with JSON
-`{"filter":["path",...]}` and `application/x-mkit-sparse` response bytes. S3
+`{"filter":["path",...]}` and `application/x-kit-sparse` response bytes. S3
 uses `sparse/v2/<tree-hex>/<filter-hex>` beneath the configured object prefix.
 HTTP/S3 clients validate the requested root and filter and return locally derived
 entries. They MUST NOT return a successful fetch for a substituted witness.

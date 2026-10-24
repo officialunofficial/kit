@@ -1,6 +1,6 @@
 # mkit-sync
 
-Native clone, fetch, pull, and push for `.mkit` repositories, as a library.
+Native clone, fetch, pull, and push for `.kit` repositories, as a library.
 
 `mkit-sync` is the filesystem layer behind the `mkit` command line's `clone`,
 `fetch`, `pull`, and `push`. The read path walks a branch's packmap chain, downloads the packs it
@@ -31,7 +31,7 @@ use mkit_sync::{
 let source = TransportSource::new(&transport);
 let remote = CloneRemote {
     name: "default".into(),
-    url: "mkit+https://example.invalid/repo".into(),
+    url: "kit+https://example.invalid/repo".into(),
     kind: "http".into(),
 };
 
@@ -69,12 +69,12 @@ use `RemoteSource::repository_address` to bind it to the repository and
 origin. Sources without that identity retain the full walk. Changing the
 origin or repository prevents reuse, even with the same remote and branch names.
 
-The disposable common-dir cache lives in **.mkit/applied-packs/.heads/**.
+The disposable common-dir cache lives in **.kit/applied-packs/.heads/**.
 The leading dot keeps the directory outside the valid remote-record namespace.
 Its filename is lowercase BLAKE3 over the remote name, branch name, repository,
 and origin, in that order. Each UTF-8 value has an eight-byte little-endian
 byte-length prefix. File contents are six LF-separated fields, without a final
-LF: `mkit-fetch-head-v1`, lowercase head hash, lowercase tracking-tip hash,
+LF: `kit-fetch-head-v1`, lowercase head hash, lowercase tracking-tip hash,
 decimal pack count, decimal node count, and lowercase BLAKE3 of the preceding
 five fields including their four separators. The checksum detects accidental
 corruption. Readers cap input at 512 bytes and validate counts against the
@@ -183,8 +183,8 @@ backends ship:
   transport scheme (file, ssh, s3, http, connect) works. Credentials live in
   the transport the caller built; `with_error_classifier` lets a caller map
   transport-specific failures to typed errors. This backend supports push.
-* `ClientSource` (feature `client`): `mkit_client::Client` for `mkit+https` and
-  `mkit+http` remotes, anonymous or **signed by an injected
+* `ClientSource` (feature `client`): `mkit_client::Client` for `kit+https` and
+  `kit+http` remotes, anonymous or **signed by an injected
   `mkit_client::Signer` and `Clock`**. Private reads are authenticated by the
   signer; nothing is read from the environment or from user config. The async
   client is driven by an `Executor` (`block_on`): `FuturesExecutor` for a
@@ -234,7 +234,7 @@ Ticketed uploads and advances never invoke admission recovery. The callback also
 reports multipart progress after durable persistence and can cancel before a part.
 The host must bound its retry ladder and waits.
 
-The CLI uses a configured `ClientSource` for `mkit+https` and `mkit+http` push,
+The CLI uses a configured `ClientSource` for `kit+https` and `kit+http` push,
 fetch, pull, and clone. Native extra-CA, bearer credentials, grants, helpers, and
 configuration remain host-owned. Other schemes retain `TransportSource`.
 `NativeHttp` streams upload frames and incrementally decodes downloads; generic

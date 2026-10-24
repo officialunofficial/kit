@@ -21,7 +21,7 @@ performs the scheme switch).
 
 The SSH wire format is defined in
 [`SPEC-RPC`](SPEC-RPC.md) and lives in the generated
-[`ssh.proto`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto) bindings.
+[`ssh.proto`](../../rust/crates/mkit-rpc/proto/kit/rpc/v1/ssh/ssh.proto) bindings.
 This document covers the cross-transport contract: verbs, URL
 parsing, authentication, the forced-command server pattern, size
 caps, retry policy, and the error taxonomy.
@@ -75,7 +75,7 @@ The SSH transport overrides both methods to expose the
 `PackChunk` frame loop it already ran internally for the
 whole-buffer path (§4.2, §6). The Connect transport streams packs through a
 client-streaming `UploadPack` and a server-streaming `DownloadPack` RPC
-on the `mkit.transport.v1` service
+on the `kit.transport.v1` service
 ([SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) §6), which reuses
 this same `PackChunk` shape on the wire.
 
@@ -121,15 +121,15 @@ Programs MUST NOT pattern-match on the advisory message strings.
 
 | Scheme prefix | Transport | Notes |
 |---|---|---|
-| `mkit+memory://…` | In-memory (`MemoryTransport`) | Test / fuzz only. Cannot be opened by `remote_dispatch::open` &mdash; the URL is accepted by `mkit remote add` for round-tripping, but actual construction happens in-process. |
-| `mkit+file:///abs/path` | Filesystem (`FileTransport`) | Triple slash; everything after `mkit+file://` is taken as the on-disk root path. |
-| `mkit+https://host/project` | ConnectRPC (`mkit-transport-connect`'s `ConnectTransport`) &mdash; see [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) | The `mkit+` prefix is stripped before the inner call; production uses `https://`. |
-| `mkit+http://localhost…` | Same dispatch as above, plain HTTP for local dev | Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`, `localhost`) per `validate_http_scheme`; any other host returns `InsecureScheme`. |
-| `mkit+s3://endpoint/bucket[/prefix]` | S3-compatible (`S3Transport`) | The endpoint becomes `https://<endpoint>`; R2 is the primary target, AWS S3 also works but its CAS semantics are weaker (see §6.3). |
-| `mkit+ssh://user@host[:port]/path` | SSH child and `mkit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty/`.`/`..` segments. SCP-style `mkit+ssh://user@host:path`/`mkit+ssh://user@host:port:path` are also accepted (see [`mkit-transport-ssh/src/url.rs`](../../rust/crates/mkit-transport-ssh/src/url.rs)). |
+| `kit+memory://…` | In-memory (`MemoryTransport`) | Test / fuzz only. Cannot be opened by `remote_dispatch::open` &mdash; the URL is accepted by `mkit remote add` for round-tripping, but actual construction happens in-process. |
+| `kit+file:///abs/path` | Filesystem (`FileTransport`) | Triple slash; everything after `kit+file://` is taken as the on-disk root path. |
+| `kit+https://host/project` | ConnectRPC (`mkit-transport-connect`'s `ConnectTransport`) &mdash; see [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) | The `kit+` prefix is stripped before the inner call; production uses `https://`. |
+| `kit+http://localhost…` | Same dispatch as above, plain HTTP for local dev | Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`, `localhost`) per `validate_http_scheme`; any other host returns `InsecureScheme`. |
+| `kit+s3://endpoint/bucket[/prefix]` | S3-compatible (`S3Transport`) | The endpoint becomes `https://<endpoint>`; R2 is the primary target, AWS S3 also works but its CAS semantics are weaker (see §6.3). |
+| `kit+ssh://user@host[:port]/path` | SSH child and `mkit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty/`.`/`..` segments. SCP-style `kit+ssh://user@host:path`/`kit+ssh://user@host:port:path` are also accepted (see [`mkit-transport-ssh/src/url.rs`](../../rust/crates/mkit-transport-ssh/src/url.rs)). |
 
 Bare `ssh://`, `https://`, `http://`, `s3://`, `file://` URLs (without
-the `mkit+` prefix) are deliberately rejected. The prefix marks a URL
+the `kit+` prefix) are deliberately rejected. The prefix marks a URL
 as something mkit recognizes; mkit does not silently extend the namespace
 of any sibling tool.
 
@@ -138,7 +138,7 @@ of any sibling tool.
 ## 4. SSH transport
 
 mkit's SSH transport spawns a long-lived `ssh(1)` child process and
-exchanges length-prefixed [`SshFrame`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto)
+exchanges length-prefixed [`SshFrame`](../../rust/crates/mkit-rpc/proto/kit/rpc/v1/ssh/ssh.proto)
 messages on its stdin/stdout. The framing layer is defined in
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing).
 
@@ -238,9 +238,9 @@ CAS intent is carried entirely by the `RefExpectation` enum in
 `UpdateRef.expectation`. `expected_id` carries the digest only when
 `expectation = REF_EXPECTATION_MATCH`; it is ignored for `ANY` /
 `MISSING`. `RefExpectation` is defined once, in
-[`mkit/common/v1/refs.proto`](../../proto/mkit/common/v1/refs.proto),
+[`kit/common/v1/refs.proto`](../../proto/kit/common/v1/refs.proto),
 and imported by `ssh.proto` &mdash; it is the same enum (same wire numbers)
-the `mkit.repo.v1` multiplayer protocol uses for its own `UpdateRef`.
+the `kit.repo.v1` multiplayer protocol uses for its own `UpdateRef`.
 
 | `RefWriteCondition` | `expectation`             | `expected_id`       | Semantics |
 |---|---|---|---|
@@ -289,7 +289,7 @@ SSH transport security is delegated to the user's `ssh(1)` CLI:
 - Identity selection → `ssh-agent`/`~/.ssh/config`.
 - Kex / cipher / auth → `ssh(1)` / sshd.
 
-Three `.mkit/config` keys override `ssh(1)` defaults for the mkit SSH
+Three `.kit/config` keys override `ssh(1)` defaults for the mkit SSH
 child only (see [`SshOptions`](../../rust/crates/mkit-transport-ssh/src/lib.rs)):
 
 ```
@@ -373,8 +373,8 @@ disambiguation.
 
 ## 5. HTTP transport (removed)
 
-The JSON REST transport no longer exists. `mkit+https://` and
-`mkit+http://` remotes use the Connect transport. Read
+The JSON REST transport no longer exists. `kit+https://` and
+`kit+http://` remotes use the Connect transport. Read
 [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) for its wire contract.
 Verifiable sparse-checkout fetch has no Connect equivalent. The S3
 transport carries it (§6.6).
@@ -390,7 +390,7 @@ talks SigV4 against Cloudflare R2 (primary target) or AWS S3
 ### 6.1 Object layout
 
 The table below lists canonical repository-relative keys. For a URL of
-the form `mkit+s3://endpoint/bucket/prefix`, the transport prepends
+the form `kit+s3://endpoint/bucket/prefix`, the transport prepends
 `prefix/` to every canonical object key and every `ListObjectsV2`
 query prefix. A no-prefix URL continues to address keys at bucket root.
 Prefixes MUST NOT be empty path segments, `.`, `..`, contain duplicate
@@ -405,9 +405,9 @@ Examples:
 
 | URL | Canonical key | Effective S3 path |
 |---|---|---|
-| `mkit+s3://host/bucket` | `packs/<hex>` | `/bucket/packs/<hex>` |
-| `mkit+s3://host/bucket/repo-a` | `packs/<hex>` | `/bucket/repo-a/packs/<hex>` |
-| `mkit+s3://host/bucket/repo-a` | `refs/heads/main` | `/bucket/repo-a/refs/heads/main` |
+| `kit+s3://host/bucket` | `packs/<hex>` | `/bucket/packs/<hex>` |
+| `kit+s3://host/bucket/repo-a` | `packs/<hex>` | `/bucket/repo-a/packs/<hex>` |
+| `kit+s3://host/bucket/repo-a` | `refs/heads/main` | `/bucket/repo-a/refs/heads/main` |
 
 For `list_refs("refs/heads/")` under `repo-a`, the transport sends
 `ListObjectsV2` to `/bucket?list-type=2&prefix=repo-a/refs/heads/`,
@@ -611,7 +611,7 @@ concerns.
 | Transport | `Missing` | `Match(h)` | Cross-process safe |
 |---|---|---|---|
 | Memory | `Mutex`-protected read-then-write | `Mutex`-protected | N/A (test only) |
-| File   | `link(2)` after `write_atomic` (atomic per POSIX) | OS exclusive file lock on `<root>/.mkit/refs/.lock` (via `std::fs::File::lock`) wraps a read-then-`write_atomic`; an in-process `Mutex` keeps multi-threaded callers within one process from contending on the OS lock | Yes |
+| File   | `link(2)` after `write_atomic` (atomic per POSIX) | OS exclusive file lock on `<root>/.kit/refs/.lock` (via `std::fs::File::lock`) wraps a read-then-`write_atomic`; an in-process `Mutex` keeps multi-threaded callers within one process from contending on the OS lock | Yes |
 | S3     | `If-None-Match: *` enforced by R2 | `If-Match: "<md5-of-wire>"` enforced by R2 | Yes (on R2; S3 multipart breaks `Match` &mdash; see §6.3) |
 | SSH    | Server-enforced via `expectation = REF_EXPECTATION_MISSING` | Server-enforced via `expectation = REF_EXPECTATION_MATCH` plus 32-byte `expected_id` | Depends on server-side ref-store atomicity |
 
@@ -676,7 +676,7 @@ These hold for every conformant transport, regardless of scheme:
 | Invariant | Enforced by |
 |---|---|
 | Errors form a closed taxonomy; no coupling to message strings | `TransportError` variants at the trait boundary; advisory messages MUST NOT be pattern-matched (§2) |
-| No scheme guessing or fallback | `mkit+` prefix required; unsupported schemes error at dispatch instead of guessing (§3) |
+| No scheme guessing or fallback | `kit+` prefix required; unsupported schemes error at dispatch instead of guessing (§3) |
 | No plaintext HTTP off loopback | `validate_http_scheme` → `InsecureScheme` for any non-loopback `http://` host (§3) |
 | Stored pack bytes match their announced digest | SSH: server verifies `BLAKE3(received) == pack_id` before storing (§4.2) |
 | A rejected upload never creates or overwrites the destination pack | SSH upload-stream validation: `total_bytes` required and capped, `pack_id` match, contiguous offsets, exact end (§4.2) |

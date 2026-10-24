@@ -301,7 +301,7 @@ fn rebase_i_squash_with_conflict_then_continue() {
         "squash should pause on the line-1 conflict"
     );
     assert!(
-        repo.path.join(".mkit/rebase-apply").exists(),
+        repo.path.join(".kit/rebase-apply").exists(),
         "a paused rebase should leave in-progress state"
     );
 
@@ -328,7 +328,7 @@ fn rebase_i_squash_with_conflict_then_continue() {
         repo.path.join("a.txt").exists(),
         "a.txt lost in the squash fold"
     );
-    assert!(!repo.path.join(".mkit/rebase-apply").exists());
+    assert!(!repo.path.join(".kit/rebase-apply").exists());
 }
 
 #[test]
@@ -346,7 +346,7 @@ fn rebase_i_squash_as_first_line_is_rejected_without_mutating() {
     );
     // Rejected before any mutation.
     assert_eq!(log_subjects(&repo), before);
-    assert!(!repo.path.join(".mkit/rebase-apply").exists());
+    assert!(!repo.path.join(".kit/rebase-apply").exists());
 }
 
 /// `rebase -i <onto>` when the current branch is *behind* `onto` (an
@@ -428,7 +428,7 @@ fn rebase_accepts_head_relative_revspec() {
 #[test]
 fn rebase_accepts_short_hash_revspec() {
     let repo = setup();
-    let main_hash = fs::read_to_string(repo.path.join(".mkit/refs/heads/main")).unwrap();
+    let main_hash = fs::read_to_string(repo.path.join(".kit/refs/heads/main")).unwrap();
     let short = &main_hash.trim()[..12];
     let out = run(&repo, &["rebase", short]);
     assert!(
@@ -478,7 +478,7 @@ fn rebase_rejects_unknown_revspec() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(log_subjects(&repo), before);
-    assert!(!repo.path.join(".mkit/rebase-apply").exists());
+    assert!(!repo.path.join(".kit/rebase-apply").exists());
 }
 
 #[test]

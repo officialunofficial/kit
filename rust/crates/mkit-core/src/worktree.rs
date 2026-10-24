@@ -1,6 +1,6 @@
 //! Worktree → tree-object builder.
 //!
-//! Walks a directory, applies `.mkitignore`, hashes each file as a
+//! Walks a directory, applies `.kitignore`, hashes each file as a
 //! [`Blob`](crate::object::Blob), recurses on subdirectories, validates
 //! symlink targets against path-traversal, and writes a single root
 //! [`Tree`] into the supplied [`ObjectStore`].
@@ -113,13 +113,13 @@ pub struct StatObservation {
 }
 
 /// Build a tree object for `dir` and its subdirectories. Honours the
-/// `.gitignore` + `.mkitignore` ignore files loaded from `dir`.
+/// `.gitignore` + `.kitignore` ignore files loaded from `dir`.
 ///
 /// Ignore rules only exclude **untracked** content: a path that is tracked
 /// (or whose subtree holds tracked content) is always included even if it
 /// matches an ignore rule, so a tracked file matching `.gitignore` is never
 /// dropped from the worktree snapshot (which would misreport it as a deletion
-/// in status/diff). The staging index at `<dir>/.mkit/index` provides the
+/// in status/diff). The staging index at `<dir>/.kit/index` provides the
 /// tracked set; an absent index means nothing is tracked.
 ///
 /// # Errors
@@ -132,7 +132,7 @@ pub fn build_tree<S: ObjectSink + Sync + ?Sized>(sink: &S, dir: &Path) -> Worktr
 /// set (`index`). Callers that seed their index from `HEAD` when no index
 /// file exists yet (status, restore safety) MUST pass it here so a tracked
 /// file that matches an ignore rule is not dropped right after a checkout.
-/// `None` falls back to the on-disk `<dir>/.mkit/index` (empty if absent).
+/// `None` falls back to the on-disk `<dir>/.kit/index` (empty if absent).
 ///
 /// # Errors
 /// See [`WorktreeError`].
@@ -1704,8 +1704,8 @@ mod tests {
     fn build_tree_skips_mkit_directory() {
         let (_sd, store) = fresh_store();
         let work = TempDir::new().unwrap();
-        fs::create_dir(work.path().join(".mkit")).unwrap();
-        fs::write(work.path().join(".mkit/should_skip"), b"").unwrap();
+        fs::create_dir(work.path().join(".kit")).unwrap();
+        fs::write(work.path().join(".kit/should_skip"), b"").unwrap();
         fs::write(work.path().join("keep.txt"), b"kept").unwrap();
         let h = build_tree(&store, work.path()).unwrap();
         let obj = store.read_object(&h).unwrap();
@@ -1731,7 +1731,7 @@ mod tests {
     fn build_tree_respects_mkitignore() {
         let (_sd, store) = fresh_store();
         let work = TempDir::new().unwrap();
-        fs::write(work.path().join(".mkitignore"), b"*.log\n").unwrap();
+        fs::write(work.path().join(".kitignore"), b"*.log\n").unwrap();
         fs::write(work.path().join("keep.txt"), b"kept").unwrap();
         fs::write(work.path().join("debug.log"), b"ignored").unwrap();
         let h = build_tree(&store, work.path()).unwrap();
@@ -1739,9 +1739,9 @@ mod tests {
         let Object::Tree(t) = obj else {
             panic!("expected tree");
         };
-        // .mkitignore + keep.txt, but not debug.log.
+        // .kitignore + keep.txt, but not debug.log.
         assert_eq!(t.entries.len(), 2);
-        assert_eq!(t.entries[0].name.as_slice(), b".mkitignore");
+        assert_eq!(t.entries[0].name.as_slice(), b".kitignore");
         assert_eq!(t.entries[1].name.as_slice(), b"keep.txt");
     }
 
@@ -2227,10 +2227,10 @@ mod tests {
         let (_sd, store) = fresh_store();
         let h = write_blob(&store, b"x");
         let mut idx = Index::new();
-        // ".mkit" is rejected by TreeEntry::validate_name as repo
+        // ".kit" is rejected by TreeEntry::validate_name as repo
         // metadata aliasing.
         idx.entries.push(IndexEntry {
-            path: ".mkit".into(),
+            path: ".kit".into(),
             status: EntryStatus::Blob,
             object_hash: h,
             mtime_ns: 0,

@@ -55,11 +55,11 @@
 //!               = domain_digest(TYPE_DOMAIN, bmt_root(leaves))
 //!
 //! ChunkedBlob   leaves = [meta_leaf] ++ chunks
-//!   meta_leaf   = domain_digest("mkit-cblob-meta-v1", total_size_le ‖ chunk_size_le)
+//!   meta_leaf   = domain_digest("kit-cblob-meta-v1", total_size_le ‖ chunk_size_le)
 //!   chunk i     -> BMT position i+1   (meta is position 0)
 //!
 //! Tree          leaves = entries (existing lex order)
-//!   entry leaf  = domain_digest("mkit-tree-entry-v1", name_len_le ‖ name ‖ mode ‖ object_hash)
+//!   entry leaf  = domain_digest("kit-tree-entry-v1", name_len_le ‖ name ‖ mode ‖ object_hash)
 //! ```
 //!
 //! The outer `wrap_id` wrap makes the id type-distinct: a bare BMT root
@@ -100,13 +100,13 @@ use crate::hash::{HASH_LEN, Hash, Hasher, domain_digest, hash};
 use crate::object::{ChunkedBlob, Tree, TreeEntry};
 
 /// Type domain for the outer identity wrap of a `ChunkedBlob`.
-const CHUNKED_TYPE_DOMAIN: &[u8] = b"mkit.chunked\x00";
+const CHUNKED_TYPE_DOMAIN: &[u8] = b"kit.chunked\x00";
 /// Type domain for the outer identity wrap of a `Tree`.
-const TREE_TYPE_DOMAIN: &[u8] = b"mkit.tree\x00";
+const TREE_TYPE_DOMAIN: &[u8] = b"kit.tree\x00";
 /// Leaf domain binding a `ChunkedBlob`'s `total_size`/`chunk_size`.
-const CBLOB_META_DOMAIN: &[u8] = b"mkit-cblob-meta-v1";
+const CBLOB_META_DOMAIN: &[u8] = b"kit-cblob-meta-v1";
 /// Leaf domain for a `Tree` entry's `(name, mode, object_hash)` triple.
-const TREE_ENTRY_DOMAIN: &[u8] = b"mkit-tree-entry-v1";
+const TREE_ENTRY_DOMAIN: &[u8] = b"kit-tree-entry-v1";
 
 /// Upper bound on sibling levels in a [`Proof`]: `u32::BITS`, matching
 /// `commonware_storage::bmt::MAX_LEVELS`. Because [`Proof::leaf_count`] is a
@@ -789,8 +789,8 @@ pub fn compute_tree_id(tree: &Tree) -> Hash {
 /// Pinned from a test run (see `empty_tree_id_matches_constant`); the
 /// empty BMT root is `H(leaf_count ‖ H(""))`, NOT `H(0 ‖ 0)`.
 pub const TREE_EMPTY_ID: Hash = [
-    0x1a, 0xb8, 0xd0, 0x78, 0x8b, 0x29, 0xfe, 0x59, 0x92, 0x01, 0x1e, 0x64, 0xd6, 0xc9, 0x22, 0xec,
-    0x93, 0xf4, 0x24, 0x8b, 0x37, 0x55, 0xb9, 0x2b, 0x15, 0xb0, 0x7e, 0x66, 0x4c, 0xb1, 0x56, 0x52,
+    0xb2, 0x91, 0x17, 0xce, 0x9b, 0x3d, 0x66, 0xba, 0x98, 0xcd, 0x0a, 0x57, 0x14, 0x54, 0x00, 0xf0,
+    0xbf, 0x6f, 0xff, 0x8b, 0x5c, 0x27, 0xc4, 0x55, 0x2d, 0x80, 0xa3, 0x84, 0x46, 0xf2, 0x7e, 0xf7,
 ];
 
 // ---------------------------------------------------------------------------

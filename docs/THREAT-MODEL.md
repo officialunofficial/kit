@@ -44,7 +44,7 @@ across one of these lines MUST treat the input as untrusted.
 | Boundary                                     | Trusted side          | Untrusted side                              |
 |----------------------------------------------|-----------------------|---------------------------------------------|
 | Local user ↔ remote repo author              | the running user      | files inside a cloned tree, including       |
-|                                              |                       | the repo's `.mkit/config`                   |
+|                                              |                       | the repo's `.kit/config`                   |
 | Local user ↔ same-host other UID             | the running user      | other UIDs on the host                      |
 | Transport peer (network)                     | the peer the user     | every other host on the path                |
 |                                              | configured            |                                             |
@@ -66,7 +66,7 @@ and the implementation has tests or fuzz coverage backing it.
 ### 3.1 Hostile remote repo author
 
 Attacker controls every file in the cloned tree, including
-`.mkit/config`, working-tree contents, ref files, packs, and any
+`.kit/config`, working-tree contents, ref files, packs, and any
 attestation envelope they push.
 
 mkit defends:
@@ -75,12 +75,12 @@ mkit defends:
   on read; pack readers refuse oversize allocations
   (`specs/SPEC-PACKFILE.md`, `specs/SPEC-DELTA.md`).
 - Worktree containment. Symlinks pointing outside the repo root, and
-  paths matching `.mkit` / `.git` (case-insensitive), are rejected
+  paths matching `.kit` / `.git` (case-insensitive), are rejected
   during checkout.
 - Signature and attestation verification. Trust roots come from the
   user-scoped trust-roots file (§5), not from the cloned repo.
 - Choice of key material and external processes. Per §4, a hostile
-  `.mkit/config` cannot select which key file is read, which binary
+  `.kit/config` cannot select which key file is read, which binary
   is spawned as an external signer, which keystore backend/key ref is
   used, or what argv an external signer gets.
 - Unsigned/forged history on `clone`/`pull`/`fetch`. Every
@@ -95,7 +95,7 @@ mkit defends:
   authorized-signer binding yet &mdash; separate follow-up work). Opt-out is
   explicit and user-scoped only (`--no-verify-signatures` / the
   user-scoped `pull.require_signed = false` config, never settable from
-  a cloned repo's own `.mkit/config` &mdash; see §4).
+  a cloned repo's own `.kit/config` &mdash; see §4).
 
 mkit does NOT defend:
 
@@ -126,7 +126,7 @@ mkit defends:
   (SPEC-GIT-IMPORT §3).
 - Translation provenance. Every translated commit/tag is signed by
   the local IMPORT key, original raw bytes are retained
-  sha1-addressed under `.mkit/git/<name>/raw/` as audit evidence, and
+  sha1-addressed under `.kit/git/<name>/raw/` as audit evidence, and
   each imported head gets a `git-import/v1` attestation binding the
   git commit id, canonical remote identity, and mkit twin.
   `mkit git verify` re-checks all of it offline.
@@ -178,7 +178,7 @@ into running their code or by exploiting an unrelated process.
 
 mkit does NOT defend against this case. Once an attacker runs as the
 same UID, they can read the key file, spawn arbitrary external
-signers, edit `.mkit/config`, and so on. mkit's threat model assumes
+signers, edit `.kit/config`, and so on. mkit's threat model assumes
 the local UID is trusted.
 
 The mitigations in §4 and §5 are about preventing a *remote* repo
@@ -228,7 +228,7 @@ mkit does NOT defend:
 ## 4. Configuration scope split
 
 mkit reads two configuration files. Their scope is partitioned by
-attacker model: a hostile clone can write `<repo>/.mkit/config` but
+attacker model: a hostile clone can write `<repo>/.kit/config` but
 it cannot write the user-scoped file at
 `$XDG_CONFIG_HOME/mkit/config` (`~/.config/mkit/config` by default).
 
@@ -314,7 +314,7 @@ there is no repo config knob that sets it. Both commands additionally
 refuse an in-repo trust-roots path unless `--trust-roots` was passed
 explicitly (`warn_if_unsafe_trust_roots` in
 `rust/crates/mkit-cli/src/commands/trust_roots.rs`) &mdash; a hostile clone
-that ships `.mkit/trust-roots.toml` listing attacker keys cannot get it
+that ships `.kit/trust-roots.toml` listing attacker keys cannot get it
 selected implicitly.
 
 Without `--trusted`, `mkit verify` proves only that the object's
@@ -422,7 +422,7 @@ takes no defensive posture against them.
 - Recovery from a compromised signing key. There is no onchain or
   in-band revocation; the user's recourse is to publish a new key
   and re-sign forward history.
-- A `.mkit/` directory served from a network filesystem (NFS, SMB/CIFS,
+- A `.kit/` directory served from a network filesystem (NFS, SMB/CIFS,
   or most FUSE-backed network mounts). Every fail-closed exclusion
   guarantee that depends on `mkit-core::repo_lock` &mdash; including
   `SPEC-GC.md`'s GC-vs-writer guarantee and every lock in
@@ -436,7 +436,7 @@ takes no defensive posture against them.
   fallback locking strategy. Repositories that must be shared across
   hosts should use one of mkit's network transports
   (`docs/specs/SPEC-TRANSPORT.md`) instead of a shared network-mounted
-  `.mkit/` directory. See `rust/crates/mkit-core/src/repo_lock.rs`'s
+  `.kit/` directory. See `rust/crates/mkit-core/src/repo_lock.rs`'s
   module doc for the full caveat.
 
 ---
@@ -458,7 +458,7 @@ matching update here.
   non-extractability properties.
 - `cargo fuzz` targets cover delta decode, pack reader, the object
   deserializer, and the encrypted software key record parser (`docs/FUZZ.md`).
-- Integration tests assert that a hostile `<repo>/.mkit/config`
+- Integration tests assert that a hostile `<repo>/.kit/config`
   cannot set any user-scoped key (warning plus ignored). Per-key
   coverage lives in `rust/crates/mkit-cli/tests/repo_config_forbidden_keys.rs`,
   and the in-process meta-test

@@ -12,7 +12,7 @@
 //! root (clock-free), and [`expire`] drops entries older than the
 //! retention policy so they stop pinning objects.
 //!
-//! On-disk: `.mkit/recovery-log`, append-only, one tab-delimited record
+//! On-disk: `.kit/recovery-log`, append-only, one tab-delimited record
 //! per line — `<unix_ts>\t<op>\t<64-hex superseded>\t<branch>`. The
 //! branch is last because ref names cannot contain tabs or spaces; `op`
 //! is a short internal token. Parsing is **strict** (fail closed) so a
@@ -43,7 +43,7 @@ use crate::atomic::{sync_parent_dir, write_atomic};
 use crate::hash::{self, Hash};
 use crate::layout::RepoLayout;
 
-/// File name under `.mkit/` for the append-only recovery log.
+/// File name under `.kit/` for the append-only recovery log.
 pub const RECOVERY_LOG: &str = "recovery-log";
 
 /// Default retention: keep entries from the last 90 days, and always the

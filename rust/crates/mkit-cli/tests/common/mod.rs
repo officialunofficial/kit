@@ -103,7 +103,7 @@ pub(crate) fn mkit_env(
 
 /// Prewrite a deterministic Ed25519 signing key at the default path.
 pub(crate) fn install_fixed_key(root: &Path) -> Result<(), String> {
-    let keys = root.join(".mkit").join("keys");
+    let keys = root.join(".kit").join("keys");
     std::fs::create_dir_all(&keys).map_err(|e| format!("mkdir keys: {e}"))?;
     let kp = KeyPair::from_seed(KEY_SEED);
     save_key(&keys.join("default.key"), &kp).map_err(|e| format!("save_key: {e}"))?;
@@ -266,7 +266,7 @@ pub(crate) fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
             .map_err(|e| format!("[{label}] live object {} missing/corrupt: {e}", to_hex(h)))?;
     }
 
-    // No leaked *held* locks: every `.mkit/*.lock` is acquired and released
+    // No leaked *held* locks: every `.kit/*.lock` is acquired and released
     // within a single command, so none may still be kernel-locked once the
     // command has returned. The sentinel files themselves are allowed (even
     // expected) to persist on disk — `repo_lock` never unlinks them (see
@@ -285,13 +285,13 @@ pub(crate) fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
                 .read(true)
                 .write(true)
                 .open(&path)
-                .map_err(|e| format!("[{label}] open lock sentinel .mkit/{name}: {e}"))?;
+                .map_err(|e| format!("[{label}] open lock sentinel .kit/{name}: {e}"))?;
             match file.try_lock() {
                 Ok(()) => {
                     let _ = file.unlock();
                 }
                 Err(_) => {
-                    return Err(format!("[{label}] leaked held lock: .mkit/{name}"));
+                    return Err(format!("[{label}] leaked held lock: .kit/{name}"));
                 }
             }
         }
@@ -320,7 +320,7 @@ pub(crate) fn in_progress(mkit_dir: &Path) -> Option<&'static str> {
 
 /// If `verb` left any on-disk residue after concluding, return a description of
 /// the first piece found — else `None`. Residue is the in-progress marker, the
-/// shared `mkit-conflicts` sidecar, or the op-specific message file
+/// shared `kit-conflicts` sidecar, or the op-specific message file
 /// (`MERGE_MSG`/`CHERRY_PICK_MSG`/`REVERT_MSG`) — all of which the core
 /// `clear_*_state` helpers remove. `ORIG_HEAD` is deliberately NOT checked: a
 /// `reset` legitimately leaves it. Rebase keeps its sidecar/message *inside*
@@ -337,7 +337,7 @@ pub(crate) fn operation_residue(mkit_dir: &Path, verb: &str) -> Option<String> {
         }
         _ => return None,
     };
-    for residue in [head, "mkit-conflicts", msg] {
+    for residue in [head, "kit-conflicts", msg] {
         if mkit_dir.join(residue).exists() {
             return Some(residue.to_owned());
         }
@@ -374,7 +374,7 @@ impl Repo {
         self.xdg.path()
     }
     pub(crate) fn mkit_dir(&self) -> PathBuf {
-        self.path().join(".mkit")
+        self.path().join(".kit")
     }
 
     pub(crate) fn run(&self, args: &[&str]) -> Output {

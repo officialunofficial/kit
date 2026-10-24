@@ -6,7 +6,7 @@
 //! `file://`, `https://`, `s3://`, and `ssh://` are all wired via
 //! `remote_dispatch::open`. `--sparse` is implemented (behind the
 //! `sparse-checkout` feature): the patterns are persisted to
-//! `.mkit/sparse-checkout` and a verifiable sparse checkout is performed
+//! `.kit/sparse-checkout` and a verifiable sparse checkout is performed
 //! after the pull. `--depth` (shallow clone) is still deferred and is
 //! rejected with a clear message rather than silently ignored.
 
@@ -45,12 +45,12 @@ struct CloneOpts {
     /// branch.
     #[arg(short = 'b', long = "branch", value_name = "NAME")]
     branch: Option<String>,
-    /// Name the cloned remote `<name>` in the new repo's `.mkit/config`
+    /// Name the cloned remote `<name>` in the new repo's `.kit/config`
     /// instead of the implicit flat `default` remote (mirrors `mkit
     /// remote add <name> <url>`).
     #[arg(short = 'o', long = "origin", value_name = "NAME")]
     origin: Option<String>,
-    /// Remote URL (e.g. `mkit+file:///abs/path`).
+    /// Remote URL (e.g. `kit+file:///abs/path`).
     url: String,
     /// Destination directory. Defaults to the final URL segment.
     dir: Option<String>,
@@ -76,7 +76,7 @@ pub fn run(args: &[String]) -> u8 {
         return super::usage_error("mkit clone: --depth is not yet wired");
     }
     // `--sparse` no longer rejects — the patterns are persisted to
-    // `.mkit/sparse-checkout` after the pack pull lands, and the next
+    // `.kit/sparse-checkout` after the pack pull lands, and the next
     // `mkit checkout` honours them. Sparse fetch over the wire is
     // wired through `mkit checkout --sparse` itself.
     let url = opts.url.as_str();
@@ -112,7 +112,7 @@ pub fn run(args: &[String]) -> u8 {
     // A non-default `-o <name>` is a genuine named remote, persisted the way
     // `mkit remote add <name> <url>` would, so the pull below (called with
     // this same name) resolves tracking refs under `refs/remotes/<name>/*`
-    // consistently with what `.mkit/config` records.
+    // consistently with what `.kit/config` records.
     let target_layout = match mkit_sync::init_clone_dir(&target, &remote) {
         Ok(layout) => layout,
         Err(e) => return emit_err(&e.to_string(), clone_init_exit_code(&e)),
@@ -169,7 +169,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // If `--sparse` was supplied, persist the patterns to
-    // `.mkit/sparse-checkout` so the next checkout honours them, and
+    // `.kit/sparse-checkout` so the next checkout honours them, and
     // run a verifiable sparse checkout against HEAD right now.
     #[cfg(feature = "sparse-checkout")]
     if !opts.sparse.is_empty()
@@ -187,7 +187,7 @@ pub fn run(args: &[String]) -> u8 {
     exit::OK
 }
 
-/// Persist the supplied sparse patterns to `.mkit/sparse-checkout` and
+/// Persist the supplied sparse patterns to `.kit/sparse-checkout` and
 /// drive a verifiable sparse re-materialise against the freshly-cloned
 /// HEAD. Mirrors the inline sparse path used by `mkit checkout
 /// --sparse`, but the entry point is "we just landed a full clone".
@@ -207,7 +207,7 @@ fn apply_sparse_after_clone(
     let layout = mkit_core::layout::discover(target)
         .map_err(|e| (format!("worktree discovery: {e}"), exit::DATAERR))?;
 
-    // Persist patterns to .mkit/sparse-checkout for follow-up commands.
+    // Persist patterns to .kit/sparse-checkout for follow-up commands.
     let pat_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
     write_sparse_checkout(&layout, &pat_refs)
         .map_err(|e| (format!("write sparse-checkout: {e}"), exit::CANTCREAT))?;
@@ -288,7 +288,7 @@ fn clone_init_exit_code(error: &mkit_sync::CloneInitError) -> u8 {
 fn derive_dir_from_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
     let last = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    let stripped = last.strip_suffix(".mkit").unwrap_or(last);
+    let stripped = last.strip_suffix(".kit").unwrap_or(last);
     if stripped.is_empty() {
         "repo".to_string()
     } else {
@@ -298,11 +298,11 @@ fn derive_dir_from_url(url: &str) -> String {
 
 fn scheme_of(url: &str) -> Option<&'static str> {
     for (prefix, kind) in [
-        ("mkit+file://", "file"),
-        ("mkit+https://", "http"),
-        ("mkit+s3://", "s3"),
-        ("mkit+ssh://", "ssh"),
-        ("mkit+memory://", "memory"),
+        ("kit+file://", "file"),
+        ("kit+https://", "http"),
+        ("kit+s3://", "s3"),
+        ("kit+ssh://", "ssh"),
+        ("kit+memory://", "memory"),
     ] {
         if url.starts_with(prefix) {
             return Some(kind);
@@ -313,7 +313,7 @@ fn scheme_of(url: &str) -> Option<&'static str> {
 
 /// Validate `--url`, `-o`/`--origin`, and `-b`/`--branch` before any
 /// filesystem or config side effect. `-o`/`--origin` names the remote
-/// that gets persisted to the new repo's `.mkit/config`; `-b`/`--branch`
+/// that gets persisted to the new repo's `.kit/config`; `-b`/`--branch`
 /// selects which advertised branch to land HEAD on. Both flow into
 /// config/ref writes, so they get the same config-injection guard as
 /// the URL, plus their own shape checks. Returns the resolved origin
@@ -321,7 +321,7 @@ fn scheme_of(url: &str) -> Option<&'static str> {
 fn validate_clone_inputs(opts: &CloneOpts) -> Result<String, u8> {
     let url = opts.url.as_str();
     // Reject control characters (newline et al.) before the URL is
-    // persisted to `.mkit/config` via `config::write` (which emits values
+    // persisted to `.kit/config` via `config::write` (which emits values
     // raw) — a newline would inject extra `key = value` lines into the
     // config (config injection). Mirrors the `mkit remote add` check.
     if config::validate_value(url).is_err() {

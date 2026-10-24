@@ -1,18 +1,18 @@
-//! Strict `mkit+ssh://` URL parser.
+//! Strict `kit+ssh://` URL parser.
 //!
 //! SPEC-TRANSPORT §3 and SSH-SECURITY.md §2 are the authority for what
-//! is (and isn't) a legal `mkit+ssh://` URL.
+//! is (and isn't) a legal `kit+ssh://` URL.
 //!
-//! Accepted forms (all with the mandatory `mkit+` prefix):
+//! Accepted forms (all with the mandatory `kit+` prefix):
 //!
 //! ```text
-//! mkit+ssh://user@host/path
-//! mkit+ssh://user@host:port/path
-//! mkit+ssh://user@host:path           (legacy SCP-style, no port)
-//! mkit+ssh://user@host:port:path      (legacy SCP-style, explicit port)
+//! kit+ssh://user@host/path
+//! kit+ssh://user@host:port/path
+//! kit+ssh://user@host:path           (legacy SCP-style, no port)
+//! kit+ssh://user@host:port:path      (legacy SCP-style, explicit port)
 //! ```
 //!
-//! The `user@` prefix is REQUIRED. The `mkit+` prefix is REQUIRED. Paths
+//! The `user@` prefix is REQUIRED. The `kit+` prefix is REQUIRED. Paths
 //! are restricted to a conservative ASCII subset (`[A-Za-z0-9._-/]`) with
 //! no empty / `.` / `..` segments so neither the on-disk config nor the
 //! remote-shell transport can be confused by shell meta-characters, NUL
@@ -21,11 +21,11 @@
 use mkit_core::protocol::TransportError;
 
 /// Mandatory strict-namespace prefix for every mkit remote URL
-/// (`mkit+ssh://…`). Forbidding bare `ssh://…` is deliberate: we do not
+/// (`kit+ssh://…`). Forbidding bare `ssh://…` is deliberate: we do not
 /// want the parser to silently accept a looser superset.
-pub const MKIT_SSH_PREFIX: &str = "mkit+ssh://";
+pub const MKIT_SSH_PREFIX: &str = "kit+ssh://";
 
-/// A resolved `mkit+ssh://` target. All fields are owned so the struct
+/// A resolved `kit+ssh://` target. All fields are owned so the struct
 /// outlives the caller's input buffer — the SSH child process is spawned
 /// asynchronously and we cannot rely on borrows from the URL string.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +109,7 @@ pub fn validate_ssh_path(path: &str) -> Result<(), TransportError> {
     Ok(())
 }
 
-/// Parse a `mkit+ssh://…` URL into a [`SshTarget`].
+/// Parse a `kit+ssh://…` URL into a [`SshTarget`].
 ///
 /// Returns [`TransportError::InvalidRef`] with a human-readable reason
 /// for any validation failure. (`InvalidRef` is reused here as the
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn parses_url_form_no_port() {
-        let t = parse_mkit_ssh_url("mkit+ssh://alice@host.example.com/repos/project").unwrap();
+        let t = parse_mkit_ssh_url("kit+ssh://alice@host.example.com/repos/project").unwrap();
         assert_eq!(t.user, "alice");
         assert_eq!(t.host, "host.example.com");
         assert_eq!(t.port, None);
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn parses_url_form_with_port() {
-        let t = parse_mkit_ssh_url("mkit+ssh://alice@host.example.com:2222/repos/project").unwrap();
+        let t = parse_mkit_ssh_url("kit+ssh://alice@host.example.com:2222/repos/project").unwrap();
         assert_eq!(t.user, "alice");
         assert_eq!(t.host, "host.example.com");
         assert_eq!(t.port, Some(2222));
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn parses_scp_form_no_port() {
-        let t = parse_mkit_ssh_url("mkit+ssh://git@github.com:org/repo").unwrap();
+        let t = parse_mkit_ssh_url("kit+ssh://git@github.com:org/repo").unwrap();
         assert_eq!(t.user, "git");
         assert_eq!(t.host, "github.com");
         assert_eq!(t.port, None);
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn parses_scp_form_with_port() {
-        let t = parse_mkit_ssh_url("mkit+ssh://alice@host.example.com:2222:repos/project").unwrap();
+        let t = parse_mkit_ssh_url("kit+ssh://alice@host.example.com:2222:repos/project").unwrap();
         assert_eq!(t.user, "alice");
         assert_eq!(t.host, "host.example.com");
         assert_eq!(t.port, Some(2222));
@@ -349,8 +349,8 @@ mod tests {
 
     #[test]
     fn accepts_deep_nested_path() {
-        let t = parse_mkit_ssh_url("mkit+ssh://deploy@internal.host/projects/deep/nested/path")
-            .unwrap();
+        let t =
+            parse_mkit_ssh_url("kit+ssh://deploy@internal.host/projects/deep/nested/path").unwrap();
         assert_eq!(t.path, "/projects/deep/nested/path");
     }
 
@@ -372,36 +372,36 @@ mod tests {
     #[test]
     fn rejects_missing_user() {
         // No `@` at all.
-        assert!(parse_mkit_ssh_url("mkit+ssh://host.example.com/repo").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://host.example.com/repo").is_err());
     }
 
     #[test]
     fn rejects_empty_user() {
         // `@` present but user is empty (`@host:...`).
-        assert!(parse_mkit_ssh_url("mkit+ssh://@host.example.com/repo").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://@host.example.com/repo").is_err());
     }
 
     #[test]
     fn rejects_missing_host() {
-        assert!(parse_mkit_ssh_url("mkit+ssh://user@").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://user@").is_err());
     }
 
     #[test]
     fn rejects_empty_path_url_form() {
         // No `/path` and no `:path`.
-        assert!(parse_mkit_ssh_url("mkit+ssh://user@host.example.com").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://user@host.example.com").is_err());
     }
 
     #[test]
     fn rejects_missing_port_value() {
         // Bare `host:` with no port digits.
-        assert!(parse_mkit_ssh_url("mkit+ssh://user@host:/repo").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://user@host:/repo").is_err());
     }
 
     #[test]
     fn rejects_non_u16_port() {
         assert!(
-            parse_mkit_ssh_url("mkit+ssh://user@host:99999/repo").is_err(),
+            parse_mkit_ssh_url("kit+ssh://user@host:99999/repo").is_err(),
             "99999 exceeds u16"
         );
     }
@@ -411,80 +411,80 @@ mod tests {
     #[test]
     fn rejects_dot_dot_traversal() {
         assert!(
-            parse_mkit_ssh_url("mkit+ssh://user@host/../../etc/passwd").is_err(),
+            parse_mkit_ssh_url("kit+ssh://user@host/../../etc/passwd").is_err(),
             "../ traversal must be rejected"
         );
     }
 
     #[test]
     fn rejects_single_dot_segment() {
-        assert!(parse_mkit_ssh_url("mkit+ssh://user@host/repo/./x").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://user@host/repo/./x").is_err());
     }
 
     #[test]
     fn rejects_double_slash_empty_segment() {
-        assert!(parse_mkit_ssh_url("mkit+ssh://user@host/repo//x").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://user@host/repo//x").is_err());
     }
 
     #[test]
     fn rejects_nul_byte_injection() {
-        let injected = "mkit+ssh://user@host/path\0injected";
+        let injected = "kit+ssh://user@host/path\0injected";
         assert!(parse_mkit_ssh_url(injected).is_err());
     }
 
     #[test]
     fn rejects_nul_byte_in_path_component() {
-        let injected = "mkit+ssh://user@host/path\u{0}injected";
+        let injected = "kit+ssh://user@host/path\u{0}injected";
         assert!(parse_mkit_ssh_url(injected).is_err());
     }
 
     #[test]
     fn rejects_crlf_in_user_field() {
         // CR or LF anywhere in the URL is rejected before we split.
-        assert!(parse_mkit_ssh_url("mkit+ssh://us\rer@host/repo").is_err());
-        assert!(parse_mkit_ssh_url("mkit+ssh://us\ner@host/repo").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://us\rer@host/repo").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://us\ner@host/repo").is_err());
     }
 
     #[test]
     fn rejects_shell_meta_in_path() {
-        assert!(parse_mkit_ssh_url("mkit+ssh://user@host/repo;touch").is_err());
-        assert!(parse_mkit_ssh_url("mkit+ssh://user@host/repo$(whoami)").is_err());
-        assert!(parse_mkit_ssh_url("mkit+ssh://user@host/repo|cat").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://user@host/repo;touch").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://user@host/repo$(whoami)").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://user@host/repo|cat").is_err());
     }
 
     #[test]
     fn rejects_space_in_path() {
-        assert!(parse_mkit_ssh_url("mkit+ssh://user@host/has space").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://user@host/has space").is_err());
     }
 
     #[test]
     fn rejects_percent_encoded_path_payload() {
         // We do NOT percent-decode. A literal `%00` in the URL fails
         // the ASCII-subset check.
-        assert!(parse_mkit_ssh_url("mkit+ssh://user@host/path%00injected").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://user@host/path%00injected").is_err());
     }
 
     #[test]
     fn rejects_disallowed_user_characters() {
         // Space / `;` / CR etc. in the user field are blocked before we
         // ever touch `ssh(1)`.
-        assert!(parse_mkit_ssh_url("mkit+ssh://al ice@host/repo").is_err());
-        assert!(parse_mkit_ssh_url("mkit+ssh://al;ice@host/repo").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://al ice@host/repo").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://al;ice@host/repo").is_err());
         // A `-oProxyCommand=…` paste attempt begins with `-` which IS
         // allowed inside the user field, but `=` and space are not,
         // so it still fails.
-        assert!(parse_mkit_ssh_url("mkit+ssh://-oProxyCommand=pwnd@host/repo").is_err());
+        assert!(parse_mkit_ssh_url("kit+ssh://-oProxyCommand=pwnd@host/repo").is_err());
     }
 
     #[test]
     fn rejects_uppercase_scheme() {
-        // We do not lowercase — `MKIT+SSH://…` is not `mkit+ssh://…`.
-        assert!(parse_mkit_ssh_url("MKIT+SSH://user@host/repo").is_err());
+        // We do not lowercase — `KIT+SSH://…` is not `kit+ssh://…`.
+        assert!(parse_mkit_ssh_url("KIT+SSH://user@host/repo").is_err());
     }
 
     #[test]
     fn rejects_wrong_scheme() {
-        assert!(parse_mkit_ssh_url("mkit+https://user@host/repo").is_err());
+        assert!(parse_mkit_ssh_url("kit+https://user@host/repo").is_err());
     }
 
     // --- validate_ssh_path direct tests ----------------------------------

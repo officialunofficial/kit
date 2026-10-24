@@ -8,7 +8,7 @@
   "kind": "chunk",
   "max_items": 1,
   "name": "chunked_blob_cs0_3chunks_metapos0_reject",
-  "object_id_hex": "00a63a562fc5b0fbe3eda18138923dfff4f94f0ca60ef869e32825028199d63d",
+  "object_id_hex": "afbb936cbd2702c2628f188e38cd91284aa0d1d90197587935e5c04787d3674c",
   "position": 0,
   "proof_kind": "single",
   "reject_reason": "position 0 is the ChunkedBlob metadata leaf, not a chunk",

@@ -1,6 +1,6 @@
 //! The `RepoLayout` type promises a byte-identical on-disk
 //! layout for classic single-worktree repositories. These tests pin
-//! that contract: the exact `.mkit/` structure a scripted command
+//! that contract: the exact `.kit/` structure a scripted command
 //! sequence produces, and the agreement between `RepoLayout`'s
 //! accessors and the real files the binary writes.
 //!
@@ -15,7 +15,7 @@ use std::path::Path;
 use common::Repo;
 use mkit_core::layout::RepoLayout;
 
-/// Collect `.mkit`-relative paths (files and dirs), excluding
+/// Collect `.kit`-relative paths (files and dirs), excluding
 /// content-addressed interiors whose names vary run-to-run (object
 /// shards, history journal blobs) and lock files that exist only while
 /// a command runs.
@@ -26,7 +26,7 @@ fn mkit_entries(mkit: &Path) -> BTreeSet<String> {
             let path = entry.path();
             let rel = path
                 .strip_prefix(base)
-                .expect("under .mkit")
+                .expect("under .kit")
                 .to_string_lossy()
                 .replace('\\', "/");
             // Content-addressed interiors: presence pinned via the
@@ -50,7 +50,7 @@ fn mkit_entries(mkit: &Path) -> BTreeSet<String> {
     out
 }
 
-/// The `.mkit` structure after init + commit + branch + tag + stash is
+/// The `.kit` structure after init + commit + branch + tag + stash is
 /// exactly the historical single-worktree layout — nothing moved,
 /// nothing added, nothing renamed.
 #[test]
@@ -120,7 +120,7 @@ fn scripted_sequence_produces_historical_layout() {
     }
     assert_eq!(
         entries, expected,
-        "single-worktree .mkit layout drifted — the layout contract forbids this"
+        "single-worktree .kit layout drifted — the layout contract forbids this"
     );
 }
 

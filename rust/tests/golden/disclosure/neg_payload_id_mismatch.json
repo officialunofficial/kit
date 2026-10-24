@@ -1,7 +1,7 @@
 {
   "bin": "neg_payload_id_mismatch.bin",
-  "blake3": "61c12a8d4bc5a9d360389babd4e0d061eba1ccc359870e515ffa08ef90367990",
-  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "blake3": "4ecdd1b61b23ebf08e88b5ccc84f535679fc37ebab837bd45a02e350cd913b7a",
+  "commit_id_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
   "description": "The Object payload's last byte is flipped; its id no longer matches the leaf id.",
   "expect": "reject",
   "name": "neg_payload_id_mismatch",

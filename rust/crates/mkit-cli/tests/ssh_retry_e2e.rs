@@ -108,7 +108,7 @@ fn build_and_push_source(root: &Path, xdg: &Path) -> std::path::PathBuf {
     let remote = root.join("remote");
     fs::create_dir_all(&remote).unwrap();
     assert!(run_in(&remote, xdg, &["init"], &[]).status.success());
-    let remote_url = format!("mkit+file://{}", remote.display());
+    let remote_url = format!("kit+file://{}", remote.display());
     assert!(
         run_in(&source, xdg, &["remote", "add", "origin", &remote_url], &[])
             .status
@@ -145,7 +145,7 @@ fn ssh_clone_retries_past_a_dropped_first_connection() {
     let attempt_counter = root.join("ssh_attempts");
 
     let remote_path = remote.to_str().unwrap();
-    let url = format!("mkit+ssh://e2euser@localhost{remote_path}");
+    let url = format!("kit+ssh://e2euser@localhost{remote_path}");
     let dest = root.join("dest");
     let dest_str = dest.to_str().unwrap();
 

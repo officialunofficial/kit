@@ -92,9 +92,9 @@ MAX_AUDIENCES = 8
 MAX_REF_SCOPES = 16
 MAX_STATEMENT_BYTES = 4096
 MAX_GRANT_HEADER_BYTES = 8192
-DOMAIN = "mkit-write-grant:v1"
-DOMAIN_EPOCH = "mkit-write-epoch:v1"
-DOMAIN_VISIBILITY = "mkit-repo-visibility:v1"
+DOMAIN = "kit-write-grant:v1"
+DOMAIN_EPOCH = "kit-write-epoch:v1"
+DOMAIN_VISIBILITY = "kit-repo-visibility:v1"
 EPOCH_STATEMENT_MAX_LIFETIME_MS = 2_592_000_000
 MAX_EPOCH_STEP = 1024
 MAX_CLOCK_LEAD_MS = 30_000
@@ -197,7 +197,7 @@ def validate_pattern(pattern):
     base = pattern[:-2] if pattern.endswith("/*") else pattern
     if not ref_name_ok(base):
         raise Reject("ref pattern")
-    if pattern.startswith("refs/mkit/packmap/"):
+    if pattern.startswith("refs/kit/packmap/"):
         raise Reject("packmap pattern")
 
 
@@ -1212,7 +1212,7 @@ OTHER_NS = "0x0000000000000000000000000000000000000001"
 
 R_TEXT = ("a field count other than eleven, an empty field, a final line feed, "
           "a carriage return, or a byte outside the §3.1 range")
-R_DOMAIN = "a domain other than mkit-write-grant:v1"
+R_DOMAIN = "a domain other than kit-write-grant:v1"
 R_IDENT = ("a namespace or repository identity outside the §7.4 grammar, or a "
            "repository scope in another namespace")
 R_DEC = "a decimal with a sign, a leading zero, or a value out of range"
@@ -1221,7 +1221,7 @@ R_CAP = "an unknown capability, or capabilities not in the canonical spelling"
 R_AUD = ("an audience that fails the auth v2 origin rules, a * anywhere in the "
          "audience list, more than 8 audiences, or audiences out of order or duplicated")
 R_REFS = ("ref scopes that are not - for a read grant, or - for a grant with write")
-R_PAT = ("a pattern outside §3.3, a pattern under refs/mkit/packmap/, an unknown "
+R_PAT = ("a pattern outside §3.3, a pattern under refs/kit/packmap/, an unknown "
          "flag, flags out of the cufd order or repeated, more than 16 entries, "
          "entries out of order, or two entries with one pattern")
 R_LIFE = "expiry <= created, or a lifetime above GRANT_MAX_LIFETIME_MS"
@@ -1258,8 +1258,8 @@ CASES = {
     "byte-0x20": (R_TEXT, edit(f5="https://git.example.com, https://git.example.org"), "byte out of range"),
     "byte-0x7f": (R_TEXT, edit(f7="0\x7f"), "byte out of range"),
     "domain-trailing-space": (R_TEXT, edit(f0=DOMAIN + " "), "byte out of range"),
-    "domain-v2": (R_DOMAIN, edit(f0="mkit-write-grant:v2"), "domain"),
-    "domain-epoch": (R_DOMAIN, edit(f0="mkit-write-epoch:v1"), "domain"),
+    "domain-v2": (R_DOMAIN, edit(f0="kit-write-grant:v2"), "domain"),
+    "domain-epoch": (R_DOMAIN, edit(f0="kit-write-epoch:v1"), "domain"),
     "namespace-uppercase-hex": (R_IDENT, edit(f1=NS.upper().replace("0X", "0x")), "namespace"),
     "namespace-39-hex": (R_IDENT, edit(f1=NS[:-1]), "namespace"),
     "namespace-unknown-form": (R_IDENT, edit(f1="root"), "namespace"),
@@ -1294,8 +1294,8 @@ CASES = {
     "pattern-invalid-ref-name": (R_PAT, edit(f6="refs/heads/.main=cu"), "ref pattern"),
     "pattern-bare-star": (R_PAT, edit(f6="*=cu"), "ref pattern"),
     "pattern-star-suffix": (R_PAT, edit(f6="refs/heads/*x=cu"), "ref pattern"),
-    "pattern-packmap-prefix": (R_PAT, edit(f6="refs/mkit/packmap/*=cu"), "packmap pattern"),
-    "pattern-packmap-exact": (R_PAT, edit(f6="refs/mkit/packmap/main=cu"), "packmap pattern"),
+    "pattern-packmap-prefix": (R_PAT, edit(f6="refs/kit/packmap/*=cu"), "packmap pattern"),
+    "pattern-packmap-exact": (R_PAT, edit(f6="refs/kit/packmap/main=cu"), "packmap pattern"),
     "flags-unknown": (R_PAT, edit(f6="refs/heads/main=cx"), "unknown ref flag"),
     "flags-out-of-order": (R_PAT, edit(f6="refs/heads/main=uc"), "noncanonical ref flags"),
     "flags-repeated": (R_PAT, edit(f6="refs/heads/main=cc"), "noncanonical ref flags"),

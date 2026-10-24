@@ -274,7 +274,7 @@ fn stash_save_pop_roundtrip_restores_dirty_changes() {
     fs::create_dir_all(layout.worktree_state_dir()).unwrap();
     refs::init(&layout).unwrap();
 
-    // Use a separate store directory so its `.mkit/objects/` does not
+    // Use a separate store directory so its `.kit/objects/` does not
     // get treated as part of the worktree.
     let store_dir = TempDir::new().unwrap();
     let store = fresh_store_in(store_dir.path());
@@ -525,14 +525,14 @@ fn restore_preserves_mkit_directory_when_cleaning() {
     let store_dir = TempDir::new().unwrap();
     let store = fresh_store_in(store_dir.path());
 
-    fs::create_dir_all(tmp.path().join(".mkit")).unwrap();
-    fs::write(tmp.path().join(".mkit/config"), b"important").unwrap();
+    fs::create_dir_all(tmp.path().join(".kit")).unwrap();
+    fs::write(tmp.path().join(".kit/config"), b"important").unwrap();
     let empty_tree = store
         .write(&serialize::serialize(&Object::Tree(Tree { entries: vec![] })).unwrap())
         .unwrap();
     restore::restore_tree(&store, empty_tree, tmp.path(), &RestoreOptions::default()).unwrap();
     assert_eq!(
-        fs::read(tmp.path().join(".mkit/config")).unwrap(),
+        fs::read(tmp.path().join(".kit/config")).unwrap(),
         b"important"
     );
 }

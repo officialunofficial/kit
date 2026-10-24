@@ -20,10 +20,10 @@ use mkit_core::store::MAX_TREE_DEPTH;
 use mkit_core::verify::Step;
 use serde_json::Value;
 
-const TREE_DOMAIN: &[u8] = b"mkit.tree\x00";
-const CHUNKED_DOMAIN: &[u8] = b"mkit.chunked\x00";
-const TREE_ENTRY_DOMAIN: &[u8] = b"mkit-tree-entry-v1";
-const CBLOB_META_DOMAIN: &[u8] = b"mkit-cblob-meta-v1";
+const TREE_DOMAIN: &[u8] = b"kit.tree\x00";
+const CHUNKED_DOMAIN: &[u8] = b"kit.chunked\x00";
+const TREE_ENTRY_DOMAIN: &[u8] = b"kit-tree-entry-v1";
+const CBLOB_META_DOMAIN: &[u8] = b"kit-cblob-meta-v1";
 
 fn golden_dir() -> PathBuf {
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

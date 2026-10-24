@@ -1,2 +1,2 @@
 # Auth v2 signed read vectors (BLAKE3 hash of file bytes)
-read.json 91bf655ea7606dd520399659bb990177f5e816a58a12f53c09717984ce9d3f07
+read.json f0fe5d77fc66bb52297c40cc79d7216b182a97496440dccdd8297eeb73bd938f

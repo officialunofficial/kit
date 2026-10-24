@@ -21,11 +21,11 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 | `mkit-rpc`                     | `rust/crates/mkit-rpc/`               | Shared stdio framing for subprocess protocols (`specs/SPEC-RPC.md`)          |
 | `mkit-transport-memory`        | `rust/crates/mkit-transport-memory/`  | In-process transport, used by tests                                    |
 | `mkit-transport-file`          | `rust/crates/mkit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
-| `mkit-transport-connect`       | `rust/crates/mkit-transport-connect/` | ConnectRPC client implementing `mkit.transport.v1.TransportService` (`specs/SPEC-TRANSPORT-CONNECT.md`); the transport `mkit-cli` actually constructs for `mkit+https://` / `mkit+http://` |
+| `mkit-transport-connect`       | `rust/crates/mkit-transport-connect/` | ConnectRPC client implementing `kit.transport.v1.TransportService` (`specs/SPEC-TRANSPORT-CONNECT.md`); the transport `mkit-cli` actually constructs for `kit+https://` / `kit+http://` |
 | `mkit-transport-s3`            | `rust/crates/mkit-transport-s3/`      | Hand-rolled SigV4 transport (R2 plus S3-compatible)                       |
 | `mkit-transport-ssh`           | `rust/crates/mkit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
-| `mkit-serve`                   | `rust/crates/mkit-serve/`             | Self-host server: the `mkit.rpc.v1.ssh` frame session over a repository on disk; `mkit serve` is a thin wrapper |
-| `mkit-sync`                    | `rust/crates/mkit-sync/`              | Native clone/fetch/pull for `.mkit` repositories as a library: typed reports, no printing, no ambient config; `mkit clone`/`fetch`/`pull` are thin wrappers over it |
+| `mkit-serve`                   | `rust/crates/mkit-serve/`             | Self-host server: the `kit.rpc.v1.ssh` frame session over a repository on disk; `mkit serve` is a thin wrapper |
+| `mkit-sync`                    | `rust/crates/mkit-sync/`              | Native clone/fetch/pull for `.kit` repositories as a library: typed reports, no printing, no ambient config; `mkit clone`/`fetch`/`pull` are thin wrappers over it |
 | `mkit-cli`                     | `rust/crates/mkit-cli/`               | The `mkit` binary; thin glue over the library crates                   |
 | `mkit-wasm`                    | `rust/crates/mkit-wasm/`              | WASM bindings for browsers and Cloudflare Workers                      |
 | `mkit-fuzz`                    | `rust/fuzz/`                          | cargo-fuzz harnesses (`docs/FUZZ.md`)                                  |
@@ -60,7 +60,7 @@ object encoder                            object decoder + verify
   │   SPEC-OBJECTS §2 prologue              │   BLAKE3 verify on read
   ▼                                         ▼
 content-addressed store                   refs
-  │   .mkit/objects/<dd>/<hex62>            │   SPEC-REFS
+  │   .kit/objects/<dd>/<hex62>            │   SPEC-REFS
   ▼                                         ▼
 pack writer                               worktree materialize
   │   SPEC-PACKFILE                          │   symlink containment
@@ -103,7 +103,7 @@ every ref resolves to a commit. Verifying a commit against its ID
 therefore verifies every tree, entry, and chunk reachable from it.
 
 `ObjectStore::open` enforces addressing consistency through the
-`.mkit/format` repository marker. `ObjectStore::init` writes the
+`.kit/format` repository marker. `ObjectStore::init` writes the
 marker with the value `bmt-v1`; `open` requires that same value and
 rejects the repository with `IncompatibleRepoFormat` when the marker
 is missing or different, rather than misreading objects under the
@@ -144,7 +144,7 @@ PAE("application/vnd.in-toto+json", payload)
        │   SPEC-ATTESTATIONS §2.1
        ▼
 Signer ────► sig bytes        Signer is one of the two implemented paths:
-       │                        - repo-key  (Ed25519, .mkit/keys/default.key)
+       │                        - repo-key  (Ed25519, .kit/keys/default.key)
        │                        - external  (subprocess; SPEC-EXTERNAL-SIGNER)
        │
        │                      Roadmap, not implemented (`SigstoreSigner`
@@ -154,7 +154,7 @@ Signer ────► sig bytes        Signer is one of the two implemented pat
 DSSE envelope ─► JCS ─► BLAKE3 → attestation id
        │
        ▼
-.mkit/attestations/<commit-hex>/<att-id>.dsse
+.kit/attestations/<commit-hex>/<att-id>.dsse
        │
        ▼
 transport (OP_UPLOAD_ATTESTATION / DOWNLOAD / LIST)

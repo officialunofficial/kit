@@ -115,7 +115,7 @@ fn export_produces_fsck_clean_matching_mirror() {
         [
             "refs/heads/main",
             "refs/heads/side",
-            "refs/mkit/attestations",
+            "refs/kit/attestations",
             "refs/tags/v1"
         ]
     );
@@ -140,7 +140,7 @@ fn export_produces_fsck_clean_matching_mirror() {
     // One attestation entry per exported head (named by attestation id).
     let att = git_ok(
         &mirror,
-        &["ls-tree", "--name-only", "refs/mkit/attestations"],
+        &["ls-tree", "--name-only", "refs/kit/attestations"],
     );
     assert_eq!(att.lines().count(), 3);
     assert!(att.lines().all(|l| {
@@ -203,7 +203,7 @@ fn translation_is_deterministic_from_fresh_state() {
         // Attestation envelopes embed signer keyids; ref/object ids
         // for translated history must match exactly.
         v.into_iter()
-            .filter(|l| !l.starts_with("refs/mkit/attestations"))
+            .filter(|l| !l.starts_with("refs/kit/attestations"))
             .collect()
     };
     assert_eq!(
@@ -354,7 +354,7 @@ fn stateful_rounds_keep_mirror_and_repo_invariants() {
     ]);
     let strip = |v: Vec<String>| -> Vec<String> {
         v.into_iter()
-            .filter(|l| !l.starts_with("refs/mkit/attestations"))
+            .filter(|l| !l.starts_with("refs/kit/attestations"))
             .collect()
     };
     assert_eq!(strip(mirror_refs(&mirror)), strip(mirror_refs(&m2)));
@@ -412,7 +412,7 @@ fn no_attest_skips_attestations_ref() {
     assert!(
         !mirror_refs(&mirror)
             .iter()
-            .any(|l| l.starts_with("refs/mkit/attestations")),
+            .any(|l| l.starts_with("refs/kit/attestations")),
         "--no-attest must not publish the attestations ref"
     );
 }
@@ -497,26 +497,20 @@ fn published_attestation_content_matches_spec() {
 
     let names = git_ok(
         &mirror,
-        &["ls-tree", "--name-only", "refs/mkit/attestations"],
+        &["ls-tree", "--name-only", "refs/kit/attestations"],
     );
     let mut matched = false;
     for name in names.lines() {
         let blob = git_ok(
             &mirror,
-            &[
-                "cat-file",
-                "blob",
-                &format!("refs/mkit/attestations:{name}"),
-            ],
+            &["cat-file", "blob", &format!("refs/kit/attestations:{name}")],
         );
         let env = mkit_attest::envelope::decode(blob.as_bytes()).expect("valid DSSE envelope");
         assert_eq!(env.payload_type, mkit_attest::PAYLOAD_TYPE_IN_TOTO);
         assert_eq!(env.signatures.len(), 1);
         let payload = String::from_utf8(env.payload.clone()).unwrap();
         assert!(
-            payload.contains(
-                "https://github.com/officialunofficial/mkit/spec/predicate/git-bridge/v1"
-            ),
+            payload.contains("https://kit.storage/spec/predicate/git-bridge/v1"),
             "predicateType missing in {payload}"
         );
         if payload.contains("refs/heads/main") {
@@ -552,7 +546,7 @@ fn out_of_band_mirror_move_fails_the_lease() {
 
     // Move main out-of-band to another commit object (the synthetic
     // attestations commit is convenient and valid).
-    let foreign = git_ok(&mirror, &["rev-parse", "refs/mkit/attestations"]);
+    let foreign = git_ok(&mirror, &["rev-parse", "refs/kit/attestations"]);
     git_ok(&mirror, &["update-ref", "refs/heads/main", foreign.trim()]);
 
     r.commit_file("late.txt", b"x\n", "late");

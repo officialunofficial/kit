@@ -2,7 +2,7 @@
 //!
 //! Implements the local-disk side of `docs/specs/SPEC-REFS.md`: ref names,
 //! the 65-byte wire encoding, the symbolic-or-detached `HEAD` file, and
-//! shallow-boundary persistence at `.mkit/shallow`.
+//! shallow-boundary persistence at `.kit/shallow`.
 //!
 //! Wire format (per SPEC-REFS §1): exactly 64 lowercase-hex characters
 //! plus a trailing `0x0A` newline = 65 bytes. Uppercase hex is rejected
@@ -42,17 +42,17 @@ use crate::atomic::{write_atomic, write_create_new};
 use crate::hash::{HASH_LEN, HEX_LEN, Hash, to_hex};
 use crate::layout::RepoLayout;
 
-/// Subdirectory holding all refs (`.mkit/refs`).
+/// Subdirectory holding all refs (`.kit/refs`).
 pub const REFS_DIR: &str = "refs";
-/// Subdirectory holding branch refs (`.mkit/refs/heads`).
+/// Subdirectory holding branch refs (`.kit/refs/heads`).
 pub const HEADS_DIR: &str = "refs/heads";
-/// Subdirectory holding tag refs (`.mkit/refs/tags`).
+/// Subdirectory holding tag refs (`.kit/refs/tags`).
 pub const TAGS_DIR: &str = "refs/tags";
-/// Subdirectory holding remote-tracking refs (`.mkit/refs/remotes`).
+/// Subdirectory holding remote-tracking refs (`.kit/refs/remotes`).
 pub const REMOTES_DIR: &str = "refs/remotes";
-/// HEAD file relative to the `.mkit` root.
+/// HEAD file relative to the `.kit` root.
 pub const HEAD_FILE: &str = "HEAD";
-/// Shallow-boundary file relative to the `.mkit` root.
+/// Shallow-boundary file relative to the `.kit` root.
 pub const SHALLOW_FILE: &str = "shallow";
 
 /// Symbolic-ref prefix written to `HEAD` when pointing at a branch.
@@ -65,7 +65,7 @@ const HEAD_MAX_BYTES: u64 = 4 * 1024;
 /// file picked up extra whitespace, but anything pathological is
 /// rejected.
 const REF_FILE_MAX_BYTES: u64 = 128;
-/// Hard cap on `.mkit/shallow` (1 MiB).
+/// Hard cap on `.kit/shallow` (1 MiB).
 const SHALLOW_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Errors raised by this module.
@@ -162,14 +162,14 @@ pub const MAX_REF_NAME_BYTES: usize = 512;
 /// The wire name prefix of a branch head.
 pub const BRANCH_REF_PREFIX: &str = "refs/heads/";
 /// The wire name prefix of a branch's packmap ref, which a push writes
-/// next to its head (`refs/mkit/packmap/<branch>`).
-pub const PACKMAP_REF_PREFIX: &str = "refs/mkit/packmap/";
+/// next to its head (`refs/kit/packmap/<branch>`).
+pub const PACKMAP_REF_PREFIX: &str = "refs/kit/packmap/";
 /// The wire name prefix of a tag.
 pub const TAG_REF_PREFIX: &str = "refs/tags/";
 
 /// Longest new branch name, in bytes: a push writes both
-/// `refs/heads/<branch>` and `refs/mkit/packmap/<branch>`, and each must
-/// fit [`MAX_REF_NAME_BYTES`], so the longer prefix sets the bound (494).
+/// `refs/heads/<branch>` and `refs/kit/packmap/<branch>`, and each must
+/// fit [`MAX_REF_NAME_BYTES`], so the longer prefix sets the bound (495).
 pub const MAX_BRANCH_NAME_BYTES: usize = MAX_REF_NAME_BYTES - PACKMAP_REF_PREFIX.len();
 /// Longest new tag name, in bytes: `refs/tags/<tag>` must fit
 /// [`MAX_REF_NAME_BYTES`] (502).
@@ -214,7 +214,7 @@ impl RefNameKind {
         match self {
             Self::Ref => "",
             Self::Branch => {
-                ", because refs/heads/<name> and refs/mkit/packmap/<name> must \
+                ", because refs/heads/<name> and refs/kit/packmap/<name> must \
                  each fit the 512-byte ref-name limit"
             }
             Self::Tag => ", because refs/tags/<name> must fit the 512-byte ref-name limit",
@@ -281,7 +281,7 @@ pub fn check_new_name(name: &str, kind: RefNameKind) -> RefResult<()> {
 }
 
 /// Check the wire names a push of `branch` writes, `refs/heads/<branch>`
-/// and `refs/mkit/packmap/<branch>`, against [`MAX_REF_NAME_BYTES`]. A
+/// and `refs/kit/packmap/<branch>`, against [`MAX_REF_NAME_BYTES`]. A
 /// local branch named before the branch bound existed can be longer than
 /// [`MAX_BRANCH_NAME_BYTES`] and still be used locally, but not pushed.
 ///
@@ -1013,10 +1013,10 @@ pub fn list_tags_with(
 }
 
 // -----------------------------------------------------------------------------
-// Shallow boundaries (.mkit/shallow)
+// Shallow boundaries (.kit/shallow)
 // -----------------------------------------------------------------------------
 
-/// Load shallow-boundary hashes from `.mkit/shallow`. Returns `Ok(None)`
+/// Load shallow-boundary hashes from `.kit/shallow`. Returns `Ok(None)`
 /// if the file does not exist or is empty.
 pub fn load_shallow_boundaries(layout: &RepoLayout) -> RefResult<Option<Vec<Hash>>> {
     let path = layout.shallow_file();
@@ -1049,7 +1049,7 @@ pub fn load_shallow_boundaries(layout: &RepoLayout) -> RefResult<Option<Vec<Hash
     Ok(Some(out))
 }
 
-/// Write shallow-boundary hashes to `.mkit/shallow`. Passing an empty
+/// Write shallow-boundary hashes to `.kit/shallow`. Passing an empty
 /// slice removes the file.
 pub fn write_shallow_boundaries(layout: &RepoLayout, boundaries: &[Hash]) -> RefResult<()> {
     let path = layout.shallow_file();
@@ -1345,7 +1345,7 @@ fn list_refs_under_with(
     Ok(out)
 }
 
-/// Cap on ref-tree recursion depth. A malicious or corrupt `.mkit/refs/`
+/// Cap on ref-tree recursion depth. A malicious or corrupt `.kit/refs/`
 /// directory with deeply nested empty dirs should not stack-overflow
 /// the walker. 32 is far beyond anything a valid ref name (which cannot
 /// contain more than a few `/` separators given the 1–255 path-segment
@@ -1558,35 +1558,35 @@ mod tests {
     }
 
     /// A new branch name must leave `refs/heads/<b>` and
-    /// `refs/mkit/packmap/<b>` within 512 bytes (494), a new tag
+    /// `refs/kit/packmap/<b>` within 512 bytes (495), a new tag
     /// `refs/tags/<t>` (502); a branch created before that bound stays
     /// writable locally but cannot be pushed.
     #[test]
     fn branch_and_tag_bounds_derive_from_their_wire_names() {
-        assert_eq!(MAX_BRANCH_NAME_BYTES, 494);
+        assert_eq!(MAX_BRANCH_NAME_BYTES, 495);
         assert_eq!(MAX_TAG_NAME_BYTES, 502);
         let (_dir, layout) = fresh_repo();
         let id = h("c");
-        update_ref(&layout, &long_name(494), RefWriteCondition::Missing, &id).unwrap();
-        check_pushable_branch(&long_name(494)).unwrap();
+        update_ref(&layout, &long_name(495), RefWriteCondition::Missing, &id).unwrap();
+        check_pushable_branch(&long_name(495)).unwrap();
         let err =
-            update_ref(&layout, &long_name(495), RefWriteCondition::Missing, &id).unwrap_err();
+            update_ref(&layout, &long_name(496), RefWriteCondition::Missing, &id).unwrap_err();
         assert!(matches!(
             err,
             RefError::RefNameTooLong {
-                len: 495,
+                len: 496,
                 kind: RefNameKind::Branch,
                 ..
             }
         ));
         let shown = err.to_string();
         assert!(
-            shown.contains("branch name too long (495 bytes; at most 494")
-                && shown.contains("refs/mkit/packmap/<name>"),
+            shown.contains("branch name too long (496 bytes; at most 495")
+                && shown.contains("refs/kit/packmap/<name>"),
             "{shown}"
         );
         assert!(matches!(
-            write_head_branch(&layout, &long_name(495)),
+            write_head_branch(&layout, &long_name(496)),
             Err(RefError::RefNameTooLong { .. })
         ));
         write_tag(&layout, &long_name(502), &id).unwrap();
@@ -1607,8 +1607,8 @@ mod tests {
         let err = check_pushable_branch(&old).unwrap_err();
         assert!(
             err.to_string()
-                .contains("ref name too long (518 bytes; at most 512")
-                && err.to_string().contains("'refs/mkit/packmap/"),
+                .contains("ref name too long (517 bytes; at most 512")
+                && err.to_string().contains("'refs/kit/packmap/"),
             "{err}"
         );
     }

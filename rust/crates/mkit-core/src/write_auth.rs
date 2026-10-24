@@ -8,7 +8,7 @@ use crate::hash::{Hash, hash};
 use ed25519_dalek::{Signature, VerifyingKey};
 
 /// Domain/version. v1 requests are never interpreted as v2 requests.
-pub const DOMAIN: &str = "mkit-write:v2";
+pub const DOMAIN: &str = "kit-write:v2";
 /// Maximum validity interval; replay records must survive at least until expiry.
 pub const MAX_VALIDITY_MS: i64 = 300_000;
 /// Maximum permitted clock lead of the sender.
@@ -440,7 +440,7 @@ mod tests {
                 audience: "https://a.example",
                 repository: "main",
             },
-            procedure: "/mkit.transport.v1.TransportService/UploadPack",
+            procedure: "/kit.transport.v1.TransportService/UploadPack",
             commitment: &commitment,
             created_at: 1000,
             expires_at: 2000,
@@ -486,7 +486,7 @@ mod tests {
         );
     }
 
-    const UPLOAD_PART: &str = "/mkit.transport.v1.TransportService/UploadPart";
+    const UPLOAD_PART: &str = "/kit.transport.v1.TransportService/UploadPart";
 
     fn part_text(ticket: &str, index: &str, subtree: &str, len: &str) -> String {
         format!("part:{ticket}:{index}:{subtree}:{len}")

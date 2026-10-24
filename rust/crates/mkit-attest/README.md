@@ -22,6 +22,6 @@ spec in the same PR.
   length-prefixed `buffa`-generated `SignerFrame` wire (see
   `contrib/signers/README.md` and `docs/specs/SPEC-EXTERNAL-SIGNER.md`).
 
-Attestations are stored under `.mkit/attestations/<commit-hash>/<att-id>.dsse`
+Attestations are stored under `.kit/attestations/<commit-hash>/<att-id>.dsse`
 and are a first-class object type, not a side-channel &mdash; see the top-level
 README's "Attestations" section for the end-to-end model.

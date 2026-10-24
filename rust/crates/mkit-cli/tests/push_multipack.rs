@@ -43,7 +43,7 @@ fn head_hash(dir: &Path) -> Hash {
 /// Mirrors `pack_rebaseline.rs`'s helper of the same name.
 fn packmap_chain(tx: &dyn Transport, branch: &str) -> Vec<PackListNode> {
     let mut nodes = Vec::new();
-    let mut cursor = tx.read_ref(&format!("refs/mkit/packmap/{branch}")).unwrap();
+    let mut cursor = tx.read_ref(&format!("refs/kit/packmap/{branch}")).unwrap();
     while let Some(key) = cursor {
         let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();
         let node = transfer::decode_packlist(&bytes).unwrap();

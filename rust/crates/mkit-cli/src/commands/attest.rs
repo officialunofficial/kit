@@ -11,7 +11,7 @@
 //! `--external-signer-arg` is repeatable; each instance adds one
 //! argv token to the external signer subprocess. If any are passed,
 //! they REPLACE (not append to) `attest.external_signer_args` from
-//! `.mkit/config` — per-invocation override for "sign with tag X
+//! `.kit/config` — per-invocation override for "sign with tag X
 //! this one time" that avoids shell-quoting hell.
 //!
 //! Defaults:
@@ -19,7 +19,7 @@
 //! * `--algorithm` — `attest.default_algorithm` in config, else `ed25519`.
 //! * `--signer` — `attest.signer` in config, else `repo-key`.
 //! * `--predicate-type` —
-//!   `https://github.com/officialunofficial/mkit/spec/predicate/empty/v1`.
+//!   `https://kit.storage/spec/predicate/empty/v1`.
 //! * `--predicate-file` — omitted ⇒ `{}`.
 //!
 //! Multi-signature envelopes are produced by passing one or more
@@ -61,11 +61,10 @@ use crate::exit;
 ///
 /// Uses the GitHub-anchored URI scheme defined in
 /// `docs/specs/SPEC-ATTESTATIONS.md` §6.4
-/// (`https://github.com/officialunofficial/mkit/spec/predicate/<name>/v<n>`)
+/// (`https://kit.storage/spec/predicate/<name>/v<n>`)
 /// so the only predicate URI mkit ships out-of-the-box points at a
 /// location the project actually controls.
-const DEFAULT_PREDICATE_TYPE: &str =
-    "https://github.com/officialunofficial/mkit/spec/predicate/empty/v1";
+const DEFAULT_PREDICATE_TYPE: &str = "https://kit.storage/spec/predicate/empty/v1";
 
 /// Hard cap on a `--predicate-file` body. A DSSE predicate is a
 /// small JSON object; refusing anything past 1 MiB stops a runaway or

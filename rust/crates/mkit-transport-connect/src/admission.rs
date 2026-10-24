@@ -82,7 +82,7 @@ pub fn is_reserved(name: &str, bearer: bool) -> bool {
     if bearer && name == "authorization" {
         return true;
     }
-    if ["x-mkit-", "x-forwarded-", "content-", "connect-", "proxy-"]
+    if ["x-kit-", "x-forwarded-", "content-", "connect-", "proxy-"]
         .iter()
         .any(|prefix| name.starts_with(prefix))
     {
@@ -99,7 +99,7 @@ pub fn is_reserved(name: &str, bearer: bool) -> bool {
         "x-repository",
         "x-content-commitment",
         "x-write-grant",
-        "x-mkit-ref",
+        "x-kit-ref",
         "host",
         "transfer-encoding",
         "cookie",
@@ -313,7 +313,7 @@ mod tests {
         let context = (
             "https://example.invalid",
             "default",
-            "/mkit.transport.v1.TransportService/UpdateRef",
+            "/kit.transport.v1.TransportService/UpdateRef",
         );
         for (output, fail) in [
             (
@@ -387,7 +387,7 @@ mod tests {
             "x-repository",
             "x-content-commitment",
             "x-write-grant",
-            "x-mkit-ref",
+            "x-kit-ref",
             "host",
             "transfer-encoding",
             "cookie",
@@ -397,7 +397,7 @@ mod tests {
             "te",
             "trailer",
             "upgrade",
-            "x-mkit-any",
+            "x-kit-any",
             "x-forwarded-any",
             "content-any",
             "connect-any",

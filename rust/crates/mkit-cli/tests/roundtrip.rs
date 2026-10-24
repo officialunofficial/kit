@@ -34,9 +34,9 @@ fn init_creates_mkit_directory() {
     let td = tempfile::tempdir().unwrap();
     let out = run_in(td.path(), &["init"]);
     assert!(out.status.success(), "init failed: {out:?}");
-    assert!(td.path().join(".mkit/objects").is_dir());
-    assert!(td.path().join(".mkit/refs").is_dir());
-    assert!(td.path().join(".mkit/HEAD").is_file());
+    assert!(td.path().join(".kit/objects").is_dir());
+    assert!(td.path().join(".kit/refs").is_dir());
+    assert!(td.path().join(".kit/HEAD").is_file());
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn keygen_creates_key_file() {
     assert!(run_in(td.path(), &["init"]).status.success());
     let out = run_in(td.path(), &["keygen"]);
     assert!(out.status.success(), "keygen failed: {out:?}");
-    let key_path = td.path().join(".mkit/keys/default.key");
+    let key_path = td.path().join(".kit/keys/default.key");
     assert!(key_path.is_file(), "key file not created");
     let meta = fs::metadata(&key_path).unwrap();
     assert_eq!(meta.len(), 32, "ed25519 seed must be 32 bytes");

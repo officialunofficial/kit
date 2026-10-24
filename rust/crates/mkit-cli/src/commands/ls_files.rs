@@ -5,7 +5,7 @@
 //! Default: tracked paths (one per line, sorted). `-s` prints stage info
 //! (`<mode> <hash> <stage>\t<path>`; stage is always 0 — mkit has no merge
 //! stages). `--others` lists untracked worktree files instead;
-//! `--exclude-standard` drops `.mkitignore`-ignored ones, and `--ignored`
+//! `--exclude-standard` drops `.kitignore`-ignored ones, and `--ignored`
 //! inverts to show only the ignored. `-z` NUL-terminates with raw paths.
 
 use std::io::Write;
@@ -33,7 +33,7 @@ struct LsFilesOpts {
     /// List untracked worktree files instead of tracked ones.
     #[arg(long)]
     others: bool,
-    /// Drop `.mkitignore`-ignored files (with `--others`).
+    /// Drop `.kitignore`-ignored files (with `--others`).
     #[arg(long = "exclude-standard")]
     exclude_standard: bool,
     /// Show only ignored files (requires `--others`).
@@ -168,7 +168,7 @@ fn collect_others(
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name.eq_ignore_ascii_case(".mkit") || name.eq_ignore_ascii_case(".git") {
+        if name.eq_ignore_ascii_case(".kit") || name.eq_ignore_ascii_case(".git") {
             continue;
         }
         let path = if prefix.is_empty() {

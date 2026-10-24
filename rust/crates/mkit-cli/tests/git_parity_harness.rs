@@ -1179,14 +1179,14 @@ fn ls_files_exclude_standard_matches_git() {
     }
     let h = Harness::new();
     h.init_both();
-    // git reads .gitignore, mkit reads .mkitignore — write the matching
+    // git reads .gitignore, mkit reads .kitignore — write the matching
     // ignore file into each repo so both exclude `secret.log`. The ignore
     // file also ignores itself, so the differently-named control files
-    // (.gitignore vs .mkitignore) don't show up and skew the comparison.
+    // (.gitignore vs .kitignore) don't show up and skew the comparison.
     std::fs::write(h.git_repo.join(".gitignore"), b"*.log\n.gitignore\n")
         .expect("write .gitignore");
-    std::fs::write(h.mkit_repo.join(".mkitignore"), b"*.log\n.mkitignore\n")
-        .expect("write .mkitignore");
+    std::fs::write(h.mkit_repo.join(".kitignore"), b"*.log\n.kitignore\n")
+        .expect("write .kitignore");
     h.write_both("keep.txt", b"k\n");
     h.write_both("secret.log", b"s\n");
     // `--others --exclude-standard` drops the ignored `secret.log` and the

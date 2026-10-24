@@ -8,7 +8,7 @@
 //!     against a `MemoryTransport` — precise error-variant and
 //!     ref-untouched assertions.
 //!   * CLI subprocess, via `mkit pull`/`mkit clone` against a
-//!     `mkit+file://` remote — proves the exit code and `--no-verify-signatures`
+//!     `kit+file://` remote — proves the exit code and `--no-verify-signatures`
 //!     opt-out actually thread through the real binary.
 //!
 //! In every case the "hostile remote" is simulated by tampering a
@@ -211,7 +211,7 @@ fn require_signed_false_bypasses_the_check() {
 }
 
 // ---------------------------------------------------------------------------
-// CLI subprocess coverage (mkit+file:// transport) — proves the flag /
+// CLI subprocess coverage (kit+file:// transport) — proves the flag /
 // exit code / config wiring, not just the underlying dispatch functions.
 // ---------------------------------------------------------------------------
 
@@ -229,7 +229,7 @@ fn cli_pull_exits_nonzero_and_does_not_update_state_on_a_tampered_remote() {
     tamper_head_commit_signature(alice.path());
 
     let bare = tempfile::tempdir().unwrap();
-    let url = format!("mkit+file://{}", bare.path().display());
+    let url = format!("kit+file://{}", bare.path().display());
     assert!(
         run_in(alice.path(), &["remote", "add", &url])
             .status
@@ -277,7 +277,7 @@ fn cli_clone_exits_nonzero_on_a_tampered_remote() {
     tamper_head_commit_signature(alice.path());
 
     let bare = tempfile::tempdir().unwrap();
-    let url = format!("mkit+file://{}", bare.path().display());
+    let url = format!("kit+file://{}", bare.path().display());
     assert!(
         run_in(alice.path(), &["remote", "add", &url])
             .status
@@ -315,7 +315,7 @@ fn cli_pull_no_verify_signatures_flag_bypasses_the_check() {
     tamper_head_commit_signature(alice.path());
 
     let bare = tempfile::tempdir().unwrap();
-    let url = format!("mkit+file://{}", bare.path().display());
+    let url = format!("kit+file://{}", bare.path().display());
     assert!(
         run_in(alice.path(), &["remote", "add", &url])
             .status

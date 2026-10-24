@@ -333,7 +333,7 @@ fn export_formal_delta_vectors() {
         PathBuf::from,
     );
     let mut rng = Rng(seed);
-    let mut out = Out(format!("MKIT-DELTA-VECTORS 1 seed={seed:#x}\n"));
+    let mut out = Out(format!("KIT-DELTA-VECTORS 1 seed={seed:#x}\n"));
 
     // Golden: SPEC-DELTA §8 vectors 1-3, empty sides, INSERT split points
     // (§3.2: 127-byte literals), and a COPY longer than u16::MAX (§3.1 cap).

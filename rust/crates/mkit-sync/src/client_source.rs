@@ -1,5 +1,5 @@
-//! A [`RemoteSource`] over [`mkit_client::Client`], for `mkit+https` and
-//! `mkit+http` remotes.
+//! A [`RemoteSource`] over [`mkit_client::Client`], for `kit+https` and
+//! `kit+http` remotes.
 //!
 //! `mkit-client` is asynchronous and runtime-independent; the fetch engine is
 //! synchronous. [`ClientSource`] joins them through an [`Executor`] that
@@ -545,7 +545,7 @@ mod tests {
                     "refs/heads/main",
                     mkit_core::refs::RefWriteCondition::Missing,
                     &[4; 32],
-                    "refs/mkit/packmap/main",
+                    "refs/kit/packmap/main",
                     mkit_core::refs::RefWriteCondition::Missing,
                     &[4; 32],
                     &[],
@@ -596,8 +596,8 @@ mod tests {
             .encode_to_vec(),
         );
         let bodies = [
-            format!(r#"{{"code":"unavailable","details":[{{"type":"mkit.transport.v1.PendingVerification","value":"{pending}"}}]}}"#),
-            r#"{"code":"unavailable","details":[{"type":"mkit.transport.v1.MembershipNotVisible","value":""}]}"#.into(),
+            format!(r#"{{"code":"unavailable","details":[{{"type":"kit.transport.v1.PendingVerification","value":"{pending}"}}]}}"#),
+            r#"{"code":"unavailable","details":[{"type":"kit.transport.v1.MembershipNotVisible","value":""}]}"#.into(),
             r#"{"code":"unavailable","message":"busy"}"#.into(),
         ];
         for (i, body) in bodies.iter().enumerate() {
@@ -652,7 +652,7 @@ mod tests {
         );
         let value = base64::engine::general_purpose::STANDARD.encode(detail);
         let body = format!(
-            r#"{{"code":"permission_denied","details":[{{"type":"mkit.transport.v1.AdmissionChallenge","value":"{value}"}}]}}"#
+            r#"{{"code":"permission_denied","details":[{{"type":"kit.transport.v1.AdmissionChallenge","value":"{value}"}}]}}"#
         );
         let mut response = failure_response(&body, None);
         *response.status_mut() = http::StatusCode::PAYMENT_REQUIRED;

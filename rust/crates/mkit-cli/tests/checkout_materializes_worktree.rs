@@ -40,7 +40,7 @@ fn checkout_refuses_removed_tracked_files() {
     let out = run_in(td.path(), &["commit", "-m", "initial"]);
     assert!(out.status.success(), "commit failed: {out:?}");
 
-    // Nuke the worktree files (but keep .mkit/).
+    // Nuke the worktree files (but keep .kit/).
     fs::remove_file(td.path().join("a.txt")).unwrap();
     fs::remove_file(td.path().join("b.txt")).unwrap();
     fs::remove_dir_all(td.path().join("sub")).unwrap();
@@ -316,13 +316,13 @@ fn checkout_respects_mkitignore() {
 
     // Now add a local-only file + an ignore rule that covers it, and
     // perform a checkout. The local file must survive.
-    fs::write(td.path().join(".mkitignore"), "local.txt\n").unwrap();
+    fs::write(td.path().join(".kitignore"), "local.txt\n").unwrap();
     fs::write(td.path().join("local.txt"), b"untracked").unwrap();
 
     let out = run_in(td.path(), &["checkout", "main"]);
     assert!(out.status.success(), "checkout failed: {out:?}");
     assert_eq!(
-        fs::read_to_string(td.path().join(".mkitignore")).unwrap(),
+        fs::read_to_string(td.path().join(".kitignore")).unwrap(),
         "local.txt\n"
     );
     assert_eq!(fs::read(td.path().join("local.txt")).unwrap(), b"untracked");
@@ -330,7 +330,7 @@ fn checkout_respects_mkitignore() {
 }
 
 fn head_commit(cwd: &std::path::Path) -> String {
-    fs::read_to_string(cwd.join(".mkit/refs/heads/main"))
+    fs::read_to_string(cwd.join(".kit/refs/heads/main"))
         .unwrap()
         .trim()
         .to_string()

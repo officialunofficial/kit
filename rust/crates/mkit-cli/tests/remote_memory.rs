@@ -7,7 +7,7 @@
 //! than spawning the binary.
 //!
 //! For a full argv → binary → transport path we also run `remote add`
-//! / `remote` (show) against the `mkit+memory://` URL so the string
+//! / `remote` (show) against the `kit+memory://` URL so the string
 //! contract (URL format accepted, roundtripped through config) stays
 //! under test.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
@@ -39,7 +39,7 @@ fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
 fn remote_add_memory_url_roundtrips_through_config() {
     let td = tempfile::tempdir().unwrap();
     assert!(run_in(td.path(), &["init"]).status.success());
-    let out = run_in(td.path(), &["remote", "add", "mkit+memory://example"]);
+    let out = run_in(td.path(), &["remote", "add", "kit+memory://example"]);
     assert!(out.status.success(), "remote add failed: {out:?}");
 
     // Bare `remote` lists NAMES only (git-shaped); the URL appears under
@@ -51,7 +51,7 @@ fn remote_add_memory_url_roundtrips_through_config() {
     let out = run_in(td.path(), &["remote", "-v"]);
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("mkit+memory://example"));
+    assert!(stdout.contains("kit+memory://example"));
     assert!(stdout.contains("(fetch)"));
     assert!(stdout.contains("(push)"));
 }
@@ -64,7 +64,7 @@ fn remote_add_rejects_non_mkit_urls() {
     assert!(!out.status.success(), "bare https:// must be rejected");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("mkit+<scheme>://"),
+        stderr.contains("kit+<scheme>://"),
         "error message should mention required URL prefix, got: {stderr}"
     );
 }
@@ -99,8 +99,8 @@ fn push_then_pull_roundtrips_refs_via_memory_transport() {
     assert_eq!(pulled, pushed, "push/pull ref count mismatch");
 
     // Bob now has `refs/heads/main` pointing at alice's commit.
-    let alice_main = fs::read_to_string(alice.path().join(".mkit/refs/heads/main")).unwrap();
-    let bob_main = fs::read_to_string(bob.path().join(".mkit/refs/heads/main")).unwrap();
+    let alice_main = fs::read_to_string(alice.path().join(".kit/refs/heads/main")).unwrap();
+    let bob_main = fs::read_to_string(bob.path().join(".kit/refs/heads/main")).unwrap();
     assert_eq!(
         alice_main.trim(),
         bob_main.trim(),

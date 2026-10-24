@@ -50,7 +50,7 @@ re-verifies.
 
 The mapping in this document is defined for mkit objects whose
 prologue carries `schema_version = 0x01` (SPEC-OBJECTS §2). The
-emitted `mkit-schema` header records that version. A bridge
+emitted `kit-schema` header records that version. A bridge
 encountering an object with any other `schema_version` MUST refuse
 that object (and therefore every ref whose closure contains it) with
 an actionable error. Future mkit schema versions extend this spec
@@ -191,24 +191,24 @@ tree <sha1-of-translated-tree>
 parent <sha1-of-translated-parent>          (one line per parent, in order)
 author <synthesized author line>            (§6.2)
 committer <same bytes as author>
-mkit-schema 1
-mkit-author <identity encoding>             (§6.3)
-mkit-signer <64 lowercase hex>
-mkit-signature <128 lowercase hex>
-mkit-tree <64 lowercase hex>                (mkit tree_hash)
-mkit-parent <64 lowercase hex>              (one per mkit parent, in order)
-mkit-message-hash <64 lowercase hex>        (only if non-zero)
-mkit-content-digest <64 lowercase hex>      (only if non-zero)
+kit-schema 1
+kit-author <identity encoding>             (§6.3)
+kit-signer <64 lowercase hex>
+kit-signature <128 lowercase hex>
+kit-tree <64 lowercase hex>                (mkit tree_hash)
+kit-parent <64 lowercase hex>              (one per mkit parent, in order)
+kit-message-hash <64 lowercase hex>        (only if non-zero)
+kit-content-digest <64 lowercase hex>      (only if non-zero)
 <empty line>
 <message bytes, verbatim>
 ```
 
-Header order is exactly as listed and is normative. `mkit-parent`
+Header order is exactly as listed and is normative. `kit-parent`
 headers appear in mkit parent order (which always matches the `parent`
-line order). `mkit-message-hash` / `mkit-content-digest` are emitted
+line order). `kit-message-hash` / `kit-content-digest` are emitted
 iff the corresponding 32-byte slot is non-zero (SPEC-OBJECTS §5.1
 defines zero as "absent"). All other `mkit-*` headers are always
-emitted &mdash; including an all-zero `mkit-signature` (the object layer
+emitted &mdash; including an all-zero `kit-signature` (the object layer
 accepts unsigned commits structurally; the bridge translates what is
 stored and never invents or strips signatures).
 
@@ -231,10 +231,10 @@ body after the blank separator line is then empty.)
 git requires `author <name> <<email>> <timestamp> <tz>` where `<name>`
 and `<email>` must not contain `<`, `>`, `\n`, or `\0`. The
 synthesized line is **display-only**: reconstruction reads the
-`mkit-author` header (§6.3), never this line. The synthesis is still
+`kit-author` header (§6.3), never this line. The synthesis is still
 normative because it is part of the hashed git bytes.
 
-- email: the fixed string `bridge@mkit.invalid` (RFC 2606 reserved
+- email: the fixed string `bridge@kit.invalid` (RFC 2606 reserved
   TLD; never routable).
 - timestamp: the mkit `u64` timestamp rendered in decimal, timezone
   fixed `+0000`. A timestamp exceeding `i64::MAX` MUST be refused
@@ -243,7 +243,7 @@ normative because it is part of the hashed git bytes.
   committer concept; inventing a distinct one would add a free
   variable for no information.
 - name, by identity kind:
-  - `ed25519` (0x01): `mkit:ed25519:` + 64 lowercase hex of the key.
+  - `ed25519` (0x01): `kit:ed25519:` + 64 lowercase hex of the key.
   - `did_key` (0x02): `did:key:` + the payload bytes verbatim
     (conformant readers validate the payload as printable ASCII &mdash;
     `Identity::is_valid` in mkit-core &mdash; and multibase text cannot
@@ -252,17 +252,17 @@ normative because it is part of the hashed git bytes.
     payload).
   - `opaque` (0x03): the payload verbatim **iff** it is valid UTF-8
     and contains no `<` (0x3C), no `>` (0x3E), and no ASCII control
-    byte (`< 0x20`, and 0x7F DEL); otherwise `mkit:opaque:` +
+    byte (`< 0x20`, and 0x7F DEL); otherwise `kit:opaque:` +
     unpadded base64 (RFC 4648 standard alphabet) of the payload.
 
 The verbatim-opaque rule keeps human-readable opaque identities
 human-readable in `git log` while remaining a pure function of the
 payload bytes.
 
-### 6.3 `mkit-author` header encoding
+### 6.3 `kit-author` header encoding
 
 ```
-mkit-author <kind-hex2>:<base64-of-payload>
+kit-author <kind-hex2>:<base64-of-payload>
 ```
 
 `kind-hex2` is the two-digit lowercase hex of the IdentityKind byte
@@ -285,12 +285,12 @@ object <sha1-of-translated-target>
 type <git type of target>                   (§7.1)
 tag <name bytes verbatim>
 tagger <synthesized line>                   (§6.2 rules, tagger identity)
-mkit-schema 1
-mkit-tagger <identity encoding>             (§6.3 encoding)
-mkit-signer <64 lowercase hex>
-mkit-signature <128 lowercase hex>          (all-zero = unsigned, carried as-is)
-mkit-target <64 lowercase hex>              (mkit target hash)
-mkit-target-type <2 lowercase hex>          (mkit ObjectType byte)
+kit-schema 1
+kit-tagger <identity encoding>             (§6.3 encoding)
+kit-signer <64 lowercase hex>
+kit-signature <128 lowercase hex>          (all-zero = unsigned, carried as-is)
+kit-target <64 lowercase hex>              (mkit target hash)
+kit-target-type <2 lowercase hex>          (mkit ObjectType byte)
 <empty line>
 <message bytes, verbatim>
 ```
@@ -300,7 +300,7 @@ mkit-target-type <2 lowercase hex>          (mkit ObjectType byte)
 `type` is the git type of the *translated* target (`commit`, `tree`,
 `blob`, `tag`). A tag whose mkit target is a remix is refused with
 the remix policy (§8). A tag whose target is a chunked blob carries
-git `type blob` (the flattened translation); `mkit-target-type`
+git `type blob` (the flattened translation); `kit-target-type`
 preserves the distinction (`05`) for reconstruction.
 
 The git `tag` header value cannot contain `\n`. mkit tag-object
@@ -321,7 +321,7 @@ Translating remixes is **deliberately out of scope for v1**. The
 mapping is tractable (a remix is structurally a commit plus a sorted
 `(upstream_id, commit_hash)` source list, which would ride as
 headers), but it is excluded to bound v1 review scope and because the
-remix signing domain (`mkit.remix\0`) doubles the §10 verification
+remix signing domain (`kit.remix\0`) doubles the §10 verification
 surface.
 
 Refusal granularity is **per ref**: a ref whose reachable closure
@@ -329,7 +329,7 @@ contains a remix is skipped with an actionable warning naming the ref
 and the offending object; the export of other refs proceeds. An
 export in which *every* requested ref is skipped exits non-zero.
 
-The header names `mkit-remix-source` and `mkit-object-type` are
+The header names `kit-remix-source` and `kit-object-type` are
 **reserved** by this spec for the future remix mapping and MUST NOT
 be emitted by v1 bridges, so adding remix support is a spec extension
 rather than a breaking change to the v1 mapping.
@@ -344,24 +344,24 @@ claim and re-verify carried signatures; it is **not an import path**
 &mdash; it is only defined on objects the §3–§7 mapping can emit, and MUST
 fail loudly on anything else (missing `mkit-*` headers, unknown
 headers in the `mkit-*` namespace, a `tag`/`commit` without
-`mkit-schema`, git modes with no mkit equivalent such as `160000`,
+`kit-schema`, git modes with no mkit equivalent such as `160000`,
 etc.).
 
 - blob: re-wrap bytes ≤ 1 MiB as `blob`; > 1 MiB re-chunk per §4.
 - tree: map modes back, re-sort to mkit byte-lex order, replace each
   child SHA-1 with the BLAKE3 of the reconstructed child.
-- commit: rebuild SPEC-OBJECTS §5 layout from `mkit-tree`,
-  `mkit-parent`*, `mkit-author`, message bytes, the author-line
-  timestamp, `mkit-signer`, `mkit-message-hash` / `mkit-content-digest`
-  (zero when absent), `mkit-signature`.
-- tag: rebuild SPEC-OBJECTS §6a layout from `mkit-target`,
-  `mkit-target-type`, the `tag` name bytes, `mkit-tagger`, message,
-  timestamp, `mkit-signer`, `mkit-signature`.
+- commit: rebuild SPEC-OBJECTS §5 layout from `kit-tree`,
+  `kit-parent`*, `kit-author`, message bytes, the author-line
+  timestamp, `kit-signer`, `kit-message-hash` / `kit-content-digest`
+  (zero when absent), `kit-signature`.
+- tag: rebuild SPEC-OBJECTS §6a layout from `kit-target`,
+  `kit-target-type`, the `tag` name bytes, `kit-tagger`, message,
+  timestamp, `kit-signer`, `kit-signature`.
 
 A reconstruction is **valid** iff the rebuilt bytes deserialize under
 SPEC-OBJECTS and re-serialize to the identical bytes, and their
 BLAKE3 equals the value carried in the parent's reference to them
-(tree entry, `mkit-tree`, `mkit-parent`, `mkit-target`).
+(tree entry, `kit-tree`, `kit-parent`, `kit-target`).
 
 ---
 
@@ -386,7 +386,7 @@ Deep verification proves the entire translated graph is the signed
 original. Cost is proportional to the closure; it is the mode for
 mirror audits, not per-commit checks.
 
-An all-zero `mkit-signature` fails both modes (same convention as
+An all-zero `kit-signature` fails both modes (same convention as
 unsigned annotated tags, SPEC-SIGNING §4a) and MUST be reported as
 "unsigned", not "tampered".
 
@@ -398,7 +398,7 @@ At export, the bridge mints one DSSE/in-toto attestation per exported
 ref head (SPEC-ATTESTATIONS encoding rules apply):
 
 - `predicateType`:
-  `https://github.com/officialunofficial/mkit/spec/predicate/git-bridge/v1`
+  `https://kit.storage/spec/predicate/git-bridge/v1`
   (the SPEC-ATTESTATIONS §6.4 project-controlled URI scheme).
 - `subject[0]`: `name` = the full mkit ref name; `digest` =
   `{"blake3": "<64hex mkit hash of the ref head &mdash; a commit, or a tag
@@ -452,28 +452,28 @@ import side's git-import/v1 attestation); a fork-mode head whose tip
 is a bridge-translated local commit is attested as usual.
 
 Bridge attestations are stored like any attestation
-(`.mkit/attestations/<commit>/…`) and additionally published on the
-git mirror under the ref `refs/mkit/attestations` as a flat tree:
+(`.kit/attestations/<commit>/…`) and additionally published on the
+git mirror under the ref `refs/kit/attestations` as a flat tree:
 one entry per published envelope, name = `<64hex attestation
 id>.dsse` (the BLAKE3 of the envelope bytes, matching the local
 store's naming &mdash; naming by git sha would collide when two refs share
 a head), content = the DSSE envelope bytes, committed by a synthetic
 commit whose author/committer line is the fixed string
-`mkit-git-bridge <bridge@mkit.invalid> <ts> +0000` with `<ts>` = the
+`kit-git-bridge <bridge@kit.invalid> <ts> +0000` with `<ts>` = the
 newest exported head's timestamp (deterministic; deliberately not
 the exporter's identity &mdash; the envelopes inside the tree carry the
 signed identity claims). Consumers locate a head's attestations by
 the `gitCommit` field inside the envelopes' predicates. Note for
 consumers: non-standard ref namespaces are not fetched by `git
 clone` defaults &mdash; document the explicit refspec
-(`+refs/mkit/attestations:refs/mkit/attestations`).
+(`+refs/kit/attestations:refs/kit/attestations`).
 
 **Multi-exporter limitation.** The attestations ref forms a linear
 synthetic-commit chain per mirror. Two *machines* exporting to the
 same mirror will contend on it: each one's chain diverges from the
 other's, and the lease (§12.2) refuses the overwrite. §12.2's
 concurrent-exporter safety claim covers translated refs (identical
-bytes by determinism); for `refs/mkit/attestations` the v1 posture
+bytes by determinism); for `refs/kit/attestations` the v1 posture
 is one exporter per mirror, enforced by the lease failing loudly.
 
 A SHA-1 collision would let two git objects claim one `gitCommit`
@@ -541,7 +541,7 @@ internal state are never exported.
 ### 12.3 Mapping cache
 
 The blake3↔sha1 map and per-ref last-exported state live under
-`.mkit/git/<remote>/` (layout is implementation-defined and
+`.kit/git/<remote>/` (layout is implementation-defined and
 explicitly non-normative). Because translation is deterministic, the
 cache is disposable: deleting it and re-deriving from the object
 store MUST yield identical mappings **for every object still in the
@@ -706,7 +706,7 @@ under steps 2–3**; SHA-1 remains a locator everywhere else (§2).
 | One state dir never serves two mirrors | destination binding recorded at first export (§12.3) |
 | Plain export can never force-replace an upstream it was imported from | origin guard compares canonical remote identities and refuses (§14.2) |
 | Fork-mode push never rewinds a branch or moves a tag on a repo the exporter doesn't own | fast-forward-only rule against a fresh `ls-remote` observation (§14.1) |
-| Adding remix support later cannot break v1 consumers | `mkit-remix-source` / `mkit-object-type` header names reserved, never emitted (§8) |
+| Adding remix support later cannot break v1 consumers | `kit-remix-source` / `kit-object-type` header names reserved, never emitted (§8) |
 
 §10 is the concentrated statement of what verification does and does
 not prove per mode (shallow: carried fields; deep: the whole graph;

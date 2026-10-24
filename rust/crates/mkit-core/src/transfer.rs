@@ -15,7 +15,7 @@
 //! walking object hashes. Each push records a [`PackListNode`] — this
 //! module's small versioned wire format — holding the pack(s) it added plus
 //! a `prev` pointer to the previous node, forming a per-branch chain. The
-//! push side advertises the chain head through a `refs/mkit/packmap/<branch>`
+//! push side advertises the chain head through a `refs/kit/packmap/<branch>`
 //! metadata ref whose value is the BLAKE3 of the head node (itself stored as
 //! a pack object). The fetch side reads that ref, walks the chain, and
 //! unpacks every pack oldest-first. Chaining keeps each push O(1) on the

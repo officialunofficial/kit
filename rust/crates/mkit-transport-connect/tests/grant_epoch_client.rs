@@ -16,7 +16,7 @@ use mkit_transport_connect::{
     Completion, ConnectTransport, EnvelopeSigner, VisibilityChoice, VisibilityRequest, generated,
 };
 
-const SERVICE: &str = "mkit.transport.v1.TransportService";
+const SERVICE: &str = "kit.transport.v1.TransportService";
 
 struct Dalek(SigningKey);
 impl EnvelopeSigner for Dalek {

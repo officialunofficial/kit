@@ -26,12 +26,12 @@
 use mkit_core::hash::Hash;
 use mkit_core::protocol::PackKey;
 use mkit_core::refs::{RefWriteCondition, validate_ref_name};
-use mkit_rpc::mkit::common::v1::RefEntry;
-use mkit_rpc::mkit::rpc::v1::ssh::{
+use mkit_rpc::kit::common::v1::RefEntry;
+use mkit_rpc::kit::rpc::v1::ssh::{
     DownloadPack, DownloadPackHeader, ListRefsResponse, PackChunk, PackExistsResponse,
     ReadRefResponse, UpdateRef, UploadPack, UploadPackResponse, ssh_frame,
 };
-use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode};
+use mkit_rpc::kit::rpc::v1::{Error as RpcError, ErrorCode};
 
 use crate::budget::upload_limits;
 use crate::packs::FinishError;
@@ -352,7 +352,7 @@ impl<'r> Verbs<'r> {
 
 #[cfg(test)]
 mod tests {
-    use mkit_rpc::mkit::common::v1::RefExpectation;
+    use mkit_rpc::kit::common::v1::RefExpectation;
 
     use super::*;
 

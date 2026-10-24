@@ -172,7 +172,7 @@ fn remote_rename_moves_and_remove_deletes_tracking_refs() {
     refs::write_remote_ref(&layout, "old", "main", &tip).unwrap();
 
     // Named remote in config so rename/remove operate on it.
-    r.ok(&["remote", "add", "old", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "old", "kit+file:///tmp/nowhere"]);
     r.ok(&["remote", "rename", "old", "new"]);
     assert!(
         refs::read_remote_ref(&layout, "new", "main")
@@ -195,7 +195,7 @@ fn remote_rename_moves_and_remove_deletes_tracking_refs() {
     );
 }
 
-/// Plant a marker file under `.mkit/git/<name>/` to stand in for
+/// Plant a marker file under `.kit/git/<name>/` to stand in for
 /// bridge state (leases/maps/staging mirror) without needing a real
 /// git-bridge remote wired up.
 fn plant_bridge_state(layout: &RepoLayout, name: &str) -> std::path::PathBuf {
@@ -215,7 +215,7 @@ fn remote_rename_single_to_multi_segment_moves_refs_and_bridge_state() {
     refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
     plant_bridge_state(&layout, "a");
 
-    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
     let out = r.ok(&["remote", "rename", "a", "team/upstream"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -257,7 +257,7 @@ fn remote_rename_multi_to_single_segment_moves_refs_and_prunes_empty_parent() {
     refs::write_remote_ref(&layout, "team/upstream", "main", &tip).unwrap();
     plant_bridge_state(&layout, "team/upstream");
 
-    r.ok(&["remote", "add", "team/upstream", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "team/upstream", "kit+file:///tmp/nowhere"]);
     r.ok(&["remote", "rename", "team/upstream", "b"]);
 
     assert!(
@@ -289,7 +289,7 @@ fn remote_rename_multi_to_multi_segment_moves_refs_and_bridge_state() {
     refs::write_remote_ref(&layout, "team/upstream", "main", &tip).unwrap();
     plant_bridge_state(&layout, "team/upstream");
 
-    r.ok(&["remote", "add", "team/upstream", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "team/upstream", "kit+file:///tmp/nowhere"]);
     let out = r.ok(&["remote", "rename", "team/upstream", "archive/upstream"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -327,7 +327,7 @@ fn rename_into_own_subtree_moves_state() {
     refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
     plant_bridge_state(&layout, "a");
 
-    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
     let out = r.ok(&["remote", "rename", "a", "a/sub"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -372,7 +372,7 @@ fn rename_out_of_own_subtree_moves_state() {
     refs::write_remote_ref(&layout, "a/sub", "main", &tip).unwrap();
     plant_bridge_state(&layout, "a/sub");
 
-    r.ok(&["remote", "add", "a/sub", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/sub", "kit+file:///tmp/nowhere"]);
     let out = r.ok(&["remote", "rename", "a/sub", "a"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -404,7 +404,7 @@ fn rename_out_of_deep_nesting_prunes_parents() {
     refs::write_remote_ref(&layout, "x/y/z", "main", &tip).unwrap();
     plant_bridge_state(&layout, "x/y/z");
 
-    r.ok(&["remote", "add", "x/y/z", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "x/y/z", "kit+file:///tmp/nowhere"]);
     r.ok(&["remote", "rename", "x/y/z", "flat"]);
 
     assert!(
@@ -430,7 +430,7 @@ fn failed_rename_restores_source_state() {
     let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
     refs::write_remote_ref(&layout, "orig", "main", &tip).unwrap();
     plant_bridge_state(&layout, "orig");
-    r.ok(&["remote", "add", "orig", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "orig", "kit+file:///tmp/nowhere"]);
 
     // A non-empty orphaned state dir at the destination, with no config
     // entry — exactly what `remote remove` leaves behind for bridge
@@ -472,7 +472,7 @@ fn failed_rename_restores_source_state() {
 /// never surface a phantom `refs/remotes/.rename.tmp.../...` ref or
 /// remote. The companion bridge-side assertion (zero-arg bridge-state
 /// resolution via `state_names`/`resolve_state` ignoring the same
-/// shape planted under `.mkit/git/`) lives in
+/// shape planted under `.kit/git/`) lives in
 /// `git_tools::tests::state_names_and_resolve_state_skip_dot_leading_orphans`
 /// (feature `git-bridge`), since those functions only exist under that
 /// feature. This test covers the case
@@ -522,8 +522,8 @@ fn prefix_nested_remotes_coexist() {
     let r = Repo::new();
     r.commit_file("a.txt", b"a\n", "base");
 
-    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b", "mkit+file:///tmp/nowhere-b"]);
+    r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/b", "kit+file:///tmp/nowhere-b"]);
 
     let out = r.ok(&["remote"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -541,7 +541,7 @@ fn prefix_nested_remotes_coexist() {
     let out = r.ok(&["remote", "get-url", "a/b"]);
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
-        "mkit+file:///tmp/nowhere-b",
+        "kit+file:///tmp/nowhere-b",
         "a/b's config entry must remain intact"
     );
 }
@@ -561,8 +561,8 @@ fn remove_prefix_remote_preserves_nested_sibling() {
     refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
     refs::write_remote_ref(&layout, "a/b", "main", &tip).unwrap();
 
-    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b", "mkit+file:///tmp/nowhere-b"]);
+    r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/b", "kit+file:///tmp/nowhere-b"]);
 
     let out = r.ok(&["remote", "remove", "a"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -613,8 +613,8 @@ fn rename_prefix_remote_preserves_nested_sibling() {
     plant_bridge_state(&layout, "a");
     plant_bridge_state(&layout, "a/b");
 
-    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b", "mkit+file:///tmp/nowhere-b"]);
+    r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/b", "kit+file:///tmp/nowhere-b"]);
 
     let out = r.ok(&["remote", "rename", "a", "x"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -651,7 +651,7 @@ fn rename_prefix_remote_preserves_nested_sibling() {
     let ab_marker = layout.git_state_dir().join("a/b/marker.txt");
     assert!(
         ab_marker.exists(),
-        "a/b's bridge state must remain at .mkit/git/a/b/, untouched"
+        "a/b's bridge state must remain at .kit/git/a/b/, untouched"
     );
     assert_eq!(std::fs::read(&ab_marker).unwrap(), b"bridge state\n");
 
@@ -659,7 +659,7 @@ fn rename_prefix_remote_preserves_nested_sibling() {
     let out = r.ok(&["remote", "get-url", "a/b"]);
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
-        "mkit+file:///tmp/nowhere-b",
+        "kit+file:///tmp/nowhere-b",
         "a/b's config entry must remain intact"
     );
 }
@@ -677,8 +677,8 @@ fn deeply_nested_sibling_survives() {
     refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
     refs::write_remote_ref(&layout, "a/b/c", "main", &tip).unwrap();
 
-    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b/c", "mkit+file:///tmp/nowhere-c"]);
+    r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/b/c", "kit+file:///tmp/nowhere-c"]);
 
     r.ok(&["remote", "remove", "a"]);
 
@@ -724,8 +724,8 @@ fn rename_into_own_subtree_with_sibling_present() {
     refs::write_remote_ref(&layout, "a/x", "main", &tip).unwrap();
     plant_bridge_state(&layout, "a/x");
 
-    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/x", "mkit+file:///tmp/nowhere-x"]);
+    r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/x", "kit+file:///tmp/nowhere-x"]);
 
     let out = r.ok(&["remote", "rename", "a", "a/b"]);
     assert_eq!(
@@ -775,8 +775,8 @@ fn selective_move_restores_on_occupied_destination() {
     refs::write_remote_ref(&layout, "a/x", "main", &tip).unwrap();
     plant_bridge_state(&layout, "a/x");
 
-    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/x", "mkit+file:///tmp/nowhere-x"]);
+    r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/x", "kit+file:///tmp/nowhere-x"]);
 
     // A non-empty orphan directory already sitting at the destination —
     // no config entry, just like the bridge-state orphans
@@ -837,8 +837,8 @@ fn deeply_nested_sibling_survives_rename() {
     refs::write_remote_ref(&layout, "a/b/c", "main", &tip).unwrap();
     plant_bridge_state(&layout, "a/b/c");
 
-    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b/c", "mkit+file:///tmp/nowhere-c"]);
+    r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/b/c", "kit+file:///tmp/nowhere-c"]);
 
     let out = r.ok(&["remote", "rename", "a", "x"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -903,8 +903,8 @@ fn selective_move_restore_recurses_into_retained_ancestors() {
     // ancestor of the protected root) rather than moved/removed whole.
     refs::write_remote_ref(&layout, "a/b/c", "main", &tip).unwrap();
 
-    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b/c", "mkit+file:///tmp/nowhere-c"]);
+    r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/b/c", "kit+file:///tmp/nowhere-c"]);
 
     // Occupied, non-empty destination forces the final rename (step 4)
     // to fail, driving the restore path.
@@ -973,8 +973,8 @@ fn rename_round_trip_into_sibling_fails_closed() {
     refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
     refs::write_remote_ref(&layout, "a/x", "main", &tip).unwrap();
 
-    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/x", "mkit+file:///tmp/nowhere-x"]);
+    r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/x", "kit+file:///tmp/nowhere-x"]);
 
     // First leg: `a` -> `a/b`. `a/x` is a sibling of `old` ("a"), so it
     // is protected and this succeeds cleanly.
@@ -1049,7 +1049,7 @@ fn no_sibling_fast_path_unchanged() {
     let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
     refs::write_remote_ref(&layout, "team/upstream", "main", &tip).unwrap();
     plant_bridge_state(&layout, "team/upstream");
-    r.ok(&["remote", "add", "team/upstream", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "team/upstream", "kit+file:///tmp/nowhere"]);
 
     r.ok(&["remote", "remove", "team/upstream"]);
 
@@ -1076,12 +1076,12 @@ fn no_sibling_fast_path_unchanged() {
 
 #[test]
 fn named_remote_fetch_and_pull_use_their_namespace() {
-    // Origin repo with one commit, exposed over mkit+file://.
+    // Origin repo with one commit, exposed over kit+file://.
     let origin = Repo::new();
     origin.commit_file("a.txt", b"a\n", "origin base");
     let origin_store = origin.path().join("store");
     std::fs::create_dir_all(&origin_store).unwrap();
-    let url = format!("mkit+file://{}", origin_store.display());
+    let url = format!("kit+file://{}", origin_store.display());
     origin.ok(&["remote", "add", &url]);
     origin.ok(&["push", "--all"]);
 

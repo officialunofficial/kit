@@ -2,7 +2,7 @@
   "version": 2,
   "audience": "https://api.example.test",
   "repository": "room-a",
-  "procedure": "/mkit.repo.v1.RepoService/UpdateRef",
+  "procedure": "/kit.repo.v1.RepoService/UpdateRef",
   "body": "auth-v2 fixed body",
   "created_at": 1700000000000,
   "expires_at": 1700000300000,
@@ -10,8 +10,8 @@
   "seed": "0707070707070707070707070707070707070707070707070707070707070707",
   "body_digest": "17c7f9521e4c4c77d18358fe8d873861613cdddf86486b8ccde07790f1101a3d",
   "commitment": "body:17c7f9521e4c4c77d18358fe8d873861613cdddf86486b8ccde07790f1101a3d",
-  "canonical": "mkit-write:v2\nhttps://api.example.test\nroom-a\n/mkit.repo.v1.RepoService/UpdateRef\nbody:17c7f9521e4c4c77d18358fe8d873861613cdddf86486b8ccde07790f1101a3d\n1700000000000\n1700000300000\nabababababababababababababababababababababababababababababababab",
-  "signing_digest": "bf9b3247d18ce6bde1653f8969b405c0c0cf7f43713f633bf20d74944432b9c5",
+  "canonical": "kit-write:v2\nhttps://api.example.test\nroom-a\n/kit.repo.v1.RepoService/UpdateRef\nbody:17c7f9521e4c4c77d18358fe8d873861613cdddf86486b8ccde07790f1101a3d\n1700000000000\n1700000300000\nabababababababababababababababababababababababababababababababab",
+  "signing_digest": "18a49e312e3f0d6419a7f0cb6864af7d7c8382ec6d3fe715052b3005dab8b2dd",
   "public_key": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
-  "signature": "49baee0bad6f139a09181a0ee80fecfea67628b744c0650c9c81954b43ebfaff38820a367755f65514b85ef74e603a35a15cc4ae885a4779d08463b3396bb80b"
+  "signature": "eccfd40feafa0a2bd272f3ac66b232e5cf4f0395cbdc11c5ab0c3f3a8c3eb3d0c6a2b0f5afeb041618df80c77aa651f5f230a3b1dd1a80ba5276e9f53a927301"
 }

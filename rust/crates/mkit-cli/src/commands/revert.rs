@@ -7,7 +7,7 @@
 //! gc/recovery. On a clean revert we commit the reversed tree with a
 //! generated `Revert "<subject>"` message. On conflict we materialise the
 //! conflict material, persist `REVERT_HEAD`/`REVERT_MSG`/`ORIG_HEAD` + the
-//! `mkit-conflicts` sidecar, and exit non-zero; the user resolves,
+//! `kit-conflicts` sidecar, and exit non-zero; the user resolves,
 //! `mkit add`s, then runs `mkit revert --continue` (or `--abort`).
 
 use std::io::Write;

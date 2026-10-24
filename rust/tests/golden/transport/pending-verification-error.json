@@ -1,1 +1,1 @@
-{"code":"unavailable","message":"pack verification pending","details":[{"type":"mkit.transport.v1.PendingVerification","value":"CIgn"}]}
+{"code":"unavailable","message":"pack verification pending","details":[{"type":"kit.transport.v1.PendingVerification","value":"CIgn"}]}

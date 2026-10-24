@@ -197,8 +197,8 @@ fn cleartext_http_to_a_non_loopback_host_is_refused_unless_allowed() {
     assert!(!err.contains("non-loopback"), "{err}");
 }
 
-const READ_URL_PATH: &str = "mkit.transport.v1.TransportService/ListRefs";
-const WRITE_URL_PATH: &str = "mkit.transport.v1.TransportService/UpdateRef";
+const READ_URL_PATH: &str = "kit.transport.v1.TransportService/ListRefs";
+const WRITE_URL_PATH: &str = "kit.transport.v1.TransportService/UpdateRef";
 
 fn read_request_to(url: &str) -> Request<Vec<u8>> {
     Request::post(format!("{url}{READ_URL_PATH}"))
@@ -438,7 +438,7 @@ fn sequential_reads_and_signed_writes_reuse_a_connection() {
     let http = NativeHttp::new().unwrap();
     for procedure in ["ListRefs", "ReadRef", "UpdateRef"] {
         let request = Request::post(format!(
-            "http://{address}/mkit.transport.v1.TransportService/{procedure}"
+            "http://{address}/kit.transport.v1.TransportService/{procedure}"
         ))
         .header("x-signature", "fixed-signature")
         .header("idempotency-key", "fixed-nonce")
@@ -496,7 +496,7 @@ fn a_signed_request_received_before_disconnect_is_not_replayed_by_the_pool() {
         b"ok"
     );
     let request = Request::post(format!(
-        "http://{address}/mkit.transport.v1.TransportService/UpdateRef"
+        "http://{address}/kit.transport.v1.TransportService/UpdateRef"
     ))
     .header("x-signature", "fixed-signature")
     .header("idempotency-key", "fixed-nonce")
@@ -655,7 +655,7 @@ fn request_kind_selects_independent_timeout_budgets() {
         });
         let result = send(
             &http,
-            &format!("http://{addr}/mkit.transport.v1.TransportService/{procedure}"),
+            &format!("http://{addr}/kit.transport.v1.TransportService/{procedure}"),
             1024,
         );
         if transfer {
@@ -877,7 +877,7 @@ fn a_streamed_signed_write_survives_an_idle_close_without_changing_its_body() {
     let chunks = vec![vec![1; 8192], vec![2; 8192], vec![3; 8192]];
     let mut body = StreamingBody(chunks.clone().into_iter());
     let request = Request::post(format!(
-        "http://{address}/mkit.transport.v1.TransportService/UploadPack"
+        "http://{address}/kit.transport.v1.TransportService/UploadPack"
     ))
     .header("x-signature", "fixed-signature")
     .header("idempotency-key", "fixed-nonce")

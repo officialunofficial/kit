@@ -48,7 +48,7 @@
 
 // Generated protobuf modules. `_includes.rs` is emitted by
 // buffa-build; it sets up the module tree for common.proto,
-// signer.proto, ssh.proto under `mkit::rpc::v1`.
+// signer.proto, ssh.proto under `kit::rpc::v1`.
 include!(concat!(env!("OUT_DIR"), "/_includes.rs"));
 
 /// Maximum length of a single framed protobuf message in bytes.
@@ -58,7 +58,7 @@ pub const MAX_FRAME_BYTES: u32 = 1024 * 1024;
 
 /// The protocol version mkit v0.1.x speaks. Aliased here so callers
 /// don't need to chase the generated module path.
-pub const PROTOCOL_VERSION: i32 = crate::mkit::rpc::v1::ProtocolVersion::ProtocolVersion1 as i32;
+pub const PROTOCOL_VERSION: i32 = crate::kit::rpc::v1::ProtocolVersion::ProtocolVersion1 as i32;
 
 mod framing;
 mod helpers;
@@ -88,7 +88,7 @@ mod tests {
     fn pin_response_debug_redacts_pin() {
         // signer.proto marks `pin` with [debug_redact = true]; a stray
         // `{:?}` log of a PinResponse must never echo the PIN.
-        let pr = crate::mkit::rpc::v1::signer::PinResponse {
+        let pr = crate::kit::rpc::v1::signer::PinResponse {
             pin: Some("123456".into()),
             ..Default::default()
         };

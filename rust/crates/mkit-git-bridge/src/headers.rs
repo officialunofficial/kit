@@ -7,22 +7,22 @@ use mkit_core::object::{IDENTITY_MAX_LEN, Identity, IdentityKind};
 /// Header names, in the exact emission order the spec pins for
 /// commits (§6.1). `MKIT_PARENT` repeats; the two annotation headers
 /// are emitted only when non-zero.
-pub const MKIT_SCHEMA: &str = "mkit-schema";
-pub const MKIT_AUTHOR: &str = "mkit-author";
-pub const MKIT_TAGGER: &str = "mkit-tagger";
-pub const MKIT_SIGNER: &str = "mkit-signer";
-pub const MKIT_SIGNATURE: &str = "mkit-signature";
-pub const MKIT_TREE: &str = "mkit-tree";
-pub const MKIT_PARENT: &str = "mkit-parent";
-pub const MKIT_MESSAGE_HASH: &str = "mkit-message-hash";
-pub const MKIT_CONTENT_DIGEST: &str = "mkit-content-digest";
-pub const MKIT_TARGET: &str = "mkit-target";
-pub const MKIT_TARGET_TYPE: &str = "mkit-target-type";
+pub const MKIT_SCHEMA: &str = "kit-schema";
+pub const MKIT_AUTHOR: &str = "kit-author";
+pub const MKIT_TAGGER: &str = "kit-tagger";
+pub const MKIT_SIGNER: &str = "kit-signer";
+pub const MKIT_SIGNATURE: &str = "kit-signature";
+pub const MKIT_TREE: &str = "kit-tree";
+pub const MKIT_PARENT: &str = "kit-parent";
+pub const MKIT_MESSAGE_HASH: &str = "kit-message-hash";
+pub const MKIT_CONTENT_DIGEST: &str = "kit-content-digest";
+pub const MKIT_TARGET: &str = "kit-target";
+pub const MKIT_TARGET_TYPE: &str = "kit-target-type";
 
 /// Reserved by §8 for the future remix mapping — never emitted, and
 /// reconstruction rejects them so a v1 verifier cannot silently
 /// accept a future-format object.
-pub const RESERVED: &[&str] = &["mkit-remix-source", "mkit-object-type"];
+pub const RESERVED: &[&str] = &["kit-remix-source", "kit-object-type"];
 
 /// The schema version this mapping covers (§1.2).
 pub const SCHEMA_VALUE: &str = "1";

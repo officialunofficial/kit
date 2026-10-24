@@ -115,7 +115,7 @@ fn gc_does_not_prune_recovery_logged_commit() {
     let td = init_repo();
     let root = td.path();
     commit(root, "a.txt", b"one\n", "one");
-    let superseded = fs::read_to_string(root.join(".mkit/refs/heads/main"))
+    let superseded = fs::read_to_string(root.join(".kit/refs/heads/main"))
         .unwrap()
         .trim()
         .to_owned();
@@ -128,7 +128,7 @@ fn gc_does_not_prune_recovery_logged_commit() {
         "amend"
     );
     assert_ne!(
-        fs::read_to_string(root.join(".mkit/refs/heads/main"))
+        fs::read_to_string(root.join(".kit/refs/heads/main"))
             .unwrap()
             .trim(),
         superseded,

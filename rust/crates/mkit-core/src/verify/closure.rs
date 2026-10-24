@@ -1441,7 +1441,7 @@ mod tests {
         let export = export_closure(&store, &commit_id, ClosureMode::Snapshot).unwrap();
         assert!(!export.packs.is_empty());
         for pack in &export.packs {
-            assert_eq!(&pack[..4], b"MKIT");
+            assert_eq!(&pack[..4], b"KIT\0");
             assert_eq!(
                 u32::from_le_bytes(pack[4..8].try_into().unwrap()),
                 pack::VERSION

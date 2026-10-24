@@ -9,9 +9,9 @@
 //!
 //! * `--algorithm` defaults to `ed25519` (backward-compat with the
 //!   original single-algorithm command). `ed25519` writes to
-//!   `.mkit/keys/default.key`; `secp256k1` / `p256` write to the path
+//!   `.kit/keys/default.key`; `secp256k1` / `p256` write to the path
 //!   configured via `attest.<algo>_key_path` (default
-//!   `.mkit/keys/<algo>.key`).
+//!   `.kit/keys/<algo>.key`).
 //! * `--force` overwrites an existing key file; without it, refuse with
 //!   a clear error.
 //! * `--print-pubkey` emits the canonical keyid on stdout so downstream
@@ -80,7 +80,7 @@ pub fn run(args: &[String]) -> u8 {
     // Resolve the target key path from config. Each algorithm reads
     // its own config knob so `mkit keygen`, `mkit commit`, and
     // `mkit attest` agree on where the key lives — a user with
-    // `signing_key = /home/u/.mkit/global.key` in their user-scoped
+    // `signing_key = /home/u/.kit/global.key` in their user-scoped
     // config gets that path written/read consistently.
     let layout = match super::resolve_layout(&cwd) {
         Ok(layout) => layout,

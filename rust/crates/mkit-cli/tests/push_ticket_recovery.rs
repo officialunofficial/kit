@@ -371,7 +371,7 @@ fn rebaseline_over_six_packs_keeps_the_append_plan() {
         )
         .unwrap();
         assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip(&repo)));
-        let newest = tx.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
+        let newest = tx.read_ref("refs/kit/packmap/main").unwrap().unwrap();
         let node =
             mkit_core::transfer::decode_packlist(&tx.download_blob(&PackKey::new(newest)).unwrap())
                 .unwrap();

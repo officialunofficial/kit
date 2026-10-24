@@ -8,7 +8,7 @@ SSH-SECURITY).
 ## Quick start
 
 ```sh
-mkit init                          # create .mkit/ in the current directory
+mkit init                          # create .kit/ in the current directory
 mkit keygen                        # generate an Ed25519 signing key
 echo hello > README.md
 mkit add README.md
@@ -40,13 +40,13 @@ discovery too), like git:
   invocations like `mkit --no-pager log` don't error.
 
 `--git-dir`, `--work-tree`, and `--exec-path` are **non-goals** &mdash; mkit uses
-the `.mkit/` marker and has no split work-tree / exec-path model.
+the `.kit/` marker and has no split work-tree / exec-path model.
 
 ## Subcommand reference
 
 Working-tree commands:
 
-- `mkit init` &mdash; create a new repository in `.mkit/`.
+- `mkit init` &mdash; create a new repository in `.kit/`.
 - `mkit add [-A|-u] [-f] [-p] <path>...` / `mkit add .` &mdash; stage files for the
   next commit. Multiple pathspecs may be given. `.` stages every non-ignored
   file under the current directory. `-A`/`--all` stages every change in
@@ -55,7 +55,7 @@ Working-tree commands:
   updating modified ones and recording deletions &mdash; without adding
   untracked paths (takes no path arguments). `-A` and `-u` are mutually
   exclusive. An explicitly-named path that is ignored (by
-  `.gitignore`/`.mkitignore`) is refused unless `-f`/`--force` is given
+  `.gitignore`/`.kitignore`) is refused unless `-f`/`--force` is given
   (git parity); already-tracked paths are never subject to ignore.
   `-p`/`--patch` interactively presents each hunk between the staged (or
   HEAD) blob and the worktree file and stages only the accepted ones &mdash;
@@ -195,9 +195,9 @@ Working-tree commands:
   untracked files, or an operation in progress unless `--force` is
   given, and never removes the main tree or the tree you are standing
   in. `prune` deletes registry entries whose tree has vanished
-  (`--dry-run` previews). On-disk: a linked tree's `.mkit` is a pointer
-  *file* (`mkitdir: <path>`) into the main repository's
-  `.mkit/worktrees/<id>/`. Interim limit: `mkit gc` refuses to run while
+  (`--dry-run` previews). On-disk: a linked tree's `.kit` is a pointer
+  *file* (`kitdir: <path>`) into the main repository's
+  `.kit/worktrees/<id>/`. Interim limit: `mkit gc` refuses to run while
   linked worktrees exist (cross-tree root collection is a tracked
   follow-up) &mdash; remove or prune them first.
 - `mkit stash [save|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
@@ -523,7 +523,7 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   (`--stage`) prints stage info as `<mode> <hash> <stage>\t<path>` (git
   octal mode; `<stage>` is always `0` &mdash; mkit has no merge stages). `--others`
   lists untracked worktree files instead; `--exclude-standard` drops
-  ignored ones (per `.gitignore`/`.mkitignore`) and `--ignored` inverts to
+  ignored ones (per `.gitignore`/`.kitignore`) and `--ignored` inverts to
   show only ignored files (`--ignored` requires `--others`, like git's `-i`
   outside an
   `-o`/`-c` selection). `-z` NUL-terminates records and emits raw paths
@@ -534,7 +534,7 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   `--abbrev-ref HEAD` prints the current branch; `--verify` is accepted for
   git-script compatibility but is a **no-op** &mdash; mkit always errors on an
   unresolvable revision, with or without it; `--show-toplevel` prints the
-  repository root (the directory holding `.mkit`, found by walking up from
+  repository root (the directory holding `.kit`, found by walking up from
   cwd).
 - `mkit rev-list [--count] <rev>` &mdash; list the commit ids reachable from
   `<rev>` in reverse-chronological (topological) order, one 64-hex id per
@@ -582,7 +582,7 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   matching a shell glob (`*` spans `/`, `?` matches one char, `[...]` is a
   character class &mdash; the same matcher as `branch --list`/`tag -l`). This is
   the stable inspection surface for refs: scripts should use it
-  instead of `ls`/`cat` on `.mkit/refs/`, which is not a supported interface.
+  instead of `ls`/`cat` on `.kit/refs/`, which is not a supported interface.
 - `mkit ref cat <name>` &mdash; print the resolved hash for exactly one ref,
   following `HEAD`'s symbolic indirection (`HEAD` is mkit's only symbolic
   ref). `<name>` must be a fully-qualified ref name &mdash; `refs/heads/<b>`,
@@ -601,7 +601,7 @@ Attestations:
   carrying the commit hash as `subject` and the user-supplied
   predicate, wrapped in a DSSE envelope. On success prints the
   att-id (BLAKE3 over the canonical envelope, 64 hex) and stores the
-  envelope under `.mkit/attestations/<commit>/<att-id>.dsse`.
+  envelope under `.kit/attestations/<commit>/<att-id>.dsse`.
 
   Flags:
 
@@ -754,7 +754,7 @@ Branches / refs:
   removes them &mdash; but, like git, an untracked directory is only removed
   *wholesale* (shown `<dir>/`) when nothing inside survives: **ignored
   files are kept** (unless `-x`) and keep their parent directory, and a
-  **nested repository** (a subdirectory containing `.mkit`/`.git`) is left
+  **nested repository** (a subdirectory containing `.kit`/`.git`) is left
   untouched (git needs the double-force `-ff` to remove one, which mkit
   doesn't offer). `-x` also removes ignored files, `-X` removes *only*
   ignored (`-x` and `-X` are mutually exclusive). Trailing pathspecs limit
@@ -774,7 +774,7 @@ Branches / refs:
     `$EDITOR` is launched.
   - `mkit tag -s <name> [-m <msg>] [<commit>]` &mdash; create a signed
     annotated tag: an Ed25519 signature over the canonical tag bytes
-    under the distinct `mkit.tag` domain. Verify with
+    under the distinct `kit.tag` domain. Verify with
     `mkit verify <name>`.
   - `mkit tag -d <name>` &mdash; delete a tag.
   - `--author <spec>` overrides the tagger identity (same grammar as
@@ -912,7 +912,7 @@ merge cannot auto-resolve a path, the command:
      **file-vs-directory** → no markers (they would corrupt the file);
      the surviving side's content is left in place. Resolve these by
      hand. Each prints a per-path note.
-2. Records resumable operation state under `.mkit/` (see below) and exits
+2. Records resumable operation state under `.kit/` (see below) and exits
    non-zero.
 
 To finish, for each conflicting path: edit the worktree file to its
@@ -947,9 +947,9 @@ recoverable error and changes nothing). Starting a new merge / cherry-pick
 
 #### Operation-state files
 
-All live under `.mkit/`; rebase keeps its state inside
-`.mkit/rebase-apply/`. These use Git-compatible names plus one documented
-mkit sidecar. The `.mkit/index` stays a single-stage **resolved** staging
+All live under `.kit/`; rebase keeps its state inside
+`.kit/rebase-apply/`. These use Git-compatible names plus one documented
+mkit sidecar. The `.kit/index` stays a single-stage **resolved** staging
 area &mdash; there are no unmerged index stages (SPEC-INDEX is unchanged).
 
 | File                          | Meaning                                              |
@@ -958,8 +958,8 @@ area &mdash; there are no unmerged index stages (SPEC-INDEX is unchanged).
 | `CHERRY_PICK_HEAD`            | commit being applied by an in-progress cherry-pick   |
 | `ORIG_HEAD`                   | HEAD before the operation, used by `--abort`         |
 | `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
-| `mkit-conflicts`              | mkit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
-| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `mkit-conflicts` sidecar when paused. `actions` is parallel to `todo` (`pick`/`reword`/`squash`/`fixup`, from `rebase -i`); absent ⇒ all `pick` |
+| `kit-conflicts`              | mkit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
+| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` is parallel to `todo` (`pick`/`reword`/`squash`/`fixup`, from `rebase -i`); absent ⇒ all `pick` |
 
 Remote / sync:
 
@@ -971,7 +971,7 @@ Remote / sync:
 - `mkit remote add [<name>] <url>` &mdash; add a remote. With a `<name>`,
   registers a named remote (`remote.<name>.url`); without one, sets the
   flat default `remote_endpoint`. The URL MUST start with
-  `mkit+<scheme>://` (see below).
+  `kit+<scheme>://` (see below).
 - `mkit remote set [<name>] <url>` &mdash; alias for `mkit remote add`.
 - `mkit remote remove <name>` (alias `rm`) &mdash; delete a named remote. The
   reserved name `default` clears the flat `remote_endpoint`.
@@ -1003,7 +1003,7 @@ Remote / sync:
     silently substitutes another branch &mdash; a missing branch fails the
     clone with a "remote branch not found" error.
   - `-o`/`--origin <name>` &mdash; name the cloned remote `<name>` in the new
-    repo's `.mkit/config` instead of the implicit flat `default` remote
+    repo's `.kit/config` instead of the implicit flat `default` remote
     (mirrors `mkit remote add <name> <url>` at clone time). The name
     must be dot-free and ref-safe, like a named `remote add`. Tracking
     refs land under `refs/remotes/<name>/*` to match.
@@ -1045,7 +1045,7 @@ Remote / sync:
   (bounded cost per fetch). Opt out per invocation with
   `--no-verify-signatures`, or persistently for scripted/CI use via the
   **user-scoped** `pull.require_signed = false` config key &mdash; it cannot be
-  set from a cloned repo's own `.mkit/config` (see THREAT-MODEL.md §4).
+  set from a cloned repo's own `.kit/config` (see THREAT-MODEL.md §4).
   `--all` applies the same verification (and the same opt-out) to every
   remote it iterates.
 - **Library.** `clone`, `fetch` and `pull` run on the `mkit-sync` crate
@@ -1117,7 +1117,7 @@ Remote / sync:
 - `mkit serve [--idle-timeout-secs <secs>] [--max-session-secs <secs>] <path>` &mdash; internal SSH
   transport server. It speaks the mkit-rpc SSH framing on stdin and stdout
   and has no other mode. It has no network listener. The engine is the
-  `mkit-serve` crate. The refs and packs are the files that `mkit+file://`
+  `mkit-serve` crate. The refs and packs are the files that `kit+file://`
   remotes use. `mkit serve --root <dir> [--principal <hex>] [<ns>/<name>]`
   is the multi-repository form that a forge forces. The path names a
   `<NAMESPACE>/<NAME>` under `<dir>`. When the path is omitted, an
@@ -1131,7 +1131,7 @@ Remote / sync:
   over ssh, so it is read-only. Plain mode, without `--root`, lets every
   session write. See SPEC-TRANSPORT §4.1 and
   [SSH-SECURITY.md](SSH-SECURITY.md) §5. Both forms hold a shared
-  `serve.lock` in `<path>/.mkit` for as long as the process is alive. Any
+  `serve.lock` in `<path>/.kit` for as long as the process is alive. Any
   number of concurrent `serve` processes may hold it at once. A local
   worktree-mutating command or `gc` run against that same path while the
   lock is held prints a warning to stderr and proceeds. It is not refused.
@@ -1154,11 +1154,11 @@ Remote / sync:
   …"). At startup, when no other `mkit serve` process serves the root, it
   removes upload temp files (`packs/.<hex>.tmp.<pid>.<seq>`) that a crashed
   server left, once they are an hour old. It refuses a root marked
-  `.mkit/server-meta` (exit 78), because the refs of that root live in a
+  `.kit/server-meta` (exit 78), because the refs of that root live in a
   database.
 
   `--http` and `--listen-enc` do not exist. `MKIT_API_TOKEN` is sent as a
-  bearer token by `mkit+https://` remotes.
+  bearer token by `kit+https://` remotes.
 - `mkit pack-shard <hash> [--out <dir>] [--force]` &mdash; encode a stored
   pack into Reed-Solomon shards plus a manifest, ready to publish to
   an HTTP / S3 origin. Producer side of the SPEC-PACK-SHARDS
@@ -1220,10 +1220,10 @@ Remote / sync:
   ancestry, non-canonical chunking) are skipped per-ref with a
   warning; an export where everything was skipped exits non-zero.
   Pushes use per-ref `--force-with-lease` from recorded state under
-  `.mkit/git/<name>/`; mkit-side history rewrites mirror as
+  `.kit/git/<name>/`; mkit-side history rewrites mirror as
   force-pushes. Unless `--no-attest`, each exported head gets a
   signed `git-bridge/v1` DSSE attestation (saved like `mkit attest`,
-  published on the mirror's `refs/mkit/attestations` ref &mdash; fetch it
+  published on the mirror's `refs/kit/attestations` ref &mdash; fetch it
   with an explicit refspec; git clones skip it by default).
   Attestation signing uses the same signer resolution as `mkit
   attest` (`--algorithm`/`--signer` flags, else config defaults), so
@@ -1240,11 +1240,11 @@ Remote / sync:
   upstream default branch. Without: add the upstream to the current
   repo as `refs/remotes/<name>/*` tracking refs plus tags. Every
   translated commit/tag is signed by a DEDICATED import key
-  (`.mkit/keys/git-import.key`, generated on first use and pinned per
+  (`.kit/keys/git-import.key`, generated on first use and pinned per
   state dir &mdash; collaborative tracking requires sharing it; a different
   key produces an unrelated fork). Original authorship rides in the
   author identity; original git bytes are retained under
-  `.mkit/git/<name>/` with a `git-import/v1` attestation per head.
+  `.kit/git/<name>/` with a `git-import/v1` attestation per head.
   Unrepresentable refs skip per-ref with warnings (submodules,
   mkit-illegal names, historic-mode trees in fork state dirs).
   Upstream history imports once per (key, upstream); hashes are a
@@ -1280,7 +1280,7 @@ Remote / sync:
   requires the exact sha1. Exits non-zero listing each failing object;
   unsigned (all-zero-signature) objects also fail, reported as a count
   ("unsigned", never "tampered" &mdash; SPEC-GIT-BRIDGE §10).
-- `mkit git status` &mdash; one block per `.mkit/git/<name>/` state dir:
+- `mkit git status` &mdash; one block per `.kit/git/<name>/` state dir:
   direction, recorded source/dest, pinned importer key, tracking refs
   (import) and lease positions (export), staging health.
 - `mkit git format-patch <A..B> [-o <dir>] [--stdout]` &mdash; render
@@ -1314,7 +1314,7 @@ Agent integration:
   a predicate file passed to `attest` must resolve **inside** the repo
   (no reading outside files into a signed attestation), a `trust_roots`
   path passed to `verify-attest` must resolve **outside** the repo (a
-  hostile clone's in-repo `.mkit/attest-trust-roots.toml` can never be
+  hostile clone's in-repo `.kit/attest-trust-roots.toml` can never be
   selected via the MCP &mdash; see THREAT-MODEL §"Trust-roots scope"), and the
   external/multi-signer attestation controls are intentionally omitted
   because they can direct subprocess execution (use the `attest` CLI for
@@ -1379,12 +1379,12 @@ register grants on a server.
   [--timeout DURATION]` &mdash; switch a repository between public and private.
   By default it is a signed request with the repository signing key
   (`transport_auth = envelope`, a trusted remote, and the owner's key). With
-  `--statement` it sends an owner-signed `mkit-repo-visibility:v1` statement
+  `--statement` it sends an owner-signed `kit-repo-visibility:v1` statement
   with no envelope, which any owner scheme can sign.
 
 Cloning a private repository: a Connect clone with `transport_auth = envelope`
 signs with `signing_key`, which defaults to the repository-relative
-`.mkit/keys/default.key`. A fresh clone has no such file, so set a user-level
+`.kit/keys/default.key`. A fresh clone has no such file, so set a user-level
 `signing_key` (or `signer = keystore`) before cloning.
 
 Signing flags (`grant create`, `epoch bump`, `grant revoke`, `visibility set
@@ -1435,7 +1435,7 @@ Config / keys / version:
 - `mkit config <key> [--format=json]` &mdash; show one value.
 - `mkit config --unset <key>` &mdash; remove a configuration value. Deletes
   from whichever scope a `set` of that key would use &mdash; the repo layer
-  (`<repo>/.mkit/config`) for a repo-safe key, or the user-scoped layer
+  (`<repo>/.kit/config`) for a repo-safe key, or the user-scoped layer
   (`$XDG_CONFIG_HOME/mkit/config`) for a `REPO_FORBIDDEN_KEYS` key &mdash;
   unless overridden by `--local`/`--global`. Idempotent: unsetting an
   already-absent key is a silent success (like `rm -f`), not an error;
@@ -1466,7 +1466,7 @@ Config / keys / version:
     **non-authoritative**: mkit's commit author is cryptographic
     (`user.identity` or the signing key's derived Identity), and these
     values **never** feed it. They are repo-safe (stored in
-    `.mkit/config`) precisely because they cannot influence the signed
+    `.kit/config`) precisely because they cannot influence the signed
     author &mdash; unlike `user.identity`, which stays user-scoped and in
     `REPO_FORBIDDEN_KEYS` so a hostile clone cannot spoof authorship. The
     **first** time either alias is set in a repo that has never set
@@ -1488,7 +1488,7 @@ Config / keys / version:
   sidecar asset when the release publishes one; this runs entirely
   in-process, no `cosign` and no GitHub attestation API are involved.
   Only **installer-managed** binaries are updated:
-  the `.mkit-installed-tag` receipt written by `install.sh` must sit
+  the `.kit-installed-tag` receipt written by `install.sh` must sit
   next to the (canonicalized) executable, and the global
   `$MKIT_STATE_DIR/installed-tag` (default `~/.local/state/mkit`) must
   agree with it when present. Homebrew/cargo installs are refused with
@@ -1520,9 +1520,9 @@ Config / keys / version:
 
 ## Ignore files
 
-mkit reads ignore patterns from **both** `.gitignore` and `.mkitignore` at
-the repository root. `.gitignore` is applied first and `.mkitignore` last, so
-under gitignore's last-match-wins rule a repo's own `.mkitignore` can override
+mkit reads ignore patterns from **both** `.gitignore` and `.kitignore` at
+the repository root. `.gitignore` is applied first and `.kitignore` last, so
+under gitignore's last-match-wins rule a repo's own `.kitignore` can override
 (including re-include via `!`) anything `.gitignore` set. Matching is honored
 by `add`, `clean`, `ls-files --others`, `restore`/`checkout`, and the
 worktree tree-builder.
@@ -1542,7 +1542,7 @@ v1 subset:
 - A trailing `/` restricts a pattern to directories. A leading `!` negates
   (last match wins); `\#` / `\!` escape a leading `#` / `!` to a literal.
   Trailing unescaped spaces are trimmed.
-- `.mkit` and `.git` are always ignored (matched on the basename, ASCII
+- `.kit` and `.git` are always ignored (matched on the basename, ASCII
   case-insensitively).
 
 **Deferred (documented non-goals for now):** nested per-directory
@@ -1619,7 +1619,7 @@ These are documented behaviors, not bugs, with tracked follow-ups:
   such a colliding untracked path; with `-f` it is overwritten. git's
   `reset --hard` discards silently. The guard re-checks each dropped path
   directly, so it also covers a tracked file that matches an ignore rule
-  (`.gitignore`/`.mkitignore`). `<commit>` defaults to `HEAD`.
+  (`.gitignore`/`.kitignore`). `<commit>` defaults to `HEAD`.
 
 ### Commands deliberately not implemented (by design)
 
@@ -1641,9 +1641,9 @@ unreachable objects once they fall outside the grace window. See
 
 ## Config keys
 
-Stored in `.mkit/config` as `key = value` lines &mdash; **except** security-sensitive
+Stored in `.kit/config` as `key = value` lines &mdash; **except** security-sensitive
 keys, which are **user-scoped only** and ignored if set in a repo's
-`.mkit/config` (a hostile repo must not be able to redirect signing or trust).
+`.kit/config` (a hostile repo must not be able to redirect signing or trust).
 Those keys &mdash; `user.identity`, `signing_key`, `signer`, `key.*`, `attest.*`,
 `ssh.*`, `trusted_remote_endpoint`, `admission_helper`, `grant.webauthn_rp`, and
 `remote.<name>.admission_headers` &mdash; live in the user config
@@ -1653,12 +1653,12 @@ which routes them to the user scope automatically.
 | Key | Value | Default | Notes |
 |-----|-------|---------|-------|
 | `user.identity` | hex Identity | unset | **User-scoped only**; see below |
-| `signing_key` | path | `.mkit/keys/default.key` | Ed25519 seed file; **user-scoped only** |
+| `signing_key` | path | `.kit/keys/default.key` | Ed25519 seed file; **user-scoped only** |
 | `default_branch` | name | `main` | Branch for `mkit init` |
 | `remote_endpoint` | URL / path | empty | Set via `mkit remote add` |
 | `remote_bucket` | name | empty | For s3 remotes |
 | `remote_type` | `file` / `http` / `s3` / `ssh` / `memory` | auto | |
-| `transport_auth` | `bearer` / `envelope` | `bearer` | Write-auth mode for `mkit+https://`/`mkit+http://`; `envelope` additionally Ed25519-signs writes with the commit-signing key (see `signer`/`signing_key`/`key.ed25519_ref`) |
+| `transport_auth` | `bearer` / `envelope` | `bearer` | Write-auth mode for `kit+https://`/`kit+http://`; `envelope` additionally Ed25519-signs writes with the commit-signing key (see `signer`/`signing_key`/`key.ed25519_ref`) |
 | `http.sslCAInfo` | PEM certificate file path | unset | Additional trust certificates for native Connect HTTPS remotes only; normal user/repository/`-c` configuration scopes apply. `MKIT_SSL_CA_FILE` takes precedence. See [HTTPS certificate trust](#https-certificate-trust). |
 | `admission_helper` | absolute executable path | unset | User-scoped; invoked once for a 402 on a trusted remote. Its stdin includes untrusted server challenge content. The helper decides whether and how much to spend. |
 | `remote.<name>.admission_headers` | comma-separated HTTP header names | empty | User-scoped additions to the admission helper's request allowlist; hard-reserved names are refused. |
@@ -1682,7 +1682,7 @@ sensitive selector keys are ignored from repo-local config; set them in
 
 ### HTTPS certificate trust
 
-For a private or local mkit remote over Connect HTTPS (`mkit+https://`),
+For a private or local mkit remote over Connect HTTPS (`kit+https://`),
 supply a PEM file containing the CA certificates you trust:
 
 ```sh
@@ -1747,30 +1747,30 @@ recommended trust model.
 
 ## URL schemes
 
-`mkit remote add <url>` accepts the strict `mkit+<scheme>://...` form
+`mkit remote add <url>` accepts the strict `kit+<scheme>://...` form
 only. Anything else is hard-rejected:
 
 ```
-error: invalid remote URL '<input>': must start with 'mkit+<scheme>://'
-hint: URL must start with mkit+<scheme>:// (e.g. mkit+https://, mkit+ssh://, mkit+file://, mkit+s3://)
+error: invalid remote URL '<input>': must start with 'kit+<scheme>://'
+hint: URL must start with kit+<scheme>:// (e.g. kit+https://, kit+ssh://, kit+file://, kit+s3://)
 ```
 
 Accepted schemes:
 
 | Scheme | Form | Use |
 |--------|------|-----|
-| `mkit+file` | `mkit+file:///abs/path` | local filesystem mirror |
-| `mkit+https` | `mkit+https://host[:port][/path]` | ConnectRPC gateway (for example, VCS Worker) |
-| `mkit+s3` | `mkit+s3://endpoint/bucket[/prefix]` | S3-compatible object store |
-| `mkit+ssh` | `mkit+ssh://user@host[:port]:path` | SSH with the mkit shell |
-| `mkit+memory` | `mkit+memory://` | in-memory (testing only) |
+| `kit+file` | `kit+file:///abs/path` | local filesystem mirror |
+| `kit+https` | `kit+https://host[:port][/path]` | ConnectRPC gateway (for example, VCS Worker) |
+| `kit+s3` | `kit+s3://endpoint/bucket[/prefix]` | S3-compatible object store |
+| `kit+ssh` | `kit+ssh://user@host[:port]:path` | SSH with the mkit shell |
+| `kit+memory` | `kit+memory://` | in-memory (testing only) |
 
-`mkit+https` (and loopback-only `mkit+http`) speaks
-`mkit.transport.v1.TransportService` over ConnectRPC &mdash; see
+`kit+https` (and loopback-only `kit+http`) speaks
+`kit.transport.v1.TransportService` over ConnectRPC &mdash; see
 `docs/specs/SPEC-TRANSPORT-CONNECT.md`. Any `/path` on the URL is
 accepted (for shape-consistency with the other schemes) but currently
 has no wire effect: every RPC resolves to the fixed
-`/mkit.transport.v1.TransportService/<Method>` path regardless.
+`/kit.transport.v1.TransportService/<Method>` path regardless.
 Write RPCs against a deployment that requires the Ed25519 write envelope
 (for example, an auth-v2 `mkit-server` deployment) need
 `mkit config transport_auth envelope` &mdash; see the config table above and
@@ -1782,12 +1782,12 @@ self-certifying `ed25519-<64 lowercase hex>` and `0x<40 lowercase hex>`
 forms, and the opaque authority-mode form `[a-z0-9][a-z0-9._-]{0,71}`
 other than `root`, `ed25519-…` and `0x…` (SPEC-SERVER §6.2.2). An
 authority-mode deployment can therefore use a UUIDv7, for example
-`mkit+https://vcs.example/019c88c3-a904-7bd1-8a5d-3182a0c6978a/repo`. The
+`kit+https://vcs.example/019c88c3-a904-7bd1-8a5d-3182a0c6978a/repo`. The
 URL does not say which mode the server runs; the server still enforces
 only its own grammar and answers `invalid_argument` for the other. Plain
 `https://` is not a sync remote &mdash; at a server's origin it serves
 objects by repository path (SPEC-HTTP-OBJECTS) &mdash; so `mkit clone
-https://…` is refused with a hint to add the `mkit+` prefix.
+https://…` is refused with a hint to add the `kit+` prefix.
 
 Private reads on an authority-mode server are decided by the
 deployment's authority hook on the signer's key, not by grants or owner
@@ -1854,7 +1854,7 @@ parsing stderr.
 - **`CLICOLOR_FORCE=1`** &mdash; force ANSI color even when stdout is piped.
   `NO_COLOR` overrides this.
 - **`SSH_AUTH_SOCK`** &mdash; standard OpenSSH agent socket, used by
-  `mkit+ssh://` transports.
+  `kit+ssh://` transports.
 - **`MKIT_SSL_CA_FILE`** &mdash; PEM certificate file for additional native
   Connect HTTPS remote trust only, overriding `http.sslCAInfo`. The
   self-updater is excluded by design; S3 remotes are not yet covered.
@@ -1870,19 +1870,19 @@ parsing stderr.
 
 | Path                                | Purpose                                          |
 | ----------------------------------- | ------------------------------------------------ |
-| `.mkit/`                            | Repo-local state (like `.git/`)                  |
-| `.mkit/config`                      | Repo-local config &mdash; overrides user-level values  |
-| `.mkit/keys/default.key`            | Repo-local Ed25519 signing key                   |
-| `.mkit/index`                       | Staging index                                    |
-| `.mkit/index.lock`                  | Held by commit/checkout/merge/rebase             |
-| `.mkit/COMMIT_EDITMSG`              | Scratch file for `mkit commit` without `-m`      |
+| `.kit/`                            | Repo-local state (like `.git/`)                  |
+| `.kit/config`                      | Repo-local config &mdash; overrides user-level values  |
+| `.kit/keys/default.key`            | Repo-local Ed25519 signing key                   |
+| `.kit/index`                       | Staging index                                    |
+| `.kit/index.lock`                  | Held by commit/checkout/merge/rebase             |
+| `.kit/COMMIT_EDITMSG`              | Scratch file for `mkit commit` without `-m`      |
 | `$XDG_CONFIG_HOME/mkit/config`      | User-level config (cross-repo defaults)          |
 | `$XDG_CONFIG_HOME/mkit/grants/`     | Your grant store: `<grant id>.grant` files (0700/0600), never repo-scoped |
 | `$XDG_DATA_HOME/mkit/keys/`         | User-level keystore (optional)                   |
 | `$XDG_CACHE_HOME/mkit/`             | User-level cache                                 |
 | `$XDG_STATE_HOME/mkit/`             | User-level state                                 |
 
-Repo-local values in `.mkit/config` win over user-level config except for
+Repo-local values in `.kit/config` win over user-level config except for
 security-sensitive signer, keystore, external-signer, and identity selector keys
 that mkit intentionally accepts only from user scope or explicit flags.
 

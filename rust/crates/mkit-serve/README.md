@@ -1,6 +1,6 @@
 # mkit-serve
 
-The self-host server for mkit. It speaks the `mkit.rpc.v1.ssh` frame
+The self-host server for mkit. It speaks the `kit.rpc.v1.ssh` frame
 protocol (SPEC-TRANSPORT §4.2) over a repository on disk. The `mkit serve`
 command is a thin wrapper around this crate.
 
@@ -13,7 +13,7 @@ commands already use:
 <root>/
   packs/<64-hex>      pack bytes, published only after the hash verifies
   refs/...            one file per ref
-  .mkit/refs/.lock    the lock that every ref write takes
+  .kit/refs/.lock    the lock that every ref write takes
 ```
 
 ## Authority

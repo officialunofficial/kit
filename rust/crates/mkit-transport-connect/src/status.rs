@@ -6,7 +6,7 @@ use futures::future::BoxFuture;
 #[cfg(test)]
 use http::{Request, Response, StatusCode};
 
-pub(crate) const STATUS_MARKER: &str = "x-mkit-client-status";
+pub(crate) const STATUS_MARKER: &str = "x-kit-client-status";
 
 #[cfg(test)]
 #[derive(Clone)]

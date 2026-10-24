@@ -282,7 +282,7 @@ pub(super) fn urls() -> Value {
         ("decoded_nul", format!("{base}a%00b"), true),
         ("dot_entry", format!("{base}%2E"), true),
         ("dotdot_entry", format!("{base}.."), true),
-        ("metadata_entry", format!("{base}.mkit"), true),
+        ("metadata_entry", format!("{base}.kit"), true),
         ("reserved_entry", format!("{base}CON.txt"), true),
         ("trailing_space", format!("{base}a%20"), true),
         ("trailing_dot", format!("{base}a."), true),
@@ -408,7 +408,7 @@ pub(super) fn responses() -> Value {
             json!({"method":"GET","failure":reason,"if_none_match":etag,"admission":"challenge"}),
             404,
             json!({"Cache-Control":"no-store"}),
-            json!(["ETag", "X-Mkit-Object", "X-Mkit-Commit"]),
+            json!(["ETag", "X-Kit-Object", "X-Kit-Commit"]),
         );
     }
     add(
@@ -423,62 +423,62 @@ pub(super) fn responses() -> Value {
         json!({"method":"GET","route":"ref","published_reachable":true,"repository_tombstone":true,"if_none_match":etag,"admission":"challenge"}),
         451,
         json!({"Content-Type":"application/json","Cache-Control":"no-store","Link":"<https://vcs.example.test>; rel=\"blocked-by\""}),
-        json!(["ETag", "X-Mkit-*", "Content-Range"]),
+        json!(["ETag", "X-Kit-*", "Content-Range"]),
     );
     add(
         "tombstone_head_no_body",
         json!({"method":"HEAD","route":"object","published_reachable":true,"repository_tombstone":true}),
         451,
         json!({"Content-Type":"application/json","Cache-Control":"no-store","Link":"<https://vcs.example.test>; rel=\"blocked-by\""}),
-        json!(["ETag", "X-Mkit-*", "Content-Range"]),
+        json!(["ETag", "X-Kit-*", "Content-Range"]),
     );
     add(
         "global_block_without_repository_tombstone",
         json!({"method":"GET","route":"object","published_reachable":true,"global_block":true,"repository_tombstone":false}),
         404,
         json!({"Cache-Control":"no-store"}),
-        json!(["ETag", "X-Mkit-*"]),
+        json!(["ETag", "X-Kit-*"]),
     );
     add(
         "blocked_before_tombstone_before_304",
         json!({"method":"GET","route":"object","published_reachable":true,"global_block":true,"repository_tombstone":false,"if_none_match":etag}),
         404,
         json!({"Cache-Control":"no-store"}),
-        json!(["ETag", "X-Mkit-*"]),
+        json!(["ETag", "X-Kit-*"]),
     );
     add(
         "chunk_only_under_tombstoned_manifest",
         json!({"method":"GET","route":"object","chunk_only_under_tombstoned_manifest":true,"repository_tombstone":false}),
         404,
         json!({"Cache-Control":"no-store"}),
-        json!(["ETag", "X-Mkit-*"]),
+        json!(["ETag", "X-Kit-*"]),
     );
     add(
         "chunk_only_under_blocked_untombstoned_manifest",
         json!({"method":"GET","route":"object","chunk_only_under_blocked_manifest":true,"manifest_globally_blocked":true,"manifest_tombstone":false,"if_none_match":etag}),
         404,
         json!({"Cache-Control":"no-store"}),
-        json!(["ETag", "X-Mkit-*"]),
+        json!(["ETag", "X-Kit-*"]),
     );
     add(
         "not_modified_before_range_admission",
         json!({"method":"GET","route":"ref","if_none_match":etag,"range":"bytes=200-300","size":100,"admission":"challenge"}),
         304,
-        json!({"ETag":etag,"Cache-Control":"private, no-cache","X-Mkit-Object":h,"X-Mkit-Object-Type":"blob","X-Mkit-Commit":commit}),
+        json!({"ETag":etag,"Cache-Control":"private, no-cache","X-Kit-Object":h,"X-Kit-Object-Type":"blob","X-Kit-Commit":commit}),
         json!(["ADMISSION-REQUIRED"]),
     );
     add(
         "not_modified_admitted_policy",
         json!({"method":"GET","if_none_match":etag,"admission_configured":true,"admission_called":false}),
         304,
-        json!({"ETag":etag,"Cache-Control":"private, max-age=31536000, immutable","X-Mkit-Object":h,"X-Mkit-Object-Type":"blob"}),
+        json!({"ETag":etag,"Cache-Control":"private, max-age=31536000, immutable","X-Kit-Object":h,"X-Kit-Object-Type":"blob"}),
         json!(["ADMISSION-REQUIRED"]),
     );
     add(
         "not_modified_proof_admitted_policy",
         json!({"method":"GET","route":"object","proof":true,"if_none_match":format!("\"{commit}.{h}.object\""),"admission_configured":true,"admission_called":false}),
         304,
-        json!({"ETag":format!("\"{commit}.{h}.object\""),"Cache-Control":"private, max-age=31536000, immutable","X-Mkit-Object":h,"X-Mkit-Object-Type":"chunked_blob","X-Mkit-Commit":commit}),
+        json!({"ETag":format!("\"{commit}.{h}.object\""),"Cache-Control":"private, max-age=31536000, immutable","X-Kit-Object":h,"X-Kit-Object-Type":"chunked_blob","X-Kit-Commit":commit}),
         json!(["ADMISSION-REQUIRED"]),
     );
     add(
@@ -499,7 +499,7 @@ pub(super) fn responses() -> Value {
         "bearer_gated_public_id",
         json!({"method":"GET","route":"object","public":true,"bearer_required":true,"bearer_valid":true}),
         200,
-        json!({"ETag":etag,"Cache-Control":"private, max-age=31536000, immutable","X-Mkit-Object":h,"X-Mkit-Object-Type":"blob"}),
+        json!({"ETag":etag,"Cache-Control":"private, max-age=31536000, immutable","X-Kit-Object":h,"X-Kit-Object-Type":"blob"}),
         json!([]),
     );
     add(
@@ -530,10 +530,10 @@ pub(super) fn responses() -> Value {
         json!({"Cache-Control":"no-store","Content-Type":"application/json","WWW-Authenticate":"Admission example","ADMISSION-REQUIRED":"opaque-challenge"}),
         json!([
             "ETag",
-            "X-Mkit-*",
-            "X-Mkit-Object",
-            "X-Mkit-Object-Type",
-            "X-Mkit-Commit",
+            "X-Kit-*",
+            "X-Kit-Object",
+            "X-Kit-Object-Type",
+            "X-Kit-Commit",
             "Content-Range"
         ]),
     );
@@ -622,7 +622,7 @@ pub(super) fn responses() -> Value {
             json!({"method":"GET","type":"tree"}),
             200,
             "public, max-age=31536000, immutable",
-            "application/vnd.mkit.object",
+            "application/vnd.kit.object",
             100,
             None,
         ),
@@ -663,9 +663,9 @@ pub(super) fn responses() -> Value {
             None,
         ),
     ] {
-        let mut headers = json!({"ETag":etag,"Accept-Ranges":"bytes","Cache-Control":cache,"Content-Type":media,"Content-Length":length.to_string(),"X-Mkit-Object":h,"X-Mkit-Object-Type":request["type"].as_str().unwrap_or("blob")});
+        let mut headers = json!({"ETag":etag,"Accept-Ranges":"bytes","Cache-Control":cache,"Content-Type":media,"Content-Length":length.to_string(),"X-Kit-Object":h,"X-Kit-Object-Type":request["type"].as_str().unwrap_or("blob")});
         if request["route"] == "ref" {
-            headers["X-Mkit-Commit"] = json!(commit);
+            headers["X-Kit-Commit"] = json!(commit);
             headers["Content-Disposition"] =
                 json!("inline; filename=\"small.txt\"; filename*=UTF-8''small.txt");
         }
@@ -722,7 +722,7 @@ pub(super) fn responses() -> Value {
             name,
             json!({"method":"GET","proof":true,"route":route,"kind":kind,"range_header":"bytes=1-2","selector":selector,"public":name!="proof_private","admission":if name=="proof_admitted" {"allow"} else {"off"},"token_remaining_seconds":60}),
             200,
-            json!({"Content-Type":if kind=="MKDS" {"application/vnd.mkit.disclosure-span"}else{"application/vnd.mkit.disclosure"},"Accept-Ranges":"none","ETag":format!("\"{commit}.{h}.{selector}\""),"Cache-Control":cache,"X-Mkit-Commit":commit,"X-Mkit-Object":h,"X-Mkit-Object-Type":if name=="proof_blob_range" {"blob"} else {"chunked_blob"}}),
+            json!({"Content-Type":if kind=="MKDS" {"application/vnd.kit.disclosure-span"}else{"application/vnd.kit.disclosure"},"Accept-Ranges":"none","ETag":format!("\"{commit}.{h}.{selector}\""),"Cache-Control":cache,"X-Kit-Commit":commit,"X-Kit-Object":h,"X-Kit-Object-Type":if name=="proof_blob_range" {"blob"} else {"chunked_blob"}}),
             json!(["Content-Range"]),
         );
     }
@@ -744,19 +744,19 @@ pub(super) fn responses() -> Value {
         "admitted_ref_served_directly",
         json!({"method":"GET","route":"ref","redirects":true,"public":true,"admission_configured":true,"admission":"allow"}),
         200,
-        json!({"ETag":etag,"Cache-Control":"private, no-cache","X-Mkit-Object":h,"X-Mkit-Object-Type":"blob","X-Mkit-Commit":commit}),
+        json!({"ETag":etag,"Cache-Control":"private, no-cache","X-Kit-Object":h,"X-Kit-Object-Type":"blob","X-Kit-Commit":commit}),
         json!(["Location"]),
     );
     add(
         "cors_configured",
         json!({"method":"GET","origin":"https://viewer.example"}),
         200,
-        json!({"Access-Control-Allow-Origin":"https://viewer.example","Vary":"Origin","Access-Control-Expose-Headers":"ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Admission-Receipt, ADMISSION-REQUIRED, ADMISSION-RESPONSE, Link"}),
+        json!({"Access-Control-Allow-Origin":"https://viewer.example","Vary":"Origin","Access-Control-Expose-Headers":"ETag, Content-Range, Accept-Ranges, Content-Length, X-Kit-Commit, X-Kit-Object, X-Kit-Object-Type, WWW-Authenticate, Admission-Receipt, ADMISSION-REQUIRED, ADMISSION-RESPONSE, Link"}),
         json!(["Access-Control-Allow-Credentials"]),
     );
     add(
         "key_document_exempt",
-        json!({"method":"GET","route":"/.well-known/mkit-url-token-keys.json","bearer_required":true}),
+        json!({"method":"GET","route":"/.well-known/kit-url-token-keys.json","bearer_required":true}),
         200,
         json!({"Content-Type":"application/json","Cache-Control":"public, max-age=300"}),
         json!([]),
@@ -873,7 +873,7 @@ pub(super) fn check(dir: &std::path::Path) {
             }
         }
         assert_eq!(headers["X-Content-Type-Options"], "nosniff");
-        for name in ["X-Mkit-Object", "X-Mkit-Commit"] {
+        for name in ["X-Kit-Object", "X-Kit-Commit"] {
             if let Some(value) = headers[name].as_str() {
                 assert_id(value);
             }

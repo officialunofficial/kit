@@ -179,7 +179,7 @@ re-sort (a file and a directory of one name) refuse per-ref, and
 trees nesting beyond 128 levels (mkit's `MAX_TREE_DEPTH` defense)
 refuse per-ref. Entry names are validated by SPEC-OBJECTS §4.1
 (deserialize-time rules &mdash; non-negotiable): names that are `.git`/
-`.mkit` case-insensitive, end in dot/space, are Windows device stems
+`.kit` case-insensitive, end in dot/space, are Windows device stems
 (`aux.c`-class), exceed 255 bytes, or contain backslash refuse the
 ref.
 
@@ -240,7 +240,7 @@ Three layers, from authoritative to advisory:
 1. **git-import/v1 attestation** (authoritative): one DSSE/in-toto
    attestation per imported ref head per fetch, signed with the
    importer's configured signer. `predicateType` =
-   `https://github.com/officialunofficial/mkit/spec/predicate/git-import/v1`.
+   `https://kit.storage/spec/predicate/git-import/v1`.
    `subject[0]` = `{name: <full mkit ref>, digest: {blake3: <mkit
    head hash>}}`. Predicate (JCS key order):
 
@@ -256,7 +256,7 @@ Three layers, from authoritative to advisory:
 
    Because parents are inside signed commit bytes, a head attestation
    transitively pins the imported closure. Envelopes are stored like
-   any attestation (`.mkit/attestations/<commit>/…`). Importers
+   any attestation (`.kit/attestations/<commit>/…`). Importers
    SHOULD skip re-minting for a head whose recorded imported state is
    unchanged (mirroring SPEC-GIT-BRIDGE §11's guidance).
 2. **Retained raw bytes**: the original git commit and tag object
@@ -313,7 +313,7 @@ exactly this reason. `mkit-git-bridge`'s current dependency (`sha1 =
 
 ## 6. Per-remote state and guardrails
 
-State lives in `.mkit/git/<remote>/` (layout implementation-defined,
+State lives in `.kit/git/<remote>/` (layout implementation-defined,
 non-normative except for the binding semantics below):
 
 - `dest` (export-direction dirs)/`source`: the canonical remote

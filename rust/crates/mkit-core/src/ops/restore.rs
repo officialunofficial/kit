@@ -4,7 +4,7 @@
 //! directory: writes blobs as files, recurses into subtrees as
 //! directories, creates symlinks for symlink entries, and (when
 //! `clean=true`) deletes anything in the target dir that is not in the
-//! tree (preserving `.mkit/` and `.git/`).
+//! tree (preserving `.kit/` and `.git/`).
 //!
 //! ### Symlink invariant
 //!
@@ -100,7 +100,7 @@ pub struct SparsePattern {
 #[derive(Debug, Clone)]
 pub struct RestoreOptions {
     /// If `true`, delete anything in the target dir that is not in the
-    /// tree (preserving `.mkit/` and `.git/`). Default `true`.
+    /// tree (preserving `.kit/` and `.git/`). Default `true`.
     pub clean: bool,
     /// If `Some`, only restore entries whose path matches the patterns.
     pub sparse_patterns: Option<Vec<SparsePattern>>,
@@ -115,7 +115,7 @@ impl Default for RestoreOptions {
     }
 }
 
-/// Parse the contents of a `.mkit/sparse-checkout` file into patterns.
+/// Parse the contents of a `.kit/sparse-checkout` file into patterns.
 #[must_use]
 pub fn parse_sparse_patterns(content: &str) -> Vec<SparsePattern> {
     let mut out = Vec::new();
@@ -191,7 +191,7 @@ pub fn could_match_descendant(patterns: &[SparsePattern], dir_prefix: &str) -> b
     false
 }
 
-/// Load patterns from `<repo_root>/.mkit/sparse-checkout`. Returns
+/// Load patterns from `<repo_root>/.kit/sparse-checkout`. Returns
 /// `Ok(None)` if the file does not exist or has zero patterns.
 ///
 /// # Errors
@@ -271,7 +271,7 @@ pub struct RestoreReport {
 /// Materialise `tree_hash` into `root` as a working tree.
 ///
 /// Thin wrapper around [`restore_tree`] that additionally:
-/// 1. Loads `<root>/.gitignore` + `<root>/.mkitignore`. Ignore rules do NOT
+/// 1. Loads `<root>/.gitignore` + `<root>/.kitignore`. Ignore rules do NOT
 ///    gate which tree entries are materialised — tracked content is always
 ///    written (git parity) — they only protect *untracked* worktree files
 ///    (editor swapfiles, local-only build artefacts, …) from the
@@ -1012,9 +1012,9 @@ fn make_tmp_sibling_name(name: &str) -> String {
 
 /// Sweep `target_dir` of untracked entries before re-materialising a
 /// tree. Entries present in `tree_entries`, the repo-metadata dirs
-/// (`.mkit`/`.git`, ASCII case-insensitive so case-insensitive
-/// filesystems can't smuggle a `.MKIT`/`.Git` entry past the sweep — Git
-/// CVE-2021-21300 family), and `.mkitignore` are always preserved.
+/// (`.kit`/`.git`, ASCII case-insensitive so case-insensitive
+/// filesystems can't smuggle a `.KIT`/`.Git` entry past the sweep — Git
+/// CVE-2021-21300 family), and `.kitignore` are always preserved.
 ///
 /// When `ignore` is `Some`, this is the worktree-checkout path: entries
 /// matching the ignore list are additionally preserved (ancestor-aware,
@@ -1045,10 +1045,10 @@ fn clean_directory(
             .to_str()
             .ok_or(RestoreError::InvalidUtf8)?
             .to_string();
-        if name_str.eq_ignore_ascii_case(".mkit") || name_str.eq_ignore_ascii_case(".git") {
+        if name_str.eq_ignore_ascii_case(".kit") || name_str.eq_ignore_ascii_case(".git") {
             continue;
         }
-        if name_str == ".mkitignore" {
+        if name_str == ".kitignore" {
             continue;
         }
         // The ignore-aware checkout path also preserves `.gitignore`.
@@ -1410,12 +1410,12 @@ mod tests {
     fn restore_preserves_mkit_directory() {
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();
-        fs::create_dir_all(target.path().join(".mkit")).unwrap();
-        fs::write(target.path().join(".mkit/config"), b"important").unwrap();
+        fs::create_dir_all(target.path().join(".kit")).unwrap();
+        fs::write(target.path().join(".kit/config"), b"important").unwrap();
         let tree = put_tree_with(&store, vec![]);
         restore_tree(&store, tree, target.path(), &RestoreOptions::default()).unwrap();
         assert_eq!(
-            fs::read(target.path().join(".mkit/config")).unwrap(),
+            fs::read(target.path().join(".kit/config")).unwrap(),
             b"important"
         );
     }
@@ -1423,20 +1423,20 @@ mod tests {
     #[test]
     fn clean_directory_preserves_case_variant_mkit_and_git() {
         // Regression for Git CVE-2021-21300 family: on case-insensitive
-        // filesystems a worktree directory named `.MKIT` or `.Git` must
+        // filesystems a worktree directory named `.KIT` or `.Git` must
         // never be swept by `clean_directory`, otherwise a hostile tree
         // entry could trick restore into deleting repo metadata.
         let target = TempDir::new().unwrap();
-        fs::create_dir_all(target.path().join(".MKIT")).unwrap();
-        fs::write(target.path().join(".MKIT/config"), b"meta").unwrap();
+        fs::create_dir_all(target.path().join(".KIT")).unwrap();
+        fs::write(target.path().join(".KIT/config"), b"meta").unwrap();
         fs::create_dir_all(target.path().join(".Git")).unwrap();
         fs::write(target.path().join(".Git/HEAD"), b"ref").unwrap();
         // Empty tree — without the case-insensitive guard, everything
         // unknown is removed.
         clean_directory(target.path(), &[], None, "", None).unwrap();
         assert!(
-            target.path().join(".MKIT/config").exists(),
-            ".MKIT swept by clean_directory (case-fold bypass)"
+            target.path().join(".KIT/config").exists(),
+            ".KIT swept by clean_directory (case-fold bypass)"
         );
         assert!(
             target.path().join(".Git/HEAD").exists(),
@@ -1447,15 +1447,15 @@ mod tests {
     #[test]
     fn clean_directory_with_ignore_list_preserves_case_variant_mkit_and_git() {
         let target = TempDir::new().unwrap();
-        fs::create_dir_all(target.path().join(".MKIT")).unwrap();
-        fs::write(target.path().join(".MKIT/config"), b"meta").unwrap();
+        fs::create_dir_all(target.path().join(".KIT")).unwrap();
+        fs::write(target.path().join(".KIT/config"), b"meta").unwrap();
         fs::create_dir_all(target.path().join(".GIT")).unwrap();
         fs::write(target.path().join(".GIT/HEAD"), b"ref").unwrap();
         let ignore = crate::ignore::IgnoreList::new();
         clean_directory(target.path(), &[], None, "", Some(&ignore)).unwrap();
         assert!(
-            target.path().join(".MKIT/config").exists(),
-            ".MKIT swept by clean_directory (ignore-aware, case-fold bypass)"
+            target.path().join(".KIT/config").exists(),
+            ".KIT swept by clean_directory (ignore-aware, case-fold bypass)"
         );
         assert!(
             target.path().join(".GIT/HEAD").exists(),
@@ -1822,7 +1822,7 @@ mod tests {
     #[test]
     fn load_sparse_checkout_returns_none_when_missing() {
         let target = TempDir::new().unwrap();
-        fs::create_dir_all(target.path().join(".mkit")).unwrap();
+        fs::create_dir_all(target.path().join(".kit")).unwrap();
         let p = load_sparse_checkout(&RepoLayout::single(target.path())).unwrap();
         assert!(p.is_none());
     }
@@ -1876,7 +1876,7 @@ mod tests {
         // Pre-seed an ignore file, an UNTRACKED ignored file (must survive the
         // clean sweep), and a tracked path that happens to match the ignore
         // pattern but IS in the target tree (must be written — git parity).
-        fs::write(target.path().join(".mkitignore"), "*.tmp\nsecret.txt\n").unwrap();
+        fs::write(target.path().join(".kitignore"), "*.tmp\nsecret.txt\n").unwrap();
         fs::write(target.path().join("scratch.tmp"), b"local-only").unwrap();
         fs::write(target.path().join("secret.txt"), b"OLD-LOCAL").unwrap();
         let secret_blob = put_blob(&store, b"COMMITTED-SECRET");
@@ -1922,7 +1922,7 @@ mod tests {
         // target tree (so it gets recursed into).
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();
-        fs::write(target.path().join(".mkitignore"), "dist/\n").unwrap();
+        fs::write(target.path().join(".kitignore"), "dist/\n").unwrap();
         fs::create_dir(target.path().join("dist")).unwrap();
         fs::write(target.path().join("dist/local.tmp"), b"local").unwrap();
         // Target tree: dist/ (tree) holding a tracked app.js.

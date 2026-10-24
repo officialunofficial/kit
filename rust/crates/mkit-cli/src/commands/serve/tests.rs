@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 use mkit_core::hash::hash;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport as _};
-use mkit_rpc::mkit::rpc::v1::ssh::{
+use mkit_rpc::kit::rpc::v1::ssh::{
     Close, Hello, HelloResponse, PackChunk, SshFrame, UploadPack, ssh_frame,
 };
-use mkit_rpc::mkit::rpc::v1::{ErrorCode, ProtocolVersion};
+use mkit_rpc::kit::rpc::v1::{ErrorCode, ProtocolVersion};
 use mkit_transport_file::FileTransport;
 
 use super::*;
@@ -30,7 +30,7 @@ type Body = ssh_frame::Body;
 
 fn repo_root() -> tempfile::TempDir {
     let td = tempfile::tempdir().unwrap();
-    fs::create_dir_all(td.path().join(".mkit")).unwrap();
+    fs::create_dir_all(td.path().join(".kit")).unwrap();
     td
 }
 
@@ -246,7 +246,7 @@ fn original_command_accepts_exactly_mkit_serve_path() {
 fn root_mode_root(names: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
     let td = tempfile::tempdir().unwrap();
     for (ns, name) in names {
-        fs::create_dir_all(td.path().join(ns).join(name).join(".mkit")).unwrap();
+        fs::create_dir_all(td.path().join(ns).join(name).join(".kit")).unwrap();
     }
     let root = fs::canonicalize(td.path()).unwrap();
     (td, root)
@@ -276,7 +276,7 @@ fn root_repo_resolves_namespaced_path() {
 fn an_address_namespace_is_read_only() {
     let addr = format!("0x{}", "ab".repeat(20));
     let td = tempfile::tempdir().unwrap();
-    fs::create_dir_all(td.path().join(&addr).join("room-a").join(".mkit")).unwrap();
+    fs::create_dir_all(td.path().join(&addr).join("room-a").join(".kit")).unwrap();
     let root = fs::canonicalize(td.path()).unwrap();
     let (_, policy) = resolve_root_repo(&root, &format!("{addr}/room-a")).unwrap();
     assert_eq!(policy, WritePolicy::ReadOnly);
@@ -311,7 +311,7 @@ fn root_repo_refuses_symlinked_components() {
     // A repository dir outside the root, linked from `<root>/<ns2>`: the
     // addressed path resolves through the link but its canonical form
     // differs from `<root>/<ns2>/room-a`.
-    fs::create_dir_all(target.path().join("room-a/.mkit")).unwrap();
+    fs::create_dir_all(target.path().join("room-a/.kit")).unwrap();
     let ns2 = format!("ed25519-{}", "cd".repeat(32));
     #[cfg(unix)]
     {
@@ -324,7 +324,7 @@ fn root_repo_refuses_symlinked_components() {
         // Even a symlink inside the root aliasing a real dir: canonical
         // must equal the addressed path exactly.
         let ns3 = format!("ed25519-{}", "ef".repeat(32));
-        fs::create_dir_all(root.join("real/repo/.mkit")).unwrap();
+        fs::create_dir_all(root.join("real/repo/.kit")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join(&ns3)).unwrap();
         assert_eq!(
             resolve_root_repo(&root, &format!("{ns3}/repo")).unwrap_err(),
@@ -351,7 +351,7 @@ fn root_repo_requires_a_repo_dir() {
         resolve_root_repo(&root, &format!("{NS}/gone")).unwrap_err(),
         exit::NOINPUT
     );
-    // Present but no `.mkit`.
+    // Present but no `.kit`.
     fs::create_dir_all(root.join(NS).join("plain")).unwrap();
     assert_eq!(
         resolve_root_repo(&root, &format!("{NS}/plain")).unwrap_err(),
@@ -376,7 +376,7 @@ fn resolve_repo_path_rejects_non_repo_dir() {
 fn resolve_repo_path_accepts_repo_dir() {
     let td = repo_root();
     let resolved = resolve_repo_path(td.path().to_str().unwrap()).unwrap();
-    assert!(resolved.join(".mkit").is_dir());
+    assert!(resolved.join(".kit").is_dir());
 }
 
 /// Both timeout flags are bounded at 7 days; past that clap refuses the
@@ -446,7 +446,7 @@ fn idle_timeout_flag_defaults_to_60_and_takes_zero() {
 
 // ---------------------------------------------------------------- session
 
-/// The first golden session through `serve_stdio`, over the `.mkit`
+/// The first golden session through `serve_stdio`, over the `.kit`
 /// layout seeded as it was captured: refs `main`, `dev`, `tags/v1` and one
 /// 1000-byte pack.
 #[test]
@@ -583,7 +583,7 @@ fn idle_timeout_counts_bytes_not_frames() {
 #[test]
 fn a_root_whose_refs_live_in_sqlite_is_refused() {
     let td = repo_root();
-    fs::write(td.path().join(".mkit/server-meta"), b"sqlite").unwrap();
+    fs::write(td.path().join(".kit/server-meta"), b"sqlite").unwrap();
     let (code, out) = serve(td.path(), Cursor::new(encode([hello()])), None);
     assert_eq!(code, exit::CONFIG_ERROR);
     assert!(out.is_empty());
@@ -619,7 +619,7 @@ fn startup_sweeps_crashed_uploads_only_when_no_server_holds_the_lock() {
         .unwrap();
 
     // Another server is up (it holds `serve.lock` shared): no sweep.
-    let dot_mkit = td.path().join(".mkit");
+    let dot_mkit = td.path().join(".kit");
     let other = repo_lock::acquire_shared(
         &dot_mkit,
         crate::commands::SERVE_LOCK,

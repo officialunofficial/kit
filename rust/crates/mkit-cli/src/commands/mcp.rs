@@ -64,7 +64,7 @@ struct McpOpts {
     /// Bearer token required on every request's `Authorization: Bearer
     /// <token>` header when `--http` is used. Falls back to the
     /// `MKIT_MCP_TOKEN` environment variable when omitted. CLI-only/
-    /// env-only — never read from repo-local `.mkit/config`, matching
+    /// env-only — never read from repo-local `.kit/config`, matching
     /// `mkit-server`'s bearer-token sourcing. A dedicated env var
     /// (not `mkit-server`'s `MKIT_API_TOKEN`) since the two surfaces
     /// have different threat models — this one is a high-privilege,
@@ -313,7 +313,7 @@ fn schema(props: Vec<(&str, Value)>, required: &[&str]) -> Value {
 fn repo_prop() -> (&'static str, Value) {
     (
         "repo_path",
-        prop("Path to the mkit repository (the directory containing .mkit/)"),
+        prop("Path to the mkit repository (the directory containing .kit/)"),
     )
 }
 
@@ -656,7 +656,7 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "mkit_init",
-        description: "Create a new mkit repository (.mkit/) in repo_path. Run mkit_keygen next — \
+        description: "Create a new mkit repository (.kit/) in repo_path. Run mkit_keygen next — \
                       commits require a signing key.",
         hints: (false, false, false),
         schema: || schema(vec![repo_prop()], &["repo_path"]),
@@ -664,8 +664,8 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "mkit_keygen",
         description: "Generate a signing key. Default (ed25519) writes the commit-signing key at \
-                      .mkit/keys/default.key; secp256k1/p256 write separate ATTESTATION signer keys \
-                      (.mkit/keys/<alg>.key) for use with mkit_attest. Refuses to overwrite.",
+                      .kit/keys/default.key; secp256k1/p256 write separate ATTESTATION signer keys \
+                      (.kit/keys/<alg>.key) for use with mkit_attest. Refuses to overwrite.",
         hints: (false, false, false),
         schema: || {
             schema(
@@ -687,7 +687,7 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "mkit_attest",
         description: "Produce a signed DSSE attestation (in-toto v1 Statement) for a commit. \
-                      Prints the att-id and stores the envelope under .mkit/attestations/. \
+                      Prints the att-id and stores the envelope under .kit/attestations/. \
                       (Multi-signer envelopes and external-signer argv are intentionally NOT \
                       exposed here — they can direct subprocess execution; use the `mkit attest` \
                       CLI for that advanced flow.)",
@@ -809,7 +809,7 @@ pub(crate) fn call_tool(
 ///   into a signed attestation.
 /// * `trust_roots` (verify-attest, verify) is *external authority* — it
 ///   must resolve OUTSIDE the repo, so a hostile clone's planted
-///   `.mkit/trust-roots.toml` can never be selected via the MCP
+///   `.kit/trust-roots.toml` can never be selected via the MCP
 ///   (the CLI's "explicit --trust-roots = user intent" gate assumes a
 ///   user, but here the value can come from repo-controlled prompt text;
 ///   see docs/THREAT-MODEL.md §"Trust-roots scope").

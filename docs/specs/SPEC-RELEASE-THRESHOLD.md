@@ -206,7 +206,7 @@ hash-to-curve step) is an mkit-specific application namespace, fixed
 at:
 
 ```text
-NAMESPACE = b"mkit-attest/dsse/v1"
+NAMESPACE = b"kit-attest/dsse/v1"
 ```
 
 `mkit_attest::BLS_THRESHOLD_NAMESPACE` exposes the constant. Signing
@@ -294,7 +294,7 @@ Output:
    group, GitHub Actions issue comment, OpenBao audit-log channel &mdash;
    pick one, document it).
 3. Each maintainer pulls the PAE, runs
-   `release-party sign --share ~/.mkit/release-share.json
+   `release-party sign --share ~/.kit/release-share.json
                        --pae <bytes>`,
    which:
    - Loads the share via the keystore backend.
@@ -350,7 +350,7 @@ identifier `ALGORITHM_BLS12381_THRESHOLD = 5` stays reserved in
 | No single maintainer can produce a valid release signature | M-of-N threshold with quorum = ceil(2n/3) under the `N3f1` fault model (§1, §2.1) |
 | Verifiers check exactly one signature against exactly one public key, with a binary verdict | single `verify_message::<MinSig>` pairing check; any step failure is fatal, no per-share verdict at the aggregated layer (§4) |
 | Malformed key or signature bytes never reach the pairing | fixed sizes (96-byte G2 key, 48-byte G1 signature) and point-decode rejection, verifier steps 1–4 (§3.2, §3.3, §4) |
-| A release signature cannot be replayed as any other BLS message | the pinned hash-to-curve namespace `mkit-attest/dsse/v1` (§3.7) |
+| A release signature cannot be replayed as any other BLS message | the pinned hash-to-curve namespace `kit-attest/dsse/v1` (§3.7) |
 | The DSSE `keyid` resolves to the intended cohort key, not an attacker-supplied one | trust-root registry maps `bls12381-thr:<hex>` to pinned public-key bytes (§3.3, §4) |
 | A re-deal that doesn't match the published cohort key is rejected | public commitment to the cohort key (README and trust-roots TOML pin), bounding the trusted-dealer window (§2.1) |
 | Maintainer rotation never invalidates existing verifier pins | resharing keeps the aggregated public key unchanged (§1, §5.3) |

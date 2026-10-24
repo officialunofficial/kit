@@ -135,7 +135,7 @@ fn audit_rejects_swapped_intermediate_import_mappings() {
     let order = String::from_utf8(order.stdout).unwrap();
     let ids: Vec<_> = order.lines().collect();
     assert_eq!(ids.len(), 3);
-    let path = fork.join(".mkit/git/upstream/map");
+    let path = fork.join(".kit/git/upstream/map");
     let map = std::fs::read_to_string(&path).unwrap();
     let mut rows: Vec<Vec<String>> = map
         .lines()
@@ -198,7 +198,7 @@ fn audit_succeeds_without_import_private_key() {
     }
     let f = Fixture::new();
     let fork = f.import();
-    std::fs::remove_file(fork.join(".mkit/keys/git-import.key")).unwrap();
+    std::fs::remove_file(fork.join(".kit/keys/git-import.key")).unwrap();
     f.mkit_ok(&fork, &["git", "verify", "--fork-audit"]);
 }
 
@@ -223,7 +223,7 @@ fn fresh_clone_imports_checks_out_and_verifies() {
     f.mkit_ok(&fork, &["verify", "HEAD"]);
 
     // Tag imported as an mkit tag object on refs/tags/v1.
-    let mkit_dir = fork.join(".mkit");
+    let mkit_dir = fork.join(".kit");
     let layout = RepoLayout::single(&fork);
     let tag = refs::read_tag(&layout, "v1").unwrap().unwrap();
     let store = ObjectStore::open(&layout).unwrap();
@@ -402,7 +402,7 @@ fn reimport_is_noop_and_fresh_state_is_deterministic() {
     }
     let f = Fixture::new();
     let fork = f.import();
-    let mkit_dir = fork.join(".mkit");
+    let mkit_dir = fork.join(".kit");
     let layout = RepoLayout::single(&fork);
     let head1 = refs::read_remote_ref(&layout, "upstream", "main")
         .unwrap()
@@ -440,7 +440,7 @@ fn crash_marker_discards_map_and_recovers() {
     }
     let f = Fixture::new();
     let fork = f.import();
-    let mkit_dir = fork.join(".mkit");
+    let mkit_dir = fork.join(".kit");
     let layout = RepoLayout::single(&fork);
     let state = mkit_dir.join("git/upstream");
     let head1 = refs::read_remote_ref(&layout, "upstream", "main")
@@ -537,12 +537,12 @@ fn passthrough_export_creates_prable_fork() {
     // Attestation scoping (§11): only the bridge-translated head gets
     // a translation claim — passthrough objects keep their
     // git-import/v1 provenance.
-    let tree = git_stdout(&forkgit, &["ls-tree", "refs/mkit/attestations"]);
+    let tree = git_stdout(&forkgit, &["ls-tree", "refs/kit/attestations"]);
     assert_eq!(tree.lines().count(), 1, "one translated head:\n{tree}");
 
     // The import mirror's own ref namespaces stay untouched: the
-    // export staged under refs/mkit-export/, not refs/heads/.
-    let staging = fork.join(".mkit/git/upstream/repo.git");
+    // export staged under refs/kit-export/, not refs/heads/.
+    let staging = fork.join(".kit/git/upstream/repo.git");
     assert_eq!(
         git_stdout(&staging, &["rev-parse", "refs/heads/main"]),
         up_tip
@@ -837,7 +837,7 @@ fn verify_status_and_fork_audit() {
     );
 
     // Tamper with retained raw bytes → verify must fail loudly.
-    let raw_root = fork.join(".mkit/git/upstream/raw");
+    let raw_root = fork.join(".kit/git/upstream/raw");
     let bucket = std::fs::read_dir(&raw_root)
         .unwrap()
         .next()
@@ -964,7 +964,7 @@ fn passthrough_cannot_target_another_states_import_source() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("recorded git-import source"), "{stderr}");
     // And the refusal left no side effects on the dest binding.
-    assert!(!fork.join(".mkit/git/upstream/dest").exists());
+    assert!(!fork.join(".kit/git/upstream/dest").exists());
 }
 
 #[test]
@@ -1066,7 +1066,7 @@ fn import_spec_version_mismatch_refuses() {
     }
     let f = Fixture::new();
     let fork = f.import();
-    std::fs::write(fork.join(".mkit/git/upstream/import-spec"), "999\n").unwrap();
+    std::fs::write(fork.join(".kit/git/upstream/import-spec"), "999\n").unwrap();
     let out = f.mkit(&fork, &["git", "fetch"]);
     assert!(!out.status.success(), "spec mismatch must refuse");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1158,7 +1158,7 @@ fn remote_rename_moves_and_remove_keeps_bridge_state() {
     let f = Fixture::new();
     let fork = f.import();
     let up = f.upstream();
-    let mkit_dir = fork.join(".mkit");
+    let mkit_dir = fork.join(".kit");
     // Bind the bridge state name to a configured remote of the same name.
     f.mkit_ok(
         &fork,
@@ -1391,7 +1391,7 @@ fn divergence_probe_refuses_second_key_over_same_content() {
     // Wipe ALL bridge state (bindings, key pin, map) but keep the
     // store: only the §6.1 content probe stands between this repo and
     // a second, divergent import of the same upstream.
-    std::fs::remove_dir_all(fork.join(".mkit/git/upstream")).unwrap();
+    std::fs::remove_dir_all(fork.join(".kit/git/upstream")).unwrap();
     let other = f.root.path().join("other.key");
     let kp = mkit_core::sign::KeyPair::from_seed([7u8; 32]);
     mkit_core::sign::save_key(&other, &kp).unwrap();
@@ -1423,7 +1423,7 @@ fn state_dir_lock_blocks_concurrent_bridge_operation() {
     let f = Fixture::new();
     let fork = f.import();
     // Hold the per-state lock the way a concurrent process would.
-    let lock = mkit_core::repo_lock::acquire_default(&fork.join(".mkit"), "git-upstream.lock")
+    let lock = mkit_core::repo_lock::acquire_default(&fork.join(".kit"), "git-upstream.lock")
         .expect("acquire test lock");
     let out = f.mkit(&fork, &["git", "fetch"]);
     drop(lock);
@@ -1723,7 +1723,7 @@ fn map_only_loss_rebuilds_even_with_unchanged_refs() {
     }
     let f = Fixture::new();
     let fork = f.import();
-    let state = fork.join(".mkit/git/upstream");
+    let state = fork.join(".kit/git/upstream");
     // Delete ONLY the map — no crash marker, upstream unchanged. The
     // disposable-cache contract says the next run rebuilds it; the
     // unchanged-ref short-circuit must not leave it empty (a later
@@ -1745,7 +1745,7 @@ fn corrupt_direction_stamp_refuses_instead_of_rebinding() {
     }
     let f = Fixture::new();
     let fork = f.import();
-    std::fs::write(fork.join(".mkit/git/upstream/direction"), "garbage\n").unwrap();
+    std::fs::write(fork.join(".kit/git/upstream/direction"), "garbage\n").unwrap();
     let out = f.mkit(&fork, &["git", "fetch"]);
     assert!(!out.status.success(), "corrupt binding must refuse");
     assert!(
@@ -1761,7 +1761,7 @@ fn partially_corrupt_map_triggers_full_rebuild() {
     }
     let f = Fixture::new();
     let fork = f.import();
-    let state = fork.join(".mkit/git/upstream");
+    let state = fork.join(".kit/git/upstream");
     // Corrupt the middle of the map but leave valid lines: surviving
     // lines are not evidence the rest exists — the cache must rebuild.
     let map = std::fs::read_to_string(state.join("map")).unwrap();
@@ -1868,7 +1868,7 @@ fn map_tail_truncation_at_line_boundary_rebuilds() {
     }
     let f = Fixture::new();
     let fork = f.import();
-    let state = fork.join(".mkit/git/upstream");
+    let state = fork.join(".kit/git/upstream");
     // Drop the LAST line (ref tips are appended last): the file still
     // parses cleanly, so only the tip-presence check can catch it.
     let map = std::fs::read_to_string(state.join("map")).unwrap();

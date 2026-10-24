@@ -1,4 +1,4 @@
-//! `.mkit/config` parser / writer and XDG path helpers.
+//! `.kit/config` parser / writer and XDG path helpers.
 //!
 //! On-disk format: `key = value`, one per line, lines starting with `#`
 //! ignored. User-facing short-hand values for `user.identity`:
@@ -8,7 +8,7 @@
 //!
 //! There are two layered config files. Higher-priority values win:
 //!
-//! 1. **Repo-scoped** (`<repo>/.mkit/config`) — per-project knobs that
+//! 1. **Repo-scoped** (`<repo>/.kit/config`) — per-project knobs that
 //!    travel with a clone: branch defaults and remote endpoints.
 //!    Security-sensitive keys are rejected here, see
 //!    [`REPO_FORBIDDEN_KEYS`].
@@ -33,9 +33,9 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-pub const CONFIG_FILE: &str = ".mkit/config";
+pub const CONFIG_FILE: &str = ".kit/config";
 pub const USER_CONFIG_SUBPATH: &str = "mkit/config";
-pub const DEFAULT_SIGNING_KEY: &str = ".mkit/keys/default.key";
+pub const DEFAULT_SIGNING_KEY: &str = ".kit/keys/default.key";
 pub const DEFAULT_BRANCH: &str = "main";
 pub const DEFAULT_SIGNER: &str = "legacy";
 pub const DEFAULT_KEY_BACKEND: &str = "software";
@@ -43,7 +43,7 @@ pub const DEFAULT_KEY_REF: &str = "software:default";
 pub const DEFAULT_SECP256K1_KEY_REF: &str = "software:default-secp256k1";
 pub const DEFAULT_P256_KEY_REF: &str = "software:default-p256";
 
-/// Keys that MUST NOT be settable via the per-repo `<repo>/.mkit/config`
+/// Keys that MUST NOT be settable via the per-repo `<repo>/.kit/config`
 /// because a hostile clone could otherwise:
 ///
 /// * redirect `signing_key` to overwrite arbitrary files on disk or to
@@ -152,7 +152,7 @@ pub struct Config {
     /// Extra PEM certificate authorities for native HTTPS remote connections.
     /// `MKIT_SSL_CA_FILE` overrides this normally layered `http.sslCAInfo` key.
     pub http_ssl_ca_info: String,
-    /// Write-auth scheme for `mkit+https://` / `mkit+http://` remotes
+    /// Write-auth scheme for `kit+https://` / `kit+http://` remotes
     /// (`mkit-transport-connect::ConnectTransport`). Empty/`"bearer"`
     /// (default) sends `MKIT_API_TOKEN` as a Bearer token.
     /// `"envelope"` ADDITIONALLY signs every write RPC
@@ -378,7 +378,7 @@ impl AttestConfig {
     #[must_use]
     pub fn secp256k1_key_path_or_default(&self) -> &str {
         if self.secp256k1_key_path.is_empty() {
-            ".mkit/keys/secp256k1.key"
+            ".kit/keys/secp256k1.key"
         } else {
             self.secp256k1_key_path.as_str()
         }
@@ -387,7 +387,7 @@ impl AttestConfig {
     #[must_use]
     pub fn p256_key_path_or_default(&self) -> &str {
         if self.p256_key_path.is_empty() {
-            ".mkit/keys/p256.key"
+            ".kit/keys/p256.key"
         } else {
             self.p256_key_path.as_str()
         }
@@ -427,7 +427,7 @@ pub enum ConfigError {
     #[error("invalid http.sslCAInfo path: {0}")]
     InvalidHttpCaPath(&'static str),
     #[error(
-        "key path must not contain `..`; relative paths must stay under `.mkit/keys/` and absolute paths must stay under `$HOME`: {0}"
+        "key path must not contain `..`; relative paths must stay under `.kit/keys/` and absolute paths must stay under `$HOME`: {0}"
     )]
     InvalidKeyPath(String),
 }
@@ -525,7 +525,7 @@ pub fn validate_key_path(value: &str) -> Result<(), ConfigError> {
 /// Resolve a configured signing-key path against `root`.
 ///
 /// Policy from the security hardening follow-up:
-/// - relative paths are allowed only under `<repo>/.mkit/keys/`
+/// - relative paths are allowed only under `<repo>/.kit/keys/`
 /// - absolute paths are allowed only under the home directory of the
 ///   process's effective uid (looked up via `getpwuid_r(geteuid())`,
 ///   not `$HOME`, so a hostile parent can't set `HOME=/` and admit
@@ -545,11 +545,11 @@ pub fn resolve_key_path(layout: &RepoLayout, value: &str) -> Result<PathBuf, Con
     }
 
     // A relative key path is repo-relative with a mandatory
-    // `.mkit/keys/` prefix. Resolve the `.mkit/` component against the
+    // `.kit/keys/` prefix. Resolve the `.kit/` component against the
     // layout's COMMON dir — the one shared key store — so a linked
     // worktree signs with the same repo keys as the main tree.
     // Single-worktree repos resolve byte-identically to the historical
-    // `<root>/.mkit/…` join.
+    // `<root>/.kit/…` join.
     let Ok(under_mkit) = path.strip_prefix(mkit_core::MKIT_DIR) else {
         return Err(ConfigError::InvalidKeyPath(value.to_owned()));
     };
@@ -998,7 +998,7 @@ fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> bool {
     }
 }
 
-/// Write the given `Config` to `<root>/.mkit/config`. Only repo-scoped
+/// Write the given `Config` to `<root>/.kit/config`. Only repo-scoped
 /// (non-forbidden) fields are emitted; security-sensitive fields live
 /// in the user-scoped file and must be written there explicitly.
 ///
@@ -1008,7 +1008,7 @@ fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> bool {
 /// ([`read_or_default`] / [`read_layered`]`.merged`): this serializer
 /// emits repo-safe fields such as `user.name` / `user.email`, so a
 /// user-scoped value would be materialized into the clone-traveling
-/// `.mkit/config` (a privacy/scope leak). Callers that need the effective
+/// `.kit/config` (a privacy/scope leak). Callers that need the effective
 /// (merged) value for *reads* should use it only for reads.
 pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
     let path = layout.config_file();
@@ -1016,7 +1016,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         fs::create_dir_all(parent)?;
     }
     // Only repo-safe keys are emitted. Anything in `REPO_FORBIDDEN_KEYS`
-    // is explicitly NOT serialised to `<repo>/.mkit/config` — it lives
+    // is explicitly NOT serialised to `<repo>/.kit/config` — it lives
     // in `$XDG_CONFIG_HOME/mkit/config` via `write_user_kv`. Note
     // `attest.{signer,default_algorithm}` are forbidden too because
     // they're the *selectors* that weaponise a user-scoped external
@@ -1257,7 +1257,7 @@ where
         return None;
     }
 
-    if endpoint.starts_with("mkit+http://") || endpoint.starts_with("mkit+https://") {
+    if endpoint.starts_with("kit+http://") || endpoint.starts_with("kit+https://") {
         if getenv(mkit_transport_connect::TOKEN_ENV).is_some() {
             return Some(format!(
                 "refusing repo-configured remote `{endpoint}` with ambient {} bearer token; trust it explicitly with `mkit config trusted_remote_endpoint {endpoint}` (writes {})",
@@ -1269,7 +1269,7 @@ where
     }
 
     #[cfg(feature = "s3")]
-    if endpoint.starts_with("mkit+s3://")
+    if endpoint.starts_with("kit+s3://")
         && (getenv(mkit_transport_s3::ENV_ACCESS_KEY).is_some()
             || getenv(mkit_transport_s3::ENV_SECRET_KEY).is_some())
     {
@@ -1585,10 +1585,10 @@ mod tests {
         // the subsection case intact (git treats subsections case-sensitively),
         // so named remotes survive a round-trip.
         let dir = TempDir::new().unwrap();
-        std::fs::create_dir_all(dir.path().join(".mkit")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".kit")).unwrap();
         std::fs::write(
-            dir.path().join(".mkit/config"),
-            "remote.Origin.url = mkit+file:///tmp/x\nremote.Origin.type = file\n",
+            dir.path().join(".kit/config"),
+            "remote.Origin.url = kit+file:///tmp/x\nremote.Origin.type = file\n",
         )
         .unwrap();
         let cfg = read_or_default(&RepoLayout::single(dir.path())).unwrap();
@@ -1693,7 +1693,7 @@ mod tests {
     #[test]
     fn write_does_not_emit_forbidden_repo_keys() {
         let td = TempDir::new().unwrap();
-        fs::create_dir_all(td.path().join(".mkit")).unwrap();
+        fs::create_dir_all(td.path().join(".kit")).unwrap();
         let mut cfg = Config::with_defaults();
         cfg.user_identity = "01200011".into();
         cfg.signing_key = "/should/not/be/written".into();
@@ -1714,7 +1714,7 @@ mod tests {
 
     #[test]
     fn repo_signing_key_is_rejected_with_warning() {
-        // Hostile-clone scenario: `.mkit/config` tries to redirect the
+        // Hostile-clone scenario: `.kit/config` tries to redirect the
         // signing key. After the partition fix, the value MUST NOT be
         // applied — it falls back to the built-in default.
         let cfg = layer(
@@ -1734,7 +1734,7 @@ mod tests {
     #[test]
     fn repo_trusted_remote_endpoint_is_rejected() {
         let cfg = layer(
-            Some("trusted_remote_endpoint = mkit+https://attacker.invalid/repo\n"),
+            Some("trusted_remote_endpoint = kit+https://attacker.invalid/repo\n"),
             None,
         );
         assert!(cfg.trusted_remote_endpoint.is_empty());
@@ -1945,7 +1945,7 @@ mod tests {
         // Fallback default still wins.
         assert_eq!(
             cfg.attest.secp256k1_key_path_or_default(),
-            ".mkit/keys/secp256k1.key"
+            ".kit/keys/secp256k1.key"
         );
     }
 
@@ -1957,7 +1957,7 @@ mod tests {
             None,
         );
         assert!(cfg.attest.p256_key_path.is_empty());
-        assert_eq!(cfg.attest.p256_key_path_or_default(), ".mkit/keys/p256.key");
+        assert_eq!(cfg.attest.p256_key_path_or_default(), ".kit/keys/p256.key");
     }
 
     /// Meta-test: every key listed in [`REPO_FORBIDDEN_KEYS`] MUST be
@@ -2052,7 +2052,7 @@ mod tests {
                 ),
             };
             // `Config::with_defaults()` pre-seeds a few fields (e.g.
-            // `signing_key = ".mkit/keys/default.key"`, `signer =
+            // `signing_key = ".kit/keys/default.key"`, `signer =
             // "legacy"`). Merge order is "defaults → user → repo
             // (filtered)", so a dropped repo line cannot OVERWRITE the
             // default. The crisp invariant is: the attacker's
@@ -2067,8 +2067,8 @@ mod tests {
 
     #[test]
     fn user_signing_key_is_honored() {
-        let cfg = layer(None, Some("signing_key = /home/user/.mkit/global.key\n"));
-        assert_eq!(cfg.signing_key, "/home/user/.mkit/global.key");
+        let cfg = layer(None, Some("signing_key = /home/user/.kit/global.key\n"));
+        assert_eq!(cfg.signing_key, "/home/user/.kit/global.key");
     }
 
     /// Helper mirroring the old `trusted_remote_error_with(cfg, ..)`
@@ -2092,7 +2092,7 @@ mod tests {
     #[test]
     fn repo_http_remote_with_token_requires_user_trust() {
         let cfg = layered(
-            Some("remote_endpoint = mkit+https://example.invalid/repo\n"),
+            Some("remote_endpoint = kit+https://example.invalid/repo\n"),
             None,
         );
         let msg = gate_for_flat(&cfg, &|name| {
@@ -2105,8 +2105,8 @@ mod tests {
     #[test]
     fn trusted_http_remote_is_allowed() {
         let cfg = layered(
-            Some("remote_endpoint = mkit+https://example.invalid/repo\n"),
-            Some("trusted_remote_endpoint = mkit+https://example.invalid/repo\n"),
+            Some("remote_endpoint = kit+https://example.invalid/repo\n"),
+            Some("trusted_remote_endpoint = kit+https://example.invalid/repo\n"),
         );
         let msg = gate_for_flat(&cfg, &|name| {
             (name == mkit_transport_connect::TOKEN_ENV).then(|| "token".to_string())
@@ -2118,7 +2118,7 @@ mod tests {
     #[test]
     fn repo_s3_remote_with_env_creds_requires_user_trust() {
         let cfg = layered(
-            Some("remote_endpoint = mkit+s3://r2.example.com/bucket/proj\n"),
+            Some("remote_endpoint = kit+s3://r2.example.com/bucket/proj\n"),
             None,
         );
         let msg = gate_for_flat(&cfg, &|name| match name {
@@ -2138,7 +2138,7 @@ mod tests {
     fn user_chosen_http_remote_with_token_is_allowed() {
         let token =
             |name: &str| (name == mkit_transport_connect::TOKEN_ENV).then(|| "tok".to_string());
-        let ep = "mkit+https://example.invalid/repo";
+        let ep = "kit+https://example.invalid/repo";
         // repo_chosen = false (user-scoped or CLI-supplied endpoint).
         assert!(trusted_remote_error_for(ep, false, "", &token).is_none());
         // repo_chosen = true with no user trust → refused.
@@ -2151,7 +2151,7 @@ mod tests {
     #[test]
     fn repo_http_remote_without_token_is_allowed() {
         let none = |_: &str| None;
-        let ep = "mkit+https://example.invalid/repo";
+        let ep = "kit+https://example.invalid/repo";
         assert!(trusted_remote_error_for(ep, true, "", &none).is_none());
     }
 
@@ -2160,8 +2160,8 @@ mod tests {
     #[test]
     fn ssh_and_file_endpoints_bypass_credential_gate() {
         let all = |_: &str| Some("present".to_string());
-        assert!(trusted_remote_error_for("mkit+ssh://host/path", true, "", &all).is_none());
-        assert!(trusted_remote_error_for("mkit+file:///srv/mirror", true, "", &all).is_none());
+        assert!(trusted_remote_error_for("kit+ssh://host/path", true, "", &all).is_none());
+        assert!(trusted_remote_error_for("kit+file:///srv/mirror", true, "", &all).is_none());
     }
 
     /// `endpoint_credential_trust` is the public per-endpoint entry the
@@ -2171,15 +2171,15 @@ mod tests {
     fn endpoint_credential_trust_honours_provenance_and_user_trust() {
         let cfg = layered(
             None,
-            Some("trusted_remote_endpoint = mkit+https://trusted.invalid/r\n"),
+            Some("trusted_remote_endpoint = kit+https://trusted.invalid/r\n"),
         );
         // Untrusted, repo-chosen endpoint: only refused when creds are
         // actually present in the environment. In a clean test
         // environment there is no MKIT_API_TOKEN, so this passes; the
         // hostile-repo integration tests cover the credentialed case.
-        let _ = endpoint_credential_trust(&cfg, "mkit+https://untrusted.invalid/r", true);
+        let _ = endpoint_credential_trust(&cfg, "kit+https://untrusted.invalid/r", true);
         // User-trusted endpoint is always allowed.
-        assert!(endpoint_credential_trust(&cfg, "mkit+https://trusted.invalid/r", true).is_ok());
+        assert!(endpoint_credential_trust(&cfg, "kit+https://trusted.invalid/r", true).is_ok());
     }
 
     #[test]
@@ -2197,31 +2197,31 @@ mod tests {
     #[test]
     fn validate_key_path_rejects_parent_dir() {
         assert!(validate_key_path("../etc/passwd").is_err());
-        assert!(validate_key_path(".mkit/keys/../../etc/passwd").is_err());
+        assert!(validate_key_path(".kit/keys/../../etc/passwd").is_err());
         assert!(validate_key_path("foo/../bar").is_err());
     }
 
     #[test]
     fn validate_key_path_accepts_relative_and_absolute() {
         assert!(validate_key_path("").is_ok());
-        assert!(validate_key_path(".mkit/keys/default.key").is_ok());
-        assert!(validate_key_path("/home/user/.mkit/global.key").is_ok());
+        assert!(validate_key_path(".kit/keys/default.key").is_ok());
+        assert!(validate_key_path("/home/user/.kit/global.key").is_ok());
     }
 
     #[test]
     fn resolve_key_path_resolves_against_common_dir_in_linked_worktree() {
         // A linked tree signs with the ONE shared repo
         // key store, not a phantom keys dir under its own root.
-        let layout = RepoLayout::linked("/trees/wt1", "/main/.mkit/worktrees/wt1", "/main/.mkit");
-        let out = resolve_key_path(&layout, ".mkit/keys/default.key").unwrap();
-        assert_eq!(out, std::path::Path::new("/main/.mkit/keys/default.key"));
+        let layout = RepoLayout::linked("/trees/wt1", "/main/.kit/worktrees/wt1", "/main/.kit");
+        let out = resolve_key_path(&layout, ".kit/keys/default.key").unwrap();
+        assert_eq!(out, std::path::Path::new("/main/.kit/keys/default.key"));
     }
 
     #[test]
     fn resolve_key_path_rejects_relative_path_outside_repo_keys() {
         let td = TempDir::new().unwrap();
         assert!(
-            resolve_key_path(&RepoLayout::single(td.path()), ".mkit/custom/global.key").is_err()
+            resolve_key_path(&RepoLayout::single(td.path()), ".kit/custom/global.key").is_err()
         );
     }
 
@@ -2230,10 +2230,10 @@ mod tests {
         let td = TempDir::new().unwrap();
         let out = resolve_key_path(
             &RepoLayout::single(td.path()),
-            ".mkit/keys/custom/global.key",
+            ".kit/keys/custom/global.key",
         )
         .unwrap();
-        assert_eq!(out, td.path().join(".mkit/keys/custom/global.key"));
+        assert_eq!(out, td.path().join(".kit/keys/custom/global.key"));
     }
 
     #[cfg(unix)]
@@ -2255,7 +2255,7 @@ mod tests {
         // accepted by `resolve_key_path` and that one diverging from
         // it is rejected.
         let td = TempDir::new().unwrap();
-        let inside = from_passwd.join(".mkit/test-inside.key");
+        let inside = from_passwd.join(".kit/test-inside.key");
         assert!(resolve_key_path(&RepoLayout::single(td.path()), inside.to_str().unwrap()).is_ok());
         // `/__definitely_not_a_home_dir__` cannot be under any real
         // passwd `pw_dir` on a sane system.
@@ -2319,9 +2319,9 @@ mod tests {
         assert_eq!(cfg.attest.signer_or_fallback(), "repo-key");
         assert_eq!(
             cfg.attest.secp256k1_key_path_or_default(),
-            ".mkit/keys/secp256k1.key"
+            ".kit/keys/secp256k1.key"
         );
-        assert_eq!(cfg.attest.p256_key_path_or_default(), ".mkit/keys/p256.key");
+        assert_eq!(cfg.attest.p256_key_path_or_default(), ".kit/keys/p256.key");
     }
 
     #[test]
@@ -2355,7 +2355,7 @@ mod tests {
     fn named_remote_keys_parse_repo_safe() {
         let cfg = layer(
             Some(
-                "remote.origin.url = mkit+file:///srv/m\n\
+                "remote.origin.url = kit+file:///srv/m\n\
                  remote.origin.type = file\n\
                  branch.main.remote = origin\n\
                  branch.main.merge = main\n",
@@ -2363,7 +2363,7 @@ mod tests {
             None,
         );
         let origin = cfg.remotes.get("origin").expect("origin present");
-        assert_eq!(origin.url, "mkit+file:///srv/m");
+        assert_eq!(origin.url, "kit+file:///srv/m");
         assert_eq!(origin.remote_type, "file");
         let up = cfg.branch_upstreams.get("main").expect("upstream present");
         assert_eq!(up.remote, "origin");
@@ -2377,7 +2377,7 @@ mod tests {
         cfg.remotes.insert(
             "origin".into(),
             RemoteEntry {
-                url: "mkit+https://h/r".into(),
+                url: "kit+https://h/r".into(),
                 remote_type: "http".into(),
             },
         );
@@ -2392,7 +2392,7 @@ mod tests {
         let reloaded = read_or_default(&RepoLayout::single(td.path())).unwrap();
         assert_eq!(
             reloaded.remotes.get("origin").unwrap().url,
-            "mkit+https://h/r"
+            "kit+https://h/r"
         );
         assert_eq!(
             reloaded.branch_upstreams.get("main").unwrap().remote,
@@ -2404,20 +2404,20 @@ mod tests {
     fn resolve_remote_default_and_named_provenance() {
         // Named remote in the repo layer is repo_chosen.
         let lc = layered(
-            Some("remote.origin.url = mkit+https://h/r\nremote.origin.type = http\n"),
+            Some("remote.origin.url = kit+https://h/r\nremote.origin.type = http\n"),
             None,
         );
         let r = resolve_remote(&lc, "origin").expect("origin resolves");
-        assert_eq!(r.endpoint, "mkit+https://h/r");
+        assert_eq!(r.endpoint, "kit+https://h/r");
         assert!(r.repo_chosen);
 
         // Flat default endpoint in the repo layer is repo_chosen.
-        let lc = layered(Some("remote_endpoint = mkit+https://h/d\n"), None);
+        let lc = layered(Some("remote_endpoint = kit+https://h/d\n"), None);
         let r = resolve_remote(&lc, "default").expect("default resolves");
         assert!(r.repo_chosen);
 
         // User-layer flat endpoint is NOT repo_chosen.
-        let lc = layered(None, Some("remote_endpoint = mkit+https://h/u\n"));
+        let lc = layered(None, Some("remote_endpoint = kit+https://h/u\n"));
         let r = resolve_remote(&lc, "").expect("empty -> default");
         assert!(!r.repo_chosen);
 
@@ -2437,7 +2437,7 @@ mod tests {
         assert_eq!(up.branch, "trunk");
 
         // Fallback to default remote tracking same-named branch.
-        let lc = layered(Some("remote_endpoint = mkit+file:///srv\n"), None);
+        let lc = layered(Some("remote_endpoint = kit+file:///srv\n"), None);
         let up = resolve_upstream(&lc, "feature").unwrap();
         assert_eq!(up.remote, DEFAULT_REMOTE_NAME);
         assert_eq!(up.branch, "feature");

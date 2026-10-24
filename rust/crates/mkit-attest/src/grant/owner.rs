@@ -121,7 +121,7 @@ mod tests {
     use super::super::AcceptedSchemes;
     use super::*;
 
-    const STATEMENT: &[u8] = b"mkit-write-epoch:v1\nany bytes: the scheme signs what it is given";
+    const STATEMENT: &[u8] = b"kit-write-epoch:v1\nany bytes: the scheme signs what it is given";
 
     fn cfg(schemes: &[OwnerScheme]) -> VerifierConfig {
         VerifierConfig::new(

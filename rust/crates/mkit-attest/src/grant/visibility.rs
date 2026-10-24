@@ -1,4 +1,4 @@
-//! The `mkit-repo-visibility:v1` statement (SPEC-WRITE-GRANTS §9.1).
+//! The `kit-repo-visibility:v1` statement (SPEC-WRITE-GRANTS §9.1).
 
 use mkit_core::repo_identity::RepositoryIdentity;
 
@@ -43,7 +43,7 @@ impl Visibility {
     }
 }
 
-/// A parsed `mkit-repo-visibility:v1` statement: the owner sets a
+/// A parsed `kit-repo-visibility:v1` statement: the owner sets a
 /// repository's visibility (§9.1).
 ///
 /// [`VisibilityStatement::parse`] accepts exactly the canonical encoding and
@@ -188,8 +188,8 @@ mod tests {
             GrantError::FinalLineFeed,
         );
         rejects(f.join("\r\n").as_bytes(), GrantError::CarriageReturn);
-        rejects(&with(0, "mkit-write-epoch:v1"), GrantError::Domain);
-        rejects(&with(0, "mkit-repo-visibility:v2"), GrantError::Domain);
+        rejects(&with(0, "kit-write-epoch:v1"), GrantError::Domain);
+        rejects(&with(0, "kit-repo-visibility:v2"), GrantError::Domain);
         rejects(&with(1, "website"), GrantError::Repository);
         rejects(
             &with(1, &REPO.replace("website", "Website")),

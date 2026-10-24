@@ -1,7 +1,7 @@
 {
   "bin": "neg_invalid_entry_name.bin",
-  "blake3": "d5850aef400ccfc245e9f366cdf4eb78ffe67852b0427a902e8c3e30cb40cf15",
-  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "blake3": "7e230a70d9072a55f763e400fa9909542a325e920263e206a9dbe5414ec42552",
+  "commit_id_hex": "6175d8f9894a93541ef408c7f473d421466419e27d2b88b41e283719dbc69559",
   "description": "The step's entry name has a trailing space (SPEC-OBJECTS §4.1).",
   "expect": "reject",
   "name": "neg_invalid_entry_name",

@@ -429,7 +429,7 @@ fn advance() -> proto::AdvanceRefsRequest {
         head_expectation: Some(proto::RefExpectation::Match.into()),
         head_expected_id: Some([3; 32].to_vec()),
         head_new_id: Some([4; 32].to_vec()),
-        packmap_ref: Some("refs/mkit/packmap/main".into()),
+        packmap_ref: Some("refs/kit/packmap/main".into()),
         packmap_expectation: Some(proto::RefExpectation::Missing.into()),
         packmap_new_id: Some([5; 32].to_vec()),
         ticket_ids: vec![[6; 32].to_vec(), [7; 32].to_vec()],
@@ -461,7 +461,7 @@ fn the_observer_sees_the_exact_ref_moves_and_runs_before_the_signer() {
     let copy = proto::AdvanceRefsRequest {
         head_ref: Some("refs/heads/copy".into()),
         head_expectation: Some(proto::RefExpectation::Missing.into()),
-        packmap_ref: Some("refs/mkit/packmap/copy".into()),
+        packmap_ref: Some("refs/kit/packmap/copy".into()),
         packmap_expectation: Some(proto::RefExpectation::Missing.into()),
         source_ref: Some("refs/heads/main".into()),
         expected_tip: Some([2; 32].to_vec()),
@@ -513,7 +513,7 @@ fn the_observer_sees_the_exact_ref_moves_and_runs_before_the_signer() {
                 RefTarget::Set([4; 32])
             ),
             RefMove::new(
-                "refs/mkit/packmap/main",
+                "refs/kit/packmap/main",
                 RefWriteCondition::Missing,
                 RefTarget::Set([5; 32])
             ),
@@ -618,8 +618,8 @@ fn per_attempt_headers_ride_along_unsigned_and_reserved_names_are_refused() {
         "x-repository",
         "x-content-commitment",
         "x-write-grant",
-        "x-mkit-ref",
-        "x-mkit-anything",
+        "x-kit-ref",
+        "x-kit-anything",
         "x-forwarded-for",
         "host",
         "content-type",
@@ -883,7 +883,7 @@ fn blob(salt: u8) -> Entry {
 }
 fn info() -> proto::GetServerInfoResponse {
     proto::GetServerInfoResponse {
-        protocol: Some("mkit.transport.v1".into()),
+        protocol: Some("kit.transport.v1".into()),
         spec_version: Some(2),
         atomic_advance: Some(true),
         max_pack_bytes: Some(1 << 20),
@@ -1062,7 +1062,7 @@ fn packmap_driver_capture_matrix() {
             assert_eq!(advance.head_new_id, Some(vec![4; 32]));
             assert_eq!(
                 advance.packmap_ref.as_deref(),
-                Some("refs/mkit/packmap/main")
+                Some("refs/kit/packmap/main")
             );
             assert_eq!(
                 advance.packmap_expectation,
@@ -1192,7 +1192,7 @@ fn a_whole_push_runs_the_observer_and_signer_for_every_write() {
     assert_eq!(seen[2].moves.len(), 2);
     assert_eq!(seen[2].moves[0].name, "refs/heads/main");
     assert_eq!(seen[2].moves[0].new, RefTarget::Set([4; 32]));
-    assert_eq!(seen[2].moves[1].name, "refs/mkit/packmap/main");
+    assert_eq!(seen[2].moves[1].name, "refs/kit/packmap/main");
     // Observer precedes signer precedes dispatch, per write.
     let log = log.borrow();
     for name in ["UploadPack", "AdvanceRefs"] {
@@ -1254,7 +1254,7 @@ fn a_poll_resends_the_same_envelope_and_a_renewed_envelope_is_a_new_attempt() {
         }
         .encode_to_vec();
         serde_json::json!({"code":"unavailable","details":[
-            {"type":"type.googleapis.com/mkit.transport.v1.PendingVerification",
+            {"type":"type.googleapis.com/kit.transport.v1.PendingVerification",
              "value":base64::engine::general_purpose::STANDARD.encode(detail)}]})
         .to_string()
     };
@@ -1335,12 +1335,12 @@ fn sign_envelope_cannot_skip_or_mislabel_the_observed_intent() {
     ));
     assert!(log.borrow().is_empty(), "no seam ran");
     // A non-write procedure needs no intent and is not observed.
-    let read = "/mkit.transport.v1.TransportService/ReadRef";
+    let read = "/kit.transport.v1.TransportService/ReadRef";
     block_on(client.sign_envelope(read, &commitment, None, None)).unwrap();
     assert!(observer.seen.borrow().is_empty());
     // An administrative procedure is outside the six write RPCs: it reaches the
     // signer, and is observed only when the host passes an intent.
-    let admin = "/mkit.transport.v1.TransportService/SetRepoVisibility";
+    let admin = "/kit.transport.v1.TransportService/SetRepoVisibility";
     block_on(client.sign_envelope(admin, &commitment, None, None)).unwrap();
     assert!(observer.seen.borrow().is_empty());
     assert_eq!(signer.seen.borrow().last().unwrap().0, admin);
@@ -1451,7 +1451,7 @@ fn pending_body() -> String {
     }
     .encode_to_vec();
     serde_json::json!({"code":"unavailable","details":[
-        {"type":"type.googleapis.com/mkit.transport.v1.PendingVerification",
+        {"type":"type.googleapis.com/kit.transport.v1.PendingVerification",
          "value":base64::engine::general_purpose::STANDARD.encode(detail)}]})
     .to_string()
 }

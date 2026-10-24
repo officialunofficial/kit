@@ -43,7 +43,7 @@ async fn answer(stream: &mut TcpStream) {
 }
 fn request(origin: &str, method: &str, content_type: &str, signed: bool) -> Request<ClientBody> {
     let mut req = Request::post(format!(
-        "{origin}/mkit.transport.v1.TransportService/{method}"
+        "{origin}/kit.transport.v1.TransportService/{method}"
     ))
     .header("content-type", content_type);
     if signed {
@@ -208,7 +208,7 @@ async fn streaming_upload_uses_fresh_socket_and_never_replays_mid_body() {
     });
     let body = http_body_util::BodyExt::boxed(http_body_util::StreamBody::new(first.chain(rest)));
     let req = Request::post(format!(
-        "{origin}/mkit.transport.v1.TransportService/UploadPart"
+        "{origin}/kit.transport.v1.TransportService/UploadPart"
     ))
     .header("content-type", "application/connect+proto")
     .body(body)

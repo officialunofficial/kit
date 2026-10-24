@@ -136,7 +136,7 @@ pub(crate) struct Applied {
 /// Local staleness recovery remains limited to the closure check
 /// reporting [`SyncError::RemoteMissingObject`] on a run that skipped at least
 /// one recorded pack. The record claimed packs were applied but their objects
-/// are not in the store (for example `.mkit/objects` was wiped while
+/// are not in the store (for example `.kit/objects` was wiped while
 /// `applied-packs/` survived), so `applied` is cleared in memory and the
 /// whole chain is resolved if necessary and retried once with no skips.
 /// Every other failure propagates without triggering self-heal, because none
@@ -259,7 +259,7 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 ///
 /// For every advertised branch the flow is exactly:
 ///
-/// 1. read the branch's packmap ref (`refs/mkit/packmap/<branch>`),
+/// 1. read the branch's packmap ref (`refs/kit/packmap/<branch>`),
 /// 2. walk its chain oldest-first and download any pack the applied-pack
 ///    record does not already have, with no repo lock held,
 /// 3. acquire the repo lock, unpack the downloaded packs and assert the tip's

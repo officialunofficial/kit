@@ -4,7 +4,7 @@
 //! Local-filesystem [`Transport`] implementation.
 //!
 //! This is a real local/served transport, not a test-only fixture: it is
-//! the backend for `mkit+file://` remotes and for repositories served via
+//! the backend for `kit+file://` remotes and for repositories served via
 //! `mkit serve`. It also doubles as the in-tree test transport.
 //!
 //! Stores pack files under `<root>/packs/<64-hex>` and ref files under
@@ -25,11 +25,11 @@
 //! |-----------|--------------------------------------------------------|----------------|
 //! | `Any`     | `write_atomic`: tmp file → `fsync` → `rename` → parent | Last writer wins. Concurrent writers never expose a half-written file because `rename(2)` is atomic on POSIX. |
 //! | `Missing` | `write_create_new`: same tmp+fsync, then a hard-link    | Only the first writer succeeds. If two concurrent callers both see "absent" before writing, only one `link(2)` wins; the other gets `AlreadyExists` → `RefConflict`. |
-//! | `Match(H)`| OS file-lock + in-process `Mutex` around read-then-`write_atomic` | Atomic across processes on the same on-disk root. The OS exclusive lock on `<root>/.mkit/refs/.lock` serialises every `Match` CAS critical section; the in-process `Mutex` keeps multi-threaded callers from racing each other before they hit the file lock. |
+//! | `Match(H)`| OS file-lock + in-process `Mutex` around read-then-`write_atomic` | Atomic across processes on the same on-disk root. The OS exclusive lock on `<root>/.kit/refs/.lock` serialises every `Match` CAS critical section; the in-process `Mutex` keeps multi-threaded callers from racing each other before they hit the file lock. |
 //!
 //! Cross-process atomicity for `Match` is achieved via
 //! [`std::fs::File::lock`] (stable as of Rust 1.89) on a sentinel file
-//! `<root>/.mkit/refs/.lock`. The lock is held for the duration of the
+//! `<root>/.kit/refs/.lock`. The lock is held for the duration of the
 //! read-compare-write sequence and released on `Drop` (including on
 //! panic). The in-process `Mutex` is retained as a fast-path optimisation
 //! and to serialise lock acquisition fairly within one process.
@@ -229,7 +229,7 @@ pub fn create_dir_all_durably(dir: &Path) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// RAII guard around an OS-level exclusive file lock on the per-repo
-/// sentinel file `<root>/.mkit/refs/.lock`. Used to serialise `Match`
+/// sentinel file `<root>/.kit/refs/.lock`. Used to serialise `Match`
 /// CAS critical sections across processes that share the same on-disk
 /// root.
 ///
@@ -254,7 +254,7 @@ struct RefLock {
 }
 
 impl RefLock {
-    /// Acquire the exclusive lock on `<root>/.mkit/refs/.lock`,
+    /// Acquire the exclusive lock on `<root>/.kit/refs/.lock`,
     /// creating the lock file (and its parent directories) on first
     /// use. Blocks until the lock can be taken.
     fn acquire(root: &Path) -> io::Result<Self> {
@@ -306,7 +306,7 @@ impl Drop for RefLock {
 /// and a `Mutex` protecting the `Match` CAS read-then-write sequence
 /// within a process. Cross-process atomicity is supplied separately
 /// by `RefLock`, which takes an OS exclusive lock on
-/// `<root>/.mkit/refs/.lock` for the duration of the CAS critical
+/// `<root>/.kit/refs/.lock` for the duration of the CAS critical
 /// section.
 ///
 /// The `Mutex` is unit-typed (zero overhead for lock/unlock when
@@ -428,14 +428,14 @@ impl FileTransport {
         }
     }
 
-    /// The transport root: `packs/`, `refs/` and `.mkit/` live under it.
+    /// The transport root: `packs/`, `refs/` and `.kit/` live under it.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     /// Run `f` holding the ref mutation lock: this transport's in-process
-    /// mutex, then the OS exclusive lock on `<root>/.mkit/refs/.lock`
+    /// mutex, then the OS exclusive lock on `<root>/.kit/refs/.lock`
     /// (created on first use). Every ref write takes it, including
     /// [`Transport::update_ref`], so what `f` reads, decides and writes
     /// through [`LockedRefs`] is one step that no other writer on the same
@@ -541,7 +541,7 @@ impl FileTransport {
 
     /// The path of a server-owned file: `rel` must be a plain relative path
     /// (normal components only) under [`SERVER_DIR`], and must not resolve
-    /// outside `<root>/.mkit/server` through a symlink. The only files
+    /// outside `<root>/.kit/server` through a symlink. The only files
     /// [`LockedRefs::write_file`] and [`LockedRefs::remove_file`] touch.
     ///
     /// # Errors
@@ -611,7 +611,7 @@ impl FileTransport {
 
 /// The directory, under a [`FileTransport`] root, of files a server keeps
 /// next to the refs ([`LockedRefs::write_file`]).
-pub const SERVER_DIR: &str = ".mkit/server";
+pub const SERVER_DIR: &str = ".kit/server";
 
 /// The marker, under a [`FileTransport`] root, that a SQLite-metadata
 /// `mkit-server` deployment writes: the root's refs live in that server's
@@ -619,7 +619,7 @@ pub const SERVER_DIR: &str = ".mkit/server";
 /// transport refuses a marked root ([`RefFileError::MetaElsewhere`]), so a
 /// local push or `mkit serve` cannot keep a second, diverging copy of the
 /// refs. Reads still work.
-pub const SERVER_META_MARKER: &str = ".mkit/server-meta";
+pub const SERVER_META_MARKER: &str = ".kit/server-meta";
 
 /// Why a strict ref-file operation ([`LockedRefs`],
 /// [`FileTransport::read_ref_strict`], [`FileTransport::list_ref_files`],
@@ -1454,7 +1454,7 @@ mod tests {
 
         // Lock sentinel file must exist after a Match CAS.
         assert!(
-            dir.path().join(".mkit").join("refs").join(".lock").exists(),
+            dir.path().join(".kit").join("refs").join(".lock").exists(),
             "RefLock sentinel file should be created on first Match CAS"
         );
     }
@@ -1751,7 +1751,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(refs.read_ref("refs/heads/a").unwrap(), Some(h));
                 // Another open file description cannot take the lock.
-                let lock = dir.path().join(".mkit").join("refs").join(".lock");
+                let lock = dir.path().join(".kit").join("refs").join(".lock");
                 let other = fs::File::open(lock).unwrap();
                 other.try_lock().is_err()
             })
@@ -1780,7 +1780,7 @@ mod tests {
         let t = FileTransport::new(dir.path());
         let h = blake3_hash(b"before");
         t.write_ref("refs/heads/main", &h).unwrap();
-        fs::create_dir_all(dir.path().join(".mkit")).unwrap();
+        fs::create_dir_all(dir.path().join(".kit")).unwrap();
         fs::write(dir.path().join(SERVER_META_MARKER), b"marked").unwrap();
 
         // Every write path refuses, naming the marker; nothing changes.
@@ -1798,8 +1798,8 @@ mod tests {
             .with_ref_lock(|refs| {
                 let update = refs.update_ref("refs/heads/x", RefWriteCondition::Missing, &h);
                 let delete = refs.delete_ref("refs/heads/main");
-                let file = refs.write_file(Path::new(".mkit/server/rows/a"), b"x");
-                let remove = refs.remove_file(Path::new(".mkit/server/rows/a"));
+                let file = refs.write_file(Path::new(".kit/server/rows/a"), b"x");
+                let remove = refs.remove_file(Path::new(".kit/server/rows/a"));
                 [update.err(), delete.err(), file.err(), remove.err()]
             })
             .unwrap();
@@ -1910,7 +1910,7 @@ mod tests {
     fn locked_file_writes_stay_under_the_server_dir() {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
-        let rel = Path::new(".mkit/server/row");
+        let rel = Path::new(".kit/server/row");
         t.with_ref_lock(|refs| {
             refs.write_file(rel, b"v1").unwrap();
             refs.write_file(rel, b"v2").unwrap();
@@ -1920,9 +1920,9 @@ mod tests {
                 "../up",
                 "a/../b",
                 "./a",
-                ".mkit/server",
-                ".mkit/server/../refs/.lock",
-                ".mkit/refs/.lock",
+                ".kit/server",
+                ".kit/server/../refs/.lock",
+                ".kit/refs/.lock",
                 "refs/x",
                 "packs/x",
             ] {
@@ -1953,20 +1953,20 @@ mod tests {
 
         let dir = tmp();
         let outside = tmp();
-        fs::create_dir_all(dir.path().join(".mkit")).unwrap();
-        symlink(outside.path(), dir.path().join(".mkit/server")).unwrap();
+        fs::create_dir_all(dir.path().join(".kit")).unwrap();
+        symlink(outside.path(), dir.path().join(".kit/server")).unwrap();
         let t = FileTransport::new(dir.path());
         let result = t
-            .with_ref_lock(|refs| refs.write_file(Path::new(".mkit/server/row"), b"x"))
+            .with_ref_lock(|refs| refs.write_file(Path::new(".kit/server/row"), b"x"))
             .unwrap();
         assert!(matches!(result, Err(RefFileError::Escape(_))));
         assert!(!outside.path().join("row").exists());
         // A symlink to a directory inside the root is refused too.
-        fs::remove_file(dir.path().join(".mkit/server")).unwrap();
+        fs::remove_file(dir.path().join(".kit/server")).unwrap();
         fs::create_dir_all(dir.path().join("refs")).unwrap();
-        symlink(dir.path().join("refs"), dir.path().join(".mkit/server")).unwrap();
+        symlink(dir.path().join("refs"), dir.path().join(".kit/server")).unwrap();
         assert!(matches!(
-            t.server_path(Path::new(".mkit/server/row")),
+            t.server_path(Path::new(".kit/server/row")),
             Err(RefFileError::Escape(_))
         ));
     }

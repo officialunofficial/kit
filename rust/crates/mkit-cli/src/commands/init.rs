@@ -44,7 +44,7 @@ pub fn run(args: &[String]) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
         stderr,
-        "initialized empty mkit repository in {}/.mkit/",
+        "initialized empty mkit repository in {}/.kit/",
         display(&cwd)
     );
     exit::OK

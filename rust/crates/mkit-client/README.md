@@ -1,7 +1,7 @@
 # mkit-client
 
 The async protocol client for mkit servers, for Rust hosts on native and wasm
-targets. It speaks `mkit.transport.v1` over a host-supplied HTTP channel, signs
+targets. It speaks `kit.transport.v1` over a host-supplied HTTP channel, signs
 with a host-supplied signer, and has no Connect runtime, tokio, hyper or C
 compression dependency. It is the former `mkit-push`, renamed and extended.
 
@@ -14,7 +14,7 @@ compression dependency. It is the former `mkit-push`, renamed and extended.
   `Client::signed` signs every RPC except discovery, as the protocol requires
   of a client that has a signer. Writes need a signed client or explicit
   unsigned-write opt-in (below). There is no fork
-  RPC in `mkit.transport.v1`, so none is exposed (a branch copy from a published
+  RPC in `kit.transport.v1`, so none is exposed (a branch copy from a published
   source is `advance_refs` with `source_ref`).
 - **`Push`: the bounded whole-push** built on the same calls (below).
 - **Read helpers.** `Client::resolve_pack_chain` walks a packmap chain (bounded
@@ -151,7 +151,7 @@ default observer does nothing, and a signer that implements only
   request id) is added to that attempt's request and is not signed. A name that
   is not reserved replaces a transport default of the same name. Names are
   checked against the hard-reserved list of SPEC-TRANSPORT-CONNECT section 5.1
-  (the auth v2 headers, `X-Mkit-*`, `X-Forwarded-*`, `Content-*`, `Connect-*`,
+  (the auth v2 headers, `X-Kit-*`, `X-Forwarded-*`, `Content-*`, `Connect-*`,
   `Host`, `Cookie`, `Idempotency-Key`, hop-by-hop headers; `Authorization` too,
   because the client cannot know whether its transport already sends one) and a
   reserved name is `Error::ReservedHeader` before anything is signed.

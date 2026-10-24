@@ -22,16 +22,16 @@ repo-state API takes it).
 
 ## 1. State classification
 
-Every piece of repository state under `.mkit/` belongs to exactly one
+Every piece of repository state under `.kit/` belongs to exactly one
 of two classes:
 
 | Class | Contents |
 |---|---|
 | **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `history-v1/`, `recovery-log`, `attestations/`, `applied-packs/`, `upload-parts/`, `git/`, `sparse/`, `pack-shards/`, `worktrees/`, `refs-history-<branch>.lock`, `refs-<ref>.lock`, `worktrees.lock`, `serve.lock` (SPEC-CONCURRENCY §2) |
-| **worktree state dir** (private to one tree) | `HEAD`, `index`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `mkit-conflicts`, `MKIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock` |
+| **worktree state dir** (private to one tree) | `HEAD`, `index`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `MKIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock` |
 
 In the classic single-worktree layout both directories are the same
-`<root>/.mkit/`; the two-directory model is byte-identical there.
+`<root>/.kit/`; the two-directory model is byte-identical there.
 
 Divergences from git, both deliberate:
 
@@ -43,8 +43,8 @@ Divergences from git, both deliberate:
   specifies tree-local stash semantics (`stash` in a linked tree never
   touches a sibling's entries).
 
-Relative signing-key paths in config (`.mkit/keys/…`) resolve their
-`.mkit/` prefix against the **common dir**, so every tree signs with
+Relative signing-key paths in config (`.kit/keys/…`) resolve their
+`.kit/` prefix against the **common dir**, so every tree signs with
 the one shared repo key store.
 
 The disposable **applied-packs/.heads/** subdirectory stores native fetch
@@ -58,20 +58,20 @@ No wire, ref, or authoritative repository format changes.
 ## 2. On-disk model
 
 ```
-<main>/.mkit/                       # common dir
+<main>/.kit/                       # common dir
   worktrees/<id>/                   # one per linked tree (the registry)
     commondir                       # path to the common dir
-    mkitdir                         # abs path of the tree's pointer file
+    kitdir                         # abs path of the tree's pointer file
     HEAD, index, ORIG_HEAD, ...     # that tree's per-worktree state
-<linked-tree>/.mkit                 # pointer FILE (not a directory)
+<linked-tree>/.kit                 # pointer FILE (not a directory)
 ```
 
 ### 2.1 Pointer file
 
-A linked tree's `.mkit` is a regular file containing exactly one line:
+A linked tree's `.kit` is a regular file containing exactly one line:
 
 ```
-mkitdir: <path>\n
+kitdir: <path>\n
 ```
 
 - `<path>` names the tree's state dir; absolute, or relative to the
@@ -82,9 +82,9 @@ mkitdir: <path>\n
 - MUST be a **regular file**. Readers MUST reject a symlinked pointer
   (likewise `commondir` and the back-pointer): the size cap is checked
   against the file itself, and following a hostile link (for example
-  `.mkit -> /dev/zero` in an untarred tree) would turn discovery into
+  `.kit -> /dev/zero` in an untarred tree) would turn discovery into
   an unbounded read.
-- Writers MUST produce the canonical form (prefix `mkitdir: `, one
+- Writers MUST produce the canonical form (prefix `kitdir: `, one
   trailing `\n`); `layout::write_pointer_file` is the single writer.
 
 ### 2.2 State-dir metadata files
@@ -94,7 +94,7 @@ mkitdir: <path>\n
   `../..\n`. When ABSENT, readers MUST default to `../..` (the layout
   `worktree add` produces). Same single-line/size rules as the pointer
   file.
-- `mkitdir` &mdash; the absolute path of the linked tree's pointer file (the
+- `kitdir` &mdash; the absolute path of the linked tree's pointer file (the
   back-pointer `worktree prune` verifies). Same single-line/size rules.
 
 ### 2.3 Worktree ids
@@ -110,11 +110,11 @@ sanitized (invalid bytes → `-`) and uniquified git-style
 Given a working directory `W` (mkit treats the invocation directory as
 the worktree root; there is no upward search):
 
-1. If `W/.mkit` is a **directory** or **absent** → the single-worktree
-   layout (`common dir = state dir = W/.mkit`). Absence is not a
+1. If `W/.kit` is a **directory** or **absent** → the single-worktree
+   layout (`common dir = state dir = W/.kit`). Absence is not a
    discovery error; "not a repository" surfaces from the store open,
    unchanged from pre-worktree behavior.
-2. If `W/.mkit` is a **file** → parse it as a pointer file. Then:
+2. If `W/.kit` is a **file** → parse it as a pointer file. Then:
    - the state dir is the pointer target (resolved against `W` if
      relative); it MUST exist and is canonicalized;
    - the common dir comes from `<state>/commondir` (default `../..`),
@@ -210,7 +210,7 @@ the same pack bytes.
 
 ### 4.5 `worktree add` write ordering (crash safety)
 
-1. state dir fully populated (`commondir`, `mkitdir` back-pointer,
+1. state dir fully populated (`commondir`, `kitdir` back-pointer,
    `HEAD`) &mdash; before any pointer to it exists;
 2. branch ref creation (new-branch form), through the history-recording
    ref path;
@@ -232,7 +232,7 @@ versions with and without worktree support while linked trees exist.
 - `mkit-core/src/layout.rs` unit tests: accessor/classification
   goldens, discovery fail-closed matrix, pointer-file golden bytes,
   id grammar.
-- `mkit-cli/tests/layout_baseline_pin.rs`: the single-worktree `.mkit`
+- `mkit-cli/tests/layout_baseline_pin.rs`: the single-worktree `.kit`
   shape is a compatibility surface; it must never drift.
 - `mkit-cli/tests/linked_worktree_discovery.rs`,
   `worktree_command.rs`, `worktree_gc_cross_tree.rs`: shared-store,

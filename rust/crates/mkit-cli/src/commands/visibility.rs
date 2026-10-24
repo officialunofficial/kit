@@ -6,7 +6,7 @@
 //! * **Envelope** (default): a signed auth v2 write of `SetRepoVisibility`
 //!   with the repository signing key, so it needs `transport_auth = envelope`
 //!   and a trusted remote, like `mkit push`. A grant never authorizes it.
-//! * **Statement** (`--statement`): an owner-signed `mkit-repo-visibility:v1`
+//! * **Statement** (`--statement`): an owner-signed `kit-repo-visibility:v1`
 //!   statement, sent with no envelope and with `X-Repository`. It signs with
 //!   any owner scheme, including a wallet or passkey by import.
 //!
@@ -54,7 +54,7 @@ enum VisibilityCommand {
 
 #[derive(Debug, Args)]
 struct SetOpts {
-    /// Remote name, or an `mkit+https://` URL naming `<namespace>/<name>`.
+    /// Remote name, or an `kit+https://` URL naming `<namespace>/<name>`.
     remote: String,
     /// The visibility to set.
     #[arg(value_enum)]

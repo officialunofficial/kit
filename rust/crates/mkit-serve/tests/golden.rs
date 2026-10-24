@@ -13,8 +13,8 @@ use common::*;
 use mkit_core::hash::{Hash, hash};
 use mkit_core::protocol::{PackKey, Transport as _};
 use mkit_core::refs::RefWriteCondition;
-use mkit_rpc::mkit::common::v1::RefExpectation;
-use mkit_rpc::mkit::rpc::v1::ssh::SshFrame;
+use mkit_rpc::kit::common::v1::RefExpectation;
+use mkit_rpc::kit::rpc::v1::ssh::SshFrame;
 use mkit_serve::{ReadFrames, SessionConfig, SessionEnd, WriteFrames, WritePolicy, serve_session};
 use mkit_transport_file::FileTransport;
 
@@ -306,7 +306,7 @@ fn the_write_policy_decides_each_write() {
     let denied = |f: &SshFrame| {
         assert_error(
             f,
-            mkit_rpc::mkit::rpc::v1::ErrorCode::InvalidRequest,
+            mkit_rpc::kit::rpc::v1::ErrorCode::InvalidRequest,
             "write not permitted",
         );
     };
@@ -349,7 +349,7 @@ fn a_refused_upload_still_checks_its_framing() {
     ]);
     assert_error(
         &frames[0],
-        mkit_rpc::mkit::rpc::v1::ErrorCode::InvalidRequest,
+        mkit_rpc::kit::rpc::v1::ErrorCode::InvalidRequest,
         "PackChunk.offset is not the expected next offset",
     );
     assert!(matches!(frames[1].body, Some(Body::PackExistsResponse(_))));

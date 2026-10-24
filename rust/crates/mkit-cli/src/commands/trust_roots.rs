@@ -52,7 +52,7 @@ pub fn default_trust_roots_path() -> PathBuf {
 
 /// Refuse to operate on an in-repo trust-roots file unless the user
 /// passed `--trust-roots` explicitly. Without this gate, a hostile
-/// cloned repo could ship `<repo>/.mkit/trust-roots.toml` listing
+/// cloned repo could ship `<repo>/.kit/trust-roots.toml` listing
 /// attacker keys and a trust-consuming command would trust it
 /// implicitly. See `docs/THREAT-MODEL.md` §5 "Trust-roots scope".
 pub fn warn_if_unsafe_trust_roots(
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn warn_if_unsafe_trust_roots_refuses_in_repo_path_without_explicit_flag() {
-        let mkit_dir = Path::new("/repo/.mkit");
+        let mkit_dir = Path::new("/repo/.kit");
         let trust_path = mkit_dir.join("trust-roots.toml");
         let err = warn_if_unsafe_trust_roots(&trust_path, mkit_dir, false).unwrap_err();
         assert_eq!(err, exit::CONFIG_ERROR);
@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn warn_if_unsafe_trust_roots_allows_explicit_flag() {
-        let mkit_dir = Path::new("/repo/.mkit");
+        let mkit_dir = Path::new("/repo/.kit");
         let trust_path = mkit_dir.join("trust-roots.toml");
         warn_if_unsafe_trust_roots(&trust_path, mkit_dir, true).unwrap();
     }

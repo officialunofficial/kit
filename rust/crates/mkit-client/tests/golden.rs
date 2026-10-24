@@ -50,11 +50,11 @@ fn one_pack_plan_ids_are_stable() {
     let (packs, node) = ids(Limits::default());
     assert_eq!(
         packs,
-        ["377baa94219010ebe93689587e6eff487491cf87debc778fcf510a74d295af6c"]
+        ["84c3912b1d9a228a0fe46677b2ad5a54c877f7843791b37bb77786d4cbb239df"]
     );
     assert_eq!(
         node,
-        "b05415c01f7d174385cd2487e8f26bbc6744b541656187d855c5e42a732b846c"
+        "309d37790fb5cb82c80ecb96f410ec3f174dc4d2b571c298509bbcdd9b6e0d0a"
     );
 }
 
@@ -68,13 +68,13 @@ fn split_plan_ids_are_stable() {
     assert_eq!(
         packs,
         [
-            "eebfaf7a2f5697fbd6eba7f73b21d1a06a062be19825b8bb7bd7884c69d55464",
-            "cdeb25cbea80e759021686dc0339ec945952d754c45f807f847fbc206fa095a3",
-            "d1d22d68702bf09ed25a14d4446740f3b1186cfe7f71182d03dbd3db6552f67d",
+            "01fe04f5dfa1f86d0970df0824012029309e23ab8dd1b868593687a031f1039b",
+            "eeebc0228e0750b205094c5139b42dea73a450678f9e547914be591cfd05e259",
+            "bcacfb6cd375c8605a942758f58706b28bb20d3475ceaf27e35b56dfc74272b5",
         ]
     );
     assert_eq!(
         node,
-        "d64e7ed3aa76692e2759c567dc97010979c5d022740a2bc683c646274a96f53a"
+        "274e8ae9f9d5ef1394bbc3fc055d06acebdce9478f9f9292b35f2e71a09d03a4"
     );
 }

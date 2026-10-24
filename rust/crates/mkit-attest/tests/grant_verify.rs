@@ -374,10 +374,10 @@ fn grant_verified_effective_flags_keep_the_packmap_rule() {
     assert_eq!(write.effective_flags("refs/tags/v1"), RefFlags::CREATE);
     // `refs/*` never reaches a packmap ref; its coverage comes from the head.
     assert_eq!(
-        write.effective_flags("refs/mkit/packmap/main"),
+        write.effective_flags("refs/kit/packmap/main"),
         RefFlags::EMPTY
     );
-    let head = packmap_head("refs/mkit/packmap/main").unwrap();
+    let head = packmap_head("refs/kit/packmap/main").unwrap();
     assert_eq!(write.effective_flags(&head), cu);
     // A grant checked for a read yields no write flags.
     let read = owner

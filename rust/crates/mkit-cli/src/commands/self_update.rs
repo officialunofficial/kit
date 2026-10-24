@@ -12,12 +12,12 @@
 //!
 //! Management contract (shared with `install.sh`):
 //!
-//! * The binary is "installer-managed" iff `<bin_dir>/.mkit-installed-tag`
+//! * The binary is "installer-managed" iff `<bin_dir>/.kit-installed-tag`
 //!   exists next to the (canonicalized) executable. Homebrew, cargo,
 //!   and other package-manager installs don't have it — for those we
 //!   refuse with channel-specific guidance instead of fighting the
 //!   package manager.
-//! * Receipts: `<bin_dir>/.mkit-installed-tag` plus the global
+//! * Receipts: `<bin_dir>/.kit-installed-tag` plus the global
 //!   `$MKIT_STATE_DIR/installed-tag` (default `~/.local/state/mkit`).
 //!   Both are re-written after a successful swap, in the installer's
 //!   exact format (`vX.Y.Z\n`, atomic `.new` + rename), so installer
@@ -308,7 +308,7 @@ pub fn run_update(opts: &Opts, env: &UpdateEnv) -> Result<Outcome, (String, u8)>
             )
         })?
         .to_path_buf();
-    let local_receipt = bin_dir.join(".mkit-installed-tag");
+    let local_receipt = bin_dir.join(".kit-installed-tag");
     let global_receipt = env.state_dir.join("installed-tag");
 
     let local_tag = read_receipt(&local_receipt);
@@ -480,7 +480,7 @@ fn unmanaged_guidance(exe: &Path) -> String {
         "reinstall via `curl mkit.sh | sh` to adopt it (the installer writes the receipt)"
     };
     format!(
-        "this mkit binary ({p}) is not installer-managed (no .mkit-installed-tag receipt \
+        "this mkit binary ({p}) is not installer-managed (no .kit-installed-tag receipt \
          next to it); {hint}"
     )
 }

@@ -108,7 +108,7 @@ pub fn hash_filter(filter: &[PathBuf]) -> Hash {
     canonical.sort_unstable();
     canonical.dedup();
     let mut h = Hasher::new();
-    h.update(b"mkit-sparse-filter-v2\0");
+    h.update(b"kit-sparse-filter-v2\0");
     for bytes in canonical {
         h.update(&(bytes.len() as u64).to_le_bytes());
         h.update(bytes);

@@ -32,17 +32,17 @@ fn stdout_str(out: &Output) -> String {
 }
 
 fn file_url(dir: &Path) -> String {
-    format!("mkit+file://{}", dir.display())
+    format!("kit+file://{}", dir.display())
 }
 
 fn read_ref(repo: &Path, r#ref: &str) -> Option<String> {
-    fs::read_to_string(repo.join(".mkit").join(r#ref))
+    fs::read_to_string(repo.join(".kit").join(r#ref))
         .ok()
         .map(|s| s.trim().to_string())
 }
 
 /// Build an upstream repo with `main` (commit c1) and `feature` (commit
-/// c2, a descendant of c1), pushed with `--all` to a bare `mkit+file://`
+/// c2, a descendant of c1), pushed with `--all` to a bare `kit+file://`
 /// store. Returns `(workdir, bare remote dir, url, main tip, feature
 /// tip)` — both temp dirs must stay alive for the URL to keep resolving.
 fn multi_branch_upstream() -> (tempfile::TempDir, tempfile::TempDir, String, String, String) {
@@ -143,10 +143,10 @@ fn clone_dash_o_persists_the_named_remote() {
         Some(main_tip.as_str())
     );
     // The remote is recorded under the given name, not the flat default.
-    let cfg = fs::read_to_string(target.join(".mkit/config")).unwrap();
+    let cfg = fs::read_to_string(target.join(".kit/config")).unwrap();
     assert!(
         cfg.contains(&format!("remote.upstream.url = {url}")),
-        ".mkit/config should record the named remote: {cfg}"
+        ".kit/config should record the named remote: {cfg}"
     );
     assert!(
         !cfg.contains("remote_endpoint"),
@@ -158,7 +158,7 @@ fn clone_dash_o_persists_the_named_remote() {
     assert_eq!(stdout_str(&show).trim(), url);
 
     // Tracking refs land under the named remote, not `default`.
-    assert!(target.join(".mkit/refs/remotes/upstream/main").exists());
+    assert!(target.join(".kit/refs/remotes/upstream/main").exists());
 }
 
 #[test]
@@ -187,7 +187,7 @@ fn clone_dash_b_and_dash_o_together() {
         read_ref(&target, "refs/heads/feature").as_deref(),
         Some(feature_tip.as_str())
     );
-    assert!(target.join(".mkit/refs/remotes/upstream/feature").exists());
+    assert!(target.join(".kit/refs/remotes/upstream/feature").exists());
 }
 
 #[test]

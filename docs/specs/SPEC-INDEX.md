@@ -9,13 +9,13 @@ audience: implementers of durable local staging state
 
 Status: **Stable, normative** for durable local staging state. Local-only;
 not exchanged between peers. See SPEC-CONVENTIONS §2.
-Scope: the on-disk layout of `.mkit/index`, used by the staging area.
+Scope: the on-disk layout of `.kit/index`, used by the staging area.
 
 ---
 
 ## 1. Role
 
-`.mkit/index` (the `INDEX_FILE` constant) is the staging area &mdash; a list
+`.kit/index` (the `INDEX_FILE` constant) is the staging area &mdash; a list
 of paths that will be included in the next commit, each paired with an
 object hash, a status byte, and a stat cache that lets `add`/`status`
 prove a worktree file unchanged in O(stat) instead of O(content).
@@ -69,13 +69,13 @@ for content):
 - No path segment is `"."` or `".."`.
 - No segment is empty (rejects `//`, leading/trailing `/`).
 - No byte in any segment is `0x00` (NUL) or `\\` (backslash).
-- The path is not `.mkit` or `.git`, and does not start with `.mkit/`
+- The path is not `.kit` or `.git`, and does not start with `.kit/`
   or `.git/`. (Repo metadata cannot be staged.)
 - The index is a single-stage resolved staging area: it never holds
   more than one live entry per path (no unmerged/conflict stages).
 
 These rules are **looser** than SPEC-OBJECTS §4.1: per-segment Windows
-reserved-name, trailing dot/space, and case-insensitive `.mkit`/`.git`
+reserved-name, trailing dot/space, and case-insensitive `.kit`/`.git`
 checks are NOT enforced at the index layer. Staging code that needs to
 guarantee a clean commit MUST additionally validate via the
 SPEC-OBJECTS §4.1 grammar before writing the tree object &mdash; the index
@@ -150,7 +150,7 @@ entries whose path, status, and `object_hash` are unchanged.
 Writes use atomic-rename: write to a sibling tempfile (named
 `.<file>.tmp.<pid>.<seq>`), `fsync` the tempfile, `rename(2)` into
 place, then `fsync` the parent directory so the rename itself is
-durable across power loss. The `.mkit/` directory is created if absent.
+durable across power loss. The `.kit/` directory is created if absent.
 (The index write is deliberately NOT part of the object store's batched
 durability schedule &mdash; it is one of the durable pointers that schedule
 orders itself against; see SPEC-OBJECTS §10.1.)
@@ -228,7 +228,7 @@ re-emits current filenames byte-identically and records every fixture BLAKE3 in
 | A header cannot force pathological allocation | `entry_count` checked against the minimum entry size and remaining buffer → `IndexError::Corrupt`; 64 MiB cap → `IndexError::TooLarge` (§5) |
 | The file encodes exactly its declared entries | trailing bytes rejected (§5) |
 | Each path has exactly one live interpretation | duplicate exact paths → `IndexError::DuplicatePath` (§5) |
-| No staged path escapes the worktree or names repo metadata | path grammar: non-empty, no leading `/`, no `.`/`..`/empty segments, no NUL or backslash, not `.mkit`/`.git` → `IndexError::InvalidPath` / `Corrupt` (§2) |
+| No staged path escapes the worktree or names repo metadata | path grammar: non-empty, no leading `/`, no `.`/`..`/empty segments, no NUL or backslash, not `.kit`/`.git` → `IndexError::InvalidPath` / `Corrupt` (§2) |
 | Every entry has a defined kind, and removals carry no object | status whitelist → `IndexError::BadStatus` (§3); `removed` entries MUST carry `[0;32]`, enforced at read time → `IndexError::RemovedHasHash` (§2, §3) |
 | The stat cache never changes an observable result | cache is an optimization only &mdash; all five match conditions must hold, and racy entries (not safely older than the index file's mtime) are re-hashed (§4) |
 | A cache hit reflects the bytes that were actually hashed | cache fields recorded from the opened descriptor used for hashing, never a stat taken after verification (§4) |
