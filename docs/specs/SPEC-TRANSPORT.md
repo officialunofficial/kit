@@ -462,8 +462,7 @@ note on large packs.
   not the binding constraint (for example a 32-bit target, where
   `PACK_BODY_LIMIT` widens to `usize::MAX` and `S3_SINGLE_PUT_MAX`
   becomes the real gate). Raising `PACK_BODY_LIMIT` itself is the
-  streaming/constant-memory `Transport` redesign tracked elsewhere in
-  a later production-readiness effort, out of scope here.
+  streaming/constant-memory `Transport` redesign, which is out of scope here.
 - `REF_BODY_LIMIT = 256` bytes (a ref is 64 hex + newline; the
   256-byte ceiling accommodates trailing whitespace and trivial
   S3 metadata).

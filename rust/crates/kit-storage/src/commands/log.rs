@@ -24,8 +24,8 @@
 //!
 //! `--graph` is accepted for git compatibility but is a no-op: it is a
 //! documented v1 non-goal (see `docs/CLI.md`). Full graph parity is not
-//! achievable given kit's content-addressed model; a limited
-//! `--oneline --graph` renderer remains a possible post-v1 follow-up.
+//! achievable given kit's content-addressed model; `log` has
+//! no `--oneline --graph` renderer.
 //!
 //! History filters — `--author`/`--grep` (substring matches),
 //! `--since`/`--until` (a small explicit date grammar, see the

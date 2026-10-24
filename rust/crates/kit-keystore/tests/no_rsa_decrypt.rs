@@ -12,7 +12,7 @@
 // if a future patch reintroduces a reference to the affected
 // entrypoint. If it ever needs to legitimately fire, the deny.toml
 // ignore MUST be dropped at the same time (or, at minimum, this test
-// removed with a follow-up issue and an updated advisory).
+// removed together with an updated advisory).
 //
 // Implementation note: we do not use compile_fail or trybuild-style
 // negative tests here because the symbol lives in a transitive crate

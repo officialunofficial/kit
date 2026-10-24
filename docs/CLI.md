@@ -168,7 +168,7 @@ Working-tree commands:
   colorizes the patch (git's palette: bold metadata, cyan hunk headers,
   green additions, red deletions); the default `auto` colorizes only on a
   tty (honoring `NO_COLOR`/`CLICOLOR_FORCE`), and `--no-color` forces it
-  off. (Color for `status`/`log`/`branch` is a tracked follow-up.)
+  off. (`status`, `log` and `branch` do not use color.)
   `-w`/`--ignore-all-space` ignores whitespace when comparing lines (a
   line that differs from its counterpart only in whitespace shows as
   unchanged context &mdash; like git); `-b`/`--ignore-space-change` is the
@@ -1554,7 +1554,7 @@ ignore files (only the repo root is read), global excludes
 ## Divergences from Git
 
 kit's local commands intentionally diverge from Git in a few places.
-These are documented behaviors, not bugs, with tracked follow-ups:
+These are documented behaviors, not bugs:
 
 - **Human output goes to stderr; stdout is reserved for porcelain/data.**
   kit's command summaries (`commit`/`merge`/`push`/`status` …) are
@@ -1581,7 +1581,7 @@ These are documented behaviors, not bugs, with tracked follow-ups:
   graph is drawn. Full graph parity is unachievable because kit's default
   `log` body already diverges from git's `commit/Author/Date` (kit
   `Identity` plus 64-hex ids); an `--oneline --graph` renderer for the
-  linear/DAG case is a tracked post-v1 follow-up, not a v1 blocker.
+  linear/DAG case is not implemented.
 - **`kit log --author`/`--grep` are plain substring matches, not
   regexes.** git's `--author`/`--grep` default to POSIX extended-regex
   matching against a free-text `Name <email>` header; kit identities are
@@ -1706,7 +1706,7 @@ These settings apply only to native kit remotes over the Connect transport:
 HTTPS RPCs, pack uploads and downloads. The self-updater uses the OS trust
 store and the release checksum when present; it does not read
 `KIT_SSL_CA_FILE` / `http.sslCAInfo`. S3 remotes do not yet honor either
-setting; private-CA S3 endpoints are a post-launch follow-up. Wasm/browser
+setting; private-CA S3 endpoints are not supported. Wasm/browser
 certificate trust is unchanged.
 The key shares its spelling with [Git's CA-file setting](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpsslCAInfo);
 kit uses its own `KIT_SSL_CA_FILE` environment variable.

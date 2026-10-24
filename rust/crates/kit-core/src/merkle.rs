@@ -8,7 +8,7 @@
 //!
 //! ## Primitive — a vendored BMT, byte-identical to `commonware_storage::bmt`
 //!
-//! The house idiom (makechain `transactions_root.rs`) uses
+//! The upstream crate provides
 //! `commonware_storage::bmt`. We do **not** depend on it for object identity:
 //! `merkle.rs` lives in `kit-core` and `Object::id` calls it, so this module
 //! must compile to `wasm32` for `kit-core` *itself* to — independent of any
@@ -19,10 +19,8 @@
 //! `tests::proofs_match_commonware` extends that guarantee to inclusion
 //! proofs (bytes and cross-verifier acceptance) — so the two never drift.
 //!
-//! RESOLVED (commonware#4089 / commonwarexyz/monorepo#4090, shipped in
-//! `commonware =2026.7.0`): `bmt` itself is now genuinely `no_std` — that
-//! part of the original TODO held. It is *not* enough to drop the vendored
-//! copy, though: `commonware_storage::bmt::Builder<H: Hasher>` is generic
+//! Since `commonware =2026.7.0`, `bmt` itself is genuinely `no_std`. That
+//! is *not* enough to drop the vendored copy: `commonware_storage::bmt::Builder<H: Hasher>` is generic
 //! over `commonware_cryptography::Hasher`, so reaching a concrete hasher
 //! (e.g. `Blake3`) means depending on the `commonware-cryptography` crate —
 //! and that crate's `blst` dependency (BLS12-381) is **not** feature-gated;
@@ -794,7 +792,7 @@ pub const TREE_EMPTY_ID: Hash = [
 ];
 
 // ---------------------------------------------------------------------------
-// Position lookup (mirror makechain `message_index`)
+// Position lookup
 // ---------------------------------------------------------------------------
 
 /// BMT position of `chunk_hash` within `cb`, or `None` if absent. The

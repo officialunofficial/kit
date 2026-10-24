@@ -195,7 +195,7 @@ disagree, fix the script:
       `cargo owner --add github:officialunofficial:makechain <crate>`, then
       `cargo owner --add <maintainer> <crate>` for each maintainer. Confirm
       the owners with `cargo owner --list <crate>`.
-- [ ] File follow-up issues for anything discovered during smoke test.
+- [ ] Record anything the smoke test found, and fix it before the next release.
 
 ## Cutting a release
 
@@ -515,7 +515,7 @@ dev-only `tempfile`).
 
 `cargo deny check` finishes with `advisories ok, bans ok, licenses ok, sources
 ok`. Remaining warnings are duplicate crate versions from ecosystem splits and
-optional YubiKey/RustCrypto prerelease transitive stacks; they are tracked as
+optional YubiKey/RustCrypto prerelease transitive stacks; they stay
 warnings, not release blockers, because they introduce no unapproved sources,
 yanked crates, or denied licenses. Live OS-native keystore tests are opt-in via
 `KIT_RUN_NATIVE_KEYSTORE_TESTS=1`.

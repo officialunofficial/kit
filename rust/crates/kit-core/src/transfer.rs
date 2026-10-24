@@ -69,7 +69,7 @@ const PACKLIST_HEADER_LEN: usize = 4 + 1;
 /// chain referenced become unreachable from the new head node: they are not
 /// deleted here (this module only ever writes new nodes/packs, never
 /// deletes), so they linger as orphaned storage on the remote until a
-/// server-side sweep reclaims them (tracked as makechain#849). A stale
+/// server-side sweep reclaims them. A stale
 /// pack lingering harmlessly is safe; nothing on the fetch side ever
 /// resolves it once no live chain points to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
