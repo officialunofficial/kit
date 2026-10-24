@@ -7,8 +7,7 @@
 //! - `onto`       : 64-hex BLAKE3 of the rebase target
 //! - `todo`       : newline-separated list of remaining commits
 //! - `actions`    : newline-separated per-commit action parallel to `todo`
-//!   (`pick`/`reword`/`squash`/`fixup`); absent ⇒ every commit is a `pick`,
-//!   for back-compat with rebases started before interactive support
+//!   (`pick`/`reword`/`squash`/`fixup`); it has exactly one line per `todo` line
 //! - `done`       : newline-separated list of replayed commits
 //!
 //! Trailing newlines are tolerated on read and always written.
@@ -185,9 +184,8 @@ pub fn read_state(layout: &RepoLayout) -> RebaseResult<RebaseState> {
 
     let todo = read_hash_list(&dir.join(TODO_FILE))?;
     let done = read_hash_list(&dir.join(DONE_FILE))?;
-    // The actions file is parallel to todo. Absent (a rebase started before
-    // interactive support, or a non-interactive rebase) → every commit is a
-    // Pick. Realign to todo's length defensively.
+    // The actions file is parallel to todo. A missing file or a length
+    // mismatch is corrupt state.
     let actions = read_actions(&dir.join(ACTIONS_FILE), todo.len())?;
 
     Ok(RebaseState {
@@ -334,16 +332,13 @@ fn read_hash_list(path: &Path) -> RebaseResult<Vec<Hash>> {
     Ok(out)
 }
 
-/// Read the parallel-to-todo action list. A missing file yields all
-/// `Pick` (back-compat with pre-interactive state). The result is always
-/// realigned to `todo_len`: extra entries are dropped, missing ones
-/// default to `Pick`, so a malformed/short file can never desync the two
-/// lists.
+/// Read the parallel-to-todo action list. The list must have exactly
+/// `todo_len` entries, so the two lists can never desync.
 fn read_actions(path: &Path, todo_len: usize) -> RebaseResult<Vec<RebaseAction>> {
     let raw = match read_text_capped(path, MAX_HASH_LIST_BYTES) {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(vec![RebaseAction::Pick; todo_len]);
+            return Err(RebaseError::InvalidRebaseState);
         }
         Err(e) => return Err(RebaseError::Io(e)),
     };
@@ -356,7 +351,9 @@ fn read_actions(path: &Path, todo_len: usize) -> RebaseResult<Vec<RebaseAction>>
         let action = RebaseAction::from_keyword(line).ok_or(RebaseError::InvalidRebaseState)?;
         out.push(action);
     }
-    out.resize(todo_len, RebaseAction::Pick);
+    if out.len() != todo_len {
+        return Err(RebaseError::InvalidRebaseState);
+    }
     Ok(out)
 }
 
@@ -489,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_actions_file_defaults_to_all_pick() {
+    fn missing_or_misaligned_actions_file_is_invalid_state() {
         let tmp = TempDir::new().unwrap();
         let kit = RepoLayout::single(tmp.path());
         fs::create_dir_all(kit.worktree_state_dir()).unwrap();
@@ -502,11 +499,17 @@ mod tests {
             done: Vec::new(),
         };
         write_state(&kit, &state).unwrap();
-        // Simulate a rebase started before interactive support: delete the
-        // actions sidecar. Reading must still yield one Pick per todo commit.
-        fs::remove_file(kit.rebase_dir().join("actions")).unwrap();
-        let read = read_state(&kit).unwrap();
-        assert_eq!(read.actions, vec![RebaseAction::Pick, RebaseAction::Pick]);
+        let actions = kit.rebase_dir().join("actions");
+        fs::write(&actions, b"pick\n").unwrap();
+        assert!(matches!(
+            read_state(&kit),
+            Err(RebaseError::InvalidRebaseState)
+        ));
+        fs::remove_file(&actions).unwrap();
+        assert!(matches!(
+            read_state(&kit),
+            Err(RebaseError::InvalidRebaseState)
+        ));
     }
 
     #[test]
