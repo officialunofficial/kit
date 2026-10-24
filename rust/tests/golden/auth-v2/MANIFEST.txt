@@ -1,2 +1,3 @@
 # Auth v2 signed read vectors (BLAKE3 hash of file bytes)
+# Update the digests with `python3 scripts/golden/write_manifest.py rust/tests/golden/auth-v2`
 read.json f0fe5d77fc66bb52297c40cc79d7216b182a97496440dccdd8297eeb73bd938f
