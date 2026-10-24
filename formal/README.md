@@ -11,10 +11,6 @@ list of properties, mutants, bounds and recorded results.
 |---|---|---|---|
 | [`quint/refs/`](quint/refs/README.md) | Quint, TLC, Apalache | Ref CAS per lock domain, lock order, recovery log, `serve.lock` and `server.lock`, served names; `refs_mbt.qnt` feeds the conformance test | ref concurrency model, ref conformance model |
 | [`quint/history/`](quint/history/README.md) | Quint, TLC, Apalache | History publication, crash recovery, the scrub schedule | history publication model |
-| [`quint/gc/`](quint/gc/README.md) | Quint, TLC, Apalache | `kit gc`, the recovery log, concurrent writers and the grace window, the server `ContentIndex` GC ordering | garbage-collection model |
-| [`quint/transport/`](quint/transport/README.md) | Quint, TLC, Apalache | Requested transport identities, shard quorum, release threshold signing | transport model |
-| [`quint/advance/`](quint/advance/README.md) | Quint, TLC, Apalache | `advance_refs`, the retry ladder, `read_ref` disambiguation, the re-baseline gate | remote-advance model |
-| [`lean/`](lean/README.md) | Lean 4 | Merkle inclusion proofs and the delta codec: proofs plus differential tests against Rust | Merkle proof model, delta model |
 | [`kani/`](kani/README.md) | Kani | Bounded checks of the untrusted-input decoders (harnesses live next to the Rust code) | decoder harnesses |
 | [`scripts/`](scripts/) | quint, jq | `gen-refs-traces.sh`: regenerates the ITF fixtures for `rust/crates/kit-formal-conformance` | ref conformance model |
 
@@ -23,12 +19,10 @@ list of properties, mutants, bounds and recorded results.
 From the repository root:
 
 ```sh
-just formal               # quint default mode + lean + conformance
-just formal-quint         # every quint/*/check.sh, default mode
-just formal-apalache      # the bounded Apalache runs
-just formal-lean          # lake build + both difftests
-just formal-kani          # every Kani harness, one at a time
-just formal-conformance   # replay the refs traces against the code
+bash formal/scripts/run-quint.sh      # every quint/*/check.sh, default mode
+bash formal/scripts/run-quint.sh --all  # also the TLC runs left off by default
+bash formal/scripts/run-kani.sh       # every Kani harness, one at a time
+(cd rust && cargo test -p kit-formal-conformance)  # replay the refs traces
 ```
 
 Each `quint/*/check.sh` also runs on its own (`./check.sh`, see its
@@ -44,5 +38,5 @@ workflow is [`.github/workflows/formal.yml`](../.github/workflows/formal.yml).
   model's `check.sh`, which exits 1 on anything unexpected.
 - Record bounds, commands and outcomes in the model's README. Never call
   a bounded result proved.
-- `just formal-quint` picks up any new `quint/<name>/check.sh`
+- `formal/scripts/run-quint.sh` picks up any new `quint/<name>/check.sh`
   automatically.

@@ -1,16 +1,14 @@
 # Formal verification
 
 kit checks parts of its specifications with formal tools: model
-checkers for the concurrent and crash-recovery protocols, a proof
-assistant for two pure algorithms, a bounded model checker for the
-untrusted-input decoders, and a replay harness that ties one model back to
-the code. This page says what each check covers, how strong its result
+checkers for the concurrent and crash-recovery protocols, a bounded model
+checker for the untrusted-input decoders, and a replay harness that ties
+one model back to the code. This page says what each check covers, how strong its result
 is, what it assumes, and what it found. The per-model READMEs under
 [`formal/`](../formal/README.md) hold the full detail: every invariant,
 mutant, bound, state count and run time.
 
-The formal verification effort integrates the Quint and Lean models and was
-done against the current specs. The spec
+The models and harnesses check the current specs. The spec
 text is normative. Where a model found the spec wrong, the spec was fixed;
 where it found the code wrong, the code was fixed with a regression test,
 or the gap is listed under [Open findings](#open-findings).
@@ -22,16 +20,14 @@ literally.
 
 | Label | Meaning | Tool |
 |---|---|---|
-| **proved** | A machine-checked theorem for every input, under the hypotheses it states. No `sorry`, no `native_decide`, no axiom beyond `propext`, `Classical.choice`, `Quot.sound`. | Lean 4 |
 | **exhaustive (finite instance)** | Every reachable state of a fixed, small instance (named constants: processes, objects, clock range). Says nothing about larger instances. | TLC |
 | **bounded (length k)** | Every execution of at most k steps of a fixed instance, checked symbolically. | Apalache |
 | **bounded (input size)** | Every input up to the stated size, checked symbolically by CBMC. | Kani |
 | **simulated** | Random executions (for example 20,000 samples of 40 steps, seed `0x1`). Finds bugs; shows nothing about the executions it did not draw. | `quint run` |
-| **tested** | Pinned scenarios (`quint test`, `#guard`, Rust tests) or a replay of sampled traces against the code. | quint, Lean, cargo |
+| **tested** | Pinned scenarios (`quint test`, Rust tests) or a replay of sampled traces against the code. | quint, cargo |
 
-"Bounded" never means "proved". Only the Lean theorems are proofs, and
-only for the model: the link from the Lean model to the Rust code is a
-differential test, not a proof.
+"Bounded" never means "proved". No result on this page is a proof for
+unbounded inputs.
 
 **Non-vacuity.** A property that holds could hold because it is too weak
 or because the model never reaches the interesting states. Every
@@ -39,11 +35,8 @@ invariant here is therefore paired with evidence that it can fail:
 
 - a **mutant**, a copy of the model with one deliberate bug, which the
   checker must report as a violation of that specific invariant;
-- a **canary**, a false reachability claim ("no gc ever deletes
-  anything") the checker must refute, which shows the states that matter
-  are reached;
-- for Lean, a `*_needed` or `mutant_*` lemma showing that each
-  hypothesis and each check is load-bearing;
+- a **canary**, a false reachability claim the checker must refute,
+  which shows the states that matter are reached;
 - for Kani, a `*_canary_*` harness marked `#[kani::should_panic]`.
 
 Each `check.sh` prints one line per check with its expected outcome
@@ -54,9 +47,8 @@ stops failing breaks the run just like an invariant that stops holding.
 
 | Layer | Tool (pin) | Used for | Why this tool |
 |---|---|---|---|
-| Protocol models | [Quint](https://quint-lang.org) 0.32.0 | Ref CAS and lock order, gc and the recovery log, history publication and crash recovery, `advance_refs` retries, transport identity, shard quorum, threshold signing | Concurrency, crashes and retries are state-machine properties. Quint gives typed, executable models with `quint test` scenarios and fast random simulation, and compiles to TLA+ for the model checkers. |
+| Protocol models | [Quint](https://quint-lang.org) 0.32.0 | Ref CAS and lock order, the recovery log, history publication and crash recovery | Concurrency, crashes and retries are state-machine properties. Quint gives typed, executable models with `quint test` scenarios and fast random simulation, and compiles to TLA+ for the model checkers. |
 | Model checking | Apalache 0.62.2, TLC (the `tlc2.TLC` class inside the Apalache jar), Java 21 | Bounded symbolic (Apalache) and exhaustive explicit-state (TLC) checks of the compiled Quint models, including TLC liveness under fairness | Apalache is run directly on the TLA+ `quint compile` emits, because `quint verify` bundles an older Apalache (0.56.1) that predates the FoldSet fixes the models rely on. |
-| Algorithm proofs | Lean 4 v4.34.0 (`formal/lean/lean-toolchain`), core library only | Merkle inclusion proofs (SPEC-MERKLE-OBJECTS) and the delta codec (SPEC-DELTA) | Pure functions over unbounded inputs need proofs, not state exploration. The Cedar-style pattern: an executable Lean model, theorems about it, and a differential test that replays Rust-exported vectors through the model. |
 | Decoders | Kani 0.68.0 (CBMC 6.11.0) | Panic freedom and spec agreement of `delta`, `merkle`, `pack`, `serialize`, the keystore record and RPC framing on small symbolic inputs | Checks the actual Rust, not a model, which is what matters for untrusted input. The fuzz targets ([FUZZ.md](FUZZ.md)) cover larger inputs by sampling. |
 | Conformance | Rust test replaying ITF traces | `refs_mbt.qnt` traces replayed step by step against `kit_core::refs`, `ops::recovery`, `FileTransport` and `MemoryTransport` | Closes the loop from a model to the code for the ref layer: the same step must produce the same refs, recovery log and CAS outcome. |
 
@@ -88,18 +80,6 @@ ones a spec reader is most likely to look for.
 | SPEC-CONCURRENCY §3.1 (documented cross-domain gap) | `WitnessCrossDomainGap`, `WitnessUndetectedLateServer` | reached, as documented | - |
 | SPEC-REFS §5 (implementation conformance, ref conformance model) | 5 `refs_mbt.qnt` traces (300 steps, 41 commits) agree with the code after every step | tested | 5 injected adapter faults and 2 tampered traces are each caught; an independent adapter mutant was caught in review |
 
-### Garbage collection ([`formal/quint/gc`](../formal/quint/gc/README.md), garbage-collection model)
-
-| Spec clause | Property | Status | Non-vacuity |
-|---|---|---|---|
-| SPEC-GC Invariants (no live object pruned) | `NoLivePruned`, `NoDangling` | exhaustive (`gc` 19.6M states, `gcGrace0` 19.7M); bounded (length 8) | `mutLenient`, `mutNoLockGrace0`, `gcPushRaw*`, `gcPushFast` |
-| SPEC-GC fail-closed requirement | `UnreadableAborts` | exhaustive | `mutLenient` |
-| SPEC-GC recovery log, SPEC-CONCURRENCY §3.2 | `SupersededRetained`, `LockExclusion` | exhaustive | `mutNoRecord`, `mutNoKeepLast`, `mutNoLock` |
-| SPEC-GC "Concurrent writers and the grace window" | writer outside gc's locks cannot lose an object when every newly reachable object has `T - mtime < GRACE` (`gcPushBounded`); dedup hits that refresh mtime (`gcPushFastFreshen`, the refreshed-dedup code) are safe | exhaustive with at most 2 producer rewrites and no corrupt source (9.5M and 11.9M states); bounded (length 8) | `mutBoundedLax` (the bound is tight), `gcPushFast` (unrefreshed-dedup code) |
-| SPEC-GC final sweep exclusion and process crashes | `sweepFixed::All` (`NoDangling`, `NoRecentPruned`, `NoLivePruned`, `NoLeakedLock`) | exhaustive (4,832 states, one object and writer, clock 0..5, grace 2); bounded (length 12) | `sweepSplit`, `sweepNoLock`, `sweepNoRefresh`; `sweepSlow` and `sweepGrace0` retain the timing restriction |
-| SPEC-GC progress | `NoLeakedLock`, `NoStuckPush` | exhaustive | `mutLeakLock`, `mutStuckPush` |
-| Server `ContentIndex` GC ordering (no spec text yet) | `NoReachableLoss`, `NoLiveDelete`, `DeletingClears`, `UploadCanStep` | exhaustive; bounded (length 16) | `ciBytesFirst`, `ciShortTtl`, `ciMutNoDeletingGuard`, `ciMutNoSeqGuard`, `ciMutNoResume`, `ciMutNoGiveUp` |
-
 ### History publication and scrub ([`formal/quint/history`](../formal/quint/history/README.md))
 
 | Spec clause | Property | Status | Non-vacuity |
@@ -110,37 +90,6 @@ ones a spec reader is most likely to look for.
 | SPEC-HISTORY-PROOF §4.4 (recovery completes) | `IntentEventuallyCleared` (liveness, weak fairness, finitely many crashes) | exhaustive (TLC temporal, 400,776 states) | `mutRecoverSkipsPending`, `mutRawIgnoresTx`, and the property fails without `WF(RecoverAttempt)` |
 | SPEC-HISTORY-PROOF §4.5 (scrub lap at most 65 publishes, 7-day bound, invalid state forces a full walk) | `ActualPublishBound`, `TimeBound`, `InvalidForcesFull` | exhaustive on scaled constants (1,904 states); bounded (length 8); `realLapBoundTest` checks the real constants for every `verified_through` up to 1,000,000 | `mutWrapWithoutFull`, `mutIgnoreAge`, `mutTrustInvalid`, `scrubLossy`, `scrubClockBack` |
 | SPEC-HISTORY-PROOF §4.5 ("fewer than 604800 s") | `WindowOnlyWhenFresh` | bounded (Apalache length 8) and simulated only; the TLC VIEW omits the elapsed time | `mutAgeInclusive` (the pre-fix comparison) |
-
-### Remote advance ([`formal/quint/advance`](../formal/quint/advance/README.md), remote-advance model)
-
-| Spec clause | Property | Status | Non-vacuity |
-|---|---|---|---|
-| SPEC-TRANSPORT-CONNECT §4; `Transport::advance_refs` contract | `DeltaTransfer` (a head that resolves to T has a packmap that reconstructs T) | exhaustive (2 and 3 pushers, commits 0..6, 3 loop attempts, 2 ladder re-issues; up to 7.6M states); bounded (length 8) | `ordered2_noGate`, `http1_gateNoAny`, `ordered2_headFirst` |
-| SPEC-TRANSPORT §7 (`read_ref` before reporting a conflict) | `SuccessSound`, `ConflictHonest` | as above | `ordered2_oldConflict`, `atomic2_oldConflict`, `ordered2_trustConflict` |
-| SPEC-REFS §5 (no lost update, CAS and user level) | `NoLostUpdate`, `NoLostSuccess` | as above | `noop2_splitCas`, `ordered2_splitCas` |
-| Progress of a push | `NoStuckPusher`, `BoundedRetries`; `Termination` (liveness, weak fairness) | exhaustive; `Termination` on the 2-pusher instances and `http1` only | `ordered2_noTimeout`, `ordered2_noLadderBound` |
-
-### Transport identity, shards, threshold ([`formal/quint/transport`](../formal/quint/transport/README.md), transport model)
-
-| Spec clause | Property | Status | Non-vacuity |
-|---|---|---|---|
-| INVARIANTS.md "Requested transport identities are checked before effects"; SPEC-PACK-SHARDS §2, §4.2; SPEC-TRANSPORT "Consumers MUST verify" | `NodeMatchesRequest`, `ShardsOnlyForRequestedManifest`, `ReconstructOnlyForRequested`, `ShardPathReturnsRequested`, `PackMatchesRequest`, `PublishedWithinRequestedClosure` | exhaustive; bounded (length 6) | one mutant per check (`identity_nodeNoVerify`, `identity_noManifestPrecheck`, ...) |
-| INVARIANTS.md "Shard worker bounds do not delay an available quorum"; SPEC-PACK-SHARDS §5 | `SlotBound`, `OkHasQuorum`, `NotFoundPastThreshold`, `NoFalseNotFound`, `NoDisconnect`, `NoAttemptAfterDecision`, `QuorumNotBlockedByAdmission`; liveness P1, P2 | exhaustive at N/K/slots 2/1/2, 1/2/2, 3/2/3; bounded (length 14) | `shards_noSlotCheck`, `shards_earlyQuorum`, `shards_offByOne`, `shards_noFailureThreshold`, `shards_noCancel`, `shards_noGroupCancel`, `shards_blocking`, `shards_recvBlocking` |
-| SPEC-RELEASE-THRESHOLD §5.3, §8 (t-of-n, rotation) | `NoForgery`, `AggregateFromOneShareSet`, `AggregateCompleteness`, `AcceptedOnlyFromShareSetQuorum` | exhaustive at n=3, t=2, one rotation (477,344 states); bounded (length 8; n=4, t=3 at length 6) | `thr_noRefresh`, `thr_verifierIgnoresMsg`, `thr_t1`, `thr_filterAnyEpoch` |
-
-### Merkle objects and delta ([`formal/lean`](../formal/lean/README.md), Merkle proof model, delta model)
-
-| Spec clause | Property | Status | Non-vacuity |
-|---|---|---|---|
-| SPEC-MERKLE-OBJECTS §1.1, §5.3, §5.4 (completeness) | `complete`, `complete_id`, `complete_chunk` | proved, for every `n` and `i < n` | `complete_witness` |
-| SPEC-MERKLE-OBJECTS §2, §5.4 (soundness, binding, exact sibling consumption) | `sound`, `sound_id`, `unique_proof`, `cross_kind_rejected`, `accepted_length`, `extra_sibling_rejected`, `dropped_sibling_rejected` | proved, under the injectivity hypotheses `NodeInj`, `LeafInj`, `FinInj`, `WrapInj` | `*_needed` lemmas (drop a hypothesis and a wrong leaf verifies), `mutant_*` verifiers |
-| SPEC-MERKLE-OBJECTS §4, §5.4, §5.5 (empty tree, zero positions, chunk position 0) | `empty_tree_no_proof`, `verifyRangeId_nil`, `verifyMultiId_nil`, `chunk_pos0_rejected` | proved | `vacuous_accepts_empty_tree` |
-| SPEC-MERKLE-OBJECTS §5.4 (multi-leaf and range completeness) | selection and verification agree | tested: every subset for `n <= 9`, every range for `n <= 24` (`#guard`) | two `#guard` mutants |
-| SPEC-MERKLE-OBJECTS (Rust agreement) | roots, ids, sibling positions and digests, every verdict | tested (differential, golden and seeded-random vectors up to 1,100 leaves) | two model mutants and two corrupted Rust verdicts must be detected |
-| SPEC-DELTA §2, §3 (canonical codec) | `decode_encode`, `encode_decode` | proved | `decode_encode_needs_wf`, `decodeLax_not_canonical` |
-| SPEC-DELTA §4, §8, §10 (no out-of-bounds read, soundness, completeness, error kind, truncation) | `apply_ne_oob`, `apply_sound`, `apply_complete`, `apply_overrun`, `apply_underrun`, `runT_bounded`, `apply_prefix` | proved | one reader mutant per §4 check (`applyMut`) falsifies the matching theorem |
-| SPEC-DELTA §5 (writer) | `apply_encodeWith`, `apply_encodeRust` | proved (bases and targets under 2^32 bytes) | `trusting_roundtrip_fails` |
-| SPEC-DELTA (Rust agreement) | acceptance, output bytes and error kind of every exported stream | tested (differential) | five `--mutant` readers and one corrupted Rust verdict must be detected |
 
 ### Decoders ([`formal/kani`](../formal/kani/README.md))
 
@@ -158,17 +107,11 @@ ones a spec reader is most likely to look for.
 Each result holds only under these assumptions. They are stated in the
 model or harness that relies on them.
 
-- **Hashes.** Lean theorems take injectivity of the node, leaf, finalize
-  and wrap hashes as explicit hypotheses (`NodeInj`, `LeafInj`, `FinInj`,
-  `WrapInj`), not as axioms; `termHasher` (a free term algebra) satisfies
-  all of them, so the theorems are not vacuous. The Quint transport
-  models treat BLAKE3 as the identity on contents (collision resistance)
-  and BLS signatures as symbolic (unforgeability, no interpolation across
-  polynomials). Kani harnesses replace BLAKE3 with a deterministic mixer
+- **Hashes.** Kani harnesses replace BLAKE3 with a deterministic mixer
   and stub zstd decompression.
 - **Bounds.** Every Quint result is for the fixed instance in its README:
-  a handful of processes (2 or 3), objects (up to 8), commits (up to 7)
-  and clock values. Apalache lengths are 4 to 16 steps. Kani inputs are a
+  a handful of processes (2 or 3), objects, commits and clock values.
+  Apalache lengths are 8 to 10 steps. Kani inputs are a
   few bytes to 125 bytes. Constants are scaled where the real ones are
   too large (for example the scrub model uses `MIN_WINDOW=2` for 512 and
   `MAX_AGE=3` for seven days, keeping the relation that matters, and a
@@ -181,11 +124,8 @@ model or harness that relies on them.
   functions, named in its README, and abstracts I/O: a durable write is
   one step, a lock is a set membership. A mismatch between a model step
   and the code it names is a modelling error these checks cannot catch;
-  the reviews on ref concurrency model through remote-advance model compared each model with the code
-  by hand, and ref conformance model replays one model against the code.
-- **Lean to Rust.** The Lean models are executable specifications. Their
-  agreement with `merkle.rs` and `delta.rs` rests on the differential
-  tests (sampled vectors), not on a proof.
+  reviews compared each model with the code
+  by hand, and the ref conformance replay checks one model against the code.
 
 ## Findings
 
@@ -197,24 +137,17 @@ after.
 
 | Finding name | Finding | Found by | Fix |
 |---|---|---|---|
-| Dedup freshness | A dedup hit left an object's old mtime, so gc could delete an object that a concurrent git import was about to publish (SPEC-GC "Concurrent writers") | `gcPushFast::NoDangling` (Apalache length 8, TLC) | `BulkWriter::write`, the git import writer and the only object writer outside gc's lock set, refreshes mtime on a dedup hit and rewrites the object if the refresh fails. `ObjectStore::write` and `WriteBatch` callers hold `worktree.lock`, so they skip the refresh (it cost ~280x on their dedup hits). The related sweep, cached-closure, and read-only reuse fixes are listed below; the grace-window assumptions still apply. |
 | Empty-tree range proof | The range-proof builder returned the all-default proof for `0..=0` of the empty Tree; SPEC-MERKLE-OBJECTS §5.4 requires a refusal | Kani `merkle_builder_empty_tree_refuses` | `BmtTree::range_proof` refuses every range of the empty tree |
 | Scrub age boundary | The scrub took the window path at exactly 604800 s; SPEC-HISTORY-PROOF §4.5 says "fewer than" | `scrub::WindowOnlyWhenFresh` | `decide_chain` compares with `>=` |
-| Conflict readback | A push reported NonFastForward for a head write that landed but whose response was lost; SPEC-TRANSPORT §7 requires a `read_ref` first | `ordered2_oldConflict::ConflictHonest` | `head_conflict` reads the head back on `HeadConflict` and `RefConflict` |
-| Sweep refresh exclusion | A refresh between the age check and unlink could lose a reused object | `sweepSplit`, `sweepNoLock` | [`ObjectStore::prune_if_old_with_hook`](../rust/crates/kit-core/src/store.rs) holds the exclusive format-file lock across the final metadata check and unlink; writers hold its shared counterpart. See SPEC-GC "Concurrent writers and the grace window". |
 | Cached-closure freshness | Cached git translations skipped refreshing the reachable objects | code reading; cached-reuse regressions | [`Importer::reuse_closure`](../rust/crates/kit-git-bridge/src/import.rs) traverses the complete cached closure through `reuse_object` before memoizing it. |
 | Read-only reuse | Reused read-only object files failed the commit fsync with `EACCES` | read-only reuse regression | [`sync_reused_file`](../rust/crates/kit-core/src/store.rs) opens reused files read-only on Unix before `sync_all`; platforms requiring write access retain that requirement. |
-| Force-push packmap guard | Ordered `Any` fallback and head-only or appending force pushes could be stranded by a concurrent atomic re-baseline | `gapHttpAny2`, `gapNoopAny2`, `gapTwoAny3`, `gapAppendAny2`, `gapAppendTwoAny3`; ABA regression `gapAbaAny3` | [`push_step`](../rust/crates/kit-sync/src/push/force.rs) guards publication with the planned packmap and replans incompatible changes; dependent packs also compare the planned head. See SPEC-TRANSPORT-CONNECT §4 and the [remote-advance model](../formal/quint/advance/README.md). |
 
 ### Fixed in the spec
 
 The models also found spec text that was wrong or incomplete, and the
 spec was corrected: the scrub lap is at most 65 publishes,
 not 64, and that bound needs the scrub write to land (SPEC-HISTORY-PROOF
-§4.5); SPEC-GC now states the normative writer condition
-`T - mtime < grace`; SPEC-TRANSPORT §7 and SPEC-TRANSPORT-CONNECT now
-agree on the retry and `read_ref` obligations; SPEC-MERKLE-OBJECTS §5.4
-states the builder refusal. The per-model READMEs list each change.
+§4.5); SPEC-MERKLE-OBJECTS §5.4 states the builder refusal. The per-model READMEs list each change.
 
 ### Open findings
 
@@ -222,39 +155,29 @@ These findings and exclusions remain open within the stated model bounds.
 
 | Finding name or model | Severity | Finding | Evidence |
 |---|---|---|---|
-| GC grace and clock assumptions | hypothesis | Refresh and final unlink exclude each other, but a newly reachable object still needs `T - mtime < grace` until root publication. Expired or zero grace and clock skew can violate that condition. | SPEC-GC "Concurrent writers and the grace window"; `sweepSlow`, `sweepGrace0`, and the [GC model limits](../formal/quint/gc/README.md) |
-| Future non-force lease | model limit | A lease can name a future head, plan a head-only rewind against the old head, and later succeed after an incompatible reset. The force-push repair does not cover this non-force case. | `futureLeaseNonforce_test`; [remote-advance model](../formal/quint/advance/README.md) |
-| remote-advance model | spec ambiguity | The §7 `read_ref` rule cannot tell "never landed" from "landed, then built on"; such a push is reported NonFastForward although its commit is in the remote history | `WitnessLandedThenNff` |
-| transport model | spec gap (liveness) | One corrupted shard among the first `minimum_shards` responses fails the download although a valid quorum is available | `shards_bad::DecodeFailsOnlyWithoutHonestQuorum`, `P2Corrupt` |
-| transport model | spec gap | `aggregate` does not verify partials, so one low-index garbage partial blocks aggregation unless a coordinator verifies first | `thr_asImpl::AggregateCompleteness` |
-| transport model | spec gap | Nothing binds a share-set epoch: rotation is safe only if old shares are erased, and a rotated-out set's posted partials still verify | `thr_retainOld::NoForgery`, `CanaryNoStaleAggregate` |
-| transport model | doc drift | SPEC-PACK-SHARDS §5 still describes one thread per shard URL; SPEC-RELEASE-THRESHOLD's `ceil(2n/3)` differs from the code's N3f1 quorum for n = 3k | code reading; `quorumTableTest` |
-| transport model | hypothesis | The shard byte budget (`MAX_BUFFERED_SHARD_BYTES`) could turn valid shards into failures for packs near the size limit; not modelled or tested | code reading |
+| GC grace and clock assumptions | hypothesis | Refresh and final unlink exclude each other, but a newly reachable object still needs `T - mtime < grace` until root publication. Expired or zero grace and clock skew can violate that condition. | SPEC-GC "Concurrent writers and the grace window" |
 | ref conformance model | coverage | The conformance fixtures reach no successful `amend` commit and no memory-transport `Any` write | fixture tally |
-| Conflict readback | doc drift | `AdvanceOutcome::HeadConflict`'s rustdoc still says callers treat it as NonFastForward | `kit-core/src/protocol.rs` |
 
 ## Limitations
 
-- **Bounded is not proved.** Outside Lean, every result covers a finite
+- **Bounded is not proved.** Every result covers a finite
   instance, a bounded length or a bounded input size. Larger instances
   are argued, not checked; several READMEs record checks that did not
   finish within the 30-minute budget and were cut back.
 - **Not everything is checked by every tool.** Some invariants are checked
   only by simulation and Apalache (for example `WindowOnlyWhenFresh`), some
-  liveness properties only on the smaller instances (`Termination` on two
-  pushers), and some mutants only by `quint run` and TLC. The per-model
+  liveness properties only on the smaller instances, and some mutants only by `quint run` and TLC. The per-model
   READMEs say which.
 - **Models follow the code by hand.** Only the refs model is replayed
-  against the implementation (ref conformance model), and only for 5 sampled traces.
+  against the implementation, and only for 5 sampled traces.
   Lock steps, the `history-mmr` ancestry path and age-based recovery
   pruning are not compared.
-- **Not modelled.** Among others: pack GC, ledger expiry, `MAX_REACHABLE`
-  truncation, SQLite-backed server metadata, the S3 spool sweep, the git
-  bridge locks, the shard byte budget, multi-entry trees in Kani, and
+- **Not modelled.** Among others: gc, pack GC, the git bridge locks,
+  multi-entry trees in Kani, and
   every decoder input beyond the Kani bounds (left to fuzzing and
   proptests).
 - **Tool trust.** Results trust Quint's compiler to TLA+, Apalache, TLC,
-  CBMC and the Lean kernel. Tool versions are pinned; the Apalache jar is
+  and CBMC. Tool versions are pinned; the Apalache jar is
   checked by sha256.
 
 ## Run the checks
