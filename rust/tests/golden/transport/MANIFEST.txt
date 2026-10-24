@@ -1,11 +1,14 @@
 # Transport golden vectors (deterministic)
-# Pins the repository grammar, PendingVerification, and AdmissionChallenge fixtures
-# Update the digests with `python3 scripts/golden/write_manifest.py rust/tests/golden/transport`
+# Pins the repository grammar, PendingVerification, AdmissionChallenge and SigV4 fixtures
+# Update with `python3 scripts/golden/write_manifest.py rust/tests/golden/transport`
+# Cross-checked by `python3 scripts/golden/transport_ref.py rust/tests/golden`
 # Format: <binary stem (implicit .bin) or full filename> <blake3-hex-of-file-bytes>
 repository-grammar.json 7a93bfa0ba43c1367474c2d9c9a001b57dd85ed4a9757fd2be0644c23878f330
 pending-verification.bin 97a6a7ec5a8bcfd52188e818d06ca050bbddf99d051c279924d14a2e7fc482d2
 pending-verification.json 7882f6f642ef8dd8f7be4a431813893f779ca820db104ba40d410803ff252714
-pending-verification-error.json c107c07dbd506f1d19cb61de9a5f3f97fac23c3ef9f2a1e8fec70efa42be92d2
+pending-verification-error.json ecc2bd1672f46e8b87ddbfe19d105cac41b0bf9b18b871467242964924662674
 admission-challenge.bin c28c45c02233a7aaff7007d7881c928005b5b26486e47df3bab3e22a9321474a
 admission-challenge.json ceeca6df6e5a8ba757024abead646f054259e539f4fdf9ab157e6cf896e65531
-admission-challenge-error.json f00dcc32b4afba371acc7f49c1e65d83fd4b471546a41c99b5d4581fb32235fa
+admission-challenge-error.json 8e154a7b77abb6f4ba9d096166575c30fc445e78b8af8dd84de47612350f2fb7
+sigv4_basic d3187132e2f1e7cb293aecabcbd3d16e3e606bf407028020c66c22d7612ad421
+sigv4_list_query ce1ab30165ffb977c0b6b17930887898b5db4c7741e689a5d91c5b01f11f4a81
