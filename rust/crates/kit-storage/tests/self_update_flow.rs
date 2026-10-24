@@ -470,7 +470,13 @@ fn cosign_gets_the_pinned_signer_identity() {
     run_update(&opts(), &env_for(&origin, &install, "0.3.0")).unwrap();
     let args = read(&install.cosign_ok.with_file_name("cosign-ok.args"));
     assert!(args.contains("verify-blob"), "{args}");
-    assert!(args.contains("release\\.yml@refs/tags/v"), "{args}");
+    assert!(
+        args.contains(
+            "--certificate-identity\nhttps://github.com/officialunofficial/kit/.github/workflows/release.yml@refs/tags/v9.9.9\n"
+        ),
+        "{args}"
+    );
+    assert!(!args.contains("regexp"), "{args}");
     assert!(
         args.contains("https://token.actions.githubusercontent.com"),
         "{args}"

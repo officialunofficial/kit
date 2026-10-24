@@ -232,7 +232,8 @@ archives. The attacker does not control the host that serves `install.sh`.
 
 - Authenticity of the archive. The script requires `cosign` and verifies the
   archive against its `.cosign.bundle`. The pinned certificate identity is the
-  `release.yml` workflow of `officialunofficial/kit` at a strict semver tag.
+  `release.yml` workflow of `officialunofficial/kit` at the exact tag being installed.
+  A valid signature for any other tag fails the check.
   The pinned issuer is the GitHub Actions OIDC issuer. The script exits when
   `cosign` or the bundle is missing. Only `--insecure-skip-cosign` or
   `KIT_SKIP_COSIGN=1` turns this off.

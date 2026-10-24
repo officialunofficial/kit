@@ -11,7 +11,7 @@
 //!
 //! * The cosign keyless bundle of the archive. `cosign verify-blob`
 //!   checks that the release workflow of this repository signed the
-//!   archive at a strict-semver tag. This is the authenticity check,
+//!   archive at the exact tag being installed. This is the authenticity check,
 //!   the same one `install.sh` makes. The `cosign` program must be on
 //!   `PATH`. There is no way to skip the check.
 //! * The sha256 sidecar of the archive. It comes from the same origin
@@ -77,10 +77,11 @@ const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 /// 512 MB leaves room without letting a gzip bomb fill the disk).
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
-/// The signer that `cosign verify-blob` accepts: the release workflow
-/// of this repository at a strict-semver tag. `install.sh` uses the
-/// same values.
-const COSIGN_IDENTITY_REGEXP: &str = r"^https://github\.com/officialunofficial/kit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$";
+/// The signer that `cosign verify-blob` accepts is the release workflow
+/// of this repository at the exact tag being installed. A signature for
+/// any other tag does not pass. `install.sh` uses the same identity.
+const COSIGN_IDENTITY_PREFIX: &str =
+    "https://github.com/officialunofficial/kit/.github/workflows/release.yml@refs/tags/";
 const COSIGN_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 /// Maximum redirects; https→http downgrades are refused outright.
@@ -428,7 +429,13 @@ pub fn run_update(opts: &Opts, env: &UpdateEnv) -> Result<Outcome, (String, u8)>
         )
     })?;
     let bundle = download(&client, env, &bundle_url, MAX_BUNDLE_BYTES)?;
-    verify_cosign(&env.cosign, &archive_bytes, &bundle, &archive_name)?;
+    verify_cosign(
+        &env.cosign,
+        &target_tag,
+        &archive_bytes,
+        &bundle,
+        &archive_name,
+    )?;
 
     let sha_name = format!("{archive_name}.sha256");
     let sha_url = asset_url(&release, &sha_name).ok_or_else(|| {
@@ -746,6 +753,7 @@ fn download(
 /// is removed on return.
 fn verify_cosign(
     cosign: &Path,
+    tag: &str,
     archive: &[u8],
     bundle: &[u8],
     archive_name: &str,
@@ -758,8 +766,8 @@ fn verify_cosign(
         .and_then(|()| std::fs::write(&bundle_path, bundle))
         .map_err(|e| (format!("write verification files: {e}"), exit::CANTCREAT))?;
     let out = std::process::Command::new(cosign)
-        .args(["verify-blob", "--certificate-identity-regexp"])
-        .arg(COSIGN_IDENTITY_REGEXP)
+        .args(["verify-blob", "--certificate-identity"])
+        .arg(format!("{COSIGN_IDENTITY_PREFIX}{tag}"))
         .args(["--certificate-oidc-issuer", COSIGN_OIDC_ISSUER, "--bundle"])
         .arg(&bundle_path)
         .arg(&archive_path)

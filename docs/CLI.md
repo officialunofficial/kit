@@ -1486,7 +1486,8 @@ Config / keys / version:
   [--format human|json]` &mdash; update this binary in place from a
   GitHub Release. The update fails closed. It runs `cosign verify-blob`
   on the archive with its `.cosign.bundle` asset. The bundle must come from
-  the release workflow of this repository at a strict-semver tag. It then
+  the release workflow of this repository at the exact tag being
+  installed. A signature for another tag fails. It then
   checks the `.sha256` asset. A release that lacks either asset is
   refused. `cosign` must be on `PATH`. No option skips these checks. The
   command runs no downloaded code before both checks pass. Only **installer-managed** binaries are updated:
