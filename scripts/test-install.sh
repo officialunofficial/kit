@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Test the signature check in install.sh with a fake curl and a fake cosign.
+# The fake cosign accepts a bundle only when the bundle names the exact
+# certificate identity that install.sh passes. A bundle signed for another
+# valid tag must make the install fail and must leave no binary behind.
+#
+# Run from any directory:  bash scripts/test-install.sh
+
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+identity_for() {
+    printf 'https://github.com/officialunofficial/kit/.github/workflows/release.yml@refs/tags/%s' "$1"
+}
+
+case "$(uname -s)" in
+    Darwin) os_part=apple-darwin ;;
+    Linux) os_part=unknown-linux-gnu ;;
+    *) echo "skip: unsupported host" >&2; exit 0 ;;
+esac
+case "$(uname -m)" in
+    x86_64 | amd64) arch_part=x86_64 ;;
+    arm64 | aarch64) arch_part=aarch64 ;;
+    *) echo "skip: unsupported host" >&2; exit 0 ;;
+esac
+target="${arch_part}-${os_part}"
+
+# Build a release fixture for one tag. The bundle holds the identity of
+# the tag that "signed" it, which the caller chooses.
+make_release() {
+    local tag=$1 signed_tag=$2 bare=${1#v}
+    local dir="$work/releases/$tag" stage="$work/stage/$tag/kit-${bare}-${target}"
+    mkdir -p "$dir" "$stage"
+    printf '#!/bin/sh\necho "kit %s"\n' "$bare" >"$stage/kit"
+    chmod 0755 "$stage/kit"
+    local archive="kit-${bare}-${target}.tar.gz"
+    tar -czf "$dir/$archive" -C "$work/stage/$tag" "kit-${bare}-${target}"
+    (cd "$dir" && shasum -a 256 "$archive" >"$archive.sha256")
+    identity_for "$signed_tag" >"$dir/$archive.cosign.bundle"
+}
+
+mkdir -p "$work/bin"
+cat >"$work/bin/curl" <<'SH'
+#!/bin/sh
+# Fake curl: map a release URL to a fixture file.
+url=""; out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out=$2; shift 2 ;;
+        -*) shift ;;
+        *) url=$1; shift ;;
+    esac
+done
+rel=${url#https://github.com/officialunofficial/kit/releases/download/}
+[ "$rel" != "$url" ] || exit 22
+src="$FAKE_RELEASES/$rel"
+[ -f "$src" ] || exit 22
+if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi
+SH
+cat >"$work/bin/cosign" <<'SH'
+#!/bin/sh
+# Fake cosign: accept only an exact identity that matches the bundle.
+identity=""; bundle=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        verify-blob) shift ;;
+        --certificate-identity) identity=$2; shift 2 ;;
+        --bundle) bundle=$2; shift 2 ;;
+        --certificate-identity-regexp) echo "regexp identity is not allowed" >&2; exit 2 ;;
+        --certificate-oidc-issuer) shift 2 ;;
+        *) shift ;;
+    esac
+done
+[ -n "$identity" ] && [ -n "$bundle" ] || exit 2
+[ "$(cat "$bundle")" = "$identity" ]
+SH
+chmod 0755 "$work/bin/curl" "$work/bin/cosign"
+
+fails=0
+run_install() {
+    local name=$1 tag=$2 expect=$3
+    local prefix="$work/prefix-$name" state="$work/state-$name"
+    mkdir -p "$prefix"
+    chmod 0755 "$prefix"
+    local status=0
+    PATH="$work/bin:$PATH" FAKE_RELEASES="$work/releases" \
+        KIT_INSTALL_DIR="$prefix" KIT_STATE_DIR="$state" \
+        sh "$repo_root/install.sh" --version "$tag" >"$work/$name.out" 2>&1 || status=$?
+    if [ "$expect" = pass ] && [ "$status" -eq 0 ] && [ -x "$prefix/kit" ]; then
+        echo "ok: $name"
+    elif [ "$expect" = fail ] && [ "$status" -ne 0 ] && [ ! -e "$prefix/kit" ]; then
+        echo "ok: $name"
+    else
+        echo "FAIL: $name (status $status, expected $expect)" >&2
+        cat "$work/$name.out" >&2
+        fails=1
+    fi
+}
+
+make_release v0.5.1 v0.5.1
+run_install same-tag v0.5.1 pass
+
+# A signature that is valid for an older tag must not install a newer tag.
+make_release v0.5.2 v0.4.0
+run_install replayed-tag v0.5.2 fail
+
+# A signature for a later tag must not install an earlier tag either.
+make_release v0.3.0 v0.9.0
+run_install later-tag v0.3.0 fail
+
+# A tag with regex or path characters never reaches cosign.
+run_install bad-tag 'v0.5.1/../v0.4.0' fail
+
+exit "$fails"

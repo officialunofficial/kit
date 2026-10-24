@@ -198,17 +198,11 @@ pub fn could_match_descendant(patterns: &[SparsePattern], dir_prefix: &str) -> b
 /// - [`RestoreError::Io`] for filesystem failures other than "not found".
 pub fn load_sparse_checkout(layout: &RepoLayout) -> RestoreResult<Option<Vec<SparsePattern>>> {
     let path = layout.sparse_checkout_file();
-    let meta = match fs::metadata(&path) {
-        Ok(m) => m,
+    let raw = match crate::bounded_read::read_capped_string(&path, MAX_SPARSE_BYTES) {
+        Ok(raw) => raw,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(RestoreError::Io(e)),
     };
-    if meta.len() > MAX_SPARSE_BYTES {
-        return Err(RestoreError::Io(io::Error::other(
-            "sparse-checkout too large",
-        )));
-    }
-    let raw = fs::read_to_string(&path)?;
     let patterns = parse_sparse_patterns(&raw);
     if patterns.is_empty() {
         Ok(None)
@@ -1817,6 +1811,19 @@ mod tests {
         assert_eq!(p[0].pattern, "src");
         assert!(p[1].negated);
         assert!(p[2].dir_only);
+    }
+
+    #[test]
+    fn load_sparse_checkout_rejects_an_oversize_file() {
+        let target = TempDir::new().unwrap();
+        let layout = RepoLayout::single(target.path());
+        fs::create_dir_all(target.path().join(".kit")).unwrap();
+        let big = vec![b'a'; usize::try_from(MAX_SPARSE_BYTES).unwrap() + 1];
+        fs::write(layout.sparse_checkout_file(), big).unwrap();
+        assert!(matches!(
+            load_sparse_checkout(&layout),
+            Err(RestoreError::Io(_))
+        ));
     }
 
     #[test]

@@ -313,7 +313,8 @@ pub fn read_revert_state(layout: &RepoLayout) -> ConflictStateResult<Option<Reve
         return Ok(None);
     };
     let orig_head = read_hex_file(&layout.orig_head_file())?.ok_or(ConflictStateError::Invalid)?;
-    let message = match fs::read(layout.revert_msg_file()) {
+    let message = match crate::bounded_read::read_capped(&layout.revert_msg_file(), MAX_STATE_BYTES)
+    {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(ConflictStateError::Io(e)),
@@ -370,7 +371,8 @@ pub fn read_merge_state(layout: &RepoLayout) -> ConflictStateResult<Option<Merge
         return Ok(None);
     };
     let orig_head = read_hex_file(&layout.orig_head_file())?.ok_or(ConflictStateError::Invalid)?;
-    let message = match fs::read(layout.merge_msg_file()) {
+    let message = match crate::bounded_read::read_capped(&layout.merge_msg_file(), MAX_STATE_BYTES)
+    {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(ConflictStateError::Io(e)),
@@ -412,11 +414,12 @@ pub fn read_cherry_pick_state(layout: &RepoLayout) -> ConflictStateResult<Option
         return Ok(None);
     };
     let orig_head = read_hex_file(&layout.orig_head_file())?.ok_or(ConflictStateError::Invalid)?;
-    let message = match fs::read(layout.cherry_pick_msg_file()) {
-        Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(ConflictStateError::Io(e)),
-    };
+    let message =
+        match crate::bounded_read::read_capped(&layout.cherry_pick_msg_file(), MAX_STATE_BYTES) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(ConflictStateError::Io(e)),
+        };
     Ok(Some(CherryPickState {
         cherry_pick_head,
         orig_head,
@@ -638,5 +641,43 @@ mod tests {
         fs::create_dir_all(kit.worktree_state_dir()).unwrap();
         clear_merge_state(&kit).unwrap();
         clear_cherry_pick_state(&kit).unwrap();
+    }
+
+    #[test]
+    fn oversize_message_files_are_rejected() {
+        let big = vec![b'm'; usize::try_from(MAX_STATE_BYTES).unwrap() + 1];
+
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        let state = MergeState {
+            merge_head: h("theirs"),
+            orig_head: h("orig"),
+            message: b"m".to_vec(),
+        };
+        write_merge_state(&kit, &state, &[]).unwrap();
+        fs::write(kit.merge_msg_file(), &big).unwrap();
+        assert!(read_merge_state(&kit).is_err());
+
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        let state = RevertState {
+            revert_head: h("theirs"),
+            orig_head: h("orig"),
+            message: b"m".to_vec(),
+        };
+        write_revert_state(&kit, &state, &[]).unwrap();
+        fs::write(kit.revert_msg_file(), &big).unwrap();
+        assert!(read_revert_state(&kit).is_err());
+
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        let state = CherryPickState {
+            cherry_pick_head: h("theirs"),
+            orig_head: h("orig"),
+            message: b"m".to_vec(),
+        };
+        write_cherry_pick_state(&kit, &state, &[]).unwrap();
+        fs::write(kit.cherry_pick_msg_file(), &big).unwrap();
+        assert!(read_cherry_pick_state(&kit).is_err());
     }
 }

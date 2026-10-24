@@ -103,17 +103,17 @@ pub fn save(layout: &RepoLayout, commit: &Hash, bytes: &[u8]) -> Result<(Hash, P
 /// * [`Error::EnvelopeTooLarge`] if the file exceeds `MAX_ENVELOPE_SIZE`.
 /// * [`Error::Io`] on read failure (incl. not-found).
 pub fn load(path: &Path) -> Result<env_mod::Envelope, Error> {
-    let meta =
-        fs::metadata(path).map_err(|e| Error::Io(format!("stat {}: {e}", path.display())))?;
-    // Cast via try_from so 32-bit targets can't truncate the size check.
-    let size_usize = usize::try_from(meta.len()).unwrap_or(usize::MAX);
-    if size_usize > MAX_ENVELOPE_SIZE {
-        return Err(Error::EnvelopeTooLarge {
-            len: size_usize,
-            max: MAX_ENVELOPE_SIZE,
-        });
-    }
-    let bytes = fs::read(path).map_err(|e| Error::Io(format!("read {}: {e}", path.display())))?;
+    let limit = u64::try_from(MAX_ENVELOPE_SIZE).unwrap_or(u64::MAX);
+    let bytes = match kit_core::bounded_read::read_capped(path, limit) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            return Err(Error::EnvelopeTooLarge {
+                len: MAX_ENVELOPE_SIZE.saturating_add(1),
+                max: MAX_ENVELOPE_SIZE,
+            });
+        }
+        Err(e) => return Err(Error::Io(format!("read {}: {e}", path.display()))),
+    };
     env_mod::decode(&bytes)
 }
 
@@ -390,5 +390,13 @@ mod tests {
         assert_eq!(listed.len(), 1);
         let want = format!("{}{FILE_EXT}", hash_mod::to_hex(&good_id));
         assert_eq!(listed[0].file_name().unwrap(), want.as_str());
+    }
+
+    #[test]
+    fn load_rejects_an_oversize_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.dsse");
+        fs::write(&path, vec![0u8; MAX_ENVELOPE_SIZE + 1]).unwrap();
+        assert!(matches!(load(&path), Err(Error::EnvelopeTooLarge { .. })));
     }
 }

@@ -157,7 +157,7 @@ pub(super) fn status(_args: &StatusArgs) -> CmdResult<()> {
             .map_or("unknown", |d| d.as_str());
         let _ = writeln!(out, "{name}  direction={direction}");
         for (file, label) in [("source", "source"), ("dest", "dest")] {
-            if let Ok(v) = std::fs::read_to_string(state.join(file)) {
+            if let Ok(v) = super::git_import::read_stamp(&state.join(file)) {
                 let _ = writeln!(out, "  {label}: {}", v.trim());
             }
         }

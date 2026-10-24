@@ -304,6 +304,8 @@ jobs:
         run: bash scripts/check-writing.sh
       - name: Cited paths and links exist
         run: bash scripts/check-doc-paths.sh
+      - name: The installer binds the signature to the requested tag
+        run: bash scripts/test-install.sh
 
   # One stable name for branch protection. It fails when any job above fails
   # or is cancelled. A skipped job (the macOS leg on a pull request) passes.

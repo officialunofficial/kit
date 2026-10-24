@@ -340,7 +340,7 @@ fn export(layout: &RepoLayout, opts: &ExportArgs) -> CmdResult<u8> {
         kit_git_bridge::map::write_binding(&state, "dest", &bound_identity)
             .map_err(|e| (format!("record dest: {e}"), exit::CANTCREAT))?;
     } else {
-        match std::fs::read_to_string(&dest_file) {
+        match super::git_import::read_stamp(&dest_file) {
             Ok(recorded) if recorded.trim() != bound_identity => {
                 return Err((
                     format!(
@@ -1053,7 +1053,7 @@ fn recorded_import_source(layout: &RepoLayout, identity: &str) -> Option<String>
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let src = entry.path().join("source");
-        if let Ok(recorded) = std::fs::read_to_string(src)
+        if let Ok(recorded) = super::git_import::read_stamp(&src)
             && recorded.trim() == identity
         {
             return Some(name);

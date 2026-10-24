@@ -36,6 +36,16 @@ use crate::exit;
 use crate::format;
 
 /// SPEC-GIT-IMPORT §5 predicate type.
+/// Longest accepted stamp file under a git state directory. A stamp holds
+/// one short line, such as a remote identity or a version number.
+const MAX_STAMP_BYTES: u64 = 4096;
+
+/// Read a short stamp file from a git state directory. The read fails when
+/// the file is longer than [`MAX_STAMP_BYTES`].
+pub(crate) fn read_stamp(path: &Path) -> std::io::Result<String> {
+    kit_core::bounded_read::read_capped_string(path, MAX_STAMP_BYTES)
+}
+
 pub(crate) const PREDICATE_TYPE: &str = "https://kit.storage/spec/predicate/git-import/v1";
 
 /// Default dedicated import key path (SPEC-GIT-IMPORT §4).
@@ -334,7 +344,7 @@ fn validate_import_bindings(layout: &RepoLayout, state: &Path, url: &str) -> Cmd
         }
     }
     let identity = remote_identity(url);
-    match std::fs::read_to_string(state.join("source")) {
+    match read_stamp(&state.join("source")) {
         Ok(recorded) if recorded.trim() != identity => Err((
             format!(
                 "state '{}' is bound to {}; use a different --remote-name for {url}",
@@ -996,7 +1006,7 @@ fn bind_import_state(layout: &RepoLayout, state: &Path, url: &str) -> CmdResult<
         .map_err(|e| (e.to_string(), exit::USAGE))?;
     let identity = remote_identity(url);
     let src_file = state.join("source");
-    match std::fs::read_to_string(&src_file) {
+    match read_stamp(&src_file) {
         Ok(recorded) if recorded.trim() != identity => Err((
             format!(
                 "state '{}' is bound to {}; use a different --remote-name for {}",
@@ -1047,7 +1057,7 @@ fn absolutize_clone_url(url: &str) -> String {
 }
 
 fn read_source(state: &Path) -> CmdResult<Option<String>> {
-    match std::fs::read_to_string(state.join("source")) {
+    match read_stamp(&state.join("source")) {
         Ok(s) => Ok(Some(s.trim().to_owned())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err((format!("read source: {e}"), exit::GENERAL_ERROR)),
@@ -1064,7 +1074,7 @@ fn other_state_with_source(
         if entry.path() == this_state {
             continue;
         }
-        if let Ok(src) = std::fs::read_to_string(entry.path().join("source"))
+        if let Ok(src) = read_stamp(&entry.path().join("source"))
             && src.trim() == identity
         {
             return Some(entry.file_name().to_string_lossy().into_owned());
@@ -1193,3 +1203,22 @@ fn divergence_probe(
 }
 
 use super::error as emit_err;
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::*;
+
+    #[test]
+    fn read_stamp_rejects_an_oversize_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        std::fs::write(&path, "x".repeat(usize::try_from(MAX_STAMP_BYTES).unwrap())).unwrap();
+        assert!(read_stamp(&path).is_ok());
+        std::fs::write(
+            &path,
+            "x".repeat(usize::try_from(MAX_STAMP_BYTES).unwrap() + 1),
+        )
+        .unwrap();
+        assert!(read_stamp(&path).is_err());
+    }
+}

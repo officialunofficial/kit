@@ -383,7 +383,7 @@ pub(super) fn run(args: &VerifyArgs) -> CmdResult<()> {
     };
 
     let source = if audit.pinned.is_some() {
-        let version = std::fs::read_to_string(state.join("import-spec"))
+        let version = crate::commands::git_import::read_stamp(&state.join("import-spec"))
             .map_err(|e| (format!("read import-spec: {e}"), exit::DATAERR))?;
         if version.trim() != import::IMPORT_SPEC_VERSION.to_string() {
             return Err((
@@ -391,7 +391,7 @@ pub(super) fn run(args: &VerifyArgs) -> CmdResult<()> {
                 exit::DATAERR,
             ));
         }
-        std::fs::read_to_string(state.join("source"))
+        crate::commands::git_import::read_stamp(&state.join("source"))
             .map_err(|e| (format!("read import source: {e}"), exit::DATAERR))?
             .trim()
             .to_owned()

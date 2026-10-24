@@ -113,20 +113,19 @@ pub fn is_bisect_in_progress(layout: &RepoLayout) -> bool {
 /// - [`BisectError::InvalidBisectState`] for any malformed line.
 pub fn read_state(layout: &RepoLayout) -> BisectResult<BisectState> {
     let path = layout.bisect_file();
-    let meta = match fs::metadata(&path) {
-        Ok(m) => m,
+    let raw = match crate::bounded_read::read_capped_string(&path, MAX_BISECT_FILE_BYTES) {
+        Ok(raw) => raw,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Err(BisectError::NoBisectInProgress);
         }
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            return Err(BisectError::InvalidBisectState);
+        }
         Err(e) => return Err(BisectError::Io(e)),
     };
-    if meta.len() == 0 {
+    if raw.is_empty() {
         return Err(BisectError::InvalidBisectState);
     }
-    if meta.len() > MAX_BISECT_FILE_BYTES {
-        return Err(BisectError::InvalidBisectState);
-    }
-    let raw = fs::read_to_string(&path)?;
 
     let mut lines = raw.split('\n');
 
@@ -858,5 +857,28 @@ mod tests {
         skipped.insert(c2);
         skipped.insert(c3);
         assert_eq!(pick_midpoint_skip(&[c1, c2, c3], &skipped), ZERO);
+    }
+
+    #[test]
+    fn read_state_rejects_an_oversize_file() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        fs::create_dir_all(dir.path().join(".kit")).unwrap();
+        let big = vec![b'a'; usize::try_from(MAX_BISECT_FILE_BYTES).unwrap() + 1];
+        fs::write(layout.bisect_file(), big).unwrap();
+        assert!(matches!(
+            read_state(&layout),
+            Err(BisectError::InvalidBisectState)
+        ));
+    }
+
+    #[test]
+    fn read_state_reports_a_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        assert!(matches!(
+            read_state(&layout),
+            Err(BisectError::NoBisectInProgress)
+        ));
     }
 }

@@ -20,7 +20,7 @@
 # Trust model:
 #   * cosign keyless verification is REQUIRED by default. The script
 #     fetches the per-archive `.cosign.bundle`, validates that it was
-#     signed by this repo's release.yml workflow at a strict-semver tag,
+#     signed by this repo's release.yml workflow at the exact tag,
 #     and only then installs. The published .sha256 file is fetched
 #     from the same origin as the archive and proves NOTHING about
 #     authenticity on its own — it's a defense-in-depth integrity check.
@@ -291,7 +291,7 @@ fetch "$sha_url" "$tmp/${archive}.sha256"
 # This is the AUTHENTICATION step. The .sha256 check below is integrity
 # only — it shows nothing about provenance because the file is served
 # from the same origin as the archive. Cosign verifies that this archive
-# was produced by this repo's release.yml workflow at a strict-semver tag.
+# was produced by this repo's release.yml workflow at this exact tag.
 if [ "$skip_cosign" = "1" ]; then
   warn "cosign verification SKIPPED (--insecure-skip-cosign / KIT_SKIP_COSIGN=1)"
   warn "the only authenticity check disabled. SHA256 alone proves nothing."
