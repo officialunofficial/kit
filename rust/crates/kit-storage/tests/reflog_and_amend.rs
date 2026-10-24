@@ -252,7 +252,7 @@ fn amend_replaces_head_keeping_parent() {
     );
 
     // The superseded commit object still exists on disk (unreachable
-    // until gc) — `kit cat` can still read it.
+    // until gc reclaims it) — `kit cat` can still read it.
     let cat = run(root, &["cat", &second]);
     assert!(
         cat.status.success(),

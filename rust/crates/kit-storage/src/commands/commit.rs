@@ -84,7 +84,7 @@ struct CommitOptions {
     /// is reused (no `$EDITOR` is launched).
     ///
     /// NOTE: the superseded commit is not deleted — it stays on disk as
-    /// an unreachable object until `kit gc` ships.
+    /// an unreachable object until `kit gc` reclaims it.
     #[arg(long)]
     amend: bool,
     /// Suppress the commit summary line (git `-q`).

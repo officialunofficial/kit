@@ -91,7 +91,7 @@ commands:
                     --format=json emits a JSON result object on success
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
-                    The superseded commit becomes unreachable until `gc` ships.
+                    The superseded commit becomes unreachable; `gc` can reclaim it.
   log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [--author PAT] [--grep PAT] [--since DATE] [--until DATE] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]
                     Show commit history (default prints the full message
                     body + a UTC date; --oneline/--abbrev-commit abbreviate
