@@ -1,0 +1,4 @@
+# Commits that the commit message scan skips. Each line holds one full commit
+# hash. History is not rewritten, so a commit that already leaked stays here.
+# Do not add a new commit to this list.
+fcaf4bf58ad57c213376f89b65cbb6ee3a37c747
