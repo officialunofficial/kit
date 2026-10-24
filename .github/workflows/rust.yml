@@ -302,6 +302,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: No tracker ids, plan labels or tool names
         run: bash scripts/check-writing.sh
+      - name: Cited paths and links exist
+        run: bash scripts/check-doc-paths.sh
 
   # One stable name for branch protection. It fails when any job above fails
   # or is cancelled. A skipped job (the macOS leg on a pull request) passes.

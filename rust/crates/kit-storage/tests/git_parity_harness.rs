@@ -2,7 +2,7 @@
 //!
 //! Runs the same script under real `git` and under `kit`, normalizes the
 //! output **modulo object-id length** (git's 40-hex SHA-1 vs kit's 64-hex
-//! BLAKE3), and asserts the in-matrix parity contract from `docs/PARITY.md`.
+//! BLAKE3), and asserts the in-matrix parity contract in `docs/CLI.md`.
 //!
 //! Conventions:
 //! - Each VCS gets its own repo dir under one canonicalized temp root

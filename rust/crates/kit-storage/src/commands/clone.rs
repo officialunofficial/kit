@@ -99,7 +99,7 @@ pub fn run(args: &[String]) -> u8 {
     // pull below, and kit's own object-transfer summary follows at the
     // end — kit deliberately never fabricates git's
     // Enumerating/Counting/Compressing/`Total N (delta D)` lines (see
-    // docs/PARITY.md).
+    // docs/CLI.md).
     {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "Cloning into '{}'...", target.display());

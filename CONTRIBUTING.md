@@ -52,6 +52,7 @@ cargo test --locked --workspace
 cd ..
 bash scripts/check-writing.sh
 bash scripts/check-unsafe-safety.sh
+bash scripts/check-doc-paths.sh
 ```
 
 ## Rules for code

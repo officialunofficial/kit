@@ -27,7 +27,7 @@ the rest.
 
 These owner-derived authorization rules apply to `namespace_mode =
 self_certifying`, the default. An opt-in authority-owned deployment follows
-[SPEC-SERVER §6.2.2](SPEC-SERVER.md#622-opt-in-authority-owned-namespaces):
+SPEC-SERVER §6.2.2:
 opaque names carry no verifiable owner, and the Authority hook is its ownership
 source. Such a deployment MUST refuse presented owner-signed grants,
 grant-epoch operations, and owner-signed visibility statements with
@@ -615,7 +615,7 @@ by exactly one of these paths:
 3. **Authority source.** A deployment-defined source authorizes the
    signer, as SPEC-TRANSPORT-CONNECT §7.5 rule 3 describes, failing
    closed. Key-set lookup and generation fencing MUST follow
-   [SPEC-PRIMITIVE-EVIDENCE §1.2](SPEC-PRIMITIVE-EVIDENCE.md#12-decisions-and-authority).
+   SPEC-PRIMITIVE-EVIDENCE §1.2.
 
 A **read** of a private repository (§9) is authorized by the same three
 paths, with the `read` capability in place of `write`. A read of a
@@ -1031,7 +1031,7 @@ for their principals are registered server-side instead.
   key.
 - The deployment operator registers a signed grant (in the §4.2
   encoding) for a principal (informative: an operator command,
-  wrapped by [SPEC-SERVER §16.5](SPEC-SERVER.md#165-procedures)). Registration verifies §7 steps
+  wrapped by SPEC-SERVER §16.5). Registration verifies §7 steps
   1, 3, 4 and 5 and rejects a grant whose grantee is not the principal.
 - No grant is carried on ssh and enc, so any of the three §6 paths may
   authorize a request: the owner key when the principal is the

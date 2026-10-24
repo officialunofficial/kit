@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
 // Shared ref types used across kit's wire protocols. Used by
-// kit.rpc.v1.ssh (rust/crates/kit-rpc/proto/ssh.proto) and by the
+// kit.rpc.v1.ssh (rust/crates/kit-rpc/proto/kit/rpc/v1/ssh/ssh.proto) and by the
 // kit.transport.v1 remote protocol.
 //
 // This file is the single source of truth for these two types. The wire

@@ -105,7 +105,7 @@ fn push_reports_honest_monotonic_progress_when_forced_on() {
     );
     // Never fabricate git's compression/delta-graph numbers — kit's
     // transport is one-object-per-pack and computes no cross-branch
-    // delta graph (docs/PARITY.md's "Human-facing output parity").
+    // delta graph (docs/CLI.md).
     assert!(!stderr.contains("Compressing objects"), "stderr: {stderr}");
     assert!(!stderr.contains("Enumerating objects"), "stderr: {stderr}");
     assert!(!stderr.contains("Total "), "stderr: {stderr}");

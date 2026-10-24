@@ -96,8 +96,6 @@ started writing; it preserves the original request, including signed headers,
 nonce, body, and streaming receiver. A failure after writing starts returns to
 the host's existing recovery policy. Idle checkout checks elapsed monotonic time
 even when the runtime is paused, and TCP_NODELAY matches the previous adapter.
-See the [CLI HTTPS latency comparison](../../../docs/operations/connect-cli-latency.md)
-for measured clone, pull, and push behavior and reproduction instructions.
 
 The host response profile retains the previous metadata limit of 4 MiB and its
 acceptance of successful 2xx responses, missing content types, protobuf content

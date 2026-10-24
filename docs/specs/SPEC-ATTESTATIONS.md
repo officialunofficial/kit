@@ -9,8 +9,7 @@ audience: implementers and integrators producing or verifying native kit attesta
 
 Status: **Draft**. This document defines a native attestation primitive
 for kit: the on-disk layout, the wire envelope, the signing contract,
-the CLI, and the transport additions. It supersedes the historical
-`docs/NOTARY.md` design note.
+the CLI, and the transport additions.
 
 Scope: everything about how kit produces, stores, transports, and
 verifies an attestation about a commit. **Not** in scope: what an
@@ -219,7 +218,7 @@ JCS-canonical key order. Note `predicate` precedes `predicateType`
   actually looks for; without it those tools cannot read a kit
   attestation's subjects at all. A producer that does not hold the
   subject bytes MUST NOT fabricate a `sha256` digest. Storage-receipt
-  advance subjects under [SPEC-SERVER §15](SPEC-SERVER.md#15-storage-receipts)
+  advance subjects under SPEC-SERVER §15
   carry `blake3` only **by that predicate's rule** in both opaque and
   indexed modes. An indexed server may hold the commit bytes; that does
   not add `sha256` to a storage-receipt advance subject. The server
@@ -544,7 +543,7 @@ into):
   &mdash; code review sign-off **(planned; not yet defined)**.
 - `https://kit.storage/spec/predicate/storage-receipt/v1`
   &mdash; server-signed evidence of a committed live advance or lease
-  change ([SPEC-SERVER §15](SPEC-SERVER.md#15-storage-receipts)).
+  change (SPEC-SERVER §15).
 - Third-party predicates (for example, a Makechain settlement predicate at
   a yet-to-be-provisioned URI such as
   `tag:github.com,2024:officialunofficial/kit/settlement/v1`) are

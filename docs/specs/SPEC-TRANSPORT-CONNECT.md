@@ -179,7 +179,7 @@ entries, including surplus entries; each inspector receives one complete set.
 the `invalid_argument` cases below, then perform the
 [SPEC-WRITE-GRANTS §9.3](SPEC-WRITE-GRANTS.md#93-read-authorization)
 read check (including its receipt-only write-grantee exception), then
-require the [SPEC-SERVER §10.1](SPEC-SERVER.md#101-callers-view) writer
+require the SPEC-SERVER §10.1 writer
 view. A write-only grantee establishes that view through its signed grant
 and MAY retrieve advance receipts only for refs inside that grant's
 ref scopes. For this check, a paired packmap maps to its branch. A
@@ -449,8 +449,8 @@ excludes.
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
 | An invalid part receipt (malformed, unknown key id, bad MAC, or bound to another ticket; §7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` with exactly one `PendingVerification` detail |
-| A membership-dependent miss within the relay-lag bound, in indexed mode ([SPEC-SERVER §9.4](SPEC-SERVER.md#94-repository-isolated-membership-checks)) | `unavailable`, public message `repository membership not yet visible`, with exactly one empty `MembershipNotVisible` detail and no `Retry-After`; a retry with the same nonce is safe. A client classifies by the detail first and MAY fall back to the exact message for servers that predate it |
-| Publication verification ran out of its execution allowance or retained-evidence capacity, or the publication state changed between verification and commit ([SPEC-SERVER §10.2](SPEC-SERVER.md#102-per-ref-clearance-and-publication)). Nothing commits. | `unavailable` with no detail, never `PendingVerification`; the ladder retries it, though a deterministic capacity limit is not resolved by retrying |
+| A membership-dependent miss within the relay-lag bound, in indexed mode (SPEC-SERVER §9.4) | `unavailable`, public message `repository membership not yet visible`, with exactly one empty `MembershipNotVisible` detail and no `Retry-After`; a retry with the same nonce is safe. A client classifies by the detail first and MAY fall back to the exact message for servers that predate it |
+| Publication verification ran out of its execution allowance or retained-evidence capacity, or the publication state changed between verification and commit (SPEC-SERVER §10.2). Nothing commits. | `unavailable` with no detail, never `PendingVerification`; the ladder retries it, though a deterministic capacity limit is not resolved by retrying |
 | A decoded pushed file object is globally blocklisted (SPEC-SERVER §14.2) | `permission_denied`, exact message `object blocked`, with a repository-empty writer `RedactionNotice` detail whose rewrites are empty |
 | An `AdvanceRefs` closure contains a repository tombstone (SPEC-SERVER §14.5) | `invalid_argument`, exact message `open closure`, with applicable writer `RedactionNotice` details; the ordinary membership-lag interval does not apply |
 | A delta base is tombstoned in this repository (SPEC-SERVER §14.5) | `failed_precondition`, exact message `delta base not available in this repository`, with applicable writer `RedactionNotice` details and no lag interval; this is the existing self-contained replan case |
@@ -1003,7 +1003,7 @@ fingerprint. Reusing a nonce for a different operation MUST fail.
 Same-operation retries MUST return the saved result and MUST NOT repeat
 mutable effects or charge quota again. A signed ref write MUST atomically commit
 its replay result, applicable quota, and reference changes (including both sides
-of a paired advance or deletion), as [SPEC-SERVER §3.1](SPEC-SERVER.md#31-atomic-acceptance) requires. A failed
+of a paired advance or deletion), as SPEC-SERVER §3.1 requires. A failed
 acceptance guard commits none of that unit's effects. Configured notifications
 occur only after durable commit. Replay records MUST remain until
 the signed expiry has passed.
@@ -1220,7 +1220,7 @@ names an Ed25519 public key. The `0x` form names a 20-byte address;
 defines how an owner key derives it.
 A self-certifying deployment MUST NOT resolve other forms through a registry.
 A deployment MAY instead opt in to `namespace_mode = authority` under
-[SPEC-SERVER §6.2.2](SPEC-SERVER.md#622-opt-in-authority-owned-namespaces).
+SPEC-SERVER §6.2.2.
 That mode accepts opaque namespaces matching `[a-z0-9][a-z0-9._-]{0,71}`,
 including lowercase UUIDv7 names, and MUST reject `root` and the `ed25519-`
 and `0x` prefixes. The two deployment grammars are disjoint. The deployment
@@ -1234,7 +1234,7 @@ A deployment under `any` MUST NOT claim complete deployment-wide takedown.
 The auth-v2 wire envelope and RPC schema do not change. A client MUST accept
 the union of the two namespace grammars when it parses a remote URL: the
 self-certifying grammar above and the authority-mode grammar of
-[SPEC-SERVER §6.2.2](SPEC-SERVER.md#622-opt-in-authority-owned-namespaces).
+SPEC-SERVER §6.2.2.
 The grammars are disjoint, because an authority-mode namespace is never `root`
 and never starts with `ed25519-` or `0x`, so the union is unambiguous; a URL
 does not tell the client which mode the server runs. The server still enforces
@@ -1626,7 +1626,7 @@ This section fixes, for each RPC of a ticketed upload,
 whether admission (§5.1) runs and which effects become durable.
 
 Atomic acceptance, replay immunity, declared durability, and recovery follow
-[SPEC-SERVER §3.1–§3.2](SPEC-SERVER.md#31-atomic-acceptance). These requirements
+SPEC-SERVER §3.1–§3.2. These requirements
 apply to any conforming server, independently of its storage implementation.
 
 Every RPC carries its own nonce: `BeginUpload`, each `UploadPart`,
@@ -1681,7 +1681,7 @@ independent byte reservations.
 A deployment settles a charge on `Committed` and releases it on
 `Aborted` or `Expired`, so an aborted upload settles nothing
 (informative). Outcome delivery is at least once with a stable reservation
-identity for deduplication, as [SPEC-SERVER](SPEC-SERVER.md) specifies. Repeated
+identity for deduplication, as SPEC-SERVER specifies. Repeated
 delivery does not create another terminal outcome or settlement.
 
 **Reference-server behavior.** The built-in default admission
@@ -1945,7 +1945,7 @@ Explicitly deferred to later work:
   variant and the retryable mapping of `aborted` (§5), the server's
   admission step and outcomes (§5.1, §7.7), and the client's 402
   handling, `admission_helper`, and header allowlist (§5.1).
-- The remote-hook contract and outcome guarantees: see [SPEC-SERVER](SPEC-SERVER.md).
+- The remote-hook contract and outcome guarantees: see SPEC-SERVER.
 - Pricing, admission verification, and settlement: deployment policy,
   never kit's (§5.1).
 

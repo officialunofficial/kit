@@ -15,7 +15,7 @@ and browser access. This document changes no protobuf schema.
 
 Authority: this document specifies the plain HTTP contract for object serving. [SPEC-CONVENTIONS](SPEC-CONVENTIONS.md) supplies normative keywords.
 [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md), abbreviated STC, owns
-repository identities and admission headers. [SPEC-SERVER](SPEC-SERVER.md)
+repository identities and admission headers. SPEC-SERVER
 owns indexed mode, the published view, hooks, and durable outcomes.
 
 ## 1. Purpose and rationale

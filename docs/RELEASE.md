@@ -14,18 +14,14 @@ Contents:
 - [Supply-chain policy](#supply-chain-policy)
 - [Reproducibility](#reproducibility)
 - [Required GitHub Actions secrets and variables](#required-github-actions-secrets-and-variables)
-- [One-time setup](#one-time-setup)
 
 ## What gets published
 
-A single `vX.Y.Z` tag drives two decoupled channels:
+A single `vX.Y.Z` tag drives the binary release through
+[`.github/workflows/release.yml`](../.github/workflows/release.yml).
+A maintainer publishes the crates to crates.io by hand from the same tag.
 
-- **Binaries** via
-  [`.github/workflows/release.yml`](../.github/workflows/release.yml).
-- **crates.io** via
-  [`.github/workflows/crates-publish.yml`](../.github/workflows/crates-publish.yml).
-
-All are gated on the same signed tag. Before `release.yml` publishes anything,
+Both steps use the same signed tag. Before `release.yml` publishes anything,
 it verifies that the tag is strict semver, annotated, GPG-signed by an
 allowlisted release fingerprint, and points at a commit reachable from
 `origin/main`. It then produces:
@@ -121,8 +117,6 @@ Run top to bottom. Do not skip steps.
 
 - [ ] `release.yml` succeeded through `validate-release-tag` and all four
       platform builds.
-- [ ] `crates-publish.yml` succeeded (every publishable crate indexed).
-- [ ] `mcp-release.yml` succeeded (docs MCP corpus indexed for the tag).
 - [ ] GitHub Release created as a non-draft.
 - [ ] Archives present:
       `kit-X.Y.Z-aarch64-apple-darwin.tar.gz`,
@@ -222,19 +216,17 @@ disagree, fix the script:
    `origin/main`.
 5. Watch the workflows. `release.yml` job order is:
    `validate-release-tag` → `build` (× 4 archs) → `sbom` / `third-party-notices` (parallel) →
-   `release`. `crates-publish.yml` runs `cargo
-   publish --workspace --locked` in dependency order.
+   `release`.
 6. Run the [smoke test](#smoke-test).
 
 ## Publishing to crates.io
 
-crates.io publishing is **tag-driven**, owned by
-[`.github/workflows/crates-publish.yml`](../.github/workflows/crates-publish.yml).
-On a pushed `v*.*.*` tag it runs `cargo publish --workspace --locked` to publish every
-workspace member without `publish = false` to crates.io in
-dependency order, waiting for each to index before the next. A guard refuses to
-publish if the tag does not match the workspace version (`kit-core`'s version
-in `rust/Cargo.toml` at the tagged tree).
+No workflow in this repository publishes to crates.io. A maintainer checks out
+the signed tag and runs `cargo publish --workspace --locked`. The command
+publishes every workspace member without `publish = false` to crates.io in
+dependency order, waiting for each to index before the next. Before the run,
+check that the tag matches the workspace version (`kit-core`'s version in
+`rust/Cargo.toml` at the tagged tree).
 
 ### What publishes vs. what doesn't
 
@@ -251,48 +243,28 @@ Notes on the published set:
 - **`kit-storage`** &mdash; published so `cargo install kit-storage` installs the `kit`
   binary; it also ships via the signed GitHub Release archives and `cargo
   install --git`. Its library surface is unstable CLI internals, deliberately
-  **not** a public API &mdash; kept out of the pre-publish semver gate (the
-  `cargo semver-checks` step in `crates-publish.yml`). Depend on the `kit-*`
+  **not** a public API &mdash; kept out of the pre-publish semver gate. Depend on the `kit-*`
   library crates, not on `kit_storage::…`.
 - **The crates.io `kit` name** belongs to an unrelated project; the CLI is
   published as **`kit-storage`**. Do not run `cargo install kit`.
 
 ### Token
 
-`cargo publish` authenticates with the `CRATES_PACKAGE_KEY` **org-level** secret
-(scopes: publish-new plus publish-update), exposed to cargo as
-`CARGO_REGISTRY_TOKEN`. A token (not trusted publishing) is required because
-brand-new crates can't use trusted publishing on their first publish. The org
-secret must grant this repo access, and its crates.io account must own the
-crates (via the `makechain` team). Migrating to crates.io Trusted Publishing
-(OIDC) to drop the long-lived token is a recommended follow-up.
-
-> Both jobs in `.github/workflows/release-plz.yml` (`release-plz-release`,
-> `release-plz-pr`) are `workflow_dispatch`-only, gated on the repo variable
-> `RELEASE_PLZ_ENABLED == 'true'` (currently true). Neither runs on push.
->
-> This used to be different: `release-plz-release` ran on every push to
-> `main`, on the assumption that `release_always = false` in
-> `rust/release-plz.toml` would always no-op it ("commit is not from a
-> release PR"). That assumption broke on the v0.4.2 release (2026-09-02):
-> the kit-release skill's own procedure merges release-plz's own PR as the
-> release-prep PR, and release-plz recognized that merge commit as a real
-> release and actually ran `cargo publish` for every crate — racing (and
-> mostly winning against) the tag-driven `crates-publish.yml` publish, which
-> then failed with a harmless-but-confusing "already exists" error. The push
-> trigger was removed for this reason: `crates-publish.yml` is the sole real
-> publish path, and this job must never fire on its own.
+`cargo publish` needs a crates.io API token with the publish-new and
+publish-update scopes. The account must own the `kit-*` crates. A token is
+required because a brand-new crate cannot use trusted publishing on its first
+publish. Keep the token out of the repository.
 
 ### Gotchas
 
 - **Immutable versions**: crates.io never lets you overwrite a published
   version. Always bump before tagging; never re-publish an existing version.
-- **Partial publish**: if a publish fails mid-train, the already-landed crates
-  can't be re-published. Re-runs must `--exclude` what landed (edit the publish
-  step or publish the remainder by hand).
+- **Partial publish**: if a publish fails mid-train, the crates that landed
+  cannot be published again. Run the next attempt with `--exclude` for each
+  crate that landed.
 - **Native deps**: `cargo publish` builds each crate with **default** features,
   so no `libpcsclite` is needed (`kit-keystore`'s `backend-yubikey` is off by
-  default); only `protoc` is required (installed in the workflow for
+  default); only `protoc` is required (for
   `kit-rpc`).
 
 ## Signing and verification
@@ -602,24 +574,9 @@ x86_64 build is the most reliable reproducibility target for third parties.
 
 ## Required GitHub Actions secrets and variables
 
-| Secret | Purpose | Required for |
-| --- | --- | --- |
-| `CRATES_PACKAGE_KEY` (org-level) | crates.io publish token (publish-new plus publish-update) | `crates-publish.yml` |
-
-cosign keyless signing runs on the GitHub OIDC token. It needs no extra secret.
+cosign keyless signing runs on the GitHub OIDC token. No release step needs a
+repository secret.
 
 | Variable | Purpose | Required for |
 | --- | --- | --- |
 | `KIT_RELEASE_GPG_FINGERPRINTS` | Space-separated trusted 40-hex GPG fingerprints allowed to sign release tags (public keys must be on `keys.openpgp.org` or `keyserver.ubuntu.com`) | `release.yml` preflight |
-
-## One-time setup
-
-### `CRATES_PACKAGE_KEY`
-
-Generate a crates.io API token (scopes: publish-new plus publish-update) on an
-account that owns the `kit-*` crates (via the `makechain` team), and add it as
-an **org-level** secret named `CRATES_PACKAGE_KEY` with this repo granted access.
-For the very first publish, ensure each crate name is available or already owned
-by the org; crates.io rejects deps on unpublished crates, so the dependency-order
-publish in `crates-publish.yml` handles a clean first release once the token and
-version are in place.
