@@ -41,6 +41,59 @@ inheriting from `contrib/signers/Cargo.toml`, and they are not part of
 the `kit` binary's link graph. They communicate over the protocol
 defined in `specs/SPEC-EXTERNAL-SIGNER.md`.
 
+### 1.1 Optional kit-core features
+
+`kit-core` has two optional features. Both are off by default. Other
+crates enable them through their own features. Kept code depends on both,
+so the modules stay.
+
+| Feature | Module | Lines | Kept code that needs it |
+|---|---|---|---|
+| `history-mmr` | `history.rs`, `history/ancestry.rs` | 2,478 | `refs.rs` and `refs/ancestry_state.rs` (ref-write journal), `kit-sync` `worktree.rs`, and in `kit-storage` the `branch`, `commit`, `reflog`, `reset` and `update-ref` commands. The `kit-formal-conformance` ref test and `docs/specs/SPEC-HISTORY-PROOF.md` also cite it. |
+| `sparse-checkout` | `sparse.rs` | 537 | In `kit-storage`: `sparse_cache.rs`, the `--sparse` option of `clone` and `checkout`, and the `sparse_checkout_local` test. Also the `sparse-checkout` feature of `kit-transport-s3`, the `sparse_verify` fuzz target and the `layout.rs` witness cache directory. `docs/specs/SPEC-SPARSE-CHECKOUT.md` specifies the wire format. |
+
+Removing one of these modules means removing every item in its row.
+The spec text goes in the same change as the code.
+
+The `pack-shards` feature and the `pack_shard` module are not part of
+`kit`. Nothing kept depended on them.
+
+#### Size of kit-core
+
+The count is `find rust/crates/kit-core -name '*.rs' | xargs cat | wc -l`.
+It covers `src`, `tests` and `examples`.
+
+| Item | Lines |
+|---|---|
+| Imported tree | 81,981 |
+| Net change in `src` and `tests` before this section | -850 |
+| `pack_shard` module removed | -1,607 |
+| `layout.rs` pack-shard directory removed | -25 |
+| Now | 79,499 |
+
+The migration plan sets a target of 77,357 lines. The plan reaches that
+number by removing `pack_shard`, `history` and `sparse` (4,624 lines in
+total). Here, `history` and `sparse` stay (3,015 lines). Without them the
+count is 76,484, which is 873 lines under the plan. The other changes
+above account for that difference.
+
+### 1.2 Owner signature schemes
+
+The grant owner schemes `secp256k1-eip191` and `webauthn-p256` stay.
+The decision is to keep the code and the spec text together.
+
+- `kit-attest` `eth.rs` (Keccak-256, EIP-191 digest, address derivation)
+  is the base of both schemes and of the `0x` namespace address.
+- `kit-attest` `grant/owner.rs` and `grant/webauthn.rs` verify the
+  schemes. `kit-storage` `grants/owner.rs` signs with them.
+- `kit grant`, `kit epoch` and `kit visibility` use them. `docs/CLI.md`
+  and `docs/specs/SPEC-WRITE-GRANTS.md` section 4 describe them.
+- The grant golden vectors and `scripts/golden/grants_ref.py` check them.
+
+A removal has to take out all of these in one change, with the
+`0x` namespace rule in `repo_identity`. No code is dead today, so the
+spec text stays.
+
 ---
 
 ## 2. Data flow: object → pack → ref → transport
