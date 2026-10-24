@@ -396,12 +396,6 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
                 ));
             }
         },
-        "author_mid" => {
-            return Err(emit_err(
-                "config key `author_mid` has been removed; use `user.identity` (mid:<N>)",
-                exit::CONFIG_ERROR,
-            ));
-        }
         // Inert git-compat `core.*` keys (section matched case-insensitively):
         // store the allowlisted ones, and refuse the dangerous ones (they
         // would change what kit executes if honored). Anything else under
