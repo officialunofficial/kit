@@ -410,7 +410,7 @@ fn config_shows_attest_signer() {
 }
 
 #[test]
-fn commit_can_use_keystore_signer_without_legacy_keygen() {
+fn commit_can_use_keystore_signer_without_file_keygen() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(td.path().join("repo")).expect("repo dir");
     assert!(run(td.path(), &["init"]).status.success());
@@ -455,7 +455,7 @@ fn commit_can_use_keystore_signer_without_legacy_keygen() {
     );
     assert!(
         !td.path().join("repo/.kit/keys/default.key").exists(),
-        "keystore commit must not silently create the legacy key"
+        "keystore commit must not silently create the file key"
     );
 
     let head = resolve_head(&td.path().join("repo"));
@@ -615,7 +615,7 @@ fn keystore_commit_missing_key_fails_without_generation() {
     );
     assert!(
         !td.path().join("repo/.kit/keys/default.key").exists(),
-        "keystore commit must not silently create the legacy key"
+        "keystore commit must not silently create the file key"
     );
     assert!(
         !td.path().join("data/kit/keys").exists(),
@@ -913,7 +913,7 @@ fn assert_missing_history_key_failure(root: &std::path::Path, output: &Output) {
     );
     assert!(
         !root.join("repo/.kit/keys/default.key").exists(),
-        "history command must not silently create the legacy key"
+        "history command must not silently create the file key"
     );
     assert!(
         !root

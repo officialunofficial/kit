@@ -665,7 +665,7 @@ pub(crate) fn owner_ed25519_signer(
     layout: &RepoLayout,
 ) -> Result<Arc<dyn kit_transport_connect::EnvelopeSigner>, String> {
     match cfg.signer.as_str() {
-        "" | "legacy" => {
+        "" | "file" => {
             let key_path = crate::config::resolve_key_path(layout, &cfg.signing_key)
                 .map_err(|e| format!("signing_key: {e}"))?;
             if !key_path.exists() {
@@ -681,7 +681,7 @@ pub(crate) fn owner_ed25519_signer(
             cfg,
         )?)),
         other => Err(format!(
-            "unknown signer `{other}` — expected `legacy` or `keystore`"
+            "unknown signer `{other}` — expected `file` or `keystore`"
         )),
     }
 }
@@ -692,13 +692,13 @@ pub(crate) fn owner_ed25519_signer(
 ///
 /// Reuses EXACTLY the same signer resolution as `kit commit`'s
 /// [`crate::commands::commit::load_commit_signer`] (`cfg.signer` ==
-/// `""`/`"legacy"` -> the repo key file at `cfg.signing_key`; `"keystore"`
+/// `""`/`"file"` -> the repo key file at `cfg.signing_key`; `"keystore"`
 /// -> `cfg.key.ed25519_ref_or_fallback()` via `kit-keystore`) rather than
 /// inventing a parallel key path — the write envelope authenticates with
 /// the SAME Ed25519 identity that already signs the user's commits.
 ///
 /// Both signer kinds sign the raw envelope digest directly (no
-/// SPEC-SIGNING commit/remix/tag domain prefix): the legacy path delegates
+/// SPEC-SIGNING commit/remix/tag domain prefix): the file path delegates
 /// to the EXISTING `kit_attest::RepoKeySigner` (its `sign` already signs
 /// the given bytes directly — "the PAE's own `\"DSSEv1 \"` prefix is the
 /// domain separator" per its own doc comment — so no new raw-Ed25519 call
@@ -715,7 +715,7 @@ pub(crate) fn envelope_signer_from_config(
     }
     let remote_error = |msg: String| DispatchError::Transport(TransportError::RemoteError(msg));
     match cfg.signer.as_str() {
-        "" | "legacy" => {
+        "" | "file" => {
             let key_path =
                 crate::config::resolve_key_path(layout, &cfg.signing_key).map_err(|e| {
                     remote_error(format!("transport_auth = envelope: signing_key: {e}"))
@@ -741,7 +741,7 @@ pub(crate) fn envelope_signer_from_config(
             ))
         }
         other => Err(remote_error(format!(
-            "transport_auth = envelope: unknown signer `{other}` — expected `legacy` or `keystore`"
+            "transport_auth = envelope: unknown signer `{other}` — expected `file` or `keystore`"
         ))),
     }
 }
@@ -1693,7 +1693,7 @@ mod tests {
         for endpoint in ["kit+https://untrusted.example", "kit+http://127.0.0.1:1"] {
             let mut cfg = Config {
                 transport_auth: "envelope".into(),
-                signer: "legacy".into(),
+                signer: "file".into(),
                 signing_key: ".kit/keys/missing-signing-key".into(),
                 ..Config::default()
             };

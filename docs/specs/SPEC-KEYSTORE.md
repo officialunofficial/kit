@@ -26,7 +26,7 @@ by SPEC-EXTERNAL-SIGNER, not here.
 `kit` treats signatures as trust anchors for commits, remix objects, and
 DSSE-wrapped in-toto attestations. Today, long-term signing keys are raw
 32-byte files under `.kit/keys/`, protected by strict local filesystem
-hardening. That is a useful compatibility baseline, but it is not a
+hardening. That is a useful baseline, but it is not a
 cross-platform vault policy.
 
 `kit-keystore` provides a generic signing-key vault abstraction over
@@ -35,7 +35,7 @@ signing keystore, not a protocol lifecycle system. It returns signer handles;
 callers decide what those signers are allowed to sign.
 
 `kit-keystore` provides the crate, API, CLI, config, a software backend (both
-a deterministic raw-compatibility mode and an encrypted-at-rest mode), OS-native
+a deterministic raw-file mode and an encrypted-at-rest mode), OS-native
 extractable storage backends where implemented, and keystore-backed
 commit/attestation signing, with honest capability reporting throughout. It
 does not provide Secure Enclave, Windows TPM/CNG provider keys, TPM/PCR-bound
@@ -58,7 +58,7 @@ Shipped against this spec:
 - Software backend with encrypted-at-rest records (`software:<label>`,
   XChaCha20-Poly1305 + length-prefixed AAD over backend/label/algorithm /
   public key/key ID/attrs/protector ID, wrapped DEK in an OS protector).
-- Software-raw compatibility backend (`software-raw:<label>`), reusing
+- Software-raw backend (`software-raw:<label>`), reusing
   `kit_core::sign::{load_raw_32, save_raw_32}` hardening.
 - OS-native backends behind feature flags: `macos-keychain`,
   `linux-secret-service`, `systemd-creds`. (Windows is not a supported
@@ -71,7 +71,7 @@ Shipped against this spec:
   defaults specified in §9.
 - Keystore-backed commit signing (`signer = keystore`) and attestation
   signing (`attest.signer = keystore`).
-- Repo-forbidden config gating for every selector in §8 and the legacy
+- Repo-forbidden config gating for every selector in §8 and the raw-file
   selectors in §8.3.
 
 Not yet shipped against this spec:
@@ -93,15 +93,13 @@ Not yet shipped against this spec:
    dependencies.
 2. Platform and vault dependencies live in a new crate,
    `rust/crates/kit-keystore`, behind feature flags where appropriate.
-3. Existing raw key files remain supported for compatibility. The current
-   `kit keygen` command remains as a legacy compatibility surface unless a
-   future spec explicitly removes it.
+3. Raw key files are supported. The `kit keygen` command creates them.
 4. New keystore UX is exposed through `kit key ...`, not by changing the
-   meaning of `kit keygen` in-place.
+   meaning of `kit keygen`.
 5. Repo-controlled config must never select a backend, label, key reference,
    signer binary, or signing algorithm. All such selectors are user-scoped.
 6. No signing command may silently generate or rotate a key. Key creation is
-   explicit through `kit key generate` or legacy `kit keygen`.
+   explicit through `kit key generate` or `kit keygen`.
 7. Backend capabilities are explicit. A backend must not pretend to support
    export, import, user presence, hardware binding, or algorithm support that
    it cannot actually provide.
@@ -113,7 +111,7 @@ Not yet shipped against this spec:
 10. `software:<label>` is the encrypted-at-rest software backend. Production
     `kit-storage` builds must enable the target-appropriate OS protector feature,
     while `kit-keystore` default features remain empty. Raw-file
-    compatibility is exposed only through the explicit `software-raw:<label>`
+    storage is exposed only through the explicit `software-raw:<label>`
     backend token and must not be the secure default.
 11. The encrypted software backend must use OS-protected envelope encryption,
     not a password-derived key or an unaudited local encryption scheme.
@@ -132,7 +130,7 @@ Not yet shipped against this spec:
 - `kit-attest` integration through a keystore-backed implementation of its
   existing `Signer` trait.
 - Ed25519 commit signing through a keystore signer handle.
-- Test vectors proving compatibility with current software signing semantics.
+- Test vectors proving equivalence with raw-file software signing semantics.
 - Threat-model documentation updates.
 
 ### 3.2 Out of scope
@@ -325,13 +323,13 @@ Public key encodings:
 Canonical key IDs:
 
 - Ed25519 new canonical form: `ed25519:<64 lowercase hex raw pubkey>`.
-- Ed25519 legacy attestation form remains accepted where already supported:
+- Ed25519 repo-key attestation form:
   `blake3:<64 lowercase hex blake3(pubkey)>`.
 - secp256k1: `secp256k1:<66 lowercase hex compressed SEC1 pubkey>`.
 - P-256: `p256:<66 lowercase hex compressed SEC1 pubkey>`.
 
-The keystore must expose canonical key IDs. Compatibility adapters may emit
-legacy key IDs only where existing verifier contracts require them. Public
+The keystore must expose canonical key IDs. The repo-key signer emits
+the `blake3:` form. Public
 `KeyId` values must be non-empty, must not contain control characters, and must
 be at most 256 bytes.
 
@@ -601,12 +599,11 @@ Storage:
   directory or a documented equivalent.
 - `software:<label>` maps to exactly one encrypted key record under that
   user-scoped storage root. It must not resolve relative to the current repo.
-- `software-raw:<label>` maps to exactly one raw compatibility key record under
-  a raw-specific storage subtree. It exists for deterministic tests,
-  compatibility, and explicit migration work only. It must never be selected by
-  default.
-- Legacy `.kit/keys/*` files remain supported only through legacy raw-file
-  flows such as `kit keygen`, `signing_key`, and `repo-key` compatibility.
+- `software-raw:<label>` maps to exactly one raw key record under
+  a raw-specific storage subtree. It exists for deterministic tests only.
+  It must never be selected by default.
+- `.kit/keys/*` files are used only through the raw-file
+  flows such as `kit keygen`, `signing_key`, and `repo-key`.
 - The software backend reuses the existing hardened raw-file functions,
   behind the `kit-keystore` abstraction.
 - If it writes files, it must preserve or improve current hardening:
@@ -621,8 +618,8 @@ Storage:
 
 Storage-security modes:
 
-- **Compatibility raw-file mode** (`software-raw`) preserves the hardened
-  `0600` raw-key behavior of legacy `kit keygen`. It does not satisfy the
+- **Raw-file mode** (`software-raw`) preserves the hardened
+  `0600` raw-key behavior of `kit keygen`. It does not satisfy the
   encrypted-at-rest software-backend acceptance criterion, and must never be
   the default.
 - **Encrypted software-file mode** owns the `software` backend token. It must
@@ -650,7 +647,7 @@ Storage-security modes:
 - The software backend must not claim `supports_device_bound`,
   `supports_non_extractable`, or encrypted-at-rest properties unless implemented
   truthfully.
-- The raw compatibility backend must be clearly reported as
+- The raw-file backend must be clearly reported as
   `BackendKind::SoftwareRaw` and must not claim encrypted-at-rest protection.
 
 #### 6.1.1 `EncryptedKeyRecord` wire format
@@ -697,8 +694,7 @@ offset  size     field
 Any bit outside 0–2 set MUST be rejected as a decoding error.
 
 Readers MUST reject any version byte other than `0x01` (no dual-version
-compatibility &mdash; see SPEC-CONVENTIONS §2's note on versioning; this is
-local, unreleased state with no installed base to protect) and MUST
+read &mdash; see SPEC-CONVENTIONS §2.2) and MUST
 reject any trailing bytes after the declared field list, the same
 discipline SPEC-INDEX applies to the staging-area file.
 
@@ -923,7 +919,7 @@ when no explicit backend or configured key ref supplies one.
 selection. Exact names are normative unless amended here:
 
 ```text
-signer = legacy
+signer = file
 key.backend = software
 key.default_ref = software:default
 key.ed25519_ref = software:default
@@ -934,8 +930,8 @@ attest.signer = repo-key
 
 Interpretation:
 
-- `signer` selects the commit-signing source. Built-in default is `legacy`,
-  which preserves existing raw-file `signing_key` behavior. Setting
+- `signer` selects the commit-signing source. Built-in default is `file`,
+  which uses the raw-file `signing_key`. Setting
   `signer = keystore` opts commit signing into `kit-keystore`.
 - `key.backend` is the default backend for `kit key` commands when no backend
   is provided and no full key ref is being used.
@@ -949,11 +945,11 @@ Interpretation:
 
 Precedence:
 
-- Commit signing always uses Ed25519. If `signer = legacy` or empty, commit
-  signing uses the existing `signing_key` raw-file behavior. If
+- Commit signing always uses Ed25519. If `signer = file` or empty, commit
+  signing uses the `signing_key` raw-file. If
   `signer = keystore`, commit signing uses `key.ed25519_ref`; if empty, it uses
   `key.default_ref`; if both are empty, it fails with a config error rather than
-  silently falling back to legacy raw-file signing.
+  silently falling back to raw-file signing.
 - Keystore-backed attestation signing uses the ref for the selected algorithm:
   `key.ed25519_ref`, `key.secp256k1_ref`, or `key.p256_ref`. If the selected
   per-algorithm ref is empty, it uses `key.default_ref`.
@@ -974,9 +970,9 @@ Every config key in section 8.1 must be present in `REPO_FORBIDDEN_KEYS` in
 include additional keys (for example `signing_key`,
 `attest.external_signer_path`, `attest.external_signer_args`,
 `attest.secp256k1_key_path`, `attest.p256_key_path`,
-`attest.default_algorithm`) covering legacy signer selectors and other
+`attest.default_algorithm`) covering raw-file signer selectors and other
 private-key-influencing settings. Such extras must not be removed because
-they enforce the same confused-deputy posture for the pre-keystore code path.
+they enforce the same confused-deputy posture for the raw-file code path.
 
 Reason:
 
@@ -987,9 +983,9 @@ Reason:
 - A malicious repo must not trigger user-presence prompts or confused-deputy
   through a user-trusted key.
 
-### 8.3 Existing keys
+### 8.3 Raw-file keys
 
-Existing keys remain valid:
+These keys select raw-file signing:
 
 ```text
 signing_key
@@ -999,11 +995,10 @@ attest.external_signer_path
 attest.external_signer_args
 ```
 
-Compatibility behavior:
+Behavior:
 
-- `signing_key` continues to drive legacy raw-file Ed25519 commit signing.
-- `attest.*_key_path` continues to drive legacy repo-key attestation signing.
-- Existing security scope rules remain unchanged.
+- `signing_key` drives raw-file Ed25519 commit signing.
+- `attest.*_key_path` drives repo-key attestation signing.
 - Keystore refs do not replace existing path keys; they are a parallel
   mechanism.
 
@@ -1015,8 +1010,7 @@ The new command namespace is:
 kit key <subcommand>
 ```
 
-`kit keygen` remains as a legacy compatibility command and may internally
-delegate to the old raw-file implementation.
+`kit keygen` creates raw-file keys.
 
 ### 9.1 `kit key generate`
 
@@ -1138,7 +1132,7 @@ Behavior:
 - Must require `--yes`. No interactive prompt is required.
 - Must delete exactly one selected key.
 - Must report key-not-found distinctly from successful deletion.
-- Must not delete legacy raw key files unless the selected backend is the
+- Must not delete raw key files unless the selected backend is the
   software backend and the selected label maps to that exact key.
 - For encrypted software storage, deletion intentionally fails if the selected
   record cannot be decrypted with its recorded protector. Manual recovery from a
@@ -1207,11 +1201,11 @@ Requirements:
   `kit_attest::verify` registry when the trust root contains the emitted
   public key.
 
-Key ID compatibility:
+Key IDs:
 
-- New keystore Ed25519 key IDs should be canonical `ed25519:<pubkey>`.
-- Existing repo-key signer may continue using legacy `blake3:<hash(pubkey)>`.
-- Verifier must continue accepting legacy `blake3:` for Ed25519.
+- Keystore Ed25519 key IDs should be canonical `ed25519:<pubkey>`.
+- The repo-key signer uses `blake3:<hash(pubkey)>`.
+- The verifier accepts `blake3:` for Ed25519.
 
 ## 12. External signer relationship
 
@@ -1225,7 +1219,7 @@ Rules:
 - `kit-keystore` may later provide an external signer backend or bridge using
   the same RPC protocol.
 - Keystore work must not mutate the v1 RPC wire schema unless this spec is
-  updated with a compatibility analysis.
+  updated with an analysis of the change.
 - If key refs are passed to external signers in the future, use
   `KEY_FORM_OPAQUE_HANDLE` and explicit key_ref bytes.
 
@@ -1245,7 +1239,7 @@ Rules:
 
 - `commit`, `attest`, `merge`, `cherry-pick`, or any future signing command
   must not generate a key as a side effect.
-- Missing key errors must point users to `kit key generate` or legacy
+- Missing key errors must point users to `kit key generate` or
   `kit keygen`.
 
 ### 13.3 Secret handling
@@ -1314,7 +1308,7 @@ If implemented:
 - User config can set keystore selectors.
 - Missing keys fail without generation.
 
-### 14.3 Golden compatibility tests
+### 14.3 Golden equivalence tests
 
 Required golden tests:
 
@@ -1409,7 +1403,7 @@ the per-section requirements above remain normative.
 - Teach `kit commit` to use a configured Ed25519 keystore key ref.
   **Shipped** behind `signer = keystore`.
 - Add golden equivalence tests. **Shipped** &mdash; see
-  `keystore_commit_signature_matches_legacy_keypair_signature` in
+  `keystore_commit_signature_matches_file_keypair_signature` in
   `commands/commit.rs` tests.
 
 ### Backend matrix
@@ -1417,7 +1411,7 @@ the per-section requirements above remain normative.
 - Make `software` the encrypted-at-rest software backend using OS-protected
   envelope encryption. **Shipped** &mdash; `SoftwareKeystore` + `EncryptedKeyRecord`
   (XChaCha20-Poly1305, length-prefixed AAD, OS protector wrapping the DEK).
-- Move raw compatibility persistence to `software-raw`. **Shipped** as
+- Move raw-file persistence to `software-raw`. **Shipped** as
   `SoftwareRawKeystore`.
 - Implement macOS Keychain, Linux Secret Service, `systemd-creds`, and
   YubiKey OpenPGP/PIV/FIDO2 backends behind feature flags with honest
@@ -1453,7 +1447,7 @@ the per-section requirements above remain normative.
   `systemd-creds`, and YubiKey backends with capability
   reports limited to what they actually implement.
 - The encrypted software-file design is OS-protected envelope encryption. The
-  `software` backend is encrypted-at-rest; raw compatibility is explicit via
+  `software` backend is encrypted-at-rest; raw-file storage is explicit via
   `software-raw`.
 - YubiKey support includes OpenPGP/PIV discovery and FIDO2/CTAP fail-closed
   routing; bounded PIN/touch prompt signing is out of scope unless this spec
@@ -1468,14 +1462,14 @@ worth adding. Out of scope for now.
 `kit-keystore` uses these fixed conservative defaults:
 
 - default backend: encrypted-at-rest software backend (`software`)
-- raw compatibility backend: explicit `software-raw`
-- commit signing source: legacy raw-file `signing_key`
+- raw-file backend: explicit `software-raw`
+- commit signing source: raw-file `signing_key`
 - attestation signing source: existing `repo-key`
 - new Ed25519 keystore key IDs: `ed25519:<pubkey>`
-- repo-key attestation legacy key IDs: `blake3:<hash(pubkey)>`
+- repo-key attestation key IDs: `blake3:<hash(pubkey)>`
 - export mode: stdout only with `--unsafe-print-secret`
 - commit and attestation refs: shared per-algorithm `key.*_ref` values
-- no silent migration from raw files
+- no silent import of raw files
 - no implicit export
 - no repo-controlled key refs
 - no hardware capability claims without runtime proof
@@ -1489,8 +1483,8 @@ here adds a new requirement.
 
 | Invariant | Enforced by |
 |---|---|
-| A repo can never choose the key, backend, label, signer, or algorithm that signs | every §8.1 selector (and the §8.3 legacy ones) is in `REPO_FORBIDDEN_KEYS` (§2.5, §8.2, §13.1) |
-| No signing command ever creates or rotates a key | explicit `kit key generate` / legacy `kit keygen` only; missing keys are hard errors (§2.6, §10, §13.2) |
+| A repo can never choose the key, backend, label, signer, or algorithm that signs | every §8.1 selector (and the §8.3 raw-file ones) is in `REPO_FORBIDDEN_KEYS` (§2.5, §8.2, §13.1) |
+| No signing command ever creates or rotates a key | explicit `kit key generate` / `kit keygen` only; missing keys are hard errors (§2.6, §10, §13.2) |
 | An unavailable backend never silently degrades to a weaker one | construction/operations return unavailable errors; Linux protector selection fails closed (§5.3, §6.1) |
 | Capabilities never overstate what a backend can do | operation booleans tied to trait availability; per-backend honesty rules (§2.7, §5.3, §13.4) |
 | Requested key attributes are honored or refused, never silently weakened | backends reject unsupported attribute combinations (§5.2, §13.4) |
@@ -1500,6 +1494,6 @@ here adds a new requirement.
 | An encrypted record cannot be re-bound to different metadata | AAD binds version/backend/label/algorithm/pubkey/keyid/attrs (§6.1, §6.1.1) |
 | `(label, algorithm)` is never silently overwritten, and delete removes exactly one key | overwrite requires `--force` / `overwrite: true`; no prefix deletes (§5.7, §9.1, §9.5) |
 | A configured full key ref's backend is authoritative | the ref routes to its backend; never reinterpreted via `key.backend` (§7, §8.1) |
-| Keystore signing is byte-equal to legacy signing where determinism allows | golden equivalence vectors for deterministic software backends; verification-equivalence otherwise (§2.8, §14.3) |
+| Keystore signing is byte-equal to raw-file signing where determinism allows | golden equivalence vectors for deterministic software backends; verification-equivalence otherwise (§2.8, §14.3) |
 | The keystore never invents protocol-level domain separation | `sign` signs the supplied bytes under existing kit semantics (commit hash per §10, DSSE PAE per §11) (§5.6) |
 | FIDO2/CTAP labels fail closed through the keystore API | dedicated label guard returns `UnsupportedOperation`, routing to the external signer path (§6.7) |

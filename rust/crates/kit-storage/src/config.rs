@@ -40,7 +40,7 @@ pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub const USER_CONFIG_SUBPATH: &str = "kit/config";
 pub const DEFAULT_SIGNING_KEY: &str = ".kit/keys/default.key";
 pub const DEFAULT_BRANCH: &str = "main";
-pub const DEFAULT_SIGNER: &str = "legacy";
+pub const DEFAULT_SIGNER: &str = "file";
 pub const DEFAULT_KEY_BACKEND: &str = "software";
 pub const DEFAULT_KEY_REF: &str = "software:default";
 pub const DEFAULT_SECP256K1_KEY_REF: &str = "software:default-secp256k1";
@@ -888,7 +888,7 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
         "trusted_remote_endpoint" => val.clone_into(&mut cfg.trusted_remote_endpoint),
         "admission_helper" => val.clone_into(&mut cfg.admission_helper),
         "signer" => {
-            expect_one_of(key, val, &["legacy", "keystore"])?;
+            expect_one_of(key, val, &["file", "keystore"])?;
             val.clone_into(&mut cfg.signer);
         }
         "pull.require_signed" => {
@@ -2130,7 +2130,7 @@ mod tests {
             };
             // `Config::with_defaults()` pre-seeds a few fields (e.g.
             // `signing_key = ".kit/keys/default.key"`, `signer =
-            // "legacy"`). Merge order is "defaults → user → repo
+            // "file"`). Merge order is "defaults → user → repo
             // (filtered)", so a dropped repo line cannot OVERWRITE the
             // default. The crisp invariant is: the attacker's
             // SENTINEL must NEVER appear in the observed value.

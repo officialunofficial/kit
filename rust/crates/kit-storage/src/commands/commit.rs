@@ -682,14 +682,14 @@ fn load_signing_key(
 }
 
 pub(super) enum CommitSigner {
-    Legacy(KeyPair),
+    File(KeyPair),
     Keystore(Box<dyn kit_keystore::KeySigner>),
 }
 
 impl CommitSigner {
     pub(super) fn public_key(&self) -> Result<[u8; 32], (String, u8)> {
         match self {
-            Self::Legacy(kp) => Ok(kp.public.0),
+            Self::File(kp) => Ok(kp.public.0),
             Self::Keystore(signer) => {
                 let public = signer
                     .public_key()
@@ -708,11 +708,11 @@ impl CommitSigner {
     }
 
     /// Sign a [`Tag`] under the distinct tag domain. Mirrors
-    /// [`Self::sign_commit`]: legacy keypairs sign directly, keystore
+    /// [`Self::sign_commit`]: file keypairs sign directly, keystore
     /// signers sign the pre-computed tag signing hash.
     pub(super) fn sign_tag(&mut self, tag: &Tag) -> Result<[u8; 64], (String, u8)> {
         match self {
-            Self::Legacy(kp) => sign::sign_tag(tag, kp)
+            Self::File(kp) => sign::sign_tag(tag, kp)
                 .map(|signature| signature.0)
                 .map_err(|error| (format!("sign: {error}"), exit::GENERAL_ERROR)),
             Self::Keystore(signer) => {
@@ -736,7 +736,7 @@ impl CommitSigner {
 
     pub(super) fn sign_commit(&mut self, commit: &Commit) -> Result<[u8; 64], (String, u8)> {
         match self {
-            Self::Legacy(kp) => sign::sign_commit(commit, kp)
+            Self::File(kp) => sign::sign_commit(commit, kp)
                 .map(|signature| signature.0)
                 .map_err(|error| (format!("sign: {error}"), exit::GENERAL_ERROR)),
             Self::Keystore(signer) => {
@@ -764,10 +764,10 @@ pub(super) fn load_commit_signer(
     cfg: &Config,
 ) -> Result<CommitSigner, (String, u8)> {
     match cfg.signer.as_str() {
-        "" | "legacy" => load_signing_key(layout, &cfg.signing_key).map(CommitSigner::Legacy),
+        "" | "file" => load_signing_key(layout, &cfg.signing_key).map(CommitSigner::File),
         "keystore" => load_keystore_commit_signer(cfg),
         other => Err((
-            format!("unknown signer `{other}` — expected `legacy` or `keystore`"),
+            format!("unknown signer `{other}` — expected `file` or `keystore`"),
             exit::CONFIG_ERROR,
         )),
     }
@@ -798,7 +798,7 @@ fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8
     let signer = opener.open(&selector).map_err(|error| match error {
         kit_keystore::Error::KeyNotFound(_) => (
             format!(
-                "missing keystore signing key for algorithm ed25519 — run `kit key generate --backend {} --algorithm ed25519 --label <label>` first, or set `signer = legacy` and use `kit keygen`: {error}",
+                "missing keystore signing key for algorithm ed25519 — run `kit key generate --backend {} --algorithm ed25519 --label <label>` first, or set `signer = file` and use `kit keygen`: {error}",
                 key_ref.backend()
             ),
             exit::NOINPUT,
@@ -1277,7 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn keystore_commit_signature_matches_legacy_keypair_signature() {
+    fn keystore_commit_signature_matches_file_keypair_signature() {
         let seed = [0x5a; 32];
         let kp = KeyPair::from_seed(seed);
         let store_root = tempfile::tempdir().unwrap();
@@ -1308,7 +1308,7 @@ mod tests {
         );
 
         let keystore_sig = signer.sign_commit(&commit).unwrap();
-        let legacy_sig = sign::sign_commit(&commit, &kp).unwrap().0;
-        assert_eq!(keystore_sig, legacy_sig);
+        let file_sig = sign::sign_commit(&commit, &kp).unwrap().0;
+        assert_eq!(keystore_sig, file_sig);
     }
 }

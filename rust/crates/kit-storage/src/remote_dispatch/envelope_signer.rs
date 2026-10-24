@@ -1,5 +1,5 @@
 //! `kit_transport_connect::EnvelopeSigner` adapters over the SAME signer
-//! resolution `kit commit` uses (`cfg.signer` == `""`/`"legacy"` -> the
+//! resolution `kit commit` uses (`cfg.signer` == `""`/`"file"` -> the
 //! repo key file; `"keystore"` -> a keystore backend), so `kit push`'s
 //! write-envelope auth authenticates with the user's existing commit
 //! identity rather than a parallel key path. See
@@ -20,7 +20,7 @@ use kit_transport_connect::EnvelopeSigner;
 
 use crate::config::Config;
 
-/// `cfg.signer = ""` / `"legacy"`: the same repo-key-file `KeyPair`
+/// `cfg.signer = ""` / `"file"`: the same repo-key-file `KeyPair`
 /// `kit commit` loads via `crate::commands::commit::load_signing_key`,
 /// signed through the EXISTING `kit_attest::RepoKeySigner` — its `sign`
 /// already signs the given bytes directly with no extra domain prefix

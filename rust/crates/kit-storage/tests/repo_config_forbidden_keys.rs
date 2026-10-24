@@ -194,7 +194,7 @@ fn admission_config_routes_to_user_and_refuses_reserved_names() {
 
 #[test]
 fn repo_signer_dropped() {
-    assert_forbidden_key_dropped("signer", "keystore", "legacy");
+    assert_forbidden_key_dropped("signer", "keystore", "file");
 }
 
 #[test]
