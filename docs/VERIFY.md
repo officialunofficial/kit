@@ -9,7 +9,7 @@ code snippet on this page has been run against a real repository as part of
 writing it.
 
 This guide covers the "verifier kit". The kit itself &mdash; proofs, the
-disclosure module, closure export, the CLI, the wasm exports &mdash; lives in
+disclosure module, closure export and the CLI &mdash; lives in
 the code. This document explains how to *use* it.
 
 ## Contents
@@ -169,10 +169,9 @@ pack-internal encoding detail, not part of object identity).
 
 A closure is carried as one or more [SPEC-PACKFILE](specs/SPEC-PACKFILE.md)
 v1 packs containing **only raw (`0x00`) entries** &mdash; no compression, no
-deltas. This is deliberate: `kit-wasm` is built with `default-features =
-false` (no `pack-zstd`, keeping the wasm build blst/zstd-free per
-SPEC-MERKLE-OBJECTS' constraint), so a wasm-based verifier has no way to
-decompress a `0x03`/`0x04` entry and no store to resolve a delta base
+deltas. This is deliberate: a verifier built without `pack-zstd` (for example a wasm32
+build, which stays blst/zstd-free per SPEC-MERKLE-OBJECTS' constraint) has no
+way to decompress a `0x03`/`0x04` entry and no store to resolve a delta base
 against. A verifier MUST scan entry *types* before doing any decompression
 work, and reject a delta or compressed entry outright as a profile
 violation naming the pack and entry index &mdash; never attempt to decompress
@@ -269,45 +268,6 @@ from the manifest &mdash; a manifest whose embedded `root` disagrees with
 `expected_root` is rejected (`ClosureRootMismatch`) before any pack is even
 touched. The manifest is a locator (which packs to fetch), never a trust
 anchor.
-
-**TypeScript**, with `@officialunofficial/kit-wasm`. Packs travel as one
-concatenated buffer plus a JSON array of their individual lengths, since
-`js_sys::Array<Uint8Array>` doesn't cross the wasm boundary as cheaply as a
-flat buffer:
-
-```ts
-import { verify_closure_manifest } from "@officialunofficial/kit-wasm";
-
-const commitId =
-  "767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519";
-const manifest: Uint8Array = /* MANIFEST.mkcl bytes */;
-const packs: Uint8Array[] = [/* one Uint8Array per .pack file, export order */];
-
-const concat = new Uint8Array(packs.reduce((n, p) => n + p.byteLength, 0));
-let offset = 0;
-for (const p of packs) {
-  concat.set(p, offset);
-  offset += p.byteLength;
-}
-
-const report = JSON.parse(
-  verify_closure_manifest(
-    commitId,
-    manifest,
-    concat,
-    JSON.stringify(packs.map((p) => p.byteLength)),
-  ),
-);
-if (!report.complete) {
-  throw new Error(`closure incomplete: ${report.missing.length} missing, ${report.corrupt.length} corrupt`);
-}
-```
-
-Concatenated packs are capped independently of a disclosure bundle, at
-1 GiB (`MAX_CLOSURE_INPUT_BYTES`, matching the native store's per-object
-cap) &mdash; a closure is every object reachable from a commit, a
-realistically much larger shape than a handful of disclosure proofs, so it
-gets its own, much larger ceiling (see §7).
 
 ## 4. Partial disclosure (bundle)
 
@@ -422,8 +382,8 @@ $ kit verify-proof 64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592
 {"commit_id":"64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93","tree_hash":"15fa3e247b96d89c9504a8125be55b3de930ccc9e3a2f750fff0a25098cd7cf8","path":[{"name":"src","name_hex":"737263","mode":"tree"},{"name":"lib.rs","name_hex":"6c69622e7273","mode":"blob"}],"leaf_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","signer":"0a486e59affe8fb54af5fa3e31b3b49663970da1cba4140d538a72ffb12e2077","signature_valid":true,"payload":{"kind":"range","bytes_len":40,"bytes_blake3":"0b9523ef4483e7a5a1651f25553c85294f0bf872b689c840df3c9f4a494c5cf1","blob_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","chunk":null,"offset_in_blob":100,"absolute_offset":100},"step_inner_roots":["36b9b63b57ac62c1b0afee72d739e0d8aece1b17d0229b7a3d580b9e2c4cf955","7e837a5798b77529da077b0475cd370a2114c7c5dc99a654eecdc3559ac89ff4"],"chunk_inner_root":null,"signer_trusted":null}
 ```
 
-This is the same shape `kit-wasm`'s `verify_disclosure` produces
-(`signer_trusted` is the CLI's own trust-roots addition on top).
+`signer_trusted` is the CLI's own trust-roots addition on top of the
+disclosure verifier's result.
 
 **Rust:**
 
@@ -441,35 +401,6 @@ assert_eq!(disclosed.path, vec![
 ]);
 assert!(disclosed.signature_valid);
 ```
-
-**TypeScript**, with `@officialunofficial/kit-wasm`:
-
-```ts
-import {
-  verify_disclosure,
-  disclosure_payload_bytes,
-} from "@officialunofficial/kit-wasm";
-
-const commitId =
-  "64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93";
-const bundle: Uint8Array = /* p.bin bytes */;
-
-const disclosed = JSON.parse(verify_disclosure(commitId, bundle));
-if (
-  disclosed.path.map((p: { name: string }) => p.name).join("/") !==
-  "src/lib.rs"
-) {
-  throw new Error("unexpected path");
-}
-
-// Payload bytes travel out-of-band; this call re-verifies independently.
-const slice = disclosure_payload_bytes(commitId, bundle);
-```
-
-`verify_disclosure` deliberately never returns payload bytes inline (they
-could be arbitrarily large relative to the summary); call
-`disclosure_payload_bytes` for them, and treat a failure of either call as
-a failure of the whole disclosure &mdash; both independently re-verify.
 
 ## 5. Interop for commonware-based verifiers
 
@@ -588,7 +519,7 @@ even begin &mdash; precisely the algorithm SPEC-MERKLE-OBJECTS §5.4 specifies
 in prose. `kit_core::merkle`'s own id-based verifiers (`verify_tree_entry`,
 `verify_chunk`, and their range/multi counterparts) already do exactly
 that fold-then-wrap-then-compare, tested and golden-vector-pinned; reach
-for those directly (`merkle::wrap_id` / wasm's `wrap_object_id` apply the
+for those directly (`merkle::wrap_id` applies the
 same wrap step) rather than hand-rolling the fold loop.
 
 ### Leaf digest formulas
@@ -747,12 +678,6 @@ own test harness should take.
 - **Non-membership proofs** (proving a name is *absent* from a `Tree`) are
   reserved as disclosure `payload_kind 3` (`Absent`). A
   disclosure bundle only ever proves inclusion.
-- **wasm caps**, independent of the native crate's own bounds (`kit_core::verify`,
-  which kit-wasm builds on top of): objects 16 MiB
-  (`MAX_WORKSPACE_OBJECT_BYTES`, `kit-wasm/src/objects.rs`); a disclosure
-  bundle 64 MiB (`verify::MAX_BUNDLE_BYTES`, shared with the native crate);
-  concatenated closure packs 1 GiB (`MAX_CLOSURE_INPUT_BYTES`,
-  `kit-wasm/src/verify.rs`, independent of the bundle cap &mdash; see §3).
 
 ## 8. Reference table
 
@@ -779,14 +704,6 @@ own test harness should take.
 | `export_closure(store, root, mode) -> ClosureExport` (native) | producer side of a closure | SPEC-DISCLOSURE §7.2/§7.3 |
 | `merkle::wrap_id(kind, inner_root) -> Hash` | apply the outer type-domain wrap (§5's step 1); a v2 `Step.inner_root` is wrap-checked with this before upstream BMT verify | SPEC-MERKLE-OBJECTS §2 |
 | `merkle::verify_tree_entry` / `verify_chunk` (+ `*_range` / `*_multi`) | single/range/multi-leaf BMT inclusion proofs, against the object id | SPEC-MERKLE-OBJECTS §5.4 |
-| **kit-wasm** | | |
-| `verify_disclosure(commit_id_hex, bundle) -> json` | JS-facing bundle verify (no payload bytes) | SPEC-DISCLOSURE §3&ndash;§4 |
-| `disclosure_payload_bytes(commit_id_hex, bundle) -> bytes` | verified payload bytes (re-verifies) | SPEC-DISCLOSURE §4 |
-| `verify_closure_packs` / `verify_closure_manifest` | JS-facing closure verify | SPEC-DISCLOSURE §7 |
-| `verify_tree_entry` / `verify_chunk` | JS-facing single-leaf proof verify | SPEC-MERKLE-OBJECTS §5.4 |
-| `chunked_blob_decode` | decode a `ChunkedBlob`'s manifest to JSON | SPEC-OBJECTS §7 |
-| `blob_bao_encode` / `blob_bao_slice` / `blob_bao_verify_slice` | Bao over **canonical** blob bytes | SPEC-DISCLOSURE §4 (Range) |
-| `wrap_object_id(kind, inner_root_hex) -> hex` | JS-facing `wrap_id`; v2 bundles carry `step_inner_roots` / `chunk_inner_root` on the `verify_disclosure` JSON | SPEC-MERKLE-OBJECTS §2 |
 | **MCP tools** (`kit mcp`) | | |
 | `kit_prove` / `kit_verify_proof` / `kit_closure_verify` | agent-facing equivalents of the CLI commands above | &mdash; |
 

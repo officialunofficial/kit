@@ -19,7 +19,7 @@ a served object set is the full content that commit id commits to
 container (MKDS, §8).
 
 This spec covers the verifier kit. Out of scope, deliberately:
-wasm bindings, CLI commands and the docs guide.
+CLI commands and the docs guide.
 
 ## 1. Purpose and trust model
 

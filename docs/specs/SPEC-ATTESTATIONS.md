@@ -359,15 +359,7 @@ point MUST perform the binding check in the previous paragraph itself
 `extract_primary_commit_hash` and rejects any envelope whose subject
 hash does not equal the commit hex the directory is keyed under
 (`kit-storage`'s `verify_attest` command), before considering the
-envelope's signature at all. **The WASM binding
-(`kit_wasm::attest::attest_verify`) does not** &mdash; it takes no
-commit-hash parameter and returns whether *any* signature verifies,
-with no subject-binding check, despite being a public, documented API
-surface. That is a real, narrow gap in one entry point, not a property
-of `kit-attest`'s verification model in general. Closing it requires
-adding a required commit-hash parameter to `attest_verify` and
-performing the same check internally; this document stays **Draft**
-until that lands.
+envelope's signature at all.
 
 The `kit verify-attest` CLI enumerates every envelope under
 `.kit/attestations/<commit>/`, prints a per-signature verdict, and
@@ -782,8 +774,7 @@ Does NOT protect against:
 
 ## 12. Stability
 
-This document stays draft while the §5.3 WASM-verification gap remains
-open. Once that closes, any breaking change to the on-disk layout or
+Any breaking change to the on-disk layout or
 wire envelope requires a version bump and a `SPEC-ATTESTATIONS-v2.md`
 (same pattern as `SPEC-OBJECTS`). The DSSE + in-toto bodies are
 governed by their upstream specs; kit tracks those as they evolve.

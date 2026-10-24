@@ -1147,9 +1147,7 @@ reuse
 .Cm verify Ns 's
 trust-roots flow against the disclosed signer.
 .Fl Fl format Ns = Ns Cm json
-emits JSON matching kit-wasm's
-.Cm verify_disclosure
-shape.
+emits the disclosure result as JSON.
 .Fl Fl payload-out Ar file
 writes the verified payload bytes to
 .Ar file .
@@ -1194,9 +1192,7 @@ list is checked only when
 .Fl Fl show-unreferenced
 is passed, which enumerates every local object.
 .Fl Fl format Ns = Ns Cm json
-emits kit-wasm's
-.Cm ClosureReport
-shape.
+emits the closure report as JSON.
 .It Cm attest Oo Fl Fl commit Ar hash Oc Op Fl Fl algorithm Ar alg Op Fl Fl signer Ar kind Op Fl Fl predicate-type Ar uri Op Fl Fl predicate-file Ar path
 Produce a signed DSSE attestation for the given commit (defaults to
 HEAD). Multiple

@@ -46,7 +46,7 @@ struct VerifyProofOpts {
     /// Path to a trust-roots TOML file. Implies `--trusted`.
     #[arg(long, value_name = "PATH")]
     trust_roots: Option<String>,
-    /// Emit the wasm `verify_disclosure` JSON shape (plus `signer_trusted`).
+    /// Emit the disclosure result as JSON (plus `signer_trusted`).
     #[arg(long, value_enum, default_value = "default")]
     format: VerifyProofFormat,
     /// Write the verified payload bytes (object, chunk, or range) to FILE.
