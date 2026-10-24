@@ -94,9 +94,9 @@ kit defines three distinct signing domains. They MUST produce disjoint
 signable byte strings for any possible input.
 
 ```
-COMMIT_DOMAIN   = "kit.commit\x00"       (12 bytes)
-REMIX_DOMAIN    = "kit.remix\x00"        (11 bytes)
-TAG_DOMAIN      = "kit.tag\x00"          (9 bytes)
+COMMIT_DOMAIN   = "kit.commit\x00"       (11 bytes)
+REMIX_DOMAIN    = "kit.remix\x00"        (10 bytes)
+TAG_DOMAIN      = "kit.tag\x00"          (8 bytes)
 ```
 
 The terminal `\x00` is part of the domain string. Disjointness here does
