@@ -70,30 +70,33 @@ spec text stays.
 Counts are lines of Rust (`wc -l`) in files that git tracks, per crate, as of
 this writing. The Source column counts `src/`, including unit tests
 that sit in the same file. The Tests column counts every other `.rs` file
-in the crate, such as `tests/` and `benches/`. The `kit-fuzz` row counts
-`rust/fuzz/`.
+in the crate, such as `tests/`. The Generated column counts the
+checked-in generated code. The `kit-fuzz` row counts `rust/fuzz/`. The
+`kit-benches` row counts `rust/benches/`. Rows sort by Total, largest first.
+Each Total is Source plus Tests plus Generated.
 
 | Crate | Source | Tests | Generated | Total |
 |---|---:|---:|---:|---:|
-| `kit-core` | 69,332 | 10,341 | 0 | 79,673 |
 | `kit-storage` | 50,521 | 42,401 | 0 | 92,922 |
+| `kit-core` | 69,332 | 10,362 | 0 | 79,694 |
+| `kit-rpc` | 940 | 167 | 50,231 | 51,338 |
 | `kit-attest` | 12,715 | 6,416 | 0 | 19,131 |
 | `kit-sync` | 12,041 | 3,771 | 0 | 15,812 |
-| `kit-client` | 6,582 | 3,094 | 0 | 9,676 |
-| `kit-keystore` | 6,123 | 219 | 0 | 6,342 |
 | `kit-transport-connect` | 5,357 | 6,840 | 0 | 12,197 |
+| `kit-client` | 6,582 | 3,094 | 0 | 9,676 |
 | `kit-git-bridge` | 4,654 | 2,534 | 0 | 7,188 |
-| `kit-transport-s3` | 2,136 | 1,505 | 0 | 3,641 |
-| `kit-transport-ssh` | 2,127 | 0 | 0 | 2,127 |
+| `kit-keystore` | 6,105 | 219 | 0 | 6,324 |
 | `kit-serve` | 2,026 | 1,652 | 0 | 3,678 |
-| `kit-transport-file` | 2,031 | 0 | 0 | 2,031 |
-| `kit-rpc` | 940 | 167 | 50,231 | 51,338 |
-| `kit-transport-memory` | 500 | 0 | 0 | 500 |
-| `kit-sign-file` | 445 | 421 | 0 | 866 |
-| `kit-test-util` | 156 | 0 | 0 | 156 |
-| `kit-formal-conformance` | 10 | 701 | 0 | 711 |
+| `kit-transport-s3` | 2,136 | 1,505 | 0 | 3,641 |
 | `kit-fuzz` | 2,094 | 720 | 0 | 2,814 |
-| **All crates** | **179,790** | **80,782** | **50,231** | **310,803** |
+| `kit-transport-ssh` | 2,127 | 0 | 0 | 2,127 |
+| `kit-transport-file` | 2,031 | 0 | 0 | 2,031 |
+| `kit-benches` | 232 | 846 | 0 | 1,078 |
+| `kit-sign-file` | 445 | 421 | 0 | 866 |
+| `kit-formal-conformance` | 10 | 701 | 0 | 711 |
+| `kit-transport-memory` | 500 | 0 | 0 | 500 |
+| `kit-test-util` | 156 | 0 | 0 | 156 |
+| **All crates** | **180,004** | **81,649** | **50,231** | **311,884** |
 
 Generated code is a documented exception to the rule against checked-in
 generated output. The code generator needs `protoc`, and many hosts ship a `protoc` too old
