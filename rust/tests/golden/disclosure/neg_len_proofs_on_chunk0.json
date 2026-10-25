@@ -1,7 +1,7 @@
 {
   "bin": "neg_len_proofs_on_chunk0.bin",
-  "blake3": "30d3048abfb6392927bba84620ee68ca8ad19bc4bd1d6e973172f67b05181dd6",
-  "commit_id_hex": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
+  "blake3": "ae8041ee7c0fd3fa873320278fd421794e37d5a2a21d920f67c774d6c171805c",
+  "commit_id_hex": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
   "description": "A Range payload discloses chunk index 0 but still carries a chunk_len_proofs entry; index 0 has nothing preceding it to describe, so any entry there is rejected outright.",
   "expect": "reject",
   "name": "neg_len_proofs_on_chunk0",
@@ -10,5 +10,5 @@
   ],
   "reject_reason": "chunk_len_proofs is only meaningful at chunk index > 0",
   "selector": "range(offset=0,len=16) [chunk_len_proofs on chunk 0]",
-  "size": 3962
+  "size": 3578
 }

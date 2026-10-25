@@ -1,21 +1,21 @@
 {
-  "blake3": "90863d6251f7a28951fc976a7d7511eb8507ea402667f488bc2f772a16cd3e97",
-  "commit": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
+  "blake3": "6b2b7abd692fc6f061d8b371aa66bdff5c39f8d6ccb0ee50153233de26927510",
+  "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
   "expect": {
     "accept": true,
     "disclosed": {
-      "bytes_blake3": "6e24269b03fcd564c8999eae188f55714c348a2e871e9f1a8ecd07c3a8042de0",
+      "bytes_blake3": "023a6a20cd50d5590c60d426b59f95e5b5f493f501fdb9ec3f02853510ad81ae",
       "bytes_len": 16,
-      "commit": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
-      "leaf": "69ec78e7bb51c89849aa06a054dd69b6151ebfc285260c8d20ddbadf2119d8c7",
+      "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+      "leaf": "712ef6d89e55a543488382d9bd8b1f5110f07263a5aba08f2f9d982c92c46bad",
       "path_hex": [
         "6368756e6b65642e62696e"
       ],
       "payload": {
-        "absolute_offset": 80234,
+        "absolute_offset": 29531,
         "chunk": [
           1,
-          3145728,
+          1048577,
           0
         ],
         "kind": "Range",
@@ -26,5 +26,5 @@
   },
   "name": "in_chunk_range",
   "schema_version": 1,
-  "size": 3994
+  "size": 3610
 }

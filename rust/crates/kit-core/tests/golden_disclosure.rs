@@ -354,7 +354,7 @@ fn build_vectors() -> Vec<Vector> {
         .insert("disclosed".into(), disclosed_summary(&d));
     v.push(Vector {
         name: "chunked_file_chunk1",
-        description: "Chunk index 1 of the 3 MiB chunked file.",
+        description: "Chunk index 1 of the chunked file.",
         bin: bundle,
         json: j,
     });

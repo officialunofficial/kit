@@ -1,13 +1,13 @@
 {
-  "blake3": "2b160ca0822997a532ac19c1176f1640d6f26529b54a82cac31e80ac95092ccc",
-  "commit": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
+  "blake3": "91408c51087569dbe2ece06244014c46e1f77d9252132f5a39371bf6b7261737",
+  "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
   "expect": {
     "accept": true,
     "disclosed": {
-      "bytes_blake3": "aff25b520b0e928061ea7c503fe2ade317b4058bac960366fd81358dbc098088",
-      "bytes_len": 90056,
-      "commit": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
-      "leaf": "69ec78e7bb51c89849aa06a054dd69b6151ebfc285260c8d20ddbadf2119d8c7",
+      "bytes_blake3": "d2f39d7303d349fdbd98cb32bb234fcede0975e4d7a811c9f64a496106f7e873",
+      "bytes_len": 18572,
+      "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+      "leaf": "712ef6d89e55a543488382d9bd8b1f5110f07263a5aba08f2f9d982c92c46bad",
       "path_hex": [
         "6368756e6b65642e62696e"
       ],
@@ -15,12 +15,12 @@
         "chunk_size": 0,
         "index": 1,
         "kind": "Chunk",
-        "total_size": 3145728
+        "total_size": 1048577
       },
       "signature_valid": true
     }
   },
   "name": "chunk",
   "schema_version": 1,
-  "size": 90806
+  "size": 19258
 }

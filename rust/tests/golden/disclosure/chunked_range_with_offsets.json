@@ -1,11 +1,11 @@
 {
   "bin": "chunked_range_with_offsets.bin",
-  "blake3": "addb72758e470d274035be7f84c751aa60db6e2773c6df9a7f20d35b19ec89e6",
-  "commit_id_hex": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
+  "blake3": "3f6ece5d7cfc04db23c7d52ed95fc4df262a7b32b46ba62b0f4279c5e2f41321",
+  "commit_id_hex": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
   "description": "The same range, with a complete chunk_len_proofs set proving the absolute file offset.",
   "disclosed": {
-    "chunk_inner_root_hex": "398fa1d23379ff8094ca34dedf21dd9b108059c3fc375060b028399854a1e395",
-    "leaf_id_hex": "69ec78e7bb51c89849aa06a054dd69b6151ebfc285260c8d20ddbadf2119d8c7",
+    "chunk_inner_root_hex": "6f6490590242634f410607739fc5ee7015acec7b2e1963fcf4ef6709f6e42e91",
+    "leaf_id_hex": "712ef6d89e55a543488382d9bd8b1f5110f07263a5aba08f2f9d982c92c46bad",
     "path": [
       {
         "mode": 1,
@@ -13,13 +13,13 @@
       }
     ],
     "payload": {
-      "absolute_offset": 80234,
-      "blob_id_hex": "aff25b520b0e928061ea7c503fe2ade317b4058bac960366fd81358dbc098088",
-      "bytes_blake3": "e09187e247cbf5bce2f4d26033e7335502624bb554971567148120c3a076316f",
+      "absolute_offset": 29531,
+      "blob_id_hex": "d2f39d7303d349fdbd98cb32bb234fcede0975e4d7a811c9f64a496106f7e873",
+      "bytes_blake3": "b68b5040078dcd91248ef913815a5e9132b31b5366273a486dbb8f85c825fe52",
       "chunk": {
         "chunk_size": 0,
         "index": 1,
-        "total_size": 3145728
+        "total_size": 1048577
       },
       "kind": "range",
       "len": 64,
@@ -28,15 +28,15 @@
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
     "step_inner_roots_hex": [
-      "0152c264b145fa4255be62befc32032e66eb571acf82b27b4f2580c7a560f2ce"
+      "0554f091edd7efe582ee9e5dec12a091734f8a002dd9387d01299b675ce157d2"
     ],
-    "tree_hash_hex": "f4c093c3570e0adbf7c75a874d083c4118f5a625a2896a802bb550b29d78ff4b"
+    "tree_hash_hex": "a7e483c901dfea906d9ff88336269ddd64fa6e04aa872b2228e9e79d14588b3b"
   },
   "expect": "accept",
   "name": "chunked_range_with_offsets",
   "path_hex": [
     "6368756e6b65642e62696e"
   ],
-  "selector": "range(offset=80234,len=64,with_offsets=true)",
-  "size": 3994
+  "selector": "range(offset=29531,len=64,with_offsets=true)",
+  "size": 3610
 }

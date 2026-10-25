@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 3b005f947facd9dece6389079c3c92861ac267d2c24b0e964dd0284e577d541b # shrinks to seed = 2, operation = 0, at = 0, payload = []
+cc 4fb6eac154546456521f475155b8037882c99730fe33d2aa6c8a72b5c1d903dd # shrinks to seed = 0, operation = 0, at = 0, payload = []

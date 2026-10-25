@@ -574,7 +574,7 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
     // chunked leaf under one commit, without changing the shared fixture.
     let other = kit_core::worktree::store_file_object(
         &fixture.store,
-        &common::prng_bytes(99, 3 * 1024 * 1024),
+        &common::prng_bytes(99, 1024 * 1024 + 1),
     )
     .unwrap();
     let mut entries = tree.entries;
@@ -721,7 +721,7 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         Some("span_too_large"),
         Some(CAP + 1),
     ));
-    let plaintext = common::prng_bytes(0x1234_5678_9abc_def0, 3 * 1024 * 1024);
+    let plaintext = common::chunked_plaintext();
     for (name, trusted, bin, reject, expanded) in vectors {
         let mut input = bin.clone();
         if let Some(n) = expanded {
@@ -1050,7 +1050,7 @@ proptest! {
             }
             _ => unreachable!("non-exhaustive RangeProof"),
         };
-        let plaintext = common::prng_bytes(0x1234_5678_9abc_def0, 3 * 1024 * 1024);
+        let plaintext = common::chunked_plaintext();
         let begin = usize::try_from(offset).unwrap();
         let end = usize::try_from(offset + len).unwrap();
         prop_assert_eq!(actual.as_slice(), &plaintext[begin..end]);

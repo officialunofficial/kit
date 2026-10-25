@@ -39,6 +39,16 @@ pub(crate) fn prng_bytes(seed: u64, len: usize) -> Vec<u8> {
     out
 }
 
+/// The bytes of `chunked.bin` in the fixture: 1 MiB plus one byte of a
+/// fixed PRNG stream. That size is just above the chunking threshold, so
+/// `FastCDC` yields several chunks. The seed gives small first chunks,
+/// which keeps the vectors small.
+// Not every test binary that includes this module uses it.
+#[allow(dead_code)]
+pub(crate) fn chunked_plaintext() -> Vec<u8> {
+    prng_bytes(2037, 1024 * 1024 + 1)
+}
+
 // Not every test binary that includes this module builds the fixture.
 #[allow(dead_code)]
 pub(crate) fn build_fixture() -> Fixture {
@@ -53,8 +63,7 @@ pub(crate) fn build_fixture() -> Fixture {
     let deep_file = store_file_object(&store, b"three levels deep, deterministic").unwrap();
     let exec = store_file_object(&store, b"#!/bin/sh\necho hi\n").unwrap();
 
-    // 3 MiB of a fixed PRNG stream so FastCDC yields several chunks.
-    let chunked_bytes = prng_bytes(0x1234_5678_9abc_def0, 3 * 1024 * 1024);
+    let chunked_bytes = chunked_plaintext();
     let chunked_id = store_file_object(&store, &chunked_bytes).unwrap();
 
     let deep_tree = Tree {
