@@ -39,6 +39,17 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = 'binary(crash_recovery) or binary(lock_contention)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# The branch rename race test spawns the binary for every round and writes
+# many padding files. It takes about 5 s alone and over 2 minutes on a loaded
+# runner. It does not hang. Give it a longer ceiling.
+[[profile.default.overrides]]
+filter = 'binary(branch_rename_commit_race)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(branch_rename_commit_race)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
 # The bounded stateful suite (tests/state_machine.rs) spawns the binary for
 # every operation. It does not hang, but a slow runner can drift toward the
 # default ceiling.
