@@ -493,7 +493,7 @@ proof.verify_element_inclusion::<Blake3>(
 ```
 
 The field is mandatory (bundle version 2; a version byte of 1 is
-rejected with no compatibility decoder). It is wrap-checked against the
+rejected). It is wrap-checked against the
 trusted id before use and cross-checked against the proof fold, so it
 adds no trust surface.
 

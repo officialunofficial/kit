@@ -1603,10 +1603,10 @@ mod tests {
         }
     }
 
-    /// Pilot migration to `minifuzz` (commonware-invariants) — the same
+    /// Runs on `minifuzz` (commonware-invariants) — the same
     /// in-process harness upstream commonware uses for its in-tree
-    /// property tests. Replaces the bespoke splitmix64 loop
-    /// (`run_iterated_unit`) for this one target while honouring the
+    /// property tests. It replaces the bespoke splitmix64 loop
+    /// (`run_iterated_unit`) for this one target and honours the
     /// FUZZ.md guardrails: `with_search_limit(MAX_ITER)` caps iterations
     /// `with_seed(RNG_SEED)` keeps the run deterministic, and
     /// the body truncates each input to `MAX_INPUT` and applies the

@@ -406,9 +406,8 @@ never silently wrong, whenever it is eventually re-read.
 
 ## 5. Format and scope
 
-The auxiliary namespace and descriptor are version 1. This is a deliberate
-pre-release replacement of ref-event history; no native journal reader,
-executor bridge, or compatibility API is supported. `CommitHistory` is an
+The auxiliary namespace and descriptor are version 1. No native journal
+reader or executor bridge is supported. `CommitHistory` is an
 in-memory MMB used to construct canonical snapshots. Its `ForwardFold` bagging
 policy is a cryptographic format parameter shared by producers and verifiers.
 

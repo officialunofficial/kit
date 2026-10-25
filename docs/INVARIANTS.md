@@ -352,7 +352,7 @@ checked by `scripts/check-release-artifact-features.sh` against
 
 **Always:** a `0x03`/`0x04` entry's payload after `uncompressed_len` is
 exactly one RFC 8878 Zstandard frame (SPEC-PACKFILE §3.3). The decoder
-(`pack-zstd`) rejects a skippable or legacy frame magic, a second
+(`pack-zstd`) rejects a skippable or pre-RFC frame magic, a second
 concatenated frame and any trailing byte, with `PackError::ZstdDecompress`.
 It applies the §3.3 bomb guards: the claim is at most `MAX_RAW_OBJECT_SIZE`
 before decoding, the output is bounded to the claim, and the decoded length
