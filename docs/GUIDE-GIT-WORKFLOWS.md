@@ -1,6 +1,6 @@
 # Git workflows with kit
 
-How to live with git from kit: migrate a repository, track a git
+How to live with git from kit: import a repository, track a git
 upstream while working natively, and send work back. Everything here
 needs a `git` on `PATH`. The default build includes the bridge; a build
 with `--no-default-features` omits it. The mechanics are specified in
@@ -15,7 +15,7 @@ the author identity field, and the original git bytes are retained
 for audit. Hashes are a function of (upstream, import key) &mdash; same
 key, same upstream, same hashes, on any machine.
 
-## 1. Migrate a git repository to kit
+## 1. Import a git repository into kit
 
 ```console
 $ kit git import git@github.com:org/repo.git repo

@@ -223,7 +223,7 @@ account's key, not the caller's.
 
 ---
 
-## 6. Upgrade path
+## 6. Open gaps
 
 Candidate future work (non-binding):
 
@@ -242,7 +242,7 @@ Until then: rely on `ssh(1)` and the pinning keys above.
 |-------------------------------------------|------------------------------------|
 | MitM on first connection                  | user's `StrictHostKeyChecking`     |
 | Upstream host-key rotation (silent swap)  | user's `StrictHostKeyChecking=yes` plus known_hosts |
-| Wrong binary on remote (legacy rename)    | OP_HELLO, §7.4 (fails loud)         |
+| Wrong binary on remote                    | OP_HELLO, §7.4 (fails loud)         |
 | Future-proto kit client ↔ older server   | OP_HELLO STATUS_UNSUPPORTED reply   |
 | Silent client holding `kit serve`        | `--idle-timeout-secs` (default 60 s; §4) |
 | Trickling or non-reading client           | budgets (SPEC-TRANSPORT §4.4), sshd `MaxSessions`/`MaxStartups`, optional `--max-session-secs` (§4) |

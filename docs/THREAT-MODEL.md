@@ -270,7 +270,7 @@ ignored.
 
 | Key                                 | Scope     | Rationale                                                 |
 |-------------------------------------|-----------|-----------------------------------------------------------|
-| `signer`                            | **User**  | Selects legacy raw-file vs keystore commit signing.       |
+| `signer`                            | **User**  | Selects raw-file vs keystore commit signing.              |
 | `key.backend`                       | **User**  | Selects the keystore backend family.                      |
 | `key.default_ref`                   | **User**  | Selects a private signing key reference.                  |
 | `key.ed25519_ref`                   | **User**  | Selects the Ed25519 private signing key reference.        |
@@ -322,7 +322,7 @@ keyed on the **resolved endpoint plus its provenance** &mdash; `repo_chosen`
 `remote.<name>.url` entry) versus user-chosen (user-scoped config or an
 explicit CLI argument) &mdash; never on a remote *name*. This means the same
 fence applies uniformly whether the credential-bearing endpoint comes
-from the legacy single-remote field or from a named remote: a hostile
+from the single-remote field or from a named remote: a hostile
 clone cannot smuggle ambient credentials to a new host by hiding the
 endpoint behind a named remote, and a user-chosen endpoint with the
 user's own credentials is never second-guessed. Unauthenticated and
@@ -398,9 +398,9 @@ Security assumptions:
   against malware running as the user. Production `kit-storage` builds enable the
   target OS protector features; the `kit-keystore` library keeps default
   features empty for lean builds and tests.
-- `software-raw:<label>` is the explicit raw-file compatibility backend. It
-  keeps deterministic raw-key behavior for compatibility tests and migration
-  workflows and is not the secure default.
+- `software-raw:<label>` is the explicit raw-file backend. It
+  keeps deterministic raw-key behavior for tests and is not the secure
+  default.
 - Linux Secret Service, macOS Keychain, and `systemd-creds` store
   extractable 32-byte signing secrets behind their
   platform protection boundary. They do not claim hardware binding,

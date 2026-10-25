@@ -1,8 +1,8 @@
-# Cutting an kit release
+# Cutting a kit release
 
-This is the single release runbook. It consolidates what used to live under
-`docs/release/` (checklist, signing/verification, supply-chain policy,
-reproducibility, crates.io publishing) into one page.
+This is the single release runbook. It covers the checklist,
+signing and verification, supply-chain policy, reproducibility and
+crates.io publishing.
 
 Contents:
 

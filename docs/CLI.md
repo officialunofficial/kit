@@ -959,7 +959,7 @@ area &mdash; there are no unmerged index stages (SPEC-INDEX is unchanged).
 | `ORIG_HEAD`                   | HEAD before the operation, used by `--abort`         |
 | `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
 | `kit-conflicts`              | kit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
-| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` is parallel to `todo` (`pick`/`reword`/`squash`/`fixup`, from `rebase -i`); absent ⇒ all `pick` |
+| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` is parallel to `todo` (`pick`/`reword`/`squash`/`fixup`, from `rebase -i`) |
 
 Remote / sync:
 
@@ -1102,7 +1102,7 @@ Remote / sync:
   repository's common `upload-parts/` cache let the next `kit push` resume
   the parts already accepted, provided the regenerated push plan is identical.
   After an interruption, run `kit push` again to resume; the message reports
-  how many parts were saved. Legacy Connect remotes use the existing upload path.
+  how many parts were saved.
 - **Transfer progress.** `clone`/`push`/`pull`/`fetch` stream a
   live, honest progress line on stderr while the network transfer runs &mdash;
   `Writing objects: N objects, B bytes` while building/uploading the
@@ -1662,7 +1662,7 @@ which routes them to the user scope automatically.
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
-| `signer` | `legacy` / `keystore` | `legacy` | User-scoped commit signing source |
+| `signer` | `file` / `keystore` | `file` | User-scoped commit signing source |
 | `key.backend` | backend name | `software` | User-scoped default for `kit key` |
 | `key.default_ref` | `<backend>:<label>` | `software:default` | User-scoped fallback key ref |
 | `key.ed25519_ref` | `<backend>:<label>` | `software:default` | User-scoped Ed25519 ref |
@@ -1731,10 +1731,6 @@ user.identity = <raw-hex>               # already-encoded Identity
 
 When unset, the CLI derives an Ed25519 Identity from the signing key's
 public key at commit time. Most users don't need to set this.
-
-The legacy `author_mid = <N>` key from pre-0.1.0 is rejected at
-`kit config` time with a hint pointing to `user.identity`. `parseConfig`
-silently ignores stray `author_mid` lines that may still be on disk.
 
 ### `ssh.*`
 

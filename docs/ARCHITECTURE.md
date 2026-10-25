@@ -55,28 +55,6 @@ so the modules stay.
 Removing one of these modules means removing every item in its row.
 The spec text goes in the same change as the code.
 
-The `pack-shards` feature and the `pack_shard` module are not part of
-`kit`. Nothing kept depended on them.
-
-#### Size of kit-core
-
-The count is `find rust/crates/kit-core -name '*.rs' | xargs cat | wc -l`.
-It covers `src`, `tests` and `examples`.
-
-| Item | Lines |
-|---|---|
-| Imported tree | 81,981 |
-| Net change in `src` and `tests` before this section | -850 |
-| `pack_shard` module removed | -1,607 |
-| `layout.rs` pack-shard directory removed | -25 |
-| Now | 79,499 |
-
-The migration plan sets a target of 77,357 lines. The plan reaches that
-number by removing `pack_shard`, `history` and `sparse` (4,624 lines in
-total). Here, `history` and `sparse` stay (3,015 lines). Without them the
-count is 76,484, which is 873 lines under the plan. The other changes
-above account for that difference.
-
 ### 1.2 Owner signature schemes
 
 The grant owner schemes `secp256k1-eip191` and `webauthn-p256` stay.
