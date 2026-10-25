@@ -1,0 +1,5 @@
+# Sparse checkout golden vector (deterministic)
+# Written by `KIT_UPDATE_SPARSE_GOLDEN=1 cargo test -p kit-core --features sparse-checkout --lib sparse_v2_golden_bytes`
+# Checked by `python3 scripts/golden/sparse_ref.py`
+# Format: <name> <blake3-hex-of-file-bytes>
+response_v2.bin 72e2dce846ff4c8a8b22e1be5995c9e0a3852d792eff4ebaac81e66599773f8d

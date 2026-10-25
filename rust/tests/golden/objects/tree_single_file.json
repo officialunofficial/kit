@@ -3,5 +3,5 @@
   "description": "single-entry tree pointing at the empty blob; SPEC-OBJECTS §13.3",
   "bin": "tree_single_file.bin",
   "size": 56,
-  "blake3": "aa216c3b83227acddfe4c1790f489fd42dd718f080130ef602a66ae5d2e1552b"
+  "blake3": "c5aa8dfab79a7eb31fd61179775c895dadaa6e81c8ccac7e786757722810787e"
 }

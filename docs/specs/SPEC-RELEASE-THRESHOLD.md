@@ -199,30 +199,6 @@ one). This is a real, standard IETF ciphersuite; it is not an kit- or
 commonware-specific construction, and any BLS12-381 implementation
 conforming to that draft and RFC 9380 can be checked against it.
 
-### 3.7 Namespace
-
-Layered *on top of* the ciphersuite in §3.6 (not a replacement for its
-hash-to-curve step) is an kit-specific application namespace, fixed
-at:
-
-```text
-NAMESPACE = b"kit-attest/dsse/v1"
-```
-
-`kit_attest::BLS_THRESHOLD_NAMESPACE` exposes the constant. Signing
-and verification combine the namespace and the message (the DSSE PAE,
-§4) via a unique, unambiguous encoding &mdash; not bare concatenation &mdash; before
-that combined value is hash-to-curve'd per §3.6. The namespace separates
-the maintainer-set BLS key from any other context that might share the
-same shares &mdash; a release signature cannot be replayed as a vote, a
-commit endorsement, or any other BLS message under a different
-namespace.
-
-The `dsse/v1` suffix names the current, and so far only, application
-namespace this key is used under (see SPEC-CONVENTIONS §4). If a
-distinct application use of this key is ever introduced, it gets its own
-distinctly-named namespace constant.
-
 ---
 
 ## 4. Verifier algorithm
@@ -243,8 +219,8 @@ The verifier:
    `V::Public::decode`); reject on decode failure.
 3. Reject if `signature.len() != 48`.
 4. Decode `signature` as a G1 point; reject on decode failure.
-5. Run `ops::verify_message::<MinSig>(&pk, NAMESPACE, pae, &sig)` &mdash;
-   the single BLS verify against the namespaced hash-to-curve. The
+5. Run `ops::verify_message::<MinSig>(&pk, None, pae, &sig)` &mdash;
+   the single BLS verify of `pae` against the hash-to-curve of §3.6. The
    internal computation is one optimal-ate pairing check.
 
 Failure of any step is fatal: the verifier MUST NOT accept the
@@ -348,7 +324,7 @@ identifier `ALGORITHM_BLS12381_THRESHOLD = 5` stays reserved in
 | No single maintainer can produce a valid release signature | M-of-N threshold with quorum = ceil(2n/3) under the `N3f1` fault model (§1, §2.1) |
 | Verifiers check exactly one signature against exactly one public key, with a binary verdict | single `verify_message::<MinSig>` pairing check; any step failure is fatal, no per-share verdict at the aggregated layer (§4) |
 | Malformed key or signature bytes never reach the pairing | fixed sizes (96-byte G2 key, 48-byte G1 signature) and point-decode rejection, verifier steps 1–4 (§3.2, §3.3, §4) |
-| A release signature cannot be replayed as any other BLS message | the pinned hash-to-curve namespace `kit-attest/dsse/v1` (§3.7) |
+| A release signature covers exactly one DSSE PAE | the verify of `pae` in §4 step 5; the PAE binds the payload type |
 | The DSSE `keyid` resolves to the intended cohort key, not an attacker-supplied one | trust-root registry maps `bls12381-thr:<hex>` to pinned public-key bytes (§3.3, §4) |
 | A re-deal that doesn't match the published cohort key is rejected | public commitment to the cohort key (README and trust-roots TOML pin), bounding the trusted-dealer window (§2.1) |
 | Maintainer rotation never invalidates existing verifier pins | resharing keeps the aggregated public key unchanged (§1, §5.3) |

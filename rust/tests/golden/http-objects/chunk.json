@@ -1,13 +1,13 @@
 {
-  "blake3": "a26743579e4fd498bea9be6c4915d26b7074c06a1de92aa38dc4dadb326bbb43",
-  "commit": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
+  "blake3": "2b160ca0822997a532ac19c1176f1640d6f26529b54a82cac31e80ac95092ccc",
+  "commit": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
   "expect": {
     "accept": true,
     "disclosed": {
-      "bytes_blake3": "ff17ef3bdb49c474f1b2cbed6b6ebd94b0c7cf6d66bec6e7a74f1a8f97ef9b21",
+      "bytes_blake3": "aff25b520b0e928061ea7c503fe2ade317b4058bac960366fd81358dbc098088",
       "bytes_len": 90056,
-      "commit": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
-      "leaf": "4247b88856da901974dc02ffe9d2c2c49545973ee57fc3139d45c8e394c92397",
+      "commit": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
+      "leaf": "69ec78e7bb51c89849aa06a054dd69b6151ebfc285260c8d20ddbadf2119d8c7",
       "path_hex": [
         "6368756e6b65642e62696e"
       ],

@@ -82,7 +82,7 @@ fn golden_index_empty_round_trips() {
     // the exact bytes.
     let bytes = read_golden("index_empty.bin");
     assert_eq!(bytes.len(), 41);
-    assert_eq!(&bytes[..4], b"MKIX");
+    assert_eq!(&bytes[..4], b"KIDX");
     assert_eq!(
         bytes[4],
         index::FORMAT_VERSION,
@@ -96,7 +96,7 @@ fn golden_index_empty_round_trips() {
 #[test]
 fn golden_index_3entries_round_trips() {
     let bytes = read_golden("index_3entries.bin");
-    assert_eq!(&bytes[..4], b"MKIX");
+    assert_eq!(&bytes[..4], b"KIDX");
     assert_eq!(
         bytes[4],
         index::FORMAT_VERSION,

@@ -3,5 +3,5 @@
   "description": "signed tag object: same shape as tag_annotated, signed with seed [0x07;32] over the kit.tag domain",
   "bin": "tag_signed.bin",
   "size": 209,
-  "blake3": "86f8fac740ade5611ac18ff333b37759468b3ca9bc594cdbb8a7077a8fef9b2e"
+  "blake3": "0a235e943960b14019cbede26325283387f17ec70ce2d30a7926a7421c98abbb"
 }

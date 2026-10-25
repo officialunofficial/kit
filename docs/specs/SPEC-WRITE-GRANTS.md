@@ -7,14 +7,15 @@ audience: implementers of kit.transport.v1 servers that restrict writes or serve
 
 # SPEC-WRITE-GRANTS &mdash; namespace owners delegate repository writes and reads
 
-Status: **Draft**. The grant, epoch and visibility statement codecs and
-the header encoding (`kit_attest::grant`, feature `grants`), the
+Status: **Draft**. The grant, epoch, visibility and URL token statement
+codecs and the header encoding (`kit_attest::grant`, feature `grants`), the
 owner-scheme primitives of §4 (Keccak-256, the EIP-191 digest, secp256k1
 recovery, address derivation and the §4.4 low-`s` rules), all three
 owner schemes (`ed25519`, `secp256k1-eip191` and `webauthn-p256`, with
 the §4.3 rules against configured relying parties), and the stateless
-verifier (§7 steps 1 to 10, the §5.2 and §9.1 statement checks and the
-§10 registration check) are implemented. The Connect server enforces write
+verifier (§7 steps 1 to 10, the §5.2 and §9.1 statement checks, the
+stateless §9.4 token checks and the §10 registration check) are
+implemented. The Connect server enforces write
 grants, including the stored-epoch equality check in §7 step 11, the
 §8.2 and §8.3 ref-scope rules, and the unsigned grant-epoch RPCs. It
 verifies signed reads (§9.2), enforces private-repository reads and both
@@ -1148,8 +1149,7 @@ Each is the literal first field of its statement and is permanent:
 | `kit-repo-visibility:v1` | Visibility statement (§9.1). |
 | `kit-url-token:v1` | URL token (§9.4). |
 
-They are distinct from the auth v2 separator `kit-write:v2` and from
-the workspace grant separator `kit-workspace-grant:v1`.
+They are distinct from the auth v2 separator `kit-write:v2`.
 
 ---
 
@@ -1170,8 +1170,6 @@ the workspace grant separator `kit-workspace-grant:v1`.
   view contains.
 - Owners that no single key controls, for example multisig or contract
   accounts.
-- The workspace grant (`kit-workspace-grant:v1`). It grants workspace
-  permissions, not repository access, and stays separate.
 
 ### 13.1 Golden fixtures
 
@@ -1205,6 +1203,16 @@ document's rules, independently of the Rust code.
   clock lead at its bound, the §5.2 checks 1 to 5 and the §9.1 checks.
   `epoch-ed25519.json` also pins §5.2 check 7 and the retry rule at 0
   and at the 64-bit maximum.
+- `url-token-ed25519.json`: URL tokens (§9.4) signed by a fixed URL-token
+  seed. Each vector has the eight statement fields, the id, the 64-byte
+  signature and the token, and accept and reject request contexts: the
+  exclusive expiry, another audience, another repository and another
+  target. The covered targets are an object id, the root tree, a nested
+  path, a non-ASCII path, a path of exactly 1,024 bytes, and the longest
+  lifetime with the largest epoch. The `rejects` list holds tokens that
+  fail one rule each: the token format and base64 rules, a truncated,
+  altered or non-canonical signature, a signature by another key, an
+  unknown key id, and each statement rule of §9.4.
 - `reject/verify-*.json`: signed grants that fail verification: the
   `ed25519` scheme on a `0x` namespace, an unadvertised scheme, another
   key's signature, a 63-byte blob, the SPEC-SIGNING §1 strict checks (a

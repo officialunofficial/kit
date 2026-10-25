@@ -676,7 +676,7 @@ mod tests {
         let bytes = serialize(&obj).expect("valid blob serialises");
         // Prologue
         assert_eq!(bytes[0], 0x01);
-        assert_eq!(&bytes[1..5], b"MKT1");
+        assert_eq!(&bytes[1..5], b"KOB1");
         assert_eq!(bytes[5], 0x01);
         let parsed = deserialize(&bytes).unwrap();
         assert_eq!(obj, parsed);
@@ -829,7 +829,7 @@ mod tests {
         let obj = Object::Tag(sample_tag());
         let bytes = serialize(&obj).unwrap();
         assert_eq!(bytes[0], 0x07, "tag object_type tag");
-        assert_eq!(&bytes[1..5], b"MKT1");
+        assert_eq!(&bytes[1..5], b"KOB1");
         assert_eq!(bytes[5], 0x01);
         assert_eq!(deserialize(&bytes).unwrap(), obj);
     }
@@ -863,7 +863,7 @@ mod tests {
     fn tag_decode_rejects_forbidden_name_byte() {
         // Hand-craft a tag whose name embeds a `/`. The writer would
         // reject it, so build the wire bytes directly.
-        let mut buf = vec![0x07, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x07, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&[0u8; 32]); // target
         buf.push(ObjectType::Commit as u8); // target_type
         buf.extend_from_slice(&3u32.to_le_bytes()); // name_len
@@ -880,7 +880,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_object_type() {
-        let bad = [0xFF, b'M', b'K', b'T', b'1', 0x01];
+        let bad = [0xFF, b'K', b'O', b'B', b'1', 0x01];
         assert_eq!(deserialize(&bad), Err(KitError::InvalidObjectType(0xFF)));
     }
 
@@ -892,7 +892,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_schema_version() {
-        let bad = [0x01, b'M', b'K', b'T', b'1', 0x02, 0, 0, 0, 0];
+        let bad = [0x01, b'K', b'O', b'B', b'1', 0x02, 0, 0, 0, 0];
         assert_eq!(deserialize(&bad), Err(KitError::UnsupportedObjectVersion));
     }
 
@@ -900,7 +900,7 @@ mod tests {
     fn rejects_truncated_blob() {
         // length=100 but only 2 bytes follow
         let bad = [
-            0x01, b'M', b'K', b'T', b'1', 0x01, 0x64, 0x00, 0x00, 0x00, 0xAA, 0xBB,
+            0x01, b'K', b'O', b'B', b'1', 0x01, 0x64, 0x00, 0x00, 0x00, 0xAA, 0xBB,
         ];
         assert_eq!(deserialize(&bad), Err(KitError::UnexpectedEof));
     }
@@ -909,7 +909,7 @@ mod tests {
     fn rejects_unsorted_tree_entries() {
         // Build an unsorted tree by hand — can't go through serialize()
         // because writers don't validate ordering today.
-        let mut buf = vec![0x02, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x02, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&2u32.to_le_bytes());
         // entry "z.txt"
         buf.extend_from_slice(&5u32.to_le_bytes());
@@ -936,7 +936,7 @@ mod tests {
 
     #[test]
     fn rejects_zero_length_identity() {
-        let mut buf = vec![0x03, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x03, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&[0u8; 32]); // tree_hash
         buf.extend_from_slice(&0u32.to_le_bytes()); // parent_count
         buf.push(IdentityKind::Opaque as u8);
@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_identity_kind() {
-        let mut buf = vec![0x03, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x03, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&[0u8; 32]);
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.push(0xEE); // unknown kind
@@ -957,7 +957,7 @@ mod tests {
 
     #[test]
     fn rejects_ed25519_with_wrong_length() {
-        let mut buf = vec![0x03, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x03, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&[0u8; 32]);
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.push(IdentityKind::Ed25519 as u8);
@@ -968,7 +968,7 @@ mod tests {
 
     #[test]
     fn rejects_oversize_identity() {
-        let mut buf = vec![0x03, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x03, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&[0u8; 32]);
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.push(IdentityKind::Opaque as u8);
@@ -979,14 +979,14 @@ mod tests {
 
     #[test]
     fn rejects_too_many_tree_entries() {
-        let mut buf = vec![0x02, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x02, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&(MAX_TREE_ENTRIES + 1).to_le_bytes());
         assert_eq!(deserialize(&buf), Err(KitError::TooManyEntries));
     }
 
     #[test]
     fn rejects_truncated_chunk_list() {
-        let mut buf = vec![0x05, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&1024u64.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.extend_from_slice(&2u32.to_le_bytes()); // chunk_count = 2
@@ -1070,7 +1070,7 @@ mod tests {
     /// header before the parent vec is sized from attacker input.
     #[test]
     fn rejects_truncated_commit_parents() {
-        let mut buf = vec![0x03, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x03, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&[0u8; 32]); // tree_hash
         // Within MAX_PARENTS (1_000) so the existing TooManyParents
         // guard doesn't fire — we want to confirm the capacity-vs-
@@ -1086,7 +1086,7 @@ mod tests {
     /// (which is 64 bytes — two hashes). Reject without allocating.
     #[test]
     fn rejects_truncated_remix_sources() {
-        let mut buf = vec![0x04, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x04, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&[0u8; 32]); // tree_hash
         buf.extend_from_slice(&0u32.to_le_bytes()); // parent_count
         // 10_000 sources × 64 bytes = 640_000 bytes required, but the
@@ -1097,7 +1097,7 @@ mod tests {
 
     #[test]
     fn rejects_too_many_commit_parents() {
-        let mut buf = vec![0x03, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x03, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&[0u8; 32]); // tree_hash
         buf.extend_from_slice(&(MAX_PARENTS + 1).to_le_bytes()); // parent_count
         assert_eq!(deserialize(&buf), Err(KitError::TooManyParents));
@@ -1105,7 +1105,7 @@ mod tests {
 
     #[test]
     fn rejects_too_many_remix_parents() {
-        let mut buf = vec![0x04, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x04, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&[0u8; 32]); // tree_hash
         buf.extend_from_slice(&(MAX_PARENTS + 1).to_le_bytes()); // parent_count
         assert_eq!(deserialize(&buf), Err(KitError::TooManyParents));
@@ -1113,7 +1113,7 @@ mod tests {
 
     #[test]
     fn rejects_too_many_remix_sources() {
-        let mut buf = vec![0x04, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x04, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&[0u8; 32]); // tree_hash
         buf.extend_from_slice(&0u32.to_le_bytes()); // parent_count
         buf.extend_from_slice(&(MAX_REMIX_SOURCES + 1).to_le_bytes()); // source_count
@@ -1122,7 +1122,7 @@ mod tests {
 
     #[test]
     fn rejects_too_many_chunks() {
-        let mut buf = vec![0x05, b'M', b'K', b'T', b'1', 0x01];
+        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
         buf.extend_from_slice(&1024u64.to_le_bytes()); // total_size
         buf.extend_from_slice(&0u32.to_le_bytes()); // chunk_size
         buf.extend_from_slice(&(MAX_CHUNKS + 1).to_le_bytes()); // chunk_count

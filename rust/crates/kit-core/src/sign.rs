@@ -418,7 +418,7 @@ fn write_identity(buf: &mut Vec<u8>, id: &Identity) -> Result<(), KitError> {
 /// Serialize a commit's fields for signing. SPEC-SIGNING §3.
 ///
 /// INCLUDED, in order:
-/// 1. Object prologue: `[type=0x03][magic="MKT1"][schema_version=0x01]`.
+/// 1. Object prologue: `[type=0x03][magic="KOB1"][schema_version=0x01]`.
 /// 2. `tree_hash` (32).
 /// 3. `parent_count` (u32 LE) and `parent_hash` × `parent_count` (32 each).
 /// 4. Identity author: `[kind:u8][len:u16 LE][payload:len]`.
@@ -488,7 +488,7 @@ pub fn remix_signing_bytes(r: &Remix) -> Result<Vec<u8>, KitError> {
 /// Serialize a tag's fields for signing. SPEC-SIGNING §4a.
 ///
 /// INCLUDED, in order:
-/// 1. Object prologue: `[type=0x07][magic="MKT1"][schema_version=0x01]`.
+/// 1. Object prologue: `[type=0x07][magic="KOB1"][schema_version=0x01]`.
 /// 2. `target` (32) and `target_type` (u8).
 /// 3. `name`: `[len:u32 LE][name bytes]`.
 /// 4. Identity tagger: `[kind:u8][len:u16 LE][payload:len]`.

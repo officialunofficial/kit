@@ -1,6 +1,6 @@
 {
-  "blake3": "81dd961737fe97cc5a773238c74b6bb71821cdbadb31408bebdf6eb47e1d3ab2",
-  "commit": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
+  "blake3": "eb3923de9803bcd67e10383d779a8253f575fc5a4192cb62079d71eb960e752f",
+  "commit": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
   "expect": {
     "accept": false,
     "expand_to": null,
@@ -15,7 +15,7 @@
         "source": "span_two_chunks.bin"
       },
       {
-        "hex": "0a32aa3c7f4de2dba7efe9116c5d22b2c919290a126ac09bf316e7938d4441ac"
+        "hex": "ccefee8368fdda5fe57b8fb01de919919af5bee2b749e57bb50afb00c66d11b2"
       },
       {
         "length": 113,
@@ -31,7 +31,7 @@
         "source": "span_two_chunks.bin"
       },
       {
-        "hex": "b2be73c325e261a99577c9563339b57843eab0b72fad329897d2ac049ca2aeb32a6d466ff84af91004d83a7a3b97b93e35382013013ba14eb678f9c46633c20c"
+        "hex": "197b37b78c4cce28bbf351ed2fb80557e8bd57e0f08165283dfe19f3537d766af310c7ad21d557cdbbfac9695324b59e729dfef1e6911e59a8b837a034f17208"
       },
       {
         "length": 70361,

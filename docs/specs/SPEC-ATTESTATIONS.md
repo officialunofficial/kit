@@ -537,11 +537,6 @@ into):
 
 - `https://slsa.dev/provenance/v1` &mdash; SLSA build provenance.
 - `https://in-toto.io/attestation/vuln/v0.1` &mdash; vuln-scan results.
-- `https://kit.storage/spec/predicate/review/v1`
-  &mdash; code review sign-off **(planned; not yet defined)**.
-- `https://kit.storage/spec/predicate/storage-receipt/v1`
-  &mdash; server-signed evidence of a committed live advance or lease
-  change (SPEC-SERVER §15).
 - Third-party predicates (for example, a Makechain settlement predicate at
   a yet-to-be-provisioned URI such as
   `tag:github.com,2024:officialunofficial/kit/settlement/v1`) are
@@ -779,7 +774,7 @@ governed by their upstream specs; kit tracks those as they evolve.
 Items currently marked **(planned)** &mdash; §5.2 (`--add-signature`),
 §7.3 (transport verbs), §8 (`kit attest ls/show/rm`,
 `--require-predicate`/`--require-signer`), §9
-(`attest.auto_sign_commit`), §6.4 review predicate URI &mdash; are
+(`attest.auto_sign_commit`) &mdash; are
 forward-compatible additions and will not require a version bump
 when implemented.
 

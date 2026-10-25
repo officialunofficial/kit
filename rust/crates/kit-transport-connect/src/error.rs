@@ -43,7 +43,7 @@ const MAX_SCHEME: usize = 64;
 const MAX_VALUE: usize = 8_192;
 const MAX_DESCRIPTION: usize = 512;
 const MAX_DETAIL_BASE64: usize = 88_836;
-const CHALLENGE_TYPE: &str = "kit.transport.v1.AdmissionChallenge";
+const CHALLENGE_TYPE: &str = <AdmissionChallenge as buffa::MessageName>::FULL_NAME;
 
 fn visible_header_values(
     err: &ConnectError,

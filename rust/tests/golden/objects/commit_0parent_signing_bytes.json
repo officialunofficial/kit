@@ -3,5 +3,5 @@
   "description": "canonical Ed25519 signing-bytes preimage for commit_0parent (sign domain prefix not included)",
   "bin": "commit_0parent_signing_bytes.bin",
   "size": 128,
-  "blake3": "cb8b0560f7671d2cffeb2ae8bb0fbda2b1fb0cb822204f29b149543eb3ee83c5"
+  "blake3": "94c9b69b2b8bc45fff23e36c447ae3294b97bd28fa38eba558b0ba6e1c8c2610"
 }

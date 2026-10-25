@@ -3,7 +3,7 @@
 //! Spec reference: `docs/specs/SPEC-OBJECTS.md` §1–§9. Briefly:
 //!
 //! * Every stored object begins with the 6-byte v1 prologue
-//!   `[u8 object_type][4B "MKT1"][u8 0x01]`.
+//!   `[u8 object_type][4B "KOB1"][u8 0x01]`.
 //! * Hashes are 32-byte BLAKE3.
 //! * Integers are little-endian. Timestamps are `u64` (widened from
 //!   `u32` in the kit-era).
@@ -16,7 +16,7 @@ use crate::hash::{Hash, ZERO};
 use core::fmt;
 
 /// Fixed 4-byte magic at offset 1 of every v1 object.
-pub const MAGIC: [u8; 4] = *b"MKT1";
+pub const MAGIC: [u8; 4] = *b"KOB1";
 /// Current (and only) v1 schema version byte.
 pub const SCHEMA_VERSION: u8 = 0x01;
 /// Upper bound on [`Identity`] payload length. Rejected at decode time
@@ -603,7 +603,7 @@ pub enum KitError {
     EmptyData,
     #[error("object_type byte {0:#04x} is not in 0x01..=0x07")]
     InvalidObjectType(u8),
-    #[error("magic at offset 1 is not \"MKT1\"")]
+    #[error("magic at offset 1 is not \"KOB1\"")]
     InvalidMagic,
     #[error("schema_version byte is not 0x01")]
     UnsupportedObjectVersion,

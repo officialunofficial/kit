@@ -9,7 +9,7 @@
 # BLAKE3 and the strict tree parser come from objects_ref.py.
 #
 # The check:
-#   * parses the envelope: magic MSP1, version 2, the canonical tree id, the
+#   * parses the envelope: magic KSP1, version 2, the canonical tree id, the
 #     filter commitment, an exact serialized tree length and no trailing byte;
 #   * parses the tree strictly and compares its bytes with a rebuilt tree;
 #   * recomputes the tree id with the merkle rule and compares it;
@@ -46,7 +46,7 @@ def parse_envelope(data):
     if len(data) > MAX_ENVELOPE:
         raise ValueError("envelope too large")
     r = o.Reader(data)
-    if r.take(4) != b"MSP1":
+    if r.take(4) != b"KSP1":
         raise ValueError("bad magic")
     if r.u8() != 2:
         raise ValueError("unsupported version")
@@ -60,7 +60,7 @@ def parse_envelope(data):
 
 
 def serialize_tree(entries):
-    body = b"\x02MKT1\x01" + struct.pack("<I", len(entries))
+    body = b"\x02KOB1\x01" + struct.pack("<I", len(entries))
     for name, mode, h in entries:
         body += struct.pack("<I", len(name)) + name + bytes([mode]) + h
     return body
@@ -80,7 +80,7 @@ def main():
     expect(commitment == filter_commitment(["a"]), "filter commitment of the filter [a]")
     expect(commitment not in (filter_commitment([]), filter_commitment(["b"])), "a different filter has the same commitment")
     expect(filter_commitment(["b", "a", "a"]) == filter_commitment(["a", "b"]), "filter sorting and deduplication")
-    for bad in (data[:-1], data + b"\x00", b"MSPC" + data[4:], data[:4] + b"\x01" + data[5:]):
+    for bad in (data[:-1], data + b"\x00", b"KSPC" + data[4:], data[:4] + b"\x01" + data[5:]):
         try:
             parse_envelope(bad)
             o.fail("a malformed envelope was accepted")

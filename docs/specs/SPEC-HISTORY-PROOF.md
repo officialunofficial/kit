@@ -237,7 +237,7 @@ a GC retention root or a freshness assertion.
 Integers are little-endian. Exact bytes:
 
 ```text
-"MKHA" || u8(1)
+"KHAN" || u8(1)
 repository[32] || generation[32] || tip[32]
 u64(leaf_count) || root[32]
 u16(ref_name_byte_length) || full_ref_name
@@ -329,7 +329,7 @@ store. What it does not do on every publish is re-read and re-hash the
 per branch in an advisory auxiliary file, `scrub`, alongside `current`:
 
 ```text
-"MKSC" || u8(2)
+"KSCR" || u8(2)
 generation[32]
 u64(cursor) || u64(verified_through) || u64(last_full_verify_unix)
 BLAKE3(all preceding bytes)[32]

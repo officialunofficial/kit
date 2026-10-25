@@ -1,6 +1,6 @@
 {
   "bin": "neg_wrong_root.manifest.bin",
-  "blake3": "d63484cfe6649e158908eba356e4747f1b110e40251828a628f65d7156f6beb8",
+  "blake3": "c9796cb4882b2d17a8d25b4d80ecf329f72ac2eb2497c2d52229e9d5f9637e71",
   "description": "Bundle is complete for A, verified against a different root B.",
   "expect": "incomplete",
   "ids": [],
@@ -8,7 +8,7 @@
   "n_packs": 1,
   "name": "neg_wrong_root",
   "pack_hashes": [
-    "8511cb681291c8e156863a8aa467e21e531415681cc966bd657a66043ccb8e7b"
+    "6a126549c39fe03975a8e6b1cc4dbfcdecc5f2ac4f59c8a3ce0950b768064b4d"
   ],
   "reason": "missing root",
   "root_hex": "1111111111111111111111111111111111111111111111111111111111111111",

@@ -1,0 +1,748 @@
+{
+  "key_id": "4a78877c4a0926fc5d5cb282bb45c11c",
+  "key_seed": "1111111111111111111111111111111111111111111111111111111111111111",
+  "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+  "rejects": [
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "token format",
+      "name": "no-dot",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "token format",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "token format",
+      "name": "two-dots",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "token format",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.AAJpemLB6KKWS56NqJxuGezFZnggQOvzIqWBBB1qCxUvqaWUHYvMRBDMWU86HyczrQoNh4DHwLls2aW93cq2Cg.AAJpemLB6KKWS56NqJxuGezFZnggQOvzIqWBBB1qCxUvqaWUHYvMRBDMWU86HyczrQoNh4DHwLls2aW93cq2Cg"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "token format",
+      "name": "empty-statement",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "token format",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": ".AAJpemLB6KKWS56NqJxuGezFZnggQOvzIqWBBB1qCxUvqaWUHYvMRBDMWU86HyczrQoNh4DHwLls2aW93cq2Cg"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "token format",
+      "name": "empty-signature",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "token format",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM."
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "token base64",
+      "name": "padded-statement",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "token base64",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM=.AAJpemLB6KKWS56NqJxuGezFZnggQOvzIqWBBB1qCxUvqaWUHYvMRBDMWU86HyczrQoNh4DHwLls2aW93cq2Cg"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "token base64",
+      "name": "signature-truncated-char",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "token base64",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.AAJpemLB6KKWS56NqJxuGezFZnggQOvzIqWBBB1qCxUvqaWUHYvMRBDMWU86HyczrQoNh4DHwLls2aW93cq2C"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "statement too long",
+      "name": "statement-segment-too-long",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "statement too long",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.AAJpemLB6KKWS56NqJxuGezFZnggQOvzIqWBBB1qCxUvqaWUHYvMRBDMWU86HyczrQoNh4DHwLls2aW93cq2Cg"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "signature length",
+      "name": "signature-63-bytes",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "signature length",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.AAJpemLB6KKWS56NqJxuGezFZnggQOvzIqWBBB1qCxUvqaWUHYvMRBDMWU86HyczrQoNh4DHwLls2aW93cq2"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "bad signature",
+      "name": "signature-bit-flipped",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "bad signature",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.AQJpemLB6KKWS56NqJxuGezFZnggQOvzIqWBBB1qCxUvqaWUHYvMRBDMWU86HyczrQoNh4DHwLls2aW93cq2Cg"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "bad signature",
+      "name": "signature-s-not-canonical",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "bad signature",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.AAJpemLB6KKWS56NqJxuGezFZnggQOvzIqWBBB1qCxUcfZvxN-7enOZoUfIYGQZIrQoNh4DHwLls2aW93cq2Gg"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "bad signature",
+      "name": "signed-by-other-key-same-key-id",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "bad signature",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.BAucA2iFJfwp7FRGv27fhS8y0SUMeCwDhAU9S4q4E1tVgjWQiXWYLYjZKGcMsW9eJkxbLmRCyAwEry2OLk75BQ"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "unknown key id",
+      "name": "signed-by-other-key",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "unknown key id",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKMjUwMjgzYWI2MGRiYTQxZjcwMDVlMmVlMTMzNTNhZWU.ngcNSbssudwYPVDlxh2nJGqPUj7XazHOpM9B2hyF65Kca5nXFm65HV9wEiqUOuQRc04ECDW8uhvYnSK6fARMCA"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "domain",
+      "name": "domain-epoch",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "domain",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXdyaXRlLWVwb2NoOnYxCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tCjB4OGJhMWYxMDk1NTFiZDQzMjgwMzAxMjY0NWFjMTM2ZGRkNjRkYmE3Mi93ZWJzaXRlCnBhdGg6cmVmcy9oZWFkcy9tYWluOlpHOWpjeTloTG0xawozCjE3OTAwMDAwMDAwMDAKMTc5MDAwMDkwMDAwMAo0YTc4ODc3YzRhMDkyNmZjNWQ1Y2IyODJiYjQ1YzExYw.p_y7TLJ4_XmDawu6qfcQsVUpmVHXPgBh-aJsIhKkpiTq31mgcm5yI2b4ClL4HsNbnQMkOvS1VAiC8xP-9HJwDg"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "audience",
+      "name": "audience-default-port",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "audience",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbTo0NDMKMHg4YmExZjEwOTU1MWJkNDMyODAzMDEyNjQ1YWMxMzZkZGQ2NGRiYTcyL3dlYnNpdGUKcGF0aDpyZWZzL2hlYWRzL21haW46Wkc5amN5OWhMbTFrCjMKMTc5MDAwMDAwMDAwMAoxNzkwMDAwOTAwMDAwCjRhNzg4NzdjNGEwOTI2ZmM1ZDVjYjI4MmJiNDVjMTFj.l_nqa1jBkaDisBddb6ApyAuoEn_6CK_zq6HBb9SnI-LSOE_tI5TGAdAghR_g557RPnNglsay8R0ykkms_9eLCA"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "audience",
+      "name": "audience-list",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "audience",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbSxodHRwczovL2dpdC5leGFtcGxlLm9yZwoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.T_mYPn54fzTB-5kcv6I9B8Fi37aNUz1xLqFEo9FSfwj3yK-3QzYHm8x_tp4DRzXBWJYV3c5w8in6ZCbuD7LYDw"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "repository",
+      "name": "repository-bare-name",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "repository",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQp3ZWJzaXRlCnBhdGg6cmVmcy9oZWFkcy9tYWluOlpHOWpjeTloTG0xawozCjE3OTAwMDAwMDAwMDAKMTc5MDAwMDkwMDAwMAo0YTc4ODc3YzRhMDkyNmZjNWQ1Y2IyODJiYjQ1YzExYw.TjX7VanK7nfnl47YJYjikm3tMqTSijjjp8J3DLm9sfa1qRyOilXc5Jjq2YQmtLI9rb1Rl-EhrHSqLb2bk9oQAw"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "url token target",
+      "name": "target-unknown-kind",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "url token target",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQp0cmVlOmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWIKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.N2wpCehCyg_9tIQw1KQb7U-f4ATBSRKpJmztb_DJv2PjFT1ybSH60FaaltHZ313lqoHfz0tvy28zZSsVp2jQCA"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "url token target",
+      "name": "target-object-uppercase",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "url token target",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpvYmplY3Q6QUJBQkFCQUJBQkFCQUJBQkFCQUJBQkFCQUJBQkFCQUJBQkFCQUJBQkFCQUJBQkFCQUJBQkFCQUJBQkFCQUJBQgozCjE3OTAwMDAwMDAwMDAKMTc5MDAwMDkwMDAwMAo0YTc4ODc3YzRhMDkyNmZjNWQ1Y2IyODJiYjQ1YzExYw.wAURDS5veyVUw_dr2Ryd68fWQ--RmzkedxCBX1AfB0i8h9y2BJEd5d9vjkm9zIPF2XKmrdnmBNrdE0hO21fSBA"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "url token target",
+      "name": "target-ref-invalid",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "url token target",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvLng6ZUEKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.7pI5LAaOVg2N0k-AYO09aZRzQYxCmyZXj5U6pJYhjzWoRMt8P4KqzpQFGka-f4YKF0rV-QXmH3GHFgu7RY34Ag"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "url token target",
+      "name": "target-path-padded",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "url token target",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjplQT09CjMKMTc5MDAwMDAwMDAwMAoxNzkwMDAwOTAwMDAwCjRhNzg4NzdjNGEwOTI2ZmM1ZDVjYjI4MmJiNDVjMTFj.h1iTD89V6COjfkCAYCdVu3gX3YevXc_HhXOfKZ8T5brQGlMBqlU7F3pmQbttgGVDgQw6RFnf2_W-lwb3gYJtCw"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "url token target",
+      "name": "target-path-dot-dot",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "url token target",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpZUzh1TGk5aQozCjE3OTAwMDAwMDAwMDAKMTc5MDAwMDkwMDAwMAo0YTc4ODc3YzRhMDkyNmZjNWQ1Y2IyODJiYjQ1YzExYw.g-8ZrGi1C6HkVuvs-ccl_-64hF5c8SicrVpbq-ZogVTMQwiPr2puXar7tmjFbg5zQlOM8JxXA8aaoI004WPrAw"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "url token target",
+      "name": "target-path-empty-entry",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "url token target",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpZUzh2WWcKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.349AdxwpDR8pDJty6kKkmUa9ptzFafot8h_RTVxUYMjF8v9i8538-ZZO0FeTzK_yLNgXc7IRiGtgQOB_9zdQBg"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "url token target",
+      "name": "target-path-leading-slash",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "url token target",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpMMkUKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.kEBEVYSlXa4jDbut1cjIRfGi3tOKyCj1oqkwz23Hcpvid75HevGI4iU8Hd2xoP_pUIeVWCBspE0am3J0fwT1Cw"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "url token target",
+      "name": "target-path-control-character",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "url token target",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpZUXBpCjMKMTc5MDAwMDAwMDAwMAoxNzkwMDAwOTAwMDAwCjRhNzg4NzdjNGEwOTI2ZmM1ZDVjYjI4MmJiNDVjMTFj.nzIcJhhrAwkF1Qj9HrdJ7Yt_QNgbJ2BdPUBLMMN-cjSlYZ7-rA0jI-LLY4Mo0sp1Ny7sQB3CA_QkF3tVlk2xBQ"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "url token target",
+      "name": "target-path-not-utf8",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "url token target",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpfdwozCjE3OTAwMDAwMDAwMDAKMTc5MDAwMDkwMDAwMAo0YTc4ODc3YzRhMDkyNmZjNWQ1Y2IyODJiYjQ1YzExYw.U4rcQvL9F5SgKfREVkghwd51h8wyteyDdR3cyNSoQaArqi3nJ2X5iPcEwDDEzrPZMhK2iAOlBg7ogy51VjS8BA"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "url token target",
+      "name": "target-path-1025-bytes",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "url token target",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRQozCjE3OTAwMDAwMDAwMDAKMTc5MDAwMDkwMDAwMAo0YTc4ODc3YzRhMDkyNmZjNWQ1Y2IyODJiYjQ1YzExYw.wcScTlpVTdq1KvPLHJe2Cc_VzEXBu89uytH1jTmW0TE9U5M9Pr0qn_63hvtrYDWpzWSW7DGchJJA7f0ZlH85CA"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "noncanonical decimal",
+      "name": "epoch-leading-zero",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "noncanonical decimal",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMDMKMTc5MDAwMDAwMDAwMAoxNzkwMDAwOTAwMDAwCjRhNzg4NzdjNGEwOTI2ZmM1ZDVjYjI4MmJiNDVjMTFj.L1CdO2NRi9VzxCGHlEdkOEQpcukdGcGOPOkCG_a6Z0fbHEqdwuFIjZLCanyZX8JKQLFxKm0d1FoBjWQFeXA0CQ"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "decimal out of range",
+      "name": "epoch-2-pow-64",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "decimal out of range",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMTg0NDY3NDQwNzM3MDk1NTE2MTYKMTc5MDAwMDAwMDAwMAoxNzkwMDAwOTAwMDAwCjRhNzg4NzdjNGEwOTI2ZmM1ZDVjYjI4MmJiNDVjMTFj.82Zhoim4FBYocJIb7ZdKlg3PvpXkz8sAqPcr1FXkD1P3bp4LQAT1MfN1STQgXD-y98gWG2tcKVORckGWnnUcBw"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "expiry not after created",
+      "name": "expiry-equals-issued",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "expiry not after created",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDAwMDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.sTd-b6wQPtWaJMaQJ-IT6TYT_bL3nSXqFv_XKGSrPRjfaAL3Rv5qwZEs5jM7oUIkTvxqNsqz83FAJkHTYZFDBw"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "lifetime too long",
+      "name": "lifetime-over-24-hours",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "lifetime too long",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwODY0MDAwMDEKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.F1YfU-TJk2lGPVWGfUjqCkFLVC0cBXYinpR4tj37P9l4E49_S02U_Ftr9t-rKCkNYeQgeVbgiKzlSVgTKnC6DA"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "noncanonical hex",
+      "name": "key-id-uppercase",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "noncanonical hex",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNEE3ODg3N0M0QTA5MjZGQzVENUNCMjgyQkI0NUMxMUM.2vc2LaXpsui864D9PTGjc7ldFv2dX1ZD364Xk1t7A6iNYSoKhUCwv8nOKzoSBCbTMX4C1ctdH1MObMtWeVX_DA"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "noncanonical hex",
+      "name": "key-id-30-hex",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "noncanonical hex",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMx.9q5JejbI-VIDq5JhnhUHCj1fKRtAfBPUnGcHD0Yu8yLdpA2eoHcu83yM2j-fYnFZq0kU7EyhZP_wDdzUVs-oAA"
+    },
+    {
+      "audience": "https://git.example.com",
+      "expected_error": "field count",
+      "name": "field-count-7",
+      "now": 1790000000000,
+      "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+      "rule": "field count",
+      "target": "path:refs/heads/main:ZG9jcy9hLm1k",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpaRzlqY3k5aExtMWsKMwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDA.BjGxst4bV9satYpQcaqMrRSm1RNXQ3Oo68PLi-qzDLcRG8dpf4xD8f3JiSMmTpAvneYRdem_zXF5fQPdFNfABA"
+    }
+  ],
+  "spec": "SPEC-WRITE-GRANTS §9.4",
+  "vectors": [
+    {
+      "accept_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "at-issued",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:abababababababababababababababababababababababababababababababab"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "last-ms-before-expiry",
+          "now": 1790000899999,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:abababababababababababababababababababababababababababababababab"
+        }
+      ],
+      "fields": {
+        "audience": "https://git.example.com",
+        "epoch": "3",
+        "expiry": "1790000900000",
+        "issued": "1790000000000",
+        "key_id": "4a78877c4a0926fc5d5cb282bb45c11c",
+        "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+        "target": "object:abababababababababababababababababababababababababababababababab"
+      },
+      "id": "696560b09697ed76cb6b6404f654bd149992f2877d298d14c84e0314f6a947c2",
+      "name": "object",
+      "reject_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "expired",
+          "name": "at-expiry",
+          "now": 1790000900000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:abababababababababababababababababababababababababababababababab"
+        },
+        {
+          "audience": "https://git.example.org",
+          "expected_error": "audience not listed",
+          "name": "other-audience",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:abababababababababababababababababababababababababababababababab"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "repository mismatch",
+          "name": "other-repository",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/docs",
+          "target": "object:abababababababababababababababababababababababababababababababab"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "target mismatch",
+          "name": "other-target",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/main:eA"
+        }
+      ],
+      "signature_hex": "95966439940cc8cc484305eeb21c31951843496d35f954f151f8140ae5b2649861dc56ceb54a897e914c682b152ae8013ba62ebffd0803996bab0b2edfd7980b",
+      "statement": "kit-url-token:v1\nhttps://git.example.com\n0x8ba1f109551bd432803012645ac136ddd64dba72/website\nobject:abababababababababababababababababababababababababababababababab\n3\n1790000000000\n1790000900000\n4a78877c4a0926fc5d5cb282bb45c11c",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpvYmplY3Q6YWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYgozCjE3OTAwMDAwMDAwMDAKMTc5MDAwMDkwMDAwMAo0YTc4ODc3YzRhMDkyNmZjNWQ1Y2IyODJiYjQ1YzExYw.lZZkOZQMyMxIQwXushwxlRhDSW01-VTxUfgUCuWyZJhh3FbOtUqJfpFMaCsVKugBO6Yuv_0IA5lrqwsu39eYCw"
+    },
+    {
+      "accept_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "at-issued",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/main:"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "last-ms-before-expiry",
+          "now": 1790000899999,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/main:"
+        }
+      ],
+      "fields": {
+        "audience": "https://git.example.com",
+        "epoch": "0",
+        "expiry": "1790000900000",
+        "issued": "1790000000000",
+        "key_id": "4a78877c4a0926fc5d5cb282bb45c11c",
+        "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+        "target": "path:refs/heads/main:"
+      },
+      "id": "07ea4650a24332b65a345a229ae3c58f59588420ccb1b7deb9886f973d93a9c4",
+      "name": "path-root-tree",
+      "reject_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "expired",
+          "name": "at-expiry",
+          "now": 1790000900000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/main:"
+        },
+        {
+          "audience": "https://git.example.org",
+          "expected_error": "audience not listed",
+          "name": "other-audience",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/main:"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "repository mismatch",
+          "name": "other-repository",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/docs",
+          "target": "path:refs/heads/main:"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "target mismatch",
+          "name": "other-target",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        }
+      ],
+      "signature_hex": "15052c3b9cea108888590ffc8583a57aaeadf5560c104837d3de0dce3611c2b868e3212d4015a4e14bd711292a4442d1f187a6146f80986aa663ec44d962330f",
+      "statement": "kit-url-token:v1\nhttps://git.example.com\n0x8ba1f109551bd432803012645ac136ddd64dba72/website\npath:refs/heads/main:\n0\n1790000000000\n1790000900000\n4a78877c4a0926fc5d5cb282bb45c11c",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjoKMAoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.FQUsO5zqEIiIWQ_8hYOleq6t9VYMEEg3094NzjYRwrho4yEtQBWk4UvXESkqRELR8YemFG-AmGqmY-xE2WIzDw"
+    },
+    {
+      "accept_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "at-issued",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/release/1.0:ZG9jcy9ndWlkZS9pbnRyby5tZA"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "last-ms-before-expiry",
+          "now": 1790000899999,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/release/1.0:ZG9jcy9ndWlkZS9pbnRyby5tZA"
+        }
+      ],
+      "fields": {
+        "audience": "https://git.example.com",
+        "epoch": "7",
+        "expiry": "1790000900000",
+        "issued": "1790000000000",
+        "key_id": "4a78877c4a0926fc5d5cb282bb45c11c",
+        "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+        "target": "path:refs/heads/release/1.0:ZG9jcy9ndWlkZS9pbnRyby5tZA"
+      },
+      "id": "2b68ce1c6e17503316ef147394dbae3003cac8f58f75709e21e3cb84bf7c3f94",
+      "name": "path-nested",
+      "reject_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "expired",
+          "name": "at-expiry",
+          "now": 1790000900000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/release/1.0:ZG9jcy9ndWlkZS9pbnRyby5tZA"
+        },
+        {
+          "audience": "https://git.example.org",
+          "expected_error": "audience not listed",
+          "name": "other-audience",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/release/1.0:ZG9jcy9ndWlkZS9pbnRyby5tZA"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "repository mismatch",
+          "name": "other-repository",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/docs",
+          "target": "path:refs/heads/release/1.0:ZG9jcy9ndWlkZS9pbnRyby5tZA"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "target mismatch",
+          "name": "other-target",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        }
+      ],
+      "signature_hex": "284934d7a053279de432a0144028daa8bc1f801cf22a9120df4f4577899af35e0bfda4ebfd40528aafee6538b5a16dbcc9f4d265981ce8cbc785c3bd6a25eb0f",
+      "statement": "kit-url-token:v1\nhttps://git.example.com\n0x8ba1f109551bd432803012645ac136ddd64dba72/website\npath:refs/heads/release/1.0:ZG9jcy9ndWlkZS9pbnRyby5tZA\n7\n1790000000000\n1790000900000\n4a78877c4a0926fc5d5cb282bb45c11c",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvcmVsZWFzZS8xLjA6Wkc5amN5OW5kV2xrWlM5cGJuUnlieTV0WkEKNwoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.KEk016BTJ53kMqAUQCjaqLwfgBzyKpEg309Fd4ma814L_aTr_UBSiq_uZTi1oW28yfTSZZgc6MvHhcO9aiXrDw"
+    },
+    {
+      "accept_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "at-issued",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/tags/v1:w6kvw7wudHh0"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "last-ms-before-expiry",
+          "now": 1790000899999,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/tags/v1:w6kvw7wudHh0"
+        }
+      ],
+      "fields": {
+        "audience": "https://git.example.com",
+        "epoch": "1",
+        "expiry": "1790000900000",
+        "issued": "1790000000000",
+        "key_id": "4a78877c4a0926fc5d5cb282bb45c11c",
+        "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+        "target": "path:refs/tags/v1:w6kvw7wudHh0"
+      },
+      "id": "be4debb34100d78571bf2b08c6316704743f81b14298f5a6b24390b1f4907321",
+      "name": "path-non-ascii",
+      "reject_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "expired",
+          "name": "at-expiry",
+          "now": 1790000900000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/tags/v1:w6kvw7wudHh0"
+        },
+        {
+          "audience": "https://git.example.org",
+          "expected_error": "audience not listed",
+          "name": "other-audience",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/tags/v1:w6kvw7wudHh0"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "repository mismatch",
+          "name": "other-repository",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/docs",
+          "target": "path:refs/tags/v1:w6kvw7wudHh0"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "target mismatch",
+          "name": "other-target",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        }
+      ],
+      "signature_hex": "8543a28e8d6b3da9329dcca1e63eecc4f32317274ebf1deb42d5044dbcdcab348620be01900449a97f8d3c13bbdb65e9cdead2cc05cb73bef3f114de2afddd0d",
+      "statement": "kit-url-token:v1\nhttps://git.example.com\n0x8ba1f109551bd432803012645ac136ddd64dba72/website\npath:refs/tags/v1:w6kvw7wudHh0\n1\n1790000000000\n1790000900000\n4a78877c4a0926fc5d5cb282bb45c11c",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvdGFncy92MTp3Nmt2dzd3dWRIaDAKMQoxNzkwMDAwMDAwMDAwCjE3OTAwMDA5MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.hUOijo1rPakyncyh5j7sxPMjFydOvx3rQtUETbzcqzSGIL4BkARJqX-NPBO722XpzerSzAXLc77z8RTeKv3dDQ"
+    },
+    {
+      "accept_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "at-issued",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/main:YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "last-ms-before-expiry",
+          "now": 1790000899999,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/main:YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ"
+        }
+      ],
+      "fields": {
+        "audience": "https://git.example.com",
+        "epoch": "2",
+        "expiry": "1790000900000",
+        "issued": "1790000000000",
+        "key_id": "4a78877c4a0926fc5d5cb282bb45c11c",
+        "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+        "target": "path:refs/heads/main:YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ"
+      },
+      "id": "691744d081d09ed94c2881cbbeb463200884e3f17d448283f44c048dbf4a7af5",
+      "name": "path-1024-bytes",
+      "reject_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "expired",
+          "name": "at-expiry",
+          "now": 1790000900000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/main:YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ"
+        },
+        {
+          "audience": "https://git.example.org",
+          "expected_error": "audience not listed",
+          "name": "other-audience",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/main:YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "repository mismatch",
+          "name": "other-repository",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/docs",
+          "target": "path:refs/heads/main:YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "target mismatch",
+          "name": "other-target",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        }
+      ],
+      "signature_hex": "e9b154388aa252def8c4686802eff27ebc371efe5f2beb9cdba1540b64da1d13f7182334395552f135a89055c844e8580059f8059f77404fe1432e83cbb5ba0a",
+      "statement": "kit-url-token:v1\nhttps://git.example.com\n0x8ba1f109551bd432803012645ac136ddd64dba72/website\npath:refs/heads/main:YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ\n2\n1790000000000\n1790000900000\n4a78877c4a0926fc5d5cb282bb45c11c",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpwYXRoOnJlZnMvaGVhZHMvbWFpbjpZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlRCjIKMTc5MDAwMDAwMDAwMAoxNzkwMDAwOTAwMDAwCjRhNzg4NzdjNGEwOTI2ZmM1ZDVjYjI4MmJiNDVjMTFj.6bFUOIqiUt74xGhoAu_yfrw3Hv5fK-uc26FUC2TaHRP3GCM0OVVS8TWokFXIROhYAFn4BZ93QE_hQy6Dy7W6Cg"
+    },
+    {
+      "accept_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "at-issued",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "last-ms-before-expiry",
+          "now": 1790086399999,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "fields": {
+        "audience": "https://git.example.com",
+        "epoch": "18446744073709551615",
+        "expiry": "1790086400000",
+        "issued": "1790000000000",
+        "key_id": "4a78877c4a0926fc5d5cb282bb45c11c",
+        "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+        "target": "object:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "id": "39b606bc33e015c179232576a78eb938a3787247bfbe7f0bd772cb2b8d0da016",
+      "name": "max-lifetime-max-epoch",
+      "reject_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "expired",
+          "name": "at-expiry",
+          "now": 1790086400000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "audience": "https://git.example.org",
+          "expected_error": "audience not listed",
+          "name": "other-audience",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "object:0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "repository mismatch",
+          "name": "other-repository",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/docs",
+          "target": "object:0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "target mismatch",
+          "name": "other-target",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "target": "path:refs/heads/main:eA"
+        }
+      ],
+      "signature_hex": "b0b9bd0c2814c6cdb30b4154e4f5e040a80a74288659f9681901431e6d730712b89c66f43f39e4b2d8ec168adbced3052d11c0a82e1c97b45fe0a3b1a3335807",
+      "statement": "kit-url-token:v1\nhttps://git.example.com\n0x8ba1f109551bd432803012645ac136ddd64dba72/website\nobject:0000000000000000000000000000000000000000000000000000000000000000\n18446744073709551615\n1790000000000\n1790086400000\n4a78877c4a0926fc5d5cb282bb45c11c",
+      "token": "a2l0LXVybC10b2tlbjp2MQpodHRwczovL2dpdC5leGFtcGxlLmNvbQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIvd2Vic2l0ZQpvYmplY3Q6MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMAoxODQ0Njc0NDA3MzcwOTU1MTYxNQoxNzkwMDAwMDAwMDAwCjE3OTAwODY0MDAwMDAKNGE3ODg3N2M0YTA5MjZmYzVkNWNiMjgyYmI0NWMxMWM.sLm9DCgUxs2zC0FU5PXgQKgKdCiGWfloGQFDHm1zBxK4nGb0PznkstjsForbztMFLRHAqC4cl7Rf4KOxozNYBw"
+    }
+  ]
+}

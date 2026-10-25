@@ -3,5 +3,5 @@
   "description": "3-entry tree: README.md (blob) + scripts (executable) + src (tree), lex-sorted",
   "bin": "tree.bin",
   "size": 140,
-  "blake3": "bbe5431cc7a6dd021ddb485b3cfda42dff664066ad4d00125e171c2bc908fd74"
+  "blake3": "7601dbbbfe427b8c3539ef82e8f151b4a8d0c646c660ab3239e09fe2e61f9c75"
 }

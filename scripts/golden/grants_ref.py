@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
 # Independent reference check of the grant codec and verifier golden
-# vectors (SPEC-WRITE-GRANTS §3, §4, §4.2, §5.1-§5.2, §7, §9.1;
+# vectors (SPEC-WRITE-GRANTS §3, §4, §4.2, §5.1-§5.2, §7, §9.1, §9.4;
 # SPEC-TRANSPORT-CONNECT §7.4):
 #   rust/tests/golden/grants/grant-statements.json
 #   rust/tests/golden/grants/headers.json
 #   rust/tests/golden/grants/{grant,epoch,visibility}-ed25519.json
 #   rust/tests/golden/grants/{secp256k1-eip191,webauthn-p256}.json
+#   rust/tests/golden/grants/url-token-ed25519.json
 #   rust/tests/golden/grants/reject/*.json (reject/verify-*: verification)
 #   rust/tests/golden/grants/MANIFEST.txt
 #
@@ -46,6 +47,11 @@
 #         json module (object_pairs_hook for duplicate names at any depth,
 #         parse_constant refusing NaN/Infinity, strict UTF-8, no unpaired
 #         surrogate).
+#   * the URL token fixture (§9.4): each statement rebuilt from its eight
+#     fields, re-signed from the URL-token seed, packed into the
+#     `<statement>.<signature>` token, and every accept, reject and
+#     token-level reject re-run through a stateless token verifier written
+#     here from §9.4.
 #     Self-tests: the web3.js "Some data" EIP-191 vector and the RFC 6979
 #     §A.2.5 P-256/SHA-256 "sample" vector.
 #
@@ -75,6 +81,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 
 sys.dont_write_bytecode = True  # keep scripts/golden free of __pycache__
 
@@ -95,6 +102,10 @@ MAX_GRANT_HEADER_BYTES = 8192
 DOMAIN = "kit-write-grant:v1"
 DOMAIN_EPOCH = "kit-write-epoch:v1"
 DOMAIN_VISIBILITY = "kit-repo-visibility:v1"
+DOMAIN_URL_TOKEN = "kit-url-token:v1"
+URL_TOKEN_MAX_LIFETIME_MS = 86_400_000
+MAX_TOKEN_PATH_BYTES = 1024
+MAX_REF_NAME_BYTES = 512
 EPOCH_STATEMENT_MAX_LIFETIME_MS = 2_592_000_000
 MAX_EPOCH_STEP = 1024
 MAX_CLOCK_LEAD_MS = 30_000
@@ -108,6 +119,7 @@ NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,99}\Z")
 IDENTITY_RE = re.compile(
     r"(ed25519-[0-9a-f]{64}|0x[0-9a-f]{40})/[a-z0-9][a-z0-9._-]{0,99}\Z")
 HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
+HEX32_RE = re.compile(r"[0-9a-f]{32}\Z")
 DECIMAL_RE = re.compile(r"(0|[1-9][0-9]*)\Z")
 
 
@@ -1328,6 +1340,134 @@ def write_rejects(root):
     print(f"wrote {len(CASES)} reject vectors")
 
 
+# ---------------------------------------------------------------------------
+# URL tokens (§9.4), written from the spec text.
+
+
+def validate_token_target(text):
+    """The §9.4 target grammar: `object:<64 hex>` or
+    `path:<ref>:<unpadded base64url path>`."""
+    bad = Reject("url token target")
+    if text.startswith("object:"):
+        if not HEX64_RE.match(text[len("object:"):]):
+            raise bad
+        return
+    if not text.startswith("path:"):
+        raise bad
+    ref, sep, encoded = text[len("path:"):].partition(":")
+    if not sep or len(ref.encode()) > MAX_REF_NAME_BYTES or not ref_name_ok(ref):
+        raise bad
+    if encoded and not b64_canonical(encoded):
+        raise bad
+    try:
+        path = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+    except UnicodeDecodeError:
+        raise bad
+    if len(path.encode()) > MAX_TOKEN_PATH_BYTES:
+        raise bad
+    if any(unicodedata.category(c) == "Cc" for c in path):
+        raise bad
+    if path and any(entry in ("", ".", "..") for entry in path.split("/")):
+        raise bad
+
+
+def validate_url_token_statement(statement):
+    """None if `statement` is a canonical §9.4 token statement, else the
+    reason of the first rule it breaks."""
+    try:
+        f = split_statement(statement, 8)
+        if f[0] != DOMAIN_URL_TOKEN:
+            raise Reject("domain")
+        if not origin_ok(f[1]):
+            raise Reject("audience")
+        if not IDENTITY_RE.match(f[2]):
+            raise Reject("repository")
+        validate_token_target(f[3])
+        decimal(f[4], U64_MAX)
+        issued, expiry = timestamps(f[5], f[6])
+        if not HEX32_RE.match(f[7]):
+            raise Reject("noncanonical hex")
+        if expiry <= issued:
+            raise Reject("expiry not after created")
+        if expiry - issued > URL_TOKEN_MAX_LIFETIME_MS:
+            raise Reject("lifetime too long")
+    except Reject as r:
+        return str(r)
+    return None
+
+
+def build_url_token_statement(fields):
+    """§9.4: eight fields joined by "\n"."""
+    return "\n".join([
+        DOMAIN_URL_TOKEN, fields["audience"], fields["repository"], fields["target"],
+        fields["epoch"], fields["issued"], fields["expiry"], fields["key_id"],
+    ]).encode("ascii")
+
+
+def verify_url_token(token, public, request):
+    """§9.4 stateless verification in spec order. None or the first reason."""
+    parts = token.split(".")
+    if len(parts) != 2 or "" in parts:
+        return "token format"
+    body, signature_text = parts
+    if len(body) > -(-MAX_STATEMENT_BYTES // 3) * 4:
+        return "statement too long"
+    if not (b64_canonical(body) and b64_canonical(signature_text)):
+        return "token base64"
+    statement = b64url_decode(body)
+    err = validate_url_token_statement(statement)
+    if err:
+        return err
+    f = statement.decode("ascii").split("\n")
+    if f[7] != blake3(public)[:16].hex():
+        return "unknown key id"
+    signature = b64url_decode(signature_text)
+    if len(signature) != 64:
+        return "signature length"
+    if not ed25519_verify_strict(public, blake3(statement), signature):
+        return "bad signature"
+    if f[1] != request["audience"]:
+        return "audience not listed"
+    if f[2] != request["repository"]:
+        return "repository mismatch"
+    if f[3] != request["target"]:
+        return "target mismatch"
+    if request["now"] >= int(f[6]):
+        return "expired"
+    return None
+
+
+def check_url_tokens(root):
+    """url-token-ed25519.json: [vectors, contexts, token rejects]."""
+    with open(os.path.join(root, "url-token-ed25519.json"), encoding="utf-8") as fh:
+        doc = json.load(fh)
+    seed = bytes.fromhex(doc["key_seed"])
+    public = ed25519_public(seed)
+    assert doc["public_key"] == public.hex()
+    assert doc["key_id"] == blake3(public)[:16].hex()
+    counts = [0, 0, 0]
+    for v in doc["vectors"]:
+        assert v["fields"]["key_id"] == doc["key_id"], v["name"]
+        statement = build_url_token_statement(v["fields"])
+        assert statement == v["statement"].encode("ascii"), v["name"]
+        assert validate_url_token_statement(statement) is None, v["name"]
+        assert blake3(statement).hex() == v["id"], v["name"]
+        signature = ed25519_sign(seed, statement)
+        assert signature.hex() == v["signature_hex"], v["name"]
+        assert f"{b64url(statement)}.{b64url(signature)}" == v["token"], v["name"]
+        counts[0] += 1
+        for ctx in v["accept_contexts"] + v["reject_contexts"]:
+            got = verify_url_token(v["token"], public, ctx)
+            assert got == ctx["expected_error"], (v["name"], ctx["name"], got)
+            counts[1] += 1
+    for r in doc["rejects"]:
+        got = verify_url_token(r["token"], public, r)
+        assert got == r["expected_error"] == r["rule"], (r["name"], got)
+        counts[2] += 1
+    assert len({r["expected_error"] for r in doc["rejects"]}) >= 16
+    return counts
+
+
 def b3sum(data):
     out = subprocess.run(["b3sum", "--no-names"], input=data, capture_output=True, check=True)
     return out.stdout.decode().strip()
@@ -1406,6 +1546,7 @@ def check(root, use_b3sum):
 
     signed_counts, verify_rows = check_signed(root)
     ecdsa_counts = check_ecdsa(root)
+    url_counts = check_url_tokens(root)
 
     print("| reject vector | expected_error | rule |")
     print("|---|---|---|")
@@ -1415,7 +1556,9 @@ def check(root, use_b3sum):
           f"{len(headers['rejects'])} header rejects, {len(rows)} reject vectors, "
           f"{signed_counts[0]} signed statements with {signed_counts[1]} contexts, "
           f"{ecdsa_counts[0]} ECDSA-signed statements with {ecdsa_counts[1]} contexts, "
-          f"{signed_counts[2]} verify rejects, {len(listed)} pinned files)")
+          f"{signed_counts[2]} verify rejects, {url_counts[0]} URL tokens with "
+          f"{url_counts[1]} contexts and {url_counts[2]} token rejects, "
+          f"{len(listed)} pinned files)")
 
 
 def main():

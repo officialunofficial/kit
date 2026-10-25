@@ -34,7 +34,7 @@ from recurring.
 | `fuzz_targets/merkle_packlist.rs` | `transfer::decode_packlist` / `transfer::encode_packlist` (never panics; a decoded node re-encodes and re-decodes to the same node) |
 | `fuzz_targets/disclosure_decode.rs` | `verify::verify_disclosure` decode path (SPEC-DISCLOSURE) — never panics on adversarial bundle bytes, regardless of the commit id checked against; every `Vec`/`Proof` length is bounded before allocation |
 | `fuzz_targets/verify_disclosure.rs` | `verify::verify_disclosure` / `verify::build_disclosure` (never panics; a freshly built bundle over a real `ObjectStore` fixture verifies; a mutated bundle rejects cleanly) |
-| `fuzz_targets/span_decode.rs` | `verify::span::verify_disclosure_span` structural decode (never panics on arbitrary MKDS bytes; lengths and counts are checked before allocation) |
+| `fuzz_targets/span_decode.rs` | `verify::span::verify_disclosure_span` structural decode (never panics on arbitrary KDSP bytes; lengths and counts are checked before allocation) |
 | `fuzz_targets/verify_span.rs` | `verify::span::{encode_span,verify_disclosure_span}` (a newly encoded committed span verifies; its mutated commit id rejects; arbitrary input never panics) |
 | `fuzz_targets/pack_entries.rs` | `pack::PackEntries` (never panics on adversarial pack bytes; a pack `PackReader::read` accepts also parses as `PackEntries` with the same entry count) |
 | `fuzz_targets/verify_closure.rs` | `verify::verify_closure` / `verify::verify_closure_packs` / `verify::verify_closure_manifest` / `verify::export_closure` (never panics; a freshly exported snapshot closure verifies; a mutated manifest rejects cleanly; raw adversarial bytes fed directly as pack buffers — whole and split into two — to `verify_closure_packs`/`verify_closure_manifest` never panic and any `Ok` report is internally consistent) |
@@ -49,7 +49,7 @@ from recurring.
 | `fuzz_targets/commitment_parse.rs` | `write_auth::ContentCommitment::parse` (an accepted commitment displays as exactly the input text) |
 | `fuzz_targets/ignore_parse.rs` | `ignore::parse` / `ops::restore::parse_sparse_patterns` (never panics on any text) |
 | `fuzz_targets/grant_parse.rs` | `Grant::parse` / `SignedHeader::parse` (an accepted input re-encodes to exactly itself) |
-| `fuzz_targets/epoch_visibility_parse.rs` | `EpochStatement::parse` / `VisibilityStatement::parse`, the stateless grant verifiers and the `webauthn-p256` blob and client data parsers |
+| `fuzz_targets/epoch_visibility_parse.rs` | `EpochStatement::parse` / `VisibilityStatement::parse` / `UrlTokenStatement::parse` / `TokenTarget::parse`, the URL token verifier, the stateless grant verifiers and the `webauthn-p256` blob and client data parsers |
 | `fuzz_targets/config_parse.rs` | `config::apply_text` (a repository config never sets a user-scoped key) |
 | `fuzz_targets/stash_list.rs` | `ops::stash::deserialize_list` (an accepted list re-encodes to exactly itself) |
 | `fuzz_targets/bridge_map.rs` | The `kit-git-bridge` map and ref-state loaders (never panic on any file content) |
@@ -69,7 +69,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | ------ | --------------------- |
 | `kit_attest::envelope::decode` | `envelope_decode` |
 | `kit_attest::grant` `Grant::parse`, `SignedHeader::parse`, `RepoScope` and `RefScope` `parse`, capability and visibility field `parse` | `grant_parse` |
-| `kit_attest::grant` `EpochStatement::parse`, `VisibilityStatement::parse` | `epoch_visibility_parse` |
+| `kit_attest::grant` `EpochStatement::parse`, `VisibilityStatement::parse`, `UrlTokenStatement::parse`, `TokenTarget::parse`, `verify_url_token` | `epoch_visibility_parse` |
 | `kit_attest::grant::webauthn` `WebAuthnAssertion::parse` | `epoch_visibility_parse` |
 | `kit_attest::webauthn::decode_pae_b64_standard` | None. It is one call to the audited base64 decoder, and it has no parsing code of its own. |
 | `kit_core::serialize::deserialize` | `tree` |
@@ -130,7 +130,7 @@ Target-specific invariants:
 - **Delta**: a `COPY` instruction's `offset + length` stays within the
   base slice; a truncated `COPY` header or `INSERT` literal produces
   `DeltaCorrupt`; opcode `0x00` is always rejected.
-- **MKDS span**: the decode target accepts arbitrary capped bytes without a
+- **KDSP span**: the decode target accepts arbitrary capped bytes without a
   panic. The verify target re-encodes the committed two-chunk fixture through
   the product encoder, verifies its 20-byte range, rejects a changed embedded
   commit id, then checks arbitrary capped bytes. The fixture and its derived

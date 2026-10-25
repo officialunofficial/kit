@@ -12,10 +12,10 @@ use std::path::PathBuf;
 pub const MAX_LEAVES: u64 = 1_000_000;
 pub const MAX_FILTER_PATHS: usize = 100_000;
 pub const MAX_FILTER_BYTES: usize = 1024 * 1024;
-pub const SPARSE_WIRE_MAGIC: [u8; 4] = *b"MSP1";
+pub const SPARSE_WIRE_MAGIC: [u8; 4] = *b"KSP1";
 pub const SPARSE_WIRE_VERSION: u8 = 2;
 pub const SPARSE_WIRE_MAX_BYTES: usize = 16 * 1024 * 1024;
-pub const SPARSE_CACHE_MAGIC: [u8; 4] = *b"MSPC";
+pub const SPARSE_CACHE_MAGIC: [u8; 4] = *b"KSPC";
 pub const SPARSE_CACHE_VERSION: u8 = 2;
 pub const SPARSE_CACHE_DIR: &str = "sparse";
 

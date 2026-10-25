@@ -16,7 +16,7 @@ to a specific kit commit id, with proof bytes on the order of a few KiB
 regardless of repository size ("partial disclosure"), **and** proving that
 a served object set is the full content that commit id commits to
 ("closure profile" / full disclosure, §7), and a multi-chunk range
-container (MKDS, §8).
+container (KDSP, §8).
 
 This spec covers the verifier kit. Out of scope, deliberately:
 CLI commands and the docs guide.
@@ -81,7 +81,7 @@ an LEB128 **varint**, arrays raw, `Option<T>` as a bool discriminant
 followed by `T` when present):
 
 ```
-magic   = "MKDP"              (4 raw bytes)
+magic   = "KDPB"              (4 raw bytes)
 version: u8 = 2
 commit_id: [u8; 32]
 commit_bytes: Vec<u8>          <= 4 MiB
@@ -152,7 +152,7 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
 
 1. **MUST** reject `bundle` outright if it exceeds `MAX_BUNDLE_BYTES`,
    before decoding anything.
-2. **MUST** check the fixed 5-byte header (`"MKDP"` magic + version byte)
+2. **MUST** check the fixed 5-byte header (`"KDPB"` magic + version byte)
    before decoding the codec body; an unrecognized version is a typed
    error, not a fallback to another format.
 3. **MUST** decode the codec body with every `Vec` bounded as in §3, and
@@ -371,7 +371,7 @@ Encoded with commonware-codec conventions (fixed integers big-endian,
 lengths LEB128 varint, arrays raw), matching §3:
 
 ```
-magic "MKCL"            (4 raw bytes)
+magic "KCLM"            (4 raw bytes)
 version: u8 = 1
 root: [u8; 32]
 mode: u8                0 = snapshot, 1 = history
@@ -455,11 +455,11 @@ no code with the Rust crates. It decodes the manifest and the packs, derives
 every object id, walks the closure from the trusted root, and compares the
 result with each sidecar.
 
-## 8. Multi-chunk span container (MKDS v1)
+## 8. Multi-chunk span container (KDSP v1)
 
-MKDS proves a content range crossing chunk boundaries of one ChunkedBlob.
-It wraps unchanged MKDP v2 Range and Chunk bundles, rather than introducing
-a payload kind. External tools MUST be able to encode and verify MKDS from
+KDSP proves a content range crossing chunk boundaries of one ChunkedBlob.
+It wraps unchanged KDPB v2 Range and Chunk bundles, rather than introducing
+a payload kind. External tools MUST be able to encode and verify KDSP from
 this section and §3–§5 alone. [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md)
 selects this representation by query.
 
@@ -470,13 +470,13 @@ varints as in §3 (minimal encoding, bounded to u32 for vector lengths).
 Arrays are raw bytes. No padding is inserted.
 
 ```text
-magic: [4] = "MKDS"
+magic: [4] = "KDSP"
 version: u8 = 1
 commit_id: [32]
 offset: u64                 absolute content offset
 len: u64                    content length, not inclusive endpoint
-anchor: Vec<u8>             encoded MKDP v2 Range
-chunks: Vec<Vec<u8>>         encoded MKDP v2 Chunk bundles
+anchor: Vec<u8>             encoded KDPB v2 Range
+chunks: Vec<Vec<u8>>         encoded KDPB v2 Chunk bundles
 ```
 
 The anchor MUST disclose content offset 0, length 1 of chunk `first`,
@@ -506,7 +506,7 @@ language-independent golden contract, not implementation type names.
 | Check | Reject reason |
 |---|---|
 | Total encoded size at most 64 MiB | `span_too_large` |
-| Magic equals MKDS | `span_magic` |
+| Magic equals KDSP | `span_magic` |
 | Version equals 1 | `span_version` |
 | Fields and bounded vectors decode completely, including chunk count at most 1,000,000 | `span_encoding` |
 | No trailing bytes | `span_trailing_bytes` |
@@ -527,7 +527,7 @@ language-independent golden contract, not implementation type names.
 | The requested end exceeds the beginning of the last chunk (the last chunk is needed) | `span_last_unneeded` |
 
 An incomplete nonempty length-proof set fails anchor verification with
-`span_anchor_invalid`; a valid MKDP anchor omitting its optional offset
+`span_anchor_invalid`; a valid KDPB anchor omitting its optional offset
 proofs at index > 0 fails with `span_anchor_offset`. The anchor's proven
 absolute offset is the beginning of the first included chunk, not
 `first * chunk_size`: content-defined chunking has variable lengths.
@@ -554,8 +554,8 @@ and rejects for gaps, duplicates, wrong selectors, mixed commits,
 mismatched leaves, missing/incomplete anchors, ranges outside the span,
 an unnecessary last chunk, magic/version errors, trailing bytes,
 truncation, a non-minimal varint, a varint above `u32::MAX`, a chunk count
-of 1,000,001, an MKDP or MKDS container supplied as the anchor, an MKDP
-supplied in place of an MKDS, and oversize input. Large reject bodies use sidecar byte-range copy and patch
+of 1,000,001, an KDPB or KDSP container supplied as the anchor, an KDPB
+supplied in place of an KDSP, and oversize input. Large reject bodies use sidecar byte-range copy and patch
 recipes over the accepted containers; each recipe reconstructs exact bytes
 before verification.
 The oversize vector uses a pinned small seed plus a sidecar expansion
@@ -566,7 +566,7 @@ vector is zero-filled to one empty vector per declared chunk, so a lenient
 reader fails for a different reason and only the 1,000,000 cap rejects it.
 Each reject sidecar names the exact reason in §8.2.
 
-Document version 4 adds MKDS wire version 1; MKDP wire version 2 and its
+Document version 4 adds KDSP wire version 1; KDPB wire version 2 and its
 existing vectors remain unchanged.
 
 ## 9. Later (out of scope for this document)

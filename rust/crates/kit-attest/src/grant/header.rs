@@ -11,7 +11,7 @@ use super::{GrantError, MAX_GRANT_HEADER_BYTES};
 /// the alphabet and non-zero unused trailing bits, so each byte string has
 /// exactly one encoding. Spelled out rather than taken from
 /// `URL_SAFE_NO_PAD` so a change of defaults cannot loosen it.
-const B64: GeneralPurpose = GeneralPurpose::new(
+pub(super) const B64: GeneralPurpose = GeneralPurpose::new(
     &alphabet::URL_SAFE,
     GeneralPurposeConfig::new()
         .with_encode_padding(false)

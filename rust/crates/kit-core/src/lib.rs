@@ -12,7 +12,7 @@
 //! kit-core — BLAKE3 hashing and canonical v1 object byte format.
 //!
 //! The byte layout implemented here is defined, normatively, in
-//! `docs/specs/SPEC-OBJECTS.md` (version `0x01`, magic `"MKT1"`). Any change
+//! `docs/specs/SPEC-OBJECTS.md` (version `0x01`, magic `"KOB1"`). Any change
 //! to this crate MUST update the spec in the same PR.
 //!
 //! The library depends on `std` to keep the code readable. No `serde`,

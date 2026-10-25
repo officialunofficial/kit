@@ -24,7 +24,7 @@ const DOWNLOAD_PACK: &str = "/kit.transport.v1.TransportService/DownloadPack";
 pub(crate) const RESPONSE_LIMIT: usize = 1024 * 1024;
 /// A `ListRefs` page is at most 2 MiB when encoded (SPEC-TRANSPORT-CONNECT §7.9).
 pub(crate) const LIST_REFS_LIMIT: usize = 2 * 1024 * 1024;
-const CHALLENGE_TYPE: &str = "kit.transport.v1.AdmissionChallenge";
+const CHALLENGE_TYPE: &str = <crate::proto::AdmissionChallenge as buffa::MessageName>::FULL_NAME;
 const PENDING_TYPE: &str = "kit.transport.v1.PendingVerification";
 const MEMBERSHIP_TYPE: &str = "kit.transport.v1.MembershipNotVisible";
 

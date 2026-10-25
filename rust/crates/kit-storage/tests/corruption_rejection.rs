@@ -118,7 +118,7 @@ fn content_addressed_garbage_is_rejected_on_decode() {
     // Each variant loads past content-addressing, then must fail to decode.
     let cases: &[(&str, Vec<u8>)] = &[
         ("empty", Vec::new()),
-        ("short-prologue", vec![0x03, b'M', b'K']),
+        ("short-prologue", vec![0x03, b'K', b'O']),
         ("bad-magic", {
             let mut v = vec![0x03];
             v.extend_from_slice(b"XXXX");
@@ -127,7 +127,7 @@ fn content_addressed_garbage_is_rejected_on_decode() {
         }),
         ("bad-type", {
             let mut v = vec![0x09]; // 0x09 is not a valid ObjectType
-            v.extend_from_slice(b"MKT1");
+            v.extend_from_slice(b"KOB1");
             v.push(0x01);
             v
         }),

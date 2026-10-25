@@ -60,7 +60,7 @@ All integers are little-endian. The envelope is exactly:
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 0 | 4 | Network magic `MSP1`, or cache magic `MSPC` |
+| 0 | 4 | Network magic `KSP1`, or cache magic `KSPC` |
 | 4 | 1 | Version 2 |
 | 5 | 32 | Canonical Tree ID |
 | 37 | 32 | Filter commitment |

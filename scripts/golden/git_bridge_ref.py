@@ -227,9 +227,9 @@ def chunked_manifest():
     chunks, pos = [], 0
     for end in o.boundaries(BIG, gear):
         data = BIG[pos:end]
-        chunks.append(blake3(b"\x01MKT1\x01" + struct.pack("<I", len(data)) + data))
+        chunks.append(blake3(b"\x01KOB1\x01" + struct.pack("<I", len(data)) + data))
         pos = end
-    body = b"\x05MKT1\x01" + struct.pack("<QII", len(BIG), 0, len(chunks)) + b"".join(chunks)
+    body = b"\x05KOB1\x01" + struct.pack("<QII", len(BIG), 0, len(chunks)) + b"".join(chunks)
     return body, o.chunked_id(len(BIG), 0, chunks)
 
 
@@ -341,7 +341,7 @@ def import_commit(framed, tree_kit, parents_kit):
     _, stamp = person(committer)
     pub = o.ed25519_sign(IMPORT_SEED, b"")[0]
     prefix = (
-        b"\x03MKT1\x01"
+        b"\x03KOB1\x01"
         + tree_kit
         + struct.pack("<I", len(parents_kit))
         + b"".join(parents_kit)
@@ -366,7 +366,7 @@ def import_tag(framed, target_kit, target_type):
         ident, stamp = b"(no tagger)", 0
     pub = o.ed25519_sign(IMPORT_SEED, b"")[0]
     prefix = (
-        b"\x07MKT1\x01"
+        b"\x07KOB1\x01"
         + target_kit
         + bytes([target_type])
         + struct.pack("<I", len(name))
@@ -430,7 +430,7 @@ def check_import(root):
 def check_tagger_less():
     """The tagger-less tag of golden_import.rs, rebuilt from its git objects."""
     content = b"vector content\n"
-    blob_kit = b"\x01MKT1\x01" + struct.pack("<I", len(content)) + content
+    blob_kit = b"\x01KOB1\x01" + struct.pack("<I", len(content)) + content
     blob_sha = hashlib.sha1(frame(b"blob", content)).digest()
     entry = (b"file.txt", 1, blake3(blob_kit))
     tree_id = o.tree_id([entry])
@@ -447,7 +447,7 @@ def check_tagger_less():
     )
     tag_kit = import_tag(frame(b"tag", tag_body), blake3(commit_kit), o.COMMIT)
     expect(
-        blake3(tag_kit).hex() == "d14450517907902cd49c2cd0ad707178346ae98a0ad7d64d4bfe6a6c88605372",
+        blake3(tag_kit).hex() == "a9b667cd537a4344117fdfe92740ca5c294ef677cac80624f8cc5c85fc6ae831",
         "import tagger-less tag id",
     )
 

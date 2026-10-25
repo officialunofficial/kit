@@ -77,7 +77,7 @@ fn upstream_element(proof_bytes: &[u8], leaf: Hash, position: u32, inner_root: H
 /// Decode a v2 bundle far enough to check every step and chunk header
 /// with upstream BMT, without calling kit verifiers.
 fn native_check(bundle: &[u8]) -> Result<(), NativeFail> {
-    if bundle.len() < 5 || &bundle[..4] != b"MKDP" {
+    if bundle.len() < 5 || &bundle[..4] != b"KDPB" {
         return Err(NativeFail::Other("bad magic"));
     }
     let version = bundle[4];

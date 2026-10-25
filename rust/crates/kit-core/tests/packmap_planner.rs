@@ -174,7 +174,7 @@ fn state(prior: Option<Hash>, held: &HashSet<Hash>, reset: bool) -> ChainState {
 #[allow(clippy::too_many_lines)] // Keep fixture cases and their assertions together.
 fn former_driver_fixture_matrix_matches_literal_wire_and_ids() {
     let (a, b, c, retry_head) = ([0x11; 32], [0x22; 32], [0x33; 32], [0x44; 32]);
-    // Expected ids are independently derived from the existing pinned MKPL
+    // Expected ids are independently derived from the existing pinned KPKL
     // codec layout, not claimed to be captures of former driver executions.
     let fixtures = [
         (
@@ -183,7 +183,7 @@ fn former_driver_fixture_matrix_matches_literal_wire_and_ids() {
             vec![],
             vec![b],
             false,
-            Some("ed1197878af9fe071d21bff4a0c171933076e0cc4d6e8558005a3cc14e6970a3"),
+            Some("8460aaeab2f0794e13e56799e56fafe15861ee87fac489bcd976ef92c6865d35"),
         ),
         (
             "append",
@@ -191,7 +191,7 @@ fn former_driver_fixture_matrix_matches_literal_wire_and_ids() {
             vec![c],
             vec![b],
             false,
-            Some("81b13163a68e2dc4bf09d23bc83f515a361a5f0a301d903e745123e35c1a429e"),
+            Some("3befb2598f86b347f4b20c0d160962da2411321dfc37b7606d06561d68c38bbd"),
         ),
         (
             "partial overlap",
@@ -199,7 +199,7 @@ fn former_driver_fixture_matrix_matches_literal_wire_and_ids() {
             vec![b],
             vec![b, c],
             false,
-            Some("04b9aceef7673b4f4c8b039c2aea4f7cc98f9d40fbf4455d8736231bcce12cde"),
+            Some("1a81a692a6910ef19b04fd894bf304c90201d3d8d46a2fcd8f52e936bca8bf69"),
         ),
         (
             "full overlap retry",
@@ -215,7 +215,7 @@ fn former_driver_fixture_matrix_matches_literal_wire_and_ids() {
             vec![b, c],
             vec![b, c],
             true,
-            Some("d00f0c74759dd0d64e01110e4f19ba2f99454127037e6e4ba288f662f6931a22"),
+            Some("cf106b92ed63094c1e789ca404c533e11a7543930d1123bfd9aa07dbb6bbd9c8"),
         ),
         (
             "changed head retry",
@@ -223,7 +223,7 @@ fn former_driver_fixture_matrix_matches_literal_wire_and_ids() {
             vec![b],
             vec![b, c],
             false,
-            Some("baeabbc75a5852eabaa2f986a07034887f88128d7592b5001b6c90d976fda7d4"),
+            Some("1fadd223798f466a638ceb05f4e8cd36dd1780cc26db1e590466e01040b63ac7"),
         ),
         (
             "reset retry",
@@ -231,7 +231,7 @@ fn former_driver_fixture_matrix_matches_literal_wire_and_ids() {
             vec![b, c],
             vec![b, c],
             true,
-            Some("d00f0c74759dd0d64e01110e4f19ba2f99454127037e6e4ba288f662f6931a22"),
+            Some("cf106b92ed63094c1e789ca404c533e11a7543930d1123bfd9aa07dbb6bbd9c8"),
         ),
         (
             "broken chain reset",
@@ -239,7 +239,7 @@ fn former_driver_fixture_matrix_matches_literal_wire_and_ids() {
             vec![],
             vec![b, c],
             true,
-            Some("d00f0c74759dd0d64e01110e4f19ba2f99454127037e6e4ba288f662f6931a22"),
+            Some("cf106b92ed63094c1e789ca404c533e11a7543930d1123bfd9aa07dbb6bbd9c8"),
         ),
     ];
     for (label, prior, held, keys, reset, expected_id) in fixtures {
@@ -264,7 +264,7 @@ fn former_driver_fixture_matrix_matches_literal_wire_and_ids() {
         );
         if let Some(node) = planned {
             // Independent literal encoding for this fixture's one-byte counts.
-            let mut wire = b"MKPL\x01".to_vec();
+            let mut wire = b"KPKL\x01".to_vec();
             match prior.filter(|_| !reset) {
                 Some(head) => {
                     wire.push(1);

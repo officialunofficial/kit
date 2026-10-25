@@ -4,7 +4,7 @@ Content-addressed VCS primitives for kit: BLAKE3 hashing, canonical objects,
 refs, packs, and the transport trait every backend implements.
 
 The byte layout this crate produces is defined, normatively, in
-`docs/specs/SPEC-OBJECTS.md` (version `0x01`, magic `"MKT1"`) &mdash; any change here
+`docs/specs/SPEC-OBJECTS.md` (version `0x01`, magic `"KOB1"`) &mdash; any change here
 must update the spec in the same PR. The crate depends only on `std`: no
 `serde`, no `anyhow`, no panics on unchecked input.
 

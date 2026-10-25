@@ -1,4 +1,4 @@
-//! Test-local MKDS reference verifier; no product code or private MKDP types.
+//! Test-local KDSP reference verifier; no product code or private KDPB types.
 use super::*;
 
 type Result<T> = std::result::Result<T, &'static str>;
@@ -63,7 +63,7 @@ fn decode(input: &[u8]) -> Result<Decoded<'_>> {
         return Err("span_too_large");
     }
     let mut r = Reader(input);
-    if r.take(4)? != b"MKDS" {
+    if r.take(4)? != b"KDSP" {
         return Err("span_magic");
     }
     if r.take(1)? != [1] {

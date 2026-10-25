@@ -68,7 +68,7 @@ mod wire {
         payload: &[u8],
     ) -> Vec<u8> {
         let mut out = Vec::new();
-        out.extend_from_slice(b"MKDP");
+        out.extend_from_slice(b"KDPB");
         out.push(2u8);
         commit_id.write(&mut out);
         commit_bytes.write(&mut out);

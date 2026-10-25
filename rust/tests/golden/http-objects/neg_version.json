@@ -1,6 +1,6 @@
 {
-  "blake3": "1316649a5ae2eb0e9a529acdcf4d9365a0137d612ec431f6c4b429b8b3c2ed4b",
-  "commit": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
+  "blake3": "e7f2b2df4f7cc0d44befd72bb0c474720af786b6415206c23851067ed9b7faab",
+  "commit": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
   "expect": {
     "accept": false,
     "expand_to": null,
@@ -10,7 +10,7 @@
   "recipe": {
     "segments": [
       {
-        "hex": "4d4b4453"
+        "hex": "4b445350"
       },
       {
         "length": 33,

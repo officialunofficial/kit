@@ -191,7 +191,7 @@ def decode_bundle(data):
         raise Reject("bundle too large")
     b = Bundle(data)
     try:
-        if b.take(4) != b"MKDP":
+        if b.take(4) != b"KDPB":
             raise Reject("bad magic")
         version = b.u8()
         if version != 2:

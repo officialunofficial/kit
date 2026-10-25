@@ -1,0 +1,9 @@
+# SSH serve session golden vectors (deterministic)
+# Checked by `python3 scripts/golden/ssh_serve_ref.py`
+# Format: <name> <blake3-hex-of-file-bytes>
+session-1.bin 82e812e181c1bda202171036f59a55493cf2123ba83d4850c0d06d6972c0289a
+session-1.in.bin 5eefed7f6f3db6d65978d3c8e603feb3b5db8340338e7081d3c322b24b854592
+session-2.bin 029c3cf49c8e65c9626be93fe66214ee26ef7dbb85b87e677365bd0ff1e37c4f
+session-2.in.bin 39ca29bd7647b75d5f7ed887c5cc1b501e5e3a10b57c19fb5752aa2ae74190fc
+session-3.bin 6dea10f6a2b9eac9f7ddbd8e36c99df6baaf416039acfad03de955e1fdb58cda
+session-3.in.bin f9f0a3e285c01547ea7d931fbd00f4407528e2b9d01b5a7df49655fe384f1e0e

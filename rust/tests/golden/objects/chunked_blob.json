@@ -3,5 +3,5 @@
   "description": "chunked blob manifest with 4 fixed-size chunks",
   "bin": "chunked_blob.bin",
   "size": 150,
-  "blake3": "fc224d8aee722f2fc616e1c8acb240b9c9bc05ba84226cf6c71be224ece579b8"
+  "blake3": "60c235e46c15a6049c779b45bde55fe93695889127adab5b0d3b42131e9fc478"
 }

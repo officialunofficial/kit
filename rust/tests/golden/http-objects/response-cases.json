@@ -1287,7 +1287,7 @@
       "name": "proof_object",
       "request": {
         "admission": "off",
-        "kind": "MKDP",
+        "kind": "KDPB",
         "method": "GET",
         "proof": true,
         "public": true,
@@ -1320,7 +1320,7 @@
       "name": "proof_ref",
       "request": {
         "admission": "off",
-        "kind": "MKDP",
+        "kind": "KDPB",
         "method": "GET",
         "proof": true,
         "public": true,
@@ -1353,7 +1353,7 @@
       "name": "proof_blob_range",
       "request": {
         "admission": "off",
-        "kind": "MKDP",
+        "kind": "KDPB",
         "method": "GET",
         "proof": true,
         "public": true,
@@ -1386,7 +1386,7 @@
       "name": "proof_span",
       "request": {
         "admission": "off",
-        "kind": "MKDS",
+        "kind": "KDSP",
         "method": "GET",
         "proof": true,
         "public": true,
@@ -1419,7 +1419,7 @@
       "name": "proof_private",
       "request": {
         "admission": "off",
-        "kind": "MKDP",
+        "kind": "KDPB",
         "method": "GET",
         "proof": true,
         "public": false,
@@ -1452,7 +1452,7 @@
       "name": "proof_admitted",
       "request": {
         "admission": "allow",
-        "kind": "MKDS",
+        "kind": "KDSP",
         "method": "GET",
         "proof": true,
         "public": true,

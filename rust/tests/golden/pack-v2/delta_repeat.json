@@ -3,24 +3,24 @@
   "description": "a 0x00 base and a 0x04 zstd-delta entry against it",
   "entries": [
     {
-      "blake3_of_bytes": "587e28ff4c918a1b1e4dacf09ceaafaa7f11d49d8ad52615aaeb447c6650e902",
-      "id": "587e28ff4c918a1b1e4dacf09ceaafaa7f11d49d8ad52615aaeb447c6650e902",
+      "blake3_of_bytes": "96cc96b78a0f53dfc0f08facff9d28897936a0a799f3743e36950bd32094ddaa",
+      "id": "96cc96b78a0f53dfc0f08facff9d28897936a0a799f3743e36950bd32094ddaa",
       "len": 65,
       "type": 0
     },
     {
-      "blake3_of_bytes": "8aef4d27f20ef2cfd6a693197fe790b618f6b1fc524164caaea24dfcb8ba6a87",
-      "decoded_blake3": "73f1a378cebf1a519197de17137c1e820111fb202ffd0e0f3759a421f6ce0199",
+      "blake3_of_bytes": "700dc015e19f92bd474e5b9fc2dbd2c18723051872028af994d31805cd1113c3",
+      "decoded_blake3": "6b19d1af9418e73f861ae7398dfb02f0677a2526ac6c4f9e731fecc31e5c866a",
       "frame_len": 49,
       "frame_offset": 123,
-      "id": "8aef4d27f20ef2cfd6a693197fe790b618f6b1fc524164caaea24dfcb8ba6a87",
+      "id": "700dc015e19f92bd474e5b9fc2dbd2c18723051872028af994d31805cd1113c3",
       "len": 4106,
       "type": 4,
       "uncompressed_len": 4148
     }
   ],
   "name": "delta_repeat",
-  "pack_key": "7ac8366d25d6a284b1e909a07de772f6cc2ea7ec86ad2ebe360db31e70b55201",
+  "pack_key": "0633a89c681e83a2152aec2956dc75cd5030770a089e1cdcdf37e2c3155aa36d",
   "size": 204,
   "version": 2
 }

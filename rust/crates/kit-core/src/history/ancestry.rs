@@ -13,7 +13,7 @@ use crate::refs::ancestry_state::{self, Transaction};
 use crate::refs::{self, RefMutation, RefWriteCondition};
 use crate::store::ObjectStore;
 
-const MAGIC: &[u8; 5] = b"MKHA\x01";
+const MAGIC: &[u8; 5] = b"KHAN\x01";
 /// Bound both graph walking and persisted allocation (32 MiB of leaf hashes).
 pub(crate) const MAX_ANCESTRY_LEAVES: usize = 1_000_000;
 const MAX_SNAPSHOT_BYTES: u64 = (MAX_ANCESTRY_LEAVES as u64) * 32 + 8192;
@@ -691,7 +691,7 @@ struct ScrubState {
 /// length now, can never be misread as the new layout; either mismatch
 /// alone already makes [`ScrubState::decode`] return `None`, the same
 /// safe "no prior scrub state" fallback either way.
-const SCRUB_MAGIC: &[u8; 5] = b"MKSC\x02";
+const SCRUB_MAGIC: &[u8; 5] = b"KSCR\x02";
 
 impl ScrubState {
     /// Builds a fresh state for a just-completed full verification.

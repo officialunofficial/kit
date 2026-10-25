@@ -87,8 +87,8 @@ Where a `SPEC-*.md` document specifies byte layout:
 
 ## 4. Domain-separator and namespace naming
 
-kit's signing and hashing domain separators (for example, `kit.tag\0`,
-BLS namespace strings like `dsse/v1`) are permanent, literal byte
+kit's signing and hashing domain separators (for example, `kit.tag\0`)
+are permanent, literal byte
 strings baked into the signing/hashing contract &mdash; not a version field
 and not a label that gets bumped in place. A
 distinct new application of an existing key MUST mint its own,
@@ -98,18 +98,35 @@ change.
 
 Every domain separator, magic and predicate URI MUST have a value that
 no other one has. The reference implementation checks this: a test scans
-the source of every crate and fails when two constants share a value.
+the source of every crate and fails when two definitions share a value. A
+definition is a `const` or `static` item, a tag passed inline to a hash call,
+or a magic written inline as a byte string.
+
+Every magic is a distinct ASCII value that begins with `K`. The table
+below is the one registry of magics. Each owning spec states how the magic
+is used.
+
+| Magic | Bytes | Format | Owning spec |
+|---|---|---|---|
+| `KIT\0` | 4 | Pack file | SPEC-PACKFILE |
+| `KITKSV1\0` | 8 | Encrypted key record | SPEC-KEYSTORE |
+| `KOB1` | 4 | Object prologue | SPEC-OBJECTS |
+| `KIDX` | 4 | Staging index | SPEC-INDEX |
+| `KDPB` | 4 | Disclosure bundle | SPEC-DISCLOSURE |
+| `KDSP` | 4 | Disclosure span | SPEC-DISCLOSURE |
+| `KCLM` | 4 | Closure manifest | SPEC-DISCLOSURE |
+| `KSP1` | 4 | Sparse checkout wire envelope | SPEC-SPARSE-CHECKOUT |
+| `KSPC` | 4 | Sparse checkout cache envelope | SPEC-SPARSE-CHECKOUT |
+| `KPKL` | 4 | Pack list | SPEC-TRANSPORT-CONNECT |
+| `KSTS` | 4 | Stash record | SPEC-WORKTREE |
+| `KHAN` | 4 | Ancestry state | SPEC-HISTORY-PROOF |
+| `KSCR` | 4 | Ancestry scrub record | SPEC-HISTORY-PROOF |
 
 A registry (informative, not itself normative) of the domain
 separators and namespace strings currently in use is maintained inline
 in each format's own spec (SPEC-OBJECTS §10 for object-hash domains,
-SPEC-SIGNING for the commit/remix signing domain, SPEC-RELEASE-THRESHOLD
-§3 for the BLS namespace); this document does not duplicate that list,
-only the naming rule.
-
-`kit-authority-generation:v1` is the dedicated deployment-authority statement
-domain for namespace authority generation changes (SPEC-SERVER §6.2.1), distinct
-from grants, hook requests, write envelopes and admin statements.
+SPEC-SIGNING for the commit/remix signing domain); this document does not
+duplicate that list, only the naming rule.
 
 ## 5. Golden vectors and conformance tests
 

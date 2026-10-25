@@ -1,4 +1,4 @@
-//! MKDS v1 multi-chunk range proofs (SPEC-DISCLOSURE §8).
+//! KDSP v1 multi-chunk range proofs (SPEC-DISCLOSURE §8).
 //!
 //! The decoder borrows its inner bundles. Verification retains only small
 //! summaries and the requested output, so it never keeps decoded chunks
@@ -16,7 +16,7 @@ use commonware_codec::{EncodeSize, Write};
 
 use super::MAX_BUNDLE_BYTES;
 
-const MAGIC: &[u8; 4] = b"MKDS";
+const MAGIC: &[u8; 4] = b"KDSP";
 const VERSION: u8 = 1;
 const MAX_CHUNK_BUNDLES: usize = 1_000_000;
 
@@ -50,7 +50,7 @@ pub struct DisclosedSpan {
     pub chunk_inner_root: Hash,
 }
 
-/// First failed MKDS check, in SPEC-DISCLOSURE §8.2 order.
+/// First failed KDSP check, in SPEC-DISCLOSURE §8.2 order.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SpanError {
@@ -78,7 +78,7 @@ pub enum SpanError {
     /// Fewer than two chunk bundles.
     #[error("span_chunk_count")]
     ChunkCount,
-    /// Anchor MKDP failed verification.
+    /// Anchor KDPB failed verification.
     #[error("span_anchor_invalid: {0}")]
     AnchorInvalid(#[source] VerifyError),
     /// Anchor is not a one-byte chunked Range at local offset zero.
@@ -87,7 +87,7 @@ pub enum SpanError {
     /// Anchor does not prove its absolute offset.
     #[error("span_anchor_offset")]
     AnchorOffset,
-    /// An inner MKDP failed verification.
+    /// An inner KDPB failed verification.
     #[error("span_inner_invalid: {0}")]
     InnerInvalid(#[source] VerifyError),
     /// An inner payload is not Chunk.
@@ -233,7 +233,7 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, SpanError> {
     })
 }
 
-/// Encode an MKDS v1 container from already encoded MKDP v2 bundles.
+/// Encode an KDSP v1 container from already encoded KDPB v2 bundles.
 ///
 /// Encoding does not authenticate or validate the supplied bundles. Callers
 /// must verify the result against a trusted commit id before using it.
@@ -279,7 +279,7 @@ struct Summary {
 }
 
 // This seam lets unit tests exercise inconsistent decoded summaries that
-// genuine authenticated MKDP bundles cannot produce.
+// genuine authenticated KDPB bundles cannot produce.
 fn check_summaries(
     summaries: &[Summary],
     first: u32,
@@ -445,9 +445,9 @@ pub fn verify_disclosure_span(trusted: &Hash, bytes: &[u8]) -> Result<DisclosedS
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RangeProof {
-    /// One MKDP v2 Range bundle.
+    /// One KDPB v2 Range bundle.
     Mkdp(Vec<u8>),
-    /// One MKDS v1 container.
+    /// One KDSP v1 container.
     Mkds(Vec<u8>),
 }
 
@@ -455,9 +455,9 @@ pub enum RangeProof {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RangeProofKind {
-    /// The range lies within one chunk (or a plain Blob): one MKDP v2 bundle.
+    /// The range lies within one chunk (or a plain Blob): one KDPB v2 bundle.
     Mkdp,
-    /// The range crosses a chunk boundary: one MKDS v1 container.
+    /// The range crosses a chunk boundary: one KDSP v1 container.
     Mkds,
 }
 
@@ -722,7 +722,7 @@ fn encoded_disclosure_size(
 /// # Errors
 ///
 /// Returns [`RangeProofError`] for invalid ranges, hints, source objects,
-/// or an encoded result that exceeds the MKDP/MKDS 64 MiB cap.
+/// or an encoded result that exceeds the KDPB/KDSP 64 MiB cap.
 #[allow(clippy::too_many_lines)] // The loop must keep each preceding chunk scoped to one iteration.
 pub fn build_range_proof_from<S: ObjectSource + ?Sized>(
     source: &S,
@@ -924,7 +924,7 @@ mod tests {
         wrong_magic[4] = 2;
         assert_eq!(verify(&wrong_magic), "span_magic");
         assert_eq!(verify(&VALID[..4]), "span_encoding");
-        assert_eq!(verify(&[b'M', b'K', b'D', b'S', 2]), "span_version");
+        assert_eq!(verify(&[b'K', b'D', b'S', b'P', 2]), "span_version");
 
         let mut wrong_commit = VALID.to_vec();
         wrong_commit[5] ^= 1;
@@ -1090,7 +1090,7 @@ mod tests {
         let missing_offset = encode_span(trusted, d.offset, d.len, &no_offsets, &d.chunks);
         assert_eq!(verify(&missing_offset), "span_anchor_offset");
 
-        let bad_inner = encode_span(trusted, d.offset, d.len, d.anchor, &[b"MKDS", d.chunks[1]]);
+        let bad_inner = encode_span(trusted, d.offset, d.len, d.anchor, &[b"KDSP", d.chunks[1]]);
         assert_eq!(verify(&bad_inner), "span_inner_invalid");
         let wrong_selector =
             encode_span(trusted, d.offset, d.len, d.anchor, &[d.anchor, d.chunks[1]]);
@@ -1258,7 +1258,7 @@ mod tests {
         let RangeProof::Mkds(proof) =
             build_range_proof_from(&source, &commit_id, &[b"file"], 2047, 2, None).unwrap()
         else {
-            panic!("expected MKDS")
+            panic!("expected KDSP")
         };
         assert_eq!(
             verify_disclosure_span(&commit_id, &proof).unwrap().bytes,

@@ -3,5 +3,5 @@
   "description": "chunked blob with chunk_size=0 (CDC) and 3 chunks; SPEC-OBJECTS §13.7 (118 bytes)",
   "bin": "chunked_blob_cs0_3chunks.bin",
   "size": 118,
-  "blake3": "b5b2a9a15c8d39962b6d45599a8bcfae2728246d5122629cc72ae20c9e3b69ba"
+  "blake3": "72c69c4d432d6e081d37bdb652a27480fad97036d19946cdb7d036e40359a982"
 }

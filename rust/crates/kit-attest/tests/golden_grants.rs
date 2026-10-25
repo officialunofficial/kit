@@ -6,7 +6,8 @@
 //!   defined here, and the signed `ed25519` fixtures of [`signed`]
 //!   (`{grant,epoch,visibility}-ed25519.json`, `reject/verify-*.json`) and
 //!   the ECDSA fixtures of [`ecdsa`] (`secp256k1-eip191.json`,
-//!   `webauthn-p256.json`, `reject/verify-{secp256k1,webauthn}-*.json`).
+//!   `webauthn-p256.json`, `reject/verify-{secp256k1,webauthn}-*.json`)
+//!   and the URL token fixture of [`url_token`] (`url-token-ed25519.json`).
 //!   `MANIFEST.txt` pins every file in the directory, including the reject
 //!   vectors.
 //! * The codec's `reject/*.json` (all but `reject/verify-*`) are authored by
@@ -37,6 +38,9 @@ mod signed;
 
 #[path = "golden_grants/ecdsa.rs"]
 mod ecdsa;
+
+#[path = "golden_grants/url_token.rs"]
+mod url_token;
 
 /// The §3.4 example statement (illustrative in the spec; pinned here).
 const SPEC_EXAMPLE: &str = "kit-write-grant:v1
@@ -472,6 +476,7 @@ fn write_all() {
     );
     signed::write_signed();
     ecdsa::write_ecdsa();
+    url_token::write_url_token();
     let mut manifest = String::from(
         "# SPEC-WRITE-GRANTS grant codec and verifier golden vectors (deterministic)\n\
          # Accept, signed and reject/verify-* vectors: `KIT_WRITE_GOLDEN=1 cargo test -p kit-attest --features grants --test golden_grants`\n\

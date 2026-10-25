@@ -1532,7 +1532,7 @@ member of the repository only at the `AdvanceRefs` apply that consumes
 its ticket. `AdvanceRefs` gains a repeated `ticket_ids` field
 naming the tickets it consumes. A ticket can be consumed only by an
 advance of the ref it names; any other advance is `failed_precondition`.
-A head-only `UpdateRef` consumes no tickets. Packlist nodes (`MKPL`) are
+A head-only `UpdateRef` consumes no tickets. Packlist nodes (`KPKL`) are
 uploads like any other pack, and need tickets too.
 **Reference-server behavior.** An advance names at most seven tickets (§4;
 SPEC-SERVER §15.2).

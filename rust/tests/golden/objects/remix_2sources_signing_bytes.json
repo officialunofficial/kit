@@ -3,5 +3,5 @@
   "description": "canonical Ed25519 signing-bytes preimage for remix_2sources",
   "bin": "remix_2sources_signing_bytes.bin",
   "size": 262,
-  "blake3": "ad27009171ca5913e63bd7574610d13a3b9b58b694c67ab6cbd250a554937a9c"
+  "blake3": "f22c30f3f1ea26d016a758188a5cc910da66ed152606b65a2cdab5170d3bfbf5"
 }

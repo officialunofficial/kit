@@ -1,4 +1,4 @@
-//! SPEC-HTTP-OBJECTS tables, unchanged MKDP bodies, and test-only MKDS codec.
+//! SPEC-HTTP-OBJECTS tables, unchanged KDPB bodies, and test-only KDSP codec.
 //! Check mode consumes committed bytes; only `KIT_WRITE_GOLDEN=1` builds fixtures.
 #![allow(clippy::unwrap_used)]
 
@@ -35,7 +35,7 @@ fn directory() -> PathBuf {
 }
 
 fn encoded_span(commit: Hash, offset: u64, len: u64, anchor: &[u8], chunks: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = b"MKDS\x01".to_vec();
+    let mut out = b"KDSP\x01".to_vec();
     commit.write(&mut out);
     offset.write(&mut out);
     len.write(&mut out);
@@ -609,7 +609,7 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         Some("span_leaf_context"),
         None,
     ));
-    // Existing invalid MKDP anchor proves that nonempty but incomplete length
+    // Existing invalid KDPB anchor proves that nonempty but incomplete length
     // sets are rejected, rather than silently treated as omitted.
     let incomplete = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/golden/disclosure/neg_incomplete_length_proof_set.bin");
@@ -660,7 +660,7 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         Some("span_encoding"),
         None,
     ));
-    // Structural failures must be diagnosed before any embedded MKDP
+    // Structural failures must be diagnosed before any embedded KDPB
     // verification. Each bad varint replaces the anchor's length prefix in an
     // otherwise complete valid container, so a lenient reader would accept
     // (or fail for a different reason) rather than stop with `span_encoding`.
@@ -717,7 +717,7 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
     vectors.push((
         "neg_oversize",
         fixture.commit_id,
-        b"MKDS\x01".to_vec(),
+        b"KDSP\x01".to_vec(),
         Some("span_too_large"),
         Some(CAP + 1),
     ));
@@ -783,7 +783,7 @@ fn write_http_object_goldens_if_requested() {
     }
     let files = fixture_files();
     let mut manifest = String::from(
-        "# SPEC-HTTP-OBJECTS and MKDS v1; <artifact> <BLAKE3>\n# KIT_WRITE_GOLDEN=1 cargo test -p kit-core --test golden_http_objects\n",
+        "# SPEC-HTTP-OBJECTS and KDSP v1; <artifact> <BLAKE3>\n# KIT_WRITE_GOLDEN=1 cargo test -p kit-core --test golden_http_objects\n",
     );
     for (name, bytes) in files {
         writeln!(manifest, "{name} {}", to_hex(&hash(&bytes))).unwrap();
@@ -968,7 +968,7 @@ fn boundary_aware_builder_matches_committed_bytes() {
     )
     .unwrap();
     let RangeProof::Mkdp(bytes) = proof else {
-        panic!("plain Blob must use MKDP")
+        panic!("plain Blob must use KDPB")
     };
     assert_eq!(bytes, fs::read(directory().join("blob_range.bin")).unwrap());
 }

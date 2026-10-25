@@ -838,8 +838,8 @@ mod tests {
         let staged = write_blob(&s, b"only staged copy");
         for bytes in [
             Vec::new(),
-            b"MKIX\x03\0\0\0\0".to_vec(),
-            b"MKIX\x04\0\0\0\0".to_vec(),
+            b"KIDX\x03\0\0\0\0".to_vec(),
+            b"KIDX\x04\0\0\0\0".to_vec(),
         ] {
             fs::write(md.index_file(), &bytes).unwrap();
             assert!(run_gc(&s, &md, u64::MAX, 0, false).is_err());

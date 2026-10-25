@@ -7,7 +7,7 @@
 # The check shares no code with the Rust crates. It reads only
 # SPEC-HTTP-OBJECTS and SPEC-DISCLOSURE (sections 3 to 5 and 8), SPEC-REFS
 # section 3 and SPEC-OBJECTS section 4.1. BLAKE3 and the object rules come from
-# objects_ref.py; the MKDP verifier comes from disclosure_ref.py.
+# objects_ref.py; the KDPB verifier comes from disclosure_ref.py.
 #
 # For each group of vectors the check:
 #   * url-parse.json: parses every URL with the grammar of section 2 and
@@ -17,9 +17,9 @@
 #   * response-cases.json: applies the response precedence of section 3 and the
 #     header rules of sections 5, 7 and 8 and compares the status, the
 #     required headers and the forbidden headers;
-#   * MKDP bodies (object_*, blob_range, chunk, in_chunk_range): verifies the
+#   * KDPB bodies (object_*, blob_range, chunk, in_chunk_range): verifies the
 #     bundle and compares the disclosed summary;
-#   * MKDS bodies (span_* and neg_*): rebuilds each body from its recipe,
+#   * KDSP bodies (span_* and neg_*): rebuilds each body from its recipe,
 #     checks the pinned size and digest, then runs the checks of
 #     SPEC-DISCLOSURE section 8.2 in order and compares the outcome or the
 #     reject reason.
@@ -237,11 +237,11 @@ def check_content_headers(root):
     return len(table["cases"])
 
 
-# ----------------------------------------------------------- MKDP / MKDS
+# ----------------------------------------------------------- KDPB / KDSP
 
 
 def mkdp_summary(result):
-    """Reduce a verified MKDP result to the fields of an http-objects sidecar."""
+    """Reduce a verified KDPB result to the fields of an http-objects sidecar."""
     payload = result["payload"]
     kind = {"object": "Object", "chunk": "Chunk", "range": "Range"}[payload["kind"]]
     out = {"kind": kind}
@@ -286,7 +286,7 @@ def check_mkdp(root, name):
 
 
 class SpanReject(Exception):
-    """An MKDS check failed. The text is the reject reason of section 8.2."""
+    """An KDSP check failed. The text is the reject reason of section 8.2."""
 
 
 MAX_SPAN = 64 << 20
@@ -326,7 +326,7 @@ def verify_span(data, trusted):
     if len(data) > MAX_SPAN:
         raise SpanReject("span_too_large")
     r = SpanReader(data)
-    if r.take(4) != b"MKDS":
+    if r.take(4) != b"KDSP":
         raise SpanReject("span_magic")
     if r.take(1) != b"\x01":
         raise SpanReject("span_version")
@@ -602,7 +602,7 @@ def respond(r):
     headers.update(identity)
     if proof:
         headers["Accept-Ranges"] = "none"
-        headers["Content-Type"] = "application/vnd.kit.disclosure-span" if r.get("kind") == "MKDS" else "application/vnd.kit.disclosure"
+        headers["Content-Type"] = "application/vnd.kit.disclosure-span" if r.get("kind") == "KDSP" else "application/vnd.kit.disclosure"
         return 200, headers, b""
     kind = r.get("type", "blob")
     headers["X-Kit-Object-Type"] = kind

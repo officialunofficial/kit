@@ -270,10 +270,12 @@ pub fn bridge_map_one_iteration(input: &[u8]) {
     let _ = load_import_ref_state(dir.path());
 }
 
-/// SPEC-WRITE-GRANTS epoch and visibility statements and the stateless
-/// verifier (`epoch_visibility_parse`): `EpochStatement::parse` and
-/// `VisibilityStatement::parse` never panic, and anything they accept
-/// re-encodes to exactly the input bytes. The input, read as an
+/// SPEC-WRITE-GRANTS epoch, visibility and URL token statements and the
+/// stateless verifier (`epoch_visibility_parse`): `EpochStatement::parse`,
+/// `VisibilityStatement::parse` and `UrlTokenStatement::parse` never panic,
+/// and anything they accept re-encodes to exactly the input bytes. The input,
+/// read as a URL token, also runs through `verify_url_token` with an empty
+/// key set, which must not panic and must refuse it. The input, read as an
 /// `X-Write-Grant` value, also runs through every verifier entry point,
 /// which must not panic, and whose accepted statements are the canonical
 /// bytes of the header. The input also drives the `webauthn-p256` parsers
@@ -281,9 +283,9 @@ pub fn bridge_map_one_iteration(input: &[u8]) {
 pub fn epoch_visibility_parse_one_iteration(input: &[u8]) {
     use kit_attest::grant::{
         AcceptedSchemes, Capability, EpochStatement, GrantRequest, OwnerScheme, RepoScope,
-        RepositoryIdentity, SignedHeader, VerifierConfig, VisibilityStatement,
-        verify_epoch_statement, verify_for_registration, verify_grant_owner,
-        verify_visibility_statement,
+        RepositoryIdentity, SignedHeader, TokenTarget, UrlTokenRequest, UrlTokenStatement,
+        VerifierConfig, VisibilityStatement, verify_epoch_statement, verify_for_registration,
+        verify_grant_owner, verify_url_token, verify_visibility_statement,
     };
     const NOW_MS: i64 = 1_790_000_000_000;
     let input = &input[..input.len().min(MAX_INPUT)];
@@ -302,10 +304,41 @@ pub fn epoch_visibility_parse_one_iteration(input: &[u8]) {
             "accepted visibility statement must re-encode byte for byte"
         );
     }
+    if let Ok(s) = UrlTokenStatement::parse(input) {
+        assert_eq!(
+            s.encode().expect("accepted token statement must re-encode"),
+            input,
+            "accepted token statement must re-encode byte for byte"
+        );
+    }
     webauthn_assertion_checks(input);
     let Ok(text) = core::str::from_utf8(input) else {
         return;
     };
+    if let Ok(target) = TokenTarget::parse(text) {
+        assert_eq!(
+            target.encode().ok().as_deref(),
+            Some(text),
+            "accepted token target must re-encode byte for byte"
+        );
+    }
+    let repository = RepositoryIdentity::parse("0x8ba1f109551bd432803012645ac136ddd64dba72/fuzz")
+        .expect("fixed repository is valid");
+    let target = TokenTarget::Object([0; 32]);
+    assert!(
+        verify_url_token(
+            text,
+            &[],
+            &UrlTokenRequest {
+                audience: "https://git.example.com",
+                repository: &repository,
+                target: &target,
+                now_ms: NOW_MS,
+            },
+        )
+        .is_err(),
+        "a token never verifies against an empty key set"
+    );
     let Ok(header) = SignedHeader::parse(text) else {
         return;
     };
@@ -604,7 +637,7 @@ pub fn disclosure_decode_one_iteration(input: &[u8]) {
 
 const GOOD_SPAN: &[u8] = include_bytes!("../../tests/golden/http-objects/span_two_chunks.bin");
 
-/// Exercise the MKDS verifier on arbitrary bytes. The trusted id is the
+/// Exercise the KDSP verifier on arbitrary bytes. The trusted id is the
 /// committed fixture's real commit, and a copy of the input with that commit
 /// spliced into the header is also verified, so mutated containers get past
 /// the commit comparison and reach the anchor and chunk checks.
@@ -612,7 +645,7 @@ pub fn span_decode_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
     let commit: [u8; 32] = GOOD_SPAN[5..37].try_into().expect("committed commit id");
     let _ = kit_core::verify::span::verify_disclosure_span(&commit, input);
-    if input.len() >= 37 && input.starts_with(b"MKDS\x01") {
+    if input.len() >= 37 && input.starts_with(b"KDSP\x01") {
         let mut patched = input.to_vec();
         patched[5..37].copy_from_slice(&commit);
         let _ = kit_core::verify::span::verify_disclosure_span(&commit, &patched);
@@ -735,7 +768,7 @@ pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
     let container = match proof {
         RangeProof::Mkdp(bytes) => {
             let disclosed = kit_core::verify::verify_disclosure(&commit_id, &bytes)
-                .expect("fresh MKDP must verify");
+                .expect("fresh KDPB must verify");
             assert!(matches!(
                 disclosed.payload,
                 kit_core::verify::DisclosedPayload::Range { .. }
@@ -1659,7 +1692,7 @@ mod tests {
     #[test]
     fn unit_sparse_wire_decode() {
         run_iterated_unit(sparse_wire_decode_one_iteration).unwrap();
-        for case in [&b""[..], b"MKSR", &[0xFF; 64][..]] {
+        for case in [&b""[..], b"KSP1", &[0xFF; 64][..]] {
             run_one(case, sparse_wire_decode_one_iteration).unwrap();
         }
     }
@@ -1820,7 +1853,7 @@ mod tests {
     fn merkle_packlist_target_runs_within_caps() {
         run_iterated_unit(merkle_packlist_one_iteration).expect("guardrails held");
         // A couple of explicit boundary cases.
-        for case in [&b""[..], &b"MKPL\x01"[..], &[0xFF; 64]] {
+        for case in [&b""[..], &b"KPKL\x01"[..], &[0xFF; 64]] {
             run_one(case, merkle_packlist_one_iteration).expect("guardrails held");
         }
     }
@@ -1836,7 +1869,7 @@ mod tests {
     #[test]
     fn disclosure_decode_target_runs_within_caps() {
         run_iterated_unit(disclosure_decode_one_iteration).expect("guardrails held");
-        for case in [&b""[..], b"MKDP\x01", &[0xFF; 64][..]] {
+        for case in [&b""[..], b"KDPB\x01", &[0xFF; 64][..]] {
             run_one(case, disclosure_decode_one_iteration).expect("guardrails held");
         }
     }
@@ -1844,7 +1877,7 @@ mod tests {
     #[test]
     fn span_decode_target_runs_within_caps() {
         run_iterated_unit(span_decode_one_iteration).expect("guardrails held");
-        for case in [&b""[..], b"MKDS\x01", &[0xff; 64][..]] {
+        for case in [&b""[..], b"KDSP\x01", &[0xff; 64][..]] {
             run_one(case, span_decode_one_iteration).expect("guardrails held");
         }
         let mut nonminimal = GOOD_SPAN[..53].to_vec();
@@ -1860,7 +1893,7 @@ mod tests {
     fn verify_span_target_runs_within_caps() {
         let fixture = build_span_fixture();
         run_iterated_unit_with(&fixture, verify_span_one_iteration_with).expect("guardrails held");
-        for case in [&b""[..], b"MKDP\x02", &[0xff; 64][..]] {
+        for case in [&b""[..], b"KDPB\x02", &[0xff; 64][..]] {
             let started = Instant::now();
             verify_span_one_iteration_with(case, &fixture);
             assert!(started.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
@@ -1994,7 +2027,7 @@ mod tests {
     fn tree_target_handles_known_corruption() {
         tree_one_iteration(&[]);
         // Tree prologue + count = u32::MAX → must reject TooManyEntries.
-        let mut bad = vec![0x02u8, b'M', b'K', b'T', b'1', 0x01];
+        let mut bad = vec![0x02u8, b'K', b'O', b'B', b'1', 0x01];
         bad.extend_from_slice(&u32::MAX.to_le_bytes());
         tree_one_iteration(&bad);
     }

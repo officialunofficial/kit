@@ -1,7 +1,7 @@
 {
   "bin": "neg_commit_bytes_are_a_tag.bin",
-  "blake3": "7d9ec28f8c42d499aede2df101e20e49ca5d64b271938d3c3e09c47c377caf19",
-  "commit_id_hex": "b587259cc4a0a3e839c553d02d89d3f689305a56ebab1ec588fb10bea66305b6",
+  "blake3": "3d715252e9acded931003526884f2e7c6e76cd51f63e2b57e159225dce776312",
+  "commit_id_hex": "94c66ddc35b772aea5e96b0188623f9784316b51e874a0ee4289dd9d616de0c7",
   "description": "commit_bytes decode to a valid, signed Tag rather than a Commit/Remix.",
   "expect": "reject",
   "name": "neg_commit_bytes_are_a_tag",

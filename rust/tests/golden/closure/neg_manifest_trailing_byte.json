@@ -1,6 +1,6 @@
 {
   "bin": "neg_manifest_trailing_byte.manifest.bin",
-  "blake3": "664d5667c460b95d15cea843608b2a8b5ef6200c9002dfac3cc9ddb319f20601",
+  "blake3": "126f04f890a0bd27c4c4259aedff582ae270d235844a1ed2ac133ad38764bdf5",
   "description": "One extra trailing byte after the declared manifest body.",
   "expect": "reject",
   "ids": [],
@@ -8,10 +8,10 @@
   "n_packs": 1,
   "name": "neg_manifest_trailing_byte",
   "pack_hashes": [
-    "8511cb681291c8e156863a8aa467e21e531415681cc966bd657a66043ccb8e7b"
+    "6a126549c39fe03975a8e6b1cc4dbfcdecc5f2ac4f59c8a3ce0950b768064b4d"
   ],
   "reason": "trailing bytes",
-  "root_hex": "ec29b09f12b3436bd4f2870552df398deadaf45713e93ad284713283569f821d",
+  "root_hex": "543563c9d2f0f34d8866bf869b078c5a2f9ecabfd25d9ed4bcb5f02578d5292b",
   "size": 72,
   "unreferenced": [],
   "verified": 0

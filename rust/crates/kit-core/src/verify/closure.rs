@@ -28,7 +28,7 @@ pub const MAX_CLOSURE_PACKS: usize = 65_536;
 /// four-byte length prefix and [`MAX_CLOSURE_PACKS`] pack keys.
 pub const MAX_MANIFEST_BYTES: u64 = 5 + 32 + 1 + 4 + MAX_CLOSURE_PACKS as u64 * 32;
 
-const MANIFEST_MAGIC: &[u8; 4] = b"MKCL";
+const MANIFEST_MAGIC: &[u8; 4] = b"KCLM";
 const MANIFEST_VERSION: u8 = 1;
 const MODE_SNAPSHOT: u8 = 0;
 const MODE_HISTORY: u8 = 1;
@@ -107,7 +107,7 @@ pub struct ClosureExport {
     pub packs: Vec<Vec<u8>>,
 }
 
-/// Convenience index of a closure export: magic `"MKCL"`, version 1,
+/// Convenience index of a closure export: magic `"KCLM"`, version 1,
 /// root id, mode, and the [`pack_key`] of each pack in order.
 ///
 /// The caller supplies the trusted root to [`verify_closure_manifest`];
@@ -125,7 +125,7 @@ pub struct ClosureManifest {
 }
 
 impl ClosureManifest {
-    /// Encode to `"MKCL" ‖ version ‖ root ‖ mode ‖ packs`.
+    /// Encode to `"KCLM" ‖ version ‖ root ‖ mode ‖ packs`.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(5 + 32 + 1 + self.packs.encode_size());

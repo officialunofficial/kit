@@ -30,9 +30,9 @@ include a byte-range disclosure proof:
 a proof range is selected by `?proof=1&range=a-b`, never by `Range`.
 The proof is a separate representation with its own validator and media type.
 This lets a verifier request the complete proof without HTTP slicing it.
-The proof uses the MKDS container of existing MKDP v2 bundles
+The proof uses the KDSP container of existing KDPB v2 bundles
 ([SPEC-DISCLOSURE](SPEC-DISCLOSURE.md), multi-chunk span section).
-MKDP payload kind 3 remains reserved; MKDP v2 bytes are unchanged.
+KDPB payload kind 3 remains reserved; KDPB v2 bytes are unchanged.
 
 ## 2. Routes and URL syntax
 
@@ -200,7 +200,7 @@ suspension, and visibility change, not every rewind or deletion.
 In a proof-capable profile, for an object proof URL, `commit` MUST be reachable in the published view,
 and its decoded `path` MUST resolve to the requested object id. Either
 failure is 404. A ref proof uses its resolved commit. Informative: an
-MKDP/MKDS proof authenticates the path through trees to the commit and its
+KDPB/KDSP proof authenticates the path through trees to the commit and its
 signature; the reader-side ref-to-commit binding remains the server's
 claim. SPEC-SERVER §15 storage receipts attest only live committed
 advances to writers. A signed reader-side binding is a later follow-up.
@@ -279,19 +279,19 @@ representation's ETag, after authorization and resolution and before Range.
 This section defines the proof-capable profile. The shipped HTTP handlers
 use §3's unsupported profile; they validate query syntax and refuse before
 any of the preparation or successful representation behavior below.
-The generic MKDP/MKDS formats and client verification remain supported.
+The generic KDPB/KDSP formats and client verification remain supported.
 
-`?proof=1` MUST return an MKDP Object bundle, including canonical manifest
+`?proof=1` MUST return an KDPB Object bundle, including canonical manifest
 bytes for a ChunkedBlob and canonical tree bytes for an empty root path.
-`?proof=1&range=a-b` MUST return an MKDP Range bundle when the inclusive
-range lies within one chunk or a plain blob; otherwise it MUST return MKDS.
-The server MUST prove absolute offsets for chunked MKDP ranges with the
+`?proof=1&range=a-b` MUST return an KDPB Range bundle when the inclusive
+range lies within one chunk or a plain blob; otherwise it MUST return KDSP.
+The server MUST prove absolute offsets for chunked KDPB ranges with the
 complete preceding chunk-length proof set. Query ranges MUST NOT be
 clipped: any endpoint outside content is 416. The inclusive query becomes
 `offset=a, len=b-a+1` using checked arithmetic; overflow is 416.
 Non-blob leaves do not support proof ranges and yield 416.
 
-MKDP uses `application/vnd.kit.disclosure`; MKDS uses
+KDPB uses `application/vnd.kit.disclosure`; KDSP uses
 `application/vnd.kit.disclosure-span`. Proofs MUST carry
 `Accept-Ranges: none`, MUST ignore every HTTP Range/If-Range header, and
 MUST use 200 rather than 206. The 64 MiB encoded bundle cap applies.
@@ -458,7 +458,7 @@ Preflight MUST use 204 without auth or admission and allow these values:
 [`rust/tests/golden/http-objects/`](../../rust/tests/golden/http-objects/)
 pins versioned JSON tables (`schema_version: 1`, `cases`) for URL parsing
 and response expectations (including `content-headers.json`, shared by native
-and local Worker wire tests), MKDP proof bodies, and MKDS accept/reject
+and local Worker wire tests), KDPB proof bodies, and KDSP accept/reject
 bodies with sidecars. In response rows, `expect.headers` is the required
 header subset and `absent_headers` lists forbidden headers. Header names
 compare case-insensitively, and an `absent_headers` entry ending in `*` forbids
@@ -468,7 +468,7 @@ exists. `MANIFEST.txt` pins BLAKE3 digests for every artifact.
 Negative span sidecars may describe byte-range copy and patch recipes over
 the accepted span containers; the check-mode test reconstructs the body and
 checks its pinned size and digest before applying the reference verifier.
-The independent test-local MKDS encoder and reference verifier are in
+The independent test-local KDSP encoder and reference verifier are in
 [`golden_http_objects.rs`](../../rust/crates/kit-core/tests/golden_http_objects.rs).
 `KIT_WRITE_GOLDEN=1` regenerates the artifacts; check mode reads committed
 vectors. Reject sidecars name the exact span rejection reason.
@@ -484,7 +484,7 @@ applicable reader-view `kit.transport.v1.RedactionNotice`
 tombstoned id ahead of 304, and 451 precedence against 304 and
 Admission, including the tombstoned-manifest chunk case.
 
-Token-bearing URL vectors, the product MKDS verifier, the boundary-aware
+Token-bearing URL vectors, the product KDSP verifier, the boundary-aware
 builder, verifier bindings, HTTP query ranges and Workers prefetch are
 future work. Signed-read HTTP GETs and schema
 extensions for an object-id admission field or token principal require
@@ -498,7 +498,7 @@ separate work.
 | 1 | draft | Adds an extension allowlist and encoded filenames to successful ordinary ref-path Blob/ChunkedBlob responses, including HEAD and 206; object-id, proof, non-file, 304 and error responses are unchanged. |
 | 1 | draft | Clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it (SPEC-SERVER §9.6). |
 | 1 | draft | Clarifies that the boundary-aware builder reduces reads and memory, while complete preceding length proofs still impose an O(first chunk index) encoded-size cost and 416 on oversize. |
-| 1 | draft | Initial HTTP contract, selecting MKDP v2 or MKDS v1 without changing object bytes or protobuf. Fix round 1 clarifies bearer and admission-gated caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |
+| 1 | draft | Initial HTTP contract, selecting KDPB v2 or KDSP v1 without changing object bytes or protobuf. Fix round 1 clarifies bearer and admission-gated caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |
 
 ## 11. Invariants
 

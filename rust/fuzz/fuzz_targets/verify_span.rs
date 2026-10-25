@@ -1,4 +1,4 @@
-//! cargo-fuzz target for MKDS verification and a valid re-encoded span.
+//! cargo-fuzz target for KDSP verification and a valid re-encoded span.
 
 #![no_main]
 #![cfg(feature = "libfuzzer")]

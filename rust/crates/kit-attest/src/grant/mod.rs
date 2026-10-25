@@ -1,5 +1,5 @@
-//! Write grants (SPEC-WRITE-GRANTS): the grant, epoch and visibility
-//! statement codecs, their `X-Write-Grant` header encoding, owner
+//! Write grants (SPEC-WRITE-GRANTS): the grant, epoch, visibility and URL
+//! token statement codecs, their `X-Write-Grant` header encoding, owner
 //! signatures and the stateless verifier.
 //!
 //! * [`text`]: the §3.1 canonical text rules every statement shares.
@@ -9,6 +9,8 @@
 //! * [`header`]: the §4.2 `<statement>.<scheme>.<blob>` header value.
 //! * [`epoch`]: the §5.1 epoch statement and the §5.2 check 7.
 //! * [`visibility`]: the §9.1 visibility statement.
+//! * [`url_token`]: the §9.4 URL token statement, its signature and the
+//!   stateless token verifier.
 //! * [`config`]: the deployment's [`VerifierConfig`] (own audience,
 //!   accepted schemes, `WebAuthn` relying parties).
 //! * [`owner`]: §4 owner-signature dispatch (`ed25519`, `secp256k1-eip191`,
@@ -33,6 +35,7 @@ pub mod owner;
 pub mod ref_scope;
 pub mod statement;
 pub mod text;
+pub mod url_token;
 pub mod verify;
 pub mod visibility;
 pub mod webauthn;
@@ -45,6 +48,10 @@ pub use kit_core::repo_identity::{Namespace, RepositoryIdentity};
 pub use owner::verify_owner_signature;
 pub use ref_scope::{RefFlags, RefPattern, RefScopes, head_packmap, packmap_head};
 pub use statement::{Capabilities, Capability, Grant, RepoScope};
+pub use url_token::{
+    MAX_TOKEN_PATH_BYTES, TokenTarget, URL_TOKEN_MAX_LIFETIME_MS, UrlTokenRequest,
+    UrlTokenStatement, VerifiedUrlToken, sign_url_token, url_token_key_id, verify_url_token,
+};
 pub use verify::{
     GrantRequest, OwnerVerified, VerifiedEpoch, VerifiedGrant, VerifiedVisibility,
     verify_epoch_statement, verify_for_registration, verify_grant_owner,
@@ -59,6 +66,8 @@ pub const DOMAIN_GRANT: &str = "kit-write-grant:v1";
 pub const DOMAIN_EPOCH: &str = "kit-write-epoch:v1";
 /// Domain separator and first field of a visibility statement (§12.1).
 pub const DOMAIN_VISIBILITY: &str = "kit-repo-visibility:v1";
+/// Domain separator and first field of a URL token statement (§12.1).
+pub const DOMAIN_URL_TOKEN: &str = "kit-url-token:v1";
 
 /// Longest grant lifetime: 30 days (§1.1).
 pub const GRANT_MAX_LIFETIME_MS: i64 = 2_592_000_000;

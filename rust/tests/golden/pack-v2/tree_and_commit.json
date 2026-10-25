@@ -3,34 +3,34 @@
   "description": "a 0x00 leaf blob, a 0x03 tree and a 0x03 Ed25519-signed commit",
   "entries": [
     {
-      "blake3_of_bytes": "fd78ccd97e109fcaa52d46fa2e46b01a0adefc9cbb465176893b4ab54d73f2e2",
-      "id": "fd78ccd97e109fcaa52d46fa2e46b01a0adefc9cbb465176893b4ab54d73f2e2",
+      "blake3_of_bytes": "64fd14d684933b589f2932c781dadf4ef288ef54495eef087af4d368f6fc2d80",
+      "id": "64fd14d684933b589f2932c781dadf4ef288ef54495eef087af4d368f6fc2d80",
       "len": 21,
       "type": 0
     },
     {
-      "blake3_of_bytes": "beab0ce685da535843e5387d1325b61070e4413e145052c152b884159fe05e2b",
-      "decoded_blake3": "beab0ce685da535843e5387d1325b61070e4413e145052c152b884159fe05e2b",
-      "frame_len": 182,
+      "blake3_of_bytes": "48800e7109a77704c28941cc5811313d2575eb4bc5f64bdadd3e7676fa85ced8",
+      "decoded_blake3": "48800e7109a77704c28941cc5811313d2575eb4bc5f64bdadd3e7676fa85ced8",
+      "frame_len": 181,
       "frame_offset": 47,
-      "id": "1baa55bd645bc1339c8486ee96b10b3ff7d70ef20343a6cb1c20473ce44bc418",
+      "id": "0fa62b8743f836e08885a8ee1f4520b7f16afd3133d2dc5c8c5184809b676937",
       "len": 3210,
       "type": 3,
       "uncompressed_len": 3210
     },
     {
-      "blake3_of_bytes": "8302731c1b1c699a55c2af23480c2471eb5ea6c2e1c35181806a00492930747d",
-      "decoded_blake3": "8302731c1b1c699a55c2af23480c2471eb5ea6c2e1c35181806a00492930747d",
+      "blake3_of_bytes": "d943bf161671f3bc7866be1686e9249e1da310e13e483fa0663f7d5d2b56c246",
+      "decoded_blake3": "d943bf161671f3bc7866be1686e9249e1da310e13e483fa0663f7d5d2b56c246",
       "frame_len": 222,
-      "frame_offset": 238,
-      "id": "8302731c1b1c699a55c2af23480c2471eb5ea6c2e1c35181806a00492930747d",
+      "frame_offset": 237,
+      "id": "d943bf161671f3bc7866be1686e9249e1da310e13e483fa0663f7d5d2b56c246",
       "len": 1169,
       "type": 3,
       "uncompressed_len": 1169
     }
   ],
   "name": "tree_and_commit",
-  "pack_key": "18d858d09904315a994794b2432faded2a76120bfbacd5ddbace1dc40d63cd83",
-  "size": 492,
+  "pack_key": "466c3da3c5585711c0f559a8e8b36e247235f9f68fef8eeb1eafd7bc47f53e84",
+  "size": 491,
   "version": 2
 }

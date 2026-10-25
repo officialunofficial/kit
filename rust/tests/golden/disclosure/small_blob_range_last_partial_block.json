@@ -1,11 +1,11 @@
 {
   "bin": "small_blob_range_last_partial_block.bin",
-  "blake3": "c323a681de5b2ebc5e6d8f93a8451d8c0a902329af6accbeca1b2b9b47ebd779",
-  "commit_id_hex": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
+  "blake3": "2ae72d7ec7db2a8d9a209056e010a76ac4b7e8a37025e53527eef96e6fcb8faa",
+  "commit_id_hex": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
   "description": "The final, partial (< 1 KiB) Bao block of the same blob.",
   "disclosed": {
     "chunk_inner_root_hex": null,
-    "leaf_id_hex": "744699dd9c5f163a425b30cc78e871837300225da6d40af3635a97f196f63c51",
+    "leaf_id_hex": "99f646f5fd525d63009379188c165d10f1ac8c0614855d702136130a4a66d537",
     "path": [
       {
         "mode": 1,
@@ -14,7 +14,7 @@
     ],
     "payload": {
       "absolute_offset": 1024,
-      "blob_id_hex": "744699dd9c5f163a425b30cc78e871837300225da6d40af3635a97f196f63c51",
+      "blob_id_hex": "99f646f5fd525d63009379188c165d10f1ac8c0614855d702136130a4a66d537",
       "bytes_blake3": "2dab2884b562eb7b2c48ad01901c4668eac40798d4a40416047f4d4ab828fe9d",
       "chunk": null,
       "kind": "range",
@@ -24,9 +24,9 @@
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
     "step_inner_roots_hex": [
-      "3efe0325dbdc1bdacbc90e03d55563dbdff21a59d52d85d1adcdae53856c3c10"
+      "0152c264b145fa4255be62befc32032e66eb571acf82b27b4f2580c7a560f2ce"
     ],
-    "tree_hash_hex": "e88d20b32dc03ddeb3819c6d37171469797d85083f995efc5dbbf0d989e696bf"
+    "tree_hash_hex": "f4c093c3570e0adbf7c75a874d083c4118f5a625a2896a802bb550b29d78ff4b"
   },
   "expect": "accept",
   "name": "small_blob_range_last_partial_block",

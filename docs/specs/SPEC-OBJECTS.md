@@ -49,7 +49,7 @@ Every stored object begins with:
 ```
 offset  size  field              value
 0       1     object_type        one of 0x01..0x07 (see §1)
-1       4     magic              ASCII "MKT1" = 0x4D 0x4B 0x54 0x31
+1       4     magic              ASCII "KOB1" = 0x4D 0x4B 0x54 0x31
 5       1     schema_version     0x01
 6       …     body               type-specific (see §3-§8)
 ```
@@ -67,7 +67,7 @@ The prologue applies to **all seven object types**. Rationale:
 
 Readers MUST reject any of:
 - `object_type` not in `0x01..0x07` → `InvalidObjectType`
-- `magic` != `"MKT1"` → `InvalidMagic`
+- `magic` != `"KOB1"` → `InvalidMagic`
 - `schema_version` != `0x01` → `UnsupportedObjectVersion`
 
 There is no v0. kit does not read kit-era bytes.
@@ -467,7 +467,7 @@ The mandatory `.kit/format` = `bmt-v1` repository marker (§10) guards
 the addressing scheme. A store without the marker is refused at open.
 
 Future versions MUST increment `schema_version` and MUST preserve the
-`"MKT1"` magic prefix. The magic byte string is normative &mdash; readers are
+`"KOB1"` magic prefix. The magic byte string is normative &mdash; readers are
 allowed to route on `magic` before consulting `schema_version`, enabling
 multi-version readers.
 
@@ -476,7 +476,7 @@ multi-version readers.
 ## 13. Test vectors (implementer MUST produce)
 
 1. **Empty blob id**: `Blob` is a flat type (§10) &mdash; its id is
-   `BLAKE3(prologue{0x01,MKT1,0x01} ‖ u32(0))`, a 10-byte total input.
+   `BLAKE3(prologue{0x01,KOB1,0x01} ‖ u32(0))`, a 10-byte total input.
    Record the resulting hex digest.
 2. **Empty tree id**: `Tree` is a **merkelized** type (§10 /
    SPEC-MERKLE-OBJECTS) &mdash; its id is the domain-wrapped Merkle root over
@@ -542,7 +542,7 @@ mechanism that enforces or detects each:
 
 | Invariant | Enforced by |
 |---|---|
-| Every stored object is one of the seven known types under `"MKT1"`/`schema_version 0x01` | prologue rejection: `InvalidObjectType`/`InvalidMagic`/`UnsupportedObjectVersion` (§2) |
+| Every stored object is one of the seven known types under `"KOB1"`/`schema_version 0x01` | prologue rejection: `InvalidObjectType`/`InvalidMagic`/`UnsupportedObjectVersion` (§2) |
 | An object's bytes always match its id | read-time recomputation under the type-dependent id rule → `HashMismatch`; for merkelized types this also proves the child set present and correctly ordered (§10) |
 | No stored object exceeds 1 GiB | storage-layer rejection (§3, §10) |
 | An object encodes exactly its declared layout, nothing more | trailing-byte rule → `TrailingData` (§11) |

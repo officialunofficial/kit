@@ -53,7 +53,7 @@
 //! ## Wire bundle (`verify_disclosure` / `build_disclosure`)
 //!
 //! ```text
-//! magic   = "MKDP"            (4 raw bytes)
+//! magic   = "KDPB"            (4 raw bytes)
 //! version: u8 = 2
 //! commit_id: [u8; 32]
 //! commit_bytes: Vec<u8>        <= 4 MiB
@@ -108,7 +108,7 @@ use crate::store::MAX_TREE_DEPTH;
 pub const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Fixed 4-byte magic at the start of every disclosure bundle.
-const BUNDLE_MAGIC: &[u8; 4] = b"MKDP";
+const BUNDLE_MAGIC: &[u8; 4] = b"KDPB";
 /// Current (and only) bundle version byte. v1 is rejected with
 /// [`VerifyError::UnsupportedBundleVersion`] (SPEC-DISCLOSURE v2).
 const BUNDLE_VERSION: u8 = 2;
@@ -132,8 +132,8 @@ pub enum VerifyError {
     #[error("disclosure bundle exceeds the {MAX_BUNDLE_BYTES} byte cap")]
     BundleTooLarge,
     /// The bundle is shorter than the fixed magic+version header, or the
-    /// magic bytes are not `"MKDP"`.
-    #[error("disclosure bundle magic is not \"MKDP\"")]
+    /// magic bytes are not `"KDPB"`.
+    #[error("disclosure bundle magic is not \"KDPB\"")]
     BadMagic,
     /// The bundle's version byte is not `2`. A version byte of `1` is
     /// this error with payload `1`.
@@ -288,8 +288,8 @@ pub enum VerifyError {
         entry_index: usize,
     },
     /// The encoded closure manifest is shorter than the magic+version
-    /// header, or the magic bytes are not `"MKCL"`.
-    #[error("closure manifest magic is not \"MKCL\"")]
+    /// header, or the magic bytes are not `"KCLM"`.
+    #[error("closure manifest magic is not \"KCLM\"")]
     ClosureManifestBadMagic,
     /// The manifest's version byte is not `1`.
     #[error("closure manifest version {0} is not supported (v1 only)")]
@@ -603,7 +603,7 @@ pub fn verify_path(
     )
 }
 
-/// Commit authentication shared by all bundles in one MKDS container.
+/// Commit authentication shared by all bundles in one KDSP container.
 #[derive(Clone, Copy)]
 pub(crate) struct CommitContext {
     tree_hash: Hash,
@@ -621,7 +621,7 @@ impl CommitContext {
     }
 }
 
-/// Reuse a commit that the MKDS anchor has authenticated, but still bind
+/// Reuse a commit that the KDSP anchor has authenticated, but still bind
 /// each inner bundle's own commit bytes to the trusted id.
 pub(crate) fn verify_path_reusing_context(
     commit_id: &Hash,
@@ -1301,7 +1301,7 @@ pub fn verify_disclosure(commit_id: &Hash, bundle: &[u8]) -> Result<Disclosed, V
     })
 }
 
-/// MKDS-only verification path. The anchor authenticated `context`; the
+/// KDSP-only verification path. The anchor authenticated `context`; the
 /// inner bundle still has to carry commit bytes hashing to `commit_id`.
 pub(crate) fn verify_disclosure_reusing_context(
     commit_id: &Hash,

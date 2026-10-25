@@ -40,7 +40,7 @@ use crate::store::{ObjectStore, StoreError};
 // ---------------------------------------------------------------------------
 
 /// ASCII magic at the start of every packlist node ("kit pack list").
-pub const PACKLIST_MAGIC: &[u8; 4] = b"MKPL";
+pub const PACKLIST_MAGIC: &[u8; 4] = b"KPKL";
 /// Current packlist version. Readers reject anything else so a future
 /// format change is a loud error, not a silent misparse.
 pub const PACKLIST_VERSION: u8 = 1;
@@ -85,7 +85,7 @@ pub struct PackListNode {
 pub enum PackListError {
     #[error("packlist is shorter than the {PACKLIST_HEADER_LEN}-byte magic+version header")]
     TooShort,
-    #[error("packlist magic is not \"MKPL\"")]
+    #[error("packlist magic is not \"KPKL\"")]
     InvalidMagic,
     #[error("packlist version {0} is not supported (v1 only)")]
     UnsupportedVersion(u8),
@@ -97,7 +97,7 @@ pub enum PackListError {
     Malformed,
 }
 
-/// Serialise one packlist node: the `MKPL`/version guard header followed by
+/// Serialise one packlist node: the `KPKL`/version guard header followed by
 /// the `prev`/`packs` body encoded with `commonware-codec` (idiomatic
 /// `Option` + `Vec`).
 ///
@@ -1479,7 +1479,7 @@ mod wire_conformance {
     use super::*;
 
     /// Conformance pin: the exact on-wire bytes of a `PackListNode`. Locks
-    /// the `commonware-codec` body encoding (`MKPL` + version guard, then a
+    /// the `commonware-codec` body encoding (`KPKL` + version guard, then a
     /// codec `Option<Hash>` and a length-prefixed `Vec<Hash>`) so a
     /// commonware version bump that silently changes the encoding is caught
     /// here rather than in the field. Regenerate deliberately only on an
@@ -1487,7 +1487,7 @@ mod wire_conformance {
     #[test]
     fn packlist_wire_format_is_pinned() {
         let bytes = encode_packlist(Some([0x11u8; 32]), &[[0x22u8; 32], [0x33u8; 32]]).unwrap();
-        let expected = "4d4b504c0101\
+        let expected = "4b504b4c0101\
                         1111111111111111111111111111111111111111111111111111111111111111\
                         02\
                         2222222222222222222222222222222222222222222222222222222222222222\

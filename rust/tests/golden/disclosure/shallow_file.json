@@ -1,11 +1,11 @@
 {
   "bin": "shallow_file.bin",
-  "blake3": "893b66d2c0dd180aebc61f2fa90f4e876aa7cf38fef2dedeef73af42f7039756",
-  "commit_id_hex": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
+  "blake3": "226c13b05c85008e026781e216cc1cc4fd2cc62ad4df624579ffa03d7122d55d",
+  "commit_id_hex": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
   "description": "A file directly under the root.",
   "disclosed": {
     "chunk_inner_root_hex": null,
-    "leaf_id_hex": "684833f5cc69fe8fbb550a67bd90386c46e978d77b7b4f7e23cdb654d2c82c2b",
+    "leaf_id_hex": "3a056150fb8dbdd13507eb67e7b13c67dde0658368151381b3aeb431373db772",
     "path": [
       {
         "mode": 1,
@@ -13,16 +13,16 @@
       }
     ],
     "payload": {
-      "bytes_blake3": "684833f5cc69fe8fbb550a67bd90386c46e978d77b7b4f7e23cdb654d2c82c2b",
+      "bytes_blake3": "3a056150fb8dbdd13507eb67e7b13c67dde0658368151381b3aeb431373db772",
       "kind": "object",
       "len": 30
     },
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
     "step_inner_roots_hex": [
-      "3efe0325dbdc1bdacbc90e03d55563dbdff21a59d52d85d1adcdae53856c3c10"
+      "0152c264b145fa4255be62befc32032e66eb571acf82b27b4f2580c7a560f2ce"
     ],
-    "tree_hash_hex": "e88d20b32dc03ddeb3819c6d37171469797d85083f995efc5dbbf0d989e696bf"
+    "tree_hash_hex": "f4c093c3570e0adbf7c75a874d083c4118f5a625a2896a802bb550b29d78ff4b"
   },
   "expect": "accept",
   "name": "shallow_file",

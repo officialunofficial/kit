@@ -285,7 +285,7 @@ Status against the SPEC-HISTORY-PROOF text (including the
    in §4.5 (`saturating_sub` counts a future `last_full_verify_unix` as 0 s
    elapsed; `scrubClockBack`).
 5. **§4.5's scrub encoding was out of date.** Fixed in the spec: §4.5 now
-   has `"MKSC" || u8(2) || generation[32] || ...` (93 bytes) with the
+   has `"KSCR" || u8(2) || generation[32] || ...` (93 bytes) with the
    generation binding, and §4.1 lists `scrub`.
 6. **The 7-day bound only applies when a publish happens.** Now stated in
    §4.5 ("evaluated only when a fast-forward publish runs"); `TimeBound` is

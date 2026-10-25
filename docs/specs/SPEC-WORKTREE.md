@@ -227,7 +227,7 @@ The `stash` file in a worktree state dir holds the stash stack. It is a
 binary manifest. All integers are little-endian.
 
 ```text
-magic   : 4 bytes   "MKST"
+magic   : 4 bytes   "KSTS"
 count   : u32
 entries : count entries, newest first
   commit_hash : 32 bytes
@@ -237,7 +237,7 @@ entries : count entries, newest first
   message     : msg_len bytes of UTF-8
 ```
 
-`MKST` is a protocol constant. No other magic, tag or domain-separation
+`KSTS` is a protocol constant. No other magic, tag or domain-separation
 value may equal it. A new stash is prepended, so the newest entry comes
 first.
 
@@ -256,7 +256,7 @@ Each `commit_hash` and `parent_hash` is a gc root (SPEC-GC).
 
 Reference implementation: `kit-core/src/ops/stash.rs`
 (`serialize_list`, `deserialize_list`). The uniqueness test in
-`kit-core/tests/unique_tags.rs` covers the `MKST` constant.
+`kit-core/tests/unique_tags.rs` covers the `KSTS` constant.
 
 ## 5. Out of scope (v1)
 

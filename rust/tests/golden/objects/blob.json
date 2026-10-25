@@ -3,5 +3,5 @@
   "description": "10-byte UTF-8 blob 'hello kit\n'",
   "bin": "blob.bin",
   "size": 20,
-  "blake3": "da5182e47fd49a13644d37a9c2601984dd4c6383d551971eb01113add5d848ef"
+  "blake3": "591ca28e2d4a899e6856980172975f24c00893119d4d86f8e8c958831545b605"
 }

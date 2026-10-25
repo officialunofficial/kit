@@ -58,7 +58,7 @@ and can only be changed through a format-version bump.
 ## 3. Gear table seed
 
 The gear table is 256 `u64` entries, derived from a splitmix64 initial
-state seeded with an 8-byte ASCII literal. kit does **not** use the
+state seeded with a 7-byte ASCII literal. kit does **not** use the
 gear table from the FastCDC paper (Xia et al., USENIX ATC '16); the
 table is kit-specific and produced by the procedure below.
 

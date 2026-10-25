@@ -503,9 +503,9 @@ and `rust/tests/golden/disclosure/neg_incomplete_length_proof_set.*`;
 `kit_core::verify::tests::len_proofs_on_chunk0_are_rejected` and
 `rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*` (SPEC-DISCLOSURE §4/§4.1).
 
-## MKDS spans bind every chunk to one authenticated byte range
+## KDSP spans bind every chunk to one authenticated byte range
 
-**Always:** an accepted MKDS container has one trusted commit, authenticated
+**Always:** an accepted KDSP container has one trusted commit, authenticated
 path and leaf, a complete preceding length-proof set, and consecutive chunk
 bundles. Its absolute boundaries come from verified canonical Blob content
 lengths. The requested range starts in the first included chunk and ends in

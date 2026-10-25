@@ -33,7 +33,7 @@ Only the stat cache is disposable. Local-only does not imply reconstructible.
 
 ```
 offset  size    field
-0       4       magic            "MKIX" = 0x4D 0x4B 0x49 0x58
+0       4       magic            "KIDX" = 0x4D 0x4B 0x49 0x58
 4       1       version          0x03
 5       4       entry_count      u32 LE
 9       …       entries          entry_count × entry
@@ -223,7 +223,7 @@ re-emits current filenames byte-identically and records every fixture BLAKE3 in
 
 | Invariant | Enforced by |
 |---|---|
-| A file is parsed only under a known layout | `"MKIX"` magic → `IndexError::BadMagic`; explicit supported version matrix → `IndexError::UnsupportedVersion` (§2, §5) |
+| A file is parsed only under a known layout | `"KIDX"` magic → `IndexError::BadMagic`; explicit supported version matrix → `IndexError::UnsupportedVersion` (§2, §5) |
 | A header cannot force pathological allocation | `entry_count` checked against the minimum entry size and remaining buffer → `IndexError::Corrupt`; 64 MiB cap → `IndexError::TooLarge` (§5) |
 | The file encodes exactly its declared entries | trailing bytes rejected (§5) |
 | Each path has exactly one live interpretation | duplicate exact paths → `IndexError::DuplicatePath` (§5) |

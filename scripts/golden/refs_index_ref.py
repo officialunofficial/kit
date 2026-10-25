@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import objects_ref as o  # noqa: E402
 from objects_ref import blake3, expect  # noqa: E402
 
-MAGIC = b"MKIX"
+MAGIC = b"KIDX"
 VERSION = 3
 STATUSES = {0x00, 0x01, 0x02, 0x03, 0x04}
 MAX_PATH = 4096

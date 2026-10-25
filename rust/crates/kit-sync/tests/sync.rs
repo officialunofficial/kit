@@ -834,7 +834,7 @@ fn staging_honours_the_configured_directory() {
 /// A signed one-commit history whose pack carries a zstd entry
 /// (`examples/gen_zstd_fixture.rs` regenerates it).
 const ZSTD_PACK: &[u8] = include_bytes!("fixtures/zstd.pack");
-const ZSTD_TIP: &str = "0eff1297629ad4ada20ef655fd38808b4f64187ac64940a12722d6a0ef4e8e8f";
+const ZSTD_TIP: &str = "79810b90a7979f0e33a07f74054104a4254693eaafdea73f07acb47276743ae4";
 
 fn remote_with_zstd_pack() -> Remote {
     // The blob alone is about 9.7 KB; the pack is far smaller only because an

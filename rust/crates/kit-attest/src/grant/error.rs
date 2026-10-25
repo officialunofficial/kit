@@ -86,6 +86,16 @@ pub enum GrantError {
     Repository,
     /// A visibility other than `public` or `private` (§9.1).
     Visibility,
+    /// §9.4: a URL token target outside the `object:` and `path:` grammar.
+    UrlTokenTarget,
+    /// §9.4: a URL token that is not two non-empty `.`-separated segments.
+    TokenFormat,
+    /// §9.4: a URL token segment that is not canonical unpadded base64url.
+    TokenBase64,
+    /// §9.4: the key id of a URL token names no key in the verification set.
+    UnknownKeyId,
+    /// §9.4: the request names another target than the URL token binds.
+    TargetMismatch,
     /// §4: a scheme the deployment does not advertise.
     SchemeNotAdvertised,
     /// §4: a scheme not valid for the namespace form (`ed25519` needs an
@@ -208,6 +218,11 @@ impl GrantError {
             Self::UnknownScheme => "unknown scheme",
             Self::Repository => "repository",
             Self::Visibility => "visibility",
+            Self::UrlTokenTarget => "url token target",
+            Self::TokenFormat => "token format",
+            Self::TokenBase64 => "token base64",
+            Self::UnknownKeyId => "unknown key id",
+            Self::TargetMismatch => "target mismatch",
             Self::SchemeNotAdvertised => "scheme not advertised",
             Self::SchemeNamespaceMismatch => "scheme namespace mismatch",
             Self::SignatureLength => "signature length",

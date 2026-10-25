@@ -54,7 +54,7 @@ fn one_pack_plan_ids_are_stable() {
     );
     assert_eq!(
         node,
-        "309d37790fb5cb82c80ecb96f410ec3f174dc4d2b571c298509bbcdd9b6e0d0a"
+        "1e9678bd2e1a7e24ce50c3390cc5d54f56bba0cac7d8f23a8375d04e8de3571e"
     );
 }
 
@@ -75,6 +75,6 @@ fn split_plan_ids_are_stable() {
     );
     assert_eq!(
         node,
-        "274e8ae9f9d5ef1394bbc3fc055d06acebdce9478f9f9292b35f2e71a09d03a4"
+        "88b1df1daccb35e3993c7e4dd8f3278a301fc6f88cd7a3751558123cc3601318"
     );
 }

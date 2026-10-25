@@ -1018,7 +1018,7 @@ fn packmap_driver_capture_matrix() {
             .iter()
             .filter(|request| method(request) == "UploadPack")
             .map(capture_uploaded_pack)
-            .filter(|(_, bytes)| bytes.starts_with(b"MKPL"))
+            .filter(|(_, bytes)| bytes.starts_with(b"KPKL"))
             .collect();
         let moves: Vec<_> = sent
             .iter()

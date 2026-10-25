@@ -3,7 +3,7 @@
 //! On-disk layout per `docs/specs/SPEC-INDEX.md`:
 //!
 //! ```text
-//! [4B magic "MKIX"][1B version=3][4B LE entry_count][entries...][32B BLAKE3 checksum]
+//! [4B magic "KIDX"][1B version=3][4B LE entry_count][entries...][32B BLAKE3 checksum]
 //! entry := [1B status][32B object_hash][8B LE mtime_ns][8B LE size]
 //!          [8B LE ino][8B LE ctime_ns][2B LE path_len][path_len UTF-8 bytes]
 //! ```
@@ -34,8 +34,8 @@ use crate::layout::RepoLayout;
 use crate::object::{EntryMode, Object};
 use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
 
-/// Magic bytes — ASCII `"MKIX"`.
-pub const MAGIC: [u8; 4] = *b"MKIX";
+/// Magic bytes — ASCII `"KIDX"`.
+pub const MAGIC: [u8; 4] = *b"KIDX";
 /// Checksummed index format. Other versions are rejected without rewriting.
 pub const FORMAT_VERSION: u8 = 0x03;
 /// Hard cap on a serialised index file (64 MiB), per SPEC-INDEX §4.
@@ -395,8 +395,8 @@ fn path_descends_from(path: &str, base: &str) -> bool {
 /// Errors returned by the index subsystem.
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
-    /// Magic bytes were not `"MKIX"`.
-    #[error("index file has wrong magic (expected MKIX)")]
+    /// Magic bytes were not `"KIDX"`.
+    #[error("index file has wrong magic (expected KIDX)")]
     BadMagic,
     /// `version` byte was not the current `FORMAT_VERSION`.
     #[error("unsupported index version: {0:#x}")]
@@ -777,7 +777,7 @@ mod tests {
         let bytes = idx.serialize();
         assert_eq!(bytes.len(), 117);
         let mut expected = Vec::new();
-        expected.extend_from_slice(b"MKIX");
+        expected.extend_from_slice(b"KIDX");
         expected.push(0x03); // version
         expected.extend_from_slice(&1u32.to_le_bytes());
         expected.push(0x01); // Blob
@@ -798,14 +798,14 @@ mod tests {
         // 9-byte header declaring u32::MAX entries: the minimum entry is
         // 67 bytes, so this must fail fast, before looping.
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"MKIX");
+        bytes.extend_from_slice(b"KIDX");
         bytes.push(FORMAT_VERSION);
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         bytes.extend_from_slice(&hash::hash(&bytes));
         assert!(matches!(deserialize(&bytes), Err(IndexError::Corrupt)));
         // One entry declared, only 60 bytes of body: still corrupt.
         let mut short = Vec::new();
-        short.extend_from_slice(b"MKIX");
+        short.extend_from_slice(b"KIDX");
         short.push(FORMAT_VERSION);
         short.extend_from_slice(&1u32.to_le_bytes());
         short.extend_from_slice(&[0u8; 60]);
@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn rejects_unknown_version_0x04() {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"MKIX");
+        bytes.extend_from_slice(b"KIDX");
         bytes.push(0x04);
         bytes.extend_from_slice(&0u32.to_le_bytes());
         assert!(matches!(
@@ -1142,7 +1142,7 @@ mod tests {
 
     #[test]
     fn rejects_truncated_header() {
-        let err = deserialize(b"MKIX").unwrap_err();
+        let err = deserialize(b"KIDX").unwrap_err();
         assert!(matches!(err, IndexError::Corrupt));
     }
 

@@ -113,10 +113,10 @@ fn signing_hashes_are_stable() {
     };
     assert_eq!(
         to_hex(&commit_signing_hash(&c).unwrap()),
-        "f4e541f00ad26ea8100e45b7d5e333aa7cb47226930b3462a58e55287dab0360",
+        "b438caefed1d1a64bc65f7ab974a9306732bc68d17bb7182ce3fe45050abb1a6",
     );
     assert_eq!(
         to_hex(&remix_signing_hash(&r).unwrap()),
-        "2f46db12135e6be6bd5398b44e9872b0be3578f1793a846404201ed44cff90e7",
+        "058b46345971455846d841cdfed57e18bd2eeba1ecb031e5373ede5eec9d60c6",
     );
 }

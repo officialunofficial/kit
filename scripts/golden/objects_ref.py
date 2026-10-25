@@ -41,7 +41,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from blake3_subtree_ref import blake3  # noqa: E402
 
-PROLOGUE_MAGIC = b"MKT1"
+PROLOGUE_MAGIC = b"KOB1"
 SCHEMA_VERSION = 1
 BLOB, TREE, COMMIT, REMIX, CHUNKED, DELTA, TAG = 1, 2, 3, 4, 5, 6, 7
 
@@ -524,7 +524,7 @@ def check_objects(root):
         "empty tree id (SPEC-OBJECTS section 13.2)",
     )
     expect(
-        files["empty_blob"] == b"\x01MKT1\x01\x00\x00\x00\x00",
+        files["empty_blob"] == b"\x01KOB1\x01\x00\x00\x00\x00",
         "empty blob bytes",
     )
     cb = parsed["chunked_blob_cs0_3chunks"]

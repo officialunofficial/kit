@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import objects_ref as o  # noqa: E402
 from objects_ref import blake3  # noqa: E402
 
-MANIFEST_MAGIC = b"MKCL"
+MANIFEST_MAGIC = b"KCLM"
 PACK_MAGIC = b"KIT\x00"
 SNAPSHOT, HISTORY = 0, 1
 

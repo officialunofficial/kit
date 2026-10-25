@@ -1,7 +1,7 @@
 {
   "bin": "neg_zero_length_range.bin",
-  "blake3": "441b7586c8ad3b99ab142126b66bfcab4eae55bce7dfc4813bb4eb68903b445d",
-  "commit_id_hex": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
+  "blake3": "0b2ca450f15cc52d038f3c34bc3b6a550da488c59fc42f3664c7810c3066623b",
+  "commit_id_hex": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
   "description": "A Range payload with len = 0.",
   "expect": "reject",
   "name": "neg_zero_length_range",

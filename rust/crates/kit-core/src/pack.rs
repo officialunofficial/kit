@@ -4110,7 +4110,7 @@ mod tests {
 
     #[test]
     fn rejects_truncated_pack() {
-        let pack = vec![b'M', b'K']; // only 2 bytes
+        let pack = vec![b'K', b'I']; // only 2 bytes
         let (_dir, store) = fresh_store();
         let err = PackReader::read(&pack, &store).unwrap_err();
         assert!(matches!(err, PackError::PackfileTooShort));

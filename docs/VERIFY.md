@@ -279,7 +279,7 @@ client sampling one byte range, wants.
 ### The bundle at a glance
 
 ```
-magic   = "MKDP"              (4 raw bytes)
+magic   = "KDPB"              (4 raw bytes)
 version: u8 = 2
 commit_id: [u8; 32]
 commit_bytes: Vec<u8>          <= 4 MiB; verifier: BLAKE3(commit_bytes) == commit_id

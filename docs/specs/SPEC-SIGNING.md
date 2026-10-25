@@ -150,7 +150,7 @@ signing_bytes = PROLOGUE
 ```
 
 Where `PROLOGUE` is the 6 bytes defined in SPEC-OBJECTS §2:
-`[object_type=0x03] [magic="MKT1"] [schema_version=0x01]`.
+`[object_type=0x03] [magic="KOB1"] [schema_version=0x01]`.
 
 **Included fields, in order:**
 

@@ -3,5 +3,5 @@
   "description": "remix with two sources sorted by (upstream_id, commit_hash)",
   "bin": "remix_2sources.bin",
   "size": 326,
-  "blake3": "5ee0001c2da4c49f7f71f9d34b3b7f224b28e7858117e23e763f75016ac10452"
+  "blake3": "6a8e07b6b7ad9a5df78353cf187ca07615a4e4cbfceda7e1b03bf890685b42d1"
 }

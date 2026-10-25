@@ -4,7 +4,7 @@
 //! manifest:
 //!
 //! ```text
-//! magic   : 4   bytes  "MKST"
+//! magic   : 4   bytes  "KSTS"
 //! count   : u32 LE
 //! entries : count *
 //!     commit_hash  : 32 bytes
@@ -33,8 +33,8 @@ use crate::serialize;
 use crate::store::ObjectStore;
 use crate::worktree;
 
-/// Magic bytes for the stash manifest: `MKST` ("`Kit` `STash`").
-pub const MAGIC: [u8; 4] = *b"MKST";
+/// Magic bytes for the stash manifest: `KSTS` ("`Kit` `STash`").
+pub const MAGIC: [u8; 4] = *b"KSTS";
 
 /// Stash manifest path under the repo root.
 pub const STASH_FILE: &str = ".kit/stash";

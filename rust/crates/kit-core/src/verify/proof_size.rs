@@ -1,4 +1,4 @@
-//! Exact MKDP/MKDS lengths from metadata, without constructing Merkle or Bao
+//! Exact KDPB/KDSP lengths from metadata, without constructing Merkle or Bao
 //! proofs. Chunk lengths describe canonical Blob content, excluding its ten
 //! header bytes. All results enforce the 64 MiB wire cap.
 
@@ -20,7 +20,7 @@ pub struct PrefixStep {
 /// Exact format, chunk bounds and wire length selected by a chunked range.
 #[derive(Debug, Clone, Copy)]
 pub struct EncodedRangePlan {
-    /// MKDP for one chunk; MKDS for a range crossing a boundary.
+    /// KDPB for one chunk; KDSP for a range crossing a boundary.
     pub kind: RangeProofKind,
     /// First requested chunk index.
     pub first: usize,
@@ -121,7 +121,7 @@ fn bao_slice_size(canonical_bytes: u64, offset: u64, len: u64) -> Result<u64, Ra
     capped(8 + covered + u128::from(parents) * 64)
 }
 
-/// Exact MKDP range size for a plain canonical Blob.
+/// Exact KDPB range size for a plain canonical Blob.
 ///
 /// # Errors
 /// Invalid metadata, zero length, overflow, content bounds or wire cap.
@@ -148,7 +148,7 @@ fn canonical_length(content: u64, index: usize) -> Result<u64, RangeProofError> 
         .ok_or(RangeProofError::OffsetOverflow)
 }
 
-/// Exact chunked MKDP/MKDS size from indexed lengths through the last
+/// Exact chunked KDPB/KDSP size from indexed lengths through the last
 /// included chunk. Metadata after the span is unnecessary: `total_chunks`
 /// alone fixes the Merkle shape. The caller checks the manifest's total
 /// content bounds before collecting these lengths.
@@ -255,7 +255,7 @@ impl ChunkedRangeSizer {
     ///
     /// # Errors
     /// Invalid length/count, overflow or a provably exceeded encoded cap.
-    #[allow(clippy::too_many_lines)] // Mirrors the MKDP/MKDS wire fields in one sizing transition.
+    #[allow(clippy::too_many_lines)] // Mirrors the KDPB/KDSP wire fields in one sizing transition.
     pub fn push(&mut self, content: u64) -> Result<Option<EncodedRangePlan>, RangeProofError> {
         let index = self.index;
         let position = u32::try_from(index)

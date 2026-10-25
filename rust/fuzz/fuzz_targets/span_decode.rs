@@ -1,4 +1,4 @@
-//! cargo-fuzz target for arbitrary MKDS v1 structural inputs.
+//! cargo-fuzz target for arbitrary KDSP v1 structural inputs.
 
 #![no_main]
 #![cfg(feature = "libfuzzer")]

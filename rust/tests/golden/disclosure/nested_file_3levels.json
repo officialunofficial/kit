@@ -1,11 +1,11 @@
 {
   "bin": "nested_file_3levels.bin",
-  "blake3": "be4d946d9c8f57eaccc6b49b77fef2387f5c8081696cd9c5a58b19a52cb542d5",
-  "commit_id_hex": "28815964e4166139f07737e7570701896adf60e6aab614b39774099c4d5e3040",
+  "blake3": "8e741f42172a05df4dd5f9d2ae9a7f66098f7bfec0939040074ca5f3d10ea685",
+  "commit_id_hex": "3203af93b216d56ed39ab298fce4340755beb34684f5678e11c6752fcffb1b55",
   "description": "A file 3 directory levels deep.",
   "disclosed": {
     "chunk_inner_root_hex": null,
-    "leaf_id_hex": "fa882d11536d6fc7fc489c085bfcfae1de41f850115c1a343414e667abec20d4",
+    "leaf_id_hex": "e8b91e2d0eff68db1cb2bfcbc5eb1aaee3f43d37d22a58a708bb41291d11ccde",
     "path": [
       {
         "mode": 2,
@@ -21,18 +21,18 @@
       }
     ],
     "payload": {
-      "bytes_blake3": "fa882d11536d6fc7fc489c085bfcfae1de41f850115c1a343414e667abec20d4",
+      "bytes_blake3": "e8b91e2d0eff68db1cb2bfcbc5eb1aaee3f43d37d22a58a708bb41291d11ccde",
       "kind": "object",
       "len": 42
     },
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
     "step_inner_roots_hex": [
-      "3efe0325dbdc1bdacbc90e03d55563dbdff21a59d52d85d1adcdae53856c3c10",
-      "cb3161f1791a414a4c2df7d9698663be04580778c92b1a69bd8f6a285e39fbb3",
-      "e0fc3b81e69cfd42f7655b24574c8926119ff7b7a14695ea6546f8d87b23504b"
+      "0152c264b145fa4255be62befc32032e66eb571acf82b27b4f2580c7a560f2ce",
+      "1de1dec6cb5a04b0ceeecde6d74eb5a5b873ce1a4346c13a794ec05fcf364e05",
+      "89741ae0a8245c35232f02c88d631ae989190b65913d579affde7f3601286dde"
     ],
-    "tree_hash_hex": "e88d20b32dc03ddeb3819c6d37171469797d85083f995efc5dbbf0d989e696bf"
+    "tree_hash_hex": "f4c093c3570e0adbf7c75a874d083c4118f5a625a2896a802bb550b29d78ff4b"
   },
   "expect": "accept",
   "name": "nested_file_3levels",
