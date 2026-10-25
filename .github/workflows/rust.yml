@@ -224,6 +224,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Every spec has a recognized status
         run: bash scripts/check-spec-status.sh
+      - name: Every magic in a spec matches its hex bytes
+        run: python3 -I -B scripts/check-spec-magics.py
       # The Python checks share no code with the Rust crates. They are the
       # independent reference for the golden vectors.
       - name: Install the Python reference dependencies

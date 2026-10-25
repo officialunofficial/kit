@@ -49,7 +49,7 @@ Every stored object begins with:
 ```
 offset  size  field              value
 0       1     object_type        one of 0x01..0x07 (see §1)
-1       4     magic              ASCII "KOB1" = 0x4D 0x4B 0x54 0x31
+1       4     magic              ASCII "KOB1" = 0x4B 0x4F 0x42 0x31
 5       1     schema_version     0x01
 6       …     body               type-specific (see §3-§8)
 ```

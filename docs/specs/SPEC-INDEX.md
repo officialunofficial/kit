@@ -33,7 +33,7 @@ Only the stat cache is disposable. Local-only does not imply reconstructible.
 
 ```
 offset  size    field
-0       4       magic            "KIDX" = 0x4D 0x4B 0x49 0x58
+0       4       magic            "KIDX" = 0x4B 0x49 0x44 0x58
 4       1       version          0x03
 5       4       entry_count      u32 LE
 9       …       entries          entry_count × entry
