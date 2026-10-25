@@ -1,6 +1,6 @@
 {
   "bin": "neg_manifest_version_2.manifest.bin",
-  "blake3": "671069c23ae84b7a0c10ea1a28003e730b833cc242939811dcb326a17c5e17e6",
+  "blake3": "ecae1823fe6395711fa06a590bf9d9dfbb636b339ac5a3c4f8a09491107c80a1",
   "description": "Manifest version byte is 2.",
   "expect": "reject",
   "ids": [],
@@ -8,10 +8,10 @@
   "n_packs": 1,
   "name": "neg_manifest_version_2",
   "pack_hashes": [
-    "6a126549c39fe03975a8e6b1cc4dbfcdecc5f2ac4f59c8a3ce0950b768064b4d"
+    "75b0a2c668d2c65924da30d6831d756531fa25347b6049b4ba80342d6bd3b76c"
   ],
   "reason": "unsupported version",
-  "root_hex": "543563c9d2f0f34d8866bf869b078c5a2f9ecabfd25d9ed4bcb5f02578d5292b",
+  "root_hex": "a273bf064da865c9d6eae5206cc24b719d0a8aba95335b1234ead318de351c93",
   "size": 71,
   "unreferenced": [],
   "verified": 0

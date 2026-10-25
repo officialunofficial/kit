@@ -433,7 +433,7 @@ entry point directly and ignore the manifest.
 ### 7.6 Vectors
 
 `rust/tests/golden/closure/` pins the bytes. The vectors use their own
-small fixture repo. Its `chunked.bin` is an 80 KiB file split by FastCDC
+small fixture repo. Its `chunked.bin` is a 36 KiB file split by FastCDC
 into more than one chunk. The fixture stores the ChunkedBlob directly, so
 the vectors stay under 1 MiB in total. Accept vectors: `snapshot`
 (fixture head commit), `history` (a second commit so history &ne;

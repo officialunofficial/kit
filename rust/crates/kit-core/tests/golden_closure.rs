@@ -202,7 +202,7 @@ fn tag_for(store: &ObjectStore, commit_id: Hash) -> Hash {
 /// chunks. It is far below the 1 MiB threshold the worktree uses,
 /// because the fixture writes the `ChunkedBlob` directly. This keeps the
 /// vectors small.
-const CHUNKED_FILE_LEN: usize = 80 * 1024;
+const CHUNKED_FILE_LEN: usize = 36 * 1024;
 
 struct ClosureFixture {
     _dir: tempfile::TempDir,
@@ -225,7 +225,7 @@ fn build_fixture() -> ClosureFixture {
     let deep_file = store_file_object(&store, b"three levels deep, deterministic").unwrap();
     let exec = store_file_object(&store, b"#!/bin/sh\necho hi\n").unwrap();
 
-    let chunked_bytes = common::prng_bytes(0x1234_5678_9abc_def0, CHUNKED_FILE_LEN);
+    let chunked_bytes = common::prng_bytes(3, CHUNKED_FILE_LEN);
     let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), &chunked_bytes)
         .map(|b| {
             let data = chunked_bytes[b.offset..b.offset + b.length].to_vec();

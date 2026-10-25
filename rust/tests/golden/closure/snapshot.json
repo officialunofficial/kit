@@ -1,27 +1,27 @@
 {
   "bin": "snapshot.manifest.bin",
-  "blake3": "0339113919cfb1f7de13f29d5cbd45c71eb65c6dfab19efc5d2658b82cc84d43",
+  "blake3": "e419f9c6d61a58fd4ed2ce1a95164a22be6f7a474dca32006dc416e852f2e78c",
   "description": "Snapshot closure of the fixture head commit.",
   "expect": "accept",
   "ids": [
-    "1e573daa6d0fe99ecd849d6d09ee449511ff2423a0c46c708f3ed5cee87556db",
+    "1a6196a1fa62528a7f063961082605ce0607f5154549ed897c740368871115d1",
     "3a056150fb8dbdd13507eb67e7b13c67dde0658368151381b3aeb431373db772",
     "4f024791c53cd90d98fdcc4d245743ace83de8df37b79d1afe99c5dd6c6382ad",
-    "543563c9d2f0f34d8866bf869b078c5a2f9ecabfd25d9ed4bcb5f02578d5292b",
-    "905bdae18e24d230b2b61facee3f0320cc033a252fdbba713f2f38d78764ff36",
+    "8c42e5ddb073dcee4c6d9754c0f1026ed73f04b80c8025e132430083f836ef07",
     "9b72443311af4f7aea17ed35950c9f712ea3cac594965081dbebbb721944d320",
+    "a273bf064da865c9d6eae5206cc24b719d0a8aba95335b1234ead318de351c93",
+    "af42b597b898859e3cbb938919c7877140cf9cffec0c303be78e46f14e3d64ad",
     "bf23bdae6bc394c54e30250314c42405439199ccbef0223d09c6770937e26e12",
-    "df759b2e442e74407bff09122fe3bc97aa7d3e7f2a21baf2aec85f2a79f8489f",
-    "e8b91e2d0eff68db1cb2bfcbc5eb1aaee3f43d37d22a58a708bb41291d11ccde",
-    "f144803e6de0a0dabf3ae19e15568064c5033cc5fb1eecbc077b49f680224f88"
+    "d0b975470d14ec60e9b728014d4fa7c64d2af411969c82ea9d05da0e3e000b2c",
+    "e8b91e2d0eff68db1cb2bfcbc5eb1aaee3f43d37d22a58a708bb41291d11ccde"
   ],
   "mode": "snapshot",
   "n_packs": 1,
   "name": "snapshot",
   "pack_hashes": [
-    "6a126549c39fe03975a8e6b1cc4dbfcdecc5f2ac4f59c8a3ce0950b768064b4d"
+    "75b0a2c668d2c65924da30d6831d756531fa25347b6049b4ba80342d6bd3b76c"
   ],
-  "root_hex": "543563c9d2f0f34d8866bf869b078c5a2f9ecabfd25d9ed4bcb5f02578d5292b",
+  "root_hex": "a273bf064da865c9d6eae5206cc24b719d0a8aba95335b1234ead318de351c93",
   "size": 71,
   "unreferenced": [],
   "verified": 10
