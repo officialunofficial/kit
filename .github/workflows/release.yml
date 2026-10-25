@@ -231,12 +231,14 @@ jobs:
           REF="${{ needs.validate-release-tag.outputs.ref }}"
           COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
           VERSION="${{ needs.validate-release-tag.outputs.version }}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "archive=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}.${{ matrix.archive_ext }}" >> "$GITHUB_OUTPUT"
-          echo "stage=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=${TAG}"
+            echo "ref=${REF}"
+            echo "commit=${COMMIT}"
+            echo "version=${VERSION}"
+            echo "archive=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}.${{ matrix.archive_ext }}"
+            echo "stage=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -338,11 +340,13 @@ jobs:
           for STAGE in "${{ steps.meta.outputs.stage }}"; do
             (
               cd "${STAGE}"
+              SUMS="$(mktemp)"
               if command -v sha256sum >/dev/null 2>&1; then
-                find . -type f ! -name SHA256SUMS -exec sha256sum {} \; | sort -k 2 > SHA256SUMS
+                find . -type f ! -name SHA256SUMS -exec sha256sum {} \; | sort -k 2 > "${SUMS}"
               else
-                find . -type f ! -name SHA256SUMS -exec shasum -a 256 {} \; | sort -k 2 > SHA256SUMS
+                find . -type f ! -name SHA256SUMS -exec shasum -a 256 {} \; | sort -k 2 > "${SUMS}"
               fi
+              mv "${SUMS}" SHA256SUMS
               cat SHA256SUMS
             )
           done
@@ -419,10 +423,12 @@ jobs:
           REF="${{ needs.validate-release-tag.outputs.ref }}"
           COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
           VERSION="${{ needs.validate-release-tag.outputs.version }}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=${TAG}"
+            echo "ref=${REF}"
+            echo "commit=${COMMIT}"
+            echo "version=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -541,11 +547,13 @@ jobs:
           TAG_OBJECT="${{ needs.validate-release-tag.outputs.tag_object }}"
           COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
           VERSION="${{ needs.validate-release-tag.outputs.version }}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          echo "tag_object=${TAG_OBJECT}" >> "$GITHUB_OUTPUT"
-          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+            echo "ref=${REF}"
+            echo "tag_object=${TAG_OBJECT}"
+            echo "commit=${COMMIT}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
