@@ -47,8 +47,7 @@ buffa = "0.9.1"
 base64 = "0.22"
 
 # Async runtime driving the ConnectRPC client. The `Transport` trait (kit_core::protocol::Transport) is
-# synchronous; `kit_core::protocol::async_shim::Executor` bridges the
-# client side.
+# synchronous; `kit_sync::Executor` bridges the client side.
 tokio = { version = "1", default-features = false, features = [
     "rt",
     "rt-multi-thread",
