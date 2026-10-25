@@ -322,7 +322,7 @@ fn import_key_is_pinned_against_other_keys() {
     let fork = f.import();
 
     // A different key for the same state refuses with guidance.
-    let other = f.root.path().join("other.key");
+    let other = f.root.path().join("other-key").join("other.key");
     let kp = kit_core::sign::KeyPair::from_seed([9u8; 32]);
     kit_core::sign::save_key(&other, &kp).unwrap();
     let out = f.kit(&fork, &["git", "fetch", "--key", other.to_str().unwrap()]);
@@ -1392,7 +1392,7 @@ fn divergence_probe_refuses_second_key_over_same_content() {
     // store: only the §6.1 content probe stands between this repo and
     // a second, divergent import of the same upstream.
     std::fs::remove_dir_all(fork.join(".kit/git/upstream")).unwrap();
-    let other = f.root.path().join("other.key");
+    let other = f.root.path().join("other-key").join("other.key");
     let kp = kit_core::sign::KeyPair::from_seed([7u8; 32]);
     kit_core::sign::save_key(&other, &kp).unwrap();
 

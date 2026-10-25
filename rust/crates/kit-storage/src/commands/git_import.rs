@@ -1121,10 +1121,6 @@ fn load_or_create_import_key(layout: &RepoLayout, flag: Option<&str>) -> CmdResu
             }
             let kp = KeyPair::generate()
                 .map_err(|e| (format!("generate import key: {e}"), exit::GENERAL_ERROR))?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| (format!("mkdir keys: {e}"), exit::CANTCREAT))?;
-            }
             kit_core::sign::save_key(&path, &kp)
                 .map_err(|e| (format!("save import key: {e}"), exit::CANTCREAT))?;
             eprintln!(
