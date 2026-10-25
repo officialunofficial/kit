@@ -32,4 +32,4 @@ pub use seams::{
 
 pub use stream::{RequestStream, ResponseStream};
 
-pub use seams::{FailureDiagnostic, FailureKind, FailureObserver, ResponseProfile};
+pub use seams::{FailureDiagnostic, FailureKind, FailureObserver};

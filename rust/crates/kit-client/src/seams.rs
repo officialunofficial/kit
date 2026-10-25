@@ -393,42 +393,6 @@ pub struct UnsignedRequestContext<'a> {
     pub intent: Option<WriteIntent<'a>>,
 }
 
-/// Optional response acceptance and framing bounds selected by the host.
-/// Defaults preserve the client's strict response checks and existing limits.
-// Independent acceptance options, rather than mutually exclusive states.
-#[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Copy, Default)]
-#[non_exhaustive]
-pub struct ResponseProfile {
-    /// Omit the `ListRefs` page-size field when the caller selects zero.
-    pub omit_zero_page_size: bool,
-    /// Drop read hints that fail the canonical ref-name grammar.
-    pub ignore_invalid_ref_hints: bool,
-    /// Defer the final downloaded-byte hash check to the caller. Frame order,
-    /// chunk identity, offsets, declared size and resource limits still apply.
-    /// Hosts using this option must verify bytes before storing or trusting them.
-    pub skip_download_hash_verification: bool,
-    /// Accept every successful HTTP status rather than only 200.
-    pub allow_other_success_status: bool,
-    /// Accept an omitted response content type.
-    pub allow_missing_content_type: bool,
-    /// Accept content types beginning with the requested media type.
-    pub allow_content_type_prefix: bool,
-    /// Default absent error fields and normalize unknown codes by HTTP status.
-    pub allow_incomplete_error_fields: bool,
-    /// Accept a zero-byte coded HTTP body without requiring a coding envelope.
-    pub allow_empty_coded_body: bool,
-    /// Interpret omitted ReadRef/PackExists presence fields as false.
-    pub missing_presence_is_false: bool,
-    /// Expose bounded HTTP error bodies instead of refusing redirects locally.
-    /// Redirects are never followed.
-    pub expose_error_responses: bool,
-    /// Optional Connect data-frame cap, clamped to the response budget.
-    pub frame_limit: Option<usize>,
-    /// Optional end-frame and HTTP error-body cap, clamped to the response budget.
-    pub end_frame_limit: Option<usize>,
-}
-
 /// The stage that observed a response or channel failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -489,16 +453,12 @@ impl std::fmt::Debug for FailureDiagnostic<'_> {
     }
 }
 
-/// Host-owned failure classification and response acceptance. Mapping a failure
+/// Host-owned failure classification. Mapping a failure
 /// does not retry the request; scheduling remains with the caller.
 pub trait FailureObserver {
     /// Return an alternate error, or preserve the client's default failure.
     fn map_failure(&self, _failure: &FailureDiagnostic<'_>) -> Option<Error> {
         None
-    }
-    /// Select explicit response compatibility for this exchange.
-    fn response_profile(&self) -> ResponseProfile {
-        ResponseProfile::default()
     }
 }
 
@@ -517,14 +477,6 @@ impl RequestPolicy for NoRequestPolicy {
 /// recovery, helper execution, trust and grant verification remain in the host.
 /// This synchronous callback must not run a blocking admission helper.
 pub trait RequestPolicy {
-    /// Select a bounded response budget for this procedure. The default keeps
-    /// the primitive's caller-supplied limit unchanged.
-    fn response_limit(&self, _procedure: &str, default: usize) -> usize {
-        default
-    }
-    fn response_profile(&self, _procedure: &str) -> ResponseProfile {
-        ResponseProfile::default()
-    }
     fn map_failure(&self, _failure: &FailureDiagnostic<'_>) -> Option<Error> {
         None
     }

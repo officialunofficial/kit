@@ -377,13 +377,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     ) -> Result<Reply<RefPage>, Error> {
         let request = ListRefsRequest {
             prefix: Some(prefix.to_owned()),
-            page_size: if page_size == 0
-                && self.rpc().response_profile("ListRefs").omit_zero_page_size
-            {
-                None
-            } else {
-                Some(page_size)
-            },
+            page_size: Some(page_size),
             page_token: Some(page_token.to_owned()),
             ..Default::default()
         };
@@ -548,13 +542,6 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         let value = match response.exists {
             Some(false) => None,
             Some(true) => Some(id32(response.object_id.as_deref(), "ref value")?),
-            None if self
-                .rpc()
-                .response_profile("ReadRef")
-                .missing_presence_is_false =>
-            {
-                None
-            }
             None => return Err(Error::Invalid("ref presence")),
         };
         Ok(Reply { value, identity })
@@ -585,17 +572,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             .unary_with("PackExists", &request, opts)
             .await
             .map_err(Error::typed)?;
-        let value = match response.exists {
-            Some(value) => value,
-            None if self
-                .rpc()
-                .response_profile("PackExists")
-                .missing_presence_is_false =>
-            {
-                false
-            }
-            None => return Err(Error::Invalid("pack presence")),
-        };
+        let value = response.exists.ok_or(Error::Invalid("pack presence"))?;
         Ok(Reply { value, identity })
     }
 
@@ -1211,13 +1188,13 @@ mod unsigned_write_tests {
         assert_eq!(clock.nonces.get(), 1);
         assert_eq!(channel.0.borrow().len(), 2);
     }
-    struct ProfileChannel {
+    struct ScriptedChannel {
         status: http::StatusCode,
         content_type: Option<&'static str>,
         body: Vec<u8>,
         limit: Cell<usize>,
     }
-    impl HttpTransport for ProfileChannel {
+    impl HttpTransport for ScriptedChannel {
         async fn send(
             &self,
             _: http::Request<Vec<u8>>,
@@ -1246,21 +1223,6 @@ mod unsigned_write_tests {
         ) -> Result<crate::RequestHeaders, crate::Veto> {
             Ok(crate::RequestHeaders::new())
         }
-        fn response_limit(&self, _: &str, _: usize) -> usize {
-            4 * 1024 * 1024
-        }
-        fn response_profile(&self, _: &str) -> crate::ResponseProfile {
-            crate::ResponseProfile {
-                omit_zero_page_size: true,
-                ignore_invalid_ref_hints: true,
-                allow_other_success_status: true,
-                allow_missing_content_type: true,
-                allow_content_type_prefix: true,
-                missing_presence_is_false: true,
-                allow_incomplete_error_fields: true,
-                ..crate::ResponseProfile::default()
-            }
-        }
         fn map_failure(&self, failure: &crate::FailureDiagnostic<'_>) -> Option<Error> {
             assert!(
                 failure
@@ -1279,7 +1241,7 @@ mod unsigned_write_tests {
             Some(Error::Transport("host-mapped failure".to_owned()))
         }
     }
-    fn profile_destination() -> Destination {
+    fn test_destination() -> Destination {
         Destination::new("https://vcs.example.org".into(), "default".into()).unwrap()
     }
 
@@ -1308,44 +1270,24 @@ mod unsigned_write_tests {
         }
     }
     #[test]
-    fn zero_page_size_and_invalid_hints_require_explicit_host_compatibility() {
+    fn zero_page_size_is_sent_and_invalid_hints_are_refused() {
         let channel = ReadRequestCapture::default();
-        let client = Client::anonymous(&channel, profile_destination());
+        let client = Client::anonymous(&channel, test_destination());
         ready(client.list_refs("", 0, "", None)).unwrap();
         let request = channel.0.borrow();
         let list = ListRefsRequest::decode_from_slice(request[0].body()).unwrap();
         assert_eq!(list.page_size, Some(0));
         drop(request);
-        assert!(matches!(
-            ready(client.pack_exists(&[1; 32], Some("refs/heads/bad\nheader"), None)),
-            Err(Error::Invalid("ref hint"))
-        ));
-        assert_eq!(channel.0.borrow().len(), 1);
-
-        let policy = ResponsePolicy(std::cell::RefCell::new(Vec::new()));
-        let client =
-            Client::anonymous(&channel, profile_destination()).with_request_policy(&policy);
-        ready(client.list_refs("", 0, "", None)).unwrap();
-        ready(client.list_refs("", 7, "", None)).unwrap();
-        for hint in ["../bad", "refs/heads/bad\nheader", "refs/heads/main"] {
-            ready(client.pack_exists(&[1; 32], Some(hint), None)).unwrap();
+        for hint in ["../bad", "refs/heads/bad\nheader"] {
+            assert!(matches!(
+                ready(client.pack_exists(&[1; 32], Some(hint), None)),
+                Err(Error::Invalid("ref hint"))
+            ));
         }
+        assert_eq!(channel.0.borrow().len(), 1);
+        ready(client.pack_exists(&[1; 32], Some("refs/heads/main"), None)).unwrap();
         let requests = channel.0.borrow();
-        assert_eq!(
-            ListRefsRequest::decode_from_slice(requests[1].body())
-                .unwrap()
-                .page_size,
-            None
-        );
-        assert_eq!(
-            ListRefsRequest::decode_from_slice(requests[2].body())
-                .unwrap()
-                .page_size,
-            Some(7)
-        );
-        assert!(requests[3].headers().get("x-kit-ref").is_none());
-        assert!(requests[4].headers().get("x-kit-ref").is_none());
-        assert_eq!(requests[5].headers()["x-kit-ref"], "refs/heads/main");
+        assert_eq!(requests[1].headers()["x-kit-ref"], "refs/heads/main");
     }
 
     #[test]
@@ -1355,13 +1297,13 @@ mod unsigned_write_tests {
             (http::StatusCode::OK, None),
             (http::StatusCode::OK, Some("application/proto; mode=test")),
         ] {
-            let channel = ProfileChannel {
+            let channel = ScriptedChannel {
                 status,
                 content_type,
                 body: Vec::new(),
                 limit: Cell::new(0),
             };
-            let client = Client::anonymous(&channel, profile_destination());
+            let client = Client::anonymous(&channel, test_destination());
             assert!(matches!(
                 ready(client.read_ref("refs/heads/main", None)),
                 Err(Error::Invalid("Connect response status/encoding"))
@@ -1371,52 +1313,19 @@ mod unsigned_write_tests {
     }
 
     #[test]
-    fn host_response_profile_explicitly_selects_acceptance_presence_and_budget() {
-        let policy = ResponsePolicy(std::cell::RefCell::new(Vec::new()));
-        for (status, content_type) in [
-            (http::StatusCode::NO_CONTENT, None),
-            (http::StatusCode::OK, None),
-            (http::StatusCode::OK, Some("application/proto-any-prefix")),
-        ] {
-            let channel = ProfileChannel {
-                status,
-                content_type,
-                body: Vec::new(),
-                limit: Cell::new(0),
-            };
-            let client =
-                Client::anonymous(&channel, profile_destination()).with_request_policy(&policy);
-            assert!(
-                ready(client.read_ref("refs/heads/main", None))
-                    .unwrap()
-                    .value
-                    .is_none()
-            );
-            assert!(
-                !ready(client.pack_exists(&[1; 32], None, None))
-                    .unwrap()
-                    .value
-            );
-            assert_eq!(channel.limit.get(), 4 * 1024 * 1024);
-        }
-        assert!(policy.0.borrow().is_empty());
-    }
-
-    #[test]
     fn host_failure_mapping_receives_original_protobuf_and_http_evidence() {
         let policy = ResponsePolicy(std::cell::RefCell::new(Vec::new()));
         let invalid = vec![0xff];
         let cause = ReadRefResponse::decode_from_slice(&invalid)
             .unwrap_err()
             .to_string();
-        let channel = ProfileChannel {
-            status: http::StatusCode::CREATED,
+        let channel = ScriptedChannel {
+            status: http::StatusCode::OK,
             content_type: Some("application/proto"),
             body: invalid.clone(),
             limit: Cell::new(0),
         };
-        let client =
-            Client::anonymous(&channel, profile_destination()).with_request_policy(&policy);
+        let client = Client::anonymous(&channel, test_destination()).with_request_policy(&policy);
         assert!(matches!(
             ready(client.read_ref("refs/heads/main", None)),
             Err(Error::Transport(_))
@@ -1426,18 +1335,18 @@ mod unsigned_write_tests {
             let captured = &observations[0];
             assert_eq!(captured.0, crate::FailureKind::Decode);
             assert_eq!(captured.1, cause);
-            assert_eq!(captured.2, Some(201));
+            assert_eq!(captured.2, Some(200));
             assert_eq!(captured.3, invalid);
         }
         for body in [b"backend unavailable".as_slice(), b"{}"] {
-            let channel = ProfileChannel {
+            let channel = ScriptedChannel {
                 status: http::StatusCode::SERVICE_UNAVAILABLE,
                 content_type: Some("text/plain"),
                 body: body.to_vec(),
                 limit: Cell::new(0),
             };
             let client =
-                Client::anonymous(&channel, profile_destination()).with_request_policy(&policy);
+                Client::anonymous(&channel, test_destination()).with_request_policy(&policy);
             assert!(matches!(
                 ready(client.read_ref("refs/heads/main", None)),
                 Err(Error::Transport(_))
@@ -1448,24 +1357,21 @@ mod unsigned_write_tests {
         assert_eq!(captures[1].2, Some(503));
         assert_eq!(captures[1].3, b"backend unavailable");
         assert!(captures[1].4.is_none());
-        assert_eq!(
-            captures[2].4,
-            Some(("unavailable".to_owned(), String::new()))
-        );
+        assert!(captures[2].4.is_none());
     }
 
     #[test]
     fn admission_uses_actual_status_before_optional_failure_mapping() {
         let policy = ResponsePolicy(std::cell::RefCell::new(Vec::new()));
         for body in [b"{}".as_slice(), b"unusable error body"] {
-            let channel = ProfileChannel {
+            let channel = ScriptedChannel {
                 status: http::StatusCode::PAYMENT_REQUIRED,
                 content_type: None,
                 body: body.to_vec(),
                 limit: Cell::new(0),
             };
             let client =
-                Client::anonymous(&channel, profile_destination()).with_request_policy(&policy);
+                Client::anonymous(&channel, test_destination()).with_request_policy(&policy);
             assert!(matches!(
                 ready(client.read_ref("refs/heads/main", None)),
                 Err(Error::AdmissionRequired(_))

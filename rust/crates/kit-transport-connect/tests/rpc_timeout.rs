@@ -11,7 +11,7 @@
 //! `tests/roundtrip.rs`'s "a real server, not a mock standing in for one").
 //! Both the `ListRefs` and `DownloadPack` handlers are deliberately slow by
 //! the same fixed delay; the test asserts a short `unary_timeout` fails the
-//! `ListRefs` call fast (nowhere near the legacy 300s budget) while a
+//! `ListRefs` call fast (nowhere near the 300s budget) while a
 //! *longer* `pack_transfer_timeout` on the very same client instance lets
 //! the equally-slow `DownloadPack` call succeed — proving the two timeout
 //! classes are wired independently rather than sharing one client-wide
@@ -312,7 +312,7 @@ fn unary_timeout_fires_fast_while_pack_transfer_timeout_covers_the_same_delay() 
     let elapsed = start.elapsed();
     assert!(
         elapsed < Duration::from_secs(2),
-        "unary_timeout must fire well before the 300s legacy default \
+        "unary_timeout must fire well before the 300s default \
          (and before the handler's own 300ms delay would have finished \
          naturally is irrelevant — 50ms must win): took {elapsed:?}"
     );
@@ -322,7 +322,7 @@ fn unary_timeout_fires_fast_while_pack_transfer_timeout_covers_the_same_delay() 
     );
 
     // -- pack-transfer call: same slow handler, must still succeed ------
-    let key = PackKey::new([0x77u8; 32]);
+    let key = PackKey::new(kit_core::hash::hash(b"slow-pack-payload"));
     let start = Instant::now();
     let bytes = client
         .download_pack(&key)

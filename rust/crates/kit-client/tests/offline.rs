@@ -846,22 +846,8 @@ fn streamed_challenge_headers_keep_the_admission_bounds() {
     assert!(matches!(error, Error::Invalid("admission header")));
 }
 
-struct TerminalCompatibility;
-impl kit_client::RequestPolicy for TerminalCompatibility {
-    fn headers(
-        &self,
-        _: &kit_client::RequestContext<'_>,
-    ) -> Result<kit_client::RequestHeaders, kit_client::Veto> {
-        Ok(kit_client::RequestHeaders::new())
-    }
-    fn response_profile(&self, _: &str) -> kit_client::ResponseProfile {
-        let mut profile = kit_client::ResponseProfile::default();
-        profile.allow_incomplete_error_fields = true;
-        profile
-    }
-}
 #[test]
-fn streamed_terminal_error_compatibility_is_explicit_and_defaults_stay_strict() {
+fn streamed_terminal_errors_must_be_complete() {
     for terminal in ["{\"error\":null}", "{\"error\":{}}"] {
         let (key, pack) = sample_pack(1);
         let script = Script::new(move |_| {
@@ -879,15 +865,6 @@ fn streamed_terminal_error_compatibility_is_explicit_and_defaults_stay_strict() 
             block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)),
             Err(Error::Invalid("Connect end error"))
         ));
-        let client = anonymous(&script).with_request_policy(&TerminalCompatibility);
-        let result = block_on(client.download_pack(&key, None, 1 << 20, None));
-        if terminal.contains("null") {
-            assert!(result.is_ok());
-        } else {
-            assert!(
-                matches!(result, Err(Error::Remote(error)) if error.code == "unknown" && error.message.is_empty())
-            );
-        }
     }
 }
 
@@ -1042,26 +1019,12 @@ fn pack_locations_require_server_advertisement_and_client_configuration() {
     }
 }
 
-struct DeferredHash;
-impl kit_client::RequestPolicy for DeferredHash {
-    fn headers(
-        &self,
-        _: &kit_client::RequestContext<'_>,
-    ) -> Result<kit_client::RequestHeaders, kit_client::Veto> {
-        Ok(kit_client::RequestHeaders::new())
-    }
-    fn response_profile(&self, _: &str) -> kit_client::ResponseProfile {
-        let mut profile = kit_client::ResponseProfile::default();
-        profile.skip_download_hash_verification = true;
-        profile
-    }
-}
 #[test]
-fn pack_location_fallback_still_verifies_when_host_defers_stream_hash_checks() {
+fn pack_location_fallback_still_verifies_the_stream_hash() {
     let mut script = LocationScript::valid();
     script.fetched = Ok(b"fake".to_vec());
     script.streamed = b"fake".to_vec();
-    let client = Client::anonymous(&script, destination()).with_request_policy(&DeferredHash);
+    let client = Client::anonymous(&script, destination());
     assert!(block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)).is_err());
     assert_eq!(*script.opt_ins.borrow(), [Some(true), None]);
 }

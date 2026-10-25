@@ -5,8 +5,7 @@ use crate::{
 };
 use http::HeaderMap;
 use kit_client::{
-    Clock, FailureDiagnostic, FailureKind, RequestContext, RequestHeaders, RequestPolicy,
-    ResponseProfile, Signer, UnsignedRequestContext, Veto,
+    Clock, RequestContext, RequestHeaders, RequestPolicy, Signer, UnsignedRequestContext, Veto,
 };
 use kit_core::hash::Hash;
 use kit_core::protocol::{AdvanceOutcome, BackoffIterator, CommitOutcome, TransportError};
@@ -14,123 +13,6 @@ use kit_sync::{RemoteSource, SourceError};
 use kit_sync::{UploadEvent as SourceUploadEvent, WriteRecovery};
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
-
-const LEGACY_MESSAGE_LIMIT: usize = 4 * 1024 * 1024;
-
-fn legacy_http_code(status: u16) -> &'static str {
-    match status {
-        400 => "internal",
-        401 => "unauthenticated",
-        403 => "permission_denied",
-        404 => "unimplemented",
-        408 => "deadline_exceeded",
-        429 | 502 | 503 | 504 => "unavailable",
-        _ => "unknown",
-    }
-}
-
-/// Choose presentation and scheduling from preserved evidence. HTTP bodies,
-/// protobufs and streaming envelopes are decoded by the protocol client.
-fn legacy_diagnostic(failure: &FailureDiagnostic<'_>) -> Option<kit_client::Error> {
-    if let Some(error) = failure.parsed_error {
-        return Some(kit_client::Error::Remote(Box::new(error.clone())));
-    }
-    let status = failure.status.map_or(0, |status| status.as_u16());
-    let (code, message) = match failure.kind {
-        FailureKind::Http => (
-            legacy_http_code(status),
-            format!(
-                "HTTP error {status}: {}",
-                String::from_utf8_lossy(failure.body.unwrap_or_default())
-            ),
-        ),
-        FailureKind::Headers => {
-            let content_type = failure
-                .headers
-                .and_then(|headers| headers.get(http::header::CONTENT_TYPE))
-                .map(|value| value.to_str().unwrap_or(""))?;
-            let code = if content_type.starts_with("application/proto")
-                || content_type.starts_with("application/json")
-            {
-                "internal"
-            } else {
-                "unknown"
-            };
-            (code, format!("unexpected content-type: {content_type}"))
-        }
-        FailureKind::Decode => (
-            "internal",
-            format!("failed to decode response: {}", failure.cause),
-        ),
-        FailureKind::DecodeResourceLimit => (
-            "resource_exhausted",
-            format!(
-                "failed to decode response: {}; if this server is trusted, raise CallOptions::with_element_memory_limit or ClientConfig::with_default_element_memory_limit",
-                failure.cause
-            ),
-        ),
-        FailureKind::RequestIo => ("unavailable", format!("request failed: {}", failure.cause)),
-        FailureKind::BodyIo => (
-            "internal",
-            format!("failed to read response body: {}", failure.cause),
-        ),
-        FailureKind::WireLimit => (
-            "resource_exhausted",
-            format!(
-                "response body size exceeds limit {}",
-                failure.limit.unwrap_or(LEGACY_MESSAGE_LIMIT)
-            ),
-        ),
-        FailureKind::InflatedLimit => (
-            "resource_exhausted",
-            format!(
-                "decompressed size exceeds limit {}",
-                failure.limit.unwrap_or(LEGACY_MESSAGE_LIMIT)
-            ),
-        ),
-        FailureKind::Coding => {
-            if failure.status.is_some_and(|status| !status.is_success()) {
-                (legacy_http_code(status), format!("HTTP error {status}"))
-            } else {
-                let coding = failure
-                    .headers
-                    .and_then(|headers| headers.get(http::header::CONTENT_ENCODING))
-                    .and_then(|value| value.to_str().ok());
-                let old = coding.and_then(|coding| {
-                    // Reuse the existing compression provider only to format a
-                    // failed bounded response; no decoded data is dispatched.
-                    connectrpc::CompressionRegistry::default()
-                        .decompress_with_limit(
-                            coding,
-                            bytes::Bytes::copy_from_slice(failure.body.unwrap_or_default()),
-                            failure.limit.unwrap_or(LEGACY_MESSAGE_LIMIT),
-                        )
-                        .err()
-                });
-                if let Some(old) = old {
-                    let code = match old.code {
-                        connectrpc::ErrorCode::ResourceExhausted => "resource_exhausted",
-                        connectrpc::ErrorCode::InvalidArgument => "data_loss",
-                        _ => "internal",
-                    };
-                    (code, old.message.unwrap_or_default())
-                } else {
-                    ("data_loss", failure.cause.to_owned())
-                }
-            }
-        }
-        _ => return None,
-    };
-    Some(kit_client::Error::Remote(Box::new(
-        kit_client::RemoteError {
-            code: code.to_owned(),
-            message,
-            details: Vec::new(),
-            status,
-            headers: failure.headers.cloned().unwrap_or_default(),
-        },
-    )))
-}
 
 pub(crate) struct HostSigner<'a> {
     signer: Option<&'a dyn EnvelopeSigner>,
@@ -428,32 +310,6 @@ impl RequestPolicy for HostPolicy<'_> {
     }
     fn advertise_request_timeout(&self, _procedure: &str) -> bool {
         true
-    }
-    fn response_limit(&self, procedure: &str, default: usize) -> usize {
-        if procedure == "/kit.transport.v1.TransportService/DownloadPack" {
-            default
-        } else {
-            LEGACY_MESSAGE_LIMIT
-        }
-    }
-    fn response_profile(&self, _procedure: &str) -> ResponseProfile {
-        let mut profile = ResponseProfile::default();
-        profile.allow_other_success_status = true;
-        profile.allow_missing_content_type = true;
-        profile.allow_content_type_prefix = true;
-        profile.allow_incomplete_error_fields = true;
-        profile.allow_empty_coded_body = true;
-        profile.omit_zero_page_size = true;
-        profile.ignore_invalid_ref_hints = true;
-        profile.skip_download_hash_verification = true;
-        profile.missing_presence_is_false = true;
-        profile.expose_error_responses = true;
-        profile.frame_limit = Some(LEGACY_MESSAGE_LIMIT);
-        profile.end_frame_limit = Some(LEGACY_MESSAGE_LIMIT);
-        profile
-    }
-    fn map_failure(&self, failure: &FailureDiagnostic<'_>) -> Option<kit_client::Error> {
-        legacy_diagnostic(failure)
     }
     fn headers(&self, request: &RequestContext<'_>) -> Result<RequestHeaders, Veto> {
         if self.attempt_deadline.get().is_none() {

@@ -1652,7 +1652,7 @@ fn pages_concatenate_and_each_page_retries_the_same_request() {
     assert_eq!(requests[2].page_token, requests[1].page_token);
     for request in &requests {
         assert_eq!(request.prefix.as_deref(), Some("refs/heads/"));
-        assert_eq!(request.page_size, None, "server selects its page cap");
+        assert_eq!(request.page_size, Some(0), "zero asks for the server cap");
     }
     assert!(
         state
@@ -1770,7 +1770,7 @@ fn cursor_cycles_and_unordered_pages_are_rejected() {
 }
 
 #[test]
-fn ref_hints_survive_retry_and_invalid_hints_are_dropped() {
+fn ref_hints_survive_retry_and_invalid_hints_are_refused() {
     let served = Served::new(State {
         download_failures: 1,
         ..Default::default()
@@ -1794,12 +1794,12 @@ fn ref_hints_survive_retry_and_invalid_hints_are_dropped() {
     assert_eq!(client.download_blob(&key).unwrap(), DATA);
     assert!(client.pack_exists(&key).unwrap());
     for hint in ["../bad", "refs/heads/bad\nheader"] {
-        assert_eq!(client.download_pack_via_ref(&key, hint).unwrap(), DATA);
-        assert_eq!(client.download_blob_via_ref(&key, hint).unwrap(), DATA);
-        assert!(client.pack_exists_via_ref(&key, hint).unwrap());
+        assert!(client.download_pack_via_ref(&key, hint).is_err());
+        assert!(client.download_blob_via_ref(&key, hint).is_err());
+        assert!(client.pack_exists_via_ref(&key, hint).is_err());
     }
     let state = served.state.lock().unwrap();
-    assert_eq!(state.requests.len(), 13);
+    assert_eq!(state.requests.len(), 7);
     for (index, request) in state.requests.iter().enumerate() {
         assert_eq!(request.repository.as_deref(), Some("default"));
         assert_eq!(

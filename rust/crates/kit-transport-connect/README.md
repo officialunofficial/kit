@@ -11,9 +11,7 @@ scheduling, and progress callbacks. The CLI lends its configured `ClientSource`
 through `ConnectTransport::with_source` for `kit+https` and `kit+http`
 push, fetch, pull, and clone. Other schemes use `TransportSource`.
 
-The server side is not in this crate or in this repository. The `server` Cargo
-feature and its `serve`/`router`/`TransportServer`/`map_transport_error` API,
-which backed the removed `kit serve --http`, were removed in 0.5.
+The server side is not in this crate or in this repository.
 
 [ConnectRPC]: https://connectrpc.com/
 
@@ -70,55 +68,46 @@ retry ladder. Ticket-consuming calls return admission challenges without a helpe
 Pending verification and membership waits retain their deadlines and cancellation
 checkpoints. HTTP request budgets are clipped to the remaining advance deadline.
 
-## Native behavior differences
+## Native behavior
 
-| Behavior | Previous driver | Protocol client adapter |
-| --- | --- | --- |
-| Uploads | Generated streaming calls and a part producer thread | Pull frames through a bounded channel; no producer thread |
-| Downloads | Generated streaming decoder | Incremental bounded Connect and protobuf decoding into the final pack buffer |
-| Runtime | Dedicated runtime with multiple worker threads | Current-thread runtime, driven by the synchronous caller |
-| Connections | Pooled unary connections with one stale-socket retry; fresh streamed transfers | One idle connection per origin, including streams, with a ten-second idle timeout; hyper retries only untouched requests canceled before writing starts |
-| HTTP and content coding | HTTP/1.1 or HTTP/2, gzip or zstd | HTTP/1.1, gzip or identity |
-| Request budgets | 30 seconds for metadata, 300 seconds for transfers; signing consumes the local budget | Same budgets, including signing, bounded by remaining advance time; the timeout header advertises the locally clamped remaining budget |
-| Channel failures | Connect status mapping and ordinary retry ladder | Host-owned mappings retain HTTP diagnostics, status classes, and retry counts; body-read failures and deadlines remain terminal; metadata-bound failures retain 429 retries |
-| Gzip validation | Buffered decoder could stop after the first member | Streaming decoder rejects trailing bytes and concatenated members |
-| Shared adapter operations | Independent operation state with shared ticket maps | Caller-owned session with short internal state locks; callbacks may reenter the adapter |
+| Behavior | Detail |
+| --- | --- |
+| Uploads | Pull frames through a bounded channel. No producer thread. |
+| Downloads | Incremental bounded Connect and protobuf decoding into the final pack buffer. |
+| Runtime | Current-thread runtime, driven by the synchronous caller. |
+| Connections | One idle connection per origin, including streams, with a ten-second idle timeout. Hyper retries only untouched requests canceled before writing starts. |
+| HTTP and content coding | HTTP/1.1, gzip or identity. |
+| Request budgets | 30 seconds for metadata, 300 seconds for transfers. Signing consumes the local budget. Remaining advance time bounds both. The timeout header advertises the locally clamped remaining budget. |
+| Channel failures | The default `kit-client` validation applies. Body-read failures and deadlines are terminal. Metadata-bound failures retry on 429. |
+| Gzip validation | The streaming decoder rejects trailing bytes and concatenated members. |
+| Shared adapter operations | A caller-owned session with short internal state locks. Callbacks may reenter the adapter. |
 
-Neither upload framing nor download decoding retains a complete framed transfer
+Neither upload framing nor download decoding holds a complete framed transfer
 next to the final pack. Generic `HttpTransport` implementations can use the
-buffered streaming fallback; the native adapter implements bounded streaming.
-Pack bytes and ids, ref conditions and moves, receipt records, CLI output, and
-exit codes remain unchanged. No server, wire, stored-format change, or wipe occurs.
+buffered streaming fallback. The native adapter implements bounded streaming.
 
 Reads and signed writes both reuse connections on the same owned current-thread
 runtime. Hyper's cancellation retry can recover only a request that has not
-started writing; it preserves the original request, including signed headers,
+started writing. It preserves the original request, including signed headers,
 nonce, body, and streaming receiver. A failure after writing starts returns to
-the host's existing recovery policy. Idle checkout checks elapsed monotonic time
-even when the runtime is paused, and TCP_NODELAY matches the previous adapter.
+the host's recovery policy. Idle checkout checks elapsed monotonic time
+even when the runtime is paused. The channel sets `TCP_NODELAY`.
 
-The host response profile retains the previous metadata limit of 4 MiB and its
-acceptance of successful 2xx responses, missing content types, protobuf content
-type prefixes, and omitted false presence fields. It omits a zero listing page
-size, ignores malformed optional read hints, and leaves final download digest
-verification to sync's staging boundary, as the previous driver did. Chunk
-identity, offsets, lengths, and resource bounds remain enforced. The protocol
-client's default validation and response limits remain unchanged.
+The host request policy uses the protocol client's default validation and
+response limits.
 
-This adapter keeps pack-location negotiation disabled so reads retain their
-existing discovery and retry behavior. Native hosts using `kit-client` directly
-can negotiate verified locations through `kit-sync::NativeHttp`.
+This adapter keeps pack-location negotiation disabled. Native hosts using
+`kit-client` directly can negotiate verified locations through
+`kit-sync::NativeHttp`.
 
-## Remaining adapter users
+## Adapter users
 
-The CLI retains this adapter for TLS and bearer configuration, envelope signers,
+The CLI uses this adapter for TLS and bearer configuration, envelope signers,
 per-request grants, admission helpers, durable receipt storage, and progress.
-Its epoch and visibility commands also retain the concrete adapter's legacy
-`Completion` result. Config validates admission header names through its public
-helper. In-process sync tests retain `Transport`; server conformance retains that
-facade and generated aliases. `EnvelopeTransport`, pooled HTTP utilities, and
-generated aliases remain published compatibility APIs. None retains a second
-per-RPC protocol driver.
+Its epoch and visibility commands use the concrete adapter's `Completion`
+result. Config validates admission header names through its public helper.
+In-process sync tests use `Transport`. Server conformance uses that facade and
+the generated aliases. None keeps a second per-RPC protocol driver.
 
 ## Testing
 

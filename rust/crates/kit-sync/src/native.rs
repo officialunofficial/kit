@@ -534,25 +534,6 @@ async fn read_bounded<D: FailureObserver + ?Sized>(
     Ok(out)
 }
 
-/// Preserve a host-opted-in HTTP admission response even when its bounded
-/// body cannot be read. The protocol client still validates challenge headers.
-async fn read_response_body<D: FailureObserver + ?Sized>(
-    body: hyper::body::Incoming,
-    limit: usize,
-    diagnostics: Diagnostics<'_, D>,
-    profile: kit_client::ResponseProfile,
-) -> Result<Vec<u8>, ExchangeFailure> {
-    match read_bounded(body, limit, diagnostics).await {
-        Err(_)
-            if profile.expose_error_responses
-                && diagnostics.status == Some(http::StatusCode::PAYMENT_REQUIRED) =>
-        {
-            Ok(Vec::new())
-        }
-        result => result,
-    }
-}
-
 /// Inflate a gzip body, refusing one that expands past `limit`.
 enum GzipFailure {
     Coding(std::io::Error),
@@ -660,86 +641,57 @@ fn decode_body<D: FailureObserver + ?Sized>(
     wire: Vec<u8>,
     headers: &HeaderMap,
     limit: usize,
-    profile: kit_client::ResponseProfile,
     diagnostics: Diagnostics<'_, D>,
 ) -> Result<Vec<u8>, ExchangeFailure> {
-    let bytes = (|| {
-        let mut codings = headers.get_all(CONTENT_ENCODING).iter();
-        let coding = match (codings.next(), codings.next()) {
-            (None, _) => None,
-            (Some(v), None) => Some(
-                v.to_str()
-                    .map_err(|_| {
-                        diagnostics.failure(
-                            FailureKind::Coding,
-                            "unreadable content-encoding",
-                            Some(&wire),
-                            limit,
-                            NativeHttpError::Exchange("unreadable content-encoding".to_owned()),
-                        )
-                    })?
-                    .trim()
-                    .to_ascii_lowercase(),
-            ),
-            (Some(_), Some(_)) => {
-                return Err(diagnostics.failure(
-                    FailureKind::Coding,
-                    "multiple content-encoding values",
-                    Some(&wire),
-                    limit,
-                    NativeHttpError::Exchange(
-                        "unsupported content-encoding (gzip only)".to_owned(),
-                    ),
-                ));
-            }
-        };
-        match coding.as_deref() {
-            None | Some("identity") => Ok(wire),
-            Some("gzip") if wire.is_empty() && profile.allow_empty_coded_body => Ok(wire),
-            Some("gzip") => match gunzip_bounded(&wire, limit) {
-                Ok(bytes) => Ok(bytes),
-                Err(error) => {
-                    let (kind, cause, message) = error.diagnostic();
-                    Err(diagnostics.failure(
-                        kind,
-                        &cause,
+    let mut codings = headers.get_all(CONTENT_ENCODING).iter();
+    let coding = match (codings.next(), codings.next()) {
+        (None, _) => None,
+        (Some(v), None) => Some(
+            v.to_str()
+                .map_err(|_| {
+                    diagnostics.failure(
+                        FailureKind::Coding,
+                        "unreadable content-encoding",
                         Some(&wire),
                         limit,
-                        NativeHttpError::Exchange(message),
-                    ))
-                }
-            },
-            Some(coding) => Err(diagnostics.failure(
+                        NativeHttpError::Exchange("unreadable content-encoding".to_owned()),
+                    )
+                })?
+                .trim()
+                .to_ascii_lowercase(),
+        ),
+        (Some(_), Some(_)) => {
+            return Err(diagnostics.failure(
                 FailureKind::Coding,
-                coding,
+                "multiple content-encoding values",
                 Some(&wire),
                 limit,
                 NativeHttpError::Exchange("unsupported content-encoding (gzip only)".to_owned()),
-            )),
+            ));
         }
-    })();
-    match bytes {
-        Ok(bytes) => Ok(bytes),
-        Err(_)
-            if profile.expose_error_responses
-                && diagnostics.status == Some(http::StatusCode::PAYMENT_REQUIRED) =>
-        {
-            // A diagnostic mapper may already have classified a body failure.
-            // Admission takes precedence so the central client emits the typed
-            // challenge and applies its existing validation bounds.
-            Ok(Vec::new())
-        }
-        Err(ExchangeFailure::Native(_))
-            if profile.expose_error_responses
-                && diagnostics
-                    .status
-                    .is_some_and(|status| !status.is_success()) =>
-        {
-            // The central HTTP decoder still observes the status and admission
-            // headers when an error envelope's coding is unusable.
-            Ok(Vec::new())
-        }
-        Err(error) => Err(error),
+    };
+    match coding.as_deref() {
+        None | Some("identity") => Ok(wire),
+        Some("gzip") => match gunzip_bounded(&wire, limit) {
+            Ok(bytes) => Ok(bytes),
+            Err(error) => {
+                let (kind, cause, message) = error.diagnostic();
+                Err(diagnostics.failure(
+                    kind,
+                    &cause,
+                    Some(&wire),
+                    limit,
+                    NativeHttpError::Exchange(message),
+                ))
+            }
+        },
+        Some(coding) => Err(diagnostics.failure(
+            FailureKind::Coding,
+            coding,
+            Some(&wire),
+            limit,
+            NativeHttpError::Exchange("unsupported content-encoding (gzip only)".to_owned()),
+        )),
     }
 }
 
@@ -812,9 +764,6 @@ impl NativeHttp {
             status: None,
             headers: None,
         };
-        let profile = observer
-            .map(FailureObserver::response_profile)
-            .unwrap_or_default();
         let (mut parts, body) = request.into_parts();
         if parts.uri.scheme_str() == Some("http")
             && !self.allow_insecure_http
@@ -851,7 +800,7 @@ impl NativeHttp {
                 })?;
             // Redirects are never followed: a redirect would carry a signed
             // request to an origin the signature was not made for.
-            if response.status().is_redirection() && !profile.expose_error_responses {
+            if response.status().is_redirection() {
                 let diagnostics = Diagnostics {
                     status: Some(response.status()),
                     headers: Some(response.headers()),
@@ -871,8 +820,8 @@ impl NativeHttp {
                 headers: Some(&parts.headers),
                 ..initial
             };
-            let wire = read_response_body(body, response_limit, diagnostics, profile).await?;
-            let bytes = decode_body(wire, &parts.headers, response_limit, profile, diagnostics)?;
+            let wire = read_bounded(body, response_limit, diagnostics).await?;
+            let bytes = decode_body(wire, &parts.headers, response_limit, diagnostics)?;
             parts.headers.remove(CONTENT_ENCODING);
             parts.headers.remove(CONTENT_LENGTH);
             Ok(Response::from_parts(parts, bytes))
@@ -981,46 +930,13 @@ fn response_gzip<D: FailureObserver + ?Sized>(
     }
 }
 
-async fn stream_error_response<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized>(
-    response: Response<hyper::body::Incoming>,
-    limit: usize,
-    sink: &mut S,
-    initial: Diagnostics<'_, D>,
-    profile: kit_client::ResponseProfile,
-) -> Result<(), Error> {
-    let (mut parts, body) = response.into_parts();
-    let diagnostics = Diagnostics {
-        status: Some(parts.status),
-        headers: Some(&parts.headers),
-        ..initial
-    };
-    let limit = profile.end_frame_limit.unwrap_or(limit).min(limit);
-    let wire = read_response_body(body, limit, diagnostics, profile)
-        .await
-        .map_err(ExchangeFailure::into_client)?;
-    let bytes = decode_body(wire, &parts.headers, limit, profile, diagnostics)
-        .map_err(ExchangeFailure::into_client)?;
-    parts.headers.remove(CONTENT_ENCODING);
-    parts.headers.remove(CONTENT_LENGTH);
-    sink.start(Response::from_parts(parts, ()))?;
-    sink.chunk(&bytes)?;
-    sink.finish()
-}
-
 async fn stream_response<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized>(
     response: Response<hyper::body::Incoming>,
     limit: usize,
     sink: &mut S,
     initial: Diagnostics<'_, D>,
 ) -> Result<(), Error> {
-    let profile = initial
-        .observer
-        .map(FailureObserver::response_profile)
-        .unwrap_or_default();
-    if !response.status().is_success() && profile.expose_error_responses {
-        return stream_error_response(response, limit, sink, initial, profile).await;
-    }
-    if response.status().is_redirection() && !profile.expose_error_responses {
+    if response.status().is_redirection() {
         return Err(Error::Transport("redirect refused".to_owned()));
     }
     let (mut parts, mut body) = response.into_parts();
@@ -1070,9 +986,7 @@ async fn stream_response<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized
                 }
             }
         }
-        if (wire_received > 0 || !profile.allow_empty_coded_body)
-            && let Err(error) = decoder.try_finish()
-        {
+        if let Err(error) = decoder.try_finish() {
             return Err(gzip_error(&mut decoder, &error));
         }
         decoder.get_mut().sink.finish()

@@ -5,7 +5,7 @@ use http::{HeaderMap, HeaderValue, Request, Response};
 use kit_core::hash::Hash;
 
 use crate::connect::{Error, decode_response_diagnosed, end_error_diagnosed};
-use crate::{FailureDiagnostic, FailureKind, FailureObserver, ResponseProfile};
+use crate::{FailureDiagnostic, FailureKind, FailureObserver};
 pub(crate) struct NoDiagnostics;
 impl FailureObserver for NoDiagnostics {}
 use crate::proto::{DownloadPackResponse, download_pack_response::Body};
@@ -112,9 +112,6 @@ impl<D: FailureObserver + ?Sized> FailureObserver for HeadObserver<'_, D> {
             headers: Some(self.head.headers()),
             ..*failure
         })
-    }
-    fn response_profile(&self) -> ResponseProfile {
-        self.inner.response_profile()
     }
 }
 
@@ -259,36 +256,22 @@ pub(crate) trait FrameSink {
 pub(crate) struct Decoder<S> {
     pub(crate) sink: S,
     limit: usize,
-    end_limit: usize,
     header: [u8; 5],
     header_bytes: usize,
     payload: Vec<u8>,
     end: Option<Vec<u8>>,
     response: Option<Response<()>>,
-    profile: ResponseProfile,
 }
 impl<S> Decoder<S> {
-    #[cfg(test)]
     pub(crate) fn new(sink: S, limit: usize) -> Self {
-        Self::profiled(sink, limit, ResponseProfile::default())
-    }
-    pub(crate) fn profiled(sink: S, response_limit: usize, profile: ResponseProfile) -> Self {
         Self {
             sink,
-            limit: profile
-                .frame_limit
-                .unwrap_or(response_limit)
-                .min(response_limit),
-            end_limit: profile
-                .end_frame_limit
-                .unwrap_or(response_limit)
-                .min(response_limit),
+            limit,
             header: [0; 5],
             header_bytes: 0,
             payload: Vec::new(),
             end: None,
             response: None,
-            profile,
         }
     }
 }
@@ -316,11 +299,7 @@ impl<S: FrameSink> Decoder<S> {
                 self.header[3],
                 self.header[4],
             ]) as usize;
-            let limit = if self.header[0] == 2 {
-                self.end_limit
-            } else {
-                self.limit
-            };
+            let limit = self.limit;
             if size > limit {
                 let cause = format!("Connect frame size {size} exceeds limit {limit}");
                 let mapped = observer.and_then(|observer| {
@@ -377,7 +356,7 @@ impl<S: FrameSink> Decoder<S> {
             .map_or((http::StatusCode::OK, &empty_headers), |response| {
                 (response.status(), response.headers())
             });
-        end_error_diagnosed(end, status, headers, self.profile, observer)?;
+        end_error_diagnosed(end, status, headers, observer)?;
         self.sink.finish()
     }
 }
@@ -429,23 +408,17 @@ pub(crate) struct Pack {
     cap: u64,
     expected: Option<u64>,
     last: bool,
-    verify_hash: bool,
     pub(crate) bytes: Vec<u8>,
     accept_location: bool,
     pub(crate) location: Option<crate::proto::DownloadPackLocation>,
 }
 impl Pack {
-    #[cfg(test)]
     pub(crate) fn new(key: Hash, cap: u64) -> Self {
-        Self::profiled(key, cap, ResponseProfile::default())
-    }
-    pub(crate) fn profiled(key: Hash, cap: u64, profile: ResponseProfile) -> Self {
         Self {
             key,
             cap,
             expected: None,
             last: false,
-            verify_hash: !profile.skip_download_hash_verification,
             accept_location: false,
             location: None,
             bytes: Vec::new(),
@@ -509,7 +482,7 @@ impl FrameSink for Pack {
         }
         if !self.last
             || self.expected != Some(self.bytes.len() as u64)
-            || (self.verify_hash && kit_core::pack::pack_key(&self.bytes) != self.key)
+            || kit_core::pack::pack_key(&self.bytes) != self.key
         {
             return Err(Error::Invalid("pack content commitment"));
         }
@@ -676,7 +649,7 @@ mod tests {
         ));
     }
     #[test]
-    fn hash_verification_can_only_be_deferred_by_explicit_host_profile() {
+    fn download_hash_is_always_verified() {
         let key = [1; 32];
         let header = DownloadPackResponse {
             body: Some(
@@ -712,22 +685,13 @@ mod tests {
             strict.finish(),
             Err(Error::Invalid("pack content commitment"))
         ));
-        let profile = ResponseProfile {
-            skip_download_hash_verification: true,
-            ..ResponseProfile::default()
-        };
-        let mut deferred = Pack::profiled(key, 4, profile);
-        deferred.frame(&header).unwrap();
-        deferred.frame(&chunk(0)).unwrap();
-        deferred.finish().unwrap();
-        assert_eq!(deferred.bytes, b"pack");
-        let mut wrong_offset = Pack::profiled(key, 4, profile);
+        let mut wrong_offset = Pack::new(key, 4);
         wrong_offset.frame(&header).unwrap();
         assert!(matches!(
             wrong_offset.frame(&chunk(1)),
             Err(Error::Invalid("download chunk identity"))
         ));
-        let mut too_large = Pack::profiled(key, 3, profile);
+        let mut too_large = Pack::new(key, 3);
         assert!(matches!(
             too_large.frame(&header),
             Err(Error::Limit("pack download"))

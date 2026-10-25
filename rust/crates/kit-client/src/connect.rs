@@ -1,7 +1,7 @@
 use crate::seams::{
     Attempt, FailureDiagnostic, FailureKind, FailureObserver, NoObserver, NoRequestPolicy,
-    Observer, RequestContext, RequestPolicy, ResponseProfile, SignError, SigningRequest,
-    UnsignedRequestContext, WriteIntent,
+    Observer, RequestContext, RequestPolicy, SignError, SigningRequest, UnsignedRequestContext,
+    WriteIntent,
 };
 use base64::{
     Engine as _,
@@ -194,11 +194,6 @@ impl<P: RequestPolicy + ?Sized> FailureObserver for PolicyObserver<'_, P> {
                 procedure: self.procedure,
                 ..*failure
             })
-        })
-    }
-    fn response_profile(&self) -> ResponseProfile {
-        self.policy.map_or_else(ResponseProfile::default, |policy| {
-            policy.response_profile(self.procedure)
         })
     }
 }
@@ -643,17 +638,12 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         commitment: &str,
         opts: Opts<'_>,
     ) -> Result<(R, Option<Identity>), Error> {
-        let opts = self.response_options(method, opts);
         let mut body = crate::stream::Chunks(
             messages
                 .into_iter()
                 .map(|message| framed(&message.encode_to_vec())),
         );
-        let sink = crate::stream::Decoder::profiled(
-            crate::stream::SingleFrame::default(),
-            opts.limit,
-            self.response_profile(method),
-        );
+        let sink = crate::stream::Decoder::new(crate::stream::SingleFrame::default(), opts.limit);
         let (sink, identity, headers, status) = self
             .stream_call(method, Vec::new(), &mut body, commitment, opts, sink)
             .await?;
@@ -820,14 +810,11 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         let limit = usize::try_from(cap)
             .unwrap_or(usize::MAX)
             .saturating_add(overhead);
-        let opts = self.response_options("DownloadPack", Opts { limit, ..opts });
-        let limit = opts.limit;
+        let opts = Opts { limit, ..opts };
         let mut chunks = crate::stream::Chunks(std::iter::once(Ok(body)));
-        let sink = crate::stream::Decoder::profiled(
-            crate::stream::Pack::profiled(key, cap, self.response_profile("DownloadPack"))
-                .accept_locations(accept_location),
+        let sink = crate::stream::Decoder::new(
+            crate::stream::Pack::new(key, cap).accept_locations(accept_location),
             limit,
-            self.response_profile("DownloadPack"),
         );
         let (sink, identity, _, _) = self
             .stream_call(
@@ -842,17 +829,11 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         Ok((sink.sink, identity))
     }
 
-    fn apply_ref_hint<B>(
-        &self,
-        method: &str,
-        request: &mut Request<B>,
-        hint: Option<&str>,
-    ) -> Result<(), Error> {
-        let hint = hint.filter(|hint| {
-            !self.response_profile(method).ignore_invalid_ref_hints
-                || kit_core::refs::validate_ref_name(hint)
-        });
+    fn apply_ref_hint<B>(request: &mut Request<B>, hint: Option<&str>) -> Result<(), Error> {
         if let Some(hint) = hint {
+            if !kit_core::refs::validate_ref_name(hint) {
+                return Err(Error::Invalid("ref hint"));
+            }
             request.headers_mut().insert(
                 "x-kit-ref",
                 HeaderValue::from_str(hint).map_err(|_| Error::Invalid("ref hint"))?,
@@ -874,7 +855,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             mut request,
             identity,
         } = self.build(method, body, commitment, true, opts, 1).await?;
-        self.apply_ref_hint(method, &mut request, opts.hint)?;
+        Self::apply_ref_hint(&mut request, opts.hint)?;
         let (parts, _) = request.into_parts();
         let request = Request::from_parts(parts, ());
         let procedure = format!("{SERVICE}{method}");
@@ -907,28 +888,12 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         } = self
             .build(method, body, commitment, streaming, opts, 1)
             .await?;
-        self.apply_ref_hint(method, &mut request, opts.hint)?;
+        Self::apply_ref_hint(&mut request, opts.hint)?;
         let (bytes, headers, status) = self.send_response(&request, opts.limit).await?;
         self.observe_response(method, commitment, opts, identity, &headers)?;
         Ok((bytes, headers, identity, status))
     }
 
-    fn response_options<'b>(&self, method: &str, opts: Opts<'b>) -> Opts<'b> {
-        let procedure = format!("{SERVICE}{method}");
-        Opts {
-            limit: self.request_policy.map_or(opts.limit, |policy| {
-                policy.response_limit(&procedure, opts.limit)
-            }),
-            ..opts
-        }
-    }
-    pub(crate) fn response_profile(&self, method: &str) -> ResponseProfile {
-        let procedure = format!("{SERVICE}{method}");
-        self.request_policy
-            .map_or_else(ResponseProfile::default, |policy| {
-                policy.response_profile(&procedure)
-            })
-    }
     fn decode_message<R: Message + Default>(
         &self,
         method: &str,
@@ -1358,9 +1323,6 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             copy.extensions_mut().insert(AdvertiseRequestTimeout);
         }
         let procedure = request.uri().path();
-        let limit = self
-            .request_policy
-            .map_or(limit, |policy| policy.response_limit(procedure, limit));
         let diagnostics = PolicyObserver {
             policy: self.request_policy,
             procedure,
@@ -1417,7 +1379,6 @@ pub(crate) fn decode_response_diagnosed<D: FailureObserver + ?Sized>(
     limit: usize,
     observer: &D,
 ) -> Result<(Vec<u8>, HeaderMap), Error> {
-    let profile = observer.response_profile();
     if response.body().len() > limit {
         return Err(observer
             .map_failure(&FailureDiagnostic {
@@ -1433,7 +1394,7 @@ pub(crate) fn decode_response_diagnosed<D: FailureObserver + ?Sized>(
             .unwrap_or(Error::Limit("RPC response")));
     }
     if !response.status().is_success() {
-        let parsed = parse_remote_error(response.body(), response.status(), profile);
+        let parsed = serde_json::from_slice::<RemoteError>(response.body());
         if response.status().as_u16() == 402 || challenged(parsed.as_ref().ok()) {
             return Err(Error::AdmissionRequired(Box::new(admission_required(
                 parsed.ok().as_ref(),
@@ -1469,16 +1430,8 @@ pub(crate) fn decode_response_diagnosed<D: FailureObserver + ?Sized>(
         return Err(mapped.unwrap_or_else(|| Error::Remote(Box::new(error))));
     }
     let supplied_type = response.headers().get("content-type");
-    let type_ok = supplied_type == content_type
-        || (supplied_type.is_none() && profile.allow_missing_content_type)
-        || (profile.allow_content_type_prefix
-            && supplied_type
-                .zip(content_type)
-                .is_some_and(|(supplied, expected)| {
-                    supplied.as_bytes().starts_with(expected.as_bytes())
-                }));
-    if (!profile.allow_other_success_status && response.status() != http::StatusCode::OK)
-        || !type_ok
+    if response.status() != http::StatusCode::OK
+        || supplied_type != content_type
         || response
             .headers()
             .get("content-encoding")
@@ -1503,64 +1456,6 @@ pub(crate) fn decode_response_diagnosed<D: FailureObserver + ?Sized>(
     }
     let (parts, body) = response.into_parts();
     Ok((body, parts.headers))
-}
-
-fn parse_remote_error(
-    bytes: &[u8],
-    status: http::StatusCode,
-    profile: ResponseProfile,
-) -> Result<RemoteError, serde_json::Error> {
-    #[derive(Deserialize)]
-    struct Fields {
-        code: Option<String>,
-        message: Option<String>,
-        #[serde(default)]
-        details: Vec<Detail>,
-    }
-    if !profile.allow_incomplete_error_fields {
-        return serde_json::from_slice(bytes);
-    }
-    let fields: Fields = serde_json::from_slice(bytes)?;
-    let fallback = match status.as_u16() {
-        400 => "internal",
-        401 => "unauthenticated",
-        403 => "permission_denied",
-        404 => "unimplemented",
-        408 => "deadline_exceeded",
-        429 | 502 | 503 | 504 => "unavailable",
-        _ => "unknown",
-    };
-    let code = fields
-        .code
-        .filter(|code| {
-            matches!(
-                code.as_str(),
-                "canceled"
-                    | "unknown"
-                    | "invalid_argument"
-                    | "deadline_exceeded"
-                    | "not_found"
-                    | "already_exists"
-                    | "permission_denied"
-                    | "resource_exhausted"
-                    | "failed_precondition"
-                    | "aborted"
-                    | "out_of_range"
-                    | "unimplemented"
-                    | "internal"
-                    | "unavailable"
-                    | "data_loss"
-                    | "unauthenticated"
-            )
-        })
-        .unwrap_or_else(|| fallback.to_owned());
-    Ok(RemoteError {
-        code,
-        message: fields.message.unwrap_or_default(),
-        details: fields.details,
-        status: status.as_u16(),
-        headers: HeaderMap::new(),
-    })
 }
 
 fn strip_type(url: &str) -> &str {
@@ -1788,7 +1683,6 @@ pub(crate) fn end_error(frame: &[u8]) -> Result<(), Error> {
         frame,
         http::StatusCode::OK,
         &HeaderMap::new(),
-        ResponseProfile::default(),
         &PolicyObserver::<NoRequestPolicy> {
             policy: None,
             procedure: "",
@@ -1796,14 +1690,13 @@ pub(crate) fn end_error(frame: &[u8]) -> Result<(), Error> {
     )
 }
 
-/// Interpret a terminal error with the same host-selected envelope rules and
+/// Interpret a terminal error with the same envelope rules and
 /// admission headers as a unary response. Terminal JSON never supplies its own
 /// HTTP status or replaces the actual response headers.
 pub(crate) fn end_error_diagnosed<D: FailureObserver + ?Sized>(
     frame: &[u8],
     status: http::StatusCode,
     headers: &HeaderMap,
-    profile: ResponseProfile,
     observer: &D,
 ) -> Result<(), Error> {
     let end: serde_json::Value =
@@ -1811,11 +1704,8 @@ pub(crate) fn end_error_diagnosed<D: FailureObserver + ?Sized>(
     let Some(error) = end.get("error") else {
         return Ok(());
     };
-    if error.is_null() && profile.allow_incomplete_error_fields {
-        return Ok(());
-    }
     let bytes = serde_json::to_vec(error).map_err(|_| Error::Invalid("Connect end error"))?;
-    let mut remote = parse_remote_error(&bytes, status, profile)
+    let mut remote = serde_json::from_slice::<RemoteError>(&bytes)
         .map_err(|_| Error::Invalid("Connect end error"))?;
     if challenged(Some(&remote)) {
         return Err(Error::AdmissionRequired(Box::new(admission_required(

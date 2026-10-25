@@ -41,7 +41,7 @@ receipt, resend durable parts, or exceed the operation deadline.
 
 **Enforced by:** `ClientSource` write recovery and caller-owned `ClientSession`,
 host request policy, `NativeHttp` budgets, both-backend push and policy tests,
-the multipart process-kill test, and native streaming and response compatibility
+the multipart process-kill test, and native streaming and response bound
 tests. Session locks release before host callbacks; receipt observation precedes
 successful ticket cleanup.
 
