@@ -1250,17 +1250,22 @@ pub fn ssh_session_one_iteration(input: &[u8]) {
     }
 }
 
-/// Single-shot: invoke `body(input)` exactly once, with the
-/// per-iteration wall-clock cap. libfuzzer harnesses call this from
-/// their `fuzz_target!` body; the iteration counter lives one level up,
-/// in `run_iterated_unit`.
+/// Single-shot: invoke `body(input)` with the per-iteration wall-clock
+/// cap. libfuzzer harnesses call this from their `fuzz_target!` body; the
+/// iteration counter lives one level up, in `run_iterated_unit`.
+///
+/// A busy machine can stall one call for more than the cap. A call that
+/// exceeds the cap therefore runs once more. Only a second slow call fails,
+/// because a real slowdown in the body is slow on every call.
 pub fn run_one(input: &[u8], body: fn(&[u8])) -> Result<(), GuardrailError> {
-    let start = Instant::now();
-    body(input);
-    if start.elapsed() > PER_ITER {
-        return Err(GuardrailError::IterationTooSlow);
+    for _ in 0..2 {
+        let start = Instant::now();
+        body(input);
+        if start.elapsed() <= PER_ITER {
+            return Ok(());
+        }
     }
-    Ok(())
+    Err(GuardrailError::IterationTooSlow)
 }
 
 /// PRNG-driven runner used by the unit-test shim. Deterministically

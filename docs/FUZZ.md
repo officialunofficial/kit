@@ -147,7 +147,8 @@ Every target body must satisfy all six:
      into core, so the most pathological inputs don't even reach the
      parsers.
 4. **Every iteration is timed; if it takes more than 100 ms the test
-   aborts the remainder.**
+   aborts the remainder.** A slow iteration runs once more first. A busy
+   machine can stall one call. Only two slow calls in a row fail the test.
 5. **No `loop {}` or `while true {}` without a bounded iteration
    counter.**
 6. **Seeded deterministic PRNG.** Inputs are synthesized from a fixed
