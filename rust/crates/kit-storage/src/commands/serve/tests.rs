@@ -160,7 +160,7 @@ const NS: &str = "ed25519-ababababababababababababababababababababababababababab
 
 fn parse_opts(a: &[&str]) -> Result<ServeOpts, u8> {
     let args = a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-    clap_shim::parse::<ServeOpts>("kit serve", &args)
+    clap_args::parse::<ServeOpts>("kit serve", &args)
 }
 
 /// `--principal` accepts only the raw 32-byte key as 64 lowercase hex.
@@ -385,7 +385,7 @@ fn resolve_repo_path_accepts_repo_dir() {
 fn timeout_flags_are_bounded() {
     let parse = |a: &[&str]| {
         let args = a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        clap_shim::parse::<ServeOpts>("kit serve", &args)
+        clap_args::parse::<ServeOpts>("kit serve", &args)
     };
     let week = MAX_TIMEOUT_SECS.to_string();
     let over = (MAX_TIMEOUT_SECS + 1).to_string();
@@ -431,7 +431,7 @@ fn a_huge_idle_timeout_does_not_overflow() {
 fn idle_timeout_flag_defaults_to_60_and_takes_zero() {
     let parse = |a: &[&str]| {
         let args = a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        clap_shim::parse::<ServeOpts>("kit serve", &args).unwrap()
+        clap_args::parse::<ServeOpts>("kit serve", &args).unwrap()
     };
     assert_eq!(parse(&["repo"]).idle_timeout_secs, 60);
     assert_eq!(

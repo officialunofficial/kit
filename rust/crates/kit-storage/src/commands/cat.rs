@@ -8,7 +8,7 @@ use kit_core::object::Object;
 use kit_core::store::ObjectStore;
 use kit_core::worktree;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -21,7 +21,7 @@ struct CatOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<CatOpts>("kit cat", args) {
+    let opts = match clap_args::parse::<CatOpts>("kit cat", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

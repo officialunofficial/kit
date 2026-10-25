@@ -52,7 +52,7 @@ use kit_core::store::{DisplaySource, EphemeralSink, ObjectSource, ObjectStore};
 use kit_core::worktree;
 
 use super::revspec;
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -177,7 +177,7 @@ impl DiffOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<DiffOpts>("kit diff", args) {
+    let opts = match clap_args::parse::<DiffOpts>("kit diff", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

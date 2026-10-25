@@ -23,7 +23,7 @@ use kit_core::refs;
 use kit_core::serialize;
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::editor::spawn_editor;
 use crate::exit;
 use crate::format::{self, JsonObject};
@@ -84,7 +84,7 @@ fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<TagOpts>("kit tag", args) {
+    let opts = match clap_args::parse::<TagOpts>("kit tag", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

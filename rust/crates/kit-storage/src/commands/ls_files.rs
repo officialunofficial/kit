@@ -16,7 +16,7 @@ use kit_core::ignore::{self, IgnoreList};
 use kit_core::index::{self, EntryStatus};
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -43,7 +43,7 @@ struct LsFilesOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<LsFilesOpts>("kit ls-files", args) {
+    let opts = match clap_args::parse::<LsFilesOpts>("kit ls-files", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

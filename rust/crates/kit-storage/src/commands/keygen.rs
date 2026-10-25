@@ -35,7 +35,7 @@ use kit_attest::Algorithm;
 use kit_core::sign::{KeyPair, load_raw_32, save_key, save_raw_32};
 use zeroize::Zeroizing;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::commands::attest_factory;
 use crate::exit;
 use crate::format;
@@ -56,7 +56,7 @@ struct KeygenOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let parsed = match clap_shim::parse::<KeygenOpts>("kit keygen", args) {
+    let parsed = match clap_args::parse::<KeygenOpts>("kit keygen", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

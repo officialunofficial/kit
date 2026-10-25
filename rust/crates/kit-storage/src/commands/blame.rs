@@ -46,7 +46,7 @@ use kit_core::refs;
 use kit_core::store::ObjectStore;
 
 use super::revspec;
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -178,7 +178,7 @@ pub fn run(args: &[String]) -> u8 {
     // value), so pull them out of argv first; bare `-M`/`-C` and stacked
     // short clusters (`-CC`, `-Mw`) fall through to clap below.
     let (clap_args, inline) = extract_inline_thresholds(args);
-    let opts = match clap_shim::parse::<BlameOpts>("kit blame", &clap_args) {
+    let opts = match clap_args::parse::<BlameOpts>("kit blame", &clap_args) {
         Ok(o) => o,
         Err(code) => return code,
     };

@@ -10,7 +10,7 @@ use clap::Parser;
 use kit_core::ops::merge::{find_merge_base, is_ancestor};
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -30,7 +30,7 @@ struct MergeBaseOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<MergeBaseOpts>("kit merge-base", args) {
+    let opts = match clap_args::parse::<MergeBaseOpts>("kit merge-base", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

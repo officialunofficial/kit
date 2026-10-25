@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use kit_core::layout::RepoLayout;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::config::{self, Config, RemoteEntry};
 use crate::exit;
 use crate::format;
@@ -85,7 +85,7 @@ enum RemoteCmd {
 #[must_use]
 #[allow(clippy::too_many_lines)] // flat dispatch over the remote subcommands
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<RemoteOpts>("kit remote", args) {
+    let opts = match clap_args::parse::<RemoteOpts>("kit remote", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

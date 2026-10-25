@@ -75,7 +75,7 @@ use kit_core::ops::{
 use kit_core::refs;
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -121,7 +121,7 @@ struct StatusOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<StatusOpts>("kit status", args) {
+    let opts = match clap_args::parse::<StatusOpts>("kit status", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

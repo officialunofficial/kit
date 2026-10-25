@@ -37,7 +37,7 @@ use kit_core::ops::restore::{RestoreOptions, SparsePattern, restore_tree_to_work
 use kit_core::store::ObjectStore;
 use kit_core::worktree;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 #[derive(Debug, Parser)]
@@ -78,7 +78,7 @@ struct RestoreOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<RestoreOpts>("kit restore", args) {
+    let opts = match clap_args::parse::<RestoreOpts>("kit restore", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

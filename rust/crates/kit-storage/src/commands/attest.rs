@@ -52,7 +52,7 @@ use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::{hash as hash_mod, refs};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::commands::attest_factory::{self, FactoryError};
 use crate::config::Config;
 use crate::exit;
@@ -208,7 +208,7 @@ fn parse_signer_spec(s: &str) -> Result<SignerSpec, String> {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
-    let parsed = match clap_shim::parse::<Args>("kit attest", args) {
+    let parsed = match clap_args::parse::<Args>("kit attest", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

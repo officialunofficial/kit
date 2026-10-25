@@ -43,7 +43,7 @@ use kit_core::hash::{Hash, ZERO};
 use kit_core::index::{self, EntryStatus, IndexEntry};
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 #[derive(Debug, Parser)]
@@ -134,7 +134,7 @@ impl Planned {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<MvOpts>("kit mv", args) {
+    let opts = match clap_args::parse::<MvOpts>("kit mv", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

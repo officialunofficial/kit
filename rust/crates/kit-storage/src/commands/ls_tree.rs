@@ -15,7 +15,7 @@ use kit_core::object::{EntryMode, Object};
 use kit_core::store::ObjectStore;
 
 use super::revspec;
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -35,7 +35,7 @@ struct LsTreeOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<LsTreeOpts>("kit ls-tree", args) {
+    let opts = match clap_args::parse::<LsTreeOpts>("kit ls-tree", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

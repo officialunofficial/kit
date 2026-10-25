@@ -25,7 +25,7 @@ use kit_core::store::{DisplaySource, ObjectStore};
 use kit_core::worktree;
 
 use super::revspec;
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -50,7 +50,7 @@ struct ShowOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<ShowOpts>("kit show", args) {
+    let opts = match clap_args::parse::<ShowOpts>("kit show", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

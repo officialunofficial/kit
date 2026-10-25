@@ -23,7 +23,7 @@ use kit_core::object::Object;
 use kit_core::refs::{self, RefWriteCondition};
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 use clap::Parser;
@@ -72,7 +72,7 @@ enum WorktreeCmd {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<WorktreeOpts>("kit worktree", args) {
+    let opts = match clap_args::parse::<WorktreeOpts>("kit worktree", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

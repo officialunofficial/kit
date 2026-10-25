@@ -10,7 +10,7 @@ use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::config::{self, Config};
 use crate::exit;
 use crate::format;
@@ -51,7 +51,7 @@ struct ConfigOpts {
 #[must_use]
 #[allow(clippy::too_many_lines)] // one flat set/show/unset dispatch
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<ConfigOpts>("kit config", args) {
+    let opts = match clap_args::parse::<ConfigOpts>("kit config", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

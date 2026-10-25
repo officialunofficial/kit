@@ -59,7 +59,7 @@ use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::{hash as hash_mod, refs};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format::JsonObject;
 
@@ -137,7 +137,7 @@ fn emit_json(commit: &Hash, ok: bool, error: Option<&str>, atts: &[AttRecord]) {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
-    let parsed = match clap_shim::parse::<Args>("kit verify-attest", args) {
+    let parsed = match clap_args::parse::<Args>("kit verify-attest", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

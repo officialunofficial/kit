@@ -16,7 +16,7 @@ use clap::{Parser, ValueEnum};
 use kit_core::layout::RepoLayout;
 use kit_core::protocol::UploadLimits;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::config;
 use crate::exit;
 use crate::format::JsonObject;
@@ -81,7 +81,7 @@ fn interrupted_hint(endpoint: &str, limits: UploadLimits) -> &'static str {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<PushOpts>("kit push", args) {
+    let opts = match clap_args::parse::<PushOpts>("kit push", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

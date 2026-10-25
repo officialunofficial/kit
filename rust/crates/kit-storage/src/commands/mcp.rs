@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use serde_json::{Value, json};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 #[derive(Debug, Parser)]
@@ -83,7 +83,7 @@ struct McpOpts {
 /// Entry point for `kit mcp`.
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<McpOpts>("kit mcp", args) {
+    let opts = match clap_args::parse::<McpOpts>("kit mcp", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

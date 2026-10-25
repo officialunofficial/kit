@@ -27,7 +27,7 @@ use kit_core::store::ObjectStore;
 use kit_core::worktree;
 
 use super::{advance_head, error as emit_err, load_tree_hash};
-use crate::clap_shim;
+use crate::clap_args;
 use crate::config;
 use crate::exit;
 use crate::format::{self, JsonObject, json_string_array};
@@ -83,7 +83,7 @@ fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<RevertOpts>("kit revert", args) {
+    let opts = match clap_args::parse::<RevertOpts>("kit revert", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

@@ -19,7 +19,7 @@ use kit_core::ignore::{self, IgnoreList};
 use kit_core::index::Index;
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 #[derive(Debug, Parser)]
@@ -58,7 +58,7 @@ struct Victim {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<CleanOpts>("kit clean", args) {
+    let opts = match clap_args::parse::<CleanOpts>("kit clean", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

@@ -6,7 +6,7 @@
 
 use clap::Parser;
 
-use crate::clap_shim;
+use crate::clap_args;
 
 #[derive(Debug, Parser)]
 #[command(name = "kit switch", about = "Switch branches (git switch).")]
@@ -23,7 +23,7 @@ struct SwitchOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<SwitchOpts>("kit switch", args) {
+    let opts = match clap_args::parse::<SwitchOpts>("kit switch", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

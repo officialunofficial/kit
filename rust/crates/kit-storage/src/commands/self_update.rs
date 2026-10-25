@@ -56,7 +56,7 @@ use clap::Parser;
 use kit_core::hash;
 use sha2::Digest as _;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::cli::CLI_VERSION;
 use crate::exit;
 use crate::format::json_escape;
@@ -133,7 +133,7 @@ pub fn run(args: &[String]) -> u8 {
 }
 
 fn run_update_cli(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<Opts>("kit self update", args) {
+    let opts = match clap_args::parse::<Opts>("kit self update", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

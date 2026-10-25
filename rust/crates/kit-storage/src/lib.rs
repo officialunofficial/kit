@@ -21,7 +21,7 @@
 #![deny(unsafe_code)]
 
 mod admission_helper;
-pub mod clap_shim;
+pub mod clap_args;
 pub mod cli;
 pub mod commands;
 pub mod config;

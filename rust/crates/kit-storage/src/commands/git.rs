@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::commands::attest_factory;
 use crate::exit;
 use crate::format;
@@ -89,7 +89,7 @@ struct ExportArgs {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let cmd = match clap_shim::parse::<Cmd>("kit git", args) {
+    let cmd = match clap_args::parse::<Cmd>("kit git", args) {
         Ok(c) => c,
         Err(code) => return code,
     };

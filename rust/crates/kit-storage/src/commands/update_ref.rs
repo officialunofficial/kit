@@ -23,7 +23,7 @@ use kit_core::refs::{self, RefWriteCondition};
 use kit_core::store::ObjectStore;
 
 use super::revspec;
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 #[derive(Debug, Parser)]
@@ -52,7 +52,7 @@ enum Namespace {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<UpdateRefOpts>("kit update-ref", args) {
+    let opts = match clap_args::parse::<UpdateRefOpts>("kit update-ref", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

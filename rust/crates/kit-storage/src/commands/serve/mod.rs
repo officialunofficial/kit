@@ -18,7 +18,7 @@ use kit_core::repo_lock::{self, LockError, RepoLock};
 use kit_rpc::kit::rpc::v1::ErrorCode;
 use kit_serve::{Repo, SessionConfig, SessionEnd, WriteFrames, WritePolicy, serve_session};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::cli::CLI_VERSION;
 use crate::exit;
 
@@ -172,7 +172,7 @@ const STALE_UPLOAD_AGE: Duration = Duration::from_hours(1);
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<ServeOpts>("kit serve", args) {
+    let opts = match clap_args::parse::<ServeOpts>("kit serve", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

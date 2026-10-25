@@ -34,7 +34,7 @@ use kit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_with};
 use kit_core::refs::{self, Head, RefWriteCondition};
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -77,7 +77,7 @@ struct ResetOpts {
 #[must_use]
 #[allow(clippy::too_many_lines)] // linear flow over the soft/mixed/hard modes
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<ResetOpts>("kit reset", args) {
+    let opts = match clap_args::parse::<ResetOpts>("kit reset", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

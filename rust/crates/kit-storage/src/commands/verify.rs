@@ -30,7 +30,7 @@ use kit_core::sign::{verify_commit, verify_remix, verify_tag};
 use kit_core::store::ObjectStore;
 
 use super::trust_roots;
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 #[derive(Debug, Parser)]
@@ -54,7 +54,7 @@ struct VerifyOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<VerifyOpts>("kit verify", args) {
+    let opts = match clap_args::parse::<VerifyOpts>("kit verify", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

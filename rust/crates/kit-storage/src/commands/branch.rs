@@ -21,7 +21,7 @@ use kit_core::refs::{self, Head};
 use kit_core::store::ObjectStore;
 
 use super::revspec;
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -96,7 +96,7 @@ struct BranchOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<BranchOpts>("kit branch", args) {
+    let opts = match clap_args::parse::<BranchOpts>("kit branch", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

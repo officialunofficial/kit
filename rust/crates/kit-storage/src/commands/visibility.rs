@@ -19,7 +19,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use kit_attest::grant::{Visibility, VisibilityStatement};
 use kit_transport_connect::{VisibilityChoice, VisibilityRequest};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::commands::{error, usage_error};
 use crate::exit;
 use crate::grants::cli::{Ctx, finish_wait, parse_timeout, print_statement};
@@ -76,7 +76,7 @@ struct SetOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<VisibilityOpts>("kit visibility", args) {
+    let opts = match clap_args::parse::<VisibilityOpts>("kit visibility", args) {
         Ok(opts) => opts,
         Err(code) => return code,
     };

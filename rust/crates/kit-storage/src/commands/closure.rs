@@ -14,7 +14,7 @@ use kit_core::verify::{
 use kit_core::{ClosureMode, reachable_objects, reachable_snapshot};
 
 use super::revspec;
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format::{self, JsonObject};
 
@@ -77,7 +77,7 @@ struct VerifyArgs {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let cmd = match clap_shim::parse::<Cmd>("kit closure", args) {
+    let cmd = match clap_args::parse::<Cmd>("kit closure", args) {
         Ok(c) => c,
         Err(code) => return code,
     };

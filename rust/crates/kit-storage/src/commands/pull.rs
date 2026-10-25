@@ -9,7 +9,7 @@ use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::config;
 use crate::exit;
 use crate::format::{self, JsonObject};
@@ -52,7 +52,7 @@ struct PullOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<PullOpts>("kit pull", args) {
+    let opts = match clap_args::parse::<PullOpts>("kit pull", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

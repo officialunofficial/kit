@@ -31,7 +31,7 @@ use kit_core::ops::recovery::{self, RetentionPolicy};
 use kit_core::ops::run_gc;
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 /// Default object grace window: 14 days, matching Git's `gc.pruneExpire`.
@@ -57,7 +57,7 @@ struct GcOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<GcOpts>("kit gc", args) {
+    let opts = match clap_args::parse::<GcOpts>("kit gc", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

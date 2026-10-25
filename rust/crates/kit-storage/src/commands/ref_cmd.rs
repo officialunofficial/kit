@@ -37,7 +37,7 @@ use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::refs::{self, RefError};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -67,7 +67,7 @@ enum RefCmd {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<RefOpts>("kit ref", args) {
+    let opts = match clap_args::parse::<RefOpts>("kit ref", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

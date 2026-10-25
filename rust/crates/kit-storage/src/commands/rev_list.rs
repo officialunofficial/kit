@@ -9,7 +9,7 @@ use std::io::Write;
 use clap::Parser;
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -28,7 +28,7 @@ struct RevListOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<RevListOpts>("kit rev-list", args) {
+    let opts = match clap_args::parse::<RevListOpts>("kit rev-list", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

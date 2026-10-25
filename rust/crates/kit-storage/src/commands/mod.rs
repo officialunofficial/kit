@@ -2,7 +2,7 @@
 //! module.
 //!
 //! Dispatch lives in `main.rs`; business logic lives in library
-//! crates; this module is the thin presentation shim.
+//! crates; this module is the thin presentation layer.
 
 pub mod add;
 pub mod attest;

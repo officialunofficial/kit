@@ -21,7 +21,7 @@ use kit_core::index::{self, EntryStatus, Index, IndexEntry};
 use kit_core::store::ObjectStore;
 use kit_core::worktree;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 #[derive(Debug, Parser)]
@@ -52,7 +52,7 @@ struct RmOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<RmOpts>("kit rm", args) {
+    let opts = match clap_args::parse::<RmOpts>("kit rm", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

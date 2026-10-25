@@ -10,7 +10,7 @@ use kit_keystore::{
 };
 use zeroize::Zeroize;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::config::{self, Config};
 use crate::exit;
 
@@ -117,7 +117,7 @@ struct DeleteOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<KeyOpts>("kit key", args) {
+    let opts = match clap_args::parse::<KeyOpts>("kit key", args) {
         Ok(opts) => opts,
         Err(code) => return code,
     };

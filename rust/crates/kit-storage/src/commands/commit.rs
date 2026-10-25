@@ -36,7 +36,7 @@ use kit_core::store::ObjectStore;
 use kit_core::worktree;
 use kit_keystore::{KeyRef, KeySelector, open_backend};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::config::Config;
 use crate::editor::{COMMIT_EDITMSG_TEMPLATE, spawn_editor};
 use crate::exit;
@@ -124,7 +124,7 @@ pub fn run(args: &[String]) -> u8 {
     // Split fused `-am<msg>` / `-am <msg>` shortcuts into the
     // equivalent `-a -m <msg>` so clap sees only canonical forms.
     let normalised = expand_dash_am(args);
-    let opts = match clap_shim::parse::<CommitOptions>("kit commit", &normalised) {
+    let opts = match clap_args::parse::<CommitOptions>("kit commit", &normalised) {
         Ok(o) => o,
         Err(code) => return code,
     };

@@ -10,7 +10,7 @@ use kit_core::store::ObjectStore;
 use kit_core::verify::{Selector, VerifyError, build_disclosure};
 
 use super::revspec;
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format::{self, JsonObject};
 
@@ -71,7 +71,7 @@ fn parse_range_arg(s: &str) -> Result<(u64, u64), String> {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<ProveOpts>("kit prove", args) {
+    let opts = match clap_args::parse::<ProveOpts>("kit prove", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

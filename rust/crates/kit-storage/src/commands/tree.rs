@@ -7,7 +7,7 @@ use clap::Parser;
 use kit_core::store::ObjectStore;
 use kit_core::worktree;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -20,7 +20,7 @@ struct TreeOpts {}
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    if let Err(code) = clap_shim::parse::<TreeOpts>("kit tree", args) {
+    if let Err(code) = clap_args::parse::<TreeOpts>("kit tree", args) {
         return code;
     }
     let cwd = match std::env::current_dir() {

@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use kit_core::refs;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::config;
 use crate::exit;
 use crate::remote_dispatch;
@@ -68,7 +68,7 @@ struct CloneOpts {
 #[must_use]
 #[allow(clippy::too_many_lines)] // linear flow: parse + init + pull + report
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<CloneOpts>("kit clone", args) {
+    let opts = match clap_args::parse::<CloneOpts>("kit clone", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

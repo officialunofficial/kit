@@ -27,7 +27,7 @@ use clap::{Parser, Subcommand};
 use super::trust_roots::{
     self, TrustEntry, default_trust_roots_path, keyid_matches_pubkey, warn_if_unsafe_trust_roots,
 };
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 #[derive(Debug, Parser)]
@@ -90,7 +90,7 @@ struct RemoveOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<TrustOpts>("kit trust", args) {
+    let opts = match clap_args::parse::<TrustOpts>("kit trust", args) {
         Ok(opts) => opts,
         Err(code) => return code,
     };

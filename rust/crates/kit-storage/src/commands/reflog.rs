@@ -15,7 +15,7 @@ use kit_core::object::Object;
 use kit_core::refs::{self, Head};
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 use crate::signal;
@@ -50,7 +50,7 @@ struct ReflogOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<ReflogOpts>("kit reflog", args) {
+    let opts = match clap_args::parse::<ReflogOpts>("kit reflog", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

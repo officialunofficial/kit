@@ -15,7 +15,7 @@ use clap::Parser;
 use kit_core::layout::RepoLayout;
 use kit_core::refs::{self, Head};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 #[derive(Debug, Parser)]
@@ -36,7 +36,7 @@ struct SymbolicRefOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<SymbolicRefOpts>("kit symbolic-ref", args) {
+    let opts = match clap_args::parse::<SymbolicRefOpts>("kit symbolic-ref", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

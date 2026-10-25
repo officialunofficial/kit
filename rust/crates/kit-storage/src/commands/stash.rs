@@ -8,7 +8,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::ops::stash;
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format::{self, JsonObject};
 
@@ -108,7 +108,7 @@ pub fn run(args: &[String]) -> u8 {
         args.to_vec()
     };
 
-    let opts = match clap_shim::parse::<StashOpts>("kit stash", &rewritten) {
+    let opts = match clap_args::parse::<StashOpts>("kit stash", &rewritten) {
         Ok(o) => o,
         Err(code) => return code,
     };

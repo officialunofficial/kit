@@ -7,7 +7,7 @@ use std::io::Write;
 use clap::Parser;
 use kit_core::refs;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -24,7 +24,7 @@ struct ShowRefOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<ShowRefOpts>("kit show-ref", args) {
+    let opts = match clap_args::parse::<ShowRefOpts>("kit show-ref", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

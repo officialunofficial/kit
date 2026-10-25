@@ -37,8 +37,8 @@
 //! output.
 //!
 //! Argument parsing is delegated to clap-derive via
-//! [`crate::clap_shim::parse`]; clap emits standard diagnostics on
-//! errors and the shim maps them to kit sysexits (`USAGE` for
+//! [`crate::clap_args::parse`]; clap emits standard diagnostics on
+//! errors and the parser maps them to kit sysexits (`USAGE` for
 //! unknown flags, `DATAERR` for malformed `-n` values, etc.).
 
 use std::cmp::Ordering;
@@ -55,7 +55,7 @@ use kit_core::refs;
 use kit_core::store::ObjectStore;
 
 use super::revspec;
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 use crate::signal;
@@ -186,7 +186,7 @@ impl LogOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<LogOpts>("kit log", args) {
+    let opts = match clap_args::parse::<LogOpts>("kit log", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

@@ -12,10 +12,10 @@
 //! 2. Print the error to stderr in clap's standard format so users
 //!    see consistent diagnostics across commands.
 //!
-//! This module does both. The typical migrated command looks like:
+//! This module does both. A typical command looks like:
 //!
 //! ```ignore
-//! use crate::clap_shim;
+//! use crate::clap_args;
 //! use clap::Parser;
 //!
 //! #[derive(Parser, Debug)]
@@ -25,7 +25,7 @@
 //! }
 //!
 //! pub fn run(args: &[String]) -> u8 {
-//!     let opts = match clap_shim::parse::<Opts>("kit my-cmd", args) {
+//!     let opts = match clap_args::parse::<Opts>("kit my-cmd", args) {
 //!         Ok(o) => o,
 //!         Err(code) => return code,
 //!     };

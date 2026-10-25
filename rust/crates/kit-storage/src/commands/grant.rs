@@ -11,7 +11,7 @@ use clap::{Args, Parser, Subcommand};
 use kit_attest::grant::{Capabilities, Namespace};
 use kit_core::hash::{from_hex, hash, to_hex_bytes};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::commands::epoch::{BumpOpts, RevokeExtras, bump};
 use crate::commands::{error, usage_error};
 use crate::exit;
@@ -155,7 +155,7 @@ struct RevokeOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<GrantOpts>("kit grant", args) {
+    let opts = match clap_args::parse::<GrantOpts>("kit grant", args) {
         Ok(opts) => opts,
         Err(code) => return code,
     };

@@ -13,7 +13,7 @@ use kit_attest::grant::{
 };
 use std::io::Write as _;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::commands::{error, usage_error};
 use crate::exit;
 use crate::format::{JsonObject, json_string_array};
@@ -83,7 +83,7 @@ pub(crate) struct BumpOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<EpochOpts>("kit epoch", args) {
+    let opts = match clap_args::parse::<EpochOpts>("kit epoch", args) {
         Ok(opts) => opts,
         Err(code) => return code,
     };

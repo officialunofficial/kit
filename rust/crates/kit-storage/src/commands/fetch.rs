@@ -10,7 +10,7 @@ use clap::{Parser, ValueEnum};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::config;
 use crate::exit;
 use crate::format::{self, JsonObject};
@@ -55,7 +55,7 @@ struct FetchOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<FetchOpts>("kit fetch", args) {
+    let opts = match clap_args::parse::<FetchOpts>("kit fetch", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

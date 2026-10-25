@@ -4,7 +4,7 @@
 //! hash all work.
 //!
 //! The rebase state machine lives in `kit_core::ops::rebase`. This
-//! shim loads / writes that state and drives the replay loop via
+//! command loads / writes that state and drives the replay loop via
 //! [`kit_core::ops::cherry_pick()`].
 //!
 //! With `-i`/`--interactive`, the todo list is opened in `$EDITOR`
@@ -46,7 +46,7 @@ use kit_core::worktree;
 
 use clap::{Parser, ValueEnum};
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::config;
 use crate::editor;
 use crate::exit;
@@ -103,7 +103,7 @@ fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<RebaseOpts>("kit rebase", args) {
+    let opts = match clap_args::parse::<RebaseOpts>("kit rebase", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

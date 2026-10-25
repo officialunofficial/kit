@@ -14,7 +14,7 @@ use kit_core::ops::restore::{
 use kit_core::refs;
 use kit_core::store::ObjectStore;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 #[derive(Debug, Parser)]
@@ -45,7 +45,7 @@ enum SparseCmd {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<SparseOpts>("kit sparse-checkout", args) {
+    let opts = match clap_args::parse::<SparseOpts>("kit sparse-checkout", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

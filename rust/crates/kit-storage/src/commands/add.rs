@@ -18,7 +18,7 @@ use kit_core::serialize;
 use kit_core::store::{ObjectSink, ObjectStore};
 use kit_core::worktree;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 
 #[derive(Debug, Parser)]
@@ -197,7 +197,7 @@ fn worktree_err_exit_code(e: &worktree::WorktreeError) -> u8 {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<AddOpts>("kit add", args) {
+    let opts = match clap_args::parse::<AddOpts>("kit add", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

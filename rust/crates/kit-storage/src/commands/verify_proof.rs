@@ -11,7 +11,7 @@ use kit_core::verify::{Disclosed, DisclosedPayload, MAX_BUNDLE_BYTES, verify_dis
 
 use super::prove::display_path;
 use super::trust_roots;
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format::{self, JsonObject};
 
@@ -57,7 +57,7 @@ struct VerifyProofOpts {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<VerifyProofOpts>("kit verify-proof", args) {
+    let opts = match clap_args::parse::<VerifyProofOpts>("kit verify-proof", args) {
         Ok(o) => o,
         Err(code) => return code,
     };

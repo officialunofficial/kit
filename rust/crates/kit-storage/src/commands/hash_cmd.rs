@@ -8,7 +8,7 @@ use kit_core::serialize;
 use kit_core::store::ObjectStore;
 use kit_core::worktree;
 
-use crate::clap_shim;
+use crate::clap_args;
 use crate::exit;
 use crate::format;
 
@@ -21,7 +21,7 @@ struct HashOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<HashOpts>("kit hash", args) {
+    let opts = match clap_args::parse::<HashOpts>("kit hash", args) {
         Ok(o) => o,
         Err(code) => return code,
     };
