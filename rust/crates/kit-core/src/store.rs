@@ -500,7 +500,7 @@ impl ObjectStore {
         #[cfg(test)]
         self.read_calls.fetch_add(1, Ordering::Relaxed);
         let path = self.path_for(h);
-        let mut file = File::open(&path).map_err(|e| match e.kind() {
+        let file = File::open(&path).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
             _ => StoreError::Io(e),
         })?;
@@ -514,9 +514,7 @@ impl ObjectStore {
         // included). Pre-size the buffer to avoid the doubling
         // re-allocations of `read_to_end` for large objects.
         let cap = usize::try_from(size).map_err(|_| StoreError::ObjectTooLarge)?;
-        let mut bytes = Vec::with_capacity(cap);
-        file.read_to_end(&mut bytes)?;
-        Ok(bytes)
+        read_to_end_capped(file, cap, MAX_RAW_OBJECT_SIZE)
     }
 
     /// Reads raw bytes for a verifier that must classify a hash mismatch
@@ -989,6 +987,18 @@ pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Read `reader` to its end into a buffer pre-sized for `size` bytes.
+/// The read stops after `limit + 1` bytes, so a file that grew after
+/// the size check cannot grow the buffer past the limit.
+fn read_to_end_capped<R: Read>(reader: R, size: usize, limit: usize) -> StoreResult<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(size.min(limit));
+    reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(StoreError::ObjectTooLarge);
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1231,6 +1241,19 @@ mod tests {
         f.set_len(MAX_RAW_OBJECT_SIZE as u64 + 1).unwrap();
         drop(f);
         let err = store.read(&h).unwrap_err();
+        assert!(matches!(err, StoreError::ObjectTooLarge));
+    }
+
+    #[test]
+    fn capped_read_stops_at_the_limit() {
+        // The declared size is small, but the stream is longer than the
+        // limit. The read must refuse and must not buffer the whole stream.
+        let stream = io::repeat(7).take(1_000_000);
+        let err = read_to_end_capped(stream, 4, 16).unwrap_err();
+        assert!(matches!(err, StoreError::ObjectTooLarge));
+        let ok = read_to_end_capped(&[1u8, 2, 3][..], 3, 3).unwrap();
+        assert_eq!(ok, [1, 2, 3]);
+        let err = read_to_end_capped(&[0u8; 4][..], 3, 3).unwrap_err();
         assert!(matches!(err, StoreError::ObjectTooLarge));
     }
 
