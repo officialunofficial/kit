@@ -22,3 +22,4 @@ both@@tool or model name@@\b(?:Claude|Anthropic|Codex|ChatGPT|OpenAI|Copilot|Gem
 both@@old product name@@(?i)m[k]it
 commit@@process word in a commit message@@\b(?i:phases?|tickets?|work packages?)\b|\b(?i:stage|part|step)s? (?:[0-9]+|one|two|three)\b|\b(?i:part of (?:the |a )?(?:plan|series|rollout))\b
 commit@@trailer that names a tool or adds credit@@^(?i:co-authored-by|generated with|signed-off-by|assisted-by)\b
+both@@reference to the change history instead of the current behavior@@\b(?i:(?:not|outside) (?:a )?part of (?:this|that) (?:commit|change|patch|diff|pr|pull request)|(?:out of|beyond) (?:the )?scope (?:of|for) (?:this|that) (?:commit|change|patch|diff)|(?:in|for|until) (?:a )?(?:later|follow-?up) (?:commit|change|patch|diff)|this (?:commit|patch|diff) (?:does not|doesn.t|adds|removes|changes))\b
