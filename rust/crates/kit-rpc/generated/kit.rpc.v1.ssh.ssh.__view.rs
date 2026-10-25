@@ -2793,9 +2793,7 @@ impl ::buffa::HasMessageView for super::super::ReadRefResponse {
 ///
 /// REQUIRED on every `UpdateRef`. A server MUST reject
 /// `REF_EXPECTATION_UNSPECIFIED` (the protobuf default, sent when a
-/// client omits the field) with `ERROR_CODE_INVALID_REQUEST`. kit is
-/// alpha (pre-1.0) and clients/servers move together; there is no
-/// back-compat for the pre-`expectation` wire shape.
+/// client omits the field) with `ERROR_CODE_INVALID_REQUEST`.
 ///
 /// Wire numbers are load-bearing. Do NOT renumber; new variants append.
 /// (Defined in kit/common/v1/refs.proto; see that file's comment.)
