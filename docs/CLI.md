@@ -1308,6 +1308,16 @@ Agent integration:
   kit mcp --repository /path/to/repo
   ```
 
+  A build with the `mcp-v2` feature also serves streamable HTTP with
+  `--http <addr>`. The listener refuses to start without a bearer token.
+  Put the token in a file and pass `--http-token-file <path>`. The file
+  must hold only the token, must have at most 4096 bytes, and must not
+  be readable by group or others. You can set `KIT_MCP_TOKEN` instead.
+  Setting both is an error. No option takes the token on the command
+  line, because other users can read a command line.
+  `--unsafe-allow-any-http-peer` turns the check off. Use it only for
+  local development.
+
 Grants, epochs and repository visibility ([SPEC-WRITE-GRANTS](specs/SPEC-WRITE-GRANTS.md)):
 
 A *grant* is a statement signed by a namespace owner that lets a grantee's key

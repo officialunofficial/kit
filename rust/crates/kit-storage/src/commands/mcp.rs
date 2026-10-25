@@ -55,22 +55,25 @@ struct McpOpts {
     /// is meant to be reachable from elsewhere.
     ///
     /// FAIL-CLOSED: refuses to bind unless
-    /// either a bearer token is configured (`--http-token` or the
+    /// either a bearer token is configured (`--http-token-file` or the
     /// `KIT_MCP_TOKEN` env var) or `--unsafe-allow-any-http-peer` is
     /// passed. See `mcp_v2.rs`.
     #[cfg(feature = "mcp-v2")]
     #[arg(long, value_name = "ADDR")]
     http: Option<String>,
-    /// Bearer token required on every request's `Authorization: Bearer
-    /// <token>` header when `--http` is used. Falls back to the
-    /// `KIT_MCP_TOKEN` environment variable when omitted. CLI-only/
-    /// env-only — never read from repo-local `.kit/config`. A dedicated env var
-    /// keeps this surface apart from any Git transport token, since the
-    /// threat models differ — this one is a high-privilege,
-    /// agent-facing tool catalog, not a Git transport.
+    /// Read the bearer token from this file. Every request needs an
+    /// `Authorization: Bearer <token>` header when `--http` is used. The
+    /// `KIT_MCP_TOKEN` environment variable is the other source; setting
+    /// both is an error. The file must hold only the token, must be at
+    /// most 4096 bytes, and must not be readable by group or others. There
+    /// is no flag that takes the token itself, because a command line is
+    /// visible to other users. The token is never read from repo-local
+    /// `.kit/config`. A dedicated variable keeps this surface apart from any
+    /// Git transport token, since the threat models differ — this one is a
+    /// high-privilege, agent-facing tool catalog, not a Git transport.
     #[cfg(feature = "mcp-v2")]
-    #[arg(long, value_name = "TOKEN")]
-    http_token: Option<String>,
+    #[arg(long, value_name = "PATH")]
+    http_token_file: Option<PathBuf>,
     /// Dev/test escape hatch: accept ANY caller on `--http` with no bearer
     /// check (fail-open). Prints a loud warning. Intended only for local
     /// development — NEVER for production, since every tool call
@@ -113,7 +116,7 @@ fn dispatch(allowed: Option<&Path>, opts: &McpOpts) -> u8 {
     super::mcp_v2::serve(
         allowed,
         opts.http.as_deref(),
-        opts.http_token.as_deref(),
+        opts.http_token_file.as_deref(),
         opts.unsafe_allow_any_http_peer,
     )
 }

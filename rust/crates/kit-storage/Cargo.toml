@@ -106,7 +106,7 @@ rmcp = { version = "3", default-features = false, features = [
 # raw hyper is all the glue this needs.
 hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"], optional = true }
-# Constant-time bearer-token comparison for `kit mcp --http-token` —
+# Constant-time bearer-token comparison for `kit mcp --http` —
 # already resolved transitively (ed25519-dalek pulls it), so this is not a
 # new supply-chain root.
 subtle = { version = "2", optional = true }

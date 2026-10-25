@@ -20,6 +20,18 @@ fn kit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_kit")
 }
 
+/// Write `body` to a token file closed to group and others. The returned
+/// directory guard removes the file when it drops.
+fn token_file(body: &str) -> (tempfile::TempDir, String) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("token");
+    std::fs::write(&path, body).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let path = path.to_str().unwrap().to_owned();
+    (dir, path)
+}
+
 struct HttpMcp {
     child: Child,
     base_url: String,
@@ -50,7 +62,7 @@ impl HttpMcp {
 
     /// [`Self::spawn`], but with `extra_args` appended to the `kit mcp`
     /// invocation and `headers` sent on every [`Self::request`] call — the
-    /// hook `mod auth`'s tests use to pass `--http-token`/exercise the
+    /// hook `mod auth`'s tests use to pass `--http-token-file`/exercise the
     /// `Authorization` header without duplicating the spawn/address-parsing
     /// dance.
     fn spawn_with_args(
@@ -282,7 +294,7 @@ fn unknown_tool_is_a_protocol_error_over_http() {
 /// (`resolve_http_auth`/`BearerAuthHttp`) over the streamable-HTTP
 /// transport's plain request/response shape.
 mod auth {
-    use super::{HttpMcp, kit_bin};
+    use super::{HttpMcp, kit_bin, token_file};
     use std::process::{Command, Stdio};
 
     #[test]
@@ -299,17 +311,41 @@ mod auth {
     #[test]
     fn refuses_an_empty_token() {
         let repo = tempfile::tempdir().unwrap();
-        let (status, stderr) = HttpMcp::spawn_expect_refusal(repo.path(), &["--http-token", ""]);
+        let (_dir, path) = token_file("\n");
+        let (status, stderr) =
+            HttpMcp::spawn_expect_refusal(repo.path(), &["--http-token-file", &path]);
         assert!(!status.success(), "should refuse to bind: {stderr}");
         assert!(stderr.contains("MUST NOT be empty"), "{stderr}");
     }
 
     #[test]
+    fn the_token_flag_no_longer_exists() {
+        let repo = tempfile::tempdir().unwrap();
+        let (status, stderr) =
+            HttpMcp::spawn_expect_refusal(repo.path(), &["--http-token", "s3cr3t"]);
+        assert!(!status.success(), "should reject the flag: {stderr}");
+        assert!(!stderr.contains("listening"), "{stderr}");
+    }
+
+    #[test]
+    fn refuses_a_token_file_open_to_others() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let repo = tempfile::tempdir().unwrap();
+        let (_dir, path) = token_file("s3cr3t");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (status, stderr) =
+            HttpMcp::spawn_expect_refusal(repo.path(), &["--http-token-file", &path]);
+        assert!(!status.success(), "should refuse to bind: {stderr}");
+        assert!(stderr.contains("group or others"), "{stderr}");
+    }
+
+    #[test]
     fn refuses_token_and_unsafe_flag_together() {
         let repo = tempfile::tempdir().unwrap();
+        let (_dir, path) = token_file("s3cr3t");
         let (status, stderr) = HttpMcp::spawn_expect_refusal(
             repo.path(),
-            &["--http-token", "s3cr3t", "--unsafe-allow-any-http-peer"],
+            &["--http-token-file", &path, "--unsafe-allow-any-http-peer"],
         );
         assert!(!status.success(), "should refuse to bind: {stderr}");
         assert!(stderr.contains("mutually exclusive"), "{stderr}");
@@ -318,7 +354,8 @@ mod auth {
     #[test]
     fn rejects_requests_with_no_or_wrong_bearer_token() {
         let repo = tempfile::tempdir().unwrap();
-        let server = HttpMcp::spawn_with_args(repo.path(), &["--http-token", "right-token"], &[]);
+        let (_dir, path) = token_file("right-token\n");
+        let server = HttpMcp::spawn_with_args(repo.path(), &["--http-token-file", &path], &[]);
 
         let no_auth = reqwest::blocking::Client::new()
             .post(&server.base_url)
@@ -341,9 +378,10 @@ mod auth {
     #[test]
     fn accepts_requests_with_the_right_bearer_token() {
         let repo = tempfile::tempdir().unwrap();
+        let (_dir, path) = token_file("right-token\n");
         let server = HttpMcp::spawn_with_args(
             repo.path(),
-            &["--http-token", "right-token"],
+            &["--http-token-file", &path],
             &[("authorization", "Bearer right-token")],
         );
 

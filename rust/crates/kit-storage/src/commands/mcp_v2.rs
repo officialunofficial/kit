@@ -104,8 +104,7 @@ fn tool_from_spec(spec: &ToolSpec) -> Tool {
     tool
 }
 
-/// Environment-variable fallback for `--http-token`, checked when the flag
-/// is omitted. It has a name of its own, not
+/// Environment variable that holds the bearer token. It has a name of its own, not
 /// `kit_transport_connect::TOKEN_ENV`: `kit mcp --http` and a remote
 /// transport are different threat models (a high-privilege, agent-facing
 /// tool catalog including `kit_checkout`, versus a Git transport) and MUST
@@ -119,7 +118,7 @@ const MCP_TOKEN_ENV: &str = "KIT_MCP_TOKEN";
 pub(crate) fn serve(
     allowed: Option<&Path>,
     http: Option<&str>,
-    http_token: Option<&str>,
+    http_token_file: Option<&Path>,
     unsafe_allow_any_http_peer: bool,
 ) -> u8 {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -136,7 +135,7 @@ pub(crate) fn serve(
 
     let result = match http {
         Some(addr) => {
-            let auth = match resolve_http_auth(http_token, unsafe_allow_any_http_peer) {
+            let auth = match resolve_http_auth(http_token_file, unsafe_allow_any_http_peer) {
                 Ok(a) => a,
                 Err(code) => return code,
             };
@@ -159,20 +158,69 @@ pub(crate) fn serve(
 /// escape hatch (in which case every request is accepted unchecked).
 type HttpAuth = Option<Arc<str>>;
 
+/// Largest accepted token file. A bearer token is short.
+const MAX_TOKEN_FILE_BYTES: u64 = 4096;
+
+/// Read the token from `file`, or from [`MCP_TOKEN_ENV`] when no file is
+/// given. Setting both is an error, so the source is never ambiguous.
+/// A token file must be a regular file, small, and closed to group and
+/// others. One trailing newline is removed.
+fn load_token(file: Option<&Path>, env_token: Option<String>) -> Result<Option<String>, u8> {
+    let Some(path) = file else {
+        return Ok(env_token);
+    };
+    if env_token.is_some() {
+        eprintln!("kit mcp --http: --http-token-file and KIT_MCP_TOKEN are mutually exclusive");
+        return Err(exit::USAGE);
+    }
+    read_token_file(path).map(Some).map_err(|e| {
+        eprintln!("kit mcp --http: --http-token-file {}: {e}", path.display());
+        exit::CONFIG_ERROR
+    })
+}
+
+fn read_token_file(path: &Path) -> Result<String, String> {
+    use std::io::Read as _;
+
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let meta = f.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a regular file".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err("readable by group or others; run chmod 600 on it".to_owned());
+        }
+    }
+    let mut buf = Vec::new();
+    f.by_ref()
+        .take(MAX_TOKEN_FILE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if buf.len() as u64 > MAX_TOKEN_FILE_BYTES {
+        return Err(format!("larger than {MAX_TOKEN_FILE_BYTES} bytes"));
+    }
+    let text = String::from_utf8(buf).map_err(|_| "not UTF-8".to_owned())?;
+    let token = text.strip_suffix('\n').unwrap_or(&text);
+    let token = token.strip_suffix('\r').unwrap_or(token);
+    Ok(token.to_owned())
+}
+
 /// Resolve `--http`'s fail-closed auth gate — FAIL-CLOSED:
 /// refuses to report a usable auth
-/// configuration unless either a non-empty token is available (flag or
+/// configuration unless either a non-empty token is available (file or
 /// [`MCP_TOKEN_ENV`]) or the operator explicitly opted into the unsafe
 /// escape. Exit-code side effects (printing + returning early) live here
 /// rather than in `serve_http` so the async listener never starts without
 /// a resolved auth decision.
-fn resolve_http_auth(token: Option<&str>, unsafe_allow_any: bool) -> Result<HttpAuth, u8> {
-    let env_token = std::env::var(MCP_TOKEN_ENV).ok();
-    let token = token.map(str::to_owned).or(env_token);
+fn resolve_http_auth(token_file: Option<&Path>, unsafe_allow_any: bool) -> Result<HttpAuth, u8> {
+    let token = load_token(token_file, std::env::var(MCP_TOKEN_ENV).ok())?;
     match (token, unsafe_allow_any) {
         (Some(_), true) => {
             eprintln!(
-                "kit mcp --http: --http-token (or KIT_MCP_TOKEN) and \
+                "kit mcp --http: --http-token-file (or KIT_MCP_TOKEN) and \
                  --unsafe-allow-any-http-peer are mutually exclusive"
             );
             Err(exit::USAGE)
@@ -196,7 +244,7 @@ fn resolve_http_auth(token: Option<&str>, unsafe_allow_any: bool) -> Result<Http
         (None, false) => {
             eprintln!(
                 "kit mcp --http: refusing to bind without a bearer token.\n\
-                 Pass --http-token <TOKEN> (or set KIT_MCP_TOKEN) to require it on \
+                 Pass --http-token-file <PATH> (or set KIT_MCP_TOKEN) to require a token on \
                  every request, or --unsafe-allow-any-http-peer to accept any caller \
                  (development only)."
             );
@@ -366,5 +414,52 @@ where
         } else {
             Box::pin(std::future::ready(Ok(unauthorized_response())))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token_file(name: &str, body: &[u8], mode: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("kit-mcp-token-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token");
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[test]
+    fn token_file_strips_one_trailing_newline() {
+        let p = token_file("newline", b"abc123\n\n", 0o600);
+        assert_eq!(read_token_file(&p).unwrap(), "abc123\n");
+        let p = token_file("plain", b"abc123\n", 0o600);
+        assert_eq!(read_token_file(&p).unwrap(), "abc123");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_file_open_to_others_is_refused() {
+        for mode in [0o640, 0o604, 0o644] {
+            let p = token_file(&format!("lax{mode:o}"), b"abc", mode);
+            let e = read_token_file(&p).unwrap_err();
+            assert!(e.contains("group or others"), "{e}");
+        }
+    }
+
+    #[test]
+    fn token_file_over_the_cap_is_refused() {
+        let p = token_file("big", &vec![b'a'; 4097], 0o600);
+        assert!(read_token_file(&p).unwrap_err().contains("larger than"));
+    }
+
+    #[test]
+    fn token_file_and_env_together_are_refused() {
+        let p = token_file("both", b"abc", 0o600);
+        assert_eq!(load_token(Some(&p), Some("x".into())), Err(exit::USAGE));
+        assert_eq!(load_token(Some(&p), None), Ok(Some("abc".into())));
+        assert_eq!(load_token(None, Some("x".into())), Ok(Some("x".into())));
     }
 }
