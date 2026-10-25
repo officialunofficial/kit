@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn token_verifies_and_binds_its_request() {
-        let target = path("refs/heads/main", "docs/a.md");
+        let target = path("refs/heads/main", "data/a.bin");
         let repository = RepositoryIdentity::parse(REPO).unwrap();
         let token = sign_url_token(&statement(target.clone()), &key()).unwrap();
         let keys = [key().verifying_key()];

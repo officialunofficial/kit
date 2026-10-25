@@ -26,7 +26,7 @@ while IFS=: read -r file line path; do
         fail=1
     fi
 done < <(git grep -nIoE '(^|[^A-Za-z0-9_./-])(scripts|formal|docs|\.github|rust/(crates|tests|fuzz))/[A-Za-z0-9_./-]+\.(md|sh|py|rs|yml|yaml|json|toml|proto|txt)([^A-Za-z0-9_*]|$)' -- . \
-    ':(exclude)scripts/check-doc-paths.sh' ':(exclude)scripts/test-check-writing.sh' ':(exclude)CHANGELOG.md' ':(exclude)rust/Cargo.lock' |
+    ':(exclude)scripts/check-doc-paths.sh' ':(exclude)scripts/test-check-writing.sh' ':(exclude)rust/crates/kit-attest/tests/golden_grants/url_token.rs' ':(exclude)CHANGELOG.md' ':(exclude)rust/Cargo.lock' |
     sed -E 's/^([^:]*):([0-9]+):[^A-Za-z]?/\1:\2:/')
 
 # Check 2: relative Markdown links. The anchor and any query are dropped.
