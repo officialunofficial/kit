@@ -6274,7 +6274,7 @@ impl ::serde::Serialize for PackExistsResponseOwnedView {
 /// Announces an upload before any PackChunk. `total_bytes` is required: the
 /// server uses it to reject oversized uploads before storage and to verify
 /// the following PackChunk stream ends exactly at the declared byte count.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct UploadPackHeaderView<'a> {
     /// Field 1: `pack_id`
     pub pack_id: ::core::option::Option<&'a [u8]>,
@@ -6285,6 +6285,15 @@ pub struct UploadPackHeaderView<'a> {
     /// Field 3: `ticket_token`
     pub ticket_token: ::core::option::Option<&'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::core::fmt::Debug for UploadPackHeaderView<'a> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("UploadPackHeaderView")
+            .field("pack_id", &self.pack_id)
+            .field("total_bytes", &self.total_bytes)
+            .field("ticket_token", &::core::format_args!("[REDACTED]"))
+            .finish()
+    }
 }
 impl<'a> ::buffa::MessageView<'a> for UploadPackHeaderView<'a> {
     type Owned = super::super::UploadPackHeader;
@@ -10518,7 +10527,7 @@ impl ::serde::Serialize for AlreadyPresentOwnedView {
     }
 }
 /// Upload reservation bound by an opaque authenticated token (SPEC-TRANSPORT-CONNECT §7.6).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct UploadTicketView<'a> {
     /// 32-byte id; its hex form is \<ticket\> in part: commitments (SPEC-TRANSPORT-CONNECT §7.6).
     ///
@@ -10537,6 +10546,16 @@ pub struct UploadTicketView<'a> {
     /// Field 4: `token`
     pub token: ::core::option::Option<&'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::core::fmt::Debug for UploadTicketView<'a> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("UploadTicketView")
+            .field("id", &self.id)
+            .field("part_size", &self.part_size)
+            .field("expires_unix_ms", &self.expires_unix_ms)
+            .field("token", &::core::format_args!("[REDACTED]"))
+            .finish()
+    }
 }
 impl<'a> ::buffa::MessageView<'a> for UploadTicketView<'a> {
     type Owned = super::super::UploadTicket;
@@ -10854,7 +10873,7 @@ impl ::serde::Serialize for UploadTicketOwnedView {
     }
 }
 /// First message of one part's stream (SPEC-TRANSPORT-CONNECT §7.6).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct UploadPartHeaderView<'a> {
     /// Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
     ///
@@ -10865,6 +10884,14 @@ pub struct UploadPartHeaderView<'a> {
     /// Field 2: `index`
     pub index: ::core::option::Option<u32>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::core::fmt::Debug for UploadPartHeaderView<'a> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("UploadPartHeaderView")
+            .field("ticket_token", &::core::format_args!("[REDACTED]"))
+            .field("index", &self.index)
+            .finish()
+    }
 }
 impl<'a> ::buffa::MessageView<'a> for UploadPartHeaderView<'a> {
     type Owned = super::super::UploadPartHeader;
@@ -11489,13 +11516,20 @@ impl ::serde::Serialize for UploadPartRequestOwnedView {
     }
 }
 /// Acknowledges one uploaded part (SPEC-TRANSPORT-CONNECT §7.6).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct UploadPartResponseView<'a> {
     /// Opaque server-authenticated part receipt (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 1: `receipt`
     pub receipt: ::core::option::Option<&'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::core::fmt::Debug for UploadPartResponseView<'a> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("UploadPartResponseView")
+            .field("receipt", &::core::format_args!("[REDACTED]"))
+            .finish()
+    }
 }
 impl<'a> ::buffa::MessageView<'a> for UploadPartResponseView<'a> {
     type Owned = super::super::UploadPartResponse;
@@ -11741,7 +11775,7 @@ impl ::serde::Serialize for UploadPartResponseOwnedView {
     }
 }
 /// Finish an upload after all parts (SPEC-TRANSPORT-CONNECT §7.6).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct CompleteUploadRequestView<'a> {
     /// Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
     ///
@@ -11752,6 +11786,14 @@ pub struct CompleteUploadRequestView<'a> {
     /// Field 2: `receipts`
     pub receipts: ::buffa::RepeatedView<'a, &'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::core::fmt::Debug for CompleteUploadRequestView<'a> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CompleteUploadRequestView")
+            .field("ticket_token", &::core::format_args!("[REDACTED]"))
+            .field("receipts", &::core::format_args!("[REDACTED]"))
+            .finish()
+    }
 }
 impl<'a> ::buffa::MessageView<'a> for CompleteUploadRequestView<'a> {
     type Owned = super::super::CompleteUploadRequest;
@@ -14499,13 +14541,21 @@ impl ::serde::Serialize for RefPathOwnedView {
         ::serde::Serialize::serialize(&self.0, __s)
     }
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct IssueObjectUrlResponseView<'a> {
     /// Field 1: `token`
     pub token: ::core::option::Option<&'a str>,
     /// Field 2: `expires_unix_ms`
     pub expires_unix_ms: ::core::option::Option<i64>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::core::fmt::Debug for IssueObjectUrlResponseView<'a> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("IssueObjectUrlResponseView")
+            .field("token", &::core::format_args!("[REDACTED]"))
+            .field("expires_unix_ms", &self.expires_unix_ms)
+            .finish()
+    }
 }
 impl<'a> ::buffa::MessageView<'a> for IssueObjectUrlResponseView<'a> {
     type Owned = super::super::IssueObjectUrlResponse;

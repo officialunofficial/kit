@@ -96,6 +96,54 @@ mod tests {
         assert!(dbg.contains("[REDACTED]"), "Debug must redact pin: {dbg}");
         assert!(!dbg.contains("123456"), "PIN leaked into Debug: {dbg}");
     }
+
+    #[cfg(feature = "transport-messages")]
+    #[test]
+    fn transport_credentials_debug_redact_values() {
+        // transport.proto marks upload tokens and the object-URL token with
+        // [debug_redact = true]; a stray `{:?}` log must never echo them.
+        use crate::transport::kit::transport::v1::{
+            CompleteUploadRequest, IssueObjectUrlResponse, UploadPartHeader, UploadTicket,
+        };
+        let secret = "s3cr3t-value";
+        let bytes = secret.as_bytes().to_vec();
+        let dumps = [
+            format!(
+                "{:?}",
+                UploadTicket {
+                    token: Some(bytes.clone()),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                UploadPartHeader {
+                    ticket_token: Some(bytes.clone()),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                CompleteUploadRequest {
+                    ticket_token: Some(bytes.clone()),
+                    receipts: vec![bytes],
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                IssueObjectUrlResponse {
+                    token: Some(secret.into()),
+                    ..Default::default()
+                }
+            ),
+        ];
+        for dbg in dumps {
+            assert!(dbg.contains("[REDACTED]"), "Debug must redact: {dbg}");
+            assert!(!dbg.contains(secret), "credential leaked into Debug: {dbg}");
+            assert!(!dbg.contains("115"), "byte dump leaked into Debug: {dbg}");
+        }
+    }
 }
 
 /// Shared transport and health wire types and Connect service traits.

@@ -4721,7 +4721,7 @@ impl ::core::fmt::Debug for UploadPackHeader {
         f.debug_struct("UploadPackHeader")
             .field("pack_id", &self.pack_id)
             .field("total_bytes", &self.total_bytes)
-            .field("ticket_token", &self.ticket_token)
+            .field("ticket_token", &::core::format_args!("[REDACTED]"))
             .finish()
     }
 }
@@ -7714,7 +7714,7 @@ impl ::core::fmt::Debug for UploadTicket {
             .field("id", &self.id)
             .field("part_size", &self.part_size)
             .field("expires_unix_ms", &self.expires_unix_ms)
-            .field("token", &self.token)
+            .field("token", &::core::format_args!("[REDACTED]"))
             .finish()
     }
 }
@@ -7935,7 +7935,7 @@ pub struct UploadPartHeader {
 impl ::core::fmt::Debug for UploadPartHeader {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("UploadPartHeader")
-            .field("ticket_token", &self.ticket_token)
+            .field("ticket_token", &::core::format_args!("[REDACTED]"))
             .field("index", &self.index)
             .finish()
     }
@@ -8368,7 +8368,9 @@ pub struct UploadPartResponse {
 }
 impl ::core::fmt::Debug for UploadPartResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("UploadPartResponse").field("receipt", &self.receipt).finish()
+        f.debug_struct("UploadPartResponse")
+            .field("receipt", &::core::format_args!("[REDACTED]"))
+            .finish()
     }
 }
 impl UploadPartResponse {
@@ -8521,8 +8523,8 @@ pub struct CompleteUploadRequest {
 impl ::core::fmt::Debug for CompleteUploadRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("CompleteUploadRequest")
-            .field("ticket_token", &self.ticket_token)
-            .field("receipts", &self.receipts)
+            .field("ticket_token", &::core::format_args!("[REDACTED]"))
+            .field("receipts", &::core::format_args!("[REDACTED]"))
             .finish()
     }
 }
@@ -10199,7 +10201,7 @@ pub struct IssueObjectUrlResponse {
 impl ::core::fmt::Debug for IssueObjectUrlResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("IssueObjectUrlResponse")
-            .field("token", &self.token)
+            .field("token", &::core::format_args!("[REDACTED]"))
             .field("expires_unix_ms", &self.expires_unix_ms)
             .finish()
     }

@@ -306,7 +306,7 @@ message UploadPackHeader {
   bytes pack_id = 1;
   uint64 total_bytes = 2;
   // Opaque authenticated upload ticket (SPEC-TRANSPORT-CONNECT §7.6).
-  bytes ticket_token = 3;
+  bytes ticket_token = 3 [debug_redact = true];
 }
 
 message UploadPackRequest {
@@ -439,13 +439,13 @@ message UploadTicket {
   // Expiry in Unix milliseconds, as in auth v2 (SPEC-TRANSPORT-CONNECT §7.6).
   int64 expires_unix_ms = 3;
   // Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6, "Ticket token").
-  bytes token = 4;
+  bytes token = 4 [debug_redact = true];
 }
 
 // First message of one part's stream (SPEC-TRANSPORT-CONNECT §7.6).
 message UploadPartHeader {
   // Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
-  bytes ticket_token = 1;
+  bytes ticket_token = 1 [debug_redact = true];
   // Zero-based part index (SPEC-TRANSPORT-CONNECT §7.6).
   uint32 index = 2;
 }
@@ -464,15 +464,15 @@ message UploadPartRequest {
 // Acknowledges one uploaded part (SPEC-TRANSPORT-CONNECT §7.6).
 message UploadPartResponse {
   // Opaque server-authenticated part receipt (SPEC-TRANSPORT-CONNECT §7.6).
-  bytes receipt = 1;
+  bytes receipt = 1 [debug_redact = true];
 }
 
 // Finish an upload after all parts (SPEC-TRANSPORT-CONNECT §7.6).
 message CompleteUploadRequest {
   // Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
-  bytes ticket_token = 1;
+  bytes ticket_token = 1 [debug_redact = true];
   // Part receipts in part-index order (SPEC-TRANSPORT-CONNECT §7.6).
-  repeated bytes receipts = 2;
+  repeated bytes receipts = 2 [debug_redact = true];
 }
 
 // Empty body is successful completion (SPEC-TRANSPORT-CONNECT §7.6).
@@ -539,7 +539,7 @@ message RefPath {
 }
 
 message IssueObjectUrlResponse {
-  string token = 1;
+  string token = 1 [debug_redact = true];
   int64 expires_unix_ms = 2;
 }
 
