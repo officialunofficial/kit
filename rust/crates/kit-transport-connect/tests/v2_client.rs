@@ -1148,7 +1148,7 @@ fn disk_receipt_invalid_argument_resends_all_but_fresh_receipt_fails() {
 }
 
 #[test]
-fn discovery_fallback_matrix_latches_unknown_only() {
+fn upload_path_follows_discovery() {
     let key = PackKey::new(hash(DATA));
     let served = Served::new(State::default());
     assert!(
@@ -1203,15 +1203,16 @@ fn discovery_fallback_matrix_latches_unknown_only() {
         begin_modes: VecDeque::from([BeginMode::Unimplemented]),
         ..Default::default()
     });
-    let client = served.signed_client();
-    client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
-        .unwrap();
-    client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
-        .unwrap();
+    assert!(
+        served
+            .signed_client()
+            .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+            .unwrap_err()
+            .to_string()
+            .contains("server does not implement BeginUpload")
+    );
     assert_eq!(served.calls("BeginUpload"), 1);
-    assert_eq!(served.calls("UploadPack"), 2);
+    assert_eq!(served.calls("UploadPack"), 0);
 
     let served = Served::new(State {
         begin_modes: VecDeque::from([BeginMode::Unimplemented]),
@@ -1528,7 +1529,7 @@ fn discovery_is_once_even_for_concurrent_callers() {
 }
 
 #[test]
-fn legacy_and_exhausted_discovery_remain_conservative() {
+fn failed_discovery_remains_conservative() {
     for (code, expected_calls) in [
         (ErrorCode::Unimplemented, 1),
         (ErrorCode::Unavailable, 6),
@@ -1544,11 +1545,7 @@ fn legacy_and_exhausted_discovery_remain_conservative() {
         served.state.lock().unwrap().discovery = Discovery::Response(Box::new(info(Some(true))));
         assert!(!client.supports_atomic_advance());
         assert_eq!(client.atomic_advance_status(), None);
-        if code == ErrorCode::Unimplemented {
-            assert!(matches!(client.server_info(), ServerInfoView::Legacy));
-        } else {
-            assert!(matches!(client.server_info(), ServerInfoView::Unknown));
-        }
+        assert!(matches!(client.server_info(), ServerInfoView::Unknown));
         assert_eq!(served.calls("GetServerInfo"), expected_calls);
     }
 }
@@ -1945,7 +1942,7 @@ fn begin_rejection_and_v2_small_unimplemented_are_terminal() {
         .upload_pack_via_ref(DATA, &key, "refs/heads/main")
         .unwrap_err();
     assert!(
-        matches!(error, TransportError::RemoteError(message) if message.contains("V2 server does not implement BeginUpload"))
+        matches!(error, TransportError::RemoteError(message) if message.contains("server does not implement BeginUpload"))
     );
     assert_eq!(served.calls("UploadPack"), 0);
 }
@@ -2088,54 +2085,6 @@ fn ticketed_upload_pack_carries_no_write_grant() {
             .unwrap()
             .grant
             .is_none()
-    );
-}
-
-#[test]
-fn legacy_upload_and_advance_hooks_are_ticketless() {
-    let served = Served::new(State {
-        discovery: Discovery::Error(ErrorCode::Unimplemented),
-        ..Default::default()
-    });
-    let client = served.signed_client();
-    let key = PackKey::new(hash(DATA));
-    client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
-        .unwrap();
-    let outcome = client
-        .advance_refs_committing(
-            "refs/heads/main",
-            RefWriteCondition::Missing,
-            &hash(b"tip"),
-            "refs/kit/packmap/main",
-            RefWriteCondition::Missing,
-            &hash(b"node"),
-            &[key],
-        )
-        .unwrap();
-    assert_eq!(outcome, CommitOutcome::Advanced(AdvanceOutcome::Committed));
-    assert_eq!(served.calls("BeginUpload"), 0);
-    let state = served.state.lock().unwrap();
-    assert!(
-        state
-            .requests
-            .iter()
-            .find(|r| r.rpc == "UploadPack")
-            .unwrap()
-            .upload_token
-            .is_none()
-    );
-    assert!(
-        state
-            .requests
-            .iter()
-            .find(|r| r.rpc == "AdvanceRefs")
-            .unwrap()
-            .advance
-            .as_ref()
-            .unwrap()
-            .ticket_ids
-            .is_empty()
     );
 }
 

@@ -82,8 +82,6 @@ pub enum VisibilityRequest<'a> {
 pub enum ServerInfoView {
     /// A validated v2 (or later) deployment advertisement.
     V2(Box<GetServerInfoResponse>),
-    /// The discovery procedure is unimplemented on this server.
-    Legacy,
     /// Discovery failed after retries or returned invalid capabilities.
     Unknown,
 }
@@ -806,13 +804,12 @@ impl ConnectTransport {
         result
     }
     /// Discover and cache deployment capabilities for this instance's lifetime.
-    /// Legacy and failed discovery stay conservative, even if the server changes.
+    /// Failed discovery stays conservative, even if the server changes.
     pub fn server_info(&self) -> &ServerInfoView {
         self.server_info.get_or_init(|| {
             self.with_client_source(|source| {
                 Ok(match source.server_info() {
                     Some(info) => ServerInfoView::V2(Box::new(info)),
-                    None if source.discovery_is_legacy() => ServerInfoView::Legacy,
                     None => ServerInfoView::Unknown,
                 })
             })

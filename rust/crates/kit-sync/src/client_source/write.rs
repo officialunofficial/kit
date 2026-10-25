@@ -153,12 +153,6 @@ impl Flag {
     fn new(value: bool) -> Self {
         Self(AtomicBool::new(value))
     }
-    fn get(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
-    fn set(&self, value: bool) {
-        self.0.store(value, Ordering::Relaxed);
-    }
     fn replace(&self, value: bool) -> bool {
         self.0.swap(value, Ordering::Relaxed)
     }
@@ -248,8 +242,6 @@ pub(super) struct WriteState {
     tickets: StateCell<HashMap<(String, PackKey), UploadTicket>>,
     pub(super) receipts: StateCell<Arc<dyn PartReceiptStore>>,
     swept: Flag,
-    ticketless: Flag,
-    discovery_legacy: Flag,
 }
 
 impl Default for WriteState {
@@ -259,8 +251,6 @@ impl Default for WriteState {
             tickets: StateCell::new(HashMap::new()),
             receipts: StateCell::new(Arc::new(MemoryPartReceiptStore::default())),
             swept: Flag::new(false),
-            ticketless: Flag::new(false),
-            discovery_legacy: Flag::new(false),
         }
     }
 }
@@ -332,11 +322,6 @@ impl<
                     self.executor.block_on(self.client.server_info())
                 }) {
                     Ok(info) if valid_info(&info) => Ok(info),
-                    Err(SourceError::Remote(remote)) if remote.code == "unimplemented" => {
-                        self.write_state().discovery_legacy.set(true);
-                        self.write_state().ticketless.set(true);
-                        Err(())
-                    }
                     _ => Err(()),
                 }
             })
@@ -452,19 +437,12 @@ impl<
         }
     }
 
-    /// Cached valid server capabilities, absent for legacy or failed discovery.
+    /// Cached valid server capabilities, absent for failed discovery.
     ///
     /// Discovery failure keeps uploads conservative and does not become a
     /// source construction failure.
     pub fn server_info(&self) -> Option<GetServerInfoResponse> {
         self.write_info()
-    }
-
-    /// Whether discovery returned the legacy unimplemented response.
-    #[must_use]
-    pub fn discovery_is_legacy(&self) -> bool {
-        let _ = self.write_info();
-        self.write_state().discovery_legacy.get()
     }
 
     /// Upload a pack without reserving a ref-bound ticket.
@@ -542,7 +520,6 @@ impl<
         }
         let info = self.write_info();
         let ticketless = (info.is_none() && self.client.public_key().is_none())
-            || self.write_state().ticketless.get()
             || info.as_ref().is_some_and(|info| {
                 (bytes.len() as u64) < info.begin_upload_threshold_bytes.unwrap_or(0)
             });
@@ -573,10 +550,6 @@ impl<
                 ))
             });
             let begun = match begun {
-                Err(error) if info.is_none() && remote_is(&error, "unimplemented") => {
-                    self.write_state().ticketless.set(true);
-                    return self.write_upload(bytes, key, head);
-                }
                 Err(SourceError::Remote(remote)) if remote.code == "unimplemented" => {
                     let message = if info
                         .as_ref()
@@ -584,7 +557,7 @@ impl<
                     {
                         "server storage cannot accept packs over part_size"
                     } else {
-                        "V2 server does not implement BeginUpload"
+                        "server does not implement BeginUpload"
                     };
                     return Err(SourceError::RemoteError(message.to_owned()));
                 }
@@ -1018,7 +991,7 @@ impl<
                 ticket_threshold_bytes: signed
                     .then_some(info.begin_upload_threshold_bytes.unwrap_or(0)),
             },
-            None if signed && !self.write_state().ticketless.get() => UploadLimits {
+            None if signed => UploadLimits {
                 max_pack_bytes: None,
                 tickets_per_advance: Some(7),
                 ticket_threshold_bytes: Some(0),
