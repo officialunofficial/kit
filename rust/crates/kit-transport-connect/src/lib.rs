@@ -7,7 +7,7 @@
 //! Repository operations borrow `kit-sync::ClientSource`; the host supplies
 //! credential selection, admission recovery, scheduling and durable receipts.
 //!
-//! Generated messages and Connect bindings remain compatibility reexports
+//! Generated messages and Connect bindings are reexported
 //! from `kit-rpc`, owned by the canonical transport schema.
 //!
 //! See [`docs/specs/SPEC-TRANSPORT-CONNECT.md`][spec] for the full wire

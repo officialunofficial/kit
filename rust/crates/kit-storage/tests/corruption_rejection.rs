@@ -55,7 +55,7 @@ fn assert_rejected(repo: &Repo, args: &[&str], case: &str) {
     );
 }
 
-/// Run a command and assert it SUCCEEDED (for accepted-compatibility cases).
+/// Run a command and assert it SUCCEEDED (for accepted inputs).
 fn assert_accepted(repo: &Repo, args: &[&str], case: &str) {
     let out = repo.run(args);
     check_exit(&out, case).unwrap_or_else(|e| panic!("{case}: {e}"));
@@ -172,7 +172,7 @@ fn malformed_branch_ref_is_rejected() {
 #[test]
 fn branch_ref_without_trailing_newline_is_accepted() {
     // `decode_ref_wire` trims optional trailing whitespace, so a 64-hex ref with
-    // NO trailing newline is valid (compatibility), not a corruption.
+    // NO trailing newline is valid, not a corruption.
     let repo = committed_repo();
     let p = repo.kit_dir().join("refs/heads/main");
     let good64 = fs::read_to_string(&p).unwrap().trim_end().to_owned();

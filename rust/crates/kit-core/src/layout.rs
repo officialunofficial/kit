@@ -863,15 +863,15 @@ mod tests {
     }
 
     /// Golden invariant: in the single-worktree layout every
-    /// accessor equals the historical `<root>/.kit/<relative>` join,
+    /// accessor equals the plain `<root>/.kit/<relative>` join,
     /// byte for byte.
     #[test]
-    fn single_layout_paths_match_legacy_joins() {
+    fn single_layout_paths_match_plain_joins() {
         let root = Path::new("/repo");
         let l = RepoLayout::single(root);
-        let legacy_kit = root.join(KIT_DIR);
+        let kit_dir = root.join(KIT_DIR);
         for (name, got, relative, _class) in accessor_table(&l) {
-            assert_eq!(got, legacy_kit.join(relative), "accessor {name}");
+            assert_eq!(got, kit_dir.join(relative), "accessor {name}");
         }
     }
 
@@ -927,8 +927,7 @@ mod tests {
         assert_eq!(UPLOAD_PARTS_DIR_NAME, "upload-parts");
         assert_eq!(GIT_STATE_DIR_NAME, "git");
         assert_eq!(SPARSE_CACHE_DIR_NAME, "sparse");
-        // Legacy prefix-embedding constants remain valid views of the
-        // same locations.
+        // The prefix-embedding constants are views of the same locations.
         assert_eq!(
             Path::new(crate::index::INDEX_FILE),
             Path::new(KIT_DIR).join(INDEX_FILE_NAME)

@@ -91,7 +91,7 @@ impl WindowCursorMetadata {
     }
 
     /// End of the bytes already absorbed into the integrity frontier.
-    /// Exact version-2 cursors return `Some`; legacy cursors return `None`.
+    /// Exact version-2 cursors return `Some`; version-1 cursors return `None`.
     /// This can exceed the entry position because an acquired window includes
     /// bytes of subsequent entries. Resume does not hash those bytes twice.
     #[must_use]

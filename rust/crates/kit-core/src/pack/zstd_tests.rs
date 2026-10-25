@@ -106,15 +106,15 @@ fn decoder_enforces_one_frame() {
     let a = zstd::bulk::compress(&[1u8; 100], 3).unwrap();
     let b = zstd::bulk::compress(&[2u8; 100], 3).unwrap();
     assert_eq!(zstd_decompress_capped(&a, 100).unwrap(), vec![1u8; 100]);
-    let mut legacy = a.clone();
-    legacy[0] = 0x27; // v0.7 legacy frame magic 0xFD2FB527
+    let mut pre_rfc = a.clone();
+    pre_rfc[0] = 0x27; // v0.7 frame magic 0xFD2FB527
     for (case, frame, cap) in [
         ("two frames", cat(&[&a, &b]), 200),
         ("frame + skippable", cat(&[&a, &SKIPPABLE]), 100),
         ("skippable + frame", cat(&[&SKIPPABLE, &a]), 100),
         ("lone skippable", SKIPPABLE.to_vec(), 0),
         ("trailing byte", cat(&[&a, &[0]]), 100),
-        ("legacy magic", legacy, 100),
+        ("pre-RFC magic", pre_rfc, 100),
     ] {
         let r = zstd_decompress_capped(&frame, cap);
         assert!(

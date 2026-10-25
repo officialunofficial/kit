@@ -1,4 +1,4 @@
-//! Compatibility transport facade over `kit-client` and `kit-sync`.
+//! Synchronous transport facade over `kit-client` and `kit-sync`.
 use super::host::{HostClock, HostPolicy, HostSigner, map_source};
 use crate::admission::AdmissionPolicy;
 use crate::envelope::EnvelopeSigner;
@@ -293,7 +293,7 @@ pub const PACK_TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
 #[cfg(test)]
 const CHUNK_SIZE: usize = 800 * 1024;
 
-/// Compatibility facade retaining synchronous transport and host policy configuration.
+/// Synchronous transport facade with host policy configuration.
 pub struct ConnectTransport {
     pub(crate) http: NativeHttp,
     pub(crate) session: ClientSession,

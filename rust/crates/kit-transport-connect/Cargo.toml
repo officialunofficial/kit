@@ -1,7 +1,7 @@
 # Native Transport and host-policy adapter over kit-client's canonical
 # kit.transport.v1 per-RPC implementation. The CLI lends ClientSource for
 # repository operations; remaining Transport callers keep this facade.
-# Generated bindings and pooled HTTP utilities remain public compatibility APIs.
+# Generated bindings and pooled HTTP utilities are public APIs.
 [package]
 name = "kit-transport-connect"
 description = "Native Transport and host-policy adapter over the kit-client Connect protocol implementation"

@@ -85,7 +85,7 @@ impl WindowReader {
                 .saturating_add(decoder_scratch)
         } else {
             // Raw/delta carry storage becomes the owned entry without a copy.
-            // The legacy reader may reserve a carried frame before checking its
+            // The two-pass reader may reserve a carried frame before checking its
             // decoded cap; the one-pass reader checks that cap first.
             let entry = if self.one_pass {
                 payload_len.min(output)
@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_raw_carry_reservation_precedes_decoded_cap() {
+    fn two_pass_raw_carry_reservation_precedes_decoded_cap() {
         let mut reader = at_header(0, 16 << 20);
         reader.one_pass = false;
         assert_eq!(reader.memory_bound(0), (64 << 10) + (16 << 20));

@@ -960,7 +960,7 @@ mod tests {
         let store = ObjectStore::init(&layout).unwrap();
 
         // No pre-existing ref: this is a brand new branch's first ever
-        // commit, not a v0.1.x migration. There is nothing to backfill.
+        // commit. There is nothing to backfill.
         let c0 = write_commit(&store, vec![], 1);
         write_ref_recording_history(&layout, "main", RefWriteCondition::Missing, &c0).unwrap();
 
@@ -972,9 +972,8 @@ mod tests {
         );
     }
 
-    /// A long v0.1.x-style chain (ref exists on disk, journal never
-    /// touched) — simulates an existing repo enabling `history-mmr` for
-    /// the first time.
+    /// A long chain (ref exists on disk, journal never touched) —
+    /// simulates a repo enabling `history-mmr` for the first time.
     #[cfg(feature = "history-mmr")]
     const CONCURRENT_BACKFILL_CHAIN_LEN: usize = 500;
 

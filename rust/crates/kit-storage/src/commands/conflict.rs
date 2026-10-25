@@ -457,7 +457,7 @@ pub fn ensure_abort_safe(
     //     content still match the operation result.
     // A clean path the user has since edited (staged or in the worktree) is
     // THEIR work — keep it non-discardable so the checks below refuse to
-    // destroy it. Without a result tree (legacy state) we fall back to the
+    // destroy it. Without a recorded result tree we fall back to the
     // conflict records alone.
     let conflict_paths: HashSet<String> = records.iter().map(|r| r.path.clone()).collect();
     let mut discardable = conflict_paths.clone();

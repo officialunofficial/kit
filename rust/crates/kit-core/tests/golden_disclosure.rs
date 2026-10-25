@@ -1003,7 +1003,7 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
-    // 16. version = 1 (no compatibility decoder).
+    // 16. version = 1.
     {
         let (steps, leaf) = walk_path(&f.store, f.tree_hash, &["shallow.txt".as_bytes()]);
         let bytes = canonical_bytes(&f.store, &leaf);
@@ -1017,7 +1017,7 @@ fn build_vectors() -> Vec<Vector> {
         bin[4] = 1;
         v.push(Vector {
             name: "neg_bundle_version_1",
-            description: "The version byte is 1; v2 is the only supported value and there is no compatibility decoder.",
+            description: "The version byte is 1; v2 is the only supported value.",
             bin,
             json: base_json(
                 &f.commit_id,

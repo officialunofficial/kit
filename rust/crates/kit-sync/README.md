@@ -276,11 +276,11 @@ the three scheduling variants directly; existing Connect transport polling
 behavior remains inside that transport. Core's generic backoff does not retry
 the new scheduling outcomes.
 
-Migration toward 0.6: change custom `RemoteSource` results and classifiers to
-`SourceError`, map core errors with `SourceError::from`, and replace matches on
-`SyncError::Transport` with `SyncError::Source`. The observer parameter on
-`ClientSource` defaults to `NoObserver`; inferred construction also accepts
-`Client::with_observer`. Read calls do not invoke the write observer.
+Custom `RemoteSource` results and classifiers use `SourceError`. Map core
+errors with `SourceError::from`. Match on `SyncError::Source` for source
+failures. The observer parameter on `ClientSource` defaults to `NoObserver`;
+inferred construction also accepts `Client::with_observer`. Read calls do not
+invoke the write observer.
 
 ### `connect-native`: a small native HTTP channel
 

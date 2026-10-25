@@ -97,8 +97,8 @@ pub(crate) trait Syncer: Send + Sync + fmt::Debug {
     /// Atomically rename a staged temp file into its final path,
     /// replacing any existing file.
     fn rename(&self, tmp: TempPath, final_path: &Path) -> io::Result<()>;
-    /// Durably flush the directory entry updates of `dir` — the legacy
-    /// per-object schedule ([`SyncPolicy::PerObject`] and
+    /// Durably flush the directory entry updates of `dir` — the per-object
+    /// schedule ([`SyncPolicy::PerObject`] and
     /// `ObjectStore::write`).
     fn dir_sync(&self, dir: &Path) -> io::Result<()>;
     /// Writeback + ordering barrier for the dirent updates of `dir`,
@@ -892,12 +892,12 @@ mod tests {
     }
 
     #[test]
-    fn sync_policy_per_object_matches_legacy_event_pattern() {
-        // Legacy pattern = ObjectStore::write: Full(tmp), Rename, DirSync
+    fn sync_policy_per_object_matches_write_event_pattern() {
+        // Write pattern = ObjectStore::write: Full(tmp), Rename, DirSync
         // per object, in that order, objects visible immediately.
         let (_dir, store, rec) = recording_store();
-        let legacy_h = store.write(b"legacy path").unwrap();
-        let legacy: Vec<Ev> = rec.events();
+        let write_h = store.write(b"write path").unwrap();
+        let written: Vec<Ev> = rec.events();
 
         let batch = store.batch_with_policy(SyncPolicy::PerObject);
         let h = batch.write(b"per object path").unwrap();
@@ -905,7 +905,7 @@ mod tests {
             store.contains(&h),
             "PerObject writes must be visible immediately, pre-commit"
         );
-        let per_object: Vec<Ev> = rec.events()[legacy.len()..].to_vec();
+        let per_object: Vec<Ev> = rec.events()[written.len()..].to_vec();
 
         let kinds = |evs: &[Ev]| -> Vec<u8> {
             evs.iter()
@@ -920,14 +920,14 @@ mod tests {
         };
         assert_eq!(
             kinds(&per_object),
-            kinds(&legacy),
-            "PerObject batch must reproduce the legacy per-write sync pattern"
+            kinds(&written),
+            "PerObject batch must reproduce the per-write sync pattern"
         );
         // commit() of a PerObject batch is a no-op.
         let before = rec.events().len();
         batch.commit().unwrap();
         assert_eq!(rec.events().len(), before);
-        let _ = legacy_h;
+        let _ = write_h;
     }
 
     // ---- Cycle 3: equivalence & limits ---------------------------------

@@ -66,7 +66,7 @@ kit-sync = { version = "0.5", path = "../kit-sync" }
 # `[dev-dependencies]`. It is intentionally NOT a normal dependency so it
 # does not ship in `cargo install kit-storage`.
 kit-transport-file = { version = "0.5", path = "../kit-transport-file" }
-# `kit-transport-connect` supplies native host policy and the compatibility
+# `kit-transport-connect` supplies native host policy and the transport
 # facade for Connect dispatch. `kit-client` owns the per-RPC protocol and
 # `kit-sync::ClientSource` drives repository operations. The adapter is
 # unconditional; the CLI hosts no Connect HTTP server.
@@ -93,8 +93,7 @@ tokio = { version = "1", default-features = false, features = [
 # `mcp-v2` feature. `default-features = false`: no reqwest/client-side bits —
 # `transport-io` is the default stdio server, `transport-streamable-http-server`
 # is `kit mcp --http <addr>` (SEP-2567 dropped sessions for 2026-07-28
-# traffic; `legacy_session_mode` still serves pre-2026-07-28 clients over
-# reconnect-friendly SSE). Off by default so the default `kit-storage` build
+# traffic). Off by default so the default `kit-storage` build
 # compiles no MCP HTTP server. See `commands/mcp_v2.rs`.
 rmcp = { version = "3", default-features = false, features = [
     "server",

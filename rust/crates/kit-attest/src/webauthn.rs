@@ -332,7 +332,7 @@ pub fn verify_webauthn_wrapping_with_policy(
 /// The warning on [`verify_webauthn_wrapping_with_policy`] applies: this is
 /// a lax self-check helper and MUST NOT verify third-party assertions.
 ///
-/// This is a thin compatibility wrapper that delegates to
+/// This is a thin wrapper that delegates to
 /// [`verify_webauthn_wrapping_with_policy`] with
 /// [`WebAuthnPolicy::permissive`]. It checks the `type`, the challenge
 /// binding, the `authenticatorData` shape, and the signature — but does

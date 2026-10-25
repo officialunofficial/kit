@@ -716,7 +716,7 @@ fn decompress_zstd_into(payload: &[u8], output: &mut Vec<u8>) -> Result<(), Pack
 /// RFC 8878 §3.1.1 Zstandard frame magic number, as it appears on the
 /// wire (`0xFD2FB528` little-endian). SPEC-PACKFILE §3.3 allows exactly
 /// one such frame per entry: a skippable frame (`0x184D2A5?`) or a
-/// legacy pre-RFC frame magic is rejected by the decoder.
+/// pre-RFC frame magic is rejected by the decoder.
 #[cfg(feature = "pack-zstd")]
 const ZSTD_FRAME_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
@@ -729,7 +729,7 @@ fn require_zstd_frame_magic(frame: &[u8]) -> Result<(), PackError> {
     } else {
         Err(PackError::ZstdDecompress(
             "entry payload does not start with a Zstandard frame magic \
-             (skippable and legacy frames are not allowed)"
+             (skippable and pre-RFC frames are not allowed)"
                 .to_string(),
         ))
     }
@@ -975,7 +975,7 @@ fn zstd_sequence_modes(block: &[u8]) -> Result<u8, &'static str> {
 /// without resolving or storing anything.
 ///
 /// This lets a caller pre-fetch bases that may live OUTSIDE the pack (e.g.
-/// objects a legacy per-object remote stored individually) before calling
+/// objects a per-object remote stored individually) before calling
 /// [`PackReader::read`], so delta resolution never fails part-way through a
 /// pack. Raw entries are skipped; duplicates are de-duplicated.
 ///

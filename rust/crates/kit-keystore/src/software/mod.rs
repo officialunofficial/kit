@@ -1,4 +1,4 @@
-//! User-scoped software compatibility backend.
+//! User-scoped software backends.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,7 +42,7 @@ pub struct SoftwareKeystore {
     protector: Option<Arc<dyn KeyProtector>>,
 }
 
-/// Explicit raw-file compatibility backend.
+/// Explicit raw-file backend.
 #[derive(Clone, Debug)]
 pub struct SoftwareRawKeystore {
     inner: SoftwareKeystore,
@@ -240,14 +240,14 @@ impl SoftwareKeystore {
 }
 
 impl SoftwareRawKeystore {
-    /// Create a raw-file compatibility keystore using the default user-scoped root.
+    /// Create a raw-file keystore using the default user-scoped root.
     pub fn new() -> Result<Self> {
         Ok(Self {
             inner: SoftwareKeystore::new_with_backend(BackendKind::SoftwareRaw)?,
         })
     }
 
-    /// Create a raw-file compatibility keystore at an explicit root.
+    /// Create a raw-file keystore at an explicit root.
     #[must_use]
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
         Self {
@@ -905,7 +905,7 @@ fn hex_value(byte: u8) -> Result<u8> {
 }
 
 #[cfg(all(test, feature = "attest"))]
-mod compatibility_tests {
+mod signer_equivalence_tests {
     use super::*;
     use kit_attest::Signer as _;
 

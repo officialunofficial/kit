@@ -245,7 +245,7 @@ pub fn create_dir_all_durably(dir: &Path) -> io::Result<()> {
 /// each time; a lock taken on the previous inode would migrate to an
 /// abandoned file and stop providing mutual exclusion.
 ///
-/// v1 uses blocking [`File::lock`](std::fs::File::lock) (formerly `lock_exclusive`); refs
+/// v1 uses blocking [`File::lock`](std::fs::File::lock); refs
 /// updates are user-driven and serialisation is the desired behaviour.
 /// A future v2 could expose `try_lock` for fail-fast contention
 /// handling.

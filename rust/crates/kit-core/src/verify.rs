@@ -110,8 +110,7 @@ pub const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 /// Fixed 4-byte magic at the start of every disclosure bundle.
 const BUNDLE_MAGIC: &[u8; 4] = b"MKDP";
 /// Current (and only) bundle version byte. v1 is rejected with
-/// [`VerifyError::UnsupportedBundleVersion`]; there is no compatibility
-/// decoder (SPEC-DISCLOSURE v2).
+/// [`VerifyError::UnsupportedBundleVersion`] (SPEC-DISCLOSURE v2).
 const BUNDLE_VERSION: u8 = 2;
 /// Cap on `commit_bytes` — comfortably above any real commit (~250 B) or
 /// remix (larger, due to `sources`), far below `MAX_RAW_OBJECT_SIZE`.
@@ -137,7 +136,7 @@ pub enum VerifyError {
     #[error("disclosure bundle magic is not \"MKDP\"")]
     BadMagic,
     /// The bundle's version byte is not `2`. A version byte of `1` is
-    /// this error with payload `1`; there is no v1 compatibility decoder.
+    /// this error with payload `1`.
     #[error("disclosure bundle version {0} is not supported (v2 only)")]
     UnsupportedBundleVersion(u8),
     /// A step's or chunk header's declared `inner_root` does not wrap to

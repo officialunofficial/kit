@@ -3,7 +3,7 @@
 The async protocol client for kit servers, for Rust hosts on native and wasm
 targets. It speaks `kit.transport.v1` over a host-supplied HTTP channel, signs
 with a host-supplied signer, and has no Connect runtime, tokio, hyper or C
-compression dependency. It is the former `kit-push`, renamed and extended.
+compression dependency.
 
 ## Layers
 

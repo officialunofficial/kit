@@ -564,7 +564,7 @@ fn index_pack_entries_parallel(
 /// extracted, so the walk retains object ids rather than the complete object
 /// set. A fetch-by-id source that returns bytes whose derived id differs from
 /// the requested id reports `corrupt` under the requested id; this is
-/// intentionally different from the map path's legacy
+/// intentionally different from the map path's
 /// `missing` + `unreferenced` classification for a parsable bit flip.
 ///
 /// The root itself missing yields `missing = [root]`, `verified = 0`. The
@@ -611,9 +611,9 @@ pub fn verify_closure_store(
 
 /// Re-hashes every supplied object and walks from `root` with
 /// [`children`]`(obj, mode)`. Store-less: the caller provides the
-/// object bytes. This compatibility path is implemented by the same
+/// object bytes. The map path is implemented by the same
 /// pull-based walker as [`verify_closure_streaming`], with an in-memory
-/// source keyed by each successfully derived id, followed by the legacy
+/// source keyed by each successfully derived id, followed by the
 /// supplied-set `unreferenced` pass.
 ///
 /// A deserialize failure is recorded as `corrupt` under the BLAKE3 of

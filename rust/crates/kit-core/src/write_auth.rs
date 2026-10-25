@@ -607,7 +607,6 @@ mod tests {
                 "invalid pack commitment",
             ),
             (format!("pack:{digest}:1:2"), "invalid pack commitment"),
-            // Formerly an unknown kind; now a malformed `part:`.
             (format!("part:{digest}:1"), "invalid part commitment"),
             (String::new(), "unknown content commitment"),
             (format!("blob:{digest}"), "unknown content commitment"),
@@ -966,8 +965,8 @@ impl Authorized {
 /// `None`.
 ///
 /// # Errors
-/// Rejects legacy/missing versions, malformed fields, context/content mismatch,
-/// validity-window failures and invalid signatures.
+/// Rejects unsupported or missing versions, malformed fields, context/content
+/// mismatch, validity-window failures and invalid signatures.
 pub fn verify_headers(
     expected: Context<'_>,
     procedure: &str,
@@ -989,8 +988,8 @@ pub fn verify_headers(
 /// `UploadPack` stream or an `UploadPart` stream.
 ///
 /// # Errors
-/// Rejects legacy/missing versions, malformed fields, context/content mismatch,
-/// a commitment of the wrong kind for the stream, validity-window failures
+/// Rejects unsupported or missing versions, malformed fields, context/content
+/// mismatch, a commitment of the wrong kind for the stream, validity-window failures
 /// and invalid signatures.
 pub fn verify_headers_with(
     expected: Context<'_>,

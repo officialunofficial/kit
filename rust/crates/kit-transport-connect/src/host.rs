@@ -717,7 +717,7 @@ pub(crate) fn map_client(error: kit_client::Error, upload: bool) -> TransportErr
         other => TransportError::RemoteError(other.to_string()),
     }
 }
-/// Translate source failures at the compatibility boundary, per operation.
+/// Translate source failures at the transport boundary, per operation.
 pub(crate) struct HostSource<'a>(
     pub(crate) &'a dyn RemoteSource,
     pub(crate) &'a HostPolicy<'a>,

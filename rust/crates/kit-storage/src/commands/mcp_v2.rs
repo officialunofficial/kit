@@ -13,7 +13,7 @@
 //! not a conversation or session"), so unlike `mcp.rs`'s hand-rolled loop
 //! there is no `initialized` gate to track here — `rmcp` owns protocol
 //! framing and version negotiation, including serving 2025-era clients
-//! that still send the legacy handshake.
+//! that still send the `initialize` handshake.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

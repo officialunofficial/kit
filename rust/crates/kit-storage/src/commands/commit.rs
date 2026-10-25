@@ -593,7 +593,7 @@ fn commit_tree(store: &ObjectStore, commit: &kit_core::hash::Hash) -> Option<kit
     }
 }
 
-/// Pre-process `args` to canonicalize the legacy `-am<msg>` /
+/// Pre-process `args` to canonicalize the combined `-am<msg>` /
 /// `-am <msg>` shortcut into `-a -m <msg>`. Everything else passes
 /// through unchanged. Clap then sees only canonical forms.
 fn expand_dash_am(args: &[String]) -> Vec<String> {
@@ -1120,7 +1120,7 @@ fn decode_user_identity_hex(hex: &str) -> Result<Identity, String> {
     let kind = match kind_byte {
         0x01 => IdentityKind::Ed25519,
         0x02 => IdentityKind::DidKey,
-        // 0x03 (mid) shares the Opaque variant — upstream compat.
+        // 0x03 (mid) shares the Opaque variant.
         0x03 | 0x04 => IdentityKind::Opaque,
         other => return Err(format!("user.identity: unknown kind byte {other:#04x}")),
     };

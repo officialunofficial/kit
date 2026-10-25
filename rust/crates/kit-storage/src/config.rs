@@ -196,7 +196,7 @@ pub struct Config {
     pub attest: AttestConfig,
     /// Named remotes keyed by name (`remote.<name>.url` /
     /// `remote.<name>.type`). Repo-safe — addresses, same class as the
-    /// flat `remote_endpoint`. The legacy flat `remote_endpoint` /
+    /// flat `remote_endpoint`. The flat `remote_endpoint` /
     /// `remote_type` act as the implicit `default` remote.
     pub remotes: std::collections::BTreeMap<String, RemoteEntry>,
     /// Per-branch upstream tracking keyed by local branch name
@@ -1148,7 +1148,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// The implicit name of the legacy flat `remote_endpoint` /
+/// The implicit name of the flat `remote_endpoint` /
 /// `remote_type` remote.
 pub const DEFAULT_REMOTE_NAME: &str = "default";
 

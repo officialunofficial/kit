@@ -59,7 +59,7 @@ impl fmt::Display for OpenError {
             Self::RefsElsewhere(path) => write!(
                 f,
                 "repository root {} is marked {SERVER_META_MARKER}: its refs live in a database, \
-                 and its ref files would be a second, diverging copy. Migrate the refs back to \
+                 and its ref files would be a second, diverging copy. Move the refs back to \
                  files and remove the marker by hand.",
                 path.display()
             ),

@@ -7,8 +7,7 @@
 //!
 //! Behaviour:
 //!
-//! * `--algorithm` defaults to `ed25519` (backward-compat with the
-//!   original single-algorithm command). `ed25519` writes to
+//! * `--algorithm` defaults to `ed25519`. `ed25519` writes to
 //!   `.kit/keys/default.key`; `secp256k1` / `p256` write to the path
 //!   configured via `attest.<algo>_key_path` (default
 //!   `.kit/keys/<algo>.key`).

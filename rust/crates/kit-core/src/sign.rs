@@ -239,9 +239,7 @@ impl KeyPair {
 /// subgroup attacks are rejected.
 ///
 /// The looser default `VerifyingKey::verify` accepts non-canonical
-/// encodings for backwards compat with older Ed25519 implementations;
-/// kit has no such compat constraint (golden vectors are regenerated
-/// from our own signer) so we hold the stricter line.
+/// encodings. kit holds the stricter line.
 pub fn verify(
     public: &PublicKey,
     domain: &[u8],
@@ -374,10 +372,6 @@ pub fn verify_batch(entries: &[(PublicKey, Hash, Signature)]) -> Result<(), KitE
 /// `REMIX_DOMAIN`) and always fit in `u16`; construction-time asserts
 /// this in `sign()` / `verify()` call sites.
 ///
-/// NOTE: This is a wire/signature change vs the original v0.1.0
-/// format. Any signatures produced before this change do NOT verify
-/// under the new digest. A coordinated CHANGELOG entry documents the
-/// break; there are no shipped artefacts to migrate.
 #[must_use]
 fn domain_digest(domain: &[u8], signing_bytes: &[u8]) -> [u8; HASH_LEN] {
     crate::hash::domain_digest(domain, signing_bytes)

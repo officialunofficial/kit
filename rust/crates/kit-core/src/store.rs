@@ -104,7 +104,7 @@ pub enum StoreError {
     #[error(".kit already exists in this directory")]
     AlreadyInitialized,
     #[error(
-        "repository object-addressing format is {found:?}, expected \"{}\" — this repository predates merkle object addressing and is not readable by this kit (pre-1.0: no migration). See docs/specs/SPEC-MERKLE-OBJECTS.md.",
+        "repository object-addressing format is {found:?}, expected \"{}\". This kit cannot read the repository. See docs/specs/SPEC-MERKLE-OBJECTS.md.",
         FORMAT_VALUE
     )]
     IncompatibleRepoFormat { found: Option<String> },
@@ -335,7 +335,7 @@ impl ObjectStore {
         let objects_root = layout.objects_dir();
         fs::create_dir_all(&objects_root)?;
         // Declare the object-addressing format so a future open by an
-        // incompatible (older) kit fails loudly (SPEC-MERKLE-OBJECTS §7).
+        // different kit fails loudly (SPEC-MERKLE-OBJECTS §7).
         fs::write(layout.format_file(), format!("{FORMAT_VALUE}\n").as_bytes())?;
         Ok(Self {
             objects_root,
@@ -900,7 +900,7 @@ impl ObjectSink for ObjectStore {
     }
 
     fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
-        // Per-object path is the legacy/rare sink; hot ingest paths use
+        // Per-object path is the rare sink; hot ingest paths use
         // WriteBatch, whose put_parts is copy-free.
         let total: usize = parts.iter().map(|p| p.len()).sum();
         let mut bytes = Vec::with_capacity(total);

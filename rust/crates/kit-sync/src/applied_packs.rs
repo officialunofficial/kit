@@ -11,7 +11,7 @@
 //! One file per remote: `.kit/applied-packs/<record>` (the `applied-packs/`
 //! directory is created on first write). Contents are a lowercase 64-hex
 //! BLAKE3 pack digest per line, LF-terminated, with no header. Unknown or
-//! malformed lines are ignored on load, for forward compatibility. Writes
+//! malformed lines are ignored on load. Writes
 //! are atomic: a sibling `.tmp` file is written, fsynced, and renamed over
 //! the destination — the same temp+fsync+rename pattern
 //! `kit_core::refs`/`kit_core::atomic` use for ref files.
@@ -40,9 +40,8 @@
 //!
 //! # Repo-layout classification (cross-link: `RepoLayout`)
 //!
-//! `RepoLayout` migration will eventually own every ad-hoc
-//! `kit_dir.join(...)` call site, including this one. When it lands, this
-//! path MUST be classified as **common-dir (shared) state**: the record
+//! `RepoLayout` owns the path of this record. The path is classified as
+//! **common-dir (shared) state**: the record
 //! describes what is already in the shared object store, so every worktree
 //! of a repo shares one record per remote — it is NOT per-worktree state.
 //!
@@ -273,7 +272,7 @@ fn record_path(layout: &RepoLayout, remote: &str) -> PathBuf {
 
 /// Parse the on-disk record format: one lowercase 64-hex digest per LF
 /// line. Malformed lines (wrong length, non-hex, uppercase hex) are
-/// silently ignored, per the module's forward-compatibility contract.
+/// silently ignored, per the module's contract.
 fn parse(bytes: &[u8]) -> HashSet<Hash> {
     let mut set = HashSet::new();
     let Ok(s) = core::str::from_utf8(bytes) else {

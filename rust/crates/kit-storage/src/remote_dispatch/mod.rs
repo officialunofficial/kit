@@ -911,7 +911,7 @@ pub struct Pushed {
 /// remote-tracking ref is advanced to the pushed tip.
 ///
 /// `remote` is the remote NAME used for the local tracking-ref
-/// namespace; `None` means the legacy `default`. A branch too large for one
+/// namespace; `None` means `default`. A branch too large for one
 /// advance is split (see [`push_branch_steps`]); its tracking ref follows each
 /// published advance, so an interrupted push resumes where it stopped.
 /// `authority` is checked before a split branch uploads anything.

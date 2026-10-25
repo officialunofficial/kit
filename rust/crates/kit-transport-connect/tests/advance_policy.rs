@@ -1,4 +1,4 @@
-//! Compatibility boundaries for completion outcomes and admission receipts.
+//! Completion outcomes and admission receipts.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use connectrpc::server::Server;
 use connectrpc::{ConnectError, RequestContext, Response, Router, handler_fn};

@@ -331,9 +331,9 @@ impl Default for KeyAttrs {
 /// Backend family identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BackendKind {
-    /// User-scoped software compatibility backend.
+    /// User-scoped encrypted software backend.
     Software,
-    /// User-scoped raw-file compatibility backend.
+    /// User-scoped raw-file backend.
     SoftwareRaw,
     /// macOS Keychain backend.
     MacosKeychain,

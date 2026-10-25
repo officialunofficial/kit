@@ -1643,7 +1643,7 @@ mod tests {
     fn existing_ref_over_the_bound_stays_usable_and_deletable() {
         let (_dir, layout) = fresh_repo();
         let over = long_name(MAX_REF_NAME_BYTES + 1);
-        let id = h("legacy");
+        let id = h("over-bound");
         let path = ref_path(layout.common_dir(), HEADS_DIR, &over);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, encode_ref_wire(&id)).unwrap();

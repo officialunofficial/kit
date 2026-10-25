@@ -148,7 +148,7 @@ fn keygen_p256_writes_to_custom_config_path() {
 #[test]
 fn keygen_default_ed25519_behavior_preserved() {
     // `kit keygen` with no flag must still generate the ed25519 key at
-    // `.kit/keys/default.key` — backward compat.
+    // `.kit/keys/default.key`.
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
     fs::create_dir_all(root.join(".kit")).unwrap();
