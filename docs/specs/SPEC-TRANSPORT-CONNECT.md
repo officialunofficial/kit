@@ -36,8 +36,8 @@ or any server/client implementation; those are separate changes (§8).
 Write and read grants, epochs, signed reads, and private repositories
 are [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md)'s.
 
-Replaces the removed JSON HTTP transport (SPEC-TRANSPORT §5) behind
-`kit+https://`/`kit+http://` in `kit-storage` &mdash;
+Serves
+`kit+https://`/`kit+http://` remotes in `kit-storage` &mdash;
 `kit-transport-connect` is what `remote_dispatch` constructs for those
 schemes. The `sparse-checkout` extension has no `kit.transport.v1` equivalent.
 
@@ -46,7 +46,7 @@ client, §7.3) against `kit-transport-connect/tests/roundtrip.rs`'s
 in-process server &mdash; real HTTP, real protobuf framing, real Connect
 streaming, backed by `kit-transport-memory`. No server for this protocol
 lives in this repository. `ConnectTransport` supports both the
-bearer-token scheme (SPEC-TRANSPORT §5.2) and the Ed25519 write envelope
+bearer-token scheme and the Ed25519 write envelope
 (§7.1) as independent, additive auth modes &mdash; see §7.3.
 
 The proto lives at

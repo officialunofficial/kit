@@ -371,10 +371,9 @@ disambiguation.
 
 ---
 
-## 5. HTTP transport (removed)
+## 5. HTTP remotes
 
-The JSON REST transport no longer exists. `kit+https://` and
-`kit+http://` remotes use the Connect transport. Read
+`kit+https://` and `kit+http://` remotes use the Connect transport. Read
 [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) for its wire contract.
 Verifiable sparse-checkout fetch has no Connect equivalent. The S3
 transport carries it (§6.6).
