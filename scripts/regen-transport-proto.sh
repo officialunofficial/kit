@@ -19,16 +19,22 @@ cd "$(dirname "$0")/.."
 # distinguishes a true codegen run.
 refresh() {
     local label="$1" gen_dir="$2" build_glob="$3" marker="$4"
-    local out
+    local out="" candidate
     # Reusing an OUT_DIR updates the marker, not necessarily its directory
     # mtime. Select by marker mtime so an older directory with fresh codegen
     # wins over a newer directory containing stale output.
-    out=$(ls -t $build_glob/$marker 2>/dev/null | head -n 1)
+    # The glob expands here on purpose, so it stays unquoted.
+    # shellcheck disable=SC2086
+    for candidate in $build_glob/"$marker"; do
+        if [ -e "$candidate" ] && { [ -z "$out" ] || [ "$candidate" -nt "$out" ]; }; then
+            out="$candidate"
+        fi
+    done
     if [ -z "${out}" ]; then
         echo "error: no codegen output found for $label under: $build_glob" >&2
         exit 1
     fi
-    out="${out%/$marker}"
+    out="${out%/"$marker"}"
     rm -f "$gen_dir"/*.rs
     mkdir -p "$gen_dir"
     # The owning crate also stages RPC schemas at OUT_DIR's root. Select
