@@ -28,6 +28,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 
 use crate::Error;
 use crate::jcs::{self, Member, Value};
+use crate::store::MAX_ENVELOPE_SIZE;
 use kit_core::Hash;
 
 /// MIME type written into `payloadType` for every kit attestation.
@@ -142,10 +143,19 @@ pub fn attestation_id(envelope_bytes: &[u8]) -> Hash {
 /// Decode a JCS-canonical DSSE envelope produced by [`encode`].
 ///
 /// # Errors
+/// [`Error::EnvelopeTooLarge`] if the input is longer than
+/// [`MAX_ENVELOPE_SIZE`]. The check runs before any allocation.
+///
 /// [`Error::MalformedEnvelope`] if the input does not match the exact
 /// byte shape this crate emits, or if the embedded base64 payload /
 /// signatures fail to decode.
 pub fn decode(bytes: &[u8]) -> Result<Envelope, Error> {
+    if bytes.len() > MAX_ENVELOPE_SIZE {
+        return Err(Error::EnvelopeTooLarge {
+            len: bytes.len(),
+            max: MAX_ENVELOPE_SIZE,
+        });
+    }
     let mut p = Parser { src: bytes, pos: 0 };
     p.expect(b"{\"payload\":")?;
     let payload_b64 = p.take_string()?;
@@ -248,6 +258,16 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_rejects_input_over_the_size_cap() {
+        let bytes = vec![b' '; MAX_ENVELOPE_SIZE + 1];
+        assert!(matches!(
+            decode(&bytes),
+            Err(Error::EnvelopeTooLarge { len, max })
+                if len == MAX_ENVELOPE_SIZE + 1 && max == MAX_ENVELOPE_SIZE
+        ));
+    }
 
     #[test]
     fn pae_dsse_v1_reference_encoding() {
