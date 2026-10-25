@@ -116,4 +116,38 @@ run_install later-tag v0.3.0 fail
 # A tag with regex or path characters never reaches cosign.
 run_install bad-tag 'v0.5.1/../v0.4.0' fail
 
+# Version order follows semver. A pre-release is below its release, so
+# installing the release over a recorded pre-release is no downgrade,
+# and installing a pre-release over a recorded release is one.
+check_downgrade() {
+    local name=$1 recorded=$2 tag=$3 expect=$4
+    local state="$work/state-$name" prefix="$work/prefix-$name" status=0
+    mkdir -p "$state" "$prefix"
+    chmod 0755 "$prefix"
+    printf '%s\n' "$recorded" >"$state/installed-tag"
+    PATH="$work/bin:$PATH" FAKE_RELEASES="$work/releases" \
+        KIT_INSTALL_DIR="$prefix" KIT_STATE_DIR="$state" \
+        sh "$repo_root/install.sh" --version "$tag" >"$work/$name.out" 2>&1 || status=$?
+    local warned=no
+    grep -q 'DOWNGRADE' "$work/$name.out" && warned=yes
+    if [ "$warned" = "$expect" ] && [ "$status" -eq 0 ]; then
+        echo "ok: $name"
+    else
+        echo "FAIL: $name (status $status, downgrade warning $warned, expected $expect)" >&2
+        cat "$work/$name.out" >&2
+        fails=1
+    fi
+}
+
+make_release v1.0.0 v1.0.0
+make_release v1.0.0-rc.1 v1.0.0-rc.1
+make_release v1.0.0-rc.2 v1.0.0-rc.2
+make_release v1.0.0-rc.10 v1.0.0-rc.10
+make_release v0.10.0 v0.10.0
+check_downgrade release-over-prerelease v1.0.0-rc.1 v1.0.0 no
+check_downgrade prerelease-over-release v1.0.0 v1.0.0-rc.1 yes
+check_downgrade rc2-over-rc10 v1.0.0-rc.10 v1.0.0-rc.2 yes
+check_downgrade rc10-over-rc2 v1.0.0-rc.2 v1.0.0-rc.10 no
+check_downgrade minor-ten-over-nine v0.9.0 v0.10.0 no
+
 exit "$fails"

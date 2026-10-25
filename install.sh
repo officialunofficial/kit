@@ -189,12 +189,48 @@ esac
 printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
   || die "invalid release tag '$tag' (expected vMAJOR.MINOR.PATCH)"
 
+# ---- semver comparison ----
+#
+# Print -1, 0 or 1 when the bare version $1 is lower than, equal to or
+# higher than $2. A pre-release orders below its release. Numeric
+# pre-release identifiers order below alphanumeric ones. The rules match
+# cmp_versions in the self-updater.
+semver_cmp() {
+  awk -v a="$1" -v b="$2" '
+    function numcmp(x, y) {
+      sub(/^0+/, "", x); sub(/^0+/, "", y)
+      if (length(x) != length(y)) return length(x) < length(y) ? -1 : 1
+      return x < y ? -1 : (x > y ? 1 : 0)
+    }
+    function isnum(x) { return x ~ /^[0-9]+$/ }
+    function cmp(a, b,    ac, bc, ap, bp, i, n, m, r, as, bs, ai, bi) {
+      ap = ""; bp = ""
+      i = index(a, "-"); if (i) { ap = substr(a, i + 1); a = substr(a, 1, i - 1) }
+      i = index(b, "-"); if (i) { bp = substr(b, i + 1); b = substr(b, 1, i - 1) }
+      split(a, ac, "."); split(b, bc, ".")
+      for (i = 1; i <= 3; i++) { r = numcmp(ac[i], bc[i]); if (r) return r }
+      if (ap == "" && bp == "") return 0
+      if (ap == "") return 1
+      if (bp == "") return -1
+      n = split(ap, as, "."); m = split(bp, bs, ".")
+      for (i = 1; i <= n && i <= m; i++) {
+        ai = as[i]; bi = bs[i]
+        if (isnum(ai) && isnum(bi)) r = numcmp(ai, bi)
+        else if (isnum(ai)) r = -1
+        else if (isnum(bi)) r = 1
+        else r = ai < bi ? -1 : (ai > bi ? 1 : 0)
+        if (r) return r
+      }
+      return n < m ? -1 : (n > m ? 1 : 0)
+    }
+    BEGIN { print cmp(a, b) }
+  '
+}
+
 # ---- silent-downgrade guard ----
 #
 # We compare the previously-installed tag against the tag we're about
-# to install. POSIX sh has no built-in semver compare, so we use sort
-# -V (GNU/BSD coreutils both ship it). If sort -V is missing we just
-# warn and continue.
+# to install with semver_cmp.
 #
 # Two records are consulted:
 #   1. $state_dir/installed-tag — global per-user record, survives
@@ -217,20 +253,14 @@ prev_tag_global="$(read_state_file "$state_file")"
 prev_tag_local="$(read_state_file "$bin_state_file")"
 
 # Pick the higher of the two so a missing/empty file never lets a
-# downgrade slip through. sort -V handles the comparison; if either is
-# empty we just use the non-empty one.
+# downgrade slip through. If either is empty, use the non-empty one.
 if [ -n "$prev_tag_global" ] && [ -n "$prev_tag_local" ]; then
   prev_g_bare="${prev_tag_global#v}"
   prev_l_bare="${prev_tag_local#v}"
-  if command -v sort >/dev/null 2>&1; then
-    prev_higher="$(printf '%s\n%s\n' "$prev_g_bare" "$prev_l_bare" | sort -V | tail -n1)"
-    if [ "$prev_higher" = "$prev_l_bare" ]; then
-      prev_tag="$prev_tag_local"
-    else
-      prev_tag="$prev_tag_global"
-    fi
-  else
+  if [ "$(semver_cmp "$prev_g_bare" "$prev_l_bare")" = "1" ]; then
     prev_tag="$prev_tag_global"
+  else
+    prev_tag="$prev_tag_local"
   fi
 elif [ -n "$prev_tag_global" ]; then
   prev_tag="$prev_tag_global"
@@ -239,18 +269,12 @@ else
 fi
 
 if [ -n "$prev_tag" ] && [ "$prev_tag" != "$tag" ]; then
-  if command -v sort >/dev/null 2>&1; then
-    # Strip leading 'v' for sort -V.
-    prev_bare="${prev_tag#v}"
-    new_bare="${bare}"
-    higher="$(printf '%s\n%s\n' "$prev_bare" "$new_bare" | sort -V | tail -n1)"
-    if [ "$higher" = "$prev_bare" ] && [ "$prev_bare" != "$new_bare" ]; then
-      warn "you are installing $tag but $prev_tag is already recorded — this is a DOWNGRADE."
-      if [ "$resolved_from_latest" = "1" ]; then
-        die "refusing to silently downgrade from $prev_tag to $tag via 'latest'. Pin --version $prev_tag or newer, or delete $state_file and $bin_state_file."
-      else
-        warn "proceeding because --version was passed explicitly."
-      fi
+  if [ "$(semver_cmp "${prev_tag#v}" "$bare")" = "1" ]; then
+    warn "you are installing $tag but $prev_tag is already recorded — this is a DOWNGRADE."
+    if [ "$resolved_from_latest" = "1" ]; then
+      die "refusing to silently downgrade from $prev_tag to $tag via 'latest'. Pin --version $prev_tag or newer, or delete $state_file and $bin_state_file."
+    else
+      warn "proceeding because --version was passed explicitly."
     fi
   fi
 fi
