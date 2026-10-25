@@ -39,13 +39,13 @@ harness = false
 # The library carries the sample types and the timing helpers.
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
+serde_json = "=1.0.154"
 
 [dev-dependencies]
 criterion = { version = "=0.8.2", default-features = false, features = ["plotters", "cargo_bench_support", "html_reports"] }
 kit-core = { path = "../crates/kit-core" }
 sha1 = "=0.11.0"
-sha2 = "=0.11.0"
+sha2 = "=0.11.1"
 blake2 = "=0.11.0"
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc"] }
 k256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "std"] }

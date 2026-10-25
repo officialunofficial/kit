@@ -95,7 +95,7 @@ tokio = { version = "=1.54.1", default-features = false, features = [
 # is `kit mcp --http <addr>` (SEP-2567 dropped sessions for 2026-07-28
 # traffic). Off by default so the default `kit-storage` build
 # compiles no MCP HTTP server. See `commands/mcp_v2.rs`.
-rmcp = { version = "=3.4.1", default-features = false, features = [
+rmcp = { version = "=3.6.0", default-features = false, features = [
     "server",
     "transport-io",
     "transport-streamable-http-server",
@@ -104,7 +104,7 @@ rmcp = { version = "=3.4.1", default-features = false, features = [
 # (examples/servers/src/counter_hyper_streamable_http.rs) rather than pulling
 # in axum: `StreamableHttpService` implements `tower::Service` directly, so
 # raw hyper is all the glue this needs.
-hyper = { version = "=1.11.1", features = ["server", "http1"], optional = true }
+hyper = { version = "=1.12.0", features = ["server", "http1"], optional = true }
 hyper-util = { version = "=0.1.20", features = ["tokio", "server-auto", "service"], optional = true }
 # Constant-time bearer-token comparison for `kit mcp --http` —
 # already resolved transitively (ed25519-dalek pulls it), so this is not a
@@ -140,7 +140,7 @@ thiserror = "=2.0.21"
 # JSON-RPC parse/emit for the `kit mcp` stdio server. Zero new supply
 # chain: serde_json is already in this binary's normal dependency graph
 # via kit-attest (JCS tests) and the http/s3 transports (reqwest).
-serde_json = "=1.0.151"
+serde_json = "=1.0.154"
 serde = { version = "=1.0.229", features = ["derive"] }
 # `kit self update` (commands/self_update.rs): release download over
 # rustls, sha256 sidecar check, and single-member tar.gz
@@ -151,7 +151,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 # crate's Cargo.toml and SPEC-TRANSPORT-CONNECT.md §7.3) — the two
 # transports are independent and don't need to agree.
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "blocking", "json"] }
-sha2 = "=0.11.0"
+sha2 = "=0.11.1"
 # `kit grant`/`epoch`/`visibility` (grants/): base64url and hex for imported
 # wallet and WebAuthn signatures, and secp256k1 point decompression to derive
 # the 0x owner address of a keystore key. All three are already in the graph
@@ -167,7 +167,7 @@ tar = "=0.4.46"
 getrandom = { version = "=0.4.3", features = ["sys_rng"] }
 # Wraps the raw 32-byte secrets keygen pulls out of the RNG until they
 # land inside the algorithm signer (which has its own scrubbing).
-zeroize = "=1.9.0"
+zeroize = "=1.9.1"
 
 # POSIX uid + O_NOFOLLOW for keygen.rs's raw-32 load/save paths
 # (secp256k1, p256). The Ed25519 path uses kit_core::sign which has
@@ -179,8 +179,8 @@ zeroize = "=1.9.0"
 # stores; async-signal-safe) so this crate stays
 # `#![deny(unsafe_code)]` — see signal.rs.
 [target.'cfg(unix)'.dependencies]
-libc = "=0.2.189"
-signal-hook = { version = "=0.4.4", default-features = false }
+libc = "=0.2.191"
+signal-hook = { version = "=0.4.5", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 kit-keystore = { version = "0.5", path = "../kit-keystore", features = ["backend-macos-keychain"] }
@@ -208,13 +208,13 @@ p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "st
 # Snapshot testing for CLI golden-output fixtures.
 # `filters` feature enables regex-based redaction so version-string
 # bumps don't churn snapshots.
-insta = { version = "=1.48.0", features = ["filters"] }
+insta = { version = "=1.49.0", features = ["filters"] }
 # Stateful end-to-end invariant suite (tests/state_machine.rs): proptest
 # generates random op sequences driven through the real `kit` binary,
 # asserting a repo-invariant battery after each op. Same major as
 # kit-core's dev-dep. Bounded by default (32 cases); the nightly job
 # raises PROPTEST_CASES under the `state-machine` nextest profile.
-proptest = "=1.11.0"
+proptest = "=1.12.0"
 # tests/remote_dispatch_connect.rs: drives push_all/pull_all
 # against a REAL in-process kit.transport.v1.TransportService server
 # (connectrpc's hyper server, memory-backed) rather than a mockito stub —
@@ -226,7 +226,7 @@ connectrpc = { version = "=0.9.1", default-features = false, features = ["server
 http = "=1.5.0"
 tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "io-util"] }
 # Real TLS proxy for the Connect CLI regression matrix.
-tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
 futures = "=0.3.34"
 # tests/cli_transcripts.rs: declarative `.trycmd` transcript tests for
 # simple, deterministic CLI output (error messages, not full help text —

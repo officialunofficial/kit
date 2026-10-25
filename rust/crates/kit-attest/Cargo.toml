@@ -59,7 +59,7 @@ base64 = "=0.23.1"
 thiserror = "=2.0.21"
 # Used by the secp256k1/p256 signers to scrub raw 32-byte secrets
 # from stack memory before they leave the constructor frame.
-zeroize = { version = "=1.9.0", features = ["derive"] }
+zeroize = { version = "=1.9.1", features = ["derive"] }
 # `serde` + `serde_json` are used ONLY on the parsing side (envelope decode +
 # external-signer response). The canonical JCS encoder is hand-rolled per
 # RFC 8785 — `serde_json::to_string` does NOT satisfy JCS sort/escape rules.
@@ -70,7 +70,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 # 1.7976931348623158e308) overflow to infinity and are wrongly refused.
 # Cargo feature unification turns it on for every serde_json user in a
 # build that includes kit-attest (parsing only: no API change).
-serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
+serde_json = { version = "=1.0.154", features = ["float_roundtrip"] }
 # Atomic-rename writes for `store::save`; mirrors kit-core::store.
 tempfile = "=3.27.0"
 # Re-used directly so signer_repo_key + verify can talk to the SAME dalek
@@ -92,18 +92,18 @@ p256 = { version = "=0.14.0", optional = true, default-features = false, feature
 # emits a sha256 digest alongside blake3 (SPEC-ATTESTATIONS §4.2) so
 # cosign / `gh attestation verify` / the SLSA verifier can read it,
 # regardless of which signing algorithms are compiled in.
-sha2 = { version = "=0.11.0", default-features = false }
+sha2 = { version = "=0.11.1", default-features = false }
 # Keccak-256 (the ORIGINAL Keccak, `0x01` padding) for the `grants`
 # feature's address derivation and EIP-191 digests (SPEC-WRITE-GRANTS
 # §4, §4.1). Same `digest 0.11` line as `sha2`; its only other
 # dependency, `keccak 0.2`, is already in the graph via ed25519-dalek.
 # Never use `sha3::Sha3_256` for these values.
-sha3 = { version = "=0.11.0", default-features = false, optional = true }
+sha3 = { version = "=0.12.0", default-features = false, optional = true }
 
 [dev-dependencies]
 hex = "=0.4.3"
 # Roundtrip property tests over generated grants (`grant` module).
-proptest = "=1.11.0"
+proptest = "=1.12.0"
 # Tests that hand-build signing keys need dalek unconditionally, so pull
 # it in as a dev-dep separate from the feature-gated runtime dep.
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc"] }
