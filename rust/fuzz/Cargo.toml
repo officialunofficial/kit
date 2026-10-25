@@ -45,6 +45,7 @@ kit-keystore = { path = "../crates/kit-keystore", features = ["fuzzing"] }
 kit-rpc = { path = "../crates/kit-rpc", features = ["arbitrary"] }
 kit-serve = { path = "../crates/kit-serve" }
 kit-storage = { path = "../crates/kit-storage" }
+kit-transport-ssh = { path = "../crates/kit-transport-ssh" }
 tempfile = "3"
 
 # libfuzzer-sys is gated on the `libfuzzer` feature so `cargo test`
@@ -344,6 +345,30 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "chunked_blob_build"
 path = "fuzz_targets/chunked_blob_build.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "trust_roots_parse"
+path = "fuzz_targets/trust_roots_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "ssh_url_parse"
+path = "fuzz_targets/ssh_url_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "grant_fields_parse"
+path = "fuzz_targets/grant_fields_parse.rs"
 test = false
 doc = false
 bench = false

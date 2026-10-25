@@ -10,7 +10,7 @@ it in.
 `delta`, `pack`, `tree`, `merkle_packlist`, `merkle_proof`,
 `software_key_record`, `rpc_decode`, `git_commit_parse`, `git_tag_parse`,
 `git_tree_parse`, `config_parse`, `stash_list`, `bridge_map`,
-`envelope_decode`, `ref_wire_decode`, `index_decode`, `history_order_decode`, `conflict_state_decode`, `sparse_wire_decode`, `git_object_parse`, `repo_identity_parse`, `commitment_parse`, `ignore_parse`, `grant_parse`, `epoch_visibility_parse`, `pack_cursor_decode`, `chunked_blob_build`.
+`envelope_decode`, `ref_wire_decode`, `index_decode`, `history_order_decode`, `conflict_state_decode`, `sparse_wire_decode`, `git_object_parse`, `repo_identity_parse`, `commitment_parse`, `ignore_parse`, `grant_parse`, `epoch_visibility_parse`, `pack_cursor_decode`, `chunked_blob_build`, `trust_roots_parse`, `ssh_url_parse`, `grant_fields_parse`.
 
 ## Two execution paths
 

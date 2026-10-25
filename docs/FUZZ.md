@@ -55,6 +55,9 @@ from recurring.
 | `fuzz_targets/bridge_map.rs` | The `kit-git-bridge` map and ref-state loaders (never panic on any file content) |
 | `fuzz_targets/pack_cursor_decode.rs` | `pack::window::WindowCursor::from_bytes` (an accepted cursor re-encodes to exactly itself) |
 | `fuzz_targets/chunked_blob_build.rs` | `worktree::chunked_blob_from_bytes` (the manifest records the input length) |
+| `fuzz_targets/trust_roots_parse.rs` | `trust_roots::parse` / `trust_roots::hex_decode` (an accepted file serializes to text that parses back to the same entries; every accepted key has a length that fits its kind) |
+| `fuzz_targets/ssh_url_parse.rs` | `kit_transport_ssh::parse_kit_ssh_url` / `validate_ssh_path` (an accepted target has a user, a host and a valid path, and no control byte) |
+| `fuzz_targets/grant_fields_parse.rs` | The `kit_attest::grant::text` field parsers, `Capabilities::parse`, `RefFlags::parse`, `RefPattern::parse`, `RefScopes::parse`, `AcceptedSchemes::from_tokens`, `is_loopback_origin` and `Grant::parse_with_id` (an accepted value re-encodes to exactly the input; an accepted grant id is the hash of the input) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in
@@ -69,6 +72,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | ------ | --------------------- |
 | `kit_attest::envelope::decode` | `envelope_decode` |
 | `kit_attest::grant` `Grant::parse`, `SignedHeader::parse`, `RepoScope` and `RefScope` `parse`, capability and visibility field `parse` | `grant_parse` |
+| `kit_attest::grant::text` `split_fields`, `decimal_u64`, `decimal_millis`, `hex32`, `audiences`; `Grant::parse_with_id`; `Capabilities::parse`; `RefFlags::parse`, `RefPattern::parse`, `RefScopes::parse`; `AcceptedSchemes::from_tokens`; `is_loopback_origin` | `grant_fields_parse` |
 | `kit_attest::grant` `EpochStatement::parse`, `VisibilityStatement::parse`, `UrlTokenStatement::parse`, `TokenTarget::parse`, `verify_url_token` | `epoch_visibility_parse` |
 | `kit_attest::grant::webauthn` `WebAuthnAssertion::parse` | `epoch_visibility_parse` |
 | `kit_attest::webauthn::decode_pae_b64_standard` | None. It is one call to the audited base64 decoder, and it has no parsing code of its own. |
@@ -96,9 +100,9 @@ Each one has a fuzz target, or a written reason why it has none.
 | `kit_storage::config::parse_pipe_list` | None. It splits a user-written config value on `\|`. It does no other parsing. Unit tests cover it. |
 | `kit_storage::grants::parse_relying_parties`, `grants::spec::parse_ttl`, `grants::cli::parse_timeout`, `grants::cli::parse_namespace` | None. They read command-line text that the user types, not bytes from a peer or a repository. Unit tests cover them. |
 | `kit_storage::commands::attest_factory::parse_algorithm` | None. It matches a command-line word against a fixed list. Unit tests cover it. |
-| `kit_storage::commands::trust_roots` `parse`, `hex_decode` | None. They read a trust file that the user owns. Unit tests cover them. |
+| `kit_storage::commands::trust_roots` `parse`, `hex_decode` | `trust_roots_parse` |
 | `kit_storage::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
-| `kit_transport_ssh::url::parse_kit_ssh_url` | None. It reads a URL that the user types. Unit tests cover it. |
+| `kit_transport_ssh::url::parse_kit_ssh_url`, `validate_ssh_path` | `ssh_url_parse` |
 | `kit_transport_s3::sigv4::parse_host` | None. It strips a scheme prefix from a configured endpoint. It does no other parsing. Unit tests cover it. |
 | `kit_serve::serve_session` wire handling | `ssh_session`, `rpc_decode` |
 | `kit-client` connect stream frame decoder (private) | None. It is not a public function. Unit tests in `connect/tests.rs` cover it. |

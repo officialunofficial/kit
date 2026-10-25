@@ -1551,6 +1551,117 @@ pub fn chunked_blob_build_one_iteration(input: &[u8]) {
     assert_eq!(manifest.chunks.is_empty(), input.is_empty());
 }
 
+/// Trust-roots file text (`trust_roots_parse`): `parse` never panics. An
+/// accepted file serializes to text that parses back to the same entries,
+/// and every accepted entry has valid hex and a key length that fits its
+/// kind. `hex_decode` never panics, and an accepted string round trips.
+pub fn trust_roots_parse_one_iteration(input: &[u8]) {
+    use kit_storage::commands::trust_roots::{hex_decode, parse, serialize};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    if let Some(bytes) = hex_decode(text) {
+        assert_eq!(
+            kit_core::hash::to_hex_bytes(&bytes),
+            text.to_ascii_lowercase(),
+            "accepted hex must round trip"
+        );
+    }
+    if let Ok(entries) = parse(text) {
+        let again = parse(&serialize(&entries)).expect("accepted entries must re-parse");
+        assert_eq!(entries, again, "accepted trust roots must round trip");
+        for e in &entries {
+            let key = hex_decode(&e.pubkey_hex).expect("accepted key is hex");
+            assert!(!e.keyid.is_empty());
+            match e.kind.as_str() {
+                "ed25519" => assert_eq!(key.len(), 32),
+                _ => assert!(key.len() == 33 || key.len() == 65),
+            }
+        }
+    }
+}
+
+/// `kit+ssh://` URL text (`ssh_url_parse`): `parse_kit_ssh_url` and
+/// `validate_ssh_path` never panic. An accepted target has a non-empty user
+/// and host without control bytes, and a path that `validate_ssh_path`
+/// accepts.
+pub fn ssh_url_parse_one_iteration(input: &[u8]) {
+    use kit_transport_ssh::{KIT_SSH_PREFIX, parse_kit_ssh_url, validate_ssh_path};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let _ = validate_ssh_path(text);
+    if let Ok(target) = parse_kit_ssh_url(text) {
+        assert!(text.starts_with(KIT_SSH_PREFIX));
+        assert!(!target.user.is_empty() && !target.host.is_empty());
+        for part in [&target.user, &target.host, &target.path] {
+            assert!(
+                !part.bytes().any(|b| b == 0 || b == b'\r' || b == b'\n'),
+                "accepted target must hold no control byte"
+            );
+        }
+        assert!(validate_ssh_path(&target.path).is_ok());
+    }
+}
+
+/// The field-level grant parsers (`grant_fields_parse`): the `text` helpers,
+/// `Capabilities`, `RefFlags`, `RefPattern`, `RefScopes`,
+/// `AcceptedSchemes::from_tokens`, `is_loopback_origin` and
+/// `Grant::parse_with_id` never panic. Every accepted value re-encodes to
+/// exactly the input, and an accepted grant id is the hash of the input.
+pub fn grant_fields_parse_one_iteration(input: &[u8]) {
+    use kit_attest::grant::text::{
+        audiences, decimal_millis, decimal_u64, encode_audiences, encode_hex32, encode_millis,
+        hex32, join_fields, split_fields,
+    };
+    use kit_attest::grant::{
+        AcceptedSchemes, Capabilities, Grant, RefFlags, RefPattern, RefScopes, is_loopback_origin,
+    };
+    let input = &input[..input.len().min(MAX_INPUT)];
+    for n in 1..=4 {
+        if let Ok(fields) = split_fields(input, n) {
+            assert_eq!(
+                join_fields(&fields).expect("accepted fields must join"),
+                input,
+                "accepted fields must join back byte for byte"
+            );
+        }
+    }
+    if let Ok((grant, id)) = Grant::parse_with_id(input) {
+        assert_eq!(id, kit_core::hash::hash(input));
+        assert_eq!(grant.id().ok(), Some(id));
+    }
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    if let Ok(v) = decimal_u64(text) {
+        assert_eq!(v.to_string(), text);
+    }
+    if let Ok(v) = decimal_millis(text) {
+        assert_eq!(encode_millis(v).ok().as_deref(), Some(text));
+    }
+    if let Ok(v) = hex32(text) {
+        assert_eq!(encode_hex32(&v), text);
+    }
+    if let Ok(v) = audiences(text) {
+        assert_eq!(encode_audiences(&v).ok().as_deref(), Some(text));
+    }
+    let _ = Capabilities::parse(text);
+    if let Ok(v) = RefFlags::parse(text) {
+        assert_eq!(v.to_string(), text);
+    }
+    if let Ok(v) = RefPattern::parse(text) {
+        assert_eq!(v.to_string(), text);
+    }
+    if let Ok(v) = RefScopes::parse(text) {
+        assert_eq!(v.to_string(), text);
+    }
+    let _ = AcceptedSchemes::from_tokens(text.split(','));
+    let _ = is_loopback_origin(text);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1757,6 +1868,64 @@ mod tests {
         .unwrap();
         for case in [&b""[..], b"\x00", &[0xFF; 64][..], &valid[..]] {
             run_one(case, stash_list_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_trust_roots_parse() {
+        run_iterated_unit(trust_roots_parse_one_iteration).unwrap();
+        let hex = "aa".repeat(32);
+        let valid = format!(
+            "[[trust_root]]\nkeyid = \"ed25519:{hex}\"\nkind = \"ed25519\"\npubkey_hex = \"{hex}\"\n"
+        );
+        let junk = format!("{valid}junk\n");
+        for case in [
+            valid.as_bytes(),
+            junk.as_bytes(),
+            b"",
+            b"[[trust_root]]\n",
+            b"zz",
+            &[0xFF; 64][..],
+        ] {
+            run_one(case, trust_roots_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_ssh_url_parse() {
+        run_iterated_unit(ssh_url_parse_one_iteration).unwrap();
+        for case in [
+            &b"kit+ssh://git@example.com/repo"[..],
+            b"kit+ssh://git@example.com:2222/a/b",
+            b"kit+ssh://example.com/repo",
+            b"kit+ssh://git@example.com/../x",
+            b"kit+ssh://git@example.com/a\nb",
+            b"kit+ssh://",
+            b"",
+            &[0xFF; 64][..],
+        ] {
+            run_one(case, ssh_url_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_grant_fields_parse() {
+        run_iterated_unit(grant_fields_parse_one_iteration).unwrap();
+        for case in [
+            &b"cu"[..],
+            b"uc",
+            b"refs/heads/main=cu;refs/heads/wip/*=cufd",
+            b"read,write",
+            b"write,read",
+            b"https://git.example.com,https://git.example.org",
+            b"1790000000000",
+            b"01",
+            b"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            b"a\nb\nc",
+            b"",
+            &[0xFF; 64][..],
+        ] {
+            run_one(case, grant_fields_parse_one_iteration).unwrap();
         }
     }
 

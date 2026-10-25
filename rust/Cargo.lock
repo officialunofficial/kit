@@ -2975,6 +2975,7 @@ dependencies = [
  "kit-rpc",
  "kit-serve",
  "kit-storage",
+ "kit-transport-ssh",
  "libfuzzer-sys",
  "tempfile",
 ]
