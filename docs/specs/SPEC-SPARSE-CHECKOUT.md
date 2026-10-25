@@ -11,7 +11,7 @@ audience: sparse-checkout transport and cache implementers
 
 Sparse protocol v2 carries complete canonical Tree metadata, without unselected
 file payloads. Only the current witness format is supported. Unsupported formats
-MUST be rejected; no compatibility decoder or migration is provided.
+MUST be rejected.
 
 The caller MUST obtain the expected Tree ID from an authenticated commit, remix,
 or parent Tree. Verification MUST compare that expected ID with both the
@@ -77,7 +77,7 @@ Cache files are disposable `.kit/sparse/<tree-hex>.witness` files containing
 current Tree metadata. Readers MUST validate the full witness and compare both
 Tree ID and filter commitment with caller expectations on every hit. Filename
 identity alone is insufficient. Invalid cache entries are misses and may be
-overwritten after a verified rebuild. No older cache paths are read or migrated.
+overwritten after a verified rebuild.
 
 ## 5. Transport and fallback
 

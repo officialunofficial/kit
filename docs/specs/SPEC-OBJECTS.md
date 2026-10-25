@@ -148,8 +148,7 @@ when ordering is canonical.
 0x04    executable   regular file, executable bit set (POSIX 0o755)
 ```
 
-Mode `0x04` is new in v1 (previously absent; its absence was a silent
-data-loss bug for any POSIX workflow). Writers MUST emit `0x04` for any
+Mode `0x04` marks an executable file. Writers MUST emit `0x04` for any
 file with the POSIX executable bit set at staging time. Non-POSIX hosts
 MAY round-trip `0x04` bytes opaquely.
 
@@ -190,15 +189,9 @@ repeat parent_count:
 [64 bytes signature]                      Ed25519, see SPEC-SIGNING
 ```
 
-Differences from kit's legacy (pre-v1) commit encoding:
-- `author_mid: u64` → `Identity` tagged union (§9).
-- `timestamp: u32` → `u64`. Avoids 2106 overflow.
-- Relative field order of `signer` and `message` is preserved.
-
 Message bytes are UTF-8 **by convention**: writers SHOULD emit UTF-8,
-but readers MUST NOT reject non-UTF-8 message bytes (matching every
-existing implementation; load-bearing for histories imported from
-systems with legacy encodings).
+but readers MUST NOT reject non-UTF-8 message bytes (load-bearing for
+histories imported from systems with non-UTF-8 encodings).
 
 ### 5.1 `message_hash`/`content_digest`
 
@@ -458,7 +451,7 @@ This prevents trivial amplification and prologue-replay attacks.
 
 | Version | Released | Changes                                                          |
 |---------|----------|------------------------------------------------------------------|
-| `0x01`  | v1.0     | First kit format. See §2 for prologue. No v0 compatibility.     |
+| `0x01`  | v1.0     | First kit format. See §2 for prologue.                          |
 
 `schema_version` stays at `0x01`. Adding the `tag` object type (`0x07`)
 is an **additive object-type allocation within v1**: it introduces
@@ -468,13 +461,10 @@ vector is unaffected. A version bump is reserved for changes that alter
 an existing type's layout.
 
 Merkle object addressing (`Tree`/`ChunkedBlob` keyed by BMT root,
-[SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md)) likewise leaves every
-type's **bytes** unchanged &mdash; only the bytes→id function changes &mdash; so
-`schema_version` is NOT bumped. The break it does introduce (every
-`Tree`/`ChunkedBlob` and thus every `Commit` re-addresses) is guarded
-instead by the mandatory `.kit/format` = `bmt-v1` repository marker
-(§10): a pre-merkle store has no marker and is refused at open. Pre-1.0,
-no migration is provided.
+[SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md)) leaves every
+type's **bytes** unchanged and does not bump `schema_version`.
+The mandatory `.kit/format` = `bmt-v1` repository marker (§10) guards
+the addressing scheme. A store without the marker is refused at open.
 
 Future versions MUST increment `schema_version` and MUST preserve the
 `"MKT1"` magic prefix. The magic byte string is normative &mdash; readers are

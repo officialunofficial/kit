@@ -53,23 +53,22 @@ convention and use ad hoc status strings. That is a known,
 non-urgent inconsistency &mdash; retrofitting them is left as a documentation
 cleanup, not a normative requirement of this section.
 
-### 2.2 Versioning and migration shims
+### 2.2 Versioning
 
-Whether a format change needs a migration shim (dual-version read
-support, a `FORMAT_VERSION_V1`-style fallback) follows directly from
-§2.1's bindingness axis:
+A reader accepts one version of each format. It rejects every other
+version. A format change bumps the version and does not add a second read
+path. This rule follows from §2.1's bindingness axis:
 
-- **`normative`** documents describe compatibility or durable-state contracts,
-  including authoritative local-only state. A version bump MUST provide a
-  migration path or explicitly document a deliberate breaking change.
+- **`normative`** documents describe durable-state contracts, including
+  authoritative local-only state. A version bump replaces the old
+  version.
 - **`advisory`** documents may describe disposable, reconstructible caches.
   Whether state can be rebuilt is determined by its contents and source of
   truth, not whether it crosses a network. Staged paths, selected object hashes,
   mode choices and deletion tombstones in `.kit/index` are authoritative:
   neither HEAD nor current working files can recreate them. SPEC-INDEX therefore
-  rejects unsupported versions without rewriting those selections. The current
-  pre-release index format deliberately provides no legacy reader or migration
-  shim; only stat observations may be discarded.
+  rejects unsupported versions without rewriting those selections. Only stat
+  observations may be discarded.
 
 ## 3. Wire-encoding notation
 
@@ -91,11 +90,11 @@ Where a `SPEC-*.md` document specifies byte layout:
 kit's signing and hashing domain separators (for example, `kit.tag\0`,
 BLS namespace strings like `dsse/v1`) are permanent, literal byte
 strings baked into the signing/hashing contract &mdash; not a version field
-and not a compatibility-era label that gets bumped in place. A
+and not a label that gets bumped in place. A
 distinct new application of an existing key MUST mint its own,
 distinctly-named domain/namespace constant rather than repurpose an
-existing one for a second meaning; there is no in-place migration path
-for a domain separator's bytes.
+existing one for a second meaning. A domain separator's bytes never
+change.
 
 Every domain separator, magic and predicate URI MUST have a value that
 no other one has. The reference implementation checks this: a test scans

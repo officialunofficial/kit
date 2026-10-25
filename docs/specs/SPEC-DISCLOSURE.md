@@ -120,8 +120,7 @@ The whole bundle MUST be `<= MAX_BUNDLE_BYTES` (64 MiB), checked before
 any decode work. Trailing bytes after the declared body MUST be
 rejected. `version != 2`, an unrecognized `payload_kind`, and an
 unrecognized `mode` byte are typed decode errors, never a bare "invalid".
-A version byte of `1` is a typed `UnsupportedBundleVersion(1)` error;
-there is no compatibility decoder.
+A version byte of `1` is a typed `UnsupportedBundleVersion(1)` error.
 
 `Step` and `ChunkHdr`/`LenProof`'s `proof` fields decode with
 [`merkle::Proof::decode`](../../rust/crates/kit-core/src/merkle.rs)'s
@@ -568,8 +567,7 @@ reader fails for a different reason and only the 1,000,000 cap rejects it.
 Each reject sidecar names the exact reason in §8.2.
 
 Document version 4 adds MKDS wire version 1; MKDP wire version 2 and its
-existing vectors remain unchanged. No migration or compatibility reader
-is needed for the additive container.
+existing vectors remain unchanged.
 
 ## 9. Later (out of scope for this document)
 

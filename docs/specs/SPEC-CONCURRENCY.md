@@ -159,8 +159,8 @@ Guarded internal ref primitives MUST NOT reacquire the held mutation lock.
 Pending intent retains both its old and target ref as GC roots, even in a build
 without `history-mmr`; all raw mutation paths reject stepping over that intent.
 The exact durable state machine and generation semantics are
-SPEC-HISTORY-PROOF §4. Legacy event-journal APIs remain explicit low-level
-interfaces and do not establish first-parent ancestry.
+SPEC-HISTORY-PROOF §4. The low-level event-journal APIs do not establish first-parent
+ancestry.
 
 ### 3.4 Object refresh versus local gc
 

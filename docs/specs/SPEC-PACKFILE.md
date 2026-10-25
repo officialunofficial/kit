@@ -335,17 +335,13 @@ independently at decode time; it is not folded into `MAX_TOTAL_PAYLOAD`
 or `entry_count`.
 
 **The per-pack cap is a format choice, not a transport ceiling.**
-Earlier versions of this section justified the 4 GiB figure by the
-5 GiB single-`PUT` limit of S3-compatible stores, and flagged multipart
-upload as a future-version candidate. That framing is
-stale: S3 multipart upload shipped without a `version`
-bump, because it turned out to be a purely transport-layer concern
+S3 multipart upload is a purely transport-layer concern
 &mdash; `CreateMultipartUpload`/`UploadPart` against each backend's own
 single-`PUT` ceiling, resolved entirely inside the transport
-implementations, never touching this spec. The 4 GiB figure is simply
-the bound this version chose to keep pack construction and
-verification bounded in memory and time; it is not derived from, and
-no longer needs to track, any transport's own object-size limits.
+implementations, never touching this spec. The 4 GiB figure is the
+bound this version chose to keep pack construction and
+verification bounded in memory and time; it does not track any
+transport's own object-size limits.
 
 **A push whose payload exceeds one pack's cap is not blocked &mdash; it
 splits.** `remote_dispatch::build_and_upload_packs` seals
@@ -523,7 +519,7 @@ parsed). The check ordering means a corrupt trailer surfaces as
 
 ---
 
-## 9. Backward compatibility rule
+## 9. Format versioning rule
 
 kit v1 is the first version. The format rule going forward is:
 

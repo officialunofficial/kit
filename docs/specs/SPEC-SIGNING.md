@@ -396,14 +396,12 @@ Ed25519 roles in the wider kit ecosystem:
   protocol itself defines for public-key authentication (RFC 4252
   §7), entirely outside kit's control.
 
-**Correction:** an earlier version of this section claimed "OpenSSH
-8.0+ accepts the same raw Ed25519 seed as its `id_ed25519` private
-key." This is not accurate: OpenSSH's private-key files use its own
-`openssh-key-v1` container format (a bcrypt-KDF-wrapped, base64,
-PEM-bracketed structure), not a bare 32-byte seed. Reusing an kit
-seed as an SSH identity requires an explicit conversion step (wrapping
-the same 32 bytes into that container), which is outside this
-document's scope.
+OpenSSH does not accept a raw Ed25519 seed as its `id_ed25519` private
+key. Its private-key files use the `openssh-key-v1` container format (a
+bcrypt-KDF-wrapped, base64, PEM-bracketed structure), not a bare 32-byte
+seed. Reusing a kit seed as an SSH identity requires an explicit
+conversion step (wrapping the same 32 bytes into that container), which
+is outside this document's scope.
 
 **Cross-protocol domain separation is not yet analyzed.** §5's
 disjointness argument covers only the three domains this document

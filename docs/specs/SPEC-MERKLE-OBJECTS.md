@@ -124,11 +124,7 @@ never transcribed by hand. The empty `ChunkedBlob` (`N = 0`, a meta-only
 ## 5. Inclusion proofs
 
 Status: **stable**. Wire bytes and sibling selection are pinned to
-§5.7's upstream train and to the golden vectors in §5.6; this section no
-longer carries the "provisional" carve-out earlier revisions of this
-document used, and the wire format is a breaking change from that
-provisional iteration (§5.8). Object identity (§2) was already stable and
-is unaffected.
+§5.7's upstream train and to the golden vectors in §5.6.
 
 ### 5.1 Proof struct
 
@@ -308,21 +304,6 @@ cross-acceptance claim across many tree sizes and proof shapes
 (single/range/multi), including that a mutated proof is rejected by
 both sides.
 
-### 5.8 Change from the prior provisional format
-
-The provisional iteration of this section (`version: 1`) specified a
-different, non-commonware-aligned wire format
-(`u32 LE leaf_count ‖ u32 LE sibling_count ‖ siblings`) whose sibling
-selection always emitted an entry for an odd trailing node — including
-its own duplicate, which §5.3 now omits — and whose verification checked
-the bare inner root rather than the object id. It had no consumer
-(SPEC-TRANSPORT does not transport proofs) and was never wire-compatible
-with anything outside this repository, so this is a breaking change with
-no migration shim, under SPEC-CONVENTIONS §2.2's "explicitly document a
-deliberate breaking change" allowance for a provisional format's first
-stabilization. Object identity (§2) and every other golden vector in
-this corpus are unaffected.
-
 ## 6. Invariants
 
 | Mutation | Detected because |
@@ -343,14 +324,9 @@ this corpus are unaffected.
 Roots are deterministic across machines (all length/position fields are
 fixed big- or little-endian as specified; no host-endian leakage).
 
-## 7. Compatibility
+## 7. Repository format marker
 
-The serialized **byte layout** of `Tree` and `ChunkedBlob` is unchanged
-(SPEC-OBJECTS §4/§7); only the bytes→id function changes, and only for
-these two types. `schema_version` therefore stays `0x01`. A repository
-written under the all-flat-hash scheme is **not** readable by a
-merkle-addressing implementation: every `Tree`/`ChunkedBlob` (and thus
-every `Commit` and ref reachable through one) re-addresses. Pre-1.0 there
-is no migration; a conformant store MUST refuse to open a repository whose
-on-disk format marker does not declare merkle addressing rather than
-silently mis-reading it (SPEC-OBJECTS §10).
+The serialized **byte layout** of `Tree` and `ChunkedBlob` is given in
+SPEC-OBJECTS §4/§7. `schema_version` is `0x01`. A conformant store MUST
+refuse to open a repository whose on-disk format marker does not declare
+merkle addressing rather than silently mis-reading it (SPEC-OBJECTS §10).

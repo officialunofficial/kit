@@ -75,11 +75,10 @@ fails the §3 grammar is refused as §3 says. The local and client-side
 transports (file, s3, memory) are not servers and are unaffected.
 
 *Informative.* Every kit client writes only `refs/heads/`, `refs/tags/`
-and `refs/kit/packmap/` names. `kit serve` before 0.5 stored any
+and `refs/kit/packmap/` names. A third-party client could have left a
 grammar-valid name as a file at the served root (`main` as
-`<root>/main`), so a third-party client could have left such files; they
-are no longer served, and `docs/CLI.md` ("Refs outside `refs/`") says how
-an operator finds and moves them. Version 3 added this rule.
+`<root>/main`). The server does not serve such files, and `docs/CLI.md`
+("Refs outside `refs/`") says how an operator finds and moves them.
 
 On local disk (`.kit/refs/heads/<name>`, `.kit/refs/tags/<name>`,
 `.kit/refs/remotes/<remote>/<name>`). On transports, branch and tag refs
@@ -163,10 +162,6 @@ says which bound applies. A branch created before these bounds, up to
 512 bytes, can still be committed to, renamed and deleted locally, but a
 push of it fails with "ref name too long", naming the wire name.
 
-**Version 2** added the 512-byte bound, a deliberate breaking change
-under the pre-production policy with no migration path: version 1 had
-no length limit, and the ssh server accepted names of any length.
-
 **Notable divergences from Git ref naming:**
 
 - No `@` allowed (Git permits `@{reflog}`-style refs; kit does not).
@@ -200,18 +195,13 @@ returns all refs whose full name begins with `prefix` **at a path-
 component boundary**. The `name` in each returned tuple has `prefix`
 (plus the separating `/`) stripped.
 
-**Correction:** an earlier version of this section specified a third
-case &mdash; matching `F` against `P'` as a bare string prefix with no
-separator required &mdash; and justified it with a worked example
-(`listRefs("refs/heads/feat")` matching `refs/heads/feature`). That
-case is removed: it made the prefix-to-name mapping **non-injective**
-(`refs/heads/feat/x` and `refs/heads/featx` both stripped to the name
-`x` under the old rule, a real defect this document's own §4.1
-uniqueness invariant explicitly disallows) and could produce a
-returned `name` starting with `/` or otherwise violating the §3 name
-grammar. Prefix matching now requires a component boundary,
-unconditionally &mdash; matching Git's own `for-each-ref`/`show-ref`
-prefix semantics.
+Prefix matching requires a component boundary, unconditionally. A bare
+string prefix would make the prefix-to-name mapping **non-injective**
+(`refs/heads/feat/x` and `refs/heads/featx` would both strip to the name
+`x`, which this document's §4.1 uniqueness invariant disallows) and
+could produce a returned `name` that starts with `/` or violates the §3
+name grammar. This matches Git's own `for-each-ref`/`show-ref` prefix
+semantics.
 
 Normative behavior (this is the single source of truth; all transports
 MUST conform):

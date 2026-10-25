@@ -58,13 +58,7 @@ MUST verify:
 - The sum of all emitted bytes equals `result_len` at end-of-stream.
 
 Mismatches yield `DeltaCorrupt`. The Rust implementation surfaces this
-as `KitError::DeltaCorrupt(DeltaCorruption)` (earlier versions collapsed
-"COPY past base", "reserved bits set", "zero opcode", "zero-length
-COPY", "result_len overrun", and "result_len underrun at EOF" were all
-collapsed into the generic `KitError::TrailingData`, which
-`serialize.rs` also uses for the unrelated "trailing bytes after a
-complete object" condition — the two could not be told apart by
-matching on the variant). `DeltaCorruption` is a
+as `KitError::DeltaCorrupt(DeltaCorruption)`. `DeltaCorruption` is a
 `#[non_exhaustive]` enum with one variant per condition below —
 `BaseLenMismatch`, `ReservedOpcodeBits`, `ZeroOpcode`, `ZeroLengthCopy`,
 `CopyPastBase`, `ResultLenOverrun`, `ResultLenUnderrun` — so callers can
@@ -275,7 +269,7 @@ are inline byte arrays so any framing drift trips immediately.
   low bits of the COPY opcode byte).
 - Multi-base deltas (a delta that references two or more bases).
 
-Any of these require a `stream_version` bump; backward readers MUST
+Any of these require a `stream_version` bump; readers MUST
 refuse unknown versions.
 
 ---

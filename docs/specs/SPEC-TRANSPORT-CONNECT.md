@@ -16,10 +16,9 @@ resumable parts (§7.6), ref deletion (§7.8), read consistency and
 paging (§7.9), admission challenges (§5.1),
 and the per-RPC upload lifecycle (§7.7). `kit.transport.v1` evolves
 additively: v2 adds RPCs and fields and never renumbers or removes one,
-so no wire break occurs. The breaks are semantic only. kit is
-pre-production (CONTRIBUTING, "Pre-production compatibility policy"), so
-v2 has no v1 compatibility machinery: no v1 reader, no negotiation, and
-no fallback mode. The proto messages v2 names land with the version 2
+so no wire break occurs. The breaks are semantic only. v2 has no
+v1 reader, no negotiation, and no fallback mode.
+The proto messages v2 names land with the version 2
 implementation, and the admission messages with the admission implementation
 (§8); until then the implementations described under
 "Reference implementation" below implement the v1 surface only. §9
@@ -31,7 +30,7 @@ pack-transfer streaming design, repository addressing, write
 authorization policy, upload tickets, admission challenges, and read
 consistency &mdash; and how
 servers and the native CLI client consume one generated codebase. It does not cover S3 multipart,
-the `WatchRefs` live-feed migration, pricing or admission verification,
+the `WatchRefs` live feed, pricing or admission verification,
 or any server/client implementation; those are separate changes (§8).
 Write and read grants, epochs, signed reads, and private repositories
 are [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md)'s.
@@ -62,9 +61,8 @@ proto/kit/transport/v1/transport.proto   → kit.transport.v1
 proto/kit/common/v1/refs.proto           → kit.common.v1
 ```
 
-Every change to `transport.proto` MUST keep the wire format compatible
-with the previous version. There is no grace period for a published
-field number or enum value.
+Every change to `transport.proto` MUST keep the wire format of each
+published field number and enum value.
 
 `kit.transport.v1` defines its own `RefExpectation` and `RefEntry`. They
 are byte-for-byte duplicates of the types in `kit.rpc.v1.ssh` and
@@ -236,9 +234,7 @@ unary call instead of an `SshFrame` or a JSON body:
 | `Match(h)` | `REF_EXPECTATION_MATCH` | 32-byte digest `h` | Current ref value MUST equal `h`. |
 
 A conforming server MUST reject `REF_EXPECTATION_UNSPECIFIED` (the
-proto zero value) with Connect code `invalid_argument` &mdash; kit is
-alpha (pre-1.0); there is no back-compat surface for a client that
-omits `expectation`.
+proto zero value) with Connect code `invalid_argument`.
 
 Unlike the SSH wire's `Error.details` (an opaque, not-client-consumed
 carrier for the current ref value, per SPEC-TRANSPORT §4.2.1) and

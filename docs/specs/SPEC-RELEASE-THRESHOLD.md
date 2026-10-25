@@ -219,11 +219,9 @@ commit endorsement, or any other BLS message under a different
 namespace.
 
 The `dsse/v1` suffix names the current, and so far only, application
-namespace this key is used under &mdash; it is not a compatibility-era label
-(see SPEC-CONVENTIONS §4). If a distinct application use of this key
-is ever introduced, it gets its own distinctly-named namespace
-constant; there is no plan to migrate this namespace's bytes to a
-different value while today's usage continues.
+namespace this key is used under (see SPEC-CONVENTIONS §4). If a
+distinct application use of this key is ever introduced, it gets its own
+distinctly-named namespace constant.
 
 ---
 

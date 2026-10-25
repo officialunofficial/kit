@@ -261,9 +261,7 @@ lies outside `refs/` is answered, before any storage access, with:
 | `UpdateRef`/`ReadRef` naming a grammar-valid ref outside `refs/` | `Error { code = ERROR_CODE_INVALID_REQUEST, message = "ref name must start with refs/ (…)" }`, empty `details` |
 
 Never with an absent-ref answer. Having empty `details`, it is not a
-CAS conflict; a client surfaces it as a remote error with its message. kit is alpha
-(pre-1.0) &mdash; clients and servers move together; there is no v0.x
-back-compatibility surface to preserve.
+CAS conflict; a client surfaces it as a remote error with its message.
 
 On a CAS mismatch the server returns `Error { code =
 ERROR_CODE_INVALID_REQUEST }` with the current ref value in

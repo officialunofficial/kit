@@ -165,8 +165,7 @@ Readers MUST enforce:
   replacement by an actor who can rewrite the entire local file.
 
 Only version 3 is supported. Readers MUST reject every other version without
-rewriting the index. This is a deliberate pre-release format break: there is no
-legacy reader or migration API. An unsupported index MUST NOT be rebuilt from
+rewriting the index. An unsupported index MUST NOT be rebuilt from
 HEAD or working files, because those cannot recover its staged selections.
 
 GC MUST abort before sweeping if any registered worktree index is corrupt or
