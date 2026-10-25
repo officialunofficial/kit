@@ -35,7 +35,7 @@ SPEC-CONCURRENCY with a layout server. A layout server is a server that embeds t
   one over the bound, on ReadRef / UpdateRef / both AdvanceRefs names,
   **before touching storage**, with an explicit error, never as absent;
   that a refused request writes nothing (no partial AdvanceRefs); and that
-  a listing skips stored legacy refs (`<root>/main`, over-long names)
+  a listing skips stored stray refs (`<root>/main`, over-long names)
   (`RefuseBeforeStorage`, `ExplicitRefusal`, `RefusedWritesNothing`,
   `ListingServedOnly`). Names are abstract classes (served, outside
   `refs/`, over-long, grammar-invalid). **Which byte strings fall in which
@@ -86,7 +86,7 @@ refs or values.
 | `quint run` | `serve2`, `serve3`, `served` Safety | same | ok |
 | TLC | `serve2` Safety | exhaustive: 2 server slots (each may start as either binary), 1 local command, 3 uploaders | ok, 18,812 states |
 | TLC | `serve3` Safety | exhaustive: 3 server slots | ok, 152,012 states |
-| TLC | `served` Safety | exhaustive (one request at a time, 5 name classes, legacy files present or not) | ok, 66,064 states |
+| TLC | `served` Safety | exhaustive (one request at a time, 5 name classes, stray files present or not) | ok, 66,064 states |
 | TLC | `refs2` Safety, slice `domains` | exhaustive for 2 processes whose ops are local `updateRef`, `file` or `mem` on one ref (TLC `CONSTANT KINDS <- ...`, `REFS <- {0}`), CONSTRAINT `nextEntry <= 2`; VIEW drops only `lastAction` | ok, 3,418,713 states |
 | TLC | `refs2` Safety, slice `chain` | same, ops `commit`, `amend`, `branch`, `checkout`, `gc` on one ref | ok, 3,538,512 states |
 | Apalache 0.62.2 | `refs2` Safety (full op space) | length `REFS_DEPTH` = 8 (~22 min under load) | ok |
@@ -116,7 +116,7 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 | `serve2` | `WitnessUndetectedLateServer` | documented §3.1 gap: detection is one-directional |
 | `served_checkAfterRead` | `RefuseBeforeStorage`, `ExplicitRefusal` | pre-v3 behaviour (answering `main` from storage / as absent) |
 | `served_headCheckedLate` | `RefuseBeforeStorage`, `RefusedWritesNothing` | both AdvanceRefs names must be checked before the first write |
-| `served_listNoSkip` | `ListingServedOnly` | legacy refs must be skipped in listings |
+| `served_listNoSkip` | `ListingServedOnly` | stray refs must be skipped in listings |
 
 Canaries (`Canary*`, `Witness*` reachability) confirm the interesting
 states are visited: a sweep removes a crashed upload's file, a start skips

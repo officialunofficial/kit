@@ -144,8 +144,8 @@ module serve_test {
 module served_test {
   import servedNames(FAULTS = { checkAfterRead: false, headCheckedLate: false, listNoSkip: false }).* from "./serve"
 
-  // ReadRef("main") with a legacy <root>/main present: refused by name,
-  // storage untouched, never "absent" nor the legacy value.
+  // ReadRef("main") with a stray <root>/main present: refused by name,
+  // storage untouched, never "absent" nor the stray value.
   run readMainRefusedTest =
     initFixed(SNFAULTS_NONE, 1, 0).then(recv("ReadRef", "M", "M")).then(check)
       .expect(and { phase == "reply", reply == "outsideRefs" })
@@ -164,13 +164,13 @@ module served_test {
       .expect(and { reply == "ok", store.get("P") == 2, store.get("A") == 2 })
       .then(answer).expect(Safety)
 
-  // The listing skips a legacy over-long ref and the <root>/main file.
-  run listingSkipsLegacyTest =
+  // The listing skips a stray over-long ref and the <root>/main file.
+  run listingSkipsStrayTest =
     initFixed(SNFAULTS_NONE, 1, 1).then(recv("ListRefs", "A", "A")).then(storage1)
       .expect(and { listed == Set("A", "P"), Safety })
 
   // MUTANT checkAfterRead (pre-v3 behaviour): ReadRef("main") answers from
-  // storage ("absent" when no legacy file).
+  // storage ("absent" when no stray file).
   run mutantCheckAfterReadTest =
     initFixed({ ...SNFAULTS_NONE, checkAfterRead: true }, 0, 0).then(recv("ReadRef", "M", "M")).then(storage1)
       .expect(and { reply == "absent", not(RefuseBeforeStorage), not(ExplicitRefusal) })
@@ -182,7 +182,7 @@ module served_test {
       .expect(and { reply == "outsideRefs", store.get("P") == 2, not(RefusedWritesNothing),
                     not(RefuseBeforeStorage) })
 
-  // MUTANT listNoSkip: the listing returns the legacy files.
+  // MUTANT listNoSkip: the listing returns the stray files.
   run mutantListNoSkipTest =
     initFixed({ ...SNFAULTS_NONE, listNoSkip: true }, 1, 1).then(recv("ListRefs", "A", "A")).then(storage1)
       .expect(not(ListingServedOnly))

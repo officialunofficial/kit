@@ -392,7 +392,7 @@ module servedNames {
   // ListRefs prefix: "refs" | "none" (the empty prefix) | "main".
   type Req = { verb: str, n1: str, n2: str, value: int, prefix: str }
 
-  var store: str -> int         // on-disk / stored refs, legacy files included
+  var store: str -> int         // on-disk / stored refs, stray files included
   var req: Req
   var phase: str                // idle | check | storage1 | storage2 | reply
   var wrote: Set[str]           // names this request wrote
@@ -407,7 +407,7 @@ module servedNames {
 
   pure val NOREQ: Req = { verb: "", n1: "A", n2: "A", value: 0, prefix: "refs" }
 
-  // Deterministic initial state: A and P hold 1; legacy M / L files per m, l.
+  // Deterministic initial state: A and P hold 1; stray M / L files per m, l.
   action initFixed(f: SNFaults, m: int, l: int): bool = all {
     faults' = f,
     store' = Map("A" -> 1, "P" -> 1, "M" -> m, "L" -> l, "X" -> 0),
@@ -427,8 +427,8 @@ module servedNames {
   action init = {
    nondet a = Set(0, 1).oneOf()
    nondet p = Set(0, 1).oneOf()
-   nondet m = Set(0, 1).oneOf()   // a legacy <root>/main file may exist
-   nondet l = Set(0, 1).oneOf()   // a legacy over-long ref may exist
+   nondet m = Set(0, 1).oneOf()   // a stray <root>/main file may exist
+   nondet l = Set(0, 1).oneOf()   // a stray over-long ref may exist
    all {
     faults' = FAULTS,
     store' = Map("A" -> a, "P" -> p, "M" -> m, "L" -> l, "X" -> 0),
@@ -503,8 +503,8 @@ module servedNames {
       wrote' = if (req.verb == "UpdateRef" or req.verb == "AdvanceRefs") Set(req.n1) else Set(),
       listed' = if (req.verb == "ListRefs") listing else Set(),
       badListing' = (badListing or (req.verb == "ListRefs" and listing.exists(n => not(SERVED.contains(n))))),
-      // checkAfterRead: the legacy behaviour answers from storage (the
-      // pre-0.5 file, or "absent").
+      // checkAfterRead: a server without the check answers from storage (a
+      // stray file, or "absent").
       reply' = if (req.verb == "ReadRef") (if (store.get(req.n1) == ABSENT) "absent" else "value")
                else if (req.verb == "AdvanceRefs") "" else "ok",
       badReply' = (badReply or lateRefusal),
@@ -555,7 +555,7 @@ module servedNames {
   // Canaries (expected FALSE): the interesting cases are reached.
   val CanaryNoOutsideRefusal: bool = not(phase == "reply" and reply == "outsideRefs" and store.get("M") != ABSENT)
   val CanaryNoLongRefusal: bool = not(phase == "reply" and reply == "tooLong" and req.verb == "AdvanceRefs")
-  val CanaryNoLegacySkipped: bool =
+  val CanaryNoStraySkipped: bool =
     not(phase == "reply" and req.verb == "ListRefs" and store.get("L") != ABSENT and store.get("M") != ABSENT
         and listed.contains("A"))
   val CanaryNoAdvance: bool = not(phase == "reply" and req.verb == "AdvanceRefs" and reply == "ok")

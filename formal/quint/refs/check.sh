@@ -154,7 +154,7 @@ qrun serve.qnt serve2_serverSkipsServe UpServersHoldServeShared violation
 qrun serve.qnt serve2_serverSkipsServe NoMissedDetection violation
 qrun serve.qnt serve2_serverLockShared OneKitServer violation
 qrun serve.qnt served Safety ok
-for c in CanaryNoOutsideRefusal CanaryNoLongRefusal CanaryNoLegacySkipped CanaryNoAdvance; do
+for c in CanaryNoOutsideRefusal CanaryNoLongRefusal CanaryNoStraySkipped CanaryNoAdvance; do
   qrun serve.qnt served "$c" violation
 done
 qrun serve.qnt served_checkAfterRead RefuseBeforeStorage violation
