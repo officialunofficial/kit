@@ -492,7 +492,7 @@ struct ParsedS3Url {
 fn parse_s3_url(url: &str) -> Result<ParsedS3Url, TransportError> {
     let rest = url
         .strip_prefix("kit+s3://")
-        .ok_or_else(|| TransportError::InvalidRef(format!("not an kit+s3 URL: {url}")))?;
+        .ok_or_else(|| TransportError::InvalidRef(format!("not a kit+s3 URL: {url}")))?;
     let Some((host, tail)) = rest.split_once('/') else {
         return Err(TransportError::InvalidRef(
             "kit+s3 URL missing bucket".into(),

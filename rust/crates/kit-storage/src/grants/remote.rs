@@ -28,7 +28,7 @@ impl Target {
     pub fn audience(&self) -> Result<String, String> {
         audience_from_url(&self.endpoint).ok_or_else(|| {
             format!(
-                "`{}` is not an kit+https:// (or loopback kit+http://) remote",
+                "`{}` is not a kit+https:// (or loopback kit+http://) remote",
                 self.endpoint
             )
         })
@@ -89,7 +89,7 @@ fn resolve_target_unchecked(cfg: &LayeredConfig, arg: Option<&str>) -> Result<Ta
         }),
         Some(name) => {
             let resolved = config::resolve_remote(cfg, name).ok_or_else(|| {
-                format!("no remote named `{name}` (add one with `kit remote add`, or pass an kit+https:// URL)")
+                format!("no remote named `{name}` (add one with `kit remote add`, or pass a kit+https:// URL)")
             })?;
             Ok(Target {
                 name: resolved.name,

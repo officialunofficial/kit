@@ -640,7 +640,7 @@ Storage-security modes:
     when no desktop Secret Service session is detected, and must fail closed if
     no usable protector is available.
   - Fail closed if no configured OS protection mechanism is available.
-  - Never derive the encryption key from an kit-managed password, hidden
+  - Never derive the encryption key from a kit-managed password, hidden
     passphrase, repo data, or environment variable.
 - The software backend must be clearly reported as `BackendKind::Software` and
   documented as software-only, not hardware-bound.

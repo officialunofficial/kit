@@ -525,10 +525,10 @@ internal state are never exported.
   rewriting. See SPEC-GIT-IMPORT §5's collision-resistant-hashing
   requirement for the corresponding mandate on the import side; the
   same requirement applies to any SHA-1 this bridge computes.
-- Deleting an kit branch never deletes it on the mirror (export is
+- Deleting a kit branch never deletes it on the mirror (export is
   add/update-only); a later re-created branch of the same name
   updates the mirror ref under the observed-value lease.
-- An kit-side history rewrite (amend/rebase/force-push) exports as a
+- A kit-side history rewrite (amend/rebase/force-push) exports as a
   git force-push. Mapping-cache entries for rewritten-away commits are
   **retained**: determinism makes them permanently correct, and they
   cost only space.

@@ -817,7 +817,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     }
 
     /// Build the signed auth v2 request headers for `procedure` and
-    /// `commitment` without sending anything, so a host that dispatches an kit
+    /// `commitment` without sending anything, so a host that dispatches a kit
     /// procedure through its own binding can sign it.
     ///
     /// It runs the same pipeline as a dispatched call: with `intent`, the

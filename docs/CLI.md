@@ -88,11 +88,11 @@ Working-tree commands:
   move as an exact rename and report git's `R` by default; `--no-renames`
   shows the underlying deletion plus addition instead.
   - `-f`/`--force` &mdash; overwrite an existing destination. Without it, `mv`
-    refuses to clobber an existing path (matching git's `mv` guard) &mdash; an
+    refuses to clobber an existing path (matching git's `mv` guard) &mdash; a
     kit data-loss guard; a dangling symlink at the destination counts as
     existing (git refuses that too). A missing or untracked source is
     refused. All sources are validated before any move, so a bad source in
-    a batch never leaves the worktree half-moved. As an kit safety
+    a batch never leaves the worktree half-moved. As a kit safety
     divergence, a destination that escapes the repository through a
     symlinked parent directory is refused (git would silently follow it).
   - **Directory sources** are supported: `mv dir newdir` renames the
@@ -147,7 +147,7 @@ Working-tree commands:
   prefixes rather than SHA-1 (git's optional indent heuristic is not
   applied).
   `--name-only` instead lists one changed path per line; `--name-status`
-  prefixes each with a status letter (`A`/`D`/`M`; `T` marks an kit mode
+  prefixes each with a status letter (`A`/`D`/`M`; `T` marks a kit mode
   change). `--stat` shows a diffstat: one `<name> | <count> <graph>` row
   per file (name column padded, `+`/`-` graph scaled to the terminal
   width like `git diff --stat`, honoring `COLUMNS`; default 80) followed
@@ -564,7 +564,7 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   (git's create-only form). `-d` deletes the ref (optionally verifying a
   **concrete** `<oldvalue>` first &mdash; an all-zero value is rejected, since a ref
   asserted absent has nothing to delete); deleting a branch refuses the
-  currently checked-out one &mdash; an kit safety divergence (git's plumbing would,
+  currently checked-out one &mdash; a kit safety divergence (git's plumbing would,
   leaving HEAD dangling).
 - `kit ref list [--pattern <glob>]` &mdash; print every ref's full name and
   resolved hash, one `<refname> <hash>` line per ref, sorted lexicographically
@@ -1594,7 +1594,7 @@ These are documented behaviors, not bugs:
 Several Git commands that were once "wontfix-by-design" have been
 **reinstated under safety guards** as part of the git-parity
 porcelain-completion work: `kit revert`, `kit mv`, `kit clean`, and
-`kit reset --hard` are all available and documented above. Each keeps an
+`kit reset --hard` are all available and documented above. Each keeps a
 kit data-loss guard &mdash; for example, `clean` and `reset --hard` refuse to delete or
 discard without an explicit `-f` &mdash; rather than adopting git's silent
 destructive default. Rename *detection* in diff/log output remains a

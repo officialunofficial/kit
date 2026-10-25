@@ -514,7 +514,7 @@ pub(crate) fn open_connect_trusted(
         .map_err(DispatchError::UntrustedRemote)?;
     if !is_connect_url(endpoint) {
         return Err(DispatchError::UnsupportedScheme(format!(
-            "`{endpoint}` is not an kit+https:// or kit+http:// remote; grant epochs and repository visibility are served over Connect"
+            "`{endpoint}` is not a kit+https:// or kit+http:// remote; grant epochs and repository visibility are served over Connect"
         )));
     }
     open_connect_with_config(endpoint, &cfg.merged, layout, Some(remote_name), sign)

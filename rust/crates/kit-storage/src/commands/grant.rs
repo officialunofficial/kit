@@ -593,7 +593,7 @@ fn list(o: &ListOpts) -> u8 {
         let _ = writeln!(stdout, "  expires    {}", date(g.grant.expiry_ms));
     }
     if o.check && check_audience.is_none() && check_error.is_none() {
-        eprintln!("note: --check needs a remote with an kit+https:// URL");
+        eprintln!("note: --check needs a remote with a kit+https:// URL");
     }
     exit::OK
 }

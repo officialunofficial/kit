@@ -41,7 +41,7 @@ pub struct TranslationBatch {
     pub emitted: usize,
 }
 
-/// git mode string for an kit tree-entry mode (§5).
+/// git mode string for a kit tree-entry mode (§5).
 #[must_use]
 pub fn git_mode(mode: EntryMode) -> &'static [u8] {
     match mode {

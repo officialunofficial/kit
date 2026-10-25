@@ -25,7 +25,7 @@
 //!
 //! `--name-only` / `--name-status` switch to summary output: one record
 //! per changed path — just the path, or an `A`/`D`/`M` status letter
-//! (`T` for an kit mode change) plus the path. Special-byte paths are
+//! (`T` for a kit mode change) plus the path. Special-byte paths are
 //! C-style quoted (git `core.quotePath`); `-z` instead NUL-terminates
 //! records and emits raw paths (and, for `--name-status`, NUL-terminates
 //! the status letter and path as separate fields).
@@ -76,7 +76,7 @@ struct DiffOpts {
     #[arg(long, conflicts_with = "name_status")]
     name_only: bool,
 
-    /// Show a status letter (`A`/`D`/`M`; `T` for an kit mode change)
+    /// Show a status letter (`A`/`D`/`M`; `T` for a kit mode change)
     /// and the name of each changed file (like `git diff --name-status`).
     #[arg(long)]
     name_status: bool,

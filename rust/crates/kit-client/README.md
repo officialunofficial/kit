@@ -159,7 +159,7 @@ default observer does nothing, and a signer that implements only
 - **Signing outside the client.** `Client::sign_envelope(procedure,
   &commitment, identity, intent)` returns the auth v2 request headers
   (`SignedEnvelope`) without sending: the same observer, signer and deadline
-  check, for a host that dispatches an kit
+  check, for a host that dispatches a kit
   procedure through its own binding. The six transport write procedures require an
   `intent` naming that procedure (`Error::Invalid` otherwise), so the observer
   cannot be skipped; any other procedure reaches the signer and is observed only

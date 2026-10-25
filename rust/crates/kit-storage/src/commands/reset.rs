@@ -20,7 +20,7 @@
 //!   git, untracked files are left in place. This is the one destructive
 //!   variant, so it runs the same dirty/untracked guard as `checkout`:
 //!   it **refuses** to discard locally-modified or staged content
-//!   unless `-f`/`--force` is given. That guard is an kit safety
+//!   unless `-f`/`--force` is given. That guard is a kit safety
 //!   divergence — git's `reset --hard` discards silently.
 
 use std::io::Write;
@@ -155,7 +155,7 @@ pub fn run(args: &[String]) -> u8 {
 
     // Guard BEFORE any mutation, unless `-f`. The shared `checkout` guard
     // refuses if discarding would lose locally-modified, staged, or
-    // colliding-untracked content — an kit safety divergence (git's
+    // colliding-untracked content — a kit safety divergence (git's
     // `reset --hard` discards silently). The guard's worktree snapshot now
     // keeps tracked files even when they match an ignore rule, but the
     // dropped-path set (paths present at HEAD/index and gone in the target)

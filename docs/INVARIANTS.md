@@ -392,7 +392,7 @@ accepts kit's.
 
 **Because:** SPEC-MERKLE-OBJECTS §5.7 makes this byte-identity a
 normative compatibility promise, so a commonware-based verifier (for
-example, makechain) can decode and verify an kit proof with the
+example, makechain) can decode and verify a kit proof with the
 upstream type directly, applying only kit's outer type-domain wrap
 (`wrap_id`) on top. kit cannot depend on `commonware-storage`'s `bmt`
 module directly for this (it drags in `commonware-cryptography`'s

@@ -271,7 +271,7 @@ The strict envelope decoder in `kit-attest::envelope::decode` accepts
 **only** the exact byte shape `encode` emits &mdash; no whitespace
 tolerance, no key-order flexibility. Third-party DSSE envelopes
 written by other tools must be re-canonicalized before kit's decoder
-will accept them. (This is intentional: an kit producer always
+will accept them. (This is intentional: a kit producer always
 writes through `encode`, so the strict decoder gives the strongest
 possible "what you wrote is what came back" guarantee.)
 

@@ -2,7 +2,7 @@
 spec: SPEC-DISCLOSURE
 version: 4
 status: draft-normative
-audience: implementers of an kit disclosure-bundle or closure-profile verifier (any language)
+audience: implementers of a kit disclosure-bundle or closure-profile verifier (any language)
 ---
 
 # SPEC-DISCLOSURE &mdash; partial-disclosure bundle and closure-profile verification
@@ -554,8 +554,8 @@ and rejects for gaps, duplicates, wrong selectors, mixed commits,
 mismatched leaves, missing/incomplete anchors, ranges outside the span,
 an unnecessary last chunk, magic/version errors, trailing bytes,
 truncation, a non-minimal varint, a varint above `u32::MAX`, a chunk count
-of 1,000,001, an KDPB or KDSP container supplied as the anchor, an KDPB
-supplied in place of an KDSP, and oversize input. Large reject bodies use sidecar byte-range copy and patch
+of 1,000,001, a KDPB or KDSP container supplied as the anchor, a KDPB
+supplied in place of a KDSP, and oversize input. Large reject bodies use sidecar byte-range copy and patch
 recipes over the accepted containers; each recipe reconstructs exact bytes
 before verification.
 The oversize vector uses a pinned small seed plus a sidecar expansion

@@ -286,7 +286,7 @@ def check_mkdp(root, name):
 
 
 class SpanReject(Exception):
-    """An KDSP check failed. The text is the reject reason of section 8.2."""
+    """A KDSP check failed. The text is the reject reason of section 8.2."""
 
 
 MAX_SPAN = 64 << 20

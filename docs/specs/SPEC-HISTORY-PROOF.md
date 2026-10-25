@@ -98,7 +98,7 @@ follows from the root computation rather than from a separate check:
 the decoder accepts any value, but a nonzero `inactive_peaks` adds
 `u64_be(inactive_peaks)` to the root preimage (commonware's
 `Hasher::root_with_folded_peaks`), so the reconstructed root can never
-equal an kit root computed with zero inactive peaks (§2.3), and
+equal a kit root computed with zero inactive peaks (§2.3), and
 `verify_inclusion` returns `false`.
 
 The `digests` layout is the **fold-based** layout documented in

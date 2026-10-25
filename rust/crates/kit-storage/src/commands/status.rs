@@ -540,7 +540,7 @@ fn porcelain_code(staging: StatusStaging, kind: DiffKind) -> &'static str {
 }
 
 /// Default human output, git-shaped. All lines go to stderr — stdout is
-/// reserved for porcelain/data callers (an kit convention; documented in
+/// reserved for porcelain/data callers (a kit convention; documented in
 /// docs/CLI.md). A consumer that wants the human format in a pipeline can
 /// `kit status 2>&1` explicitly; the default pipeline behaviour stays
 /// empty-on-clean. The (use "kit …") hints name kit commands, not git.

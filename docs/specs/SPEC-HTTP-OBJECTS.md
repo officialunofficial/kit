@@ -281,9 +281,9 @@ use §3's unsupported profile; they validate query syntax and refuse before
 any of the preparation or successful representation behavior below.
 The generic KDPB/KDSP formats and client verification remain supported.
 
-`?proof=1` MUST return an KDPB Object bundle, including canonical manifest
+`?proof=1` MUST return a KDPB Object bundle, including canonical manifest
 bytes for a ChunkedBlob and canonical tree bytes for an empty root path.
-`?proof=1&range=a-b` MUST return an KDPB Range bundle when the inclusive
+`?proof=1&range=a-b` MUST return a KDPB Range bundle when the inclusive
 range lies within one chunk or a plain blob; otherwise it MUST return KDSP.
 The server MUST prove absolute offsets for chunked KDPB ranges with the
 complete preceding chunk-length proof set. Query ranges MUST NOT be

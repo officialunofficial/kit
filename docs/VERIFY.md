@@ -1,7 +1,7 @@
-# VERIFY &mdash; verifying an kit commit hash
+# VERIFY &mdash; verifying a kit commit hash
 
 Audience: someone building a verifier or a data-availability (DA) provider
-who has an kit commit id from an external anchor (a chain, a signed
+who has a kit commit id from an external anchor (a chain, a signed
 release, a timestamp) and bytes served by a party they do not trust. This
 guide stands alone with the specs and the golden vectors; it links to the
 specs for normative detail rather than restating it, and every command and
@@ -25,7 +25,7 @@ the code. This document explains how to *use* it.
 
 ## 1. What a commit id commits to
 
-An kit commit id is a 32-byte BLAKE3 digest of a small (~250 byte)
+A kit commit id is a 32-byte BLAKE3 digest of a small (~250 byte)
 canonical commit object. Everything else &mdash; every file, every directory,
 every chunk of every large file in the repository at that commit &mdash; is
 reachable from that one id through an unbroken chain of content-addressed
@@ -210,7 +210,7 @@ land in `corrupt`. It deserializes fine, gets content-addressed under a
 *different* id than whatever filename or slot it was served under, and
 surfaces as **`missing`** (the id the walk actually wanted, still absent)
 **plus `unreferenced`** (the id the tampered bytes actually hash to, never
-visited). `corrupt` is reserved for bytes that don't even parse as an kit
+visited). `corrupt` is reserved for bytes that don't even parse as a kit
 object. The local CLI's default (no `--from`, without
 `--show-unreferenced`) uses the pull-based store path, so a byte flip is
 reported directly as `corrupt` under the requested id; passing
@@ -409,14 +409,14 @@ deliberately, **byte-identical** to `commonware_storage::bmt::Proof` at the
 release train kit pins (`2026.9.0`, `rust/Cargo.toml`): same wire framing
 (`be32(leaf_count) || varint(n) || n * 32-byte digest`), same sibling
 selection algorithm, for single, range, and multi-leaf proofs alike. A verifier already built against the upstream
-`commonware-storage` crate (makechain, for instance) can decode an kit
+`commonware-storage` crate (makechain, for instance) can decode a kit
 proof directly with the upstream type and run upstream's own
 `verify_*_inclusion` **unchanged** &mdash; no kit-specific decoder, and no
 kit dependency, needed for the proof-checking step itself. One thing sits
 outside that byte-identity, though: `Proof::verify_element_inclusion(leaf,
-position, root)` checks against an already-known *bare* inner root, not an
+position, root)` checks against an already-known *bare* inner root, not a
 kit id (it doesn't recover or return the folded value, only accept/reject
-against a `root` the caller supplies), and an kit repository never
+against a `root` the caller supplies), and a kit repository never
 publishes a bare inner root anywhere &mdash; only the domain-wrapped id. A
 commonware-native verifier therefore needs exactly one extra step around
 upstream's unmodified check: verify the wrap.
@@ -525,7 +525,7 @@ same wrap step) rather than hand-rolling the fold loop.
 ### Leaf digest formulas
 
 The leaf digest formulas themselves are kit-specific (they're what makes
-an kit tree entry or chunked-blob metadata leaf what it is, not a generic
+a kit tree entry or chunked-blob metadata leaf what it is, not a generic
 BMT property) and are normative in
 [SPEC-MERKLE-OBJECTS](specs/SPEC-MERKLE-OBJECTS.md) §3:
 
@@ -668,7 +668,7 @@ own test harness should take.
 - **git SHA-1 hashes support full disclosure only.** A git blob is a flat
   SHA-1 digest with no sub-file structure to build a partial proof over; a
   client that already trusts a git SHA-1 verifies it with git's own
-  hashing, not this kit. Partial disclosure is an kit-id-only capability.
+  hashing, not this kit. Partial disclosure is a kit-id-only capability.
 - **Ancestry (history MMB) proofs are not part of this kit.** They are a real,
   separately-scoped capability (see SPEC-DISCLOSURE) that needs a chain-side
   anchor beyond a single commit id to be useful &mdash; "branch tip at block B

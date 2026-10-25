@@ -99,7 +99,7 @@ pub const MAX_TREE_DEPTH: usize = 128;
 /// without losing the structured-decode-error variants.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("path is not an kit repository (missing .kit/objects)")]
+    #[error("path is not a kit repository (missing .kit/objects)")]
     NotAKitRepository,
     #[error(".kit already exists in this directory")]
     AlreadyInitialized,

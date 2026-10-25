@@ -47,7 +47,7 @@ upstream object."* It is never an authorship claim &mdash; original
 authorship rides in the `author`/`tagger` Identity (§3.2), and
 SPEC-SIGNING §6 already separates attribution from the verification
 key. A git GPG/SSH signature on the source commit/tag is **carried in
-the retained raw bytes** (§5) and is not representable as an kit
+the retained raw bytes** (§5) and is not representable as a kit
 signature.
 
 ### 1.2 Version keying and determinism
@@ -69,7 +69,7 @@ key**, and a crashed import is resumed by re-running it.
 
 - Bidirectional sync (permanent &mdash; restating SPEC-GIT-BRIDGE §1.3).
 - SHA-256 git repositories (whole-import refusal).
-- Shallow import: structurally impossible &mdash; an kit parent hash is
+- Shallow import: structurally impossible &mdash; a kit parent hash is
   the BLAKE3 of the translated parent, which requires the full
   closure. The staging mirror is always a full clone.
 - Escaping schemes for git-legal/kit-illegal names or refs

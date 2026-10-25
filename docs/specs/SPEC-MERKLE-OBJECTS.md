@@ -293,12 +293,12 @@ byte-identical to the upstream Binary Merkle Tree proof construction that
 kit's BMT primitive already mirrors for root computation (§1), at the
 release train kit currently cross-verifies against (pinned in
 `rust/Cargo.toml`'s workspace dependencies). A verifier already built
-against that upstream construction can decode an kit proof with its own
+against that upstream construction can decode a kit proof with its own
 type directly and run its own verification unmodified — but that
 verification checks against the **bare folded value**, not the object
 id; a caller in that position MUST still apply this section's
 `domain_digest(TYPE_DOMAIN, folded)` wrap (§5.4) before comparing to an
-id, exactly as an kit-native verifier does. A native-only cross-check
+id, exactly as a kit-native verifier does. A native-only cross-check
 test in `rust/crates/kit-core/src/merkle.rs` pins this byte-identity and
 cross-acceptance claim across many tree sizes and proof shapes
 (single/range/multi), including that a mutated proof is rejected by

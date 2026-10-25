@@ -222,7 +222,7 @@ fn fresh_clone_imports_checks_out_and_verifies() {
     );
     f.kit_ok(&fork, &["verify", "HEAD"]);
 
-    // Tag imported as an kit tag object on refs/tags/v1.
+    // Tag imported as a kit tag object on refs/tags/v1.
     let kit_dir = fork.join(".kit");
     let layout = RepoLayout::single(&fork);
     let tag = refs::read_tag(&layout, "v1").unwrap().unwrap();

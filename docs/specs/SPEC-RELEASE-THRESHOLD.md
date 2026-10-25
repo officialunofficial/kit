@@ -195,7 +195,7 @@ Ulas map), and the proof-of-possession scheme (`POP_`, which requires
 each participating key to have a separately-verified proof of
 possession before it may contribute to an aggregate &mdash; closing the
 rogue-key attack that plain BLS aggregation is vulnerable to without
-one). This is a real, standard IETF ciphersuite; it is not an kit- or
+one). This is a real, standard IETF ciphersuite; it is not a kit- or
 commonware-specific construction, and any BLS12-381 implementation
 conforming to that draft and RFC 9380 can be checked against it.
 

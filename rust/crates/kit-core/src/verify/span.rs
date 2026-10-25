@@ -233,7 +233,7 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, SpanError> {
     })
 }
 
-/// Encode an KDSP v1 container from already encoded KDPB v2 bundles.
+/// Encode a KDSP v1 container from already encoded KDPB v2 bundles.
 ///
 /// Encoding does not authenticate or validate the supplied bundles. Callers
 /// must verify the result against a trusted commit id before using it.
