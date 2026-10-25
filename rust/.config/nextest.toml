@@ -50,6 +50,18 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = 'binary(branch_rename_commit_race)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# The bridge map fuzz test writes three files in every iteration and must
+# finish each iteration in 100 ms. Other tests that sync files to disk can
+# stall those writes for longer than that. The test runs alone. It takes
+# about 0.3 s.
+[[profile.default.overrides]]
+filter = 'package(kit-fuzz) and test(=tests::unit_bridge_map)'
+threads-required = "num-test-threads"
+
+[[profile.ci.overrides]]
+filter = 'package(kit-fuzz) and test(=tests::unit_bridge_map)'
+threads-required = "num-test-threads"
+
 # The bounded stateful suite (tests/state_machine.rs) spawns the binary for
 # every operation. It does not hang, but a slow runner can drift toward the
 # default ceiling.
