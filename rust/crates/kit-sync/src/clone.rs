@@ -18,7 +18,7 @@ use crate::source::RemoteSource;
 pub const DEFAULT_REMOTE_NAME: &str = "default";
 
 /// The branch a new repository's config names as its default.
-const DEFAULT_BRANCH: &str = "main";
+pub const DEFAULT_BRANCH: &str = "main";
 
 /// The remote a clone records in the new repository's config.
 #[derive(Debug, Clone, PartialEq, Eq)]

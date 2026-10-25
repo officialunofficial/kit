@@ -8,6 +8,7 @@
 
 use kit_core::hash::Hash;
 use kit_core::protocol::PackKey;
+use kit_core::refs::PACKMAP_REF_PREFIX;
 use kit_core::transfer;
 
 use crate::error::SyncError;
@@ -20,7 +21,7 @@ use crate::source::RemoteSource;
 /// it never collides with real heads or tags. See [`kit_core::transfer`].
 #[must_use]
 pub fn packmap_ref(branch: &str) -> String {
-    format!("refs/kit/packmap/{branch}")
+    format!("{PACKMAP_REF_PREFIX}{branch}")
 }
 
 /// Push and fetch callers may carry a short branch name or its full ref name.

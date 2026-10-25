@@ -1,3 +1,7 @@
+/// Service name of a native-keystore signing-key entry.
+pub(crate) const SIGNING_KEY_SERVICE: &str = "dev.kit.keystore.signing-key.v1";
+/// Service name of a native-keystore entry that holds a software-key DEK.
+pub(crate) const SOFTWARE_DEK_SERVICE: &str = "dev.kit.keystore.software-dek.v1";
 use crate::{
     Algorithm, BackendKind, Error, KeyLabel, KeyMetadata, KeySigner as _, Result, SecretKey,
     SoftwareSigner,

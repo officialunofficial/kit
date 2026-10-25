@@ -39,7 +39,6 @@ pub const CONFIG_FILE: &str = ".kit/config";
 pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub const USER_CONFIG_SUBPATH: &str = "kit/config";
 pub const DEFAULT_SIGNING_KEY: &str = ".kit/keys/default.key";
-pub const DEFAULT_BRANCH: &str = "main";
 pub const DEFAULT_SIGNER: &str = "file";
 pub const DEFAULT_KEY_BACKEND: &str = "software";
 pub const DEFAULT_KEY_REF: &str = "software:default";
@@ -1078,9 +1077,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// The implicit name of the flat `remote_endpoint` /
-/// `remote_type` remote.
-pub const DEFAULT_REMOTE_NAME: &str = "default";
+pub use kit_sync::{DEFAULT_BRANCH, DEFAULT_REMOTE_NAME};
 
 /// A resolved remote: its endpoint URL plus whether the repo-scoped
 /// config selected it (`repo_chosen`), which the credential gate

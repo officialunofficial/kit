@@ -2,6 +2,7 @@
 
 use super::random_handle;
 use crate::encrypted_record::KeyProtector;
+use crate::native_list::SOFTWARE_DEK_SERVICE;
 use crate::{Error, Result};
 
 #[derive(Debug)]
@@ -9,7 +10,6 @@ pub(crate) struct LinuxSecretServiceProtector;
 
 impl LinuxSecretServiceProtector {
     pub(crate) const ID: &'static str = "linux-secret-service";
-    const SERVICE: &'static str = "dev.kit.keystore.software-dek.v1";
 
     pub(crate) fn available() -> Result<bool> {
         match zbus_secret_service_keyring_store::Store::new() {
@@ -26,7 +26,7 @@ impl LinuxSecretServiceProtector {
         })?;
         let _guard = crate::keyring_default_store_lock();
         keyring_core::set_default_store(store);
-        keyring_core::Entry::new(Self::SERVICE, account)
+        keyring_core::Entry::new(SOFTWARE_DEK_SERVICE, account)
             .map_err(|error| Error::Io(format!("Linux Secret Service software protector: {error}")))
     }
 }

@@ -5,13 +5,13 @@ use std::collections::HashMap;
 use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::native_list::SIGNING_KEY_SERVICE;
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
     KeyDeleter, KeyExporter, KeyGenerator, KeyImporter, KeyLabel, KeyLister, KeyMetadata,
     KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner, validate_label,
 };
 
-const SERVICE: &str = "dev.kit.keystore.signing-key.v1";
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25_300;
 
 /// User-scoped macOS Keychain backend.
@@ -32,7 +32,7 @@ impl MacosKeychainKeystore {
     fn get_secret(label: &KeyLabel, algorithm: Algorithm) -> Result<SecretKey> {
         let account = Self::account(label, algorithm);
         let password = Zeroizing::new(
-            security_framework::passwords::get_generic_password(SERVICE, &account)
+            security_framework::passwords::get_generic_password(SIGNING_KEY_SERVICE, &account)
                 .map_err(|error| map_keychain_error(error, label, algorithm))?,
         );
         if password.len() != 32 {
@@ -128,7 +128,10 @@ impl KeyImporter for MacosKeychainKeystore {
             secret.algorithm(),
             *secret.expose_secret(),
         )?;
-        let exists = match security_framework::passwords::get_generic_password(SERVICE, &account) {
+        let exists = match security_framework::passwords::get_generic_password(
+            SIGNING_KEY_SERVICE,
+            &account,
+        ) {
             Ok(secret) => {
                 let _secret = Zeroizing::new(secret);
                 true
@@ -143,7 +146,7 @@ impl KeyImporter for MacosKeychainKeystore {
             });
         }
         security_framework::passwords::set_generic_password(
-            SERVICE,
+            SIGNING_KEY_SERVICE,
             &account,
             secret.expose_secret(),
         )
@@ -171,7 +174,7 @@ impl KeyLister for MacosKeychainKeystore {
         let mut options = ItemSearchOptions::new();
         options
             .class(ItemClass::generic_password())
-            .service(SERVICE)
+            .service(SIGNING_KEY_SERVICE)
             .load_attributes(true)
             .limit(Limit::All);
         let results = match options.search() {
@@ -191,8 +194,10 @@ impl KeyLister for MacosKeychainKeystore {
             let Some((algorithm, label)) = crate::native_list::parse_account(account) else {
                 continue;
             };
-            let secret = match security_framework::passwords::get_generic_password(SERVICE, account)
-            {
+            let secret = match security_framework::passwords::get_generic_password(
+                SIGNING_KEY_SERVICE,
+                account,
+            ) {
                 Ok(secret) => secret,
                 Err(error) if is_not_found(error) => continue,
                 Err(error) => {
@@ -225,7 +230,7 @@ impl KeyDeleter for MacosKeychainKeystore {
         validate_label(selector.label())?;
         let algorithm = crate::native_list::resolve_selector_algorithm(selector, Self::get_secret)?;
         let account = Self::account(selector.label_id(), algorithm);
-        security_framework::passwords::delete_generic_password(SERVICE, &account)
+        security_framework::passwords::delete_generic_password(SIGNING_KEY_SERVICE, &account)
             .map_err(|error| map_keychain_error(error, selector.label_id(), algorithm))
     }
 }

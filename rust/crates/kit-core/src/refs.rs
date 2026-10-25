@@ -167,6 +167,9 @@ pub const BRANCH_REF_PREFIX: &str = "refs/heads/";
 pub const PACKMAP_REF_PREFIX: &str = "refs/kit/packmap/";
 /// The wire name prefix of a tag.
 pub const TAG_REF_PREFIX: &str = "refs/tags/";
+/// The ref that carries published bridge attestations on a git mirror
+/// (SPEC-GIT-BRIDGE §11).
+pub const ATTESTATIONS_REF: &str = "refs/kit/attestations";
 
 /// Longest new branch name, in bytes: a push writes both
 /// `refs/heads/<branch>` and `refs/kit/packmap/<branch>`, and each must

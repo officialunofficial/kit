@@ -4,13 +4,12 @@ use std::collections::HashMap;
 
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::native_list::SIGNING_KEY_SERVICE;
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
     KeyDeleter, KeyExporter, KeyGenerator, KeyImporter, KeyLabel, KeyLister, KeyMetadata,
     KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner, validate_label,
 };
-
-const SERVICE: &str = "dev.kit.keystore.signing-key.v1";
 
 /// User-scoped Freedesktop Secret Service backend.
 #[derive(Clone, Debug, Default)]
@@ -32,7 +31,7 @@ impl LinuxSecretServiceKeystore {
             .map_err(|error| keyring_backend_error("create Secret Service store", error))?;
         let _guard = crate::keyring_default_store_lock();
         keyring_core::set_default_store(store);
-        keyring_core::Entry::new(SERVICE, &Self::account(label, algorithm))
+        keyring_core::Entry::new(SIGNING_KEY_SERVICE, &Self::account(label, algorithm))
             .map_err(|error| map_keyring_error(error, label, algorithm))
     }
 
@@ -165,7 +164,7 @@ impl KeyLister for LinuxSecretServiceKeystore {
             .map_err(|error| keyring_backend_error("create Secret Service store", error))?;
         let _guard = crate::keyring_default_store_lock();
         keyring_core::set_default_store(store);
-        let spec = HashMap::from([("service", SERVICE)]);
+        let spec = HashMap::from([("service", SIGNING_KEY_SERVICE)]);
         let entries = keyring_core::Entry::search(&spec).map_err(keyring_list_error)?;
 
         let mut out = Vec::new();
@@ -173,7 +172,7 @@ impl KeyLister for LinuxSecretServiceKeystore {
             let Some((service, account)) = entry.get_specifiers() else {
                 continue;
             };
-            if service != SERVICE {
+            if service != SIGNING_KEY_SERVICE {
                 continue;
             }
             let secret = match entry.get_secret() {

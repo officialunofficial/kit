@@ -9,16 +9,12 @@
 
 use core::fmt;
 
-use kit_core::refs::{validate_ref_name, validate_ref_name_grammar};
+use kit_core::refs::{
+    BRANCH_REF_PREFIX, PACKMAP_REF_PREFIX, validate_ref_name, validate_ref_name_grammar,
+};
 
 use super::text::strictly_ascending;
 use super::{GrantError, MAX_REF_SCOPES};
-
-/// No pattern may be, or begin with, this prefix (§3.3). §8.3 covers packmap
-/// refs through their branch instead.
-pub const PACKMAP_PREFIX: &str = "refs/kit/packmap/";
-/// The branch prefix a packmap ref travels with (§8.3).
-const HEADS_PREFIX: &str = "refs/heads/";
 
 /// §8.3: the head ref `refs/heads/<x>` whose flags cover the packmap ref
 /// `refs/kit/packmap/<x>`. `None` for anything else, including a name
@@ -27,8 +23,8 @@ const HEADS_PREFIX: &str = "refs/heads/";
 /// [`RefScopes::effective_flags`].
 #[must_use]
 pub fn packmap_head(ref_name: &str) -> Option<String> {
-    let branch = ref_name.strip_prefix(PACKMAP_PREFIX)?;
-    validate_ref_name(ref_name).then(|| format!("{HEADS_PREFIX}{branch}"))
+    let branch = ref_name.strip_prefix(PACKMAP_REF_PREFIX)?;
+    validate_ref_name(ref_name).then(|| format!("{BRANCH_REF_PREFIX}{branch}"))
 }
 
 /// §8.3: the packmap ref `refs/kit/packmap/<x>` of the head ref
@@ -36,8 +32,8 @@ pub fn packmap_head(ref_name: &str) -> Option<String> {
 /// else.
 #[must_use]
 pub fn head_packmap(head: &str) -> Option<String> {
-    let branch = head.strip_prefix(HEADS_PREFIX)?;
-    validate_ref_name(head).then(|| format!("{PACKMAP_PREFIX}{branch}"))
+    let branch = head.strip_prefix(BRANCH_REF_PREFIX)?;
+    validate_ref_name(head).then(|| format!("{PACKMAP_REF_PREFIX}{branch}"))
 }
 
 /// The `cufd` flags of a ref-scope entry (§3.3, §8).
@@ -137,7 +133,7 @@ impl RefPattern {
     /// `RefPattern` if it does not follow the SPEC-REFS §3 ref-name
     /// grammar, optionally followed by `/*` (so a bare `*` and
     /// `refs/heads/*x` fail); `PackmapPattern` if it is or begins with
-    /// [`PACKMAP_PREFIX`].
+    /// [`PACKMAP_REF_PREFIX`].
     ///
     /// The grammar only, not §3's 512-byte name bound: the statement cap
     /// already bounds a pattern, and a pattern longer than any ref name
@@ -150,7 +146,7 @@ impl RefPattern {
             None if validate_ref_name_grammar(s) => Self::Exact(s.to_owned()),
             _ => return Err(GrantError::RefPattern),
         };
-        if s.starts_with(PACKMAP_PREFIX) {
+        if s.starts_with(PACKMAP_REF_PREFIX) {
             return Err(GrantError::PackmapPattern);
         }
         Ok(pattern)
@@ -252,13 +248,13 @@ impl RefScopes {
     /// `ref_name`. A ref no pattern matches, or a name outside SPEC-REFS §3,
     /// gets [`RefFlags::EMPTY`], so every change to it is denied.
     ///
-    /// A packmap ref (under [`PACKMAP_PREFIX`]) always gets
+    /// A packmap ref (under [`PACKMAP_REF_PREFIX`]) always gets
     /// [`RefFlags::EMPTY`], even under `refs/*` or `refs/kit/*`: §3.3 never
     /// matches packmap refs directly. §8.3 covers one through its head; see
     /// [`packmap_head`].
     #[must_use]
     pub fn effective_flags(&self, ref_name: &str) -> RefFlags {
-        if !validate_ref_name(ref_name) || ref_name.starts_with(PACKMAP_PREFIX) {
+        if !validate_ref_name(ref_name) || ref_name.starts_with(PACKMAP_REF_PREFIX) {
             return RefFlags::EMPTY;
         }
         self.0

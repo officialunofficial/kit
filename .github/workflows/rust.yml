@@ -226,6 +226,10 @@ jobs:
         run: bash scripts/check-spec-status.sh
       - name: Every magic in a spec matches its hex bytes
         run: python3 -I -B scripts/check-spec-magics.py
+      - name: Every format constant has one owner
+        run: |
+          python3 -I -B scripts/check-format-constants.py
+          bash scripts/test-check-format-constants.sh
       # The Python checks share no code with the Rust crates. They are the
       # independent reference for the golden vectors.
       - name: Install the Python reference dependencies

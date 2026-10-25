@@ -893,7 +893,7 @@ impl<
             && head
                 .strip_prefix("refs/heads/")
                 .filter(|branch| !branch.is_empty())
-                .is_none_or(|branch| packmap != format!("refs/kit/packmap/{branch}"))
+                .is_none_or(|branch| packmap != crate::packmap::packmap_ref(branch))
         {
             return Err(SourceError::InvalidRef(
                 "ticketed advance requires paired head and packmap refs".into(),

@@ -98,7 +98,7 @@ pub mod sparse;
 
 #[cfg(feature = "sparse-checkout")]
 pub use sparse::{
-    MAX_FILTER_PATHS as SPARSE_MAX_FILTER_PATHS, MAX_LEAVES as SPARSE_MAX_LEAVES, SPARSE_CACHE_DIR,
+    MAX_FILTER_PATHS as SPARSE_MAX_FILTER_PATHS, MAX_LEAVES as SPARSE_MAX_LEAVES,
     SPARSE_CACHE_MAGIC, SPARSE_CACHE_VERSION, SPARSE_WIRE_MAGIC, SPARSE_WIRE_MAX_BYTES,
     SPARSE_WIRE_VERSION, SparseError, SparseManifest, SparseProof, SparseResponse, SparseWireError,
     VerifiedSparseTree, build_sparse, decode_sparse_cache, decode_sparse_response,
@@ -155,11 +155,11 @@ pub use index::{
 };
 pub use layout::RepoLayout;
 pub use refs::{
-    BRANCH_REF_PREFIX, HEAD_FILE, HEADS_DIR, Head, MAX_BRANCH_NAME_BYTES, MAX_REF_NAME_BYTES,
-    MAX_TAG_NAME_BYTES, PACKMAP_REF_PREFIX, REFS_DIR, Ref, RefError, RefNameKind, RefResult,
-    RefWriteCondition, SHALLOW_FILE, TAG_REF_PREFIX, TAGS_DIR, check_new_name, check_new_ref_name,
-    check_pushable_branch, decode_ref_wire, encode_ref_wire, validate_ref_name,
-    validate_ref_name_grammar, validate_ref_prefix,
+    ATTESTATIONS_REF, BRANCH_REF_PREFIX, HEAD_FILE, HEADS_DIR, Head, MAX_BRANCH_NAME_BYTES,
+    MAX_REF_NAME_BYTES, MAX_TAG_NAME_BYTES, PACKMAP_REF_PREFIX, REFS_DIR, Ref, RefError,
+    RefNameKind, RefResult, RefWriteCondition, SHALLOW_FILE, TAG_REF_PREFIX, TAGS_DIR,
+    check_new_name, check_new_ref_name, check_pushable_branch, decode_ref_wire, encode_ref_wire,
+    validate_ref_name, validate_ref_name_grammar, validate_ref_prefix,
 };
 pub use repo_lock::{DEFAULT_TIMEOUT as LOCK_DEFAULT_TIMEOUT, LockError, LockResult, RepoLock};
 pub use worktree::{

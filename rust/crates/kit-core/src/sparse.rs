@@ -17,7 +17,6 @@ pub const SPARSE_WIRE_VERSION: u8 = 2;
 pub const SPARSE_WIRE_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const SPARSE_CACHE_MAGIC: [u8; 4] = *b"KSPC";
 pub const SPARSE_CACHE_VERSION: u8 = 2;
-pub const SPARSE_CACHE_DIR: &str = "sparse";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SparseManifest {

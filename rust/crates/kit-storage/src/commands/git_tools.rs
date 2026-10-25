@@ -23,6 +23,7 @@ use clap::Parser;
 use kit_core::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Commit, Object};
+use kit_core::refs::ATTESTATIONS_REF;
 use kit_core::store::ObjectStore;
 use kit_git_bridge::gitobj::{GitObject, GitType, Sha1Id, sha1_hex};
 use kit_git_bridge::gitsrc::{CatFileBatch, GitObjKind};
@@ -32,8 +33,6 @@ use super::revspec;
 use crate::exit;
 
 type CmdResult<T> = Result<T, (String, u8)>;
-
-const ATTESTATIONS_REF: &str = "refs/kit/attestations";
 
 #[derive(Debug, Parser)]
 pub(super) struct VerifyArgs {

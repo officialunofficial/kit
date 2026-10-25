@@ -58,8 +58,8 @@ pub use client_source::{
     WriteRecovery,
 };
 pub use clone::{
-    CloneError, CloneInitError, CloneRemote, CloneReport, DEFAULT_REMOTE_NAME, clone,
-    init_clone_dir,
+    CloneError, CloneInitError, CloneRemote, CloneReport, DEFAULT_BRANCH, DEFAULT_REMOTE_NAME,
+    clone, init_clone_dir,
 };
 pub use error::SyncError;
 pub use fetch::FetchReport;

@@ -49,8 +49,6 @@ pub use kit_sync::push::{MAX_CHAIN_COMMITS, MAX_SPLIT_STEPS, PushControl, StepAu
 
 use packmap::rebaseline_depth;
 
-const DEFAULT_REMOTE: &str = "default";
-
 /// Errors returned by the push / pull helpers. Mapped to exit codes by
 /// the commands themselves.
 #[derive(Debug, thiserror::Error)]
@@ -935,7 +933,7 @@ pub(crate) fn push_all_with_source(
     let (mut options, warning) = push_options(cwd, authority)?;
     let observer = PushObserver { warning };
     options.control.observer = &observer;
-    options.remote_name = remote.unwrap_or(DEFAULT_REMOTE);
+    options.remote_name = remote.unwrap_or(kit_sync::DEFAULT_REMOTE_NAME);
     options.target = kit_sync::PushTarget::All { force };
     let report = kit_sync::push(cwd, source, &options)?;
     Ok(Pushed {

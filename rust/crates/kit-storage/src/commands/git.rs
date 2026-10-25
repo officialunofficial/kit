@@ -12,6 +12,7 @@ use clap::Parser;
 use kit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, statement, store as attest_store};
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
+use kit_core::refs::ATTESTATIONS_REF;
 use kit_core::{Hash, ObjectStore, refs};
 use kit_git_bridge::gitobj::{GitObject, GitType, Sha1Id, sha1_from_hex, sha1_hex};
 use kit_git_bridge::translate::translate_closure;
@@ -28,9 +29,6 @@ use crate::format;
 
 /// SPEC-GIT-BRIDGE §11 predicate type.
 const PREDICATE_TYPE: &str = "https://kit.storage/spec/predicate/git-bridge/v1";
-
-/// Mirror-side ref carrying published bridge attestations (§11).
-const ATTESTATIONS_REF: &str = "refs/kit/attestations";
 
 #[derive(Debug, Parser)]
 #[command(name = "kit git", about = "Git-bridge subcommands (SPEC-GIT-BRIDGE).")]

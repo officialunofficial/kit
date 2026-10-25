@@ -44,12 +44,8 @@ use super::graph::reachable_closure_checked;
 use super::rebase;
 use super::recovery;
 use super::stash;
+use crate::layout::ATTESTATIONS_DIR_NAME;
 use crate::refs::{self, HEADS_DIR, REMOTES_DIR, TAGS_DIR};
-
-/// Directory under `.kit/` holding per-commit attestation envelopes.
-/// Owned here (not in `kit-attest`) so the core collector stays free of
-/// a reverse crate dependency — it only reads directory *names*.
-const ATTESTATIONS_DIR: &str = "attestations";
 
 /// Longest ref or root file that gc reads: one hex hash plus whitespace.
 const HASH_FILE_MAX_BYTES: u64 = 128;
@@ -420,7 +416,7 @@ fn walk_ref_roots_strict(
 /// the `attestations/<commit-hex>/` directory names. Non-hex directory
 /// names are ignored (defensive); a missing dir yields an empty set.
 fn attested_commits(common_dir: &Path) -> Result<Vec<Hash>, io::Error> {
-    let dir = common_dir.join(ATTESTATIONS_DIR);
+    let dir = common_dir.join(ATTESTATIONS_DIR_NAME);
     let mut out = Vec::new();
     let rd = match fs::read_dir(&dir) {
         Ok(rd) => rd,

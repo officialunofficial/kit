@@ -36,9 +36,6 @@ use kit_core::Hash;
 use kit_core::hash::{self as hash_mod, HEX_LEN};
 use kit_core::layout::RepoLayout;
 
-/// Directory under `<root>` that owns every envelope on disk.
-pub const SUBDIR: &str = "attestations";
-
 /// Envelope file extension. Keep in sync with SPEC-ATTESTATIONS §3.
 pub const FILE_EXT: &str = ".dsse";
 
