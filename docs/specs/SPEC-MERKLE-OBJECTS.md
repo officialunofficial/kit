@@ -23,8 +23,8 @@ object's read-time id check into a free completeness proof for its whole
 child set: if the root matches, every child is present and correctly
 ordered.
 
-This is a **breaking** change relative to the all-flat-hash scheme; it is
-not byte-compatible with pre-merkle repositories. See §7.
+A repository stores objects under this scheme only. A store that does not
+declare it is rejected. See §7.
 
 ## 1. Primitive
 

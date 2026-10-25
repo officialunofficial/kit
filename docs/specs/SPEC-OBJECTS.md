@@ -408,8 +408,8 @@ Objects > 1 GiB MUST be rejected.
 A conforming repository MUST also carry a `.kit/format` file declaring
 the object-addressing format (`bmt-v1`); an implementation MUST refuse to
 open a repository whose marker is absent or unrecognized
-(`IncompatibleRepoFormat`) rather than mis-read a pre-merkle store under
-the current id rule. See SPEC-INDEX for the `.kit/index` sidecar.
+(`IncompatibleRepoFormat`) rather than mis-read a store without the marker
+under the current id rule. See SPEC-INDEX for the `.kit/index` sidecar.
 
 ### 10.1 Durability
 
@@ -554,7 +554,7 @@ mechanism that enforces or detects each:
 | A tag targets only a storable object, with an unambiguous name | `target_type` whitelist → `TagTargetTypeInvalid`; name floor → `TagNameInvalid` (§6a) |
 | Delta objects never appear in the object store | pack-only rule (§1, §8) |
 | Reassembled `ChunkedBlob` content is exactly `total_size` bytes | reassembly length check (§7) |
-| A merkle-addressing reader never mis-reads a pre-merkle store | mandatory `.kit/format` = `bmt-v1` marker → `IncompatibleRepoFormat` (§10, §12) |
+| A merkle-addressing reader never mis-reads a store without the marker | mandatory `.kit/format` = `bmt-v1` marker → `IncompatibleRepoFormat` (§10, §12) |
 | A visible object is durable; refs/index/log entries reference only durable objects | atomic temp-file and rename write and the ordering invariant (§10.1) |
 
 These are format-level guarantees. Signature guarantees are specified in

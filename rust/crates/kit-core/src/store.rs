@@ -295,8 +295,8 @@ impl ObjectStore {
             return Err(StoreError::NotAKitRepository);
         }
         // Reject a repository that does not declare merkle object
-        // addressing — a pre-merkle repo would mis-read every Tree /
-        // ChunkedBlob (and thus every Commit) under the new id scheme.
+        // addressing — such a repo would mis-read every Tree /
+        // ChunkedBlob (and thus every Commit) under this id scheme.
         let read_format = || -> io::Result<String> {
             let file = File::open(layout.format_file())?;
             file.lock_shared()?;
@@ -1040,7 +1040,7 @@ mod tests {
 
     #[test]
     fn open_rejects_repo_missing_or_wrong_format_marker() {
-        // A pre-merkle repo (objects dir present, no format marker) must be
+        // A repo with an objects dir and no format marker must be
         // rejected loudly rather than silently mis-read.
         let dir = TempDir::new().unwrap();
         let layout = RepoLayout::single(dir.path());
