@@ -241,7 +241,8 @@ pub fn run(args: &[String]) -> u8 {
     let mut all_ok = true;
     let mut atts: Vec<AttRecord> = Vec::with_capacity(envelopes.len());
     for path in &envelopes {
-        let bytes = match std::fs::read(path) {
+        let limit = u64::try_from(store::MAX_ENVELOPE_SIZE).unwrap_or(u64::MAX);
+        let bytes = match kit_core::bounded_read::read_capped(path, limit) {
             Ok(b) => b,
             Err(e) => {
                 let _ = writeln!(report, "  {}: read error: {e}", path.display());

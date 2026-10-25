@@ -341,9 +341,9 @@ impl From<CodecError> for VerifyError {
 
 mod closure;
 pub use closure::{
-    ClosureExport, ClosureManifest, ClosureReport, MAX_CLOSURE_PACKS, ObjectSource, export_closure,
-    verify_closure, verify_closure_manifest, verify_closure_packs, verify_closure_store,
-    verify_closure_streaming,
+    ClosureExport, ClosureManifest, ClosureReport, MAX_CLOSURE_PACKS, MAX_MANIFEST_BYTES,
+    ObjectSource, export_closure, verify_closure, verify_closure_manifest, verify_closure_packs,
+    verify_closure_store, verify_closure_streaming,
 };
 mod push;
 pub use push::{PushReport, verify_push};

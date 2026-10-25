@@ -24,6 +24,10 @@ use crate::verify::VerifyError;
 /// Hard cap on the number of packs a closure manifest may list.
 pub const MAX_CLOSURE_PACKS: usize = 65_536;
 
+/// Largest valid encoded [`ClosureManifest`]: the fixed header, a
+/// four-byte length prefix and [`MAX_CLOSURE_PACKS`] pack keys.
+pub const MAX_MANIFEST_BYTES: u64 = 5 + 32 + 1 + 4 + MAX_CLOSURE_PACKS as u64 * 32;
+
 const MANIFEST_MAGIC: &[u8; 4] = b"MKCL";
 const MANIFEST_VERSION: u8 = 1;
 const MODE_SNAPSHOT: u8 = 0;
@@ -867,6 +871,18 @@ mod tests {
     use crate::layout::RepoLayout;
     use crate::object::{Blob, Commit, EntryMode, Identity, Object, ObjectType, Tree, TreeEntry};
     use crate::sign::{KeyPair, sign_commit};
+
+    #[test]
+    fn largest_manifest_fits_the_manifest_byte_limit() {
+        let manifest = ClosureManifest {
+            root: ZERO,
+            mode: ClosureMode::History,
+            packs: vec![ZERO; MAX_CLOSURE_PACKS],
+        };
+        let encoded = manifest.encode();
+        assert!(encoded.len() as u64 <= MAX_MANIFEST_BYTES);
+        assert_eq!(ClosureManifest::decode(&encoded).unwrap(), manifest);
+    }
     use crate::worktree::store_file_object;
     use tempfile::TempDir;
 

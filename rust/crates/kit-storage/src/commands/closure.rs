@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, ValueEnum};
 use kit_core::hash::{Hash, from_hex, to_hex};
 use kit_core::pack_key;
+use kit_core::protocol::PACK_BODY_LIMIT;
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::verify::{
     ClosureReport, export_closure, verify_closure, verify_closure_manifest, verify_closure_store,
@@ -186,7 +187,10 @@ fn run_verify_from(opts: &VerifyArgs, dir: &Path, json: bool) -> u8 {
         }
     };
     let manifest_path = dir.join("MANIFEST.mkcl");
-    let manifest = match fs::read(&manifest_path) {
+    let manifest = match kit_core::bounded_read::read_capped(
+        &manifest_path,
+        kit_core::verify::MAX_MANIFEST_BYTES,
+    ) {
         Ok(b) => b,
         Err(e) => {
             return emit_err(
@@ -205,16 +209,10 @@ fn run_verify_from(opts: &VerifyArgs, dir: &Path, json: bool) -> u8 {
             exit::DATAERR,
         );
     }
-    let mut packs = Vec::new();
-    for key in &decoded.packs {
-        let file = dir.join(format!("{}.pack", to_hex(key)));
-        match fs::read(&file) {
-            Ok(b) => packs.push(b),
-            Err(e) => {
-                return emit_err(&format!("read {}: {e}", file.display()), exit::NOINPUT);
-            }
-        }
-    }
+    let packs = match read_pack_files(dir, &decoded.packs, PACK_BODY_LIMIT) {
+        Ok(p) => p,
+        Err(msg) => return emit_err(&msg, exit::NOINPUT),
+    };
     let refs: Vec<&[u8]> = packs.iter().map(Vec::as_slice).collect();
     let report = match verify_closure_manifest(&root, &manifest, &refs) {
         Ok(r) => r,
@@ -440,9 +438,60 @@ fn mode_name(mode: ClosureMode) -> &'static str {
 
 use super::error as emit_err;
 
+/// Read the pack file of each key in `dir`. The files together may hold
+/// at most `budget` bytes, so a hostile manifest cannot make the
+/// verifier buffer more than that.
+fn read_pack_files(dir: &Path, keys: &[Hash], budget: u64) -> Result<Vec<Vec<u8>>, String> {
+    let mut remaining = budget;
+    let mut packs = Vec::with_capacity(keys.len());
+    for key in keys {
+        let file = dir.join(format!("{}.pack", to_hex(key)));
+        let bytes = kit_core::bounded_read::read_capped(&file, remaining)
+            .map_err(|e| format!("read {}: {e}", file.display()))?;
+        remaining -= bytes.len() as u64;
+        packs.push(bytes);
+    }
+    Ok(packs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_pack_files_reads_packs_within_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = [[1u8; 32], [2u8; 32]];
+        for (i, k) in keys.iter().enumerate() {
+            fs::write(
+                dir.path().join(format!("{}.pack", to_hex(k))),
+                vec![0u8; 4 + i],
+            )
+            .unwrap();
+        }
+        let packs = read_pack_files(dir.path(), &keys, 9).unwrap();
+        assert_eq!(packs.iter().map(Vec::len).collect::<Vec<_>>(), [4, 5]);
+    }
+
+    #[test]
+    fn read_pack_files_rejects_one_pack_over_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = [1u8; 32];
+        fs::write(dir.path().join(format!("{}.pack", to_hex(&key))), [0u8; 10]).unwrap();
+        let err = read_pack_files(dir.path(), &[key], 9).unwrap_err();
+        assert!(err.contains("size limit"), "{err}");
+    }
+
+    #[test]
+    fn read_pack_files_rejects_packs_that_together_pass_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = [[1u8; 32], [2u8; 32]];
+        for k in &keys {
+            fs::write(dir.path().join(format!("{}.pack", to_hex(k))), [0u8; 6]).unwrap();
+        }
+        let err = read_pack_files(dir.path(), &keys, 11).unwrap_err();
+        assert!(err.contains("size limit"), "{err}");
+    }
 
     fn parse_args(args: &[String]) -> Result<Cmd, clap::Error> {
         let mut full: Vec<String> = vec!["kit closure".into()];

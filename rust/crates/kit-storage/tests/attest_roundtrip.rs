@@ -265,6 +265,34 @@ fn verify_attest_rejects_envelope_replayed_under_another_commit() {
 }
 
 #[test]
+fn verify_attest_rejects_an_envelope_file_over_the_size_cap() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path();
+    init_repo_with_commit(root);
+    write_repo_key_trust_roots(root);
+
+    let path = kit_attest::store::envelope_path(
+        &kit_core::layout::RepoLayout::single(root),
+        &head_commit_hash(root),
+        &kit_core::hash::hash(b"oversized"),
+    );
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, vec![b' '; kit_attest::store::MAX_ENVELOPE_SIZE + 1]).unwrap();
+
+    let out = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".kit/attest-trust-roots.toml",
+        ],
+    );
+    assert!(!out.status.success(), "oversized envelope verified");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("read error"), "got: {stderr}");
+}
+
+#[test]
 fn verify_attest_rejects_malformed_statement_payload() {
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
