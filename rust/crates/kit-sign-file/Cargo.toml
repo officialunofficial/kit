@@ -30,8 +30,8 @@ kit-attest = { version = "0.5", path = "../kit-attest", default-features = false
 kit-core = { version = "0.5", path = "../kit-core" }
 # The wire schemas and the length-prefixed framing of the subprocess protocol.
 kit-rpc = { version = "0.5", path = "../kit-rpc" }
-buffa = "0.9.1"
-zeroize = "1"
+buffa = "=0.9.1"
+zeroize = "=1.9.0"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "=3.27.0"

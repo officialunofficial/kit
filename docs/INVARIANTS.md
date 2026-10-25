@@ -283,8 +283,7 @@ encoder regression.
 
 **Enforced by:** `scripts/check-crypto-stack-version.sh` audits the version
 across manifests and committed lockfiles. `scripts/check-exact-versions.py`
-fails when a workspace dependency is a range. It also fails when a crate
-manifest adds a range that `scripts/exact-versions-baseline.txt` does not list.
+fails when any dependency of the workspace or of a crate manifest is a range.
 
 ## Windows is not a build, test, or release target
 

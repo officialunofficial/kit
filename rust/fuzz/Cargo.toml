@@ -36,8 +36,8 @@ license = "MIT OR Apache-2.0"
 cargo-fuzz = true
 
 [dependencies]
-arbitrary = "1"
-buffa = "0.9.1"
+arbitrary = "=1.4.2"
+buffa = "=0.9.1"
 kit-attest = { path = "../crates/kit-attest", features = ["grants"] }
 kit-core = { path = "../crates/kit-core", features = ["sparse-checkout"] }
 kit-git-bridge = { path = "../crates/kit-git-bridge" }
@@ -46,12 +46,12 @@ kit-rpc = { path = "../crates/kit-rpc", features = ["arbitrary"] }
 kit-serve = { path = "../crates/kit-serve" }
 kit-storage = { path = "../crates/kit-storage" }
 kit-transport-ssh = { path = "../crates/kit-transport-ssh" }
-tempfile = "3"
+tempfile = "=3.27.0"
 
 # libfuzzer-sys is gated on the `libfuzzer` feature so `cargo test`
 # (stable, no nightly) doesn't pull it in. cargo-fuzz drives the build
 # with `--features libfuzzer` automatically.
-libfuzzer-sys = { version = "0.4", optional = true }
+libfuzzer-sys = { version = "=0.4.13", optional = true }
 
 # `minifuzz` (commonware-invariants) drives the in-process `#[test]`
 # property runs — see the `rpc_decode` pilot in `src/lib.rs`. Dev-only:

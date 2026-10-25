@@ -26,10 +26,10 @@ expect() {
 }
 
 # A fixture has an exact workspace table, one crate with an exact dependency
-# and a path dependency, and an empty baseline.
+# and and a path dependency.
 fixture() {
     local root="$work/$1"
-    mkdir -p "$root/rust/crates/a" "$root/scripts"
+    mkdir -p "$root/rust/crates/a"
     cat >"$root/rust/Cargo.toml" <<'TOML'
 [workspace]
 members = ["crates/a"]
@@ -46,7 +46,6 @@ alpha = { workspace = true }
 beta = "=0.4.1"
 sibling = { version = "0.5", path = "../sibling" }
 TOML
-    : >"$root/scripts/exact-versions-baseline.txt"
 }
 
 fixture clean
@@ -63,14 +62,5 @@ expect new-crate-range fail "$work/crate-range"
 fixture dev-range
 printf '\n[dev-dependencies]\ngamma = { version = "^2.1" }\n' >>"$work/dev-range/rust/crates/a/Cargo.toml"
 expect new-dev-range fail "$work/dev-range"
-
-fixture listed
-printf 'gamma = "2"\n' >>"$work/listed/rust/crates/a/Cargo.toml"
-printf 'rust/crates/a/Cargo.toml gamma\n' >"$work/listed/scripts/exact-versions-baseline.txt"
-expect listed-range pass "$work/listed"
-
-fixture stale
-printf 'rust/crates/a/Cargo.toml beta\n' >"$work/stale/scripts/exact-versions-baseline.txt"
-expect stale-baseline-entry fail "$work/stale"
 
 exit "$fails"
