@@ -8,8 +8,6 @@
 //! ```text
 //! kit+ssh://user@host/path
 //! kit+ssh://user@host:port/path
-//! kit+ssh://user@host:path           (legacy SCP-style, no port)
-//! kit+ssh://user@host:port:path      (legacy SCP-style, explicit port)
 //! ```
 //!
 //! The `user@` prefix is REQUIRED. The `kit+` prefix is REQUIRED. Paths
@@ -163,89 +161,22 @@ pub fn parse_kit_ssh_url(url: &str) -> Result<SshTarget, TransportError> {
         }
     }
 
-    // Two SSH URL families can contain a `/`:
-    //
-    //   (a) URL-style:  user@host[:port]/path
-    //   (b) SCP-style:  user@host:path  where `path` itself contains `/`.
-    //
-    // We distinguish by looking at what's between the first `:` and the
-    // first `/` after `@`. If a `:` appears BEFORE the first `/` AND
-    // the token between them parses as a u16 port, it's URL-style.
-    // Otherwise it's SCP-style (the colon is the SCP separator, and
-    // the slash lives inside the path).
-    if let Some(slash) = tail.find('/') {
-        let host_port = &tail[..slash];
-        let path_with_slash = &tail[slash..];
-        // Reject `host:` with no port digits — ambiguous form.
-        if let Some(colon) = host_port.find(':') {
-            let port_str = &host_port[colon + 1..];
-            if port_str.is_empty() {
-                return Err(TransportError::InvalidRef("ssh url has empty port".into()));
-            }
-        }
-        let is_url_form = match host_port.find(':') {
-            None => true,
-            Some(colon) => {
-                let port_str = &host_port[colon + 1..];
-                port_str.bytes().all(|b| b.is_ascii_digit())
-            }
-        };
-        if is_url_form {
-            if host_port.is_empty() || path_with_slash.is_empty() {
-                return Err(TransportError::InvalidRef(
-                    "ssh url has empty host or path".into(),
-                ));
-            }
-            return parse_host_port(user, host_port, path_with_slash);
-        }
-        // Fall through to SCP-style parsing with the full tail intact.
-    }
-
-    // SCP-style: `host[:port]:path` — `path` may itself contain slashes.
-    let first_colon = tail
-        .find(':')
-        .ok_or_else(|| TransportError::InvalidRef("ssh url missing host".into()))?;
-    let host = &tail[..first_colon];
-    let after = &tail[first_colon + 1..];
-    if host.is_empty() || after.is_empty() {
+    // URL-style only: `user@host[:port]/path`. The path starts at the
+    // first `/` after `@`.
+    let slash = tail
+        .find('/')
+        .ok_or_else(|| TransportError::InvalidRef("ssh url has no path".into()))?;
+    let (host_port, path_with_slash) = tail.split_at(slash);
+    if host_port.is_empty() {
         return Err(TransportError::InvalidRef(
             "ssh url has empty host or path".into(),
         ));
     }
-
-    // Look for `host:port:path`. If the candidate port parses as u16
-    // AND the remainder validates as a path, accept it; otherwise treat
-    // the whole tail as the path.
-    if let Some(second_colon) = after.find(':') {
-        let port_candidate = &after[..second_colon];
-        let scp_path = &after[second_colon + 1..];
-        if !port_candidate.is_empty()
-            && !scp_path.is_empty()
-            && let Ok(port) = port_candidate.parse::<u16>()
-        {
-            validate_ssh_path(scp_path)?;
-            validate_host(host)?;
-            return Ok(SshTarget {
-                user: user.to_string(),
-                host: host.to_string(),
-                port: Some(port),
-                path: scp_path.to_string(),
-            });
-        }
-    }
-
-    validate_ssh_path(after)?;
-    validate_host(host)?;
-    Ok(SshTarget {
-        user: user.to_string(),
-        host: host.to_string(),
-        port: None,
-        path: after.to_string(),
-    })
+    parse_host_port(user, host_port, path_with_slash)
 }
 
 /// Parse a `host[:port]` token plus a `/`-prefixed path into a
-/// [`SshTarget`]. Internal helper for the URL-style branch.
+/// [`SshTarget`].
 fn parse_host_port(user: &str, host_port: &str, path: &str) -> Result<SshTarget, TransportError> {
     let (host, port) = if let Some(colon) = host_port.find(':') {
         let h = &host_port[..colon];
@@ -330,21 +261,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_scp_form_no_port() {
-        let t = parse_kit_ssh_url("kit+ssh://git@github.com:org/repo").unwrap();
-        assert_eq!(t.user, "git");
-        assert_eq!(t.host, "github.com");
-        assert_eq!(t.port, None);
-        assert_eq!(t.path, "org/repo");
-    }
-
-    #[test]
-    fn parses_scp_form_with_port() {
-        let t = parse_kit_ssh_url("kit+ssh://alice@host.example.com:2222:repos/project").unwrap();
-        assert_eq!(t.user, "alice");
-        assert_eq!(t.host, "host.example.com");
-        assert_eq!(t.port, Some(2222));
-        assert_eq!(t.path, "repos/project");
+    fn rejects_scp_form() {
+        assert!(parse_kit_ssh_url("kit+ssh://git@github.com:org/repo").is_err());
+        assert!(parse_kit_ssh_url("kit+ssh://alice@host.example.com:2222:repos/project").is_err());
+        assert!(parse_kit_ssh_url("kit+ssh://alice@host.example.com:repos").is_err());
     }
 
     #[test]

@@ -1760,7 +1760,7 @@ Accepted schemes:
 | `kit+file` | `kit+file:///abs/path` | local filesystem mirror |
 | `kit+https` | `kit+https://host[:port][/path]` | ConnectRPC gateway (for example, VCS Worker) |
 | `kit+s3` | `kit+s3://endpoint/bucket[/prefix]` | S3-compatible object store |
-| `kit+ssh` | `kit+ssh://user@host[:port]:path` | SSH with the kit shell |
+| `kit+ssh` | `kit+ssh://user@host[:port]/path` | SSH with the kit shell |
 | `kit+memory` | `kit+memory://` | in-memory (testing only) |
 
 `kit+https` (and loopback-only `kit+http`) speaks

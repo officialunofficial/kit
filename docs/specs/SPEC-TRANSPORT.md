@@ -126,7 +126,7 @@ Programs MUST NOT pattern-match on the advisory message strings.
 | `kit+https://host/project` | ConnectRPC (`kit-transport-connect`'s `ConnectTransport`) &mdash; see [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) | The `kit+` prefix is stripped before the inner call; production uses `https://`. |
 | `kit+http://localhost…` | Same dispatch as above, plain HTTP for local dev | Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`, `localhost`) per `validate_http_scheme`; any other host returns `InsecureScheme`. |
 | `kit+s3://endpoint/bucket[/prefix]` | S3-compatible (`S3Transport`) | The endpoint becomes `https://<endpoint>`. The store must honor conditional writes (see §6.3). |
-| `kit+ssh://user@host[:port]/path` | SSH child and `kit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty/`.`/`..` segments. SCP-style `kit+ssh://user@host:path`/`kit+ssh://user@host:port:path` are also accepted (see [`kit-transport-ssh/src/url.rs`](../../rust/crates/kit-transport-ssh/src/url.rs)). |
+| `kit+ssh://user@host[:port]/path` | SSH child and `kit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty/`.`/`..` segments. See [`kit-transport-ssh/src/url.rs`](../../rust/crates/kit-transport-ssh/src/url.rs). |
 
 Bare `ssh://`, `https://`, `http://`, `s3://`, `file://` URLs (without
 the `kit+` prefix) are deliberately rejected. The prefix marks a URL
