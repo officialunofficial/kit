@@ -1487,6 +1487,37 @@ pub fn ignore_parse_one_iteration(input: &[u8]) {
     let _ = kit_core::ops::restore::parse_sparse_patterns(text);
 }
 
+/// Resumable pack cursor decoder (`pack_cursor_decode`):
+/// `WindowCursor::from_bytes` never panics on the raw input. The same input
+/// with a valid trailing checksum also reaches the field geometry checks,
+/// and an accepted cursor re-encodes to exactly its input.
+pub fn pack_cursor_decode_one_iteration(input: &[u8]) {
+    use kit_core::pack::window::WindowCursor;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let _ = WindowCursor::from_bytes(input);
+    let mut sealed = input[..input.len().min(4096 - 32)].to_vec();
+    sealed.extend_from_slice(&kit_core::hash::hash(&sealed));
+    if let Ok(cursor) = WindowCursor::from_bytes(&sealed) {
+        assert_eq!(
+            cursor.to_bytes(),
+            sealed,
+            "accepted cursor must re-encode byte for byte"
+        );
+    }
+}
+
+/// Chunked blob manifest builder (`chunked_blob_build`):
+/// `chunked_blob_from_bytes` never panics on any content, and the manifest
+/// records the exact input length with one id per chunk.
+pub fn chunked_blob_build_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let manifest =
+        kit_core::worktree::chunked_blob_from_bytes(input).expect("a bounded input always chunks");
+    assert_eq!(manifest.total_size, input.len() as u64);
+    assert_eq!(manifest.chunk_size, 0);
+    assert_eq!(manifest.chunks.is_empty(), input.is_empty());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2001,6 +2032,23 @@ mod tests {
         // Suppress unused-import warning for the oneof module while
         // keeping the import for future fixed cases.
         let _: Option<signer_frame::Body> = SignerFrame::default().body;
+    }
+
+    #[test]
+    fn unit_pack_cursor_decode() {
+        run_iterated_unit(pack_cursor_decode_one_iteration).unwrap();
+        for case in [&b""[..], &[1u8; 31][..], &[0u8; 4097][..], &[2u8; 80][..]] {
+            run_one(case, pack_cursor_decode_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_chunked_blob_build() {
+        run_iterated_unit(chunked_blob_build_one_iteration).unwrap();
+        let large = vec![7u8; MAX_INPUT];
+        for case in [&b""[..], b"a", &large[..]] {
+            run_one(case, chunked_blob_build_one_iteration).unwrap();
+        }
     }
 
     fn hex_to_bytes(hex: &str) -> Vec<u8> {

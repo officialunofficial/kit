@@ -48,21 +48,64 @@ from recurring.
 | `fuzz_targets/repo_identity_parse.rs` | The `repo_identity` namespace, repository and remote identity `parse` functions (an accepted value re-parses from its text form to the same text) |
 | `fuzz_targets/commitment_parse.rs` | `write_auth::ContentCommitment::parse` (an accepted commitment displays as exactly the input text) |
 | `fuzz_targets/ignore_parse.rs` | `ignore::parse` / `ops::restore::parse_sparse_patterns` (never panics on any text) |
+| `fuzz_targets/grant_parse.rs` | `Grant::parse` / `SignedHeader::parse` (an accepted input re-encodes to exactly itself) |
+| `fuzz_targets/epoch_visibility_parse.rs` | `EpochStatement::parse` / `VisibilityStatement::parse`, the stateless grant verifiers and the `webauthn-p256` blob and client data parsers |
+| `fuzz_targets/config_parse.rs` | `config::apply_text` (a repository config never sets a user-scoped key) |
+| `fuzz_targets/stash_list.rs` | `ops::stash::deserialize_list` (an accepted list re-encodes to exactly itself) |
+| `fuzz_targets/bridge_map.rs` | The `kit-git-bridge` map and ref-state loaders (never panic on any file content) |
+| `fuzz_targets/pack_cursor_decode.rs` | `pack::window::WindowCursor::from_bytes` (an accepted cursor re-encodes to exactly itself) |
+| `fuzz_targets/chunked_blob_build.rs` | `worktree::chunked_blob_from_bytes` (the manifest records the input length) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in
 `rust/fuzz/Cargo.toml`, as `software_key_record` does for `kit-keystore`.
 
-## What is **not** fuzzed (deferred)
+## Parser coverage
 
-- **`restore` (symlink resolution)** &mdash; the file-system side-effect
-  surface made it too easy to accidentally create symlink cycles.
-  Revisit once a virtual-FS shim exists to sandbox the target.
-- **SSH / URL parser wire decoding** &mdash; covered by crate-level unit
-  tests for now.
-- **`trust_roots::parse`, `parse_kit_ssh_url`** &mdash; these read text that
-  the user writes or types, not bytes from a remote peer or a hostile
-  repository. Unit tests cover them.
+Every public function that decodes or parses bytes or text appears below.
+Each one has a fuzz target, or a written reason why it has none.
+
+| Parser | Fuzz target or reason |
+| ------ | --------------------- |
+| `kit_attest::envelope::decode` | `envelope_decode` |
+| `kit_attest::grant` `Grant::parse`, `SignedHeader::parse`, `RepoScope` and `RefScope` `parse`, capability and visibility field `parse` | `grant_parse` |
+| `kit_attest::grant` `EpochStatement::parse`, `VisibilityStatement::parse` | `epoch_visibility_parse` |
+| `kit_attest::grant::webauthn` `WebAuthnAssertion::parse` | `epoch_visibility_parse` |
+| `kit_attest::webauthn::decode_pae_b64_standard` | None. It is one call to the audited base64 decoder, and it has no parsing code of its own. |
+| `kit_core::serialize::deserialize` | `tree` |
+| `kit_core::delta::decode` | `delta` |
+| `kit_core::pack` `PackReader::read`, `PackEntries` | `pack`, `pack_entries` |
+| `kit_core::pack::window::WindowCursor::from_bytes` | `pack_cursor_decode` |
+| `kit_core::merkle::Proof::decode` | `merkle_proof` |
+| `kit_core::transfer::decode_packlist` | `merkle_packlist` |
+| `kit_core::sparse::decode_sparse_response`, `decode_sparse_cache` | `sparse_wire_decode` |
+| `kit_core::verify` closure manifest `decode` | `verify_closure` |
+| `kit_core::refs::decode_ref_wire`, `parse_lowercase_hash` | `ref_wire_decode` |
+| `kit_core::index::deserialize` | `index_decode` |
+| `kit_core::history_order` `TimestampDiscovery::decode` | `history_order_decode` |
+| `kit_core::ops::conflict_state::deserialize_conflicts` | `conflict_state_decode` |
+| `kit_core::ops::stash::deserialize_list` | `stash_list` |
+| `kit_core::repo_identity` every `parse` and `parse_bare_allowed` | `repo_identity_parse` |
+| `kit_core::write_auth::ContentCommitment::parse` | `commitment_parse` |
+| `kit_core::ignore::parse`, `ops::restore::parse_sparse_patterns` | `ignore_parse` |
+| `kit_core::worktree::chunked_blob_from_bytes` | `chunked_blob_build` |
+| `kit_git_bridge::gitparse` `parse_commit`, `parse_tag`, `parse_tree`, `parse_person` | `git_commit_parse`, `git_tag_parse`, `git_tree_parse`, `git_object_parse` |
+| `kit_git_bridge::gitobj::GitObject::parse_raw`, `author::parse_timestamp`, `headers` `parse_identity`, `parse_hash`, `parse_signature` | `git_object_parse` |
+| `kit_keystore` encrypted key record `decode` | `software_key_record` |
+| `kit_storage::config` text parsing (`apply_text`) | `config_parse` |
+| `kit_storage::config::parse_pipe_list` | None. It splits a user-written config value on `\|`. It does no other parsing. Unit tests cover it. |
+| `kit_storage::grants::parse_relying_parties`, `grants::spec::parse_ttl`, `grants::cli::parse_timeout`, `grants::cli::parse_namespace` | None. They read command-line text that the user types, not bytes from a peer or a repository. Unit tests cover them. |
+| `kit_storage::commands::attest_factory::parse_algorithm` | None. It matches a command-line word against a fixed list. Unit tests cover it. |
+| `kit_storage::commands::trust_roots` `parse`, `hex_decode` | None. They read a trust file that the user owns. Unit tests cover them. |
+| `kit_storage::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
+| `kit_transport_ssh::url::parse_kit_ssh_url` | None. It reads a URL that the user types. Unit tests cover it. |
+| `kit_transport_s3::sigv4::parse_host` | None. It strips a scheme prefix from a configured endpoint. It does no other parsing. Unit tests cover it. |
+| `kit_serve::serve_session` wire handling | `ssh_session`, `rpc_decode` |
+| `kit-client` connect stream frame decoder (private) | None. It is not a public function. Unit tests in `connect/tests.rs` cover it. |
+
+One surface has no fuzz target by design. `restore` resolves symlinks. Its
+file-system side effects make it too easy to create symlink cycles. Revisit
+it once a virtual file system exists to sandbox the target.
 
 ## Invariants per target
 
