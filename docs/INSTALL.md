@@ -221,7 +221,8 @@ kit self update --version v0.5.0   # pin a specific release
 `cosign` on `PATH`, like the install script. It checks the cosign
 signature and the sha256 sidecar of the archive before it runs or
 installs any of the archive. It refuses a release that lacks either
-asset. It has no option to skip the checks. It refuses silent
+asset. It has no option to skip the checks. It uses HTTPS only. It
+refuses an asset URL that names a host other than the API host. It refuses silent
 downgrades, swaps the binary atomically, and rewrites the same
 receipts `install.sh` writes, so the two stay interchangeable.
 

@@ -37,8 +37,9 @@
 //!
 //! There is deliberately **no background update check** — this command
 //! only ever runs when invoked. Network egress: `api.github.com` and
-//! the release-asset host, HTTPS only, with an https→http redirect
-//! downgrade refused.
+//! the host of the API base, HTTPS only. Every asset URL in the release
+//! JSON must use HTTPS and name the same host and port as the API
+//! base. A redirect to a non-HTTPS URL is refused.
 //!
 //! Environment:
 //! * `GH_TOKEN` / `GITHUB_TOKEN` — bearer for the GitHub API. Optional;
@@ -46,7 +47,7 @@
 //! * `KIT_STATE_DIR` — receipt state dir override (installer parity).
 //! * `KIT_SELF_UPDATE_API_BASE` — override the API base URL
 //!   (`https://api.github.com/repos/officialunofficial/kit`). For
-//!   tests and mirrors.
+//!   tests and mirrors. It must be an `https://` URL.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -84,7 +85,7 @@ const COSIGN_IDENTITY_PREFIX: &str =
     "https://github.com/officialunofficial/kit/.github/workflows/release.yml@refs/tags/";
 const COSIGN_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
-/// Maximum redirects; https→http downgrades are refused outright.
+/// Maximum redirects. A redirect to a non-HTTPS URL is refused.
 const MAX_REDIRECTS: usize = 5;
 
 /// Per-request timeout. The archive is a few MB; 120 s tolerates slow
@@ -181,6 +182,9 @@ pub struct UpdateEnv {
     pub current_version: String,
     /// Archive-name target triple.
     pub target: String,
+    /// Accept `http://` for a loopback host. Tests set this to talk to
+    /// a local mock server. Production never sets it.
+    pub allow_loopback_http: bool,
     /// The `cosign` program that authenticates the archive.
     pub cosign: PathBuf,
 }
@@ -215,6 +219,7 @@ impl UpdateEnv {
             state_dir,
             current_version: CLI_VERSION.to_owned(),
             target: TARGET_TRIPLE.to_owned(),
+            allow_loopback_http: false,
             cosign: PathBuf::from("cosign"),
         })
     }
@@ -289,6 +294,7 @@ pub fn run_update(opts: &Opts, env: &UpdateEnv) -> Result<Outcome, (String, u8)>
         validate_tag(tag).map_err(|e| (e, exit::USAGE))?;
     }
 
+    check_url(env, &env.api_base).map_err(|e| (e, exit::CONFIG_ERROR))?;
     let client = http_client(env)?;
 
     // --- Resolve the target release tag. -----------------------------
@@ -602,18 +608,49 @@ fn cmp_versions(a: &str, b: &str) -> Result<std::cmp::Ordering, String> {
 
 // ----------------------------------------------------------------- HTTP
 
+/// Accept only an HTTPS URL. A loopback `http://` URL passes when the
+/// environment allows it. The URL must also name the same host and port
+/// as the API base, so a hostile release JSON cannot send the bearer
+/// token or the download to another origin.
+fn check_url(env: &UpdateEnv, url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL {url}: {e}"))?;
+    let loopback = parsed.host_str().is_some_and(|h| {
+        h == "localhost"
+            || h.trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|a| a.is_loopback())
+    });
+    let scheme_ok = parsed.scheme() == "https"
+        || (parsed.scheme() == "http" && env.allow_loopback_http && loopback);
+    if !scheme_ok {
+        return Err(format!("refusing non-HTTPS URL {url}"));
+    }
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err(format!("refusing URL with credentials {url}"));
+    }
+    let base = reqwest::Url::parse(&env.api_base)
+        .map_err(|e| format!("invalid API base {}: {e}", env.api_base))?;
+    if parsed.host_str() != base.host_str()
+        || parsed.port_or_known_default() != base.port_or_known_default()
+    {
+        return Err(format!(
+            "refusing URL {url}: host differs from the API base {}",
+            env.api_base
+        ));
+    }
+    Ok(())
+}
+
 fn http_client(env: &UpdateEnv) -> Result<reqwest::blocking::Client, (String, u8)> {
-    // Refuse https→http redirect downgrades: a downgrade would move
-    // the bearer token onto a plaintext channel.
-    let policy = reqwest::redirect::Policy::custom(|attempt| {
+    // Refuse a redirect to a non-HTTPS URL: it would move the bearer
+    // token onto a plaintext channel.
+    let allow_http = env.allow_loopback_http;
+    let policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= MAX_REDIRECTS {
             return attempt.error("too many redirects");
         }
-        if let Some(prev) = attempt.previous().last()
-            && prev.scheme() == "https"
-            && attempt.url().scheme() != "https"
-        {
-            return attempt.error("refusing redirect that downgrades https to a weaker scheme");
+        if attempt.url().scheme() != "https" && !allow_http {
+            return attempt.error("refusing redirect to a non-HTTPS URL");
         }
         attempt.follow()
     });
@@ -634,6 +671,7 @@ fn get(
     accept: &str,
     cap: u64,
 ) -> Result<Vec<u8>, (String, u8)> {
+    check_url(env, url).map_err(|e| (e, exit::DATAERR))?;
     let mut req = client.get(url).header("Accept", accept);
     // GitHub's API version header is harmless on non-GitHub mirrors.
     req = req.header("X-GitHub-Api-Version", "2022-11-28");
@@ -944,6 +982,61 @@ mod tests {
         assert_eq!(cmp_versions("1.0.0-alpha", "1.0.0-beta").unwrap(), Less);
         // Numeric prerelease segments order below alphanumeric (semver §11.4.3).
         assert_eq!(cmp_versions("1.0.0-1", "1.0.0-alpha").unwrap(), Less);
+    }
+
+    fn test_env(api_base: &str, allow_loopback_http: bool) -> UpdateEnv {
+        UpdateEnv {
+            api_base: api_base.to_owned(),
+            token: None,
+            exe_path: PathBuf::from("/nonexistent/kit"),
+            state_dir: PathBuf::from("/nonexistent"),
+            current_version: "0.1.0".to_owned(),
+            target: "t".to_owned(),
+            allow_loopback_http,
+            cosign: PathBuf::from("cosign"),
+        }
+    }
+
+    #[test]
+    fn check_url_accepts_same_host_https() {
+        let env = test_env("https://api.github.com/repos/o/k", false);
+        assert!(check_url(&env, &env.api_base).is_ok());
+        assert!(check_url(&env, "https://api.github.com/repos/o/k/releases/assets/1").is_ok());
+    }
+
+    #[test]
+    fn check_url_rejects_other_schemes() {
+        let env = test_env("https://api.github.com/repos/o/k", false);
+        for u in [
+            "http://api.github.com/repos/o/k/releases/assets/1",
+            "ftp://api.github.com/x",
+            "file:///etc/passwd",
+        ] {
+            assert!(check_url(&env, u).is_err(), "{u}");
+        }
+    }
+
+    #[test]
+    fn check_url_rejects_other_hosts_and_ports() {
+        let env = test_env("https://api.github.com/repos/o/k", false);
+        for u in [
+            "https://evil.example/x",
+            "https://api.github.com.evil.example/x",
+            "https://api.github.com:8443/x",
+            "https://user:pw@api.github.com/x",
+        ] {
+            assert!(check_url(&env, u).is_err(), "{u}");
+        }
+    }
+
+    #[test]
+    fn check_url_http_needs_loopback_and_opt_in() {
+        let strict = test_env("http://127.0.0.1:9/r", false);
+        assert!(check_url(&strict, &strict.api_base).is_err());
+        let lax = test_env("http://127.0.0.1:9/r", true);
+        assert!(check_url(&lax, &lax.api_base).is_ok());
+        let remote = test_env("http://example.com/r", true);
+        assert!(check_url(&remote, &remote.api_base).is_err());
     }
 
     #[test]

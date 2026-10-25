@@ -182,6 +182,7 @@ fn env_for(origin: &Origin, install: &Install, current: &str) -> UpdateEnv {
         state_dir: install.state_dir.clone(),
         current_version: current.to_owned(),
         target: TEST_TARGET.to_owned(),
+        allow_loopback_http: true,
         cosign: install.cosign_ok.clone(),
     }
 }
@@ -481,4 +482,37 @@ fn cosign_gets_the_pinned_signer_identity() {
         args.contains("https://token.actions.githubusercontent.com"),
         "{args}"
     );
+}
+
+#[test]
+fn asset_url_on_another_host_is_refused() {
+    let mut server = mockito::Server::new();
+    let archive_name = format!("kit-9.9.9-{TEST_TARGET}.tar.gz");
+    let release_json = format!(
+        r#"{{"tag_name":"v9.9.9","assets":[{{"name":"{archive_name}","url":"https://evil.example/assets/archive"}}]}}"#
+    );
+    server
+        .mock("GET", "/releases/tags/v9.9.9")
+        .with_body(&release_json)
+        .create();
+    let origin = Origin { server };
+    let install = managed_install("v0.3.0");
+    let before = std::fs::read(&install.exe).unwrap();
+
+    let mut o = opts();
+    o.version = Some("v9.9.9".to_owned());
+    let (msg, _) = run_update(&o, &env_for(&origin, &install, "0.3.0")).unwrap_err();
+    assert!(msg.contains("host differs"), "{msg}");
+    assert_eq!(std::fs::read(&install.exe).unwrap(), before);
+}
+
+#[test]
+fn plain_http_api_base_is_refused() {
+    let origin = origin_with_release("v9.9.9", b"unused");
+    let install = managed_install("v0.3.0");
+    let mut env = env_for(&origin, &install, "0.3.0");
+    env.allow_loopback_http = false;
+
+    let (msg, _) = run_update(&opts(), &env).unwrap_err();
+    assert!(msg.contains("non-HTTPS"), "{msg}");
 }
