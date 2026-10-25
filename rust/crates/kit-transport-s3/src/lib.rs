@@ -40,6 +40,7 @@
 pub mod sigv4;
 
 use std::env;
+use std::io::Read as _;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -439,17 +440,21 @@ fn extract_response(
     let body = if is_head {
         Vec::new()
     } else if let Some(limit) = body_limit {
-        // Pull into memory with an upper bound — reqwest's `bytes()` is
-        // unbounded, so we cap manually.
-        let all = resp.bytes().map_err(|_| TransportError::ConnectionFailed)?;
-        if all.len() > limit {
-            // Non-retryable: re-fetching the same oversized object would
-            // just exceed the cap again. (Previously mapped to a 507,
-            // which `is_retryable` treats as a retryable 5xx, so the
-            // backoff loop would have retried the doomed fetch.)
-            return Err(TransportError::PayloadTooLarge(all.len()));
+        // Read at most `limit + 1` bytes. The extra byte shows that the
+        // body is over the limit. The read stops there, so a hostile
+        // server cannot make the client buffer more than the limit.
+        let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+        let mut body = Vec::new();
+        resp.take(cap)
+            .read_to_end(&mut body)
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        if body.len() > limit {
+            // Non-retryable: fetching the same oversized object again
+            // would exceed the limit again. A 507 status would be
+            // retryable, so this error is a distinct kind.
+            return Err(TransportError::PayloadTooLarge(body.len()));
         }
-        all.to_vec()
+        body
     } else {
         // Body not needed (e.g. `HEAD` response already has no body, or
         // the status is retryable and the caller discards).
@@ -1191,6 +1196,48 @@ impl HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn extract_response_stops_reading_a_hostile_body_at_the_limit() {
+        const CHUNK: usize = 64 * 1024;
+        const CHUNKS: usize = 4096; // 256 MiB if the client read it all
+        let sent = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&sent);
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", "/hostile")
+            .with_status(200)
+            .with_chunked_body(move |w| {
+                let chunk = vec![0u8; CHUNK];
+                for _ in 0..CHUNKS {
+                    w.write_all(&chunk)?;
+                    counter.fetch_add(CHUNK, Ordering::SeqCst);
+                }
+                Ok(())
+            })
+            .create();
+        let resp = reqwest::blocking::get(format!("{}/hostile", server.url())).unwrap();
+        let err = extract_response(resp, Some(1024), false).err().unwrap();
+        assert!(matches!(err, TransportError::PayloadTooLarge(1025)));
+        // The server blocks on a full socket buffer once the client stops
+        // reading. It must not get close to the full body.
+        assert!(sent.load(Ordering::SeqCst) < CHUNK * CHUNKS / 2);
+    }
+
+    #[test]
+    fn extract_response_accepts_a_body_at_the_limit() {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", "/ok")
+            .with_status(200)
+            .with_body(vec![7u8; 1024])
+            .create();
+        let resp = reqwest::blocking::get(format!("{}/ok", server.url())).unwrap();
+        let out = extract_response(resp, Some(1024), false).unwrap();
+        assert_eq!(out.body.len(), 1024);
+    }
 
     #[test]
     fn pack_object_key_shape() {
