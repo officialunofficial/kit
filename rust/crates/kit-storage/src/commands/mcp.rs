@@ -55,7 +55,7 @@ struct McpOpts {
     /// is meant to be reachable from elsewhere.
     ///
     /// FAIL-CLOSED: refuses to bind unless
-    /// either a bearer token is configured (`--http-token-file` or the
+    /// either a bearer token is configured (`--token-file` or the
     /// `KIT_MCP_TOKEN` env var) or `--unsafe-allow-any-http-peer` is
     /// passed. See `mcp_v2.rs`.
     #[cfg(feature = "mcp-v2")]
@@ -73,7 +73,7 @@ struct McpOpts {
     /// high-privilege, agent-facing tool catalog, not a Git transport.
     #[cfg(feature = "mcp-v2")]
     #[arg(long, value_name = "PATH")]
-    http_token_file: Option<PathBuf>,
+    token_file: Option<PathBuf>,
     /// Dev/test escape hatch: accept ANY caller on `--http` with no bearer
     /// check (fail-open). Prints a loud warning. Intended only for local
     /// development — NEVER for production, since every tool call
@@ -116,7 +116,7 @@ fn dispatch(allowed: Option<&Path>, opts: &McpOpts) -> u8 {
     super::mcp_v2::serve(
         allowed,
         opts.http.as_deref(),
-        opts.http_token_file.as_deref(),
+        opts.token_file.as_deref(),
         opts.unsafe_allow_any_http_peer,
     )
 }

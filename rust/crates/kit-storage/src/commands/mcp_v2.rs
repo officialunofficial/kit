@@ -118,7 +118,7 @@ const MCP_TOKEN_ENV: &str = "KIT_MCP_TOKEN";
 pub(crate) fn serve(
     allowed: Option<&Path>,
     http: Option<&str>,
-    http_token_file: Option<&Path>,
+    token_file: Option<&Path>,
     unsafe_allow_any_http_peer: bool,
 ) -> u8 {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -135,7 +135,7 @@ pub(crate) fn serve(
 
     let result = match http {
         Some(addr) => {
-            let auth = match resolve_http_auth(http_token_file, unsafe_allow_any_http_peer) {
+            let auth = match resolve_http_auth(token_file, unsafe_allow_any_http_peer) {
                 Ok(a) => a,
                 Err(code) => return code,
             };
@@ -170,11 +170,11 @@ fn load_token(file: Option<&Path>, env_token: Option<String>) -> Result<Option<S
         return Ok(env_token);
     };
     if env_token.is_some() {
-        eprintln!("kit mcp --http: --http-token-file and KIT_MCP_TOKEN are mutually exclusive");
+        eprintln!("kit mcp --http: --token-file and KIT_MCP_TOKEN are mutually exclusive");
         return Err(exit::USAGE);
     }
     read_token_file(path).map(Some).map_err(|e| {
-        eprintln!("kit mcp --http: --http-token-file {}: {e}", path.display());
+        eprintln!("kit mcp --http: --token-file {}: {e}", path.display());
         exit::CONFIG_ERROR
     })
 }
@@ -220,7 +220,7 @@ fn resolve_http_auth(token_file: Option<&Path>, unsafe_allow_any: bool) -> Resul
     match (token, unsafe_allow_any) {
         (Some(_), true) => {
             eprintln!(
-                "kit mcp --http: --http-token-file (or KIT_MCP_TOKEN) and \
+                "kit mcp --http: --token-file (or KIT_MCP_TOKEN) and \
                  --unsafe-allow-any-http-peer are mutually exclusive"
             );
             Err(exit::USAGE)
@@ -244,7 +244,7 @@ fn resolve_http_auth(token_file: Option<&Path>, unsafe_allow_any: bool) -> Resul
         (None, false) => {
             eprintln!(
                 "kit mcp --http: refusing to bind without a bearer token.\n\
-                 Pass --http-token-file <PATH> (or set KIT_MCP_TOKEN) to require a token on \
+                 Pass --token-file <PATH> (or set KIT_MCP_TOKEN) to require a token on \
                  every request, or --unsafe-allow-any-http-peer to accept any caller \
                  (development only)."
             );

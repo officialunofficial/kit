@@ -1310,7 +1310,7 @@ Agent integration:
 
   A build with the `mcp-v2` feature also serves streamable HTTP with
   `--http <addr>`. The listener refuses to start without a bearer token.
-  Put the token in a file and pass `--http-token-file <path>`. The file
+  Put the token in a file and pass `--token-file <path>`. The file
   must hold only the token, must have at most 4096 bytes, and must not
   be readable by group or others. You can set `KIT_MCP_TOKEN` instead.
   Setting both is an error. No option takes the token on the command

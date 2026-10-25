@@ -99,7 +99,14 @@ pub(crate) fn kit_env(cwd: &Path, xdg: &Path, args: &[&str], extra_env: &[(&str,
 /// Prewrite a deterministic Ed25519 signing key at the default path.
 pub(crate) fn install_fixed_key(root: &Path) -> Result<(), String> {
     let keys = root.join(".kit").join("keys");
-    std::fs::create_dir_all(&keys).map_err(|e| format!("mkdir keys: {e}"))?;
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&keys)
+            .map_err(|e| format!("mkdir keys: {e}"))?;
+    }
     let kp = KeyPair::from_seed(KEY_SEED);
     save_key(&keys.join("default.key"), &kp).map_err(|e| format!("save_key: {e}"))?;
     Ok(())
