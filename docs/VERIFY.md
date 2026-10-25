@@ -409,7 +409,7 @@ deliberately, **byte-identical** to `commonware_storage::bmt::Proof` at the
 release train kit pins (`2026.9.0`, `rust/Cargo.toml`): same wire framing
 (`be32(leaf_count) || varint(n) || n * 32-byte digest`), same sibling
 selection algorithm, for single, range, and multi-leaf proofs alike. A verifier already built against the upstream
-`commonware-storage` crate (makechain, for instance) can decode a kit
+`commonware-storage` crate can decode a kit
 proof directly with the upstream type and run upstream's own
 `verify_*_inclusion` **unchanged** &mdash; no kit-specific decoder, and no
 kit dependency, needed for the proof-checking step itself. One thing sits

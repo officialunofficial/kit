@@ -184,7 +184,6 @@ disagree, fix the script:
 - [ ] Verify the release-prep PR left a fresh `## [Unreleased]` heading at
       the top of `CHANGELOG.md`.
 - [ ] After a crate's first publish, add co-owners:
-      `cargo owner --add github:officialunofficial:makechain <crate>`, then
       `cargo owner --add <maintainer> <crate>` for each maintainer. Confirm
       the owners with `cargo owner --list <crate>`.
 - [ ] Record anything the smoke test found, and fix it before the next release.

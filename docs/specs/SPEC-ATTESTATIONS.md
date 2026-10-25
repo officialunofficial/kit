@@ -14,7 +14,7 @@ the CLI, and the transport additions.
 Scope: everything about how kit produces, stores, transports, and
 verifies an attestation about a commit. **Not** in scope: what an
 attestation *means* &mdash; that's the business of the predicate-type URI,
-which is chosen by whoever makes the claim (kit itself, Makechain,
+which is chosen by whoever makes the claim (kit itself,
 GitHub, a user's build server, etc.).
 
 This spec is normative for the wire bytes and on-disk layout that the
@@ -419,7 +419,7 @@ flag or the `attest.signer` config key.
   first.
 
 `external` is the extension point an HSM, Secure Enclave, browser-
-crypto wallet, Makechain, etc. wraps. The full wire contract &mdash;
+crypto wallet, etc. wraps. The full wire contract &mdash;
 invocation, request/response shapes, capability discovery, PIN
 prompts, error semantics, size caps, timeout, determinism,
 versioning &mdash; is specified normatively in
@@ -518,7 +518,7 @@ Free-form UTF-8. Strongly recommended canonical shapes:
   `KeySigner::keyid()`. Conventionally prefixed by its algorithm.
 - External &mdash; whatever the external signer returns in
   `SignResponse.key_id`; by convention scheme-prefixed
-  (`x509:<spki-hash>`, `makechain:0x…`, etc.).
+  (`x509:<spki-hash>`, `eth:0x…`, etc.).
 - Sigstore keyless **(planned)** &mdash; `sigstore:<cert-san>` (for example,
   `sigstore:https://github.com/user/repo/.github/workflows/release.yml@refs/tags/v1`).
 
@@ -537,7 +537,7 @@ into):
 
 - `https://slsa.dev/provenance/v1` &mdash; SLSA build provenance.
 - `https://in-toto.io/attestation/vuln/v0.1` &mdash; vuln-scan results.
-- Third-party predicates (for example, a Makechain settlement predicate at
+- Third-party predicates (for example, a settlement predicate at
   a yet-to-be-provisioned URI such as
   `tag:github.com,2024:officialunofficial/kit/settlement/v1`) are
   entirely opaque to kit.

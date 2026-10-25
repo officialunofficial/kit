@@ -56,7 +56,7 @@ TLC=0 ./check.sh         # skip TLC
 APALACHE=1 ./check.sh    # add the bounded apalache-mc runs
 ```
 
-Pins (Polychrome review on verification toolchain): quint 0.32.0; Apalache 0.62.2 run
+Pins (verification toolchain): quint 0.32.0; Apalache 0.62.2 run
 directly on the TLA+ that `quint compile --target tlaplus` produces (quint
 uses its bundled Apalache only to transpile; `quint verify` is not used);
 TLC is `tlc2.TLC` from the Apalache 0.62.2 jar; Java 21.

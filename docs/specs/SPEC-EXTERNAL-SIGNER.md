@@ -14,7 +14,7 @@ drop-in compatible with the `external` signer selector referenced in
 
 Audience: integrators shipping a signer for a platform kit does not
 ship natively &mdash; Apple Secure Enclave, Ledger/Trezor, WebAuthn/CTAP,
-MetaMask/EVM wallet bridges, Makechain, HSMs, etc.
+EVM wallet bridges, HSMs, etc.
 
 The wire format itself is defined in [`SPEC-RPC`](SPEC-RPC.md). This
 document covers the signer-specific aspects: process invocation,

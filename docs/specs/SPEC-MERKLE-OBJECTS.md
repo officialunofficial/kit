@@ -37,8 +37,7 @@ cross-verifies the two roots byte-for-byte).
 
 BMT is chosen over the MMR family because an object's child set is **fixed
 and known up front**, so the append-only / range-proof properties of an
-MMR add no value &mdash; the same reasoning the Commonware/makechain
-`transactions_root` commitment uses.
+MMR add no value.
 
 ### 1.1 Construction
 

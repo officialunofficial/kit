@@ -234,8 +234,8 @@ fn depth_zero_disables_rebaseline() {
 /// A [`MemoryTransport`] wrapper with a genuinely atomic `advance_refs`:
 /// both preconditions are checked under one lock before either ref is
 /// written, so a losing push never commits half of a two-ref advance.
-/// This models the transactional advance that production
-/// remotes (native HTTP + makechain's `/refs/advance`).
+/// This models the transactional advance of a production remote, such
+/// as the native HTTP transport.
 ///
 /// The plain default `advance_refs` (used by [`MemoryTransport`] /
 /// [`FileTransport`] and exercised by the other tests in this file and in
