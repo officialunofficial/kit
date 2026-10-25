@@ -152,6 +152,12 @@ pub fn parse_kit_ssh_url(url: &str) -> Result<SshTarget, TransportError> {
     // `user@host`. We restrict the user's byte set explicitly so a CRLF
     // or ` -oProxyCommand=...` pasted into the user slot cannot reach
     // `ssh(1)`.
+    // A leading `-` would let `ssh(1)` read the field as an option.
+    if user.starts_with('-') {
+        return Err(TransportError::InvalidRef(
+            "ssh url user starts with '-'".into(),
+        ));
+    }
     for &c in user.as_bytes() {
         let ok = c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-' || c == b'+';
         if !ok {
@@ -213,6 +219,12 @@ fn parse_host_port(user: &str, host_port: &str, path: &str) -> Result<SshTarget,
 fn validate_host(host: &str) -> Result<(), TransportError> {
     if host.is_empty() {
         return Err(TransportError::InvalidRef("ssh host empty".into()));
+    }
+    // A leading `-` would let `ssh(1)` read the host as an option.
+    if host.starts_with('-') {
+        return Err(TransportError::InvalidRef(
+            "ssh host starts with '-'".into(),
+        ));
     }
     // RFC 1123 permits digits, letters, `-`, `.` in hostnames. We also
     // permit `:` so IPv6 literals like `[::1]` survive — but then the
@@ -390,10 +402,52 @@ mod tests {
         // ever touch `ssh(1)`.
         assert!(parse_kit_ssh_url("kit+ssh://al ice@host/repo").is_err());
         assert!(parse_kit_ssh_url("kit+ssh://al;ice@host/repo").is_err());
-        // A `-oProxyCommand=…` paste attempt begins with `-` which IS
-        // allowed inside the user field, but `=` and space are not,
-        // so it still fails.
         assert!(parse_kit_ssh_url("kit+ssh://-oProxyCommand=pwnd@host/repo").is_err());
+    }
+
+    #[test]
+    fn rejects_option_shaped_user() {
+        for user in [
+            "-E",
+            "-Ex",
+            "-F",
+            "-Fx",
+            "-i",
+            "-ix",
+            "-S",
+            "-Sx",
+            "-J",
+            "-Jx",
+            "-oProxyCommand",
+            "-o",
+            "--",
+            "-",
+        ] {
+            let url = format!("kit+ssh://{user}@host/repo");
+            assert!(parse_kit_ssh_url(&url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn rejects_option_shaped_host() {
+        for host in [
+            "-E",
+            "-Fx",
+            "-i",
+            "-S",
+            "-J",
+            "-oProxyCommand",
+            "-oProxyCommand:22",
+        ] {
+            let url = format!("kit+ssh://user@{host}/repo");
+            assert!(parse_kit_ssh_url(&url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn accepts_inner_dash_in_user_and_host() {
+        let t = parse_kit_ssh_url("kit+ssh://a-b@h-1.example/repo").unwrap();
+        assert_eq!((t.user.as_str(), t.host.as_str()), ("a-b", "h-1.example"));
     }
 
     #[test]

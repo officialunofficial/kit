@@ -13,8 +13,11 @@ The SSH transport shells out to the system `ssh(1)` CLI:
 
 ```
 ssh [-p port] [-o StrictHostKeyChecking=…] [-o UserKnownHostsFile=…] \
-    [-i identity] [user@]host kit serve <path>
+    [-i identity] -- user@host kit serve <path>
 ```
+
+The `--` ends the option list. The URL parser also rejects a user or host
+that starts with `-`. No URL field can become an `ssh` option.
 
 The stdin/stdout of that child process carry the kit wire protocol
 (SPEC-TRANSPORT §7). Nothing else. In particular, kit does NOT:
@@ -89,7 +92,7 @@ When set, they are passed to the child `ssh` process as:
 ssh -o StrictHostKeyChecking=yes \
     -o UserKnownHostsFile=/path/to/kit_known_hosts \
     -i /path/to/id_ed25519 \
-    user@host kit serve /path
+    -- user@host kit serve /path
 ```
 
 A per-repo known-hosts file lets you scope trust to a specific remote &mdash;

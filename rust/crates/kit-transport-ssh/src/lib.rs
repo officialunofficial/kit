@@ -1036,6 +1036,8 @@ fn build_ssh_command(target: &SshTarget, options: &SshOptions) -> Command {
     cmd.arg("-o")
         .arg(format!("ConnectTimeout={}", DEFAULT_SSH_TIMEOUT.as_secs()));
 
+    // `--` ends the option list, so no URL field can act as an ssh option.
+    cmd.arg("--");
     cmd.arg(format!("{}@{}", target.user, target.host));
     // The path is already restricted to `[A-Za-z0-9._-/]` by
     // `validate_ssh_path`, so handing it to the remote shell as a
@@ -1054,6 +1056,30 @@ mod tests {
     use kit_rpc::kit::common::v1::{RefEntry, RefExpectation};
     use kit_rpc::kit::rpc::v1::ssh::DownloadPackHeader;
     use kit_rpc::kit::rpc::v1::{Error as RpcError, ErrorCode};
+
+    /// `--` sits right before the destination, so a hostile user or
+    /// host field stays an operand even when it looks like an option.
+    #[test]
+    fn ssh_command_puts_double_dash_before_destination() {
+        for (user, host) in [("-oProxyCommand=x", "h"), ("u", "-J"), ("alice", "host")] {
+            let target = SshTarget {
+                user: user.into(),
+                host: host.into(),
+                port: Some(2222),
+                path: "/repo".into(),
+            };
+            let cmd = build_ssh_command(&target, &SshOptions::default());
+            let args: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let dest = format!("{user}@{host}");
+            let at = args.iter().position(|a| *a == dest).unwrap();
+            assert_eq!(args[at - 1], "--");
+            assert_eq!(args.iter().filter(|a| *a == "--").count(), 1);
+            assert_eq!(args[at + 1..], ["kit", "serve", "/repo"]);
+        }
+    }
 
     /// A CAS mismatch — `InvalidRequest` with the current id in
     /// `details` under a precondition write — maps to `RefConflict`.

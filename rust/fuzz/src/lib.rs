@@ -1602,6 +1602,7 @@ pub fn ssh_url_parse_one_iteration(input: &[u8]) {
                 "accepted target must hold no control byte"
             );
         }
+        assert!(!target.user.starts_with('-') && !target.host.starts_with('-'));
         assert!(validate_ssh_path(&target.path).is_ok());
     }
 }
@@ -1900,6 +1901,8 @@ mod tests {
             b"kit+ssh://example.com/repo",
             b"kit+ssh://git@example.com/../x",
             b"kit+ssh://git@example.com/a\nb",
+            b"kit+ssh://-oProxyCommand@example.com/repo",
+            b"kit+ssh://git@-J/repo",
             b"kit+ssh://",
             b"",
             &[0xFF; 64][..],
