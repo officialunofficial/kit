@@ -927,21 +927,64 @@ fn refuse_lax_dir_perms(_dir: &Path) -> Result<(), (String, u8)> {
     Ok(())
 }
 
-/// Write the new binary to a same-directory temp path (same filesystem
-/// ⇒ the final rename is atomic), owner-only perms, exec bit set.
-fn stage_binary(bin_dir: &Path, binary: &[u8]) -> Result<PathBuf, (String, u8)> {
-    let staged = bin_dir.join(format!(".kit-self-update.{}", std::process::id()));
-    std::fs::write(&staged, binary)
-        .map_err(|e| (format!("stage {}: {e}", staged.display()), exit::CANTCREAT))?;
+/// Create a new file at `path` and fail if anything exists there, a
+/// symlink included. On unix the open also sets `O_NOFOLLOW`.
+fn create_new_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
-            let _ = std::fs::remove_file(&staged);
-            (format!("chmod {}: {e}", staged.display()), exit::CANTCREAT)
-        })?;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o700).custom_flags(libc::O_NOFOLLOW);
     }
-    Ok(staged)
+    opts.open(path)
+}
+
+/// Write the new binary to a same-directory temp path (same filesystem
+/// ⇒ the final rename is atomic), owner-only perms, exec bit set. The
+/// name holds random bytes and the file is created with `create_new`,
+/// so a local user cannot plant a file or a symlink at the name first.
+fn stage_binary(bin_dir: &Path, binary: &[u8]) -> Result<PathBuf, (String, u8)> {
+    use std::io::Write as _;
+    let fail = |what: &str, path: &Path, e: &dyn std::fmt::Display| {
+        (format!("{what} {}: {e}", path.display()), exit::CANTCREAT)
+    };
+    for _ in 0..16 {
+        let mut nonce = [0u8; 8];
+        getrandom::fill(&mut nonce).map_err(|e| {
+            (
+                format!("no entropy for the staged file name: {e}"),
+                exit::CANTCREAT,
+            )
+        })?;
+        let staged = bin_dir.join(format!(
+            ".kit-self-update.{}.{}",
+            std::process::id(),
+            kit_core::hash::to_hex_bytes(&nonce)
+        ));
+        let mut file = match create_new_file(&staged) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(fail("stage", &staged, &e)),
+        };
+        let written = file.write_all(binary).and_then(|()| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+            }
+            file.sync_all()
+        });
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&staged);
+            return Err(fail("stage", &staged, &e));
+        }
+        return Ok(staged);
+    }
+    Err((
+        "could not pick an unused name for the staged file".to_owned(),
+        exit::CANTCREAT,
+    ))
 }
 
 /// Run the staged binary's `version` and require the byte-exact
@@ -1160,6 +1203,39 @@ mod tests {
         check_staged_version(&ok, "9.9.9").unwrap();
         let e = check_staged_version(&ok, "9.9.8").unwrap_err();
         assert!(e.contains("self-check failed"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_file_is_new_executable_and_unpredictable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = tmp_dir("staged-names");
+        let a = stage_binary(&d, b"one").unwrap();
+        let b = stage_binary(&d, b"two").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(std::fs::read(&a).unwrap(), b"one");
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        let old_name = format!(".kit-self-update.{}", std::process::id());
+        assert_ne!(a.file_name().unwrap().to_str().unwrap(), old_name);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_new_file_refuses_symlink_and_existing_file() {
+        let d = tmp_dir("create-new");
+        let target = d.join("victim");
+        std::fs::write(&target, b"keep").unwrap();
+        let link = d.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(create_new_file(&link).is_err());
+        assert!(create_new_file(&target).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        let fresh = d.join("fresh");
+        create_new_file(&fresh).unwrap();
+        assert!(fresh.exists());
     }
 
     #[cfg(unix)]
