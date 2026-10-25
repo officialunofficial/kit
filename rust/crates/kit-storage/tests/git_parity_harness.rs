@@ -921,31 +921,6 @@ fn mv_untracked_source_fails_like_git() {
     );
 }
 
-#[test]
-fn config_user_name_round_trips_like_git() {
-    if !git_available() {
-        return;
-    }
-    let h = Harness::new();
-    h.init_both();
-    // `git config user.name X` then `git config user.name` echoes X; kit's
-    // git-compat alias does the same (it stays non-authoritative — kit's
-    // signed author is the key/`user.identity`, not this value).
-    assert!(
-        h.git(&["config", "user.name", "Alice Example"])
-            .status
-            .success()
-    );
-    assert!(
-        h.kit(&["config", "user.name", "Alice Example"])
-            .status
-            .success()
-    );
-    let g = h.git(&["config", "user.name"]);
-    let m = h.kit(&["config", "user.name"]);
-    assert_parity_bytes("config user.name round-trip", &g, &m);
-}
-
 // =====================================================================
 // Passing subset — branch list / delete reconciliation.
 // =====================================================================
@@ -1287,22 +1262,6 @@ fn symbolic_ref_write_matches_git() {
         "symbolic-ref HEAD after write",
         &h.git(&["symbolic-ref", "HEAD"]),
         &h.kit(&["symbolic-ref", "HEAD"]),
-    );
-}
-
-#[test]
-fn config_core_inert_key_matches_git() {
-    if !git_available() {
-        return;
-    }
-    let h = Harness::new();
-    h.init_both();
-    assert!(h.git(&["config", "core.autocrlf", "true"]).status.success());
-    assert!(h.kit(&["config", "core.autocrlf", "true"]).status.success());
-    assert_parity_bytes(
-        "config core.autocrlf round-trip",
-        &h.git(&["config", "core.autocrlf"]),
-        &h.kit(&["config", "core.autocrlf"]),
     );
 }
 

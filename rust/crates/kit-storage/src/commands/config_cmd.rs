@@ -146,7 +146,6 @@ pub fn run(args: &[String]) -> u8 {
     {
         return emit_err(&format!("{e}"), exit::CONFIG_ERROR);
     }
-    warn_if_alias_without_identity(&layered.merged, key);
     let forbidden = config::is_repo_forbidden_key(key);
     if opts.local && forbidden {
         return emit_err(
@@ -252,8 +251,6 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
         }
     }
     match key {
-        "user.name" => Ok(take_nonempty(&mut cfg.user_name)),
-        "user.email" => Ok(take_nonempty(&mut cfg.user_email)),
         "default_branch" => Ok(take_nonempty(&mut cfg.default_branch)),
         "durability.objects" => Ok(take_nonempty(&mut cfg.durability_objects)),
         "remote_endpoint" => Ok(take_nonempty(&mut cfg.remote_endpoint)),
@@ -261,13 +258,6 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
         "remote_type" => Ok(take_nonempty(&mut cfg.remote_type)),
         "transport_auth" => Ok(take_nonempty(&mut cfg.transport_auth)),
         "http.sslcainfo" => Ok(take_nonempty(&mut cfg.http_ssl_ca_info)),
-        k if config::is_core_section(k) => match config::core_allowed_suffix(k) {
-            Some(suffix) => Ok(cfg.core.remove(&suffix).is_some()),
-            None => Err(emit_err(
-                &format!("unknown config key: {key}"),
-                exit::CONFIG_ERROR,
-            )),
-        },
         _ => Err(emit_err(
             &format!("unknown config key: {key}"),
             exit::CONFIG_ERROR,
@@ -293,38 +283,6 @@ fn remote_admission_name(key: &str) -> Option<&str> {
         .strip_suffix(".admission_headers")?;
     (!name.is_empty() && !name.contains('.') && kit_core::refs::validate_ref_name_grammar(name))
         .then_some(name)
-}
-
-/// Warn on stderr the first time `user.name`/`user.email` is set in a
-/// repo that has never set `user.identity`: these are
-/// git-compatibility aliases that never feed the signed commit author
-/// (see `user_name_does_not_spoof_the_signed_author` in
-/// `tests/config_git_aliases.rs`), and a user coming from git may
-/// otherwise reasonably expect them to.
-///
-/// "First time" is: neither alias nor `user.identity` has a value yet in
-/// the pre-write merged view (`merged`, read before this set is
-/// applied). Once any of the three is set, the warning never fires again
-/// for this repo — including for the second alias, so setting
-/// `user.name` then `user.email` warns only once. Unsetting all three
-/// re-arms it.
-fn warn_if_alias_without_identity(merged: &Config, key: &str) {
-    if !matches!(key, "user.name" | "user.email") {
-        return;
-    }
-    if !merged.user_identity.is_empty()
-        || !merged.user_name.is_empty()
-        || !merged.user_email.is_empty()
-    {
-        return;
-    }
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "warning: `{key}` is a git-compatibility alias and does not affect the signed commit \
-         author; commits are signed as `user.identity` (unset) or, by default, the signing \
-         key's identity — set it with `kit config user.identity <value>` (SPEC-SIGNING §6)"
-    );
 }
 
 fn write_user_scoped(key: &str, value: &str) -> u8 {
@@ -354,12 +312,6 @@ fn write_user_scoped(key: &str, value: &str) -> u8 {
 /// and routed to user-scoped storage before this is called.
 fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
     match key {
-        // Git-compatibility aliases. Accepted and round-tripped, but
-        // **non-authoritative**: they never feed the signed commit author
-        // (that is `user.identity` / the signing key), so they are
-        // repo-safe and not in `REPO_FORBIDDEN_KEYS`.
-        "user.name" => value.clone_into(&mut cfg.user_name),
-        "user.email" => value.clone_into(&mut cfg.user_email),
         "default_branch" => value.clone_into(&mut cfg.default_branch),
         // SPEC-OBJECTS §10.1 durability escape hatch. Validated at the
         // set boundary, so a typo can't silently leave the user on the
@@ -396,29 +348,6 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
                 ));
             }
         },
-        // Inert git-compat `core.*` keys (section matched case-insensitively):
-        // store the allowlisted ones, and refuse the dangerous ones (they
-        // would change what kit executes if honored). Anything else under
-        // `core.` is an unknown key.
-        k if config::is_core_section(k) => {
-            let name = k
-                .split_once('.')
-                .map_or("", |(_, n)| n)
-                .to_ascii_lowercase();
-            if let Some(suffix) = config::core_allowed_suffix(k) {
-                cfg.core.insert(suffix, value.to_string());
-            } else if config::CORE_DENIED_KEYS.contains(&name.as_str()) {
-                return Err(emit_err(
-                    &format!("config key `{key}` is not honored by kit and is rejected for safety"),
-                    exit::CONFIG_ERROR,
-                ));
-            } else {
-                return Err(emit_err(
-                    &format!("unknown config key: {key}"),
-                    exit::CONFIG_ERROR,
-                ));
-            }
-        }
         _ => {
             return Err(emit_err(
                 &format!("unknown config key: {key}"),
@@ -460,9 +389,7 @@ const CONFIG_KEYS: &[&str] = &[
     "ssh.user_known_hosts_file",
     "transport_auth",
     "trusted_remote_endpoint",
-    "user.email",
     "user.identity",
-    "user.name",
 ];
 
 fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
@@ -476,8 +403,6 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
     match key {
         "admission_helper" => Some(Cow::Borrowed(&cfg.admission_helper)),
         "user.identity" => Some(Cow::Borrowed(&cfg.user_identity)),
-        "user.name" => Some(Cow::Borrowed(&cfg.user_name)),
-        "user.email" => Some(Cow::Borrowed(&cfg.user_email)),
         "trusted_remote_endpoint" => Some(Cow::Borrowed(&cfg.trusted_remote_endpoint)),
         "signing_key" => Some(Cow::Borrowed(&cfg.signing_key)),
         "default_branch" => Some(Cow::Borrowed(&cfg.default_branch)),
@@ -514,14 +439,6 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         }
         "attest.p256_key_path" => Some(Cow::Borrowed(cfg.attest.p256_key_path_or_default())),
         "attest.signer" => Some(Cow::Borrowed(cfg.attest.signer_or_fallback())),
-        // Inert git-compat `core.*` keys (section matched case-insensitively):
-        // an allowlisted key returns its stored value (empty if unset, like
-        // the other keys); anything else under `core.` is unknown.
-        k if config::is_core_section(k) => config::core_allowed_suffix(k).map(|suffix| {
-            cfg.core
-                .get(&suffix)
-                .map_or(Cow::Borrowed(""), |v| Cow::Owned(v.clone()))
-        }),
         _ => None,
     }
 }
@@ -544,24 +461,12 @@ fn show_all(cfg: &Config, json: bool) -> u8 {
                 format::json_escape(&v)
             );
         }
-        // Dynamic, set-only `core.*` git-compat keys.
-        for (k, v) in &cfg.core {
-            let _ = write!(
-                stdout,
-                ",\"core.{}\":\"{}\"",
-                format::json_escape(k),
-                format::json_escape(v)
-            );
-        }
         let _ = stdout.write_all(b"}\n");
         return exit::OK;
     }
     for key in CONFIG_KEYS {
         let v = lookup(cfg, key).unwrap_or(Cow::Borrowed(""));
         let _ = writeln!(stdout, "{key} = {v}");
-    }
-    for (k, v) in &cfg.core {
-        let _ = writeln!(stdout, "core.{k} = {v}");
     }
     exit::OK
 }

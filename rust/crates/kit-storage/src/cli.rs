@@ -55,11 +55,10 @@ commands:
   ls-files [-s] [-z] [--others] [--ignored] [--exclude-standard]
                     List tracked files (-s adds stage info; --others lists
                     untracked; --exclude-standard drops ignored)
-  rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]
+  rev-parse [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]
                     Resolve revisions to object ids (--short abbreviates,
                     --abbrev-ref HEAD prints the branch, --show-toplevel
-                    prints the repo root; --verify is accepted for git-script
-                    compatibility — kit always errors on a bad revision)
+                    prints the repo root; kit always errors on a bad revision)
   merge-base [--is-ancestor] <a> <b>  Print the common ancestor of two
                     commits (--is-ancestor tests ancestry: exit 0/1, no output)
   rev-list [--count] <rev>  List commit ids reachable from <rev> (--count
@@ -86,18 +85,17 @@ commands:
                     -F reads the message from <file> (`-` = stdin); --author
                     overrides the commit author. After `merge --no-commit`
                     (or a resolved merge) this records a two-parent merge commit.
-                    -q suppresses the summary; -S/--gpg-sign, --no-verify,
-                    --no-edit are accepted no-ops (kit always signs, no hooks);
+                    -q suppresses the summary; kit always signs;
                     --format=json emits a JSON result object on success
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable; `gc` can reclaim it.
-  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [--author PAT] [--grep PAT] [--since DATE] [--until DATE] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]
+  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author PAT] [--grep PAT] [--since DATE] [--until DATE] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]
                     Show commit history (default prints the full message
                     body + a UTC date; --oneline/--abbrev-commit abbreviate
                     the commit id, --abbrev[=N] sets the length (default 7);
-                    --format=json emits JSONL with the raw timestamp;
-                    --graph is accepted but currently a no-op). --author/
+                    --format=json emits JSONL with the raw timestamp).
+                    --author/
                     --grep filter by substring match on the author identity
                     / commit message; --since/--until bound the commit
                     timestamp (@<unix>, now/today/yesterday, N-unit-ago,
@@ -176,9 +174,6 @@ commands:
   config [--local|--global] <key> <value>|--unset <key>  Force repo/user scope
   config user.identity <value>  Set author Identity
                         (ed25519:<hex>, mid:<N>, or raw [kind][len][bytes] hex)
-  config user.name|user.email <value>  Git-compatibility aliases; stored and
-                        round-tripped but NON-authoritative — they never set
-                        the signed author (use user.identity for that)
   config trusted_remote_endpoint <url>  Trust an HTTP/S3 remote for ambient env credentials
   config ssh.strict_host_key_checking <yes|no|accept-new>  Override SSH host policy
   config ssh.user_known_hosts_file <path>  Custom SSH known_hosts file
@@ -248,7 +243,7 @@ commands:
                     without committing; -m/--mainline selects the mainline
                     parent when replaying a merge commit, like git;
                     --format=json emits a JSON outcome object)
-  revert [-n] [--no-edit] [--format=json] <commit> | --continue | --abort
+  revert [-n] [--format=json] <commit> | --continue | --abort
                     Create a new commit undoing <commit> (forward commit;
                     conflict-aware; -n stages the revert without committing;
                     --format=json emits a JSON outcome object)
@@ -339,9 +334,8 @@ commands:
 
 global flags (before <command>):
   -C <path>         Run as if started in <path> (repeatable, like git)
-  -c <key>=<value>  One-shot config override for this invocation (inert /
-                    allowlisted keys only; security-sensitive keys refused)
-  --no-pager|-P     Accepted no-op (kit never paginates)
+  -c <key>=<value>  One-shot config override for this invocation
+                    (security-sensitive keys refused)
 ";
 
 #[cfg(test)]

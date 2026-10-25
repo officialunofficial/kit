@@ -181,8 +181,6 @@ complete -c kit -n "__fish_seen_subcommand_from log" \
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -l format -d "Output format (json)" -r -a json
 complete -c kit -n "__fish_seen_subcommand_from log" \
-    -l graph -d "Accepted for compat; currently a no-op"
-complete -c kit -n "__fish_seen_subcommand_from log" \
     -l author -d "Filter by author substring" -r
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -l grep -d "Filter by message substring" -r
@@ -468,8 +466,6 @@ complete -c kit -n "__fish_seen_subcommand_from diff" -l quiet -d "Like --exit-c
 complete -c kit -n "__fish_seen_subcommand_from branch" -l show-current -d "Print the current branch name"
 complete -c kit -n "__fish_seen_subcommand_from tag" -s l -l list -d "List tags, optional glob pattern"
 complete -c kit -n "__fish_seen_subcommand_from commit" -s q -l quiet -d "Suppress the commit summary"
-complete -c kit -n "__fish_seen_subcommand_from commit" -s S -l gpg-sign -d "Accepted no-op (kit always signs)"
-complete -c kit -n "__fish_seen_subcommand_from commit" -l no-verify -d "Accepted no-op (no hooks)"
 complete -c kit -n "__fish_seen_subcommand_from push" -s f -d "Overwrite the remote branch (skip CAS)"
 complete -c kit -n "__fish_seen_subcommand_from push" -s u -l set-upstream -d "Record the pushed remote as upstream"
 complete -c kit -n "__fish_seen_subcommand_from remote" -s v -l verbose -d "List remotes with URLs and direction"
@@ -477,5 +473,3 @@ complete -c kit -n "__fish_seen_subcommand_from remote" -a "get-url set-url" -d 
 complete -c kit -n "__fish_seen_subcommand_from diff" -l color -d "Colorize patch (always|auto|never)" -xa "always auto never"
 complete -c kit -n "__fish_seen_subcommand_from diff" -l no-color -d "Disable colorized output"
 complete -c kit -n "__fish_seen_subcommand_from reset" -s q -l quiet -d "Suppress the HEAD-is-now-at summary"
-complete -c kit -n "__fish_seen_subcommand_from revert" -l no-edit -d "Accepted no-op (auto-generates message)"
-complete -c kit -n "__fish_seen_subcommand_from commit" -l no-edit -d "Keep the existing message on amend"

@@ -51,34 +51,34 @@ fn init_repo() -> tempfile::TempDir {
 
 /// A repo-scoped key: set, verify, `--unset`, verify it's gone from
 /// both the effective value and the on-disk repo config. Uses
-/// `user.email` rather than `default_branch` because the latter has a
+/// `remote_bucket` rather than `default_branch` because the latter has a
 /// non-empty compiled-in default (`main`) that shows through once the
-/// repo override is cleared — `user.email` has no such fallback, so an
+/// repo override is cleared — `remote_bucket` has no such fallback, so an
 /// unset repo value reads back as truly empty.
 #[test]
 fn unset_removes_a_repo_scoped_key() {
     let td = init_repo();
     assert!(
-        run_in(td.path(), &["config", "user.email", "a@example.com"])
+        run_in(td.path(), &["config", "remote_bucket", "bucket-a"])
             .status
             .success()
     );
-    let show = run_in(td.path(), &["config", "user.email"]);
-    assert_eq!(stdout_str(&show).trim(), "a@example.com");
+    let show = run_in(td.path(), &["config", "remote_bucket"]);
+    assert_eq!(stdout_str(&show).trim(), "bucket-a");
 
-    let unset = run_in(td.path(), &["config", "--unset", "user.email"]);
+    let unset = run_in(td.path(), &["config", "--unset", "remote_bucket"]);
     assert!(unset.status.success(), "unset failed: {unset:?}");
 
-    let show = run_in(td.path(), &["config", "user.email"]);
+    let show = run_in(td.path(), &["config", "remote_bucket"]);
     assert_eq!(
         stdout_str(&show).trim(),
         "",
-        "user.email should be empty after --unset"
+        "remote_bucket should be empty after --unset"
     );
     let cfg = fs::read_to_string(td.path().join(".kit/config")).unwrap_or_default();
     assert!(
-        !cfg.contains("user.email"),
-        ".kit/config still contains user.email: {cfg}"
+        !cfg.contains("remote_bucket"),
+        ".kit/config still contains remote_bucket: {cfg}"
     );
 }
 

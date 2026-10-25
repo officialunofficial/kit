@@ -1,12 +1,10 @@
-//! `kit rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
+//! `kit rev-parse [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
 //! — resolve revisions to object ids, like `git rev-parse`.
 //!
 //! - bare `<rev>...` — print each resolved 64-hex id, one per line;
 //! - `--short[=N]` — abbreviate to N chars (default 7);
 //! - `--abbrev-ref <ref>` — print the short symbolic name (`HEAD` → the
 //!   current branch);
-//! - `--verify` — error if a revision does not resolve (the default error
-//!   behavior already matches, but the flag is accepted for parity);
 //! - `--show-toplevel` — print the repository root (the dir holding
 //!   `.kit`).
 //!
@@ -31,9 +29,6 @@ const DEFAULT_ABBREV: usize = 7;
 #[derive(Debug, Parser)]
 #[command(name = "kit rev-parse", about = "Resolve revisions to object ids.")]
 struct RevParseOpts {
-    /// Error if a revision does not resolve.
-    #[arg(long)]
-    verify: bool,
     /// Abbreviate the id to N chars (default 7). Value must be attached
     /// (`--short` or `--short=N`) so it does not swallow a following rev.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "7")]
@@ -96,9 +91,8 @@ pub fn run(args: &[String]) -> u8 {
         let hash = match revspec::resolve_revision(&store, &layout, spec) {
             Ok(h) => h,
             Err(e) => {
-                // `--verify` or not, a bad revision is an error (matching
-                // git, which refuses rather than echoing the bad token).
-                let _ = opts.verify;
+                // A bad revision is an error. kit refuses rather than
+                // echoing the bad token.
                 return emit_err(&format!("bad revision '{spec}': {e}"), exit::GENERAL_ERROR);
             }
         };

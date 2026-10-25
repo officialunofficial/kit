@@ -127,19 +127,6 @@ pub struct Config {
     /// Hex-encoded Identity: `[kind:u8][len:u16 LE][bytes]`. Empty =
     /// derive from the signing key's public key at commit time.
     pub user_identity: String,
-    /// Git-compatibility alias `user.name`. **Non-authoritative**: stored
-    /// and round-tripped for parity with `git config user.name`, but it
-    /// NEVER feeds the cryptographic commit author (which is
-    /// [`user_identity`](Self::user_identity) / the signing key). Repo-safe.
-    /// `kit config` warns on stderr the first time this or
-    /// [`user_email`](Self::user_email) is set while `user_identity` is
-    /// still empty, since a user coming from git might
-    /// otherwise expect it to control authorship.
-    pub user_name: String,
-    /// Git-compatibility alias `user.email`. Non-authoritative, exactly
-    /// like [`user_name`](Self::user_name) — never feeds the signed author,
-    /// and shares its first-set-without-`user_identity` warning.
-    pub user_email: String,
     /// Exact remote endpoint the user has explicitly trusted for
     /// ambient HTTP/S3 environment credentials. User-scoped only.
     pub trusted_remote_endpoint: String,
@@ -209,30 +196,7 @@ pub struct Config {
     /// STRENGTHENS durability (and slows writes); it cannot weaken
     /// anything.
     pub durability_objects: String,
-    /// Allowlisted, **inert** `core.*` git-compat keys (see
-    /// [`CORE_ALLOWED_KEYS`]). Accepted and round-tripped for parity but
-    /// **not honored** by kit — they are cosmetic settings git stores
-    /// per-repo. Dangerous `core.*` keys ([`CORE_DENIED_KEYS`]) are rejected
-    /// rather than stored. Keyed by the bare suffix (e.g. `autocrlf`).
-    pub core: std::collections::BTreeMap<String, String>,
 }
-
-/// Inert `core.*` keys accepted for git compatibility. They are stored and
-/// round-tripped but kit does not act on them (it has no CRLF translation,
-/// honors exec bits natively, etc.). Repo-safe precisely because inert.
-pub const CORE_ALLOWED_KEYS: &[&str] = &[
-    "autocrlf",
-    "bare",
-    "filemode",
-    "ignorecase",
-    "quotepath",
-    "symlinks",
-];
-
-/// Dangerous `core.*` keys that kit refuses to store: they would change what
-/// commands or hooks kit invokes if it honored them, so a hostile repo (or a
-/// typo) must not be able to set them. Rejected with a clear message.
-pub const CORE_DENIED_KEYS: &[&str] = &["editor", "fsmonitor", "hookspath", "pager", "sshcommand"];
 
 /// A named remote's stored address. `type` is a dispatch hint derived
 /// from the URL scheme at `kit remote add` time.
@@ -698,7 +662,7 @@ pub fn read_layered(layout: &RepoLayout) -> Result<LayeredConfig, ConfigError> {
     // never to `user`/`repo`, so they are never persisted by a later
     // `config::write`. They flow through the SAME forbidden-key enforcement
     // as a per-repo file: security-sensitive keys (`REPO_FORBIDDEN_KEYS`)
-    // and dangerous `core.*` (`CORE_DENIED_KEYS`) are refused, so `-c`
+    // are refused, so `-c`
     // cannot spoof the signed author or redirect signing/transport trust.
     apply_cli_overrides(&mut merged)?;
 
@@ -727,7 +691,7 @@ pub fn set_cli_overrides(overrides: Vec<(String, String)>) {
 }
 
 /// Apply the recorded `-c` overrides to `cfg`, enforcing the same
-/// forbidden-key / denied-`core.*` rules a per-repo file gets. A forbidden
+/// forbidden-key rules a per-repo file gets. A forbidden
 /// key is dropped with a warning. An unknown key or a malformed value is
 /// an error.
 fn apply_cli_overrides(cfg: &mut Config) -> Result<(), ConfigError> {
@@ -864,27 +828,8 @@ fn warn_forbidden_repo_key(path: &Path, key: &str) {
 /// unknown key or a malformed value returns the reason it is refused.
 fn apply_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
     validate_value(val).map_err(|_| "value contains control characters".to_owned())?;
-    // Inert git-compat `core.*` keys: store only the allowlisted ones.
-    if let Some(suffix) = core_allowed_suffix(key) {
-        cfg.core.insert(suffix, val.to_string());
-        return Ok(());
-    }
-    if is_core_section(key) {
-        let name = key.split_once('.').map_or("", |(_, n)| n);
-        return Err(
-            if CORE_DENIED_KEYS.contains(&name.to_ascii_lowercase().as_str()) {
-                format!("config key `{key}` is not honored by kit and is rejected for safety")
-            } else {
-                format!("unknown config key `{key}`")
-            },
-        );
-    }
     match key {
         "user.identity" => val.clone_into(&mut cfg.user_identity),
-        // Git-compatibility aliases — non-authoritative (never feed the
-        // signed author), so they are repo-safe to read at any scope.
-        "user.name" => val.clone_into(&mut cfg.user_name),
-        "user.email" => val.clone_into(&mut cfg.user_email),
         "trusted_remote_endpoint" => val.clone_into(&mut cfg.trusted_remote_endpoint),
         "admission_helper" => val.clone_into(&mut cfg.admission_helper),
         "signer" => {
@@ -973,36 +918,13 @@ fn expect_one_of(key: &str, val: &str, allowed: &[&str]) -> Result<(), String> {
     ))
 }
 
-/// `true` if `key` is in the `core` section (`core.<x>`), matched
-/// case-insensitively like git (`Core.x`, `CORE.x` all count).
-#[must_use]
-pub fn is_core_section(key: &str) -> bool {
-    key.split_once('.')
-        .is_some_and(|(section, _)| section.eq_ignore_ascii_case("core"))
-}
-
-/// If `key` is `core.<x>` (section matched case-insensitively) with `<x>` an
-/// allowlisted inert key, return the canonical lowercase suffix. git lowercases
-/// both the section and the variable name, so `Core.AutoCRLF` → `autocrlf`.
-#[must_use]
-pub fn core_allowed_suffix(key: &str) -> Option<String> {
-    let (section, name) = key.split_once('.')?;
-    if !section.eq_ignore_ascii_case("core") {
-        return None;
-    }
-    let suffix = name.to_ascii_lowercase();
-    CORE_ALLOWED_KEYS
-        .contains(&suffix.as_str())
-        .then_some(suffix)
-}
-
 /// Canonicalize a config key's case the way git does: the **section** and
 /// **variable** names are case-insensitive (lowercased), but the
 /// **subsection** — the middle segment of a `<section>.<subsection>.<var>`
 /// key, e.g. the `<name>` in `remote.<name>.url` or the `<branch>` in
 /// `branch.<branch>.remote` — is **case-sensitive** and preserved verbatim.
 ///
-/// Two-segment keys (`user.name`, `core.autocrlf`, …) have no subsection,
+/// Two-segment keys (`user.identity`, `pull.require_signed`, …) have no subsection,
 /// so both halves are lowercased. The split mirrors `apply_section_kv`'s
 /// `splitn(3, '.')`, so the canonical form round-trips through it.
 #[must_use]
@@ -1075,7 +997,7 @@ fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> Result<bool, Stri
 /// [`read_layered`]`(root).repo` for a read-modify-write, or a freshly
 /// built [`Config`] (e.g. on `clone`). NEVER pass a merged config
 /// ([`read_or_default`] / [`read_layered`]`.merged`): this serializer
-/// emits repo-safe fields such as `user.name` / `user.email`, so a
+/// emits repo-safe fields, so a
 /// user-scoped value would be materialized into the clone-traveling
 /// `.kit/config` (a privacy/scope leak). Callers that need the effective
 /// (merged) value for *reads* should use it only for reads.
@@ -1092,10 +1014,6 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
     // signer or non-Ed25519 key path against attacker-chosen content.
     let mut out = String::new();
     for (k, v) in [
-        // `user.name`/`user.email` are repo-safe git-compat aliases
-        // (non-authoritative — they never feed the signed author).
-        ("user.name", cfg.user_name.as_str()),
-        ("user.email", cfg.user_email.as_str()),
         ("default_branch", cfg.default_branch.as_str()),
         ("durability.objects", cfg.durability_objects.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
@@ -1128,10 +1046,6 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         if !up.branch.is_empty() {
             let _ = writeln!(out, "branch.{branch}.merge = {}", up.branch);
         }
-    }
-    // Inert git-compat `core.*` keys — repo-safe (kit never acts on them).
-    for (k, v) in &cfg.core {
-        let _ = writeln!(out, "core.{k} = {v}");
     }
     // Atomic replace: write to a sibling temp file then rename over the
     // target so a crash mid-write can never leave a truncated config
@@ -1592,8 +1506,7 @@ mod tests {
     #[test]
     fn normalize_config_key_casing() {
         // Two-segment keys: section + variable both lowercased.
-        assert_eq!(normalize_config_key("User.Name"), "user.name");
-        assert_eq!(normalize_config_key("Core.AutoCRLF"), "core.autocrlf");
+        assert_eq!(normalize_config_key("User.Identity"), "user.identity");
         assert_eq!(normalize_config_key("user.identity"), "user.identity");
         // Three-segment keys: section + variable lowercased, subsection kept.
         assert_eq!(
@@ -2458,10 +2371,9 @@ mod tests {
     }
 
     #[test]
-    fn denied_core_and_bad_names_are_errors() {
-        assert!(rejection(Some("core.editor = vim\n"), None).contains("rejected for safety"));
-        assert!(rejection(Some("core.nonsense = 1\n"), None).contains("unknown config key"));
-        assert!(try_layer(Some("core.autocrlf = true\n"), None).is_ok());
+    fn core_keys_are_unknown() {
+        assert!(rejection(Some("core.editor = vim\n"), None).contains("unknown config key"));
+        assert!(rejection(Some("core.autocrlf = true\n"), None).contains("unknown config key"));
     }
 
     #[test]

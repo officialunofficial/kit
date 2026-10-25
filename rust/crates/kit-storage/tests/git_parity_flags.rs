@@ -45,12 +45,15 @@ fn clean_diverge(repo: &Repo) {
 fn config_keys_are_case_insensitive() {
     let repo = Repo::new();
     // Mixed-case set, lowercase read — git-compatible.
-    repo.ok(&["config", "User.Name", "Ada"]);
-    assert_eq!(stdout(&repo.ok(&["config", "user.name"])).trim(), "Ada");
-    repo.ok(&["config", "USER.EMAIL", "ada@example.com"]);
+    repo.ok(&["config", "Durability.Objects", "per-object"]);
     assert_eq!(
-        stdout(&repo.ok(&["config", "user.email"])).trim(),
-        "ada@example.com"
+        stdout(&repo.ok(&["config", "durability.objects"])).trim(),
+        "per-object"
+    );
+    repo.ok(&["config", "REMOTE_BUCKET", "bucket-a"]);
+    assert_eq!(
+        stdout(&repo.ok(&["config", "remote_bucket"])).trim(),
+        "bucket-a"
     );
 }
 
@@ -417,9 +420,9 @@ fn config_file_keys_are_case_insensitive() {
     let repo = Repo::new();
     let cfg_path = repo.kit_dir().join("config");
     let mut body = std::fs::read_to_string(&cfg_path).unwrap_or_default();
-    body.push_str("\nUser.Name = Zoe\n");
+    body.push_str("\nRemote_Bucket = zoe\n");
     std::fs::write(&cfg_path, body).unwrap();
-    assert_eq!(stdout(&repo.ok(&["config", "user.name"])).trim(), "Zoe");
+    assert_eq!(stdout(&repo.ok(&["config", "remote_bucket"])).trim(), "zoe");
 }
 
 #[test]
@@ -1351,13 +1354,13 @@ fn global_dash_c_changes_directory() {
     assert_eq!(stdout(&out).trim(), "main");
 }
 
-/// `-c <key>=<val>` overrides an inert/allowlisted key for one invocation.
+/// `-c <key>=<val>` overrides a repo-safe key for one invocation.
 #[test]
-fn global_dash_c_override_applies_inert_key() {
+fn global_dash_c_override_applies_repo_safe_key() {
     let repo = Repo::new();
     repo.commit_file("a.txt", b"a\n", "first");
-    let out = repo.ok(&["-c", "user.email=ci@example.com", "config", "user.email"]);
-    assert_eq!(stdout(&out).trim(), "ci@example.com");
+    let out = repo.ok(&["-c", "remote_bucket=ci", "config", "remote_bucket"]);
+    assert_eq!(stdout(&out).trim(), "ci");
 }
 
 /// `-c` MUST NOT be able to smuggle a security-sensitive key
@@ -1566,15 +1569,6 @@ fn rebase_noninteractive_up_to_date_message() {
     );
 }
 
-#[test]
-fn revert_accepts_no_edit() {
-    let repo = Repo::new();
-    repo.commit_file("a.txt", b"a\n", "c1");
-    let out = repo.ok(&["revert", "--no-edit", "HEAD"]);
-    assert!(out.status.success(), "revert --no-edit failed: {out:?}");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("Revert \""));
-}
-
 // ---------- peer-review fixes: tag peeling, -c reach, diff --color <rev> -----
 
 #[test]
@@ -1619,18 +1613,18 @@ fn diff_color_with_revision_arg_is_not_greedy() {
 #[test]
 fn dash_c_enforced_on_read_or_default_path() {
     // commit reads config via read_or_default; `-c` overrides must reach it.
-    // On one invocation: an inert key (user.email) is applied silently while
+    // On one invocation: a repo-safe key (remote_bucket) is applied silently while
     // a forbidden key (user.identity) is refused with a warning — selective
     // application proving apply_cli_overrides runs on this path, not just
-    // read_layered. The inert value's *storage* is covered by
-    // global_dash_c_override_applies_inert_key (same apply_cli_overrides),
+    // read_layered. The repo-safe value's *storage* is covered by
+    // global_dash_c_override_applies_repo_safe_key (same apply_cli_overrides),
     // since no read_or_default command echoes it to stdout.
     let repo = Repo::new();
     repo.write("a.txt", b"a\n");
     repo.ok(&["add", "a.txt"]);
     let out = repo.run(&[
         "-c",
-        "user.email=ci@example.com",
+        "remote_bucket=ci",
         "-c",
         "user.identity=mid:99999",
         "commit",
@@ -1644,8 +1638,8 @@ fn dash_c_enforced_on_read_or_default_path() {
         "forbidden -c must be refused on the commit (read_or_default) path: {stderr}"
     );
     assert!(
-        !stderr.contains("ignoring `-c user.email"),
-        "inert -c must be accepted, not warned: {stderr}"
+        !stderr.contains("ignoring `-c remote_bucket"),
+        "repo-safe -c must be accepted, not warned: {stderr}"
     );
 }
 

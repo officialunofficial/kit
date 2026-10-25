@@ -56,10 +56,6 @@ struct RevertOpts {
     /// if the revert conflicts, resolve it with `--continue` / `--abort`.
     #[arg(short = 'n', long = "no-commit", conflicts_with_all = ["cont", "abort"])]
     no_commit: bool,
-    /// Accepted for git compatibility; kit auto-generates the revert
-    /// message, so `--no-edit` is the default behavior (no-op).
-    #[arg(long = "no-edit")]
-    no_edit: bool,
     /// Emit a machine-readable JSON result object to stdout describing
     /// the outcome: a new commit, `--no-commit` staging, a conflict
     /// pause (`"conflicts":[<path>,...]`), or an error.
@@ -87,7 +83,6 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
-    let _ = opts.no_edit; // accepted no-op (kit auto-generates the message)
     let json = matches!(opts.format, RevertFormat::Json);
     let cwd = match std::env::current_dir() {
         Ok(p) => p,

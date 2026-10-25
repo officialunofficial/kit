@@ -173,10 +173,9 @@ pub fn dispatch(argv: &[String]) -> u8 {
 /// Consume the leading global flags from `argv` (after `argv[0]`):
 /// `-C <path>` / `-C<path>` changes directory (repeatable, relative
 /// resolution like git), `-c <key>=<val>` / `-c<key>=<val>` records a
-/// one-shot config override, and `--no-pager` / `-P` / `--paginate` are
-/// accepted as no-ops (kit never paginates). Returns the index of the
-/// subcommand token and the collected overrides, or an exit code on a
-/// malformed flag / failed `chdir`.
+/// one-shot config override. Returns the index of the subcommand token
+/// and the collected overrides, or an exit code on a malformed flag or a
+/// failed `chdir`.
 fn parse_global_flags(argv: &[String]) -> Result<(usize, Vec<(String, String)>), u8> {
     let mut i = 1; // skip argv[0]
     let mut overrides: Vec<(String, String)> = Vec::new();
@@ -200,10 +199,6 @@ fn parse_global_flags(argv: &[String]) -> Result<(usize, Vec<(String, String)>),
         } else if let Some(kv) = arg.strip_prefix("-c").filter(|kv| !kv.is_empty()) {
             overrides.push(split_config_override(kv)?);
             i += 1;
-        } else if matches!(arg, "--no-pager" | "-P" | "--paginate") {
-            // kit never paginates; accept the flags so defensive
-            // `kit --no-pager log` doesn't error out.
-            i += 1;
         } else {
             break;
         }
@@ -226,7 +221,7 @@ fn split_config_override(kv: &str) -> Result<(String, String), u8> {
     match kv.split_once('=') {
         Some((k, v)) if !k.is_empty() => Ok((k.to_string(), v.to_string())),
         _ => Err(global_flag_err(
-            "option `-c` expects <key>=<value> (e.g. -c user.email=ci@example.com)",
+            "option `-c` expects <key>=<value> (e.g. -c default_branch=trunk)",
         )),
     }
 }

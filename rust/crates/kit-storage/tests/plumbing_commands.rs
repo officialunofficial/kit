@@ -586,53 +586,15 @@ fn symbolic_ref_write_repoints_head() {
 }
 
 #[test]
-fn config_core_allowlist_and_rejects_dangerous() {
+fn config_rejects_core_keys() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    // An allowlisted inert key round-trips...
-    assert!(
-        run_in(root, x, &["config", "core.autocrlf", "true"])
-            .status
-            .success()
-    );
-    assert_eq!(
-        out_str(&run_in(root, x, &["config", "core.autocrlf"])),
-        "true"
-    );
-    // ...and matches case-insensitively on BOTH the variable name and the
-    // section (git lowercases both).
-    assert_eq!(
-        out_str(&run_in(root, x, &["config", "core.AutoCRLF"])),
-        "true"
-    );
-    assert_eq!(
-        out_str(&run_in(root, x, &["config", "Core.autocrlf"])),
-        "true"
-    );
-    // Setting via a mixed-case section also works (canonicalizes to lower).
-    assert!(
-        run_in(root, x, &["config", "CORE.IgnoreCase", "false"])
-            .status
-            .success()
-    );
-    assert_eq!(
-        out_str(&run_in(root, x, &["config", "core.ignorecase"])),
-        "false"
-    );
-    // A dangerous key is rejected, not stored.
-    assert!(
-        !run_in(root, x, &["config", "core.sshCommand", "evil"])
-            .status
-            .success(),
-        "core.sshCommand must be rejected"
-    );
-    // An unknown core key is rejected too.
-    assert!(
-        !run_in(root, x, &["config", "core.bogus", "x"])
-            .status
-            .success(),
-        "unknown core key must be rejected"
-    );
+    for key in ["core.autocrlf", "core.sshCommand", "core.bogus"] {
+        assert!(
+            !run_in(root, x, &["config", key, "x"]).status.success(),
+            "{key} must be rejected"
+        );
+    }
 }
 
 #[test]

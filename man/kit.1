@@ -9,7 +9,6 @@
 .Nm
 .Op Fl C Ar path
 .Op Fl c Ar key Ns = Ns Ar value
-.Op Fl Fl no-pager
 .Ar command
 .Op Ar args ...
 .Sh DESCRIPTION
@@ -54,15 +53,9 @@ Repeatable; relative paths resolve against the prior
 Set a config value for this invocation only. It is applied to the
 effective config (never written to disk) and flows through the same
 enforcement as a per-repo config file: security-sensitive keys are
-refused and dangerous
-.Cm core.*
-keys are dropped, so
+refused, so
 .Fl c
 cannot spoof the signed author or redirect trust.
-.It Fl Fl no-pager , Fl P , Fl Fl paginate
-Accepted no-ops:
-.Nm
-never paginates.
 .El
 .Sh COMMANDS
 The full list of subcommands is printed by
@@ -347,7 +340,7 @@ shows only those
 .Pq Fl Fl ignored No requires Fl Fl others ;
 .Fl z
 NUL-terminates records with raw paths.
-.It Cm rev-parse Oo Fl Fl verify Oc Oo Fl Fl short Ns Op = Ns Ar N Oc Oo Fl Fl abbrev-ref Oc Oo Fl Fl show-toplevel Oc Op Ar rev ...
+.It Cm rev-parse Oo Fl Fl short Ns Op = Ns Ar N Oc Oo Fl Fl abbrev-ref Oc Oo Fl Fl show-toplevel Oc Op Ar rev ...
 Resolve revisions to object ids.
 .Fl Fl short
 abbreviates (default 7, a BLAKE3 prefix);
@@ -494,7 +487,7 @@ launched. The superseded commit is not deleted; it remains on disk as an
 unreachable object until
 .Cm gc
 reclaims it.
-.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl graph Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl n Ar N Oc Oo Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
+.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl n Ar N Oc Oo Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
 Show commit history. With no argument the walk starts at
 .Cm HEAD ;
 an optional
@@ -535,9 +528,6 @@ prefix, so it is longer than a Git SHA-1 prefix of the same length.
 .Fl Fl format Ar json
 emits one JSON object per commit on stdout, keeping the raw integer Unix
 timestamp for machine consumption.
-.Fl Fl graph
-is accepted for compatibility but is currently a no-op (no ASCII graph is
-drawn).
 .Fl Fl author Ar pattern
 and
 .Fl Fl grep Ar pattern
@@ -1302,21 +1292,6 @@ emits JSON instead of the default plain output. Recognized keys include
 .Cm ssh.user_known_hosts_file ,
 and
 .Cm ssh.identity_file .
-The git-compatibility aliases
-.Cm user.name
-and
-.Cm user.email
-are accepted and round-tripped but are
-.Em non-authoritative :
-they never set the signed commit author (that is
-.Cm user.identity
-or the signing key), so they are repo-safe, unlike
-.Cm user.identity .
-The first time either alias is set in a repo that has never set
-.Cm user.identity
-(or the other alias), a one-time warning is printed to stderr pointing
-at
-.Cm user.identity .
 .It Cm serve Oo Fl Fl idle-timeout-secs Ar secs Oc Oo Fl Fl max-session-secs Ar secs Oc Ar path
 Internal subcommand: act as the server end of an
 .Cm kit+ssh://

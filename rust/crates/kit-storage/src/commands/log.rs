@@ -22,11 +22,6 @@
 //! - `--format=json` — JSONL, one self-contained JSON object per
 //!   commit. Suitable for piping into `jq`.
 //!
-//! `--graph` is accepted for git compatibility but is a no-op: it is a
-//! documented v1 non-goal (see `docs/CLI.md`). Full graph parity is not
-//! achievable given kit's content-addressed model; `log` has
-//! no `--oneline --graph` renderer.
-//!
 //! History filters — `--author`/`--grep` (substring matches),
 //! `--since`/`--until` (a small explicit date grammar, see the
 //! `dateparse` submodule), and `--no-merges`/`--first-parent` — are
@@ -104,11 +99,6 @@ struct LogOpts {
     /// default (7); `--abbrev=N` sets the length.
     #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "7")]
     abbrev: Option<usize>,
-
-    /// Render an ASCII graph. Accepted for git compatibility but a
-    /// no-op (documented v1 non-goal).
-    #[arg(long)]
-    graph: bool,
 
     /// Only show commits whose author identity contains `<pattern>`
     /// (substring match against both the short display form — `kit
@@ -192,7 +182,6 @@ pub fn run(args: &[String]) -> u8 {
     };
     let fmt = opts.render_format();
     let abbrev = opts.abbrev_len();
-    let _ = opts.graph; // accepted, currently no-op.
 
     // `--since`/`--until` are validated up front (a bad date is a usage
     // error, not a silent no-match) before touching the repository.
@@ -679,7 +668,6 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            graph: false,
             author: None,
             grep: None,
             since: None,
@@ -699,7 +687,6 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            graph: false,
             author: None,
             grep: None,
             since: None,
@@ -719,7 +706,6 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            graph: false,
             author: None,
             grep: None,
             since: None,
@@ -739,7 +725,6 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            graph: false,
             author: None,
             grep: None,
             since: None,
@@ -758,7 +743,6 @@ mod tests {
             limit: None,
             abbrev_commit,
             abbrev,
-            graph: false,
             author: None,
             grep: None,
             since: None,

@@ -63,7 +63,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-s --stage -z --others --ignored --exclude-standard --help" -- "$cur") )
             ;;
         rev-parse)
-            COMPREPLY=( $(compgen -W "--verify --short --abbrev-ref --show-toplevel --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--short --abbrev-ref --show-toplevel --help" -- "$cur") )
             ;;
         show-ref)
             COMPREPLY=( $(compgen -W "--heads --tags --help" -- "$cur") )
@@ -84,13 +84,13 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--porcelain -s --short -z --help" -- "$cur") )
             ;;
         commit)
-            COMPREPLY=( $(compgen -W "-a --all --amend -m --message -F --file --author -q --quiet -S --gpg-sign --no-verify --no-edit --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-a --all --amend -m --message -F --file --author -q --quiet --help" -- "$cur") )
             ;;
         blame)
             COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace -M --find-moves -C --find-copies --ignore-rev --ignore-revs-file --ignore-rev-precise --first-parent --reverse --help" -- "$cur") )
             ;;
         log)
-            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --graph --author --grep --since --until --no-merges --first-parent -n --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --author --grep --since --until --no-merges --first-parent -n --help" -- "$cur") )
             ;;
         reflog)
             COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )
@@ -120,7 +120,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-i --interactive --continue --skip --abort --help" -- "$cur") )
             ;;
         revert)
-            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit --no-edit --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit --help" -- "$cur") )
             ;;
         bisect)
             COMPREPLY=( $(compgen -W "start good bad reset" -- "$cur") )

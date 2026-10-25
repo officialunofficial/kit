@@ -31,13 +31,9 @@ discovery too), like git:
   invocation. It is applied to the **effective** config only (never written
   to disk) and flows through the same enforcement as a per-repo config
   file: security-sensitive keys (`user.identity`, signing/transport trust &mdash;
-  the `REPO_FORBIDDEN_KEYS` set) are **refused** with a warning, and
-  dangerous `core.*` keys are dropped. So `-c` cannot spoof the signed
-  author or redirect trust; use it for inert/allowlisted keys (for example,
-  `-c user.email=ci@example.com`).
-- `kit --no-pager` / `-P` / `--paginate` &mdash; accepted **no-ops**. kit never
-  paginates (better for agents and scripts); the flags exist so defensive
-  invocations like `kit --no-pager log` don't error.
+  the `REPO_FORBIDDEN_KEYS` set) are **refused** with a warning. So `-c` cannot spoof the signed
+  author or redirect trust; use it for repo-safe keys (for example,
+  `-c default_branch=trunk`).
 
 `--git-dir`, `--work-tree`, and `--exec-path` are **non-goals** &mdash; kit uses
 the `.kit/` marker and has no split work-tree / exec-path model.
@@ -260,14 +256,13 @@ History / commits:
   On success `commit` prints git's summary on stderr: `[<branch> <hash>]
   <subject>` (with `(root-commit)` for the first commit, `detached HEAD`
   when detached) followed by a diffstat and `create/delete mode` lines;
-  `-q`/`--quiet` suppresses it. `-S`/`--gpg-sign[=<keyid>]` and
-  `--no-verify` are accepted **no-ops** (kit always signs and has no
-  hooks); `--no-edit` matches kit's default amend behavior.
+  `-q`/`--quiet` suppresses it. kit always signs commits and has no
+  hooks.
   `--format=json` additionally emits one JSON object to stdout on success:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
   "is_merge":<bool>,"is_root":<bool>}`.
-- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]` &mdash; show
+- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]` &mdash; show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -288,9 +283,7 @@ History / commits:
   `--format=json` emits JSONL (one JSON
   object per commit, newest first) with keys `hash`, `parents`, `tree`,
   `author`, `timestamp`, `title`, `message`; the `timestamp` stays a raw
-  Unix-seconds integer for machine consumption. **`--graph` is accepted
-  for compatibility but is currently a no-op** (no ASCII graph is drawn);
-  see "Divergences from Git" below.
+  Unix-seconds integer for machine consumption.
   `--author <pattern>` and `--grep <pattern>` filter the walk by a plain
   **substring** match &mdash; `--author` against both the short display form
   (the `Author:` line) and the full `kind:hex`/`mid:N` form
@@ -350,7 +343,7 @@ History / commits:
   git: `-M<num>`/`-C<num>` (glued, no space) set the minimum alphanumeric
   character count, and a numeric `-C<num>` still counts toward the `-C`
   level (so `-C40 -C` is level 2 with threshold 40). The percent form
-  `-M<num>%`/`-C<num>%` is accepted for git-surface compatibility, but
+  `-M<num>%`/`-C<num>%` is accepted, but
   because kit's block detector has no similarity-ratio model the number is
   treated as the same char-count threshold &mdash; a deliberate, `log`-consistent
   divergence. Remaining divergence from git: a single unmatched run over
@@ -528,12 +521,11 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   outside an
   `-o`/`-c` selection). `-z` NUL-terminates records and emits raw paths
   (otherwise special-byte paths &mdash; including under `-s` &mdash; are C-style quoted).
-- `kit rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
+- `kit rev-parse [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
   &mdash; resolve revisions to object ids. Bare `<rev>...` prints each resolved
   64-hex id; `--short[=N]` abbreviates (default 7, a BLAKE3 prefix);
-  `--abbrev-ref HEAD` prints the current branch; `--verify` is accepted for
-  git-script compatibility but is a **no-op** &mdash; kit always errors on an
-  unresolvable revision, with or without it; `--show-toplevel` prints the
+  `--abbrev-ref HEAD` prints the current branch; kit always errors on an
+  unresolvable revision; `--show-toplevel` prints the
   repository root (the directory holding `.kit`, found by walking up from
   cwd).
 - `kit rev-list [--count] <rev>` &mdash; list the commit ids reachable from
@@ -1451,27 +1443,6 @@ Config / keys / version:
   segment of `remote.<name>.url` or `branch.<branch>.remote` &mdash; stay
   **case-sensitive** (git semantics), so a remote added as `Origin` is not
   silently folded to `origin`.
-  - `user.name` / `user.email` &mdash; git-compatibility aliases. They are
-    accepted and round-trip like `git config user.name`, but are
-    **non-authoritative**: kit's commit author is cryptographic
-    (`user.identity` or the signing key's derived Identity), and these
-    values **never** feed it. They are repo-safe (stored in
-    `.kit/config`) precisely because they cannot influence the signed
-    author &mdash; unlike `user.identity`, which stays user-scoped and in
-    `REPO_FORBIDDEN_KEYS` so a hostile clone cannot spoof authorship. The
-    **first** time either alias is set in a repo that has never set
-    `user.identity` (or the other alias), `kit config` prints a
-    one-time warning to stderr pointing at `user.identity` &mdash; a user
-    coming from git might otherwise reasonably expect these to control
-    authorship.
-  - `core.*` &mdash; git-compatibility keys. An **inert** allowlist
-    (`core.autocrlf`, `core.bare`, `core.filemode`, `core.ignorecase`,
-    `core.quotepath`, `core.symlinks`) is accepted and round-tripped for
-    parity but **not honored** &mdash; kit has no CRLF translation, tracks exec
-    bits natively, etc. Dangerous `core.*` keys that would change what kit
-    runs (`core.sshCommand`, `core.pager`, `core.editor`, `core.hooksPath`,
-    `core.fsmonitor`) are **rejected** rather than stored. Names match
-    case-insensitively and canonicalize to lowercase, like git.
 - `kit self update [--version <tag>] [--check] [--allow-downgrade]
   [--format human|json]` &mdash; update this binary in place from a
   GitHub Release. The update fails closed. It runs `cosign verify-blob`
@@ -1567,12 +1538,6 @@ These are documented behaviors, not bugs:
   above.
 - **`kit remote`** lists remote **names only** (git-shaped); use
   `kit remote -v` for `<name>\t<url> (fetch)`/`(push)`.
-- **`kit log --graph` is a no-op (v1 non-goal).** The flag is accepted
-  for compatibility so existing scripts don't break, but no ASCII commit
-  graph is drawn. Full graph parity is unachievable because kit's default
-  `log` body already diverges from git's `commit/Author/Date` (kit
-  `Identity` plus 64-hex ids); an `--oneline --graph` renderer for the
-  linear/DAG case is not implemented.
 - **`kit log --author`/`--grep` are plain substring matches, not
   regexes.** git's `--author`/`--grep` default to POSIX extended-regex
   matching against a free-text `Name <email>` header; kit identities are

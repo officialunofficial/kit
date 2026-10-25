@@ -211,7 +211,6 @@ _kit() {
                     ;;
                 rev-parse)
                     _arguments \
-                        '--verify[error on an unresolvable revision]' \
                         '--short=[abbreviate to N chars]:N:' \
                         '--abbrev-ref[print the short symbolic name]' \
                         '--show-toplevel[print the repository root]' \
@@ -262,9 +261,6 @@ _kit() {
                         '(-F --file)'{-F,--file}'[read the commit message from a file (- for stdin)]:file:_files' \
                         '--author[override the author identity]:spec:' \
                         '(-q --quiet)'{-q,--quiet}'[suppress the commit summary]' \
-                        '(-S --gpg-sign)'{-S,--gpg-sign}'[accepted no-op (kit always signs)]' \
-                        '--no-verify[accepted no-op (kit has no hooks)]' \
-                        '--no-edit[keep the existing message on amend]' \
                         '--help[show help]'
                     ;;
                 blame)
@@ -292,7 +288,6 @@ _kit() {
                         '--abbrev-commit[abbreviate commit ids]' \
                         '--abbrev[set abbreviation length]:length:' \
                         '--format[output format]:format:(json)' \
-                        '--graph[include ASCII graph]' \
                         '--author[filter by author substring]:pattern:' \
                         '--grep[filter by message substring]:pattern:' \
                         '--since[only commits at or after this date]:date:' \
@@ -362,7 +357,6 @@ _kit() {
                         '--continue[continue after conflict resolution]' \
                         '--abort[abort revert]' \
                         '(-n --no-commit)'{-n,--no-commit}'[stage the reverted tree without creating a commit]' \
-                        '--no-edit[accepted no-op (kit auto-generates the message)]' \
                         '--help[show help]'
                     ;;
                 merge)

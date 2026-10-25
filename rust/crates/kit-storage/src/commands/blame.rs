@@ -395,7 +395,7 @@ struct InlineThresholds {
 ///
 /// The number is a minimum alphanumeric-character count — git's non-`%`
 /// `-M<n>` unit, which maps 1:1 onto kit's core threshold. A trailing `%`
-/// is accepted for git-surface compatibility but the number is still used
+/// is accepted, but the number is still used
 /// as a char count: kit's block detector has no similarity-ratio model, a
 /// deliberate, `log`-consistent divergence (documented in `docs/CLI.md`).
 fn extract_inline_thresholds(args: &[String]) -> (Vec<String>, InlineThresholds) {
@@ -430,7 +430,7 @@ fn extract_inline_thresholds(args: &[String]) -> (Vec<String>, InlineThresholds)
 /// Parse the value glued to `-M`/`-C` into a threshold, or `None` when it
 /// is not a bare number — an empty suffix (bare `-M`), a stacked cluster
 /// (`-CC` → `"C"`), or otherwise non-numeric. A single trailing `%` is
-/// stripped first (git-surface compatibility; the number is still a char
+/// stripped first (the number is still a char
 /// count). An all-digit value that overflows `usize` clamps to `MAX` — an
 /// unreachable threshold — rather than being mis-read as a stacked cluster.
 fn parse_threshold(val: &str) -> Option<usize> {

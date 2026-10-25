@@ -90,26 +90,6 @@ struct CommitOptions {
     /// Suppress the commit summary line (git `-q`).
     #[arg(short = 'q', long = "quiet")]
     quiet: bool,
-    /// Accepted for git compatibility; kit ALWAYS signs commits with its
-    /// own key, so `-S`/`--gpg-sign[=<keyid>]` is a no-op (the optional
-    /// `<keyid>` is ignored).
-    #[arg(
-        short = 'S',
-        long = "gpg-sign",
-        value_name = "KEYID",
-        num_args = 0..=1,
-        default_missing_value = ""
-    )]
-    gpg_sign: Option<String>,
-    /// Accepted for git compatibility; kit has no hooks, so `--no-verify`
-    /// is a no-op.
-    #[arg(long = "no-verify")]
-    no_verify: bool,
-    /// With `--amend`, keep the existing message. kit already reuses
-    /// HEAD's message when `-m` is omitted, so this is effectively the
-    /// default; accepted for compatibility.
-    #[arg(long = "no-edit")]
-    no_edit: bool,
     /// Emit a machine-readable JSON result object to stdout on success:
     /// `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
     /// "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
@@ -128,9 +108,6 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
-    // Accepted-for-compatibility no-ops: kit always signs (`-S`) and has
-    // no hooks (`--no-verify`); `--no-edit` matches kit's default amend.
-    let _ = (&opts.gpg_sign, opts.no_verify, opts.no_edit);
     let json = matches!(opts.format, CommitFormat::Json);
 
     let cwd = match std::env::current_dir() {
@@ -158,7 +135,7 @@ pub fn run(args: &[String]) -> u8 {
     // repo, so none of it needs `worktree.lock`. The lock is acquired
     // just before the actual index/ref write, below, and every read here
     // whose result is still load-bearing at write time (`merge_state` for
-    // `--amend` compat and for the merge-conclusion path; `pre_lock_head`
+    // `--amend` and for the merge-conclusion path; `pre_lock_head`
     // for `--amend`) is re-validated immediately after the lock is taken,
     // so a concurrent write landing during message composition is
     // detected rather than silently clobbered. See the re-validation

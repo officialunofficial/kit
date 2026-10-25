@@ -54,8 +54,8 @@ config-file I/O, so there is exactly one place to fence.
 The table below covers every key that `apply_kv` in
 `rust/crates/kit-storage/src/config.rs` recognizes &mdash; the flat keys (in
 source order), the dotted-section families (`remote.<name>.*`,
-`branch.<name>.*`, allow-listed `core.<key>`) handled via
-`apply_section_kv` / `core_allowed_suffix`, and the `_url`-suffixed
+`branch.<name>.*`) handled via
+`apply_section_kv`, and the `_url`-suffixed
 slot. Rows marked "not yet implemented" classify keys
 that a specification defines before `apply_kv` reads them; the patch
 that implements such a key adds it to `REPO_FORBIDDEN_KEYS` per §5,
@@ -64,8 +64,6 @@ including a matcher for a `remote.<name>.*` pattern key.
 | Key                                  | Scope      | Why this classification                                                                                                                                                              |
 |--------------------------------------|------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `user.identity`                      | **UNSAFE** | Author identity bytes for commit objects. If repo-controlled, the attacker can spoof the author of a victim-signed commit (the victim's key still signs; only the name changes).      |
-| `user.name`                          | SAFE       | Git-compatibility alias, **non-authoritative**: stored and round-tripped for parity with `git config user.name`, but no code path consumes it for authorship. Commit author resolution (`commit::resolve_author`) reads only `--author`, `user.identity`, or the signing-key fallback &mdash; never this field &mdash; so a repo-controlled value cannot influence the signed author. Repo-safe precisely because it is inert. |
-| `user.email`                         | SAFE       | Git-compatibility alias, identical classification to `user.name`: non-authoritative metadata, never feeds the signed author. (The config command persists only the repo layer on write, so a user-scoped `user.email` is not materialized into the clone-traveling repo config.) |
 | `trusted_remote_endpoint`            | **UNSAFE** | The trust selector for ambient HTTP/S3 credentials. If repo-controlled, every other defense in this list collapses &mdash; the attacker would self-trust their own exfil endpoint.          |
 | `signer`                             | **UNSAFE** | Selects raw-file vs keystore commit signing. A flip from `file` to `keystore` routes signing through a user-scoped key reference the attacker did not pick &mdash; same shape as the GHSA-001 confused-deputy. |
 | `key.backend`                        | **UNSAFE** | Selects the keystore backend family (for example, `software` vs `yubikey`). Could redirect signing to a hostile backend or surface a user-presence prompt for attacker-chosen content.      |
@@ -99,7 +97,6 @@ including a matcher for a `remote.<name>.*` pattern key.
 | `remote.<name>.type`                 | SAFE       | Dispatch hint for a named remote (`file` / `http` / `s3` / `ssh`); same reasoning as `remote_type`.                                                                                  |
 | `branch.<name>.remote`               | SAFE       | Per-branch upstream remote name. A UX/tracking pointer with no credential-routing or signing weight; the named remote it points at is still gated per-endpoint.                       |
 | `branch.<name>.merge`                | SAFE       | Per-branch upstream ref. Inert tracking metadata; the victim still verifies signed history regardless of the recorded upstream.                                                      |
-| `core.<key>` (allow-listed)          | SAFE       | Inert git-compatibility keys. Only the allow-listed `core.*` suffixes are accepted. Any other `core.*` key is a load error. kit never acts on the accepted keys.                  |
 | Any other key | **rejected** | An unknown key is a load error, not a dropped line. See §3.5. |
 
 ### 2.1 Borderline cases
@@ -154,8 +151,6 @@ In `kit-storage::config::write`, only an explicit allow-list of
 repo-safe keys is emitted:
 
 ```text
-user.name
-user.email
 default_branch
 durability.objects
 remote_endpoint
@@ -163,7 +158,6 @@ remote_bucket
 remote_type
 remote.<name>.url / remote.<name>.type   (per named remote)
 branch.<name>.remote / branch.<name>.merge   (per-branch upstream tracking)
-core.<key>                               (allow-listed git-compat keys)
 ```
 
 Any other field on the in-memory `Config` is suppressed when
@@ -345,7 +339,6 @@ and where each guarantee is anchored.
 | `kit config <key> <value>` never writes an UNSAFE key repo-scoped | the command intercepts `REPO_FORBIDDEN_KEYS` and routes to the user-scoped file (§3.2) |
 | A repo can NEVER unilaterally attach ambient credentials to its own endpoint | `enforce_trusted_remote_endpoint` requires the user-scoped `trusted_remote_endpoint` to match (§3.4) |
 | A repo can NEVER make the client run the admission helper or widen its header allowlist | both keys are UNSAFE, and the helper runs only for a remote matching `trusted_remote_endpoint` (§2, §3.4) |
-| Repo-scoped `user.name` / `user.email` never influence the signed author | both are inert; `commit::resolve_author` never reads them (§2) |
 | The classification cannot silently drift from the code | `REPO_FORBIDDEN_KEYS` is the single source of truth (§1); the meta-test iterates the whole array and panics on a missing arm (§4) |
 | Every drop is user-visible with pinned wording | stderr warning, snapshot-tested (§3.3) |
 | A config file never loads with an unknown key, a line without `=` or a malformed value | the loader returns an error that names the line (§3.5); the `config_parse` fuzz target covers the parser |
