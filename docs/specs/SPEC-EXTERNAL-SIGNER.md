@@ -304,7 +304,7 @@ FIDO2/WebAuthn signer. Drives a plugged-in roaming authenticator
 
 ```
 $ kit-sign-ctap enroll --rp-id kit.local --user-name alice
-$ kit-sign-ctap sign  --credential-id <base64url> [--pin <pin>]
+$ kit-sign-ctap sign  --credential-id <base64url>
 ```
 
 ```
@@ -322,19 +322,15 @@ reconstructs the signed input. A CTAP signer that has a credential ID but
 no local public-key metadata MUST return an error rather than an empty
 `public_key`.
 
-`--pin` on argv is **deprecated**. It is readable by any other local
-user on the host via `ps` / `/proc/<pid>/cmdline` &mdash; the same exposure
-class `docs/THREAT-MODEL.md` §3.2 defends key-file confidentiality
-against &mdash; so it MUST NOT be relied on. Omit it: when the authenticator
-reports it needs a PIN, the reference signer requests one in-band over
-the `PinPrompt`/`PinResponse` round trip (§4) instead. On the host
-side, `kit-attest`'s `ExternalSigner` answers a `PinPrompt` via its
+A PIN never appears on argv. Any other local user on the host can read
+argv via `ps` / `/proc/<pid>/cmdline` &mdash; the same exposure class
+`docs/THREAT-MODEL.md` §3.2 defends key-file confidentiality against.
+When the authenticator reports it needs a PIN, the reference signer
+requests one in-band over the `PinPrompt`/`PinResponse` round trip (§4).
+On the host side, `kit-attest`'s `ExternalSigner` answers a `PinPrompt` via its
 configured `PinProvider`, which defaults to an interactive terminal
 prompt and never sources a PIN from argv or an environment variable.
-The reference signer prints a deprecation warning when `--pin` is passed.
-
-For compatibility with kit's current external-signer host path, the
-reference CTAP signer accepts `KEY_FORM_RAW_BYTES` only when `key_ref` is
+The reference CTAP signer accepts `KEY_FORM_RAW_BYTES` only when `key_ref` is
 empty and the credential handle is supplied by argv `--credential-id`.
 Explicit credential handles should use `KEY_FORM_OPAQUE_HANDLE`.
 
