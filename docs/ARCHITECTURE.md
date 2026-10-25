@@ -65,6 +65,44 @@ A removal has to take out all of these in one change, with the
 `0x` namespace rule in `repo_identity`. No code is dead today, so the
 spec text stays.
 
+### 1.3 Size
+
+Counts are lines of Rust (`wc -l`) in files that git tracks, per crate, as of
+this writing. The Source column counts `src/`, including unit tests
+that sit in the same file. The Tests column counts every other `.rs` file
+in the crate, such as `tests/` and `benches/`. The `kit-fuzz` row counts
+`rust/fuzz/`.
+
+| Crate | Source | Tests | Generated | Total |
+|---|---:|---:|---:|---:|
+| `kit-core` | 69,332 | 10,341 | 0 | 79,673 |
+| `kit-storage` | 50,521 | 42,401 | 0 | 92,922 |
+| `kit-attest` | 12,715 | 6,416 | 0 | 19,131 |
+| `kit-sync` | 12,041 | 3,771 | 0 | 15,812 |
+| `kit-client` | 6,582 | 3,094 | 0 | 9,676 |
+| `kit-keystore` | 6,123 | 219 | 0 | 6,342 |
+| `kit-transport-connect` | 5,357 | 6,840 | 0 | 12,197 |
+| `kit-git-bridge` | 4,654 | 2,534 | 0 | 7,188 |
+| `kit-transport-s3` | 2,136 | 1,505 | 0 | 3,641 |
+| `kit-transport-ssh` | 2,127 | 0 | 0 | 2,127 |
+| `kit-serve` | 2,026 | 1,652 | 0 | 3,678 |
+| `kit-transport-file` | 2,031 | 0 | 0 | 2,031 |
+| `kit-rpc` | 940 | 167 | 50,231 | 51,338 |
+| `kit-transport-memory` | 500 | 0 | 0 | 500 |
+| `kit-sign-file` | 445 | 421 | 0 | 866 |
+| `kit-test-util` | 156 | 0 | 0 | 156 |
+| `kit-formal-conformance` | 10 | 701 | 0 | 711 |
+| `kit-fuzz` | 2,094 | 720 | 0 | 2,814 |
+| **All crates** | **179,790** | **80,782** | **50,231** | **310,803** |
+
+Generated code is a documented exception to the rule against checked-in
+generated output. The code generator needs `protoc`, and many hosts ship a `protoc` too old
+for protobuf edition 2023. A normal build needs neither, because
+`rust/crates/kit-rpc/generated/` stays in the tree. The
+README in that directory gives the reason.
+`scripts/check-generated-fresh.sh` regenerates the code and fails when the
+checked-in copy differs. Only `kit-rpc` holds generated code.
+
 ---
 
 ## 2. Data flow: object → pack → ref → transport
