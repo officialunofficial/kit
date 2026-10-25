@@ -9,6 +9,9 @@
 #   EXTRA   optional pathspecs, separated by spaces, that this pattern skips
 #
 # Lines that start with # and empty lines are ignored.
+#
+# A banned phrase right after a double quote is a mention of the phrase, not a
+# use of it. The change-history pattern allows such a quoted mention.
 
 both@@issue or pull request number@@(?<![\w&:/])#[0-9]+(?![0-9a-z-])|\b(?i:issues?|prs?|pull requests?) #?[0-9]+\b|\bkit#[0-9]+
 both@@external issue number such as org#123@@(?<![\w./-])[a-z][\w-]*(?:/[A-Za-z][\w-]*)?#[0-9]+(?![\w-])
@@ -22,4 +25,4 @@ both@@tool or model name@@\b(?:Claude|Anthropic|Codex|ChatGPT|OpenAI|Copilot|Gem
 both@@old product name@@(?i)m[k]it
 commit@@process word in a commit message@@\b(?i:phases?|tickets?|work packages?)\b|\b(?i:stage|part|step)s? (?:[0-9]+|one|two|three)\b|\b(?i:part of (?:the |a )?(?:plan|series|rollout))\b
 commit@@trailer that names a tool or adds credit@@^(?i:co-authored-by|generated with|signed-off-by|assisted-by)\b
-both@@reference to the change history instead of the current behavior@@\b(?i:(?:not|outside) (?:a )?part of (?:this|that) (?:commit|change|patch|diff|pr|pull request)|(?:out of|beyond) (?:the )?scope (?:of|for) (?:this|that) (?:commit|change|patch|diff)|(?:in|for|until) (?:a )?(?:later|follow-?up) (?:commit|change|patch|diff)|this (?:commit|patch|diff) (?:does not|doesn.t|adds|removes|changes))\b
+both@@reference to the change history instead of the current behavior@@(?<!["“])\b(?i:(?:not|outside) (?:a )?part of (?:this|that) (?:commit|change|patch|diff|pr|pull request)|(?:out of|beyond) (?:the )?scope (?:of|for) (?:this|that) (?:commit|change|patch|diff)|(?:in|for|until) (?:a )?(?:later|follow-?up) (?:commit|change|patch|diff)|this (?:commit|patch|diff) (?:does not|doesn.t|adds|removes|changes))\b

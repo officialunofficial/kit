@@ -125,6 +125,7 @@ tree_leaks 'board word two' .github/workflows/x.yml "# Sync with the ${w_tracker
 tree_leaks 'history phrase' docs/a.md "This work is ${w_notpart}." 'reference to the change history'
 tree_leaks 'later change phrase' src/a.rs "// Handle the error ${w_later}." 'reference to the change history'
 tree_clean 'commit as a noun' docs/a.md 'Each commit holds one tree.'
+tree_clean 'quoted history phrase' docs/a.md "The check flags \"${w_notpart}\" in text."
 tree_leaks 'tool name' src/a.rs "// Written by ${w_tool}." 'tool or model name'
 tree_leaks 'old product name' docs/a.md "The ${w_old} format." 'old product name'
 tree_leaks 'old product name in code' src/a.rs "const DIR: &str = \".${w_old}\";" 'old product name'
@@ -136,6 +137,7 @@ commit_case 'commit phase word' fail "Add the parser in ${w_phase} two" 'plan la
 commit_case 'commit process word' fail "Add the parser for the ${w_ticket}" 'process word in a commit message'
 commit_case 'commit old name' fail "Rename the ${w_old} directory" 'old product name'
 commit_case 'commit history phrase' fail "Add the parser, ${w_notpart}" 'reference to the change history'
+commit_case 'commit quoted history phrase' pass "Explain the check for \"${w_notpart}\"" ''
 commit_case 'commit tool name' fail "Review by ${w_tool}" 'tool or model name'
 commit_case 'commit follow-up pointer' fail "Add the parser, ${w_tracked} as ${w_follow} issue" 'pointer to later work'
 commit_case 'commit body leak' fail "$(printf 'Add the parser\n\nThis closes the %s.' "$w_ticket")" 'process word in a commit message'
