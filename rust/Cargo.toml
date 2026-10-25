@@ -90,6 +90,10 @@ unwrap_used = "deny"
 # A stray `dbg!()` left in shipped code spams stderr and leaks internals.
 # It's only ever a debugging aid, so fail the build rather than warn.
 dbg_macro = "deny"
+# Glob imports hide where a name comes from. `todo!()` is an unfinished path
+# that panics at run time.
+wildcard_imports = "warn"
+todo = "warn"
 # Every `unsafe` block needs a `// SAFETY:` comment that states the invariant
 # and why it holds (AGENTS.md). scripts/check-unsafe-safety.sh repeats the
 # check on the source text, so code under other targets and features is covered.

@@ -78,6 +78,20 @@ These rules come from [`AGENTS.md`](AGENTS.md). Read that file first.
 - Do not check in generated output unless a build needs it. Say why next to the
   file.
 
+## Rust style
+
+Clippy enforces these rules in CI, with `rustfmt`.
+
+- Do not call `unwrap()` outside tests. Use `expect("why this cannot fail")`
+  only for a documented invariant.
+- Do not use glob imports (`use foo::*`) outside test modules and preludes.
+- Do not commit `todo!()` or `dbg!()`.
+- Put a `// SAFETY:` comment on every `unsafe` block. State the invariant it
+  relies on.
+- Add a doc comment to each public item. Use comments to explain why, not what.
+- Prefer small functions and early returns. Match every variant of an enum that
+  the crate owns. Do not use a wildcard arm.
+
 ## Tests
 
 - Every new behavior needs a test.
