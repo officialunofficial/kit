@@ -94,7 +94,7 @@ pub fn to_hex(h: &Hash) -> String {
 /// `("ab", "cX")` and `("abc", "X")` would hash to the same input.
 ///
 /// Domain strings are short ASCII constants in this codebase (e.g.
-/// `b"kit-commit-v1"`); the `u16` cap is comfortable.
+/// `COMMIT_DOMAIN`, which is `b"kit.commit\x00"`); the `u16` cap is comfortable.
 ///
 /// Used by `sign` (commit / remix signatures), `sparse` (tree hash
 /// binding the manifest to its source tree), and any future module

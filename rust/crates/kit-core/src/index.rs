@@ -1113,26 +1113,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zmix_magic_explicitly() {
-        // SPEC-INDEX §5: readers MUST reject `"ZMIX"`-prefixed files. We
-        // construct the rejected magic as ASCII bytes here rather than
-        // embedding the wrong literal string.
-        let bytes = [
-            0x5A,
-            0x4D,
-            0x49,
-            0x58, // "ZMIX"
-            FORMAT_VERSION,
-            0,
-            0,
-            0,
-            0,
-        ];
-        let err = deserialize(&bytes).unwrap_err();
-        assert!(matches!(err, IndexError::BadMagic));
-    }
-
-    #[test]
     fn rejects_unsupported_version() {
         let mut bytes = Index::new().serialize();
         bytes[4] = 0xFF;

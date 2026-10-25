@@ -124,8 +124,8 @@ is used.
 
 A registry (informative, not itself normative) of the domain
 separators and namespace strings currently in use is maintained inline
-in each format's own spec (SPEC-OBJECTS §10 for object-hash domains,
-SPEC-SIGNING for the commit/remix signing domain); this document does not
+in each format's own spec (SPEC-MERKLE-OBJECTS §2 and §3 for object-hash
+domains, SPEC-SIGNING §2 for the commit, remix and tag signing domains); this document does not
 duplicate that list, only the naming rule.
 
 ## 5. Golden vectors and conformance tests
