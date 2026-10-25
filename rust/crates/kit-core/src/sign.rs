@@ -753,15 +753,30 @@ fn ensure_no_symlink_ancestors(path: &Path) -> Result<(), KitError> {
     Ok(())
 }
 
+/// Create `parent` and any missing ancestors with mode 0700. A directory
+/// that already exists keeps its mode, because the caller did not create
+/// it. A caller may pass `.` or a shared directory.
 #[cfg(unix)]
 fn create_secure_dir_all(parent: &Path) -> Result<(), KitError> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::DirBuilderExt;
 
     ensure_no_symlink_ancestors(parent)?;
-    std::fs::create_dir_all(parent)
-        .map_err(|e| KitError::KeyIo(format!("mkdir {}: {e}", parent.display())))?;
-    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| KitError::KeyIo(format!("chmod parent: {e}")))?;
+    let mut missing = Vec::new();
+    let mut cur = Some(parent);
+    while let Some(dir) = cur {
+        if dir.as_os_str().is_empty() || dir.exists() {
+            break;
+        }
+        missing.push(dir);
+        cur = dir.parent();
+    }
+    for dir in missing.into_iter().rev() {
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+            Err(e) => return Err(KitError::KeyIo(format!("mkdir {}: {e}", dir.display()))),
+        }
+    }
     Ok(())
 }
 
@@ -1473,7 +1488,8 @@ mod tests {
 
     #[test]
     fn save_then_load_roundtrip() {
-        let dir = tempdir();
+        // The key directory is new, so save creates it at mode 0700.
+        let dir = tempdir().join("keys");
         let p = dir.join("default.key");
         let kp = KeyPair::from_seed([0x77; 32]);
         save_key(&p, &kp).unwrap();
@@ -1651,7 +1667,8 @@ mod tests {
     #[test]
     fn save_key_replaces_existing_key_atomically() {
         use std::os::unix::fs::MetadataExt;
-        let dir = tempdir();
+        // The key directory is new, so save creates it at mode 0700.
+        let dir = tempdir().join("keys");
         let p = dir.join("default.key");
         let kp1 = KeyPair::from_seed([0x11; 32]);
         save_key(&p, &kp1).unwrap();
@@ -1672,9 +1689,37 @@ mod tests {
         assert_eq!(kp_loaded.public.0, kp2.public.0);
     }
 
+    /// A directory that exists before the save keeps its mode. The save
+    /// does not chmod a directory it did not create, such as `.`.
+    #[cfg(unix)]
+    #[test]
+    fn save_key_leaves_preexisting_dir_mode_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        save_key(&dir.join("default.key"), &KeyPair::from_seed([0x44; 32])).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+    }
+
+    /// Every directory the save creates gets mode 0700.
+    #[cfg(unix)]
+    #[test]
+    fn save_key_creates_missing_dirs_at_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        let p = dir.join("a").join("b").join("default.key");
+        save_key(&p, &KeyPair::from_seed([0x55; 32])).unwrap();
+        for d in [dir.join("a"), dir.join("a").join("b")] {
+            let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", d.display());
+        }
+    }
+
     #[test]
     fn save_raw_32_create_new_refuses_existing_key() {
-        let dir = tempdir();
+        // The key directory is new, so save creates it at mode 0700.
+        let dir = tempdir().join("keys");
         let p = dir.join("default.key");
         assert!(save_raw_32_create_new(&p, &[0x11; 32]).unwrap());
         assert!(!save_raw_32_create_new(&p, &[0x22; 32]).unwrap());
