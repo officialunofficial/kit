@@ -1301,6 +1301,192 @@ pub fn run_iterated_unit_with<T>(state: &T, body: fn(&[u8], &T)) -> Result<(), G
     Ok(())
 }
 
+/// Attestation envelope decoder (`envelope_decode`): `envelope::decode`
+/// never panics, and anything it accepts re-encodes to exactly the input
+/// bytes (one canonical encoding, so one attestation id). The two shapes
+/// that `encode` refuses are exempt.
+pub fn envelope_decode_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(env) = kit_attest::envelope::decode(input) {
+        // The decoder accepts an empty signature list and an empty payload
+        // type. The verifier rejects both later, and `encode` refuses
+        // them, so there is no re-encoding to compare.
+        if env.signatures.is_empty() || env.payload_type.is_empty() {
+            return;
+        }
+        assert_eq!(
+            kit_attest::envelope::encode(&env)
+                .expect("accepted envelope must re-encode")
+                .as_bytes(),
+            input,
+            "accepted envelope must re-encode byte for byte"
+        );
+    }
+}
+
+/// Ref file wire decoder (`ref_wire_decode`): `decode_ref_wire` and
+/// `parse_lowercase_hash` never panic, and an accepted hash survives an
+/// encode and decode round trip.
+pub fn ref_wire_decode_one_iteration(input: &[u8]) {
+    use kit_core::refs::{decode_ref_wire, encode_ref_wire, parse_lowercase_hash};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Some(h) = decode_ref_wire(input) {
+        assert_eq!(decode_ref_wire(&encode_ref_wire(&h)), Some(h));
+    }
+    if let Some(h) = parse_lowercase_hash(input) {
+        assert_eq!(
+            parse_lowercase_hash(kit_core::to_hex(&h).as_bytes()),
+            Some(h)
+        );
+    }
+}
+
+/// Index file decoder (`index_decode`): `index::deserialize` never panics,
+/// and an accepted index survives a serialize and deserialize round trip.
+pub fn index_decode_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(index) = kit_core::index::deserialize(input) {
+        let again = kit_core::index::deserialize(&index.serialize())
+            .expect("a serialized index must deserialize");
+        assert_eq!(again, index);
+    }
+}
+
+/// History walk state decoder (`history_order_decode`): `TimestampDiscovery::decode`
+/// never panics, and anything it accepts re-encodes to exactly the input
+/// bytes.
+pub fn history_order_decode_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(walk) = kit_core::TimestampDiscovery::decode(input) {
+        assert_eq!(
+            walk.encode(),
+            input,
+            "accepted walk state must re-encode byte for byte"
+        );
+    }
+}
+
+/// Conflict state decoder (`conflict_state_decode`): `deserialize_conflicts`
+/// never panics, and an accepted list survives a serialize and deserialize
+/// round trip.
+pub fn conflict_state_decode_one_iteration(input: &[u8]) {
+    use kit_core::ops::conflict_state::{deserialize_conflicts, serialize_conflicts};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(records) = deserialize_conflicts(input) {
+        let again = deserialize_conflicts(&serialize_conflicts(&records))
+            .expect("serialized conflict records must deserialize");
+        assert_eq!(again, records);
+    }
+}
+
+/// Sparse checkout wire decoders (`sparse_wire_decode`):
+/// `decode_sparse_response` and `decode_sparse_cache` never panic on any
+/// input.
+pub fn sparse_wire_decode_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let _ = kit_core::decode_sparse_response(input);
+    let _ = kit_core::decode_sparse_cache(input);
+}
+
+/// Git object and bridge header parsers (`git_object_parse`):
+/// `GitObject::parse_raw`, the `kit-*` header parsers, `parse_timestamp`
+/// and `parse_person` never panic. An accepted raw object re-renders to
+/// exactly the input bytes.
+pub fn git_object_parse_one_iteration(input: &[u8]) {
+    use kit_git_bridge::{author, gitobj::GitObject, gitparse, headers};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Some(obj) = GitObject::parse_raw(input) {
+        assert_eq!(obj.raw(), input, "accepted object must re-render exactly");
+    }
+    let _ = author::parse_timestamp(input);
+    let _ = gitparse::parse_person(input);
+    if let Ok(text) = core::str::from_utf8(input) {
+        let _ = headers::parse_identity(text);
+        let _ = headers::parse_hash(text);
+        let _ = headers::parse_signature(text);
+    }
+}
+
+/// Repository and remote identity parsers (`repo_identity_parse`): every
+/// `parse` and `parse_bare_allowed` never panics, and an accepted value
+/// re-parses from its text form to the same text.
+pub fn repo_identity_parse_one_iteration(input: &[u8]) {
+    use kit_core::repo_identity::{
+        Namespace, OpaqueNamespace, RemoteIdentity, RemoteNamespace, RepositoryIdentity,
+    };
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    if let Ok(v) = Namespace::parse(text) {
+        assert_eq!(v.to_string(), text, "namespace text is canonical");
+    }
+    if let Ok(v) = OpaqueNamespace::parse(text) {
+        assert_eq!(v.to_string(), text, "opaque namespace text is canonical");
+    }
+    if let Ok(v) = RemoteNamespace::parse(text) {
+        assert_eq!(v.to_string(), text, "remote namespace text is canonical");
+    }
+    for v in [
+        RepositoryIdentity::parse(text),
+        RepositoryIdentity::parse_bare_allowed(text),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let shown = v.to_string();
+        assert_eq!(
+            RepositoryIdentity::parse_bare_allowed(&shown)
+                .expect("shown identity must parse")
+                .to_string(),
+            shown
+        );
+    }
+    for v in [
+        RemoteIdentity::parse(text),
+        RemoteIdentity::parse_bare_allowed(text),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let shown = v.to_string();
+        assert_eq!(
+            RemoteIdentity::parse_bare_allowed(&shown)
+                .expect("shown identity must parse")
+                .to_string(),
+            shown
+        );
+    }
+}
+
+/// Write authorization commitment parser (`commitment_parse`):
+/// `ContentCommitment::parse` never panics, and anything it accepts
+/// displays as exactly the input text.
+pub fn commitment_parse_one_iteration(input: &[u8]) {
+    use kit_core::write_auth::ContentCommitment;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    if let Ok(c) = ContentCommitment::parse(text) {
+        assert_eq!(c.to_string(), text, "accepted commitment is canonical");
+    }
+}
+
+/// Ignore and sparse pattern files (`ignore_parse`): `ignore::parse` and
+/// `parse_sparse_patterns` never panic, and the parsed ignore list answers
+/// a match query on the input path without panicking.
+pub fn ignore_parse_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let list = kit_core::ignore::parse(text);
+    let _ = list.is_ignored("a/b/c.txt", false);
+    let _ = list.is_ignored("dir", true);
+    let _ = kit_core::ops::restore::parse_sparse_patterns(text);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1389,6 +1575,107 @@ mod tests {
             b"",
         ] {
             run_one(case, config_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_envelope_decode() {
+        run_iterated_unit(envelope_decode_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"{\"payload\":",
+            b"{\"payload\":\"\",\"payloadType\":\"t\",\"signatures\":[]}",
+            &[b'{'; 300][..],
+        ] {
+            run_one(case, envelope_decode_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_ref_wire_decode() {
+        run_iterated_unit(ref_wire_decode_one_iteration).unwrap();
+        let valid = "ab".repeat(32) + "\n";
+        for case in [&b""[..], b"\n", valid.as_bytes(), &[b'A'; 64][..]] {
+            run_one(case, ref_wire_decode_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_index_decode() {
+        run_iterated_unit(index_decode_one_iteration).unwrap();
+        let empty = kit_core::index::Index::default().serialize();
+        for case in [&b""[..], b"\x00", &empty[..], &[0xFF; 64][..]] {
+            run_one(case, index_decode_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_history_order_decode() {
+        run_iterated_unit(history_order_decode_one_iteration).unwrap();
+        for case in [&b""[..], b"\x00", &[0xFF; 64][..]] {
+            run_one(case, history_order_decode_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_conflict_state_decode() {
+        run_iterated_unit(conflict_state_decode_one_iteration).unwrap();
+        for case in [&b""[..], b"\n", b"x\ty\tz\n", &[0xFF; 64][..]] {
+            run_one(case, conflict_state_decode_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_sparse_wire_decode() {
+        run_iterated_unit(sparse_wire_decode_one_iteration).unwrap();
+        for case in [&b""[..], b"MKSR", &[0xFF; 64][..]] {
+            run_one(case, sparse_wire_decode_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_git_object_parse() {
+        run_iterated_unit(git_object_parse_one_iteration).unwrap();
+        for case in [
+            &b"blob 3\0abc"[..],
+            b"blob 4\0abc",
+            b"tree 0\0",
+            b"x 1\0",
+            b"Jane <j@x> 5 +0000",
+        ] {
+            run_one(case, git_object_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_repo_identity_parse() {
+        run_iterated_unit(repo_identity_parse_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"name",
+            b"ed25519:00/name",
+            b"root/name",
+            b"A/b",
+            b"//",
+        ] {
+            run_one(case, repo_identity_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_commitment_parse() {
+        run_iterated_unit(commitment_parse_one_iteration).unwrap();
+        let body = format!("body:{}", "ab".repeat(32));
+        for case in [&b""[..], b"part:", b"body:zz", body.as_bytes()] {
+            run_one(case, commitment_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_ignore_parse() {
+        run_iterated_unit(ignore_parse_one_iteration).unwrap();
+        for case in [&b""[..], b"*.log\n!keep.log\r\n", b"**/a/**\n", b"[\n\\\n"] {
+            run_one(case, ignore_parse_one_iteration).unwrap();
         }
     }
 

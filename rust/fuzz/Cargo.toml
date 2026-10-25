@@ -252,3 +252,83 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "envelope_decode"
+path = "fuzz_targets/envelope_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "ref_wire_decode"
+path = "fuzz_targets/ref_wire_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "index_decode"
+path = "fuzz_targets/index_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "history_order_decode"
+path = "fuzz_targets/history_order_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "conflict_state_decode"
+path = "fuzz_targets/conflict_state_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "sparse_wire_decode"
+path = "fuzz_targets/sparse_wire_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "git_object_parse"
+path = "fuzz_targets/git_object_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "repo_identity_parse"
+path = "fuzz_targets/repo_identity_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "commitment_parse"
+path = "fuzz_targets/commitment_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "ignore_parse"
+path = "fuzz_targets/ignore_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

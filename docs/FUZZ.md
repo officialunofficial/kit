@@ -38,6 +38,16 @@ from recurring.
 | `fuzz_targets/verify_span.rs` | `verify::span::{encode_span,verify_disclosure_span}` (a newly encoded committed span verifies; its mutated commit id rejects; arbitrary input never panics) |
 | `fuzz_targets/pack_entries.rs` | `pack::PackEntries` (never panics on adversarial pack bytes; a pack `PackReader::read` accepts also parses as `PackEntries` with the same entry count) |
 | `fuzz_targets/verify_closure.rs` | `verify::verify_closure` / `verify::verify_closure_packs` / `verify::verify_closure_manifest` / `verify::export_closure` (never panics; a freshly exported snapshot closure verifies; a mutated manifest rejects cleanly; raw adversarial bytes fed directly as pack buffers — whole and split into two — to `verify_closure_packs`/`verify_closure_manifest` never panic and any `Ok` report is internally consistent) |
+| `fuzz_targets/envelope_decode.rs` | `kit_attest::envelope::decode` (every accepted input re-encodes to exactly itself) |
+| `fuzz_targets/ref_wire_decode.rs` | `refs::decode_ref_wire` / `refs::parse_lowercase_hash` (an accepted hash survives an encode and decode round trip) |
+| `fuzz_targets/index_decode.rs` | `index::deserialize` (an accepted index survives a serialize and deserialize round trip) |
+| `fuzz_targets/history_order_decode.rs` | `TimestampDiscovery::decode` (every accepted input re-encodes to exactly itself) |
+| `fuzz_targets/conflict_state_decode.rs` | `ops::conflict_state::deserialize_conflicts` (an accepted list survives a serialize and deserialize round trip) |
+| `fuzz_targets/sparse_wire_decode.rs` | `sparse::decode_sparse_response` / `sparse::decode_sparse_cache` (never panics on any input) |
+| `fuzz_targets/git_object_parse.rs` | `gitobj::GitObject::parse_raw` and the `kit-git-bridge` header, timestamp and person parsers (an accepted raw object re-renders to exactly the input) |
+| `fuzz_targets/repo_identity_parse.rs` | The `repo_identity` namespace, repository and remote identity `parse` functions (an accepted value re-parses from its text form to the same text) |
+| `fuzz_targets/commitment_parse.rs` | `write_auth::ContentCommitment::parse` (an accepted commitment displays as exactly the input text) |
+| `fuzz_targets/ignore_parse.rs` | `ignore::parse` / `ops::restore::parse_sparse_patterns` (never panics on any text) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in
@@ -50,6 +60,9 @@ Targets that exercise crate-private parser surfaces should expose a minimal
   Revisit once a virtual-FS shim exists to sandbox the target.
 - **SSH / URL parser wire decoding** &mdash; covered by crate-level unit
   tests for now.
+- **`trust_roots::parse`, `parse_kit_ssh_url`** &mdash; these read text that
+  the user writes or types, not bytes from a remote peer or a hostile
+  repository. Unit tests cover them.
 
 ## Invariants per target
 
