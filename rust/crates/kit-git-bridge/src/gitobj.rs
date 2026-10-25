@@ -8,6 +8,11 @@ use sha1::{Digest, Sha1};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::gitsrc::MAX_OBJECT_BYTES;
+
+/// Bytes of the `"<type> <len>\0"` header that count besides the body.
+const HEADER_ALLOWANCE: u64 = 32;
+
 /// 20-byte git object id.
 pub type Sha1Id = [u8; 20];
 
@@ -138,10 +143,35 @@ impl GitObject {
     /// rejects non-canonical headers, since [`Self::id`] re-renders
     /// the canonical form).
     pub fn read_loose(git_dir: &Path, id: &Sha1Id) -> Result<Self, BridgeError> {
-        let compressed = std::fs::read(Self::loose_path(git_dir, id))?;
-        let mut dec = flate2::read::ZlibDecoder::new(&compressed[..]);
+        Self::read_loose_capped(git_dir, id, MAX_OBJECT_BYTES)
+    }
+
+    /// [`Self::read_loose`] with an explicit body limit. The raw object
+    /// may hold a header of up to [`HEADER_ALLOWANCE`] bytes besides the
+    /// body. The file may hold up to 0.1% more than the raw object,
+    /// because zlib adds framing to data that does not compress.
+    fn read_loose_capped(git_dir: &Path, id: &Sha1Id, max_body: u64) -> Result<Self, BridgeError> {
+        let raw_limit = max_body.saturating_add(HEADER_ALLOWANCE);
+        let file_limit = raw_limit.saturating_add(raw_limit / 1024 + 64);
+        let compressed =
+            kit_core::bounded_read::read_capped(&Self::loose_path(git_dir, id), file_limit)
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::InvalidData {
+                        BridgeError::NotBridgeObject("loose object file is too large".into())
+                    } else {
+                        BridgeError::Io(e)
+                    }
+                })?;
+        let dec = flate2::read::ZlibDecoder::new(&compressed[..]);
+        // Read one byte past the limit so an oversized object is
+        // detected without inflating the rest of it.
         let mut raw = Vec::new();
-        std::io::Read::read_to_end(&mut dec, &mut raw)?;
+        std::io::Read::read_to_end(&mut std::io::Read::take(dec, raw_limit + 1), &mut raw)?;
+        if raw.len() as u64 > raw_limit {
+            return Err(BridgeError::NotBridgeObject(
+                "loose object is too large once inflated".into(),
+            ));
+        }
         let obj = Self::parse_raw(&raw)
             .ok_or_else(|| BridgeError::NotBridgeObject("malformed loose object header".into()))?;
         if obj.id() != *id {
@@ -285,5 +315,54 @@ mod tests {
         assert!(sha1_from_hex("AB").is_none());
         assert!(bytes_from_hex("0aff", 2).is_some());
         assert!(bytes_from_hex("0AFF", 2).is_none(), "uppercase rejected");
+    }
+
+    fn loose_with(git_dir: &Path, obj: &GitObject) -> Sha1Id {
+        obj.write_loose(git_dir).unwrap()
+    }
+
+    #[test]
+    fn read_loose_accepts_a_body_at_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let obj = GitObject {
+            gtype: GitType::Blob,
+            body: vec![1u8; 100],
+        };
+        let id = loose_with(dir.path(), &obj);
+        assert_eq!(
+            GitObject::read_loose_capped(dir.path(), &id, 100).unwrap(),
+            obj
+        );
+    }
+
+    #[test]
+    fn read_loose_rejects_an_object_that_inflates_past_the_limit() {
+        // A zlib bomb: 4 MiB of zeros compresses to about 4 KiB, so the
+        // file passes the file limit but not the inflated limit.
+        let dir = tempfile::tempdir().unwrap();
+        let obj = GitObject {
+            gtype: GitType::Blob,
+            body: vec![0u8; 4 * 1024 * 1024],
+        };
+        let id = loose_with(dir.path(), &obj);
+        let err = GitObject::read_loose_capped(dir.path(), &id, 16 * 1024).unwrap_err();
+        assert!(
+            matches!(&err, BridgeError::NotBridgeObject(m) if m.contains("inflated")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn read_loose_rejects_a_file_over_the_file_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = [9u8; 20];
+        let path = GitObject::loose_path(dir.path(), &id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+        let err = GitObject::read_loose_capped(dir.path(), &id, 16).unwrap_err();
+        assert!(
+            matches!(&err, BridgeError::NotBridgeObject(m) if m.contains("file is too large")),
+            "{err}"
+        );
     }
 }
