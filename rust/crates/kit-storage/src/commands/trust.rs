@@ -172,6 +172,13 @@ fn add(opts: &AddOpts) -> u8 {
         kind: opts.kind.clone(),
         pubkey_hex: opts.pubkey_hex.to_ascii_lowercase(),
     });
+    // Never write a file that the strict parser would refuse to read.
+    if let Err(e) = trust_roots::parse(&trust_roots::serialize(&entries)) {
+        return emit_err(
+            &format!("refusing to write an invalid trust root: {e}"),
+            exit::USAGE,
+        );
+    }
     if let Err((msg, code)) = trust_roots::save(&path, &entries) {
         return emit_err(&msg, code);
     }
@@ -318,6 +325,23 @@ mod tests {
         assert_eq!(rc, exit::OK);
         assert!(trust_roots::load_entries(&path).unwrap().is_empty());
         let _ = fs::remove_dir_all(td.path());
+    }
+
+    #[test]
+    fn add_rejects_unknown_kind_and_quoted_keyid() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("trust-roots.toml");
+        let hex = "11".repeat(32);
+        let opts = |keyid: &str, kind: &str| AddOpts {
+            keyid: keyid.into(),
+            pubkey_hex: hex.clone(),
+            kind: kind.into(),
+            trust_roots: Some(path.to_string_lossy().into_owned()),
+            force: false,
+        };
+        assert_eq!(add(&opts("alice", "rsa")), exit::USAGE);
+        assert_eq!(add(&opts("a\"b", "ed25519")), exit::USAGE);
+        assert!(!path.exists());
     }
 
     #[test]

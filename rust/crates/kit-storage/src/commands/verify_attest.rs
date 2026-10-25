@@ -570,9 +570,9 @@ mod tests {
     }
 
     #[test]
-    fn load_trust_roots_drops_keyid_pubkey_mismatch() {
+    fn load_trust_roots_rejects_keyid_pubkey_mismatch() {
         // Keyid embeds pubkey `aa..`, but pubkey_hex says `bb..`.
-        // The entry must be dropped, not silently trusted.
+        // The whole file must be rejected, not silently trusted.
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("tr.toml");
         let keyid_hex = "aa".repeat(32);
@@ -585,8 +585,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let reg = load_trust_roots(&path).unwrap();
-        assert!(reg.lookup(&keyid).is_none());
+        let (_, code) = load_trust_roots(&path).unwrap_err();
+        assert_eq!(code, crate::exit::CONFIG_ERROR);
     }
 
     #[test]
@@ -625,10 +625,10 @@ mod tests {
     }
 
     /// A block of an unknown kind, such as the removed BLS threshold kind,
-    /// is silently dropped. The `verify-attest` run then reports the keyid
-    /// as `UnknownKeyid` instead of trusting it.
+    /// makes the whole file invalid. The command fails instead of
+    /// trusting a partial file.
     #[test]
-    fn load_trust_roots_skips_unknown_kind() {
+    fn load_trust_roots_rejects_unknown_kind() {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("tr.toml");
         let hex = "ab".repeat(96);
@@ -643,8 +643,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let reg = load_trust_roots(&path).unwrap();
-        assert!(reg.lookup(&keyid).is_none());
+        let (_, code) = load_trust_roots(&path).unwrap_err();
+        assert_eq!(code, crate::exit::CONFIG_ERROR);
     }
 
     #[test]

@@ -556,8 +556,13 @@ explicitly passed.** A hostile clone could otherwise ship
 loop would print "ok" against attacker-controlled signatures.
 
 Schema (a strict subset of TOML &mdash; the parser is hand-rolled and
-recognizes only this exact grammar; unknown keys inside a block are
-tolerated and ignored):
+recognizes only this exact grammar). The file is a trust anchor, so the
+parser fails closed. It rejects the whole file on an unknown key, a
+repeated key, a line outside a block, an unquoted value, a value with a
+comment, escape or inner quote, invalid hex, a wrong key length, a
+keyid that does not match its key, or a repeated keyid. Only comment
+lines (`#`) and blank lines are skipped. A block may use `algorithm` as
+an alias for `kind` but not both. If `kind` is absent, it is `ed25519`:
 
 ```toml
 # Repeat one block per trusted key.
@@ -572,7 +577,7 @@ pubkey_hex = "3a7c9e1f4b2d6058a9c3e7f1b4d6082a5c9e3f7b1d4602a8c5e9f3b7d1042a6c" 
 | `ed25519`                    | `Ed25519PubKey([u8; 32])`    | exactly 32 bytes (64 hex chars)                     |
 | `p256-sec1` or `p256`        | `P256PubKeySec1(Vec<u8>)`    | SEC1: 33 bytes compressed (66 hex) or 65 bytes uncompressed (130 hex) |
 | `secp256k1` or `secp256k1-sec1` | `Secp256k1PubKeySec1(Vec<u8>)` | SEC1: 33 bytes compressed (66 hex) or 65 bytes uncompressed (130 hex) |
-| anything else                | silently skipped             | &mdash;                                                   |
+| anything else                | the file is rejected         | &mdash;                                                   |
 
 Missing file ⇒ empty registry ⇒ every signature surfaces
 `UnknownKeyid` ⇒ no envelope verifies. The CLI prints a

@@ -17,14 +17,20 @@
 //! ```
 //!
 //! * `kind` is one of `ed25519`, `secp256k1` (alias `secp256k1-sec1`) or
-//!   `p256-sec1` (alias `p256`). Anything else is ignored.
-//! * `algorithm` is accepted as an alias for `kind`; either field name
-//!   works.
-//! * `pubkey_hex` is the raw public key bytes in lowercase hex.
+//!   `p256-sec1` (alias `p256`). Any other value is an error. The
+//!   default is `ed25519`.
+//! * `algorithm` is accepted as an alias for `kind`. A block must not
+//!   set both.
+//! * `pubkey_hex` is the raw public key bytes in hex. The length must
+//!   fit `kind`.
+//! * Every value is a plain double-quoted string.
 //!
-//! Lines outside a `[[trust_root]]` block, comments (`#`), and blank
-//! lines are ignored. A missing file parses to zero entries — the
-//! caller's documented "no trust-roots configured" UX.
+//! The parser fails closed. An unknown key, a repeated key, a line
+//! outside a block, an unquoted value, bad hex, a keyid that does not
+//! match its key or a repeated keyid is an error for the whole file.
+//! Comments (`#`) and blank lines are the only text it skips. A missing
+//! file parses to zero entries — the caller's documented "no
+//! trust-roots configured" UX.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -93,86 +99,145 @@ pub fn note_if_missing(trust_path: &Path) {
     }
 }
 
-/// Parse every `[[trust_root]]` block in `text`. Blocks with missing
-/// `keyid`/`pubkey_hex`, unparsable hex, or a keyid/pubkey mismatch
-/// are dropped with a stderr note rather than surfaced as a
-/// hard error — matches `verify-attest`'s tolerant-parser policy.
-#[must_use]
-pub fn parse(text: &str) -> Vec<TrustEntry> {
-    let mut out = Vec::new();
-    let mut in_block = false;
-    let mut keyid = String::new();
-    let mut kind = String::new();
-    let mut pubkey_hex = String::new();
+/// Parse the trust-roots file text. The file is a trust anchor, so the
+/// parser fails closed. It returns an error for the first line it cannot
+/// accept: an unknown key, a duplicate key, an unquoted value, a line
+/// outside a block, a bad `kind`, bad hex, a wrong key length, a keyid
+/// that does not match its key, or a repeated keyid. It never drops an
+/// entry.
+pub fn parse(text: &str) -> Result<Vec<TrustEntry>, String> {
+    let mut out: Vec<TrustEntry> = Vec::new();
+    let mut block: Option<Block> = None;
 
-    let flush = |keyid: &str, kind: &str, pubkey_hex: &str, out: &mut Vec<TrustEntry>| {
-        if keyid.is_empty() || pubkey_hex.is_empty() {
-            return;
-        }
-        let Some(pk_bytes) = hex_decode(pubkey_hex) else {
-            return;
-        };
-        if !keyid_matches_pubkey(keyid, &pk_bytes) {
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(
-                stderr,
-                "note: trust-root '{}' dropped — keyid does not match its pubkey_hex",
-                short_keyid(keyid)
-            );
-            return;
-        }
-        out.push(TrustEntry {
-            keyid: keyid.to_owned(),
-            kind: if kind.is_empty() {
-                "ed25519".to_owned()
-            } else {
-                kind.to_owned()
-            },
-            pubkey_hex: pubkey_hex.to_owned(),
-        });
-    };
-
-    for raw in text.lines() {
+    for (idx, raw) in text.lines().enumerate() {
+        let n = idx + 1;
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         if line == "[[trust_root]]" {
-            if in_block {
-                flush(&keyid, &kind, &pubkey_hex, &mut out);
+            if let Some(b) = block.take() {
+                push_entry(b, &mut out)?;
             }
-            in_block = true;
-            keyid.clear();
-            kind.clear();
-            pubkey_hex.clear();
+            block = Some(Block::new(n));
             continue;
         }
-        if !in_block {
-            continue;
-        }
+        let Some(b) = block.as_mut() else {
+            return Err(format!("line {n}: text outside a [[trust_root]] block"));
+        };
         let Some((k, v)) = line.split_once('=') else {
-            continue;
+            return Err(format!("line {n}: expected `key = \"value\"`"));
         };
         let key = k.trim();
-        let val = v.trim().trim_matches('"').to_owned();
-        match key {
-            "keyid" => keyid = val,
-            "kind" | "algorithm" => kind = val,
-            "pubkey_hex" => pubkey_hex = val,
-            _ => {}
+        let val = unquote(v.trim()).ok_or_else(|| {
+            format!("line {n}: the value of `{key}` must be a plain double-quoted string")
+        })?;
+        let slot = match key {
+            "keyid" => &mut b.keyid,
+            "kind" | "algorithm" => &mut b.kind,
+            "pubkey_hex" => &mut b.pubkey_hex,
+            _ => return Err(format!("line {n}: unknown key `{key}`")),
+        };
+        if slot.is_some() {
+            return Err(format!("line {n}: key `{key}` is set twice in one block"));
+        }
+        *slot = Some(val.to_owned());
+    }
+    if let Some(b) = block.take() {
+        push_entry(b, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// The fields of one `[[trust_root]]` block while the parser reads it.
+struct Block {
+    line: usize,
+    keyid: Option<String>,
+    kind: Option<String>,
+    pubkey_hex: Option<String>,
+}
+
+impl Block {
+    fn new(line: usize) -> Self {
+        Self {
+            line,
+            keyid: None,
+            kind: None,
+            pubkey_hex: None,
         }
     }
-    if in_block {
-        flush(&keyid, &kind, &pubkey_hex, &mut out);
+}
+
+/// Return the text between one pair of double quotes. Reject any other
+/// shape: no quotes, a trailing comment, an escape or an inner quote.
+fn unquote(v: &str) -> Option<&str> {
+    let inner = v.strip_prefix('"')?.strip_suffix('"')?;
+    if inner.contains(['"', '\\']) {
+        return None;
     }
-    out
+    Some(inner)
+}
+
+/// Is `pubkey_len` a valid byte length for a key of this `kind`?
+fn key_length_ok(kind: &str, pubkey_len: usize) -> bool {
+    match kind {
+        "ed25519" => pubkey_len == 32,
+        "secp256k1" | "secp256k1-sec1" | "p256-sec1" | "p256" => {
+            pubkey_len == 33 || pubkey_len == 65
+        }
+        _ => false,
+    }
+}
+
+fn push_entry(b: Block, out: &mut Vec<TrustEntry>) -> Result<(), String> {
+    let at = b.line;
+    let keyid = b
+        .keyid
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| format!("block at line {at}: missing `keyid`"))?;
+    let pubkey_hex = b
+        .pubkey_hex
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| format!("block at line {at}: missing `pubkey_hex`"))?;
+    let kind = b.kind.unwrap_or_else(|| "ed25519".to_owned());
+    let Some(pk_bytes) = hex_decode(&pubkey_hex) else {
+        return Err(format!("block at line {at}: `pubkey_hex` is not valid hex"));
+    };
+    if !key_length_ok(&kind, pk_bytes.len()) {
+        return Err(format!(
+            "block at line {at}: unknown `kind` or wrong key length for `{kind}`"
+        ));
+    }
+    if !keyid_matches_pubkey(&keyid, &pk_bytes) {
+        return Err(format!(
+            "block at line {at}: keyid '{}' does not match its pubkey_hex",
+            short_keyid(&keyid)
+        ));
+    }
+    if out.iter().any(|e| e.keyid == keyid) {
+        return Err(format!(
+            "block at line {at}: keyid '{}' appears twice",
+            short_keyid(&keyid)
+        ));
+    }
+    out.push(TrustEntry {
+        keyid,
+        kind,
+        pubkey_hex,
+    });
+    Ok(())
 }
 
 /// Load and parse the trust-roots file at `path`. A missing file
 /// parses to an empty list (not an error).
 pub fn load_entries(path: &Path) -> Result<Vec<TrustEntry>, (String, u8)> {
     match std::fs::read_to_string(path) {
-        Ok(text) => Ok(parse(&text)),
+        Ok(text) => parse(&text).map_err(|e| {
+            (
+                format!("invalid trust-roots file {}: {e}", path.display()),
+                exit::CONFIG_ERROR,
+            )
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err((format!("read {}: {e}", path.display()), exit::NOINPUT)),
     }
@@ -328,7 +393,7 @@ mod tests {
 
     #[test]
     fn parse_missing_file_is_empty() {
-        assert!(parse("").is_empty());
+        assert!(parse("").unwrap().is_empty());
     }
 
     #[test]
@@ -338,22 +403,22 @@ mod tests {
         let text = format!(
             "[[trust_root]]\nkeyid = \"{keyid}\"\nkind = \"ed25519\"\npubkey_hex = \"{hex}\"\n"
         );
-        let entries = parse(&text);
+        let entries = parse(&text).unwrap();
         assert_eq!(entries.len(), 1);
         let re_serialized = serialize(&entries);
-        let re_parsed = parse(&re_serialized);
+        let re_parsed = parse(&re_serialized).unwrap();
         assert_eq!(entries, re_parsed);
     }
 
     #[test]
-    fn parse_drops_keyid_pubkey_mismatch() {
+    fn parse_rejects_keyid_pubkey_mismatch() {
         let keyid_hex = "aa".repeat(32);
         let wrong_pubkey = "bb".repeat(32);
         let keyid = format!("ed25519:{keyid_hex}");
         let text = format!(
             "[[trust_root]]\nkeyid = \"{keyid}\"\nkind = \"ed25519\"\npubkey_hex = \"{wrong_pubkey}\"\n"
         );
-        assert!(parse(&text).is_empty());
+        assert!(parse(&text).unwrap_err().contains("does not match"));
     }
 
     #[test]
@@ -400,5 +465,67 @@ mod tests {
         save(&path, &entries).unwrap();
         let loaded = load_entries(&path).unwrap();
         assert_eq!(loaded, entries);
+    }
+
+    fn block(extra: &str) -> String {
+        let hex = "aa".repeat(32);
+        format!("[[trust_root]]\nkeyid = \"ed25519:{hex}\"\npubkey_hex = \"{hex}\"\n{extra}")
+    }
+
+    #[test]
+    fn parse_accepts_comments_blank_lines_and_default_kind() {
+        let text = format!("# note\n\n{}", block("kind = \"ed25519\"\n"));
+        assert_eq!(parse(&text).unwrap().len(), 1);
+        assert_eq!(parse(&block("")).unwrap()[0].kind, "ed25519");
+    }
+
+    #[test]
+    fn parse_rejects_junk_and_unknown_keys() {
+        assert!(parse("junk\n").is_err());
+        assert!(parse(&format!("junk\n{}", block(""))).is_err());
+        assert!(parse(&block("junk\n")).is_err());
+        assert!(parse(&block("extra = \"x\"\n")).is_err());
+        assert!(parse(&block("[table]\n")).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_bad_values() {
+        assert!(parse(&block("kind = ed25519\n")).is_err());
+        assert!(parse(&block("kind = \"ed25519\" # c\n")).is_err());
+        assert!(parse(&block("kind = \"ed\\25519\"\n")).is_err());
+        assert!(parse(&block("kind = \"rsa\"\n")).is_err());
+        assert!(parse(&block("kind = \"p256\"\n")).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_keys_and_both_kind_names() {
+        assert!(parse(&block("kind = \"ed25519\"\nkind = \"ed25519\"\n")).is_err());
+        assert!(parse(&block("kind = \"ed25519\"\nalgorithm = \"ed25519\"\n")).is_err());
+        let hex = "aa".repeat(32);
+        assert!(parse(&block(&format!("keyid = \"ed25519:{hex}\"\n"))).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_missing_fields_and_bad_hex() {
+        assert!(parse("[[trust_root]]\n").is_err());
+        assert!(parse("[[trust_root]]\nkeyid = \"alice\"\n").is_err());
+        assert!(parse("[[trust_root]]\nkeyid = \"alice\"\npubkey_hex = \"zz\"\n").is_err());
+        assert!(parse("[[trust_root]]\nkeyid = \"alice\"\npubkey_hex = \"aa\"\n").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_repeated_keyid() {
+        let b = block("");
+        assert!(parse(&format!("{b}{b}")).is_err());
+    }
+
+    #[test]
+    fn load_entries_reports_invalid_file() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("tr.toml");
+        std::fs::write(&path, "junk\n").unwrap();
+        let (msg, code) = load_entries(&path).unwrap_err();
+        assert_eq!(code, exit::CONFIG_ERROR);
+        assert!(msg.contains("line 1"));
     }
 }
