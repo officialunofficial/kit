@@ -1798,8 +1798,14 @@ for the caller's view only when the returned ref exists in that view.
 visible refs on that page, including their bytes in the 2 MiB bound;
 the `ref` is the full name. `RefEntry` retains its existing wire shape.
 The detail is `kit.transport.v1.RedactionNotice { bytes envelope = 1; }`
-and its envelope and verification follow SPEC-SERVER §14.6. Hidden
-refs and repositories MUST NOT leak a notice through these fields.
+and its envelope and verification follow SPEC-SERVER §14.6. The envelope is
+a DSSE envelope ([SPEC-ATTESTATIONS §4](SPEC-ATTESTATIONS.md#4-envelope-format)).
+Its `payloadType` is exactly `application/vnd.kit.redaction-notice.v1+json`,
+and the DSSE signature covers that string. A verifier MUST reject an
+envelope with any other `payloadType`. The golden vectors in
+`rust/tests/golden/redaction/` pin this value, and
+`scripts/check-redaction-goldens.py` checks it. Hidden refs and repositories
+MUST NOT leak a notice through these fields.
 SSH and enc callers receive the same plain error codes and messages
 without a notice detail; their frozen protocols do not gain notice
 fields.
