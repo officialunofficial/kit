@@ -147,7 +147,7 @@ not: their ID is the domain-bound root of a Binary Merkle Tree (BMT)
 built over their parts &mdash; one leaf per entry for a `Tree`, and a
 metadata leaf plus one leaf per chunk for a `ChunkedBlob`. The
 construction is normative in `docs/specs/SPEC-MERKLE-OBJECTS.md`; the
-vendored BMT lives in `rust/crates/kit-core/src/merkle.rs`.
+BMT code lives in `rust/crates/kit-core/src/merkle.rs`.
 
 A flat digest names exact bytes and nothing more. Deriving the ID
 from a Merkle root over the object's parts adds two properties.

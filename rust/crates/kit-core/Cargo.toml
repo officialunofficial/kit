@@ -38,12 +38,10 @@ bytes = "1"
 #
 # The others are optional, gated by the feature flags below. NOTE on
 # merkle identity: a merkelized object's id is a Binary Merkle Tree root
-# (see `merkle.rs`). We do NOT use `commonware_storage::bmt` for it,
-# because `bmt` is gated behind `commonware-storage/std`, which drags in
-# `zstd-sys` (a C lib that cannot target wasm32) — and wasm32 builds compute
-# object ids. Instead `merkle.rs` vendors the identical BMT construction
-# over the `blake3` crate (wasm-clean) and a native-only test cross-verifies
-# it byte-for-byte against `commonware_storage::bmt` (see dev-dependencies).
+# (see `merkle.rs`). `merkle.rs` is an independent implementation over the
+# `blake3` crate. It needs to rebuild a root from a proof, which
+# `commonware_storage::bmt` does not offer. A native-only test checks it
+# byte-for-byte against `commonware_storage::bmt` (see dev-dependencies).
 commonware-codec = { workspace = true }
 commonware-storage = { workspace = true, features = ["std"], optional = true }
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
@@ -149,10 +147,8 @@ sha2 = "0.11"
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true, features = ["std"] }
 serde_json = "1"
-# Native-only: cross-verify `merkle.rs`'s vendored BMT against the
-# canonical `commonware_storage::bmt` so the vendored construction stays
-# byte-for-byte identical to the house primitive (the wasm build uses the
-# vendored path; this proves they agree). std is fine for a native test.
+# Native-only: cross-check `merkle.rs` against the canonical
+# `commonware_storage::bmt`. Both must give the same roots and proof bytes.
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
 hex = "0.4"

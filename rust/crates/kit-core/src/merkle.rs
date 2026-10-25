@@ -6,35 +6,29 @@
 //! chunk/entry provable, and makes a reconstructed object's read-time id
 //! check a free completeness proof for its whole child set.
 //!
-//! ## Primitive — a vendored BMT, byte-identical to `commonware_storage::bmt`
+//! ## Primitive: an independent BMT over `blake3`
 //!
-//! The upstream crate provides
-//! `commonware_storage::bmt`. We do **not** depend on it for object identity:
-//! `merkle.rs` lives in `kit-core` and `Object::id` calls it, so this module
-//! must compile to `wasm32` for `kit-core` *itself* to — independent of any
-//! wasm caller. Instead this module vendors the *identical* BMT construction
-//! over the `blake3` crate (already a kit dependency, wasm-clean). A
-//! native-only test (`tests::vendored_root_matches_commonware`) cross-verifies
-//! the vendored root byte-for-byte against `commonware_storage::bmt`, and
-//! `tests::proofs_match_commonware` extends that guarantee to inclusion
-//! proofs (bytes and cross-verifier acceptance) — so the two never drift.
+//! This module is an independent implementation of the construction that
+//! `commonware_storage::bmt` uses. It is not a copy of that code. The wire
+//! bytes of the root and of every proof are identical to the upstream bytes.
 //!
-//! Since `commonware =2026.7.0`, `bmt` itself is genuinely `no_std`. That
-//! is *not* enough to drop the vendored copy: `commonware_storage::bmt::Builder<H: Hasher>` is generic
-//! over `commonware_cryptography::Hasher`, so reaching a concrete hasher
-//! (e.g. `Blake3`) means depending on the `commonware-cryptography` crate —
-//! and that crate's `blst` dependency (BLS12-381) is **not** feature-gated;
-//! it compiles unconditionally for every consumer, wasm or not. Confirmed
-//! empirically: `blst`'s C sources fail to build for
-//! `wasm32-unknown-unknown` wherever the local `clang` has no WASM LLVM
-//! backend registered (e.g. stock Xcode clang on macOS — `clang
-//! --print-targets` lists no `wasm32` entry). Even on a toolchain where it
-//! *does* build, making `commonware-storage` (and therefore
-//! `commonware-cryptography`/`blst`) a mandatory dependency of `kit-core`'s
-//! object-identity path would impose that C library's build/binary-size
-//! cost on every consumer, not just wasm callers. So the vendored
-//! construction stays;
-//! the cross-check test is what keeps it honest against upstream.
+//! The module does not use the upstream crate, for two reasons:
+//!
+//! * A verifier here starts from an object id, not from a root. The id is
+//!   `wrap_id(kind, root)`, and the hash cannot be inverted. The verifier
+//!   must rebuild the root from the proof, then wrap it, then compare. The
+//!   upstream `verify_*_inclusion` functions only compare a rebuilt root to
+//!   a root that the caller already holds. They do not return the rebuilt
+//!   root.
+//! * SPEC-MERKLE-OBJECTS §5.4 requires a builder to refuse every position of
+//!   an empty tree. Upstream returns a default proof for the range `0..=0`.
+//!
+//! The upstream crate does build for `wasm32` without its `std` feature,
+//! so the target is not the reason. Native tests keep `commonware-storage`
+//! as a dev-dependency. `tests::root_matches_commonware` compares
+//! roots for several leaf counts. `tests::proofs_match_commonware` compares
+//! proof bytes and checks that upstream accepts each proof that this module
+//! builds. These tests are the reference check for the construction.
 //!
 //! The construction (matching commonware):
 //! * leaf at index `i` is hashed with its position: `H(i_be32 ‖ leaf)`;
@@ -182,7 +176,7 @@ impl From<CodecError> for MerkleError {
 }
 
 // ---------------------------------------------------------------------------
-// Vendored BMT primitive (over `blake3`)
+// BMT primitive (over `blake3`)
 // ---------------------------------------------------------------------------
 
 /// Leaf/index count as `u32`. Objects are decode-capped at 1M
@@ -207,8 +201,8 @@ fn position_leaf(index: u32, leaf: &Hash) -> Hash {
 
 /// Returns the number of levels in a tree with `leaf_count` leaves
 /// (level 0 = leaves, last level = the pre-finalize root). A tree with 1
-/// leaf has 1 level, a tree with 2 leaves has 2 levels, etc. Ported from
-/// `commonware_storage::bmt::levels_in_tree`.
+/// leaf has 1 level, a tree with 2 leaves has 2 levels, etc. The count
+/// equals `commonware_storage::bmt::levels_in_tree`.
 fn levels_in_tree(leaf_count: u32) -> usize {
     (u32::BITS - leaf_count.saturating_sub(1).leading_zeros() + 1) as usize
 }
@@ -268,8 +262,8 @@ fn build_bmt(leaves: &[Hash]) -> BmtTree {
 /// sibling is omitted when it would be the node's own duplicate (an odd
 /// trailing node) or is already covered by another proven position —
 /// verifiers reconstruct `H(computed, computed)` / skip re-deriving it
-/// without consuming a proof entry. Ported from
-/// `commonware_storage::bmt::siblings_required_for_multi_proof`.
+/// without consuming a proof entry. The selection equals the one in
+/// `commonware_storage::bmt`.
 fn siblings_required_for_multi_proof(
     leaf_count: u32,
     positions: impl IntoIterator<Item = u32>,
@@ -313,8 +307,8 @@ fn siblings_required_for_multi_proof(
 
 /// Returns the sorted, deduplicated `(level, index)` positions of siblings
 /// required to prove inclusion of a contiguous range of leaves from
-/// `start` to `end` (inclusive). Ported from
-/// `commonware_storage::bmt::siblings_required_for_range_proof`.
+/// `start` to `end` (inclusive). The selection equals the one in
+/// `commonware_storage::bmt`.
 fn siblings_required_for_range_proof(
     leaf_count: u32,
     start: u32,
@@ -1336,12 +1330,10 @@ mod tests {
         assert_eq!(Proof::decode(&bytes, 0), Err(MerkleError::MalformedProof));
     }
 
-    /// Cross-verify the vendored BMT against `commonware_storage::bmt`
-    /// (native-only dev-dep) for several leaf counts incl. odd ones — the
-    /// guard that the wasm-path vendored construction never drifts from the
-    /// house primitive.
+    /// Cross-verify the BMT root against `commonware_storage::bmt`
+    /// (native-only dev-dep) for several leaf counts incl. odd ones.
     #[test]
-    fn vendored_root_matches_commonware() {
+    fn root_matches_commonware() {
         use commonware_cryptography::blake3::{Blake3, Digest};
         use commonware_storage::bmt::Builder;
 
@@ -1356,7 +1348,7 @@ mod tests {
             }
             let cw_root = builder.build().root().0;
             let ours = build_bmt(&leaves).root;
-            assert_eq!(ours, cw_root, "vendored BMT root diverged at n={n}");
+            assert_eq!(ours, cw_root, "BMT root diverged at n={n}");
         }
     }
 
