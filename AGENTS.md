@@ -9,6 +9,7 @@ kit is a content-addressed, signed version-control system. Security comes first.
 - Verify before trust. Check hashes, signatures and attestations before you use the data they cover.
 - Never write secrets, keys, tokens or passphrases to logs, errors, debug output or test snapshots.
 - Do not use `unsafe` without a `// SAFETY:` comment that states the invariant and why it holds.
+- Declare `#![forbid(unsafe_code)]` in every crate root. Use `#![deny(unsafe_code)]` only where a justified `#[allow(unsafe_code)]` site exists. `scripts/check-unsafe-policy.sh` checks this.
 - Give every domain-separation tag, magic and predicate URI a unique value. Never reuse one across purposes.
 - Fail closed. An unknown version, algorithm or field is an error.
 

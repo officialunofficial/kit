@@ -18,6 +18,7 @@
 //! The blake3↔sha1 mapping ([`map`]) is always a rebuildable cache —
 //! determinism means deleting it and re-deriving yields identical
 //! results, so it is never a source of truth.
+#![forbid(unsafe_code)]
 
 pub mod author;
 mod b64;

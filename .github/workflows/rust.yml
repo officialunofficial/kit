@@ -261,6 +261,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Every unsafe site has a SAFETY comment
         run: bash scripts/check-unsafe-safety.sh
+      - name: Every crate root declares an unsafe policy
+        run: bash scripts/check-unsafe-policy.sh
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ env.RUST_VERSION }}

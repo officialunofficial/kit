@@ -1,6 +1,7 @@
 //! Dev-only helpers shared by test suites across the workspace.
 //!
 //! Not published — add this crate to `[dev-dependencies]` only.
+#![forbid(unsafe_code)]
 
 use std::process::{Command, Stdio};
 

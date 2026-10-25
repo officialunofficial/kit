@@ -30,6 +30,7 @@
 //! as a starting point for your own signer (Secure Enclave, Ledger,
 //! `WebAuthn`, `MetaMask` bridge, HSM, …). See SPEC-EXTERNAL-SIGNER.md §12
 //! for the security model.
+#![forbid(unsafe_code)]
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};

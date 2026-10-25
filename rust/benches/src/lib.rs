@@ -1,4 +1,5 @@
 //! Shared types between the bench harnesses and the SVG renderer.
+#![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
