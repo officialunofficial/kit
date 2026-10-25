@@ -24,4 +24,4 @@ API for encrypted-at-rest BLS12-381 threshold signing shares
 
 External hardware signers that don't fit a native OS keystore API (Secure
 Enclave, TPM 2.0, `FIDO2`/`WebAuthn`) are driven as subprocesses instead &mdash; see
-`contrib/signers/README.md` and `docs/specs/SPEC-EXTERNAL-SIGNER.md`.
+`docs/specs/SPEC-EXTERNAL-SIGNER.md`.

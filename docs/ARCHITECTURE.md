@@ -28,18 +28,11 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 | `kit-sync`                    | `rust/crates/kit-sync/`              | Native clone/fetch/pull for `.kit` repositories as a library: typed reports, no printing, no ambient config; `kit clone`/`fetch`/`pull` are thin wrappers over it |
 | `kit-storage`                     | `rust/crates/kit-storage/`               | The `kit` binary; thin glue over the library crates                   |
 | `kit-fuzz`                    | `rust/fuzz/`                          | cargo-fuzz harnesses (`docs/FUZZ.md`)                                  |
-| `kit-sign-file` (contrib)     | `contrib/signers/kit-sign-file/`     | Reference external signer; protocol conformance baseline               |
-| `kit-sign-se` (contrib)       | `contrib/signers/kit-sign-se/`       | Apple Secure Enclave signer (Swift / CryptoKit)                        |
-| `kit-sign-tpm` (contrib)      | `contrib/signers/kit-sign-tpm/`      | TPM 2.0 P-256 signer (Linux/Windows)                                   |
-| `kit-sign-ctap` (contrib)     | `contrib/signers/kit-sign-ctap/`     | FIDO2/WebAuthn roaming-authenticator signer                            |
+| `kit-sign-file`               | `rust/crates/kit-sign-file/`         | Reference external signer; protocol conformance baseline               |
 
-The `contrib/signers/*` crates form a separate sibling Cargo
-workspace under `contrib/signers/` &mdash; they are **not** members of the
-`rust/` workspace.
-They share package metadata, lint config, and dependency pins by
-inheriting from `contrib/signers/Cargo.toml`, and they are not part of
-the `kit` binary's link graph. They communicate over the protocol
-defined in `specs/SPEC-EXTERNAL-SIGNER.md`.
+The `kit-sign-file` crate is the only external signer that ships. It
+communicates with `kit` over the protocol defined in
+`specs/SPEC-EXTERNAL-SIGNER.md`.
 
 ### 1.1 Optional kit-core features
 
@@ -210,8 +203,7 @@ kit attest ──► spawn binary at attest.external_signer_path
 ```
 
 Argv comes from `attest.external_signer_args` (user-scoped config &mdash;
-see `THREAT-MODEL.md` §4) or per-invocation flags. Every reference
-signer in `contrib/signers/` is a conformance test for this
+see `THREAT-MODEL.md` §4) or per-invocation flags. The `kit-sign-file` signer is the conformance baseline for this
 contract.
 
 ---
@@ -234,7 +226,7 @@ trait, then read `docs/specs/SPEC-TRANSPORT.md` for the verb set. Use
 For an in-tree algorithm, edit `kit-attest`'s `Algorithm` enum and
 the verifier dispatch. For an out-of-tree signer (HSM, KMS, hardware
 token), implement `docs/specs/SPEC-EXTERNAL-SIGNER.md` and ship a binary &mdash;
-see `contrib/signers/kit-sign-file/` for a minimal example.
+see `rust/crates/kit-sign-file/` for a minimal example.
 
 ### "I'm changing the wire format."
 Bump the spec version in the relevant `docs/specs/SPEC-*.md`, write a

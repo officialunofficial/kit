@@ -362,7 +362,7 @@ pub fn verify_webauthn_wrapping(
 }
 
 /// Convenience: build a `clientDataJSON` body for a given PAE + origin.
-/// This is shipped as part of the public API because `contrib/signers`
+/// This is part of the public API because external signers
 /// want to build identical bodies on the signer side — and mirroring
 /// the construction keeps the verifier and signer on the same page
 /// byte-for-byte (the JSON key ordering matters: `type`, `challenge`,

@@ -20,7 +20,7 @@ spec in the same PR.
 - `signer_repo_key` &mdash; Ed25519 over the repo key (the default signer).
 - `signer_external` &mdash; drives an external signer subprocess over the
   length-prefixed `buffa`-generated `SignerFrame` wire (see
-  `contrib/signers/README.md` and `docs/specs/SPEC-EXTERNAL-SIGNER.md`).
+  `docs/specs/SPEC-EXTERNAL-SIGNER.md`).
 
 Attestations are stored under `.kit/attestations/<commit-hash>/<att-id>.dsse`
 and are a first-class object type, not a side-channel &mdash; see the top-level

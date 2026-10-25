@@ -1787,7 +1787,7 @@ mod tests {
 
         #[test]
         fn opaque_handle_capabilities_select_the_sign_request_key_form() {
-            // Match the bundled CTAP signer's P-256 / opaque-handle Hello.
+            // Match a hardware signer's P-256 / opaque-handle Hello.
             // Its credential is configured on argv, so key_ref stays empty.
             let dir = tempfile::tempdir().unwrap();
             let mut hello = compatible_hello();

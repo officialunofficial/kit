@@ -322,7 +322,7 @@ fn map_rpc_algorithm(
         Some(RpcAlgorithm::Secp256k1) => Ok(Algorithm::Secp256k1),
         Some(RpcAlgorithm::P256) => Ok(Algorithm::P256),
         Some(RpcAlgorithm::Ed25519Webauthn) => {
-            Err("ed25519-webauthn requires the CTAP signer, not the file signer")
+            Err("ed25519-webauthn requires a WebAuthn signer, not the file signer")
         }
         _ => Err("unspecified or unknown algorithm"),
     }

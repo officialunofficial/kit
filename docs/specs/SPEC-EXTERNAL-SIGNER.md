@@ -40,9 +40,9 @@ In scope:
 Out of scope:
 
 - Key generation or import. The signer is assumed to already possess
-  or have access to the secret. Reference signers that *do* offer
-  enrollment (`kit-sign-ctap enroll`, `kit-sign-tpm keygen`) expose
-  it as a separate CLI subcommand outside the protocol.
+  or have access to the secret. A signer that offers
+  enrollment exposes it as a separate CLI subcommand outside the
+  protocol.
 - The DSSE/in-toto envelope structure ([SPEC-ATTESTATIONS](SPEC-ATTESTATIONS.md)).
 - Trust-roots configuration ([SPEC-ATTESTATIONS](SPEC-ATTESTATIONS.md) §6.5).
 
@@ -181,9 +181,9 @@ Oversized requests MUST be rejected before any request bytes are written.
 |---|---|
 | `algorithm` | The algorithm to sign under. MUST be one the signer advertised. |
 | `key_form` | The form the key is provided in. |
-| `key_ref` | Identifies which key. Empty for raw-bytes signers (key path is configured at signer startup). For opaque-handle signers (CTAP credentialId, TPM 4-byte BE persistent handle): the wire value is preferred, but signers MAY fall back to a per-process default supplied on argv (`kit-sign-tpm --handle 0x81010001`, `kit-sign-ctap --credential-id <b64url>`) when `key_ref` is empty. An ill-formed `key_ref` (wrong length, undecodable) MUST be rejected with `ERROR_CODE_INVALID_REQUEST` rather than silently falling through to the argv default. |
+| `key_ref` | Identifies which key. Empty for raw-bytes signers (key path is configured at signer startup). For opaque-handle signers (CTAP credentialId, TPM 4-byte BE persistent handle): the wire value is preferred, but signers MAY fall back to a per-process default supplied on argv (for example `--handle` or `--credential-id`) when `key_ref` is empty. An ill-formed `key_ref` (wrong length, undecodable) MUST be rejected with `ERROR_CODE_INVALID_REQUEST` rather than silently falling through to the argv default. |
 | `payload` | Raw bytes to sign. For DSSE, this is the PAE per [SPEC-ATTESTATIONS](SPEC-ATTESTATIONS.md) §2.1. |
-| `context` | Optional context. CTAP signers ignore the wire field today and build the WebAuthn `clientDataJSON` themselves from the payload and configured origin; this field is reserved for a future signer that needs caller-supplied context. |
+| `context` | Optional context. WebAuthn signers ignore the wire field today and build the WebAuthn `clientDataJSON` themselves from the payload and configured origin; this field is reserved for a future signer that needs caller-supplied context. |
 
 | `SignResponse` field | Meaning |
 |---|---|
@@ -192,7 +192,7 @@ Oversized requests MUST be rejected before any request bytes are written.
 | `algorithm` | Echoes the algorithm used. |
 | `key_id` | DSSE `signatures[].keyid`. Conventions used by the reference signers: `blake3:<hex>` for Ed25519 (BLAKE3-256 over the raw 32-byte public key), `secp256k1:<hex(compressed-pubkey)>`, `p256:<hex(compressed-pubkey)>`, `webauthn:<base64url-cred-id>`. Other schemes are tolerated; kit treats `key_id` as opaque. |
 | `certificate_chain[]` | DER-encoded X.509 chain when applicable. Empty for raw-key signers and for both reference hardware signers today (no signer ships an attestation chain in v1). |
-| `webauthn` | `{ authenticator_data, client_data_json }` for CTAP signers &mdash; required when `algorithm = ALGORITHM_ED25519_WEBAUTHN` or when the signer is FIDO2-flavored P-256, so the verifier can reconstruct `authenticator_data ‖ SHA-256(client_data_json)` and check `signature` against that. Unset for non-WebAuthn signers. |
+| `webauthn` | `{ authenticator_data, client_data_json }` for WebAuthn signers &mdash; required when `algorithm = ALGORITHM_ED25519_WEBAUTHN` or when the signer is FIDO2-flavored P-256, so the verifier can reconstruct `authenticator_data ‖ SHA-256(client_data_json)` and check `signature` against that. Unset for non-WebAuthn signers. |
 
 Callers MUST treat `SignResponse` as untrusted. For non-WebAuthn
 responses, kit rejects the response unless `algorithm` echoes the
@@ -268,14 +268,12 @@ Error code semantics: see [SPEC-RPC §3.3](SPEC-RPC.md#33-errorcode).
 
 ---
 
-## 8. Reference signers
+## 8. Reference signer
 
-Four reference signers ship in **contrib/signers/** and exercise the
-full v1 wire surface: three in Rust (`kit-sign-file`, `kit-sign-tpm`,
-`kit-sign-ctap`) and one in Swift (`kit-sign-se`, using
-`swift-protobuf`). All loop on stdin, processing successive
-`Hello` / `SignRequest` pairs until the caller closes the stream; a
-clean EOF on the length prefix is treated as a graceful shutdown.
+One reference signer ships: `kit-sign-file`, in `rust/crates/kit-sign-file/`.
+It exercises the full v1 wire surface. It loops on stdin, processing
+successive `Hello` / `SignRequest` pairs until the caller closes the
+stream. A clean EOF on the length prefix is a graceful shutdown.
 
 ### 8.1 kit-sign-file
 
@@ -297,64 +295,26 @@ requires_user_presence = false
 Reference/development implementation. Not production-grade &mdash; the
 secret is unencrypted on disk.
 
-### 8.2 kit-sign-ctap
+### 8.2 Signers for other key stores
 
-FIDO2/WebAuthn signer. Drives a plugged-in roaming authenticator
-(YubiKey, Nitrokey, SoloKey, …) over CTAP-HID.
+A signer for a hardware token or a key service implements this spec and
+ships as its own binary. Two rules apply to such a signer.
 
-```
-$ kit-sign-ctap enroll --rp-id kit.local --user-name alice
-$ kit-sign-ctap sign  --credential-id <base64url>
-```
-
-```
-algorithms = [P256]
-key_forms  = [OPAQUE_HANDLE]            # the credential_id
-supports_pin = true
-supports_certificate_chain = false
-requires_user_presence = true
-```
-
-The reference CTAP signer currently supports P-256 credentials only.
-`SignResponse.public_key` is required, and `SignResponse.webauthn` is
-populated with `authenticator_data` + `client_data_json` so the verifier
-reconstructs the signed input. A CTAP signer that has a credential ID but
-no local public-key metadata MUST return an error rather than an empty
+A signer that returns a WebAuthn assertion MUST populate
+`SignResponse.public_key` and `SignResponse.webauthn`
+(`authenticator_data` + `client_data_json`) so the verifier
+reconstructs the signed input. A signer that has a credential ID but no
+local public-key metadata MUST return an error rather than an empty
 `public_key`.
 
 A PIN never appears on argv. Any other local user on the host can read
 argv via `ps` / `/proc/<pid>/cmdline` &mdash; the same exposure class
 `docs/THREAT-MODEL.md` §3.2 defends key-file confidentiality against.
-When the authenticator reports it needs a PIN, the reference signer
+When the authenticator reports it needs a PIN, the signer
 requests one in-band over the `PinPrompt`/`PinResponse` round trip (§4).
 On the host side, `kit-attest`'s `ExternalSigner` answers a `PinPrompt` via its
 configured `PinProvider`, which defaults to an interactive terminal
 prompt and never sources a PIN from argv or an environment variable.
-The reference CTAP signer accepts `KEY_FORM_RAW_BYTES` only when `key_ref` is
-empty and the credential handle is supplied by argv `--credential-id`.
-Explicit credential handles should use `KEY_FORM_OPAQUE_HANDLE`.
-
-### 8.3 kit-sign-tpm
-
-TPM 2.0 P-256 signer. Linux-native via `tss-esapi` (gated behind the
-`tpm2` Cargo feature).
-
-```
-$ kit-sign-tpm keygen --handle 0x81010001
-$ kit-sign-tpm sign   --handle 0x81010001
-```
-
-```
-algorithms = [P256]
-key_forms  = [OPAQUE_HANDLE]            # 4-byte BE persistent handle
-supports_pin = false
-supports_certificate_chain = false
-requires_user_presence = false
-```
-
-`SignRequest.key_ref` is the persistent handle as a 4-byte big-endian
-u32; bare-argv `--handle` populates a per-process default that the
-signer uses when `key_ref` is empty.
 
 ---
 
@@ -421,7 +381,7 @@ compromised signer can still do; nothing below claims otherwise.
 | A WebAuthn assertion is bound to the kit payload | `clientDataJSON.challenge == base64url-nopad(PAE)`; signature checked over `authenticatorData ‖ SHA-256(clientDataJSON)` (§6.1) |
 | Unsupported requests fail before signing | requested algorithm + key form checked against advertised `Capabilities` (§5) |
 | An ill-formed `key_ref` never silently falls through to the argv default | `ERROR_CODE_INVALID_REQUEST` required (§6) |
-| Missing credential metadata fails closed | CTAP signers MUST error rather than return an empty `public_key` (§6, §8.2) |
+| Missing credential metadata fails closed | WebAuthn signers MUST error rather than return an empty `public_key` (§6, §8.2) |
 | A setup failure cannot desync the framing | non-zero exit with no stdout frame (§7) |
 | Oversized frames cannot exhaust the reader | `MAX_FRAME_BYTES = 1 MiB`, connection-fatal (§3) |
 | No signing request precedes compatible negotiation | protocol, capabilities and payload capacity checked before `SignRequest`; a terminal handshake Error aborts without signing (§4–§5) |

@@ -495,7 +495,7 @@ Example:
 
 ```
 kit attest --additional-signer \
-  "algorithm=p256,signer=external,path=/usr/local/bin/kit-sign-se,args=sign|--tag|demo"
+  "algorithm=p256,signer=external,path=/usr/local/bin/kit-sign-file,args=--key|/path/to/key"
 ```
 
 `|` is used inside `args=` because `,` is the outer separator.

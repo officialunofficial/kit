@@ -10,8 +10,8 @@ length-prefixed framing.
 address space:
 
 - **External signers** (`signer.proto`) &mdash; `kit-storage` ↔ a subprocess signer
-  (file, `FIDO2`, TPM, future hardware backends). See
-  `docs/specs/SPEC-EXTERNAL-SIGNER.md` and `contrib/signers/README.md`.
+  (the `kit-sign-file` signer and any signer that follows the spec). See
+  `docs/specs/SPEC-EXTERNAL-SIGNER.md`.
 - **SSH transport** (`ssh.proto`) &mdash; `kit-storage` ↔ a remote `kit serve` over
   an `ssh(1)` child process. See `docs/specs/SPEC-TRANSPORT.md`.
 - **Signature verification** (`verify.proto`) &mdash; the `VerifyRequest`/

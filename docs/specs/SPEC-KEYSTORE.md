@@ -824,9 +824,9 @@ Requirements:
 - Support may be split across OpenPGP, PIV, and FIDO2/CTAP implementations.
 - Backend must advertise the exact applet and algorithm support it can use.
 - FIDO2/WebAuthn signing must preserve the existing WebAuthn wrapping
-  semantics already used by `kit-attest` and contrib CTAP signer. Fails
+  semantics already used by `kit-attest`. Fails
   closed through the keystore API for FIDO2/CTAP labels and routes users to
-  the external CTAP signer unless a future keystore signer API can return the
+  an external WebAuthn signer unless a future keystore signer API can return the
   full WebAuthn assertion metadata.
 - User presence/PIN prompts must be represented through typed errors or an
   explicit prompt flow. Do not block indefinitely without timeout handling.

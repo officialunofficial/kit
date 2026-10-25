@@ -238,9 +238,8 @@ check automatically without calling `bls_threshold_verify` directly.
 
 ## 5. Ceremony walkthrough
 
-The CLI (`contrib/release-party/`) does not exist yet; this section
-describes the flow it will implement, giving downstream work a
-concrete shape to target.
+No CLI implements this ceremony. This section describes the flow
+that an implementation follows.
 
 ### 5.1 Genesis (one-time)
 

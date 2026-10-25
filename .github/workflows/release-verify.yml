@@ -147,7 +147,7 @@ jobs:
           brew tap officialunofficial/tap https://github.com/officialunofficial/homebrew-tap
           brew install officialunofficial/tap/kit
 
-      # Homebrew's own `test do` block (contrib/homebrew/kit.rb) is the
+      # Homebrew's own `test do` block is the
       # formula-idiomatic smoke test; run it in addition to the shared
       # basic-flow check so a formula-level regression surfaces even if
       # someone edits the formula without touching this workflow.

@@ -232,7 +232,7 @@ pub fn run(args: &[String]) -> u8 {
 
     // `--external-signer-arg` REPLACES `attest.external_signer_args`
     // when present. Per-invocation override, intentionally not additive
-    // so a user can cleanly reproduce `kit-sign-se sign --tag demo`
+    // so a user can cleanly reproduce one signer invocation
     // without having to remember (or clobber) whatever's in config.
     if let Some(argv) = parsed.external_signer_args() {
         cfg.attest.external_signer_args = argv;

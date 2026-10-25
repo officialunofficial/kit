@@ -110,7 +110,7 @@ the next available number.
 | `ALGORITHM_ED25519` | 1 | RFC 8032 raw signing. Default for commit/ref. |
 | `ALGORITHM_SECP256K1` | 2 | ECDSA over SHA-256. DSSE-compatible. |
 | `ALGORITHM_P256` | 3 | ECDSA P-256/secp256r1/prime256v1 over SHA-256. |
-| `ALGORITHM_ED25519_WEBAUTHN` | 4 | Ed25519 wrapped in a WebAuthn assertion (CTAP signers). |
+| `ALGORITHM_ED25519_WEBAUTHN` | 4 | Ed25519 wrapped in a WebAuthn assertion (WebAuthn signers). |
 | `ALGORITHM_BLS12381_THRESHOLD` | 5 | BLS12-381 threshold signature (variant `MinSig`); see `docs/specs/SPEC-RELEASE-THRESHOLD.md`. |
 
 ### 3.2 `KeyForm`
@@ -120,7 +120,7 @@ the next available number.
 | `KEY_FORM_UNSPECIFIED` | 0 | &mdash; |
 | `KEY_FORM_RAW_BYTES` | 1 | `kit-sign-file` (32-byte seed/scalar on disk). |
 | `KEY_FORM_PKCS8_DER` | 2 | Reserved; no signer ships with v0.1.0. |
-| `KEY_FORM_OPAQUE_HANDLE` | 3 | `kit-sign-tpm`, `kit-sign-ctap`. The bytes in `key_ref` are interpreted by the signer (TPM persistent handle, CTAP credentialId, …). |
+| `KEY_FORM_OPAQUE_HANDLE` | 3 | No signer ships. The signer interprets the bytes in `key_ref` (for example a TPM persistent handle or a CTAP credentialId). |
 
 ### 3.3 `ErrorCode`
 
@@ -162,22 +162,10 @@ A signer or server is kit-rpc-compliant if and only if:
 
 Reference implementations (all in this repository):
 
-- [`contrib/signers/kit-sign-file/`](../../contrib/signers/kit-sign-file/) &mdash;
+- [`rust/crates/kit-sign-file/`](../../rust/crates/kit-sign-file/) &mdash;
   `KEY_FORM_RAW_BYTES`, Ed25519/secp256k1/P-256.
-- [`contrib/signers/kit-sign-ctap/`](../../contrib/signers/kit-sign-ctap/) &mdash;
-  FIDO2/WebAuthn signer, P-256/Ed25519-WebAuthn.
-- [`contrib/signers/kit-sign-tpm/`](../../contrib/signers/kit-sign-tpm/) &mdash;
-  TPM 2.0 P-256 signer.
 - [`rust/crates/kit-storage/src/commands/serve/mod.rs`](../../rust/crates/kit-storage/src/commands/serve/mod.rs) &mdash;
   `kit serve` SSH server (consumes `ssh.proto`).
-
-The Swift `contrib/signers/kit-sign-se/` (Apple Secure Enclave)
-binary is a conforming v1 reference signer: it speaks the
-length-prefixed protobuf wire (its `Package.swift` depends on
-swift-protobuf, with generated `common.pb.swift`/`signer.pb.swift`),
-and is listed alongside the other reference signers in
-[`SPEC-EXTERNAL-SIGNER`](SPEC-EXTERNAL-SIGNER.md) §8. It wires through
-the `external` signer selector like any other kit-rpc signer.
 
 ---
 
