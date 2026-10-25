@@ -92,8 +92,8 @@ unwrap_used = "deny"
 dbg_macro = "deny"
 # Glob imports hide where a name comes from. `todo!()` is an unfinished path
 # that panics at run time.
-wildcard_imports = "warn"
-todo = "warn"
+wildcard_imports = "deny"
+todo = "deny"
 # Every `unsafe` block needs a `// SAFETY:` comment that states the invariant
 # and why it holds (AGENTS.md). scripts/check-unsafe-safety.sh repeats the
 # check on the source text, so code under other targets and features is covered.
