@@ -150,4 +150,53 @@ check_downgrade rc2-over-rc10 v1.0.0-rc.10 v1.0.0-rc.2 yes
 check_downgrade rc10-over-rc2 v1.0.0-rc.2 v1.0.0-rc.10 no
 check_downgrade minor-ten-over-nine v0.9.0 v0.10.0 no
 
+# The install directory check fails closed. A stat that fails must stop
+# the install and leave no binary behind.
+mkdir -p "$work/badstat"
+printf '#!/bin/sh\nexit 1\n' >"$work/badstat/stat"
+chmod 0755 "$work/badstat/stat"
+prefix="$work/prefix-stat-fails"
+mkdir -p "$prefix"
+chmod 0755 "$prefix"
+status=0
+PATH="$work/badstat:$work/bin:$PATH" FAKE_RELEASES="$work/releases" \
+    KIT_INSTALL_DIR="$prefix" KIT_STATE_DIR="$work/state-stat-fails" \
+    sh "$repo_root/install.sh" --version v0.5.1 >"$work/stat-fails.out" 2>&1 || status=$?
+if [ "$status" -ne 0 ] && [ ! -e "$prefix/kit" ] && grep -q 'mode' "$work/stat-fails.out"; then
+    echo "ok: stat-fails"
+else
+    echo "FAIL: stat-fails (status $status)" >&2
+    cat "$work/stat-fails.out" >&2
+    fails=1
+fi
+
+# A group-writable install directory is refused.
+prefix="$work/prefix-group-writable"
+mkdir -p "$prefix"
+chmod 0775 "$prefix"
+status=0
+PATH="$work/bin:$PATH" FAKE_RELEASES="$work/releases" \
+    KIT_INSTALL_DIR="$prefix" KIT_STATE_DIR="$work/state-group-writable" \
+    sh "$repo_root/install.sh" --version v0.5.1 >"$work/group-writable.out" 2>&1 || status=$?
+if [ "$status" -ne 0 ] && [ ! -e "$prefix/kit" ]; then
+    echo "ok: group-writable"
+else
+    echo "FAIL: group-writable (status $status)" >&2
+    cat "$work/group-writable.out" >&2
+    fails=1
+fi
+
+# The member that holds the binary must be a regular file. A symlink
+# there must fail the install.
+make_release v0.6.0 v0.6.0
+(
+    cd "$work/stage/v0.6.0/kit-0.6.0-${target}"
+    rm kit
+    ln -s /bin/sh kit
+)
+tar -czf "$work/releases/v0.6.0/kit-0.6.0-${target}.tar.gz" \
+    -C "$work/stage/v0.6.0" "kit-0.6.0-${target}"
+(cd "$work/releases/v0.6.0" && shasum -a 256 "kit-0.6.0-${target}.tar.gz" >"kit-0.6.0-${target}.tar.gz.sha256")
+run_install symlink-member v0.6.0 fail
+
 exit "$fails"

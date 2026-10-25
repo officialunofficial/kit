@@ -364,11 +364,24 @@ fi
 # ---- extract + install (atomic) ----
 
 log "extracting"
-tar -xzf "$archive"
-
 stage_dir="kit-${bare}-${target}"
-bin_src="$tmp/$stage_dir/kit"
-[ -x "$bin_src" ] || die "extracted archive missing expected binary at $stage_dir/kit"
+member="$stage_dir/kit"
+# Extract the one expected member and nothing else, as self-update does.
+# The listing must show exactly one entry, and that entry must be a
+# regular file. A link, a device or a directory is refused.
+listing="$(tar -tvzf "$archive" "$member")" \
+  || die "could not list archive member $member"
+case "$listing" in
+  -*) ;;
+  *) die "archive member $member is not a regular file" ;;
+esac
+[ "$(printf '%s\n' "$listing" | wc -l | tr -d ' ')" = 1 ] \
+  || die "archive holds more than one $member member"
+tar -xzf "$archive" "$member"
+
+bin_src="$tmp/$member"
+[ -f "$bin_src" ] && [ ! -L "$bin_src" ] && [ -x "$bin_src" ] \
+  || die "extracted archive missing expected binary at $member"
 
 mkdir -p "$install_dir"
 install_path="$install_dir/kit"
@@ -379,30 +392,33 @@ install_path="$install_dir/kit"
 # race a malicious binary into $install_path between our final mv(1)
 # and the user's first invocation. Refuse rather than win the race
 # unintentionally. Mode is read with BSD stat on Darwin and GNU stat
-# on Linux — the rest of the script already keys on $uname_os.
+# on Linux — the rest of the script already keys on $uname_os. The
+# check fails closed: an unsupported OS, a failed stat or a mode that
+# is not octal stops the install.
 case "$uname_os" in
-  Darwin) dir_mode="$(stat -f '%Lp' "$install_dir" 2>/dev/null || echo '')" ;;
-  Linux)  dir_mode="$(stat -c '%a' "$install_dir" 2>/dev/null || echo '')" ;;
-  *)      dir_mode="" ;;
+  Darwin) dir_mode="$(stat -f '%Lp' "$install_dir")" \
+            || die "could not read the mode of $install_dir" ;;
+  Linux)  dir_mode="$(stat -c '%a' "$install_dir")" \
+            || die "could not read the mode of $install_dir" ;;
+  *)      die "cannot check the mode of $install_dir on $uname_os" ;;
 esac
-
-if [ -n "$dir_mode" ]; then
-  # Normalise to three digits so the substring tests below align.
-  case "$dir_mode" in
-    [0-9])    dir_mode="00${dir_mode}" ;;
-    [0-9][0-9]) dir_mode="0${dir_mode}" ;;
-  esac
-  # Group bit = middle digit, other bit = last digit. Either even-2
-  # (write bit set) is the failure case.
-  group_digit="$(printf '%s' "$dir_mode" | cut -c2)"
-  other_digit="$(printf '%s' "$dir_mode" | cut -c3)"
-  case "$group_digit" in
-    [2367]) die "install dir $install_dir is group-writable (mode $dir_mode); refusing to install — a malicious local user could race a replacement binary into place between mv and first execution. Tighten permissions: chmod g-w $install_dir" ;;
-  esac
-  case "$other_digit" in
-    [2367]) die "install dir $install_dir is world-writable (mode $dir_mode); refusing to install — anyone on this host could race a replacement binary into place. Tighten permissions: chmod o-w $install_dir" ;;
-  esac
-fi
+case "$dir_mode" in
+  '' | *[!0-7]*) die "unexpected mode '$dir_mode' for $install_dir" ;;
+esac
+# Keep the last three digits (owner, group, other). A leading special
+# digit, such as the sticky bit, is dropped. Pad short modes.
+dir_mode="000${dir_mode}"
+dir_mode="${dir_mode#"${dir_mode%???}"}"
+# Group digit = middle, other digit = last. A write bit set is the
+# failure case.
+group_digit="$(printf '%s' "$dir_mode" | cut -c2)"
+other_digit="$(printf '%s' "$dir_mode" | cut -c3)"
+case "$group_digit" in
+  [2367]) die "install dir $install_dir is group-writable (mode $dir_mode); refusing to install — a malicious local user could race a replacement binary into place between mv and first execution. Tighten permissions: chmod g-w $install_dir" ;;
+esac
+case "$other_digit" in
+  [2367]) die "install dir $install_dir is world-writable (mode $dir_mode); refusing to install — anyone on this host could race a replacement binary into place. Tighten permissions: chmod o-w $install_dir" ;;
+esac
 
 # Atomic install: stage the new binary in the SAME directory as the
 # final install path (so rename(2) stays within one filesystem),
