@@ -19,6 +19,6 @@ both@@plan label@@\b[Pp]hase[ -]?-?(?:[0-9]+|one|two|three|four|five|[A-D])\b|\b
 both@@plan board word@@\b(?i:milestones?|trackers?)\b
 both@@review finding label@@\b[Ff]inding [0-9]|\bReview P[0-9]|\b[Rr]eviewer finding
 both@@tool or model name@@\b(?:Claude|Anthropic|Codex|ChatGPT|OpenAI|Copilot|Gemini|Codecov|LLMs?|GPT)\b|\bclaude\b
-both@@old product name@@(?i)mkit
+both@@old product name@@(?i)m[k]it
 commit@@process word in a commit message@@\b(?i:phases?|tickets?|work packages?)\b|\b(?i:stage|part|step)s? (?:[0-9]+|one|two|three)\b|\b(?i:part of (?:the |a )?(?:plan|series|rollout))\b
 commit@@trailer that names a tool or adds credit@@^(?i:co-authored-by|generated with|signed-off-by|assisted-by)\b
