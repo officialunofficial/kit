@@ -403,6 +403,14 @@ impl generated::TransportService for TestService {
                     ),
                 );
             }
+            if message == "repository membership not yet visible" {
+                return Err(ConnectError::unavailable(message).with_detail(
+                    connectrpc::ErrorDetail::from_message(
+                        "kit.transport.v1.MembershipNotVisible",
+                        &generated::MembershipNotVisible::default(),
+                    ),
+                ));
+            }
             return Err(ConnectError::new(code, message));
         }
         Ok(Response::new(generated::AdvanceRefsResponse {

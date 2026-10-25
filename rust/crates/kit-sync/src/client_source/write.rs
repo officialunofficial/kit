@@ -1149,7 +1149,7 @@ mod tests {
         Response::builder()
             .status(503)
             .body(
-                br#"{"code":"unavailable","message":"repository membership not yet visible"}"#
+                br#"{"code":"unavailable","message":"repository membership not yet visible","details":[{"type":"kit.transport.v1.MembershipNotVisible","value":""}]}"#
                     .to_vec(),
             )
             .unwrap()

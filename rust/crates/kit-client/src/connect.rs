@@ -27,9 +27,6 @@ pub(crate) const LIST_REFS_LIMIT: usize = 2 * 1024 * 1024;
 const CHALLENGE_TYPE: &str = "kit.transport.v1.AdmissionChallenge";
 const PENDING_TYPE: &str = "kit.transport.v1.PendingVerification";
 const MEMBERSHIP_TYPE: &str = "kit.transport.v1.MembershipNotVisible";
-/// Public message older servers send for a membership lag without the typed
-/// detail. Only the fallback in [`membership_lag`] reads it.
-const MEMBERSHIP_LAG: &str = "repository membership not yet visible";
 
 /// Injectable HTTP channel. Bound the response while receiving it, refuse
 /// redirects, and retain the exact request for any ambiguous retry. Transport
@@ -1556,17 +1553,16 @@ fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
 }
 
 /// Whether an `unavailable` answer is the membership-lag condition. The typed
-/// `MembershipNotVisible` detail decides; the exact public message is a
-/// fallback for servers that predate the detail.
+/// `MembershipNotVisible` detail decides.
 pub(crate) fn membership_lag(error: &RemoteError) -> bool {
     error.code == "unavailable"
-        && (error.details.iter().any(|detail| {
+        && error.details.iter().any(|detail| {
             detail
                 .type_url
                 .strip_prefix("type.googleapis.com/")
                 .unwrap_or(&detail.type_url)
                 == MEMBERSHIP_TYPE
-        }) || error.message == MEMBERSHIP_LAG)
+        })
 }
 
 pub(crate) fn pending_delay(error: &RemoteError) -> Option<Duration> {
