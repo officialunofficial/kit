@@ -185,7 +185,12 @@ case "$version" in
 esac
 
 # The tag names the signing identity below. Accept strict semver only, so the
-# tag holds no regex or path characters.
+# tag holds no regex or path characters. The character test runs on the whole
+# string first, because grep matches one line at a time and would accept a
+# tag with an embedded newline.
+case "$tag" in
+  *[!A-Za-z0-9.-]*) die "invalid release tag (expected vMAJOR.MINOR.PATCH)" ;;
+esac
 printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
   || die "invalid release tag '$tag' (expected vMAJOR.MINOR.PATCH)"
 

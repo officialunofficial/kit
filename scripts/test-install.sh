@@ -116,6 +116,17 @@ run_install later-tag v0.3.0 fail
 # A tag with regex or path characters never reaches cosign.
 run_install bad-tag 'v0.5.1/../v0.4.0' fail
 
+# A tag with an embedded newline never reaches cosign. A line-based
+# check would accept it, because its first line is a valid tag.
+run_install newline-tag "$(printf 'v0.5.1\nv0.4.0')" fail
+run_install newline-tag-leading "$(printf 'x\nv0.5.1')" fail
+for name in newline-tag newline-tag-leading; do
+    if ! grep -q 'invalid release tag' "$work/$name.out"; then
+        echo "FAIL: $name (the tag check did not reject the tag)" >&2
+        fails=1
+    fi
+done
+
 # Version order follows semver. A pre-release is below its release, so
 # installing the release over a recorded pre-release is no downgrade,
 # and installing a pre-release over a recorded release is one.
