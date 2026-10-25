@@ -4,6 +4,9 @@
 #
 #   python3 -m venv .venv && .venv/bin/pip install -r scripts/golden/requirements.txt
 #
+# The checks need no blake3 package. They use the pure-Python BLAKE3 in
+# blake3_subtree_ref.py.
+#
 # pycryptodome and ecdsa check the grant vectors. zstandard decodes the zstd
 # frames of the pack vectors on a Python older than 3.14, which has no zstd
 # module of its own.
