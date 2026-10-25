@@ -45,10 +45,10 @@ pub fn fuzz_decode_software_key_record(input: &[u8]) -> Result<()> {
     encrypted_record::EncryptedKeyRecord::decode(input).map(|_| ())
 }
 
-#[allow(dead_code)]
+#[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
 static KEYRING_DEFAULT_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[allow(dead_code)]
+#[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
 pub(crate) fn keyring_default_store_lock() -> std::sync::MutexGuard<'static, ()> {
     KEYRING_DEFAULT_STORE_LOCK
         .lock()

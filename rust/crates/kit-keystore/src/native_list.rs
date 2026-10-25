@@ -237,24 +237,8 @@ pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> 
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn run_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
-    run_native_backend_roundtrip_test_with_availability(store, false, |_| None);
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
 pub(crate) fn run_required_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
     run_native_backend_roundtrip_test_with_availability(store, true, |_| None);
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn run_required_native_backend_roundtrip_test_with_gate(
-    store: &dyn crate::Keystore,
-    gate: impl FnOnce(crate::BackendKind) -> Option<String>,
-) {
-    run_native_backend_roundtrip_test_with_availability(store, true, gate);
 }
 
 #[cfg(test)]

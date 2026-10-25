@@ -5,7 +5,6 @@
 //! objects this function produces. Do not change seeds, timestamps,
 //! tree-entry order, or file bytes.
 
-#![allow(dead_code)] // fields and helpers are used by some consumers only
 #![allow(clippy::unwrap_used)]
 
 use kit_core::hash::{Hash, ZERO};
@@ -15,6 +14,8 @@ use kit_core::sign::{KeyPair, sign_commit};
 use kit_core::store::ObjectStore;
 use kit_core::worktree::store_file_object;
 
+// Each test binary includes this module and uses a different subset.
+#[allow(dead_code)]
 pub(crate) struct Fixture {
     pub(crate) _dir: tempfile::TempDir,
     pub(crate) store: ObjectStore,
@@ -38,6 +39,8 @@ pub(crate) fn prng_bytes(seed: u64, len: usize) -> Vec<u8> {
     out
 }
 
+// Not every test binary that includes this module builds the fixture.
+#[allow(dead_code)]
 pub(crate) fn build_fixture() -> Fixture {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");

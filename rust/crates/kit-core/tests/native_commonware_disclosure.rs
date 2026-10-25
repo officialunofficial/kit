@@ -51,13 +51,22 @@ fn chunked_meta_leaf(total_size: u64, chunk_size: u32) -> Hash {
     domain_digest(CBLOB_META_DOMAIN, &body)
 }
 
-#[derive(Debug)]
-#[allow(dead_code)]
 enum NativeFail {
     Version(u8),
     Wrap,
     Upstream,
     Other(&'static str),
+}
+
+impl std::fmt::Display for NativeFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Version(v) => write!(f, "unsupported version {v}"),
+            Self::Wrap => f.write_str("wrapped digest mismatch"),
+            Self::Upstream => f.write_str("upstream proof rejected"),
+            Self::Other(what) => f.write_str(what),
+        }
+    }
 }
 
 fn wrap_ok(domain: &[u8], inner_root: &Hash, expected_id: &Hash) -> bool {
@@ -207,7 +216,7 @@ fn accept_vectors_verify_natively_with_commonware() {
         }
         let bin = fs::read(dir.join(format!("{name}.bin"))).unwrap();
         native_check(&bin)
-            .unwrap_or_else(|e| panic!("{name}: native commonware check failed: {e:?}"));
+            .unwrap_or_else(|e| panic!("{name}: native commonware check failed: {e}"));
         n_accept += 1;
     }
     assert!(
@@ -237,6 +246,6 @@ fn new_negatives_fail_at_wrap_or_upstream() {
                 | ("upstream", NativeFail::Upstream)
                 | ("version", NativeFail::Version(1))
         );
-        assert!(ok, "{name}: expected {want}, got {err:?}");
+        assert!(ok, "{name}: expected {want}, got {err}");
     }
 }

@@ -25,7 +25,6 @@ pub(super) use linux_secret_service::{
 
 /// Random opaque handle used by the credential-store protectors as the
 /// account/credential name under which the wrapped DEK is stored.
-#[allow(dead_code)]
 pub(super) fn random_handle() -> Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| Error::Internal("rng failed".into()))?;
