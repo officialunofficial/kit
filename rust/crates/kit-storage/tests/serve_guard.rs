@@ -82,15 +82,31 @@ fn serve_holds_shared_lock_while_alive() {
 
     let mut child = spawn_serve_blocked_in_handshake(td.path());
 
-    assert!(
-        wait_until_serve_lock_busy(&kit_dir, Duration::from_secs(5)),
-        "serve.lock must become busy while `kit serve` is alive"
-    );
-    // A blocking `acquire` (exclusive) must also observe the busy lock,
-    // not merely the non-blocking probe.
-    let err = kit_core::repo_lock::acquire(&kit_dir, "serve.lock", Duration::from_millis(200))
-        .unwrap_err();
-    assert!(matches!(err, kit_core::repo_lock::LockError::Busy(_)));
+    // The server holds the lock exclusively for a short sweep, then
+    // releases it and takes it shared. A probe can see the exclusive
+    // hold, and an acquire can then slip into the gap before the shared
+    // hold starts. Such an acquire succeeds. Release it and look again.
+    // Once the server holds the lock shared, a blocking `acquire`
+    // (exclusive) must observe the busy lock, not merely the
+    // non-blocking probe.
+    let start = Instant::now();
+    loop {
+        assert!(
+            wait_until_serve_lock_busy(&kit_dir, Duration::from_secs(5)),
+            "serve.lock must become busy while `kit serve` is alive"
+        );
+        match kit_core::repo_lock::acquire(&kit_dir, "serve.lock", Duration::from_millis(200)) {
+            Err(e) => {
+                assert!(matches!(e, kit_core::repo_lock::LockError::Busy(_)));
+                break;
+            }
+            Ok(lock) => drop(lock),
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "serve.lock must stay busy while `kit serve` is alive"
+        );
+    }
 
     // Let the child exit gracefully (EOF on stdin fails the handshake).
     drop(child.stdin.take());
