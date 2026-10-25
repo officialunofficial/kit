@@ -210,4 +210,36 @@ tar -czf "$work/releases/v0.6.0/kit-0.6.0-${target}.tar.gz" \
 (cd "$work/releases/v0.6.0" && shasum -a 256 "kit-0.6.0-${target}.tar.gz" >"kit-0.6.0-${target}.tar.gz.sha256")
 run_install symlink-member v0.6.0 fail
 
+# An archive with too many entries is refused.
+make_release v0.7.0 v0.7.0
+(
+    cd "$work/stage/v0.7.0/kit-0.7.0-${target}"
+    for i in $(seq 1 100); do : >"extra-$i"; done
+)
+tar -czf "$work/releases/v0.7.0/kit-0.7.0-${target}.tar.gz" \
+    -C "$work/stage/v0.7.0" "kit-0.7.0-${target}"
+(cd "$work/releases/v0.7.0" && shasum -a 256 "kit-0.7.0-${target}.tar.gz" >"kit-0.7.0-${target}.tar.gz.sha256")
+run_install many-entries v0.7.0 fail
+grep -q 'more than 64 entries' "$work/many-entries.out" || {
+    echo "FAIL: many-entries (the entry cap did not reject the archive)" >&2
+    fails=1
+}
+
+# A tar bomb is refused. The stage holds a file of zero bytes that expands
+# past the decompressed cap but compresses to a few hundred kilobytes.
+make_release v0.8.0 v0.8.0
+(
+    cd "$work/stage/v0.8.0/kit-0.8.0-${target}"
+    dd if=/dev/zero of=bomb bs=1048576 count=600 2>/dev/null
+)
+tar -czf "$work/releases/v0.8.0/kit-0.8.0-${target}.tar.gz" \
+    -C "$work/stage/v0.8.0" "kit-0.8.0-${target}"
+rm "$work/stage/v0.8.0/kit-0.8.0-${target}/bomb"
+(cd "$work/releases/v0.8.0" && shasum -a 256 "kit-0.8.0-${target}.tar.gz" >"kit-0.8.0-${target}.tar.gz.sha256")
+run_install tar-bomb v0.8.0 fail
+grep -q 'expands to more than' "$work/tar-bomb.out" || {
+    echo "FAIL: tar-bomb (the size cap did not reject the archive)" >&2
+    fails=1
+}
+
 exit "$fails"

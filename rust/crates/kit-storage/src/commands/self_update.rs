@@ -77,6 +77,12 @@ const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 /// Cap on the extracted binary (the archive is ~4 MB compressed today;
 /// 512 MB leaves room without letting a gzip bomb fill the disk).
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
+/// Cap on the decompressed archive stream: the binary plus headers and the
+/// small files that ship beside it. Skipped entries count against it.
+const MAX_UNPACKED_BYTES: u64 = MAX_BINARY_BYTES + 16 * 1024 * 1024;
+/// Cap on the number of archive entries. A release archive holds about
+/// twenty. install.sh uses the same two caps.
+const MAX_ARCHIVE_ENTRIES: usize = 64;
 
 /// The signer that `cosign verify-blob` accepts is the release workflow
 /// of this repository at the exact tag being installed. A signature for
@@ -859,13 +865,29 @@ fn verify_sha256_sidecar(archive: &[u8], sidecar: &[u8], archive_name: &str) -> 
 /// Pull `<stage_dir>/kit` out of the tar.gz. Only that one entry is
 /// ever extracted — no full unpack, so hostile archive members
 /// (traversal paths, symlinks, device nodes) are never materialized.
+/// The decompressed stream and the entry count are both capped, so
+/// skipped entries cannot make the reader work without bound.
 fn extract_binary(archive: &[u8], stage_dir: &str) -> Result<Vec<u8>, String> {
+    extract_binary_within(archive, stage_dir, MAX_UNPACKED_BYTES, MAX_ARCHIVE_ENTRIES)
+}
+
+fn extract_binary_within(
+    archive: &[u8],
+    stage_dir: &str,
+    max_unpacked: u64,
+    max_entries: usize,
+) -> Result<Vec<u8>, String> {
     let want = format!("{stage_dir}/kit");
-    let gz = flate2::read::GzDecoder::new(archive);
+    let gz = flate2::read::GzDecoder::new(archive).take(max_unpacked);
     let mut tar = tar::Archive::new(gz);
     let entries = tar.entries().map_err(|e| format!("read archive: {e}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("read archive entry: {e}"))?;
+    for (seen, entry) in entries.enumerate() {
+        if seen >= max_entries {
+            return Err(format!("archive has more than {max_entries} entries"));
+        }
+        let entry = entry.map_err(|e| {
+            format!("read archive entry (the stream may exceed {max_unpacked} bytes): {e}")
+        })?;
         let path = entry
             .path()
             .map_err(|e| format!("archive entry path: {e}"))?;
@@ -1191,6 +1213,30 @@ mod tests {
         let tgz = tgz_with(&[("kit-0.4.0-x/README.md", b"readme")]);
         let e = extract_binary(&tgz, "kit-0.4.0-x").unwrap_err();
         assert!(e.contains("no kit-0.4.0-x/kit member"), "{e}");
+    }
+
+    #[test]
+    fn extract_binary_caps_skipped_bytes() {
+        // A tar bomb: a large non-matching entry sits before the binary.
+        let bomb = vec![0u8; 256 * 1024];
+        let tgz = tgz_with(&[("kit-0.4.0-x/bomb", &bomb), ("kit-0.4.0-x/kit", b"bin")]);
+        let bin = extract_binary_within(&tgz, "kit-0.4.0-x", 1024 * 1024, 8).unwrap();
+        assert_eq!(bin, b"bin");
+        let e = extract_binary_within(&tgz, "kit-0.4.0-x", 64 * 1024, 8).unwrap_err();
+        assert!(e.contains("read archive entry"), "{e}");
+    }
+
+    #[test]
+    fn extract_binary_caps_entry_count() {
+        let names: Vec<String> = (0..=MAX_ARCHIVE_ENTRIES)
+            .map(|i| format!("kit-0.4.0-x/f{i}"))
+            .collect();
+        let mut entries: Vec<(&str, &[u8])> =
+            names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+        entries.push(("kit-0.4.0-x/kit", b"bin"));
+        let tgz = tgz_with(&entries);
+        let e = extract_binary(&tgz, "kit-0.4.0-x").unwrap_err();
+        assert!(e.contains("more than 64 entries"), "{e}");
     }
 
     // ---- staged-binary check + perms (unix) ----

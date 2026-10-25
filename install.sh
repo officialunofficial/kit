@@ -374,6 +374,18 @@ member="$stage_dir/kit"
 # Extract the one expected member and nothing else, as self-update does.
 # The listing must show exactly one entry, and that entry must be a
 # regular file. A link, a device or a directory is refused.
+# Cap the decompressed stream and the entry count before any listing, so a
+# tar bomb of skipped entries cannot make tar work without bound. These caps
+# match the self-updater: the binary cap plus 16 MiB, and 64 entries.
+max_unpacked=553648128
+max_entries=64
+unpacked="$(gzip -dc < "$archive" 2>/dev/null | head -c "$((max_unpacked + 1))" | wc -c | tr -d ' ')"
+[ "$unpacked" -le "$max_unpacked" ] \
+  || die "archive expands to more than $max_unpacked bytes"
+entries="$(tar -tzf "$archive" | wc -l | tr -d ' ')" \
+  || die "could not list the archive"
+[ "$entries" -le "$max_entries" ] \
+  || die "archive holds more than $max_entries entries"
 listing="$(tar -tvzf "$archive" "$member")" \
   || die "could not list archive member $member"
 case "$listing" in
