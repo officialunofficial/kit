@@ -395,6 +395,8 @@ pub enum ConfigError {
     /// all errors, so a typo in a security key never turns the check off.
     #[error("{location}: {reason}")]
     Rejected { location: String, reason: String },
+    #[error("{0}")]
+    NoConfigHome(String),
     #[error("config file {0} exceeds the size limit")]
     TooLarge(String),
     #[error("invalid user.identity: {0}")]
@@ -628,9 +630,23 @@ pub fn validate_value(v: &str) -> Result<(), ConfigError> {
 /// Resolve the user-scoped config file path:
 /// `$XDG_CONFIG_HOME/kit/config`, falling back to
 /// `$HOME/.config/kit/config`.
+///
+/// # Errors
+/// As [`xdg_config_home`].
+pub fn user_config_path() -> Result<PathBuf, ConfigError> {
+    xdg_config_home()
+        .map(|d| d.join(USER_CONFIG_SUBPATH))
+        .map_err(ConfigError::NoConfigHome)
+}
+
+/// The user-scoped config path for a message. It names the file when the
+/// path resolves and the config scope otherwise.
 #[must_use]
-pub fn user_config_path() -> PathBuf {
-    xdg_config_home().join(USER_CONFIG_SUBPATH)
+pub fn user_config_display() -> String {
+    user_config_path().map_or_else(
+        |_| "the user-scoped config".to_owned(),
+        |p| p.display().to_string(),
+    )
 }
 
 /// Read the layered config: defaults → user-scoped → repo-scoped
@@ -641,7 +657,7 @@ pub fn user_config_path() -> PathBuf {
 /// warning is printed to stderr and the value is dropped.
 pub fn read_or_default(layout: &RepoLayout) -> Result<Config, ConfigError> {
     let mut cfg = Config::with_defaults();
-    apply_file(&mut cfg, &user_config_path(), ConfigScope::User)?;
+    apply_file(&mut cfg, &user_config_path()?, ConfigScope::User)?;
     apply_file(&mut cfg, &layout.config_file(), ConfigScope::Repo)?;
     // `-c <key>=<val>` one-shot overrides apply to BOTH the layered and the
     // flat read path, so `kit -c … <any-command>` is honored uniformly
@@ -653,7 +669,7 @@ pub fn read_or_default(layout: &RepoLayout) -> Result<Config, ConfigError> {
 /// Read both raw layers plus the merged config.
 pub fn read_layered(layout: &RepoLayout) -> Result<LayeredConfig, ConfigError> {
     let mut merged = Config::with_defaults();
-    let user_path = user_config_path();
+    let user_path = user_config_path()?;
     let repo_path = layout.config_file();
     apply_file_inner(&mut merged, &user_path, ConfigScope::User, true)?;
     apply_file_inner(&mut merged, &repo_path, ConfigScope::Repo, true)?;
@@ -820,7 +836,7 @@ fn warn_forbidden_repo_key(path: &Path, key: &str) {
          (security-sensitive keys are user-scoped only — see {} \
          and docs/THREAT-MODEL.md)",
         path.display(),
-        user_config_path().display()
+        user_config_display()
     );
 }
 
@@ -1220,7 +1236,7 @@ where
             return Some(format!(
                 "refusing repo-configured remote `{endpoint}` with ambient {} bearer token; trust it explicitly with `kit config trusted_remote_endpoint {endpoint}` (writes {})",
                 kit_transport_connect::TOKEN_ENV,
-                user_config_path().display()
+                user_config_display()
             ));
         }
         return None;
@@ -1233,7 +1249,7 @@ where
     {
         return Some(format!(
             "refusing repo-configured remote `{endpoint}` with ambient S3 credentials; trust it explicitly with `kit config trusted_remote_endpoint {endpoint}` (writes {})",
-            user_config_path().display()
+            user_config_display()
         ));
     }
 
@@ -1249,7 +1265,7 @@ pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
     // git's canonical form, regardless of how the caller spelled the key.
     let key = normalize_config_key(key);
     let key = key.as_str();
-    let path = user_config_path();
+    let path = user_config_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1302,7 +1318,7 @@ pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
 pub fn remove_user_kv(key: &str) -> Result<bool, ConfigError> {
     let key = normalize_config_key(key);
     let key = key.as_str();
-    let path = user_config_path();
+    let path = user_config_path()?;
     let Some(existing) = read_config_text(&path)? else {
         return Ok(false);
     };
@@ -1427,30 +1443,15 @@ fn nibble(c: u8) -> Option<u8> {
     })
 }
 
-/// XDG base-dir resolvers — fall back to `$HOME/.config` / `.local`.
-fn xdg(var: &str, fallback_under_home: &str) -> PathBuf {
-    if let Some(v) = std::env::var_os(var)
-        && !v.is_empty()
-    {
-        return PathBuf::from(v);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(fallback_under_home);
-    }
-    PathBuf::from(".")
-}
-
-#[must_use]
-pub fn xdg_config_home() -> PathBuf {
-    xdg("XDG_CONFIG_HOME", ".config")
-}
-
-/// The XDG config base for data that must never land in a working directory
-/// (the grant store): an absolute `XDG_CONFIG_HOME`, else `$HOME/.config`.
+/// The XDG config base for user-scoped data: `XDG_CONFIG_HOME`, else
+/// `$HOME/.config`. The result is always an absolute path, so no
+/// working directory can supply user-scoped config, trust roots or
+/// grants.
 ///
 /// # Errors
-/// Neither is set to an absolute path.
-pub fn xdg_config_home_absolute() -> Result<PathBuf, String> {
+/// `XDG_CONFIG_HOME` is set but not absolute, or it is unset and `HOME`
+/// is unset or not absolute.
+pub fn xdg_config_home() -> Result<PathBuf, String> {
     absolute_config_home(
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
@@ -1461,10 +1462,15 @@ fn absolute_config_home(
     xdg: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
 ) -> Result<PathBuf, String> {
-    if let Some(v) = xdg.map(PathBuf::from)
-        && v.is_absolute()
-    {
-        return Ok(v);
+    if let Some(v) = xdg.filter(|v| !v.is_empty()) {
+        let v = PathBuf::from(v);
+        if v.is_absolute() {
+            return Ok(v);
+        }
+        return Err(format!(
+            "XDG_CONFIG_HOME must be an absolute path, got `{}`",
+            v.display()
+        ));
     }
     if let Some(h) = home.map(PathBuf::from)
         && h.is_absolute()
@@ -1489,15 +1495,22 @@ mod tests {
             absolute_config_home(os("/x"), os("/h")).unwrap(),
             PathBuf::from("/x")
         );
+        assert!(absolute_config_home(os("rel"), os("/h")).is_err());
         assert_eq!(
-            absolute_config_home(os("rel"), os("/h")).unwrap(),
+            absolute_config_home(os(""), os("/h")).unwrap(),
             PathBuf::from("/h/.config")
         );
         assert_eq!(
             absolute_config_home(None, os("/h")).unwrap(),
             PathBuf::from("/h/.config")
         );
-        for (x, h) in [(None, None), (os(""), os("")), (os("rel"), os("rel"))] {
+        for (x, h) in [
+            (None, None),
+            (os(""), os("")),
+            (os("rel"), os("rel")),
+            (None, os("rel")),
+            (os("./"), os("/h")),
+        ] {
             assert!(absolute_config_home(x, h).is_err());
         }
     }

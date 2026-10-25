@@ -49,7 +49,6 @@
 //! top level is set whenever `ok` is `false`.
 
 use std::io::Write;
-use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use kit_attest::envelope;
@@ -169,10 +168,10 @@ pub fn run(args: &[String]) -> u8 {
     // `docs/THREAT-MODEL.md` §"Trust-roots scope". An explicit
     // `--trust-roots <path>` always wins so CI flows can point at a
     // pinned file.
-    let trust_path = parsed
-        .trust_roots
-        .as_deref()
-        .map_or_else(default_trust_roots_path, PathBuf::from);
+    let trust_path = match resolve_trust_roots_path(parsed.trust_roots.as_deref()) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
     if let Err(code) = warn_if_unsafe_trust_roots(
         &trust_path,
         layout.common_dir(),
@@ -412,7 +411,7 @@ pub fn run(args: &[String]) -> u8 {
 // still uses directly into scope; the `mod tests` block below resolves
 // them via `use super::*`.
 use super::trust_roots::{
-    default_trust_roots_path, load_registry as load_trust_roots, note_if_missing, short_keyid,
+    load_registry as load_trust_roots, note_if_missing, resolve_trust_roots_path, short_keyid,
     warn_if_unsafe_trust_roots,
 };
 

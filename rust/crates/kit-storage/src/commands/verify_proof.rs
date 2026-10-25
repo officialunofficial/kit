@@ -106,10 +106,10 @@ pub fn run(args: &[String]) -> u8 {
             Ok(layout) => layout,
             Err(code) => return code,
         };
-        let trust_path = opts
-            .trust_roots
-            .as_deref()
-            .map_or_else(trust_roots::default_trust_roots_path, PathBuf::from);
+        let trust_path = match trust_roots::resolve_trust_roots_path(opts.trust_roots.as_deref()) {
+            Ok(p) => p,
+            Err(code) => return code,
+        };
         if let Err(code) = trust_roots::warn_if_unsafe_trust_roots(
             &trust_path,
             layout.common_dir(),

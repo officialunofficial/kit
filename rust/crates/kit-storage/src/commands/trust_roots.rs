@@ -51,9 +51,21 @@ pub struct TrustEntry {
 
 /// Resolve the user-scoped default trust-roots path:
 /// `$XDG_CONFIG_HOME/kit/trust-roots.toml`.
-#[must_use]
-pub fn default_trust_roots_path() -> PathBuf {
-    crate::config::xdg_config_home().join("kit/trust-roots.toml")
+///
+/// # Errors
+/// As [`crate::config::xdg_config_home`].
+pub fn default_trust_roots_path() -> Result<PathBuf, String> {
+    crate::config::xdg_config_home().map(|d| d.join("kit/trust-roots.toml"))
+}
+
+/// Resolve the trust-roots path: the `--trust-roots` value when given,
+/// else the user-scoped default. Print the reason and return the config
+/// exit code when no default path exists.
+pub fn resolve_trust_roots_path(flag: Option<&str>) -> Result<PathBuf, u8> {
+    match flag {
+        Some(p) => Ok(PathBuf::from(p)),
+        None => default_trust_roots_path().map_err(|e| super::error(&e, exit::CONFIG_ERROR)),
+    }
 }
 
 /// Refuse to operate on an in-repo trust-roots file unless the user
@@ -75,7 +87,10 @@ pub fn warn_if_unsafe_trust_roots(
                 "refusing to use in-repo trust-roots at {} — pass `--trust-roots` \
                  explicitly or move the file to {}",
                 trust_path.display(),
-                default_trust_roots_path().display()
+                default_trust_roots_path().map_or_else(
+                    |_| "the user config directory".to_owned(),
+                    |p| p.display().to_string()
+                )
             ),
             exit::CONFIG_ERROR,
         ));

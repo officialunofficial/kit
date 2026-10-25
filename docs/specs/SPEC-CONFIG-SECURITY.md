@@ -42,6 +42,12 @@ every key is classified as either repo-safe (`SAFE`) or user-only
 dropped with a stderr warning. They are only honored when read from
 `$XDG_CONFIG_HOME/kit/config`.
 
+The user config directory is always an absolute path. `XDG_CONFIG_HOME`
+must be absolute when set and non-empty. If it is unset or empty, kit
+uses `$HOME/.config`, and `HOME` must be absolute. Otherwise the
+command fails with an error. kit never falls back to a relative path,
+so no working directory can supply user-scoped config or trust roots.
+
 The trust boundary is anchored in
 `kit-storage/src/config.rs::REPO_FORBIDDEN_KEYS`. That constant is the
 single source of truth &mdash; `kit-storage` is the only crate that performs

@@ -209,7 +209,7 @@ fn run_unset(
                     let _ = writeln!(
                         stderr,
                         "removed `{key}` from user-scoped config at {}",
-                        config::user_config_path().display()
+                        config::user_config_display()
                     );
                 }
                 exit::OK
@@ -217,7 +217,7 @@ fn run_unset(
             Err(e) => emit_err(
                 &format!(
                     "remove user config at {}: {e}",
-                    config::user_config_path().display()
+                    config::user_config_display()
                 ),
                 exit::CANTCREAT,
             ),
@@ -292,14 +292,14 @@ fn write_user_scoped(key: &str, value: &str) -> u8 {
             let _ = writeln!(
                 stderr,
                 "wrote `{key}` to user-scoped config at {}",
-                config::user_config_path().display()
+                config::user_config_display()
             );
             exit::OK
         }
         Err(e) => emit_err(
             &format!(
                 "write user config at {}: {e}",
-                config::user_config_path().display()
+                config::user_config_display()
             ),
             exit::CANTCREAT,
         ),

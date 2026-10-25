@@ -80,9 +80,7 @@ impl GrantStore {
     /// No absolute config base directory: a store never falls back to the
     /// working directory.
     pub fn default_location() -> Result<PathBuf, String> {
-        Ok(crate::config::xdg_config_home_absolute()?
-            .join("kit")
-            .join("grants"))
+        Ok(crate::config::xdg_config_home()?.join("kit").join("grants"))
     }
 
     /// # Errors

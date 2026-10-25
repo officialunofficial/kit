@@ -22,7 +22,6 @@
 //! `verify-attest`, see `docs/THREAT-MODEL.md` §5).
 
 use std::io::Write;
-use std::path::PathBuf;
 
 use clap::Parser;
 use kit_core::object::Object;
@@ -103,10 +102,10 @@ pub fn run(args: &[String]) -> u8 {
 
     let want_trust_check = opts.trusted || opts.trust_roots.is_some();
     if want_trust_check {
-        let trust_path = opts
-            .trust_roots
-            .as_deref()
-            .map_or_else(trust_roots::default_trust_roots_path, PathBuf::from);
+        let trust_path = match trust_roots::resolve_trust_roots_path(opts.trust_roots.as_deref()) {
+            Ok(p) => p,
+            Err(code) => return code,
+        };
         if let Err(code) = trust_roots::warn_if_unsafe_trust_roots(
             &trust_path,
             layout.common_dir(),

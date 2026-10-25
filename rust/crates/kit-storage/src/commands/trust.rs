@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use super::trust_roots::{
-    self, TrustEntry, default_trust_roots_path, keyid_matches_pubkey, warn_if_unsafe_trust_roots,
+    self, TrustEntry, keyid_matches_pubkey, resolve_trust_roots_path, warn_if_unsafe_trust_roots,
 };
 use crate::clap_args;
 use crate::exit;
@@ -105,7 +105,7 @@ pub fn run(args: &[String]) -> u8 {
 /// the same repo-local path-fencing every trust-consuming command
 /// applies.
 fn resolve_path(flag: Option<&str>) -> Result<PathBuf, u8> {
-    let path = flag.map_or_else(default_trust_roots_path, PathBuf::from);
+    let path = resolve_trust_roots_path(flag)?;
     // `kit trust` has no repo context of its own (unlike `verify` /
     // `verify-attest`, which resolve a `.kit` dir to fence against) —
     // it only needs to refuse an explicit-looking-but-actually-default
