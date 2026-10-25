@@ -270,25 +270,21 @@ unreachable object does not meet today.
 
 ## Single commonware release train across every manifest and lockfile
 
-**Always:** Commonware requirements use the same caret minimum (`2026.9.0`)
-across manifests. Committed lockfiles select that baseline release train for
-reproducible builds. Downstream consumers can select compatible 2026.x releases.
-The latest-release compatibility probe updates its disposable lockfile separately.
+**Always:** Commonware requirements use the same exact version (`=2026.9.0`)
+across manifests. Committed lockfiles select the same release. A move to a
+new release changes every manifest and lockfile in one commit.
 
-**Because:** exact library requirements prevent downstream consumers from
-selecting a newer compatible release. Reproducibility belongs in lockfiles.
-Commonware-backed kit wire encodings must retain their pinned bytes when the
-resolved dependency changes.
+**Because:** AGENTS.md requires exact audited versions. Commonware-backed kit
+wire encodings must retain their pinned bytes when the resolved dependency
+changes. An exact requirement makes each change of release a reviewed change.
 
-**If violated:** an exact requirement can block downstream resolution, or a
-compatible release can silently change kit bytes without an encoder regression.
+**If violated:** a compatible release can silently change kit bytes without an
+encoder regression.
 
-**Enforced by:** `scripts/check-crypto-stack-version.sh` audits the baseline
-across manifests and committed lockfiles. The scheduled and manifest/lockfile PR
-workflow **commonware-latest.yml** runs `scripts/check-commonware-latest.sh`:
-it updates all resolved Commonware packages together, builds the consuming
-crates with all features, and runs their normal tests, including golden vectors.
-Build and test failures remain visible; the probe never restores an older pin.
+**Enforced by:** `scripts/check-crypto-stack-version.sh` audits the version
+across manifests and committed lockfiles. `scripts/check-exact-versions.py`
+fails when a workspace dependency is a range. It also fails when a crate
+manifest adds a range that `scripts/exact-versions-baseline.txt` does not list.
 
 ## Windows is not a build, test, or release target
 

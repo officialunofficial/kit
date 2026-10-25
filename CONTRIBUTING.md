@@ -56,6 +56,7 @@ bash scripts/check-unsafe-safety.sh
 bash scripts/check-unsafe-policy.sh
 bash scripts/check-doc-paths.sh
 python3 -I -B scripts/check-format-constants.py
+python3 -I -B scripts/check-exact-versions.py
 ```
 
 ## Rules for code

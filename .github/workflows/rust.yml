@@ -226,6 +226,10 @@ jobs:
         run: bash scripts/check-spec-status.sh
       - name: Every magic in a spec matches its hex bytes
         run: python3 -I -B scripts/check-spec-magics.py
+      - name: Every dependency version is exact
+        run: |
+          python3 -I -B scripts/check-exact-versions.py
+          bash scripts/test-check-exact-versions.sh
       - name: Every format constant has one owner
         run: |
           python3 -I -B scripts/check-format-constants.py
