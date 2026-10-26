@@ -62,11 +62,11 @@ steps:
       - -c
       - |
         set -euo pipefail
-        # Select only kit-storage with -p. A workspace build would unify
+        # Select only kit-cli with -p. A workspace build would unify
         # features and hide a feature that the shipped binary does not get.
         ( cd rust
           RUSTFLAGS="-C codegen-units=1 -C strip=symbols" cargo build \
-            --release --locked --target "$$TARGET" -p kit-storage --bin kit \
+            --release --locked --target "$$TARGET" -p kit-cli --bin kit \
             --message-format=json-render-diagnostics > /tmp/kit-build.jsonl )
         bash scripts/check-release-artifact-features.sh \
           /tmp/kit-build.jsonl "rust/target/$${TARGET}/release/kit"

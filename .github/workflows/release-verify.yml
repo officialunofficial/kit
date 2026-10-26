@@ -40,7 +40,7 @@ env:
 
 jobs:
   cargo-install:
-    name: cargo install kit-storage (crates.io)
+    name: cargo install kit-cli (crates.io)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -55,15 +55,15 @@ jobs:
         with:
           toolchain: ${{ steps.pin.outputs.version }}
 
-      - name: cargo install kit-storage
+      - name: cargo install kit-cli
         run: |
-          cargo install kit-storage --version "${{ inputs.version }}" --locked --root "$RUNNER_TEMP/cargo-install"
+          cargo install kit-cli --version "${{ inputs.version }}" --locked --root "$RUNNER_TEMP/cargo-install"
 
       - name: Basic flow smoke
         run: bash scripts/basic-flow-smoke.sh "$RUNNER_TEMP/cargo-install/bin/kit" "${{ inputs.version }}"
 
   cargo-binstall:
-    name: cargo binstall kit-storage
+    name: cargo binstall kit-cli
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -87,9 +87,9 @@ jobs:
       # 404s and it falls back to `cargo install` — see the limitation
       # note at the top of this file. Same command either way; only the
       # fetch path differs once the repo goes public.
-      - name: cargo binstall kit-storage
+      - name: cargo binstall kit-cli
         run: |
-          cargo binstall kit-storage --version "${{ inputs.version }}" --locked --no-confirm --root "$RUNNER_TEMP/cargo-binstall"
+          cargo binstall kit-cli --version "${{ inputs.version }}" --locked --no-confirm --root "$RUNNER_TEMP/cargo-binstall"
 
       - name: Basic flow smoke
         run: bash scripts/basic-flow-smoke.sh "$RUNNER_TEMP/cargo-binstall/bin/kit" "${{ inputs.version }}"

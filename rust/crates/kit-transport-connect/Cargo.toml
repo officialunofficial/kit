@@ -74,7 +74,7 @@ futures = "=0.3.34"
 url = "=2.5.8"
 
 # CSPRNG for the write-envelope idempotency key (`envelope::EnvelopeTransport`)
-# — same crate/version kit-core, kit-storage, and kit-keystore already pull in
+# — same crate/version kit-core, kit-cli, and kit-keystore already pull in
 # for their own random-value needs (key generation).
 getrandom = "=0.4.3"
 

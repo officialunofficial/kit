@@ -718,7 +718,7 @@ pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
 /// looked), but it is NOT fine for `branch -m`'s rename: a rename reads
 /// the source branch's tip, publishes it under the new name, and then
 /// drops the source ref. If a concurrent `commit` (via
-/// [`RefWriteCondition::Match`], see `kit-storage`'s `advance_head`)
+/// [`RefWriteCondition::Match`], see `kit-cli`'s `advance_head`)
 /// advances the source branch in the window between the rename's read
 /// and its delete, an unconditional delete destroys that freshly-landed
 /// commit's only ref with no error to either caller — commit reports
@@ -1241,7 +1241,7 @@ fn sequential_read_batch(candidates: &[RefCandidate]) -> Vec<RefReadOutcome> {
 /// Read and decode one [`RefCandidate`]'s wire content. The single
 /// definition of "how to turn a candidate into a [`RefReadOutcome`]",
 /// shared by `sequential_read_batch` and every caller-supplied
-/// `read_batch` in kit-storage's rayon fan-out and its bench — so the
+/// `read_batch` in kit-cli's rayon fan-out and its bench — so the
 /// `Unreadable`-vs-`Decoded(None)` policy (an I/O failure drops the
 /// entry; malformed-but-readable content keeps it with `hash: None`)
 /// can't drift between a sequential and a parallel caller.
@@ -1302,7 +1302,7 @@ pub enum RefReadOutcome {
 /// decoding each one sequentially inside the same call that walks the
 /// directory tree — e.g. a rayon fan-out, the same parallel-batch shape
 /// already used for pack-entry compression, delta encoding, and
-/// post-fetch signature verification (`kit-storage`'s `remote_dispatch`).
+/// post-fetch signature verification (`kit-cli`'s `remote_dispatch`).
 /// The directory walk itself (`fs::read_dir`, cheap metadata-only calls)
 /// stays sequential; only the per-file read-and-decode step, one syscall
 /// each and independent of every other entry, is worth fanning out.
@@ -2676,7 +2676,7 @@ mod tests {
     // --- remote-ref batching --------------------------------------
     //
     // `push`/`fetch` publish one remote-tracking ref per branch in a loop
-    // (`kit-storage`'s `remote_dispatch::push_all_with` /
+    // (`kit-cli`'s `remote_dispatch::push_all_with` /
     // `kit-sync`'s `fetch_objects_inner`). Each `write_remote_ref` call goes through
     // `cas_write` → `write_atomic`, which pays a parent-directory fsync
     // EVERY call (`atomic.rs`'s `sync_parent_dir`) — so N branches cost N

@@ -313,7 +313,7 @@ looks up `signer` in a caller-supplied trust-roots registry (the same
 `[[trust_root]]` TOML format `kit verify-attest` reads, managed via
 `kit trust add/list/remove`) and fails closed &mdash; a nonzero exit, distinct
 from a bad-signature failure &mdash; when `signer` is not a registered
-Ed25519 key. See `rust/crates/kit-storage/src/commands/verify.rs` and
+Ed25519 key. See `rust/crates/kit-cli/src/commands/verify.rs` and
 `docs/THREAT-MODEL.md` §5.
 
 

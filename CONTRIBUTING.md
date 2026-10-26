@@ -17,7 +17,7 @@ CLA.
 | Area | Path |
 |---|---|
 | Rust workspace | `rust/` |
-| The `kit` binary | `rust/crates/kit-storage/` |
+| The `kit` binary | `rust/crates/kit-cli/` |
 | Objects, packs, refs, signing | `rust/crates/kit-core/` |
 | Attestations | `rust/crates/kit-attest/` |
 | Transports | `rust/crates/kit-transport-*/` |

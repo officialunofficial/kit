@@ -13,7 +13,7 @@
 //     and, only while it holds it, sweeps the temp files crashed uploads left
 //     in `packs/` (`FsBlobStore::sweep_stale_uploads`, files at least
 //     STALE_UPLOAD_AGE = 1 h old), then drops it and takes the shared lock;
-//     busy -> skip the sweep (kit-storage `serve::lock_and_sweep`);
+//     busy -> skip the sweep (kit-cli `serve::lock_and_sweep`);
 //   - `worktree.lock` / `worktrees.lock` acquisition probes `serve.lock`
 //     non-blocking-exclusive and warns (never refuses) when it is busy.
 // Safety modelled: server.lock exclusion, serve.lock reader/writer

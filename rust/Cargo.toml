@@ -16,7 +16,7 @@ members = [
     "crates/kit-transport-connect",
     "crates/kit-sign-file",
     "crates/kit-sync",
-    "crates/kit-storage",
+    "crates/kit-cli",
     "fuzz",
     "benches",
     "crates/kit-formal-conformance",

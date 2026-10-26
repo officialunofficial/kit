@@ -64,7 +64,7 @@ thiserror = "=2.0.21"
 # crate sits on the kit-attest -> kit-rpc -> kit-core path, and
 # kit-core's default `pack-zstd` feature pulls a non-wasm32-buildable
 # C dependency. Every other consumer of
-# kit-rpc (kit-storage, kit-attest,
+# kit-rpc (kit-cli, kit-attest,
 # kit-transport-ssh) also depends on kit-core directly with default
 # features on, so their builds still get `pack-zstd` via that edge.
 kit-core = { version = "0.5", path = "../kit-core", default-features = false }

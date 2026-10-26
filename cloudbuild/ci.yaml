@@ -278,7 +278,7 @@ steps:
       - |
         set -euo pipefail
         cd rust
-        cargo build --locked -p kit-storage --bin kit
+        cargo build --locked -p kit-cli --bin kit
         out=$(/tmp/target-version/debug/kit version)
         expected="kit $(awk -F\" '/^version/ {print $2; exit}' Cargo.toml)"
         echo "stdout:   [$out]"

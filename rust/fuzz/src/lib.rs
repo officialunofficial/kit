@@ -223,7 +223,7 @@ pub fn grant_and_header_parse_one_iteration(input: &[u8]) {
 /// repo-scope parse accepts no forbidden key, so the sentinel values that a
 /// hostile repo plants never reach the merged config.
 pub fn config_parse_one_iteration(input: &[u8]) {
-    use kit_storage::config::{Config, ConfigScope, apply_text};
+    use kit_cli::config::{Config, ConfigScope, apply_text};
     let input = &input[..input.len().min(MAX_INPUT)];
     let Ok(text) = core::str::from_utf8(input) else {
         return;
@@ -1578,7 +1578,7 @@ pub fn chunked_blob_build_one_iteration(input: &[u8]) {
 /// and every accepted entry has valid hex and a key length that fits its
 /// kind. `hex_decode` never panics, and an accepted string round trips.
 pub fn trust_roots_parse_one_iteration(input: &[u8]) {
-    use kit_storage::commands::trust_roots::{hex_decode, parse, serialize};
+    use kit_cli::commands::trust_roots::{hex_decode, parse, serialize};
     let input = &input[..input.len().min(MAX_INPUT)];
     let Ok(text) = core::str::from_utf8(input) else {
         return;
@@ -1725,7 +1725,7 @@ pub fn read_to_end_capped_one_iteration(input: &[u8]) {
 /// cap below one tar header gives `UnpackedTooLarge`. An entry cap of one
 /// gives `TooManyEntries`.
 pub fn self_update_extract_one_iteration(input: &[u8]) {
-    use kit_storage::commands::self_update::{ExtractError, fuzz_extract_binary_within};
+    use kit_cli::commands::self_update::{ExtractError, fuzz_extract_binary_within};
     const STAGE: &str = "kit-0.0.0-fuzz";
     let input = &input[..input.len().min(MAX_INPUT)];
     if let Ok(bin) = fuzz_extract_binary_within(input, STAGE, 256 * 1024, 16) {
@@ -1776,7 +1776,7 @@ pub fn self_update_extract_one_iteration(input: &[u8]) {
 /// itself. The order is antisymmetric and transitive. A tag is valid exactly
 /// when it starts with `v` and the rest parses.
 pub fn self_update_version_one_iteration(input: &[u8]) {
-    use kit_storage::commands::self_update::{fuzz_cmp_versions, fuzz_validate_tag};
+    use kit_cli::commands::self_update::{fuzz_cmp_versions, fuzz_validate_tag};
     use std::cmp::Ordering;
     let input = &input[..input.len().min(MAX_INPUT)];
     let Ok(text) = core::str::from_utf8(input) else {
@@ -1821,7 +1821,7 @@ pub fn self_update_version_one_iteration(input: &[u8]) {
 /// non-empty `XDG_CONFIG_HOME` wins and is never repaired. Otherwise an
 /// absolute `HOME` gives `HOME/.config`. Anything else is an error.
 pub fn absolute_config_home_one_iteration(input: &[u8]) {
-    use kit_storage::config::fuzz_absolute_config_home;
+    use kit_cli::config::fuzz_absolute_config_home;
     use std::path::{Path, PathBuf};
     let input = &input[..input.len().min(MAX_INPUT)];
     let Some((&flags, rest)) = input.split_first() else {

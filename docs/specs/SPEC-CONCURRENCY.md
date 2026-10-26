@@ -2,7 +2,7 @@
 spec: SPEC-CONCURRENCY
 version: 2
 status: draft-normative
-audience: implementers of any lock-taking kit-core/kit-storage code path; reviewers of concurrency-sensitive changes
+audience: implementers of any lock-taking kit-core/kit-cli code path; reviewers of concurrency-sensitive changes
 ---
 
 # SPEC-CONCURRENCY &mdash; the total kit lock order
@@ -40,7 +40,7 @@ document points here.
 | `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ancestry intent + ref + descriptor publication for one branch (`kit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
 | `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`kit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
 | `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`kit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
-| `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-storage`'s `git_import::import_into`, `git::export`) | §4 (this document) |
+| `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-cli`'s `git_import::import_into`, `git::export`) | §4 (this document) |
 | shared/exclusive `format` handle | existing immutable common-dir `format` file | per-repo, short object-store critical section | shared during a bulk write or cached reuse and during format validation; exclusive during gc's final age check and unlink | SPEC-GC, §3.4 (this document) |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
 | `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `kit serve` (stdin SSH-frame, its only mode) and any layout server, meaning a server that embeds the `.kit` filesystem layout (which also holds `server.lock` exclusively, so one layout server serves a root at a time); taken exclusive without waiting by a starting `kit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
@@ -97,14 +97,14 @@ startup `kit serve` tries `serve.lock` exclusively, without waiting, and
 only while it holds it (so no other server is up) sweeps the temp files
 crashed uploads left in `packs/`, then drops it and takes the shared lock;
 if the lock is busy it skips the sweep. `worktree.lock`
-and `worktrees.lock` acquisition (`kit-storage`'s `acquire_worktree_lock`
+and `worktrees.lock` acquisition (`kit-cli`'s `acquire_worktree_lock`
 and `acquire_worktrees_registry_lock`) each follow up with a
 non-blocking exclusive probe of that same `serve.lock`
 (`kit_core::repo_lock::probe_exclusive`); when the probe finds it busy
 (i.e. at least one `serve` is alive), the command prints a warning to
 stderr and proceeds anyway &mdash; it does not refuse or block. The paths that
 take `worktree.lock` without the helper call the same probe directly
-(`kit-storage`'s `warn_if_served`) right after acquiring it: the per-branch
+(`kit-cli`'s `warn_if_served`) right after acquiring it: the per-branch
 unpack-and-publish phase of `fetch`/`pull` and the fast-forward phase of
 `pull` (`remote_dispatch::fetch_objects_inner` and `pull_all_with`), and
 `status`'s opportunistic index refresh. So every command that takes

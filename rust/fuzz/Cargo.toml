@@ -53,7 +53,7 @@ kit-git-bridge = { path = "../crates/kit-git-bridge" }
 kit-keystore = { path = "../crates/kit-keystore", features = ["fuzzing"] }
 kit-rpc = { path = "../crates/kit-rpc", features = ["arbitrary"] }
 kit-serve = { path = "../crates/kit-serve" }
-kit-storage = { path = "../crates/kit-storage", features = ["fuzzing"] }
+kit-cli = { path = "../crates/kit-cli", features = ["fuzzing"] }
 kit-transport-ssh = { path = "../crates/kit-transport-ssh" }
 tar = "=0.4.46"
 tempfile = "=3.27.0"

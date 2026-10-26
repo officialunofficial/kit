@@ -302,7 +302,7 @@ The per-key classification, the read-site fence, the runtime credential
 gate on `remote_endpoint`, and the rules for adding a new config key
 are codified in `docs/specs/SPEC-CONFIG-SECURITY.md`. That spec is the
 authoritative reference when reviewing a change that touches
-`kit-storage/src/config.rs` or a transport that consumes a
+`kit-cli/src/config.rs` or a transport that consumes a
 config-derived endpoint, key path, or credential.
 
 `remote_endpoint`, `remote_bucket`, and `remote_type` are repo-safe
@@ -344,7 +344,7 @@ A user can override the path on the command line (`--trust-roots
 there is no repo config knob that sets it. Both commands additionally
 refuse an in-repo trust-roots path unless `--trust-roots` was passed
 explicitly (`warn_if_unsafe_trust_roots` in
-`rust/crates/kit-storage/src/commands/trust_roots.rs`) &mdash; a hostile clone
+`rust/crates/kit-cli/src/commands/trust_roots.rs`) &mdash; a hostile clone
 that ships `.kit/trust-roots.toml` listing attacker keys cannot get it
 selected implicitly.
 
@@ -395,7 +395,7 @@ Security assumptions:
 - `software:<label>` stores encrypted-at-rest software records. It protects
   against offline disk/backup disclosure to the extent the local OS-protected
   envelope material remains unavailable to the attacker. It does not protect
-  against malware running as the user. Production `kit-storage` builds enable the
+  against malware running as the user. Production `kit-cli` builds enable the
   target OS protector features; the `kit-keystore` library keeps default
   features empty for lean builds and tests.
 - `software-raw:<label>` is the explicit raw-file backend. It
@@ -491,7 +491,7 @@ matching update here.
   deserializer, and the encrypted software key record parser (`docs/FUZZ.md`).
 - Integration tests assert that a hostile `<repo>/.kit/config`
   cannot set any user-scoped key (warning plus ignored). Per-key
-  coverage lives in `rust/crates/kit-storage/tests/repo_config_forbidden_keys.rs`,
+  coverage lives in `rust/crates/kit-cli/tests/repo_config_forbidden_keys.rs`,
   and the in-process meta-test
   `every_forbidden_key_is_actually_dropped_from_repo_scope` iterates
   the entire `REPO_FORBIDDEN_KEYS` list against a sentinel value.

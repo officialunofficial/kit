@@ -42,7 +42,7 @@ curl -sSfL https://kit.storage/install.sh | sh -s -- --version v0.5.0
 To build from source, use Rust 1.99 or newer:
 
 ```sh
-cargo install --git https://github.com/officialunofficial/kit kit-storage
+cargo install --git https://github.com/officialunofficial/kit kit-cli
 ```
 
 kit supports Linux and macOS. On Windows, run kit under

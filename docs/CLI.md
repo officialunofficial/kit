@@ -1467,7 +1467,7 @@ Config / keys / version:
   `$KIT_STATE_DIR/installed-tag` (default `~/.local/state/kit`) must
   agree with it when present. Homebrew/cargo installs are refused with
   channel-specific guidance (`brew upgrade kit`,
-  `cargo install --locked kit-storage`). Both receipts are rewritten
+  `cargo install --locked kit-cli`). Both receipts are rewritten
   after a successful swap, in the installer's exact format, so
   installer and updater stay interchangeable.
   - `--check` &mdash; only report whether an update is available (works for
@@ -1808,7 +1808,7 @@ Based on BSD `sysexits(3)`:
 | 77   | `noperm`         | Permission denied                            |
 | 78   | `config_error`   | Unknown config key or invalid value          |
 
-The constants live in `rust/crates/kit-storage/src/exit.rs`. Shell scripts
+The constants live in `rust/crates/kit-cli/src/exit.rs`. Shell scripts
 can distinguish user typos (64) from transient failures (75) without
 parsing stderr.
 

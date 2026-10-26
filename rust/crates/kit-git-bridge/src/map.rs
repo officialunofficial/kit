@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// directory (shared across worktrees, see `kit_core::layout`).
 /// Remote names are restricted to the kit ref-segment charset, minus
 /// `.`, so the directory name is always safe: this matches
-/// `kit-storage`'s `validate_remote_name` (dot-free, on top of
+/// `kit-cli`'s `validate_remote_name` (dot-free, on top of
 /// `refs::validate_ref_name`) rather than the ref grammar alone, so a
 /// name accepted here can never collide with the dot-leading temp
 /// directory `remote rename` uses (`remote.rs::rename_state_dir`) and
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn state_dir_rejects_dots() {
-        // Aligned with `kit-storage`'s `validate_remote_name`, which is
+        // Aligned with `kit-cli`'s `validate_remote_name`, which is
         // dot-free on top of the kit ref grammar: a dot anywhere in a
         // bridge state name — not just the traversal shapes `.`/`..` —
         // is rejected, so this entry point can't create a state dir

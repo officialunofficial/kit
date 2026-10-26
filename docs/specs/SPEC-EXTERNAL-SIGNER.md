@@ -164,7 +164,7 @@ signer MUST process them in order.
 | `supports_pin` | True if the signer supports a PIN round-trip. |
 | `supports_certificate_chain` | True if `SignResponse.certificate_chain` is populated. |
 | `max_payload_bytes` | Per-request payload cap. `0` = "use the framing default" (1 MiB). |
-| `requires_user_presence` | True if a touch/PIN/biometric is required. Advisory; kit-storage MAY surface a "touch your YubiKey" hint. |
+| `requires_user_presence` | True if a touch/PIN/biometric is required. Advisory; kit-cli MAY surface a "touch your YubiKey" hint. |
 
 kit MUST verify the requested algorithm + key form against
 advertised capabilities before sending a `SignRequest`. Empty algorithm or

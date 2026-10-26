@@ -356,7 +356,7 @@ point MUST perform the binding check in the previous paragraph itself
 (the CLI) already does this correctly: it calls
 `extract_primary_commit_hash` and rejects any envelope whose subject
 hash does not equal the commit hex the directory is keyed under
-(`kit-storage`'s `verify_attest` command), before considering the
+(`kit-cli`'s `verify_attest` command), before considering the
 envelope's signature at all.
 
 The `kit verify-attest` CLI enumerates every envelope under

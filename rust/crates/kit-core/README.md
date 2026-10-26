@@ -24,7 +24,7 @@ must update the spec in the same PR. The crate depends only on `std`: no
 - `chunker` / `delta` &mdash; `FastCDC` content-defined chunking and delta encoding
   for large blobs.
 - `ops` &mdash; the higher-level repository operations (`commit`, `merge`,
-  `rebase`, `cherry-pick`, …) `kit-storage` drives.
+  `rebase`, `cherry-pick`, …) `kit-cli` drives.
 
 Optional features (`history-mmr`, `sparse-checkout`) gate
 heavier `commonware-*`-backed paths &mdash; see the crate's `Cargo.toml` for what

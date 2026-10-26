@@ -14,8 +14,8 @@
 # `ceiling_for()` and explain why in the same commit.
 #
 # Why two first-party crates have a non-zero count:
-#   kit-storage  - `getpwuid_r` in config::home_dir_for_euid. The header of
-#               rust/crates/kit-storage/src/lib.rs documents the exception.
+#   kit-cli  - `getpwuid_r` in config::home_dir_for_euid. The header of
+#               rust/crates/kit-cli/src/lib.rs documents the exception.
 #   kit-core - two `#[allow(unsafe_code)]` sites, both documented in the
 #               header of rust/crates/kit-core/src/lib.rs: the
 #               `libc::geteuid()` call in `sign::effective_uid`, and the
@@ -25,7 +25,7 @@
 # All other first-party crates MUST stay at 0.
 #
 # kit-transport-memory is NOT in ceiling_for() or EXPECTED_CRATES: it is a
-# dev-only dependency of kit-storage, so geiger never reaches it from the
+# dev-only dependency of kit-cli, so geiger never reaches it from the
 # normal dependency graph of the binary.
 #
 # The script is Bash 3.2 compatible, so it runs on macOS without a newer
@@ -35,7 +35,7 @@ set -euo pipefail
 
 ceiling_for() {
     case "$1" in
-        kit-storage)               echo 23 ;;
+        kit-cli)               echo 23 ;;
         kit-client)            echo 0  ;;
         kit-core)              echo 3  ;;
         kit-keystore)          echo 0  ;;
@@ -54,9 +54,9 @@ ceiling_for() {
 
 # Every first-party crate that must appear in the geiger report. The check
 # fails when one disappears, for example after a deletion or a change that
-# makes it unreachable from kit-storage.
+# makes it unreachable from kit-cli.
 EXPECTED_CRATES=(
-    kit-storage kit-client kit-core kit-keystore kit-attest kit-rpc
+    kit-cli kit-client kit-core kit-keystore kit-attest kit-rpc
     kit-transport-file kit-transport-s3 kit-transport-ssh
     kit-transport-connect kit-git-bridge kit-serve kit-sync
 )
@@ -66,13 +66,13 @@ EXPECTED_CRATES=(
 # skipped. `git-bridge` is a default feature.
 SCAN_FEATURES="s3,git-bridge"
 
-# Run from kit-storage: it depends on every other first-party crate that ships
+# Run from kit-cli: it depends on every other first-party crate that ships
 # in the binary.
 #
 # The check fails closed. `cargo geiger` exits non-zero on a normal run
 # ("error: Found N warnings": build-script outputs and data files it
 # cannot scan), so its exit status says nothing alone. The run must print
-# the report table with kit-storage as its root, and every EXPECTED_CRATES
+# the report table with kit-cli as its root, and every EXPECTED_CRATES
 # entry must appear in it. Otherwise the script prints the geiger stderr and
 # fails.
 #
@@ -102,7 +102,7 @@ export CARGO_BUILD_TARGET_DIR="${CARGO_TARGET_DIR:-$rust_dir/target}/geiger"
 stderr_file="$(mktemp "${TMPDIR:-/tmp}/geiger-stderr.XXXXXX")"
 trap 'rm -f "$stderr_file"' EXIT
 
-cd "$rust_dir/crates/kit-storage"
+cd "$rust_dir/crates/kit-cli"
 # geiger 0.13.0 embeds Cargo 0.86. On a cold registry its pre-scan clean can
 # request a package twice and panic before it reports any count. Fetch the
 # complete locked graph with the workspace Cargo first, so geiger has no
@@ -120,15 +120,15 @@ geiger_failed() {
     exit 1
 }
 
-# The header row of the report, and its root row (kit-storage).
+# The header row of the report, and its root row (kit-cli).
 case "$OUTPUT" in
     *Functions*Expressions*) ;;
     *) geiger_failed "no report table" ;;
 esac
 # A here-string, not a pipe: `grep -q` exits at the first match, and under
 # pipefail the SIGPIPE of the writer would fail the pipeline.
-if ! grep -qE '^[0-9]+/[0-9]+ +[0-9]+/[0-9]+ .* kit-storage [0-9]+\.[0-9]+\.[0-9]+' <<<"$OUTPUT"; then
-    geiger_failed "no kit-storage root row"
+if ! grep -qE '^[0-9]+/[0-9]+ +[0-9]+/[0-9]+ .* kit-cli [0-9]+\.[0-9]+\.[0-9]+' <<<"$OUTPUT"; then
+    geiger_failed "no kit-cli root row"
 fi
 # The only error a complete run may report is the warning count ("error:
 # Found N warnings"). Any other `error:` line (a crate that failed to
@@ -194,7 +194,7 @@ for name in "${EXPECTED_CRATES[@]}"; do
     case " $SEEN " in
         *" $name "*) ;;
         *)
-            printf '::error::Expected %s in the geiger output but did not see it. Either the crate left the kit-storage graph (drop it from EXPECTED_CRATES and ceiling_for) or geiger could not reach it.\n' "$name"
+            printf '::error::Expected %s in the geiger output but did not see it. Either the crate left the kit-cli graph (drop it from EXPECTED_CRATES and ceiling_for) or geiger could not reach it.\n' "$name"
             FAIL=1
             ;;
     esac

@@ -16,7 +16,7 @@ wire shape and authentication model differ per scheme.
 There is no negotiation between transports and no scheme fallback.
 The URL scheme is part of the remote address; if the scheme is
 unsupported, the dispatcher returns an error rather than guessing
-([`kit-storage`'s `remote_dispatch::open`](../../rust/crates/kit-storage/src/remote_dispatch/mod.rs)
+([`kit-cli`'s `remote_dispatch::open`](../../rust/crates/kit-cli/src/remote_dispatch/mod.rs)
 performs the scheme switch).
 
 The SSH wire format is defined in

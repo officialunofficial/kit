@@ -202,7 +202,7 @@ pub fn acquire_default(dir: &Path, name: &str) -> LockResult<RepoLock> {
 /// Used by `kit serve`'s local-command guard to detect
 /// "is at least one `serve` alive against this root?" without blocking —
 /// a local command that finds the lock busy proceeds anyway and only
-/// emits a warning (see `kit-storage`'s `commands::warn_if_served`).
+/// emits a warning (see `kit-cli`'s `commands::warn_if_served`).
 ///
 /// # Errors
 /// - [`LockError::NameLength`]/[`LockError::InvalidName`] as in

@@ -5,8 +5,8 @@
 // `kit clone`/`pull`/`fetch` reject a hostile remote's unsigned or forged
 // commit/remix/tag history by default (THREAT-MODEL §3.1): every object a
 // fetch newly introduces is run through this check before the
-// remote-tracking ref is published. kit-storage's local dispatch
-// (rust/crates/kit-storage/src/remote_dispatch/packmap.rs) calls the Rust
+// remote-tracking ref is published. kit-cli's local dispatch
+// (rust/crates/kit-cli/src/remote_dispatch/packmap.rs) calls the Rust
 // implementation of this contract directly today —
 // `kit_core::sign::{verify_commit,verify_remix,verify_tag}`, the exact
 // check `kit verify <rev>` runs manually.
@@ -14,7 +14,7 @@
 // This schema is defined here, message-only (no bound RPC method — see
 // "Contract shape" below), so a future ConnectRPC-based transport can
 // expose the identical check over the wire instead of growing a divergent, per-transport
-// reimplementation. Nothing outside kit-storage's in-process call consumes
+// reimplementation. Nothing outside kit-cli's in-process call consumes
 // this schema yet; it is published ahead of that consumer so the wire
 // contract is fixed before a second implementation has to match it.
 //

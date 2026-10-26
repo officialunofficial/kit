@@ -272,7 +272,7 @@ jobs:
           version: '31.0'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Select only kit-storage with -p to avoid workspace feature unification.
+      # Select only kit-cli with -p to avoid workspace feature unification.
       - name: Build release kit binary
         shell: bash
         working-directory: rust
@@ -285,7 +285,7 @@ jobs:
             --release \
             --locked \
             --target ${{ matrix.target }} \
-            -p kit-storage \
+            -p kit-cli \
             --bin ${{ env.BINARY_NAME }} \
             --message-format=json-render-diagnostics > "${RUNNER_TEMP}/kit-build.jsonl"
 

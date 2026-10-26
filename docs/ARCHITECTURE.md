@@ -21,12 +21,12 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 | `kit-rpc`                     | `rust/crates/kit-rpc/`               | Shared stdio framing for subprocess protocols (`specs/SPEC-RPC.md`)          |
 | `kit-transport-memory`        | `rust/crates/kit-transport-memory/`  | In-process transport, used by tests                                    |
 | `kit-transport-file`          | `rust/crates/kit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
-| `kit-transport-connect`       | `rust/crates/kit-transport-connect/` | ConnectRPC client implementing `kit.transport.v1.TransportService` (`specs/SPEC-TRANSPORT-CONNECT.md`); the transport `kit-storage` actually constructs for `kit+https://` / `kit+http://` |
+| `kit-transport-connect`       | `rust/crates/kit-transport-connect/` | ConnectRPC client implementing `kit.transport.v1.TransportService` (`specs/SPEC-TRANSPORT-CONNECT.md`); the transport `kit-cli` actually constructs for `kit+https://` / `kit+http://` |
 | `kit-transport-s3`            | `rust/crates/kit-transport-s3/`      | Hand-rolled SigV4 transport (S3-compatible conditional writes)           |
 | `kit-transport-ssh`           | `rust/crates/kit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
 | `kit-serve`                   | `rust/crates/kit-serve/`             | Self-host server: the `kit.rpc.v1.ssh` frame session over a repository on disk; `kit serve` is a thin wrapper |
 | `kit-sync`                    | `rust/crates/kit-sync/`              | Native clone/fetch/pull for `.kit` repositories as a library: typed reports, no printing, no ambient config; `kit clone`/`fetch`/`pull` are thin wrappers over it |
-| `kit-storage`                     | `rust/crates/kit-storage/`               | The `kit` binary; thin glue over the library crates                   |
+| `kit-cli`                     | `rust/crates/kit-cli/`               | The `kit` binary; thin glue over the library crates                   |
 | `kit-fuzz`                    | `rust/fuzz/`                          | cargo-fuzz harnesses (`docs/FUZZ.md`)                                  |
 | `kit-sign-file`               | `rust/crates/kit-sign-file/`         | Reference external signer; protocol conformance baseline               |
 
@@ -42,8 +42,8 @@ so the modules stay.
 
 | Feature | Module | Lines | Kept code that needs it |
 |---|---|---|---|
-| `history-mmr` | `history.rs`, `history/ancestry.rs` | 2,478 | `refs.rs` and `refs/ancestry_state.rs` (ref-write journal), `kit-sync` `worktree.rs`, and in `kit-storage` the `branch`, `commit`, `reflog`, `reset` and `update-ref` commands. The `kit-formal-conformance` ref test and `docs/specs/SPEC-HISTORY-PROOF.md` also cite it. |
-| `sparse-checkout` | `sparse.rs` | 537 | In `kit-storage`: `sparse_cache.rs`, the `--sparse` option of `clone` and `checkout`, and the `sparse_checkout_local` test. Also the `sparse-checkout` feature of `kit-transport-s3`, the `sparse_verify` fuzz target and the `layout.rs` witness cache directory. `docs/specs/SPEC-SPARSE-CHECKOUT.md` specifies the wire format. |
+| `history-mmr` | `history.rs`, `history/ancestry.rs` | 2,478 | `refs.rs` and `refs/ancestry_state.rs` (ref-write journal), `kit-sync` `worktree.rs`, and in `kit-cli` the `branch`, `commit`, `reflog`, `reset` and `update-ref` commands. The `kit-formal-conformance` ref test and `docs/specs/SPEC-HISTORY-PROOF.md` also cite it. |
+| `sparse-checkout` | `sparse.rs` | 537 | In `kit-cli`: `sparse_cache.rs`, the `--sparse` option of `clone` and `checkout`, and the `sparse_checkout_local` test. Also the `sparse-checkout` feature of `kit-transport-s3`, the `sparse_verify` fuzz target and the `layout.rs` witness cache directory. `docs/specs/SPEC-SPARSE-CHECKOUT.md` specifies the wire format. |
 
 Removing one of these modules means removing every item in its row.
 The spec text goes in the same change as the code.
@@ -56,7 +56,7 @@ The decision is to keep the code and the spec text together.
 - `kit-attest` `eth.rs` (Keccak-256, EIP-191 digest, address derivation)
   is the base of both schemes and of the `0x` namespace address.
 - `kit-attest` `grant/owner.rs` and `grant/webauthn.rs` verify the
-  schemes. `kit-storage` `grants/owner.rs` signs with them.
+  schemes. `kit-cli` `grants/owner.rs` signs with them.
 - `kit grant`, `kit epoch` and `kit visibility` use them. `docs/CLI.md`
   and `docs/specs/SPEC-WRITE-GRANTS.md` section 4 describe them.
 - The grant golden vectors and `scripts/golden/grants_ref.py` check them.
@@ -77,7 +77,7 @@ Each Total is Source plus Tests plus Generated.
 
 | Crate | Source | Tests | Generated | Total |
 |---|---:|---:|---:|---:|
-| `kit-storage` | 50,521 | 42,401 | 0 | 92,922 |
+| `kit-cli` | 50,521 | 42,401 | 0 | 92,922 |
 | `kit-core` | 69,332 | 10,362 | 0 | 79,694 |
 | `kit-rpc` | 940 | 167 | 50,231 | 51,338 |
 | `kit-attest` | 12,715 | 6,416 | 0 | 19,131 |

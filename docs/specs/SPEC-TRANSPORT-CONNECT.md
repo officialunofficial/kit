@@ -36,7 +36,7 @@ Write and read grants, epochs, signed reads, and private repositories
 are [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md)'s.
 
 Serves
-`kit+https://`/`kit+http://` remotes in `kit-storage` &mdash;
+`kit+https://`/`kit+http://` remotes in `kit-cli` &mdash;
 `kit-transport-connect` is what `remote_dispatch` constructs for those
 schemes. The `sparse-checkout` extension has no `kit.transport.v1` equivalent.
 
@@ -1117,10 +1117,10 @@ excluded by design and S3 remotes are not yet covered. Wasm/browser clients
 retain browser-managed certificate trust; these native settings do not affect
 them. This changes no wire contract.
 
-This crate is the implementation `kit-storage`'s `remote_dispatch`
+This crate is the implementation `kit-cli`'s `remote_dispatch`
 constructs for the `kit+https://` scheme (and loopback-only
 `kit+http://`) &mdash; see
-`rust/crates/kit-storage/src/remote_dispatch/mod.rs`.
+`rust/crates/kit-cli/src/remote_dispatch/mod.rs`.
 
 **Auth modes** (closing the gap this document
 originally flagged in "Reference implementation" above):

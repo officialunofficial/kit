@@ -60,7 +60,7 @@ pub enum WorktreeError {
     /// returned a different number of hashes than the batch it was given —
     /// a contract violation by the caller (see those functions' docs),
     /// never a normal runtime condition. Reported as a typed error rather
-    /// than a panic since the caller here is `kit-storage`, a
+    /// than a panic since the caller here is `kit-cli`, a
     /// long(er)-running process where a hard panic is a worse failure mode
     /// than a clean, exit-coded error.
     #[error("hash_chunks callback returned {actual} hashes for a {expected}-chunk batch")]
@@ -395,7 +395,7 @@ struct PendingFileHash<'e> {
 /// Below this many cache-miss files per available thread, hashing them
 /// in [`build_tree_inner`]'s own loop wins over thread-spawn overhead —
 /// same crossover shape as [`probe_staged_objects`]. The value borrows
-/// `kit-storage`'s `commands::add::HASH_FANOUT_FILES_PER_THREAD`
+/// `kit-cli`'s `commands::add::HASH_FANOUT_FILES_PER_THREAD`
 /// (measured by benchmark): both fan out the exact same
 /// per-item cost, `hash_file_with_metadata`'s open+read+BLAKE3, so the
 /// same crossover point applies here. `worktree_walk_fanout` is this
@@ -1162,10 +1162,10 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// Cutting chunk boundaries from `reader` is inherently sequential (each
 /// cut's start is the previous cut's end), but once a batch of up to
 /// `STREAM_HASH_BATCH` chunks is in hand, hashing and storing each one
-/// is independent of every other chunk in the batch — `kit-storage`'s
+/// is independent of every other chunk in the batch — `kit-cli`'s
 /// native, rayon-backed `add` path passes a parallel `hash_chunks`
 /// (mirroring the pack-compression/signature-verification/delta-encoding
-/// fan-outs already in `kit-storage`). [`hash_file_with_metadata`] uses a
+/// fan-outs already in `kit-cli`). [`hash_file_with_metadata`] uses a
 /// separate sequential path that borrows chunks without batching.
 ///
 /// `hash_chunks` receives each batch in file order and MUST return
@@ -1947,7 +1947,7 @@ mod tests {
         // (simulating a rayon fan-out that hashes a batch out of order)
         // must still produce the same content-address as the sequential
         // default, as long as it returns results in input order — this
-        // pins the `_with` contract `hash_pending` (kit-storage) relies on.
+        // pins the `_with` contract `hash_pending` (kit-cli) relies on.
         // Large enough for several `STREAM_HASH_BATCH`-sized (64-chunk)
         // batches at the ~64 KiB average chunk size.
         let n = usize::try_from(CHUNK_THRESHOLD).unwrap() + 6 * 1024 * 1024;

@@ -4,7 +4,7 @@
 // `#[cfg(test)]` code (which legitimately prints), and `kit-rpc` declares
 // its own `[lints.clippy]` table (dropping workspace inheritance), so it
 // would silently escape a workspace-level deny. Scope is libraries only:
-// `kit-storage` prints as its job, and `kit-test-util` is dev-only test
+// `kit-cli` prints as its job, and `kit-test-util` is dev-only test
 // infrastructure whose diagnostic prints are the point.
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 #![doc = include_str!("../README.md")]

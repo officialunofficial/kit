@@ -4,7 +4,7 @@
 # Checks the release kit compiler-artifact log and stripped binary.
 # The kit check also allowlists the packages the CLI may compile:
 # scripts/release/kit-packages.golden, the union over every release target
-# of `cargo tree -p kit-storage` (normal + build dependencies, which matches
+# of `cargo tree -p kit-cli` (normal + build dependencies, which matches
 # the release build's compiler artifacts exactly). A package outside it
 # fails the check. If the new package is intended, run `--update-golden`
 # (it needs no toolchain for the other targets) and commit the diff with
@@ -28,12 +28,12 @@ case "${1:-}" in
     trap 'rm -f "$tmp"' EXIT
     {
       echo "# Packages the release \`kit\` build may compile: the union over"
-      echo "# release.yml's targets of \`cargo tree -p kit-storage -e normal,build\`."
+      echo "# release.yml's targets of \`cargo tree -p kit-cli -e normal,build\`."
       echo "# Checked by scripts/check-release-artifact-features.sh; regenerate with"
       echo "# \`scripts/check-release-artifact-features.sh --update-golden\` and review"
       echo "# the diff: every new name is a new dependency of the shipped CLI."
       for t in $targets; do
-        (cd "$root/rust" && cargo tree --locked -p kit-storage --target "$t" \
+        (cd "$root/rust" && cargo tree --locked -p kit-cli --target "$t" \
           -e normal,build --prefix none -f '{p}') | awk '{print $1}'
       done | LC_ALL=C sort -u
     } > "$tmp"

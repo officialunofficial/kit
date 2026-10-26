@@ -18,7 +18,7 @@ The schemas live in [`rust/crates/kit-rpc/proto/`](../../rust/crates/kit-rpc/pro
 | `common.proto` | Shared types: `Algorithm`, `KeyForm`, `ErrorCode`, `Error`, `ProtocolVersion` |
 | `signer.proto` | External-signer protocol (`SignerFrame` oneof). See [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) for prose. |
 | `ssh.proto` | SSH transport protocol (`SshFrame` oneof). See [SPEC-TRANSPORT](SPEC-TRANSPORT.md) for prose. |
-| `verify.proto` | Object-signature verification contract (`VerifyRequest`/`VerifyResponse`). **Not** a framed protocol under §1/§4 below &mdash; it is message-only, with no `oneof`-dispatched frame and no bound RPC method yet. `kit-storage`'s local dispatch (`rust/crates/kit-storage/src/remote_dispatch/packmap.rs`) calls the Rust implementation directly (`kit_core::sign::{verify_commit,verify_remix,verify_tag}`); the schema exists so a future ConnectRPC transport can bind the identical check to a service method instead of reimplementing it. |
+| `verify.proto` | Object-signature verification contract (`VerifyRequest`/`VerifyResponse`). **Not** a framed protocol under §1/§4 below &mdash; it is message-only, with no `oneof`-dispatched frame and no bound RPC method yet. `kit-cli`'s local dispatch (`rust/crates/kit-cli/src/remote_dispatch/packmap.rs`) calls the Rust implementation directly (`kit_core::sign::{verify_commit,verify_remix,verify_tag}`); the schema exists so a future ConnectRPC transport can bind the identical check to a service method instead of reimplementing it. |
 
 `ssh.proto` imports the CAS enum (`RefExpectation`) and the ref-listing
 type (`RefEntry`) from
@@ -164,7 +164,7 @@ Reference implementations (all in this repository):
 
 - [`rust/crates/kit-sign-file/`](../../rust/crates/kit-sign-file/) &mdash;
   `KEY_FORM_RAW_BYTES`, Ed25519/secp256k1/P-256.
-- [`rust/crates/kit-storage/src/commands/serve/mod.rs`](../../rust/crates/kit-storage/src/commands/serve/mod.rs) &mdash;
+- [`rust/crates/kit-cli/src/commands/serve/mod.rs`](../../rust/crates/kit-cli/src/commands/serve/mod.rs) &mdash;
   `kit serve` SSH server (consumes `ssh.proto`).
 
 ---

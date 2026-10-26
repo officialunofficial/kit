@@ -48,7 +48,7 @@ allowlisted release fingerprint, and points at a commit reachable from
    attestation verify` or `slsa-verifier` in addition to cosign. The SBOM
    and the notices cover the whole workspace.
 
-   The `kit` binary is built with `-p kit-storage --bin kit`: a bare `--bin
+   The `kit` binary is built with `-p kit-cli --bin kit`: a bare `--bin
    kit` selects every workspace member, and cargo unifies features across
    every selected package, so it would compile the shipped CLI with other
    members' features. After the build,
@@ -85,7 +85,7 @@ Run top to bottom. Do not skip steps.
 - [ ] `main` is green in CI (build plus test).
 - [ ] `cd rust && cargo test --workspace` passes on a fresh clone.
 - [ ] The release build passes for each release target (the command
-      `release.yml` runs): `cargo build --release --locked -p kit-storage --bin kit`:
+      `release.yml` runs): `cargo build --release --locked -p kit-cli --bin kit`:
   - [ ] `--target=aarch64-apple-darwin`
   - [ ] `--target=x86_64-apple-darwin`
   - [ ] `--target=x86_64-unknown-linux-gnu`
@@ -229,7 +229,7 @@ check that the tag matches the workspace version (`kit-core`'s version in
 
 | Publishes to crates.io | Stays off crates.io (`publish = false`) |
 |---|---|
-| The library crates (`kit-core`, `kit-rpc`, `kit-client`, `kit-sync`, `kit-attest`, `kit-keystore`, `kit-git-bridge`, `kit-serve`, `kit-transport-{file,memory,s3,ssh,connect}`) plus `kit-storage` (so `cargo install kit-storage` works) | `kit-sign-file`, `kit-test-util`, `kit-formal-conformance`, `fuzz`, `benches`. |
+| The library crates (`kit-core`, `kit-rpc`, `kit-client`, `kit-sync`, `kit-attest`, `kit-keystore`, `kit-git-bridge`, `kit-serve`, `kit-transport-{file,memory,s3,ssh,connect}`) plus `kit-cli` (so `cargo install kit-cli` works) | `kit-sign-file`, `kit-test-util`, `kit-formal-conformance`, `fuzz`, `benches`. |
 
 The published crates depend only on each other, forming a closed,
 dependency-ordered set; `cargo publish --workspace` computes that order and
@@ -237,13 +237,13 @@ skips any `publish = false` member.
 
 Notes on the published set:
 
-- **`kit-storage`** &mdash; published so `cargo install kit-storage` installs the `kit`
+- **`kit-cli`** &mdash; published so `cargo install kit-cli` installs the `kit`
   binary; it also ships via the signed GitHub Release archives and `cargo
   install --git`. Its library surface is unstable CLI internals, deliberately
   **not** a public API &mdash; kept out of the pre-publish semver gate. Depend on the `kit-*`
-  library crates, not on `kit_storage::…`.
+  library crates, not on `kit_cli::…`.
 - **The crates.io `kit` name** belongs to an unrelated project; the CLI is
-  published as **`kit-storage`**. Do not run `cargo install kit`.
+  published as **`kit-cli`**. Do not run `cargo install kit`.
 
 ### Token
 
@@ -280,7 +280,7 @@ release signature cannot be reused on any other artifact. The installer
 ### Artifacts attached to every release
 
 For each of the four targets, release archives build the production
-`kit-storage` target for that platform. The CLI enables the matching keystore
+`kit-cli` target for that platform. The CLI enables the matching keystore
 software-protector feature so `software` keys are encrypted at rest on supported
 targets without changing the lean default feature set of the `kit-keystore`
 library crate.
@@ -434,7 +434,7 @@ a small, auditable set of inputs. This section is the contract.
   are off by default, platform-gated, and fail closed
   when the required service or device is unavailable. The Linux Secret Service
   feature selects the pure-Rust crypto runtime, not OpenSSL. Production
-  `kit-storage` builds enable the target-appropriate software protector feature so
+  `kit-cli` builds enable the target-appropriate software protector feature so
   `software:<label>` stores encrypted records by default, while the
   `kit-keystore` library keeps an empty default feature set.
 - **Build inputs:** the Rust toolchain (pinned in `rust-toolchain.toml`), the
@@ -541,12 +541,12 @@ byte-identical binary to the one published on GitHub Releases.
 git clone --depth 1 --branch vX.Y.Z https://github.com/officialunofficial/kit.git
 cd kit/rust
 # 2. rustup picks up rust-toolchain.toml on first `cargo` invocation.
-# 3. Build for your target with release.yml's command (`-p kit-storage`
+# 3. Build for your target with release.yml's command (`-p kit-cli`
 #    selects only the CLI; a bare `--bin kit` unifies other members'
 #    features and differs).
 export RUSTFLAGS="-C codegen-units=1 -C strip=symbols"
 TARGET=x86_64-unknown-linux-gnu
-cargo build --release --locked --target "$TARGET" -p kit-storage --bin kit
+cargo build --release --locked --target "$TARGET" -p kit-cli --bin kit
 # 4. Hash the binary.
 shasum -a 256 "target/$TARGET/release/kit"
 # 5. Compare against the SHA256SUMS inside each release archive.

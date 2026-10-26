@@ -9,16 +9,16 @@ length-prefixed framing.
 `kit-rpc` owns the schemas kit uses to talk to processes outside its own
 address space:
 
-- **External signers** (`signer.proto`) &mdash; `kit-storage` ↔ a subprocess signer
+- **External signers** (`signer.proto`) &mdash; `kit-cli` ↔ a subprocess signer
   (the `kit-sign-file` signer and any signer that follows the spec). See
   `docs/specs/SPEC-EXTERNAL-SIGNER.md`.
-- **SSH transport** (`ssh.proto`) &mdash; `kit-storage` ↔ a remote `kit serve` over
+- **SSH transport** (`ssh.proto`) &mdash; `kit-cli` ↔ a remote `kit serve` over
   an `ssh(1)` child process. See `docs/specs/SPEC-TRANSPORT.md`.
 - **Signature verification** (`verify.proto`) &mdash; the `VerifyRequest`/
   `VerifyResponse` contract `kit clone`/`pull`/`fetch` check every
   newly-fetched commit/remix/tag against. Message-only today
-  (no bound RPC method): `kit-storage`'s local dispatch
-  (`rust/crates/kit-storage/src/remote_dispatch/packmap.rs`) calls the Rust
+  (no bound RPC method): `kit-cli`'s local dispatch
+  (`rust/crates/kit-cli/src/remote_dispatch/packmap.rs`) calls the Rust
   implementation directly (`kit_core::sign::{verify_commit,verify_remix,verify_tag}`);
   the schema is published so a future ConnectRPC-based transport
   can bind the identical check to a service method instead of

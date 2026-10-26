@@ -75,7 +75,7 @@ ignore = [
     # They reach us only through the optional
     # `backend-linux-secret-service` keystore feature:
     #
-    #   kit-storage / kit-fuzz (all-features) -> kit-keystore
+    #   kit-cli / kit-fuzz (all-features) -> kit-keystore
     #     -> zbus-secret-service-keyring-store 1.0.1
     #     -> secret-service 5.2.0 + zbus 5.19.0
     #     -> zbus_names / zbus_macros -> zvariant -> zvariant_derive

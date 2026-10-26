@@ -93,7 +93,7 @@ mk_push kit-ci-main --build-config=cloudbuild/ci.yaml
 
 # Third-party notices and the release artifact check. They run only when an
 # input that can change the result changes.
-SUPPLY_FILES='rust/Cargo.lock','rust/Cargo.toml','rust/crates/**/Cargo.toml','rust/crates/kit-storage/**','rust/about.toml','rust/about.hbs','rust/rust-toolchain.toml','scripts/check-release-artifact-features.sh','scripts/release/**','.github/workflows/release.yml','cloudbuild/supply.yaml'
+SUPPLY_FILES='rust/Cargo.lock','rust/Cargo.toml','rust/crates/**/Cargo.toml','rust/crates/kit-cli/**','rust/about.toml','rust/about.hbs','rust/rust-toolchain.toml','scripts/check-release-artifact-features.sh','scripts/release/**','.github/workflows/release.yml','cloudbuild/supply.yaml'
 mk_pr   kit-supply-pr   --build-config=cloudbuild/supply.yaml \
         --comment-control="$COL" --included-files="$SUPPLY_FILES"
 mk_push kit-supply-main --build-config=cloudbuild/supply.yaml \

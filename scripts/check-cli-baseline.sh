@@ -3,13 +3,13 @@
 #
 # The server-free CLI check (docs/INVARIANTS.md, "The
 # default `kit` CLI is server-free"). For the DEFAULT features of
-# `kit-storage`, on every target, the normal dependency graph must contain:
+# `kit-cli`, on every target, the normal dependency graph must contain:
 #
 #   - no `axum`, `rusqlite` or `libsqlite3-sys`;
 #   - no hyper `server` feature, no hyper-util `server*` feature, and no
 #     connectrpc `server` or `axum` feature.
 #
-# `kit serve` (rust/crates/kit-storage/src/commands/serve/) and its engine
+# `kit serve` (rust/crates/kit-cli/src/commands/serve/) and its engine
 # `kit-serve` build no async runtime. The `kit-serve` graph must contain
 # no `tokio` or `futures*` package, and the `serve` code must not name tokio.
 #
@@ -29,12 +29,12 @@ err() {
   fail=1
 }
 
-tree=$(cd rust && cargo tree --locked -p kit-storage -e normal --target all --prefix none)
-features=$(cd rust && cargo tree --locked -p kit-storage -e normal,features --target all --prefix none)
+tree=$(cd rust && cargo tree --locked -p kit-cli -e normal --target all --prefix none)
+features=$(cd rust && cargo tree --locked -p kit-cli -e normal,features --target all --prefix none)
 
 for pkg in axum rusqlite libsqlite3-sys; do
   if printf '%s\n' "$tree" | grep -q "^$pkg "; then
-    err "the default kit-storage graph contains $pkg"
+    err "the default kit-cli graph contains $pkg"
   fi
 done
 
@@ -46,7 +46,7 @@ banned_features=(
 )
 for f in "${banned_features[@]}"; do
   if printf '%s\n' "$features" | grep -qF "$f"; then
-    err "the default kit-storage graph enables $(printf '%s\n' "$features" | grep -F "$f" | sort -u | tr '\n' ' ')"
+    err "the default kit-cli graph enables $(printf '%s\n' "$features" | grep -F "$f" | sort -u | tr '\n' ' ')"
   fi
 done
 
@@ -55,8 +55,8 @@ if printf '%s\n' "$serve_tree" | grep -qE '^(tokio|futures[a-z-]*) '; then
   err "the kit-serve graph contains an async runtime: $(printf '%s\n' "$serve_tree" | grep -E '^(tokio|futures[a-z-]*) ' | sort -u | tr '\n' ' ')"
 fi
 
-if grep -rn 'tokio' rust/crates/kit-storage/src/commands/serve; then
-  err "\`kit serve\` (rust/crates/kit-storage/src/commands/serve/) names tokio; it must build no async runtime"
+if grep -rn 'tokio' rust/crates/kit-cli/src/commands/serve; then
+  err "\`kit serve\` (rust/crates/kit-cli/src/commands/serve/) names tokio; it must build no async runtime"
 fi
 
 if [ "$fail" -ne 0 ]; then
