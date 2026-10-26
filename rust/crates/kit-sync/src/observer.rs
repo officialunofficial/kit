@@ -1,8 +1,11 @@
-//! Progress, warnings and cancellation, without printing.
+//! Progress and warnings, without printing.
 //!
 //! The library never writes to stdout or stderr. Everything a command line
-//! would print is delivered to a [`SyncObserver`] as a typed
-//! [`SyncEvent`]; an embedder that wants silence passes [`NoopObserver`].
+//! would print is delivered to an [`Observer`] as a typed [`SyncEvent`]. The
+//! observer also cancels a sync at its checkpoints. An embedder that wants
+//! silence passes [`NoopObserver`].
+
+pub use kit_core::observer::{NoopObserver, Observer};
 
 use std::path::PathBuf;
 
@@ -46,23 +49,3 @@ pub enum SyncEvent {
     /// mutation is not coordinated with it.
     RepositoryServed { worktree_root: PathBuf },
 }
-
-/// Receives [`SyncEvent`]s and can cancel a sync at its checkpoints.
-pub trait SyncObserver {
-    /// Called synchronously, on the calling thread, as events happen. Some
-    /// events fire while the repository lock is held, so keep this cheap.
-    fn event(&self, _event: &SyncEvent) {}
-
-    /// Polled at every checkpoint between network or disk steps. Returning
-    /// `true` makes the call fail with
-    /// [`SyncError::Interrupted`](crate::SyncError::Interrupted).
-    fn cancelled(&self) -> bool {
-        false
-    }
-}
-
-/// An observer that ignores every event and never cancels.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoopObserver;
-
-impl SyncObserver for NoopObserver {}

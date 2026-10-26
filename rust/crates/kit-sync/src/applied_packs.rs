@@ -76,7 +76,7 @@ use kit_core::protocol::PackKey;
 use tempfile::NamedTempFile;
 
 use crate::error::SyncError;
-use crate::observer::{SyncEvent, SyncObserver};
+use crate::observer::{Observer, SyncEvent};
 
 /// Longest applied-pack record that kit reads (64 MiB). The record is a
 /// cache. A longer file is an error, and the fetch path then starts from
@@ -126,7 +126,11 @@ impl AppliedPacks {
     /// be read. On any load error this warns and falls back to an empty
     /// in-memory record (every pack re-downloads, always correct); persisting
     /// is still attempted best-effort through the normal path.
-    pub fn load_or_empty(layout: &RepoLayout, remote: &str, observer: &dyn SyncObserver) -> Self {
+    pub fn load_or_empty(
+        layout: &RepoLayout,
+        remote: &str,
+        observer: &dyn Observer<SyncEvent>,
+    ) -> Self {
         Self::load(layout, remote).unwrap_or_else(|e| {
             observer.event(&SyncEvent::AppliedPacksUnreadable {
                 remote: remote.to_owned(),

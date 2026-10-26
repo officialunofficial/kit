@@ -166,7 +166,7 @@ admission helpers, signing, and extra certificate trust stay caller-owned.
 ### Observing a sync
 
 Warnings and progress that a command line would print arrive as
-`SyncEvent`s on a `SyncObserver` (`ObjectsUnpacked`, `BranchSkippedStale`,
+`SyncEvent`s on an `Observer` (`ObjectsUnpacked`, `BranchSkippedStale`,
 `AppliedPacksStale`, `RepositoryServed`, ...). The same trait is polled for
 cancellation (`cancelled()`), which makes the call fail with
 `SyncError::Interrupted`. `NoopObserver` ignores everything.

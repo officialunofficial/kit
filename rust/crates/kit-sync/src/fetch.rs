@@ -21,7 +21,7 @@ use std::path::Path;
 use crate::SyncOptions;
 use crate::error::SyncError;
 use crate::lock::acquire_worktree_lock;
-use crate::observer::{SyncEvent, SyncObserver};
+use crate::observer::{Observer, SyncEvent};
 use crate::packmap::{
     MAX_FETCH_PACKS, MAX_PACK_CHAIN_DEPTH, flatten_oldest_first, packmap_ref, resolve_pack_chain,
     walk_pack_chain_until,
@@ -74,7 +74,7 @@ pub(crate) struct FetchedChain {
 /// checkpoints leave the full walk unchanged.
 pub(crate) fn resolve_and_download_chain(
     source: &dyn RemoteSource,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
     branch: &str,
     head_key: Hash,
     applied: &AppliedPacks,
@@ -153,7 +153,7 @@ pub(crate) struct Applied {
 pub(crate) fn apply_fetched_chain(
     store: &ObjectStore,
     source: &dyn RemoteSource,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
     remote: &str,
     branch: &str,
     fetched: FetchedChain,
@@ -291,7 +291,7 @@ pub(crate) fn fetch_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
     source: &dyn RemoteSource,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
     remote: &str,
     options: &SyncOptions,
 ) -> Result<FetchReport, SyncError> {
@@ -321,7 +321,7 @@ fn fetch_objects_inner(
     store: &ObjectStore,
     layout: &RepoLayout,
     source: &dyn RemoteSource,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
     remote: &str,
     options: &SyncOptions,
     applied: &mut AppliedPacks,

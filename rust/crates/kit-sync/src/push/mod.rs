@@ -1,6 +1,6 @@
 //! Native repository push: bounded packs and conditioned ref publication.
 use crate::packmap::packmap_ref;
-use crate::{RemoteSource, SourceError, SyncError, SyncEvent, SyncObserver};
+use crate::{Observer, RemoteSource, SourceError, SyncError, SyncEvent};
 use kit_core::hash::{HASH_LEN, Hash};
 use kit_core::pack::{self, PackWriter, PreparedDelta, PreparedRaw};
 use kit_core::protocol::{PackKey, UploadLimits};
@@ -24,7 +24,7 @@ struct PreparedPlan {
 
 struct PushContext<'a> {
     source: &'a dyn RemoteSource,
-    observer: &'a dyn SyncObserver,
+    observer: &'a dyn Observer<SyncEvent>,
 }
 impl<'a> std::ops::Deref for PushContext<'a> {
     type Target = dyn RemoteSource + 'a;
@@ -793,7 +793,7 @@ fn build_and_upload_packs(
     plan: transfer::PackPlan,
     payload_cap: u64,
     limits: UploadLimits,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
 ) -> Result<Vec<Hash>, PushError> {
     let mut pack_keys = Vec::new();
     let mut ticketed_count = 0;
@@ -883,7 +883,7 @@ fn build_and_upload_packs(
 /// Honest progress: one real object just got staged into the outgoing
 /// pack. Never git's fabricated Enumerating/Counting/Compressing lines — see
 /// `SyncEvent`. A dry seal stages nothing to send and reports nothing.
-fn report_packed(sink: PackSink<'_>, observer: &dyn SyncObserver) {
+fn report_packed(sink: PackSink<'_>, observer: &dyn Observer<SyncEvent>) {
     if matches!(sink, PackSink::Upload { .. }) {
         observer.event(&SyncEvent::ObjectsPacked { count: 1 });
     }
@@ -1121,7 +1121,7 @@ fn seal_pack(
     pack_keys: &mut Vec<Hash>,
     ticketed_count: &mut usize,
     limits: UploadLimits,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
 ) -> Result<(), PushError> {
     if observer.cancelled() {
         return Err(PushError::Sync(SyncError::Interrupted));

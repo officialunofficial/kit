@@ -13,7 +13,7 @@ use crate::SyncOptions;
 use crate::error::SyncError;
 use crate::fetch::{FetchReport, fetch_objects};
 use crate::lock::acquire_worktree_lock;
-use crate::observer::SyncObserver;
+use crate::observer::{Observer, SyncEvent};
 use crate::source::RemoteSource;
 use crate::worktree::{
     ensure_restore_safe, list_remote_refs_parallel, restore_worktree_and_index,
@@ -81,7 +81,7 @@ pub fn pull(
     source: &dyn RemoteSource,
     remote: &str,
     options: &SyncOptions,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
 ) -> Result<PullReport, SyncError> {
     let layout = kit_core::layout::discover(dir)?;
     let store = open_store(&layout, options)?;
@@ -173,7 +173,7 @@ pub fn fetch(
     source: &dyn RemoteSource,
     remote: &str,
     options: &SyncOptions,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
 ) -> Result<FetchReport, SyncError> {
     let layout = kit_core::layout::discover(dir)?;
     // No outer lock: `fetch_objects` takes the repo lock itself, narrowly and

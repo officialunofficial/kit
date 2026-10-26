@@ -206,12 +206,19 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
         return exit::OK;
     }
 
+    let progress = crate::progress::start(
+        "Writing objects",
+        None,
+        crate::progress::should_report(opts.quiet),
+        opts.quiet,
+    );
     let remote = match remote_dispatch::open_trusted_for_push(
         &resolved.endpoint,
         &resolved.name,
         resolved.repo_chosen,
         cfg,
         layout,
+        progress.terminal(),
     ) {
         Ok(remote) => remote,
         Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
@@ -222,27 +229,25 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
     let tx = remote.tx;
 
     let push_outcome = {
-        // Scoped tightly around the transfer call so the progress
-        // guard's final `, done.` line lands before the git-shaped
-        // `To <url>` / ref-update summary printed below, not after it.
-        let _progress = crate::progress::start(
-            "Writing objects",
-            None,
-            crate::progress::should_report(opts.quiet),
-            opts.quiet,
-        );
-        tx.with_source(|source| {
-            remote_dispatch::push_branch_tracked_source(
-                layout.worktree_root(),
-                source,
-                &resolved.name,
-                &branch,
-                &remote_branch,
-                lease,
-                remote.authority.as_deref(),
-            )
-        })
-        .and_then(|result| result)
+        let outcome = tx
+            .with_source(|source| {
+                remote_dispatch::push_branch_tracked_source(
+                    layout.worktree_root(),
+                    source,
+                    &resolved.name,
+                    &branch,
+                    &remote_branch,
+                    lease,
+                    remote.authority.as_deref(),
+                    progress.terminal(),
+                )
+            })
+            .and_then(|result| result);
+        // The progress guard's final `, done.` line lands before the
+        // git-shaped `To <url>` / ref-update summary printed below, not
+        // after it.
+        drop(progress);
+        outcome
     };
     match push_outcome.map_err(remote_dispatch::DispatchError::into_published_prefix) {
         Ok((new_tip, steps)) => {
@@ -372,12 +377,19 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
         }
         return exit::OK;
     }
+    let progress = crate::progress::start(
+        "Writing objects",
+        None,
+        crate::progress::should_report(opts.quiet),
+        opts.quiet,
+    );
     let remote = match remote_dispatch::open_trusted_for_push(
         &resolved.endpoint,
         &resolved.name,
         resolved.repo_chosen,
         cfg,
         layout,
+        progress.terminal(),
     ) {
         Ok(remote) => remote,
         Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
@@ -387,22 +399,20 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
     };
     let tx = remote.tx;
     let push_outcome = {
-        let _progress = crate::progress::start(
-            "Writing objects",
-            None,
-            crate::progress::should_report(opts.quiet),
-            opts.quiet,
-        );
-        tx.with_source(|source| {
-            remote_dispatch::push_all_with_source(
-                layout.worktree_root(),
-                source,
-                Some(&resolved.name),
-                opts.force,
-                remote.authority.as_deref(),
-            )
-        })
-        .and_then(|result| result)
+        let outcome = tx
+            .with_source(|source| {
+                remote_dispatch::push_all_with_source(
+                    layout.worktree_root(),
+                    source,
+                    Some(&resolved.name),
+                    opts.force,
+                    remote.authority.as_deref(),
+                    progress.terminal(),
+                )
+            })
+            .and_then(|result| result);
+        drop(progress);
+        outcome
     };
     match push_outcome.map_err(remote_dispatch::DispatchError::into_published_prefix) {
         Ok(pushed) => {

@@ -1,13 +1,8 @@
 //! Honest transfer-progress reporting for `clone`/`push`/`pull`/`fetch`.
 //!
-//! `kit clone`/`push`/`pull`/`fetch` previously printed only a start
-//! banner and a final summary — the network transfer itself was silent.
-//! This module adds a lightweight, thread-local progress sink that the
-//! transfer call chain (`push_branch_with_depth` in
-//! `remote_dispatch::mod`, `unpack_downloaded_packs` in
-//! `remote_dispatch::packmap`) reports real, already-happened work to:
-//! objects staged into the outgoing pack, bytes handed to the transport,
-//! and objects unpacked from a downloaded pack.
+//! `kit clone`/`push`/`pull`/`fetch` print real, already-happened work while
+//! a transfer runs: objects staged into the outgoing pack, bytes handed to
+//! the transport, and objects unpacked from a downloaded pack.
 //!
 //! It deliberately never reports git's fabricated
 //! `Enumerating/Counting/Compressing objects` or `Total N (delta D)`
@@ -15,22 +10,16 @@
 //! cross-branch delta graph, so those numbers would be invented (see
 //! `docs/CLI.md`).
 //!
-//! ## Threading pattern
+//! ## The terminal observer
 //!
-//! Rather than adding a progress parameter to every function in the
-//! `push_all_with` → `push_branch_with_depth` → `pull_all` →
-//! `fetch_objects` call chain (touching dozens of existing call sites,
-//! including many integration tests that don't care about progress at
-//! all), this mirrors the pattern already used for interrupt handling:
-//! `crate::signal::is_shutdown()` is a global checkpoint polled inside
-//! the same loops. Here, [`report`] is the equivalent checkpoint —  a
-//! thread-local sink installed by [`start`] and torn down by the
-//! returned [`Guard`]'s `Drop`. When no sink is installed (the common
-//! case: every test that doesn't call [`start`], and any non-interactive
-//! run), `report` is a cheap thread-local check that does nothing.
-//! Concurrent callers (see `fetch_pull_lock_scope.rs`, which fetches
-//! from multiple threads) are unaffected: the sink is thread-local, so
-//! each thread has its own (absent, by default) reporter.
+//! [`Terminal`] is the CLI's [`Observer`] for the sync engine. The sync
+//! engine delivers each [`SyncEvent`] to it. It prints the progress line, the
+//! step lines and the warnings. It also receives the Connect transport's
+//! verification and upload events, and it cancels on the process-wide
+//! shutdown flag. [`start`] makes a terminal for one command. The returned
+//! [`Guard`] writes the last progress line when it drops. [`Terminal::detached`]
+//! makes a terminal that shows no progress. It still prints warnings. Callers
+//! that do not show progress, such as the integration tests, use it.
 //!
 //! ## Interactivity gating
 //!
@@ -44,14 +33,15 @@
 //! line because the wait can last for minutes.
 
 use kit_core::hash::{Hash, to_hex};
+use kit_sync::{Observer, SyncEvent};
 use kit_transport_connect::{PendingEvent, UploadEvent};
-use std::cell::RefCell;
 use std::io::{IsTerminal, Write};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// One real, already-happened unit of transfer work. Never a projection
 /// or estimate.
 #[derive(Debug, Clone, Copy)]
-pub enum Event {
+enum Event {
     /// `count` objects were appended to the outgoing pack(s) (push side,
     /// `build_and_upload_packs`'s `plan.raw` / `plan.deltas` loops).
     ObjectsPacked(usize),
@@ -165,14 +155,6 @@ impl Reporter {
     }
 }
 
-thread_local! {
-    /// `Some(quiet)` while a [`Guard`] is installed on this thread.
-    static QUIET: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-    static REPORTER: RefCell<Option<Reporter>> = const { RefCell::new(None) };
-    static PENDING: RefCell<Option<PendingReporter>> = const { RefCell::new(None) };
-    static UPLOAD: RefCell<Option<UploadReporter>> = const { RefCell::new(None) };
-}
-
 struct UploadReporter {
     quiet: bool,
     interactive: bool,
@@ -229,19 +211,6 @@ impl UploadReporter {
     }
 }
 
-/// Render a multipart upload event on the current command's stderr sink.
-pub fn upload_event(event: UploadEvent) {
-    UPLOAD.with(|slot| {
-        if let Some(reporter) = slot.borrow_mut().as_mut()
-            && let Some(line) = reporter.render(event)
-        {
-            let mut stderr = std::io::stderr().lock();
-            let _ = stderr.write_all(line.as_bytes());
-            let _ = stderr.flush();
-        }
-    });
-}
-
 struct PendingReporter {
     quiet: bool,
     interactive: bool,
@@ -292,120 +261,6 @@ impl PendingReporter {
     }
 }
 
-/// Report verification polling on the same caller thread as the transfer.
-pub fn pending_event(event: PendingEvent) {
-    PENDING.with(|slot| {
-        if let Some(reporter) = slot.borrow_mut().as_mut()
-            && let Some(line) = reporter.render(event)
-        {
-            let mut stderr = std::io::stderr().lock();
-            let _ = stderr.write_all(line.as_bytes());
-            let _ = stderr.flush();
-        }
-    });
-}
-
-/// End the current self-overwriting progress line before helper UX appears.
-pub fn suspend_for_admission() {
-    REPORTER.with(|slot| {
-        if slot
-            .borrow()
-            .as_ref()
-            .is_some_and(|reporter| reporter.emitted)
-        {
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(stderr);
-        }
-    });
-}
-
-/// RAII handle returned by [`start`]. Dropping it flushes a final
-/// progress line (if anything was reported) and uninstalls the
-/// thread-local sink, so a command can simply hold the guard for the
-/// duration of its transfer call and let scope-exit (including an early
-/// `return` on error) clean up.
-#[derive(Debug)]
-#[must_use = "dropping this immediately ends progress reporting"]
-pub struct Guard {
-    _private: (),
-}
-
-impl Drop for Guard {
-    fn drop(&mut self) {
-        QUIET.with(|quiet| quiet.set(None));
-        PENDING.with(|r| {
-            r.borrow_mut().take();
-        });
-        UPLOAD.with(|r| {
-            r.borrow_mut().take();
-        });
-        REPORTER.with(|r| {
-            if let Some(mut rep) = r.borrow_mut().take() {
-                rep.finish();
-            }
-        });
-    }
-}
-
-/// Install a thread-local progress reporter for the duration of the
-/// returned [`Guard`]. `enabled = false` installs no reporter, so
-/// [`report`] stays a cheap no-op — used when stderr isn't interactive
-/// or `--quiet` was passed (see [`should_report`]).
-///
-/// `total`, when known ahead of time (the push side plans its pack
-/// before building it), renders as `done/total`; `None` (the fetch/pull
-/// side, where the object count isn't known until each pack is
-/// downloaded) renders as a running count only — never a fabricated
-/// total.
-pub fn start(label: &'static str, total: Option<usize>, enabled: bool, quiet: bool) -> Guard {
-    let progress_mode = std::env::var("KIT_PROGRESS").ok();
-    QUIET.with(|state| state.set(Some(quiet || progress_mode.as_deref() == Some("never"))));
-    PENDING.with(|r| {
-        *r.borrow_mut() = Some(PendingReporter::new(
-            quiet,
-            progress_mode.as_deref(),
-            std::io::stderr().is_terminal(),
-        ));
-    });
-    UPLOAD.with(|r| {
-        *r.borrow_mut() = Some(UploadReporter {
-            quiet: quiet || progress_mode.as_deref() == Some("never"),
-            interactive: progress_mode.as_deref() == Some("always")
-                || std::io::stderr().is_terminal(),
-            active: false,
-        });
-    });
-    REPORTER.with(|r| {
-        *r.borrow_mut() = if enabled {
-            Some(Reporter::new(label, total))
-        } else {
-            None
-        };
-    });
-    Guard { _private: () }
-}
-
-/// Report one real unit of already-completed transfer work to the
-/// current thread's installed reporter, if any. A no-op — a single
-/// thread-local check — when no [`Guard`] is active on this thread,
-/// which is the default for every caller that doesn't opt in (including
-/// every existing test that drives `push_branch_with_depth` /
-/// `push_all` / `pull_all` / `fetch_all` directly).
-pub fn report(event: Event) {
-    REPORTER.with(|r| {
-        // `try_borrow_mut` rather than `borrow_mut`: `report` is called
-        // from deep inside the transfer call chain and must never panic
-        // on a re-entrant borrow; silently dropping a progress tick is
-        // harmless (the running total is cosmetic), unlike the transfer
-        // itself.
-        if let Ok(mut slot) = r.try_borrow_mut()
-            && let Some(rep) = slot.as_mut()
-        {
-            rep.record(event);
-        }
-    });
-}
-
 /// The line a piped, non-quiet run gets when one advance of a split push has
 /// landed.
 fn step_line(index: usize, total: usize, head: &Hash) -> String {
@@ -428,19 +283,6 @@ fn step_message(
     (!quiet && !interactive && total >= 2).then(|| step_line(index, total, head))
 }
 
-/// Report that advance `index` of `total` of a split push has landed. Outside
-/// a [`Guard`] (library callers, tests) nothing is printed.
-pub fn step_committed(index: usize, total: usize, head: &Hash) {
-    let Some(quiet) = QUIET.with(std::cell::Cell::get) else {
-        return;
-    };
-    let interactive = REPORTER.with(|r| r.try_borrow().is_ok_and(|slot| slot.is_some()));
-    if let Some(line) = step_message(quiet, interactive, index, total, head) {
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "{line}");
-    }
-}
-
 /// Whether progress should be shown on stderr: not explicitly silenced
 /// (`--quiet` / `-q`), and either `KIT_PROGRESS` forces a decision or
 /// stderr is a tty. Mirrors `term::use_color_stderr`'s
@@ -461,18 +303,262 @@ pub fn should_report(quiet: bool) -> bool {
     }
 }
 
+/// What a [`Terminal`] shows. `quiet` is `None` for a detached terminal.
+struct State {
+    quiet: Option<bool>,
+    reporter: Option<Reporter>,
+    pending: Option<PendingReporter>,
+    upload: Option<UploadReporter>,
+}
+
+/// The CLI's observer: it prints what a command shows while it transfers
+/// objects. See the module documentation.
+pub struct Terminal {
+    state: Mutex<State>,
+}
+
+impl std::fmt::Debug for Terminal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Terminal").finish_non_exhaustive()
+    }
+}
+
+/// Owns the terminal of one command. Dropping it writes the final progress
+/// line, if anything was reported, and stops all progress output, so a
+/// command holds it for the length of its transfer and lets scope exit
+/// (including an early `return` on error) clean up.
+#[derive(Debug)]
+#[must_use = "dropping this immediately ends progress reporting"]
+pub struct Guard {
+    terminal: Arc<Terminal>,
+}
+
+impl Guard {
+    /// The terminal to hand to the code that opens the remote and transfers.
+    #[must_use]
+    pub fn terminal(&self) -> &Arc<Terminal> {
+        &self.terminal
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.terminal.finish();
+    }
+}
+
+/// Make the terminal for one command. `enabled = false` shows no transfer
+/// progress — used when stderr isn't interactive or `--quiet` was passed
+/// (see [`should_report`]).
+///
+/// `total`, when known ahead of time, renders as `done/total`; `None` (the
+/// side where the object count isn't known until each pack is downloaded)
+/// renders as a running count only — never a fabricated total.
+pub fn start(label: &'static str, total: Option<usize>, enabled: bool, quiet: bool) -> Guard {
+    let progress_mode = std::env::var("KIT_PROGRESS").ok();
+    let terminal = Terminal {
+        state: Mutex::new(State {
+            quiet: Some(quiet || progress_mode.as_deref() == Some("never")),
+            reporter: enabled.then(|| Reporter::new(label, total)),
+            pending: Some(PendingReporter::new(
+                quiet,
+                progress_mode.as_deref(),
+                std::io::stderr().is_terminal(),
+            )),
+            upload: Some(UploadReporter {
+                quiet: quiet || progress_mode.as_deref() == Some("never"),
+                interactive: progress_mode.as_deref() == Some("always")
+                    || std::io::stderr().is_terminal(),
+                active: false,
+            }),
+        }),
+    };
+    Guard {
+        terminal: Arc::new(terminal),
+    }
+}
+
+/// Write `line` to stderr and flush it. A write failure is not worth
+/// failing a transfer for.
+fn write_stderr(line: &str) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(line.as_bytes());
+    let _ = stderr.flush();
+}
+
+impl Terminal {
+    /// A terminal that shows no progress and prints only warnings. Library
+    /// callers and tests that do not show progress use it.
+    #[must_use]
+    pub fn detached() -> Self {
+        Self {
+            state: Mutex::new(State {
+                quiet: None,
+                reporter: None,
+                pending: None,
+                upload: None,
+            }),
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, State> {
+        // A panic while printing leaves the state usable: it only holds
+        // counters.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Stop all progress output, and write the final progress line when
+    /// anything was reported.
+    fn finish(&self) {
+        let reporter = {
+            let mut state = self.state();
+            state.quiet = None;
+            state.pending = None;
+            state.upload = None;
+            state.reporter.take()
+        };
+        if let Some(mut reporter) = reporter {
+            reporter.finish();
+        }
+    }
+
+    /// Report one real unit of already-completed transfer work. Does
+    /// nothing when this terminal shows no progress.
+    fn report(&self, event: Event) {
+        if let Some(reporter) = self.state().reporter.as_mut() {
+            reporter.record(event);
+        }
+    }
+
+    /// Render a multipart upload event on stderr.
+    pub fn upload_event(&self, event: UploadEvent) {
+        let line = self
+            .state()
+            .upload
+            .as_mut()
+            .and_then(|reporter| reporter.render(event));
+        if let Some(line) = line {
+            write_stderr(&line);
+        }
+    }
+
+    /// Render a verification-polling event on stderr.
+    pub fn pending_event(&self, event: PendingEvent) {
+        let line = self
+            .state()
+            .pending
+            .as_mut()
+            .and_then(|reporter| reporter.render(event));
+        if let Some(line) = line {
+            write_stderr(&line);
+        }
+    }
+
+    /// End the current self-overwriting progress line before helper UX
+    /// appears.
+    pub fn suspend_for_admission(&self) {
+        if self
+            .state()
+            .reporter
+            .as_ref()
+            .is_some_and(|reporter| reporter.emitted)
+        {
+            write_stderr("\n");
+        }
+    }
+
+    /// Report that advance `index` of `total` of a split push has landed.
+    /// A detached terminal prints nothing.
+    fn step_committed(&self, index: usize, total: usize, head: &Hash) {
+        let line = {
+            let state = self.state();
+            let Some(quiet) = state.quiet else {
+                return;
+            };
+            step_message(quiet, state.reporter.is_some(), index, total, head)
+        };
+        if let Some(line) = line {
+            write_stderr(&format!("{line}\n"));
+        }
+    }
+}
+
+impl Observer<SyncEvent> for Terminal {
+    fn event(&self, event: &SyncEvent) {
+        match event {
+            SyncEvent::ObjectsPacked { count } => self.report(Event::ObjectsPacked(*count)),
+            SyncEvent::PackUploaded { bytes } => self.report(Event::PackUploaded(*bytes)),
+            SyncEvent::PushStep { index, total } => self.report(Event::Step {
+                index: *index,
+                total: *total,
+            }),
+            SyncEvent::PushStepCommitted { index, total, tip } => {
+                self.step_committed(*index, *total, tip);
+            }
+            SyncEvent::ObjectsUnpacked { count } => self.report(Event::ObjectsUnpacked(*count)),
+            SyncEvent::BranchSkippedStale { branch } if should_report(false) => {
+                eprintln!(
+                    "fetch: skipping branch `{branch}`: listed by an eventual ListRefs but \
+                     no longer present (deleted since the listing)"
+                );
+            }
+            SyncEvent::AppliedPacksUnreadable { remote, error } => {
+                eprintln!(
+                    "warning: could not read applied-packs record for remote '{remote}' ({error}); continuing without redownload-avoidance for this fetch"
+                );
+            }
+            SyncEvent::AppliedPacksStale {
+                remote,
+                branch,
+                cause,
+            } => {
+                eprintln!(
+                    "note: applied-packs record for remote '{remote}' branch '{branch}' looks stale ({cause}); clearing it and re-fetching the full pack chain"
+                );
+            }
+            SyncEvent::AppliedPacksPersistFailed { remote, error } => {
+                eprintln!(
+                    "warning: could not persist applied-packs record for remote '{remote}' ({error}); it will be rebuilt on the next fetch"
+                );
+            }
+            SyncEvent::RepositoryServed { worktree_root } => {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(
+                    stderr,
+                    "warning: {} is currently being served by `kit serve`; concurrent worktree \
+                     mutation and `gc` are not coordinated with it (SPEC-CONCURRENCY §3.1)",
+                    worktree_root.display()
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        crate::signal::is_shutdown()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `report` with no active [`Guard`] must not panic and must not
-    /// touch stderr (there's no reporter to write through) — the
-    /// no-op path every existing push/pull/fetch integration test takes.
+    /// A detached terminal shows nothing: its events change no state and
+    /// it never touches stderr. This is the path every push/pull/fetch
+    /// integration test takes.
     #[test]
-    fn report_without_guard_is_a_silent_no_op() {
-        report(Event::ObjectsPacked(1));
-        report(Event::PackUploaded(128));
-        report(Event::ObjectsUnpacked(3));
+    fn detached_terminal_ignores_progress_events() {
+        let terminal = Terminal::detached();
+        terminal.event(&SyncEvent::ObjectsPacked { count: 1 });
+        terminal.event(&SyncEvent::PackUploaded { bytes: 128 });
+        terminal.event(&SyncEvent::ObjectsUnpacked { count: 3 });
+        terminal.event(&SyncEvent::PushStepCommitted {
+            index: 2,
+            total: 5,
+            tip: [0xab; 32],
+        });
+        assert!(terminal.state().reporter.is_none());
+        assert!(!Observer::<SyncEvent>::cancelled(&Terminal::detached()));
     }
 
     /// A multi-pack push fires `PackUploaded` once per
@@ -489,13 +575,34 @@ mod tests {
         assert_eq!(rep.bytes, 175);
     }
 
-    /// A disabled guard (`enabled: false`) installs no reporter, so
-    /// `report` inside its scope is still the no-op path.
+    /// A disabled start installs no reporter, so events inside its scope
+    /// change nothing.
     #[test]
     fn disabled_guard_installs_no_reporter() {
         let guard = start("Writing objects", Some(4), false, true);
-        report(Event::ObjectsPacked(4));
+        guard
+            .terminal()
+            .event(&SyncEvent::ObjectsPacked { count: 4 });
+        assert!(guard.terminal().state().reporter.is_none());
+    }
+
+    /// An enabled start counts the events it receives, in order, and a
+    /// finished terminal stops counting.
+    #[test]
+    fn enabled_guard_counts_events_until_it_finishes() {
+        let guard = start("Writing objects", Some(40), true, true);
+        let terminal = guard.terminal().clone();
+        terminal.event(&SyncEvent::ObjectsPacked { count: 2 });
+        terminal.event(&SyncEvent::PackUploaded { bytes: 10 });
+        {
+            let state = terminal.state();
+            let reporter = state.reporter.as_ref().unwrap();
+            assert_eq!((reporter.done, reporter.bytes), (2, 10));
+        }
         drop(guard);
+        assert!(terminal.state().reporter.is_none());
+        terminal.event(&SyncEvent::ObjectsPacked { count: 9 });
+        assert!(terminal.state().reporter.is_none());
     }
 
     #[test]

@@ -136,24 +136,33 @@ pub fn run(args: &[String]) -> u8 {
     // so a hostile remote cannot influence this via its own repo config —
     // there isn't one yet.
     let require_signed = !opts.no_verify_signatures && merged.pull_require_signed_or_default();
-    let pull_outcome = match remote_dispatch::open_with_config(url, &merged, &target_layout) {
+    let progress = crate::progress::start(
+        "Unpacking objects",
+        None,
+        crate::progress::should_report(opts.quiet),
+        opts.quiet,
+    );
+    let pull_outcome = match remote_dispatch::open_with_config(
+        url,
+        &merged,
+        &target_layout,
+        progress.terminal(),
+    ) {
         Ok(tx) => {
-            let _progress = crate::progress::start(
-                "Unpacking objects",
-                None,
-                crate::progress::should_report(opts.quiet),
-                opts.quiet,
-            );
-            tx.with_source(|source| {
-                remote_dispatch::pull_all_with_source(
-                    &target,
-                    source,
-                    &origin_name,
-                    opts.branch.as_deref(),
-                    require_signed,
-                )
-            })
-            .and_then(|result| result)
+            let outcome = tx
+                .with_source(|source| {
+                    remote_dispatch::pull_all_with_source(
+                        &target,
+                        source,
+                        &origin_name,
+                        opts.branch.as_deref(),
+                        require_signed,
+                        progress.terminal(),
+                    )
+                })
+                .and_then(|result| result);
+            drop(progress);
+            outcome
         }
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };

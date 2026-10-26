@@ -43,6 +43,7 @@ pub mod hash;
 pub mod history_order;
 pub mod merkle;
 pub mod object;
+pub mod observer;
 pub mod ops;
 pub mod pack;
 pub mod serialize;

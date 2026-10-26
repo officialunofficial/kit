@@ -134,27 +134,37 @@ fn fetch_one(
     // Snapshot the remote-tracking refs so we can report exactly which
     // ones moved (git prints nothing when nothing changed).
     let before = tracking_snapshot(layout, &resolved.name);
-    match remote_dispatch::open_trusted(endpoint, &resolved.name, resolved.repo_chosen, cfg, layout)
-    {
+    let progress = crate::progress::start(
+        "Unpacking objects",
+        None,
+        crate::progress::should_report(quiet),
+        quiet,
+    );
+    match remote_dispatch::open_trusted(
+        endpoint,
+        &resolved.name,
+        resolved.repo_chosen,
+        cfg,
+        layout,
+        progress.terminal(),
+    ) {
         Ok(tx) => {
             let fetch_outcome = {
-                // Scoped tightly so the progress guard's final line
-                // lands before the `From <url>` summary printed below.
-                let _progress = crate::progress::start(
-                    "Unpacking objects",
-                    None,
-                    crate::progress::should_report(quiet),
-                    quiet,
-                );
-                tx.with_source(|source| {
-                    remote_dispatch::fetch_all_with_source(
-                        cwd,
-                        source,
-                        &resolved.name,
-                        require_signed,
-                    )
-                })
-                .and_then(|result| result)
+                let outcome = tx
+                    .with_source(|source| {
+                        remote_dispatch::fetch_all_with_source(
+                            cwd,
+                            source,
+                            &resolved.name,
+                            require_signed,
+                            progress.terminal(),
+                        )
+                    })
+                    .and_then(|result| result);
+                // The progress guard's final line lands before the
+                // `From <url>` summary printed below.
+                drop(progress);
+                outcome
             };
             match fetch_outcome {
                 Ok(_) => {

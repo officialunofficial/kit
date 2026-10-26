@@ -9,7 +9,7 @@ use kit_core::store::{ObjectStore, StoreError};
 
 use crate::SyncOptions;
 use crate::error::SyncError;
-use crate::observer::SyncObserver;
+use crate::observer::{Observer, SyncEvent};
 use crate::pull::{PullReport, pull};
 use crate::source::RemoteSource;
 
@@ -159,7 +159,7 @@ pub fn clone(
     source: &dyn RemoteSource,
     remote: &CloneRemote,
     options: &SyncOptions,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
 ) -> Result<CloneReport, CloneError> {
     let layout = init_clone_dir(dir, remote)?;
     let report = pull(dir, source, &remote.name, options, observer)?;

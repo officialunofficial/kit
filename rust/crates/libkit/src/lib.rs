@@ -25,6 +25,7 @@ pub mod repo;
 
 pub use environment::{CredentialSource, Environment, Identity, Token};
 pub use error::Error;
+pub use kit_core::observer::{NoopObserver, Observer};
 pub use repo::Repo;
 
 pub use kit_attest as attest;

@@ -2072,7 +2072,7 @@ its authenticated operation and body. No result claims eternal replay retention
 or proves
 that an earlier ambiguous attempt never wrote. Native repository push lives in
 `kit-sync::push(dir, source, options)`, which returns `PushReport` or typed
-`PushError` and sends progress through `SyncObserver`. The CLI delegates the
+`PushError` and sends progress through `Observer`. The CLI delegates the
 repository mechanics while retaining configuration, trust gates, grants,
 admission policy, output, and exit codes. Both push drivers use the pure
 `kit-core::transfer::packmap` planner for node bytes, idempotency, and packmap

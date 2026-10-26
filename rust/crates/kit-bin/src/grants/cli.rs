@@ -101,6 +101,7 @@ impl Ctx {
             &self.layered,
             &self.layout,
             sign,
+            &std::sync::Arc::new(crate::progress::Terminal::detached()),
         )
         .map_err(|e| e.to_string())
     }

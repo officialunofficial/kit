@@ -139,29 +139,39 @@ fn pull_one(
     let old_tip = branch
         .as_deref()
         .and_then(|b| kit_core::refs::read_ref(layout, b).ok().flatten());
-    match remote_dispatch::open_trusted(endpoint, &resolved.name, resolved.repo_chosen, cfg, layout)
-    {
+    let progress = crate::progress::start(
+        "Unpacking objects",
+        None,
+        crate::progress::should_report(quiet),
+        quiet,
+    );
+    match remote_dispatch::open_trusted(
+        endpoint,
+        &resolved.name,
+        resolved.repo_chosen,
+        cfg,
+        layout,
+        progress.terminal(),
+    ) {
         Ok(tx) => {
             let pull_outcome = {
-                // Scoped tightly so the progress guard's final line
-                // lands before the `Updating <a>..<b>` / diffstat
-                // summary printed below, not after it.
-                let _progress = crate::progress::start(
-                    "Unpacking objects",
-                    None,
-                    crate::progress::should_report(quiet),
-                    quiet,
-                );
-                tx.with_source(|source| {
-                    remote_dispatch::pull_all_with_source(
-                        cwd,
-                        source,
-                        &resolved.name,
-                        None,
-                        require_signed,
-                    )
-                })
-                .and_then(|result| result)
+                let outcome = tx
+                    .with_source(|source| {
+                        remote_dispatch::pull_all_with_source(
+                            cwd,
+                            source,
+                            &resolved.name,
+                            None,
+                            require_signed,
+                            progress.terminal(),
+                        )
+                    })
+                    .and_then(|result| result);
+                // The progress guard's final line lands before the
+                // `Updating <a>..<b>` / diffstat summary printed below,
+                // not after it.
+                drop(progress);
+                outcome
             };
             match pull_outcome {
                 Ok(_) => {

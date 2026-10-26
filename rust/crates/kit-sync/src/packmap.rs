@@ -12,7 +12,7 @@ use kit_core::refs::PACKMAP_REF_PREFIX;
 use kit_core::transfer;
 
 use crate::error::SyncError;
-use crate::observer::SyncObserver;
+use crate::observer::{Observer, SyncEvent};
 use crate::source::RemoteSource;
 
 /// Ref under which a branch's transfer packlist key is advertised. The value
@@ -80,7 +80,7 @@ pub(crate) fn download_packlist_node(
 /// corruption.
 pub fn walk_pack_chain(
     source: &dyn RemoteSource,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
     branch: &str,
     head_key: Hash,
 ) -> Result<Vec<transfer::PackListNode>, SyncError> {
@@ -91,7 +91,7 @@ pub fn walk_pack_chain(
 /// checkpoint is not an ancestor, reaching the root naturally returns the full chain.
 pub(crate) fn walk_pack_chain_until(
     source: &dyn RemoteSource,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
     branch: &str,
     head_key: Hash,
     stop: Option<Hash>,
@@ -156,7 +156,7 @@ pub fn flatten_oldest_first(mut nodes: Vec<transfer::PackListNode>) -> Vec<Hash>
 /// oldest-first list of pack keys it references.
 pub fn resolve_pack_chain(
     source: &dyn RemoteSource,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
     branch: &str,
     head_key: Hash,
 ) -> Result<Vec<Hash>, SyncError> {

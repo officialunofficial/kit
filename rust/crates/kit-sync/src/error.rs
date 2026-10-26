@@ -15,7 +15,7 @@ use kit_core::transfer::PackListError;
 /// it prints these messages verbatim.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
-    /// The caller's [`SyncObserver::cancelled`](crate::SyncObserver::cancelled)
+    /// The caller's [`Observer::cancelled`](crate::Observer::cancelled)
     /// returned `true` at a checkpoint. The transfer is half-finished, but no
     /// remote-tracking ref was published for a branch that had not completed,
     /// so retrying is safe.

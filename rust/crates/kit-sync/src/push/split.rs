@@ -64,7 +64,7 @@ pub trait StepAuthority: Send + Sync {
 /// The knobs and hooks of one branch push. The default is the production one.
 pub struct PushControl<'a> {
     /// Progress and cancellation checkpoints for this push.
-    pub observer: &'a dyn crate::SyncObserver,
+    pub observer: &'a dyn crate::Observer<crate::SyncEvent>,
     /// Checked before the first upload of a split push. `None` skips it.
     pub authority: Option<&'a dyn StepAuthority>,
     /// Refuse a split into more advances than this.
@@ -248,7 +248,7 @@ fn pack_weight_cap(payload_cap: u64, max_pack_bytes: Option<u64>) -> u64 {
 }
 
 struct Cutter<'a> {
-    observer: &'a dyn crate::SyncObserver,
+    observer: &'a dyn crate::Observer<crate::SyncEvent>,
     store: &'a ObjectStore,
     chain: &'a Chain,
     weights: &'a [u64],

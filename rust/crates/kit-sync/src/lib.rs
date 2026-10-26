@@ -3,7 +3,7 @@
 //! `kit-sync` is the filesystem layer behind the `kit` command line's
 //! `clone`, `fetch`, `pull` and `push`, as a library. Every call returns a typed
 //! report or a typed error and prints nothing: warnings and progress go to a
-//! [`SyncObserver`], and cancellation is polled through it.
+//! [`Observer`] as typed [`SyncEvent`]s, and cancellation is polled through it.
 //!
 //! * No kit config, credentials or environment variables are read by the
 //!   library itself (downloaded packs are staged under the system temporary
@@ -69,7 +69,7 @@ pub use native::{
     DEFAULT_METADATA_TIMEOUT, DEFAULT_TRANSFER_TIMEOUT, NativeClock, NativeHttp, NativeHttpError,
     default_tls_config,
 };
-pub use observer::{NoopObserver, SyncEvent, SyncObserver};
+pub use observer::{NoopObserver, Observer, SyncEvent};
 pub use pull::{PullOutcome, PullReport, fetch, pull};
 pub use source::{ErrorClassifier, RemoteSource, TransportSource};
 pub use source_error::{FailureClass, RemoteDetail, RemoteFailure, SourceError};

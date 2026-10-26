@@ -381,7 +381,7 @@ pub use kit_sync::SERVE_LOCK;
 /// this is a best-effort diagnostic, never a reason to fail the calling
 /// command.
 pub(crate) fn warn_if_served(layout: &RepoLayout) {
-    kit_sync::warn_if_served(layout, &crate::remote_dispatch::CliObserver);
+    kit_sync::warn_if_served(layout, &crate::progress::Terminal::detached());
 }
 
 /// Basename of the common-dir lock serialising linked-worktree

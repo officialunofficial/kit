@@ -13,7 +13,7 @@ use kit_core::store::ObjectStore;
 
 use crate::applied_packs::AppliedPacks;
 use crate::error::SyncError;
-use crate::observer::{SyncEvent, SyncObserver};
+use crate::observer::{Observer, SyncEvent};
 use crate::packmap::{MAX_FETCH_PACKS, MAX_FETCH_STAGED_BYTES, branch_ref_hint};
 use crate::source::RemoteSource;
 use crate::verify::verify_new_object_signatures;
@@ -37,7 +37,7 @@ pub(crate) struct StagedPack {
 /// aggregate limits. No authoritative objects or applied records are changed.
 pub(crate) fn download_pack_chain(
     source: &dyn RemoteSource,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
     branch: &str,
     chain: &[Hash],
     applied: &AppliedPacks,
@@ -56,7 +56,7 @@ pub(crate) fn download_pack_chain(
 
 pub(crate) fn download_pack_chain_with_limits(
     source: &dyn RemoteSource,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
     branch: &str,
     chain: &[Hash],
     applied: &AppliedPacks,
@@ -151,7 +151,7 @@ fn observe_retained_pack_bytes(bytes: usize) {
 /// recorded only after digest, unpack and signature checks succeed.
 pub(crate) fn unpack_downloaded_packs(
     store: &ObjectStore,
-    observer: &dyn SyncObserver,
+    observer: &dyn Observer<SyncEvent>,
     staged: StagedPacks,
     applied: &mut AppliedPacks,
     require_signed: bool,

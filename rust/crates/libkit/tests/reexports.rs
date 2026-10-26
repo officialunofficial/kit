@@ -93,3 +93,8 @@ fn sparse_checkout_item_resolves() {
         "SparseManifest"
     ));
 }
+
+#[test]
+fn observer_types_come_from_the_core_crate() {
+    assert!(names::<libkit::NoopObserver>("kit_core", "NoopObserver"));
+}

@@ -16,7 +16,7 @@ use kit_core::refs::{self, RefWriteCondition};
 use kit_core::sign::{self, KeyPair};
 use kit_core::transfer;
 use kit_sync::{
-    CloneRemote, NoopObserver, PullOutcome, RemoteSource, SyncError, SyncEvent, SyncObserver,
+    CloneRemote, NoopObserver, Observer, PullOutcome, RemoteSource, SyncError, SyncEvent,
     SyncOptions, TransportSource, clone, fetch, init_clone_dir, pull,
 };
 use kit_transport_memory::MemoryTransport;
@@ -158,7 +158,7 @@ struct Recorder {
     polls: Cell<usize>,
 }
 
-impl SyncObserver for Recorder {
+impl Observer<SyncEvent> for Recorder {
     fn event(&self, event: &SyncEvent) {
         self.events.borrow_mut().push(event.clone());
     }
@@ -738,6 +738,55 @@ fn a_failed_worktree_restore_rolls_the_branch_and_head_back() {
     assert_eq!(
         refs::read_head(&layout).unwrap(),
         refs::Head::Branch("dev".to_owned())
+    );
+}
+
+#[test]
+fn a_set_atomic_flag_cancels_a_clone() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    let flag = std::sync::atomic::AtomicBool::new(true);
+
+    let err = clone(
+        &target,
+        &remote.source(),
+        &default_remote("kit+memory://x"),
+        &SyncOptions::default(),
+        &flag,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        kit_sync::CloneError::Sync(SyncError::Interrupted)
+    ));
+}
+
+#[test]
+fn events_reach_the_observer_in_the_order_they_happen() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    let observer = Recorder::default();
+
+    clone(
+        &target,
+        &remote.source(),
+        &default_remote("kit+memory://x"),
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap();
+
+    let events = observer.events.borrow();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SyncEvent::ObjectsUnpacked { .. })),
+        "{events:?}"
     );
 }
 

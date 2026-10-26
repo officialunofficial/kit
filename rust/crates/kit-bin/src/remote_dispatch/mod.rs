@@ -24,6 +24,7 @@ mod packmap;
 
 mod upload_receipts;
 
+use crate::progress::Terminal;
 use kit_core::layout::RepoLayout;
 use std::path::Path;
 use std::sync::Arc;
@@ -36,6 +37,7 @@ use kit_core::protocol::{Transport, TransportError};
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer::PackListError;
+use kit_sync::{Observer, SyncEvent};
 use kit_transport_connect::admission::{AdmissionPolicy, is_reserved};
 use kit_transport_connect::{
     ConnectTransport, PENDING_INTERRUPTED_MESSAGE, remote_identity_from_url,
@@ -360,10 +362,11 @@ pub fn open_trusted(
     repo_chosen: bool,
     cfg: &crate::config::LayeredConfig,
     layout: &RepoLayout,
+    terminal: &Arc<Terminal>,
 ) -> Result<Remote, DispatchError> {
     crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
         .map_err(DispatchError::UntrustedRemote)?;
-    open_with_config_for_remote(endpoint, &cfg.merged, layout, Some(remote_name))
+    open_with_config_for_remote(endpoint, &cfg.merged, layout, Some(remote_name), terminal)
 }
 
 /// A configured native remote. Connect operations use `ClientSource`; other
@@ -426,16 +429,30 @@ pub(crate) fn open_trusted_for_push(
     repo_chosen: bool,
     cfg: &crate::config::LayeredConfig,
     layout: &RepoLayout,
+    terminal: &Arc<Terminal>,
 ) -> Result<PushRemote, DispatchError> {
     crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
         .map_err(DispatchError::UntrustedRemote)?;
     if !is_connect_url(endpoint) {
         return Ok(PushRemote {
-            tx: open_with_config_for_remote(endpoint, &cfg.merged, layout, Some(remote_name))?,
+            tx: open_with_config_for_remote(
+                endpoint,
+                &cfg.merged,
+                layout,
+                Some(remote_name),
+                terminal,
+            )?,
             authority: None,
         });
     }
-    let parts = open_connect_parts(endpoint, &cfg.merged, layout, Some(remote_name), true)?;
+    let parts = open_connect_parts(
+        endpoint,
+        &cfg.merged,
+        layout,
+        Some(remote_name),
+        true,
+        terminal,
+    )?;
     let tx = Arc::new(parts.transport);
     let authority = parts
         .signer_key
@@ -465,8 +482,9 @@ pub(crate) fn open_with_config(
     url: &str,
     cfg: &crate::config::Config,
     layout: &RepoLayout,
+    terminal: &Arc<Terminal>,
 ) -> Result<Remote, DispatchError> {
-    open_with_config_for_remote(url, cfg, layout, None)
+    open_with_config_for_remote(url, cfg, layout, None, terminal)
 }
 
 fn open_with_config_for_remote(
@@ -474,6 +492,7 @@ fn open_with_config_for_remote(
     cfg: &crate::config::Config,
     layout: &RepoLayout,
     remote_name: Option<&str>,
+    terminal: &Arc<Terminal>,
 ) -> Result<Remote, DispatchError> {
     if is_connect_url(url) {
         return Ok(Remote::Connect(Arc::new(open_connect_with_config(
@@ -482,6 +501,7 @@ fn open_with_config_for_remote(
             layout,
             remote_name,
             true,
+            terminal,
         )?)));
     }
     open_with_ssh_options(url, &ssh_options_from_config(cfg), None).map(Remote::Transport)
@@ -507,6 +527,7 @@ pub(crate) fn open_connect_trusted(
     cfg: &crate::config::LayeredConfig,
     layout: &RepoLayout,
     sign: bool,
+    terminal: &Arc<Terminal>,
 ) -> Result<ConnectTransport, DispatchError> {
     crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
         .map_err(DispatchError::UntrustedRemote)?;
@@ -515,7 +536,14 @@ pub(crate) fn open_connect_trusted(
             "`{endpoint}` is not a kit+https:// or kit+http:// remote; grant epochs and repository visibility are served over Connect"
         )));
     }
-    open_connect_with_config(endpoint, &cfg.merged, layout, Some(remote_name), sign)
+    open_connect_with_config(
+        endpoint,
+        &cfg.merged,
+        layout,
+        Some(remote_name),
+        sign,
+        terminal,
+    )
 }
 
 /// Build the Connect transport for `url` from `cfg`: envelope signing (when
@@ -527,8 +555,9 @@ pub(crate) fn open_connect_with_config(
     layout: &RepoLayout,
     remote_name: Option<&str>,
     sign: bool,
+    terminal: &Arc<Terminal>,
 ) -> Result<ConnectTransport, DispatchError> {
-    Ok(open_connect_parts(url, cfg, layout, remote_name, sign)?.transport)
+    Ok(open_connect_parts(url, cfg, layout, remote_name, sign, terminal)?.transport)
 }
 
 /// A Connect transport with what a push needs to check its authority.
@@ -546,6 +575,7 @@ fn open_connect_parts(
     layout: &RepoLayout,
     remote_name: Option<&str>,
     sign: bool,
+    terminal: &Arc<Terminal>,
 ) -> Result<ConnectParts, DispatchError> {
     let envelope_signer = if sign {
         if cfg.transport_auth_envelope() && cfg.trusted_remote_endpoint.trim() != url {
@@ -581,13 +611,19 @@ fn open_connect_parts(
     .with_receipt_store(Arc::new(upload_receipts::FilePartReceiptStore::new(
         layout.upload_parts_dir(),
     )))
-    .with_pending_observer(|event| {
-        crate::progress::pending_event(event);
-        !crate::signal::is_shutdown()
+    .with_pending_observer({
+        let terminal = terminal.clone();
+        move |event| {
+            terminal.pending_event(event);
+            !crate::signal::is_shutdown()
+        }
     })
-    .with_upload_observer(|event| {
-        crate::progress::upload_event(event);
-        !crate::signal::is_shutdown()
+    .with_upload_observer({
+        let terminal = terminal.clone();
+        move |event| {
+            terminal.upload_event(event);
+            !crate::signal::is_shutdown()
+        }
     })
     .with_admission_receipt_observer(|receipt| {
         eprintln!(
@@ -609,6 +645,7 @@ fn open_connect_parts(
     if !cfg.admission_helper.is_empty() && cfg.trusted_remote_endpoint.trim() == url {
         let responder = Arc::new(crate::admission_helper::ExecResponder {
             path: cfg.admission_helper.clone().into(),
+            terminal: terminal.clone(),
         });
         let mut policy = AdmissionPolicy::new(responder);
         if let Some(name) = remote_name
@@ -920,7 +957,14 @@ pub fn push_all_with(
     force: bool,
     authority: Option<&dyn StepAuthority>,
 ) -> Result<Pushed, DispatchError> {
-    push_all_with_source(cwd, &cli_source(tx), remote, force, authority)
+    push_all_with_source(
+        cwd,
+        &cli_source(tx),
+        remote,
+        force,
+        authority,
+        &Terminal::detached(),
+    )
 }
 
 pub(crate) fn push_all_with_source(
@@ -929,9 +973,10 @@ pub(crate) fn push_all_with_source(
     remote: Option<&str>,
     force: bool,
     authority: Option<&dyn StepAuthority>,
+    terminal: &Terminal,
 ) -> Result<Pushed, DispatchError> {
     let (mut options, warning) = push_options(cwd, authority)?;
-    let observer = PushObserver { warning };
+    let observer = PushObserver { terminal, warning };
     options.control.observer = &observer;
     options.remote_name = remote.unwrap_or(kit_sync::DEFAULT_REMOTE_NAME);
     options.target = kit_sync::PushTarget::All { force };
@@ -954,7 +999,6 @@ fn push_options<'a>(
     let (depth, warning) = packmap::configured_depth();
     options.rebaseline_threshold = depth;
     options.control.authority = authority;
-    options.control.observer = &CliObserver;
     Ok((options, warning))
 }
 
@@ -1025,6 +1069,7 @@ pub fn push_branch_tracked(
         remote_branch,
         lease,
         authority,
+        &Terminal::detached(),
     )
 }
 
@@ -1037,9 +1082,10 @@ pub(crate) fn push_branch_tracked_source(
     remote_branch: &str,
     lease: PushLease,
     authority: Option<&dyn StepAuthority>,
+    terminal: &Terminal,
 ) -> Result<(Hash, usize), DispatchError> {
     let (mut options, warning) = push_options(cwd, authority)?;
-    let observer = PushObserver { warning };
+    let observer = PushObserver { terminal, warning };
     options.control.observer = &observer;
     options.remote_name = remote;
     options.target = kit_sync::PushTarget::Branch {
@@ -1158,12 +1204,13 @@ pub fn push_branch_steps(
     control: &PushControl<'_>,
     on_step: &mut dyn FnMut(Hash) -> Result<(), kit_sync::PushError>,
 ) -> Result<usize, DispatchError> {
+    let terminal = Terminal::detached();
     let control = PushControl {
         authority: control.authority,
         max_steps: control.max_steps,
         max_chain: control.max_chain,
         shallow: control.shallow.clone(),
-        observer: &CliObserver,
+        observer: &terminal,
     };
     kit_sync::push::push_branch_steps(
         &cli_source(tx),
@@ -1226,7 +1273,14 @@ pub fn pull_all_with(
     target_branch: Option<&str>,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
-    pull_all_with_source(cwd, &cli_source(tx), remote, target_branch, require_signed)
+    pull_all_with_source(
+        cwd,
+        &cli_source(tx),
+        remote,
+        target_branch,
+        require_signed,
+        &Terminal::detached(),
+    )
 }
 
 pub(crate) fn pull_all_with_source(
@@ -1235,9 +1289,10 @@ pub(crate) fn pull_all_with_source(
     remote: &str,
     target_branch: Option<&str>,
     require_signed: bool,
+    terminal: &Terminal,
 ) -> Result<usize, DispatchError> {
     let options = sync_options(cwd, target_branch, require_signed)?;
-    let report = kit_sync::pull(cwd, source, remote, &options, &CliObserver)?;
+    let report = kit_sync::pull(cwd, source, remote, &options, terminal)?;
     Ok(report.fetch.branches_fetched)
 }
 
@@ -1259,7 +1314,13 @@ pub fn fetch_all_with(
     remote: &str,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
-    fetch_all_with_source(cwd, &cli_source(tx), remote, require_signed)
+    fetch_all_with_source(
+        cwd,
+        &cli_source(tx),
+        remote,
+        require_signed,
+        &Terminal::detached(),
+    )
 }
 
 pub(crate) fn fetch_all_with_source(
@@ -1267,98 +1328,30 @@ pub(crate) fn fetch_all_with_source(
     source: &dyn kit_sync::RemoteSource,
     remote: &str,
     require_signed: bool,
+    terminal: &Terminal,
 ) -> Result<usize, DispatchError> {
     let options = sync_options(cwd, None, require_signed)?;
-    let report = kit_sync::fetch(cwd, source, remote, &options, &CliObserver)?;
+    let report = kit_sync::fetch(cwd, source, remote, &options, terminal)?;
     Ok(report.branches_fetched)
 }
 
-/// The observer the CLI hands the sync engine: it prints exactly what the
-/// pre-extraction code printed, drives the progress reporter, and cancels on
-/// the process-wide shutdown flag.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CliObserver;
-
-struct PushObserver {
+/// The terminal observer, plus the one-time warning that opens a push.
+struct PushObserver<'a> {
+    terminal: &'a Terminal,
     warning: Option<String>,
 }
-impl kit_sync::SyncObserver for PushObserver {
-    fn event(&self, event: &kit_sync::SyncEvent) {
-        if matches!(event, kit_sync::SyncEvent::PushBranchStarted { .. })
+
+impl Observer<SyncEvent> for PushObserver<'_> {
+    fn event(&self, event: &SyncEvent) {
+        if matches!(event, SyncEvent::PushBranchStarted { .. })
             && let Some(warning) = &self.warning
         {
             eprintln!("{warning}");
         }
-        kit_sync::SyncObserver::event(&CliObserver, event);
+        self.terminal.event(event);
     }
     fn cancelled(&self) -> bool {
-        crate::signal::is_shutdown()
-    }
-}
-
-impl kit_sync::SyncObserver for CliObserver {
-    fn event(&self, event: &kit_sync::SyncEvent) {
-        use kit_sync::SyncEvent;
-        match event {
-            SyncEvent::ObjectsPacked { count } => {
-                crate::progress::report(crate::progress::Event::ObjectsPacked(*count));
-            }
-            SyncEvent::PackUploaded { bytes } => {
-                crate::progress::report(crate::progress::Event::PackUploaded(*bytes));
-            }
-            SyncEvent::PushStep { index, total } => {
-                crate::progress::report(crate::progress::Event::Step {
-                    index: *index,
-                    total: *total,
-                });
-            }
-            SyncEvent::PushStepCommitted { index, total, tip } => {
-                crate::progress::step_committed(*index, *total, tip);
-            }
-            SyncEvent::ObjectsUnpacked { count } => {
-                crate::progress::report(crate::progress::Event::ObjectsUnpacked(*count));
-            }
-            SyncEvent::BranchSkippedStale { branch } if crate::progress::should_report(false) => {
-                eprintln!(
-                    "fetch: skipping branch `{branch}`: listed by an eventual ListRefs but \
-                     no longer present (deleted since the listing)"
-                );
-            }
-            SyncEvent::AppliedPacksUnreadable { remote, error } => {
-                eprintln!(
-                    "warning: could not read applied-packs record for remote '{remote}' ({error}); continuing without redownload-avoidance for this fetch"
-                );
-            }
-            SyncEvent::AppliedPacksStale {
-                remote,
-                branch,
-                cause,
-            } => {
-                eprintln!(
-                    "note: applied-packs record for remote '{remote}' branch '{branch}' looks stale ({cause}); clearing it and re-fetching the full pack chain"
-                );
-            }
-            SyncEvent::AppliedPacksPersistFailed { remote, error } => {
-                eprintln!(
-                    "warning: could not persist applied-packs record for remote '{remote}' ({error}); it will be rebuilt on the next fetch"
-                );
-            }
-            SyncEvent::RepositoryServed { worktree_root } => {
-                use std::io::Write as _;
-                let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(
-                    stderr,
-                    "warning: {} is currently being served by `kit serve`; concurrent worktree \
-                     mutation and `gc` are not coordinated with it (SPEC-CONCURRENCY §3.1)",
-                    worktree_root.display()
-                );
-            }
-            _ => {}
-        }
-    }
-
-    fn cancelled(&self) -> bool {
-        crate::signal::is_shutdown()
+        self.terminal.cancelled()
     }
 }
 
@@ -1534,12 +1527,13 @@ pub fn plan_push_steps(
     condition: refs::RefWriteCondition,
     branch: &str,
 ) -> Result<Vec<Hash>, DispatchError> {
+    let terminal = Terminal::detached();
     let control = PushControl {
         authority: control.authority,
         max_steps: control.max_steps,
         max_chain: control.max_chain,
         shallow: control.shallow.clone(),
-        observer: &CliObserver,
+        observer: &terminal,
     };
     kit_sync::push::plan_push_steps(
         store,
@@ -1558,6 +1552,7 @@ pub fn plan_push_steps(
 mod tests {
     use super::ssh_options_from_config;
     use crate::config::Config;
+    use crate::progress::Terminal;
     use kit_core::layout::RepoLayout;
 
     #[test]
@@ -1695,15 +1690,25 @@ mod tests {
                 signing_key: ".kit/keys/missing-signing-key".into(),
                 ..Config::default()
             };
-            let error = super::open_with_config(endpoint, &cfg, &layout)
-                .expect_err("untrusted signing must fail");
+            let error = super::open_with_config(
+                endpoint,
+                &cfg,
+                &layout,
+                &std::sync::Arc::new(Terminal::detached()),
+            )
+            .expect_err("untrusted signing must fail");
             assert!(
                 matches!(error, super::DispatchError::UntrustedRemote(_)),
                 "destination rejection must precede key access: {error}"
             );
             cfg.trusted_remote_endpoint = endpoint.into();
-            let error = super::open_with_config(endpoint, &cfg, &layout)
-                .expect_err("trusted endpoint now resolves the absent key");
+            let error = super::open_with_config(
+                endpoint,
+                &cfg,
+                &layout,
+                &std::sync::Arc::new(Terminal::detached()),
+            )
+            .expect_err("trusted endpoint now resolves the absent key");
             assert!(
                 error.to_string().contains("requires a signing key"),
                 "trusted destination should reach key resolution: {error}"
@@ -1716,8 +1721,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(directory.path());
         let url = "kit+https://host/Uppercase";
-        let error = super::open_with_config(url, &Config::default(), &layout)
-            .expect_err("uppercase repository identity must be rejected");
+        let error = super::open_with_config(
+            url,
+            &Config::default(),
+            &layout,
+            &std::sync::Arc::new(Terminal::detached()),
+        )
+        .expect_err("uppercase repository identity must be rejected");
         assert!(
             matches!(error, super::DispatchError::MalformedUrl(_)),
             "expected malformed URL, got {error:?}"

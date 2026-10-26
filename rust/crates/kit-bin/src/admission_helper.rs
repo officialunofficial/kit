@@ -27,6 +27,8 @@ fn stop_helper(child: &mut std::process::Child) {
 
 pub(crate) struct ExecResponder {
     pub path: PathBuf,
+    /// Ends the progress line before the helper prints.
+    pub terminal: std::sync::Arc<crate::progress::Terminal>,
 }
 
 struct HelperOutput(Vec<(String, String)>);
@@ -103,7 +105,7 @@ impl ExecResponder {
                 "admission_helper path does not name a file".into(),
             ));
         }
-        crate::progress::suspend_for_admission();
+        self.terminal.suspend_for_admission();
         let schemes = ctx
             .required
             .challenges
@@ -263,6 +265,16 @@ mod tests {
         }
     }
 
+    impl ExecResponder {
+        /// A responder whose terminal shows no progress.
+        fn new(path: PathBuf) -> Self {
+            Self {
+                path,
+                terminal: std::sync::Arc::new(crate::progress::Terminal::detached()),
+            }
+        }
+    }
+
     fn script(body: &str) -> (tempfile::TempDir, ExecResponder) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("helper.sh");
@@ -270,7 +282,7 @@ mod tests {
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o700);
         std::fs::set_permissions(&path, perms).unwrap();
-        (dir, ExecResponder { path })
+        (dir, ExecResponder::new(path))
     }
 
     #[test]
@@ -328,16 +340,13 @@ mod tests {
     #[test]
     fn exec_failures_are_bounded_and_redacted() {
         let required = AdmissionRequired::new(Vec::new(), String::new(), Vec::new(), Vec::new());
-        let relative = ExecResponder {
-            path: "relative".into(),
-        };
+        let relative = ExecResponder::new("relative".into());
         assert!(matches!(
             relative.respond(&context(&required)),
             Err(AdmissionResponderError::Configuration(_))
         ));
-        let missing = ExecResponder {
-            path: std::env::temp_dir().join("missing-admission-helper-9e5d8a6f"),
-        };
+        let missing =
+            ExecResponder::new(std::env::temp_dir().join("missing-admission-helper-9e5d8a6f"));
         assert!(matches!(
             missing.respond(&context(&required)),
             Err(AdmissionResponderError::Configuration(_))
