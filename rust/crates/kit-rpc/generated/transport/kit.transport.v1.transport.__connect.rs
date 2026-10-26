@@ -1107,7 +1107,7 @@ pub trait TransportService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<GetServerInfoResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Fetch a retained writer-view storage receipt (SPEC-SERVER §15).
+    /// Fetch a retained writer-view storage receipt.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///

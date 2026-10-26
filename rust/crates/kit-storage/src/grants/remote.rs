@@ -347,7 +347,7 @@ mod tests {
 }
 
 /// Grants, grant epochs and owner statements are self-certifying-only
-/// (SPEC-SERVER §6.2.2): refuse a URL naming an authority-mode namespace
+/// (SPEC-TRANSPORT-CONNECT §7.4): refuse a URL naming an authority-mode namespace
 /// instead of falling back to the signer's own namespace.
 ///
 /// # Errors
@@ -359,7 +359,7 @@ pub fn refuse_authority_namespace(endpoint: &str) -> Result<(), String> {
         .and_then(|id| id.namespace())
     {
         Some(RemoteNamespace::Opaque(ns)) => Err(format!(
-            "`{ns}` is an authority-mode namespace; grants, grant epochs and owner statements need a self-certifying `ed25519-`/`0x` namespace (SPEC-SERVER §6.2.2, SPEC-TRANSPORT-CONNECT §7.4)"
+            "`{ns}` is an authority-mode namespace; grants, grant epochs and owner statements need a self-certifying `ed25519-`/`0x` namespace (SPEC-TRANSPORT-CONNECT §7.4)"
         )),
         _ => Ok(()),
     }
@@ -374,7 +374,7 @@ mod authority_namespace_tests {
         let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
         let err = refuse_authority_namespace(&format!("kit+https://vcs.example/{uuid}/repo"))
             .unwrap_err();
-        assert!(err.contains(uuid) && err.contains("§6.2.2"), "{err}");
+        assert!(err.contains(uuid) && err.contains("§7.4"), "{err}");
         let ed = format!("kit+https://vcs.example/ed25519-{}/repo", "ab".repeat(32));
         assert!(refuse_authority_namespace(&ed).is_ok());
         assert!(refuse_authority_namespace("kit+https://vcs.example/repo").is_ok());

@@ -295,7 +295,7 @@ Must hold. Readers MUST NOT buffer undefined delta chains.
 The first case includes `raw`, `zstd-raw`, `delta`, and `zstd-delta` results;
 it is not restricted to uncompressed raw entries. A later entry alone MUST
 NOT make a base eligible. Repository admission additionally applies the
-repository-scoped verified-membership requirements of SPEC-SERVER §9.4 to
+repository-scoped verified-membership requirements of the server to
 external bases; naming another pack in the same operation does not establish
 that membership.
 
@@ -411,12 +411,12 @@ Error precedence is deterministic across execution strategies:
    malformed is therefore a depth refusal.
 4. Malformed content, caller-selected content-profile limits, execution
    resource exhaustion, and unavailable acquisition are distinct refusal
-   classes and MUST NOT be collapsed into one another (see §6.2 and
-   SPEC-PRIMITIVE-EVIDENCE §3). Unavailable input is retryable and never
+   classes and MUST NOT be collapsed into one another (see §6.2).
+   Unavailable input is retryable and never
    produces absence; absence requires an authenticated answer to the exact
    request.
 
-Denial by a global blocklist (SPEC-SERVER §14.2) is a policy check, not a
+Denial by a global blocklist is a policy check, not a
 content check. It is evaluated after whole-source integrity and after every
 content refusal, including a bad signature, and a verifier MAY report it only
 when no earlier refusal exists. A verifier that must stop at a denied object

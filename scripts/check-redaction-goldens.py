@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify SPEC-SERVER §14 fixtures without a server implementation.
+"""Verify the redaction notice fixtures without a server implementation.
 
 The script needs only the Python standard library. BLAKE3 and Ed25519 come from
 the reference modules in scripts/golden. The protobuf messages are small, so the

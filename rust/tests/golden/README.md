@@ -31,7 +31,7 @@ Use its `--check` option to find stale digests.
 | `objects` | SPEC-OBJECTS, SPEC-SIGNING | `objects_ref.py` |
 | `pack-v2` | SPEC-PACKFILE, SPEC-DELTA | `pack_ref.py` |
 | `proofs` | SPEC-MERKLE-OBJECTS | `proofs_ref.py` |
-| `redaction` | SPEC-SERVER | `scripts/check-redaction-goldens.py` |
+| `redaction` | SPEC-TRANSPORT-CONNECT, SPEC-HTTP-OBJECTS | `scripts/check-redaction-goldens.py` |
 | `refs-index` | SPEC-INDEX, SPEC-REFS | `refs_index_ref.py` |
 | `sparse` | SPEC-SPARSE-CHECKOUT | `sparse_ref.py` |
 | `ssh-serve` | SPEC-TRANSPORT, SPEC-RPC, SPEC-REFS | `ssh_serve_ref.py` |

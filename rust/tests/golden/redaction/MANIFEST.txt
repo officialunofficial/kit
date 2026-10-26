@@ -1,4 +1,4 @@
-# SPEC-SERVER §14 redaction goldens; TEST KEY ONLY.
+# Redaction notice goldens (SPEC-TRANSPORT-CONNECT §7.9, SPEC-HTTP-OBJECTS); TEST KEY ONLY.
 # <file> <BLAKE3 hex>
 # Update the digests with `python3 scripts/golden/write_manifest.py rust/tests/golden/redaction`
 # Cross-checked by `python3 scripts/check-redaction-goldens.py`

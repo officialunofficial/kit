@@ -94,8 +94,8 @@ same trait `kit-transport-s3` and `-ssh` implement.
 | *(none &mdash; upload ticket)* | `BeginUpload` (§7.6) | unary |
 | *(none &mdash; one part of a ticketed upload)* | `UploadPart` (§7.6) | client-streaming |
 | *(none &mdash; completes a multipart upload)* | `CompleteUpload` (§7.6) | unary |
-| *(none &mdash; reads a namespace authority generation)* | `GetAuthorityGeneration` (SPEC-SERVER §6.2.1) | unary |
-| *(none &mdash; raises a namespace authority generation)* | `SetAuthorityGeneration` (SPEC-SERVER §6.2.1) | unary |
+| *(none &mdash; reads a namespace authority generation)* | `GetAuthorityGeneration` | unary |
+| *(none &mdash; raises a namespace authority generation)* | `SetAuthorityGeneration` | unary |
 | *(none &mdash; reads a namespace's grant epoch)* | `GetGrantEpoch` ([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)) | unary |
 | *(none &mdash; raises a namespace's grant epoch)* | `SetGrantEpoch` ([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)) | unary |
 | *(none &mdash; sets a repository's visibility)* | `SetRepoVisibility` ([SPEC-WRITE-GRANTS §9.1](SPEC-WRITE-GRANTS.md#91-visibility)) | unary |
@@ -143,18 +143,18 @@ headers or a bearer token. The response MAY be cached with
 | `part_size` | The part size for resumable uploads (§7.6): a power of two, at least 8 MiB. |
 | `max_parts` | The largest number of parts in one upload (§7.6). |
 | `max_list_refs_page_size` | The largest number of refs one `ListRefs` page returns (§7.9). |
-| `begin_upload_threshold_bytes` | Packs smaller than this MAY skip `BeginUpload` (§7.6). It is `0` on every multi-repository deployment, whenever `admission` is true, and with any inspector configured (SPEC-SERVER §11.1). On a single-repository deployment without admission or inspection, the value is deployment-defined. |
+| `begin_upload_threshold_bytes` | Packs smaller than this MAY skip `BeginUpload` (§7.6). It is `0` on every multi-repository deployment, whenever `admission` is true, and with any inspector configured. On a single-repository deployment without admission or inspection, the value is deployment-defined. |
 | `atomic_advance` | Whether `AdvanceRefs` commits the head and packmap atomically (§4). |
 | `indexed_mode` | Whether the deployment decodes and verifies pushed packs before refs move. |
 | `admission` | Whether the deployment runs an admission step that can challenge a request (§5.1). When it is true, `begin_upload_threshold_bytes` is `0`. |
-| `receipt_public_key`, `receipt_key_id` | Raw 32-byte current receipt-and-notice signing public key and its 64-lowercase-hex BLAKE3 key id (SPEC-SERVER §15.5). Both empty only when that role key is not configured. Historical keys are in the well-known list, not this response. |
+| `receipt_public_key`, `receipt_key_id` | Raw 32-byte current receipt-and-notice signing public key and its 64-lowercase-hex BLAKE3 key id. Both empty only when that role key is not configured. Historical keys are in the well-known list, not this response. |
 | `grant_schemes` | The owner signature schemes the deployment accepts on grants and epoch statements ([SPEC-WRITE-GRANTS §4](SPEC-WRITE-GRANTS.md#4-owner-signature-schemes)). Empty on a deployment that accepts no grants. |
 | `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
 | `index_fanout` | The deployment's repository-index fan-out advertisement (§7.9). This field does not require a particular index layout. |
-| `max_delta_chain_depth` | The advertised delta-chain depth cap (SPEC-SERVER §9.8); `0` when indexed mode is off. |
-| `leases` | Whether the deployment enforces storage leases under SPEC-SERVER §12. |
-| `async_inspection` | Whether any asynchronous inspector is configured (SPEC-SERVER §10–§11). Writers MUST sign reads to see their own pending content that is not held. Held content is hidden from every caller, including when this field is false and a synchronous inspector holds it. |
-| `inspection_max_objects` | Maximum distinct objects in one advance's complete inspected set (SPEC-SERVER §11.1). Present only when inspectors are configured; absence imposes no inspection-specific object-count limit. A client exceeding the advertised limit MUST replan into smaller advances; the server rejects the oversized advance before calling inspectors or accepting changes. |
+| `max_delta_chain_depth` | The advertised delta-chain depth cap; `0` when indexed mode is off. |
+| `leases` | Whether the deployment enforces storage leases. |
+| `async_inspection` | Whether any asynchronous inspector is configured. Writers MUST sign reads to see their own pending content that is not held. Held content is hidden from every caller, including when this field is false and a synchronous inspector holds it. |
+| `inspection_max_objects` | Maximum distinct objects in one advance's complete inspected set. Present only when inspectors are configured; absence imposes no inspection-specific object-count limit. A client exceeding the advertised limit MUST replan into smaller advances; the server rejects the oversized advance before calling inspectors or accepting changes. |
 | `supports_pack_locations` | Whether the server supports optional `DownloadPack` locations (§6.2). Absent or false disables location negotiation. |
 | `max_pack_location_lifetime_ms` | Maximum location lifetime in milliseconds (§6.2). MUST be present and positive when `supports_pack_locations` is true; absent when support is disabled. |
 
@@ -176,7 +176,7 @@ entries, including surplus entries; each inspector receives one complete set.
 the `invalid_argument` cases below, then perform the
 [SPEC-WRITE-GRANTS §9.3](SPEC-WRITE-GRANTS.md#93-read-authorization)
 read check (including its receipt-only write-grantee exception), then
-require the SPEC-SERVER §10.1 writer
+require the writer
 view. A write-only grantee establishes that view through its signed grant
 and MAY retrieve advance receipts only for refs inside that grant's
 ref scopes. For this check, a paired packmap maps to its branch. A
@@ -190,7 +190,7 @@ the receipt is missing. The lease selector
 MUST remain available to an otherwise authorized writer for that
 scope while the repository is suspended or deleted; it reveals receipt
 history, not live content. The write-only grant-scope check is part of authorization and runs
-before §12.2. The advance selector MUST then apply §12.2: under a
+before the lease check. The advance selector MUST then apply the lease check: under a
 suspended or deleted effective state of the repository or ref it MUST
 return `permission_denied` with public message `lease suspended`.
 `GetReceiptRequest` MUST select exactly one oneof arm:
@@ -204,7 +204,7 @@ An absent selector, an empty advance ref, an invalid nonempty ref,
 a packmap ref used as the selector, or `namespace_scope = true` with a
 nonempty lease ref MUST receive `invalid_argument`. The
 `advance_sequence` starts at `1`; `0` is reserved for latest. The
-branch head and paired packmap share that sequence (SPEC-SERVER §10.2), which MUST
+branch head and paired packmap share that sequence, which MUST
 NOT reset after deletion, recreation, or repository-level deletion.
 `GetReceiptResponse.receipt = 1` contains the complete DSSE envelope
 JSON as bytes, identical to the bytes returned at issue or replay.
@@ -213,8 +213,7 @@ MUST return retryable `unavailable`; `0` MUST NOT fall back to an older
 signed sequence or version. If receipts are disabled or the selected version was
 never issued or has passed the deployment's `receipt_retention`, the
 call MUST return `not_found`. The server MUST retain the latest
-receipt per ref, including a deletion, and per lease scope as
-SPEC-SERVER §15.6 requires. This read allocates no write replay entry and does not expose the reader's published-view
+receipt per ref, including a deletion, and per lease scope. This read allocates no write replay entry and does not expose the reader's published-view
 state. Advance receipts expose `previous` and the paired `packmap` of a
 committed write on that ref to every caller entitled to the receipt. SSH and enc clients receive
 no storage receipts; their wire schemas do not change.
@@ -251,7 +250,7 @@ authoritative on its own. `ReadRef` is the one source of truth for "what
 is the ref's current value," called explicitly, every time.
 
 On a committed update, `UpdateRefResponse.receipt = 1` contains the
-complete §15 storage-receipt DSSE envelope JSON bytes. It is empty
+complete storage-receipt DSSE envelope JSON bytes. It is empty
 when receipts are disabled. A CAS or validation failure returns a
 Connect error, so no receipt is issued. The field attests the live
 advance, including deletion, and says nothing about publication.
@@ -324,7 +323,7 @@ than a boolean success/CAS-conflict split (see
 instead of forcing a three-way outcome through a two-way (success /
 error) channel.
 
-`AdvanceRefsResponse.receipt = 2` contains the complete §15
+`AdvanceRefsResponse.receipt = 2` contains the complete
 storage-receipt DSSE envelope JSON bytes on a committed outcome. It
 MUST be empty on either conflict and when receipts are disabled. The
 receipt attests the live committed pair; it reveals no inspection or
@@ -335,7 +334,7 @@ advertise `atomic_advance = true` through `GetServerInfo` (§2.1). A server that
 does not offer atomic advance MUST NOT advertise it; its fallback writes the
 packmap before the head. That fallback is available only to writes outside the
 signed replay-protected write contract. Every accepted signed ref write MUST
-satisfy atomic acceptance under SPEC-SERVER §3.1, including both sides of an
+satisfy atomic acceptance (§7.1), including both sides of an
 `AdvanceRefs` or paired deletion.
 
 A server MAY require `packmap_ref` to be `refs/kit/packmap/<x>` when
@@ -344,8 +343,8 @@ A server MAY require `packmap_ref` to be `refs/kit/packmap/<x>` when
 
 **Reference-server behavior.** The reference server limits
 `max_tickets_per_advance` to seven and rejects a larger `ticket_ids` list with
-`invalid_argument` before acceptance. This limit bounds its receipt envelope
-under SPEC-SERVER §15.2; it is not a required limit for other servers.
+`invalid_argument` before acceptance. This limit bounds its receipt envelope;
+it is not a required limit for other servers.
 
 ### 4.1 Create a branch from a published source
 
@@ -363,13 +362,13 @@ explicit `false`. The server MUST reject a mixed form or
 This form requires atomic metadata; a server without it MUST return
 `failed_precondition`. It reads one authoritative published pair and
 retains ordinary ticketless advance conflict outcomes, replay, admission,
-quota, receipt and outcome semantics. SPEC-SERVER §9.3 specifies uniform
-source absence, optional expected-tip errors, and the final source fence before
+quota, receipt and outcome semantics. A missing source answers the same way for every caller. A mismatch with a given
+`expected_tip` is an error. The server checks the source a final time before
 destination acceptance. A source move after that fence may precede the
 destination commit; success still copies exactly the captured pair.
 No upload, membership addition or stored-byte charge is introduced.
 The immediate path copies the source's coverage as it stands; configured
-publication verification still checks the destination (SPEC-SERVER §10.2).
+publication verification still checks the destination.
 
 ---
 
@@ -440,19 +439,19 @@ excludes.
 | Any unauthorized read of a private repository ([SPEC-WRITE-GRANTS §9.3](SPEC-WRITE-GRANTS.md#93-read-authorization)), indistinguishable from a missing repository | `not_found` |
 | An expired, unknown, or missing ticket, or a ticket presented to an advance of a ref it does not name (§7.6) | `failed_precondition` |
 | Too many open upload tickets for the ref or the signer (§7.6) | `failed_precondition`, with public message `too many open upload tickets` |
-| An unresolved delta base after the relay-lag bound, in indexed mode (SPEC-SERVER §9.4) | `failed_precondition`, with public message `delta base not available in this repository` |
+| An unresolved delta base after the relay-lag bound, in indexed mode | `failed_precondition`, with public message `delta base not available in this repository` |
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
 | An invalid part receipt (malformed, unknown key id, bad MAC, or bound to another ticket; §7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` with exactly one `PendingVerification` detail |
-| A membership-dependent miss within the relay-lag bound, in indexed mode (SPEC-SERVER §9.4) | `unavailable`, public message `repository membership not yet visible`, with exactly one empty `MembershipNotVisible` detail and no `Retry-After`; a retry with the same nonce is safe. A client classifies by the detail first and MAY fall back to the exact message for servers that predate it |
-| Publication verification ran out of its execution allowance or retained-evidence capacity, or the publication state changed between verification and commit (SPEC-SERVER §10.2). Nothing commits. | `unavailable` with no detail, never `PendingVerification`; the ladder retries it, though a deterministic capacity limit is not resolved by retrying |
-| A decoded pushed file object is globally blocklisted (SPEC-SERVER §14.2) | `permission_denied`, exact message `object blocked`, with a repository-empty writer `RedactionNotice` detail whose rewrites are empty |
-| An `AdvanceRefs` closure contains a repository tombstone (SPEC-SERVER §14.5) | `invalid_argument`, exact message `open closure`, with applicable writer `RedactionNotice` details; the ordinary membership-lag interval does not apply |
-| A delta base is tombstoned in this repository (SPEC-SERVER §14.5) | `failed_precondition`, exact message `delta base not available in this repository`, with applicable writer `RedactionNotice` details and no lag interval; this is the existing self-contained replan case |
-| `DownloadPack` names a superseded pack (SPEC-SERVER §14.5) | `not_found` with the `RedactionNotice` details of the caller's view whose `rewrites` name the requested pack, before streaming; otherwise plain `not_found`; `PackExists` returns `false` |
-| A writer is denied by a repository- or namespace-level takedown (SPEC-SERVER §14.1) | `permission_denied`, exact existing message `lease suspended`, with applicable writer `RedactionNotice` details; readers keep §12.2's byte-identical absent answer |
+| A membership-dependent miss within the relay-lag bound, in indexed mode | `unavailable`, public message `repository membership not yet visible`, with exactly one empty `MembershipNotVisible` detail and no `Retry-After`; a retry with the same nonce is safe. A client classifies by the detail first and MAY fall back to the exact message for servers that predate it |
+| Publication verification ran out of its execution allowance or retained-evidence capacity, or the publication state changed between verification and commit. Nothing commits. | `unavailable` with no detail, never `PendingVerification`; the ladder retries it, though a deterministic capacity limit is not resolved by retrying |
+| A decoded pushed file object is globally blocklisted | `permission_denied`, exact message `object blocked`, with a repository-empty writer `RedactionNotice` detail whose rewrites are empty |
+| An `AdvanceRefs` closure contains a repository tombstone | `invalid_argument`, exact message `open closure`, with applicable writer `RedactionNotice` details; the ordinary membership-lag interval does not apply |
+| A delta base is tombstoned in this repository | `failed_precondition`, exact message `delta base not available in this repository`, with applicable writer `RedactionNotice` details and no lag interval; this is the existing self-contained replan case |
+| `DownloadPack` names a superseded pack | `not_found` with the `RedactionNotice` details of the caller's view whose `rewrites` name the requested pack, before streaming; otherwise plain `not_found`; `PackExists` returns `false` |
+| A writer is denied by a repository- or namespace-level takedown | `permission_denied`, exact existing message `lease suspended`, with applicable writer `RedactionNotice` details; readers keep the byte-identical absent answer |
 | A missed acceptance deadline, authoritative-state capacity exhaustion, or pending-delivery backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
-| Receipt signing fails after a successful apply (SPEC-SERVER §15.1). The advance remains committed; a same-nonce retry returns that result with its signed receipt. | Retryable `unavailable` |
+| Receipt signing fails after a successful apply. The advance remains committed; a same-nonce retry returns that result with its signed receipt. | Retryable `unavailable` |
 | A signed nonce already recorded with a different operation fingerprint (§7.1) | `invalid_argument` |
 | A signed nonce whose operation is still `in_flight` (§7.1). The request never reaches admission. | `aborted` (retryable) |
 | A new operation that the admission step challenges (§5.1) | `permission_denied` with HTTP status 402 and one `AdmissionChallenge` detail |
@@ -967,8 +966,8 @@ replay rules below apply to writes only. `GetServerInfo`,
 `GetAuthorityGeneration { namespace } -> { generation }` and
 `SetAuthorityGeneration { signed_statement } -> { generation }` also carry no
 auth-v2 envelope or repository selector. They are disabled by default;
-SPEC-SERVER §6.2.1 defines deployment-authority statement verification, monotonic
-targets, and the bounded completion barrier. Pending completion is `unavailable`
+The server verifies the deployment-authority statement, accepts only monotonic
+targets, and applies a bounded completion barrier. Pending completion is `unavailable`
 with `Retry-After` in delay-seconds. The generation is independent of grant epochs.
 When a pending `SetGrantEpoch` or `SetRepoVisibility` call returns `unavailable`, its retry hint is a `Retry-After` response header in delay-seconds (SPEC-WRITE-GRANTS §5.3, §9.1).
 
@@ -998,7 +997,7 @@ fingerprint. Reusing a nonce for a different operation MUST fail.
 Same-operation retries MUST return the saved result and MUST NOT repeat
 mutable effects or charge quota again. A signed ref write MUST atomically commit
 its replay result, applicable quota, and reference changes (including both sides
-of a paired advance or deletion), as SPEC-SERVER §3.1 requires. A failed
+of a paired advance or deletion). A failed
 acceptance guard commits none of that unit's effects. Configured notifications
 occur only after durable commit. Replay records MUST remain until
 the signed expiry has passed.
@@ -1011,11 +1010,10 @@ A server processes a signed write in this order:
    - a stored fingerprint that differs from the request's is
      `invalid_argument`;
    - a `committed` operation returns its stored result, except that a
-     committed write awaiting its §15 receipt MUST finish signing with
+     committed write awaiting its storage receipt MUST finish signing with
      the key selected at apply, persist the signed envelope, and then
      return that same result with the receipt. The server also MUST
-     finish durable pending signatures independently of retries
-     (SPEC-SERVER §15.1). If signing still fails, it returns retryable `unavailable` without applying again;
+     finish durable pending signatures independently of retries. If signing still fails, it returns retryable `unavailable` without applying again;
    - an `in_flight` operation returns a retryable `aborted`, without
      reaching admission. A single-repository deployment MAY resume an
      un-ticketed `UploadPack` with the same signed nonce by re-reading its
@@ -1042,9 +1040,8 @@ admission does not create one.
 
 For a unary write, steps 4 to 6 commit together in the atomic unit
 required above. §7.7 states each RPC's durable effects. A challenge,
-a `PendingVerification` answer (§7.6), a membership-lag `unavailable`
-(SPEC-SERVER §9.4), and a synchronous inspector's `fail_closed`
-`unavailable` (SPEC-SERVER §11.2) MUST NOT be stored as replay results: the
+a `PendingVerification` answer (§7.6), a membership-lag `unavailable`, and a synchronous inspector's `fail_closed`
+`unavailable` MUST NOT be stored as replay results: the
 server leaves no record for the attempt, and removes any `in_flight` record it
 inserted, so a retry with the same nonce is evaluated again from step 2.
 Only permanent refusals with codes `invalid_argument`, `not_found`,
@@ -1059,7 +1056,7 @@ returning any terminal result or resuming in-flight work.
 
 When receipt signing is enabled, that unit also fixes the
 statement bytes and signing key and durably records responsibility for the
-pending signature (SPEC-SERVER §15.1). A post-apply signing failure is the
+pending signature. A post-apply signing failure is the
 committed-result exception above; it MUST NOT discard the replay
 record or create a second commit.
 
@@ -1214,8 +1211,7 @@ names an Ed25519 public key. The `0x` form names a 20-byte address;
 [SPEC-WRITE-GRANTS §4.1](SPEC-WRITE-GRANTS.md#41-address-derivation)
 defines how an owner key derives it.
 A self-certifying deployment MUST NOT resolve other forms through a registry.
-A deployment MAY instead opt in to `namespace_mode = authority` under
-SPEC-SERVER §6.2.2.
+A deployment MAY instead opt in to `namespace_mode = authority`.
 That mode accepts opaque namespaces matching `[a-z0-9][a-z0-9._-]{0,71}`,
 including lowercase UUIDv7 names, and MUST reject `root` and the `ed25519-`
 and `0x` prefixes. The two deployment grammars are disjoint. The deployment
@@ -1223,13 +1219,13 @@ is the trust root; the name cannot verify ownership. Multi addressing,
 Authority-hook authorization, authority fencing, and `namespace_policy = any`
 are required. The mode MUST be validated at startup and MUST NOT be selected
 by a request. Owner-signed grants, grant epochs, and visibility statements
-are refused with the uniform §6.2.2 error; signed visibility envelopes and
+are refused with the uniform `owner statements are not supported in authority namespace mode` error; signed visibility envelopes and
 deployment URL tokens retain their separate authorization rules.
 A deployment under `any` MUST NOT claim complete deployment-wide takedown.
 The auth-v2 wire envelope and RPC schema do not change. A client MUST accept
 the union of the two namespace grammars when it parses a remote URL: the
-self-certifying grammar above and the authority-mode grammar of
-SPEC-SERVER §6.2.2.
+self-certifying grammar above and the authority-mode grammar in
+this section.
 The grammars are disjoint, because an authority-mode namespace is never `root`
 and never starts with `ed25519-` or `0x`, so the union is unambiguous; a URL
 does not tell the client which mode the server runs. The server still enforces
@@ -1406,7 +1402,7 @@ already a member. That costs only a re-upload.
 `AlreadyPresent` and a returned live ticket run no admission.
 When inspection hides a pack because it contains a flagged or held id,
 `BeginUpload` MUST NOT return `AlreadyPresent` for it and MUST answer as
-if the pack were absent (SPEC-SERVER §10.3).
+if the pack were absent.
 
 **Ticket token.** `token` is an opaque, server-authenticated value that
 binds the ticket id, audience, repository, signer, `pack_id`, `bytes`,
@@ -1414,7 +1410,7 @@ binds the ticket id, audience, repository, signer, `pack_id`, `bytes`,
 Token authenticity is verified without consulting strongly consistent metadata.
 When namespace authority fencing is enabled, the token also binds the authority
 generation and the server MUST check it against the current namespace generation
-before ticket-only staging and completion (SPEC-SERVER §6.2.1). A client treats the token as opaque. How the server
+before ticket-only staging and completion. A client treats the token as opaque. How the server
 authenticates tokens is deployment-defined (informative: a message
 authentication code under a deployment secret, rotated by key id).
 
@@ -1521,8 +1517,8 @@ commitment. It sends no `part:` commitment and no `CompleteUpload`.
 upload completion alone never grants repository membership. On a single-repository
 deployment, packs under the threshold MAY skip `BeginUpload`; a stored
 pack is a member. When the deployment runs admission or configures an
-inspector
-(SPEC-SERVER §11.1), the threshold is 0. An upload that needs a ticket
+inspector,
+the threshold is 0. An upload that needs a ticket
 and carries none is `failed_precondition`.
 With a threshold of 0, even an empty pack needs a ticket; `BeginUpload`
 refuses zero bytes. Clients never upload empty packs.
@@ -1534,8 +1530,7 @@ naming the tickets it consumes. A ticket can be consumed only by an
 advance of the ref it names; any other advance is `failed_precondition`.
 A head-only `UpdateRef` consumes no tickets. Packlist nodes (`KPKL`) are
 uploads like any other pack, and need tickets too.
-**Reference-server behavior.** An advance names at most seven tickets (§4;
-SPEC-SERVER §15.2).
+**Reference-server behavior.** An advance names at most seven tickets (§4).
 
 **Protocol requirement.**
 
@@ -1551,7 +1546,7 @@ commitment mismatch is `permission_denied`. A bad part hash or length
 is `invalid_argument`. No ticket failure is `resource_exhausted`,
 because clients retry that code on the backoff ladder (§5).
 On `AdvanceRefs`, `failed_precondition` with public message
-`delta base not available in this repository` (SPEC-SERVER §9.4) means
+`delta base not available in this repository` means
 the client MUST re-plan the upload once as a self-contained pack with
 no external delta bases and retry in a **new signed operation (new
 nonce)** with a new ticket. Changing `ticket_ids` changes the operation
@@ -1575,7 +1570,7 @@ After that it signs a new operation.
 
 **Pending verification.** In indexed mode, an `AdvanceRefs` that
 consumes a pack still under verification MUST fail with `unavailable`
-and exactly one `PendingVerification` detail (SPEC-SERVER §9.5).
+and exactly one `PendingVerification` detail.
 Before returning this answer, a server MAY wait for verification on a
 ticketed call. Waiting MUST remain within the request deadline and the signed
 envelope's validity window with sufficient margin to enforce the final
@@ -1588,7 +1583,7 @@ wire fields and does not change lost-reply or replay behavior.
 
 Its `retry_after_ms` field is the server's suggested poll interval.
 The server SHOULD send at least 1,000 milliseconds, except for bounded
-tiny-pack work expected to finish sooner (SPEC-SERVER §9.5). The client MUST
+tiny-pack work expected to finish sooner. The client MUST
 poll, waiting `retry_after_ms` clamped to 1,000–60,000 milliseconds
 between attempts; a missing or zero value means 1,000 milliseconds.
 It polls until the ticket expires and MUST NOT use its normal backoff
@@ -1620,8 +1615,7 @@ they do not authorize presigned uploads.
 This section fixes, for each RPC of a ticketed upload,
 whether admission (§5.1) runs and which effects become durable.
 
-Atomic acceptance, replay immunity, declared durability, and recovery follow
-SPEC-SERVER §3.1–§3.2. These requirements
+Atomic acceptance, replay immunity, declared durability, and recovery follow §7.1. These requirements
 apply to any conforming server, independently of its storage implementation.
 
 Every RPC carries its own nonce: `BeginUpload`, each `UploadPart`,
@@ -1644,8 +1638,7 @@ independent byte reservations.
 
 - **Membership.** A pack becomes a member of the repository only at the
   acceptance of the `AdvanceRefs` that consumes its ticket, or after the
-  guarded acceptance of a server-side fork into an empty repository
-  (SPEC-SERVER §9.9). A fork MUST NOT expose destination membership or accept
+  guarded acceptance of a server-side fork into an empty repository. A fork MUST NOT expose destination membership or accept
   destination writes before that acceptance. Until membership is established,
   `BeginUpload` for the same signer, ref, and pack returns the existing
   ticket, never `AlreadyPresent` (§7.6). A `BeginUpload` that finds such
@@ -1659,10 +1652,9 @@ independent byte reservations.
   an admission allowance with a reservation, for example an `UpdateRef`
   compare-and-swap loss, an epoch mismatch, or a replay race, the server records
   `Aborted` independently of the rejected acceptance unit. An uncertain result
-  MUST NOT be reported as a definite abort; recovery uses the original identity
-  (SPEC-SERVER §3.2). A missing ticket pack is also a defensive
+  MUST NOT be reported as a definite abort; recovery uses the original identity. A missing ticket pack is also a defensive
   abort case; conforming server GC retains every unexpired ticket pack
-  as a root (SPEC-SERVER §13), so it cannot normally collect that pack
+  as a root, so it cannot normally collect that pack
   before the advance consumes the ticket.
 - **Expired.** A ticket that expires before an `AdvanceRefs` consumes
   it produces `Expired` (§7.6).
@@ -1671,12 +1663,12 @@ independent byte reservations.
   compare-and-swap on `AdvanceRefs` is such a conflict, not a ticket abort.
   A separate ref admission reservation settles as `Aborted` on that conflict.
   An unconditional update whose presence changes after admission MUST abort
-  rather than apply a different ref effect (SPEC-SERVER §6.3).
+  rather than apply a different ref effect.
 
 A deployment settles a charge on `Committed` and releases it on
 `Aborted` or `Expired`, so an aborted upload settles nothing
 (informative). Outcome delivery is at least once with a stable reservation
-identity for deduplication, as SPEC-SERVER specifies. Repeated
+identity for deduplication. Repeated
 delivery does not create another terminal outcome or settlement.
 
 **Reference-server behavior.** The built-in default admission
@@ -1740,7 +1732,7 @@ of these:
   no `X-Kit-Ref`; or
 - in indexed mode, once the consuming ticket is older than the
   deployment's relay-lag bound, the uniform permanent error of the
-  membership-dependent check that missed (SPEC-SERVER §9.4). It is
+  membership-dependent check that missed. It is
   byte-identical whether the object or pack exists in another repository
   or nowhere.
 
@@ -1797,8 +1789,8 @@ for the caller's view only when the returned ref exists in that view.
 `ListRefsResponse.ref_redactions = 3` attaches `(ref, notice)` pairs for
 visible refs on that page, including their bytes in the 2 MiB bound;
 the `ref` is the full name. `RefEntry` retains its existing wire shape.
-The detail is `kit.transport.v1.RedactionNotice { bytes envelope = 1; }`
-and its envelope and verification follow SPEC-SERVER §14.6. The envelope is
+The detail is `kit.transport.v1.RedactionNotice { bytes envelope = 1; }`.
+The envelope is
 a DSSE envelope ([SPEC-ATTESTATIONS §4](SPEC-ATTESTATIONS.md#4-envelope-format)).
 Its `payloadType` is exactly `application/vnd.kit.redaction-notice.v1+json`,
 and the DSSE signature covers that string. A verifier MUST reject an
@@ -1946,7 +1938,7 @@ Explicitly deferred to later work:
   variant and the retryable mapping of `aborted` (§5), the server's
   admission step and outcomes (§5.1, §7.7), and the client's 402
   handling, `admission_helper`, and header allowlist (§5.1).
-- The remote-hook contract and outcome guarantees: see SPEC-SERVER.
+- The remote-hook contract and outcome guarantees: deployment policy.
 - Pricing, admission verification, and settlement: deployment policy,
   never kit's (§5.1).
 
@@ -1957,7 +1949,7 @@ Explicitly deferred to later work:
 | Version | Status | Changes |
 |---|---|---|
 | `2` | draft | §7.4 client URL parsing accepts the union of the self-certifying and authority-mode namespace grammars; the server still enforces only its own mode's grammar, and grants, grant epochs, and visibility statements keep the self-certifying grammar. No wire schema change. |
-| `2` | draft | Opt-in authority-owned opaque namespace grammar in §7.4; disjoint from self-certifying names, with deployment-rooted ownership and refused owner statements under SPEC-SERVER §6.2.2. No wire schema or CLI change. |
+| `2` | draft | Opt-in authority-owned opaque namespace grammar in §7.4; disjoint from self-certifying names, with deployment-rooted ownership and refused owner statements. No wire schema or CLI change. |
 | `2` (ListRepos) | draft | Additive §7.10 namespace listing RPC and new messages, atomic coordinator visibility indexes, bounded sorted pages and integrity-protected tokens; grants retain public listing rights only. |
 | `2` | draft | Additive namespace Get/SetAuthorityGeneration RPCs outside auth-v2, with deployment-authority statements and pending completion hints. |
 | `2` | draft | §7.9 states the client rule for stale listings: a listed branch whose packmap and head are both strongly absent is skipped without a tracking ref; a present head with no packmap and any transport error stay failures. |
@@ -1970,12 +1962,12 @@ Explicitly deferred to later work:
 | `2` | draft | §7.9 defines absent or zero `page_size` as the advertised maximum and malformed or foreign page tokens as `invalid_argument`. |
 | `2` | draft | §7.6 requires canonical branch-head/packmap pairing for ticketed advances; §7.8 rejects deletion with tickets. |
 | `2` | draft | §5 classifies invalid part receipts as `invalid_argument`; §7.6 permits storage-session abort after a root mismatch and retains rotated receipt keys for at least seven days. |
-| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5); SPEC-WRITE-GRANTS: signed reads and `X-Write-Grant` (§7.1), the grant RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC. The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until tickets land. Branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). The additive empty `MembershipNotVisible` error detail marks the membership-lag `unavailable` (§5); the message stays unchanged. BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6). It scopes §7.4's Host/path/forwarded-selector prohibition to Connect RPCs and cross-links plain HTTP read admission (§5.1). |
+| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5); SPEC-WRITE-GRANTS: signed reads and `X-Write-Grant` (§7.1), the grant RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC. The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until tickets land. Branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9). The additive empty `MembershipNotVisible` error detail marks the membership-lag `unavailable` (§5); the message stays unchanged. BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6). It scopes §7.4's Host/path/forwarded-selector prohibition to Connect RPCs and cross-links plain HTTP read admission (§5.1). |
 | `2` | draft | Additive opt-in pack locations in `DownloadPack`, discovery support and lifetime fields (§2.1), client verification and streaming fallback (§6.2), and unchanged repository isolation and upload verification (§§7.4, 7.6). |
-| `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1; SPEC-SERVER §12); §7.7 ticket-pack loss clarified as a defensive abort case. |
-| `2` | draft | Additive `GetServerInfoResponse.async_inspection = 18` (§2.1); published-view and quarantine rules in SPEC-SERVER §§10–11; §7.1 never stores a sync inspector `unavailable` for replay; §7.6 `AlreadyPresent` is never answered for a pack with hidden content. |
+| `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1); §7.7 ticket-pack loss clarified as a defensive abort case. |
+| `2` | draft | Additive `GetServerInfoResponse.async_inspection = 18` (§2.1); §7.1 never stores a sync inspector `unavailable` for replay; §7.6 `AlreadyPresent` is never answered for a pack with hidden content. |
 | `2` | draft | Additive `GetServerInfoResponse.inspection_max_objects = 19` (§2.1) advertises the configured synchronous-inspection advance cap, absent without inspectors. |
-| `2` | draft | Additive `GetReceipt` signed writer-view read (§2.2), storage-receipt fields on `UpdateRefResponse` and `AdvanceRefsResponse` (§§3–4), and current receipt-and-notice key semantics in `GetServerInfo` (§2.1); SPEC-SERVER §15. |
+| `2` | draft | Additive `GetReceipt` signed writer-view read (§2.2), storage-receipt fields on `UpdateRefResponse` and `AdvanceRefsResponse` (§§3–4), and current receipt-and-notice key semantics in `GetServerInfo` (§2.1). |
 | `2` | draft | Editorial: §3 and §7.3 retry obligations for `UpdateRef`/`AdvanceRefs` reconciled with SPEC-TRANSPORT §7 (verification toolchain). |
 | `1` | draft | Initial `kit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending shared-proto extraction. |
 

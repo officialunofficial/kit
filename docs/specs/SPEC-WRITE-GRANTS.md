@@ -28,7 +28,7 @@ the rest.
 
 These owner-derived authorization rules apply to `namespace_mode =
 self_certifying`, the default. An opt-in authority-owned deployment follows
-SPEC-SERVER §6.2.2:
+[SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md#74-repository-addressing):
 opaque names carry no verifiable owner, and the Authority hook is its ownership
 source. Such a deployment MUST refuse presented owner-signed grants,
 grant-epoch operations, and owner-signed visibility statements with
@@ -615,8 +615,7 @@ by exactly one of these paths:
    check in §7.
 3. **Authority source.** A deployment-defined source authorizes the
    signer, as SPEC-TRANSPORT-CONNECT §7.5 rule 3 describes, failing
-   closed. Key-set lookup and generation fencing MUST follow
-   SPEC-PRIMITIVE-EVIDENCE §1.2.
+   closed.
 
 A **read** of a private repository (§9) is authorized by the same three
 paths, with the `read` capability in place of `write`. A read of a
@@ -646,7 +645,7 @@ grants and the §8.2 and §8.3 ref-scope rules for configured
 multi-repository deployments. Grant expiry is checked when authorizing,
 so a grant that expires inside the bounded apply window can still commit.
 
-In an indexed deployment (SPEC-SERVER §9), a `u`-only `MATCH` is allowed only
+In an indexed deployment, a `u`-only `MATCH` is allowed only
 as a proven fast-forward (§8.2): the server proves the ancestry after
 verification and answers `write grant rejected: ref scope` when it cannot.
 An opaque deployment keeps answering `update without force needs indexed
@@ -828,7 +827,7 @@ repositories. Operators should set this default at deployment creation.
   visibility as `private` at deployment creation.
 
 Both modes pass through the server's admission and outcome stages like
-any other mutating RPC (SPEC-SERVER §3): admission runs after the owner,
+any other mutating RPC: admission runs after the owner,
 authority or statement check and before any state change, a refusal or
 challenge writes nothing, and a reservation granted by admission is settled
 by an outcome that names the operation. The replay, owner-key and statement
@@ -979,7 +978,7 @@ the hook key, the admin key, or any key that signs auth v2. The
 deployment rotates it by key id. It keeps a retired key in its
 verification set for at least `url_token_ttl` after retirement, and
 publishes the set with key ids at `GET /.well-known/kit-url-token-keys.json`,
-with `Cache-Control: public, max-age=300`, using SPEC-SERVER §7.2's key-list
+with `Cache-Control: public, max-age=300`, using the key-list
 JSON shape and this section's 32hex `keyId`, as
 [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) requires.
 
@@ -1031,8 +1030,8 @@ for their principals are registered server-side instead.
   by the forced command's principal argument; on enc, the peer's static
   key.
 - The deployment operator registers a signed grant (in the §4.2
-  encoding) for a principal (informative: an operator command,
-  wrapped by SPEC-SERVER §16.5). Registration verifies §7 steps
+  encoding) for a principal (informative: an operator command).
+  Registration verifies §7 steps
   1, 3, 4 and 5 and rejects a grant whose grantee is not the principal.
 - No grant is carried on ssh and enc, so any of the three §6 paths may
   authorize a request: the owner key when the principal is the
@@ -1272,9 +1271,9 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Version | Status | Changes |
 |---|---|---|
-| `1` | draft | Authority namespace mode refuses owner grants, grant epochs, and visibility statements; signed envelopes and dedicated URL tokens remain supported under SPEC-SERVER §6.2.2. Default mode and statement codecs remain unchanged. |
+| `1` | draft | Authority namespace mode refuses owner grants, grant epochs, and visibility statements; signed envelopes and dedicated URL tokens remain supported. Default mode and statement codecs remain unchanged. |
 | `1` (stored-shape amendment) | draft | §9.4 requires the current server-clock visibility change time for both envelope and statement changes; incomplete stored visibility rows fail closed. |
-| `1` (visibility admission amendment) | draft | `SetRepoVisibility` runs the server's admission and outcome stages in both modes (§9.1; SPEC-SERVER §3). No change to the statement, signature or stored visibility row. |
+| `1` (visibility admission amendment) | draft | `SetRepoVisibility` runs the server's admission and outcome stages in both modes (§9.1). No change to the statement, signature or stored visibility row. |
 | `1` (URL-token visibility amendment) | draft | A URL token issued at or before the repository's last visibility change is refused (§9.4). The stored visibility row requires a server-clock change time and refuses incomplete rows; the token statement and signature are unchanged. |
 | `1` (visibility default amendment) | draft | Repository visibility without a stored setting follows the deployment default, public unless configured; explicit visibility always wins. Changing the default also changes existing repositories without explicit visibility. |
 | `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc. Adds the `token=` URL form and key-set publication, and amends token paths to 0–1024 bytes so an empty path names the root tree. Fix round 1 orders stateless token checks before the stored-epoch read. Pins the `DownloadPack` signed-read body; Lands the URL-token fixtures. Fix round 2 caps `url_token_ttl` at 24 h and excludes control characters from token paths. |

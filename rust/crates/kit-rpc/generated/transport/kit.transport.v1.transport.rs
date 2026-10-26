@@ -1758,7 +1758,7 @@ pub struct ListRefsResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub next_page_token: ::core::option::Option<::buffa::alloc::string::String>,
-    /// Active notices associated with visible refs on this page (SPEC-SERVER §14.6).
+    /// Active notices associated with visible refs on this page.
     ///
     /// Field 3: `ref_redactions`
     #[serde(
@@ -2284,7 +2284,7 @@ pub struct ReadRefResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub object_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    /// Active notices for this visible ref; empty when absent (SPEC-SERVER §14.6).
+    /// Active notices for this visible ref; empty when absent.
     ///
     /// Field 3: `redaction_notices`
     #[serde(
@@ -6385,7 +6385,7 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub index_fanout: ::core::option::Option<u32>,
-    /// SPEC-SERVER §9.8; 0 when indexed mode is off
+    /// 0 when indexed mode is off
     ///
     /// Field 16: `max_delta_chain_depth`
     #[serde(
@@ -6395,14 +6395,14 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub max_delta_chain_depth: ::core::option::Option<u32>,
-    /// Whether storage leases are enforced; STC §2.1 and SPEC-SERVER §12.
+    /// Whether storage leases are enforced; STC §2.1.
     ///
     /// Field 17: `leases`
     #[serde(rename = "leases", skip_serializing_if = "::core::option::Option::is_none")]
     pub leases: ::core::option::Option<bool>,
     /// Whether async inspection is configured; writers MUST sign reads to see
     /// non-held pending content. Held content is hidden from every caller,
-    /// including with sync holds when false (SPEC-SERVER §§10–11).
+    /// including with sync holds when false.
     ///
     /// Field 18: `async_inspection`
     #[serde(
@@ -6412,7 +6412,7 @@ pub struct GetServerInfoResponse {
     )]
     pub async_inspection: ::core::option::Option<bool>,
     /// Maximum distinct inspected objects in one advance; absent when no inspector
-    /// is configured (SPEC-TRANSPORT-CONNECT §2.1; SPEC-SERVER §11.1).
+    /// is configured (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 19: `inspection_max_objects`
     #[serde(
@@ -10709,12 +10709,12 @@ pub const __CHALLENGE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::
     is_wkt: false,
 };
 /// Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
-/// verification (SPEC-TRANSPORT-CONNECT §7.6; SPEC-SERVER §9.5).
+/// verification (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PendingVerification {
-    /// server's suggested poll interval; bounded tiny-pack work may send under 1000 (SPEC-SERVER §9.5)
+    /// server's suggested poll interval; bounded tiny-pack work may send under 1000
     ///
     /// Field 1: `retry_after_ms`
     #[serde(
@@ -10851,7 +10851,7 @@ pub const __PENDING_VERIFICATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
     is_wkt: false,
 };
 /// Detail on an `unavailable` answer whose repository membership is not yet
-/// visible inside the relay-lag window (SPEC-SERVER §9.4; SPEC-TRANSPORT-CONNECT
+/// visible inside the relay-lag window (SPEC-TRANSPORT-CONNECT
 /// §5). The condition is carried by the type; the message has no fields and
 /// retrying with the same nonce is safe.
 #[derive(Clone, PartialEq, Default)]
@@ -10958,7 +10958,7 @@ pub const __MEMBERSHIP_NOT_VISIBLE_JSON_ANY: ::buffa::type_registry::JsonAnyEntr
     is_wkt: false,
 };
 /// Signed takedown notice used as a Connect error detail and on visible refs.
-/// The sole field is the exact DSSE JSON envelope (SPEC-SERVER §14.6).
+/// The sole field is the exact DSSE JSON envelope.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -11098,7 +11098,7 @@ pub const __REDACTION_NOTICE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::
     from_json: ::buffa::type_registry::any_from_json::<RedactionNotice>,
     is_wkt: false,
 };
-/// Optional namespace authority fence; SPEC-SERVER §6.2.1.
+/// Optional namespace authority fence.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]

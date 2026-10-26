@@ -1715,8 +1715,8 @@ mod kani_proofs {
         kani::cover!(verify_with::<2>(8), "accepts_two_sibling_proof");
     }
 
-    /// Independent single-leaf proof builder following SPEC-MERKLE-
-    /// OBJECTS §1.1 (position-hashed leaves, odd trailing node paired
+    /// Independent single-leaf proof builder following
+    /// SPEC-MERKLE-OBJECTS §1.1 (position-hashed leaves, odd trailing node paired
     /// with itself, `H(be32(leaf_count) ‖ top)` finalization) and §5.3
     /// (level-major siblings, self-duplicates omitted). Returns the
     /// finalized inner root and the sibling list. `leaves.len() <= 4`.

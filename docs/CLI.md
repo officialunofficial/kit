@@ -1749,7 +1749,8 @@ The URL path names the repository as `<namespace>/<name>`
 (SPEC-TRANSPORT-CONNECT §7.4). Two namespace grammars are accepted: the
 self-certifying `ed25519-<64 lowercase hex>` and `0x<40 lowercase hex>`
 forms, and the opaque authority-mode form `[a-z0-9][a-z0-9._-]{0,71}`
-other than `root`, `ed25519-…` and `0x…` (SPEC-SERVER §6.2.2). An
+other than `root`, `ed25519-…` and `0x…`
+([SPEC-TRANSPORT-CONNECT §7.4](specs/SPEC-TRANSPORT-CONNECT.md#74-repository-addressing)). An
 authority-mode deployment can therefore use a UUIDv7, for example
 `kit+https://vcs.example/019c88c3-a904-7bd1-8a5d-3182a0c6978a/repo`. The
 URL does not say which mode the server runs; the server still enforces

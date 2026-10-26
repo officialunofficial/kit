@@ -15,8 +15,7 @@ and browser access. This document changes no protobuf schema.
 
 Authority: this document specifies the plain HTTP contract for object serving. [SPEC-CONVENTIONS](SPEC-CONVENTIONS.md) supplies normative keywords.
 [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md), abbreviated STC, owns
-repository identities and admission headers. SPEC-SERVER
-owns indexed mode, the published view, hooks, and durable outcomes.
+repository identities and admission headers.
 
 ## 1. Purpose and rationale
 
@@ -43,7 +42,7 @@ prefix. An explicit prefix MUST obey STC §7.4, including the bare-name
 restriction. HTTP selects the repository only by this path and MUST ignore
 `X-Repository`, Host, and forwarded headers as repository selectors.
 Adapters that validate routes before serving MUST use the pipeline's deployment
-namespace mode (SPEC-SERVER §6.2.2). Authority mode accepts opaque namespace
+namespace mode (STC §7.4). Authority mode accepts opaque namespace
 names and rejects self-certifying owner IDs and `root` at both gates.
 
 ```abnf
@@ -154,13 +153,12 @@ missing/invalid-private-token 404s MUST be byte-identical in status, headers,
 and body for otherwise equivalent requests (including CORS and HEAD).
 Their response MUST NOT identify which check failed. The missing-repository
 and private-repository 404 paths SHOULD take uniform time. Hooks and storage
-failures MUST fail closed under SPEC-SERVER; an infrastructure failure is
+failures MUST fail closed; an infrastructure failure is
 503, never a fabricated success or content-dependent 400.
 
 ## 4. Published resolution and reachability
 
-The caller's view for these requests MUST always be the **published view**
-(SPEC-SERVER, published view contract). Signed-read HTTP GETs are deferred.
+The caller's view for these requests MUST always be the **published view**. Signed-read HTTP GETs are deferred.
 Pending content MUST NOT be served over HTTP, even to a writer or a token
 holder. Ref-path resolution MUST peel tags to a commit or remix and walk
 its tree by exact decoded entry bytes. Symlinks MUST be served as blob
@@ -184,11 +182,11 @@ return 404 at step 7, even when a cached reachability result or matching
 The walk MUST use current tombstones even when its reachability result
 was cached. A global blocklist entry alone is not permission to answer
 451: the id MUST be reachable in this repository's published tree walk
-and have this repository's tombstone (SPEC-SERVER §14.5).
+and have this repository's tombstone.
 The global content store MUST NOT be consulted to decide membership,
 reachability, or existence; it MAY supply bytes for an id already resolved in
 this repository and held by it.
-Extracted copies keyed by object id (SPEC-SERVER §9.6) MUST NOT constitute
+Extracted copies keyed by object id MUST NOT constitute
 authorization, membership, reachability, or observable delta bases.
 
 A rewind or ref deletion MUST invalidate reachability within a configured
@@ -202,7 +200,7 @@ and its decoded `path` MUST resolve to the requested object id. Either
 failure is 404. A ref proof uses its resolved commit. Informative: an
 KDPB/KDSP proof authenticates the path through trees to the commit and its
 signature; the reader-side ref-to-commit binding remains the server's
-claim. SPEC-SERVER §15 storage receipts attest only live committed
+claim. Storage receipts attest only live committed
 advances to writers. A signed reader-side binding is a later follow-up.
 
 ## 5. Representations, validators, and headers
@@ -375,7 +373,7 @@ repositories MUST ignore the precheck result and all other token claims,
 and MUST still redact the supplied token.
 
 The deployment MUST publish `GET /.well-known/kit-url-token-keys.json`
-using SPEC-SERVER §7.2's key-list JSON shape (`version`, `keys`, `keyId`,
+using a key-list JSON shape (`version`, `keys`, `keyId`,
 `alg`, `publicKey`, `notBeforeMs`, `notAfterMs`). Here `keyId` MUST be the
 32hex URL-token key id from SPEC-WRITE-GRANTS §9.4, and `alg` is `ed25519`.
 The document MUST carry `Content-Type: application/json` and
@@ -383,7 +381,7 @@ The document MUST carry `Content-Type: application/json` and
 URL-token authentication nor admission, and MUST include the active and
 retained verification keys. The read CORS policy applies to this document.
 The separate storage receipt-and-notice key list at
-`/.well-known/kit-receipt-keys.json` follows SPEC-SERVER §15.5: it is
+`/.well-known/kit-receipt-keys.json` is
 likewise public without bearer, URL-token authentication, or admission,
 and permits every CORS origin.
 
@@ -398,14 +396,13 @@ No object-id field or token principal is added to the hook schema here.
 The HTTP read `AdmitRequest` MUST set `creates_namespace = false`,
 `creates_repo = false`, and `new_to_repo_bytes = 0`. Its
 `credential_headers` MUST contain the request's STC §5.1 credential
-headers under SPEC-SERVER §6.3's allowlist, bounds, and redaction rules.
+headers, limited by its allowlist, bounds, and redaction rules.
 
 When reads are configured for Admission, GET and HEAD MUST be admitted
 alike. `declared_bytes` MUST be the selected GET body byte count after
 ordinary Range or proof selection; `pack_id` MUST be empty. HEAD declares
 the GET count but records `ReadServed` with zero bytes served. Admission
-credential forwarding and redaction MUST follow STC §5.1 and SPEC-SERVER
-§6.3/§6.6, including bearer/Admission header separation.
+credential forwarding and redaction MUST follow STC §5.1, including bearer/Admission header separation.
 
 A challenge MUST return 402, pass through `WWW-Authenticate` and
 `ADMISSION-REQUIRED`, and carry `Cache-Control: no-store` (or
@@ -421,12 +418,12 @@ accepted by design: revalidation and unsatisfiable ranges are never charged.
 Private content is protected by the earlier token and Authorizer steps.
 
 An allowance with a reservation id MUST durably record the pending read
-before sending the first byte, as SPEC-SERVER §5 requires. `ReadServed`
+before sending the first byte. `ReadServed`
 MUST record actual body bytes sent, including a partially sent response.
 A failure before the first byte MUST record `Aborted(INTERNAL)`.
 A successful HEAD MUST record `ReadServed{bytes_served: 0}`. Conditional
 terminal replacement, crash reconciliation, and at-least-once delivery
-MUST follow SPEC-SERVER §5's HTTP read rule. 304 and 416 MUST NOT run
+MUST follow the outcome rules of STC §7.7. 304 and 416 MUST NOT run
 Admission. Reads MUST NOT allocate auth v2 replay state.
 
 ## 8. Redirects and CORS
@@ -474,8 +471,7 @@ The independent test-local KDSP encoder and reference verifier are in
 vectors. Reject sidecars name the exact span rejection reason.
 
 An HTTP 451 body MUST be the canonical protobuf JSON of the newest
-applicable reader-view `kit.transport.v1.RedactionNotice`
-(SPEC-SERVER §14.6), with
+applicable reader-view `kit.transport.v1.RedactionNotice`, with
 `Content-Type: application/json`, `Cache-Control: no-store` (or
 `private, no-store` under a bearer gate), and
 `Link: <origin>; rel="blocked-by"`. It MUST omit `ETag`, every
@@ -496,7 +492,7 @@ separate work.
 |---|---|---|
 | 1 | draft | Extend §5.1 with inline MP4/WebM video, MP3/Ogg/WAV audio, HEIC images, Markdown and CSV. Dangerous extensions remain binary attachments; filename encoding, security headers and ordinary byte ranges are unchanged. |
 | 1 | draft | Adds an extension allowlist and encoded filenames to successful ordinary ref-path Blob/ChunkedBlob responses, including HEAD and 206; object-id, proof, non-file, 304 and error responses are unchanged. |
-| 1 | draft | Clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it (SPEC-SERVER §9.6). |
+| 1 | draft | Clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it. |
 | 1 | draft | Clarifies that the boundary-aware builder reduces reads and memory, while complete preceding length proofs still impose an O(first chunk index) encoded-size cost and 416 on oversize. |
 | 1 | draft | Initial HTTP contract, selecting KDPB v2 or KDSP v1 without changing object bytes or protobuf. Fix round 1 clarifies bearer and admission-gated caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |
 
@@ -510,5 +506,5 @@ separate work.
 | Pending content never escapes through HTTP | published view for all callers (§4) |
 | A proof cannot be sliced by HTTP Range | separate query-selected representation (§5.2) |
 | Cached private or admission-gated content never becomes public | composing privacy overrides (§5.3) |
-| A reservation has one durable terminal result | conditional read outcomes and reconciliation (§7; SPEC-SERVER §5) |
+| A reservation has one durable terminal result | conditional read outcomes and reconciliation (§7) |
 | Token credentials do not enter observability output | query redaction (§6) |

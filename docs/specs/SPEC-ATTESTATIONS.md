@@ -217,7 +217,7 @@ JCS-canonical key order. Note `predicate` precedes `predicateType`
   actually looks for; without it those tools cannot read a kit
   attestation's subjects at all. A producer that does not hold the
   subject bytes MUST NOT fabricate a `sha256` digest. Storage-receipt
-  advance subjects under SPEC-SERVER §15
+  advance subjects
   carry `blake3` only **by that predicate's rule** in both opaque and
   indexed modes. An indexed server may hold the commit bytes; that does
   not add `sha256` to a storage-receipt advance subject. The server

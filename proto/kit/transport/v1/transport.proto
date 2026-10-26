@@ -144,7 +144,7 @@ service TransportService {
   // Discover deployment capabilities without authentication (SPEC-TRANSPORT-CONNECT §2.1).
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
 
-  // Fetch a retained writer-view storage receipt (SPEC-SERVER §15).
+  // Fetch a retained writer-view storage receipt.
   rpc GetReceipt(GetReceiptRequest) returns (GetReceiptResponse);
 
   // Reserve an upload for a ref (SPEC-TRANSPORT-CONNECT §7.6).
@@ -201,7 +201,7 @@ message ListRefsResponse {
   repeated RefEntry refs = 1;
   // Empty ends the listing (SPEC-TRANSPORT-CONNECT §7.9).
   string next_page_token = 2;
-  // Active notices associated with visible refs on this page (SPEC-SERVER §14.6).
+  // Active notices associated with visible refs on this page.
   repeated RefRedaction ref_redactions = 3;
 }
 
@@ -218,7 +218,7 @@ message ReadRefRequest {
 message ReadRefResponse {
   bool exists = 1;
   bytes object_id = 2;  // 32-byte BLAKE3 digest; meaningful only when exists
-  // Active notices for this visible ref; empty when absent (SPEC-SERVER §14.6).
+  // Active notices for this visible ref; empty when absent.
   repeated RedactionNotice redaction_notices = 3;
 }
 
@@ -387,15 +387,15 @@ message GetServerInfoResponse {
   string namespace_policy = 14;
   // Fixed index prefix fan-out; default 16 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
   uint32 index_fanout = 15;
-  uint32 max_delta_chain_depth = 16;   // SPEC-SERVER §9.8; 0 when indexed mode is off
-  // Whether storage leases are enforced; STC §2.1 and SPEC-SERVER §12.
+  uint32 max_delta_chain_depth = 16;   // 0 when indexed mode is off
+  // Whether storage leases are enforced; STC §2.1.
   bool leases = 17;
   // Whether async inspection is configured; writers MUST sign reads to see
   // non-held pending content. Held content is hidden from every caller,
-  // including with sync holds when false (SPEC-SERVER §§10–11).
+  // including with sync holds when false.
   bool async_inspection = 18;
   // Maximum distinct inspected objects in one advance; absent when no inspector
-  // is configured (SPEC-TRANSPORT-CONNECT §2.1; SPEC-SERVER §11.1).
+  // is configured (SPEC-TRANSPORT-CONNECT §2.1).
   uint32 inspection_max_objects = 19;
   // Whether DownloadPack accepts location opt-in; absent or false disables it.
   bool supports_pack_locations = 20;
@@ -559,24 +559,24 @@ message Challenge {
 }
 
 // Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
-// verification (SPEC-TRANSPORT-CONNECT §7.6; SPEC-SERVER §9.5).
+// verification (SPEC-TRANSPORT-CONNECT §7.6).
 message PendingVerification {
-  uint32 retry_after_ms = 1;   // server's suggested poll interval; bounded tiny-pack work may send under 1000 (SPEC-SERVER §9.5)
+  uint32 retry_after_ms = 1;   // server's suggested poll interval; bounded tiny-pack work may send under 1000
 }
 
 // Detail on an `unavailable` answer whose repository membership is not yet
-// visible inside the relay-lag window (SPEC-SERVER §9.4; SPEC-TRANSPORT-CONNECT
+// visible inside the relay-lag window (SPEC-TRANSPORT-CONNECT
 // §5). The condition is carried by the type; the message has no fields and
 // retrying with the same nonce is safe.
 message MembershipNotVisible {}
 
 // Signed takedown notice used as a Connect error detail and on visible refs.
-// The sole field is the exact DSSE JSON envelope (SPEC-SERVER §14.6).
+// The sole field is the exact DSSE JSON envelope.
 message RedactionNotice {
   bytes envelope = 1;
 }
 
-// Optional namespace authority fence; SPEC-SERVER §6.2.1.
+// Optional namespace authority fence.
 message GetAuthorityGenerationRequest {
   string namespace = 1;
 }

@@ -11,7 +11,7 @@
 //! ```
 //!
 //! A client may also address a repository on a `namespace_mode = authority`
-//! server (SPEC-SERVER §6.2.2), whose namespace is an opaque name that
+//! server (SPEC-TRANSPORT-CONNECT §7.4), whose namespace is an opaque name that
 //! certifies no owner:
 //!
 //! ```abnf
@@ -40,7 +40,7 @@ use crate::write_auth::is_hex;
 pub const MAX_IDENTITY_LEN: usize = 173;
 /// Longest valid repository name in bytes.
 pub const MAX_NAME_LEN: usize = 100;
-/// Longest authority-mode namespace in bytes (SPEC-SERVER §6.2.2).
+/// Longest authority-mode namespace in bytes (SPEC-TRANSPORT-CONNECT §7.4).
 pub const MAX_OPAQUE_NAMESPACE_LEN: usize = 72;
 
 const ED25519_PREFIX: &str = "ed25519-";

@@ -16,7 +16,7 @@ tie rules, dedup activation, the 256/192 bounds and their failure
 modes, and the byte snapshot that carries reducer state between pages.
 Selection of which ref, session, or objects feed the walk; proof and
 token formats that wrap the snapshot; and every object I/O loop are
-specified elsewhere (SPEC-SERVER,
+specified elsewhere (see
 [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md)).
 Endianness: **little-endian** throughout. All ids are 32-byte BLAKE3
 hashes ([SPEC-OBJECTS](SPEC-OBJECTS.md) §10).
@@ -173,8 +173,7 @@ produced by a conforming encoder is bit-for-bit reproducible:
 - Which objects feed the walk: ref selection, tag peeling, session and
   proof state, descent stops, and every I/O loop.
 - The continuation token claims and MAC that wrap a snapshot, and any
-  provenance/witness encoding (see
-  SPEC-SERVER authenticated history continuations). Its
+  provenance/witness encoding. Its
   version-2 timestamp continuations carry the §5 snapshot verbatim; wrapping
   does not bump the snapshot version.
 - Any other traversal order (first-parent, breadth-first, topological,

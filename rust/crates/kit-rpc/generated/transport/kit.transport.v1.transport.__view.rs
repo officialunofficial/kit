@@ -1819,7 +1819,7 @@ pub struct ListRefsResponseView<'a> {
     ///
     /// Field 2: `next_page_token`
     pub next_page_token: ::core::option::Option<&'a str>,
-    /// Active notices associated with visible refs on this page (SPEC-SERVER §14.6).
+    /// Active notices associated with visible refs on this page.
     ///
     /// Field 3: `ref_redactions`
     pub ref_redactions: ::buffa::RepeatedView<
@@ -2131,7 +2131,7 @@ impl ListRefsResponseOwnedView {
     pub fn next_page_token(&self) -> ::core::option::Option<&'_ str> {
         self.0.reborrow().next_page_token
     }
-    /// Active notices associated with visible refs on this page (SPEC-SERVER §14.6).
+    /// Active notices associated with visible refs on this page.
     ///
     /// Field 3: `ref_redactions`
     #[must_use]
@@ -2736,7 +2736,7 @@ pub struct ReadRefResponseView<'a> {
     ///
     /// Field 2: `object_id`
     pub object_id: ::core::option::Option<&'a [u8]>,
-    /// Active notices for this visible ref; empty when absent (SPEC-SERVER §14.6).
+    /// Active notices for this visible ref; empty when absent.
     ///
     /// Field 3: `redaction_notices`
     pub redaction_notices: ::buffa::RepeatedView<
@@ -3021,7 +3021,7 @@ impl ReadRefResponseOwnedView {
     pub fn object_id(&self) -> ::core::option::Option<&'_ [u8]> {
         self.0.reborrow().object_id
     }
-    /// Active notices for this visible ref; empty when absent (SPEC-SERVER §14.6).
+    /// Active notices for this visible ref; empty when absent.
     ///
     /// Field 3: `redaction_notices`
     #[must_use]
@@ -8794,22 +8794,22 @@ pub struct GetServerInfoResponseView<'a> {
     ///
     /// Field 15: `index_fanout`
     pub index_fanout: ::core::option::Option<u32>,
-    /// SPEC-SERVER §9.8; 0 when indexed mode is off
+    /// 0 when indexed mode is off
     ///
     /// Field 16: `max_delta_chain_depth`
     pub max_delta_chain_depth: ::core::option::Option<u32>,
-    /// Whether storage leases are enforced; STC §2.1 and SPEC-SERVER §12.
+    /// Whether storage leases are enforced; STC §2.1.
     ///
     /// Field 17: `leases`
     pub leases: ::core::option::Option<bool>,
     /// Whether async inspection is configured; writers MUST sign reads to see
     /// non-held pending content. Held content is hidden from every caller,
-    /// including with sync holds when false (SPEC-SERVER §§10–11).
+    /// including with sync holds when false.
     ///
     /// Field 18: `async_inspection`
     pub async_inspection: ::core::option::Option<bool>,
     /// Maximum distinct inspected objects in one advance; absent when no inspector
-    /// is configured (SPEC-TRANSPORT-CONNECT §2.1; SPEC-SERVER §11.1).
+    /// is configured (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 19: `inspection_max_objects`
     pub inspection_max_objects: ::core::option::Option<u32>,
@@ -9531,14 +9531,14 @@ impl GetServerInfoResponseOwnedView {
     pub fn index_fanout(&self) -> ::core::option::Option<u32> {
         self.0.reborrow().index_fanout
     }
-    /// SPEC-SERVER §9.8; 0 when indexed mode is off
+    /// 0 when indexed mode is off
     ///
     /// Field 16: `max_delta_chain_depth`
     #[must_use]
     pub fn max_delta_chain_depth(&self) -> ::core::option::Option<u32> {
         self.0.reborrow().max_delta_chain_depth
     }
-    /// Whether storage leases are enforced; STC §2.1 and SPEC-SERVER §12.
+    /// Whether storage leases are enforced; STC §2.1.
     ///
     /// Field 17: `leases`
     #[must_use]
@@ -9547,7 +9547,7 @@ impl GetServerInfoResponseOwnedView {
     }
     /// Whether async inspection is configured; writers MUST sign reads to see
     /// non-held pending content. Held content is hidden from every caller,
-    /// including with sync holds when false (SPEC-SERVER §§10–11).
+    /// including with sync holds when false.
     ///
     /// Field 18: `async_inspection`
     #[must_use]
@@ -9555,7 +9555,7 @@ impl GetServerInfoResponseOwnedView {
         self.0.reborrow().async_inspection
     }
     /// Maximum distinct inspected objects in one advance; absent when no inspector
-    /// is configured (SPEC-TRANSPORT-CONNECT §2.1; SPEC-SERVER §11.1).
+    /// is configured (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 19: `inspection_max_objects`
     #[must_use]
@@ -15420,10 +15420,10 @@ impl ::serde::Serialize for ChallengeOwnedView {
     }
 }
 /// Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
-/// verification (SPEC-TRANSPORT-CONNECT §7.6; SPEC-SERVER §9.5).
+/// verification (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, Debug, Default)]
 pub struct PendingVerificationView<'a> {
-    /// server's suggested poll interval; bounded tiny-pack work may send under 1000 (SPEC-SERVER §9.5)
+    /// server's suggested poll interval; bounded tiny-pack work may send under 1000
     ///
     /// Field 1: `retry_after_ms`
     pub retry_after_ms: ::core::option::Option<u32>,
@@ -15644,7 +15644,7 @@ impl PendingVerificationOwnedView {
     pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
         self.0.into_bytes()
     }
-    /// server's suggested poll interval; bounded tiny-pack work may send under 1000 (SPEC-SERVER §9.5)
+    /// server's suggested poll interval; bounded tiny-pack work may send under 1000
     ///
     /// Field 1: `retry_after_ms`
     #[must_use]
@@ -15683,7 +15683,7 @@ impl ::serde::Serialize for PendingVerificationOwnedView {
     }
 }
 /// Detail on an `unavailable` answer whose repository membership is not yet
-/// visible inside the relay-lag window (SPEC-SERVER §9.4; SPEC-TRANSPORT-CONNECT
+/// visible inside the relay-lag window (SPEC-TRANSPORT-CONNECT
 /// §5). The condition is carried by the type; the message has no fields and
 /// retrying with the same nonce is safe.
 #[derive(Clone, Debug, Default)]
@@ -15916,7 +15916,7 @@ impl ::serde::Serialize for MembershipNotVisibleOwnedView {
     }
 }
 /// Signed takedown notice used as a Connect error detail and on visible refs.
-/// The sole field is the exact DSSE JSON envelope (SPEC-SERVER §14.6).
+/// The sole field is the exact DSSE JSON envelope.
 #[derive(Clone, Debug, Default)]
 pub struct RedactionNoticeView<'a> {
     /// Field 1: `envelope`
@@ -16162,7 +16162,7 @@ impl ::serde::Serialize for RedactionNoticeOwnedView {
         ::serde::Serialize::serialize(&self.0, __s)
     }
 }
-/// Optional namespace authority fence; SPEC-SERVER §6.2.1.
+/// Optional namespace authority fence.
 #[derive(Clone, Debug, Default)]
 pub struct GetAuthorityGenerationRequestView<'a> {
     /// Field 1: `namespace`

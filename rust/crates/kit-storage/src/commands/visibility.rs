@@ -131,7 +131,7 @@ fn set(opts: &SetOpts) -> u8 {
         };
         let Some(repository) = tx.repository() else {
             return usage_error(
-                "visibility statements need a self-certifying `ed25519-`/`0x` namespace; authority-mode servers refuse them (SPEC-SERVER §6.2.2)",
+                "visibility statements need a self-certifying `ed25519-`/`0x` namespace; authority-mode servers refuse them",
             );
         };
         let repository = repository.clone();
