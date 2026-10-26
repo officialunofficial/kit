@@ -493,6 +493,7 @@ steps:
           echo "No base commit: skipping the commit message scan."
         fi
         bash scripts/check-doc-paths.sh || status=1
+        bash scripts/test-check-doc-paths.sh || status=1
         bash scripts/test-install.sh || status=1
         exit "$status"
 
