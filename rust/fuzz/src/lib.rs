@@ -1576,7 +1576,10 @@ pub fn trust_roots_parse_one_iteration(input: &[u8]) {
             assert!(!e.keyid.is_empty());
             match e.kind.as_str() {
                 "ed25519" => assert_eq!(key.len(), 32),
-                _ => assert!(key.len() == 33 || key.len() == 65),
+                "secp256k1" | "secp256k1-sec1" | "p256-sec1" | "p256" => {
+                    assert!(key.len() == 33 || key.len() == 65);
+                }
+                other => panic!("parse accepted the unknown key kind `{other}`"),
             }
         }
     }
