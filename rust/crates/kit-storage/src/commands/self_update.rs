@@ -869,6 +869,45 @@ fn verify_sha256_sidecar(archive: &[u8], sidecar: &[u8], archive_name: &str) -> 
 /// skipped entries cannot make the reader work without bound.
 fn extract_binary(archive: &[u8], stage_dir: &str) -> Result<Vec<u8>, String> {
     extract_binary_within(archive, stage_dir, MAX_UNPACKED_BYTES, MAX_ARCHIVE_ENTRIES)
+        .map_err(|e| e.to_string())
+}
+
+/// Why `extract_binary_within` refused an archive.
+#[derive(Debug, thiserror::Error)]
+pub enum ExtractError {
+    /// The decompressed stream is longer than the cap. The archive may be
+    /// a gzip bomb.
+    #[error("archive expands to more than {max} bytes")]
+    UnpackedTooLarge { max: u64 },
+    #[error("archive has more than {max} entries")]
+    TooManyEntries { max: usize },
+    #[error("read archive: {0}")]
+    Read(std::io::Error),
+    #[error("archive entry path: {0}")]
+    EntryPath(std::io::Error),
+    #[error("archive member {0} is not a regular file")]
+    NotRegular(String),
+    #[error("{0} exceeds the {MAX_BINARY_BYTES}-byte cap")]
+    BinaryTooLarge(String),
+    #[error("archive has no {0} member")]
+    Missing(String),
+}
+
+/// A reader that serves at most `limit` bytes and records how many it
+/// has left. After a read error, zero left means the stream hit the cap.
+struct Capped<'a, R> {
+    inner: R,
+    left: &'a std::cell::Cell<u64>,
+}
+
+impl<R: Read> Read for Capped<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let room = usize::try_from(self.left.get()).unwrap_or(usize::MAX);
+        let want = buf.len().min(room);
+        let n = self.inner.read(&mut buf[..want])?;
+        self.left.set(self.left.get() - n as u64);
+        Ok(n)
+    }
 }
 
 fn extract_binary_within(
@@ -876,38 +915,49 @@ fn extract_binary_within(
     stage_dir: &str,
     max_unpacked: u64,
     max_entries: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, ExtractError> {
     let want = format!("{stage_dir}/kit");
-    let gz = flate2::read::GzDecoder::new(archive).take(max_unpacked);
+    let left = std::cell::Cell::new(max_unpacked);
+    let gz = Capped {
+        inner: flate2::read::GzDecoder::new(archive),
+        left: &left,
+    };
+    let read_failed = |e: std::io::Error| {
+        if left.get() == 0 {
+            ExtractError::UnpackedTooLarge { max: max_unpacked }
+        } else {
+            ExtractError::Read(e)
+        }
+    };
     let mut tar = tar::Archive::new(gz);
-    let entries = tar.entries().map_err(|e| format!("read archive: {e}"))?;
+    let entries = tar.entries().map_err(read_failed)?;
     for (seen, entry) in entries.enumerate() {
         if seen >= max_entries {
-            return Err(format!("archive has more than {max_entries} entries"));
+            return Err(ExtractError::TooManyEntries { max: max_entries });
         }
-        let entry = entry.map_err(|e| {
-            format!("read archive entry (the stream may exceed {max_unpacked} bytes): {e}")
-        })?;
-        let path = entry
-            .path()
-            .map_err(|e| format!("archive entry path: {e}"))?;
+        let entry = entry.map_err(read_failed)?;
+        let path = entry.path().map_err(ExtractError::EntryPath)?;
         if path.as_os_str() != want.as_str() {
             continue;
         }
         if !entry.header().entry_type().is_file() {
-            return Err(format!("archive member {want} is not a regular file"));
+            return Err(ExtractError::NotRegular(want));
         }
+        let declared = entry.header().size().map_err(ExtractError::Read)?;
         let mut buf = Vec::new();
         entry
             .take(MAX_BINARY_BYTES + 1)
             .read_to_end(&mut buf)
-            .map_err(|e| format!("extract {want}: {e}"))?;
+            .map_err(read_failed)?;
         if buf.len() as u64 > MAX_BINARY_BYTES {
-            return Err(format!("{want} exceeds the {MAX_BINARY_BYTES}-byte cap"));
+            return Err(ExtractError::BinaryTooLarge(want));
+        }
+        if buf.len() as u64 != declared {
+            return Err(read_failed(std::io::ErrorKind::UnexpectedEof.into()));
         }
         return Ok(buf);
     }
-    Err(format!("archive has no {want} member"))
+    Err(ExtractError::Missing(want))
 }
 
 /// Refuse group- or world-writable bin dirs (installer parity — see
@@ -1223,7 +1273,25 @@ mod tests {
         let bin = extract_binary_within(&tgz, "kit-0.4.0-x", 1024 * 1024, 8).unwrap();
         assert_eq!(bin, b"bin");
         let e = extract_binary_within(&tgz, "kit-0.4.0-x", 64 * 1024, 8).unwrap_err();
-        assert!(e.contains("read archive entry"), "{e}");
+        assert!(
+            matches!(e, ExtractError::UnpackedTooLarge { max } if max == 64 * 1024),
+            "{e}"
+        );
+        assert!(e.to_string().contains("expands to more than 65536 bytes"));
+    }
+
+    #[test]
+    fn extract_binary_cap_inside_the_binary_is_the_cap_error() {
+        let big = vec![1u8; 100 * 1024];
+        let tgz = tgz_with(&[("kit-0.4.0-x/kit", &big)]);
+        let e = extract_binary_within(&tgz, "kit-0.4.0-x", 64 * 1024, 8).unwrap_err();
+        assert!(matches!(e, ExtractError::UnpackedTooLarge { .. }), "{e}");
+    }
+
+    #[test]
+    fn extract_binary_corrupt_stream_is_not_the_cap_error() {
+        let e = extract_binary_within(b"not gzip", "kit-0.4.0-x", 1024 * 1024, 8).unwrap_err();
+        assert!(matches!(e, ExtractError::Read(_)), "{e}");
     }
 
     #[test]
