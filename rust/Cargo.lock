@@ -2976,6 +2976,7 @@ dependencies = [
  "kit-transport-s3",
  "kit-transport-ssh",
  "libc",
+ "libkit",
  "mockito",
  "p256",
  "predicates",
@@ -3297,6 +3298,8 @@ dependencies = [
  "kit-transport-file",
  "kit-transport-s3",
  "kit-transport-ssh",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

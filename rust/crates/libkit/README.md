@@ -3,7 +3,20 @@
 The kit library. One crate re-exports the kit crates that a program embeds.
 
 kit is a content-addressed, signed version-control system. The `kit` command
-line is built from these crates. This crate adds no behavior of its own.
+line is built from these crates. This crate adds the repository handle and
+the environment that the other crates do not have.
+
+## Repository and environment
+
+`libkit::Environment` holds every input that the library would otherwise read
+from the process: the working directory, the home directory, configuration
+overrides, the author identity and the credential sources. The library never
+reads environment variables, never changes the working directory and keeps no
+global state.
+
+`libkit::Repo` is a cheap, `Clone`, `Send + Sync` handle to one repository.
+`Repo::open` opens the repository at a path. `Repo::discover` searches the
+path and its parents. Both refuse a path with a `..` component.
 
 ## Modules
 

@@ -19,6 +19,12 @@
 //! let _algorithm = Algorithm::Ed25519;
 //! ```
 
+mod environment;
+pub mod repo;
+
+pub use environment::{CredentialSource, Environment, Identity, Token};
+pub use repo::Repo;
+
 pub use kit_attest as attest;
 pub use kit_core as core;
 pub use kit_keystore as keystore;

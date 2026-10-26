@@ -26,6 +26,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod editor;
+mod environment;
 pub mod exit;
 mod fanout;
 pub mod format;
@@ -58,7 +59,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
-    config::set_cli_overrides(overrides);
+    config::set_cli_overrides(&environment::from_process(overrides));
 
     if cmd_idx >= argv.len() {
         print_usage_stderr();

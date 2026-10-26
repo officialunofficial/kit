@@ -695,10 +695,11 @@ pub fn read_layered(layout: &RepoLayout) -> Result<LayeredConfig, ConfigError> {
 static CLI_OVERRIDES: std::sync::OnceLock<std::sync::Mutex<Vec<(String, String)>>> =
     std::sync::OnceLock::new();
 
-/// Record the `-c key=value` overrides parsed from the global flags. Each
+/// Record the `-c key=value` overrides that `environment` carries. Each
 /// is `(key, value)`; an empty list clears any previous set. Idempotent
 /// and safe to call before dispatch.
-pub fn set_cli_overrides(overrides: Vec<(String, String)>) {
+pub fn set_cli_overrides(environment: &libkit::Environment) {
+    let overrides = environment.config_overrides.clone();
     let slot = CLI_OVERRIDES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
     if let Ok(mut guard) = slot.lock() {
         *guard = overrides;
