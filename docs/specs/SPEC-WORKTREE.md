@@ -269,11 +269,11 @@ versions with and without worktree support while linked trees exist.
 - `kit-core/src/layout.rs` unit tests: accessor/classification
   goldens, discovery fail-closed matrix, pointer-file golden bytes,
   id grammar.
-- `kit-cli/tests/layout_baseline_pin.rs`: the single-worktree `.kit`
+- `kit-bin/tests/layout_baseline_pin.rs`: the single-worktree `.kit`
   shape is a compatibility surface; it must never drift.
 - `kit-core/src/ops/stash.rs` unit tests: manifest round-trip, short
   data, bad magic, oversized `count` and trailing bytes.
-- `kit-cli/tests/linked_worktree_discovery.rs`,
+- `kit-bin/tests/linked_worktree_discovery.rs`,
   `worktree_command.rs`, `worktree_gc_cross_tree.rs`: shared-store,
   tree-locality, guard, gc-survival, and lock-contention behavior
   through the real binary.

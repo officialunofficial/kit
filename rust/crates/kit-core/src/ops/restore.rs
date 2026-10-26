@@ -47,7 +47,7 @@ const MAX_SPARSE_BYTES: u64 = 1024 * 1024;
 /// MiB at the current 256 KiB max chunk size) so the read side of a
 /// large-file checkout bounds in-flight memory the same way the write
 /// side already does. Public so a caller-supplied `read_chunks`'s own
-/// fan-out threshold (e.g. `kit-cli`'s `restore_fanout`) can be capped
+/// fan-out threshold (e.g. `kit-bin`'s `restore_fanout`) can be capped
 /// against the same number: a threshold above this value could never be
 /// reached by any batch this module ever hands `read_chunks`, silently
 /// disabling that caller's parallel path on a high-core-count host.
@@ -329,14 +329,14 @@ pub fn restore_tree_to_worktree(
 /// collecting into a `Vec` preserves input order regardless of which
 /// worker finishes a given index first) are both order-preserving, so
 /// this gap has no live exploit through any code path this crate or
-/// `kit-cli` ships — it is a contract a *hand-written, buggy or hostile*
+/// `kit-bin` ships — it is a contract a *hand-written, buggy or hostile*
 /// third-party `read_chunks` could violate, same as an equally
 /// third-party `hash_chunks` already could on the write side.
 /// `kit-core` has no thread-pool dependency of its own — it stays
 /// usable from wasm targets, which have no OS threads — so the fan-out
 /// decision lives with the caller instead of living in this function.
 /// Reading each chunk (open + integrity-verify + decode) is independent
-/// of every other chunk in a batch, so `kit-cli`'s native
+/// of every other chunk in a batch, so `kit-bin`'s native
 /// checkout/clone/reset/restore paths pass a rayon-backed `read_chunks`,
 /// the read-side counterpart of `add`'s ingest-side chunk-hashing
 /// fan-out.
@@ -562,7 +562,7 @@ where
 /// are always read sequentially via the plain `restore_blob`. Giving
 /// `stash` the same rayon fan-out would mean threading a `read_chunks`
 /// callback through `ops::stash`'s own public API (`save`/`pop`/`apply`)
-/// and `kit-cli`'s stash command — a separate, larger change, not a
+/// and `kit-bin`'s stash command — a separate, larger change, not a
 /// side effect of this one.
 ///
 /// # Errors
@@ -1537,7 +1537,7 @@ mod tests {
     /// internally (simulating a rayon fan-out) but returns results in
     /// input order — the documented contract — must still reassemble the
     /// exact same bytes as the sequential default. Pins the `_with`
-    /// contract `kit-cli`'s `restore_fanout::read_chunks_fanout` relies
+    /// contract `kit-bin`'s `restore_fanout::read_chunks_fanout` relies
     /// on.
     #[test]
     fn restore_tree_to_worktree_with_out_of_order_processing_matches_sequential() {

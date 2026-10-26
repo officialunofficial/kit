@@ -2941,7 +2941,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kit-cli"
+name = "kit-bin"
 version = "0.5.0"
 dependencies = [
  "assert_cmd",
@@ -3061,7 +3061,7 @@ dependencies = [
  "commonware-invariants",
  "flate2",
  "kit-attest",
- "kit-cli",
+ "kit-bin",
  "kit-core",
  "kit-git-bridge",
  "kit-keystore",

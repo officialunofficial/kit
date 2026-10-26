@@ -1051,7 +1051,7 @@ fn build_ssh_command(target: &SshTarget, options: &SshOptions) -> Command {
 #[cfg(test)]
 mod tests {
     // These smoke tests cover the helper functions. The public surface
-    // is exercised against `kit serve` in the kit-cli tests.
+    // is exercised against `kit serve` in the kit-bin tests.
     use super::*;
     use kit_rpc::kit::common::v1::{RefEntry, RefExpectation};
     use kit_rpc::kit::rpc::v1::ssh::DownloadPackHeader;
@@ -1526,7 +1526,7 @@ mod tests {
     /// A frame missing `expectation` decodes as UNSPECIFIED — a real
     /// wire state that a conforming server MUST reject (see
     /// SPEC-TRANSPORT §4.2.1). This test pins the decode side; the
-    /// server-side rejection lives in `kit-cli/src/commands/serve.rs`.
+    /// server-side rejection lives in `kit-bin/src/commands/serve.rs`.
     #[test]
     fn update_ref_without_expectation_decodes_as_unspecified() {
         use buffa::Message;

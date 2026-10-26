@@ -46,7 +46,7 @@ grants = ["algo-ed25519", "algo-secp256k1", "algo-p256", "dep:sha3"]
 # reaches it within one build — so leaving this edge on defaults would
 # silently drag `zstd-sys` back into that build even though the
 # consumer's own `kit-core` edge already opts out. Every OTHER
-# consumer of kit-attest (kit-cli, kit-keystore)
+# consumer of kit-attest (kit-bin, kit-keystore)
 # also depends on kit-core directly with default features on, so
 # their builds are unaffected — the union still includes `pack-zstd`
 # there via that direct edge.

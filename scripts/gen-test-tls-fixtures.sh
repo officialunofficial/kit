@@ -16,7 +16,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 targets=(
-  "${repo_root}/rust/crates/kit-cli/tests/support/fixtures/ca"
+  "${repo_root}/rust/crates/kit-bin/tests/support/fixtures/ca"
   "${repo_root}/rust/crates/kit-transport-connect/tests/fixtures/ca"
 )
 days=3650

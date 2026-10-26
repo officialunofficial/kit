@@ -128,7 +128,7 @@ pub enum StoreError {
     /// was given — a contract violation by the caller (see that
     /// function's docs), never a normal runtime condition. Reported as a
     /// typed error rather than a panic: the built-in caller
-    /// (`kit-cli`'s push path) can never trigger this since rayon's
+    /// (`kit-bin`'s push path) can never trigger this since rayon's
     /// `IndexedParallelIterator::collect` always preserves length, but a
     /// future or third-party `encode_deltas` with a bug should fail the
     /// `push` cleanly rather than crash the process.

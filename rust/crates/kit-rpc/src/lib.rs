@@ -6,14 +6,14 @@
 //! kit-rpc owns the schemas kit uses to talk to processes outside
 //! its address space:
 //!
-//! - **External signers** (`signer.proto`): kit-cli ↔ a subprocess
+//! - **External signers** (`signer.proto`): kit-bin ↔ a subprocess
 //!   signer (file, FIDO2, TPM, future hardware backends).
-//! - **SSH transport** (`ssh.proto`): kit-cli ↔ a remote
+//! - **SSH transport** (`ssh.proto`): kit-bin ↔ a remote
 //!   `kit serve` over an `ssh(1)` child process.
 //! - **Signature verification** (`verify.proto`):
 //!   message-only contract for the post-fetch commit/remix/tag check
 //!   `clone`/`pull`/`fetch` run by default. No bound RPC method yet —
-//!   kit-cli's local dispatch calls the Rust implementation
+//!   kit-bin's local dispatch calls the Rust implementation
 //!   (`kit_core::sign::verify_commit`/`verify_remix`/`verify_tag`)
 //!   directly; the schema exists so a future ConnectRPC transport can
 //!   bind the identical check instead of reimplementing it.

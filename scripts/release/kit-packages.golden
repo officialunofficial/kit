@@ -1,5 +1,5 @@
 # Packages the release `kit` build may compile: the union over
-# release.yml's targets of `cargo tree -p kit-cli -e normal,build`.
+# release.yml's targets of `cargo tree -p kit-bin -e normal,build`.
 # Checked by scripts/check-release-artifact-features.sh; regenerate with
 # `scripts/check-release-artifact-features.sh --update-golden` and review
 # the diff: every new name is a new dependency of the shipped CLI.
@@ -141,7 +141,7 @@ k256
 keccak
 keyring-core
 kit-attest
-kit-cli
+kit-bin
 kit-client
 kit-core
 kit-git-bridge

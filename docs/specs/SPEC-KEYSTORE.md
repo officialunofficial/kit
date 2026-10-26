@@ -109,7 +109,7 @@ Not yet shipped against this spec:
 9. WASM builds must not depend on native keystore code. Browser integrations
    use an in-memory backend or a JS-side signer bridge, not yet implemented.
 10. `software:<label>` is the encrypted-at-rest software backend. Production
-    `kit-cli` builds must enable the target-appropriate OS protector feature,
+    `kit-bin` builds must enable the target-appropriate OS protector feature,
     while `kit-keystore` default features remain empty. Raw-file
     storage is exposed only through the explicit `software-raw:<label>`
     backend token and must not be the secure default.
@@ -126,7 +126,7 @@ Not yet shipped against this spec:
   metadata lookup, and deletion.
 - A uniform signer handle abstraction that hides whether the key is software,
   OS-native, hardware-bound, or external.
-- `kit-cli` integration through `kit key {generate,list,import,export,delete}`.
+- `kit-bin` integration through `kit key {generate,list,import,export,delete}`.
 - `kit-attest` integration through a keystore-backed implementation of its
   existing `Signer` trait.
 - Ed25519 commit signing through a keystore signer handle.
@@ -166,7 +166,7 @@ Workspace integration:
 - Default features must build on Linux and macOS CI without native service
   daemons, TPM libraries, smartcard libraries, or OS-specific SDK setup beyond
   what the target already provides.
-- `kit-keystore` default features remain empty/lean. Production `kit-cli`
+- `kit-keystore` default features remain empty/lean. Production `kit-bin`
   builds, packages, and CI release gates must enable the platform-appropriate
   encrypted software protector feature so the configured `software` default is
   usable on supported targets while the library crate remains feature-gated.
@@ -966,7 +966,7 @@ Precedence:
 ### 8.2 Repo-forbidden keys
 
 Every config key in section 8.1 must be present in `REPO_FORBIDDEN_KEYS` in
-`rust/crates/kit-cli/src/config.rs`. The `REPO_FORBIDDEN_KEYS` list may
+`rust/crates/kit-bin/src/config.rs`. The `REPO_FORBIDDEN_KEYS` list may
 include additional keys (for example `signing_key`,
 `attest.external_signer_path`, `attest.external_signer_args`,
 `attest.secp256k1_key_path`, `attest.p256_key_path`,
@@ -1163,11 +1163,11 @@ Requirements:
 
 Implementation options:
 
-- Preferred: add a small adapter in `kit-cli` that obtains the commit signing
+- Preferred: add a small adapter in `kit-bin` that obtains the commit signing
   hash through `kit_core::sign::commit_signing_hash`, asks the Ed25519
   keystore signer to sign exactly those 32 bytes, then stores the resulting
   64-byte signature in `Commit.signature`.
-- Do not duplicate `domain_digest` construction in `kit-cli` or
+- Do not duplicate `domain_digest` construction in `kit-bin` or
   `kit-keystore`.
 
 `docs/specs/SPEC-SIGNING.md` describes `BLAKE3(len_le16(domain) || domain ||
@@ -1296,7 +1296,7 @@ If implemented:
 
 ### 14.2 Integration tests
 
-`kit-cli` must test:
+`kit-bin` must test:
 
 - `kit key generate` creates a key through the software backend.
 - `kit key list` reports generated keys.
@@ -1380,11 +1380,11 @@ the per-section requirements above remain normative.
 ### CLI surface
 
 - Add `commands/key.rs`. **Shipped** at
-  `rust/crates/kit-cli/src/commands/key.rs`.
-- Wire `kit key` in `kit-cli/src/lib.rs`. **Shipped.**
+  `rust/crates/kit-bin/src/commands/key.rs`.
+- Wire `kit key` in `kit-bin/src/lib.rs`. **Shipped.**
 - Preserve `kit keygen`. **Shipped.**
 - Add config keys and repo-forbidden tests. **Shipped** &mdash; see `KeyConfig` and
-  `REPO_FORBIDDEN_KEYS` in `kit-cli/src/config.rs`.
+  `REPO_FORBIDDEN_KEYS` in `kit-bin/src/config.rs`.
 - Add CLI integration tests. **Shipped.**
 
 ### Attestation integration

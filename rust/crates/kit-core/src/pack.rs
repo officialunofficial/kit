@@ -3616,7 +3616,7 @@ mod tests {
     // =================================================================
     // `prepare_raw`/`push_prepared_raw` and `prepare_delta`/
     // `push_prepared_delta` — the pure-compression / sequential-append
-    // split added so a caller (kit-cli's `build_and_upload_packs`) can
+    // split added so a caller (kit-bin's `build_and_upload_packs`) can
     // run compression across a thread pool before replaying the
     // append in order. Must produce byte-identical output to the
     // original `push_raw`/`push_delta` and preserve call order when

@@ -1,0 +1,2026 @@
+//! Integration coverage for the `kit+https` / `kit+http` dispatch
+//! branch in [`kit_bin::remote_dispatch::open`], backed by
+//! [`kit_transport_connect::ConnectTransport`], the native
+//! `kit.transport.v1` `ConnectRPC` client.
+//!
+//! The tests drive full push and pull round trips against a real
+//! in-process `kit.transport.v1.TransportService` server (a `connectrpc`
+//! hyper server, memory-backed), not a mock standing in for one.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
+
+mod common;
+#[path = "support/https.rs"]
+mod https;
+
+use std::collections::{BTreeMap, HashMap};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
+
+use connectrpc::server::Server;
+use connectrpc::{
+    ConnectError, ErrorCode, RequestContext, Response, Router, ServiceRequest, ServiceResult,
+    ServiceStream,
+};
+use futures::StreamExt;
+use kit_bin::remote_dispatch;
+use kit_core::hash::Hash;
+use kit_core::layout::RepoLayout;
+use kit_core::protocol::{
+    AdvanceOutcome, CommitOutcome, PackKey, RefWriteCondition, Transport, TransportError,
+    TransportResult, UploadLimits,
+};
+use kit_core::refs::{self, Ref};
+use kit_core::store::ObjectStore;
+use kit_core::transfer::decode_packlist;
+use kit_transport_connect::generated;
+use kit_transport_memory::MemoryTransport;
+
+use generated::__buffa::oneof::upload_pack_request::Body as UploadBody;
+use generated::__buffa::oneof::upload_part_request::Msg as PartBody;
+
+fn kit_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_kit")
+}
+
+fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let out = Command::new(kit_bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .expect("spawn kit");
+    drop(xdg);
+    out
+}
+
+// ---------------------------------------------------------------------------
+// In-process TransportService server (memory-backed) — see
+// kit-transport-connect/tests/roundtrip.rs for the crate-local sibling of
+// this fixture; duplicated here (not shared) so this crate's tests don't
+// need a `test-support` feature on `kit-transport-connect`.
+// ---------------------------------------------------------------------------
+
+fn to_connect_error(err: TransportError) -> ConnectError {
+    match err {
+        TransportError::PackNotFound => ConnectError::not_found("pack not found"),
+        TransportError::AccessDenied => ConnectError::permission_denied("access denied"),
+        TransportError::RefConflict => ConnectError::failed_precondition("ref CAS conflict"),
+        TransportError::InvalidRef(msg) => ConnectError::invalid_argument(msg),
+        TransportError::PayloadTooLarge(n) => {
+            ConnectError::resource_exhausted(format!("payload too large: {n} bytes"))
+        }
+        TransportError::ProtocolError => ConnectError::invalid_argument("protocol error"),
+        TransportError::ServerError { status } if status >= 500 || status == 429 => {
+            ConnectError::unavailable(format!("server error {status}"))
+        }
+        TransportError::ServerError { status } => {
+            ConnectError::unknown(format!("server error {status}"))
+        }
+        TransportError::RemoteError(msg) => ConnectError::unknown(msg),
+        TransportError::ConnectionFailed
+        | TransportError::InvalidResponse
+        | TransportError::InsecureScheme => ConnectError::new(
+            ErrorCode::Internal,
+            "unexpected client-only error surfaced server-side",
+        ),
+        _ => ConnectError::new(ErrorCode::Internal, "unexpected transport error"),
+    }
+}
+
+fn to_hash(bytes: Option<Vec<u8>>) -> Result<kit_core::hash::Hash, ConnectError> {
+    let bytes = bytes.ok_or_else(|| ConnectError::invalid_argument("missing 32-byte digest"))?;
+    <[u8; 32]>::try_from(bytes.as_slice())
+        .map_err(|_| ConnectError::invalid_argument("digest must be exactly 32 bytes"))
+}
+
+fn wire_to_condition(
+    expectation: Option<buffa::EnumValue<generated::RefExpectation>>,
+    expected_id: Option<Vec<u8>>,
+) -> Result<RefWriteCondition, ConnectError> {
+    match expectation.and_then(|e| e.as_known()) {
+        Some(generated::RefExpectation::Any) => Ok(RefWriteCondition::Any),
+        Some(generated::RefExpectation::Missing) => Ok(RefWriteCondition::Missing),
+        Some(generated::RefExpectation::Match) => {
+            Ok(RefWriteCondition::Match(to_hash(expected_id)?))
+        }
+        _ => Err(ConnectError::invalid_argument(
+            "REF_EXPECTATION_UNSPECIFIED",
+        )),
+    }
+}
+
+#[derive(Debug)]
+struct CapturedCall {
+    procedure: &'static str,
+    repository: Option<String>,
+    ref_hint: Option<String>,
+    part_index: Option<u32>,
+}
+
+type CapturedCalls = Arc<Mutex<Vec<CapturedCall>>>;
+type PartBuffers = HashMap<Vec<u8>, BTreeMap<u32, Vec<u8>>>;
+
+#[derive(Default)]
+struct PartGate {
+    reached: std::sync::atomic::AtomicBool,
+    released: Mutex<bool>,
+    ready: Condvar,
+}
+
+struct TestService {
+    inner: Arc<MemoryTransport>,
+    calls: CapturedCalls,
+    not_found: Vec<&'static str>,
+    pending_advance: bool,
+    admission_required: bool,
+    ticketed: bool,
+    part_buffers: Mutex<PartBuffers>,
+    part_gate: Option<Arc<PartGate>>,
+}
+
+impl TestService {
+    fn capture(&self, ctx: &RequestContext, procedure: &'static str) -> Result<(), ConnectError> {
+        let header = |name| {
+            ctx.headers()
+                .get(name)
+                .map(|value| value.to_str().unwrap().to_owned())
+        };
+        self.calls.lock().unwrap().push(CapturedCall {
+            procedure,
+            repository: header("x-repository"),
+            ref_hint: header("x-kit-ref"),
+            part_index: None,
+        });
+        if self.admission_required
+            && procedure == "AdvanceRefs"
+            && ctx.headers().get("admission-authorization").is_none()
+        {
+            return Err(
+                ConnectError::permission_denied("admission required").with_detail(
+                    connectrpc::ErrorDetail::from_message(
+                        "kit.transport.v1.AdmissionChallenge",
+                        &generated::AdmissionChallenge {
+                            challenges: vec![generated::Challenge {
+                                scheme: Some("test".into()),
+                                value: Some("secret-challenge-value".into()),
+                                ..Default::default()
+                            }],
+                            description: Some("admission needed to write".into()),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+            );
+        }
+        if self.not_found.contains(&procedure) {
+            return Err(ConnectError::not_found("repository not found"));
+        }
+        Ok(())
+    }
+}
+
+#[allow(refining_impl_trait)]
+impl generated::TransportService for TestService {
+    async fn list_repos(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::ListReposRequest>,
+    ) -> ServiceResult<generated::ListReposResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "unused test method",
+        ))
+    }
+
+    async fn get_receipt(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetReceiptRequest>,
+    ) -> ServiceResult<generated::GetReceiptResponse> {
+        Err(ConnectError::unimplemented("not implemented yet"))
+    }
+
+    // Compile-only stubs for the additive trait methods.
+    async fn get_server_info(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetServerInfoRequest>,
+    ) -> ServiceResult<generated::GetServerInfoResponse> {
+        self.capture(&ctx, "GetServerInfo")?;
+        if self.ticketed {
+            Ok(Response::new(generated::GetServerInfoResponse {
+                protocol: Some("kit.transport.v1".into()),
+                spec_version: Some(2),
+                part_size: Some(8 << 20),
+                max_parts: Some(512),
+                max_list_refs_page_size: Some(1000),
+                atomic_advance: Some(true),
+                begin_upload_threshold_bytes: Some(0),
+                ..Default::default()
+            }))
+        } else {
+            Err(connectrpc::ConnectError::unimplemented(
+                "not implemented yet",
+            ))
+        }
+    }
+
+    async fn begin_upload(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, generated::BeginUploadRequest>,
+    ) -> ServiceResult<generated::BeginUploadResponse> {
+        if !self.ticketed {
+            return Err(connectrpc::ConnectError::unimplemented(
+                "not implemented yet",
+            ));
+        }
+        self.capture(&ctx, "BeginUpload")?;
+        let pack_id = request.to_owned_message().pack_id.unwrap_or_default();
+        if pack_id.len() != 32 {
+            return Err(ConnectError::invalid_argument("pack id"));
+        }
+        Ok(Response::new(generated::BeginUploadResponse {
+            result: Some(
+                generated::__buffa::oneof::begin_upload_response::Result::Ticket(Box::new(
+                    generated::UploadTicket {
+                        id: Some(pack_id.clone()),
+                        token: Some(pack_id),
+                        part_size: Some(8 << 20),
+                        expires_unix_ms: Some(i64::MAX),
+                        ..Default::default()
+                    },
+                )),
+            ),
+            ..Default::default()
+        }))
+    }
+
+    async fn upload_part(
+        &self,
+        ctx: RequestContext,
+        mut requests: connectrpc::InboundStream<generated::UploadPartRequest>,
+    ) -> ServiceResult<generated::UploadPartResponse> {
+        if !self.ticketed {
+            return Err(connectrpc::ConnectError::unimplemented(
+                "not implemented yet",
+            ));
+        }
+        self.capture(&ctx, "UploadPart")?;
+        let first = requests
+            .next()
+            .await
+            .ok_or_else(|| ConnectError::invalid_argument("missing header"))??;
+        let Some(PartBody::Header(header)) = first.to_owned_message().msg else {
+            return Err(ConnectError::invalid_argument("missing header"));
+        };
+        let index = header.index.unwrap_or(0);
+        let token = header.ticket_token.unwrap_or_default();
+        let mut bytes = Vec::new();
+        while let Some(message) = requests.next().await {
+            if let Some(PartBody::Chunk(chunk)) = message?.to_owned_message().msg {
+                bytes.extend_from_slice(&chunk);
+            }
+        }
+        self.calls.lock().unwrap().last_mut().unwrap().part_index = Some(index);
+        self.part_buffers
+            .lock()
+            .unwrap()
+            .entry(token)
+            .or_default()
+            .insert(index, bytes);
+        if index == 1
+            && let Some(gate) = &self.part_gate
+        {
+            gate.reached
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let mut released = gate.released.lock().unwrap();
+            while !*released {
+                released = gate.ready.wait(released).unwrap();
+            }
+        }
+        Ok(Response::new(generated::UploadPartResponse {
+            receipt: Some(vec![
+                u8::try_from(index).map_err(|_| ConnectError::invalid_argument("part index"))?,
+                1,
+            ]),
+            ..Default::default()
+        }))
+    }
+
+    async fn complete_upload(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, generated::CompleteUploadRequest>,
+    ) -> ServiceResult<generated::CompleteUploadResponse> {
+        if !self.ticketed {
+            return Err(connectrpc::ConnectError::unimplemented(
+                "not implemented yet",
+            ));
+        }
+        self.capture(&ctx, "CompleteUpload")?;
+        let message = request.to_owned_message();
+        let token = message.ticket_token.unwrap_or_default();
+        let mut buffers = self.part_buffers.lock().unwrap();
+        let parts = buffers
+            .remove(&token)
+            .ok_or_else(|| ConnectError::invalid_argument("missing parts"))?;
+        if message.receipts.len() != parts.len() {
+            return Err(ConnectError::invalid_argument("missing receipts"));
+        }
+        let bytes: Vec<u8> = parts.into_values().flatten().collect();
+        let key = PackKey::new(kit_core::hash::hash(&bytes));
+        self.inner
+            .upload_pack(&bytes, &key)
+            .map_err(to_connect_error)?;
+        Ok(Response::new(generated::CompleteUploadResponse::default()))
+    }
+
+    async fn list_refs(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, generated::ListRefsRequest>,
+    ) -> ServiceResult<generated::ListRefsResponse> {
+        self.capture(&ctx, "ListRefs")?;
+        let msg = request.to_owned_message();
+        let prefix = msg.prefix.unwrap_or_default();
+        let refs = self.inner.list_refs(&prefix).map_err(to_connect_error)?;
+        Ok(Response::new(generated::ListRefsResponse {
+            refs: refs
+                .into_iter()
+                .map(|r| generated::RefEntry {
+                    name: Some(r.name),
+                    object_id: Some(r.hash.unwrap_or_default().to_vec()),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }))
+    }
+
+    async fn read_ref(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, generated::ReadRefRequest>,
+    ) -> ServiceResult<generated::ReadRefResponse> {
+        self.capture(&ctx, "ReadRef")?;
+        let msg = request.to_owned_message();
+        let name = msg.name.unwrap_or_default();
+        let current = self.inner.read_ref(&name).map_err(to_connect_error)?;
+        Ok(Response::new(generated::ReadRefResponse {
+            exists: Some(current.is_some()),
+            object_id: current.map(|h| h.to_vec()),
+            ..Default::default()
+        }))
+    }
+
+    async fn update_ref(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, generated::UpdateRefRequest>,
+    ) -> ServiceResult<generated::UpdateRefResponse> {
+        self.capture(&ctx, "UpdateRef")?;
+        let msg = request.to_owned_message();
+        let name = msg.name.unwrap_or_default();
+        let condition = wire_to_condition(msg.expectation, msg.expected_id)?;
+        let new_id = to_hash(msg.new_id)?;
+        self.inner
+            .update_ref(&name, condition, &new_id)
+            .map_err(to_connect_error)?;
+        Ok(Response::new(generated::UpdateRefResponse::default()))
+    }
+
+    async fn advance_refs(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, generated::AdvanceRefsRequest>,
+    ) -> ServiceResult<generated::AdvanceRefsResponse> {
+        self.capture(&ctx, "AdvanceRefs")?;
+        if self.pending_advance {
+            return Err(
+                ConnectError::unavailable("verification pending").with_detail(
+                    connectrpc::ErrorDetail::from_message(
+                        "kit.transport.v1.PendingVerification",
+                        &generated::PendingVerification::default().with_retry_after_ms(5_000),
+                    ),
+                ),
+            );
+        }
+        let msg = request.to_owned_message();
+        let head_ref = msg.head_ref.unwrap_or_default();
+        let head_condition = wire_to_condition(msg.head_expectation, msg.head_expected_id)?;
+        let head_new = to_hash(msg.head_new_id)?;
+        let packmap_ref = msg.packmap_ref.unwrap_or_default();
+        let packmap_condition =
+            wire_to_condition(msg.packmap_expectation, msg.packmap_expected_id)?;
+        let packmap_new = to_hash(msg.packmap_new_id)?;
+
+        // An atomic server checks both preconditions before it writes either
+        // ref, and reports the packmap first.
+        if self.ticketed {
+            let holds = |name: &str, condition: &RefWriteCondition| {
+                let current = self.inner.read_ref(name).map_err(to_connect_error)?;
+                Ok::<_, ConnectError>(match condition {
+                    RefWriteCondition::Any => true,
+                    RefWriteCondition::Missing => current.is_none(),
+                    RefWriteCondition::Match(expected) => current == Some(*expected),
+                })
+            };
+            let outcome = if !holds(&packmap_ref, &packmap_condition)? {
+                Some(generated::AdvanceOutcome::PackmapConflict)
+            } else if !holds(&head_ref, &head_condition)? {
+                Some(generated::AdvanceOutcome::HeadConflict)
+            } else {
+                None
+            };
+            if let Some(outcome) = outcome {
+                return Ok(Response::new(generated::AdvanceRefsResponse {
+                    outcome: Some(outcome.into()),
+                    ..Default::default()
+                }));
+            }
+        }
+        let outcome = self
+            .inner
+            .advance_refs(
+                &head_ref,
+                head_condition,
+                &head_new,
+                &packmap_ref,
+                packmap_condition,
+                &packmap_new,
+            )
+            .map_err(to_connect_error)?;
+        let proto_outcome = match outcome {
+            AdvanceOutcome::Committed => generated::AdvanceOutcome::Committed,
+            AdvanceOutcome::HeadConflict => generated::AdvanceOutcome::HeadConflict,
+            AdvanceOutcome::PackmapConflict => generated::AdvanceOutcome::PackmapConflict,
+        };
+        Ok(Response::new(generated::AdvanceRefsResponse {
+            outcome: Some(proto_outcome.into()),
+            ..Default::default()
+        }))
+    }
+
+    async fn pack_exists(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, generated::PackExistsRequest>,
+    ) -> ServiceResult<generated::PackExistsResponse> {
+        self.capture(&ctx, "PackExists")?;
+        let msg = request.to_owned_message();
+        let key = PackKey::new(to_hash(msg.pack_id)?);
+        let exists = self.inner.pack_exists(&key).map_err(to_connect_error)?;
+        Ok(Response::new(generated::PackExistsResponse {
+            exists: Some(exists),
+            ..Default::default()
+        }))
+    }
+
+    async fn upload_pack(
+        &self,
+        ctx: RequestContext,
+        mut requests: connectrpc::InboundStream<generated::UploadPackRequest>,
+    ) -> ServiceResult<generated::UploadPackResponse> {
+        self.capture(&ctx, "UploadPack")?;
+        let first = requests
+            .next()
+            .await
+            .ok_or_else(|| ConnectError::invalid_argument("empty UploadPack stream"))??;
+        let header = match first.to_owned_message().body {
+            Some(UploadBody::Header(h)) => *h,
+            _ => {
+                return Err(ConnectError::invalid_argument(
+                    "first message must be header",
+                ));
+            }
+        };
+        let pack_id = header.pack_id.unwrap_or_default();
+        let total_bytes = header.total_bytes.unwrap_or(0);
+
+        let mut buf = Vec::new();
+        loop {
+            let item = requests.next().await.ok_or_else(|| {
+                ConnectError::invalid_argument("stream ended before a `last` chunk")
+            })??;
+            match item.to_owned_message().body {
+                Some(UploadBody::Chunk(c)) => {
+                    if c.pack_id.as_deref() != Some(pack_id.as_slice()) {
+                        return Err(ConnectError::invalid_argument("chunk pack_id mismatch"));
+                    }
+                    let offset = c.offset.unwrap_or(0);
+                    if offset != buf.len() as u64 {
+                        return Err(ConnectError::invalid_argument("chunk offset out of order"));
+                    }
+                    buf.extend_from_slice(&c.data.unwrap_or_default());
+                    if c.last.unwrap_or(false) {
+                        break;
+                    }
+                }
+                _ => return Err(ConnectError::invalid_argument("expected a chunk message")),
+            }
+        }
+        if buf.len() as u64 != total_bytes {
+            return Err(ConnectError::invalid_argument(
+                "received byte count does not match header.total_bytes",
+            ));
+        }
+        let key = PackKey::new(to_hash(Some(pack_id))?);
+        self.inner
+            .upload_pack(&buf, &key)
+            .map_err(to_connect_error)?;
+        Ok(Response::new(generated::UploadPackResponse::default()))
+    }
+
+    async fn download_pack(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, generated::DownloadPackRequest>,
+    ) -> ServiceResult<ServiceStream<generated::DownloadPackResponse>> {
+        self.capture(&ctx, "DownloadPack")?;
+        let msg = request.to_owned_message();
+        let key = PackKey::new(to_hash(msg.pack_id)?);
+        let bytes = self.inner.download_pack(&key).map_err(to_connect_error)?;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let total_bytes = bytes.len() as u64;
+        let header = generated::DownloadPackResponse {
+            body: Some(
+                generated::DownloadPackHeader {
+                    total_bytes: Some(total_bytes),
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let chunk = generated::DownloadPackResponse {
+            body: Some(
+                generated::PackChunk {
+                    pack_id: Some(key.as_bytes().to_vec()),
+                    offset: Some(0),
+                    data: Some(bytes),
+                    last: Some(true),
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        };
+        Response::stream_ok(futures::stream::iter([Ok(header), Ok(chunk)]))
+    }
+
+    async fn get_authority_generation(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetAuthorityGenerationRequest>,
+    ) -> ServiceResult<generated::GetAuthorityGenerationResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+    async fn set_authority_generation(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::SetAuthorityGenerationRequest>,
+    ) -> ServiceResult<generated::SetAuthorityGenerationResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+    async fn get_grant_epoch(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetGrantEpochRequest>,
+    ) -> ServiceResult<generated::GetGrantEpochResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn set_grant_epoch(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::SetGrantEpochRequest>,
+    ) -> ServiceResult<generated::SetGrantEpochResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn set_repo_visibility(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::SetRepoVisibilityRequest>,
+    ) -> ServiceResult<generated::SetRepoVisibilityResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn issue_object_url(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::IssueObjectUrlRequest>,
+    ) -> ServiceResult<generated::IssueObjectUrlResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+}
+
+/// Bind a real Connect server on an ephemeral loopback port, backed by
+/// `backend`. Returns the port, a shutdown trigger, and the server
+/// thread's join handle.
+fn spawn_server(
+    backend: Arc<MemoryTransport>,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    std::thread::JoinHandle<()>,
+    CapturedCalls,
+) {
+    spawn_server_with_errors(backend, Vec::new())
+}
+
+fn spawn_server_with_errors(
+    backend: Arc<MemoryTransport>,
+    not_found: Vec<&'static str>,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    std::thread::JoinHandle<()>,
+    CapturedCalls,
+) {
+    spawn_server_with_behavior(backend, not_found, false)
+}
+
+fn spawn_server_with_behavior(
+    backend: Arc<MemoryTransport>,
+    not_found: Vec<&'static str>,
+    pending_advance: bool,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    std::thread::JoinHandle<()>,
+    CapturedCalls,
+) {
+    spawn_server_admission(backend, not_found, pending_advance, false)
+}
+
+fn spawn_server_admission(
+    backend: Arc<MemoryTransport>,
+    not_found: Vec<&'static str>,
+    pending_advance: bool,
+    admission_required: bool,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    std::thread::JoinHandle<()>,
+    CapturedCalls,
+) {
+    spawn_server_options(
+        backend,
+        not_found,
+        pending_advance,
+        admission_required,
+        false,
+        None,
+    )
+}
+
+fn spawn_server_options(
+    backend: Arc<MemoryTransport>,
+    not_found: Vec<&'static str>,
+    pending_advance: bool,
+    admission_required: bool,
+    ticketed: bool,
+    part_gate: Option<Arc<PartGate>>,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    std::thread::JoinHandle<()>,
+    CapturedCalls,
+) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let server_calls = Arc::clone(&calls);
+    let (addr_tx, addr_rx) = mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+    let handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("build server tokio runtime");
+        rt.block_on(async move {
+            let bound = Server::bind("127.0.0.1:0")
+                .await
+                .expect("bind ephemeral loopback port");
+            let port = bound
+                .local_addr()
+                .expect("bound server has a local addr")
+                .port();
+            addr_tx.send(port).expect("send bound port to test thread");
+
+            let service = Arc::new(TestService {
+                inner: backend,
+                calls: server_calls,
+                not_found,
+                pending_advance,
+                admission_required,
+                ticketed,
+                part_buffers: Mutex::new(HashMap::new()),
+                part_gate,
+            });
+            let router = Router::new().add_service(service);
+
+            bound
+                .serve_with_graceful_shutdown(router, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve TransportService");
+        });
+    });
+
+    let port = addr_rx.recv().expect("recv bound port");
+    (port, shutdown_tx, handle, calls)
+}
+
+// ---------------------------------------------------------------------------
+// Smoke tests: URL scheme dispatch
+// ---------------------------------------------------------------------------
+
+#[test]
+fn open_accepts_kit_http_url_and_returns_transport() {
+    // Construction does NOT make a network call — nothing needs to be
+    // listening on port 1 for this to succeed.
+    let tx = remote_dispatch::open("kit+http://127.0.0.1:1/proj")
+        .expect("kit+http:// must dispatch to ConnectTransport");
+    drop(tx);
+}
+
+#[test]
+fn open_accepts_kit_https_url() {
+    let tx = remote_dispatch::open("kit+https://example.invalid/p")
+        .expect("kit+https:// must dispatch to ConnectTransport");
+    drop(tx);
+}
+
+#[test]
+fn open_rejects_malformed_kit_http_url() {
+    let Err(err) = remote_dispatch::open("kit+http://") else {
+        panic!("expected error for empty kit+http URL");
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("transport") || msg.contains("malformed"),
+        "unexpected error for empty kit+http URL: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Full push / pull roundtrip through the real Connect server
+// ---------------------------------------------------------------------------
+
+fn source_repo_with_one_commit() -> (tempfile::TempDir, String) {
+    let td = tempfile::tempdir().unwrap();
+    assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
+    std::fs::write(td.path().join("hello.txt"), b"hello\n").unwrap();
+    assert!(run_in(td.path(), &["add", "hello.txt"]).status.success());
+    let out = run_in(td.path(), &["commit", "-m", "init"]);
+    assert!(out.status.success(), "commit failed: {out:?}");
+    let tip_hex = std::fs::read_to_string(td.path().join(".kit/refs/heads/main"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    (td, tip_hex)
+}
+
+#[test]
+fn cli_push_uses_begin_upload_and_ticketed_advance() {
+    let (src, tip_hex) = source_repo_with_one_commit();
+    let backend = Arc::new(MemoryTransport::new());
+    let (port, shutdown, handle, calls) =
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let config_path = src.path().join(".kit/config");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
+    std::fs::write(config_path, config).unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(xdg.path().join("kit")).unwrap();
+    std::fs::write(
+        xdg.path().join("kit/config"),
+        format!("transport_auth = envelope\ntrusted_remote_endpoint = {url}\n"),
+    )
+    .unwrap();
+    let output = Command::new(kit_bin())
+        .args(["push", "origin"])
+        .current_dir(src.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = calls.lock().unwrap();
+    assert!(
+        calls
+            .iter()
+            .filter(|call| call.procedure == "BeginUpload")
+            .count()
+            >= 2
+    );
+    assert!(calls.iter().any(|call| call.procedure == "AdvanceRefs"));
+    assert_eq!(
+        backend
+            .read_ref("refs/heads/main")
+            .unwrap()
+            .map(|h| kit_core::hash::to_hex(&h)),
+        Some(tip_hex)
+    );
+    drop(calls);
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+#[test]
+fn push_then_pull_roundtrip_through_real_connect_server() {
+    let (src, tip_hex) = source_repo_with_one_commit();
+
+    let backend = Arc::new(MemoryTransport::new());
+    let (port, shutdown, handle, calls) = spawn_server(backend);
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+
+    // -- push --------------------------------------------------------
+    let tx = remote_dispatch::open(&url).expect("open kit+http (push)");
+    let n = remote_dispatch::push_all(src.path(), tx.as_ref()).expect("push must succeed");
+    assert_eq!(n, 1, "exactly one branch (main) must be pushed");
+    drop(tx);
+
+    // -- pull into a fresh repo ---------------------------------------
+    let dst = tempfile::tempdir().unwrap();
+    assert!(run_in(dst.path(), &["init"]).status.success());
+    let tx = remote_dispatch::open(&url).expect("open kit+http (pull)");
+    let n = remote_dispatch::pull_all(dst.path(), tx.as_ref(), "default", None).expect("pull");
+    assert_eq!(n, 1, "one remote branch must be fetched");
+    drop(tx);
+
+    let local_tip = std::fs::read_to_string(dst.path().join(".kit/refs/heads/main")).unwrap();
+    assert_eq!(
+        local_tip.trim(),
+        tip_hex,
+        "pulled branch must land on the remote tip"
+    );
+    assert_eq!(
+        std::fs::read(dst.path().join("hello.txt")).unwrap(),
+        b"hello\n",
+        "pull must materialise the committed file"
+    );
+
+    {
+        let calls = calls.lock().unwrap();
+        assert!(!calls.is_empty());
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.repository.as_deref() == Some("myproj")),
+            "{calls:?}"
+        );
+        let downloads: Vec<_> = calls
+            .iter()
+            .filter(|call| call.procedure == "DownloadPack")
+            .collect();
+        assert!(
+            downloads.len() >= 2,
+            "packlist and pack downloads must both be observed: {calls:?}"
+        );
+        assert!(
+            downloads
+                .iter()
+                .all(|call| call.ref_hint.as_deref() == Some("refs/heads/main")),
+            "{downloads:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .filter(|call| call.procedure != "DownloadPack")
+                .all(|call| call.ref_hint.is_none())
+        );
+    }
+    let _ = shutdown.send(());
+    handle.join().expect("server thread joins cleanly");
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_pending_interrupt_uses_configured_observer_and_exits_75() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    // Kills the push if the test panics before it exits, so no child outlives it.
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    let (src, _) = source_repo_with_one_commit();
+    let (port, shutdown, handle, calls) =
+        spawn_server_with_behavior(Arc::new(MemoryTransport::new()), Vec::new(), true);
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    // `remote add` intentionally restricts saved URLs to public schemes;
+    // this loopback-only fixture writes the same repo-scoped config shape.
+    let config_path = src.path().join(".kit/config");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
+    std::fs::write(config_path, config).unwrap();
+
+    let xdg = tempfile::tempdir().unwrap();
+    let child = Command::new(kit_bin())
+        .args(["push", "origin"])
+        .current_dir(src.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("KIT_PROGRESS", "always")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = KillOnDrop(child);
+
+    let started = Instant::now();
+    while !calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|call| call.procedure == "AdvanceRefs")
+    {
+        // Generous budgets: a debug `kit push` on a loaded test runner.
+        assert!(
+            started.elapsed() <= Duration::from_secs(30),
+            "push did not reach AdvanceRefs"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let signalled = Command::new("kill")
+        .args(["-INT", &child.0.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(signalled.success(), "could not signal push process");
+    let interrupted_at = Instant::now();
+    while child.0.try_wait().unwrap().is_none() {
+        assert!(
+            interrupted_at.elapsed() <= Duration::from_secs(10),
+            "push did not stop within the polling slice"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(child.0.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+    let status = child.0.wait().unwrap();
+    assert_eq!(status.code(), Some(75), "{stderr}");
+    assert!(
+        stderr.contains("Waiting for server verification"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("push: interrupted; re-run push to retry"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("BeginUpload"), "{stderr}");
+
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+#[test]
+fn open_rejects_invalid_repository_path_before_connecting() {
+    for path in [
+        "Uppercase",
+        "namespace//repo",
+        "some/project/path",
+        "repo%20name",
+    ] {
+        let url = format!("kit+http://127.0.0.1:1/{path}");
+        let Err(err) = remote_dispatch::open(&url) else {
+            panic!("invalid repository path accepted: {path}");
+        };
+        assert!(
+            matches!(err, remote_dispatch::DispatchError::MalformedUrl(_)),
+            "{err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains(path), "{message}");
+        assert!(message.contains(&url), "{message}");
+    }
+}
+
+#[test]
+fn list_refs_not_found_names_the_repository_and_origin() {
+    let repo = tempfile::tempdir().unwrap();
+    assert!(run_in(repo.path(), &["init"]).status.success());
+    let (port, shutdown, handle, _) =
+        spawn_server_with_errors(Arc::new(MemoryTransport::new()), vec!["ListRefs"]);
+    let origin = format!("http://127.0.0.1:{port}");
+    let tx = remote_dispatch::open(&format!("kit+{origin}/myproj")).unwrap();
+    let error = remote_dispatch::fetch_all(repo.path(), tx.as_ref(), "default").unwrap_err();
+    let remote_dispatch::DispatchError::RepositoryNotFound {
+        identity,
+        origin: observed,
+        ..
+    } = &error
+    else {
+        panic!("expected repository-not-found error, got {error:?}");
+    };
+    assert_eq!(identity, "myproj");
+    assert_eq!(observed, &origin);
+    assert!(error.to_string().contains("empty path selects `default`"));
+    drop(tx);
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+#[test]
+fn read_ref_not_found_is_an_absent_ref() {
+    let (port, shutdown, handle, calls) =
+        spawn_server_with_errors(Arc::new(MemoryTransport::new()), vec!["ReadRef"]);
+    let tx = remote_dispatch::open(&format!("kit+http://127.0.0.1:{port}/myproj")).unwrap();
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), None);
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "ReadRef must not trigger discovery"
+    );
+    drop(tx);
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+#[test]
+fn push_not_found_names_the_repository_for_each_write() {
+    let (src, _) = source_repo_with_one_commit();
+    for procedure in ["UploadPack", "AdvanceRefs", "UpdateRef"] {
+        let (port, shutdown, handle, calls) =
+            spawn_server_with_errors(Arc::new(MemoryTransport::new()), vec![procedure]);
+        let origin = format!("http://127.0.0.1:{port}");
+        let tx = remote_dispatch::open(&format!("kit+{origin}/myproj")).unwrap();
+        if procedure == "UpdateRef" {
+            // The first push publishes its refs through AdvanceRefs. An unchanged
+            // second push reaches the head-only UpdateRef path.
+            remote_dispatch::push_all(src.path(), tx.as_ref()).unwrap();
+        }
+        let error = remote_dispatch::push_all(src.path(), tx.as_ref()).unwrap_err();
+        let remote_dispatch::DispatchError::RepositoryNotFound {
+            identity,
+            origin: observed,
+            ..
+        } = &error
+        else {
+            panic!("{procedure}: expected repository-not-found error, got {error:?}");
+        };
+        assert_eq!(identity, "myproj", "{procedure}");
+        assert_eq!(observed, &origin, "{procedure}");
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.procedure == procedure)
+        );
+        drop(tx);
+        let _ = shutdown.send(());
+        handle.join().unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cli_admission_helper_trust_filter_json_and_exit_codes() {
+    use std::fmt::Write as _;
+    use std::os::unix::fs::PermissionsExt;
+    for case in [
+        "happy",
+        "reserved",
+        "no-helper",
+        "untrusted",
+        "missing-helper",
+    ] {
+        let (src, _) = source_repo_with_one_commit();
+        let (port, shutdown, handle, calls) =
+            spawn_server_admission(Arc::new(MemoryTransport::new()), Vec::new(), false, true);
+        let url = format!("kit+http://127.0.0.1:{port}/myproj");
+        let config_path = src.path().join(".kit/config");
+        let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+        write!(
+            config,
+            "\nremote.origin.url = {url}\nremote.origin.type = http\n"
+        )
+        .unwrap();
+        std::fs::write(config_path, config).unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(xdg.path().join("kit")).unwrap();
+        let helper = xdg.path().join("helper.sh");
+        let marker = xdg.path().join("ran");
+        let header = if case == "reserved" {
+            "X-Kit-Ref"
+        } else {
+            "Admission-Authorization"
+        };
+        if case != "missing-helper" {
+            std::fs::write(&helper, format!("#!/bin/sh\ncat >/dev/null\ntouch '{}'\nprintf '%s' '{{\"{header}\":\"secret-helper-value\"}}'\n", marker.display())).unwrap();
+            let mut perms = std::fs::metadata(&helper).unwrap().permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(&helper, perms).unwrap();
+        }
+        let trusted = if case == "untrusted" {
+            "kit+http://127.0.0.1:1/other"
+        } else {
+            &url
+        };
+        let user = if case == "no-helper" {
+            format!("trusted_remote_endpoint = {trusted}\n")
+        } else {
+            format!(
+                "trusted_remote_endpoint = {trusted}\nadmission_helper = {}\n",
+                helper.display()
+            )
+        };
+        std::fs::write(xdg.path().join("kit/config"), user).unwrap();
+        let output = Command::new(kit_bin())
+            .args(["push", "origin", "--format", "json"])
+            .current_dir(src.path())
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            !stderr.contains("secret-helper-value") && !stdout.contains("secret-helper-value"),
+            "{case}"
+        );
+        assert!(
+            !stderr.contains("secret-challenge-value")
+                && !stdout.contains("secret-challenge-value"),
+            "{case}"
+        );
+        match case {
+            "happy" => {
+                assert!(output.status.success(), "{stderr}");
+                assert!(marker.exists());
+                assert_eq!(
+                    calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|c| c.procedure == "AdvanceRefs")
+                        .count(),
+                    2
+                );
+            }
+            "reserved" => {
+                assert_eq!(output.status.code(), Some(78), "{stderr}");
+                assert!(stderr.contains("X-Kit-Ref"));
+                assert!(marker.exists());
+            }
+            "no-helper" => {
+                assert_eq!(output.status.code(), Some(77), "{stderr}");
+                assert!(stdout.contains("\"admission_required\":true"));
+                assert!(stderr.contains("hint:"));
+            }
+            "untrusted" => {
+                assert_eq!(output.status.code(), Some(77), "{stderr}");
+                assert!(!marker.exists());
+                assert!(stderr.contains("hint:"));
+            }
+            "missing-helper" => {
+                assert_eq!(output.status.code(), Some(78), "{stderr}");
+                assert!(!marker.exists());
+            }
+            _ => unreachable!(),
+        }
+        let _ = shutdown.send(());
+        handle.join().unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines)] // One subprocess lifetime covers interrupt, receipt, and resume assertions.
+fn cli_part_upload_interrupts_with_exit_75_and_resumes_from_file_receipts() {
+    use std::process::Stdio;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    let (src, _) = source_repo_with_one_commit();
+    let mut big = vec![0_u8; (8 << 20) * 2 + (1 << 20)];
+    let mut random = 0x8c17_a9e5_u32;
+    for byte in &mut big {
+        random ^= random << 13;
+        random ^= random >> 17;
+        random ^= random << 5;
+        *byte = random.to_le_bytes()[0];
+    }
+    std::fs::write(src.path().join("large.bin"), &big).unwrap();
+    assert!(run_in(src.path(), &["add", "large.bin"]).status.success());
+    let committed = run_in(src.path(), &["commit", "-m", "large"]);
+    assert!(committed.status.success(), "{committed:?}");
+    let gate = Arc::new(PartGate::default());
+    let (port, shutdown, handle, calls) = spawn_server_options(
+        Arc::new(MemoryTransport::new()),
+        Vec::new(),
+        false,
+        false,
+        true,
+        Some(Arc::clone(&gate)),
+    );
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let config_path = src.path().join(".kit/config");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
+    std::fs::write(config_path, config).unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(xdg.path().join("kit")).unwrap();
+    std::fs::write(
+        xdg.path().join("kit/config"),
+        format!("transport_auth = envelope\ntrusted_remote_endpoint = {url}\n"),
+    )
+    .unwrap();
+    let child = Command::new(kit_bin())
+        .args(["push", "origin"])
+        .current_dir(src.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("KIT_PROGRESS", "always")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = KillOnDrop(child);
+    let started = Instant::now();
+    while !gate.reached.load(Ordering::SeqCst) {
+        assert!(
+            started.elapsed() < Duration::from_secs(90),
+            "push never reached second part"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &child.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    *gate.released.lock().unwrap() = true;
+    gate.ready.notify_all();
+    let stopped = Instant::now();
+    while child.0.try_wait().unwrap().is_none() {
+        assert!(
+            stopped.elapsed() < Duration::from_secs(30),
+            "interrupted push did not stop"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(child.0.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+    let status = child.0.wait().unwrap();
+    assert_eq!(status.code(), Some(75), "{stderr}");
+    assert!(
+        stderr.contains("upload interrupted; 2 of 3 parts saved"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("run `kit push` again to resume"),
+        "{stderr}"
+    );
+    let first_parts: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call.part_index)
+        .collect();
+    assert_eq!(first_parts, [0, 1]);
+
+    let resumed = Command::new(kit_bin())
+        .args(["push", "origin"])
+        .current_dir(src.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let all_parts: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call.part_index)
+        .collect();
+    assert_eq!(all_parts, [0, 1, 2]);
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+fn cli_with_test_ca(
+    cwd: &std::path::Path,
+    xdg: &std::path::Path,
+    endpoint: &str,
+    args: &[&str],
+) -> std::process::Output {
+    let mut command = Command::new(kit_bin());
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg)
+        .env("HOME", xdg)
+        .env_remove("KIT_API_TOKEN")
+        .env_remove("KIT_SSL_CA_FILE")
+        .env_remove("KIT_PACK_REBASELINE_DEPTH");
+    if endpoint.starts_with("kit+https://") {
+        command.env("KIT_SSL_CA_FILE", https::ca_file());
+    }
+    command.output().unwrap()
+}
+
+// Endpoints are fixture inputs, as in push_output_golden.rs. Substitute only
+// that input; every remaining stdout/stderr byte and the exit code must match.
+fn endpoint_transcript(
+    output: &std::process::Output,
+    endpoint: &str,
+) -> (Option<i32>, Vec<u8>, Vec<u8>) {
+    (
+        output.status.code(),
+        output.stdout.clone(),
+        String::from_utf8(output.stderr.clone())
+            .unwrap()
+            .replace(endpoint, "<endpoint>")
+            .into_bytes(),
+    )
+}
+
+fn published_pack_bytes(transport: &dyn Transport) -> BTreeMap<kit_core::Hash, Vec<u8>> {
+    let mut bytes = BTreeMap::new();
+    let mut node = transport.read_ref("refs/kit/packmap/main").unwrap();
+    while let Some(id) = node {
+        let body = transport
+            .download_blob_via_ref(&PackKey::from(id), "refs/heads/main")
+            .unwrap();
+        let decoded = kit_core::transfer::decode_packlist(&body).unwrap();
+        for pack in decoded.packs {
+            bytes.insert(
+                pack,
+                transport
+                    .download_pack_via_ref(&PackKey::from(pack), "refs/heads/main")
+                    .unwrap(),
+            );
+        }
+        bytes.insert(id, body);
+        node = decoded.prev;
+    }
+    bytes
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() {
+    use kit_core::{layout::RepoLayout, refs, store::ObjectStore, to_hex};
+
+    let template = common::Repo::new();
+    template.commit_file("file.txt", b"first\n", "first");
+    let layout = RepoLayout::single(template.path());
+    let first = refs::read_ref(&layout, "main").unwrap().unwrap();
+    template.commit_file("file.txt", b"second\n", "second");
+    let second = refs::read_ref(&layout, "main").unwrap().unwrap();
+    let template_store = ObjectStore::open(&layout).unwrap();
+    let objects = template_store
+        .iter_object_hashes()
+        .unwrap()
+        .into_iter()
+        .map(|id| (id, template_store.read(&id).unwrap()))
+        .collect::<Vec<_>>();
+    let mut expected_transcript = None;
+    let mut expected_packs = None;
+
+    for scheme in ["file", "http", "https"] {
+        let remote = tempfile::tempdir().unwrap();
+        let backend = Arc::new(MemoryTransport::new());
+        let (port, shutdown, server, _) = spawn_server(Arc::clone(&backend));
+        let proxy = (scheme == "https").then(|| https::Proxy::new(port));
+        let endpoint = match scheme {
+            "file" => format!("kit+file://{}", remote.path().display()),
+            "http" => format!("kit+http://127.0.0.1:{port}/parity"),
+            _ => format!(
+                "kit+https://localhost:{}/parity",
+                proxy.as_ref().unwrap().port
+            ),
+        };
+        let source = common::Repo::new();
+        let source_layout = RepoLayout::single(source.path());
+        let source_store = ObjectStore::open(&source_layout).unwrap();
+        for (id, bytes) in &objects {
+            assert_eq!(source_store.write(bytes).unwrap(), *id);
+        }
+        refs::write_ref(&source_layout, "main", &first).unwrap();
+        if scheme == "http" {
+            // The development HTTP scheme is configured directly, as in the
+            // existing Connect CLI tests; remote add accepts secure schemes.
+            let config_path = source.path().join(".kit/config");
+            let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+            config.push_str("\nremote.origin.url = ");
+            config.push_str(&endpoint);
+            config.push_str("\nremote.origin.type = http\n");
+            std::fs::write(config_path, config).unwrap();
+        } else {
+            source.ok(&["remote", "add", "origin", &endpoint]);
+        }
+        let run = |cwd: &std::path::Path, args: &[&str]| {
+            cli_with_test_ca(cwd, source.xdg(), &endpoint, args)
+        };
+        let mut transcript = Vec::new();
+
+        let pushed = run(source.path(), &["push", "origin"]);
+        assert_eq!(pushed.status.code(), Some(0), "{scheme}: {pushed:?}");
+        assert!(pushed.stdout.is_empty());
+        assert_eq!(
+            pushed.stderr,
+            format!("To {endpoint}\n * [new branch]      main -> main\n").as_bytes()
+        );
+        transcript.push(endpoint_transcript(&pushed, &endpoint));
+        let unchanged = run(source.path(), &["push"]);
+        assert_eq!(unchanged.status.code(), Some(0));
+        assert!(unchanged.stdout.is_empty());
+        assert_eq!(unchanged.stderr, b"Everything up-to-date\n");
+        transcript.push(endpoint_transcript(&unchanged, &endpoint));
+
+        let checkout_root = tempfile::tempdir().unwrap();
+        let cloned = run(
+            checkout_root.path(),
+            &["clone", "-o", "origin", &endpoint, "checkout"],
+        );
+        assert_eq!(cloned.status.code(), Some(0), "{scheme}: {cloned:?}");
+        transcript.push(endpoint_transcript(&cloned, &endpoint));
+        let checkout = checkout_root.path().join("checkout");
+        let checkout_layout = RepoLayout::single(&checkout);
+        assert_eq!(
+            refs::read_ref(&checkout_layout, "main").unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            std::fs::read(checkout.join("file.txt")).unwrap(),
+            b"first\n"
+        );
+
+        refs::write_ref(&source_layout, "main", &second).unwrap();
+        let appended = run(source.path(), &["push"]);
+        assert_eq!(appended.status.code(), Some(0), "{scheme}: {appended:?}");
+        assert!(appended.stdout.is_empty());
+        assert_eq!(
+            appended.stderr,
+            format!(
+                "To {endpoint}\n   {}..{}  main -> main\n",
+                &to_hex(&first)[..7],
+                &to_hex(&second)[..7]
+            )
+            .as_bytes()
+        );
+        transcript.push(endpoint_transcript(&appended, &endpoint));
+
+        let fetched = run(&checkout, &["fetch", "origin"]);
+        assert_eq!(fetched.status.code(), Some(0), "{scheme}: {fetched:?}");
+        transcript.push(endpoint_transcript(&fetched, &endpoint));
+        assert_eq!(
+            refs::read_remote_ref(&checkout_layout, "origin", "main").unwrap(),
+            Some(second)
+        );
+        assert_eq!(
+            refs::read_ref(&checkout_layout, "main").unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            std::fs::read(checkout.join("file.txt")).unwrap(),
+            b"first\n"
+        );
+        let pulled = run(&checkout, &["pull", "origin"]);
+        assert_eq!(pulled.status.code(), Some(0), "{scheme}: {pulled:?}");
+        transcript.push(endpoint_transcript(&pulled, &endpoint));
+        assert_eq!(
+            refs::read_ref(&checkout_layout, "main").unwrap(),
+            Some(second)
+        );
+        assert_eq!(
+            std::fs::read(checkout.join("file.txt")).unwrap(),
+            b"second\n"
+        );
+        let checkout_store = ObjectStore::open(&checkout_layout).unwrap();
+        for (id, bytes) in &objects {
+            assert_eq!(checkout_store.read(id).unwrap(), *bytes);
+        }
+
+        let packed = if scheme == "file" {
+            let transport = remote_dispatch::open(&endpoint).unwrap();
+            assert_eq!(transport.read_ref("refs/heads/main").unwrap(), Some(second));
+            published_pack_bytes(transport.as_ref())
+        } else {
+            assert_eq!(backend.read_ref("refs/heads/main").unwrap(), Some(second));
+            published_pack_bytes(backend.as_ref())
+        };
+        refs::write_ref(&source_layout, "main", &first).unwrap();
+        let rejected = run(source.path(), &["push"]);
+        assert_eq!(rejected.status.code(), Some(1), "{scheme}: {rejected:?}");
+        assert!(rejected.stdout.is_empty());
+        transcript.push(endpoint_transcript(&rejected, &endpoint));
+        if let Some(proxy) = &proxy {
+            // The up-to-date and rejected pushes resolve from local tracking
+            // state. The other five commands each make several remote RPCs.
+            assert_eq!(
+                proxy.connections(),
+                5,
+                "each CLI operation must reuse its TLS connection across RPCs"
+            );
+        }
+        if let Some(expected) = &expected_transcript {
+            assert_eq!(&transcript, expected, "{scheme} CLI bytes");
+        } else {
+            expected_transcript = Some(transcript);
+        }
+        if let Some(expected) = &expected_packs {
+            assert_eq!(&packed, expected, "{scheme} pack/packmap ids and bytes");
+        } else {
+            expected_packs = Some(packed);
+        }
+        drop(proxy);
+        shutdown.send(()).unwrap();
+        server.join().unwrap();
+    }
+}
+
+// Opt in with KIT_HTTPS_BENCH_OLD_BIN and KIT_HTTPS_BENCH_NEW_BIN pointing
+// to separately built CLI binaries. CI still exercises the existing TLS matrix;
+// wall-clock comparisons are reported, never asserted on a shared runner.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cli_https_latency_comparison() {
+    use kit_core::{layout::RepoLayout, refs, store::ObjectStore};
+    use std::{
+        path::Path,
+        time::{Duration, Instant},
+    };
+    type LatencySample = (Duration, usize, usize);
+
+    let Some(old) = std::env::var_os("KIT_HTTPS_BENCH_OLD_BIN") else {
+        return;
+    };
+    let new = std::env::var_os("KIT_HTTPS_BENCH_NEW_BIN")
+        .expect("both CLI binaries are required for the comparison");
+    let variants = [("old", old), ("new", new)];
+    let samples: usize =
+        std::env::var("KIT_HTTPS_BENCH_SAMPLES").map_or(5, |value| value.parse().unwrap());
+    assert!((1..=20).contains(&samples));
+    let one_way = Duration::from_millis(25);
+    let template = common::Repo::new();
+    let layout = RepoLayout::single(template.path());
+    let mut commits = Vec::new();
+    for index in 0..7 {
+        template.commit_file(
+            "file.txt",
+            format!("commit {index}\n").as_bytes(),
+            &format!("commit {index}"),
+        );
+        commits.push(refs::read_ref(&layout, "main").unwrap().unwrap());
+    }
+    let template_store = ObjectStore::open(&layout).unwrap();
+    let objects = template_store
+        .iter_object_hashes()
+        .unwrap()
+        .into_iter()
+        .map(|id| (id, template_store.read(&id).unwrap()))
+        .collect::<Vec<_>>();
+    let mut observations: BTreeMap<(&str, &str), Vec<LatencySample>> = BTreeMap::new();
+    let mut expected_transcripts = None;
+    let mut expected_packs = None;
+
+    for sample in 0..samples {
+        // Alternate order so warming and background load do not consistently
+        // favor one binary. Every operation starts in a fresh CLI process.
+        for variant in 0..variants.len() {
+            let (label, binary) = &variants[(sample + variant) % variants.len()];
+            let backend = Arc::new(MemoryTransport::new());
+            let (port, shutdown, server, _) = spawn_server(Arc::clone(&backend));
+            let proxy = https::Proxy::with_latency(port, one_way);
+            let endpoint = format!("kit+https://localhost:{}/latency", proxy.port);
+            let seed_endpoint = format!("kit+http://127.0.0.1:{port}/latency");
+            let source = common::Repo::new();
+            let source_layout = RepoLayout::single(source.path());
+            let source_store = ObjectStore::open(&source_layout).unwrap();
+            for (id, bytes) in &objects {
+                assert_eq!(source_store.write(bytes).unwrap(), *id);
+            }
+            let config_path = source.path().join(".kit/config");
+            let base_config = std::fs::read_to_string(&config_path).unwrap_or_default();
+            let configure = |url: &str| {
+                std::fs::write(
+                    &config_path,
+                    format!(
+                        "{base_config}\nremote.origin.url = {url}\nremote.origin.type = http\n"
+                    ),
+                )
+                .unwrap();
+            };
+            let run = |cwd: &Path, args: &[&str]| {
+                Command::new(binary)
+                    .args(args)
+                    .current_dir(cwd)
+                    .env("XDG_CONFIG_HOME", source.xdg())
+                    .env("HOME", source.xdg())
+                    .env("KIT_SSL_CA_FILE", https::ca_file())
+                    .env("KIT_PACK_REBASELINE_DEPTH", "1000")
+                    .env_remove("KIT_API_TOKEN")
+                    .output()
+                    .unwrap()
+            };
+            configure(&seed_endpoint);
+            for commit in &commits[..6] {
+                refs::write_ref(&source_layout, "main", commit).unwrap();
+                let output = run(source.path(), &["push", "origin"]);
+                assert!(output.status.success(), "seed {label}: {output:?}");
+            }
+            // Assert that clone really follows six independently published
+            // packmap nodes, rather than accidentally benchmarking one snapshot.
+            let mut node = backend.read_ref("refs/kit/packmap/main").unwrap();
+            let mut depth = 0;
+            while let Some(id) = node {
+                let bytes = backend
+                    .download_blob_via_ref(&PackKey::from(id), "refs/heads/main")
+                    .unwrap();
+                node = kit_core::transfer::decode_packlist(&bytes).unwrap().prev;
+                depth += 1;
+            }
+            assert_eq!(depth, 6);
+            configure(&endpoint);
+            let checkout_root = tempfile::tempdir().unwrap();
+            let checkout = checkout_root.path().join("checkout");
+            let mut transcripts = Vec::new();
+            let mut measure = |operation, cwd: &Path, args: &[&str]| {
+                let connections = proxy.connections();
+                let http2_connections = proxy.http2_connections();
+                let started = Instant::now();
+                let output = run(cwd, args);
+                let elapsed = started.elapsed();
+                assert!(output.status.success(), "{label} {operation}: {output:?}");
+                observations.entry((*label, operation)).or_default().push((
+                    elapsed,
+                    proxy.connections() - connections,
+                    proxy.http2_connections() - http2_connections,
+                ));
+                transcripts.push(endpoint_transcript(&output, &endpoint));
+            };
+            measure(
+                "clone (6-node chain)",
+                checkout_root.path(),
+                &["clone", "-o", "origin", &endpoint, "checkout"],
+            );
+            let checkout_layout = RepoLayout::single(&checkout);
+            assert_eq!(
+                refs::read_ref(&checkout_layout, "main").unwrap(),
+                Some(commits[5])
+            );
+            measure("pull (no-op)", &checkout, &["pull", "origin"]);
+            refs::write_ref(&source_layout, "main", &commits[6]).unwrap();
+            measure("push (small commit)", source.path(), &["push", "origin"]);
+            measure("pull (one commit)", &checkout, &["pull", "origin"]);
+            assert_eq!(
+                refs::read_ref(&checkout_layout, "main").unwrap(),
+                Some(commits[6])
+            );
+            assert_eq!(
+                backend.read_ref("refs/heads/main").unwrap(),
+                Some(commits[6])
+            );
+            let checkout_store = ObjectStore::open(&checkout_layout).unwrap();
+            for (id, bytes) in &objects {
+                assert_eq!(checkout_store.read(id).unwrap(), *bytes);
+            }
+            let packs = published_pack_bytes(backend.as_ref());
+            if let Some(expected) = &expected_transcripts {
+                assert_eq!(&transcripts, expected, "{label} CLI bytes and exit codes");
+                assert_eq!(
+                    &packs,
+                    expected_packs.as_ref().unwrap(),
+                    "{label} pack/packmap ids and bytes"
+                );
+            } else {
+                expected_transcripts = Some(transcripts);
+                expected_packs = Some(packs);
+            }
+            drop(proxy);
+            shutdown.send(()).unwrap();
+            server.join().unwrap();
+        }
+    }
+    println!(
+        "HTTPS: 50 ms injected RTT, verified TLS, six-node clone, {samples} samples per binary"
+    );
+    println!(
+        "| Binary | Operation | Median ms | Min–max ms | New TLS connections (min–max) | HTTP/2 connections (min–max) |"
+    );
+    println!("|---|---|---:|---:|---:|---:|");
+    for ((binary, operation), mut rows) in observations {
+        rows.sort_by_key(|row| row.0);
+        let (min_connections, max_connections) =
+            rows.iter().fold((usize::MAX, 0), |(min, max), row| {
+                (min.min(row.1), max.max(row.1))
+            });
+        let (min_http2, max_http2) = rows.iter().fold((usize::MAX, 0), |(min, max), row| {
+            (min.min(row.2), max.max(row.2))
+        });
+        println!(
+            "| {binary} | {operation} | {} | {}–{} | {min_connections}–{max_connections} | {min_http2}–{max_http2} |",
+            rows[rows.len() / 2].0.as_millis(),
+            rows[0].0.as_millis(),
+            rows[rows.len() - 1].0.as_millis()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Force push re-baseline race
+// ---------------------------------------------------------------------------
+
+const PACKMAP: &str = "refs/kit/packmap/main";
+
+/// Runs a competing push, once, just before the wrapped transport writes
+/// refs. The competing push resets the pack chain under the force push.
+struct ResetBeforeAdvance<'a> {
+    inner: &'a dyn Transport,
+    competing: &'a dyn Transport,
+    competing_store: &'a ObjectStore,
+    competing_tip: Hash,
+    observed_head: Hash,
+    fired: AtomicBool,
+}
+
+impl ResetBeforeAdvance<'_> {
+    fn interleave(&self) {
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            remote_dispatch::push_branch_with_depth(
+                self.competing,
+                self.competing_store,
+                "main",
+                self.competing_tip,
+                RefWriteCondition::Match(self.observed_head),
+                1,
+            )
+            .unwrap();
+            let key = self.competing.read_ref(PACKMAP).unwrap().unwrap();
+            let bytes = self.competing.download_pack(&PackKey::new(key)).unwrap();
+            assert!(decode_packlist(&bytes).unwrap().prev.is_none());
+        }
+    }
+}
+
+impl Transport for ResetBeforeAdvance<'_> {
+    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        self.inner.upload_pack(bytes, key)
+    }
+    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        self.inner.download_pack(key)
+    }
+    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+        self.inner.pack_exists(key)
+    }
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        tip: &Hash,
+    ) -> TransportResult<()> {
+        self.interleave();
+        self.inner.update_ref(name, condition, tip)
+    }
+    fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
+        self.inner.read_ref(name)
+    }
+    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
+        self.inner.list_refs(prefix)
+    }
+    fn advance_refs(
+        &self,
+        head: &str,
+        head_condition: RefWriteCondition,
+        tip: &Hash,
+        packmap: &str,
+        packmap_condition: RefWriteCondition,
+        node: &Hash,
+    ) -> TransportResult<AdvanceOutcome> {
+        self.interleave();
+        self.inner
+            .advance_refs(head, head_condition, tip, packmap, packmap_condition, node)
+    }
+    fn advance_refs_committing(
+        &self,
+        head: &str,
+        head_condition: RefWriteCondition,
+        tip: &Hash,
+        packmap: &str,
+        packmap_condition: RefWriteCondition,
+        node: &Hash,
+        commit: &[PackKey],
+    ) -> TransportResult<CommitOutcome> {
+        self.interleave();
+        self.inner.advance_refs_committing(
+            head,
+            head_condition,
+            tip,
+            packmap,
+            packmap_condition,
+            node,
+            commit,
+        )
+    }
+    fn upload_limits(&self) -> UploadLimits {
+        self.inner.upload_limits()
+    }
+    fn atomic_advance_status(&self) -> Option<bool> {
+        self.inner.atomic_advance_status()
+    }
+    fn atomic_force_head_condition(&self, head: Option<Hash>) -> RefWriteCondition {
+        self.inner.atomic_force_head_condition(head)
+    }
+    fn supports_atomic_advance(&self) -> bool {
+        self.inner.supports_atomic_advance()
+    }
+}
+
+fn head(repo: &common::Repo) -> Hash {
+    refs::read_ref(&RepoLayout::single(repo.path()), "main")
+        .unwrap()
+        .unwrap()
+}
+
+/// A test signer for the write envelope. The test server accepts any key.
+struct EnvelopeKey(ed25519_dalek::SigningKey);
+
+impl kit_transport_connect::EnvelopeSigner for EnvelopeKey {
+    fn public_key_hex(&self) -> String {
+        kit_core::hash::to_hex(self.0.verifying_key().as_bytes())
+    }
+    fn sign_hex(&self, digest: &Hash) -> Result<String, String> {
+        use ed25519_dalek::Signer as _;
+        Ok(kit_core::hash::to_hex_bytes(
+            &self.0.sign(digest).to_bytes(),
+        ))
+    }
+}
+
+fn signed_transport(url: &str) -> Box<dyn Transport> {
+    let key = EnvelopeKey(ed25519_dalek::SigningKey::from_bytes(&[7; 32]));
+    Box::new(
+        kit_transport_connect::ConnectTransport::connect_with_signer(url, Some(Arc::new(key)))
+            .unwrap(),
+    )
+}
+
+/// A force push that loses a race with a pack chain reset replans and
+/// publishes. The head-only case resets the branch to a past commit. The
+/// appending case adds a commit on top of it.
+fn run_rebaseline_race(appending: bool) {
+    let backend = Arc::new(MemoryTransport::new());
+    let (port, shutdown, handle, calls) =
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let transport = signed_transport(&url);
+    let competing = signed_transport(&url);
+    assert!(transport.supports_atomic_advance());
+
+    let local = common::Repo::new();
+    local.commit_file("f.txt", b"base", "base");
+    let base = head(&local);
+    let store = ObjectStore::open(&RepoLayout::single(local.path())).unwrap();
+    remote_dispatch::push_branch_with_depth(
+        &*transport,
+        &store,
+        "main",
+        base,
+        RefWriteCondition::Missing,
+        64,
+    )
+    .unwrap();
+    local.commit_file("f.txt", b"remote", "remote");
+    let remote = head(&local);
+    remote_dispatch::push_branch_with_depth(
+        &*transport,
+        &store,
+        "main",
+        remote,
+        RefWriteCondition::Match(base),
+        64,
+    )
+    .unwrap();
+
+    local.ok(&["reset", "--hard", "-f", &kit_core::hash::to_hex(&base)]);
+    if appending {
+        local.commit_file("f.txt", b"forced", "forced");
+    }
+    let target = head(&local);
+    let replacement = common::Repo::new();
+    replacement.commit_file("f.txt", b"replacement", "replacement");
+    let replacement_store = ObjectStore::open(&RepoLayout::single(replacement.path())).unwrap();
+    let racing = ResetBeforeAdvance {
+        inner: &*transport,
+        competing: &*competing,
+        competing_store: &replacement_store,
+        competing_tip: head(&replacement),
+        observed_head: remote,
+        fired: AtomicBool::new(false),
+    };
+    let advances = |calls: &CapturedCalls| {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.procedure == "AdvanceRefs")
+            .count()
+    };
+    let before = advances(&calls);
+    remote_dispatch::push_branch_with_depth(
+        &racing,
+        &store,
+        "main",
+        target,
+        RefWriteCondition::Any,
+        64,
+    )
+    .unwrap();
+    assert!(racing.fired.load(Ordering::SeqCst));
+    assert_eq!(
+        advances(&calls) - before,
+        3,
+        "reset, rejected stale force, replanned force"
+    );
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| call.procedure != "UpdateRef"),
+        "ref writes go through the atomic advance"
+    );
+    assert_eq!(backend.read_ref("refs/heads/main").unwrap(), Some(target));
+
+    let clone = common::Repo::new();
+    remote_dispatch::pull_all(clone.path(), &*transport, "default", None).unwrap();
+    assert_eq!(head(&clone), target);
+    assert_eq!(
+        std::fs::read(clone.path().join("f.txt")).unwrap(),
+        if appending {
+            b"forced".as_slice()
+        } else {
+            b"base".as_slice()
+        }
+    );
+    let clone_store = ObjectStore::open(&RepoLayout::single(clone.path())).unwrap();
+    assert!(clone_store.read_object(&target).is_ok());
+    assert!(clone_store.read_object(&base).is_ok());
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+#[test]
+fn connect_head_only_force_replans_after_atomic_rebaseline() {
+    run_rebaseline_race(false);
+}
+
+#[test]
+fn connect_appending_force_replans_after_atomic_rebaseline() {
+    run_rebaseline_race(true);
+}

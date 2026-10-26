@@ -593,7 +593,7 @@ pub fn encode_delta_candidate(
 }
 
 /// [`encode_delta_candidate`], but for a caller that has already read
-/// `candidate.base`'s bytes — e.g. `kit-cli`'s rayon fan-out, which
+/// `candidate.base`'s bytes — e.g. `kit-bin`'s rayon fan-out, which
 /// reads each *distinct* base in `plan_pack_with`'s candidate batch once
 /// up front (a `HashMap<Hash, Vec<u8>>` keyed by base hash) instead of
 /// leaving `N` candidates sharing a base to each independently
@@ -633,7 +633,7 @@ enum BlobSlot {
 ///
 /// `kit-core` has no thread-pool dependency of its own — it stays usable
 /// from wasm targets, which have no OS threads — so the fan-out decision
-/// lives with the caller instead of living in this function. `kit-cli`'s
+/// lives with the caller instead of living in this function. `kit-bin`'s
 /// native, rayon-backed push path passes a parallel `encode_deltas`
 /// (mirroring the `prepare_raw_batch`/`prepare_delta_batch` compression
 /// fan-out already in `remote_dispatch/mod.rs`, but for the diffing step

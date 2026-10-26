@@ -383,9 +383,9 @@ fn ancestor_prefixes(path: &str) -> impl Iterator<Item = &str> {
 
 /// `true` if `path` is a strict descendant of `base` (`base` followed by a
 /// `/` and at least one more byte). Mirrors
-/// `kit_cli::commands::index_path_descends_from` — duplicated here rather
+/// `kit_bin::commands::index_path_descends_from` — duplicated here rather
 /// than shared across the crate boundary, since `kit-core` cannot depend
-/// on `kit-cli`.
+/// on `kit-bin`.
 fn path_descends_from(path: &str, base: &str) -> bool {
     path.len() > base.len()
         && path.starts_with(base)

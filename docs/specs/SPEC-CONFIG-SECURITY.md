@@ -9,7 +9,7 @@ audience: config-key authors, config.rs reviewers, transport authors
 
 Status: **Normative.** Companion to `docs/THREAT-MODEL.md` §4 and
 `docs/specs/SPEC-KEYSTORE.md` §8.2. Audience: anyone adding a new config
-key, anyone reviewing a change that touches `kit-cli/src/config.rs`,
+key, anyone reviewing a change that touches `kit-bin/src/config.rs`,
 and anyone writing a transport that consumes a config-derived
 endpoint, key path, or credential.
 
@@ -49,8 +49,8 @@ command fails with an error. kit never falls back to a relative path,
 so no working directory can supply user-scoped config or trust roots.
 
 The trust boundary is anchored in
-`kit-cli/src/config.rs::REPO_FORBIDDEN_KEYS`. That constant is the
-single source of truth &mdash; `kit-cli` is the only crate that performs
+`kit-bin/src/config.rs::REPO_FORBIDDEN_KEYS`. That constant is the
+single source of truth &mdash; `kit-bin` is the only crate that performs
 config-file I/O, so there is exactly one place to fence.
 
 ---
@@ -58,7 +58,7 @@ config-file I/O, so there is exactly one place to fence.
 ## 2. Per-key audit
 
 The table below covers every key that `apply_kv` in
-`rust/crates/kit-cli/src/config.rs` recognizes &mdash; the flat keys (in
+`rust/crates/kit-bin/src/config.rs` recognizes &mdash; the flat keys (in
 source order), the dotted-section families (`remote.<name>.*`,
 `branch.<name>.*`) handled via
 `apply_section_kv`, and the `_url`-suffixed
@@ -137,7 +137,7 @@ without needing to remember to check.
 
 ### 3.1 Read-site rule
 
-In `kit-cli::config::apply_text`:
+In `kit-bin::config::apply_text`:
 
 ```text
 if scope == ConfigScope::Repo && REPO_FORBIDDEN_KEYS.contains(key) {
@@ -153,7 +153,7 @@ untouched.
 
 ### 3.2 Write-site rule
 
-In `kit-cli::config::write`, only an explicit allow-list of
+In `kit-bin::config::write`, only an explicit allow-list of
 repo-safe keys is emitted:
 
 ```text
@@ -180,7 +180,7 @@ warning: ignoring `<key>` from per-repo config at <path> \
 ```
 
 The exact text is snapshot-tested
-(`crates/kit-cli/tests/snapshots/repo_config_forbidden_keys__repo_config_forbidden_warning.snap`).
+(`crates/kit-bin/tests/snapshots/repo_config_forbidden_keys__repo_config_forbidden_warning.snap`).
 Any wording change requires a reviewable `cargo insta` snapshot diff.
 
 ### 3.4 Runtime credential and request-signing gates
@@ -251,7 +251,7 @@ The fence is multiply-tested so a regression in any one layer cannot
 hide:
 
 1. **Per-key in-process drop test**
-   (`kit_cli::config::tests::repo_*_is_rejected` and the meta-test
+   (`kit_bin::config::tests::repo_*_is_rejected` and the meta-test
    `every_forbidden_key_is_actually_dropped_from_repo_scope`). The
    meta-test iterates the entire `REPO_FORBIDDEN_KEYS` array, plants
    each key with a sentinel value in a repo-scoped file, and asserts
@@ -259,7 +259,7 @@ hide:
    to `REPO_FORBIDDEN_KEYS` without extending the meta-test causes a
    compile-fail-style panic with an actionable error message.
 2. **Per-key end-to-end CLI test**
-   (`crates/kit-cli/tests/repo_config_forbidden_keys.rs`). For
+   (`crates/kit-bin/tests/repo_config_forbidden_keys.rs`). For
    every UNSAFE key, plants `.kit/config`, runs `kit config
    <key>`, and asserts the value did NOT propagate to stdout and
    that stderr emitted the named warning.
@@ -321,9 +321,9 @@ When you add a key to `Config`:
 
 ## 7. References
 
-- `rust/crates/kit-cli/src/config.rs` &mdash; single source of truth for
+- `rust/crates/kit-bin/src/config.rs` &mdash; single source of truth for
   `REPO_FORBIDDEN_KEYS` and the enforcement code path.
-- `rust/crates/kit-cli/tests/repo_config_forbidden_keys.rs` &mdash; per-key
+- `rust/crates/kit-bin/tests/repo_config_forbidden_keys.rs` &mdash; per-key
   CLI regression suite.
 - `docs/THREAT-MODEL.md` §4 &mdash; wider trust-boundary discussion.
 - `docs/specs/SPEC-KEYSTORE.md` §8.2 &mdash; the keystore-side requirement that

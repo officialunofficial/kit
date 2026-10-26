@@ -95,7 +95,7 @@ for a maintainer comment `/gcbrun`.
 | Trigger | Configuration | Runs |
 |---|---|---|
 | `kit-ci-pr`, `kit-ci-main` | `ci.yaml` | Every pull request and every push to `main`. No path filter, because the writing and path checks read the documents too. |
-| `kit-supply-pr`, `kit-supply-main` | `supply.yaml` | When a manifest, the lockfile, the notices policy, the release scripts or the `kit-cli` crate changes. |
+| `kit-supply-pr`, `kit-supply-main` | `supply.yaml` | When a manifest, the lockfile, the notices policy, the release scripts or the `kit-bin` crate changes. |
 | `kit-connect-pr` | `connect-latest.yaml` | When a manifest, a lockfile or the probe script changes. |
 | `kit-ci-weekly`, `kit-connect-weekly` | `ci.yaml`, `connect-latest.yaml` | Mondays at 06:00 and 05:23 UTC. Opt in with `ENABLE_SCHEDULED_TRIGGERS=1`. A new advisory can match a dependency tree that did not change. |
 

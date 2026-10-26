@@ -64,7 +64,7 @@ impl RetryIdentity {
 /// the raw public key (for `X-Public-Key`) and a raw signature over an
 /// arbitrary 32-byte digest (no domain prefix — see module docs).
 ///
-/// `kit-cli` implements this by reusing its EXISTING commit-signing
+/// `kit-bin` implements this by reusing its EXISTING commit-signing
 /// resolution (`signer` / `signing_key` / `key.ed25519_ref` config, the
 /// same keys `kit commit` reads) rather than inventing a parallel key
 /// path — see `remote_dispatch::envelope_signer_from_config`.

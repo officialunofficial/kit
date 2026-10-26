@@ -75,7 +75,7 @@ Git-to-kit mapping cache.
 
 **If violated:** swapped mappings or unrelated attestations can pass an audit.
 
-**Enforced by:** `rust/crates/kit-cli/tests/git_import_integration.rs` mapping
+**Enforced by:** `rust/crates/kit-bin/tests/git_import_integration.rs` mapping
 swap, unrelated attestation and private-key removal regressions; the full
 45-test integration suite passes. Golden translated bytes remain unchanged.
 
@@ -95,7 +95,7 @@ file object for a symlink produces an index that cannot be committed.
 
 **Enforced by:** core `worktree::blob::equality_tests`,
 `ops::diff::tests::equal_content_different_chunk_layout_is_clean`, and
-`rust/crates/kit-cli/tests/content_representation_integration.rs`. Comparison
+`rust/crates/kit-bin/tests/content_representation_integration.rs`. Comparison
 holds at most one chunk per side plus manifests; rename fingerprints are
 memoized for one diff and confirmed by byte comparison.
 
@@ -232,7 +232,7 @@ mode) and any other server process that embeds the same filesystem layout. Every
 or `worktrees.lock` immediately probes that same `serve.lock`
 non-blocking-exclusive (`kit_core::repo_lock::probe_exclusive`) and, if it
 finds the lock busy, prints a warning to stderr naming the served root
-before proceeding. Most commands do this through `kit-cli`'s
+before proceeding. Most commands do this through `kit-bin`'s
 `acquire_worktree_lock` / `acquire_worktrees_registry_lock`; the paths
 that take `worktree.lock` directly (the `fetch`/`pull` phases in
 `remote_dispatch` and `status`'s index refresh) call the same
@@ -266,7 +266,7 @@ cover. Detection does not make a concurrent `gc` safe: SPEC-GC
 writer outside gc's lock set must meet, which a dedup hit on an old
 unreachable object does not meet today.
 
-**Enforced by:** `kit-cli/tests/serve_guard.rs`.
+**Enforced by:** `kit-bin/tests/serve_guard.rs`.
 
 ## Single commonware release train across every manifest and lockfile
 
@@ -316,7 +316,7 @@ unrecognized `BackendKind`/`KeyRef` backend string, not a fail-closed one.
 
 ## The default `kit` CLI is server-free
 
-**Always:** the normal dependency graph of `kit-cli` with its default
+**Always:** the normal dependency graph of `kit-bin` with its default
 features, on every target, contains no `axum`, `rusqlite` or `libsqlite3-sys`; it enables no hyper `server` feature, no
 hyper-util `server*` feature and no connectrpc `server` or `axum` feature;
 and it has `kit-serve` (the engine of `kit serve`), whose own graph has no
@@ -326,7 +326,7 @@ tokio itself is allowed: it is the runtime of the Connect and reqwest
 *clients* in the default graph.
 
 **Because:** the CLI is what every user installs (`cargo install
-kit-cli`, the release archives). The HTTP server, the
+kit-bin`, the release archives). The HTTP server, the
 `SQLite` metadata store and their dependencies belong outside the CLI. The
 CLI serves only over ssh, through the small `kit-serve` crate. A server stack in the CLI
 graph grows the published crate's supply chain, its build time and its

@@ -18,7 +18,7 @@ verify the result.
 
 | Use case                              | Channel                              | Command                                                                                              |
 |---------------------------------------|--------------------------------------|------------------------------------------------------------------------------------------------------|
-| CLI on a dev machine (Linux/macOS)    | Release archive or `cargo install --git` | `curl kit.storage \| sh` *or* `cargo install --git https://github.com/officialunofficial/kit kit-cli` |
+| CLI on a dev machine (Linux/macOS)    | Release archive or `cargo install --git` | `curl kit.storage \| sh` *or* `cargo install --git https://github.com/officialunofficial/kit kit-bin` |
 | CLI on a dev machine (Windows)        | Not supported &mdash; use WSL         | run the above `install.sh` (or `cargo install`) inside WSL |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/kit-<VERSION>-<target>.tar.gz && tar -xzf kit-<VERSION>-<target>.tar.gz` |
 | Library inside another Rust crate     | crates.io (or git dependency)        | `kit-core = "0.5"`                                                                                  |
@@ -30,7 +30,7 @@ right answer for contributors and air-gapped CI.
 ## From source
 
 Source builds are the right path for contributors and air-gapped CI. For
-everyday CLI use, `cargo install kit-cli` from crates.io (see
+everyday CLI use, `cargo install kit-bin` from crates.io (see
 [`README.md`](../README.md)) is the shortest route.
 
 **Toolchain.** Rust 1.99, edition 2024, pinned by
@@ -40,8 +40,8 @@ auto-install on the first build.
 **Install the CLI:**
 
 ```sh
-cargo install kit-cli                                                   # from crates.io
-cargo install --git https://github.com/officialunofficial/kit kit-cli  # from git HEAD
+cargo install kit-bin                                                   # from crates.io
+cargo install --git https://github.com/officialunofficial/kit kit-bin  # from git HEAD
 ```
 
 Drops `kit` into `~/.cargo/bin/`. Make sure that directory is on your
@@ -68,7 +68,7 @@ cargo test --workspace       # all crates, all tests
 | `kit-sync`                          | native clone/fetch/pull as a library                       |
 | `kit-rpc`                           | shared stdio framing for subprocess protocols              |
 | `kit-serve`                         | self-host server: the ssh frame session over a repository  |
-| `kit-cli`                           | the `kit` binary                                          |
+| `kit-bin`                           | the `kit` binary                                          |
 | `kit-transport-{memory,file,connect,s3,ssh}` | one crate per transport scheme                    |
 
 ## From GitHub Releases
@@ -104,7 +104,7 @@ Check your glibc with `ldd --version | head -1`.
 | Run on | Ubuntu 24.04 or newer, Debian 13 or newer, Fedora 40 or newer |
 | Do not run on | Debian 12, Ubuntu 22.04, RHEL/Rocky/Alma 9, Fedora 39 |
 
-On older systems, build from source with `cargo install kit-cli`, which
+On older systems, build from source with `cargo install kit-bin`, which
 links against your host's glibc, or use a newer distro/container.
 
 If you want "latest", use the hosted installer:
@@ -230,7 +230,7 @@ Installs it does **not** manage are refused with pointers to the right
 channel instead:
 
 - Homebrew: `brew upgrade kit`
-- cargo: `cargo install --locked kit-cli` (or `cargo binstall kit-cli`)
+- cargo: `cargo install --locked kit-bin` (or `cargo binstall kit-bin`)
 
 kit never checks for updates in the background; `self update` acts
 only when you run it. Full details (receipts, downgrade policy,

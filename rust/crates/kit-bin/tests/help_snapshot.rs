@@ -1,0 +1,217 @@
+//! Snapshot test for `kit help` — every documented subcommand in
+//! `docs/CLI.md` must appear in the help text.
+//!
+//! These tests also assert man-page and shell-completion coverage of
+//! the documented subcommand list, so a new command can't silently ship
+//! without being added to `man/kit.1` and `completions/kit.{bash,zsh,
+//! fish}`.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+fn kit_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_kit")
+}
+
+/// Repository root, three levels up from this crate
+/// (`rust/crates/kit-bin`).
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+}
+
+fn read_repo_file(rel: &str) -> String {
+    let path = repo_root().join(rel);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {} ({}): {e}", rel, path.display()))
+}
+
+/// True iff `needle` occurs in `haystack` as a whole token: the
+/// characters immediately before and after the match (if any) are not
+/// alphanumeric/hyphen. Plain `.contains()` would let a short command
+/// name like `"rm"` match inside an unrelated word (e.g. "perform"),
+/// so this pins word-boundary coverage instead.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    fn is_word_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '-'
+    }
+    haystack.match_indices(needle).any(|(idx, m)| {
+        let before_ok = haystack[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word_char(c));
+        let after_ok = haystack[idx + m.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_word_char(c));
+        before_ok && after_ok
+    })
+}
+
+/// The canonical subcommand list per `docs/CLI.md`. Keep in sync with
+/// the CLI reference when adding commands.
+const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
+    "init",
+    "add",
+    "rm",
+    "mv",
+    "restore",
+    "reset",
+    "status",
+    "diff",
+    "stash",
+    "sparse-checkout",
+    "commit",
+    "log",
+    "reflog",
+    "blame",
+    "prove",
+    "verify",
+    "verify-proof",
+    "closure",
+    "cat",
+    "cat-file",
+    "hash",
+    "tree",
+    "ls-tree",
+    "ls-files",
+    "rev-parse",
+    "show",
+    "show-ref",
+    "for-each-ref",
+    "symbolic-ref",
+    "update-ref",
+    "ref",
+    "branch",
+    "checkout",
+    "clean",
+    "tag",
+    "merge",
+    "cherry-pick",
+    "revert",
+    "rebase",
+    "bisect",
+    "gc",
+    "remote",
+    "clone",
+    "fetch",
+    "pull",
+    "push",
+    "serve",
+    "mcp",
+    "key",
+    "grant",
+    "epoch",
+    "visibility",
+    "keygen",
+    "config",
+    "self",
+    "version",
+    "worktree",
+];
+
+#[test]
+fn help_lists_every_documented_subcommand() {
+    let output = Command::new(kit_bin())
+        .arg("help")
+        .output()
+        .expect("spawn `kit help`");
+    assert!(output.status.success(), "`kit help` must exit 0");
+    let text = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    for cmd in DOCUMENTED_SUBCOMMANDS {
+        assert!(
+            contains_word(&text, cmd),
+            "`kit help` output is missing documented subcommand '{cmd}'"
+        );
+    }
+}
+
+#[test]
+fn man_page_documents_every_subcommand() {
+    let man = read_repo_file("man/kit.1");
+    for cmd in DOCUMENTED_SUBCOMMANDS {
+        // The man page enumerates subcommands as mdoc `Cm <name>`
+        // macros (either `.It Cm <name>` for the leading entry or
+        // `Cm <name>` after a comma for grouped entries like
+        // `.Cm pull , Cm fetch`). Match the macro plus a delimiter so a
+        // prefix can't satisfy a longer command name by accident.
+        let documented = man.lines().any(|line| {
+            line.match_indices(&format!("Cm {cmd}")).any(|(idx, m)| {
+                let after = &line[idx + m.len()..];
+                after.is_empty() || after.starts_with([' ', ',', '\t'])
+            })
+        });
+        assert!(
+            documented,
+            "man/kit.1 is missing documented subcommand '{cmd}' (expected a `Cm {cmd}` macro)"
+        );
+    }
+}
+
+#[test]
+fn completions_cover_every_subcommand() {
+    for (file, name) in [
+        ("completions/kit.bash", "bash"),
+        ("completions/kit.zsh", "zsh"),
+        ("completions/kit.fish", "fish"),
+    ] {
+        let text = read_repo_file(file);
+        for cmd in DOCUMENTED_SUBCOMMANDS {
+            assert!(
+                contains_word(&text, cmd),
+                "{name} completion ({file}) is missing documented subcommand '{cmd}'"
+            );
+        }
+    }
+}
+
+#[test]
+fn dash_dash_help_goes_to_stdout() {
+    let output = Command::new(kit_bin())
+        .arg("--help")
+        .output()
+        .expect("spawn `kit --help`");
+    assert!(output.status.success(), "`kit --help` must exit 0");
+    assert!(!output.stdout.is_empty(), "stdout empty");
+    assert!(output.stderr.is_empty(), "stderr should be empty on --help");
+}
+
+// Unknown-subcommand exit code + exact error text: see
+// tests/cmd/unknown-subcommand.trycmd (a strict superset of what a
+// `unknown_subcommand_exits_usage` test asserting only the exit code
+// used to check here).
+
+/// Snapshot of `kit --help` output. Reviewable diffs via
+/// `cargo insta review`; raw assertions on a 30+ subcommand list
+/// produce noisy diffs that nobody reads.
+#[test]
+fn help_output_snapshot() {
+    let output = Command::new(kit_bin())
+        .arg("--help")
+        .output()
+        .expect("spawn `kit --help`");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    insta::assert_snapshot!("kit_dash_help", stdout);
+}
+
+/// Snapshot of `kit version`. Pins the format (key=value pairs,
+/// trailing newline) so any drift in the version-emitter shows up as
+/// a reviewable diff instead of a `contains("0.")` regex.
+#[test]
+fn version_output_snapshot() {
+    let output = Command::new(kit_bin())
+        .arg("version")
+        .output()
+        .expect("spawn `kit version`");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    // Mask the version string so a `Cargo.toml` version bump doesn't
+    // re-break the snapshot — we want shape-stability, not number-
+    // stability.
+    insta::with_settings!({filters => vec![
+        (r"\d+\.\d+\.\d+(-[A-Za-z0-9._-]+)?", "[VERSION]"),
+    ]}, {
+        insta::assert_snapshot!("kit_version", stdout);
+    });
+}
