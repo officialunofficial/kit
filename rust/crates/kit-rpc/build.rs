@@ -7,7 +7,9 @@
 // and stock-distro users building, with zero system dependencies.
 //
 // Regeneration path: set KIT_RPC_CODEGEN=1 to run buffa-build against
-// proto/ instead (requires protoc >= 27 on PATH or via PROTOC). After
+// proto/ and the shared proto root in the repository instead (requires
+// protoc >= 27 on PATH or via PROTOC). The published crate has no shared
+// proto root, so it builds only from generated/. After
 // changing a .proto, run scripts/regen-rpc-proto.sh from the repo root
 // to refresh generated/ and commit the result.
 
@@ -23,19 +25,20 @@ fn main() {
     let common_dir = PathBuf::from("../../../proto");
     let common_refs_proto = common_dir.join("kit/common/v1/refs.proto");
 
-    let files = [
+    let package_files = [
         proto_dir.join("kit/rpc/v1/common.proto"),
         proto_dir.join("kit/rpc/v1/signer/signer.proto"),
         proto_dir.join("kit/rpc/v1/ssh/ssh.proto"),
         proto_dir.join("kit/rpc/v1/verify/verify.proto"),
-        common_refs_proto.clone(),
     ];
 
     // Re-run when a .proto, the vendored output, or the mode changes.
     // Without these, cargo re-runs build.rs on every recompile.
+    // Every path here is inside the package. A path outside the package is
+    // absent from the published crate and would force a re-run on every build.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=generated");
-    for f in &files {
+    for f in &package_files {
         println!("cargo:rerun-if-changed={}", f.display());
     }
     println!("cargo:rerun-if-env-changed=PROTOC");
@@ -48,6 +51,11 @@ fn main() {
     let marker = out_dir.join(".kit-rpc-codegen");
 
     if std::env::var_os("KIT_RPC_CODEGEN").is_some() {
+        // Codegen runs only in the repository, where the shared proto root
+        // exists. The published crate never takes this path.
+        println!("cargo:rerun-if-changed={}", common_refs_proto.display());
+        let mut files = package_files.to_vec();
+        files.push(common_refs_proto);
         buffa_build::Config::new()
             .files(&files)
             .includes(&[&proto_dir, &common_dir])
