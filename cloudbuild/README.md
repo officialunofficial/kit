@@ -63,7 +63,7 @@ archive. They wait for `nextest-archive`.
 | `nextest-archive` | Builds every workspace test binary once. This is the only step that links with mold. |
 | `nextest-1`, `nextest-2`, `nextest-3` | The workspace tests in three partitions. They run from the archive. Each step calls `scripts/ci-nextest.sh` with its partition number. |
 | `ignored-lane` | The serial lane for ignored tests. It runs from the archive. |
-| `tests-misc` | Doctests. |
+| `tests-misc` | Doctests, and the `libkit` feature sets. |
 | `version` | `kit version` prints exactly `kit <X.Y.Z>`. |
 | `cli-baseline` | The default `kit` build has no server code. |
 | `wasm` | `kit-client` builds for wasm32 with the default and the minimal feature set. |

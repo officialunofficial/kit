@@ -26,9 +26,15 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 | `kit-transport-ssh`           | `rust/crates/kit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
 | `kit-serve`                   | `rust/crates/kit-serve/`             | Self-host server: the `kit.rpc.v1.ssh` frame session over a repository on disk; `kit serve` is a thin wrapper |
 | `kit-sync`                    | `rust/crates/kit-sync/`              | Native clone/fetch/pull for `.kit` repositories as a library: typed reports, no printing, no ambient config; `kit clone`/`fetch`/`pull` are thin wrappers over it |
+| `libkit`                      | `rust/crates/libkit/`                | The facade crate for embedders. It re-exports `kit-core`, `kit-attest` and `kit-keystore` always. It re-exports `kit-sync` under the default feature `sync`. The features `git-bridge`, `transport-file`, `transport-ssh`, `transport-s3` and `transport-connect` add one crate each. The features `history-mmr` and `sparse-checkout` forward to `kit-core`. |
 | `kit-bin`                     | `rust/crates/kit-bin/`               | The `kit` binary; thin glue over the library crates                   |
 | `kit-fuzz`                    | `rust/fuzz/`                          | cargo-fuzz harnesses (`docs/FUZZ.md`)                                  |
 | `kit-sign-file`               | `rust/crates/kit-sign-file/`         | Reference external signer; protocol conformance baseline               |
+
+The `libkit` crate does not re-export `kit-bin`, `kit-serve` or `kit-rpc`.
+`kit-bin` is the command line. `kit-serve` is the self-hosted server. `kit-rpc`
+holds the wire framing for the signer and server protocols. `kit-client`,
+`kit-transport-memory` and the test crates are not re-exported either.
 
 The `kit-sign-file` crate is the only external signer that ships. It
 communicates with `kit` over the protocol defined in
@@ -95,8 +101,9 @@ Each Total is Source plus Tests plus Generated.
 | `kit-sign-file` | 445 | 421 | 0 | 866 |
 | `kit-formal-conformance` | 10 | 701 | 0 | 711 |
 | `kit-transport-memory` | 500 | 0 | 0 | 500 |
+| `libkit` | 63 | 95 | 0 | 158 |
 | `kit-test-util` | 156 | 0 | 0 | 156 |
-| **All crates** | **180,004** | **81,649** | **50,231** | **311,884** |
+| **All crates** | **180,067** | **81,744** | **50,231** | **312,042** |
 
 Generated code is a documented exception to the rule against checked-in
 generated output. The code generator needs `protoc`, and many hosts ship a `protoc` too old

@@ -3285,6 +3285,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "libkit"
+version = "0.5.0"
+dependencies = [
+ "kit-attest",
+ "kit-core",
+ "kit-git-bridge",
+ "kit-keystore",
+ "kit-sync",
+ "kit-transport-connect",
+ "kit-transport-file",
+ "kit-transport-s3",
+ "kit-transport-ssh",
+]
+
+[[package]]
 name = "libz-sys"
 version = "1.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"

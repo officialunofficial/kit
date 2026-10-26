@@ -253,6 +253,13 @@ steps:
         set -euo pipefail
         cd rust
         cargo test --locked --doc --workspace --no-fail-fast
+        # The workspace run unifies features. These runs check the libkit
+        # feature sets one by one.
+        cargo test --locked -p libkit --no-default-features
+        cargo test --locked -p libkit
+        cargo test --locked -p libkit --no-default-features --features git-bridge,transport-file,transport-ssh
+        cargo test --locked -p libkit --no-default-features --features transport-s3,transport-connect,history-mmr,sparse-checkout
+        cargo test --locked -p libkit --all-features
         sccache --show-stats
 
   # `kit version` must print exactly `kit <X.Y.Z>`.

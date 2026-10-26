@@ -84,7 +84,7 @@ credited in the published advisory and in `CHANGELOG.md`.
 In scope:
 
 - The `kit` binary and the Rust workspace under `rust/crates/` &mdash;
-  including the library crates (`kit-core`, `kit-rpc`, `kit-attest`,
+  including the library crates (`libkit`, `kit-core`, `kit-rpc`, `kit-attest`,
   `kit-keystore`, `kit-git-bridge`, `kit-sync`, `kit-client`, `kit-serve`
   and the `kit-transport-*` crates).
 - The reference external signer `kit-sign-file` under `rust/crates/kit-sign-file/`.

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/libkit",
     "crates/kit-core",
     "crates/kit-test-util",
     "crates/kit-rpc",

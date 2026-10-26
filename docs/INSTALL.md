@@ -61,6 +61,7 @@ cargo test --workspace       # all crates, all tests
 
 | Crate                                | Role                                                       |
 |--------------------------------------|------------------------------------------------------------|
+| `libkit`                            | facade crate that re-exports the library crates            |
 | `kit-core`                          | object model, store, chunker, packs, refs, transports, ops |
 | `kit-attest`                        | DSSE plus in-toto v1, multi-algo signers                      |
 | `kit-keystore`                      | key vault interface plus backends                             |

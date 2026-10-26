@@ -273,7 +273,7 @@ Review the file list of a crate with `cargo package --list -p <crate>`.
 
 | Publishes to crates.io | Stays off crates.io (`publish = false`) |
 |---|---|
-| The library crates (`kit-core`, `kit-rpc`, `kit-client`, `kit-sync`, `kit-attest`, `kit-keystore`, `kit-git-bridge`, `kit-serve`, `kit-transport-{file,memory,s3,ssh,connect}`) plus `kit-bin` (so `cargo install kit-bin` works) | `kit-sign-file`, `kit-test-util`, `kit-formal-conformance`, `fuzz`, `benches`. |
+| The library crates (`libkit`, `kit-core`, `kit-rpc`, `kit-client`, `kit-sync`, `kit-attest`, `kit-keystore`, `kit-git-bridge`, `kit-serve`, `kit-transport-{file,memory,s3,ssh,connect}`) plus `kit-bin` (so `cargo install kit-bin` works) | `kit-sign-file`, `kit-test-util`, `kit-formal-conformance`, `fuzz`, `benches`. |
 
 The published crates depend only on each other, forming a closed,
 dependency-ordered set; `cargo publish --workspace` computes that order and
