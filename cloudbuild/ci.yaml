@@ -170,69 +170,41 @@ steps:
         sccache --show-stats
         exit "$status"
 
-  # Workspace tests split into 3 partitions that run at the same time. Each uses 9 test threads.
+  # Workspace tests split into 3 partitions that run at the same time. The
+  # steps differ only in the partition number. scripts/ci-nextest.sh holds the
+  # environment and the command, so a change happens in one place.
   - name: ${_CI_IMAGE}
     id: nextest-1
     waitFor: [nextest-archive]
     timeout: 2400s
     entrypoint: bash
-    env:
-      - "CARGO_TERM_COLOR=always"
-      - "CARGO_INCREMENTAL=0"
-      - "RUST_BACKTRACE=short"
-      - "CARGO_PROFILE_DEV_DEBUG=0"
-      - "CARGO_PROFILE_TEST_DEBUG=0"
-      - "KIT_TEST_STRICT=1"
-      - "NEXTEST_TEST_THREADS=9"
     args:
       - -c
       - |
         set -euo pipefail
-        cd rust
-        cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
-          --partition count:1/3 --profile ci --no-fail-fast
+        bash scripts/ci-nextest.sh 1
 
   - name: ${_CI_IMAGE}
     id: nextest-2
     waitFor: [nextest-archive]
     timeout: 2400s
     entrypoint: bash
-    env:
-      - "CARGO_TERM_COLOR=always"
-      - "CARGO_INCREMENTAL=0"
-      - "RUST_BACKTRACE=short"
-      - "CARGO_PROFILE_DEV_DEBUG=0"
-      - "CARGO_PROFILE_TEST_DEBUG=0"
-      - "KIT_TEST_STRICT=1"
-      - "NEXTEST_TEST_THREADS=9"
     args:
       - -c
       - |
         set -euo pipefail
-        cd rust
-        cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
-          --partition count:2/3 --profile ci --no-fail-fast
+        bash scripts/ci-nextest.sh 2
 
   - name: ${_CI_IMAGE}
     id: nextest-3
     waitFor: [nextest-archive]
     timeout: 2400s
     entrypoint: bash
-    env:
-      - "CARGO_TERM_COLOR=always"
-      - "CARGO_INCREMENTAL=0"
-      - "RUST_BACKTRACE=short"
-      - "CARGO_PROFILE_DEV_DEBUG=0"
-      - "CARGO_PROFILE_TEST_DEBUG=0"
-      - "KIT_TEST_STRICT=1"
-      - "NEXTEST_TEST_THREADS=9"
     args:
       - -c
       - |
         set -euo pipefail
-        cd rust
-        cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
-          --partition count:3/3 --profile ci --no-fail-fast
+        bash scripts/ci-nextest.sh 3
 
   # The serial lane for tests that need real timers or a real ssh(1). It runs
   # from the same archive as the partitions.

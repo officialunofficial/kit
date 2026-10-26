@@ -169,18 +169,29 @@ class Gates(unittest.TestCase):
         steps = ci_steps()
         parts = sorted(i for i in steps if re.fullmatch(r"nextest-\d+", i))
         self.assertEqual(parts, ["nextest-1", "nextest-2", "nextest-3"])
+        script = (ROOT / "scripts/ci-nextest.sh").read_text()
+        self.assertTrue(os.access(ROOT / "scripts/ci-nextest.sh", os.X_OK))
+        self.assertIn(f"PARTITIONS={len(parts)}\n", script)
+        self.assertIn('--partition "count:${partition}/${PARTITIONS}"', script)
+        self.assertIn("export KIT_TEST_STRICT=1", script)
+        for text in (script, steps["ignored-lane"]):
+            self.assertIn("--archive-file /workspace/nextest-archive.tar.zst", text)
+            self.assertIn("--workspace-remap /workspace/rust", text)
+            self.assertIn("--no-fail-fast", text)
+            self.assertNotRegex(text, r"cargo (build|test|check|clippy)\b")
         for index, step_id in enumerate(parts, 1):
             step = steps[step_id]
             self.assertIn("waitFor: [nextest-archive]", step)
-            self.assertIn(f"--partition count:{index}/{len(parts)} ", step)
-        for step_id in parts + ["ignored-lane"]:
-            step = steps[step_id]
-            self.assertIn("--archive-file /workspace/nextest-archive.tar.zst", step)
-            self.assertIn("--workspace-remap /workspace/rust", step)
-            self.assertIn("--no-fail-fast", step)
-            self.assertIn('"KIT_TEST_STRICT=1"', step)
-            self.assertNotRegex(step, r"cargo (build|test|check|clippy)\b")
+            self.assertTrue(script_of(step).rstrip().endswith(f"bash scripts/ci-nextest.sh {index}"))
+        self.assertIn('"KIT_TEST_STRICT=1"', steps["ignored-lane"])
         self.assertIn("--profile ignored-lane --no-fail-fast --run-ignored ignored-only", steps["ignored-lane"])
+
+    def test_nextest_script_rejects_a_bad_partition(self):
+        for arg in ([], ["0"], ["4"], ["x"]):
+            result = subprocess.run(["bash", str(ROOT / "scripts/ci-nextest.sh"), *arg], text=True, capture_output=True)
+            with self.subTest(arg=arg):
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("partition", result.stderr)
 
     def test_audit_ignores_match_deny_toml(self):
         deny = re.findall(r'\{ id = "(RUSTSEC-[\d-]+)"', (ROOT / "rust/deny.toml").read_text())

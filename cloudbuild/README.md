@@ -51,7 +51,7 @@ archive. They wait for `nextest-archive`.
 | `lint` | `clippy -D warnings` over every target and feature. The minimum Rust version gate: the image compiler, `rust-version` and `rust-toolchain.toml` must agree, and `cargo check` passes on every target. |
 | `docs` | `cargo doc` with `-Dwarnings`. |
 | `nextest-archive` | Builds every workspace test binary once. This is the only step that links with mold. |
-| `nextest-1`, `nextest-2`, `nextest-3` | The workspace tests in three partitions. They run from the archive. |
+| `nextest-1`, `nextest-2`, `nextest-3` | The workspace tests in three partitions. They run from the archive. Each step calls `scripts/ci-nextest.sh` with its partition number. |
 | `ignored-lane` | The serial lane for ignored tests. It runs from the archive. |
 | `tests-misc` | Doctests. |
 | `version` | `kit version` prints exactly `kit <X.Y.Z>`. |
