@@ -245,6 +245,50 @@ class Gates(unittest.TestCase):
                 if gate in text:
                     self.fail(f"{path.name} repeats the gate command: {gate}")
 
+    def test_publish_check_never_publishes(self):
+        script = ROOT / "scripts/check-publish.sh"
+        text = strip_comments(script.read_text())
+        for line in re.findall(r"(?m)^\s*(?:publish=\()?cargo publish\b.*$", text):
+            self.assertIn("--dry-run", line)
+        self.assertEqual(len(re.findall(r"cargo publish", text)), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "calls"
+            fake = Path(tmp) / "bin"
+            fake.mkdir()
+            cargo = fake / "cargo"
+            cargo.write_text(
+                "#!/bin/sh\n"
+                f'echo "$*" >> "{log}"\n'
+                'if [ "$1" = metadata ]; then\n'
+                f'  echo \'{{"target_directory":"{tmp}/target","packages":[{{"name":"a","publish":null}},{{"name":"b","publish":[]}}]}}\'\n'
+                "fi\n"
+                'if [ "$1" = package ]; then\n'
+                f'  mkdir -p "{tmp}/target/package"; echo x > "{tmp}/target/package/a-0.1.0.crate"\n'
+                "fi\n"
+            )
+            cargo.chmod(0o755)
+            env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "CARGO_REGISTRY_TOKEN": "t"}
+            result = subprocess.run(["bash", str(script)], text=True, capture_output=True, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = log.read_text().splitlines()
+            publish = [c for c in calls if c.startswith("publish")]
+            self.assertEqual(publish, ["publish --workspace --dry-run --locked"])
+            package = [c for c in calls if c.startswith("package")]
+            self.assertEqual(package, ["package -p a --locked --no-verify"])
+            for arg in (["--no-dry-run"], ["--allow-dirty", "x"], ["publish"]):
+                with self.subTest(arg=arg):
+                    before = log.read_text()
+                    result = subprocess.run(["bash", str(script), *arg], text=True, capture_output=True, env=env)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(log.read_text(), before)
+
+    def test_publish_dry_run_is_a_supply_step(self):
+        steps = split_steps(CLOUD / "supply.yaml")
+        self.assertIn("publish-dry-run", steps)
+        self.assertIn("bash scripts/check-publish.sh", script_of(steps["publish-dry-run"]))
+        self.assertIn("scripts/check-publish.sh", (ROOT / "scripts/setup-cloud-build.sh").read_text())
+        self.assertIn("`publish-dry-run`", (CLOUD / "README.md").read_text())
+
     def test_documents_agree_with_the_files(self):
         readme = (CLOUD / "README.md").read_text()
         setup = (ROOT / "scripts/setup-cloud-build.sh").read_text()

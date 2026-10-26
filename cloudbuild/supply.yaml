@@ -1,4 +1,4 @@
-# Supply-chain release gates on Cloud Build. Two steps run in parallel:
+# Supply-chain release gates on Cloud Build. Three steps run in parallel:
 #
 #   third-party-notices    `cargo about generate` fails on a dependency with a
 #                          license outside the accepted list in
@@ -12,6 +12,11 @@
 #                          the check of its dependency features. The build is
 #                          slow, so the trigger runs it only when an input
 #                          that can change the result changes.
+#   publish-dry-run        `cargo publish --workspace --dry-run --locked`
+#                          through scripts/check-publish.sh. It packs and
+#                          builds every publishable crate as it would ship,
+#                          and it checks the archive sizes. It never
+#                          publishes.
 #
 # Triggers: kit-supply-pr and kit-supply-main. Both use the path filters in
 # scripts/setup-cloud-build.sh. A path filter means that no check appears on a
@@ -81,4 +86,24 @@ steps:
           echo "Review the diff and commit it. Each new name is a new dependency of the shipped CLI." >&2
           exit 1
         fi
+        sccache --show-stats
+
+  - name: ${_CI_IMAGE}
+    id: publish-dry-run
+    waitFor: ['-']
+    timeout: 3000s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_BUILD_JOBS=4"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        bash scripts/check-publish.sh
         sccache --show-stats

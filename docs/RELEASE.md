@@ -90,6 +90,9 @@ Run top to bottom. Do not skip steps.
   - [ ] `--target=x86_64-apple-darwin`
   - [ ] `--target=x86_64-unknown-linux-gnu`
   - [ ] `--target=aarch64-unknown-linux-gnu`
+- [ ] `bash scripts/check-publish.sh` passes. It dry-runs the crates.io
+      publish of the whole workspace. See
+      [Dry run](#dry-run).
 - [ ] `[workspace.package].version` in `rust/Cargo.toml` is bumped to a version
       **not already published** (crates.io versions are immutable &mdash; a re-publish
       of an existing version fails the whole `cargo publish` run).
@@ -225,6 +228,47 @@ dependency order, waiting for each to index before the next. Before the run,
 check that the tag matches the workspace version (`kit-core`'s version in
 `rust/Cargo.toml` at the tagged tree).
 
+### Dry run
+
+Run `bash scripts/check-publish.sh` before you tag. The script runs
+`cargo publish --workspace --dry-run --locked`. The `--dry-run` flag is fixed
+in the script, so the script cannot publish. It accepts no other argument
+than `--allow-dirty`, which is for a local tree with uncommitted changes.
+
+The kit crates depend on each other, and none is on the registry before the
+first release. A dry run of one crate with `cargo publish -p <crate>
+--dry-run` fails for that reason. The `--workspace` form packs the crates in
+dependency order and verifies each crate against the packed copies of the
+others. Use it for every dry run.
+
+The script then packs each publishable crate and fails when an archive is
+larger than 5 MB. crates.io rejects an archive larger than 10 MB. The
+`publish-dry-run` step of
+[`cloudbuild/supply.yaml`](../cloudbuild/supply.yaml) runs the script on each
+pull request that changes a manifest, the lockfile or the script.
+
+The dry run prints one warning for each test file that a crate does not
+ship. The warning is expected.
+
+### What a crate ships
+
+Each publishable crate sets `include` in its `Cargo.toml`. The list names
+`src/`, `README.md`, the two license files and, where the crate needs them,
+`build.rs`, `generated/` and `proto/`. Nothing else ships.
+
+The `tests/`, `examples/` and `proptest-regressions/` directories do not
+ship. The tests read golden vectors and helper crates in the repository, and
+those files are not in a published copy. Run the tests from a checkout of the
+tag.
+
+Each crate directory holds a `README.md` and links to `LICENSE-APACHE` and
+`LICENSE-MIT`. Each manifest sets `description`, `license`, `repository`,
+`readme`, `keywords` (at most five), `categories` and `rust-version`. A crate
+with features sets `[package.metadata.docs.rs]` with `rustdoc-args = ["--cfg",
+"docsrs"]`.
+
+Review the file list of a crate with `cargo package --list -p <crate>`.
+
 ### What publishes vs. what doesn't
 
 | Publishes to crates.io | Stays off crates.io (`publish = false`) |
@@ -261,8 +305,8 @@ publish. Keep the token out of the repository.
   crate that landed.
 - **Native deps**: `cargo publish` builds each crate with **default** features,
   so no `libpcsclite` is needed (`kit-keystore`'s `backend-yubikey` is off by
-  default); only `protoc` is required (for
-  `kit-rpc`).
+  default). No `protoc` is needed, because `kit-rpc` ships its generated
+  code in `generated/`.
 
 ## Signing and verification
 

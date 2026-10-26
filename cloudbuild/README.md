@@ -21,7 +21,7 @@ owns only the work that Cloud Build cannot do:
 | Work | Where | Why |
 |---|---|---|
 | Format, lint, tests, docs, generated code, golden checks, writing and unsafe checks, fuzz smoke, supply checks | Cloud Build (`ci.yaml`) | Runs on Linux. |
-| Third-party notices, release artifact check | Cloud Build (`supply.yaml`) | Runs on Linux. |
+| Third-party notices, release artifact check, publish dry run | Cloud Build (`supply.yaml`) | Runs on Linux. |
 | Latest-release probe of the Connect stack | Cloud Build (`connect-latest.yaml`) | Runs on Linux. |
 | macOS tests (`macos.yml`) | GitHub Actions | Cloud Build has no macOS machines. |
 | Release (`release.yml`) | GitHub Actions | The signing identity is the workflow itself. |
@@ -47,7 +47,7 @@ file repeats a gate command of Cloud Build.
 | `Dockerfile.ci` | The toolchain image: the Rust version of `rust/rust-toolchain.toml`, protoc, mold, nextest, sccache, cargo-deny, cargo-audit, cargo-geiger, cargo-about, cargo-fuzz, b3sum, actionlint, and a dated nightly toolchain for cargo-fuzz. Every tool has one exact version. |
 | `builder.yaml` | Builds `Dockerfile.ci` and pushes the image. It reads the Rust version from `rust/rust-toolchain.toml`. Run it again when `Dockerfile.ci` or that file changes. |
 | `ci.yaml` | The main suite. See the steps below. |
-| `supply.yaml` | The `third-party-notices` and `release-artifact-check` steps. |
+| `supply.yaml` | The `third-party-notices`, `release-artifact-check` and `publish-dry-run` steps. |
 | `connect-latest.yaml` | The `connect-latest` step. |
 
 ## Steps of `ci.yaml`
@@ -95,7 +95,7 @@ for a maintainer comment `/gcbrun`.
 | Trigger | Configuration | Runs |
 |---|---|---|
 | `kit-ci-pr`, `kit-ci-main` | `ci.yaml` | Every pull request and every push to `main`. No path filter, because the writing and path checks read the documents too. |
-| `kit-supply-pr`, `kit-supply-main` | `supply.yaml` | When a manifest, the lockfile, the notices policy, the release scripts or the `kit-bin` crate changes. |
+| `kit-supply-pr`, `kit-supply-main` | `supply.yaml` | When a manifest, the lockfile, the notices policy, the release scripts, the publish check or the `kit-bin` crate changes. |
 | `kit-connect-pr` | `connect-latest.yaml` | When a manifest, a lockfile or the probe script changes. |
 | `kit-ci-weekly`, `kit-connect-weekly` | `ci.yaml`, `connect-latest.yaml` | Mondays at 06:00 and 05:23 UTC. Opt in with `ENABLE_SCHEDULED_TRIGGERS=1`. A new advisory can match a dependency tree that did not change. |
 
