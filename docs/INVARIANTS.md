@@ -338,9 +338,9 @@ release check (`scripts/check-release-artifact-features.sh`) then fails
 only at release time, where this check fails at the PR.
 
 **Enforced by:** `scripts/check-cli-baseline.sh` (a `cargo tree` model of
-the graph plus a grep of `commands/serve/`), run by the CI workflow
-(`.github/workflows/rust.yml`); the release build's real compiler artifacts are
-checked by `scripts/check-release-artifact-features.sh` against
+the graph plus a grep of `commands/serve/`), run by the
+`cli-baseline` step of `cloudbuild/ci.yaml`. The release build's real compiler
+artifacts are checked by `scripts/check-release-artifact-features.sh` against
 `scripts/release/kit-packages.golden`.
 
 ## The zstd decoder accepts exactly one frame per entry

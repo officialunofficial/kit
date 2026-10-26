@@ -30,7 +30,7 @@ use kit_transport_ssh::{parse_kit_ssh_url, validate_ssh_path};
 // Spawns a real `ssh(1)` subprocess against 127.0.0.1:22 —
 // slow and environment-dependent (needs `ssh` on PATH; behavior differs
 // depending on whether anything is listening on 22). Quarantined to the
-// serial `--ignored` CI lane (.github/workflows/rust.yml);
+// serial `--ignored` CI lane (cloudbuild/ci.yaml);
 // only needs localhost networking, so it runs fine there.
 #[ignore = "real ssh(1) subprocess to 127.0.0.1:22; run via the serial --ignored CI lane"]
 fn open_accepts_syntactically_valid_kit_ssh_url() {

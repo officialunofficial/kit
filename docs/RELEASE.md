@@ -61,7 +61,8 @@ allowlisted release fingerprint, and points at a commit reachable from
    `scripts/check-release-artifact-features.sh --update-golden` is run and
    the golden diff is committed with the change that brought it in.
 
-   [`release-artifact-check.yml`](../.github/workflows/release-artifact-check.yml)
+   The `release-artifact-check` step of
+   [`cloudbuild/supply.yaml`](../cloudbuild/supply.yaml)
    runs the same build and check for `x86_64-unknown-linux-gnu` on PRs
    to `main` (and pushes to it), and checks the golden list is current, so
    drift shows up before a tag rather than at it.
@@ -106,12 +107,11 @@ Run top to bottom. Do not skip steps.
       `keyserver.ubuntu.com` so the workflow can import it before
       `git verify-tag`.
 - [ ] `SECURITY.md` disclosure contact confirmed reachable.
-- [ ] Manually dispatch `rust.yml`'s `keystore-backends` job
-      (`gh workflow run rust.yml --ref main`) and confirm both legs
-      (Linux Secret Service+systemd-creds+YubiKey, macOS Keychain+YubiKey)
-      succeed. It stays `workflow_dispatch`-only (2-OS matrix cost) and is
-      not exercised by any automatic trigger, so this is the only
-      per-release check that native keystore backends still work.
+- [ ] Confirm that the `kit-ci-main` build on Cloud Build and the macOS leg
+      (`macos.yml`) both succeeded on the release commit. The macOS leg runs
+      only on pushes to `main` and on demand
+      (`gh workflow run macos.yml --ref main`). It is the only check that
+      runs the native macOS Keychain backend.
 
 ### Wait for the release workflows
 
@@ -368,10 +368,11 @@ sha256sum -c THIRD-PARTY-NOTICES.sha256 || shasum -a 256 -c THIRD-PARTY-NOTICES.
 `cargo about generate` fails the `third-party-notices` job outright if any
 dependency's license isn't in `rust/about.toml`'s `accepted` list &mdash; that list
 is kept in lockstep with `rust/deny.toml`'s `[licenses] allow` list (the
-license check cargo-deny already runs on every PR via `.github/workflows/rust-security.yml`).
-`.github/workflows/third-party-notices.yml` runs the same `cargo about
-generate` check on every PR that touches the dependency graph, so an
-unapproved license is caught before a release attempt, not during one.
+license check cargo-deny already runs on every PR in the `supply` step of
+`cloudbuild/ci.yaml`). The `third-party-notices` step of
+`cloudbuild/supply.yaml` runs the same `cargo about generate` check on every
+PR that touches the dependency graph, so an unapproved license is caught
+before a release attempt, not during one.
 
 ### Verify the SLSA build provenance attestation
 
@@ -508,7 +509,7 @@ Package-manager manifests must reference the GitHub Releases archive URL directl
 
 A fresh SBOM is generated at release time only (the `sbom` job in
 `release.yml`); there is **no** scheduled SBOM regeneration for `main`. The
-weekly cadence is `cargo audit` via `rust-security.yml` (Mondays 06:00 UTC),
+weekly cadence is `cargo audit` in the `kit-ci-weekly` Cloud Build run (Mondays 06:00 UTC),
 which sweeps for newly published advisories against the unchanged dependency
 tree. Restoring a scheduled SBOM-drift job is an open follow-up. A CVE against
 any shipped dep is a P1: patch, test, tag a new release,

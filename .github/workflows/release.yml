@@ -290,8 +290,9 @@ jobs:
       # messages) and scans the stripped binary: only packages in
       # scripts/release/kit-packages.golden, no server-only package, no
       # hyper `server`, no connectrpc `server`/`axum`, tower-http only with
-      # reqwest's features, no SQLite, no test seam. release-artifact-check.yml
-      # runs the same builds and check on PRs to main for one Linux target.
+      # reqwest's features, no SQLite, no test seam. The `release-artifact-check`
+      # step of cloudbuild/supply.yaml runs the same builds and check on PRs to
+      # main for one Linux target.
       - name: Check release kit artifact
         shell: bash
         run: |

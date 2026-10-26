@@ -174,7 +174,7 @@ fn stash_pop_succeeds_on_clean_worktree() {
 /// timeout before failing.
 // Blocks the full ~5s default lock timeout every run —
 // quarantined to the serial `--ignored` CI lane
-// (.github/workflows/rust.yml) instead of paying that wait on every
+// (cloudbuild/ci.yaml) instead of paying that wait on every
 // `cargo test`.
 #[test]
 #[ignore = "blocks the full ~5s worktree-lock timeout; run via the serial --ignored CI lane"]

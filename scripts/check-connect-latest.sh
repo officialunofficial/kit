@@ -26,6 +26,6 @@ crates=(-p kit-rpc -p kit-transport-connect -p kit-client)
 features='kit-rpc/transport,kit-rpc/transport-messages'
 "${cargo_cmd[@]}" build --locked "${crates[@]}" --features "$features"
 "${cargo_cmd[@]}" nextest run --locked "${crates[@]}" --features "$features" -j 3
-# Mirror both kit-client wasm builds in rust.yml.
+# Mirror both kit-client wasm builds in cloudbuild/ci.yaml.
 "${cargo_cmd[@]}" build --locked -p kit-client --target wasm32-unknown-unknown
 "${cargo_cmd[@]}" build --locked -p kit-client --no-default-features --target wasm32-unknown-unknown

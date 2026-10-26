@@ -14,7 +14,7 @@
 //!   the suite stays green in environments without git.
 //! - Rows that are not yet implemented are `#[ignore]`d with a reason.
 //!   Each feature un-ignores its rows as it ships, so CI
-//!   enforces only the currently-passing subset (no `rust.yml` change needed —
+//!   enforces only the currently-passing subset (no `cloudbuild/ci.yaml` change needed —
 //!   `cargo nextest` skips ignored tests by default).
 
 use std::io::Write;

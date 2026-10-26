@@ -12,8 +12,8 @@ ignore = [
     # TODO(2026-11-19): re-justify this ignore or drop it. cargo-deny v0.19's
     # advisories schema does not yet support a native `expires` field on
     # ignore entries (unexpected-keys error on `expires`), so we encode the
-    # 90-day expiry in this TODO comment plus a reminder block in
-    # .github/workflows/rust-security.yml. When cargo-deny adds `expires`
+    # 90-day expiry in this TODO comment plus the deadline check in the
+    # `supply` step of cloudbuild/ci.yaml. When cargo-deny adds `expires`
     # natively, replace this with the structured form.
     #
     # The regression test in rust/crates/kit-keystore/tests/no_rsa_decrypt.rs

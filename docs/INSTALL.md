@@ -198,8 +198,8 @@ kit 0.5.0
 
 The exact format `kit <X.Y.Z>\n` (no extra whitespace, no banner) is
 contract-tested in
-[`.github/workflows/rust.yml`](../.github/workflows/rust.yml) under the
-`Version contract` step &mdash; if you ever see anything else, the binary
+[`cloudbuild/ci.yaml`](../cloudbuild/ci.yaml) in the
+`version` step &mdash; if you ever see anything else, the binary
 on your `PATH` is not a release build of this repo.
 
 Run `kit --help` to enumerate subcommands, then jump into the

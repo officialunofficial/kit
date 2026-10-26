@@ -1684,7 +1684,7 @@ mod tests {
         // Real subprocess + wall-clock timeout, several
         // seconds of real sleep total across this module's three tests.
         // Quarantined to the serial `--ignored` CI lane
-        // (.github/workflows/rust.yml) instead of running on every `cargo test`.
+        // (cloudbuild/ci.yaml) instead of running on every `cargo test`.
         #[ignore = "real subprocess + wall-clock timeout; run via the serial --ignored CI lane"]
         fn hang_before_stdout_times_out_and_reaps_child() {
             // Child reads stdin then sleeps forever without writing
