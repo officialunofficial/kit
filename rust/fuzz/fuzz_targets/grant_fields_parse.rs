@@ -8,7 +8,7 @@
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use kit_fuzz::{MAX_ITER, grant_fields_parse_one_iteration, run_one};
+use kit_fuzz::{MAX_ITER, grant_field_parsers_one_iteration, run_one};
 
 static ITERS: AtomicU32 = AtomicU32::new(0);
 
@@ -17,5 +17,5 @@ fuzz_target!(|data: &[u8]| {
     if n >= MAX_ITER {
         return;
     }
-    let _ = run_one(data, grant_fields_parse_one_iteration);
+    let _ = run_one(data, grant_field_parsers_one_iteration);
 });

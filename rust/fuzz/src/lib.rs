@@ -110,7 +110,7 @@ pub fn delta_one_iteration(input: &[u8]) {
     let _ = kit_core::delta::decode(base, stream);
 }
 
-/// Shared pre-check for [`pack_one_iteration`] / [`pack_one_iteration_with_store`]:
+/// Shared pre-check for [`pack_reader_one_iteration`] / [`pack_reader_one_iteration_with_store`]:
 /// truncate per guardrail and refuse to feed packs whose declared
 /// `entry_count` would force a giant `Vec::with_capacity` (the reader
 /// already enforces `MAX_ENTRIES`, but the cap here prevents the test
@@ -132,9 +132,9 @@ fn pack_validated_input(input: &[u8]) -> Option<&[u8]> {
 /// Uses an in-process tempdir so the store side-effect is isolated and
 /// auto-cleaned at scope exit. Real libfuzzer / `fuzz_target!` runs call
 /// this directly, where per-call isolation matters; the unit-test loop
-/// uses [`pack_one_iteration_with_store`] instead to reuse one store
+/// uses [`pack_reader_one_iteration_with_store`] instead to reuse one store
 /// across all `MAX_ITER` iterations.
-pub fn pack_one_iteration(input: &[u8]) {
+pub fn pack_reader_one_iteration(input: &[u8]) {
     let Some(input) = pack_validated_input(input) else {
         return;
     };
@@ -150,12 +150,12 @@ pub fn pack_one_iteration(input: &[u8]) {
     let _ = kit_core::pack::PackReader::read(input, &store);
 }
 
-/// As [`pack_one_iteration`], but against a caller-provided store
+/// As [`pack_reader_one_iteration`], but against a caller-provided store
 /// instead of a fresh tempdir. Lets the unit-test loop amortize the
 /// tempdir + `ObjectStore::init` cost across all `MAX_ITER` iterations
 /// instead of paying for 100 real filesystem inits per `cargo test`
 /// invocation.
-pub fn pack_one_iteration_with_store(input: &[u8], store: &kit_core::store::ObjectStore) {
+pub fn pack_reader_one_iteration_with_store(input: &[u8], store: &kit_core::store::ObjectStore) {
     let Some(input) = pack_validated_input(input) else {
         return;
     };
@@ -165,7 +165,7 @@ pub fn pack_one_iteration_with_store(input: &[u8], store: &kit_core::store::Obje
 /// Apply `serialize::deserialize` against `input` — covers the tree
 /// decoder path (and every other object decoder, since deserialize
 /// dispatches on type byte).
-pub fn tree_one_iteration(input: &[u8]) {
+pub fn object_deserialize_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
     let _ = kit_core::serialize::deserialize(input);
 }
@@ -192,7 +192,7 @@ pub fn git_tag_parse_one_iteration(input: &[u8]) {
 /// SPEC-WRITE-GRANTS grant codec (`grant_parse`): `Grant::parse` and
 /// `SignedHeader::parse` never panic, and anything they accept re-encodes to
 /// exactly the input bytes (one canonical encoding, so one grant id).
-pub fn grant_parse_one_iteration(input: &[u8]) {
+pub fn grant_and_header_parse_one_iteration(input: &[u8]) {
     use kit_attest::grant::{Grant, SignedHeader};
     let input = &input[..input.len().min(MAX_INPUT)];
     if let Ok(grant) = Grant::parse(input) {
@@ -280,7 +280,7 @@ pub fn bridge_map_one_iteration(input: &[u8]) {
 /// which must not panic, and whose accepted statements are the canonical
 /// bytes of the header. The input also drives the `webauthn-p256` parsers
 /// (see [`webauthn_assertion_checks`]).
-pub fn epoch_visibility_parse_one_iteration(input: &[u8]) {
+pub fn statement_and_token_parse_one_iteration(input: &[u8]) {
     use kit_attest::grant::{
         AcceptedSchemes, Capability, EpochStatement, GrantRequest, OwnerScheme, RepoScope,
         RepositoryIdentity, SignedHeader, TokenTarget, UrlTokenRequest, UrlTokenStatement,
@@ -804,7 +804,7 @@ pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
 /// [`build_disclosure_fixture`] and reused across all iterations of the
 /// unit-test loop via [`run_iterated_unit_with`]; real libfuzzer runs
 /// build a fresh one per call for isolation (mirrors
-/// [`pack_one_iteration`] vs [`pack_one_iteration_with_store`]).
+/// [`pack_reader_one_iteration`] vs [`pack_reader_one_iteration_with_store`]).
 pub struct DisclosureFixture {
     _dir: tempfile::TempDir,
     commit_id: [u8; 32],
@@ -814,7 +814,7 @@ pub struct DisclosureFixture {
 /// Build a [`DisclosureFixture`]. Never fails in practice (every step is
 /// a fixed, valid construction over fixed bytes); panics only on a
 /// genuine environment failure (no writable temp dir), same posture as
-/// [`pack_one_iteration_with_store`]'s `ObjectStore::init`.
+/// [`pack_reader_one_iteration_with_store`]'s `ObjectStore::init`.
 pub fn build_disclosure_fixture() -> DisclosureFixture {
     use kit_core::hash::ZERO;
     use kit_core::layout::RepoLayout;
@@ -1612,7 +1612,7 @@ pub fn ssh_url_parse_one_iteration(input: &[u8]) {
 /// `AcceptedSchemes::from_tokens`, `is_loopback_origin` and
 /// `Grant::parse_with_id` never panic. Every accepted value re-encodes to
 /// exactly the input, and an accepted grant id is the hash of the input.
-pub fn grant_fields_parse_one_iteration(input: &[u8]) {
+pub fn grant_field_parsers_one_iteration(input: &[u8]) {
     use kit_attest::grant::text::{
         audiences, decimal_millis, decimal_u64, encode_audiences, encode_hex32, encode_millis,
         hex32, join_fields, split_fields,
@@ -1866,7 +1866,7 @@ mod tests {
 
     #[test]
     fn unit_grant_parse() {
-        run_iterated_unit(grant_parse_one_iteration).unwrap();
+        run_iterated_unit(grant_and_header_parse_one_iteration).unwrap();
         // The SPEC-WRITE-GRANTS §3.4 example, a near miss, and its header.
         let grant = "kit-write-grant:v1\n\
             0x8ba1f109551bd432803012645ac136ddd64dba72\n\
@@ -1895,7 +1895,7 @@ mod tests {
             b"",
             &[0xFF; 64][..],
         ] {
-            run_one(case, grant_parse_one_iteration).unwrap();
+            run_one(case, grant_and_header_parse_one_iteration).unwrap();
         }
     }
 
@@ -2075,7 +2075,7 @@ mod tests {
 
     #[test]
     fn unit_grant_fields_parse() {
-        run_iterated_unit(grant_fields_parse_one_iteration).unwrap();
+        run_iterated_unit(grant_field_parsers_one_iteration).unwrap();
         for case in [
             &b"cu"[..],
             b"uc",
@@ -2090,7 +2090,7 @@ mod tests {
             b"",
             &[0xFF; 64][..],
         ] {
-            run_one(case, grant_fields_parse_one_iteration).unwrap();
+            run_one(case, grant_field_parsers_one_iteration).unwrap();
         }
     }
 
@@ -2105,7 +2105,7 @@ mod tests {
     #[test]
     fn unit_epoch_visibility_parse() {
         use kit_attest::grant::{OwnerScheme, SignedHeader};
-        run_iterated_unit(epoch_visibility_parse_one_iteration).unwrap();
+        run_iterated_unit(statement_and_token_parse_one_iteration).unwrap();
         let epoch = "kit-write-epoch:v1\n\
             ed25519-3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\n\
             5\nhttps://git.example.com\n1790000000000\n1790086400000\n\
@@ -2149,7 +2149,7 @@ mod tests {
         ];
         cases.extend(headers.iter().map(String::as_bytes));
         for case in cases {
-            run_one(case, epoch_visibility_parse_one_iteration).unwrap();
+            run_one(case, statement_and_token_parse_one_iteration).unwrap();
         }
     }
 
@@ -2163,19 +2163,20 @@ mod tests {
     fn pack_target_runs_within_caps() {
         // One tempdir/store reused across all MAX_ITER
         // iterations instead of 100 real filesystem inits — the
-        // per-iteration isolation `pack_one_iteration` gives real
+        // per-iteration isolation `pack_reader_one_iteration` gives real
         // libfuzzer runs isn't needed by this deterministic PRNG-driven
         // loop, which only cares whether the reader panics/UB's.
         let dir = tempfile::TempDir::new().expect("tempdir");
         let store =
             kit_core::store::ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path()))
                 .expect("store init");
-        run_iterated_unit_with(&store, pack_one_iteration_with_store).expect("guardrails held");
+        run_iterated_unit_with(&store, pack_reader_one_iteration_with_store)
+            .expect("guardrails held");
     }
 
     #[test]
     fn tree_target_runs_within_caps() {
-        run_iterated_unit(tree_one_iteration).expect("guardrails held");
+        run_iterated_unit(object_deserialize_one_iteration).expect("guardrails held");
     }
 
     #[test]
@@ -2350,20 +2351,20 @@ mod tests {
     #[test]
     fn pack_target_handles_known_corruption() {
         // Wrong magic.
-        pack_one_iteration(b"XXXX\x01\x00\x00\x00\x00\x00\x00\x00");
+        pack_reader_one_iteration(b"XXXX\x01\x00\x00\x00\x00\x00\x00\x00");
         // Empty.
-        pack_one_iteration(&[]);
+        pack_reader_one_iteration(&[]);
         // Bogus count below the defensive cap.
-        pack_one_iteration(b"KIT\0\x01\x00\x00\x00\xFF\xFF\x00\x00");
+        pack_reader_one_iteration(b"KIT\0\x01\x00\x00\x00\xFF\xFF\x00\x00");
     }
 
     #[test]
     fn tree_target_handles_known_corruption() {
-        tree_one_iteration(&[]);
+        object_deserialize_one_iteration(&[]);
         // Tree prologue + count = u32::MAX → must reject TooManyEntries.
         let mut bad = vec![0x02u8, b'K', b'O', b'B', b'1', 0x01];
         bad.extend_from_slice(&u32::MAX.to_le_bytes());
-        tree_one_iteration(&bad);
+        object_deserialize_one_iteration(&bad);
     }
 
     #[test]
