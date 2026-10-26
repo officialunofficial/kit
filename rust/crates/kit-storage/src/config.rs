@@ -1455,6 +1455,15 @@ pub fn xdg_config_home() -> Result<PathBuf, String> {
     )
 }
 
+/// Run `absolute_config_home` for fuzzing harnesses.
+///
+/// # Errors
+/// The config base is not an absolute path.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_absolute_config_home(xdg: Option<&str>, home: Option<&str>) -> Result<PathBuf, String> {
+    absolute_config_home(xdg.map(Into::into), home.map(Into::into))
+}
+
 fn absolute_config_home(
     xdg: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,

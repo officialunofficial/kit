@@ -1080,6 +1080,38 @@ fn check_staged_version(staged: &Path, target_bare: &str) -> Result<(), String> 
     Ok(())
 }
 
+/// Run `extract_binary_within` for fuzzing harnesses.
+///
+/// # Errors
+/// The archive is refused. See [`ExtractError`].
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_extract_binary_within(
+    archive: &[u8],
+    stage_dir: &str,
+    max_unpacked: u64,
+    max_entries: usize,
+) -> Result<Vec<u8>, ExtractError> {
+    extract_binary_within(archive, stage_dir, max_unpacked, max_entries)
+}
+
+/// Compare two bare versions for fuzzing harnesses.
+///
+/// # Errors
+/// One of the versions does not parse.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_cmp_versions(a: &str, b: &str) -> Result<std::cmp::Ordering, String> {
+    cmp_versions(a, b)
+}
+
+/// Check a release tag for fuzzing harnesses.
+///
+/// # Errors
+/// The tag is not strict semver.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_validate_tag(tag: &str) -> Result<(), String> {
+    validate_tag(tag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

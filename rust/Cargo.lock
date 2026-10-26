@@ -3002,6 +3002,7 @@ dependencies = [
  "arbitrary",
  "buffa",
  "commonware-invariants",
+ "flate2",
  "kit-attest",
  "kit-core",
  "kit-git-bridge",
@@ -3011,6 +3012,7 @@ dependencies = [
  "kit-storage",
  "kit-transport-ssh",
  "libfuzzer-sys",
+ "tar",
  "tempfile",
 ]
 

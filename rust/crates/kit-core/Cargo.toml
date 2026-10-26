@@ -131,6 +131,8 @@ sparse-checkout = []
 # wasm32 crates already do. `kit-storage`, the one consumer that uses it, enables
 # it explicitly on its `kit-core` dependency instead.
 batch-verify = ["ed25519-dalek/batch", "dep:curve25519-dalek"]
+# Exposes private parser seams to the `kit-fuzz` harness. Off by default.
+fuzzing = []
 
 [dev-dependencies]
 # `hazmat::ExpandedSecretKey` (test-only): constructs a genuine

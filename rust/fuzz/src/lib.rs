@@ -1663,6 +1663,168 @@ pub fn grant_fields_parse_one_iteration(input: &[u8]) {
     let _ = is_loopback_origin(text);
 }
 
+/// Capped stream read (`read_to_end_capped`): the first four input bytes
+/// pick the size hint and the limit, and the rest is the stream. The read
+/// returns the stream exactly when it fits the limit. Otherwise it returns
+/// `ObjectTooLarge`. No other error occurs on an in-memory stream.
+pub fn read_to_end_capped_one_iteration(input: &[u8]) {
+    use kit_core::store::{StoreError, fuzz_read_to_end_capped};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Some((head, stream)) = input.split_first_chunk::<4>() else {
+        return;
+    };
+    let size = usize::from(u16::from_le_bytes([head[0], head[1]]));
+    let limit = usize::from(u16::from_le_bytes([head[2], head[3]]));
+    match fuzz_read_to_end_capped(stream, size, limit) {
+        Ok(bytes) => {
+            assert!(
+                stream.len() <= limit,
+                "an over-limit stream must be refused"
+            );
+            assert_eq!(bytes, stream, "an accepted stream must come back whole");
+        }
+        Err(StoreError::ObjectTooLarge) => {
+            assert!(
+                stream.len() > limit,
+                "a stream within the limit must be read"
+            );
+        }
+        Err(e) => panic!("an in-memory read failed for another reason: {e}"),
+    }
+}
+
+/// Release archive extraction (`self_update_extract`). The raw input as an
+/// archive never panics, and an accepted binary fits the unpacked cap. The
+/// first byte then selects a mode for a well-formed archive that holds the
+/// rest of the input as the `kit` member. The member comes back whole. A
+/// cap below one tar header gives `UnpackedTooLarge`. An entry cap of one
+/// gives `TooManyEntries`.
+pub fn self_update_extract_one_iteration(input: &[u8]) {
+    use kit_storage::commands::self_update::{ExtractError, fuzz_extract_binary_within};
+    const STAGE: &str = "kit-0.0.0-fuzz";
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(bin) = fuzz_extract_binary_within(input, STAGE, 256 * 1024, 16) {
+        assert!(
+            bin.len() <= 256 * 1024,
+            "the binary must fit the unpacked cap"
+        );
+    }
+    let Some((&mode, body)) = input.split_first() else {
+        return;
+    };
+    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    for (name, data) in [("other", &b"decoy"[..]), ("kit", body)] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, format!("{STAGE}/{name}"), data)
+            .expect("an in-memory archive entry must append");
+    }
+    let archive = builder
+        .into_inner()
+        .and_then(flate2::write::GzEncoder::finish)
+        .expect("an in-memory archive must finish");
+    match mode % 3 {
+        0 => {
+            let bin = fuzz_extract_binary_within(&archive, STAGE, 1024 * 1024, 8)
+                .expect("a well-formed archive within the caps must extract");
+            assert_eq!(bin, body, "the member must come back whole");
+        }
+        1 => assert!(matches!(
+            fuzz_extract_binary_within(&archive, STAGE, 511, 8),
+            Err(ExtractError::UnpackedTooLarge { max: 511 })
+        )),
+        _ => assert!(matches!(
+            fuzz_extract_binary_within(&archive, STAGE, 1024 * 1024, 1),
+            Err(ExtractError::TooManyEntries { max: 1 })
+        )),
+    }
+}
+
+/// Release version and tag parsing (`self_update_version`). The input text
+/// holds up to three versions, one per line. A version that parses equals
+/// itself. The order is antisymmetric and transitive. A tag is valid exactly
+/// when it starts with `v` and the rest parses.
+pub fn self_update_version_one_iteration(input: &[u8]) {
+    use kit_storage::commands::self_update::{fuzz_cmp_versions, fuzz_validate_tag};
+    use std::cmp::Ordering;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let mut lines = text.splitn(3, '\n');
+    let mut next = || lines.next().unwrap_or("");
+    let versions = [next(), next(), next()];
+    for v in versions {
+        if let Ok(order) = fuzz_cmp_versions(v, v) {
+            assert_eq!(order, Ordering::Equal, "a version must equal itself");
+        }
+        let rest_parses = v
+            .strip_prefix('v')
+            .is_some_and(|rest| fuzz_cmp_versions(rest, rest).is_ok());
+        assert_eq!(fuzz_validate_tag(v).is_ok(), rest_parses);
+    }
+    for a in versions {
+        for b in versions {
+            let (ab, ba) = (fuzz_cmp_versions(a, b), fuzz_cmp_versions(b, a));
+            assert_eq!(ab.is_ok(), ba.is_ok());
+            if let (Ok(x), Ok(y)) = (ab, ba) {
+                assert_eq!(x, y.reverse(), "the order must be antisymmetric");
+            }
+        }
+    }
+    let [a, b, c] = versions;
+    if let (Ok(ab), Ok(bc), Ok(ac)) = (
+        fuzz_cmp_versions(a, b),
+        fuzz_cmp_versions(b, c),
+        fuzz_cmp_versions(a, c),
+    ) && ab != Ordering::Greater
+        && bc != Ordering::Greater
+    {
+        assert_ne!(ac, Ordering::Greater, "the order must be transitive");
+    }
+}
+
+/// User config base directory (`absolute_config_home`). The first input
+/// byte says which of `XDG_CONFIG_HOME` and `HOME` are set. The rest is two
+/// lines of text, one per variable. A result is always absolute. A set,
+/// non-empty `XDG_CONFIG_HOME` wins and is never repaired. Otherwise an
+/// absolute `HOME` gives `HOME/.config`. Anything else is an error.
+pub fn absolute_config_home_one_iteration(input: &[u8]) {
+    use kit_storage::config::fuzz_absolute_config_home;
+    use std::path::{Path, PathBuf};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Some((&flags, rest)) = input.split_first() else {
+        return;
+    };
+    let Ok(text) = core::str::from_utf8(rest) else {
+        return;
+    };
+    let (xdg_text, home_text) = text.split_once('\n').unwrap_or((text, ""));
+    let xdg = (flags & 1 != 0).then_some(xdg_text);
+    let home = (flags & 2 != 0).then_some(home_text);
+    let result = fuzz_absolute_config_home(xdg, home);
+    if let Ok(path) = &result {
+        assert!(path.is_absolute(), "the config base must be absolute");
+    }
+    match xdg.filter(|v| !v.is_empty()) {
+        Some(x) if Path::new(x).is_absolute() => assert_eq!(result, Ok(PathBuf::from(x))),
+        Some(_) => assert!(
+            result.is_err(),
+            "a relative XDG_CONFIG_HOME must be refused"
+        ),
+        None => match home.filter(|h| Path::new(h).is_absolute()) {
+            Some(h) => assert_eq!(result, Ok(Path::new(h).join(".config"))),
+            None => assert!(result.is_err(), "no absolute base must be refused"),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2253,6 +2415,73 @@ mod tests {
         let large = vec![7u8; MAX_INPUT];
         for case in [&b""[..], b"a", &large[..]] {
             run_one(case, chunked_blob_build_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_read_to_end_capped() {
+        run_iterated_unit(read_to_end_capped_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"\x04\x00\x03\x00abc",
+            b"\x04\x00\x03\x00abcd",
+            b"\x00\x00\x00\x00",
+            b"\xff\xff\x00\x00x",
+            b"\x00\x00\xff\xffxyz",
+        ] {
+            run_one(case, read_to_end_capped_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_self_update_extract() {
+        run_iterated_unit(self_update_extract_one_iteration).unwrap();
+        let large = vec![9u8; MAX_INPUT];
+        for case in [
+            &b""[..],
+            b"\x00",
+            b"\x00#!/bin/sh\n",
+            b"\x01bin",
+            b"\x02bin",
+            &[0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0, 0xff][..],
+            &large[..],
+        ] {
+            run_one(case, self_update_extract_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_self_update_version() {
+        run_iterated_unit(self_update_version_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"1.2.3\n1.2.4\n1.3.0",
+            b"1.0.0-rc.1\n1.0.0\n1.0.0-rc.2",
+            b"v0.4.0\nv1.2.3-rc.1\nvx",
+            b"1.2\n1.2.3.4\n01a.2.3",
+            b"1.2.3-\n1.2.3-a..b\n99999999999999999999.0.0",
+            b"\xff\xfe",
+        ] {
+            run_one(case, self_update_version_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_absolute_config_home() {
+        run_iterated_unit(absolute_config_home_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"\x03/x\n/h",
+            b"\x03rel\n/h",
+            b"\x03\n/h",
+            b"\x03\nrel",
+            b"\x02/x\n/h",
+            b"\x01/x\n/h",
+            b"\x00/x\n/h",
+            b"\x01rel",
+            b"\xff\xfe",
+        ] {
+            run_one(case, absolute_config_home_one_iteration).unwrap();
         }
     }
 

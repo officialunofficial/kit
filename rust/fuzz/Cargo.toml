@@ -46,14 +46,16 @@ undocumented_unsafe_blocks = "deny"
 [dependencies]
 arbitrary = "=1.5.0"
 buffa = "=0.9.1"
+flate2 = "=1.1.10"
 kit-attest = { path = "../crates/kit-attest", features = ["grants"] }
-kit-core = { path = "../crates/kit-core", features = ["sparse-checkout"] }
+kit-core = { path = "../crates/kit-core", features = ["sparse-checkout", "fuzzing"] }
 kit-git-bridge = { path = "../crates/kit-git-bridge" }
 kit-keystore = { path = "../crates/kit-keystore", features = ["fuzzing"] }
 kit-rpc = { path = "../crates/kit-rpc", features = ["arbitrary"] }
 kit-serve = { path = "../crates/kit-serve" }
-kit-storage = { path = "../crates/kit-storage" }
+kit-storage = { path = "../crates/kit-storage", features = ["fuzzing"] }
 kit-transport-ssh = { path = "../crates/kit-transport-ssh" }
+tar = "=0.4.46"
 tempfile = "=3.27.0"
 
 # libfuzzer-sys is gated on the `libfuzzer` feature so `cargo test`
@@ -377,6 +379,38 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "grant_fields_parse"
 path = "fuzz_targets/grant_fields_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "read_to_end_capped"
+path = "fuzz_targets/read_to_end_capped.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "self_update_extract"
+path = "fuzz_targets/self_update_extract.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "self_update_version"
+path = "fuzz_targets/self_update_version.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "absolute_config_home"
+path = "fuzz_targets/absolute_config_home.rs"
 test = false
 doc = false
 bench = false

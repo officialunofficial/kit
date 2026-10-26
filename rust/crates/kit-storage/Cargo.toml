@@ -268,6 +268,8 @@ sparse-checkout = [
 # Canonical first-parent ancestry snapshots and contextual proofs. Opt in for
 # commit/branch/merge/rebase/cherry-pick publication and verified reflog output.
 history-mmr = ["kit-core/history-mmr", "kit-sync/history-mmr"]
+# Exposes private parser seams to the `kit-fuzz` harness. Off by default.
+fuzzing = []
 
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated API.

@@ -999,6 +999,12 @@ fn read_to_end_capped<R: Read>(reader: R, size: usize, limit: usize) -> StoreRes
     Ok(bytes)
 }
 
+/// Run `read_to_end_capped` over a byte slice for fuzzing harnesses.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_read_to_end_capped(bytes: &[u8], size: usize, limit: usize) -> StoreResult<Vec<u8>> {
+    read_to_end_capped(bytes, size, limit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
