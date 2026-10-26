@@ -1,0 +1,58 @@
+# Toolchain image for the Cloud Build pipeline of kit.
+#
+# cloudbuild/builder.yaml builds and pushes this image. cloudbuild/ci.yaml,
+# cloudbuild/supply.yaml and cloudbuild/connect-latest.yaml run it, so each
+# step calls `cargo` directly and installs no tool. The image gives:
+#   - one place that pins every tool version,
+#   - the same environment on every run,
+#   - sccache from the start, so RUSTC_WRAPPER never points at a missing tool.
+#
+# Rebuild the image (run cloudbuild/builder.yaml) when this file or
+# rust/rust-toolchain.toml changes. The image tag (rust-1.99.1) is the version
+# contract. Change it together with rust/rust-toolchain.toml, the _CI_IMAGE
+# default in every cloudbuild/*.yaml file and CI_IMAGE in
+# scripts/setup-cloud-build.sh. scripts/test-ci-gates.py checks that they agree.
+FROM rust:1.99.1-bookworm
+
+# git: the writing and generated-code checks read the repository.
+# python3-venv, python3-pip: the golden checks install their Python packages.
+# mold: links the nextest archive (cloudbuild/ci.yaml).
+# unzip: unpacks protoc below.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git jq mold pkg-config python3-pip python3-venv unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# protoc: the code generator needs it. The .proto files use Edition 2023, which
+# needs protoc 27 or newer.
+ARG PROTOC_VERSION=31.0
+RUN curl -sSL -o /tmp/protoc.zip \
+        "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" \
+    && unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' \
+    && rm -f /tmp/protoc.zip
+
+# rustfmt and clippy for the lint gates. The wasm32 target is for the kit-client
+# build and the generated-code check. The dated nightly toolchain is only for
+# cargo-fuzz, which needs sanitizer flags. Its date appears in cloudbuild/ci.yaml
+# too, and scripts/test-ci-gates.py checks that both agree.
+RUN rustup component add rustfmt clippy \
+    && rustup target add wasm32-unknown-unknown \
+    && rustup toolchain install nightly-2026-10-01 --profile minimal
+
+# Prebuilt tool binaries, each at one exact version. cargo-binstall resolves them
+# once here and the image keeps them. Rebuild the image to change a version.
+ARG ACTIONLINT_VERSION=1.7.7
+RUN curl -L --proto '=https' --tlsv1.2 -sSf \
+        https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash \
+    && cargo binstall -y \
+        cargo-nextest@0.9.145 \
+        sccache@0.17.0 \
+        cargo-deny@0.20.2 \
+        cargo-audit@0.22.2 \
+        cargo-geiger@0.13.0 \
+        cargo-about@0.9.1 \
+        cargo-fuzz@0.13.2 \
+        b3sum@1.8.7 \
+    && curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+        | tar -xz -C /usr/local/bin actionlint \
+    && rm -rf "${CARGO_HOME:-/usr/local/cargo}/registry"

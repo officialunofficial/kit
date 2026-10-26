@@ -1,0 +1,41 @@
+# Probe of the latest compatible Connect stack release. The script updates the
+# Connect packages inside the ranges of the manifests, then builds and tests
+# the crates that depend on them, including both kit-client wasm builds. It
+# works on a disposable checkout and never commits the lockfile it changes.
+# A failure means that a newer patch release breaks the build. Do not pin an
+# older release to hide it.
+#
+# Triggers: kit-connect-pr (path filtered to manifests, lockfiles and the
+# script) and kit-connect-weekly (Monday 05:23 UTC, opt in). Do not make the
+# pull request check required, because the path filter leaves it absent on
+# most pull requests.
+
+substitutions:
+  _CACHE_BUCKET: ${PROJECT_ID}-kit-sccache
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/kit-ci:rust-1.99.1
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 100
+  dynamicSubstitutions: true
+timeout: 1800s
+
+steps:
+  - name: ${_CI_IMAGE}
+    id: connect-latest
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=connect-latest"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        bash scripts/check-connect-latest.sh
+        sccache --show-stats

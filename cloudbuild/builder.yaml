@@ -1,0 +1,24 @@
+# Build the toolchain image (cloudbuild/Dockerfile.ci) and push it to Artifact
+# Registry. Run it once during setup. Run it again when Dockerfile.ci or
+# rust/rust-toolchain.toml changes. The other cloudbuild/*.yaml files run the
+# image through their _CI_IMAGE substitution. Keep that default equal to the
+# _CI_IMAGE below, and keep the rust-1.99.1 tag equal to the toolchain version.
+
+substitutions:
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/kit-ci:rust-1.99.1
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "cloudbuild/Dockerfile.ci", "-t", "${_CI_IMAGE}", "cloudbuild"]
+
+images: ["${_CI_IMAGE}"]
+
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+  # _CI_IMAGE contains the built-in ${PROJECT_ID}. Cloud Build resolves a
+  # built-in inside a substitution value only with dynamic substitutions.
+  # Triggers turn this on by themselves. A manual `gcloud builds submit` does
+  # not, so the config sets it.
+  dynamicSubstitutions: true
+timeout: 1800s

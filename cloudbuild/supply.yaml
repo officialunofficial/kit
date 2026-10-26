@@ -1,0 +1,84 @@
+# Supply-chain release gates on Cloud Build. Two steps run in parallel:
+#
+#   third-party-notices    `cargo about generate` fails on a dependency with a
+#                          license outside the accepted list in
+#                          rust/about.toml. The release job runs the same
+#                          command, so the check finds an unapproved license
+#                          when a dependency changes and not at tag time.
+#                          cargo-about and cargo-deny parse license
+#                          expressions with different code, so this check is
+#                          not a copy of the cargo-deny gate in ci.yaml.
+#   release-artifact-check The release profile build of the `kit` binary and
+#                          the check of its dependency features. The build is
+#                          slow, so the trigger runs it only when an input
+#                          that can change the result changes.
+#
+# Triggers: kit-supply-pr and kit-supply-main. Both use the path filters in
+# scripts/setup-cloud-build.sh. A path filter means that no check appears on a
+# pull request that touches none of those paths, so do not make these two
+# checks required.
+
+substitutions:
+  _CACHE_BUCKET: ${PROJECT_ID}-kit-sccache
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/kit-ci:rust-1.99.1
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 100
+  dynamicSubstitutions: true
+timeout: 3600s
+
+steps:
+  - name: ${_CI_IMAGE}
+    id: third-party-notices
+    waitFor: ['-']
+    timeout: 1200s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        cargo about generate --all-features about.hbs -o /dev/null
+
+  - name: ${_CI_IMAGE}
+    id: release-artifact-check
+    waitFor: ['-']
+    timeout: 3000s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "TARGET=x86_64-unknown-linux-gnu"
+      - "RUSTC_WRAPPER=/workspace/scripts/ci-rustc-wrapper.sh"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+      - "CARGO_BUILD_JOBS=4"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        # Select only kit-storage with -p. A workspace build would unify
+        # features and hide a feature that the shipped binary does not get.
+        ( cd rust
+          RUSTFLAGS="-C codegen-units=1 -C strip=symbols" cargo build \
+            --release --locked --target "$$TARGET" -p kit-storage --bin kit \
+            --message-format=json-render-diagnostics > /tmp/kit-build.jsonl )
+        bash scripts/check-release-artifact-features.sh \
+          /tmp/kit-build.jsonl "rust/target/$${TARGET}/release/kit"
+        # The golden package list must still match the targets of release.yml.
+        # The update mode is deterministic, so a stale list shows as a diff.
+        cp scripts/release/kit-packages.golden /tmp/golden.before
+        bash scripts/check-release-artifact-features.sh --update-golden
+        if ! cmp -s /tmp/golden.before scripts/release/kit-packages.golden; then
+          diff -u /tmp/golden.before scripts/release/kit-packages.golden || true
+          echo "scripts/release/kit-packages.golden is stale. Run" >&2
+          echo "  scripts/check-release-artifact-features.sh --update-golden" >&2
+          echo "Review the diff and commit it. Each new name is a new dependency of the shipped CLI." >&2
+          exit 1
+        fi
+        sccache --show-stats

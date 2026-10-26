@@ -1,0 +1,7 @@
+# Files that `gcloud builds submit` leaves out of the uploaded source. Triggers
+# fetch the repository with git and ignore this file.
+.git/
+target/
+**/target/
+rust/fuzz/corpus/
+rust/fuzz/artifacts/
