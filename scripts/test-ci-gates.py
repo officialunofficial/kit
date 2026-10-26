@@ -144,8 +144,8 @@ class Gates(unittest.TestCase):
     def test_wrapper_failure_is_visible_and_fails(self):
         result = self.run_wrapper('#!/bin/sh\necho "sccache: Compile terminated by signal 9"\nexit 2\n')
         self.assertEqual(result.returncode, 2)
-        self.assertIn("terminated by signal 9", result.stdout)
-        self.assertIn("terminated by signal 9", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "sccache: Compile terminated by signal 9\n")
 
     def test_step_graph(self):
         steps = ci_steps()

@@ -6,15 +6,16 @@
 #
 # Cargo's JSON renderer drops raw stdout, including the signal messages that
 # sccache prints when a compiler dies. On failure this script copies that output
-# to stderr and keeps the exit code.
+# to stderr instead of stdout and keeps the exit code. It prints the output once.
 set -euo pipefail
 
 output=$(mktemp)
 trap 'rm -f "$output"' EXIT
 status=0
 sccache "$@" >"$output" || status=$?
-cat "$output"
-if [ "$status" -ne 0 ]; then
+if [ "$status" -eq 0 ]; then
+  cat "$output"
+else
   cat "$output" >&2
 fi
 exit "$status"
