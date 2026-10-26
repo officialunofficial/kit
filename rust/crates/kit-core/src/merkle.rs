@@ -6,29 +6,28 @@
 //! chunk/entry provable, and makes a reconstructed object's read-time id
 //! check a free completeness proof for its whole child set.
 //!
-//! ## Primitive: an independent BMT over `blake3`
+//! ## Primitive: a BMT over `blake3`
 //!
-//! This module is an independent implementation of the construction that
-//! `commonware_storage::bmt` uses. It is not a copy of that code. The wire
-//! bytes of the root and of every proof are identical to the upstream bytes.
+//! This module implements the construction of `commonware_storage::bmt`.
+//! Tests compare the root and the proof bytes with that crate for trees of
+//! one or more leaves.
 //!
 //! The module does not use the upstream crate, for two reasons:
 //!
 //! * A verifier here starts from an object id, not from a root. The id is
 //!   `wrap_id(kind, root)`, and the hash cannot be inverted. The verifier
 //!   must rebuild the root from the proof, then wrap it, then compare. The
-//!   upstream `verify_*_inclusion` functions only compare a rebuilt root to
-//!   a root that the caller already holds. They do not return the rebuilt
-//!   root.
+//!   upstream `verify_*_inclusion` functions take the root as an argument.
+//!   They rebuild the root, compare it, and return only `Ok(())` or an
+//!   error. They do not return the rebuilt root.
 //! * SPEC-MERKLE-OBJECTS §5.4 requires a builder to refuse every position of
-//!   an empty tree. Upstream returns a default proof for the range `0..=0`.
+//!   an empty tree. Upstream `range_proof` returns a default proof for the
+//!   range `0..=0` on an empty tree.
 //!
-//! The upstream crate does build for `wasm32` without its `std` feature,
-//! so the target is not the reason. Native tests keep `commonware-storage`
-//! as a dev-dependency. `tests::root_matches_commonware` compares
-//! roots for several leaf counts. `tests::proofs_match_commonware` compares
-//! proof bytes and checks that upstream accepts each proof that this module
-//! builds. These tests are the reference check for the construction.
+//! Native tests keep `commonware-storage` as a dev-dependency.
+//! `tests::root_matches_commonware` compares roots for several leaf counts.
+//! `tests::proofs_match_commonware` compares proof bytes. It also checks that
+//! upstream accepts each proof that this module builds.
 //!
 //! The construction (matching commonware):
 //! * leaf at index `i` is hashed with its position: `H(i_be32 ‖ leaf)`;
