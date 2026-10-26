@@ -3,8 +3,8 @@
 """Pin the invariants of the Cloud Build files and of the GitHub split.
 
 The checks read text only, so they need no YAML library. They cover:
-  - one toolchain version in the image, the builder, every config and the
-    setup script;
+  - one toolchain version: rust/rust-toolchain.toml is the source, and the
+    places that cannot read it (the image tag, clippy.toml, Cargo.toml) match it;
   - mold on the nextest archive step only, a bounded number of build jobs and
     the compiler wrapper on every compiling step;
   - a step graph in which the test steps run from the archive;
@@ -56,9 +56,20 @@ class Gates(unittest.TestCase):
     def test_toolchain_version_is_one_value(self):
         channel = re.search(r'channel = "([^"]+)"', (ROOT / "rust/rust-toolchain.toml").read_text()).group(1)
         docker = (CLOUD / "Dockerfile.ci").read_text()
-        self.assertIn(f"FROM rust:{channel}-bookworm", docker)
+        self.assertIn("FROM rust:${RUST_VERSION}-bookworm", docker)
+        self.assertNotIn(channel, strip_comments(docker))
         tag = f"kit-ci:rust-{channel}"
-        files = sorted(CLOUD.glob("*.yaml")) + [ROOT / "scripts/setup-cloud-build.sh"]
+        self.assertIn(f'msrv = "{channel}"', (ROOT / "clippy.toml").read_text())
+        self.assertRegex((ROOT / "rust/Cargo.toml").read_text(), rf'(?m)^rust-version = "{re.escape(channel)}"$')
+        # Everything that can read the toolchain file does not repeat the version.
+        readers = [ROOT / "scripts/setup-cloud-build.sh", ROOT / ".github/actions/setup-rust/action.yml"]
+        readers += sorted((ROOT / ".github/workflows").glob("*.yml"))
+        for path in readers:
+            with self.subTest(reader=path.name):
+                self.assertNotIn(channel, strip_comments(path.read_text()))
+        result = subprocess.run(["bash", str(ROOT / "scripts/toolchain-version.sh")], text=True, capture_output=True)
+        self.assertEqual((result.returncode, result.stdout), (0, channel + "\n"))
+        files = sorted(CLOUD.glob("*.yaml"))
         for path in files:
             text = path.read_text()
             for match in re.finditer(r"/(kit-ci):(\S+)", text):
@@ -192,6 +203,11 @@ class Gates(unittest.TestCase):
             with self.subTest(arg=arg):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("partition", result.stderr)
+
+    def test_readme_explains_every_github_workflow(self):
+        readme = (CLOUD / "README.md").read_text()
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            self.assertIn(f"- `{path.name}` stays because", readme)
 
     def test_audit_ignores_match_deny_toml(self):
         deny = re.findall(r'\{ id = "(RUSTSEC-[\d-]+)"', (ROOT / "rust/deny.toml").read_text())

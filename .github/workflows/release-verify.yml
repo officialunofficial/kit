@@ -37,7 +37,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: "1.99.1"
 
 jobs:
   cargo-install:
@@ -47,10 +46,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: Read the pinned toolchain
+        id: pin
+        run: echo "version=$(bash scripts/toolchain-version.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.pin.outputs.version }}
 
       - name: cargo install kit-storage
         run: |
@@ -66,10 +69,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: Read the pinned toolchain
+        id: pin
+        run: echo "version=$(bash scripts/toolchain-version.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.pin.outputs.version }}
 
       - name: Install cargo-binstall
         uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2

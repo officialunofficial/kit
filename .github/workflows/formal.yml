@@ -8,7 +8,7 @@ name: "Nightly: Formal verification"
 #
 # Tool pins: Quint 0.32.0 (npm), Apalache 0.62.2 (release archive, sha256
 # checked by formal/scripts/setup-apalache.sh), Java 21 (Temurin), Kani
-# 0.68.0, Rust from RUST_VERSION below (rust/rust-toolchain.toml).
+# 0.68.0, Rust from rust/rust-toolchain.toml.
 #
 # Every result these jobs report is bounded or sampled. A green run is not a
 # proof.
@@ -24,7 +24,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: "1.99.1"
   QUINT_VERSION: "0.32.0"
   KANI_VERSION: "0.68.0"
 
@@ -70,7 +69,6 @@ jobs:
       - name: Set up Rust and cache
         uses: ./.github/actions/setup-rust
         with:
-          toolchain: ${{ env.RUST_VERSION }}
           cache-prefix: "formal-kani"
           protoc: "true"
 
@@ -92,7 +90,6 @@ jobs:
       - name: Set up Rust and cache
         uses: ./.github/actions/setup-rust
         with:
-          toolchain: ${{ env.RUST_VERSION }}
           cache-prefix: "formal-conformance"
           protoc: "false"
 

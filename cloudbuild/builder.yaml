@@ -2,16 +2,30 @@
 # Registry. Run it once during setup. Run it again when Dockerfile.ci or
 # rust/rust-toolchain.toml changes. The other cloudbuild/*.yaml files run the
 # image through their _CI_IMAGE substitution. Keep that default equal to the
-# _CI_IMAGE below, and keep the rust-1.99.1 tag equal to the toolchain version.
+# _CI_IMAGE below. The tag must end in rust-<version> of the toolchain file.
+# The step reads the version from that file and fails when the tag differs.
 
 substitutions:
   _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/kit-ci:rust-1.99.1
 
 steps:
   - name: gcr.io/cloud-builders/docker
-    args: ["build", "-f", "cloudbuild/Dockerfile.ci", "-t", "${_CI_IMAGE}", "cloudbuild"]
-
-images: ["${_CI_IMAGE}"]
+    id: image
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        version=$(bash scripts/toolchain-version.sh)
+        case "${_CI_IMAGE}" in
+          *:rust-"$version") ;;
+          *)
+            echo "The image tag ${_CI_IMAGE} does not end in rust-$version." >&2
+            exit 1
+            ;;
+        esac
+        docker build -f cloudbuild/Dockerfile.ci --build-arg "RUST_VERSION=$version" -t "${_CI_IMAGE}" cloudbuild
+        docker push "${_CI_IMAGE}"
 
 options:
   machineType: E2_HIGHCPU_8

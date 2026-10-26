@@ -50,7 +50,6 @@ permissions:
   contents: read
 
 env:
-  RUST_VERSION: "1.99.1"
   BINARY_NAME: kit
 
 jobs:
@@ -246,10 +245,14 @@ jobs:
           ref: ${{ steps.meta.outputs.commit }}
           fetch-depth: 0
 
-      - name: Install Rust ${{ env.RUST_VERSION }} + target
+      - name: Read the pinned toolchain
+        id: pin
+        run: echo "version=$(bash scripts/toolchain-version.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust ${{ steps.pin.outputs.version }} + target
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.pin.outputs.version }}
           targets: ${{ matrix.target }}
           components: rustfmt,clippy
 

@@ -8,11 +8,12 @@
 #   - sccache from the start, so RUSTC_WRAPPER never points at a missing tool.
 #
 # Rebuild the image (run cloudbuild/builder.yaml) when this file or
-# rust/rust-toolchain.toml changes. The image tag (rust-1.99.1) is the version
-# contract. Change it together with rust/rust-toolchain.toml, the _CI_IMAGE
-# default in every cloudbuild/*.yaml file and CI_IMAGE in
-# scripts/setup-cloud-build.sh. scripts/test-ci-gates.py checks that they agree.
-FROM rust:1.99.1-bookworm
+# rust/rust-toolchain.toml changes. cloudbuild/builder.yaml reads the version
+# from that file and passes it as RUST_VERSION. The image tag (rust-<version>)
+# is the version contract. Change it together with the _CI_IMAGE default in
+# every cloudbuild/*.yaml file. scripts/test-ci-gates.py checks that they agree.
+ARG RUST_VERSION
+FROM rust:${RUST_VERSION}-bookworm
 
 # git: the writing and generated-code checks read the repository.
 # python3-venv, python3-pip: the golden checks install their Python packages.

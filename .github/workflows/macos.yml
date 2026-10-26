@@ -24,7 +24,6 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: short
-  RUST_VERSION: "1.99.1"
 
 jobs:
   test-macos:
@@ -35,7 +34,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-rust
         with:
-          toolchain: ${{ env.RUST_VERSION }}
           cache-prefix: rust-test-macos
           protoc: "false"
       - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2

@@ -24,18 +24,28 @@ owns only the work that Cloud Build cannot do:
 | Third-party notices, release artifact check | Cloud Build (`supply.yaml`) | Runs on Linux. |
 | Latest-release probe of the Connect stack | Cloud Build (`connect-latest.yaml`) | Runs on Linux. |
 | macOS tests (`macos.yml`) | GitHub Actions | Cloud Build has no macOS machines. |
-| Release and release verification (`release.yml`, `release-verify.yml`) | GitHub Actions | The signing identity is the workflow itself. |
-| Nightly fuzz and formal verification (`fuzz.yml`, `formal.yml`) | GitHub Actions | No Cloud Build configuration covers them yet. They run on a schedule and never gate a pull request. |
+| Release (`release.yml`) | GitHub Actions | The signing identity is the workflow itself. |
+| Release verification (`release-verify.yml`) | GitHub Actions | It runs by hand after a release, and it needs macOS runners for the Homebrew check. |
+| Nightly fuzz (`fuzz.yml`) | GitHub Actions | It needs a floating nightly toolchain, a matrix of one job per target, and crash artifacts that GitHub keeps. |
+| Nightly formal verification (`formal.yml`) | GitHub Actions | It needs Java, Node, Apalache and Kani, which the builder image does not hold. |
 
 No gate runs on both services. `scripts/test-ci-gates.py` fails when a workflow
 file repeats a gate command of Cloud Build.
+
+### Why each remaining workflow stays
+
+- `macos.yml` stays because Cloud Build has no macOS machines.
+- `release.yml` stays because the signing identity is the workflow itself.
+- `release-verify.yml` stays because a person starts it by hand after a release, and its Homebrew check needs a macOS runner.
+- `fuzz.yml` stays because it needs a floating nightly toolchain and runs one job per target. It also keeps crash artifacts on GitHub. The `fuzz-smoke` step of `ci.yaml` covers the pinned nightly.
+- `formal.yml` stays because it needs Java, Node, Apalache and Kani. The builder image does not hold them, and the jobs run for hours.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `Dockerfile.ci` | The toolchain image: Rust 1.99.1, protoc, mold, nextest, sccache, cargo-deny, cargo-audit, cargo-geiger, cargo-about, cargo-fuzz, b3sum, actionlint, and a dated nightly toolchain for cargo-fuzz. Every tool has one exact version. |
-| `builder.yaml` | Builds `Dockerfile.ci` and pushes the image. Run it again when `Dockerfile.ci` or `rust/rust-toolchain.toml` changes. |
+| `Dockerfile.ci` | The toolchain image: the Rust version of `rust/rust-toolchain.toml`, protoc, mold, nextest, sccache, cargo-deny, cargo-audit, cargo-geiger, cargo-about, cargo-fuzz, b3sum, actionlint, and a dated nightly toolchain for cargo-fuzz. Every tool has one exact version. |
+| `builder.yaml` | Builds `Dockerfile.ci` and pushes the image. It reads the Rust version from `rust/rust-toolchain.toml`. Run it again when `Dockerfile.ci` or that file changes. |
 | `ci.yaml` | The main suite. See the steps below. |
 | `supply.yaml` | The `third-party-notices` and `release-artifact-check` steps. |
 | `connect-latest.yaml` | The `connect-latest` step. |
@@ -146,8 +156,13 @@ configuration file names a secret.
 
 ## Changing the toolchain version
 
-The version `1.99.1` appears in `rust/rust-toolchain.toml`, in `Dockerfile.ci`,
-in the image tag of every configuration and in `scripts/setup-cloud-build.sh`.
-Change all of them in one commit, then run `builder.yaml`. The date of the
-nightly toolchain appears in `Dockerfile.ci` and in the `fuzz-smoke` step.
-`scripts/test-ci-gates.py` checks both.
+`rust/rust-toolchain.toml` is the one source of the Rust version.
+`scripts/toolchain-version.sh` prints it. The image build, the setup script and
+the GitHub workflows call that script.
+
+Three places cannot read the file. They are the image tag in the `_CI_IMAGE`
+default of every configuration, `msrv` in `clippy.toml` and `rust-version` in
+`rust/Cargo.toml`. Change the toolchain file and those places in one commit.
+Then run `builder.yaml`, which fails when the image tag differs from the file.
+The date of the nightly toolchain appears in `Dockerfile.ci` and in the
+`fuzz-smoke` step. `scripts/test-ci-gates.py` checks all of these places.
