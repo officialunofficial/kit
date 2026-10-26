@@ -4,6 +4,9 @@ description = "Self-host server for kit: the ssh frame session over a repository
 keywords = ["kit", "vcs", "server", "ssh"]
 categories = ["network-programming", "filesystem"]
 readme = "README.md"
+# Ship the sources only. The tests use goldens and helpers that live outside
+# this package, so they cannot run from a published copy.
+include = ["src/**", "/README.md", "/LICENSE-APACHE", "/LICENSE-MIT"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

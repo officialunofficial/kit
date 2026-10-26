@@ -10,6 +10,9 @@ readme = "README.md"
 # library surface is the CLI's internals and is NOT a stable API — it is
 # deliberately excluded from cargo-semver-checks; depend on the `kit-*`
 # library crates instead, not on `kit_bin::…`.
+# Ship the sources only. The tests use goldens and helpers that live outside
+# this package, so they cannot run from a published copy.
+include = ["src/**", "/build.rs", "/README.md", "/LICENSE-APACHE", "/LICENSE-MIT"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -274,3 +277,4 @@ fuzzing = []
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated API.
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

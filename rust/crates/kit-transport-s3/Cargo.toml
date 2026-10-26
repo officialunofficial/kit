@@ -4,6 +4,9 @@ description = "S3-compatible conditional-write transport for kit, with SigV4 sig
 keywords = ["kit", "transport", "s3", "sigv4"]
 categories = ["network-programming"]
 readme = "README.md"
+# Ship the sources only. The tests use goldens and helpers that live outside
+# this package, so they cannot run from a published copy.
+include = ["src/**", "/README.md", "/LICENSE-APACHE", "/LICENSE-MIT"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -67,3 +70,4 @@ ignored = ["md-5"]
 # Build docs with the real (non-test) feature set so docs.rs renders the
 # feature-gated API without advertising the test-only shrunk caps.
 features = ["sparse-checkout"]
+rustdoc-args = ["--cfg", "docsrs"]

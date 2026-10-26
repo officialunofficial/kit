@@ -4,6 +4,9 @@ description = "File-system transport for kit, used in tests and local content-ad
 keywords = ["kit", "vcs", "transport", "filesystem"]
 categories = ["filesystem", "data-structures"]
 readme = "README.md"
+# Ship the sources only. The tests use goldens and helpers that live outside
+# this package, so they cannot run from a published copy.
+include = ["src/**", "/README.md", "/LICENSE-APACHE", "/LICENSE-MIT"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

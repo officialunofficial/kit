@@ -4,6 +4,9 @@ description = "DSSE + in-toto v1 attestations for kit, with multi-algorithm sign
 keywords = ["kit", "attestation", "in-toto", "dsse", "jcs"]
 categories = ["cryptography", "encoding"]
 readme = "README.md"
+# Ship the sources only. The tests use goldens and helpers that live outside
+# this package, so they cannot run from a published copy.
+include = ["src/**", "/README.md", "/LICENSE-APACHE", "/LICENSE-MIT"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -111,3 +114,4 @@ ed25519-dalek = { version = "3.0.0", default-features = false, features = ["allo
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated API.
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

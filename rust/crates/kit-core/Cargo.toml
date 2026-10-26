@@ -4,6 +4,9 @@ description = "Content-addressed VCS primitives for kit: BLAKE3 hashing, canonic
 keywords = ["kit", "vcs", "blake3", "content-addressed", "version-control"]
 categories = ["data-structures", "encoding", "cryptography"]
 readme = "README.md"
+# Ship the sources only. The tests use goldens and helpers that live outside
+# this package, so they cannot run from a published copy.
+include = ["src/**", "/README.md", "/LICENSE-APACHE", "/LICENSE-MIT"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -161,3 +164,4 @@ proptest = "1.12.0"
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated API.
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
