@@ -22,7 +22,11 @@ kit is a content-addressed, signed version-control system. Security comes first.
 
 ## Code
 
-- Do not vendor code. Depend on published crates at exact audited versions.
+- Do not vendor code. Depend on published crates.
+- Commit `Cargo.lock`. It holds the exact audited version of each external crate. CI builds with `--locked`.
+- Write each external requirement as a caret requirement with a full lower bound, such as `"1.2.3"`. The lower bound equals the version in `Cargo.lock`.
+- Write each kit-* requirement as `"=<workspace version>"` with a `path`. All kit crates share one version.
+- `scripts/check-dependency-versions.py` checks these rules. CI runs it.
 - Do not check in generated output unless a build requires it. If you do, say why next to the file.
 - Do not leave dead code. Do not add speculative features, options or abstractions.
 - Add a dependency only when the code cannot reasonably do without it.

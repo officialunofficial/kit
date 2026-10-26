@@ -22,16 +22,16 @@ default = ["pack-zstd"]
 pack-zstd = ["kit-core/pack-zstd"]
 
 [dependencies]
-kit-core = { version = "0.5", path = "../kit-core", default-features = false }
-kit-rpc = { version = "0.5", path = "../kit-rpc", features = ["transport-messages"] }
-buffa = "=0.9.1"
-http = "=1.5.0"
-base64 = "=0.23.1"
-serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.154"
-thiserror = "=2.0.21"
+kit-core = { version = "=0.5.0", path = "../kit-core", default-features = false }
+kit-rpc = { version = "=0.5.0", path = "../kit-rpc", features = ["transport-messages"] }
+buffa = "0.9.1"
+http = "1.5.0"
+base64 = "0.23.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
 
 
 [dev-dependencies]
 kit-test-util = { path = "../kit-test-util" }
-ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }

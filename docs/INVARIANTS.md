@@ -270,20 +270,22 @@ unreachable object does not meet today.
 
 ## Single commonware release train across every manifest and lockfile
 
-**Always:** Commonware requirements use the same exact version (`=2026.9.0`)
+**Always:** Commonware requirements use the same lower bound (`2026.9.0`)
 across manifests. Committed lockfiles select the same release. A move to a
 new release changes every manifest and lockfile in one commit.
 
-**Because:** AGENTS.md requires exact audited versions. Commonware-backed kit
+**Because:** Cargo.lock holds the exact audited version. Commonware-backed kit
 wire encodings must retain their pinned bytes when the resolved dependency
-changes. An exact requirement makes each change of release a reviewed change.
+changes. A change of the lower bound makes each change of release a reviewed
+change.
 
 **If violated:** a compatible release can silently change kit bytes without an
 encoder regression.
 
 **Enforced by:** `scripts/check-crypto-stack-version.sh` audits the version
-across manifests and committed lockfiles. `scripts/check-exact-versions.py`
-fails when any dependency of the workspace or of a crate manifest is a range.
+across manifests and committed lockfiles. `scripts/check-dependency-versions.py`
+fails when a requirement is not a caret requirement whose lower bound equals the
+version in Cargo.lock.
 
 ## Windows is not a build, test, or release target
 

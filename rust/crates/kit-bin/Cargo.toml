@@ -54,35 +54,35 @@ path = "src/main.rs"
 # the registry. Track workspace.package.version.
 # `batch-verify` (not a default feature — see kit-core's Cargo.toml)
 # is required by `verify_new_object_signatures`'s batch fast path.
-kit-core = { version = "0.5", path = "../kit-core", features = ["batch-verify"] }
-kit-attest = { version = "0.5", path = "../kit-attest", features = ["grants"] }
-kit-git-bridge = { version = "0.5", path = "../kit-git-bridge", optional = true }
-kit-keystore = { version = "0.5", path = "../kit-keystore" }
+kit-core = { version = "=0.5.0", path = "../kit-core", features = ["batch-verify"] }
+kit-attest = { version = "=0.5.0", path = "../kit-attest", features = ["grants"] }
+kit-git-bridge = { version = "=0.5.0", path = "../kit-git-bridge", optional = true }
+kit-keystore = { version = "=0.5.0", path = "../kit-keystore" }
 # The native clone/fetch/pull engine (packmap fetch, signature verification,
 # applied-packs record, fast-forward and rollback). The CLI keeps all
 # printing, config layering, trust gates and exit codes.
-kit-sync = { version = "0.5", path = "../kit-sync" }
+kit-sync = { version = "=0.5.0", path = "../kit-sync" }
 # `kit-transport-memory` is a dev-only (test) dependency — see
 # `[dev-dependencies]`. It is intentionally NOT a normal dependency so it
 # does not ship in `cargo install kit-bin`.
-kit-transport-file = { version = "0.5", path = "../kit-transport-file" }
+kit-transport-file = { version = "=0.5.0", path = "../kit-transport-file" }
 # `kit-transport-connect` supplies native host policy and the transport
 # facade for Connect dispatch. `kit-client` owns the per-RPC protocol and
 # `kit-sync::ClientSource` drives repository operations. The adapter is
 # unconditional; the CLI hosts no Connect HTTP server.
-kit-transport-connect = { version = "0.5", path = "../kit-transport-connect" }
-kit-transport-ssh = { version = "0.5", path = "../kit-transport-ssh" }
+kit-transport-connect = { version = "=0.5.0", path = "../kit-transport-connect" }
+kit-transport-ssh = { version = "=0.5.0", path = "../kit-transport-ssh" }
 # The engine of `kit serve`: the ssh frame session over a repository on disk.
 # It builds no async runtime.
-kit-serve = { version = "0.5", path = "../kit-serve" }
+kit-serve = { version = "=0.5.0", path = "../kit-serve" }
 # Optional: `kit+s3://` remotes on S3-compatible storage. Off by
 # default so the baseline build has no S3 client. Turn on via `--features s3`.
-kit-transport-s3 = { version = "0.5", path = "../kit-transport-s3", optional = true }
+kit-transport-s3 = { version = "=0.5.0", path = "../kit-transport-s3", optional = true }
 # Optional: the tokio runtime `kit mcp --http` (the `mcp-v2` feature) runs
 # on, with the hyper server. Off by default, so the default `kit-bin`
 # build stays server-free (scripts/check-cli-baseline.sh): tokio is in the
 # default graph only as the Connect and reqwest clients' runtime.
-tokio = { version = "=1.54.1", default-features = false, features = [
+tokio = { version = "1.54.1", default-features = false, features = [
     "rt-multi-thread",
     "net",
     "time",
@@ -95,7 +95,7 @@ tokio = { version = "=1.54.1", default-features = false, features = [
 # is `kit mcp --http <addr>` (SEP-2567 dropped sessions for 2026-07-28
 # traffic). Off by default so the default `kit-bin` build
 # compiles no MCP HTTP server. See `commands/mcp_v2.rs`.
-rmcp = { version = "=3.6.0", default-features = false, features = [
+rmcp = { version = "3.6.0", default-features = false, features = [
     "server",
     "transport-io",
     "transport-streamable-http-server",
@@ -104,44 +104,44 @@ rmcp = { version = "=3.6.0", default-features = false, features = [
 # (examples/servers/src/counter_hyper_streamable_http.rs) rather than pulling
 # in axum: `StreamableHttpService` implements `tower::Service` directly, so
 # raw hyper is all the glue this needs.
-hyper = { version = "=1.12.0", features = ["server", "http1"], optional = true }
-hyper-util = { version = "=0.1.20", features = ["tokio", "server-auto", "service"], optional = true }
+hyper = { version = "1.12.0", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1.20", features = ["tokio", "server-auto", "service"], optional = true }
 # Constant-time bearer-token comparison for `kit mcp --http` —
 # already resolved transitively (ed25519-dalek pulls it), so this is not a
 # new supply-chain root.
-subtle = { version = "=2.6.1", optional = true }
+subtle = { version = "2.6.1", optional = true }
 # HeaderMap/header names for `kit mcp --http`'s bearer-auth wrapper — already resolved
 # transitively (reqwest pulls it), not a new supply-chain root.
-http = { version = "=1.5.0", optional = true }
+http = { version = "1.5.0", optional = true }
 # `tower_service::Service` — the trait `kit mcp --http`'s bearer-auth
 # wrapper (`mcp_v2.rs`'s `BearerAuthHttp`) implements around
 # `StreamableHttpService` before handing it to `TowerToHyperService`.
 # Already resolved transitively (rmcp/hyper-util pull it), not a new
 # supply-chain root.
-tower-service = { version = "=0.3.3", optional = true }
+tower-service = { version = "0.3.3", optional = true }
 # `BoxBody`/`Bytes` — used to construct the 401 response `BearerAuthHttp`
 # returns without calling into `StreamableHttpService`, matching its
 # `Response = http::Response<BoxBody<Bytes, Infallible>>` type exactly.
 # Already resolved transitively (rmcp pulls both), not a new supply-chain
 # root.
-http-body-util = { version = "=0.1.5", optional = true }
-bytes = { version = "=1.12.1", optional = true }
-kit-rpc = { version = "0.5", path = "../kit-rpc" }
-buffa = "=0.9.1"
+http-body-util = { version = "0.1.5", optional = true }
+bytes = { version = "1.12.1", optional = true }
+kit-rpc = { version = "=0.5.0", path = "../kit-rpc" }
+buffa = "0.9.1"
 # `wrap_help` is intentionally disabled so help-text output stays
 # deterministic across terminal widths. `derive` is enabled so the
 # per-command parsing (see clap_args.rs) can use
 # `#[derive(Parser)]`; the top-level `HELP_TEXT` constant remains
 # the source of truth for `kit --help` and is pinned by snapshot
 # tests in cli.rs + tests/help_snapshot.rs.
-clap = { version = "=4.6.7", default-features = false, features = ["std", "help", "error-context", "usage", "derive", "string"] }
-tempfile = "=3.27.0"
-thiserror = "=2.0.21"
+clap = { version = "4.6.7", default-features = false, features = ["std", "help", "error-context", "usage", "derive", "string"] }
+tempfile = "3.27.0"
+thiserror = "2.0.21"
 # JSON-RPC parse/emit for the `kit mcp` stdio server. Zero new supply
 # chain: serde_json is already in this binary's normal dependency graph
 # via kit-attest (JCS tests) and the http/s3 transports (reqwest).
-serde_json = "=1.0.154"
-serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde = { version = "1.0.229", features = ["derive"] }
 # `kit self update` (commands/self_update.rs): release download over
 # rustls, sha256 sidecar check, and single-member tar.gz
 # extraction of the new binary. Cert verification is via
@@ -150,24 +150,24 @@ serde = { version = "=1.0.229", features = ["derive"] }
 # client, which pins an explicit webpki-roots list instead (see that
 # crate's Cargo.toml and SPEC-TRANSPORT-CONNECT.md §7.3) — the two
 # transports are independent and don't need to agree.
-reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "blocking", "json"] }
-sha2 = "=0.11.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "blocking", "json"] }
+sha2 = "0.11.1"
 # `kit grant`/`epoch`/`visibility` (grants/): base64url and hex for imported
 # wallet and WebAuthn signatures, and secp256k1 point decompression to derive
 # the 0x owner address of a keystore key. All three are already in the graph
 # (kit-attest, kit-keystore), so no new supply-chain root.
-base64 = "=0.23.1"
-hex = "=0.4.3"
-k256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "std"] }
-flate2 = "=1.1.10"
-tar = "=0.4.46"
+base64 = "0.23.1"
+hex = "0.4.3"
+k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
+flate2 = "1.1.10"
+tar = "0.4.46"
 # Used by `kit keygen` to generate raw 32-byte secrets for non-ed25519
 # algorithms (secp256k1 / p256). Same version kit-core already pulls in.
 # `sys_rng` provides `getrandom::SysRng`, the rand_core 0.10 `TryRng`.
-getrandom = { version = "=0.4.3", features = ["sys_rng"] }
+getrandom = { version = "0.4.3", features = ["sys_rng"] }
 # Wraps the raw 32-byte secrets keygen pulls out of the RNG until they
 # land inside the algorithm signer (which has its own scrubbing).
-zeroize = "=1.9.1"
+zeroize = "1.9.1"
 
 # POSIX uid + O_NOFOLLOW for keygen.rs's raw-32 load/save paths
 # (secp256k1, p256). The Ed25519 path uses kit_core::sign which has
@@ -179,42 +179,42 @@ zeroize = "=1.9.1"
 # stores; async-signal-safe) so this crate stays
 # `#![deny(unsafe_code)]` — see signal.rs.
 [target.'cfg(unix)'.dependencies]
-libc = "=0.2.191"
-signal-hook = { version = "=0.4.5", default-features = false }
+libc = "0.2.191"
+signal-hook = { version = "0.4.5", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-kit-keystore = { version = "0.5", path = "../kit-keystore", features = ["backend-macos-keychain"] }
+kit-keystore = { version = "=0.5.0", path = "../kit-keystore", features = ["backend-macos-keychain"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-kit-keystore = { version = "0.5", path = "../kit-keystore", features = ["backend-linux-secret-service"] }
+kit-keystore = { version = "=0.5.0", path = "../kit-keystore", features = ["backend-linux-secret-service"] }
 
 [build-dependencies]
 # build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by
 # reading src/cli.rs. No external deps — plain file I/O + string match.
 
 [dev-dependencies]
-tempfile = "=3.27.0"
+tempfile = "3.27.0"
 kit-test-util = { path = "../kit-test-util" }
 kit-transport-memory = { path = "../kit-transport-memory" }
 # The self-update test uses a local mockito server standing in for the
 # release host.
-mockito = "=1.7.2"
+mockito = "1.7.2"
 # `attest_roundtrip` tests derive per-algorithm public keys at test time
 # to build trust-roots TOML files. Dev-only: the CLI binary itself never
 # imports these directly — signing goes through the kit-attest signers.
-ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc"] }
-k256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
-p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }
+k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 # Snapshot testing for CLI golden-output fixtures.
 # `filters` feature enables regex-based redaction so version-string
 # bumps don't churn snapshots.
-insta = { version = "=1.49.0", features = ["filters"] }
+insta = { version = "1.49.0", features = ["filters"] }
 # Stateful end-to-end invariant suite (tests/state_machine.rs): proptest
 # generates random op sequences driven through the real `kit` binary,
 # asserting a repo-invariant battery after each op. Same major as
 # kit-core's dev-dep. Bounded by default (32 cases); the nightly job
 # raises PROPTEST_CASES under the `state-machine` nextest profile.
-proptest = "=1.12.0"
+proptest = "1.12.0"
 # tests/remote_dispatch_connect.rs: drives push_all/pull_all
 # against a REAL in-process kit.transport.v1.TransportService server
 # (connectrpc's hyper server, memory-backed) rather than a mockito stub —
@@ -222,26 +222,26 @@ proptest = "=1.12.0"
 # generated Connect codebase end-to-end. `server` is additive on top of
 # `kit-transport-connect`'s own `client`/`client-tls` feature set (Cargo
 # unions dependency features across dependency kinds).
-connectrpc = { version = "=0.9.1", default-features = false, features = ["server", "gzip", "zstd", "json"] }
-http = "=1.5.0"
-tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "io-util"] }
+connectrpc = { version = "0.9.1", default-features = false, features = ["server", "gzip", "zstd", "json"] }
+http = "1.5.0"
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "io-util"] }
 # Real TLS proxy for the Connect CLI regression matrix.
-tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
-futures = "=0.3.34"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+futures = "0.3.34"
 # tests/cli_transcripts.rs: declarative `.trycmd` transcript tests for
 # simple, deterministic CLI output (error messages, not full help text —
 # that's already covered by help_snapshot.rs's insta snapshots). Pins
 # exact user-facing text, not just exit codes.
-trycmd = "=1.2.1"
+trycmd = "1.2.1"
 # tests/blackbox_smoke.rs: assert_cmd's fluent Command::assert() API,
 # demonstrated on one existing hand-rolled Output-based test as a pattern
 # reference for new tests — the existing tests/common/mod.rs `Repo`
 # builder (sandboxed temp-dir + fixed signing key + `.ok()`/`.run()`)
 # already covers the cargo-test-support-style sandboxed-repo role, so
 # this is additive ergonomics on top of it, not a replacement.
-assert_cmd = "=2.2.2"
-predicates = "=3.1.4"
-assert_fs = "=1.1.4"
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+assert_fs = "1.1.4"
 
 [features]
 default = ["git-bridge"]

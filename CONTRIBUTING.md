@@ -57,7 +57,8 @@ bash scripts/check-unsafe-policy.sh
 bash scripts/check-doc-paths.sh
 bash scripts/test-check-doc-paths.sh
 python3 -I -B scripts/check-format-constants.py
-python3 -I -B scripts/check-exact-versions.py
+python3 -I -B scripts/check-dependency-versions.py
+bash scripts/test-check-dependency-versions.sh
 ```
 
 ## Rules for code
@@ -73,11 +74,30 @@ These rules come from [`AGENTS.md`](AGENTS.md). Read that file first.
 - Do not use `unsafe` without a `// SAFETY:` comment.
 - Give each domain-separation tag, magic and predicate URI a unique value.
 - Fail closed on an unknown version, algorithm or field.
-- Do not vendor code. Depend on published crates at exact versions.
+- Do not vendor code. Depend on published crates.
 - Add a dependency only when the code cannot do without it.
 - Do not leave dead code. Do not add speculative options.
 - Do not check in generated output unless a build needs it. Say why next to the
   file.
+
+## Dependency versions
+
+`Cargo.lock` is committed. It holds the exact version of each external crate.
+CI builds with `--locked`, so a build never picks a newer version.
+
+A published library crate must let its users resolve a dependency. So each
+external requirement is a caret requirement, such as `"1.2.3"`. The lower bound
+is a full version and equals the version in `Cargo.lock`. Do not write `=`,
+`*`, `~` or a short version such as `"1.2"`.
+
+All kit crates share one version. Each kit-* requirement is exact, such as
+`"=0.5.0"`, and has a `path`. A dependency with a `path` and no version is valid
+only in `dev-dependencies` or in a crate with `publish = false`.
+
+The rules cover every manifest, including binary, fuzz and bench crates.
+`scripts/check-dependency-versions.py` checks them. Run `cargo update --package
+<name>` and then edit the lower bound to change an external version. Both
+changes go in one commit.
 
 ## Rust style
 

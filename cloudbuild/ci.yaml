@@ -398,8 +398,8 @@ steps:
         bash scripts/check-spec-status.sh || status=1
         python3 -I -B scripts/check-spec-magics.py || status=1
         bash scripts/check-crypto-stack-version.sh || status=1
-        python3 -I -B scripts/check-exact-versions.py || status=1
-        bash scripts/test-check-exact-versions.sh || status=1
+        python3 -I -B scripts/check-dependency-versions.py || status=1
+        bash scripts/test-check-dependency-versions.sh || status=1
         python3 -I -B scripts/check-format-constants.py || status=1
         bash scripts/test-check-format-constants.sh || status=1
         python3 -m venv /tmp/ref-venv

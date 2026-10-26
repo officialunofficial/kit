@@ -18,7 +18,7 @@ workspace = true
 [dependencies]
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it.
-kit-core = { version = "0.5", path = "../kit-core" }
+kit-core = { version = "=0.5.0", path = "../kit-core" }
 
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated API.

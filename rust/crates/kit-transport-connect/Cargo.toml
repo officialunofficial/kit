@@ -27,12 +27,12 @@ todo = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [dependencies]
-kit-sync = { version = "0.5", path = "../kit-sync", default-features = false, features = ["connect-native"] }
-kit-client = { version = "0.5", path = "../kit-client", default-features = false }
-kit-rpc = { version = "0.5", path = "../kit-rpc", features = ["transport"] }
+kit-sync = { version = "=0.5.0", path = "../kit-sync", default-features = false, features = ["connect-native"] }
+kit-client = { version = "=0.5.0", path = "../kit-client", default-features = false }
+kit-rpc = { version = "=0.5.0", path = "../kit-rpc", features = ["transport"] }
 # Inter-workspace deps need explicit version + path so `cargo publish`
 # accepts them.
-kit-core = { version = "0.5", path = "../kit-core" }
+kit-core = { version = "=0.5.0", path = "../kit-core" }
 
 # ConnectRPC native client: hyper/hyper-util transport + rustls TLS.
 # `UploadPack`/`DownloadPack`'s client-streaming/server-streaming RPCs work
@@ -41,19 +41,19 @@ kit-core = { version = "0.5", path = "../kit-core" }
 # streaming RPCs themselves are unaffected. `json` keeps the
 # buffa-generated message types' serde derives (matches every other
 # connectrpc consumer in this workspace).
-connectrpc = { version = "=0.9.1", default-features = false, features = [
+connectrpc = { version = "0.9.1", default-features = false, features = [
     "client",
     "client-tls",
     "gzip",
     "zstd",
     "json",
 ] }
-buffa = "=0.9.1"
-base64 = "=0.23.1"
+buffa = "0.9.1"
+base64 = "0.23.1"
 
 # Async runtime driving the ConnectRPC client. The `Transport` trait (kit_core::protocol::Transport) is
 # synchronous; `kit_sync::Executor` bridges the client side.
-tokio = { version = "=1.54.1", default-features = false, features = [
+tokio = { version = "1.54.1", default-features = false, features = [
     "rt",
     "rt-multi-thread",
     "net",
@@ -62,25 +62,25 @@ tokio = { version = "=1.54.1", default-features = false, features = [
     "time",
 ] }
 
-hyper = { version = "=1.12.0", features = ["client", "http1", "http2"] }
-hyper-util = { version = "=0.1.20", features = ["client-legacy", "http1", "http2", "tokio"] }
-hyper-rustls = { version = "=0.27.10", default-features = false, features = ["http1", "http2", "tls12", "ring"] }
-pin-project-lite = "=0.2.17"
-tower-service = "=0.3.3"
-http = "=1.5.0"
-http-body-util = "=0.1.5"
-bytes = "=1.12.1"
-futures = "=0.3.34"
-url = "=2.5.8"
+hyper = { version = "1.12.0", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1.20", features = ["client-legacy", "http1", "http2", "tokio"] }
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1", "http2", "tls12", "ring"] }
+pin-project-lite = "0.2.17"
+tower-service = "0.3.3"
+http = "1.5.0"
+http-body-util = "0.1.5"
+bytes = "1.12.1"
+futures = "0.3.34"
+url = "2.5.8"
 
 # CSPRNG for the write-envelope idempotency key (`envelope::EnvelopeTransport`)
 # — same crate/version kit-core, kit-bin, and kit-keystore already pull in
 # for their own random-value needs (key generation).
-getrandom = "=0.4.3"
+getrandom = "0.4.3"
 
 # Pure-Rust TLS root store for `HttpClient::with_tls` (Mozilla root program
 # via the `webpki-roots` crate) — no OS trust-store dependency.
-webpki-roots = "=1.0.11"
+webpki-roots = "1.0.11"
 
 # Explicit dependency (beyond connectrpc's own re-export of `rustls`) so
 # this crate can deterministically install a `ring`-backed default
@@ -89,24 +89,24 @@ webpki-roots = "=1.0.11"
 # (`aws-lc-rs`, `ring`, or both) — see `tls::client_config`.
 # `ring` needs no `cmake` (unlike `aws-lc-rs`), matching this crate's
 # minimal-system-dependency posture.
-rustls = { version = "=0.23.46", features = ["ring"] }
+rustls = { version = "0.23.46", features = ["ring"] }
 
 [dev-dependencies]
 kit-test-util = { path = "../kit-test-util" }
-serde_json = "=1.0.154"
-kit-transport-memory = { version = "0.5", path = "../kit-transport-memory" }
+serde_json = "1.0.154"
+kit-transport-memory = { version = "=0.5.0", path = "../kit-transport-memory" }
 # Test-only: `envelope::tests::parity` independently re-verifies the write
 # envelope headers `EnvelopeTransport` produces against a from-scratch
 # implementation of the server-side envelope verification contract, so
 # canonical-string or header regressions are caught without a live server.
-ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc", "rand_core"] }
-hex = "=0.4.3"
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc", "rand_core"] }
+hex = "0.4.3"
 # `tests/roundtrip.rs`, `retry.rs` and `rpc_timeout.rs` build their own
 # in-process `TransportService` servers directly against
 # `connectrpc::server`/`Router` (the client-side regression gate —
 # SPEC-TRANSPORT-CONNECT's testing decision), so connectrpc's `server`
 # feature is a dev-only feature here.
-connectrpc = { version = "=0.9.1", default-features = false, features = [
+connectrpc = { version = "0.9.1", default-features = false, features = [
     "client",
     "client-tls",
     "server",
@@ -116,6 +116,6 @@ connectrpc = { version = "=0.9.1", default-features = false, features = [
 ] }
 
 # Native TLS trust and streaming RPC regression fixture only.
-tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
-tempfile = "=3.27.0"
-tokio = { version = "=1.54.1", features = ["io-util"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["io-util"] }

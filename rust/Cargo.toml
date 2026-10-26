@@ -30,18 +30,18 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/officialunofficial/kit"
 authors = ["Official Unofficial, Inc."]
 
-# Every dependency version is exact. Cargo.lock holds the resolved versions
-# of the other crates. scripts/check-exact-versions.py checks this table.
+# Each version is a caret requirement. Its lower bound equals the version in
+# Cargo.lock. scripts/check-dependency-versions.py checks this table.
 [workspace.dependencies]
-commonware-macros = { version = "=2026.9.0", default-features = false }
+commonware-macros = { version = "2026.9.0", default-features = false }
 # default-features = false matches the strictest consumer (kit-attest and
 # kit-core). A consumer that needs the default feature set must use a direct
 # dependency, because `workspace = true` cannot re-enable default features.
-commonware-storage = { version = "=2026.9.0", default-features = false }
-commonware-cryptography = { version = "=2026.9.0", default-features = false }
-commonware-runtime = { version = "=2026.9.0" }
-commonware-codec = { version = "=2026.9.0", default-features = false }
-commonware-utils = { version = "=2026.9.0", default-features = false }
+commonware-storage = { version = "2026.9.0", default-features = false }
+commonware-cryptography = { version = "2026.9.0", default-features = false }
+commonware-runtime = { version = "2026.9.0" }
+commonware-codec = { version = "2026.9.0", default-features = false }
+commonware-utils = { version = "2026.9.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
