@@ -242,4 +242,35 @@ grep -q 'expands to more than' "$work/tar-bomb.out" || {
     fails=1
 }
 
+# The entry count is bounded. A tar that lists without end must not make
+# the installer work without end: the count stops one entry past the cap.
+mkdir -p "$work/endless"
+real_tar=$(command -v tar)
+cat >"$work/endless/tar" <<SH
+#!/bin/sh
+if [ "\$1" = "-tf" ] && [ "\$2" = "-" ]; then exec yes entry; fi
+exec "$real_tar" "\$@"
+SH
+chmod 0755 "$work/endless/tar"
+prefix="$work/prefix-endless-listing"
+mkdir -p "$prefix"
+chmod 0755 "$prefix"
+status=0
+PATH="$work/endless:$work/bin:$PATH" FAKE_RELEASES="$work/releases" \
+    KIT_INSTALL_DIR="$prefix" KIT_STATE_DIR="$work/state-endless-listing" \
+    sh "$repo_root/install.sh" --version v0.5.1 >"$work/endless-listing.out" 2>&1 &
+pid=$!
+( sleep 30; kill "$pid" 2>/dev/null ) &
+watchdog=$!
+wait "$pid" || status=$?
+kill "$watchdog" 2>/dev/null || true
+if [ "$status" -ne 0 ] && [ ! -e "$prefix/kit" ] \
+    && grep -q 'more than 64 entries' "$work/endless-listing.out"; then
+    echo "ok: endless-listing"
+else
+    echo "FAIL: endless-listing (status $status)" >&2
+    cat "$work/endless-listing.out" >&2
+    fails=1
+fi
+
 exit "$fails"
