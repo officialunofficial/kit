@@ -34,6 +34,9 @@ use kit_core::Hash;
 /// MIME type written into `payloadType` for every kit attestation.
 pub const PAYLOAD_TYPE_IN_TOTO: &str = "application/vnd.in-toto+json";
 
+/// `payloadType` of a signed redaction notice (SPEC-TRANSPORT-CONNECT).
+pub const PAYLOAD_TYPE_REDACTION_NOTICE: &str = "application/vnd.kit.redaction-notice.v1+json";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sig {
     pub keyid: String,
@@ -201,6 +204,22 @@ pub fn decode(bytes: &[u8]) -> Result<Envelope, Error> {
         payload,
         signatures: sigs,
     })
+}
+
+/// Decode an envelope and require an exact `payloadType`.
+///
+/// The comparison is byte for byte. An empty or different `payloadType`
+/// fails closed, so no caller reads a payload of an unexpected type.
+///
+/// # Errors
+/// [`Error::UnsupportedPayloadType`] if `payloadType` is not `expected`.
+/// Otherwise the errors of [`decode`].
+pub fn decode_expecting(bytes: &[u8], expected: &str) -> Result<Envelope, Error> {
+    let env = decode(bytes)?;
+    if env.payload_type != expected {
+        return Err(Error::UnsupportedPayloadType);
+    }
+    Ok(env)
 }
 
 struct Parser<'a> {
@@ -396,5 +415,51 @@ mod tests {
             }],
         };
         assert_eq!(a.attestation_id().unwrap(), b.attestation_id().unwrap());
+    }
+
+    const REDACTION_NOTICE_GOLDEN: &[u8] =
+        include_bytes!("../../../tests/golden/redaction/notice-envelope.dsse.json");
+
+    fn envelope_with_type(payload_type: &str) -> Vec<u8> {
+        Envelope {
+            payload_type: payload_type.into(),
+            payload: b"{}".to_vec(),
+            signatures: vec![Sig {
+                keyid: "k".into(),
+                sig: vec![1],
+            }],
+        }
+        .encode()
+        .unwrap()
+        .into_bytes()
+    }
+
+    #[test]
+    fn decode_expecting_accepts_redaction_notice_type() {
+        let env = decode_expecting(REDACTION_NOTICE_GOLDEN, PAYLOAD_TYPE_REDACTION_NOTICE).unwrap();
+        assert_eq!(env.payload_type, PAYLOAD_TYPE_REDACTION_NOTICE);
+    }
+
+    #[test]
+    fn decode_expecting_rejects_other_payload_type() {
+        let bytes = envelope_with_type(PAYLOAD_TYPE_IN_TOTO);
+        assert!(matches!(
+            decode_expecting(&bytes, PAYLOAD_TYPE_REDACTION_NOTICE),
+            Err(Error::UnsupportedPayloadType)
+        ));
+        assert!(matches!(
+            decode_expecting(REDACTION_NOTICE_GOLDEN, PAYLOAD_TYPE_IN_TOTO),
+            Err(Error::UnsupportedPayloadType)
+        ));
+    }
+
+    #[test]
+    fn decode_expecting_rejects_empty_payload_type() {
+        let bytes = b"{\"payload\":\"e30=\",\"payloadType\":\"\",\
+                       \"signatures\":[{\"keyid\":\"k\",\"sig\":\"AQ==\"}]}";
+        assert!(matches!(
+            decode_expecting(bytes, PAYLOAD_TYPE_REDACTION_NOTICE),
+            Err(Error::UnsupportedPayloadType)
+        ));
     }
 }

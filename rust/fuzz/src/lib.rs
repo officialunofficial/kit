@@ -1355,6 +1355,28 @@ pub fn envelope_decode_one_iteration(input: &[u8]) {
             "accepted envelope must re-encode byte for byte"
         );
     }
+    // `decode_expecting` accepts exactly the envelopes whose `payloadType`
+    // is the expected type, so an empty or different type never passes.
+    for expected in [
+        kit_attest::PAYLOAD_TYPE_REDACTION_NOTICE,
+        kit_attest::PAYLOAD_TYPE_IN_TOTO,
+    ] {
+        match (
+            kit_attest::envelope::decode(input),
+            kit_attest::envelope::decode_expecting(input, expected),
+        ) {
+            (Ok(env), Ok(typed)) => {
+                assert_eq!(env.payload_type, expected);
+                assert_eq!(env, typed);
+            }
+            (Ok(env), Err(e)) => {
+                assert_ne!(env.payload_type, expected);
+                assert!(matches!(e, kit_attest::Error::UnsupportedPayloadType));
+            }
+            (Err(_), Err(_)) => {}
+            (Err(_), Ok(_)) => panic!("typed decode accepted what decode refused"),
+        }
+    }
 }
 
 /// Ref file wire decoder (`ref_wire_decode`): `decode_ref_wire` and

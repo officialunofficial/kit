@@ -116,7 +116,7 @@ pub struct VerifyResult {
 ///   `application/vnd.in-toto+json`.
 /// * [`Error::EmptySignatures`] — envelope has zero signatures.
 pub fn verify_envelope(envelope_bytes: &[u8], registry: &Registry) -> Result<VerifyResult, Error> {
-    let env = envelope::decode(envelope_bytes)?;
+    let env = envelope::decode_expecting(envelope_bytes, envelope::PAYLOAD_TYPE_IN_TOTO)?;
     verify(&env, registry)
 }
 

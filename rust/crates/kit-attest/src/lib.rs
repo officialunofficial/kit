@@ -75,7 +75,9 @@ pub mod verify;
 pub mod webauthn;
 
 pub use algorithm::Algorithm;
-pub use envelope::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, attestation_id, pae_of};
+pub use envelope::{
+    Envelope, PAYLOAD_TYPE_IN_TOTO, PAYLOAD_TYPE_REDACTION_NOTICE, Sig, attestation_id, pae_of,
+};
 pub use pin_provider::{PinPromptInfo, PinProvider, TtyPinProvider};
 pub use signer::Signer;
 pub use signer_external::ExternalSigner;
@@ -122,7 +124,7 @@ pub enum Error {
     MalformedEnvelope,
 
     // -- Verify --
-    #[error("DSSE envelope payloadType is not `application/vnd.in-toto+json`")]
+    #[error("DSSE envelope payloadType is not the expected type")]
     UnsupportedPayloadType,
     #[error("DSSE envelope has zero signatures")]
     EmptySignatures,
