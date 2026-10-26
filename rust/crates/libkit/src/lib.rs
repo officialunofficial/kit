@@ -20,9 +20,11 @@
 //! ```
 
 mod environment;
+mod error;
 pub mod repo;
 
 pub use environment::{CredentialSource, Environment, Identity, Token};
+pub use error::Error;
 pub use repo::Repo;
 
 pub use kit_attest as attest;

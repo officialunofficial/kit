@@ -195,6 +195,23 @@ pub fn resolve_layout(cwd: &Path) -> Result<RepoLayout, u8> {
         .map_err(|e| error(&format!("worktree discovery: {e}"), exit::DATAERR))
 }
 
+/// Open the repository at `cwd` through the library. On failure the error
+/// has already been printed, and the returned code is the exit status to
+/// propagate. [`crate::exit_map`] decides both the text and the code.
+///
+/// The library does not read the `-c` overrides when it opens a
+/// repository, so the environment carries none.
+pub(crate) fn open_repo(cwd: &Path) -> Result<libkit::Repo, u8> {
+    let environment = crate::environment::from_process(Vec::new());
+    libkit::Repo::open(cwd, &environment).map_err(|e| {
+        let e = libkit::Error::from(e);
+        error(
+            &crate::exit_map::message(&e),
+            crate::exit_map::exit_code(&e),
+        )
+    })
+}
+
 /// Shared helper: emit a "not yet wired" notice and return the
 /// tempfail exit code. Commands whose backing state-machines haven't
 /// been wired into the CLI yet say so honestly rather than pretending

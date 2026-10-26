@@ -5,7 +5,6 @@ use std::io::Write;
 use clap::Parser;
 use kit_core::hash::from_hex;
 use kit_core::object::Object;
-use kit_core::store::ObjectStore;
 use kit_core::worktree;
 
 use crate::clap_args;
@@ -30,14 +29,11 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let layout = match super::resolve_layout(&cwd) {
-        Ok(layout) => layout,
+    let repo = match super::open_repo(&cwd) {
+        Ok(repo) => repo,
         Err(code) => return code,
     };
-    let store = match ObjectStore::open(&layout) {
-        Ok(s) => s,
-        Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
-    };
+    let store = repo.store();
     let h = match from_hex(hash_hex) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("bad hash: {e}"), exit::DATAERR),
@@ -54,7 +50,7 @@ pub fn run(args: &[String]) -> u8 {
         // A ChunkedBlob is the canonical representation for files above
         // the chunking threshold. Reassemble its chunks and
         // stream the full content, matching `kit cat` on a plain Blob.
-        Object::ChunkedBlob(_) => match worktree::read_blob(&store, &h) {
+        Object::ChunkedBlob(_) => match worktree::read_blob(store, &h) {
             Ok(data) => {
                 let _ = stdout.write_all(&data);
             }

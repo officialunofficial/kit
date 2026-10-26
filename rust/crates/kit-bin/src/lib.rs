@@ -28,6 +28,7 @@ pub mod config;
 pub mod editor;
 mod environment;
 pub mod exit;
+pub mod exit_map;
 mod fanout;
 pub mod format;
 pub mod grants;

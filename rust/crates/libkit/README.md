@@ -18,6 +18,13 @@ global state.
 `Repo::open` opens the repository at a path. `Repo::discover` searches the
 path and its parents. Both refuse a path with a `..` component.
 
+## Errors
+
+`libkit::Error` is a `#[non_exhaustive]` enum. Each variant wraps the error
+enum of one module, such as `libkit::repo::Error`. Every error enum is
+`#[non_exhaustive]` and is `Error + Send + Sync + 'static`. The `kit` command
+line maps these errors to the exit codes in `docs/CLI.md`.
+
 ## Modules
 
 | Module | Source crate | Feature |
