@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use kit_core::layout::DiscoverError;
 use kit_core::refs::RefError;
 use kit_core::repo_lock::LockError;
-use libkit::{Environment, Error, Repo, head, lock, repo, revspec, worktrees};
+use libkit::{
+    Environment, Error, Repo, conflict, head, lock, merge, rebase, repo, revspec, worktrees,
+};
 
 fn assert_error<T: std::error::Error + Send + Sync + 'static>() {}
 
@@ -68,4 +70,25 @@ fn every_module_error_converts_and_keeps_its_text() {
     );
     assert!(errors[2].to_string().starts_with("read HEAD: "));
     assert!(errors[3].to_string().starts_with("worktree registry: "));
+}
+
+#[test]
+fn a_conflict_merge_and_rebase_error_converts_and_keeps_its_text() {
+    let conflict: Error = conflict::Error::NotStaged("a.txt".to_owned()).into();
+    assert!(matches!(conflict, Error::Conflict(_)));
+    assert!(
+        conflict
+            .to_string()
+            .starts_with("'a.txt' is resolved in the worktree")
+    );
+    let merge: Error = merge::Error::NoMergeInProgress.into();
+    assert!(matches!(merge, Error::Merge(_)));
+    assert_eq!(merge.to_string(), "no merge in progress");
+    let rebase: Error = rebase::Error::NoRebaseInProgress.into();
+    assert!(matches!(rebase, Error::Rebase(_)));
+    assert_eq!(rebase.to_string(), "no rebase in progress");
+    assert_error::<conflict::Error>();
+    assert_error::<merge::Error>();
+    assert_error::<rebase::Error>();
+    assert_error::<libkit::signing::Error>();
 }

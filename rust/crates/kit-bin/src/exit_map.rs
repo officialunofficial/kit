@@ -6,7 +6,11 @@
 
 use kit_core::store::StoreError;
 use kit_core::worktree::WorktreeError;
-use libkit::{add, blame, branch, commit, diff, head, linked, mv, repo, revspec, signer, status};
+use libkit::signing::ErrorKind;
+use libkit::{
+    add, blame, branch, commit, diff, head, linked, merge, mv, rebase, repo, revspec, signer,
+    status,
+};
 
 use crate::exit;
 
@@ -34,6 +38,102 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Add(inner) => add_exit_code(inner),
         libkit::Error::Signer(inner) => signer_exit_code(inner),
         libkit::Error::Commit(inner) => commit_exit_code(inner),
+        libkit::Error::Merge(inner) => merge_exit_code(inner),
+        libkit::Error::Rebase(inner) => rebase_exit_code(inner),
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+/// The code for a failure of the key.
+fn signing_exit_code(error: &libkit::signing::Error) -> u8 {
+    match error.kind() {
+        ErrorKind::Config => exit::CONFIG_ERROR,
+        ErrorKind::MissingInput => exit::NOINPUT,
+        ErrorKind::Denied => exit::NOPERM,
+        ErrorKind::Unavailable => exit::UNAVAILABLE,
+        ErrorKind::Data => exit::DATAERR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn merge_exit_code(error: &merge::Error) -> u8 {
+    match error {
+        // The key has its own code.
+        merge::Error::Signing(inner) => signing_exit_code(inner),
+        // `HEAD` has its own table when it goes back.
+        merge::Error::RestoreHead(inner) => head_exit_code(inner),
+        // An object of the wrong kind, or a commit that cannot be encoded.
+        merge::Error::NotACommit | merge::Error::Serialize(_) => exit::DATAERR,
+        // The state of the merge, the commit or `HEAD` cannot be written.
+        merge::Error::AdvanceHead(_)
+        | merge::Error::WriteState(_)
+        | merge::Error::StoreCommit(_) => exit::CANTCREAT,
+        merge::Error::InProgress(_)
+        | merge::Error::NoHeadCommit
+        | merge::Error::ResolveHead(_)
+        | merge::Error::Target(_)
+        | merge::Error::MergeBase(_)
+        | merge::Error::ReadCommit(_)
+        | merge::Error::Merge(_)
+        | merge::Error::Worktree(_)
+        | merge::Error::NoMergeInProgress
+        | merge::Error::ReadState(_)
+        | merge::Error::ReadConflicts(_)
+        | merge::Error::UnresolvedMarkers(_)
+        | merge::Error::BuildTree(_)
+        | merge::Error::ClearState(_)
+        | merge::Error::Conflict(_) => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn rebase_exit_code(error: &rebase::Error) -> u8 {
+    match error {
+        // The key has its own code.
+        rebase::Error::Signing(inner) => signing_exit_code(inner),
+        // The todo list contradicts the rules of the command.
+        rebase::Error::Todo(_) => exit::USAGE,
+        // An object of the wrong kind, a commit that cannot be encoded, or
+        // a `HEAD` that the rebase lost.
+        rebase::Error::NotACommit
+        | rebase::Error::NoPrecedingCommit
+        | rebase::Error::Serialize(_)
+        | rebase::Error::HeadMissingAtFinish
+        | rebase::Error::ReadFinalHead(_) => exit::DATAERR,
+        // State, commits, refs or the recovery log cannot be written.
+        rebase::Error::WriteState(_)
+        | rebase::Error::DetachHead(_)
+        | rebase::Error::UpdateHead(_)
+        | rebase::Error::PersistState(_)
+        | rebase::Error::WriteConflicts(_)
+        | rebase::Error::Store(_)
+        | rebase::Error::Recovery(_)
+        | rebase::Error::WriteRef(_)
+        | rebase::Error::ReattachHead(_)
+        | rebase::Error::RestoreRef(_)
+        | rebase::Error::RestoreHead(_) => exit::CANTCREAT,
+        rebase::Error::InProgress(_)
+        | rebase::Error::NoRebaseInProgress
+        | rebase::Error::NoSuchCommit { .. }
+        | rebase::Error::NoHeadCommit
+        | rebase::Error::ResolveHead(_)
+        | rebase::Error::ReadHead(_)
+        | rebase::Error::DetachedHead
+        | rebase::Error::CollectCommits(_)
+        | rebase::Error::Editor(_)
+        | rebase::Error::ReadCommit(_)
+        | rebase::Error::Worktree(_)
+        | rebase::Error::ReadState(_)
+        | rebase::Error::ReadConflicts(_)
+        | rebase::Error::NothingToSkip
+        | rebase::Error::UnresolvedMarkers(_)
+        | rebase::Error::InconsistentState
+        | rebase::Error::BuildTree(_)
+        | rebase::Error::ClearConflicts(_)
+        | rebase::Error::CherryPick(_)
+        | rebase::Error::Conflict(_) => exit::GENERAL_ERROR,
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -396,6 +496,8 @@ mod tests {
     use kit_core::layout::DiscoverError;
     use kit_core::refs::RefError;
     use kit_core::repo_lock::LockError;
+    use libkit::rebase::TodoError;
+    use libkit::signing::{self, ErrorKind};
     use libkit::{lock, log, worktrees};
 
     use super::*;
@@ -570,6 +672,37 @@ mod tests {
             (diff::Error::NoMergeBase.into(), exit::DATAERR),
             (
                 diff::Error::Index("read index: x".to_owned()).into(),
+                exit::GENERAL_ERROR,
+            ),
+            (merge::Error::NotACommit.into(), exit::DATAERR),
+            (
+                merge::Error::AdvanceHead(head::Error::WriteHead(RefError::NoHead)).into(),
+                exit::CANTCREAT,
+            ),
+            (
+                merge::Error::RestoreHead(head::Error::ReadHead(RefError::NoHead)).into(),
+                exit::DATAERR,
+            ),
+            (merge::Error::NoMergeInProgress.into(), exit::GENERAL_ERROR),
+            (
+                merge::Error::Signing(signing::Error::new(ErrorKind::Denied, "x")).into(),
+                exit::NOPERM,
+            ),
+            (
+                rebase::Error::Signing(signing::Error::new(ErrorKind::Config, "x")).into(),
+                exit::CONFIG_ERROR,
+            ),
+            (
+                rebase::Error::Todo(TodoError::EditUnsupported).into(),
+                exit::USAGE,
+            ),
+            (rebase::Error::HeadMissingAtFinish.into(), exit::DATAERR),
+            (
+                rebase::Error::WriteRef(RefError::NoHead).into(),
+                exit::CANTCREAT,
+            ),
+            (
+                rebase::Error::NoRebaseInProgress.into(),
                 exit::GENERAL_ERROR,
             ),
             (

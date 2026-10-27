@@ -28,6 +28,9 @@ pub mod branch;
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod commit;
 pub mod config;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod conflict;
 pub mod diff;
 mod environment;
 mod error;
@@ -40,11 +43,18 @@ pub mod lock;
 pub mod log;
 #[cfg(feature = "sync")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod merge;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod mv;
 pub mod pathspec;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod rebase;
 pub mod repo;
 pub mod revspec;
 pub mod signer;
+pub mod signing;
 #[cfg(feature = "sync")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod status;

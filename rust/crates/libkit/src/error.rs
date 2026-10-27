@@ -1,6 +1,8 @@
 //! The error type of the library.
 
 use crate::{blame, branch, diff, head, lock, log, repo, revspec, worktrees};
+#[cfg(feature = "sync")]
+use crate::{conflict, merge, rebase};
 
 /// An error from any library operation.
 ///
@@ -66,4 +68,16 @@ pub enum Error {
     #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
     #[error(transparent)]
     Commit(#[from] crate::commit::Error),
+    /// A conflict could not be written, checked or undone.
+    #[cfg(feature = "sync")]
+    #[error(transparent)]
+    Conflict(#[from] conflict::Error),
+    /// A merge could not be run.
+    #[cfg(feature = "sync")]
+    #[error(transparent)]
+    Merge(#[from] merge::Error),
+    /// A rebase could not be run.
+    #[cfg(feature = "sync")]
+    #[error(transparent)]
+    Rebase(#[from] rebase::Error),
 }

@@ -129,11 +129,16 @@ re-export them.
 Every other command is a thin layer over library code. Its logic moves
 into `libkit` over time. The CLI keeps argument parsing, printing and
 exit codes. The logic of `kit log`, `kit show`, `kit diff`, `kit blame`,
-`kit branch`, `kit worktree`, `kit mv`, `kit status`, `kit add` and
-`kit commit` is in `libkit::log`, `libkit::diff`, `libkit::blame`,
-`libkit::branch`, `libkit::linked`, `libkit::mv`, `libkit::status`,
-`libkit::add` and `libkit::commit` already. The key code of `kit commit`,
+`kit branch`, `kit worktree`, `kit mv`, `kit status`, `kit add`,
+`kit commit`, `kit merge` and `kit rebase` is in `libkit::log`,
+`libkit::diff`, `libkit::blame`, `libkit::branch`, `libkit::linked`,
+`libkit::mv`, `libkit::status`, `libkit::add`, `libkit::commit`,
+`libkit::merge` and `libkit::rebase` already. The conflict workflow of a
+paused operation is in `libkit::conflict`. The key code of `kit commit`,
 `kit tag` and the other signing commands is in `libkit::signer`.
+`libkit::merge` and `libkit::rebase` never load a key. The command gives them
+a `libkit::signing::Signing`, and the library asks that value for the key when
+it writes a commit.
 
 Two decisions are proposals. They are not part of this release.
 

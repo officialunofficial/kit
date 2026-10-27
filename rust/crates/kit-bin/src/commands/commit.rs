@@ -156,13 +156,15 @@ pub fn run(args: &[String]) -> u8 {
     // A merge in progress needs every conflict resolved and staged, exactly
     // like `kit merge --continue`.
     let gate = |records: &[ConflictRecord]| -> Result<(), String> {
-        if let Some(path) = super::conflict::first_unresolved_marker(&cwd, records)? {
+        if let Some(path) =
+            libkit::conflict::first_unresolved_marker(&cwd, records).map_err(|e| e.to_string())?
+        {
             return Err(format!(
                 "committing is not possible because '{path}' still has unresolved \
                  conflict markers; resolve it and `kit add` it"
             ));
         }
-        super::conflict::ensure_conflict_paths_staged(&layout, &store, records)
+        libkit::conflict::ensure_staged(&layout, &store, records).map_err(|e| e.to_string())
     };
     let request = libkit::commit::Request {
         message: &msg,

@@ -62,6 +62,7 @@ pub mod self_update;
 pub mod serve;
 pub mod show;
 pub mod show_ref;
+pub mod signing;
 pub mod sparse_checkout;
 pub mod stash;
 pub mod status;
@@ -486,53 +487,6 @@ pub fn record_superseded(
         branch: branch.to_owned(),
     };
     recovery::record(layout, &entry).map_err(|e| (format!("recovery log: {e}"), exit::CANTCREAT))
-}
-
-/// After staging a `result_tree` (which, being a tree, omits removed paths),
-/// add `Removed` tombstones to the index for every path present in
-/// `base_tree` but absent from `result_tree`.
-///
-/// `sync_index_to_tree`/`restore_worktree_and_index` set the index from a
-/// tree, so a staged DELETION is silently dropped. Callers that stage a
-/// computed result without committing (e.g. `cherry-pick -n` / `revert -n`)
-/// use this so the deletion stays staged — otherwise an all-deletions result
-/// leaves an empty index and `kit commit` rejects it as "nothing staged".
-pub fn stage_removed_tombstones(
-    layout: &RepoLayout,
-    store: &ObjectStore,
-    base_tree: Option<Hash>,
-    result_tree: Hash,
-) -> Result<(), String> {
-    let diff = diff_trees(store, base_tree, Some(result_tree))
-        .map_err(|e| format!("diff for staged deletions: {e}"))?;
-    let removed: Vec<String> = diff
-        .entries
-        .iter()
-        .filter(|e| e.kind == DiffKind::Removed)
-        .map(|e| e.path.clone())
-        .collect();
-    if removed.is_empty() {
-        return Ok(());
-    }
-    let mut idx = kit_core::index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
-    for path in removed {
-        match idx.find_entry(&path) {
-            Some(j) => {
-                idx.entries[j].status = EntryStatus::Removed;
-                idx.entries[j].object_hash = kit_core::hash::ZERO;
-            }
-            None => idx.upsert_entry(kit_core::index::IndexEntry {
-                path,
-                status: EntryStatus::Removed,
-                object_hash: kit_core::hash::ZERO,
-                mtime_ns: 0,
-                size: 0,
-                ino: 0,
-                ctime_ns: 0,
-            }),
-        }
-    }
-    kit_core::index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))
 }
 
 /// Tracked paths present in the current index but absent from the target

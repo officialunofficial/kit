@@ -2294,6 +2294,53 @@ pub fn identity_parse_one_iteration(input: &[u8]) {
     }
 }
 
+/// The todo list of an interactive rebase (`rebase_todo_parse`):
+/// `rebase::parse_todo` never panics on any text. It gives the same answer
+/// twice. A result has one action for each commit, names only commits of the
+/// candidate list, and never starts with a squash or a fixup. A line with a
+/// verb and the hash of a candidate reads as that candidate. The first byte
+/// sets the count of candidates, from one to eight. The rest is the text.
+pub fn rebase_todo_parse_one_iteration(input: &[u8]) {
+    use libkit::rebase::{RebaseAction, parse_todo};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Some((&count, rest)) = input.split_first() else {
+        return;
+    };
+    let candidates: Vec<kit_core::hash::Hash> = (0..=count % 8)
+        .map(|i| kit_core::hash::hash(&[i]))
+        .collect();
+    let Ok(text) = core::str::from_utf8(rest) else {
+        return;
+    };
+    let first = parse_todo(&candidates, text);
+    assert_eq!(
+        first,
+        parse_todo(&candidates, text),
+        "a todo list reads the same twice"
+    );
+    if let Ok((todo, actions)) = first {
+        assert_eq!(todo.len(), actions.len(), "one action for each commit");
+        assert!(
+            todo.iter().all(|h| candidates.contains(h)),
+            "a todo names only candidates"
+        );
+        assert!(
+            actions.first().is_none_or(|a| !a.folds_into_previous()),
+            "a fold is never first"
+        );
+        assert!(actions.iter().all(|a| matches!(
+            a,
+            RebaseAction::Pick | RebaseAction::Reword | RebaseAction::Squash | RebaseAction::Fixup
+        )));
+    }
+    let line = format!("pick {}\n", kit_core::hash::to_hex(&candidates[0]));
+    assert_eq!(
+        parse_todo(&candidates, &line).map(|(todo, _)| todo),
+        Ok(vec![candidates[0]]),
+        "a full hash names its candidate"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3068,6 +3115,24 @@ mod tests {
             .step_by(2)
             .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).expect("hex byte"))
             .collect()
+    }
+
+    #[test]
+    fn unit_rebase_todo_parse() {
+        run_iterated_unit(rebase_todo_parse_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"\x00",
+            b"\x01pick 00\n",
+            b"\x03# only a comment\n",
+            b"\x03squash 0\npick 0\n",
+            b"\x03edit 0\n",
+            b"\x03drop\n",
+            b"\x03p a\nr b\ns c\nf d\nd e\n",
+            b"\x03\xff\xfe",
+        ] {
+            run_one(case, rebase_todo_parse_one_iteration).unwrap();
+        }
     }
 
     #[test]

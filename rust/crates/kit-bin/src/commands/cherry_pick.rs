@@ -185,14 +185,15 @@ fn start(
         if let Err(e) = super::ensure_restore_safe(layout, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
-        let records = match super::conflict::materialize_conflicts(
+        let records = match libkit::conflict::materialize(
             layout,
             store,
             result.tree_hash,
             &result.conflicts,
+            &super::conflict::Notes,
         ) {
             Ok(r) => r,
-            Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+            Err(e) => return super::fail(e),
         };
         let state = CherryPickState {
             cherry_pick_head: target,
@@ -252,9 +253,9 @@ fn start(
         // tombstones so a deletion-bearing pick (or an all-deletions pick)
         // stays staged and `kit commit` records it.
         if let Err(e) =
-            super::stage_removed_tombstones(layout, store, Some(ours_tree), result.tree_hash)
+            libkit::conflict::stage_removals(layout, store, Some(ours_tree), result.tree_hash)
         {
-            return emit_err(&e, exit::GENERAL_ERROR);
+            return super::fail(e);
         }
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
@@ -345,7 +346,7 @@ fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
     };
-    match super::conflict::first_unresolved_marker(layout.worktree_root(), &records) {
+    match libkit::conflict::first_unresolved_marker(layout.worktree_root(), &records) {
         Ok(Some(path)) => {
             return emit_err(
                 &format!(
@@ -355,10 +356,10 @@ fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
             );
         }
         Ok(None) => {}
-        Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+        Err(e) => return super::fail(e),
     }
-    if let Err(e) = super::conflict::ensure_conflict_paths_staged(layout, store, &records) {
-        return emit_err(&e, exit::GENERAL_ERROR);
+    if let Err(e) = libkit::conflict::ensure_staged(layout, store, &records) {
+        return super::fail(e);
     }
 
     // Single parent = current HEAD (== orig_head). Build tree from the
@@ -479,14 +480,12 @@ fn restore_to(
     // the user's in-progress conflict resolution, so it must not run if
     // the abort is going to fail).
     if let Err(e) =
-        super::conflict::ensure_abort_safe(layout, store, records, target_tree, op_result)
+        libkit::conflict::ensure_abort_safe(layout, store, records, target_tree, op_result)
     {
-        return Err(emit_err(&e, exit::GENERAL_ERROR));
+        return Err(super::fail(e));
     }
-    if let Err(e) =
-        super::conflict::reset_conflict_paths(layout, store, records, target_tree, op_result)
-    {
-        return Err(emit_err(&e, exit::GENERAL_ERROR));
+    if let Err(e) = libkit::conflict::reset_paths(layout, store, records, target_tree, op_result) {
+        return Err(super::fail(e));
     }
     if let Err(e) = super::ensure_restore_safe(layout, store, target_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));

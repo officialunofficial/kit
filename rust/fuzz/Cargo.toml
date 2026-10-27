@@ -472,3 +472,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "rebase_todo_parse"
+path = "fuzz_targets/rebase_todo_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

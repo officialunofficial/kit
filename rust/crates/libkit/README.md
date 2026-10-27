@@ -93,6 +93,19 @@ replaces. `libkit::commit::create` then takes the worktree lock, checks that
 this state still holds, signs the commit, and moves `HEAD` only when the
 branch is still at the tip that the commit was built on.
 
+`libkit::merge` merges a branch into `HEAD`. A merge that conflicts pauses,
+and `resume` and `abort` finish or undo it. `libkit::rebase` replays the
+commits of the current branch onto another base. It pauses on a conflict in
+the same way, and it can drop the paused commit. An interactive rebase asks an
+`Editor` for the todo list, and `parse_todo` reads it. `libkit::conflict`
+writes the conflict material of a paused operation into the index and the
+files, and it checks whether a resolution is complete. These three modules
+need the `sync` feature.
+
+The library never loads a signing key. A caller gives `merge` and `rebase` a
+`libkit::signing::Signing`. The operation asks it for a `Signer` at the moment
+it writes a commit.
+
 ## Errors
 
 `libkit::Error` is a `#[non_exhaustive]` enum. Each variant wraps the error
