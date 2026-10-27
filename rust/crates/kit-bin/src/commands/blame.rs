@@ -764,7 +764,7 @@ fn render_porcelain(
                 let ident = libkit::identity::full(&line.author);
                 let summary = summaries
                     .entry(line.commit_hash)
-                    .or_insert_with(|| super::commit_subject(store, &line.commit_hash));
+                    .or_insert_with(|| libkit::log::subject(store, &line.commit_hash));
                 let _ = writeln!(stdout, "author {ident}");
                 let _ = writeln!(stdout, "author-mail <>");
                 let _ = writeln!(stdout, "author-time {}", line.timestamp);

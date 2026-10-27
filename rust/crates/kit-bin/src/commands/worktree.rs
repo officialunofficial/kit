@@ -165,7 +165,7 @@ fn add(layout: &RepoLayout, cwd: &Path, path: &str, commit_ish: Option<&str>) ->
         stdout,
         "HEAD is now at {} {}",
         format::short_hash(&commit_hash, 8),
-        super::commit_subject(&store, &commit_hash)
+        libkit::log::subject(&store, &commit_hash)
     );
     exit::OK
 }

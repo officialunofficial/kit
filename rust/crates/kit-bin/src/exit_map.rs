@@ -21,8 +21,9 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         // Another `kit` holds the lock, or a stale lock file is present.
         libkit::Error::Lock(_) => exit::TEMPFAIL,
         libkit::Error::Head(inner) => head_exit_code(inner),
-        // A damaged registry or an unreadable sibling HEAD is malformed input.
-        libkit::Error::Worktrees(_) => exit::DATAERR,
+        // A damaged registry, an unreadable sibling HEAD, a wrong revision
+        // or a bad object in the history is malformed input.
+        libkit::Error::Worktrees(_) | libkit::Error::Log(_) => exit::DATAERR,
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -88,7 +89,7 @@ mod tests {
     use kit_core::layout::DiscoverError;
     use kit_core::refs::RefError;
     use kit_core::repo_lock::LockError;
-    use libkit::{lock, worktrees};
+    use libkit::{lock, log, worktrees};
 
     use super::*;
 
@@ -147,6 +148,15 @@ mod tests {
             ),
             (
                 worktrees::Error::Registry(DiscoverError::PointerMalformed(path())).into(),
+                exit::DATAERR,
+            ),
+            (log::Error::NotACommit([1; 32]).into(), exit::DATAERR),
+            (
+                log::Error::BadRevision {
+                    spec: "x".to_owned(),
+                    source: revspec::Error::Unknown("x".to_owned()),
+                }
+                .into(),
                 exit::DATAERR,
             ),
         ]

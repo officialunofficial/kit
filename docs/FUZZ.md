@@ -62,6 +62,7 @@ from recurring.
 | `fuzz_targets/self_update_extract.rs` | `self_update::extract_binary_within` (never panics; a well-formed archive extracts whole; a cap below one tar header gives `UnpackedTooLarge`; an entry cap gives `TooManyEntries`) |
 | `fuzz_targets/self_update_version.rs` | `self_update::cmp_versions` / `self_update::validate_tag` (never panic; the version order is reflexive, antisymmetric and transitive; a tag is valid exactly when it starts with `v` and the rest parses) |
 | `fuzz_targets/revspec_parse.rs` | `libkit::revspec::resolve_revision` (never panics on any text; a resolved hash names a stored object; `HEAD`, `main~2` and `v1^0` keep their answers) |
+| `fuzz_targets/log_parse.rs` | `libkit::log::date::parse` and `libkit::log::history` (a date parses the same twice, and `@<n>` reads as `n`; a walked history has no repeated commit, names only stored commits and never shows a parent before a child) |
 | `fuzz_targets/absolute_config_home.rs` | `libkit::config::xdg_config_home` (a result is always absolute; a set `XDG_CONFIG_HOME` is never repaired; an absolute `HOME` gives `HOME/.config`) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
@@ -114,6 +115,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `kit_bin::commands::self_update` `parse_version`, `cmp_versions`, `validate_tag` | `self_update_version` |
 | `libkit::config::xdg_config_home` | `absolute_config_home` |
 | `libkit::revspec::resolve_revision` | `revspec_parse` |
+| `libkit::log::date::parse`, the selection text of `libkit::log::history` | `log_parse` |
 | `kit_bin::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
 | `kit_transport_ssh::url::parse_kit_ssh_url`, `validate_ssh_path` | `ssh_url_parse` |
 | `kit_transport_s3::sigv4::parse_host` | None. It strips a scheme prefix from a configured endpoint. It does no other parsing. Unit tests cover it. |

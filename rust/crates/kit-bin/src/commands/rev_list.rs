@@ -1,9 +1,8 @@
 //! `kit rev-list [--count] <rev>` — list the commit ids reachable from
 //! `<rev>` in reverse-chronological (topological) order, or just their
-//! count. Reuses `log`'s ordered walk so ordering matches `kit log`.
+//! count. Uses the ordered walk of `libkit::log` so ordering matches `kit log`.
 //! Object ids are full 64-hex BLAKE3 (the documented divergence).
 
-use std::collections::HashSet;
 use std::io::Write;
 
 use clap::Parser;
@@ -55,16 +54,16 @@ pub fn run(args: &[String]) -> u8 {
             );
         }
     };
-    let commits = match super::log::ordered_commits(&store, &[tip], &HashSet::new()) {
+    let commits = match libkit::log::walk(&store, &[tip], false) {
         Ok(c) => c,
-        Err(code) => return code,
+        Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
     };
     let mut stdout = std::io::stdout().lock();
     if opts.count {
         let _ = writeln!(stdout, "{}", commits.len());
     } else {
-        for (h, _) in &commits {
-            let _ = writeln!(stdout, "{}", format::hex_hash(h));
+        for entry in &commits {
+            let _ = writeln!(stdout, "{}", format::hex_hash(&entry.hash));
         }
     }
     exit::OK

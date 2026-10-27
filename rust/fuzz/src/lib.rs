@@ -1858,7 +1858,7 @@ pub fn absolute_config_home_one_iteration(input: &[u8]) {
     }
 }
 
-/// A small repository that the revision fuzz target resolves against. It has
+/// A small repository that the revision and history fuzz targets use. It has
 /// a three-commit chain, the branch `main` at the tip and the tag `v1` at
 /// the root. The fixture is built once per process, because creating a store
 /// costs more than the per-iteration budget.
@@ -1866,6 +1866,7 @@ struct RevspecFixture {
     _dir: tempfile::TempDir,
     layout: kit_core::layout::RepoLayout,
     store: kit_core::store::ObjectStore,
+    repo: libkit::Repo,
     tip: kit_core::hash::Hash,
     root: kit_core::hash::Hash,
 }
@@ -1903,10 +1904,13 @@ fn revspec_fixture() -> &'static RevspecFixture {
         let (root, tip) = (hashes[0], hashes[2]);
         kit_core::refs::write_ref(&layout, "main", &tip).expect("write the branch");
         kit_core::refs::write_tag(&layout, "v1", &root).expect("write the tag");
+        let repo = libkit::Repo::open(dir.path(), &libkit::Environment::new(dir.path()))
+            .expect("open the fixture repository");
         RevspecFixture {
             _dir: dir,
             layout,
             store,
+            repo,
             tip,
             root,
         }
@@ -1934,6 +1938,54 @@ pub fn revspec_parse_one_iteration(input: &[u8]) {
     assert_eq!(resolve("HEAD"), Some(fixture.tip));
     assert_eq!(resolve("main~2"), Some(fixture.root));
     assert_eq!(resolve("v1^0"), Some(fixture.root));
+}
+
+/// History selections and dates (`log_parse`): `log::date::parse` never
+/// panics, gives the same answer twice, and reads `@<digits>` as that number.
+/// `log::history` never panics on any selection text. A history that it
+/// returns has no repeated commit, names only stored commits, and never
+/// shows a parent before a child. The fixture also pins the default order.
+pub fn log_parse_one_iteration(input: &[u8]) {
+    use libkit::log::{self, Query};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    const NOW: u64 = 1_700_000_000;
+    let first = log::date::parse(text, NOW);
+    assert_eq!(
+        first,
+        log::date::parse(text, NOW),
+        "a date parses the same twice"
+    );
+    if let (Ok(seconds), Some(digits)) = (&first, text.trim().strip_prefix('@')) {
+        assert_eq!(Ok(*seconds), digits.parse::<u64>(), "`@<n>` reads as n");
+    }
+
+    let fixture = revspec_fixture();
+    let query = Query {
+        start: Some(text.to_owned()),
+        ..Query::default()
+    };
+    if let Ok(Some(entries)) = log::history(&fixture.repo, &query) {
+        let mut seen = std::collections::HashSet::new();
+        for (index, entry) in entries.iter().enumerate() {
+            assert!(seen.insert(entry.hash), "a commit appears once");
+            assert!(fixture.store.contains(&entry.hash), "a commit is stored");
+            for parent in &entry.commit.parents {
+                let parent_index = entries.iter().position(|e| &e.hash == parent);
+                assert!(
+                    parent_index.is_none_or(|i| i > index),
+                    "a parent never comes before a child"
+                );
+            }
+        }
+    }
+    let default = log::history(&fixture.repo, &Query::default())
+        .expect("the default walk succeeds")
+        .expect("the fixture has a HEAD");
+    assert_eq!(default.first().map(|e| e.hash), Some(fixture.tip));
+    assert_eq!(default.last().map(|e| e.hash), Some(fixture.root));
 }
 
 #[cfg(test)]
@@ -2594,6 +2646,33 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, absolute_config_home_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_log_parse() {
+        run_iterated_unit(log_parse_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"HEAD",
+            b"main",
+            b"main~1",
+            b"v1..main",
+            b"..main",
+            b"v1..",
+            b"main...v1",
+            b"...",
+            b"..",
+            b"@1700000000",
+            b"@",
+            b"now",
+            b"2 weeks ago",
+            b"2023-11-14 22:13:20",
+            b"9223372036854775807-12-31",
+            b"99999999999-01-01",
+            b"\xff\xfe",
+        ] {
+            run_one(case, log_parse_one_iteration).unwrap();
         }
     }
 

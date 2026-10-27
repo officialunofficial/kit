@@ -424,3 +424,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "log_parse"
+path = "fuzz_targets/log_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

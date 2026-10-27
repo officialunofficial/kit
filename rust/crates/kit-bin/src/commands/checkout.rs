@@ -342,7 +342,7 @@ pub fn run(args: &[String]) -> u8 {
             stderr,
             "HEAD is now at {} {}",
             format::short_hash(&commit_hash, format::SUMMARY_ABBREV),
-            super::commit_subject(&store, &commit_hash),
+            libkit::log::subject(&store, &commit_hash),
         );
     }
     exit::OK

@@ -25,6 +25,7 @@ mod error;
 pub mod head;
 pub mod identity;
 pub mod lock;
+pub mod log;
 pub mod repo;
 pub mod revspec;
 pub mod worktrees;

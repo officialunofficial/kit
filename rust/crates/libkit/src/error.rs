@@ -1,6 +1,6 @@
 //! The error type of the library.
 
-use crate::{head, lock, repo, revspec, worktrees};
+use crate::{head, lock, log, repo, revspec, worktrees};
 
 /// An error from any library operation.
 ///
@@ -26,4 +26,7 @@ pub enum Error {
     /// The trees of the repository could not be read.
     #[error(transparent)]
     Worktrees(#[from] worktrees::Error),
+    /// The history could not be walked.
+    #[error(transparent)]
+    Log(#[from] log::Error),
 }
