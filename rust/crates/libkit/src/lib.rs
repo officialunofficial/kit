@@ -57,6 +57,9 @@ pub mod pathspec;
 #[cfg(feature = "sync")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod rebase;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod remote;
 pub mod repo;
 pub mod revspec;
 pub mod signer;

@@ -520,3 +520,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "remote_validate"
+path = "fuzz_targets/remote_validate.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

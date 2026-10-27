@@ -9,7 +9,7 @@ use kit_core::worktree::WorktreeError;
 use libkit::signing::ErrorKind;
 use libkit::{
     add, attest_signer, attestation, blame, branch, commit, diff, head, keys, linked, merge, mv,
-    rebase, repo, revspec, signer, status,
+    rebase, remote, repo, revspec, signer, status,
 };
 
 use crate::exit;
@@ -43,6 +43,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Commit(inner) => commit_exit_code(inner),
         libkit::Error::Merge(inner) => merge_exit_code(inner),
         libkit::Error::Rebase(inner) => rebase_exit_code(inner),
+        libkit::Error::Remote(inner) => remote_exit_code(inner),
         #[cfg(feature = "git-bridge")]
         libkit::Error::Git(inner) => git_exit_code(inner),
         _ => exit::GENERAL_ERROR,
@@ -569,6 +570,23 @@ fn git_exit_code(error: &libkit::git::Error) -> u8 {
     }
 }
 
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn remote_exit_code(error: &remote::Error) -> u8 {
+    match error {
+        // The address or the name is malformed, or the rename names the
+        // reserved remote.
+        remote::Error::UrlControlCharacters(_)
+        | remote::Error::UnsupportedScheme(_)
+        | remote::Error::NameControlCharacters(_)
+        | remote::Error::InvalidName(_)
+        | remote::Error::RenameDefault => exit::PROTOCOL_ERROR,
+        // The config cannot take the remote.
+        remote::Error::AlreadyExists(_) | remote::Error::Write(_) => exit::CANTCREAT,
+        remote::Error::NoDefault | remote::Error::NotFound(_) => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
 fn head_exit_code(error: &head::Error) -> u8 {
     match error {
         // The state to move from is damaged.
@@ -782,6 +800,20 @@ mod tests {
                 }
                 .into(),
                 exit::DATAERR,
+            ),
+            (
+                remote::Error::UnsupportedScheme("x".to_owned()).into(),
+                exit::PROTOCOL_ERROR,
+            ),
+            (remote::Error::RenameDefault.into(), exit::PROTOCOL_ERROR),
+            (
+                remote::Error::AlreadyExists("x".to_owned()).into(),
+                exit::CANTCREAT,
+            ),
+            (remote::Error::NoDefault.into(), exit::GENERAL_ERROR),
+            (
+                remote::Error::NotFound("x".to_owned()).into(),
+                exit::GENERAL_ERROR,
             ),
             (diff::Error::StagedWithRevision.into(), exit::USAGE),
             (diff::Error::MergeBaseNeedsRevision.into(), exit::USAGE),

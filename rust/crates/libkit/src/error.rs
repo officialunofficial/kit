@@ -7,7 +7,7 @@ use crate::{
     worktrees,
 };
 #[cfg(feature = "sync")]
-use crate::{conflict, merge, rebase};
+use crate::{conflict, merge, rebase, remote};
 
 /// An error from any library operation.
 ///
@@ -99,4 +99,9 @@ pub enum Error {
     #[cfg_attr(docsrs, doc(cfg(feature = "git-bridge")))]
     #[error(transparent)]
     Git(#[from] git::Error),
+    /// A remote could not be added, changed, removed or renamed.
+    #[cfg(feature = "sync")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+    #[error(transparent)]
+    Remote(#[from] remote::Error),
 }

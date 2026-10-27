@@ -2210,6 +2210,53 @@ pub fn branch_glob_one_iteration(input: &[u8]) {
     }
 }
 
+/// Remote addresses and names (`remote_validate`): `remote::validate_url` and
+/// `remote::validate_name` never panic on any text and give the same answer
+/// twice. An address that passes starts with `kit+` or `git+` and has no
+/// control character. A name that passes has no dot, no control character and
+/// is not `default`. The text before the first newline is the address, and the
+/// rest is the name.
+pub fn remote_validate_one_iteration(input: &[u8]) {
+    use libkit::remote::{validate_name, validate_url};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let (url, name) = text.split_once('\n').unwrap_or((text, ""));
+    let first = validate_url(url).ok();
+    assert_eq!(
+        first,
+        validate_url(url).ok(),
+        "an address gives the same answer twice"
+    );
+    if first.is_some() {
+        assert!(
+            url.starts_with("kit+") || url.starts_with("git+"),
+            "an address that passes names a scheme"
+        );
+        assert!(
+            !url.bytes().any(|b| b < 0x20 || b == 0x7f),
+            "an address that passes has no control character"
+        );
+    }
+    let first = validate_name(name).is_ok();
+    assert_eq!(
+        first,
+        validate_name(name).is_ok(),
+        "a name gives the same answer twice"
+    );
+    if first {
+        assert!(
+            !name.contains('.') && name != "default",
+            "a name that passes has no dot and is not `default`"
+        );
+        assert!(
+            !name.bytes().any(|b| b < 0x20 || b == 0x7f),
+            "a name that passes has no control character"
+        );
+    }
+}
+
 /// Path arguments (`index_path_arg`): `pathspec::index_path_for_arg` never
 /// panics on a relative argument, and gives the same answer twice. An answer
 /// passes `validate_index_path`, and it has no empty, `.` or `..` component.
@@ -3356,6 +3403,23 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, branch_glob_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_remote_validate() {
+        run_iterated_unit(remote_validate_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"kit+file:///r\norigin",
+            b"git+ssh://h/r\na/b",
+            b"kit+file:///r\nremote.x\n",
+            b"kit+file://\x00\ndefault",
+            b"kit+memory://\na.b",
+            b"https://x\n..",
+            b"\xff\xfe",
+        ] {
+            run_one(case, remote_validate_one_iteration).unwrap();
         }
     }
 
