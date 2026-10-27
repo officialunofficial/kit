@@ -71,6 +71,9 @@ from recurring.
 | `fuzz_targets/rebase_todo_parse.rs` | `libkit::rebase::parse_todo` (never panics on any text; a todo list reads the same twice; a result has one action for each commit, names only listed commits and never starts with a squash or a fixup; a full hash names its commit) |
 | `fuzz_targets/signer_spec_parse.rs` | `libkit::attestation::SignerSpec` (never panics on any text; a spec parses the same twice; an accepted spec names an algorithm and a signer; a refusal names the flag) |
 | `fuzz_targets/secret_hex_parse.rs` | `libkit::keys::parse_secret_hex` (never panics on any text; exactly 64 hex digits in either case are accepted; the secret equals the digits; a refusal never shows the text) |
+| `fuzz_targets/git_patch_text.rs` | `libkit::git::patch::slug`, `split_range`, `is_mbox_from_line` and `rfc2822` (a subject gives a name of at most 52 letters, digits and dashes, and the same name twice; a range always has an end; a date always ends with `+0000`; none panics) |
+| `fuzz_targets/git_url_shape.rs` | `libkit::git::validate_url` and `libkit::git::export::is_remote_location` (a location is refused if and only if it is empty or starts with `-`; a location with a scheme is remote; none panics) |
+| `fuzz_targets/git_claim.rs` | `libkit::git::verify::claim_accepts` (never panics on any payload; a statement that holds exactly the binding is accepted; the same statement is refused for another source) |
 | `fuzz_targets/absolute_config_home.rs` | `libkit::config::xdg_config_home` (a result is always absolute; a set `XDG_CONFIG_HOME` is never repaired; an absolute `HOME` gives `HOME/.config`) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
@@ -134,6 +137,9 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::rebase::parse_todo` | `rebase_todo_parse` |
 | `libkit::attestation::SignerSpec` | `signer_spec_parse` |
 | `libkit::keys::parse_secret_hex` | `secret_hex_parse` |
+| `libkit::git::patch::split_range`, `slug`, `is_mbox_from_line`, `rfc2822` | `git_patch_text` |
+| `libkit::git::validate_url`, `libkit::git::export::is_remote_location` | `git_url_shape` |
+| `libkit::git::verify::claim_accepts` | `git_claim` |
 | `kit_bin::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
 | `kit_transport_ssh::url::parse_kit_ssh_url`, `validate_ssh_path` | `ssh_url_parse` |
 | `kit_transport_s3::sigv4::parse_host` | None. It strips a scheme prefix from a configured endpoint. It does no other parsing. Unit tests cover it. |

@@ -21,8 +21,9 @@ workspace = true
 default = ["sync"]
 # The native clone, fetch, pull and push engine.
 sync = ["dep:kit-sync"]
-# The kit and git import and export bridge.
-git-bridge = ["dep:kit-git-bridge"]
+# The kit and git import and export bridge. A pull and a fresh clone restore
+# the tree through `kit-sync`, so the feature turns `sync` on.
+git-bridge = ["dep:kit-git-bridge", "dep:serde", "dep:serde_json", "sync"]
 transport-file = ["dep:kit-transport-file"]
 transport-ssh = ["dep:kit-transport-ssh"]
 transport-s3 = ["dep:kit-transport-s3"]
@@ -43,6 +44,10 @@ kit-transport-file = { version = "=0.5.0", path = "../kit-transport-file", optio
 kit-transport-ssh = { version = "=0.5.0", path = "../kit-transport-ssh", optional = true }
 kit-transport-s3 = { version = "=0.5.0", path = "../kit-transport-s3", optional = true }
 kit-transport-connect = { version = "=0.5.0", path = "../kit-transport-connect", optional = true }
+# `serde` and `serde_json` read the claim of an import attestation. Only the
+# `git-bridge` feature uses them.
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde_json = { version = "1.0.154", optional = true }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 zeroize = "1.9.1"

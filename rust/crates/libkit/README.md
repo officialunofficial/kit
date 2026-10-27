@@ -122,6 +122,16 @@ one or more signers and saves the envelope. It takes the worktree lock for
 the write only. `verify_commit` checks every envelope of a commit against a
 trust registry and reports a verdict for each one.
 
+`libkit::git` is the git bridge. It needs the `git-bridge` feature, and that
+feature turns on `sync`.
+`git::export` sends branches and tags to a git mirror, with one attestation
+for each exported head. `git::import` reads a git upstream under a dedicated
+import key. `git::import::fetch` refreshes the tracking refs, and it can
+fast-forward the current branch. `git::verify` checks the bridge state
+against the object store. `git::state` lists the state directories.
+`git::patch` turns native commits into patches for `git am`. These
+operations never print. Notices go to an `Observer` as `git::Event` values.
+
 ## Errors
 
 `libkit::Error` is a `#[non_exhaustive]` enum. Each variant wraps the error

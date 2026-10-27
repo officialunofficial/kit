@@ -2419,6 +2419,131 @@ pub fn signer_spec_parse_one_iteration(input: &[u8]) {
     );
 }
 
+/// Patch text of the git bridge (`git_patch_text`): `slug` gives a non-empty
+/// name of at most 52 letters, digits and dashes. `split_range` never gives an
+/// empty end after the first, and a text with no `..` is the start of the
+/// range. `is_mbox_from_line` and `rfc2822` never panic, and a date ends with
+/// `+0000`. The text before the first newline is a subject, and the first
+/// eight bytes of the input are a timestamp.
+pub fn git_patch_text_one_iteration(input: &[u8]) {
+    use libkit::git::patch::{is_mbox_from_line, rfc2822, slug, split_range};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let mut stamp = [0u8; 8];
+    let take = input.len().min(8);
+    stamp[..take].copy_from_slice(&input[..take]);
+    assert!(rfc2822(u64::from_le_bytes(stamp)).ends_with(" +0000"));
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let name = slug(text);
+    assert!(!name.is_empty() && name.chars().count() <= 52);
+    assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+    assert_eq!(name, slug(text), "a subject gives the same name twice");
+    let (start, end) = split_range(text);
+    assert!(!end.is_empty(), "a range always has an end");
+    if !text.contains("..") {
+        assert_eq!((start, end), (text, "HEAD"));
+    }
+    assert_eq!(is_mbox_from_line(text), is_mbox_from_line(text));
+}
+
+/// Remote locations of the git bridge (`git_url_shape`): `validate_url`
+/// refuses exactly the empty location and the location that starts with `-`,
+/// and `is_remote_location` never panics and gives the same answer twice. A
+/// location with a scheme is remote, and an absolute path is not.
+pub fn git_url_shape_one_iteration(input: &[u8]) {
+    use libkit::git::export::is_remote_location;
+    use libkit::git::{Error, validate_url};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    match validate_url(text) {
+        Ok(()) => assert!(!text.trim().is_empty() && !text.starts_with('-')),
+        Err(Error::EmptyUrl) => assert!(text.trim().is_empty()),
+        Err(Error::InvalidUrl(url)) => {
+            assert_eq!(url, text);
+            assert!(text.starts_with('-'));
+        }
+        Err(other) => panic!("unexpected error {other:?}"),
+    }
+    assert_eq!(is_remote_location(text), is_remote_location(text));
+    assert!(is_remote_location(&format!("https://{text}")));
+    assert!(!is_remote_location(&format!(
+        "/{}",
+        text.replace([':', '/'], "")
+    )));
+}
+
+/// Import claims of the git bridge (`git_claim`): `claim_accepts` never
+/// panics on any payload and refuses a payload that is not a statement. A
+/// statement that holds exactly the binding is accepted, and the same
+/// statement is refused for another source. The text before the first newline
+/// is the kit ref, and the rest is the source.
+pub fn git_claim_one_iteration(input: &[u8]) {
+    use kit_attest::statement::{Statement, Subject, encode, sha256_hex};
+    use libkit::git::import::PREDICATE_TYPE;
+    use libkit::git::verify::{ClaimBinding, claim_accepts};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let twin = [7u8; 32];
+    let git_id = [9u8; 20];
+    let sha256 = sha256_hex(b"head");
+    let fixed = ClaimBinding {
+        kit_ref: "refs/remotes/upstream/main",
+        twin: &twin,
+        sha256: &sha256,
+        git_id: &git_id,
+        source: "example.com/up",
+    };
+    let _ = claim_accepts(input, &fixed);
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let (kit_ref, source) = text.split_once('\n').unwrap_or((text, ""));
+    // Only plain text keeps the predicate canonical without an escape.
+    let plain = |s: &str| {
+        s.chars()
+            .all(|c| c.is_ascii_graphic() && c != '"' && c != '\\')
+    };
+    if !plain(kit_ref) || !plain(source) {
+        return;
+    }
+    let predicate = format!(
+        "{{\"gitCommit\":\"{}\",\"refName\":\"{kit_ref}\",\"remoteUrl\":\"{source}\",\"schemaVersion\":1,\"specVersion\":{}}}",
+        kit_git_bridge::gitobj::sha1_hex(&git_id),
+        kit_git_bridge::import::IMPORT_SPEC_VERSION
+    );
+    let Ok(statement) = encode(&Statement {
+        subjects: vec![Subject {
+            name: Some(kit_ref.to_owned()),
+            digest_blake3_hex: kit_core::to_hex(&twin),
+            digest_sha256_hex: sha256.clone(),
+        }],
+        predicate_type: PREDICATE_TYPE.to_owned(),
+        predicate_jcs: predicate.as_bytes(),
+    }) else {
+        return;
+    };
+    let binding = ClaimBinding {
+        kit_ref,
+        twin: &twin,
+        sha256: &sha256,
+        git_id: &git_id,
+        source,
+    };
+    assert!(
+        claim_accepts(statement.as_bytes(), &binding),
+        "a statement with exactly the binding is accepted"
+    );
+    let other = ClaimBinding {
+        source: "other.example/up",
+        ..binding
+    };
+    if source != other.source {
+        assert!(!claim_accepts(statement.as_bytes(), &other));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3320,6 +3445,55 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, signer_spec_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_git_patch_text() {
+        run_iterated_unit(git_patch_text_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"Add foo, bar & baz!",
+            b"a..b",
+            b"a..",
+            b"..b",
+            b"From x Thu Jan 1 00:00:00 1970",
+            b"\xff\xff\xff\xff\xff\xff\xff\xff",
+            b"\xff\xfe",
+        ] {
+            run_one(case, git_patch_text_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_git_url_shape() {
+        run_iterated_unit(git_url_shape_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b" ",
+            b"-x",
+            b"--upload-pack=x",
+            b"example.com:path",
+            b"C:/repo",
+            b"/tmp/repo",
+            b"\xff\xfe",
+        ] {
+            run_one(case, git_url_shape_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_git_claim() {
+        run_iterated_unit(git_claim_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"{}",
+            b"refs/remotes/upstream/main\nexample.com/up",
+            b"refs/heads/main\n",
+            b"a\"b\nc",
+            b"\xff\xfe",
+        ] {
+            run_one(case, git_claim_one_iteration).unwrap();
         }
     }
 }

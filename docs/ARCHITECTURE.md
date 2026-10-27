@@ -130,12 +130,12 @@ Every other command is a thin layer over library code. Its logic moves
 into `libkit` over time. The CLI keeps argument parsing, printing and
 exit codes. The logic of `kit log`, `kit show`, `kit diff`, `kit blame`,
 `kit branch`, `kit worktree`, `kit mv`, `kit status`, `kit add`,
-`kit commit`, `kit merge`, `kit rebase`, `kit key`, `kit attest` and
-`kit verify-attest` is in `libkit::log`,
+`kit commit`, `kit merge`, `kit rebase`, `kit key`, `kit attest`,
+`kit verify-attest` and `kit git` is in `libkit::log`,
 `libkit::diff`, `libkit::blame`, `libkit::branch`, `libkit::linked`,
 `libkit::mv`, `libkit::status`, `libkit::add`, `libkit::commit`,
-`libkit::merge`, `libkit::rebase`, `libkit::keys`, `libkit::attest_signer` and
-`libkit::attestation` already. The conflict
+`libkit::merge`, `libkit::rebase`, `libkit::keys`, `libkit::attest_signer`,
+`libkit::attestation` and `libkit::git` already. The conflict
 workflow of a paused operation is in `libkit::conflict`. The key code of
 `kit commit`, `kit tag` and the other signing commands is in
 `libkit::signer`. `libkit::merge` and `libkit::rebase` never load a key. The

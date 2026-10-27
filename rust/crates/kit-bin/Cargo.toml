@@ -59,7 +59,6 @@ path = "src/main.rs"
 # is required by `verify_new_object_signatures`'s batch fast path.
 kit-core = { version = "=0.5.0", path = "../kit-core", features = ["batch-verify"] }
 kit-attest = { version = "=0.5.0", path = "../kit-attest", features = ["grants"] }
-kit-git-bridge = { version = "=0.5.0", path = "../kit-git-bridge", optional = true }
 kit-keystore = { version = "=0.5.0", path = "../kit-keystore" }
 libkit = { version = "=0.5.0", path = "../libkit", default-features = false, features = ["sync"] }
 # The native clone/fetch/pull engine (packmap fetch, signature verification,
@@ -261,7 +260,7 @@ s3 = ["dep:kit-transport-s3"]
 mcp-v2 = ["dep:rmcp", "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:subtle", "dep:http", "dep:tower-service", "dep:http-body-util", "dep:bytes", "tokio/net", "tokio/signal"]
 # The git bridge (`kit git ...`, SPEC-GIT-BRIDGE / SPEC-GIT-IMPORT). On by
 # default: it is the way to adopt kit from an existing git repository.
-git-bridge = ["dep:kit-git-bridge"]
+git-bridge = ["libkit/git-bridge"]
 # Verifiable sparse-checkout. Pulls the `kit-core` sparse module and, when
 # `s3` is on, the matching S3 fetcher into scope. Off by default — the
 # upstream `commonware-storage` is ALPHA-tier.

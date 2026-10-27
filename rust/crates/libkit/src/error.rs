@@ -1,5 +1,7 @@
 //! The error type of the library.
 
+#[cfg(feature = "git-bridge")]
+use crate::git;
 use crate::{
     attest_signer, attestation, blame, branch, diff, head, keys, lock, log, repo, revspec,
     worktrees,
@@ -92,4 +94,9 @@ pub enum Error {
     /// A signing key could not be selected or handled.
     #[error(transparent)]
     Keys(#[from] keys::Error),
+    /// A git bridge operation failed.
+    #[cfg(feature = "git-bridge")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "git-bridge")))]
+    #[error(transparent)]
+    Git(#[from] git::Error),
 }

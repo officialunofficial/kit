@@ -1,10 +1,90 @@
-//! Correspondence and provenance verification for Git bridge state.
+//! Correspondence and provenance verification of the bridge state.
+//!
+//! [`verify`] re-checks the staging repository of a state directory against
+//! the local object store. Objects that the bridge translated shallow-verify
+//! (SPEC-GIT-BRIDGE §10) and must reconstruct to their mapped kit twin.
+//! Imported objects must have retained raw bytes that hash to their sha1, and
+//! a twin that the pinned importer key signed (SPEC-GIT-IMPORT §4). With
+//! `fork_audit`, every tree and blob that a bridge commit names must also
+//! re-derive from its kit twin and reproduce the exact sha1
+//! (SPEC-GIT-BRIDGE §14.3).
 
-use super::*;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+use kit_core::Hash;
+use kit_core::object::Object;
+use kit_core::refs::ATTESTATIONS_REF;
+use kit_core::store::ObjectStore;
+use kit_git_bridge::gitobj::{GitObject, GitType, Sha1Id, sha1_hex};
+use kit_git_bridge::gitsrc::{CatFileBatch, GitObjKind};
 use kit_git_bridge::verify::ShallowVerdict;
-use kit_git_bridge::{import, reconstruct, verify};
+use kit_git_bridge::{
+    gitparse, import as bridge_import, map, reconstruct, verify as bridge_verify,
+};
+
+use super::state::{read_stamp, resolve};
+use super::{Class, Error, open_repo, plain, step};
 
 mod provenance;
+
+pub use provenance::{ClaimBinding, claim_accepts};
+
+/// What to verify.
+#[derive(Debug, Clone, Copy)]
+pub struct Request<'a> {
+    /// The remote name of the state directory. With none, the only state.
+    pub remote_name: Option<&'a str>,
+    /// Whether to re-derive the content of every bridge commit.
+    pub fork_audit: bool,
+    /// The full names of the refs to verify. With none, every recorded ref.
+    pub refs: &'a [String],
+}
+
+/// A ref that the verification walked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verified {
+    /// The ref name.
+    pub ref_name: String,
+    /// `exported` or `imported`.
+    pub origin: &'static str,
+    /// The git id of the tip.
+    pub tip: Sha1Id,
+}
+
+/// The result of a verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    /// The refs that were walked, in order.
+    pub verified: Vec<Verified>,
+    /// One line for each object that failed.
+    pub failures: Vec<String>,
+    /// The number of objects that the bridge translated.
+    pub bridge: usize,
+    /// The number of translated objects with no kit signature.
+    pub unsigned: usize,
+    /// The number of imported objects.
+    pub imported: usize,
+    /// The number of content objects that were re-derived.
+    pub derived: usize,
+    fork_audit: bool,
+}
+
+impl Report {
+    /// The counts, as one line.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let mut summary = format!(
+            "{} bridge-translated ({} unsigned), {} imported-vouched",
+            self.bridge, self.unsigned, self.imported
+        );
+        if self.fork_audit {
+            let _ = write!(summary, ", {} content-derived", self.derived);
+        }
+        summary
+    }
+}
 
 #[derive(Default)]
 struct Counts {
@@ -149,7 +229,7 @@ impl Audit<'_> {
                     .read_object(&target)
                     .map_err(|e| kit_git_bridge::BridgeError::Integrity(e.to_string()))?
                     .object_type();
-                import::unsigned_tag(id, body, pin, target, Some(kind)).map(Object::Tag)
+                bridge_import::unsigned_tag(id, body, pin, target, Some(kind)).map(Object::Tag)
             } else {
                 let parsed = gitparse::parse_commit(body)
                     .map_err(|e| kit_git_bridge::BridgeError::Integrity(e.to_string()))?;
@@ -159,7 +239,7 @@ impl Audit<'_> {
                     .iter()
                     .map(resolve)
                     .collect::<Result<Vec<_>, _>>()?;
-                import::unsigned_commit(id, body, pin, tree, parents).map(Object::Commit)
+                bridge_import::unsigned_commit(id, body, pin, tree, parents).map(Object::Commit)
             }
         })();
         let mut actual = match self.store.read_object(&twin) {
@@ -228,7 +308,7 @@ impl Audit<'_> {
         obj: &GitObject,
         rec: impl Fn(&[u8]) -> Result<reconstruct::Reconstructed, kit_git_bridge::BridgeError>,
     ) {
-        match verify::shallow_verify(obj) {
+        match bridge_verify::shallow_verify(obj) {
             Ok(ShallowVerdict::Verified) => {}
             Ok(ShallowVerdict::Unsigned) => self.counts.unsigned += 1,
             Ok(ShallowVerdict::Failed) => self.fail(id, "embedded signature does NOT verify"),
@@ -277,7 +357,7 @@ impl Audit<'_> {
     fn audit_object(&mut self, id: &Sha1Id) {
         let mut pending = vec![(*id, 0usize)];
         while let Some((id, depth)) = pending.pop() {
-            if depth > import::MAX_TREE_DEPTH
+            if depth > bridge_import::MAX_TREE_DEPTH
                 || self.seen.len() >= kit_core::ops::graph::MAX_REACHABLE
             {
                 self.fail(&id, "audit content exceeds the traversal limit");
@@ -306,19 +386,20 @@ impl Audit<'_> {
                 GitObjKind::Blob => kit_core::worktree::hash_file_object(&git.body)
                     .map_err(|e| kit_git_bridge::BridgeError::Integrity(e.to_string())),
                 GitObjKind::Tree => {
-                    let result = import::translate_tree_metadata(&id, &git.body, false, |child| {
-                        let h = self.inv.get(child).copied().ok_or_else(|| {
-                            kit_git_bridge::BridgeError::Integrity(
-                                "missing tree child mapping".into(),
-                            )
-                        })?;
-                        let kind = self
-                            .store
-                            .read_object(&h)
-                            .map_err(|e| kit_git_bridge::BridgeError::Integrity(e.to_string()))?
-                            .object_type();
-                        Ok((h, Some(kind)))
-                    });
+                    let result =
+                        bridge_import::translate_tree_metadata(&id, &git.body, false, |child| {
+                            let h = self.inv.get(child).copied().ok_or_else(|| {
+                                kit_git_bridge::BridgeError::Integrity(
+                                    "missing tree child mapping".into(),
+                                )
+                            })?;
+                            let kind = self
+                                .store
+                                .read_object(&h)
+                                .map_err(|e| kit_git_bridge::BridgeError::Integrity(e.to_string()))?
+                                .object_type();
+                            Ok((h, Some(kind)))
+                        });
                     if let Ok(entries) = gitparse::parse_tree(&git.body) {
                         for entry in entries {
                             pending.push((entry.id, depth + 1));
@@ -356,50 +437,57 @@ impl Audit<'_> {
     }
 }
 
-pub(super) fn run(args: &VerifyArgs) -> CmdResult<()> {
-    let cwd = std::env::current_dir().map_err(|e| (format!("cwd: {e}"), exit::NOINPUT))?;
-    let (layout, store) = open_repo(&cwd)?;
-    let (name, state) = resolve_state(&layout, args.remote_name.as_deref())?;
+/// Verify the bridge state of the repository at `cwd`.
+///
+/// A broken object does not stop the walk. The report lists every failure.
+///
+/// # Errors
+/// An error when `cwd` is not inside a kit repository, when the state does
+/// not exist or has no staging repository, when a named ref is not recorded,
+/// or when the recorded import version is not supported.
+pub fn verify(cwd: &Path, request: &Request<'_>) -> Result<Report, Error> {
+    let (layout, store) = open_repo(cwd)?;
+    let (name, state) = resolve(&layout, request.remote_name)?;
     let staging = state.join("repo.git");
     if !staging.join("objects").is_dir() {
-        return Err((
+        return Err(plain(
+            Class::NoInput,
             format!("state '{name}' has no staging repo to verify against"),
-            exit::NOINPUT,
         ));
     }
 
-    let targets = audit_targets(args, &state, &name)?;
+    let targets = audit_targets(request, &state, &name)?;
 
     let mut audit = Audit {
         raw_dir: state.join("raw"),
-        batch: CatFileBatch::open(&staging).map_err(|e| (e.to_string(), exit::UNAVAILABLE))?,
+        batch: CatFileBatch::open(&staging).map_err(|e| plain(Class::Unavailable, e))?,
         store: &store,
-        inv: map::load_map_inverse(&state).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?,
-        pinned: map::read_signer(&state).map_err(|e| (e.to_string(), exit::CONFIG_ERROR))?,
-        deep: args.fork_audit,
+        inv: map::load_map_inverse(&state).map_err(|e| plain(Class::General, e))?,
+        pinned: map::read_signer(&state).map_err(|e| plain(Class::Config, e))?,
+        deep: request.fork_audit,
         failures: Vec::new(),
         counts: Counts::default(),
         seen: HashSet::new(),
     };
 
     let source = if audit.pinned.is_some() {
-        let version = crate::commands::git_import::read_stamp(&state.join("import-spec"))
-            .map_err(|e| (format!("read import-spec: {e}"), exit::DATAERR))?;
-        if version.trim() != import::IMPORT_SPEC_VERSION.to_string() {
-            return Err((
-                "unsupported import-spec version for audit".into(),
-                exit::DATAERR,
+        let version = read_stamp(&state.join("import-spec"))
+            .map_err(|e| step(Class::Data, "read import-spec", e))?;
+        if version.trim() != bridge_import::IMPORT_SPEC_VERSION.to_string() {
+            return Err(plain(
+                Class::Data,
+                "unsupported import-spec version for audit",
             ));
         }
-        crate::commands::git_import::read_stamp(&state.join("source"))
-            .map_err(|e| (format!("read import source: {e}"), exit::DATAERR))?
+        read_stamp(&state.join("source"))
+            .map_err(|e| step(Class::Data, "read import source", e))?
             .trim()
             .to_owned()
     } else {
         String::new()
     };
 
-    let mut stderr = std::io::stderr().lock();
+    let mut verified = Vec::new();
     for (ref_name, tip, origin) in &targets {
         audit.walk(tip);
         // A required claim must establish the exact source/ref/head relation,
@@ -421,54 +509,35 @@ pub(super) fn run(args: &VerifyArgs) -> CmdResult<()> {
                 );
             }
         }
-        let _ = writeln!(stderr, "verified {ref_name} ({origin}, {})", sha1_hex(tip));
+        verified.push(Verified {
+            ref_name: ref_name.clone(),
+            origin,
+            tip: *tip,
+        });
     }
-    let c = &audit.counts;
-    let mut summary = format!(
-        "{} bridge-translated ({} unsigned), {} imported-vouched",
-        c.bridge, c.unsigned, c.imported
-    );
-    if args.fork_audit {
-        let _ = write!(summary, ", {} content-derived", c.derived);
-    }
-    if audit.failures.is_empty() && c.unsigned > 0 {
-        // §10: an all-zero kit-signature FAILS both verification
-        // modes — reported as unsigned (never "tampered"), but never
-        // as success either.
-        return Err((
-            format!("{} unsigned object(s) ({summary})", c.unsigned),
-            exit::DATAERR,
-        ));
-    }
-    if audit.failures.is_empty() {
-        let _ = writeln!(stderr, "ok: {summary}");
-        Ok(())
-    } else {
-        for f in &audit.failures {
-            let _ = writeln!(stderr, "FAIL {f}");
-        }
-        Err((
-            format!(
-                "{} object(s) failed verification ({summary})",
-                audit.failures.len()
-            ),
-            exit::DATAERR,
-        ))
-    }
+    let c = audit.counts;
+    Ok(Report {
+        verified,
+        failures: audit.failures,
+        bridge: c.bridge,
+        unsigned: c.unsigned,
+        imported: c.imported,
+        derived: c.derived,
+        fork_audit: request.fork_audit,
+    })
 }
 
 fn audit_targets(
-    args: &VerifyArgs,
+    request: &Request<'_>,
     state: &Path,
     name: &str,
-) -> CmdResult<Vec<(String, Sha1Id, &'static str)>> {
+) -> Result<Vec<(String, Sha1Id, &'static str)>, Error> {
     // Refs to audit: explicit, else everything recorded (both
     // directions; in a fork dir the same name may have two tips).
     let mut targets: Vec<(String, Sha1Id, &'static str)> = Vec::new();
-    let recorded_export =
-        map::load_ref_state(state).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
+    let recorded_export = map::load_ref_state(state).map_err(|e| plain(Class::General, e))?;
     let recorded_import =
-        map::load_import_ref_state(state).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
+        map::load_import_ref_state(state).map_err(|e| plain(Class::General, e))?;
     for s in &recorded_export {
         if s.ref_name != ATTESTATIONS_REF {
             targets.push((s.ref_name.clone(), s.git_id, "exported"));
@@ -482,16 +551,22 @@ fn audit_targets(
             targets.push((s.ref_name.clone(), s.git_id, "imported"));
         }
     }
-    if !args.refs.is_empty() {
-        targets.retain(|(n, _, _)| args.refs.iter().any(|r| r == n));
-        for r in &args.refs {
+    if !request.refs.is_empty() {
+        targets.retain(|(n, _, _)| request.refs.iter().any(|r| r == n));
+        for r in request.refs {
             if !targets.iter().any(|(n, _, _)| n == r) {
-                return Err((format!("{r}: not recorded in state '{name}'"), exit::USAGE));
+                return Err(plain(
+                    Class::Usage,
+                    format!("{r}: not recorded in state '{name}'"),
+                ));
             }
         }
     }
     if targets.is_empty() {
-        return Err((format!("state '{name}' records no refs"), exit::NOINPUT));
+        return Err(plain(
+            Class::NoInput,
+            format!("state '{name}' records no refs"),
+        ));
     }
 
     Ok(targets)

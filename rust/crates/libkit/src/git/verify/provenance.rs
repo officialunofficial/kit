@@ -4,7 +4,7 @@ use kit_core::{Hash, layout::RepoLayout, store::ObjectStore};
 use kit_git_bridge::gitobj::{Sha1Id, sha1_hex};
 use serde::Deserialize;
 
-use crate::commands::git_import::PREDICATE_TYPE;
+use crate::git::import::PREDICATE_TYPE;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +36,50 @@ struct Predicate {
     remote_url: String,
     schema_version: u32,
     spec_version: u32,
+}
+
+/// What a claim about an imported head must state.
+#[derive(Debug, Clone, Copy)]
+pub struct ClaimBinding<'a> {
+    /// The kit ref of the head.
+    pub kit_ref: &'a str,
+    /// The kit hash of the head.
+    pub twin: &'a Hash,
+    /// The SHA-256 digest of the head, in hex.
+    pub sha256: &'a str,
+    /// The git id of the head.
+    pub git_id: &'a Sha1Id,
+    /// The remote identity of the import source.
+    pub source: &'a str,
+}
+
+/// Whether `payload` is a `git-import/v1` statement with exactly the
+/// subject and the predicate of `binding`.
+///
+/// A payload that is not a statement, or that has more than one subject, is
+/// not accepted.
+#[must_use]
+pub fn claim_accepts(payload: &[u8], binding: &ClaimBinding<'_>) -> bool {
+    let Ok(claim) = serde_json::from_slice::<Claim>(payload) else {
+        return false;
+    };
+    let [subject] = claim.subject.as_slice() else {
+        return false;
+    };
+    claim.statement_type == kit_attest::statement::IN_TOTO_TYPE
+        && claim.predicate_type == PREDICATE_TYPE
+        && subject.name == binding.kit_ref
+        && subject.digest.blake3 == kit_core::to_hex(binding.twin)
+        && subject
+            .digest
+            .sha256
+            .as_ref()
+            .is_none_or(|h| h == binding.sha256)
+        && claim.predicate.ref_name == binding.kit_ref
+        && claim.predicate.git_commit == sha1_hex(binding.git_id)
+        && claim.predicate.remote_url == binding.source
+        && claim.predicate.schema_version == 1
+        && claim.predicate.spec_version == kit_git_bridge::import::IMPORT_SPEC_VERSION
 }
 
 pub(super) struct Context<'a> {
@@ -71,29 +115,19 @@ impl Context<'_> {
             return false;
         };
         let sha256 = kit_attest::statement::sha256_hex(&bytes);
+        let binding = ClaimBinding {
+            kit_ref: &kit_ref,
+            twin,
+            sha256: &sha256,
+            git_id,
+            source: self.source,
+        };
         paths.into_iter().any(|path| {
             let Ok(envelope) = kit_attest::store::load(&path) else {
                 return false;
             };
-            if !kit_attest::verify::verify(&envelope, &registry).is_ok_and(|r| r.any_verified) {
-                return false;
-            }
-            let Ok(claim) = serde_json::from_slice::<Claim>(&envelope.payload) else {
-                return false;
-            };
-            let [subject] = claim.subject.as_slice() else {
-                return false;
-            };
-            claim.statement_type == kit_attest::statement::IN_TOTO_TYPE
-                && claim.predicate_type == PREDICATE_TYPE
-                && subject.name == kit_ref
-                && subject.digest.blake3 == kit_core::to_hex(twin)
-                && subject.digest.sha256.as_ref().is_none_or(|h| *h == sha256)
-                && claim.predicate.ref_name == kit_ref
-                && claim.predicate.git_commit == sha1_hex(git_id)
-                && claim.predicate.remote_url == self.source
-                && claim.predicate.schema_version == 1
-                && claim.predicate.spec_version == kit_git_bridge::import::IMPORT_SPEC_VERSION
+            kit_attest::verify::verify(&envelope, &registry).is_ok_and(|r| r.any_verified)
+                && claim_accepts(&envelope.payload, &binding)
         })
     }
 }

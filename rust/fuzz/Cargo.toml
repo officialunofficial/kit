@@ -54,7 +54,7 @@ kit-keystore = { path = "../crates/kit-keystore", features = ["fuzzing"] }
 kit-rpc = { path = "../crates/kit-rpc", features = ["arbitrary"] }
 kit-serve = { path = "../crates/kit-serve" }
 kit-bin = { path = "../crates/kit-bin", features = ["fuzzing"] }
-libkit = { path = "../crates/libkit" }
+libkit = { path = "../crates/libkit", features = ["git-bridge"] }
 kit-transport-ssh = { path = "../crates/kit-transport-ssh" }
 tar = "0.4.46"
 tempfile = "3.27.0"
@@ -492,6 +492,30 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "secret_hex_parse"
 path = "fuzz_targets/secret_hex_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "git_patch_text"
+path = "fuzz_targets/git_patch_text.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "git_url_shape"
+path = "fuzz_targets/git_url_shape.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "git_claim"
+path = "fuzz_targets/git_claim.rs"
 test = false
 doc = false
 bench = false

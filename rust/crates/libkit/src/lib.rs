@@ -36,6 +36,9 @@ pub mod conflict;
 pub mod diff;
 mod environment;
 mod error;
+#[cfg(feature = "git-bridge")]
+#[cfg_attr(docsrs, doc(cfg(feature = "git-bridge")))]
+pub mod git;
 pub mod head;
 pub mod identity;
 pub mod keys;

@@ -43,6 +43,8 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Commit(inner) => commit_exit_code(inner),
         libkit::Error::Merge(inner) => merge_exit_code(inner),
         libkit::Error::Rebase(inner) => rebase_exit_code(inner),
+        #[cfg(feature = "git-bridge")]
+        libkit::Error::Git(inner) => git_exit_code(inner),
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -517,6 +519,56 @@ fn keys_exit_code(error: &keys::Error) -> u8 {
     }
 }
 
+/// The code for a git bridge error.
+#[cfg(feature = "git-bridge")]
+fn git_exit_code(error: &libkit::git::Error) -> u8 {
+    use libkit::git::{Class, Error};
+
+    match error {
+        Error::Step { class, .. } => match class {
+            Class::Usage => exit::USAGE,
+            Class::Data => exit::DATAERR,
+            Class::NoInput => exit::NOINPUT,
+            Class::Unavailable => exit::UNAVAILABLE,
+            Class::CannotCreate => exit::CANTCREAT,
+            Class::Config => exit::CONFIG_ERROR,
+            Class::TempFail => exit::TEMPFAIL,
+            _ => exit::GENERAL_ERROR,
+        },
+        // The arguments contradict each other, or the recorded bindings.
+        Error::EmptyUrl
+        | Error::InvalidUrl(_)
+        | Error::NotARepository
+        | Error::ImportSource { .. }
+        | Error::PassthroughNeedsImport { .. }
+        | Error::PassthroughNormalized { .. }
+        | Error::DirectionBound { .. }
+        | Error::StateBound { .. }
+        | Error::DuplicateImport { .. }
+        | Error::BadRefName(_)
+        | Error::NothingToExport
+        | Error::TagExists { .. } => exit::USAGE,
+        // A named ref or range is wrong, or the history is damaged.
+        Error::Discover(_)
+        | Error::RefNotFound(_)
+        | Error::NotFastForward { .. }
+        | Error::RangeNotACommit(_)
+        | Error::BinaryChange { .. }
+        | Error::CommitCycle => exit::DATAERR,
+        Error::GitUnavailable(_) => exit::UNAVAILABLE,
+        // Another process holds a lock.
+        Error::StateBusy { .. } | Error::WorktreeBusy(_) => exit::TEMPFAIL,
+        Error::DestinationExists(_) => exit::CANTCREAT,
+        Error::OtherImporter { .. } | Error::NoImportState(_) => exit::CONFIG_ERROR,
+        // The command that built the signer knows the code.
+        Error::Signer(inner) => inner
+            .downcast_ref::<crate::commands::git::SignerSetup>()
+            .map_or(exit::GENERAL_ERROR, |setup| setup.code),
+        // The rest, including the errors of later versions, is general.
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
 fn head_exit_code(error: &head::Error) -> u8 {
     match error {
         // The state to move from is damaged.
@@ -908,6 +960,90 @@ mod tests {
             (keys::Error::SecretHexLength.into(), exit::DATAERR),
             (keys::Error::SecretHexDigit.into(), exit::DATAERR),
         ]
+    }
+
+    #[cfg(feature = "git-bridge")]
+    #[test]
+    fn git_errors_have_their_documented_codes() {
+        use libkit::git::{Class, Error, Skipped};
+
+        let step = |class| Error::Step {
+            class,
+            context: "x".to_owned(),
+            message: "y".to_owned(),
+        };
+        let table: Vec<(Error, u8)> = vec![
+            (step(Class::Usage), exit::USAGE),
+            (step(Class::Data), exit::DATAERR),
+            (step(Class::NoInput), exit::NOINPUT),
+            (step(Class::Unavailable), exit::UNAVAILABLE),
+            (step(Class::CannotCreate), exit::CANTCREAT),
+            (step(Class::Config), exit::CONFIG_ERROR),
+            (step(Class::TempFail), exit::TEMPFAIL),
+            (step(Class::General), exit::GENERAL_ERROR),
+            (Error::EmptyUrl, exit::USAGE),
+            (Error::NothingToExport, exit::USAGE),
+            (Error::RefNotFound("x".to_owned()), exit::DATAERR),
+            (Error::CommitCycle, exit::DATAERR),
+            (Error::GitUnavailable("x".to_owned()), exit::UNAVAILABLE),
+            (Error::DestinationExists("x".to_owned()), exit::CANTCREAT),
+            (Error::NoImportState("x".to_owned()), exit::CONFIG_ERROR),
+            (
+                Error::StateBusy {
+                    name: "x".to_owned(),
+                    source: kit_core::repo_lock::LockError::Busy("l".to_owned()),
+                },
+                exit::TEMPFAIL,
+            ),
+            (
+                Error::AllRefsSkipped {
+                    skipped: vec![Skipped {
+                        ref_name: "x".to_owned(),
+                        reason: "y".to_owned(),
+                    }],
+                },
+                exit::GENERAL_ERROR,
+            ),
+            (
+                Error::Signer(Box::new(crate::commands::git::SignerSetup::new(
+                    "x".to_owned(),
+                    exit::NOINPUT,
+                ))),
+                exit::NOINPUT,
+            ),
+            (Error::Signer("x".into()), exit::GENERAL_ERROR),
+        ];
+        for (error, code) in table {
+            let error = libkit::Error::from(error);
+            assert_eq!(exit_code(&error), code, "{error:?}");
+        }
+    }
+
+    #[cfg(feature = "git-bridge")]
+    #[test]
+    fn git_messages_keep_the_established_wording() {
+        let error: libkit::Error = libkit::git::Error::AllRefsSkipped {
+            skipped: Vec::new(),
+        }
+        .into();
+        assert_eq!(
+            message(&error),
+            "every requested ref was skipped (0 refusals)"
+        );
+        let error: libkit::Error = libkit::git::Error::Step {
+            class: libkit::git::Class::General,
+            context: "update-ref refs/heads/main".to_owned(),
+            message: "boom".to_owned(),
+        }
+        .into();
+        assert_eq!(message(&error), "update-ref refs/heads/main: boom");
+        let error: libkit::Error = libkit::git::Error::Step {
+            class: libkit::git::Class::General,
+            context: String::new(),
+            message: "boom".to_owned(),
+        }
+        .into();
+        assert_eq!(message(&error), "boom");
     }
 
     #[test]
