@@ -113,6 +113,31 @@ README in that directory gives the reason.
 `scripts/check-generated-fresh.sh` regenerates the code and fails when the
 checked-in copy differs. Only `kit-rpc` holds generated code.
 
+### 1.4 What stays in the CLI
+
+Four items stay in `kit-bin`. They are the `kit mcp`, `kit serve` and
+`kit self` commands, and the `progress` module. `libkit` does not
+re-export them.
+
+| Item | Why it stays |
+|---|---|
+| `kit mcp` | It speaks a protocol on stdin and stdout. It runs each tool by starting this same binary, so it needs the CLI. The optional `mcp-v2` feature adds a network runtime. `libkit` stays free of it. |
+| `kit serve` | It is a thin wrapper over `kit-serve`. It owns the process stdin, stdout and idle timer. An embedder that wants the server depends on `kit-serve` directly. |
+| `kit self` | It replaces the running executable. It reads the installer receipt and calls `cosign`. A library has no executable to replace. |
+| `progress` | It prints to the terminal. It is the CLI implementation of `Observer`. `libkit` exposes the `Observer` trait. The embedder supplies its own observer. |
+
+Every other command is a thin layer over library code. Its logic moves
+into `libkit` over time. The CLI keeps argument parsing, printing and
+exit codes.
+
+Two decisions are proposals. They are not part of this release.
+
+- **FFI and bindings.** This release ships none. The Rust API is not
+  stable yet. A binding would freeze it too early.
+- **Server through `libkit`.** `libkit` does not expose the server.
+  The server holds write policy and a network surface. A library user
+  can still depend on `kit-serve` by choice.
+
 ---
 
 ## 2. Data flow: object → pack → ref → transport
