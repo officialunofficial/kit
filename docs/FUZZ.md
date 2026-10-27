@@ -114,7 +114,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::config` text parsing (`apply_text`) | `config_parse` |
 | `libkit::config::parse_pipe_list` | None. It splits a user-written config value on `\|`. It does no other parsing. Unit tests cover it. |
 | `kit_bin::grants::parse_relying_parties`, `grants::spec::parse_ttl`, `grants::cli::parse_timeout`, `grants::cli::parse_namespace` | None. They read command-line text that the user types, not bytes from a peer or a repository. Unit tests cover them. |
-| `kit_bin::commands::attest_factory::parse_algorithm` | None. It matches a command-line word against a fixed list. Unit tests cover it. |
+| `libkit::attest_signer::parse_algorithm`, `libkit::attest_signer::Kind::from_str` | None. They match a command-line word against a fixed list. Unit tests cover them. |
 | `kit_bin::commands::trust_roots::parse`, `kit_core::hash::from_hex_bytes` | `trust_roots_parse` |
 | `kit_core::store::read_to_end_capped` (private) | `read_to_end_capped` |
 | `kit_bin::commands::self_update` `extract_binary_within` (private) | `self_update_extract` |

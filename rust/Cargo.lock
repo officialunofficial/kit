@@ -3301,6 +3301,7 @@ dependencies = [
  "kit-transport-ssh",
  "tempfile",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

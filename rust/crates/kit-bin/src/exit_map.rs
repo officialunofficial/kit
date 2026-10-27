@@ -8,8 +8,8 @@ use kit_core::store::StoreError;
 use kit_core::worktree::WorktreeError;
 use libkit::signing::ErrorKind;
 use libkit::{
-    add, blame, branch, commit, diff, head, linked, merge, mv, rebase, repo, revspec, signer,
-    status,
+    add, attest_signer, blame, branch, commit, diff, head, linked, merge, mv, rebase, repo,
+    revspec, signer, status,
 };
 
 use crate::exit;
@@ -37,6 +37,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Status(inner) => status_exit_code(inner),
         libkit::Error::Add(inner) => add_exit_code(inner),
         libkit::Error::Signer(inner) => signer_exit_code(inner),
+        libkit::Error::AttestSigner(inner) => attest_signer_exit_code(inner),
         libkit::Error::Commit(inner) => commit_exit_code(inner),
         libkit::Error::Merge(inner) => merge_exit_code(inner),
         libkit::Error::Rebase(inner) => rebase_exit_code(inner),
@@ -450,6 +451,22 @@ fn commit_exit_code(error: &commit::Error) -> u8 {
     }
 }
 
+/// The exit code for a failure to build a signer of an attestation.
+///
+/// A signer that is not a known word is a usage error. A key that does not
+/// exist is a missing input. Any other failure is a bad setting.
+#[must_use]
+pub fn attest_signer_exit_code(error: &attest_signer::Error) -> u8 {
+    match error {
+        attest_signer::Error::UnknownAlgorithm(_) | attest_signer::Error::UnknownSignerKind(_) => {
+            exit::USAGE
+        }
+        attest_signer::Error::MissingKeyFile { .. }
+        | attest_signer::Error::MissingKeystoreKey { .. } => exit::NOINPUT,
+        _ => exit::CONFIG_ERROR,
+    }
+}
+
 fn head_exit_code(error: &head::Error) -> u8 {
     match error {
         // The state to move from is damaged.
@@ -496,6 +513,7 @@ mod tests {
     use kit_core::layout::DiscoverError;
     use kit_core::refs::RefError;
     use kit_core::repo_lock::LockError;
+    use libkit::attest::Algorithm;
     use libkit::rebase::TodoError;
     use libkit::signing::{self, ErrorKind};
     use libkit::{lock, log, worktrees};
@@ -744,6 +762,43 @@ mod tests {
                 }
                 .into(),
                 exit::DATAERR,
+            ),
+            (
+                attest_signer::Error::UnknownAlgorithm("x".to_owned()).into(),
+                exit::USAGE,
+            ),
+            (
+                attest_signer::Error::UnknownSignerKind("x".to_owned()).into(),
+                exit::USAGE,
+            ),
+            (
+                attest_signer::Error::MissingKeyFile {
+                    algorithm: Algorithm::Ed25519,
+                    path: "k".to_owned(),
+                }
+                .into(),
+                exit::NOINPUT,
+            ),
+            (
+                attest_signer::Error::MissingKeystoreKey {
+                    algorithm: Algorithm::P256,
+                    backend: "software".to_owned(),
+                    reason: "x".to_owned(),
+                }
+                .into(),
+                exit::NOINPUT,
+            ),
+            (
+                attest_signer::Error::InvalidKeyFile {
+                    path: "k".to_owned(),
+                    reason: "x".to_owned(),
+                }
+                .into(),
+                exit::CONFIG_ERROR,
+            ),
+            (
+                attest_signer::Error::ExternalSignerPath("x".to_owned()).into(),
+                exit::CONFIG_ERROR,
             ),
         ]
     }

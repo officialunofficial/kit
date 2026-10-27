@@ -106,6 +106,11 @@ The library never loads a signing key. A caller gives `merge` and `rebase` a
 `libkit::signing::Signing`. The operation asks it for a `Signer` at the moment
 it writes a commit.
 
+## Keys and attestations
+
+`libkit::attest_signer::build` turns an algorithm, a `Kind` and a `Config` into a
+signer. It never creates a key file.
+
 ## Errors
 
 `libkit::Error` is a `#[non_exhaustive]` enum. Each variant wraps the error

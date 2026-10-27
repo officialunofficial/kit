@@ -733,7 +733,7 @@ fn publish_attestations(
         attest_factory::build_signer(layout, algorithm, &signer_kind, &cfg).map_err(|e| {
             (
                 format!("build bridge signer: {e}"),
-                crate::commands::attest::factory_error_code(&e),
+                crate::exit_map::attest_signer_exit_code(&e),
             )
         })?;
 

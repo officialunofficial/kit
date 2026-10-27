@@ -1,6 +1,6 @@
 //! The error type of the library.
 
-use crate::{blame, branch, diff, head, lock, log, repo, revspec, worktrees};
+use crate::{attest_signer, blame, branch, diff, head, lock, log, repo, revspec, worktrees};
 #[cfg(feature = "sync")]
 use crate::{conflict, merge, rebase};
 
@@ -80,4 +80,7 @@ pub enum Error {
     #[cfg(feature = "sync")]
     #[error(transparent)]
     Rebase(#[from] rebase::Error),
+    /// A signer of an attestation could not be built.
+    #[error(transparent)]
+    AttestSigner(#[from] attest_signer::Error),
 }
