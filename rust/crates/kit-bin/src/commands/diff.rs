@@ -40,21 +40,14 @@ use std::io::Write;
 
 use clap::Parser;
 use kit_core::hash::Hash;
-use kit_core::layout::RepoLayout;
-use kit_core::object::{EntryMode, Object};
-use kit_core::ops::merge::find_merge_base;
-use kit_core::ops::{
-    DEFAULT_CONTEXT_LINES, DiffEntry, DiffKind, WhitespaceMode, detect_content_renames, diff_trees,
-    unified_hunks_opts,
-};
-use kit_core::refs;
-use kit_core::store::{DisplaySource, EphemeralSink, ObjectSource, ObjectStore};
-use kit_core::worktree;
+use kit_core::object::EntryMode;
+use kit_core::ops::{DEFAULT_CONTEXT_LINES, DiffEntry, DiffKind, WhitespaceMode};
+use libkit::diff::{self, PatchBody};
 
 use crate::clap_args;
 use crate::exit;
+use crate::exit_map;
 use crate::format;
-use libkit::revspec;
 
 mod stat;
 pub(super) use stat::render_stat;
@@ -197,63 +190,37 @@ pub fn run(args: &[String]) -> u8 {
         && color_choice.resolve(std::io::IsTerminal::is_terminal(&std::io::stdout()));
     let ws_mode = opts.whitespace_mode();
     let context = opts.unified.unwrap_or(DEFAULT_CONTEXT_LINES);
-    let cwd = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
-    };
-    let layout = match super::resolve_layout(&cwd) {
-        Ok(layout) => layout,
-        Err(code) => return code,
-    };
-    let store = match ObjectStore::open(&layout) {
-        Ok(s) => s,
-        Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
-    };
-
-    // Worktree/index snapshot trees are ephemeral: they live in this
-    // in-memory overlay, never in the durable store — no flush cost,
-    // no garbage objects. Reads fall through to the store.
-    let snapshot = EphemeralSink::new(&store);
-
-    let (old_tree, new_tree, pathspecs) = match resolve_diff_endpoints(
-        &store,
-        &snapshot,
-        &layout,
-        opts.staged,
-        opts.merge_base,
-        &opts.args,
-    ) {
-        Ok(v) => v,
-        Err((msg, code)) => return emit_err(&msg, code),
-    };
-
-    let mut result = match diff_trees(&snapshot, old_tree, new_tree) {
-        Ok(r) => r,
-        Err(e) => return emit_err(&format!("diff: {e}"), exit::GENERAL_ERROR),
-    };
-
-    // Rename detection (on by default, like git's `diff.renames`): collapse
-    // identical-content delete/add pairs into `R` entries before filtering
-    // and rendering. A provided threshold must parse, but the exact matcher
-    // ignores its magnitude.
+    // A provided rename threshold must parse. The exact matcher ignores its
+    // magnitude.
     if let Some(t) = &opts.find_renames {
         let n = t.trim_end_matches('%');
         if !n.is_empty() && n.parse::<u8>().is_err() {
             return emit_err(&format!("invalid --find-renames value: {t}"), exit::USAGE);
         }
     }
-    if !opts.no_renames
-        && let Err(e) = detect_content_renames(&snapshot, &mut result.entries)
-    {
-        return emit_err(&format!("rename detection: {e}"), exit::GENERAL_ERROR);
-    }
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
+    };
+    let repo = match super::open_repo(&cwd) {
+        Ok(repo) => repo,
+        Err(code) => return code,
+    };
 
-    let normalized: Vec<String> = pathspecs.iter().map(|p| normalize_pathspec(p)).collect();
-    let selected: Vec<&kit_core::ops::DiffEntry> = result
-        .entries
-        .iter()
-        .filter(|e| normalized.is_empty() || path_matches_any(&e.path, &normalized))
-        .collect();
+    // Rename detection is on by default, like git's `diff.renames`. It
+    // collapses identical-content delete/add pairs into `R` entries before
+    // the path filter and the rendering.
+    let request = diff::Request {
+        staged: opts.staged,
+        merge_base: opts.merge_base,
+        renames: !opts.no_renames,
+        args: &opts.args,
+    };
+    let diff = match diff::compute(&repo, &request) {
+        Ok(diff) => diff,
+        Err(e) => return fail(e),
+    };
+    let selected = diff.entries();
 
     // `--exit-code`/`--quiet` report difference via the exit status (1 =
     // changed, 0 = clean). `--quiet` additionally suppresses output.
@@ -269,16 +236,14 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut stdout = std::io::stdout().lock();
     if opts.stat {
-        // `render_stat` hoists its own `DisplaySource` wrapping.
-        return match render_stat(&mut stdout, &snapshot, selected.into_iter()) {
-            Ok(()) => diff_status,
-            Err(msg) => emit_err(&msg, exit::GENERAL_ERROR),
+        return match diff.stats() {
+            Ok(rows) => match render_stat(&mut stdout, &rows) {
+                Ok(()) => diff_status,
+                Err(msg) => emit_err(&msg, exit::GENERAL_ERROR),
+            },
+            Err(e) => fail(e),
         };
     }
-    // The patch paths below print what they render here — nothing durable
-    // is published from this path — so skip the BLAKE3 re-verify on every
-    // changed blob.
-    let display = DisplaySource::new(&snapshot);
     for e in selected {
         let res = if opts.name_only || opts.name_status {
             emit_entry_name(&mut stdout, e, opts.name_status, opts.z);
@@ -287,7 +252,7 @@ pub fn run(args: &[String]) -> u8 {
             // Render the entry to a buffer, then colorize line-by-line so
             // the byte-exact patch machinery stays color-agnostic.
             let mut buf: Vec<u8> = Vec::new();
-            match emit_entry_patch(&mut buf, &display, e, context, ws_mode) {
+            match emit_entry_patch(&mut buf, e, || diff.patch_body(e, context, ws_mode)) {
                 // Colorize on RAW BYTES (not via from_utf8_lossy) so a
                 // non-UTF-8 patch body round-trips byte-for-byte, matching
                 // the uncolored path.
@@ -297,13 +262,19 @@ pub fn run(args: &[String]) -> u8 {
                 Err(msg) => Err(msg),
             }
         } else {
-            emit_entry_patch(&mut stdout, &display, e, context, ws_mode)
+            emit_entry_patch(&mut stdout, e, || diff.patch_body(e, context, ws_mode))
         };
         if let Err(msg) = res {
             return emit_err(&msg, exit::GENERAL_ERROR);
         }
     }
     diff_status
+}
+
+/// Print a library failure and return its exit code.
+fn fail(error: diff::Error) -> u8 {
+    let error = libkit::Error::from(error);
+    emit_err(&exit_map::message(&error), exit_map::exit_code(&error))
 }
 
 /// ANSI-colorize a unified-diff patch line-by-line, matching git's default
@@ -415,403 +386,6 @@ fn emit_entry_name(out: &mut impl Write, e: &DiffEntry, name_status: bool, z: bo
     }
 }
 
-/// `(old_tree, new_tree, pathspecs)` triple computed from the args.
-type DiffEndpoints = (Option<Hash>, Option<Hash>, Vec<String>);
-
-/// Decide the `old_tree` / `new_tree` / pathspecs triple from the
-/// `staged` flag and the positional args. Returns `(message, exit_code)`
-/// on error so the caller can route it through `emit_err`.
-///
-/// Cases:
-/// - `--staged <rev>...` (any positionals) — usage contradiction,
-///   because `--staged` already fixes both endpoints (HEAD vs index).
-/// - `<a>..<b> [paths…]` — range form; both ends resolved to trees.
-/// - `<a> <b> [paths…]` — two revisions, when both resolve.
-/// - `<a> [paths…]` — one revision vs worktree (or vs index w/--staged
-///   only in the no-positional case, handled above).
-/// - no leading revision — default HEAD-vs-worktree / HEAD-vs-index,
-///   all positionals are pathspecs.
-/// `--merge-base` endpoint resolution. One revision: `merge-base(rev,
-/// HEAD)` vs the worktree; two revisions: `merge-base(a, b)` vs `b`.
-/// Trailing positionals are pathspecs. Annotated tags are peeled to their
-/// commit before the merge-base walk, like git.
-fn resolve_merge_base_endpoints(
-    store: &ObjectStore,
-    snapshot: &EphemeralSink<'_>,
-    layout: &RepoLayout,
-    args: &[String],
-) -> Result<DiffEndpoints, (String, u8)> {
-    let first = args.first().ok_or_else(|| {
-        (
-            "`--merge-base` requires at least one revision".to_string(),
-            exit::USAGE,
-        )
-    })?;
-    let a = revspec::peel_tags(
-        store,
-        revspec::resolve_revision(store, layout, first)
-            .map_err(|e| (format!("bad revision '{first}': {e}"), exit::DATAERR))?,
-    );
-
-    // A second positional that resolves to a revision selects the
-    // two-revision form. One that only *looks* like a revision but fails to
-    // resolve is a hard error; anything else is a pathspec, leaving
-    // the single-revision (vs worktree) form.
-    if let Some(second) = args.get(1) {
-        match revspec::resolve_revision(store, layout, second) {
-            Ok(h) => {
-                let b = revspec::peel_tags(store, h);
-                let base = merge_base_of(store, a, b)?;
-                let old = revspec::tree_of(store, &base)
-                    .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
-                let new = revspec::tree_of(store, &b)
-                    .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
-                return Ok((Some(old), Some(new), args[2..].to_vec()));
-            }
-            // A 2nd positional that fails to resolve is treated as a pathspec
-            // ONLY when it is clearly path-shaped (names an existing worktree
-            // path, a tracked path, or contains `/`). Otherwise it is an
-            // ambiguous bad revision — a typo'd `<b>` — which we surface,
-            // rather than silently falling back to the single-rev form and
-            // emitting an empty diff (matching git's "ambiguous argument").
-            Err(e)
-                if matches!(e, revspec::Error::Unknown(_))
-                    && looks_like_pathspec(layout, second) => {}
-            Err(e) => return Err((format!("bad revision '{second}': {e}"), exit::DATAERR)),
-        }
-    }
-
-    // Single revision: merge-base(rev, HEAD) vs the worktree.
-    let head = refs::resolve_head(layout)
-        .map_err(|e| (format!("resolve HEAD: {e}"), exit::GENERAL_ERROR))?
-        .ok_or_else(|| {
-            (
-                "HEAD has no commit to take a merge base with".to_string(),
-                exit::GENERAL_ERROR,
-            )
-        })?;
-    let head = revspec::peel_tags(store, head);
-    let base = merge_base_of(store, a, head)?;
-    let old = revspec::tree_of(store, &base).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
-    let new = worktree_tree_filtered(store, snapshot, layout)?;
-    Ok((Some(old), Some(new), args[1..].to_vec()))
-}
-
-/// Resolve the single merge base of `a` and `b`, mapping "no base" to a
-/// clear error (matches git's `--merge-base` failure on unrelated histories).
-fn merge_base_of(store: &ObjectStore, a: Hash, b: Hash) -> Result<Hash, (String, u8)> {
-    find_merge_base(store, a, b)
-        .map_err(|e| (format!("merge base: {e}"), exit::GENERAL_ERROR))?
-        .ok_or_else(|| {
-            (
-                "no merge base between the given revisions".to_string(),
-                exit::DATAERR,
-            )
-        })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn resolve_diff_endpoints(
-    store: &ObjectStore,
-    snapshot: &EphemeralSink<'_>,
-    layout: &RepoLayout,
-    staged: bool,
-    merge_base: bool,
-    args: &[String],
-) -> Result<DiffEndpoints, (String, u8)> {
-    // `--merge-base <a> [<b>] [paths…]` — diff the merge base of the given
-    // revision(s) rather than the revisions themselves. Resolved before
-    // any other form (clap already rejects `--merge-base --staged`).
-    if merge_base {
-        return resolve_merge_base_endpoints(store, snapshot, layout, args);
-    }
-
-    // `--staged` with explicit revisions is contradictory —
-    // `--staged` already pins HEAD vs the index. Pathspecs are fine, but
-    // a leading argument that *looks* like a revision is not, and must
-    // fail closed: if it resolves it is the contradiction, and if
-    // it does not it is a bad revision. Either way we error rather
-    // than silently treating a typo'd hash as a no-match pathspec (which
-    // would empty-succeed and diverge from `git diff --cached <bad-rev>`).
-    // A non-rev-looking leading arg (e.g. `path/`, `file.txt`) still falls
-    // through as a pathspec filter.
-    if staged {
-        if let Some(first) = args.first()
-            && looks_like_rev_request(first)
-        {
-            if revspec::resolve_revision(store, layout, strip_range_end(first).0).is_ok() {
-                return Err((
-                    "`--staged` diffs HEAD vs the index; it cannot take an explicit revision"
-                        .to_string(),
-                    exit::USAGE,
-                ));
-            }
-            return Err((
-                format!("bad revision '{first}': not a known ref, commit, or short hash"),
-                exit::DATAERR,
-            ));
-        }
-        // No leading revision: HEAD vs index, all positionals = pathspecs.
-        let head = head_tree(store, layout).map_err(|e| (e, exit::GENERAL_ERROR))?;
-        let idx = index_tree(layout, store, snapshot).map_err(|e| (e, exit::GENERAL_ERROR))?;
-        return Ok((head, idx, args.to_vec()));
-    }
-
-    // Symmetric range `A...B` = diff the merge base of A and B against B
-    // (git semantics). Must be checked before `A..B` (which it contains).
-    if let Some(first) = args.first()
-        && let Some((a, b)) = split_symmetric(first)
-    {
-        // Peel annotated/signed tags to their commit before merge-base
-        // resolution, like git (and like `log` does for its range bases).
-        let commit_a = revspec::peel_tags(
-            store,
-            revspec::resolve_revision(store, layout, a)
-                .map_err(|e| (format!("bad revision '{a}': {e}"), exit::DATAERR))?,
-        );
-        let commit_b = revspec::peel_tags(
-            store,
-            revspec::resolve_revision(store, layout, b)
-                .map_err(|e| (format!("bad revision '{b}': {e}"), exit::DATAERR))?,
-        );
-        let mb = find_merge_base(store, commit_a, commit_b)
-            .map_err(|e| (format!("merge base: {e}"), exit::GENERAL_ERROR))?
-            .ok_or_else(|| {
-                (
-                    format!("no merge base between '{a}' and '{b}'"),
-                    exit::DATAERR,
-                )
-            })?;
-        let old = revspec::tree_of(store, &mb).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
-        let new =
-            revspec::tree_of(store, &commit_b).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
-        return Ok((Some(old), Some(new), args[1..].to_vec()));
-    }
-
-    // Range form `A..B` as the first positional.
-    if let Some(first) = args.first()
-        && let Some((a, b)) = split_range(first)
-    {
-        let old = rev_to_tree(store, layout, a)?;
-        let new = rev_to_tree(store, layout, b)?;
-        return Ok((Some(old), Some(new), args[1..].to_vec()));
-    }
-
-    // Try to peel one or two leading revisions.
-    let first_rev = args.first().and_then(|a| try_rev_to_tree(store, layout, a));
-    match first_rev {
-        None => {
-            // No leading revision → default HEAD vs worktree; all
-            // positionals are pathspecs. If the first arg *looked* like
-            // a revision but failed to resolve, error loudly
-            // rather than silently treating it as a pathspec.
-            if let Some(first) = args.first()
-                && looks_like_rev_request(first)
-            {
-                return Err((
-                    format!("bad revision '{first}': not a known ref, commit, or short hash"),
-                    exit::DATAERR,
-                ));
-            }
-            let head = head_tree(store, layout).map_err(|e| (e, exit::GENERAL_ERROR))?;
-            let new = Some(worktree_tree_filtered(store, snapshot, layout)?);
-            Ok((head, new, args.to_vec()))
-        }
-        Some(Err(e)) => Err(e),
-        Some(Ok(old)) => {
-            // One revision resolved. Is the second positional also a
-            // revision? If so, two-rev mode; otherwise rev-vs-worktree.
-            let second_rev = args.get(1).and_then(|a| try_rev_to_tree(store, layout, a));
-            match second_rev {
-                Some(Ok(new)) => Ok((Some(old), Some(new), args[2..].to_vec())),
-                Some(Err(e)) => Err(e),
-                None => {
-                    let new = Some(worktree_tree_filtered(store, snapshot, layout)?);
-                    Ok((Some(old), new, args[1..].to_vec()))
-                }
-            }
-        }
-    }
-}
-
-/// Resolve a revision spec to a tree hash, mapping a commit/remix to its
-/// tree and accepting a bare tree hash as itself. `(message, code)` on
-/// failure.
-/// Snapshot the worktree, seeding the tracked set from the index (or HEAD
-/// when no index file exists) so a tracked file matching an ignore rule is
-/// not dropped from the snapshot and misreported as a deletion.
-fn worktree_tree_filtered(
-    store: &ObjectStore,
-    snapshot: &EphemeralSink<'_>,
-    layout: &RepoLayout,
-) -> Result<Hash, (String, u8)> {
-    let idx =
-        super::read_or_seed_index_from_head(layout, store).map_err(|e| (e, exit::GENERAL_ERROR))?;
-    worktree::build_tree_filtered_observed_with_source(
-        snapshot,
-        snapshot,
-        layout.worktree_root(),
-        Some(&idx),
-        &mut Vec::new(),
-    )
-    .map_err(|e| (format!("build tree: {e}"), exit::GENERAL_ERROR))
-}
-
-fn rev_to_tree(store: &ObjectStore, layout: &RepoLayout, spec: &str) -> Result<Hash, (String, u8)> {
-    let h = revspec::resolve_revision(store, layout, spec)
-        .map_err(|e| (format!("bad revision '{spec}': {e}"), exit::DATAERR))?;
-    revspec::tree_of(store, &h).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))
-}
-
-/// Like [`rev_to_tree`] but distinguishes "not a revision at all" (None)
-/// from "looks like a revision but is broken" (`Some(Err(..))`).
-fn try_rev_to_tree(
-    store: &ObjectStore,
-    layout: &RepoLayout,
-    spec: &str,
-) -> Option<Result<Hash, (String, u8)>> {
-    match revspec::resolve_revision(store, layout, spec) {
-        Ok(h) => {
-            Some(revspec::tree_of(store, &h).map_err(|e| (e.to_string(), exit::GENERAL_ERROR)))
-        }
-        Err(revspec::Error::Unknown(_)) => {
-            // Not a known ref/object. If it still *looks* like a
-            // revision request (ref-shaped or hash-shaped), surface the
-            // failure; otherwise it is a pathspec.
-            if looks_like_rev_request(spec) {
-                Some(Err((
-                    format!("bad revision '{spec}': not a known ref, commit, or short hash"),
-                    exit::DATAERR,
-                )))
-            } else {
-                None
-            }
-        }
-        Err(e) => Some(Err((format!("bad revision '{spec}': {e}"), exit::DATAERR))),
-    }
-}
-
-/// Split an `A..B` range. Returns `None` if there is no `..`.
-fn split_range(s: &str) -> Option<(&str, &str)> {
-    let (a, b) = s.split_once("..")?;
-    if a.is_empty() || b.is_empty() {
-        return None;
-    }
-    Some((a, b))
-}
-
-/// Split a symmetric `A...B` range. An empty side defaults to `HEAD`
-/// (`A...` = `A...HEAD`, `...B` = `HEAD...B`).
-fn split_symmetric(s: &str) -> Option<(&str, &str)> {
-    let (a, b) = s.split_once("...")?;
-    Some((
-        if a.is_empty() { "HEAD" } else { a },
-        if b.is_empty() { "HEAD" } else { b },
-    ))
-}
-
-/// The left-hand end of a possible range, used for the `--staged`
-/// contradiction probe. Returns `(rev, is_range)`.
-fn strip_range_end(s: &str) -> (&str, bool) {
-    match s.split_once("..") {
-        Some((a, _)) if !a.is_empty() => (a, true),
-        _ => (s, false),
-    }
-}
-
-/// Heuristic: does this argument look like the user *intended*
-/// a revision (so a resolve failure should be a hard error) rather than
-/// a pathspec? True for hash-shaped tokens, `A..B` ranges, and the
-/// literal `HEAD` (possibly with `~`/`^` navigation). A plain
-/// filesystem-y token (`src/`, `./x`, `*.rs`) is treated as a pathspec.
-fn looks_like_rev_request(s: &str) -> bool {
-    if s.contains("..") {
-        return true;
-    }
-    // A `~` or `^` navigation suffix is revision syntax, not a path.
-    let base = s.split(['~', '^']).next().unwrap_or(s);
-    if base == "HEAD" {
-        return true;
-    }
-    // Hash-shaped: ≥ MIN_SHORT_HASH hex chars with no path separators.
-    base.len() >= revspec::MIN_SHORT_HASH
-        && !base.contains('/')
-        && !base.contains('.')
-        && base.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// Is `arg` clearly a pathspec rather than a (typo'd) revision? True when it
-/// names an existing worktree path OR matches a tracked index path (a file/dir
-/// tracked but deleted from the worktree is still a valid pathspec, as in
-/// git). A bare `/` is NOT enough — branch names routinely contain `/` (e.g.
-/// `feature/x`), so a typo'd branch like `feature/typo` must surface as a bad
-/// revision rather than silently degrade into an empty-output pathspec filter.
-fn looks_like_pathspec(layout: &RepoLayout, arg: &str) -> bool {
-    if layout.worktree_root().join(arg).symlink_metadata().is_ok() {
-        return true;
-    }
-    // Normalize the spec the same way the path filter will (e.g. `./a.txt` ->
-    // `a.txt`) before matching the index, so a tracked-but-deleted file passed
-    // as `./a.txt` isn't misread as a bad revision.
-    let spec = normalize_pathspec(arg);
-    let Ok(idx) = kit_core::index::read_index(layout) else {
-        return false;
-    };
-    let prefix = format!("{spec}/");
-    idx.entries
-        .iter()
-        .any(|e| e.path == spec || e.path.starts_with(&prefix))
-}
-
-fn head_tree(store: &ObjectStore, layout: &RepoLayout) -> Result<Option<Hash>, String> {
-    let head = refs::resolve_head(layout).map_err(|e| format!("resolve HEAD: {e}"))?;
-    match head {
-        None => Ok(None),
-        Some(h) => match store.read_object(&h) {
-            Ok(Object::Commit(c)) => Ok(Some(c.tree_hash)),
-            Ok(Object::Remix(r)) => Ok(Some(r.tree_hash)),
-            Ok(_) => Ok(None),
-            Err(e) => Err(format!("read HEAD: {e}")),
-        },
-    }
-}
-
-fn index_tree(
-    layout: &RepoLayout,
-    store: &ObjectStore,
-    snapshot: &EphemeralSink<'_>,
-) -> Result<Option<Hash>, String> {
-    let idx = super::read_or_seed_index_from_head(layout, store)?;
-    // Ephemeral diff snapshot — nothing durable is published, so skip the
-    // re-hash; the read path verifies any object actually touched.
-    let tree = worktree::build_tree_from_index_with(store, snapshot, &idx, false)
-        .map_err(|e| format!("build index tree: {e}"))?;
-    Ok(Some(tree))
-}
-
-/// Normalize a pathspec to the index/diff path form: strip a leading
-/// `./`, collapse `\\` to `/`, drop a trailing `/`. The repo root in any
-/// spelling (`.`, `./`, `/`, or empty) normalizes to the empty string, which
-/// [`path_matches_any`] treats as "match everything" (matching git, where
-/// `diff -- .` is the whole-tree diff).
-fn normalize_pathspec(spec: &str) -> String {
-    let s = spec.replace('\\', "/");
-    let s = s.strip_prefix("./").unwrap_or(&s);
-    let s = s.strip_suffix('/').unwrap_or(s);
-    if s == "." {
-        String::new()
-    } else {
-        s.to_string()
-    }
-}
-
-fn path_matches_any(path: &str, specs: &[String]) -> bool {
-    specs
-        .iter()
-        // An empty spec is the repo root (`.`/`./`) → matches every path.
-        .any(|spec| spec.is_empty() || super::index_path_matches_or_descends(path, spec))
-}
-
 /// Abbreviated all-zero blob id git prints for an absent side of `index`.
 const ZERO_ABBREV: &str = "0000000";
 
@@ -835,20 +409,17 @@ fn abbrev(h: Option<Hash>) -> String {
 /// prefixes (longer than git's SHA-1 prefixes for the same `core.abbrev`),
 /// the one inherent divergence; everything else matches `git diff`.
 ///
-/// Shared with `kit show`, so a commit's diff body is byte-identical to
-/// `kit diff <parent> <commit>` when both use the default `context`/`ws`
-/// (git's `-U3`, exact comparison).
+/// Shared with `kit show` and `format-patch`, so a commit's diff body is
+/// byte-identical to `kit diff <parent> <commit>` when both use the default
+/// context and the exact comparison (git's `-U3`).
 ///
-/// `context` is the `-U<n>` unchanged-context-line count and `ws` is the
-/// `-w`/`-b` whitespace-comparison mode; pass
-/// [`kit_core::ops::DEFAULT_CONTEXT_LINES`] / [`WhitespaceMode::Exact`]
-/// for git's defaults.
-pub(super) fn emit_entry_patch<S: ObjectSource + ?Sized>(
+/// `read_body` supplies the patch body after the header lines are written.
+/// The caller picks the context, the whitespace mode and the read source
+/// that it passes to the library.
+pub(super) fn emit_entry_patch(
     out: &mut impl Write,
-    store: &S,
     e: &DiffEntry,
-    context: usize,
-    ws: WhitespaceMode,
+    read_body: impl FnOnce() -> Result<PatchBody, diff::Error>,
 ) -> Result<(), String> {
     // git C-style quotes special-byte paths in the header (core.quotePath),
     // quoting the whole `a/<path>` / `b/<path>` token as a unit. For a
@@ -903,26 +474,19 @@ pub(super) fn emit_entry_patch<S: ObjectSource + ?Sized>(
         }
     }
 
-    let old_bytes = match e.old_hash {
-        Some(h) => read_blob(store, &h)?,
-        None => Vec::new(),
-    };
-    let new_bytes = match e.new_hash {
-        Some(h) => read_blob(store, &h)?,
-        None => Vec::new(),
-    };
+    let body = read_body().map_err(|err| err.to_string())?;
     // `--- a/p` / `+++ b/p` (quoted), with `/dev/null` for the absent side.
     let (minus, plus) = match e.kind {
         DiffKind::Added => ("/dev/null".to_string(), b_path.clone()),
         DiffKind::Removed => (a_path.clone(), "/dev/null".to_string()),
         _ => (a_path.clone(), b_path.clone()),
     };
-    match unified_hunks_opts(&old_bytes, &new_bytes, context, ws) {
-        None => {
+    match body {
+        PatchBody::Binary => {
             let _ = writeln!(out, "Binary files {minus} and {plus} differ");
         }
-        Some(hunks) if hunks.is_empty() => {}
-        Some(hunks) => {
+        PatchBody::Empty => {}
+        PatchBody::Hunks(hunks) => {
             let _ = writeln!(out, "--- {minus}");
             let _ = writeln!(out, "+++ {plus}");
             let _ = out.write_all(&hunks);
@@ -937,17 +501,6 @@ pub(super) fn emit_entry_patch<S: ObjectSource + ?Sized>(
 fn quoted_side(side: char, path: &str) -> String {
     let s = format!("{side}/{path}");
     super::c_quote_path(&s).unwrap_or(s)
-}
-
-/// Read a blob's bytes from the store, reassembling chunked blobs via
-/// the shared core helper so diff/cat/checkout agree.
-fn read_blob<S: ObjectSource + ?Sized>(store: &S, h: &Hash) -> Result<Vec<u8>, String> {
-    worktree::read_blob(store, h).map_err(read_err)
-}
-
-/// The one place the CLI's "read object: …" error wording is defined.
-fn read_err<E: std::fmt::Display>(e: E) -> String {
-    format!("read object: {e}")
 }
 
 use super::error as emit_err;

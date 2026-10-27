@@ -20,6 +20,7 @@
 //! ```
 
 pub mod config;
+pub mod diff;
 mod environment;
 mod error;
 pub mod head;

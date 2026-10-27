@@ -52,8 +52,9 @@ pub fn print_commit_summary(
     let Ok(result) = diff_trees(store, old_tree, new_tree) else {
         return;
     };
-    // `render_stat` hoists its own `DisplaySource` wrapping.
-    let _ = super::diff::render_stat(out, store, result.entries.iter());
+    if let Ok(rows) = libkit::diff::stats(store, &result.entries) {
+        let _ = super::diff::render_stat(out, &rows);
+    }
     for e in &result.entries {
         match e.kind {
             DiffKind::Added => {

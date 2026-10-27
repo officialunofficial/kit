@@ -5,7 +5,7 @@
 //! and into the text for stderr with [`message`].
 
 use kit_core::store::StoreError;
-use libkit::{head, repo, revspec};
+use libkit::{diff, head, repo, revspec};
 
 use crate::exit;
 
@@ -24,6 +24,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         // A damaged registry, an unreadable sibling HEAD, a wrong revision
         // or a bad object in the history is malformed input.
         libkit::Error::Worktrees(_) | libkit::Error::Log(_) => exit::DATAERR,
+        libkit::Error::Diff(inner) => diff_exit_code(inner),
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -39,6 +40,32 @@ fn revspec_exit_code(error: &revspec::Error) -> u8 {
         | revspec::Error::ReadHead(_)
         | revspec::Error::ScanObjects(_)
         | revspec::Error::ReadObject(_) => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn diff_exit_code(error: &diff::Error) -> u8 {
+    match error {
+        // The arguments contradict each other.
+        diff::Error::MergeBaseNeedsRevision | diff::Error::StagedWithRevision => exit::USAGE,
+        // The caller named a revision that does not exist, or two revisions
+        // without a common ancestor.
+        diff::Error::BadRevision { .. }
+        | diff::Error::UnknownRevision(_)
+        | diff::Error::NoMergeBaseBetween { .. }
+        | diff::Error::NoMergeBase => exit::DATAERR,
+        diff::Error::Tree(_)
+        | diff::Error::MergeBase(_)
+        | diff::Error::ResolveHead(_)
+        | diff::Error::HeadWithoutCommit
+        | diff::Error::ReadHead(_)
+        | diff::Error::Index(_)
+        | diff::Error::BuildIndexTree(_)
+        | diff::Error::BuildTree(_)
+        | diff::Error::Diff(_)
+        | diff::Error::RenameDetection(_)
+        | diff::Error::ReadObject(_) => exit::GENERAL_ERROR,
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -151,6 +178,17 @@ mod tests {
                 exit::DATAERR,
             ),
             (log::Error::NotACommit([1; 32]).into(), exit::DATAERR),
+            (diff::Error::StagedWithRevision.into(), exit::USAGE),
+            (diff::Error::MergeBaseNeedsRevision.into(), exit::USAGE),
+            (
+                diff::Error::UnknownRevision("x".to_owned()).into(),
+                exit::DATAERR,
+            ),
+            (diff::Error::NoMergeBase.into(), exit::DATAERR),
+            (
+                diff::Error::Index("read index: x".to_owned()).into(),
+                exit::GENERAL_ERROR,
+            ),
             (
                 log::Error::BadRevision {
                     spec: "x".to_owned(),

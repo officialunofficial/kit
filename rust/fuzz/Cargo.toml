@@ -432,3 +432,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "diff_args"
+path = "fuzz_targets/diff_args.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

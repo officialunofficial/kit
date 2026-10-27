@@ -1,6 +1,6 @@
 //! The error type of the library.
 
-use crate::{head, lock, log, repo, revspec, worktrees};
+use crate::{diff, head, lock, log, repo, revspec, worktrees};
 
 /// An error from any library operation.
 ///
@@ -29,4 +29,7 @@ pub enum Error {
     /// The history could not be walked.
     #[error(transparent)]
     Log(#[from] log::Error),
+    /// A diff could not be computed.
+    #[error(transparent)]
+    Diff(#[from] diff::Error),
 }

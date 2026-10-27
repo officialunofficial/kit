@@ -20,14 +20,12 @@ use std::io::Write;
 use clap::Parser;
 use kit_core::hash::Hash;
 use kit_core::object::{Identity, Object, Tag};
-use kit_core::ops::diff_trees;
-use kit_core::store::{DisplaySource, ObjectStore};
 use kit_core::worktree;
 
 use crate::clap_args;
 use crate::exit;
 use crate::format;
-use libkit::revspec;
+use libkit::{Repo, revspec};
 
 /// Bound on tag-of-tag recursion, mirroring `diff`/`log`'s peel depth.
 const MAX_TAG_DEPTH: usize = 16;
@@ -58,13 +56,9 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let layout = match super::resolve_layout(&cwd) {
-        Ok(layout) => layout,
+    let repo = match super::open_repo(&cwd) {
+        Ok(repo) => repo,
         Err(code) => return code,
-    };
-    let store = match ObjectStore::open(&layout) {
-        Ok(s) => s,
-        Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
     };
 
     let specs: Vec<String> = if opts.objects.is_empty() {
@@ -75,11 +69,11 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut stdout = std::io::stdout().lock();
     for spec in &specs {
-        let h = match revspec::resolve_revision(&store, &layout, spec) {
+        let h = match revspec::resolve_revision(repo.store(), repo.layout(), spec) {
             Ok(h) => h,
             Err(e) => return emit_err(&e.to_string(), exit::GENERAL_ERROR),
         };
-        if let Err((msg, code)) = show_object(&mut stdout, &store, &h, 0, opts.stat) {
+        if let Err((msg, code)) = show_object(&mut stdout, &repo, &h, 0, opts.stat) {
             return emit_err(&msg, code);
         }
     }
@@ -89,18 +83,19 @@ pub fn run(args: &[String]) -> u8 {
 /// Display one object. `tag_depth` bounds tag-of-tag recursion.
 fn show_object(
     out: &mut impl Write,
-    store: &ObjectStore,
+    repo: &Repo,
     h: &Hash,
     tag_depth: usize,
     stat: bool,
 ) -> Result<(), (String, u8)> {
-    let obj = store
+    let obj = repo
+        .store()
         .read_object(h)
         .map_err(|e| (format!("read object: {e}"), exit::GENERAL_ERROR))?;
     match obj {
         Object::Commit(c) => show_commit_like(
             out,
-            store,
+            repo,
             h,
             "commit",
             &c.author,
@@ -112,7 +107,7 @@ fn show_object(
         ),
         Object::Remix(r) => show_commit_like(
             out,
-            store,
+            repo,
             h,
             "remix",
             &r.author,
@@ -122,7 +117,7 @@ fn show_object(
             r.tree_hash,
             stat,
         ),
-        Object::Tag(t) => show_tag(out, store, &t, tag_depth, stat),
+        Object::Tag(t) => show_tag(out, repo, &t, tag_depth, stat),
         Object::Tree(t) => {
             for e in &t.entries {
                 let (mode, ty) = super::cat_file::git_mode_and_type(e.mode);
@@ -140,7 +135,7 @@ fn show_object(
             Ok(())
         }
         Object::ChunkedBlob(_) => {
-            let data = worktree::read_blob(store, h)
+            let data = worktree::read_blob(repo.store(), h)
                 .map_err(|e| (format!("reassemble: {e}"), exit::GENERAL_ERROR))?;
             let _ = out.write_all(&data);
             Ok(())
@@ -156,7 +151,7 @@ fn show_object(
 #[allow(clippy::too_many_arguments)]
 fn show_commit_like(
     out: &mut impl Write,
-    store: &ObjectStore,
+    repo: &Repo,
     hash: &Hash,
     label: &str,
     author: &Identity,
@@ -177,32 +172,29 @@ fn show_commit_like(
     // root commit shows every file as added), reusing `diff`'s renderer.
     let parent_tree = match parent {
         Some(p) => Some(
-            libkit::revspec::tree_of(store, &p)
+            libkit::revspec::tree_of(repo.store(), &p)
                 .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?,
         ),
         None => None,
     };
-    let result = diff_trees(store, parent_tree, Some(tree))
-        .map_err(|e| (format!("diff: {e}"), exit::GENERAL_ERROR))?;
+    let diff = libkit::diff::between_trees(repo, parent_tree, Some(tree))
+        .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
     // `--stat` renders the diffstat instead of the full patch (like
-    // `git show --stat`), reusing `diff`'s byte-exact stat renderer;
-    // `render_stat` hoists its own `DisplaySource` wrapping.
+    // `git show --stat`), reusing `diff`'s byte-exact stat renderer.
     if stat {
-        return super::diff::render_stat(out, store, result.entries.iter())
-            .map_err(|e| (e, exit::GENERAL_ERROR));
+        let rows = diff
+            .stats()
+            .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
+        return super::diff::render_stat(out, &rows).map_err(|e| (e, exit::GENERAL_ERROR));
     }
-    // The patch loop below only ever prints what it renders here — nothing
-    // durable is published from this path — so skip the BLAKE3 re-verify
-    // on every changed blob.
-    let display = DisplaySource::new(store);
-    for e in &result.entries {
-        super::diff::emit_entry_patch(
-            out,
-            &display,
-            e,
-            kit_core::ops::DEFAULT_CONTEXT_LINES,
-            kit_core::ops::WhitespaceMode::Exact,
-        )
+    for e in diff.entries() {
+        super::diff::emit_entry_patch(out, e, || {
+            diff.patch_body(
+                e,
+                kit_core::ops::DEFAULT_CONTEXT_LINES,
+                kit_core::ops::WhitespaceMode::Exact,
+            )
+        })
         .map_err(|e| (e, exit::GENERAL_ERROR))?;
     }
     Ok(())
@@ -211,7 +203,7 @@ fn show_commit_like(
 /// Render an annotated/signed tag header, then the peeled target object.
 fn show_tag(
     out: &mut impl Write,
-    store: &ObjectStore,
+    repo: &Repo,
     t: &Tag,
     tag_depth: usize,
     stat: bool,
@@ -231,7 +223,7 @@ fn show_tag(
     if tag_depth + 1 >= MAX_TAG_DEPTH {
         return Err(("tag chain too deep".to_string(), exit::DATAERR));
     }
-    show_object(out, store, &t.target, tag_depth + 1, stat)
+    show_object(out, repo, &t.target, tag_depth + 1, stat)
 }
 
 /// Write a commit message indented four spaces per line (blank lines stay

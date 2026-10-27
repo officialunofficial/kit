@@ -1988,6 +1988,114 @@ pub fn log_parse_one_iteration(input: &[u8]) {
     assert_eq!(default.last().map(|e| e.hash), Some(fixture.root));
 }
 
+/// A repository for the diff fuzz target. It has two commits: `a.txt` holds
+/// two lines at `HEAD~1` and a changed second line at `HEAD`, and `HEAD` adds
+/// `b.txt`. The worktree holds the files of `HEAD`.
+fn diff_fixture() -> &'static (tempfile::TempDir, libkit::Repo) {
+    use kit_core::layout::RepoLayout;
+    use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use kit_core::store::ObjectStore;
+    use std::sync::OnceLock;
+
+    static FIXTURE: OnceLock<(tempfile::TempDir, libkit::Repo)> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("create the fixture directory");
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).expect("init the fixture store");
+        kit_core::refs::init(&layout).expect("init the fixture refs");
+        let write = |object: &Object| {
+            store
+                .write(&kit_core::serialize::serialize(object).expect("serialize a fixture object"))
+                .expect("write a fixture object")
+        };
+        let blob = |text: &str| {
+            write(&Object::Blob(Blob {
+                data: text.as_bytes().to_vec(),
+            }))
+        };
+        let tree = |files: &[(&str, kit_core::hash::Hash)]| {
+            write(&Object::Tree(Tree {
+                entries: files
+                    .iter()
+                    .map(|(name, object_hash)| TreeEntry {
+                        name: name.as_bytes().to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: *object_hash,
+                    })
+                    .collect(),
+            }))
+        };
+        let commit = |tree, parents: Vec<kit_core::hash::Hash>, time| {
+            write(&Object::Commit(Commit::new_unannotated(
+                tree,
+                parents,
+                Identity::ed25519([1; 32]),
+                [1; 32],
+                b"m".to_vec(),
+                time,
+                [0u8; 64],
+            )))
+        };
+        let first_a = blob("one\ntwo\n");
+        let second_a = blob("one\nthree\n");
+        let b = blob("b\n");
+        let first = commit(tree(&[("a.txt", first_a)]), vec![], 1);
+        let second = commit(tree(&[("a.txt", second_a), ("b.txt", b)]), vec![first], 2);
+        kit_core::refs::write_ref(&layout, "main", &second).expect("write the branch");
+        std::fs::write(dir.path().join("a.txt"), "one\nthree\n").expect("write a.txt");
+        std::fs::write(dir.path().join("b.txt"), "b\n").expect("write b.txt");
+        let repo = libkit::Repo::open(dir.path(), &libkit::Environment::new(dir.path()))
+            .expect("open the fixture repository");
+        (dir, repo)
+    })
+}
+
+/// Diff arguments (`diff_args`): `diff::compute` never panics on any
+/// revisions or paths, whatever the first byte says about `staged`,
+/// `merge_base` and `renames`. The patch body and the change counts of every
+/// returned entry never panic. The fixture also pins the answer for
+/// `HEAD~1 HEAD`.
+pub fn diff_args_one_iteration(input: &[u8]) {
+    use libkit::diff::{self, Request};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Some((flags, rest)) = input.split_first() else {
+        return;
+    };
+    let Ok(text) = core::str::from_utf8(rest) else {
+        return;
+    };
+    // At most four arguments, one per line. The bound keeps an iteration cheap.
+    let args: Vec<String> = text.lines().take(4).map(str::to_owned).collect();
+    let repo = &diff_fixture().1;
+    let request = Request {
+        staged: flags & 1 != 0,
+        merge_base: flags & 2 != 0,
+        renames: flags & 4 != 0,
+        args: &args,
+    };
+    if let Ok(result) = diff::compute(repo, &request) {
+        for entry in result.entries() {
+            assert!(!entry.path.is_empty(), "an entry has a path");
+            let _ = result.patch_body(entry, diff::DEFAULT_CONTEXT_LINES, Default::default());
+        }
+        let _ = result.stats();
+    }
+
+    let pinned = [String::from("HEAD~1"), String::from("HEAD")];
+    let result = diff::compute(
+        repo,
+        &Request {
+            staged: false,
+            merge_base: false,
+            renames: true,
+            args: &pinned,
+        },
+    )
+    .expect("the pinned diff succeeds");
+    let paths: Vec<&str> = result.entries().iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, ["a.txt", "b.txt"]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2673,6 +2781,30 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, log_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_diff_args() {
+        run_iterated_unit(diff_args_one_iteration).unwrap();
+        for case in [
+            &b"\x04"[..],
+            b"\x04HEAD",
+            b"\x04HEAD~1\nHEAD",
+            b"\x04HEAD~1..HEAD",
+            b"\x04HEAD~1...HEAD",
+            b"\x04HEAD~1\nHEAD\na.txt",
+            b"\x05HEAD",
+            b"\x01a.txt",
+            b"\x02HEAD~1",
+            b"\x06HEAD~1\nHEAD",
+            b"\x04.\n..\n./a.txt",
+            b"\x04deadbeef",
+            b"\x04\n\n\n\n\n",
+            b"\x04..",
+            b"\x04...",
+        ] {
+            run_one(case, diff_args_one_iteration).unwrap();
         }
     }
 
