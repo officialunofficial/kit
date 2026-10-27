@@ -19,6 +19,9 @@
 //! let _algorithm = Algorithm::Ed25519;
 //! ```
 
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod add;
 pub mod blame;
 pub mod branch;
 pub mod config;

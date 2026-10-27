@@ -312,7 +312,7 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     if opts.all
-        && let Err(e) = super::add::stage_tracked_changes(&layout, &store)
+        && let Err(e) = libkit::add::stage_tracked(&layout, &store)
     {
         return emit_err(&format!("stage tracked changes: {e}"), exit::GENERAL_ERROR);
     }

@@ -109,8 +109,8 @@ pub use kit_sync::worktree::{
 /// across rayon's global thread pool once there's enough work to amortize
 /// dispatch — the directory walk itself stays sequential either way (see
 /// [`refs::list_refs_with`]'s docs). Same sequential-vs-rayon crossover
-/// shape as `commands::add`'s hashing fan-outs and `remote_dispatch`'s
-/// pack/delta/signature fan-outs (`crate::fanout`). Measured ~2x faster at
+/// shape as the hashing fan-outs of `libkit::add` and the pack, delta and
+/// signature fan-outs of `kit_sync` (`kit_sync::fanout`). Measured ~2x faster at
 /// 1k-10k refs and still faster, not a wash, even at 100 (`cargo bench -p
 /// kit-benches --bench refs_ops -- list_refs_fanout`).
 pub(crate) fn list_refs_parallel(layout: &RepoLayout) -> Result<Vec<refs::Ref>, RefError> {

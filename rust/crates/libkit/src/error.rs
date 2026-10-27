@@ -53,4 +53,9 @@ pub enum Error {
     #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
     #[error(transparent)]
     Status(#[from] crate::status::Error),
+    /// Files could not be staged.
+    #[cfg(feature = "sync")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+    #[error(transparent)]
+    Add(#[from] crate::add::Error),
 }

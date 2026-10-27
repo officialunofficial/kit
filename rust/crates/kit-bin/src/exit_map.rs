@@ -5,7 +5,8 @@
 //! and into the text for stderr with [`message`].
 
 use kit_core::store::StoreError;
-use libkit::{blame, branch, diff, head, linked, mv, repo, revspec, status};
+use kit_core::worktree::WorktreeError;
+use libkit::{add, blame, branch, diff, head, linked, mv, repo, revspec, status};
 
 use crate::exit;
 
@@ -30,6 +31,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Linked(inner) => linked_exit_code(inner),
         libkit::Error::Mv(inner) => mv_exit_code(inner),
         libkit::Error::Status(inner) => status_exit_code(inner),
+        libkit::Error::Add(inner) => add_exit_code(inner),
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -230,6 +232,60 @@ fn status_exit_code(error: &status::Error) -> u8 {
     }
 }
 
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn add_exit_code(error: &add::Error) -> u8 {
+    match error {
+        // Another `kit` holds the lock.
+        add::Error::Lock(_) => exit::TEMPFAIL,
+        // The caller combined modes that exclude each other, named an ignored
+        // path, or asked for hunks of a file that is not a regular file.
+        add::Error::PatchWithBulk
+        | add::Error::PatchNeedsPaths
+        | add::Error::AllWithUpdate
+        | add::Error::BulkTakesNoPaths
+        | add::Error::NoPaths
+        | add::Error::Ignored(_)
+        | add::Error::PatchRegularOnly(_) => exit::USAGE,
+        // The input is malformed: a path that leaves the repository or goes
+        // through a symlink, a symlink target that is not allowed, or a blob
+        // that cannot be compared.
+        add::Error::InvalidPath(_)
+        | add::Error::ResolveParent { .. }
+        | add::Error::RepoRoot(_)
+        | add::Error::Outside(_)
+        | add::Error::ThroughSymlink(_)
+        | add::Error::SymlinkTargetNotUtf8
+        | add::Error::InvalidSymlinkTarget(_)
+        | add::Error::Serialize(_)
+        | add::Error::CompareStaged { .. } => exit::DATAERR,
+        // The input cannot be read.
+        add::Error::Metadata { .. }
+        | add::Error::ReadLink { .. }
+        | add::Error::NotRegular(_)
+        | add::Error::ReadDir { .. }
+        | add::Error::ReadFile { .. }
+        | add::Error::ReadInput(_) => exit::NOINPUT,
+        // The store or the index cannot be written.
+        add::Error::Store(_) | add::Error::StoreFile(_) | add::Error::WriteIndex(_) => {
+            exit::CANTCREAT
+        }
+        add::Error::Hash { source, .. } => match source {
+            WorktreeError::Io(_) | WorktreeError::FileTooLarge(_) => exit::NOINPUT,
+            WorktreeError::Object(_) | WorktreeError::Store(_) => exit::CANTCREAT,
+            WorktreeError::InvalidSymlinkTarget(_) | WorktreeError::InvalidUtf8 => exit::DATAERR,
+            // A contract violation between kit-core and its caller, which no
+            // input can trigger.
+            WorktreeError::ChunkBatchLengthMismatch { .. } => exit::SOFTWARE,
+        },
+        add::Error::NotARepository(_)
+        | add::Error::ReadIndex(_)
+        | add::Error::IgnoreFile(_)
+        | add::Error::Refresh(_)
+        | add::Error::ReadStagedBlob(_) => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
 fn head_exit_code(error: &head::Error) -> u8 {
     match error {
         // The state to move from is damaged.
@@ -425,6 +481,21 @@ mod tests {
             (
                 status::Error::HeadTree("x".to_owned()).into(),
                 exit::GENERAL_ERROR,
+            ),
+            (add::Error::NoPaths.into(), exit::USAGE),
+            (add::Error::SymlinkTargetNotUtf8.into(), exit::DATAERR),
+            (add::Error::NotRegular(path()).into(), exit::NOINPUT),
+            (
+                add::Error::Refresh("x".to_owned()).into(),
+                exit::GENERAL_ERROR,
+            ),
+            (
+                add::Error::Hash {
+                    path: path(),
+                    source: WorktreeError::InvalidUtf8,
+                }
+                .into(),
+                exit::DATAERR,
             ),
             (diff::Error::StagedWithRevision.into(), exit::USAGE),
             (diff::Error::MergeBaseNeedsRevision.into(), exit::USAGE),
