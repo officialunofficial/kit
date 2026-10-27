@@ -1,6 +1,6 @@
 //! The error type of the library.
 
-use crate::{diff, head, lock, log, repo, revspec, worktrees};
+use crate::{blame, diff, head, lock, log, repo, revspec, worktrees};
 
 /// An error from any library operation.
 ///
@@ -32,4 +32,7 @@ pub enum Error {
     /// A diff could not be computed.
     #[error(transparent)]
     Diff(#[from] diff::Error),
+    /// A file could not be blamed.
+    #[error(transparent)]
+    Blame(#[from] blame::Error),
 }

@@ -440,3 +440,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "blame_line_range"
+path = "fuzz_targets/blame_line_range.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

@@ -2096,6 +2096,97 @@ pub fn diff_args_one_iteration(input: &[u8]) {
     assert_eq!(paths, ["a.txt", "b.txt"]);
 }
 
+/// Blame ranges and revisions (`blame_line_range`): `blame::line_range::parse`
+/// never panics, gives the same answer twice, and returns a range that sits
+/// inside the file: `1 <= first <= last <= total`. `blame::blame` never
+/// panics on any range of lines, revision or revision to skip, with or
+/// without the reverse walk. A result has the consecutive line numbers of the
+/// file in order. The fixture also pins `-L 2` on `a.txt`.
+pub fn blame_line_range_one_iteration(input: &[u8]) {
+    use libkit::blame::{self, Request, line_range};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Some((flags, rest)) = input.split_first() else {
+        return;
+    };
+    let Ok(text) = core::str::from_utf8(rest) else {
+        return;
+    };
+    // One field on each line: the range of lines, the revision, and a
+    // revision to skip. An empty line is an absent field.
+    let mut fields = text.lines().map(|l| (!l.is_empty()).then_some(l));
+    let lines = fields.next().flatten();
+    let revision = fields.next().flatten();
+    let skipped: Vec<String> = fields
+        .next()
+        .flatten()
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+
+    if let Some(spec) = lines {
+        for total in [0, 1, 2, usize::from(*flags), usize::MAX] {
+            let first = line_range::parse(spec, total, "f");
+            assert_eq!(
+                first,
+                line_range::parse(spec, total, "f"),
+                "a range parses the same twice"
+            );
+            if let Ok((start, end)) = first {
+                assert!(
+                    1 <= start && start <= end && end <= total,
+                    "a range sits inside the file"
+                );
+            }
+        }
+    }
+
+    let repo = &diff_fixture().1;
+    let request = Request {
+        file: "a.txt",
+        revision,
+        reverse: flags & 1 != 0,
+        ignore_whitespace: flags & 2 != 0,
+        moves: Default::default(),
+        copies: Default::default(),
+        ignore_revs: &skipped,
+        ignore_revs_files: &[],
+        ignore_rev_precise: flags & 4 != 0,
+        first_parent: flags & 8 != 0,
+        lines,
+    };
+    if let Ok(result) = blame::blame(repo, &request) {
+        let numbers: Vec<usize> = result.lines.iter().map(|l| l.line_num).collect();
+        assert!(
+            numbers.windows(2).all(|w| w[1] == w[0] + 1),
+            "line numbers are consecutive"
+        );
+        assert!(
+            numbers.first().is_none_or(|&n| n >= 1),
+            "numbers start at 1"
+        );
+    }
+
+    let pinned = blame::blame(
+        repo,
+        &Request {
+            file: "a.txt",
+            revision: None,
+            reverse: false,
+            ignore_whitespace: false,
+            moves: Default::default(),
+            copies: Default::default(),
+            ignore_revs: &[],
+            ignore_revs_files: &[],
+            ignore_rev_precise: false,
+            first_parent: false,
+            lines: Some("2"),
+        },
+    )
+    .expect("the pinned blame succeeds");
+    assert_eq!(pinned.lines.len(), 1);
+    assert_eq!(pinned.lines[0].line_num, 2);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2805,6 +2896,34 @@ mod tests {
             b"\x04...",
         ] {
             run_one(case, diff_args_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_blame_line_range() {
+        run_iterated_unit(blame_line_range_one_iteration).unwrap();
+        for case in [
+            &b"\x00"[..],
+            b"\x00\n",
+            b"\x00,\n",
+            b"\x00,3",
+            b"\x00 3, 5 \nHEAD",
+            b"\x00-3,5",
+            b"\x00,+0",
+            b"\x000,0",
+            b"\x007,-18446744073709551615",
+            b"\x00+99999999999999999999999",
+            b"\x01\nHEAD~1..HEAD",
+            b"\x01\nHEAD~1..",
+            b"\x01\nHEAD~1...HEAD",
+            b"\x01\n..HEAD",
+            b"\x01\nHEAD..HEAD",
+            b"\x00\nHEAD~1\nHEAD",
+            b"\x04\n\nHEAD",
+            b"\x0a\n\nnope",
+            b"\x00\n\xff\xfe",
+        ] {
+            run_one(case, blame_line_range_one_iteration).unwrap();
         }
     }
 

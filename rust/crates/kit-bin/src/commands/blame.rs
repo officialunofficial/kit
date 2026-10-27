@@ -33,22 +33,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
-use kit_core::hash::{self, Hash};
-use kit_core::layout::RepoLayout;
-use kit_core::ops::blame::{
-    BlameOptions, BlameResult, CopyDetection, MoveDetection, blame_file_reverse, blame_file_with,
-    format_blame_text,
-};
-use kit_core::refs;
+use kit_core::hash::Hash;
+use kit_core::ops::blame::format_blame_text;
 use kit_core::store::ObjectStore;
 
 use crate::clap_args;
 use crate::exit;
+use crate::exit_map;
 use crate::format;
-use libkit::revspec;
+use libkit::blame::{self, BlameResult, CopyDetection, MoveDetection};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum BlameFormat {
@@ -171,7 +166,6 @@ struct BlameOpts {
 }
 
 #[must_use]
-#[allow(clippy::too_many_lines)] // linear flow: parse + resolve + blame + slice + render
 pub fn run(args: &[String]) -> u8 {
     // git's inline `-M<num>`/`-C<num>` forms can't be expressed with clap
     // derive (a short flag that both repeats *and* takes an optional glued
@@ -203,21 +197,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let layout = match super::resolve_layout(&cwd) {
-        Ok(layout) => layout,
+    let repo = match super::open_repo(&cwd) {
+        Ok(repo) => repo,
         Err(code) => return code,
     };
-    let store = match ObjectStore::open(&layout) {
-        Ok(s) => s,
-        Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
-    };
-
-    // Uses the *effective* move/copy state (`find_moves`/`find_copies`),
-    // which folds in the inline `-M<num>`/`-C<num>` forms, so a combination
-    // like `-M20 --reverse` is still rejected.
-    if let Err((msg, code)) = check_flag_conflicts(&opts, find_moves, find_copies) {
-        return emit_err(&msg, code);
-    }
 
     // `-M` enables move detection; `-C` (a repeat count) sets the copy
     // search level. An inline `-M<num>`/`-C<num>` overrides the default
@@ -243,70 +226,30 @@ pub fn run(args: &[String]) -> u8 {
     } else {
         CopyDetection::Off
     };
-    // Build the `--ignore-rev` / `--ignore-revs-file` skip set. Each
-    // failure is already git-faithful text paired with an exit code.
-    let ignore_revs = match collect_ignore_revs(&store, &layout, &opts) {
-        Ok(set) => Arc::new(set),
-        Err((msg, code)) => return emit_err(&msg, code),
-    };
 
-    let blame_opts = BlameOptions {
+    let request = blame::Request {
+        file,
+        revision: rev_spec.map(String::as_str),
+        reverse: opts.reverse,
         ignore_whitespace: opts.ignore_whitespace,
         moves,
         copies,
-        ignore_revs,
+        ignore_revs: &opts.ignore_rev,
+        ignore_revs_files: &opts.ignore_revs_file,
         ignore_rev_precise: opts.ignore_rev_precise,
         first_parent: opts.first_parent,
+        lines: opts.lines.as_deref(),
     };
-
-    // `--reverse` walks forward over a `<start>..<end>` range; plain blame
-    // walks backward from a single `<rev>` (or HEAD).
-    let result = if opts.reverse {
-        let (start, end) = match resolve_reverse_range(&store, &layout, rev_spec, file) {
-            Ok(pair) => pair,
-            Err((msg, code)) => return emit_err(&msg, code),
-        };
-        match blame_file_reverse(&store, start, end, file, &blame_opts) {
-            Ok(r) => r,
-            Err(e) => return emit_err(&format!("blame: {e}"), exit::NOINPUT),
+    let result = match blame::blame(&repo, &request) {
+        Ok(result) => result,
+        Err(error) => {
+            let error = libkit::Error::from(error);
+            return emit_err(&exit_map::message(&error), exit_map::exit_code(&error));
         }
-    } else {
-        // Resolve the commit to blame against: an explicit <rev> via the
-        // shared revspec grammar, otherwise HEAD.
-        let head = if let Some(spec) = rev_spec {
-            match revspec::resolve_revision(&store, &layout, spec) {
-                Ok(h) => h,
-                Err(e) => return emit_err(&format!("{e}"), exit::NOINPUT),
-            }
-        } else {
-            match refs::resolve_head(&layout) {
-                Ok(Some(h)) => h,
-                Ok(None) => return emit_err("no commits yet", exit::GENERAL_ERROR),
-                Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
-            }
-        };
-        match blame_file_with(&store, head, file, &blame_opts) {
-            Ok(r) => r,
-            Err(e) => return emit_err(&format!("blame: {e}"), exit::NOINPUT),
-        }
-    };
-
-    // `-L` slices the per-line attributions to the requested range,
-    // preserving the file's own 1-based line numbers in the output.
-    let result = match &opts.lines {
-        Some(spec) => match parse_line_range(spec, result.lines.len(), file) {
-            Ok((start, end)) => BlameResult {
-                lines: result.lines[start - 1..end].to_vec(),
-            },
-            // The message is already git-faithful and self-contained
-            // (it carries `file` where git does), so it prints verbatim.
-            Err(msg) => return emit_err(&msg, exit::USAGE),
-        },
-        None => result,
     };
 
     if opts.porcelain || opts.line_porcelain {
-        render_porcelain(&store, &result, file, opts.line_porcelain)
+        render_porcelain(repo.store(), &result, file, opts.line_porcelain)
     } else if json {
         render_json(&result)
     } else {
@@ -315,46 +258,6 @@ pub fn run(args: &[String]) -> u8 {
         let _ = stdout.write_all(text.as_bytes());
         exit::OK
     }
-}
-
-/// Reject flag combinations `run` cannot satisfy, before any store/revision
-/// resolution work. On error returns `(message, exit_code)`.
-///
-/// `find_moves`/`find_copies` are the *effective* move/copy state (clap's
-/// bare `-M`/`-C` folded together with the inline `-M<num>`/`-C<num>`
-/// forms), so the check fires even when detection was requested only via an
-/// inline threshold.
-fn check_flag_conflicts(
-    opts: &BlameOpts,
-    find_moves: bool,
-    find_copies: u8,
-) -> Result<(), (String, u8)> {
-    // `--reverse` is a distinct walk that resolves line survival via the
-    // LCS matcher only — it runs neither move/copy nor ignore-rev
-    // detection, so reject the combination rather than silently ignoring
-    // those flags.
-    if opts.reverse
-        && (find_moves
-            || find_copies > 0
-            || !opts.ignore_rev.is_empty()
-            || !opts.ignore_revs_file.is_empty())
-    {
-        return Err((
-            "--reverse cannot be combined with -M/-C or --ignore-rev/--ignore-revs-file"
-                .to_string(),
-            exit::USAGE,
-        ));
-    }
-    // `--ignore-rev-precise` only refines an active ignore-rev set; without
-    // one it has nothing to refine, so reject it outright rather than
-    // silently no-op'ing.
-    if opts.ignore_rev_precise && opts.ignore_rev.is_empty() && opts.ignore_revs_file.is_empty() {
-        return Err((
-            "--ignore-rev-precise requires --ignore-rev or --ignore-revs-file".to_string(),
-            exit::USAGE,
-        ));
-    }
-    Ok(())
 }
 
 /// Inline `-M<num>`/`-C<num>` threshold state pulled from argv before clap
@@ -439,240 +342,6 @@ fn parse_threshold(val: &str) -> Option<usize> {
         return None;
     }
     Some(num.parse::<usize>().unwrap_or(usize::MAX))
-}
-
-/// Resolve `--ignore-rev` / `--ignore-revs-file` into the set of commits
-/// to skip during attribution.
-///
-/// `--ignore-rev` takes any revision (short hash, ref, `HEAD~2`) via the
-/// shared revspec grammar — git resolves these the same way — so an
-/// unknown one errors `cannot find revision <rev> to ignore`.
-/// `--ignore-revs-file` entries must be **full** hex object names (git
-/// rejects short hashes in the file): each line is truncated at the first
-/// `#` (inline comments), trimmed, and skipped if empty; a malformed
-/// entry errors `invalid object name: <token>`, and an unreadable file
-/// `could not open object name list: <path>`. All three messages and the
-/// full-hash-only rule were verified against real git.
-///
-/// On error returns `(message, exit_code)`; kit uses its sysexits-style
-/// codes rather than git's blanket `128`.
-fn collect_ignore_revs(
-    store: &ObjectStore,
-    layout: &RepoLayout,
-    opts: &BlameOpts,
-) -> Result<HashSet<Hash>, (String, u8)> {
-    let mut set = HashSet::new();
-
-    for spec in &opts.ignore_rev {
-        match revspec::resolve_revision(store, layout, spec) {
-            Ok(h) => {
-                set.insert(h);
-            }
-            Err(_) => {
-                return Err((
-                    format!("cannot find revision {spec} to ignore"),
-                    exit::DATAERR,
-                ));
-            }
-        }
-    }
-
-    for path in &opts.ignore_revs_file {
-        let contents = std::fs::read_to_string(path).map_err(|_| {
-            (
-                format!("could not open object name list: {path}"),
-                exit::NOINPUT,
-            )
-        })?;
-        for raw in contents.lines() {
-            // Strip an inline `#` comment, then surrounding whitespace
-            // (covers trailing `\r` on CRLF files), matching git.
-            let line = raw.split('#').next().unwrap_or("").trim();
-            if line.is_empty() {
-                continue;
-            }
-            let h = hash::from_hex(line)
-                .map_err(|_| (format!("invalid object name: {line}"), exit::DATAERR))?;
-            set.insert(h);
-        }
-    }
-
-    Ok(set)
-}
-
-/// Resolve the `--reverse` `<start>..<end>` range argument into a pair of
-/// commit hashes. `<start>..` defaults `<end>` to HEAD. A missing range, a
-/// bare revision (no `..`), an empty `<start>`, a triple-dot/extra-dot
-/// range, or an empty range (`start == end`) is a usage error.
-///
-/// `file` is only used to sharpen the no-range diagnostic: if the single
-/// positional looks like the range itself (`a..b`), the file was likely
-/// forgotten.
-///
-/// git's diagnostics here (`No commit to dig up from?`, `More than one
-/// commit to dig up from, X and Y?`) are cryptic; kit names the concrete
-/// problem instead — a documented bucket-1 divergence, like the clearer
-/// `-L` messages. On error returns `(message, exit_code)`.
-fn resolve_reverse_range(
-    store: &ObjectStore,
-    layout: &RepoLayout,
-    rev_spec: Option<&String>,
-    file: &str,
-) -> Result<(Hash, Hash), (String, u8)> {
-    let Some(spec) = rev_spec else {
-        // A lone `a..b` positional is parsed as the *file*; the user most
-        // likely supplied the range but omitted the filename.
-        if file.contains("..") {
-            return Err((
-                format!(
-                    "--reverse: missing <file> (got only '{file}', which looks like the range)"
-                ),
-                exit::USAGE,
-            ));
-        }
-        return Err((
-            "--reverse requires a <start>..<end> revision range".to_string(),
-            exit::USAGE,
-        ));
-    };
-    let Some((start_str, end_str)) = spec.split_once("..") else {
-        return Err((
-            format!("--reverse requires a <start>..<end> range, got '{spec}'"),
-            exit::USAGE,
-        ));
-    };
-    // Reject git's triple-dot symmetric range and any extra `..`: blame
-    // takes a single two-dot range. (`a...b` splits to end `.b`; `a..b..c`
-    // to end `b..c`.)
-    if end_str.starts_with('.') || end_str.contains("..") {
-        return Err((
-            format!("--reverse requires a single <start>..<end> range, got '{spec}'"),
-            exit::USAGE,
-        ));
-    }
-    if start_str.is_empty() {
-        return Err((
-            "--reverse requires an explicit <start> revision".to_string(),
-            exit::USAGE,
-        ));
-    }
-    let start = revspec::resolve_revision(store, layout, start_str)
-        .map_err(|e| (format!("{e}"), exit::NOINPUT))?;
-    // `<start>..` (empty end) defaults to HEAD, matching git.
-    let end = if end_str.is_empty() {
-        match refs::resolve_head(layout) {
-            Ok(Some(h)) => h,
-            Ok(None) => return Err(("no commits yet".to_string(), exit::GENERAL_ERROR)),
-            Err(e) => return Err((format!("resolve HEAD: {e}"), exit::GENERAL_ERROR)),
-        }
-    } else {
-        revspec::resolve_revision(store, layout, end_str)
-            .map_err(|e| (format!("{e}"), exit::NOINPUT))?
-    };
-    // An empty range (`start == end`) has nothing to walk; git rejects it.
-    if start == end {
-        return Err((
-            format!("--reverse: empty revision range '{spec}'"),
-            exit::USAGE,
-        ));
-    }
-    Ok((start, end))
-}
-
-/// Parse a `git blame -L` style range spec into an inclusive, 1-based
-/// `(start, end)` pair validated against `total` (the file's line count).
-/// `file` only feeds git-faithful "has only N lines" diagnostics.
-///
-/// Accepted forms — `<start>,<end>`, `<start>,+<n>` (n lines forward),
-/// `<start>,-<n>` (n lines back, ending at `<start>`), `<start>,`,
-/// `,<end>`, and a bare `<start>` (treated as `<start>,` → to EOF).
-/// An omitted start defaults to line 1; an omitted end to `total`.
-/// To match git: an inverted absolute range (`5,2`) is swapped, a low
-/// bound past EOF errors `file <f> has only N lines`, and an over-long
-/// high bound is clamped to `total`. A zero/negative line number errors
-/// `-L invalid line number: <tok>` and a zero offset `-L invalid empty
-/// range`.
-///
-/// Returns `Err(message)` with a git-faithful diagnostic on bad input.
-fn parse_line_range(spec: &str, total: usize, file: &str) -> Result<(usize, usize), String> {
-    let (start_tok, end_tok) = match spec.split_once(',') {
-        Some((s, e)) => (s.trim(), Some(e.trim())),
-        None => (spec.trim(), None),
-    };
-
-    // Start anchor: defaults to 1 when omitted (the `,<end>` form).
-    let start = if start_tok.is_empty() {
-        1
-    } else {
-        parse_one_based(start_tok)?
-    };
-
-    // Resolve the inclusive `(lo, hi)` bounds from the end token. git's
-    // end forms:
-    //   omitted / empty  → to EOF
-    //   absolute `<m>`   → swap with start if inverted (`5,2` → 2..5)
-    //   `+<n>`           → n lines forward from start (`5,+2` → 5..6)
-    //   `-<n>`           → n lines back, *ending* at start (`5,-2` → 4..5),
-    //                      the low bound clamped up to line 1
-    // A `+0` / `-0` offset is an empty range.
-    let (lo, hi) = match end_tok {
-        None | Some("") => (start, total),
-        Some(tok) if tok.starts_with('+') => (start, start.saturating_add(parse_offset(tok)? - 1)),
-        Some(tok) if tok.starts_with('-') => {
-            let n = parse_offset(tok)?;
-            (start.saturating_sub(n - 1).max(1), start)
-        }
-        Some(tok) => {
-            let m = parse_one_based(tok)?;
-            if start > m { (m, start) } else { (start, m) }
-        }
-    };
-
-    // Empty file: no blamable lines. Checked *after* token validation so
-    // an explicit zero / empty-range token reports its own error first,
-    // matching git for every form.
-    if total == 0 {
-        return Err(format!("file {file} has only 0 lines"));
-    }
-
-    // git validates the low bound (the actual range start) against EOF for
-    // every form — including `-<n>`, whose anchor may itself sit past EOF —
-    // and clamps an over-long high bound down to the last line. `lo >= 1`
-    // here by construction, so the `lines[lo - 1..hi]` slice is safe.
-    if lo > total {
-        return Err(format!("file {file} has only {total} lines"));
-    }
-    Ok((lo, hi.min(total)))
-}
-
-/// Parse a single decimal line-number token. Junk (non-integer) gets a
-/// clear kit diagnostic; git instead dumps usage here.
-fn parse_line_num(tok: &str) -> Result<usize, String> {
-    tok.parse::<usize>()
-        .map_err(|_| format!("invalid line number '{tok}' in -L range"))
-}
-
-/// Parse a 1-based absolute line number, rejecting `0` and negatives the
-/// way git does: a parseable-but-invalid integer (e.g. `0`, `-3`) yields
-/// `-L invalid line number: <tok>`, while non-integer junk keeps the
-/// clearer [`parse_line_num`] message.
-fn parse_one_based(tok: &str) -> Result<usize, String> {
-    match tok.parse::<usize>() {
-        Ok(n) if n >= 1 => Ok(n),
-        // `0`, or (via the usize parse failing) a negative integer.
-        _ if tok.parse::<i64>().is_ok() => Err(format!("-L invalid line number: {tok}")),
-        _ => Err(format!("invalid line number '{tok}' in -L range")),
-    }
-}
-
-/// Parse the `<n>` in a `+<n>` / `-<n>` end offset (the leading sign is
-/// included in `tok`). A zero offset is git's `-L invalid empty range`.
-fn parse_offset(tok: &str) -> Result<usize, String> {
-    let n = parse_line_num(&tok[1..])?;
-    if n == 0 {
-        return Err("-L invalid empty range".to_string());
-    }
-    Ok(n)
 }
 
 /// JSONL output for `--format=json`. One record per source line:
@@ -792,139 +461,3 @@ fn render_porcelain(
 }
 
 use super::error as emit_err;
-
-#[cfg(test)]
-mod tests {
-    // Semantics here are pinned against real `git blame -L` behavior
-    // (verified empirically): inclusive bounds, `+n` = n lines, bare
-    // start runs to EOF, inverted ranges swap, over-long ends clamp.
-
-    /// Thin wrapper supplying a fixed filename so the range cases read
-    /// cleanly; the filename only colors the "has only N lines" message.
-    fn range(spec: &str, total: usize) -> Result<(usize, usize), String> {
-        super::parse_line_range(spec, total, "f.txt")
-    }
-
-    #[test]
-    fn explicit_range_is_inclusive() {
-        assert_eq!(range("3,5", 8), Ok((3, 5)));
-    }
-
-    #[test]
-    fn plus_n_is_n_lines_from_start() {
-        // `git blame -L 3,+2` → lines 3,4.
-        assert_eq!(range("3,+2", 8), Ok((3, 4)));
-        assert_eq!(range("1,+1", 8), Ok((1, 1)));
-    }
-
-    #[test]
-    fn minus_n_is_n_lines_ending_at_start() {
-        // `git blame -L <start>,-<n>` → n lines ending at start, low bound
-        // clamped up to line 1. Verified against real git.
-        assert_eq!(range("5,-2", 8), Ok((4, 5)));
-        assert_eq!(range("8,-3", 8), Ok((6, 8)));
-        assert_eq!(range("3,-1", 8), Ok((3, 3)));
-        assert_eq!(range("2,-5", 8), Ok((1, 2))); // clamps to line 1
-    }
-
-    #[test]
-    fn minus_n_anchor_past_eof_still_validates_low_bound() {
-        // `12,-3` on an 8-line file → [10,12] → low bound 10 > 8: error,
-        // matching git (it validates the range start, not the anchor).
-        assert!(range("12,-3", 8).unwrap_err().contains("only 8 lines"));
-        // `8,-3` → [6,8] → fine; high bound already within EOF.
-        assert_eq!(range("8,-3", 8), Ok((6, 8)));
-    }
-
-    #[test]
-    fn open_ended_start_runs_to_eof() {
-        assert_eq!(range("4,", 8), Ok((4, 8)));
-    }
-
-    #[test]
-    fn bare_start_runs_to_eof() {
-        // `git blame -L 3` → 3..EOF.
-        assert_eq!(range("3", 8), Ok((3, 8)));
-    }
-
-    #[test]
-    fn open_ended_end_starts_at_one() {
-        assert_eq!(range(",3", 8), Ok((1, 3)));
-    }
-
-    #[test]
-    fn inverted_range_is_swapped() {
-        // `git blame -L 5,2` → 2..5.
-        assert_eq!(range("5,2", 8), Ok((2, 5)));
-    }
-
-    #[test]
-    fn end_past_eof_is_clamped() {
-        assert_eq!(range("3,99", 8), Ok((3, 8)));
-    }
-
-    #[test]
-    fn start_past_eof_errors() {
-        let err = range("99,100", 8).unwrap_err();
-        assert!(err.contains("only 8 lines"), "got {err:?}");
-    }
-
-    #[test]
-    fn empty_file_message_is_git_faithful_for_every_form() {
-        // git validates explicit line-number tokens *before* the
-        // line-count check, so on an empty file the "has only 0 lines"
-        // message applies only to forms without an explicit zero; an
-        // explicit `0` (`,0` / `3,0`) still reports the invalid-zero error
-        // first. Both halves are pinned against real git.
-        for spec in ["1,", "3", "1,3", "2,5"] {
-            let err = super::parse_line_range(spec, 0, "empty.txt").unwrap_err();
-            assert_eq!(err, "file empty.txt has only 0 lines", "spec {spec:?}");
-        }
-        for spec in [",0", "3,0"] {
-            let err = super::parse_line_range(spec, 0, "empty.txt").unwrap_err();
-            assert_eq!(err, "-L invalid line number: 0", "spec {spec:?}");
-        }
-    }
-
-    #[test]
-    fn zero_start_errors() {
-        assert_eq!(range("0,5", 8).unwrap_err(), "-L invalid line number: 0");
-    }
-
-    #[test]
-    fn zero_line_number_uses_git_message() {
-        // Regression: `,0` defaults start to 1, parses end 0, then the old
-        // inverted-range swap yielded start == 0 and panicked. git reports
-        // `-L invalid line number: 0` (exact word order) for every form
-        // carrying an explicit zero.
-        for spec in [",0", "3,0", "0,0", "0", "0,"] {
-            assert_eq!(
-                range(spec, 8).unwrap_err(),
-                "-L invalid line number: 0",
-                "spec {spec:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn negative_line_number_uses_git_message() {
-        // A parseable-but-invalid integer reports its token, like git's
-        // `-L invalid line number: -3` (negatives only valid as `-<n>`
-        // *offsets*, handled separately).
-        assert_eq!(range("-3,5", 8).unwrap_err(), "-L invalid line number: -3");
-    }
-
-    #[test]
-    fn zero_offset_is_invalid_empty_range() {
-        // git: `+0` / `-0` → `-L invalid empty range`.
-        assert_eq!(range("3,+0", 8).unwrap_err(), "-L invalid empty range");
-        assert_eq!(range("3,-0", 8).unwrap_err(), "-L invalid empty range");
-    }
-
-    #[test]
-    fn non_numeric_errors() {
-        // True junk keeps kit's clearer message (git dumps usage here).
-        assert!(range("a,b", 8).is_err());
-        assert!(range("3,+x", 8).is_err());
-    }
-}

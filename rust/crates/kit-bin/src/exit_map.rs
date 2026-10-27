@@ -5,7 +5,7 @@
 //! and into the text for stderr with [`message`].
 
 use kit_core::store::StoreError;
-use libkit::{diff, head, repo, revspec};
+use libkit::{blame, diff, head, repo, revspec};
 
 use crate::exit;
 
@@ -25,6 +25,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         // or a bad object in the history is malformed input.
         libkit::Error::Worktrees(_) | libkit::Error::Log(_) => exit::DATAERR,
         libkit::Error::Diff(inner) => diff_exit_code(inner),
+        libkit::Error::Blame(inner) => blame_exit_code(inner),
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -66,6 +67,33 @@ fn diff_exit_code(error: &diff::Error) -> u8 {
         | diff::Error::Diff(_)
         | diff::Error::RenameDetection(_)
         | diff::Error::ReadObject(_) => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn blame_exit_code(error: &blame::Error) -> u8 {
+    match error {
+        // The arguments contradict each other, or the range is wrong.
+        blame::Error::ReverseWithDetection
+        | blame::Error::PreciseWithoutIgnore
+        | blame::Error::ReverseMissingFile(_)
+        | blame::Error::ReverseNeedsRange
+        | blame::Error::ReverseNotARange(_)
+        | blame::Error::ReverseNotASingleRange(_)
+        | blame::Error::ReverseNeedsStart
+        | blame::Error::ReverseEmptyRange(_)
+        | blame::Error::Lines(_) => exit::USAGE,
+        // The caller named a commit that does not exist, or a list of
+        // commits that is malformed or too long.
+        blame::Error::IgnoreRevNotFound(_)
+        | blame::Error::InvalidObjectName(_)
+        | blame::Error::IgnoreFileTooLong { .. } => exit::DATAERR,
+        // An input is missing: a list file, a revision or a file in the tree.
+        blame::Error::IgnoreFileUnreadable(_)
+        | blame::Error::Revision(_)
+        | blame::Error::Blame(_) => exit::NOINPUT,
+        blame::Error::HeadWithoutCommit | blame::Error::ResolveHead(_) => exit::GENERAL_ERROR,
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -178,6 +206,29 @@ mod tests {
                 exit::DATAERR,
             ),
             (log::Error::NotACommit([1; 32]).into(), exit::DATAERR),
+            (blame::Error::ReverseWithDetection.into(), exit::USAGE),
+            (blame::Error::ReverseNeedsStart.into(), exit::USAGE),
+            (
+                blame::Error::Lines(blame::line_range::Error::EmptyRange).into(),
+                exit::USAGE,
+            ),
+            (
+                blame::Error::IgnoreRevNotFound("x".to_owned()).into(),
+                exit::DATAERR,
+            ),
+            (
+                blame::Error::InvalidObjectName("x".to_owned()).into(),
+                exit::DATAERR,
+            ),
+            (
+                blame::Error::IgnoreFileUnreadable("x".to_owned()).into(),
+                exit::NOINPUT,
+            ),
+            (
+                blame::Error::Revision(revspec::Error::Unknown("x".to_owned())).into(),
+                exit::NOINPUT,
+            ),
+            (blame::Error::HeadWithoutCommit.into(), exit::GENERAL_ERROR),
             (diff::Error::StagedWithRevision.into(), exit::USAGE),
             (diff::Error::MergeBaseNeedsRevision.into(), exit::USAGE),
             (
