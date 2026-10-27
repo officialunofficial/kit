@@ -30,7 +30,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use kit_core::hash::Hash;
-use kit_core::ops::merge::is_ancestor;
 use kit_core::ops::restore;
 use kit_core::pack::{self, PackError};
 use kit_core::protocol::{Transport, TransportError};
@@ -1002,43 +1001,8 @@ fn push_options<'a>(
     Ok((options, warning))
 }
 
-/// True iff advancing a ref from `old` to `new` is a fast-forward (i.e.
-/// `old` is an ancestor of `new`). A missing `old` (brand-new ref) and an
-/// unchanged ref both count as fast-forwards. Used by `push`/`fetch` to
-/// pick the git-style summary symbol (`..` vs `...`/`(forced update)`).
-pub fn is_fast_forward(cwd: &Path, old: Option<Hash>, new: Hash) -> Result<bool, DispatchError> {
-    match old {
-        None => Ok(true),
-        Some(o) if o == new => Ok(true),
-        Some(o) => {
-            let layout = kit_core::layout::discover(cwd)?;
-            let store = crate::commands::open_store_configured(&layout)?;
-            Ok(is_ancestor(&store, o, new)?)
-        }
-    }
-}
-
 /// CAS lease policy for a default (current-branch → upstream) push.
 pub use kit_sync::PushLease;
-
-/// Resolve the CAS condition for a single-branch push from the local
-/// remote-tracking ref `refs/remotes/<remote>/<branch>` and the lease
-/// policy.
-pub fn lease_condition(
-    cwd: &Path,
-    remote: &str,
-    branch: &str,
-    lease: PushLease,
-) -> Result<refs::RefWriteCondition, DispatchError> {
-    if matches!(lease, PushLease::Force) {
-        return Ok(refs::RefWriteCondition::Any);
-    }
-    let layout = kit_core::layout::discover(cwd)?;
-    Ok(match refs::read_remote_ref(&layout, remote, branch)? {
-        Some(tracked) => refs::RefWriteCondition::Match(tracked),
-        None => refs::RefWriteCondition::Missing,
-    })
-}
 
 /// Push the current branch to its upstream and, on success, advance the
 /// local remote-tracking ref `refs/remotes/<remote>/<branch>` to the

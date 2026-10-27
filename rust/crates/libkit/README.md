@@ -132,6 +132,18 @@ against the object store. `git::state` lists the state directories.
 `git::patch` turns native commits into patches for `git am`. These
 operations never print. Notices go to an `Observer` as `git::Event` values.
 
+## Remotes and push
+
+`libkit::remote` adds, changes, removes, renames and lists remotes. It checks
+each address and name before it writes the config. A rename moves the
+remote-tracking refs and the other state of the remote with it. The `sync`
+feature turns this module on.
+
+`libkit::push` plans a push. `plan` finds the branch, the remote and the
+remote branch. It reads the tips and does not contact the remote.
+`record_upstream` keeps the upstream after a first push. The `sync` feature
+turns this module on.
+
 ## Errors
 
 `libkit::Error` is a `#[non_exhaustive]` enum. Each variant wraps the error

@@ -9,7 +9,7 @@ use kit_core::worktree::WorktreeError;
 use libkit::signing::ErrorKind;
 use libkit::{
     add, attest_signer, attestation, blame, branch, commit, diff, head, keys, linked, merge, mv,
-    rebase, remote, repo, revspec, signer, status,
+    push, rebase, remote, repo, revspec, signer, status,
 };
 
 use crate::exit;
@@ -44,6 +44,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Merge(inner) => merge_exit_code(inner),
         libkit::Error::Rebase(inner) => rebase_exit_code(inner),
         libkit::Error::Remote(inner) => remote_exit_code(inner),
+        libkit::Error::Push(inner) => push_exit_code(inner),
         #[cfg(feature = "git-bridge")]
         libkit::Error::Git(inner) => git_exit_code(inner),
         _ => exit::GENERAL_ERROR,
@@ -587,6 +588,24 @@ fn remote_exit_code(error: &remote::Error) -> u8 {
     }
 }
 
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn push_exit_code(error: &push::Error) -> u8 {
+    match error {
+        // The two force switches contradict each other.
+        push::Error::ConflictingForce => exit::USAGE,
+        // The branch, the upstream or the remote is missing from the config.
+        push::Error::DetachedHead
+        | push::Error::ReadHead(_)
+        | push::Error::NoUpstream(_)
+        | push::Error::UnknownRemote(_)
+        | push::Error::NoRemote => exit::CONFIG_ERROR,
+        // The upstream cannot be written.
+        push::Error::RecordUpstream(_) => exit::CANTCREAT,
+        push::Error::Ancestry(_) => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
 fn head_exit_code(error: &head::Error) -> u8 {
     match error {
         // The state to move from is damaged.
@@ -815,6 +834,17 @@ mod tests {
                 remote::Error::NotFound("x".to_owned()).into(),
                 exit::GENERAL_ERROR,
             ),
+            (push::Error::ConflictingForce.into(), exit::USAGE),
+            (push::Error::DetachedHead.into(), exit::CONFIG_ERROR),
+            (
+                push::Error::NoUpstream("x".to_owned()).into(),
+                exit::CONFIG_ERROR,
+            ),
+            (
+                push::Error::UnknownRemote("x".to_owned()).into(),
+                exit::CONFIG_ERROR,
+            ),
+            (push::Error::NoRemote.into(), exit::CONFIG_ERROR),
             (diff::Error::StagedWithRevision.into(), exit::USAGE),
             (diff::Error::MergeBaseNeedsRevision.into(), exit::USAGE),
             (

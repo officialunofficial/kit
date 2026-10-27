@@ -71,6 +71,28 @@ pub fn ssl_ca_file_path(cfg: &Config, layout: &RepoLayout) -> Result<Option<Path
     cfg.ssl_ca_file_path(layout, &environment::current())
 }
 
+/// Record the upstream of a branch after a push, for the current command.
+///
+/// # Errors
+/// As [`libkit::push::record_upstream`].
+pub fn record_upstream(
+    layout: &RepoLayout,
+    cfg: &LayeredConfig,
+    branch: &str,
+    upstream: Upstream,
+    replace: bool,
+) -> Result<(), libkit::push::Error> {
+    libkit::push::record_upstream(
+        layout,
+        cfg,
+        &environment::current(),
+        &StderrWarnings,
+        branch,
+        upstream,
+        replace,
+    )
+}
+
 /// Write one user-scoped key for the current command.
 pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
     libkit::config::write_user_kv(&environment::current(), key, value)

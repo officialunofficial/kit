@@ -15,12 +15,14 @@ use std::io::Write;
 use clap::{Parser, ValueEnum};
 use kit_core::layout::RepoLayout;
 use kit_core::protocol::UploadLimits;
+use libkit::push::{self, PushLease};
 
 use crate::clap_args;
 use crate::config;
 use crate::exit;
+use crate::exit_map;
 use crate::format::JsonObject;
-use crate::remote_dispatch::{self, PushLease};
+use crate::remote_dispatch;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum PushFormat {
@@ -85,12 +87,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
-    if opts.force && opts.force_with_lease {
-        return emit_err(
-            "--force and --force-with-lease are mutually exclusive",
-            exit::USAGE,
-        );
-    }
+    let lease = match push::lease(opts.force, opts.force_with_lease) {
+        Ok(lease) => lease,
+        Err(e) => return plan_failure(e, false),
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -107,65 +107,35 @@ pub fn run(args: &[String]) -> u8 {
     if opts.all {
         push_all(&layout, &cfg, &opts)
     } else {
-        push_current(&layout, &cfg, &opts)
+        push_current(&layout, &cfg, &opts, lease)
     }
 }
 
 /// Default push: current branch → its upstream, CAS-protected.
 #[allow(clippy::too_many_lines)] // linear flow: resolve + no-op + push + report
-fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
+fn push_current(
+    layout: &RepoLayout,
+    cfg: &config::LayeredConfig,
+    opts: &PushOpts,
+    lease: PushLease,
+) -> u8 {
     let json = matches!(opts.format, PushFormat::Json);
-    let branch = match kit_core::refs::read_head(layout) {
-        Ok(kit_core::refs::Head::Branch(b)) => b,
-        Ok(kit_core::refs::Head::Detached(_)) => {
-            return emit_err_json(
-                "cannot push a detached HEAD; check out a branch first",
-                exit::CONFIG_ERROR,
-                json,
-            );
-        }
-        Err(e) => return emit_err_json(&format!("read HEAD: {e}"), exit::CONFIG_ERROR, json),
+    // An explicit `kit push <remote>` overrides the configured upstream.
+    let plan = match push::plan(layout, cfg, opts.remote.as_deref()) {
+        Ok(plan) => plan,
+        Err(e) => return plan_failure(e, json),
     };
-
-    // Resolve the (remote, remote-branch) to push to. An explicit
-    // `kit push <remote> [branch]`-style positional remote overrides
-    // the configured upstream; otherwise fall back to the upstream.
-    let (remote_name, remote_branch) = match &opts.remote {
-        Some(name) => (name.clone(), branch.clone()),
-        None => match config::resolve_upstream(cfg, &branch) {
-            Some(up) => (up.remote, up.branch),
-            None => {
-                return emit_err_json(
-                    &format!(
-                        "no upstream configured for branch '{branch}' and no default remote; \
-                         run `kit push <remote>` to push it (the upstream will be remembered)"
-                    ),
-                    exit::CONFIG_ERROR,
-                    json,
-                );
-            }
-        },
-    };
-
-    let Some(resolved) = config::resolve_remote(cfg, &remote_name) else {
-        return emit_err_json(
-            &format!(
-                "unknown remote '{remote_name}' — add it with `kit remote add {remote_name} <url>`"
-            ),
-            exit::CONFIG_ERROR,
-            json,
-        );
-    };
-
-    // Snapshot the local tip and the last-seen remote-tracking ref so we
-    // can render git's ref-update summary block and detect a no-op push.
-    let local_tip = kit_core::refs::read_ref(layout, &branch).ok().flatten();
-    let old_tracked = kit_core::refs::read_remote_ref(layout, &resolved.name, &remote_branch)
-        .ok()
-        .flatten();
+    let up_to_date = plan.is_up_to_date(opts.force);
+    let push::Plan {
+        branch,
+        remote: resolved,
+        remote_branch,
+        tracked: old_tracked,
+        ..
+    } = plan;
     // Nothing to do when the remote-tracking ref already matches the local
     // tip (and we're not forcing). Matches git's `Everything up-to-date`.
-    if !opts.force && local_tip.is_some() && local_tip == old_tracked {
+    if up_to_date {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "Everything up-to-date");
         if json {
@@ -185,7 +155,6 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
         return exit::OK;
     }
 
-    let lease = lease_for(opts);
     if opts.dry_run {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
@@ -255,21 +224,23 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             // time (Git-like first-push convenience). Only persisted
             // when not already set, and never for a detached/forced
             // overwrite of an unrelated branch.
-            record_upstream(
+            // Best-effort: the push has succeeded, so a failure to write the
+            // upstream does not fail the command.
+            let _ = config::record_upstream(
                 layout,
                 cfg,
                 &branch,
-                &resolved.name,
-                &remote_branch,
+                libkit::config::Upstream {
+                    remote: resolved.name.clone(),
+                    branch: remote_branch.clone(),
+                },
                 opts.set_upstream,
             );
             // git-style ref-update summary block: `To <url>` then one
             // `<old>..<new>` / `* [new branch]` / `+ …(forced)` line.
             // On a store error during the ancestry check, assume a
             // fast-forward (don't mislabel an ordinary push as forced).
-            let forced =
-                !remote_dispatch::is_fast_forward(layout.worktree_root(), old_tracked, new_tip)
-                    .unwrap_or(true);
+            let forced = !push::is_fast_forward(layout, old_tracked, new_tip).unwrap_or(true);
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "To {}", resolved.endpoint);
             let _ = writeln!(
@@ -349,16 +320,9 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
 #[allow(clippy::too_many_lines)] // Linear branch loop keeps each push result and hint together.
 fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
     let json = matches!(opts.format, PushFormat::Json);
-    let remote_name = opts
-        .remote
-        .clone()
-        .unwrap_or_else(|| config::DEFAULT_REMOTE_NAME.to_owned());
-    let Some(resolved) = config::resolve_remote(cfg, &remote_name) else {
-        return emit_err_json(
-            "no remote configured — use `kit remote add <url>`",
-            exit::CONFIG_ERROR,
-            json,
-        );
+    let resolved = match push::plan_all(cfg, opts.remote.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(e) => return plan_failure(e, json),
     };
     if opts.dry_run {
         let mut stderr = std::io::stderr().lock();
@@ -534,54 +498,14 @@ fn emit_push_error(
     }
 }
 
-fn lease_for(opts: &PushOpts) -> PushLease {
-    if opts.force {
-        PushLease::Force
-    } else if opts.force_with_lease {
-        PushLease::WithLease
-    } else {
-        PushLease::FastForward
-    }
-}
-
-/// Persist `branch.<b>.{remote,merge}` after a successful first push, so
-/// a subsequent bare `kit push` resolves the upstream. Best-effort: a
-/// write failure is non-fatal (the push already succeeded).
-fn record_upstream(
-    layout: &RepoLayout,
-    cfg: &config::LayeredConfig,
-    branch: &str,
-    remote: &str,
-    remote_branch: &str,
-    force: bool,
-) {
-    // Without `-u`, only record on the FIRST push (git-like convenience);
-    // `-u`/`--set-upstream` re-points the upstream even if already set.
-    if !force
-        && cfg
-            .merged
-            .branch_upstreams
-            .get(branch)
-            .is_some_and(|u| !u.remote.is_empty())
-    {
-        return;
-    }
-    // Re-read the on-disk REPO config (not the merged view) and add the
-    // upstream entry without disturbing the existing remotes / flat
-    // fields. Using the repo layer ensures user-scoped values (e.g. a
-    // private `user.email`) are never materialized into `.kit/config`.
-    let Ok(layered) = config::read_layered(layout) else {
-        return;
-    };
-    let mut on_disk = layered.repo;
-    on_disk.branch_upstreams.insert(
-        branch.to_owned(),
-        config::Upstream {
-            remote: remote.to_owned(),
-            branch: remote_branch.to_owned(),
-        },
-    );
-    let _ = config::write(layout, &on_disk);
+/// Print a planning failure and give its exit code.
+fn plan_failure(error: push::Error, json: bool) -> u8 {
+    let error = libkit::Error::from(error);
+    emit_err_json(
+        &exit_map::message(&error),
+        exit_map::exit_code(&error),
+        json,
+    )
 }
 
 use super::error as emit_err;

@@ -140,7 +140,9 @@ workflow of a paused operation is in `libkit::conflict`. The key code of
 `kit commit`, `kit tag` and the other signing commands is in
 `libkit::signer`. `libkit::merge` and `libkit::rebase` never load a key. The
 command gives them a `libkit::signing::Signing`, and the library asks that
-value for the key when it writes a commit.
+value for the key when it writes a commit. The plan of
+`kit push` is in `libkit::push`. The transfer stays in `kit-bin`, in the
+`remote_dispatch` module, because it uses the transports and the terminal.
 
 Two decisions are proposals. They are not part of this release.
 

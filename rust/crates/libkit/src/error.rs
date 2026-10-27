@@ -7,7 +7,7 @@ use crate::{
     worktrees,
 };
 #[cfg(feature = "sync")]
-use crate::{conflict, merge, rebase, remote};
+use crate::{conflict, merge, push, rebase, remote};
 
 /// An error from any library operation.
 ///
@@ -104,4 +104,9 @@ pub enum Error {
     #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
     #[error(transparent)]
     Remote(#[from] remote::Error),
+    /// A push could not be planned.
+    #[cfg(feature = "sync")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+    #[error(transparent)]
+    Push(#[from] push::Error),
 }
