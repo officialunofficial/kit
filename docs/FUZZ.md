@@ -67,6 +67,7 @@ from recurring.
 | `fuzz_targets/blame_line_range.rs` | `libkit::blame::line_range::parse` and `libkit::blame::blame` (a range parses the same twice and sits inside the file; a blame never panics on any range, revision or revision to skip, with or without the reverse walk; `-L 2` on `a.txt` keeps its answer) |
 | `fuzz_targets/branch_glob.rs` | `libkit::branch::glob_match` (never panics on any pattern or name; a match gives the same answer twice; `*` matches every name; a name with no metacharacter matches itself) |
 | `fuzz_targets/index_path_arg.rs` | `libkit::pathspec::index_path_for_arg` (never panics on a relative argument; an argument gives the same answer twice; an answer is a valid index path with no empty, `.` or `..` component; a plain name gives itself) |
+| `fuzz_targets/identity_parse.rs` | `libkit::identity::parse_author` and `libkit::identity::decode_config` (never panic on any text; a text gives the same answer twice; a key that parses has 32 bytes; a DID key that parses is valid; the full form of a key or a DID key parses back to itself) |
 | `fuzz_targets/absolute_config_home.rs` | `libkit::config::xdg_config_home` (a result is always absolute; a set `XDG_CONFIG_HOME` is never repaired; an absolute `HOME` gives `HOME/.config`) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
@@ -124,6 +125,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::blame::line_range::parse`, the revision range of `libkit::blame::blame` | `blame_line_range` |
 | `libkit::branch::glob_match` | `branch_glob` |
 | `libkit::pathspec::index_path_for_arg` | `index_path_arg` |
+| `libkit::identity::parse_author`, `libkit::identity::decode_config` | `identity_parse` |
 | The branch name and the id that `libkit::linked::add` derives from a path | None. It builds a name from a local path, and then `refs::validate_ref_name` or `layout::validate_worktree_id` must accept the name. Unit tests cover the derivation. |
 | The path arguments of `libkit::add::stage` | None. A named path is checked against the file system, not parsed. Integration tests cover a path outside the repository and a path through a symlink. |
 | `kit_bin::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |

@@ -24,6 +24,9 @@
 pub mod add;
 pub mod blame;
 pub mod branch;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod commit;
 pub mod config;
 pub mod diff;
 mod environment;
@@ -41,6 +44,7 @@ pub mod mv;
 pub mod pathspec;
 pub mod repo;
 pub mod revspec;
+pub mod signer;
 #[cfg(feature = "sync")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod status;

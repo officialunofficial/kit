@@ -6,7 +6,7 @@
 
 use kit_core::store::StoreError;
 use kit_core::worktree::WorktreeError;
-use libkit::{add, blame, branch, diff, head, linked, mv, repo, revspec, status};
+use libkit::{add, blame, branch, commit, diff, head, linked, mv, repo, revspec, signer, status};
 
 use crate::exit;
 
@@ -32,6 +32,8 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Mv(inner) => mv_exit_code(inner),
         libkit::Error::Status(inner) => status_exit_code(inner),
         libkit::Error::Add(inner) => add_exit_code(inner),
+        libkit::Error::Signer(inner) => signer_exit_code(inner),
+        libkit::Error::Commit(inner) => commit_exit_code(inner),
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -286,6 +288,68 @@ fn add_exit_code(error: &add::Error) -> u8 {
     }
 }
 
+/// The code of a key that cannot load or sign.
+pub(crate) fn signer_exit_code(error: &signer::Error) -> u8 {
+    match error {
+        // The config names a key that the library refuses.
+        signer::Error::KeyPath(_) | signer::Error::UnknownSigner(_) | signer::Error::KeyRef(_) => {
+            exit::CONFIG_ERROR
+        }
+        // The user has not made the key.
+        signer::Error::NoKeyFile(_) | signer::Error::MissingKey { .. } => exit::NOINPUT,
+        // The key file is there, but this user cannot read it.
+        signer::Error::LoadKey(_) => exit::NOPERM,
+        // The keystore backend is not usable on this machine.
+        signer::Error::Backend(_) => exit::UNAVAILABLE,
+        // The key or its answer is malformed.
+        signer::Error::CannotOpen(_)
+        | signer::Error::OpenKey(_)
+        | signer::Error::PublicKey(_)
+        | signer::Error::PublicKeyLength(_)
+        | signer::Error::CommitHash(_)
+        | signer::Error::TagHash(_)
+        | signer::Error::KeystoreSign(_)
+        | signer::Error::SignatureLength(_) => exit::DATAERR,
+        // A file key cannot sign, or a future variant fails closed.
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn commit_exit_code(error: &commit::Error) -> u8 {
+    match error {
+        // The caller asked for a state that the repository does not have.
+        commit::Error::AmendDuringMerge
+        | commit::Error::NothingToAmend
+        | commit::Error::NothingStaged
+        | commit::Error::MergeDiscarded => exit::USAGE,
+        // Another writer changed the state, so the caller can run again.
+        commit::Error::Lock(_)
+        | commit::Error::MergeChanged
+        | commit::Error::HeadMoved
+        | commit::Error::BranchMoved { .. } => exit::TEMPFAIL,
+        // The state to commit from is damaged.
+        commit::Error::ReadHead(_)
+        | commit::Error::AmendNotACommit(_)
+        | commit::Error::ReadAmendTarget { .. }
+        | commit::Error::Serialize(_) => exit::DATAERR,
+        // The commit, its log or the index cannot be written.
+        commit::Error::Store(_) | commit::Error::Recovery(_) | commit::Error::SyncIndex(_) => {
+            exit::CANTCREAT
+        }
+        commit::Error::Signer(inner) => signer_exit_code(inner),
+        commit::Error::Head(inner) => head_exit_code(inner),
+        commit::Error::ReadMergeState(_)
+        | commit::Error::StageTracked(_)
+        | commit::Error::ReadConflicts(_)
+        | commit::Error::Unresolved(_)
+        | commit::Error::ReadIndex(_)
+        | commit::Error::BuildTree(_)
+        | commit::Error::ClearMergeState(_) => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
 fn head_exit_code(error: &head::Error) -> u8 {
     match error {
         // The state to move from is damaged.
@@ -507,6 +571,38 @@ mod tests {
             (
                 diff::Error::Index("read index: x".to_owned()).into(),
                 exit::GENERAL_ERROR,
+            ),
+            (
+                signer::Error::UnknownSigner("x".to_owned()).into(),
+                exit::CONFIG_ERROR,
+            ),
+            (signer::Error::NoKeyFile(path()).into(), exit::NOINPUT),
+            (signer::Error::PublicKeyLength(3).into(), exit::DATAERR),
+            (signer::Error::SignatureLength(3).into(), exit::DATAERR),
+            (commit::Error::AmendDuringMerge.into(), exit::USAGE),
+            (commit::Error::NothingToAmend.into(), exit::USAGE),
+            (commit::Error::NothingStaged.into(), exit::USAGE),
+            (commit::Error::MergeChanged.into(), exit::TEMPFAIL),
+            (commit::Error::HeadMoved.into(), exit::TEMPFAIL),
+            (
+                commit::Error::BranchMoved {
+                    branch: "main".to_owned(),
+                    commit: [1; 32],
+                }
+                .into(),
+                exit::TEMPFAIL,
+            ),
+            (
+                commit::Error::Unresolved("x".to_owned()).into(),
+                exit::GENERAL_ERROR,
+            ),
+            (
+                commit::Error::SyncIndex("x".to_owned()).into(),
+                exit::CANTCREAT,
+            ),
+            (
+                commit::Error::Signer(signer::Error::PublicKeyLength(3)).into(),
+                exit::DATAERR,
             ),
             (
                 log::Error::BadRevision {

@@ -464,3 +464,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "identity_parse"
+path = "fuzz_targets/identity_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

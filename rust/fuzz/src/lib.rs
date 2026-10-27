@@ -2253,6 +2253,47 @@ pub fn index_path_arg_one_iteration(input: &[u8]) {
     }
 }
 
+/// Identity text (`identity_parse`): `identity::parse_author` and
+/// `identity::decode_config` never panic on any text, and give the same answer
+/// twice. A key that parses has 32 bytes. A DID key that parses is a valid
+/// identity. An identity that `identity::full` prints for a key or a DID key
+/// parses back to itself. The text before the first newline goes to
+/// `parse_author`, and the rest goes to `decode_config`.
+pub fn identity_parse_one_iteration(input: &[u8]) {
+    use libkit::identity::{decode_config, full, parse_author};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let (spec, config) = text.split_once('\n').unwrap_or((text, ""));
+    assert_eq!(
+        parse_author(spec),
+        parse_author(spec),
+        "a spec gives the same answer twice"
+    );
+    assert_eq!(
+        decode_config(config),
+        decode_config(config),
+        "a config value gives the same answer twice"
+    );
+    for id in [parse_author(spec), decode_config(config)]
+        .into_iter()
+        .flatten()
+    {
+        match id.kind {
+            kit_core::IdentityKind::Ed25519 => {
+                assert_eq!(id.bytes.len(), 32, "a key has 32 bytes");
+                assert_eq!(parse_author(&full(&id)).as_ref(), Ok(&id));
+            }
+            kit_core::IdentityKind::DidKey => {
+                assert!(id.is_valid(), "a DID key that parses is valid");
+                assert_eq!(parse_author(&full(&id)).as_ref(), Ok(&id));
+            }
+            kit_core::IdentityKind::Opaque => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3069,6 +3110,27 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, index_path_arg_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_identity_parse() {
+        run_iterated_unit(identity_parse_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"ed25519:1111111111111111111111111111111111111111111111111111111111111111",
+            b"did:key:z6MkExample",
+            b"did:key:",
+            b"opaque:hello",
+            b"opaque:",
+            b"foo:bar\n012000",
+            b"x\n0120001111111111111111111111111111111111111111111111111111111111111111",
+            b"x\n011000aabbcc",
+            b"x\n030200aabb",
+            b"x\nzz",
+            b"\xff\xfe",
+        ] {
+            run_one(case, identity_parse_one_iteration).unwrap();
         }
     }
 }

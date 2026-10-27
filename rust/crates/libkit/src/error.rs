@@ -58,4 +58,12 @@ pub enum Error {
     #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
     #[error(transparent)]
     Add(#[from] crate::add::Error),
+    /// A signing key could not be loaded or could not sign.
+    #[error(transparent)]
+    Signer(#[from] crate::signer::Error),
+    /// A commit could not be made.
+    #[cfg(feature = "sync")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+    #[error(transparent)]
+    Commit(#[from] crate::commit::Error),
 }
