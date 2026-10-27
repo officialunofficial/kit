@@ -128,7 +128,8 @@ re-export them.
 
 Every other command is a thin layer over library code. Its logic moves
 into `libkit` over time. The CLI keeps argument parsing, printing and
-exit codes.
+exit codes. The logic of `kit log`, `kit show`, `kit diff` and `kit blame`
+is in `libkit::log`, `libkit::diff` and `libkit::blame` already.
 
 Two decisions are proposals. They are not part of this release.
 
