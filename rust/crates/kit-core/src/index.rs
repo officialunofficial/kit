@@ -381,17 +381,6 @@ fn ancestor_prefixes(path: &str) -> impl Iterator<Item = &str> {
     path.match_indices('/').map(move |(i, _)| &path[..i])
 }
 
-/// `true` if `path` is a strict descendant of `base` (`base` followed by a
-/// `/` and at least one more byte). Mirrors
-/// `kit_bin::commands::index_path_descends_from` — duplicated here rather
-/// than shared across the crate boundary, since `kit-core` cannot depend
-/// on `kit-bin`.
-fn path_descends_from(path: &str, base: &str) -> bool {
-    path.len() > base.len()
-        && path.starts_with(base)
-        && path.as_bytes().get(base.len()) == Some(&b'/')
-}
-
 /// Errors returned by the index subsystem.
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
@@ -699,6 +688,59 @@ pub fn index_path(layout: &RepoLayout) -> PathBuf {
     layout.index_file()
 }
 
+/// Does `path` equal `base` or lie below the directory `base`?
+///
+/// Both are index paths with `/` separators. The match is on whole path
+/// components, so `src` does not match `srcs/a`.
+#[must_use]
+pub fn path_matches_or_descends(path: &str, base: &str) -> bool {
+    path == base || path_descends_from(path, base)
+}
+
+/// Does `path` lie strictly below the directory `base`? That means `base`,
+/// then a `/`, then at least one more byte.
+#[must_use]
+pub fn path_descends_from(path: &str, base: &str) -> bool {
+    path.len() > base.len()
+        && path.starts_with(base)
+        && path.as_bytes().get(base.len()) == Some(&b'/')
+}
+
+/// Read the index. An absent or empty index is seeded from HEAD when HEAD
+/// names a commit or a remix.
+///
+/// This keeps the staging invariant for an old repository or one whose
+/// index file was removed. Adding or removing one path then starts from
+/// the current commit snapshot, so the next commit does not forget the
+/// unchanged tracked files.
+///
+/// # Errors
+/// A message when the index or HEAD cannot be read, or when HEAD names an
+/// object that is not a commit or a remix.
+pub fn read_or_seed_from_head(layout: &RepoLayout, store: &ObjectStore) -> Result<Index, String> {
+    let idx = read_index(layout).map_err(|e| format!("read index: {e}"))?;
+    if !idx.entries.is_empty() {
+        return Ok(idx);
+    }
+    let Some(head_hash) =
+        crate::refs::resolve_head(layout).map_err(|e| format!("resolve HEAD: {e}"))?
+    else {
+        return Ok(idx);
+    };
+    match store
+        .read_object(&head_hash)
+        .map_err(|e| format!("read HEAD: {e}"))?
+    {
+        Object::Commit(c) => {
+            from_tree(store, c.tree_hash).map_err(|e| format!("index from HEAD: {e}"))
+        }
+        Object::Remix(r) => {
+            from_tree(store, r.tree_hash).map_err(|e| format!("index from HEAD: {e}"))
+        }
+        _ => Err("HEAD does not resolve to a commit or remix".to_string()),
+    }
+}
+
 /// Validate a staged path: non-empty, relative, no traversal, no NUL,
 /// no backslash, never under `.kit/` or `.git/`.
 #[must_use]
@@ -742,6 +784,30 @@ mod tests {
 
     fn seed_hash(s: &str) -> Hash {
         hash::hash(s.as_bytes())
+    }
+
+    #[test]
+    fn path_match_is_on_whole_components() {
+        assert!(path_matches_or_descends("src", "src"));
+        assert!(path_matches_or_descends("src/a.rs", "src"));
+        assert!(!path_matches_or_descends("srcs/a.rs", "src"));
+        assert!(!path_matches_or_descends("sr", "src"));
+        assert!(path_descends_from("a/b", "a"));
+        assert!(!path_descends_from("a", "a"));
+    }
+
+    #[test]
+    fn read_or_seed_returns_an_empty_index_when_head_is_unborn() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        crate::refs::init(&layout).unwrap();
+        assert!(
+            read_or_seed_from_head(&layout, &store)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
     }
 
     #[test]

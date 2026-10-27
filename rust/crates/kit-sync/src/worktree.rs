@@ -234,17 +234,10 @@ pub fn paths_overlap(left: &str, right: &str) -> bool {
     index_path_matches_or_descends(left, right) || index_path_descends_from(right, left)
 }
 
-#[must_use]
-pub fn index_path_matches_or_descends(path: &str, base: &str) -> bool {
-    path == base || index_path_descends_from(path, base)
-}
-
-#[must_use]
-pub fn index_path_descends_from(path: &str, base: &str) -> bool {
-    path.len() > base.len()
-        && path.starts_with(base)
-        && path.as_bytes().get(base.len()) == Some(&b'/')
-}
+pub use kit_core::index::{
+    path_descends_from as index_path_descends_from,
+    path_matches_or_descends as index_path_matches_or_descends,
+};
 
 #[must_use]
 pub fn is_ignored_worktree_path(
@@ -276,37 +269,7 @@ pub fn current_head_tree(layout: &RepoLayout, store: &ObjectStore) -> Result<Opt
     }
 }
 
-/// Read the index, seeding an absent/empty one from HEAD when possible.
-///
-/// This lets old repositories or manually removed indexes keep the
-/// expected staging invariant: adding/removing one path starts from the
-/// current commit snapshot instead of making the next commit forget all
-/// unchanged tracked files.
-pub fn read_or_seed_index_from_head(
-    layout: &RepoLayout,
-    store: &ObjectStore,
-) -> Result<kit_core::index::Index, String> {
-    let idx = kit_core::index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
-    if !idx.entries.is_empty() {
-        return Ok(idx);
-    }
-
-    let Some(head_hash) =
-        kit_core::refs::resolve_head(layout).map_err(|e| format!("resolve HEAD: {e}"))?
-    else {
-        return Ok(idx);
-    };
-    match store
-        .read_object(&head_hash)
-        .map_err(|e| format!("read HEAD: {e}"))?
-    {
-        Object::Commit(c) => kit_core::index::from_tree(store, c.tree_hash)
-            .map_err(|e| format!("index from HEAD: {e}")),
-        Object::Remix(r) => kit_core::index::from_tree(store, r.tree_hash)
-            .map_err(|e| format!("index from HEAD: {e}")),
-        _ => Err("HEAD does not resolve to a commit or remix".to_string()),
-    }
-}
+pub use kit_core::index::read_or_seed_from_head as read_or_seed_index_from_head;
 
 pub use kit_core::refs::write_ref_recording_history;
 
