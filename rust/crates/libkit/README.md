@@ -117,6 +117,11 @@ key. A secret lives in a `SecretKey`, which wipes its bytes on drop.
 `libkit::attest_signer::build` turns an algorithm, a `Kind` and a `Config` into a
 signer. It never creates a key file.
 
+`libkit::attestation::create` signs an in-toto statement about a commit with
+one or more signers and saves the envelope. It takes the worktree lock for
+the write only. `verify_commit` checks every envelope of a commit against a
+trust registry and reports a verdict for each one.
+
 ## Errors
 
 `libkit::Error` is a `#[non_exhaustive]` enum. Each variant wraps the error

@@ -8,8 +8,8 @@ use kit_core::store::StoreError;
 use kit_core::worktree::WorktreeError;
 use libkit::signing::ErrorKind;
 use libkit::{
-    add, attest_signer, blame, branch, commit, diff, head, keys, linked, merge, mv, rebase, repo,
-    revspec, signer, status,
+    add, attest_signer, attestation, blame, branch, commit, diff, head, keys, linked, merge, mv,
+    rebase, repo, revspec, signer, status,
 };
 
 use crate::exit;
@@ -38,6 +38,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Add(inner) => add_exit_code(inner),
         libkit::Error::Signer(inner) => signer_exit_code(inner),
         libkit::Error::AttestSigner(inner) => attest_signer_exit_code(inner),
+        libkit::Error::Attestation(inner) => attestation_exit_code(inner),
         libkit::Error::Keys(inner) => keys_exit_code(inner),
         libkit::Error::Commit(inner) => commit_exit_code(inner),
         libkit::Error::Merge(inner) => merge_exit_code(inner),
@@ -469,6 +470,38 @@ pub fn attest_signer_exit_code(error: &attest_signer::Error) -> u8 {
 }
 
 #[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn attestation_exit_code(error: &attestation::Error) -> u8 {
+    match error {
+        attestation::Error::Signer(inner) => attest_signer_exit_code(inner),
+        // A signer spec that does not parse.
+        attestation::Error::SpecPart(_)
+        | attestation::Error::SpecAlgorithm(_)
+        | attestation::Error::SpecSigner(_)
+        | attestation::Error::SpecKey(_)
+        | attestation::Error::SpecMissingAlgorithm
+        | attestation::Error::SpecMissingSigner => exit::USAGE,
+        // An input is missing: the predicate file or the list of envelopes.
+        attestation::Error::PredicateRead { .. } | attestation::Error::List(_) => exit::NOINPUT,
+        // The predicate is wrong, or the statement or envelope is malformed.
+        attestation::Error::PredicateTooLarge(_)
+        | attestation::Error::PredicateNotObject
+        | attestation::Error::Statement(_)
+        | attestation::Error::Encode(_) => exit::DATAERR,
+        // The envelope cannot be written.
+        attestation::Error::Pruned(_) | attestation::Error::Store(_) => exit::CANTCREAT,
+        // Another `kit` holds the worktree lock.
+        attestation::Error::Lock(_) => exit::TEMPFAIL,
+        attestation::Error::NoHeadCommit
+        | attestation::Error::ReadHead(_)
+        | attestation::Error::OpenStore(_)
+        | attestation::Error::ReadCommit { .. }
+        | attestation::Error::Sign { .. }
+        | attestation::Error::KeyId { .. } => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
 fn keys_exit_code(error: &keys::Error) -> u8 {
     match error {
         // A backend name or a key reference in the settings is wrong.
@@ -818,6 +851,44 @@ mod tests {
                 exit::CONFIG_ERROR,
             ),
             (
+                attestation::Error::Signer(attest_signer::Error::UnknownAlgorithm("x".to_owned()))
+                    .into(),
+                exit::USAGE,
+            ),
+            (
+                attestation::Error::Signer(attest_signer::Error::Keystore("x".to_owned())).into(),
+                exit::CONFIG_ERROR,
+            ),
+            (
+                attestation::Error::SpecPart("x".to_owned()).into(),
+                exit::USAGE,
+            ),
+            (attestation::Error::SpecMissingSigner.into(), exit::USAGE),
+            (
+                attestation::Error::PredicateTooLarge("p".to_owned()).into(),
+                exit::DATAERR,
+            ),
+            (attestation::Error::PredicateNotObject.into(), exit::DATAERR),
+            (
+                attestation::Error::PredicateRead {
+                    path: "p".to_owned(),
+                    source: std::io::Error::other("x"),
+                }
+                .into(),
+                exit::NOINPUT,
+            ),
+            (attestation::Error::Pruned([1; 32]).into(), exit::CANTCREAT),
+            (
+                attestation::Error::Lock(lock::Error::Worktree(LockError::Busy("l".to_owned())))
+                    .into(),
+                exit::TEMPFAIL,
+            ),
+            (attestation::Error::NoHeadCommit.into(), exit::GENERAL_ERROR),
+            (
+                attestation::Error::List(kit_attest::Error::Io("x".to_owned())).into(),
+                exit::NOINPUT,
+            ),
+            (
                 keys::Error::Backend(kit_keystore::Error::Encoding("x".into())).into(),
                 exit::CONFIG_ERROR,
             ),
@@ -893,5 +964,7 @@ mod tests {
         assert!(message(&backend).starts_with("key backend: "));
         let hex: libkit::Error = keys::Error::SecretHexLength.into();
         assert_eq!(message(&hex), "--hex must be exactly 64 hex characters");
+        let spec: libkit::Error = attestation::Error::SpecMissingAlgorithm.into();
+        assert_eq!(message(&spec), "--additional-signer: missing algorithm=...");
     }
 }

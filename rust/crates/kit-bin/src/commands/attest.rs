@@ -47,30 +47,13 @@
 use std::io::Write;
 
 use clap::Parser;
-use kit_attest::{Algorithm, Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, Signer, statement, store};
-use kit_core::hash::Hash;
-use kit_core::layout::RepoLayout;
-use kit_core::{hash as hash_mod, refs};
+use kit_core::hash as hash_mod;
+use libkit::attest_signer;
+use libkit::attestation::{self, Request, SignerSpec};
 
 use crate::clap_args;
-use crate::commands::attest_factory::{self, FactoryError};
-use crate::config::Config;
 use crate::exit;
-
-/// Default predicate type URI — placeholder; real callers pass their own.
-///
-/// Uses the GitHub-anchored URI scheme defined in
-/// `docs/specs/SPEC-ATTESTATIONS.md` §6.4
-/// (`https://kit.storage/spec/predicate/<name>/v<n>`)
-/// so the only predicate URI kit ships out-of-the-box points at a
-/// location the project actually controls.
-const DEFAULT_PREDICATE_TYPE: &str = "https://kit.storage/spec/predicate/empty/v1";
-
-/// Hard cap on a `--predicate-file` body. A DSSE predicate is a
-/// small JSON object; refusing anything past 1 MiB stops a runaway or
-/// hostile file from being slurped whole into memory before the JSON
-/// parse even runs.
-const MAX_PREDICATE_BYTES: u64 = 1024 * 1024;
+use crate::progress::ServedWarning;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -128,85 +111,7 @@ impl Args {
     }
 }
 
-/// Parsed `--additional-signer` spec. The `path` field overrides the
-/// per-algorithm key path (for `repo-key`) or the external-signer
-/// binary path (for `external`); if unset we fall back to the
-/// `[attest]` config section just like the primary signer does.
-#[derive(Debug, PartialEq, Eq)]
-struct SignerSpec {
-    algorithm: Algorithm,
-    signer_kind: String,
-    path: Option<String>,
-    /// Parsed `args=a|b|c` clause. `None` ⇒ fall through to
-    /// `attest.external_signer_args`; `Some(vec)` ⇒ override for this
-    /// signer only. Pipe-separated on the wire because comma is the
-    /// spec's key=value separator.
-    args: Option<Vec<String>>,
-}
-
-fn parse_signer_spec(s: &str) -> Result<SignerSpec, String> {
-    let mut algorithm: Option<Algorithm> = None;
-    let mut signer_kind: Option<String> = None;
-    let mut path: Option<String> = None;
-    let mut args: Option<Vec<String>> = None;
-    for part in s.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let Some((k, v)) = part.split_once('=') else {
-            return Err(format!(
-                "--additional-signer spec part '{part}' is not key=value"
-            ));
-        };
-        match k.trim() {
-            "algorithm" => {
-                let v = v.trim();
-                let alg = attest_factory::parse_algorithm(v).map_err(|_| {
-                    format!("--additional-signer: unknown algorithm '{v}' — expected one of: ed25519, secp256k1, p256")
-                })?;
-                algorithm = Some(alg);
-            }
-            "signer" => {
-                let v = v.trim();
-                if !matches!(v, "repo-key" | "external") {
-                    return Err(format!(
-                        "--additional-signer: unknown signer '{v}' — expected one of: repo-key, external"
-                    ));
-                }
-                signer_kind = Some(v.to_owned());
-            }
-            "path" => {
-                path = Some(v.trim().to_owned());
-            }
-            "args" => {
-                // Pipe-separator is a deliberate divergence from the
-                // `,`-separator used between spec keys: `,` is already
-                // taken, and `|` is the shortest ASCII separator that
-                // doesn't need shell-quoting. An empty value means
-                // "zero argv" and is valid (overrides a non-empty
-                // config explicitly).
-                args = Some(crate::config::parse_pipe_list(v.trim()));
-            }
-            other => {
-                return Err(format!("--additional-signer: unknown spec key '{other}'"));
-            }
-        }
-    }
-    let algorithm =
-        algorithm.ok_or_else(|| "--additional-signer: missing algorithm=...".to_owned())?;
-    let signer_kind =
-        signer_kind.ok_or_else(|| "--additional-signer: missing signer=...".to_owned())?;
-    Ok(SignerSpec {
-        algorithm,
-        signer_kind,
-        path,
-        args,
-    })
-}
-
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
     let parsed = match clap_args::parse::<Args>("kit attest", args) {
         Ok(o) => o,
@@ -238,298 +143,78 @@ pub fn run(args: &[String]) -> u8 {
         cfg.attest.external_signer_args = argv;
     }
 
-    // --- Resolve commit. --------------------------------------------
-    let commit_hash = match resolve_commit(&layout, parsed.commit.as_deref()) {
-        Ok(h) => h,
-        Err((msg, code)) => return emit_err(&msg, code),
-    };
-
-    // --- Read the commit's serialised bytes for the subject digest. --
-    // The in-toto Statement subject now carries both a blake3 and a
-    // sha256 digest of the SAME bytes (SPEC-ATTESTATIONS §4.2), so we
-    // need the raw serialised commit, not just its hash. Reading here
-    // (before signing/the lock below) doesn't weaken the existing
-    // anti-race protection: the lock-held re-check further down still
-    // catches a concurrent `gc` pruning the commit between resolution
-    // and the final save.
-    let commit_bytes = {
-        let obj_store = match kit_core::store::ObjectStore::open(&layout) {
-            Ok(s) => s,
-            Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
-        };
-        match super::read_object_bytes(&obj_store, &commit_hash) {
-            Ok(b) => b,
-            Err((msg, code)) => return emit_err(&msg, code),
-        }
-    };
-
-    // --- Resolve primary algorithm + signer. ------------------------
-    let alg_str = parsed
-        .algorithm
-        .clone()
-        .unwrap_or_else(|| cfg.attest.default_algorithm_or_fallback().to_owned());
-    let algorithm = match attest_factory::parse_algorithm(&alg_str) {
-        Ok(a) => a,
-        Err(FactoryError::UnknownAlgorithm(s)) => {
-            return emit_err(
-                &format!("unknown algorithm '{s}' — expected one of: ed25519, secp256k1, p256"),
-                exit::USAGE,
-            );
-        }
-        Err(e) => return emit_err(&format!("{e}"), exit::USAGE),
-    };
-    let signer_kind = parsed
-        .signer
-        .clone()
-        .unwrap_or_else(|| cfg.attest.signer_or_fallback().to_owned());
-
-    let primary_signer = match attest_factory::build_signer(&layout, algorithm, &signer_kind, &cfg)
-    {
-        Ok(s) => s,
-        Err(e) => return emit_err(&format!("{e}"), factory_error_code(&e)),
-    };
-
-    // --- Resolve additional signers. --------------------------------
-    // Parse ALL specs before building ANY signer so a malformed spec
-    // surfaces as a USAGE error without any crypto happening.
-    let mut additional_specs: Vec<SignerSpec> = Vec::with_capacity(parsed.additional_signers.len());
-    for spec_str in &parsed.additional_signers {
-        match parse_signer_spec(spec_str) {
-            Ok(s) => additional_specs.push(s),
-            Err(e) => return emit_err(&e, exit::USAGE),
-        }
-    }
-
-    let mut signers: Vec<Box<dyn Signer>> = Vec::with_capacity(1 + additional_specs.len());
-    signers.push(primary_signer);
-    for spec in &additional_specs {
-        let signer = match build_additional_signer(&layout, spec, &cfg) {
-            Ok(s) => s,
-            Err(e) => return emit_err(&format!("{e}"), factory_error_code(&e)),
-        };
-        signers.push(signer);
-    }
-
-    // --- Build predicate bytes. ------------------------------------
-    let predicate_bytes: Vec<u8> = match parsed.predicate_file.as_deref() {
-        Some(p) => match read_predicate_file(p) {
-            Ok(b) => b,
-            Err((msg, code)) => return emit_err(&msg, code),
-        },
-        None => b"{}".to_vec(),
-    };
-    let predicate_type = parsed
-        .predicate_type
-        .unwrap_or_else(|| DEFAULT_PREDICATE_TYPE.to_owned());
-
-    // --- Build Statement. ------------------------------------------
-    let stmt_bytes = match statement::for_commit(
-        &commit_hash,
-        &commit_bytes,
-        &predicate_type,
-        &predicate_bytes,
-    ) {
-        Ok(s) => s.into_bytes(),
-        Err(
-            kit_attest::Error::PredicateMustBeJsonObject
-            | kit_attest::Error::PredicateNotJsonObject
-            | kit_attest::Error::PredicateNotUtf8,
-        ) => {
-            return emit_err(
-                "--predicate-file must contain a JCS-canonical JSON object",
-                exit::DATAERR,
-            );
-        }
-        Err(e) => return emit_err(&format!("statement: {e}"), exit::DATAERR),
-    };
-
-    // --- Sign with every signer, aborting on the first failure. -----
-    let pae = kit_attest::pae_of(PAYLOAD_TYPE_IN_TOTO, &stmt_bytes);
-    let mut signatures: Vec<Sig> = Vec::with_capacity(signers.len());
-    for (idx, signer) in signers.iter_mut().enumerate() {
-        let sig_bytes = match signer.sign(&pae) {
-            Ok(b) => b,
-            Err(e) => {
-                return emit_err(
-                    &format!("sign (signer #{}): {e}", idx + 1),
-                    exit::GENERAL_ERROR,
-                );
-            }
-        };
-        let keyid = match signer.keyid() {
-            Ok(k) => k,
-            Err(e) => {
-                return emit_err(
-                    &format!("keyid (signer #{}): {e}", idx + 1),
-                    exit::GENERAL_ERROR,
-                );
-            }
-        };
-        signatures.push(Sig {
-            keyid,
-            sig: sig_bytes,
-        });
-    }
-
-    let envelope = Envelope {
-        payload_type: PAYLOAD_TYPE_IN_TOTO.to_owned(),
-        payload: stmt_bytes,
-        signatures,
-    };
-    let encoded = match envelope.encode() {
-        Ok(s) => s,
-        Err(e) => return emit_err(&format!("encode envelope: {e}"), exit::DATAERR),
-    };
-
-    // --- Save. ----------------------------------------------------
-    // Hold the repo lock across the envelope write so a concurrent
-    // `gc --grace-secs 0` can't compute its live set (which treats
-    // attestation subjects as roots) before this attestation lands and then
-    // prune the just-attested commit. The repo was validated above
-    // (`layout.common_dir().is_dir()`), so a non-repo reported cleanly. Held
-    // tightly, after signing (which may shell out to an external signer),
-    // around the write only.
-    let _lock = match super::acquire_worktree_lock(&layout) {
-        Ok(l) => l,
+    let request = match request_from(&parsed) {
+        Ok(request) => request,
         Err(code) => return code,
     };
-    // The commit was resolved before the lock; re-verify it still exists in
-    // the object store now that gc can't run, so we never write an
-    // attestation whose subject a concurrent `gc --grace-secs 0` pruned
-    // between resolution and this save. (`obj_store` avoids shadowing
-    // the `kit_attest::store` module used for `store::save`.)
-    let obj_store = match kit_core::store::ObjectStore::open(&layout) {
-        Ok(s) => s,
-        Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
+    match attestation::create(
+        &layout,
+        &crate::environment::current(),
+        &cfg,
+        &request,
+        &ServedWarning,
+    ) {
+        Ok(created) => {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "attested {} → {} ({} signature(s))",
+                hash_mod::to_hex(&created.id),
+                created.path.display(),
+                created.signatures
+            );
+            exit::OK
+        }
+        Err(e) => {
+            let e = libkit::Error::from(e);
+            emit_err(
+                &crate::exit_map::message(&e),
+                crate::exit_map::exit_code(&e),
+            )
+        }
+    }
+}
+
+/// Turn the parsed flags into a request. A flag that does not parse gives
+/// the usage exit code, before any signing starts.
+fn request_from(parsed: &Args) -> Result<Request, u8> {
+    let commit = match parsed.commit.as_deref() {
+        Some(hex) => match hash_mod::from_hex(hex) {
+            Ok(hash) => Some(hash),
+            Err(e) => {
+                return Err(emit_err(&format!("bad --commit hash: {e}"), exit::DATAERR));
+            }
+        },
+        None => None,
     };
-    if !obj_store.contains(&commit_hash) {
-        return emit_err(
-            &format!(
-                "attested commit {} no longer exists (pruned concurrently?); aborting",
-                hash_mod::to_hex(&commit_hash)
-            ),
-            exit::CANTCREAT,
-        );
-    }
-    let (att_id, path) = match store::save(&layout, &commit_hash, encoded.as_bytes()) {
-        Ok(p) => p,
-        Err(e) => return emit_err(&format!("store: {e}"), exit::CANTCREAT),
-    };
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "attested {} → {} ({} signature(s))",
-        hash_mod::to_hex(&att_id),
-        path.display(),
-        envelope.signatures.len()
-    );
-    exit::OK
-}
-
-/// Build an additional signer from a parsed spec.
-///
-/// `path` overrides the per-algorithm key path (repo-key) or the
-/// external-signer binary path (external); if unset we fall through to
-/// the same `[attest]` config the primary signer uses.
-fn build_additional_signer(
-    layout: &RepoLayout,
-    spec: &SignerSpec,
-    base: &Config,
-) -> Result<Box<dyn Signer>, FactoryError> {
-    match spec.signer_kind.as_str() {
-        "repo-key" => {
-            // A per-spec path overrides the config-level key path; we
-            // synthesise a one-off Config to feed the factory so it
-            // still does the load-and-validate dance we want.
-            let mut cfg = base.clone();
-            if let Some(p) = spec.path.as_deref() {
-                // Path-traversal guard at the spec layer, mirroring the
-                // user-config validator. A per-spec `path=...` value
-                // can come from `--additional-signer` argv or, in the
-                // multi-sig flow, from a CI-controlled string. Either
-                // way `..` traversal is rejected.
-                if let Err(e) = crate::config::validate_key_path(p) {
-                    return Err(FactoryError::InvalidKeyFile {
-                        path: p.to_owned(),
-                        reason: e.to_string(),
-                    });
-                }
-                match spec.algorithm {
-                    Algorithm::Ed25519 => p.clone_into(&mut cfg.signing_key),
-                    Algorithm::Secp256k1 => p.clone_into(&mut cfg.attest.secp256k1_key_path),
-                    Algorithm::P256 => p.clone_into(&mut cfg.attest.p256_key_path),
-                }
-            }
-            attest_factory::build_signer(layout, spec.algorithm, "repo-key", &cfg)
-        }
-        "external" => {
-            let mut cfg = base.clone();
-            if let Some(p) = spec.path.as_deref() {
-                p.clone_into(&mut cfg.attest.external_signer_path);
-            }
-            // Per-spec `args=...` REPLACES the config-level argv so
-            // multi-sig specs can independently drive different
-            // external binaries. Absent `args=` ⇒ inherit the primary
-            // signer's config value, matching how `path=` falls through.
-            if let Some(argv) = spec.args.as_ref() {
-                cfg.attest.external_signer_args.clone_from(argv);
-            }
-            attest_factory::build_signer(layout, spec.algorithm, "external", &cfg)
-        }
-        other => Err(FactoryError::UnknownSignerKind(other.to_owned())),
-    }
-}
-
-pub(crate) fn factory_error_code(e: &FactoryError) -> u8 {
-    match e {
-        FactoryError::UnknownSignerKind(_) | FactoryError::UnknownAlgorithm(_) => exit::USAGE,
-        FactoryError::MissingKeyFile { .. } | FactoryError::MissingKeystoreKey { .. } => {
-            exit::NOINPUT
-        }
-        _ => exit::CONFIG_ERROR,
-    }
-}
-
-/// Read a `--predicate-file` with a size cap. Stats the file
-/// first so an oversized predicate is rejected before any large read,
-/// then reads with a bounded `take` as defence-in-depth against a file
-/// that grows between the stat and the read.
-fn read_predicate_file(path: &str) -> Result<Vec<u8>, (String, u8)> {
-    use std::io::Read;
-    let meta = std::fs::metadata(path)
-        .map_err(|e| (format!("predicate file '{path}': {e}"), exit::NOINPUT))?;
-    if meta.len() > MAX_PREDICATE_BYTES {
-        return Err((
-            format!("predicate file '{path}' exceeds {MAX_PREDICATE_BYTES}-byte cap"),
-            exit::DATAERR,
-        ));
-    }
-    let file = std::fs::File::open(path)
-        .map_err(|e| (format!("predicate file '{path}': {e}"), exit::NOINPUT))?;
-    let mut data = Vec::new();
-    file.take(MAX_PREDICATE_BYTES + 1)
-        .read_to_end(&mut data)
-        .map_err(|e| (format!("predicate file '{path}': {e}"), exit::NOINPUT))?;
-    if data.len() as u64 > MAX_PREDICATE_BYTES {
-        return Err((
-            format!("predicate file '{path}' exceeds {MAX_PREDICATE_BYTES}-byte cap"),
-            exit::DATAERR,
-        ));
-    }
-    Ok(data)
-}
-
-/// Parse `--commit` value or fall back to HEAD.
-fn resolve_commit(layout: &RepoLayout, flag: Option<&str>) -> Result<Hash, (String, u8)> {
-    if let Some(hex) = flag {
-        return hash_mod::from_hex(hex)
-            .map_err(|e| (format!("bad --commit hash: {e}"), exit::DATAERR));
-    }
-    match refs::resolve_head(layout) {
-        Ok(Some(h)) => Ok(h),
-        Ok(None) => Err(("HEAD has no commit yet".to_owned(), exit::GENERAL_ERROR)),
-        Err(e) => Err((format!("read HEAD: {e}"), exit::GENERAL_ERROR)),
-    }
+    let algorithm = parsed
+        .algorithm
+        .as_deref()
+        .map(attest_signer::parse_algorithm)
+        .transpose()
+        .map_err(|e| emit_err(&e.to_string(), exit::USAGE))?;
+    let signer = parsed
+        .signer
+        .as_deref()
+        .map(str::parse::<attest_signer::Kind>)
+        .transpose()
+        .map_err(|e| emit_err(&e.to_string(), exit::USAGE))?;
+    // Every spec is parsed before any signer is built, so a malformed spec
+    // is a usage error with no crypto done.
+    let additional = parsed
+        .additional_signers
+        .iter()
+        .map(|spec| spec.parse::<SignerSpec>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| emit_err(&e.to_string(), exit::USAGE))?;
+    Ok(Request {
+        commit,
+        algorithm,
+        signer,
+        predicate_type: parsed.predicate_type.clone(),
+        predicate_file: parsed.predicate_file.as_deref().map(Into::into),
+        additional,
+    })
 }
 
 use super::error as emit_err;
@@ -611,80 +296,6 @@ mod tests {
     fn parse_args_rejects_unknown() {
         let args = vec!["--bogus".into(), "x".into()];
         assert!(parse_args(&args).is_err());
-    }
-
-    #[test]
-    fn parse_signer_spec_ok() {
-        let s = parse_signer_spec("algorithm=secp256k1,signer=repo-key,path=k.key").unwrap();
-        assert_eq!(s.algorithm, Algorithm::Secp256k1);
-        assert_eq!(s.signer_kind, "repo-key");
-        assert_eq!(s.path.as_deref(), Some("k.key"));
-    }
-
-    #[test]
-    fn parse_signer_spec_with_args() {
-        let s = parse_signer_spec(
-            "algorithm=p256,signer=external,path=/usr/bin/signer,args=sign|--tag|demo",
-        )
-        .unwrap();
-        assert_eq!(s.algorithm, Algorithm::P256);
-        assert_eq!(s.signer_kind, "external");
-        assert_eq!(s.path.as_deref(), Some("/usr/bin/signer"));
-        assert_eq!(
-            s.args.as_deref(),
-            Some(["sign".to_owned(), "--tag".to_owned(), "demo".to_owned()].as_slice())
-        );
-    }
-
-    #[test]
-    fn parse_signer_spec_args_empty_means_zero_argv() {
-        // `args=` with no value is a valid override that means "this
-        // signer gets zero argv, regardless of config." Distinct from
-        // omitting `args=` entirely (which inherits from config).
-        let s = parse_signer_spec("algorithm=ed25519,signer=external,args=").unwrap();
-        assert_eq!(s.args.as_deref(), Some([].as_slice()));
-    }
-
-    #[test]
-    fn parse_signer_spec_without_path() {
-        let s = parse_signer_spec("algorithm=p256,signer=external").unwrap();
-        assert_eq!(s.algorithm, Algorithm::P256);
-        assert_eq!(s.signer_kind, "external");
-        assert!(s.path.is_none());
-    }
-
-    #[test]
-    fn parse_signer_spec_missing_algorithm() {
-        let e = parse_signer_spec("signer=repo-key").unwrap_err();
-        assert!(e.contains("algorithm"), "{e}");
-    }
-
-    #[test]
-    fn parse_signer_spec_missing_signer() {
-        let e = parse_signer_spec("algorithm=ed25519").unwrap_err();
-        assert!(e.contains("signer"), "{e}");
-    }
-
-    #[test]
-    fn parse_signer_spec_unknown_algorithm() {
-        let e = parse_signer_spec("algorithm=rsa,signer=repo-key").unwrap_err();
-        assert!(e.contains("rsa"), "{e}");
-    }
-
-    #[test]
-    fn parse_signer_spec_unknown_signer_kind() {
-        let e = parse_signer_spec("algorithm=ed25519,signer=sigstore").unwrap_err();
-        assert!(e.contains("sigstore"), "{e}");
-    }
-
-    #[test]
-    fn parse_signer_spec_not_key_value() {
-        // Missing comma between key=value pairs — `split_once('=')` swallows
-        // the rest into the value of the first key. This surfaces as an
-        // "unknown algorithm" error for the bogus algorithm value, which is
-        // clear enough for the user to fix.
-        let e = parse_signer_spec("algorithm=ed25519 signer=repo-key").unwrap_err();
-        assert!(e.contains("algorithm") || e.contains("key=value"), "{e}");
     }
 
     #[test]

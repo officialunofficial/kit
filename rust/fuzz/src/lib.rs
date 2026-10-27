@@ -2377,6 +2377,46 @@ pub fn secret_hex_parse_one_iteration(input: &[u8]) {
     }
 }
 
+/// Signer specs (`signer_spec_parse`): `attestation::SignerSpec` never panics
+/// on any text and gives the same answer twice. An accepted spec names an
+/// algorithm and a signer. Every refusal reads as an `--additional-signer`
+/// message.
+pub fn signer_spec_parse_one_iteration(input: &[u8]) {
+    use libkit::attestation::SignerSpec;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let first = text.parse::<SignerSpec>();
+    let second = text.parse::<SignerSpec>();
+    match (&first, &second) {
+        (Ok(a), Ok(b)) => {
+            assert_eq!(a, b, "a spec parses the same twice");
+            assert!(
+                text.contains("algorithm") && text.contains("signer"),
+                "an accepted spec names an algorithm and a signer"
+            );
+        }
+        (Err(a), Err(b)) => {
+            assert_eq!(
+                a.to_string(),
+                b.to_string(),
+                "a refusal reads the same twice"
+            );
+            assert!(
+                a.to_string().starts_with("--additional-signer"),
+                "a refusal names the flag"
+            );
+        }
+        _ => panic!("a spec must parse the same way twice"),
+    }
+    assert!(
+        "algorithm=ed25519,signer=repo-key"
+            .parse::<SignerSpec>()
+            .is_ok()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3255,6 +3295,29 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, secret_hex_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_signer_spec_parse() {
+        run_iterated_unit(signer_spec_parse_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"algorithm=ed25519,signer=repo-key",
+            b"algorithm=p256,signer=external,path=/bin/sign,args=a|b|c",
+            b"algorithm=p256,signer=external,args=",
+            b" algorithm = p256 , signer = external ,",
+            b"signer=repo-key",
+            b"algorithm=ed25519",
+            b"algorithm=rsa,signer=repo-key",
+            b"algorithm=ed25519,signer=keystore",
+            b"algorithm=ed25519,signer=repo-key,color=red",
+            b"algorithm",
+            b",,,",
+            b"=",
+            b"\xff\xfe",
+        ] {
+            run_one(case, signer_spec_parse_one_iteration).unwrap();
         }
     }
 }

@@ -51,12 +51,9 @@
 use std::io::Write;
 
 use clap::{Parser, ValueEnum};
-use kit_attest::envelope;
-use kit_attest::verify::{extract_primary_commit_hash, verify};
-use kit_attest::{Algorithm, store};
-use kit_core::hash::Hash;
-use kit_core::layout::RepoLayout;
-use kit_core::{hash as hash_mod, refs};
+use kit_attest::Algorithm;
+use kit_core::hash::{self as hash_mod, Hash};
+use libkit::attestation::{self, Checked, Failure};
 
 use crate::clap_args;
 use crate::exit;
@@ -89,37 +86,27 @@ struct Args {
     format: VerifyAttestFormat,
 }
 
-/// One reported signature verdict, collected for the JSON envelope.
-struct SigRecord {
-    keyid: String,
-    algorithm: Option<String>,
-    verified: bool,
-    reason: Option<String>,
-}
-
-/// One reported attestation, collected for the JSON envelope. `error`
-/// covers read/decode/subject-mismatch failures (mutually exclusive
-/// with a populated `signatures`).
-struct AttRecord {
-    id: Option<Hash>,
-    error: Option<String>,
-    signatures: Vec<SigRecord>,
-}
-
-fn emit_json(commit: &Hash, ok: bool, error: Option<&str>, atts: &[AttRecord]) {
+fn emit_json(commit: &Hash, ok: bool, error: Option<&str>, atts: &[Checked]) {
     let mut items = Vec::with_capacity(atts.len());
     for a in atts {
         let mut obj = JsonObject::new();
+        let failure = a.outcome.as_ref().err().map(ToString::to_string);
         obj.field_opt_hash("id", a.id.as_ref())
-            .field_opt_str("error", a.error.as_deref());
-        let mut sigs = Vec::with_capacity(a.signatures.len());
-        for s in &a.signatures {
-            let mut sobj = JsonObject::new();
-            sobj.field_str("keyid", &s.keyid)
-                .field_opt_str("algorithm", s.algorithm.as_deref())
-                .field_bool("verified", s.verified)
-                .field_opt_str("reason", s.reason.as_deref());
-            sigs.push(sobj.finish());
+            .field_opt_str("error", failure.as_deref());
+        let mut sigs = Vec::new();
+        if let Ok(result) = &a.outcome {
+            for s in &result.signatures {
+                let alg = Algorithm::from_keyid(&s.keyid);
+                let mut sobj = JsonObject::new();
+                sobj.field_str("keyid", &s.keyid)
+                    .field_opt_str("algorithm", alg.map(|a| a.to_string()).as_deref())
+                    .field_bool("verified", s.verified)
+                    .field_opt_str(
+                        "reason",
+                        (!s.verified).then(|| format!("{:?}", s.reason)).as_deref(),
+                    );
+                sigs.push(sobj.finish());
+            }
         }
         obj.field_raw("signatures", &format!("[{}]", sigs.join(",")));
         items.push(obj.finish());
@@ -131,6 +118,15 @@ fn emit_json(commit: &Hash, ok: bool, error: Option<&str>, atts: &[AttRecord]) {
         .field_raw("attestations", &format!("[{}]", items.join(",")));
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "{}", top.finish());
+}
+
+/// Print a library error and give its exit code.
+fn library_error(error: attestation::Error) -> u8 {
+    let error = libkit::Error::from(error);
+    emit_err(
+        &crate::exit_map::message(&error),
+        crate::exit_map::exit_code(&error),
+    )
 }
 
 #[must_use]
@@ -154,9 +150,16 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     // --- Resolve commit. --------------------------------------------
-    let commit_hash = match resolve_commit(&layout, parsed.commit.as_deref()) {
-        Ok(h) => h,
-        Err((msg, code)) => return emit_err(&msg, code),
+    let requested = match parsed.commit.as_deref() {
+        Some(hex) => match hash_mod::from_hex(hex) {
+            Ok(hash) => Some(hash),
+            Err(e) => return emit_err(&format!("bad --commit hash: {e}"), exit::DATAERR),
+        },
+        None => None,
+    };
+    let commit_hash = match attestation::resolve_commit(&layout, requested) {
+        Ok(hash) => hash,
+        Err(e) => return library_error(e),
     };
 
     // --- Build Registry. --------------------------------------------
@@ -206,10 +209,16 @@ pub fn run(args: &[String]) -> u8 {
         None => None,
     };
 
-    // --- Enumerate envelopes. ---------------------------------------
-    let envelopes = match store::list(&layout, &commit_hash) {
+    // --- Check every envelope. --------------------------------------
+    let checked = match attestation::verify_commit(&layout, &commit_hash, &registry) {
         Ok(v) => v,
-        Err(e) => return err(&format!("list attestations: {e}"), exit::NOINPUT),
+        Err(e) => {
+            let e = libkit::Error::from(e);
+            return err(
+                &crate::exit_map::message(&e),
+                crate::exit_map::exit_code(&e),
+            );
+        }
     };
     // All `verify-attest` report lines are human-readable prose; the
     // verdict is conveyed via the exit code (OK / DATAERR /
@@ -217,7 +226,7 @@ pub fn run(args: &[String]) -> u8 {
     // regardless of `--format=json` — while stdout carries the JSON
     // envelope (see `emit_json`).
     let mut report = std::io::stderr().lock();
-    if envelopes.is_empty() {
+    if checked.is_empty() {
         let msg = format!(
             "no attestations for commit {}",
             hash_mod::to_hex(&commit_hash)
@@ -233,153 +242,19 @@ pub fn run(args: &[String]) -> u8 {
     let _ = writeln!(
         report,
         "verifying {} attestation(s) for commit {}",
-        envelopes.len(),
+        checked.len(),
         hash_mod::to_hex(&commit_hash)
     );
 
-    let mut all_ok = true;
-    let mut atts: Vec<AttRecord> = Vec::with_capacity(envelopes.len());
-    for path in &envelopes {
-        let limit = u64::try_from(store::MAX_ENVELOPE_SIZE).unwrap_or(u64::MAX);
-        let bytes = match kit_core::bounded_read::read_capped(path, limit) {
-            Ok(b) => b,
-            Err(e) => {
-                let _ = writeln!(report, "  {}: read error: {e}", path.display());
-                all_ok = false;
-                atts.push(AttRecord {
-                    id: None,
-                    error: Some(format!("read error: {e}")),
-                    signatures: Vec::new(),
-                });
-                continue;
-            }
-        };
-        let att_id = kit_attest::attestation_id(&bytes);
-        let env = match envelope::decode(&bytes) {
-            Ok(env) => env,
-            Err(e) => {
-                let _ = writeln!(
-                    report,
-                    "  {}: malformed envelope: {e}",
-                    hash_mod::to_hex(&att_id)
-                );
-                all_ok = false;
-                atts.push(AttRecord {
-                    id: Some(att_id),
-                    error: Some(format!("malformed envelope: {e}")),
-                    signatures: Vec::new(),
-                });
-                continue;
-            }
-        };
-        let subject_hash = match extract_primary_commit_hash(&env.payload) {
-            Ok(subject_hash) => subject_hash,
-            Err(e) => {
-                let _ = writeln!(
-                    report,
-                    "  {}: subject error: {e}",
-                    hash_mod::to_hex(&att_id)
-                );
-                all_ok = false;
-                atts.push(AttRecord {
-                    id: Some(att_id),
-                    error: Some(format!("subject error: {e}")),
-                    signatures: Vec::new(),
-                });
-                continue;
-            }
-        };
-        if subject_hash != commit_hash {
-            let _ = writeln!(
-                report,
-                "  {}: subject mismatch: statement names {}, requested {}",
-                hash_mod::to_hex(&att_id),
-                hash_mod::to_hex(&subject_hash),
-                hash_mod::to_hex(&commit_hash)
-            );
-            all_ok = false;
-            atts.push(AttRecord {
-                id: Some(att_id),
-                error: Some(format!(
-                    "subject mismatch: statement names {}, requested {}",
-                    hash_mod::to_hex(&subject_hash),
-                    hash_mod::to_hex(&commit_hash)
-                )),
-                signatures: Vec::new(),
-            });
-            continue;
-        }
-        let result = match verify(&env, &registry) {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = writeln!(
-                    report,
-                    "  {}: malformed envelope: {e}",
-                    hash_mod::to_hex(&att_id)
-                );
-                all_ok = false;
-                atts.push(AttRecord {
-                    id: Some(att_id),
-                    error: Some(format!("malformed envelope: {e}")),
-                    signatures: Vec::new(),
-                });
-                continue;
-            }
-        };
-        let _ = writeln!(
-            report,
-            "  attestation {}: {} signature(s)",
-            hash_mod::to_hex(&att_id),
-            result.signatures.len()
-        );
-        let mut any_shown = false;
-        // The JSON record carries EVERY signature (unfiltered) so an
-        // agent parsing it never loses data to `--algorithm`; only the
-        // human stderr report is filtered.
-        let mut sig_records = Vec::with_capacity(result.signatures.len());
-        for sig in &result.signatures {
-            let alg = Algorithm::from_keyid(&sig.keyid);
-            let alg_str = alg.map_or_else(|| "unknown".to_owned(), |a| a.to_string());
-            sig_records.push(SigRecord {
-                keyid: sig.keyid.clone(),
-                algorithm: alg.map(|_| alg_str.clone()),
-                verified: sig.verified,
-                reason: (!sig.verified).then(|| format!("{:?}", sig.reason)),
-            });
-            if let (Some(filter_alg), Some(sig_alg)) = (filter, alg)
-                && filter_alg != sig_alg
-            {
-                continue;
-            }
-            any_shown = true;
-            let verdict = if sig.verified {
-                "verified".to_owned()
-            } else {
-                format!("FAILED ({:?})", sig.reason)
-            };
-            let _ = writeln!(
-                report,
-                "    [{alg_str}] {} — {verdict}",
-                short_keyid(&sig.keyid)
-            );
-        }
-        atts.push(AttRecord {
-            id: Some(att_id),
-            error: None,
-            signatures: sig_records,
-        });
-        if !any_shown && filter.is_some() {
-            let _ = writeln!(report, "    (no signatures matched --algorithm filter)");
-        }
-        if !result.any_verified {
-            all_ok = false;
-        }
+    for item in &checked {
+        write_report(&mut report, item, filter);
     }
+    let all_ok = checked.iter().all(Checked::is_verified);
 
     drop(report);
     if all_ok {
         if json {
-            emit_json(&commit_hash, true, None, &atts);
+            emit_json(&commit_hash, true, None, &checked);
         }
         {
             let mut stderr = std::io::stderr().lock();
@@ -392,7 +267,7 @@ pub fn run(args: &[String]) -> u8 {
                 &commit_hash,
                 false,
                 Some("at least one attestation failed verification"),
-                &atts,
+                &checked,
             );
         }
         {
@@ -400,6 +275,52 @@ pub fn run(args: &[String]) -> u8 {
             let _ = writeln!(stderr, "bad: at least one attestation failed verification");
         }
         exit::DATAERR
+    }
+}
+
+/// Write the human lines for one envelope. The filter hides signatures of
+/// other algorithms from this report only. The JSON output keeps them all.
+fn write_report(report: &mut impl Write, item: &Checked, filter: Option<Algorithm>) {
+    let id = item.id.as_ref().map(hash_mod::to_hex).unwrap_or_default();
+    let result = match &item.outcome {
+        Ok(result) => result,
+        Err(Failure::Read(e)) => {
+            let _ = writeln!(report, "  {}: read error: {e}", item.path.display());
+            return;
+        }
+        Err(failure) => {
+            let _ = writeln!(report, "  {id}: {failure}");
+            return;
+        }
+    };
+    let _ = writeln!(
+        report,
+        "  attestation {id}: {} signature(s)",
+        result.signatures.len()
+    );
+    let mut any_shown = false;
+    for sig in &result.signatures {
+        let alg = Algorithm::from_keyid(&sig.keyid);
+        let alg_str = alg.map_or_else(|| "unknown".to_owned(), |a| a.to_string());
+        if let (Some(filter_alg), Some(sig_alg)) = (filter, alg)
+            && filter_alg != sig_alg
+        {
+            continue;
+        }
+        any_shown = true;
+        let verdict = if sig.verified {
+            "verified".to_owned()
+        } else {
+            format!("FAILED ({:?})", sig.reason)
+        };
+        let _ = writeln!(
+            report,
+            "    [{alg_str}] {} — {verdict}",
+            short_keyid(&sig.keyid)
+        );
+    }
+    if !any_shown && filter.is_some() {
+        let _ = writeln!(report, "    (no signatures matched --algorithm filter)");
     }
 }
 
@@ -414,18 +335,6 @@ use super::trust_roots::{
     load_registry as load_trust_roots, note_if_missing, resolve_trust_roots_path, short_keyid,
     warn_if_unsafe_trust_roots,
 };
-
-fn resolve_commit(layout: &RepoLayout, flag: Option<&str>) -> Result<Hash, (String, u8)> {
-    if let Some(hex) = flag {
-        return hash_mod::from_hex(hex)
-            .map_err(|e| (format!("bad --commit hash: {e}"), exit::DATAERR));
-    }
-    match refs::resolve_head(layout) {
-        Ok(Some(h)) => Ok(h),
-        Ok(None) => Err(("HEAD has no commit yet".to_owned(), exit::GENERAL_ERROR)),
-        Err(e) => Err((format!("read HEAD: {e}"), exit::GENERAL_ERROR)),
-    }
-}
 
 use super::error as emit_err;
 
