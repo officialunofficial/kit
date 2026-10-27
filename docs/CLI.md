@@ -375,7 +375,7 @@ History / commits:
   `--ignore-rev` accepts any revision (short hash, ref, `HEAD~2`);
   `--ignore-revs-file` entries must be full hex object names, one per line,
   with blank lines and `#` comments (including inline) skipped &mdash; both
-  matching git. (kit does not auto-read a `.git-blame-ignore-revs` file or
+  matching git. A file over 16 MiB is a data error. (kit does not auto-read a `.git-blame-ignore-revs` file or
   a `blame.ignoreRevsFile` config key; pass the file explicitly.)
   `--ignore-rev-precise` (kit-only; requires `--ignore-rev` or
   `--ignore-revs-file` &mdash; a usage error otherwise) refines that fall-through
