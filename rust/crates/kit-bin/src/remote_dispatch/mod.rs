@@ -597,7 +597,7 @@ fn open_connect_parts(
     let ca_file = if url.starts_with("kit+https://")
         && std::env::var_os(kit_transport_connect::tls::CA_FILE_ENV).is_none()
     {
-        cfg.ssl_ca_file_path(layout).map_err(|error| {
+        crate::config::ssl_ca_file_path(cfg, layout).map_err(|error| {
             DispatchError::Transport(TransportError::TlsConfiguration(error.to_string()))
         })?
     } else {

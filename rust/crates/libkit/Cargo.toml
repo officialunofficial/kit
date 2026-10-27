@@ -43,10 +43,8 @@ kit-transport-file = { version = "=0.5.0", path = "../kit-transport-file", optio
 kit-transport-ssh = { version = "=0.5.0", path = "../kit-transport-ssh", optional = true }
 kit-transport-s3 = { version = "=0.5.0", path = "../kit-transport-s3", optional = true }
 kit-transport-connect = { version = "=0.5.0", path = "../kit-transport-connect", optional = true }
-thiserror = "2.0.21"
-
-[dev-dependencies]
 tempfile = "3.27.0"
+thiserror = "2.0.21"
 
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated modules.

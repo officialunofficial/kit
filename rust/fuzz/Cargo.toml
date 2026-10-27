@@ -54,6 +54,7 @@ kit-keystore = { path = "../crates/kit-keystore", features = ["fuzzing"] }
 kit-rpc = { path = "../crates/kit-rpc", features = ["arbitrary"] }
 kit-serve = { path = "../crates/kit-serve" }
 kit-bin = { path = "../crates/kit-bin", features = ["fuzzing"] }
+libkit = { path = "../crates/libkit" }
 kit-transport-ssh = { path = "../crates/kit-transport-ssh" }
 tar = "0.4.46"
 tempfile = "3.27.0"

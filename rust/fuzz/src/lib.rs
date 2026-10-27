@@ -223,7 +223,8 @@ pub fn grant_and_header_parse_one_iteration(input: &[u8]) {
 /// repo-scope parse accepts no forbidden key, so the sentinel values that a
 /// hostile repo plants never reach the merged config.
 pub fn config_parse_one_iteration(input: &[u8]) {
-    use kit_bin::config::{Config, ConfigScope, apply_text};
+    use libkit::NoopObserver;
+    use libkit::config::{Config, ConfigScope, apply_text};
     let input = &input[..input.len().min(MAX_INPUT)];
     let Ok(text) = core::str::from_utf8(input) else {
         return;
@@ -231,7 +232,7 @@ pub fn config_parse_one_iteration(input: &[u8]) {
     let path = std::path::Path::new("fuzz-config");
     for scope in [ConfigScope::Repo, ConfigScope::User] {
         let mut cfg = Config::default();
-        let _ = apply_text(&mut cfg, text, path, scope, false);
+        let _ = apply_text(&mut cfg, text, path, scope, &NoopObserver);
         if scope == ConfigScope::Repo {
             // A repo file must never set a user-scoped key.
             assert!(cfg.trusted_remote_endpoint.is_empty());
@@ -1821,7 +1822,8 @@ pub fn self_update_version_one_iteration(input: &[u8]) {
 /// non-empty `XDG_CONFIG_HOME` wins and is never repaired. Otherwise an
 /// absolute `HOME` gives `HOME/.config`. Anything else is an error.
 pub fn absolute_config_home_one_iteration(input: &[u8]) {
-    use kit_bin::config::fuzz_absolute_config_home;
+    use libkit::Environment;
+    use libkit::config::xdg_config_home;
     use std::path::{Path, PathBuf};
     let input = &input[..input.len().min(MAX_INPUT)];
     let Some((&flags, rest)) = input.split_first() else {
@@ -1833,7 +1835,12 @@ pub fn absolute_config_home_one_iteration(input: &[u8]) {
     let (xdg_text, home_text) = text.split_once('\n').unwrap_or((text, ""));
     let xdg = (flags & 1 != 0).then_some(xdg_text);
     let home = (flags & 2 != 0).then_some(home_text);
-    let result = fuzz_absolute_config_home(xdg, home);
+    let environment = Environment {
+        xdg_config_home: xdg.map(PathBuf::from),
+        home: home.map(PathBuf::from),
+        ..Environment::new("/work")
+    };
+    let result = xdg_config_home(&environment);
     if let Ok(path) = &result {
         assert!(path.is_absolute(), "the config base must be absolute");
     }

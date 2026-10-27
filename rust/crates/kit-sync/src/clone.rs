@@ -13,12 +13,7 @@ use crate::observer::{Observer, SyncEvent};
 use crate::pull::{PullReport, pull};
 use crate::source::RemoteSource;
 
-/// The name of the implicit flat remote, spelled `remote_endpoint` /
-/// `remote_type` in the repository config.
-pub const DEFAULT_REMOTE_NAME: &str = "default";
-
-/// The branch a new repository's config names as its default.
-pub const DEFAULT_BRANCH: &str = "main";
+pub use kit_core::{DEFAULT_BRANCH, DEFAULT_REMOTE_NAME};
 
 /// The remote a clone records in the new repository's config.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -302,7 +302,7 @@ The per-key classification, the read-site fence, the runtime credential
 gate on `remote_endpoint`, and the rules for adding a new config key
 are codified in `docs/specs/SPEC-CONFIG-SECURITY.md`. That spec is the
 authoritative reference when reviewing a change that touches
-`kit-bin/src/config.rs` or a transport that consumes a
+`libkit/src/config.rs` or a transport that consumes a
 config-derived endpoint, key path, or credential.
 
 `remote_endpoint`, `remote_bucket`, and `remote_type` are repo-safe

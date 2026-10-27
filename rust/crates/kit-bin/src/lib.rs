@@ -10,15 +10,7 @@
 //! only for in-process testing, and is deliberately excluded from
 //! `cargo-semver-checks` — do not depend on it as a stable API.
 
-// `deny` rather than `forbid` so the (currently single) `getpwuid_r`
-// home-dir lookup in `config::home_dir_for_euid` can call libc. That
-// function defeats the `HOME=/` parent-process trick when validating
-// an absolute `signing_key` path: env-derived home would admit every
-// path; passwd-derived home is bound to the same uid the file-mode
-// checks use. All other modules remain effectively `forbid`'d via
-// review; new `unsafe` sites need both an `#[allow]` opt-in and a
-// SAFETY comment on the block.
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 mod admission_helper;
 pub mod clap_args;
@@ -60,7 +52,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
-    config::set_cli_overrides(&environment::from_process(overrides));
+    environment::install(environment::from_process(overrides));
 
     if cmd_idx >= argv.len() {
         print_usage_stderr();

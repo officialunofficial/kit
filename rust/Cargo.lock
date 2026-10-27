@@ -3070,6 +3070,7 @@ dependencies = [
  "kit-serve",
  "kit-transport-ssh",
  "libfuzzer-sys",
+ "libkit",
  "tar",
  "tempfile",
 ]

@@ -13,9 +13,7 @@
 # justified block can move the count a little. Change the ceiling in
 # `ceiling_for()` and explain why in the same commit.
 #
-# Why two first-party crates have a non-zero count:
-#   kit-bin  - `getpwuid_r` in config::home_dir_for_euid. The header of
-#               rust/crates/kit-bin/src/lib.rs documents the exception.
+# Why one first-party crate has a non-zero count:
 #   kit-core - two `#[allow(unsafe_code)]` sites, both documented in the
 #               header of rust/crates/kit-core/src/lib.rs: the
 #               `libc::geteuid()` call in `sign::effective_uid`, and the
@@ -35,7 +33,7 @@ set -euo pipefail
 
 ceiling_for() {
     case "$1" in
-        kit-bin)               echo 23 ;;
+        kit-bin)               echo 0  ;;
         kit-client)            echo 0  ;;
         kit-core)              echo 3  ;;
         kit-keystore)          echo 0  ;;

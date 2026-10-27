@@ -19,6 +19,7 @@
 //! let _algorithm = Algorithm::Ed25519;
 //! ```
 
+pub mod config;
 mod environment;
 mod error;
 pub mod repo;

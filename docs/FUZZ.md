@@ -50,7 +50,7 @@ from recurring.
 | `fuzz_targets/ignore_parse.rs` | `ignore::parse` / `ops::restore::parse_sparse_patterns` (never panics on any text) |
 | `fuzz_targets/grant_parse.rs` | `Grant::parse` / `SignedHeader::parse` (an accepted input re-encodes to exactly itself) |
 | `fuzz_targets/epoch_visibility_parse.rs` | `EpochStatement::parse` / `VisibilityStatement::parse` / `UrlTokenStatement::parse` / `TokenTarget::parse`, the URL token verifier, the stateless grant verifiers and the `webauthn-p256` blob and client data parsers |
-| `fuzz_targets/config_parse.rs` | `config::apply_text` (a repository config never sets a user-scoped key) |
+| `fuzz_targets/config_parse.rs` | `libkit::config::apply_text` (a repository config never sets a user-scoped key) |
 | `fuzz_targets/stash_list.rs` | `ops::stash::deserialize_list` (an accepted list re-encodes to exactly itself) |
 | `fuzz_targets/bridge_map.rs` | The `kit-git-bridge` map and ref-state loaders (never panic on any file content) |
 | `fuzz_targets/pack_cursor_decode.rs` | `pack::window::WindowCursor::from_bytes` (an accepted cursor re-encodes to exactly itself) |
@@ -61,13 +61,14 @@ from recurring.
 | `fuzz_targets/read_to_end_capped.rs` | `store::read_to_end_capped` (a stream is read whole exactly when it fits the limit, otherwise `ObjectTooLarge`) |
 | `fuzz_targets/self_update_extract.rs` | `self_update::extract_binary_within` (never panics; a well-formed archive extracts whole; a cap below one tar header gives `UnpackedTooLarge`; an entry cap gives `TooManyEntries`) |
 | `fuzz_targets/self_update_version.rs` | `self_update::cmp_versions` / `self_update::validate_tag` (never panic; the version order is reflexive, antisymmetric and transitive; a tag is valid exactly when it starts with `v` and the rest parses) |
-| `fuzz_targets/absolute_config_home.rs` | `config::absolute_config_home` (a result is always absolute; a set `XDG_CONFIG_HOME` is never repaired; an absolute `HOME` gives `HOME/.config`) |
+| `fuzz_targets/absolute_config_home.rs` | `libkit::config::xdg_config_home` (a result is always absolute; a set `XDG_CONFIG_HOME` is never repaired; an absolute `HOME` gives `HOME/.config`) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in
 `rust/fuzz/Cargo.toml`, as `software_key_record` does for `kit-keystore`. The `read_to_end_capped`,
-`self_update_extract`, `self_update_version` and `absolute_config_home` targets
-use the same `fuzzing` feature on `kit-core` and `kit-bin`.
+`self_update_extract` and `self_update_version` targets use the same `fuzzing`
+feature on `kit-core` and `kit-bin`. The `absolute_config_home` target needs no
+feature, because `libkit::config::xdg_config_home` is public.
 
 ## Parser coverage
 
@@ -102,15 +103,15 @@ Each one has a fuzz target, or a written reason why it has none.
 | `kit_git_bridge::gitparse` `parse_commit`, `parse_tag`, `parse_tree`, `parse_person` | `git_commit_parse`, `git_tag_parse`, `git_tree_parse`, `git_object_parse` |
 | `kit_git_bridge::gitobj::GitObject::parse_raw`, `author::parse_timestamp`, `headers` `parse_identity`, `parse_hash`, `parse_signature` | `git_object_parse` |
 | `kit_keystore` encrypted key record `decode` | `software_key_record` |
-| `kit_bin::config` text parsing (`apply_text`) | `config_parse` |
-| `kit_bin::config::parse_pipe_list` | None. It splits a user-written config value on `\|`. It does no other parsing. Unit tests cover it. |
+| `libkit::config` text parsing (`apply_text`) | `config_parse` |
+| `libkit::config::parse_pipe_list` | None. It splits a user-written config value on `\|`. It does no other parsing. Unit tests cover it. |
 | `kit_bin::grants::parse_relying_parties`, `grants::spec::parse_ttl`, `grants::cli::parse_timeout`, `grants::cli::parse_namespace` | None. They read command-line text that the user types, not bytes from a peer or a repository. Unit tests cover them. |
 | `kit_bin::commands::attest_factory::parse_algorithm` | None. It matches a command-line word against a fixed list. Unit tests cover it. |
 | `kit_bin::commands::trust_roots` `parse`, `hex_decode` | `trust_roots_parse` |
 | `kit_core::store::read_to_end_capped` (private) | `read_to_end_capped` |
 | `kit_bin::commands::self_update` `extract_binary_within` (private) | `self_update_extract` |
 | `kit_bin::commands::self_update` `parse_version`, `cmp_versions`, `validate_tag` | `self_update_version` |
-| `kit_bin::config::absolute_config_home` (private) | `absolute_config_home` |
+| `libkit::config::xdg_config_home` | `absolute_config_home` |
 | `kit_bin::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
 | `kit_transport_ssh::url::parse_kit_ssh_url`, `validate_ssh_path` | `ssh_url_parse` |
 | `kit_transport_s3::sigv4::parse_host` | None. It strips a scheme prefix from a configured endpoint. It does no other parsing. Unit tests cover it. |

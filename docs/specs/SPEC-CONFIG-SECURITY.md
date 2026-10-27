@@ -9,7 +9,7 @@ audience: config-key authors, config.rs reviewers, transport authors
 
 Status: **Normative.** Companion to `docs/THREAT-MODEL.md` §4 and
 `docs/specs/SPEC-KEYSTORE.md` §8.2. Audience: anyone adding a new config
-key, anyone reviewing a change that touches `kit-bin/src/config.rs`,
+key, anyone reviewing a change that touches `libkit/src/config.rs`,
 and anyone writing a transport that consumes a config-derived
 endpoint, key path, or credential.
 
@@ -39,18 +39,23 @@ in GHSA-001.
 The defense is structural, not per-call: at the config READ site,
 every key is classified as either repo-safe (`SAFE`) or user-only
 (`UNSAFE`). UNSAFE keys appearing in `<repo>/.kit/config` are
-dropped with a stderr warning. They are only honored when read from
+dropped, and the loader reports each drop as an event. The `kit` command
+prints the event as a warning on stderr. They are only honored when read from
 `$XDG_CONFIG_HOME/kit/config`.
 
-The user config directory is always an absolute path. `XDG_CONFIG_HOME`
-must be absolute when set and non-empty. If it is unset or empty, kit
-uses `$HOME/.config`, and `HOME` must be absolute. Otherwise the
-command fails with an error. kit never falls back to a relative path,
-so no working directory can supply user-scoped config or trust roots.
+The user config directory is always an absolute path. The library reads no
+environment variable. The program gives it an environment that holds the
+XDG config directory, the home directory and the `-c` overrides. The `kit`
+command fills them from `XDG_CONFIG_HOME` and `HOME`. The XDG config
+directory must be absolute when set and non-empty. If it is unset or empty,
+kit uses `<home>/.config`, and the home directory must be absolute.
+Otherwise the command fails with an error. kit never falls back to a
+relative path, so no working directory can supply user-scoped config or
+trust roots.
 
 The trust boundary is anchored in
-`kit-bin/src/config.rs::REPO_FORBIDDEN_KEYS`. That constant is the
-single source of truth &mdash; `kit-bin` is the only crate that performs
+`libkit/src/config.rs::REPO_FORBIDDEN_KEYS`. That constant is the
+single source of truth &mdash; `libkit` is the only crate that performs
 config-file I/O, so there is exactly one place to fence.
 
 ---
@@ -58,7 +63,7 @@ config-file I/O, so there is exactly one place to fence.
 ## 2. Per-key audit
 
 The table below covers every key that `apply_kv` in
-`rust/crates/kit-bin/src/config.rs` recognizes &mdash; the flat keys (in
+`rust/crates/libkit/src/config.rs` recognizes &mdash; the flat keys (in
 source order), the dotted-section families (`remote.<name>.*`,
 `branch.<name>.*`) handled via
 `apply_section_kv`, and the `_url`-suffixed
@@ -137,11 +142,11 @@ without needing to remember to check.
 
 ### 3.1 Read-site rule
 
-In `kit-bin::config::apply_text`:
+In `libkit::config::apply_text`:
 
 ```text
 if scope == ConfigScope::Repo && REPO_FORBIDDEN_KEYS.contains(key) {
-    write stderr warning;
+    report a ConfigEvent to the observer;
     skip the key (continue);
 }
 ```
@@ -153,7 +158,7 @@ untouched.
 
 ### 3.2 Write-site rule
 
-In `kit-bin::config::write`, only an explicit allow-list of
+In `libkit::config::write`, only an explicit allow-list of
 repo-safe keys is emitted:
 
 ```text
@@ -179,7 +184,7 @@ warning: ignoring `<key>` from per-repo config at <path> \
    <user-config-path> and docs/THREAT-MODEL.md)
 ```
 
-The exact text is snapshot-tested
+The `kit` command prints this text from the event. The exact text is snapshot-tested
 (`crates/kit-bin/tests/snapshots/repo_config_forbidden_keys__repo_config_forbidden_warning.snap`).
 Any wording change requires a reviewable `cargo insta` snapshot diff.
 
@@ -243,6 +248,14 @@ warning, and the loader does not parse its value. A typo in a security key
 such as `pull.require_signd` is therefore an error. It never turns the
 check off.
 
+### 3.6 Absolute key paths
+
+A relative `signing_key` path must stay under `.kit/keys/`. An absolute
+path must lie under the home directory of the environment. That home
+directory must be absolute and must not be the filesystem root. If it is
+unset, relative or the root, every absolute key path is refused. A path
+with a `..` component is always refused.
+
 ---
 
 ## 4. Test coverage
@@ -251,7 +264,7 @@ The fence is multiply-tested so a regression in any one layer cannot
 hide:
 
 1. **Per-key in-process drop test**
-   (`kit_bin::config::tests::repo_*_is_rejected` and the meta-test
+   (`libkit::config::tests::repo_*_is_rejected` and the meta-test
    `every_forbidden_key_is_actually_dropped_from_repo_scope`). The
    meta-test iterates the entire `REPO_FORBIDDEN_KEYS` array, plants
    each key with a sentinel value in a repo-scoped file, and asserts
@@ -268,7 +281,7 @@ hide:
    Pins the exact stderr wording so cosmetic drift surfaces as a
    reviewable diff.
 4. **Trusted-remote runtime-gate tests**
-   (`config::tests::repo_*_remote_*requires_user_trust` and
+   (`kit_bin::config::tests::repo_*_remote_*requires_user_trust` and
    `trusted_http_remote_is_allowed`). Cover the
    `enforce_trusted_remote_endpoint` semantics for both HTTP and S3,
    plus the safe-path where the user has trusted the same endpoint.
@@ -321,8 +334,10 @@ When you add a key to `Config`:
 
 ## 7. References
 
-- `rust/crates/kit-bin/src/config.rs` &mdash; single source of truth for
+- `rust/crates/libkit/src/config.rs` &mdash; single source of truth for
   `REPO_FORBIDDEN_KEYS` and the enforcement code path.
+- `rust/crates/kit-bin/src/config.rs` &mdash; the process binding: it
+  prints the events and applies the runtime credential gate.
 - `rust/crates/kit-bin/tests/repo_config_forbidden_keys.rs` &mdash; per-key
   CLI regression suite.
 - `docs/THREAT-MODEL.md` §4 &mdash; wider trust-boundary discussion.

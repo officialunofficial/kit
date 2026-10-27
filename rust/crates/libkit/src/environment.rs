@@ -55,8 +55,12 @@ pub enum CredentialSource {
 pub struct Environment {
     /// The directory that resolves relative paths. It must be absolute.
     pub cwd: PathBuf,
-    /// The home directory of the user, when the program knows one.
+    /// The home directory of the user, when the program knows one. A
+    /// relative value is refused where the library needs a home directory.
     pub home: Option<PathBuf>,
+    /// The XDG config directory, when the program has one. It wins over
+    /// `home` for the user config. A relative value is an error.
+    pub xdg_config_home: Option<PathBuf>,
     /// Configuration overrides as `(key, value)` pairs. They win over files.
     pub config_overrides: Vec<(String, String)>,
     /// The author identity, when the program knows one.

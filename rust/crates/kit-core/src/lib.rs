@@ -127,6 +127,13 @@ pub use store::{
     KIT_DIR, MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, OBJECTS_DIR, ObjectStore, StoreError, StoreResult,
 };
 
+/// The name of the implicit flat remote, spelled `remote_endpoint` /
+/// `remote_type` in the repository config.
+pub const DEFAULT_REMOTE_NAME: &str = "default";
+
+/// The branch a new repository's config names as its default.
+pub const DEFAULT_BRANCH: &str = "main";
+
 // Content-defined chunker (FastCDC v1).
 pub use chunker::{
     AVG_SIZE as CHUNK_AVG_SIZE, ChunkBoundary, ChunkIterator, FastCdc, MASK_L as CHUNK_MASK_L,

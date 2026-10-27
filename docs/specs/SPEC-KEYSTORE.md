@@ -966,7 +966,7 @@ Precedence:
 ### 8.2 Repo-forbidden keys
 
 Every config key in section 8.1 must be present in `REPO_FORBIDDEN_KEYS` in
-`rust/crates/kit-bin/src/config.rs`. The `REPO_FORBIDDEN_KEYS` list may
+`rust/crates/libkit/src/config.rs`. The `REPO_FORBIDDEN_KEYS` list may
 include additional keys (for example `signing_key`,
 `attest.external_signer_path`, `attest.external_signer_args`,
 `attest.secp256k1_key_path`, `attest.p256_key_path`,
@@ -1384,7 +1384,7 @@ the per-section requirements above remain normative.
 - Wire `kit key` in `kit-bin/src/lib.rs`. **Shipped.**
 - Preserve `kit keygen`. **Shipped.**
 - Add config keys and repo-forbidden tests. **Shipped** &mdash; see `KeyConfig` and
-  `REPO_FORBIDDEN_KEYS` in `kit-bin/src/config.rs`.
+  `REPO_FORBIDDEN_KEYS` in `libkit/src/config.rs`.
 - Add CLI integration tests. **Shipped.**
 
 ### Attestation integration
