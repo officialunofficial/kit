@@ -4,7 +4,10 @@
 use std::error::Error as _;
 use std::path::PathBuf;
 
-use libkit::{Environment, Error, Repo, repo};
+use kit_core::layout::DiscoverError;
+use kit_core::refs::RefError;
+use kit_core::repo_lock::LockError;
+use libkit::{Environment, Error, Repo, head, lock, repo, revspec, worktrees};
 
 fn assert_error<T: std::error::Error + Send + Sync + 'static>() {}
 
@@ -43,4 +46,26 @@ fn a_store_cause_keeps_its_text() {
     let inner = repo::Error::Store(kit_core::store::StoreError::Io(io));
     let error = Error::from(inner);
     assert!(error.to_string().contains("disk"));
+}
+
+#[test]
+fn every_module_error_converts_and_keeps_its_text() {
+    let errors: Vec<Error> = vec![
+        revspec::Error::Unknown("nope".to_owned()).into(),
+        lock::Error::Registry(LockError::Busy("worktrees.lock".to_owned())).into(),
+        head::Error::ReadHead(RefError::NoHead).into(),
+        worktrees::Error::Registry(DiscoverError::PointerMalformed(PathBuf::from("/w"))).into(),
+    ];
+    assert!(matches!(errors[0], Error::Revspec(_)));
+    assert!(matches!(errors[1], Error::Lock(_)));
+    assert!(matches!(errors[2], Error::Head(_)));
+    assert!(matches!(errors[3], Error::Worktrees(_)));
+    assert_eq!(errors[0].to_string(), "unknown revision 'nope'");
+    assert!(
+        errors[1]
+            .to_string()
+            .starts_with("worktree registry lock: ")
+    );
+    assert!(errors[2].to_string().starts_with("read HEAD: "));
+    assert!(errors[3].to_string().starts_with("worktree registry: "));
 }

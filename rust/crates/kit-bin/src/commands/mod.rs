@@ -57,7 +57,6 @@ pub mod restore;
 pub mod rev_list;
 pub mod rev_parse;
 pub mod revert;
-pub mod revspec;
 pub mod rm;
 pub mod self_update;
 pub mod serve;
@@ -260,60 +259,51 @@ pub(crate) fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<H
     }
 }
 
-/// Point the current branch (or detached HEAD) at `new_head`, routing a
-/// branch advance through the history-MMB helper.
+/// The message and exit code for a failed HEAD move. [`crate::exit_map`] owns
+/// both.
+pub(crate) fn head_failure(failure: libkit::head::Error) -> (String, u8) {
+    let failure = libkit::Error::from(failure);
+    (
+        crate::exit_map::message(&failure),
+        crate::exit_map::exit_code(&failure),
+    )
+}
+
+/// Point the current branch (or detached HEAD) at `new_head`, without a
+/// condition on the old tip.
 ///
-/// Shared by `cherry-pick`/`revert`/`merge`. Unlike the historical
-/// per-command copies, a failure to read HEAD is propagated as an error
-/// rather than silently fabricating `Head::Branch("main")` and writing
-/// the commit pointer to the wrong (or a non-existent) `main` ref.
+/// Shared by `cherry-pick`, `revert` and `merge`. An unreadable HEAD is an
+/// error: the helper never guesses a branch name.
 ///
 /// # Errors
-/// Returns a human-readable message if HEAD cannot be read or the ref
-/// write fails.
+/// Returns a human-readable message if HEAD cannot be read or the write
+/// fails.
 pub(crate) fn advance_head(layout: &RepoLayout, new_head: &Hash) -> Result<(), String> {
-    let head = refs::read_head(layout).map_err(|e| format!("read HEAD: {e}"))?;
-    match head {
-        Head::Branch(name) => {
-            write_ref_recording_history(layout, &name, RefWriteCondition::Any, new_head)
-                .map_err(|e| format!("write ref: {e}"))
-        }
-        Head::Detached(_) => {
-            refs::write_head_detached(layout, new_head).map_err(|e| format!("update HEAD: {e}"))
-        }
-    }
+    libkit::head::advance(layout, new_head, RefWriteCondition::Any).map_err(|e| head_failure(e).0)
 }
 
 /// Restore the current branch (or detached HEAD) to `target` as the
-/// final step of a conflict `--abort`/rollback.
-///
-/// Shared by `cherry-pick`/`revert`/`merge` `restore_to`. As with
-/// [`advance_head`], an unreadable HEAD is reported as an error instead
-/// of defaulting to `main` — a corrupted HEAD during `--abort` must not
-/// silently clobber/create a `main` branch.
+/// final step of a conflict `--abort` or rollback.
 ///
 /// # Errors
 /// Returns a CLI exit code (already printed via [`error`]) on failure.
 pub(crate) fn restore_head_ref(layout: &RepoLayout, target: &Hash) -> Result<(), u8> {
-    let head =
-        refs::read_head(layout).map_err(|e| error(&format!("read HEAD: {e}"), exit::DATAERR))?;
-    match head {
-        Head::Branch(name) => {
-            write_ref_recording_history(layout, &name, RefWriteCondition::Any, target)
-                .map_err(|e| error(&format!("restore ref: {e}"), exit::CANTCREAT))
-        }
-        Head::Detached(_) => refs::write_head_detached(layout, target)
-            .map_err(|e| error(&format!("restore HEAD: {e}"), exit::CANTCREAT)),
-    }
+    libkit::head::advance(layout, target, RefWriteCondition::Any).map_err(|e| {
+        let (message, code) = head_failure(e);
+        error(&message, code)
+    })
 }
 
-/// Basename of the repo-level lock that serialises worktree/index
-/// read-modify-write commands (`add`, `rm`, `commit`, `merge`,
-/// `checkout`, `rebase`, `cherry-pick`, `stash`, `sparse-checkout`).
-///
-/// Ref-only mutations (`branch`/`tag`) and config-only mutations do not
-/// take this lock — they rely on ref-CAS / atomic-config writes instead.
-pub use kit_sync::WORKTREE_LOCK;
+pub use libkit::lock::{SERVE_LOCK, WORKTREE_LOCK, WORKTREES_REGISTRY_LOCK};
+
+/// The message and exit code for a failed lock.
+fn lock_failure(failure: libkit::lock::Error) -> u8 {
+    let failure = libkit::Error::from(failure);
+    error(
+        &crate::exit_map::message(&failure),
+        crate::exit_map::exit_code(&failure),
+    )
+}
 
 /// Acquire the shared worktree/index lock for this worktree.
 ///
@@ -321,169 +311,36 @@ pub use kit_sync::WORKTREE_LOCK;
 /// second mutating `kit` blocks (then times out) instead of racing on
 /// the worktree + `.kit/index`. On failure, the lock message has
 /// already been printed to stderr and the returned [`u8`] is the exit
-/// code to propagate.
-///
-/// Mirrors the pattern already used in `sparse_checkout` and
-/// `remote_dispatch`; new mutating commands should reuse this helper
-/// rather than calling `repo_lock::acquire_default` directly.
+/// code to propagate. The lock scope is the caller's decision: the guard
+/// is [`libkit::lock::RepoLock`], and dropping it releases the lock.
 ///
 /// # Errors
 /// Returns [`exit::TEMPFAIL`] when the lock cannot be taken within the
 /// default timeout (another `kit` holds it, or a stale lockfile is
 /// present).
-pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<kit_core::repo_lock::RepoLock, u8> {
-    // Per-worktree state: the lock serialises THIS tree's worktree/
-    // index mutations. A separate shared lock covers
-    // store/refs/gc mutation.
-    let lock = kit_core::repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK)
-        .map_err(|e| {
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(stderr, "error: repo lock: {e}");
-            exit::TEMPFAIL
-        })?;
-    warn_if_served(layout);
-    Ok(lock)
+pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<libkit::lock::RepoLock, u8> {
+    libkit::lock::acquire_worktree(layout, &crate::progress::ServedWarning).map_err(lock_failure)
 }
-
-/// Basename of the shared lock a live `kit serve` process holds for its
-/// whole lifetime (SPEC-CONCURRENCY §3.1). Lives in the
-/// common dir (`FileTransport` always serves a single-worktree root, so
-/// common dir and worktree state dir coincide there — see
-/// `kit_core::layout`). Local mutating commands never take this lock
-/// themselves; they only [`probe_exclusive`](kit_core::repo_lock::probe_exclusive)
-/// it via `warn_if_served` to detect a live `serve`.
-pub use kit_sync::SERVE_LOCK;
 
 /// Warn on stderr when at least one `kit serve` is currently alive
-/// against `layout`'s common dir. Called by [`acquire_worktree_lock`]
-/// and [`acquire_worktrees_registry_lock`] right after they take their
-/// own lock, so every worktree-mutating command and `gc` gets the
-/// warning "for free."
+/// against `layout`'s common dir.
 ///
-/// `pub(crate)`, not private: a handful of call sites take
-/// [`WORKTREE_LOCK`]/[`WORKTREES_REGISTRY_LOCK`] directly via
-/// `kit_core::repo_lock::acquire`/`acquire_default` instead of through
-/// [`acquire_worktree_lock`]/[`acquire_worktrees_registry_lock`] — narrowly
-/// scoped locks held across only part of a larger operation, where
-/// threading a `RepoLock` guard back out through this module's `u8`-exit-code
-/// wrapper doesn't fit the caller's own error type (e.g. `remote_dispatch`'s
-/// per-branch pull/fetch locks, which propagate `LockError` via `?` into
-/// `DispatchError`; `status`'s opportunistic, near-zero-timeout cache
-/// refresh). Every such site MUST call this function right after acquiring
-/// either lock, exactly as this module's two wrappers do — grep this
-/// function's callers before adding a new direct `acquire`/`acquire_default`
-/// call against either lock name.
-///
-/// This is detection, not coordination: `FileTransport`'s only lock
-/// (`refs/.lock`) serializes file-transport instances against each
-/// other, not against local worktree mutation or `gc` — see
-/// SPEC-CONCURRENCY §3.1. A probe failure (I/O error) is swallowed:
-/// this is a best-effort diagnostic, never a reason to fail the calling
-/// command.
+/// [`acquire_worktree_lock`] and [`acquire_worktrees_registry_lock`] call
+/// this already. A call site that takes [`WORKTREE_LOCK`] or
+/// [`WORKTREES_REGISTRY_LOCK`] directly, because it holds the lock for only
+/// part of a larger operation, calls this function right after it takes the
+/// lock.
 pub(crate) fn warn_if_served(layout: &RepoLayout) {
-    kit_sync::warn_if_served(layout, &crate::progress::Terminal::detached());
+    libkit::lock::warn_if_served(layout, &crate::progress::ServedWarning);
 }
-
-/// Basename of the common-dir lock serialising linked-worktree
-/// registry mutations (`worktree add`/`remove`/`prune`), the
-/// branch-checkout guard + HEAD-write critical sections
-/// (`checkout`/`switch`, `branch -d`/`-m`), and gc's freeze of the
-/// worktree set. Distinct from [`WORKTREE_LOCK`], which guards ONE
-/// tree's worktree/index state.
-///
-/// GLOBAL LOCK ORDER (SPEC-WORKTREE §4.3): a process that takes more
-/// than one of these MUST acquire in this order —
-/// `worktrees.lock` ≺ per-tree `worktree.lock`(s) ≺
-/// `refs-history.lock` — or two multi-lock takers can stall each
-/// other until the 5s timeout.
-pub const WORKTREES_REGISTRY_LOCK: &str = "worktrees.lock";
 
 /// Acquire the shared worktree-registry lock (common dir).
 ///
 /// # Errors
 /// [`exit::TEMPFAIL`] when the lock cannot be taken (message already
 /// printed), mirroring [`acquire_worktree_lock`].
-pub fn acquire_worktrees_registry_lock(
-    layout: &RepoLayout,
-) -> Result<kit_core::repo_lock::RepoLock, u8> {
-    let lock = kit_core::repo_lock::acquire_default(layout.common_dir(), WORKTREES_REGISTRY_LOCK)
-        .map_err(|e| {
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "error: worktree registry lock: {e}");
-        exit::TEMPFAIL
-    })?;
-    warn_if_served(layout);
-    Ok(lock)
-}
-
-/// Every worktree of `layout`'s repository as `(tree root, layout)`
-/// pairs: the main tree first, then each healthy linked tree from the
-/// registry. Broken (prunable) registry entries are skipped — they
-/// have no live HEAD to consult; `worktree prune` reaps them.
-///
-/// # Errors
-/// A human-readable message when the registry cannot be enumerated
-/// (fail closed: a caller consulting sibling HEADs must not treat an
-/// unreadable registry as "no siblings").
-pub(crate) fn all_worktree_layouts(
-    layout: &RepoLayout,
-) -> Result<Vec<(std::path::PathBuf, RepoLayout)>, String> {
-    let mut out = Vec::new();
-    if let Some(main_root) = layout.common_dir().parent() {
-        out.push((main_root.to_path_buf(), RepoLayout::single(main_root)));
-    }
-    for wt in kit_core::layout::worktrees(layout).map_err(|e| format!("worktree registry: {e}"))? {
-        if wt.prunable.is_some() {
-            continue;
-        }
-        let Some(tree_root) = wt.tree_root else {
-            continue;
-        };
-        out.push((
-            tree_root.clone(),
-            RepoLayout::linked(tree_root, wt.state_dir, layout.common_dir()),
-        ));
-    }
-    Ok(out)
-}
-
-/// The tree (other than the invoking one) that has `branch` checked
-/// out, if any. Branch moves are single-writer-per-branch (the
-/// history-MMB journal assumes it), so `checkout`/`switch`/`worktree
-/// add` refuse to put one branch on two trees, and `branch -d`/`-m`
-/// refuse to pull a branch out from under a sibling tree.
-///
-/// # Errors
-/// Propagates registry/HEAD read failures as a message — fail closed.
-pub(crate) fn branch_checked_out_elsewhere(
-    layout: &RepoLayout,
-    branch: &str,
-) -> Result<Option<std::path::PathBuf>, String> {
-    let self_state = layout
-        .worktree_state_dir()
-        .canonicalize()
-        .unwrap_or_else(|_| layout.worktree_state_dir().to_path_buf());
-    for (tree_root, candidate) in all_worktree_layouts(layout)? {
-        let candidate_state = candidate
-            .worktree_state_dir()
-            .canonicalize()
-            .unwrap_or_else(|_| candidate.worktree_state_dir().to_path_buf());
-        if candidate_state == self_state {
-            continue; // the invoking tree itself
-        }
-        match refs::read_head(&candidate) {
-            Ok(Head::Branch(name)) if name == branch => return Ok(Some(tree_root)),
-            // A sibling with no HEAD yet (mid-add) holds no branch.
-            Ok(_) | Err(RefError::NoHead) => {}
-            Err(e) => {
-                return Err(format!(
-                    "read HEAD of worktree at {}: {e}",
-                    tree_root.display()
-                ));
-            }
-        }
-    }
-    Ok(None)
+pub fn acquire_worktrees_registry_lock(layout: &RepoLayout) -> Result<libkit::lock::RepoLock, u8> {
+    libkit::lock::acquire_registry(layout, &crate::progress::ServedWarning).map_err(lock_failure)
 }
 
 /// C-style-quote `path` the way Git does for porcelain / `--name-*`
@@ -901,154 +758,6 @@ pub(crate) fn remove_dropped_path(abs: &Path) -> std::io::Result<()> {
 mod tests {
     use super::{advance_head, c_quote_path, restore_head_ref};
     use kit_core::hash::Hash;
-
-    #[cfg(feature = "history-mmr")]
-    fn write_commit(store: &kit_core::store::ObjectStore, parents: Vec<Hash>, seed: u8) -> Hash {
-        use kit_core::object::{Commit, Identity, Object};
-
-        let commit = Commit::new_unannotated(
-            [seed; 32],
-            parents,
-            Identity::ed25519([seed; 32]),
-            [seed; 32],
-            b"msg".to_vec(),
-            0,
-            [0u8; 64],
-        );
-        let bytes = kit_core::serialize::serialize(&Object::Commit(commit)).unwrap();
-        store.write(&bytes).unwrap()
-    }
-
-    #[cfg(feature = "history-mmr")]
-    #[test]
-    fn write_ref_recording_history_backfills_v01x_style_repo_from_object_store() {
-        use super::write_ref_recording_history;
-        use kit_core::history::{AncestrySnapshot, Position, verify_inclusion};
-        use kit_core::refs::{self, RefWriteCondition};
-        use kit_core::store::ObjectStore;
-
-        let td = tempfile::tempdir().unwrap();
-        let repo_root = td.path();
-        let layout = kit_core::layout::RepoLayout::single(repo_root);
-        let store = ObjectStore::init(&layout).unwrap();
-
-        // Build a 3-commit chain entirely via the object store and point
-        // `refs/heads/main` at the tip directly — simulating a repo
-        // written without `history-mmr`: the ref exists, but
-        // no canonical ancestry snapshot has been published.
-        let c0 = write_commit(&store, vec![], 1);
-        let c1 = write_commit(&store, vec![c0], 2);
-        let c2 = write_commit(&store, vec![c1], 3);
-        refs::write_ref(&layout, "main", &c2).unwrap();
-
-        // The first history-mmr-enabled write for this branch: a new
-        // commit c3 on top of the pre-existing tip c2.
-        let c3 = write_commit(&store, vec![c2], 4);
-        write_ref_recording_history(&layout, "main", RefWriteCondition::Match(c2), &c3).unwrap();
-
-        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(c3));
-
-        // The journal must now hold the full backfilled chain (c0, c1,
-        // c2) PLUS the new c3 — not just c3 alone.
-        let hist = AncestrySnapshot::load(&layout, "main").unwrap();
-        assert_eq!(hist.len(), 4);
-        let root = hist.root();
-        for (i, c) in [c0, c1, c2, c3].into_iter().enumerate() {
-            let pos = Position(i as u64);
-            let proof = hist.prove(pos).unwrap();
-            assert!(
-                verify_inclusion(&c, pos, &proof, &root),
-                "commit at position {i} failed inclusion proof after backfill"
-            );
-        }
-    }
-
-    #[cfg(feature = "history-mmr")]
-    #[test]
-    fn write_ref_recording_history_does_not_backfill_a_genuinely_fresh_branch() {
-        use super::write_ref_recording_history;
-        use kit_core::history::AncestrySnapshot;
-        use kit_core::refs::RefWriteCondition;
-        use kit_core::store::ObjectStore;
-
-        let td = tempfile::tempdir().unwrap();
-        let repo_root = td.path();
-        let layout = kit_core::layout::RepoLayout::single(repo_root);
-        let store = ObjectStore::init(&layout).unwrap();
-
-        // No pre-existing ref: this is a brand new branch's first ever
-        // commit. There is nothing to backfill.
-        let c0 = write_commit(&store, vec![], 1);
-        write_ref_recording_history(&layout, "main", RefWriteCondition::Missing, &c0).unwrap();
-
-        let hist = AncestrySnapshot::load(&layout, "main").unwrap();
-        assert_eq!(
-            hist.len(),
-            1,
-            "only the one real write, no phantom backfill entries"
-        );
-    }
-
-    /// A long chain (ref exists on disk, journal never touched) —
-    /// simulates a repo enabling `history-mmr` for the first time.
-    #[cfg(feature = "history-mmr")]
-    const CONCURRENT_BACKFILL_CHAIN_LEN: usize = 500;
-
-    /// Concurrent initial publications serialize ancestry construction under
-    /// the history lock and produce one complete chain without duplicate leaves.
-    #[cfg(feature = "history-mmr")]
-    #[test]
-    fn write_ref_recording_history_concurrent_backfill_does_not_duplicate_leaves() {
-        use super::write_ref_recording_history;
-        use kit_core::history::AncestrySnapshot;
-        use kit_core::refs::{self, RefWriteCondition};
-        use kit_core::store::ObjectStore;
-        use std::sync::{Arc, Barrier};
-
-        let td = tempfile::tempdir().unwrap();
-        let repo_root = td.path();
-        let layout = Arc::new(kit_core::layout::RepoLayout::single(repo_root));
-        let store = ObjectStore::init(&layout).unwrap();
-
-        let mut tip: Option<Hash> = None;
-        for seed in 0..CONCURRENT_BACKFILL_CHAIN_LEN {
-            let seed = u8::try_from(seed % 256).expect("seed % 256 fits in u8");
-            tip = Some(write_commit(&store, tip.into_iter().collect(), seed));
-        }
-        let tip = tip.unwrap();
-        refs::write_ref(&layout, "main", &tip).unwrap();
-
-        // Two independent new commits, each racing to be the first
-        // history-mmr-enabled write for this branch.
-        let c_a = write_commit(&store, vec![tip], 250);
-        let c_b = write_commit(&store, vec![tip], 251);
-
-        let barrier = Arc::new(Barrier::new(2));
-
-        let (layout_a, barrier_a) = (Arc::clone(&layout), Arc::clone(&barrier));
-        let t_a = std::thread::spawn(move || {
-            barrier_a.wait();
-            write_ref_recording_history(&layout_a, "main", RefWriteCondition::Any, &c_a)
-        });
-        let (layout_b, barrier_b) = (Arc::clone(&layout), Arc::clone(&barrier));
-        let t_b = std::thread::spawn(move || {
-            barrier_b.wait();
-            write_ref_recording_history(&layout_b, "main", RefWriteCondition::Any, &c_b)
-        });
-
-        let res_a = t_a.join().expect("thread a must not panic");
-        let res_b = t_b.join().expect("thread b must not panic");
-        res_a.expect("writer a must succeed");
-        res_b.expect("writer b must succeed");
-
-        let hist = AncestrySnapshot::load(&layout, "main").unwrap();
-        assert_eq!(
-            hist.len(),
-            CONCURRENT_BACKFILL_CHAIN_LEN as u64 + 1,
-            "the winning tip must have exactly its own first-parent ancestry; \
-             the superseded sibling writer is not an ancestor"
-        );
-    }
 
     #[test]
     fn c_quote_leaves_plain_paths_alone() {

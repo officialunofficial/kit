@@ -22,9 +22,9 @@ use kit_core::layout::RepoLayout;
 use kit_core::refs::{self, RefWriteCondition};
 use kit_core::store::ObjectStore;
 
-use super::revspec;
 use crate::clap_args;
 use crate::exit;
+use libkit::revspec;
 
 #[derive(Debug, Parser)]
 #[command(

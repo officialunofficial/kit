@@ -126,7 +126,7 @@ fn mark(store: &ObjectStore, layout: &RepoLayout, arg: Option<&str>, good: bool)
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
     let hash_: Hash = match arg {
-        Some(s) => match super::revspec::resolve_revision(store, layout, s) {
+        Some(s) => match libkit::revspec::resolve_revision(store, layout, s) {
             Ok(h) => h,
             Err(e) => return emit_err(&format!("bad commit: {e}"), exit::DATAERR),
         },

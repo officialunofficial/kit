@@ -20,10 +20,10 @@ use kit_core::ops::merge::is_ancestor;
 use kit_core::refs::{self, Head};
 use kit_core::store::ObjectStore;
 
-use super::revspec;
 use crate::clap_args;
 use crate::exit;
 use crate::format;
+use libkit::revspec;
 
 /// Abbreviated-id length for `branch -v`, matching `log`'s default and
 /// git's default `core.abbrev` (7) in shape (kit's id is a BLAKE3 prefix).
@@ -212,7 +212,7 @@ fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
         Ok(l) => l,
         Err(code) => return code,
     };
-    match super::branch_checked_out_elsewhere(layout, name) {
+    match libkit::worktrees::checked_out_elsewhere(layout, name) {
         Ok(Some(at)) => {
             return super::error(
                 &format!("branch '{name}' is checked out at '{}'", at.display()),
@@ -220,7 +220,7 @@ fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
             );
         }
         Ok(None) => {}
-        Err(e) => return super::error(&e, crate::exit::DATAERR),
+        Err(e) => return super::error(&e.to_string(), crate::exit::DATAERR),
     }
     match super::delete_ref_recording_history(layout, name) {
         Ok(()) => {
@@ -294,7 +294,7 @@ fn rename(layout: &RepoLayout, names: &[String]) -> u8 {
         Ok(l) => l,
         Err(code) => return code,
     };
-    match super::branch_checked_out_elsewhere(layout, &old) {
+    match libkit::worktrees::checked_out_elsewhere(layout, &old) {
         Ok(Some(at)) => {
             return emit_err(
                 &format!("branch '{old}' is checked out at '{}'", at.display()),
@@ -302,7 +302,7 @@ fn rename(layout: &RepoLayout, names: &[String]) -> u8 {
             );
         }
         Ok(None) => {}
-        Err(e) => return emit_err(&e, exit::DATAERR),
+        Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
     }
 
     // Create the destination first under a CAS that refuses to clobber an
@@ -404,7 +404,7 @@ fn resolve_filter(
             Some(s) => {
                 let h = revspec::resolve_revision(store, layout, s)
                     .map_err(|e| format!("bad revision '{s}': {e}"))?;
-                let h = super::log::peel_tags(store, h);
+                let h = libkit::revspec::peel_tags(store, h);
                 // The ancestry filters compare COMMITS; a tree/blob id would
                 // otherwise be treated as a parentless leaf and silently
                 // mis-filter (e.g. `--no-contains <tree>` keeps every branch

@@ -55,12 +55,13 @@ from recurring.
 | `fuzz_targets/bridge_map.rs` | The `kit-git-bridge` map and ref-state loaders (never panic on any file content) |
 | `fuzz_targets/pack_cursor_decode.rs` | `pack::window::WindowCursor::from_bytes` (an accepted cursor re-encodes to exactly itself) |
 | `fuzz_targets/chunked_blob_build.rs` | `worktree::chunked_blob_from_bytes` (the manifest records the input length) |
-| `fuzz_targets/trust_roots_parse.rs` | `trust_roots::parse` / `trust_roots::hex_decode` (an accepted file serializes to text that parses back to the same entries; every accepted key has a length that fits its kind) |
+| `fuzz_targets/trust_roots_parse.rs` | `trust_roots::parse` / `kit_core::hash::from_hex_bytes` (an accepted file serializes to text that parses back to the same entries; every accepted key has a length that fits its kind) |
 | `fuzz_targets/ssh_url_parse.rs` | `kit_transport_ssh::parse_kit_ssh_url` / `validate_ssh_path` (an accepted target has a user, a host and a valid path, and no control byte) |
 | `fuzz_targets/grant_fields_parse.rs` | The `kit_attest::grant::text` field parsers, `Capabilities::parse`, `RefFlags::parse`, `RefPattern::parse`, `RefScopes::parse`, `AcceptedSchemes::from_tokens`, `is_loopback_origin` and `Grant::parse_with_id` (an accepted value re-encodes to exactly the input; an accepted grant id is the hash of the input) |
 | `fuzz_targets/read_to_end_capped.rs` | `store::read_to_end_capped` (a stream is read whole exactly when it fits the limit, otherwise `ObjectTooLarge`) |
 | `fuzz_targets/self_update_extract.rs` | `self_update::extract_binary_within` (never panics; a well-formed archive extracts whole; a cap below one tar header gives `UnpackedTooLarge`; an entry cap gives `TooManyEntries`) |
 | `fuzz_targets/self_update_version.rs` | `self_update::cmp_versions` / `self_update::validate_tag` (never panic; the version order is reflexive, antisymmetric and transitive; a tag is valid exactly when it starts with `v` and the rest parses) |
+| `fuzz_targets/revspec_parse.rs` | `libkit::revspec::resolve_revision` (never panics on any text; a resolved hash names a stored object; `HEAD`, `main~2` and `v1^0` keep their answers) |
 | `fuzz_targets/absolute_config_home.rs` | `libkit::config::xdg_config_home` (a result is always absolute; a set `XDG_CONFIG_HOME` is never repaired; an absolute `HOME` gives `HOME/.config`) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
@@ -107,11 +108,12 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::config::parse_pipe_list` | None. It splits a user-written config value on `\|`. It does no other parsing. Unit tests cover it. |
 | `kit_bin::grants::parse_relying_parties`, `grants::spec::parse_ttl`, `grants::cli::parse_timeout`, `grants::cli::parse_namespace` | None. They read command-line text that the user types, not bytes from a peer or a repository. Unit tests cover them. |
 | `kit_bin::commands::attest_factory::parse_algorithm` | None. It matches a command-line word against a fixed list. Unit tests cover it. |
-| `kit_bin::commands::trust_roots` `parse`, `hex_decode` | `trust_roots_parse` |
+| `kit_bin::commands::trust_roots::parse`, `kit_core::hash::from_hex_bytes` | `trust_roots_parse` |
 | `kit_core::store::read_to_end_capped` (private) | `read_to_end_capped` |
 | `kit_bin::commands::self_update` `extract_binary_within` (private) | `self_update_extract` |
 | `kit_bin::commands::self_update` `parse_version`, `cmp_versions`, `validate_tag` | `self_update_version` |
 | `libkit::config::xdg_config_home` | `absolute_config_home` |
+| `libkit::revspec::resolve_revision` | `revspec_parse` |
 | `kit_bin::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
 | `kit_transport_ssh::url::parse_kit_ssh_url`, `validate_ssh_path` | `ssh_url_parse` |
 | `kit_transport_s3::sigv4::parse_host` | None. It strips a scheme prefix from a configured endpoint. It does no other parsing. Unit tests cover it. |

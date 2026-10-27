@@ -1577,14 +1577,15 @@ pub fn chunked_blob_build_one_iteration(input: &[u8]) {
 /// Trust-roots file text (`trust_roots_parse`): `parse` never panics. An
 /// accepted file serializes to text that parses back to the same entries,
 /// and every accepted entry has valid hex and a key length that fits its
-/// kind. `hex_decode` never panics, and an accepted string round trips.
+/// kind. `from_hex_bytes` never panics, and an accepted string round trips.
 pub fn trust_roots_parse_one_iteration(input: &[u8]) {
-    use kit_bin::commands::trust_roots::{hex_decode, parse, serialize};
+    use kit_bin::commands::trust_roots::{parse, serialize};
+    use kit_core::hash::from_hex_bytes;
     let input = &input[..input.len().min(MAX_INPUT)];
     let Ok(text) = core::str::from_utf8(input) else {
         return;
     };
-    if let Some(bytes) = hex_decode(text) {
+    if let Some(bytes) = from_hex_bytes(text) {
         assert_eq!(
             kit_core::hash::to_hex_bytes(&bytes),
             text.to_ascii_lowercase(),
@@ -1595,7 +1596,7 @@ pub fn trust_roots_parse_one_iteration(input: &[u8]) {
         let again = parse(&serialize(&entries)).expect("accepted entries must re-parse");
         assert_eq!(entries, again, "accepted trust roots must round trip");
         for e in &entries {
-            let key = hex_decode(&e.pubkey_hex).expect("accepted key is hex");
+            let key = from_hex_bytes(&e.pubkey_hex).expect("accepted key is hex");
             assert!(!e.keyid.is_empty());
             match e.kind.as_str() {
                 "ed25519" => assert_eq!(key.len(), 32),
@@ -1855,6 +1856,84 @@ pub fn absolute_config_home_one_iteration(input: &[u8]) {
             None => assert!(result.is_err(), "no absolute base must be refused"),
         },
     }
+}
+
+/// A small repository that the revision fuzz target resolves against. It has
+/// a three-commit chain, the branch `main` at the tip and the tag `v1` at
+/// the root. The fixture is built once per process, because creating a store
+/// costs more than the per-iteration budget.
+struct RevspecFixture {
+    _dir: tempfile::TempDir,
+    layout: kit_core::layout::RepoLayout,
+    store: kit_core::store::ObjectStore,
+    tip: kit_core::hash::Hash,
+    root: kit_core::hash::Hash,
+}
+
+fn revspec_fixture() -> &'static RevspecFixture {
+    use kit_core::layout::RepoLayout;
+    use kit_core::object::{Commit, Identity, Object};
+    use kit_core::store::ObjectStore;
+    use std::sync::OnceLock;
+
+    static FIXTURE: OnceLock<RevspecFixture> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("create the fixture directory");
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).expect("init the fixture store");
+        kit_core::refs::init(&layout).expect("init the fixture refs");
+        let mut parents = Vec::new();
+        let mut hashes = Vec::new();
+        for seed in 1u8..=3 {
+            let commit = Commit::new_unannotated(
+                [seed; 32],
+                parents.clone(),
+                Identity::ed25519([seed; 32]),
+                [seed; 32],
+                vec![seed],
+                u64::from(seed),
+                [0u8; 64],
+            );
+            let bytes = kit_core::serialize::serialize(&Object::Commit(commit))
+                .expect("serialize a fixture commit");
+            let hash = store.write(&bytes).expect("write a fixture commit");
+            parents = vec![hash];
+            hashes.push(hash);
+        }
+        let (root, tip) = (hashes[0], hashes[2]);
+        kit_core::refs::write_ref(&layout, "main", &tip).expect("write the branch");
+        kit_core::refs::write_tag(&layout, "v1", &root).expect("write the tag");
+        RevspecFixture {
+            _dir: dir,
+            layout,
+            store,
+            tip,
+            root,
+        }
+    })
+}
+
+/// Revision specs (`revspec_parse`): `resolve_revision` never panics on any
+/// text, and a hash that it returns names an object in the store. The
+/// fixture also pins three fixed answers, so a change to the grammar shows
+/// up as a failed assertion on every input.
+pub fn revspec_parse_one_iteration(input: &[u8]) {
+    use libkit::revspec::resolve_revision;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let fixture = revspec_fixture();
+    if let Ok(hash) = resolve_revision(&fixture.store, &fixture.layout, text) {
+        assert!(
+            fixture.store.contains(&hash),
+            "a resolved revision must name a stored object"
+        );
+    }
+    let resolve = |spec: &str| resolve_revision(&fixture.store, &fixture.layout, spec).ok();
+    assert_eq!(resolve("HEAD"), Some(fixture.tip));
+    assert_eq!(resolve("main~2"), Some(fixture.root));
+    assert_eq!(resolve("v1^0"), Some(fixture.root));
 }
 
 #[cfg(test)]
@@ -2515,6 +2594,34 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, absolute_config_home_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_revspec_parse() {
+        run_iterated_unit(revspec_parse_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"HEAD",
+            b"HEAD~",
+            b"HEAD~2",
+            b"HEAD~3",
+            b"HEAD^2",
+            b"main^0^0^0",
+            b"v1",
+            b"refs/tags/v1",
+            b"refs/heads/main",
+            b"refs/remotes/origin/main",
+            b"origin/main",
+            b"~1",
+            b"^",
+            b"HEAD~99999999999999999999",
+            b"HEAD^~^~",
+            b"abcd",
+            b"ffffffffffffffff",
+            b"\xff\xfe",
+        ] {
+            run_one(case, revspec_parse_one_iteration).unwrap();
         }
     }
 

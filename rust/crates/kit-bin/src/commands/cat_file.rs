@@ -23,10 +23,10 @@ use kit_core::object::{EntryMode, Object};
 use kit_core::store::ObjectStore;
 use kit_core::worktree;
 
-use super::revspec;
 use crate::clap_args;
 use crate::exit;
 use crate::format;
+use libkit::revspec;
 
 #[derive(Debug, Parser)]
 #[command(name = "kit cat-file", about = "Inspect a stored object.")]

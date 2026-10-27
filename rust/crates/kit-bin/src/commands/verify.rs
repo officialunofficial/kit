@@ -69,7 +69,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let h = match super::revspec::resolve_revision(&store, &layout, &opts.revision) {
+    let h = match libkit::revspec::resolve_revision(&store, &layout, &opts.revision) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("{e}"), exit::DATAERR),
     };

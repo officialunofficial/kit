@@ -18,6 +18,23 @@ global state.
 `Repo::open` opens the repository at a path. `Repo::discover` searches the
 path and its parents. Both refuse a path with a `..` component.
 
+## Revisions, locks and HEAD
+
+`libkit::revspec::resolve_revision` turns a revision string into one object
+hash. It accepts a full or short hash, a branch, a tag, a remote-tracking ref
+and `HEAD`, each with `~n` and `^n` steps. `peel_tags` and `tree_of` follow
+tag objects and find the tree of a commit.
+
+`libkit::lock` takes the worktree lock and the registry lock. The caller
+decides the scope: it holds the returned guard for as long as other writers
+must wait, then drops the guard. A `lock::Event` tells the caller when a live
+server holds the repository.
+
+`libkit::head::advance` moves the current branch, or a detached HEAD, to a
+new commit. A `RefWriteCondition` refuses a write that would discard a
+concurrent advance. `libkit::worktrees` lists the trees of a repository and
+finds the tree that has a branch checked out.
+
 ## Errors
 
 `libkit::Error` is a `#[non_exhaustive]` enum. Each variant wraps the error

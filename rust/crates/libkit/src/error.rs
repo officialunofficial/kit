@@ -1,6 +1,6 @@
 //! The error type of the library.
 
-use crate::repo;
+use crate::{head, lock, repo, revspec, worktrees};
 
 /// An error from any library operation.
 ///
@@ -14,4 +14,16 @@ pub enum Error {
     /// A repository could not be opened or discovered.
     #[error(transparent)]
     Repo(#[from] repo::Error),
+    /// A revision could not be resolved.
+    #[error(transparent)]
+    Revspec(#[from] revspec::Error),
+    /// A repository lock could not be taken.
+    #[error(transparent)]
+    Lock(#[from] lock::Error),
+    /// HEAD could not be moved.
+    #[error(transparent)]
+    Head(#[from] head::Error),
+    /// The trees of the repository could not be read.
+    #[error(transparent)]
+    Worktrees(#[from] worktrees::Error),
 }

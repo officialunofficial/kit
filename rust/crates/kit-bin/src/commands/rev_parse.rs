@@ -19,10 +19,10 @@ use kit_core::layout::RepoLayout;
 use kit_core::refs::{self, Head};
 use kit_core::store::ObjectStore;
 
-use super::revspec;
 use crate::clap_args;
 use crate::exit;
 use crate::format;
+use libkit::revspec;
 
 const DEFAULT_ABBREV: usize = 7;
 

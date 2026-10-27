@@ -176,8 +176,8 @@ fn check_add_target(layout: &RepoLayout, target: &Path) -> Result<(), u8> {
     // worktree of this repository — the tree walkers treat a nested
     // `.kit` as a foreign-repo boundary, which would make the outer
     // tree silently skip the inner one.
-    let siblings =
-        super::all_worktree_layouts(layout).map_err(|e| super::error(&e, exit::DATAERR))?;
+    let siblings = libkit::worktrees::all_layouts(layout)
+        .map_err(|e| super::error(&e.to_string(), exit::DATAERR))?;
     for (tree_root, _) in &siblings {
         let root = canonical_or_lexical(tree_root);
         if target.starts_with(&root) {
@@ -260,7 +260,7 @@ fn plan_head(
                 branch: spec.to_string(),
                 tip,
             },
-            _ => match super::revspec::resolve_revision(store, layout, spec) {
+            _ => match libkit::revspec::resolve_revision(store, layout, spec) {
                 Ok(h) => HeadPlan::Detached(h),
                 Err(e) => {
                     return Err(super::error(
@@ -275,7 +275,7 @@ fn plan_head(
     // Single-writer-per-branch: a branch may be checked out in at most
     // one tree (the history-MMB ref-write path assumes it).
     if let HeadPlan::ExistingBranch { branch, .. } | HeadPlan::NewBranch { branch, .. } = &plan {
-        match super::branch_checked_out_elsewhere(layout, branch) {
+        match libkit::worktrees::checked_out_elsewhere(layout, branch) {
             Ok(Some(at)) => {
                 return Err(super::error(
                     &format!(
@@ -286,7 +286,7 @@ fn plan_head(
                 ));
             }
             Ok(None) => {}
-            Err(e) => return Err(super::error(&e, exit::DATAERR)),
+            Err(e) => return Err(super::error(&e.to_string(), exit::DATAERR)),
         }
         // The invoking tree too: the helper deliberately skips self.
         if matches!(refs::read_head(layout), Ok(refs::Head::Branch(ref cur)) if cur == branch) {
@@ -318,7 +318,7 @@ fn create_worktree(
     // frozen: the pre-lock check in `plan_head` raced sibling
     // checkouts/adds; this one cannot.
     if let HeadPlan::ExistingBranch { branch, .. } | HeadPlan::NewBranch { branch, .. } = plan {
-        match super::branch_checked_out_elsewhere(layout, branch) {
+        match libkit::worktrees::checked_out_elsewhere(layout, branch) {
             Ok(None) => {}
             Ok(Some(at)) => {
                 return Err(super::error(
@@ -329,7 +329,7 @@ fn create_worktree(
                     exit::DATAERR,
                 ));
             }
-            Err(e) => return Err(super::error(&e, exit::DATAERR)),
+            Err(e) => return Err(super::error(&e.to_string(), exit::DATAERR)),
         }
     }
 
@@ -423,9 +423,9 @@ fn list(layout: &RepoLayout, porcelain: bool) -> u8 {
     let _ = store; // hashes come from refs; store presence validates the repo
 
     let mut rows: Vec<ListRow> = Vec::new();
-    let siblings = match super::all_worktree_layouts(layout) {
+    let siblings = match libkit::worktrees::all_layouts(layout) {
         Ok(s) => s,
-        Err(e) => return super::error(&e, exit::DATAERR),
+        Err(e) => return super::error(&e.to_string(), exit::DATAERR),
     };
     for (tree_root, candidate) in &siblings {
         let head = refs::resolve_head(candidate).ok().flatten();

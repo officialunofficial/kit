@@ -123,7 +123,7 @@ fn add(opts: &AddOpts) -> u8 {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let Some(pk_bytes) = trust_roots::hex_decode(&opts.pubkey_hex) else {
+    let Some(pk_bytes) = kit_core::hash::from_hex_bytes(&opts.pubkey_hex) else {
         return emit_err(
             &format!("bad --pubkey-hex '{}': not valid hex", opts.pubkey_hex),
             exit::USAGE,

@@ -14,10 +14,10 @@ use kit_core::hash::Hash;
 use kit_core::object::{EntryMode, Object};
 use kit_core::store::ObjectStore;
 
-use super::revspec;
 use crate::clap_args;
 use crate::exit;
 use crate::format;
+use libkit::revspec;
 
 #[derive(Debug, Parser)]
 #[command(name = "kit ls-tree", about = "List the contents of a tree object.")]
@@ -180,20 +180,7 @@ fn resolve_tree(
 ) -> Result<Hash, String> {
     let h = revspec::resolve_revision(store, layout, spec)
         .map_err(|e| format!("bad revision '{spec}': {e}"))?;
-    object_to_tree(store, &h)
-}
-
-fn object_to_tree(store: &ObjectStore, h: &Hash) -> Result<Hash, String> {
-    match store
-        .read_object(h)
-        .map_err(|e| format!("read object: {e}"))?
-    {
-        Object::Commit(c) => Ok(c.tree_hash),
-        Object::Remix(r) => Ok(r.tree_hash),
-        Object::Tree(_) => Ok(*h),
-        Object::Tag(t) => object_to_tree(store, &t.target),
-        _ => Err(format!("{} is not a tree-ish", format::hex_hash(h))),
-    }
+    revspec::tree_of(store, &h).map_err(|e| e.to_string())
 }
 
 /// Normalize a pathspec to `(repo-relative path, had-trailing-slash)`.

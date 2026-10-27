@@ -51,10 +51,10 @@ use kit_core::refs;
 use kit_core::store::{DisplaySource, EphemeralSink, ObjectSource, ObjectStore};
 use kit_core::worktree;
 
-use super::revspec;
 use crate::clap_args;
 use crate::exit;
 use crate::format;
+use libkit::revspec;
 
 mod stat;
 pub(super) use stat::render_stat;
@@ -447,7 +447,7 @@ fn resolve_merge_base_endpoints(
             exit::USAGE,
         )
     })?;
-    let a = peel_tags(
+    let a = revspec::peel_tags(
         store,
         revspec::resolve_revision(store, layout, first)
             .map_err(|e| (format!("bad revision '{first}': {e}"), exit::DATAERR))?,
@@ -460,10 +460,12 @@ fn resolve_merge_base_endpoints(
     if let Some(second) = args.get(1) {
         match revspec::resolve_revision(store, layout, second) {
             Ok(h) => {
-                let b = peel_tags(store, h);
+                let b = revspec::peel_tags(store, h);
                 let base = merge_base_of(store, a, b)?;
-                let old = object_to_tree(store, &base).map_err(|e| (e, exit::GENERAL_ERROR))?;
-                let new = object_to_tree(store, &b).map_err(|e| (e, exit::GENERAL_ERROR))?;
+                let old = revspec::tree_of(store, &base)
+                    .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
+                let new = revspec::tree_of(store, &b)
+                    .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
                 return Ok((Some(old), Some(new), args[2..].to_vec()));
             }
             // A 2nd positional that fails to resolve is treated as a pathspec
@@ -473,7 +475,7 @@ fn resolve_merge_base_endpoints(
             // rather than silently falling back to the single-rev form and
             // emitting an empty diff (matching git's "ambiguous argument").
             Err(e)
-                if matches!(e, revspec::RevError::Unknown(_))
+                if matches!(e, revspec::Error::Unknown(_))
                     && looks_like_pathspec(layout, second) => {}
             Err(e) => return Err((format!("bad revision '{second}': {e}"), exit::DATAERR)),
         }
@@ -488,9 +490,9 @@ fn resolve_merge_base_endpoints(
                 exit::GENERAL_ERROR,
             )
         })?;
-    let head = peel_tags(store, head);
+    let head = revspec::peel_tags(store, head);
     let base = merge_base_of(store, a, head)?;
-    let old = object_to_tree(store, &base).map_err(|e| (e, exit::GENERAL_ERROR))?;
+    let old = revspec::tree_of(store, &base).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
     let new = worktree_tree_filtered(store, snapshot, layout)?;
     Ok((Some(old), Some(new), args[1..].to_vec()))
 }
@@ -562,12 +564,12 @@ fn resolve_diff_endpoints(
     {
         // Peel annotated/signed tags to their commit before merge-base
         // resolution, like git (and like `log` does for its range bases).
-        let commit_a = peel_tags(
+        let commit_a = revspec::peel_tags(
             store,
             revspec::resolve_revision(store, layout, a)
                 .map_err(|e| (format!("bad revision '{a}': {e}"), exit::DATAERR))?,
         );
-        let commit_b = peel_tags(
+        let commit_b = revspec::peel_tags(
             store,
             revspec::resolve_revision(store, layout, b)
                 .map_err(|e| (format!("bad revision '{b}': {e}"), exit::DATAERR))?,
@@ -580,8 +582,9 @@ fn resolve_diff_endpoints(
                     exit::DATAERR,
                 )
             })?;
-        let old = object_to_tree(store, &mb).map_err(|e| (e, exit::GENERAL_ERROR))?;
-        let new = object_to_tree(store, &commit_b).map_err(|e| (e, exit::GENERAL_ERROR))?;
+        let old = revspec::tree_of(store, &mb).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
+        let new =
+            revspec::tree_of(store, &commit_b).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
         return Ok((Some(old), Some(new), args[1..].to_vec()));
     }
 
@@ -657,7 +660,7 @@ fn worktree_tree_filtered(
 fn rev_to_tree(store: &ObjectStore, layout: &RepoLayout, spec: &str) -> Result<Hash, (String, u8)> {
     let h = revspec::resolve_revision(store, layout, spec)
         .map_err(|e| (format!("bad revision '{spec}': {e}"), exit::DATAERR))?;
-    object_to_tree(store, &h).map_err(|e| (e, exit::GENERAL_ERROR))
+    revspec::tree_of(store, &h).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))
 }
 
 /// Like [`rev_to_tree`] but distinguishes "not a revision at all" (None)
@@ -668,8 +671,10 @@ fn try_rev_to_tree(
     spec: &str,
 ) -> Option<Result<Hash, (String, u8)>> {
     match revspec::resolve_revision(store, layout, spec) {
-        Ok(h) => Some(object_to_tree(store, &h).map_err(|e| (e, exit::GENERAL_ERROR))),
-        Err(revspec::RevError::Unknown(_)) => {
+        Ok(h) => {
+            Some(revspec::tree_of(store, &h).map_err(|e| (e.to_string(), exit::GENERAL_ERROR)))
+        }
+        Err(revspec::Error::Unknown(_)) => {
             // Not a known ref/object. If it still *looks* like a
             // revision request (ref-shaped or hash-shaped), surface the
             // failure; otherwise it is a pathspec.
@@ -683,28 +688,6 @@ fn try_rev_to_tree(
             }
         }
         Err(e) => Some(Err((format!("bad revision '{spec}': {e}"), exit::DATAERR))),
-    }
-}
-
-/// Follow `Object::Tag` targets to the first non-tag object, so an
-/// annotated/signed tag resolves to the commit it points at. Delegates to
-/// the shared `log::peel_tags` (kept as a local alias for the call sites).
-fn peel_tags(store: &ObjectStore, h: Hash) -> Hash {
-    super::log::peel_tags(store, h)
-}
-
-/// Map a resolved object hash to a tree hash: commit/remix → its tree,
-/// a tree → itself.
-pub(super) fn object_to_tree(store: &ObjectStore, h: &Hash) -> Result<Hash, String> {
-    match store.read_object(h) {
-        Ok(Object::Commit(c)) => Ok(c.tree_hash),
-        Ok(Object::Remix(r)) => Ok(r.tree_hash),
-        Ok(Object::Tree(_)) => Ok(*h),
-        Ok(_) => Err(format!(
-            "{} is not a commit, remix, or tree",
-            kit_core::hash::to_hex(h)
-        )),
-        Err(e) => Err(read_err(e)),
     }
 }
 

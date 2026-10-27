@@ -48,8 +48,8 @@ pub fn run(args: &[String]) -> u8 {
     };
     // Peel annotated/signed tags to the commit they point at, like the
     // sibling history commands (resolve_revision returns the tag object).
-    let a = match super::revspec::resolve_revision(&store, &layout, &opts.a) {
-        Ok(h) => super::log::peel_tags(&store, h),
+    let a = match libkit::revspec::resolve_revision(&store, &layout, &opts.a) {
+        Ok(h) => libkit::revspec::peel_tags(&store, h),
         Err(e) => {
             return emit_err(
                 &format!("bad revision '{}': {e}", opts.a),
@@ -57,8 +57,8 @@ pub fn run(args: &[String]) -> u8 {
             );
         }
     };
-    let b = match super::revspec::resolve_revision(&store, &layout, &opts.b) {
-        Ok(h) => super::log::peel_tags(&store, h),
+    let b = match libkit::revspec::resolve_revision(&store, &layout, &opts.b) {
+        Ok(h) => libkit::revspec::peel_tags(&store, h),
         Err(e) => {
             return emit_err(
                 &format!("bad revision '{}': {e}", opts.b),

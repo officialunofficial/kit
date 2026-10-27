@@ -31,7 +31,7 @@ use kit_core::index::EntryStatus;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
 use kit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_with};
-use kit_core::refs::{self, Head, RefWriteCondition};
+use kit_core::refs::{self, RefWriteCondition};
 use kit_core::store::ObjectStore;
 
 use crate::clap_args;
@@ -103,7 +103,7 @@ pub fn run(args: &[String]) -> u8 {
     let reset_index = !opts.soft;
 
     let spec = opts.target.as_deref().unwrap_or("HEAD");
-    let target = match super::revspec::resolve_revision(&store, &layout, spec) {
+    let target = match libkit::revspec::resolve_revision(&store, &layout, spec) {
         Ok(h) => h,
         Err(e) => {
             return emit_err(
@@ -266,15 +266,7 @@ pub fn run(args: &[String]) -> u8 {
 /// moves through the history-recording ref helper so a `history-mmr`
 /// build journals the move; detached HEAD is rewritten directly.
 fn move_head(layout: &RepoLayout, target: &Hash) -> Result<(), (String, u8)> {
-    let head = refs::read_head(layout).map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?;
-    match head {
-        Head::Branch(name) => {
-            super::write_ref_recording_history(layout, &name, RefWriteCondition::Any, target)
-                .map_err(|e| (format!("write ref: {e}"), exit::CANTCREAT))
-        }
-        Head::Detached(_) => refs::write_head_detached(layout, target)
-            .map_err(|e| (format!("update HEAD: {e}"), exit::CANTCREAT)),
-    }
+    libkit::head::advance(layout, target, RefWriteCondition::Any).map_err(super::head_failure)
 }
 
 use super::error as emit_err;

@@ -9,10 +9,10 @@ use kit_core::hash::{Hash, hash};
 use kit_core::store::ObjectStore;
 use kit_core::verify::{Selector, VerifyError, build_disclosure};
 
-use super::revspec;
 use crate::clap_args;
 use crate::exit;
 use crate::format::{self, JsonObject};
+use libkit::revspec;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProveFormat {

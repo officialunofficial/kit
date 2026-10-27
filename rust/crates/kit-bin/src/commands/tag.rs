@@ -220,7 +220,7 @@ fn resolve_target(
     target_spec: Option<&str>,
 ) -> Result<kit_core::hash::Hash, (String, u8)> {
     match target_spec {
-        Some(spec) => super::revspec::resolve_revision(store, layout, spec)
+        Some(spec) => libkit::revspec::resolve_revision(store, layout, spec)
             .map_err(|e| (format!("{e}"), exit::DATAERR)),
         None => match refs::resolve_head(layout) {
             Ok(Some(h)) => Ok(h),

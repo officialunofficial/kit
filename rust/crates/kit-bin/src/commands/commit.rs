@@ -822,7 +822,7 @@ fn resolve_amend_target(layout: &RepoLayout, store: &ObjectStore) -> Result<Comm
 /// Advance the branch pointed to by HEAD (or HEAD itself, if detached)
 /// to `commit_hash`.
 ///
-/// Routes through [`super::write_ref_recording_history`] so a build
+/// Routes through [`libkit::head::advance`] so a build
 /// with `--features history-mmr` publishes the branch's canonical ancestry
 /// snapshot under its history and ref mutation guards. Detached HEAD advances
 /// bypass branch ancestry: a detached HEAD has no branch name.
@@ -845,32 +845,26 @@ fn advance_head(
     commit_hash: &kit_core::hash::Hash,
     expected: Option<kit_core::hash::Hash>,
 ) -> Result<(), (String, u8)> {
-    let head = refs::read_head(layout).map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?;
-    match head {
-        Head::Branch(name) => {
-            let condition = match expected {
-                Some(h) => refs::RefWriteCondition::Match(h),
-                None => refs::RefWriteCondition::Missing,
-            };
-            super::write_ref_recording_history(layout, &name, condition, commit_hash).map_err(|e| {
-                match e {
-                    refs::RefError::Conflict(_) => (
-                        format!(
-                            "commit aborted: branch '{name}' moved underneath this commit \
-                             (a concurrent commit landed) — the commit object {} is durable \
-                             but currently unreferenced (GC-recoverable), nothing is corrupted; \
-                             re-run `kit commit`",
-                            format::hex_hash(commit_hash)
-                        ),
-                        exit::TEMPFAIL,
-                    ),
-                    other => (format!("write ref: {other}"), exit::CANTCREAT),
-                }
-            })
-        }
-        Head::Detached(_) => refs::write_head_detached(layout, commit_hash)
-            .map_err(|e| (format!("update HEAD: {e}"), exit::CANTCREAT)),
-    }
+    let condition = match expected {
+        Some(h) => refs::RefWriteCondition::Match(h),
+        None => refs::RefWriteCondition::Missing,
+    };
+    libkit::head::advance(layout, commit_hash, condition).map_err(|e| match e {
+        libkit::head::Error::WriteRef {
+            branch,
+            source: refs::RefError::Conflict(_),
+        } => (
+            format!(
+                "commit aborted: branch '{branch}' moved underneath this commit \
+                 (a concurrent commit landed) — the commit object {} is durable \
+                 but currently unreferenced (GC-recoverable), nothing is corrupted; \
+                 re-run `kit commit`",
+                format::hex_hash(commit_hash)
+            ),
+            exit::TEMPFAIL,
+        ),
+        other => super::head_failure(other),
+    })
 }
 
 /// Direct, deterministic tests of `advance_head`'s
@@ -1042,7 +1036,8 @@ pub(super) fn resolve_author(
 /// * `opaque:<bytes>` — raw UTF-8 bytes, stored as-is.
 fn parse_author_spec(spec: &str) -> Result<Identity, String> {
     if let Some(hex) = spec.strip_prefix("ed25519:") {
-        let bytes = hex_decode(hex).ok_or_else(|| "ed25519:<hex> invalid hex".to_string())?;
+        let bytes = kit_core::hash::from_hex_bytes(hex)
+            .ok_or_else(|| "ed25519:<hex> invalid hex".to_string())?;
         if bytes.len() != 32 {
             return Err("ed25519:<hex> must decode to 32 bytes".to_string());
         }
@@ -1083,8 +1078,8 @@ fn parse_author_spec(spec: &str) -> Result<Identity, String> {
 /// config file stores the canonical `[kind:u8][len:u16 LE][bytes]`
 /// form (see `config::expand_user_identity`), so we invert that here.
 fn decode_user_identity_hex(hex: &str) -> Result<Identity, String> {
-    let bytes =
-        hex_decode(hex).ok_or_else(|| "user.identity: not a lowercase hex string".to_string())?;
+    let bytes = kit_core::hash::from_hex_bytes(hex)
+        .ok_or_else(|| "user.identity: not a lowercase hex string".to_string())?;
     if bytes.len() < 3 {
         return Err("user.identity: too short (kind + len prefix missing)".to_string());
     }
@@ -1107,31 +1102,6 @@ fn decode_user_identity_hex(hex: &str) -> Result<Identity, String> {
     Ok(Identity {
         kind,
         bytes: payload,
-    })
-}
-
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let b = s.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        let hi = nibble(b[i])?;
-        let lo = nibble(b[i + 1])?;
-        out.push((hi << 4) | lo);
-        i += 2;
-    }
-    Some(out)
-}
-
-fn nibble(c: u8) -> Option<u8> {
-    Some(match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => 10 + c - b'a',
-        b'A'..=b'F' => 10 + c - b'A',
-        _ => return None,
     })
 }
 

@@ -416,3 +416,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "revspec_parse"
+path = "fuzz_targets/revspec_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

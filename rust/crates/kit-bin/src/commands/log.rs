@@ -49,11 +49,11 @@ use kit_core::ops::merge::find_merge_base;
 use kit_core::refs;
 use kit_core::store::ObjectStore;
 
-use super::revspec;
 use crate::clap_args;
 use crate::exit;
 use crate::format;
 use crate::signal;
+use libkit::revspec;
 
 mod dateparse;
 
@@ -409,24 +409,7 @@ fn resolve_tip(
                 .map_err(|e| format!("bad revision '{s}': {e}"))?,
         ),
     };
-    Ok(raw.map(|h| peel_tags(store, h)))
-}
-
-/// Maximum tag-of-tag chain length to follow when peeling (cycle guard).
-const MAX_TAG_DEPTH: usize = 16;
-
-/// Follow `Object::Tag` targets to the first non-tag object, so an
-/// annotated/signed tag resolves to the commit it points at. A non-tag (or
-/// unreadable) object stops the peel and is returned as-is. Shared with
-/// `rev-list` / `merge-base`.
-pub(super) fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
-    for _ in 0..MAX_TAG_DEPTH {
-        match store.read_object(&h) {
-            Ok(Object::Tag(t)) => h = t.target,
-            _ => break,
-        }
-    }
-    h
+    Ok(raw.map(|h| revspec::peel_tags(store, h)))
 }
 
 /// A commit ready to emit, ordered by timestamp (newest first) with the hash

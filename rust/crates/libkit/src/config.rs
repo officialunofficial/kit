@@ -29,6 +29,7 @@
 //! the XDG config directory and the `-c` overrides.
 
 use kit_core::bounded_read;
+use kit_core::hash::from_hex_bytes;
 use kit_core::layout::RepoLayout;
 use kit_core::observer::{NoopObserver, Observer};
 use std::fmt::Write as _;
@@ -1229,8 +1230,8 @@ pub fn expand_user_identity(value: &str) -> Result<String, ConfigError> {
                 "ed25519:<hex> must have 64 hex chars",
             ));
         }
-        let bytes =
-            hex_decode(hex).ok_or(ConfigError::InvalidUserIdentity("ed25519 hex is not valid"))?;
+        let bytes = from_hex_bytes(hex)
+            .ok_or(ConfigError::InvalidUserIdentity("ed25519 hex is not valid"))?;
         return Ok(encode_identity_hex(0x01, &bytes));
     }
     if let Some(dec) = value.strip_prefix("mid:") {
@@ -1244,7 +1245,7 @@ pub fn expand_user_identity(value: &str) -> Result<String, ConfigError> {
             "raw hex is too short or has odd length",
         ));
     }
-    let bytes = hex_decode(value).ok_or(ConfigError::InvalidUserIdentity(
+    let bytes = from_hex_bytes(value).ok_or(ConfigError::InvalidUserIdentity(
         "raw value is not valid hex",
     ))?;
     let declared = u16::from(bytes[1]) | (u16::from(bytes[2]) << 8);
@@ -1273,29 +1274,6 @@ fn hex_encode(bytes: &[u8]) -> String {
         s.push(H[(b & 0x0F) as usize] as char);
     }
     s
-}
-
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let b = s.as_bytes();
-    for i in (0..b.len()).step_by(2) {
-        let hi = nibble(b[i])?;
-        let lo = nibble(b[i + 1])?;
-        out.push((hi << 4) | lo);
-    }
-    Some(out)
-}
-
-fn nibble(c: u8) -> Option<u8> {
-    Some(match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => 10 + c - b'a',
-        b'A'..=b'F' => 10 + c - b'A',
-        _ => return None,
-    })
 }
 
 /// The XDG config base for user-scoped data: `xdg_config_home` of

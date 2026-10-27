@@ -45,10 +45,10 @@ use kit_core::ops::blame::{
 use kit_core::refs;
 use kit_core::store::ObjectStore;
 
-use super::revspec;
 use crate::clap_args;
 use crate::exit;
 use crate::format;
+use libkit::revspec;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum BlameFormat {

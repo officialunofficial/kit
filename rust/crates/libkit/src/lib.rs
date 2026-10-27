@@ -22,7 +22,11 @@
 pub mod config;
 mod environment;
 mod error;
+pub mod head;
+pub mod lock;
 pub mod repo;
+pub mod revspec;
+pub mod worktrees;
 
 pub use environment::{CredentialSource, Environment, Identity, Token};
 pub use error::Error;

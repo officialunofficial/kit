@@ -36,6 +36,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use kit_attest::{Registry, TrustRoot};
+use kit_core::hash::from_hex_bytes;
 
 use crate::exit;
 
@@ -215,7 +216,7 @@ fn push_entry(b: Block, out: &mut Vec<TrustEntry>) -> Result<(), String> {
         .filter(|k| !k.is_empty())
         .ok_or_else(|| format!("block at line {at}: missing `pubkey_hex`"))?;
     let kind = b.kind.unwrap_or_else(|| "ed25519".to_owned());
-    let Some(pk_bytes) = hex_decode(&pubkey_hex) else {
+    let Some(pk_bytes) = from_hex_bytes(&pubkey_hex) else {
         return Err(format!("block at line {at}: `pubkey_hex` is not valid hex"));
     };
     if !key_length_ok(&kind, pk_bytes.len()) {
@@ -270,7 +271,7 @@ pub fn load_registry(path: &Path) -> Result<Registry, (String, u8)> {
 }
 
 fn add_entry_to_registry(reg: &mut Registry, e: &TrustEntry) {
-    let Some(pk_bytes) = hex_decode(&e.pubkey_hex) else {
+    let Some(pk_bytes) = from_hex_bytes(&e.pubkey_hex) else {
         return;
     };
     match e.kind.as_str() {
@@ -301,7 +302,7 @@ pub fn find_ed25519_signer<'a>(entries: &'a [TrustEntry], signer: &[u8; 32]) -> 
         if e.kind != "ed25519" {
             return None;
         }
-        let bytes = hex_decode(&e.pubkey_hex)?;
+        let bytes = from_hex_bytes(&e.pubkey_hex)?;
         if bytes.len() == 32 && bytes == signer {
             Some(e.keyid.as_str())
         } else {
@@ -374,32 +375,6 @@ pub fn short_keyid(keyid: &str) -> String {
         }
         _ => keyid.to_owned(),
     }
-}
-
-#[must_use]
-pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let b = s.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        let hi = nibble(b[i])?;
-        let lo = nibble(b[i + 1])?;
-        out.push((hi << 4) | lo);
-        i += 2;
-    }
-    Some(out)
-}
-
-fn nibble(c: u8) -> Option<u8> {
-    Some(match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => 10 + c - b'a',
-        b'A'..=b'F' => 10 + c - b'A',
-        _ => return None,
-    })
 }
 
 #[cfg(test)]

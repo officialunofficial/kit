@@ -5,7 +5,7 @@
 //! and into the text for stderr with [`message`].
 
 use kit_core::store::StoreError;
-use libkit::repo;
+use libkit::{head, repo, revspec};
 
 use crate::exit;
 
@@ -17,6 +17,37 @@ use crate::exit;
 pub fn exit_code(error: &libkit::Error) -> u8 {
     match error {
         libkit::Error::Repo(inner) => repo_exit_code(inner),
+        libkit::Error::Revspec(inner) => revspec_exit_code(inner),
+        // Another `kit` holds the lock, or a stale lock file is present.
+        libkit::Error::Lock(_) => exit::TEMPFAIL,
+        libkit::Error::Head(inner) => head_exit_code(inner),
+        // A damaged registry or an unreadable sibling HEAD is malformed input.
+        libkit::Error::Worktrees(_) => exit::DATAERR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn revspec_exit_code(error: &revspec::Error) -> u8 {
+    match error {
+        revspec::Error::Unknown(_)
+        | revspec::Error::Ambiguous(_)
+        | revspec::Error::BadSuffix { .. }
+        | revspec::Error::NotACommit(_)
+        | revspec::Error::NotTreeish(_)
+        | revspec::Error::ReadHead(_)
+        | revspec::Error::ScanObjects(_)
+        | revspec::Error::ReadObject(_) => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+fn head_exit_code(error: &head::Error) -> u8 {
+    match error {
+        // The state to move from is damaged.
+        head::Error::ReadHead(_) => exit::DATAERR,
+        // The state cannot be written.
+        head::Error::WriteRef { .. } | head::Error::WriteHead(_) => exit::CANTCREAT,
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -55,6 +86,9 @@ mod tests {
     use std::path::PathBuf;
 
     use kit_core::layout::DiscoverError;
+    use kit_core::refs::RefError;
+    use kit_core::repo_lock::LockError;
+    use libkit::{lock, worktrees};
 
     use super::*;
 
@@ -78,6 +112,42 @@ mod tests {
             (
                 repo::Error::Store(StoreError::AlreadyInitialized).into(),
                 exit::GENERAL_ERROR,
+            ),
+            (
+                revspec::Error::Unknown("x".to_owned()).into(),
+                exit::GENERAL_ERROR,
+            ),
+            (
+                revspec::Error::NotTreeish("x".to_owned()).into(),
+                exit::GENERAL_ERROR,
+            ),
+            (
+                lock::Error::Worktree(LockError::Busy("worktree.lock".to_owned())).into(),
+                exit::TEMPFAIL,
+            ),
+            (
+                lock::Error::Registry(LockError::Busy("worktrees.lock".to_owned())).into(),
+                exit::TEMPFAIL,
+            ),
+            (
+                head::Error::ReadHead(RefError::NoHead).into(),
+                exit::DATAERR,
+            ),
+            (
+                head::Error::WriteRef {
+                    branch: "main".to_owned(),
+                    source: RefError::NoHead,
+                }
+                .into(),
+                exit::CANTCREAT,
+            ),
+            (
+                head::Error::WriteHead(RefError::NoHead).into(),
+                exit::CANTCREAT,
+            ),
+            (
+                worktrees::Error::Registry(DiscoverError::PointerMalformed(path())).into(),
+                exit::DATAERR,
             ),
         ]
     }
@@ -125,6 +195,10 @@ mod tests {
             message(&store),
             "not a kit repo: .kit already exists in this directory"
         );
+        let busy: libkit::Error = lock::Error::Worktree(LockError::Busy("l".to_owned())).into();
+        assert_eq!(message(&busy), "repo lock: lock 'l' busy after timeout");
+        let head: libkit::Error = head::Error::WriteHead(RefError::NoHead).into();
+        assert!(message(&head).starts_with("update HEAD: "));
         let traversal: libkit::Error = repo::Error::PathTraversal(path()).into();
         assert!(message(&traversal).contains(".."));
     }

@@ -29,8 +29,8 @@ use kit_git_bridge::gitobj::{GitObject, GitType, Sha1Id, sha1_hex};
 use kit_git_bridge::gitsrc::{CatFileBatch, GitObjKind};
 use kit_git_bridge::{author, gitparse, map};
 
-use super::revspec;
 use crate::exit;
+use libkit::revspec;
 
 type CmdResult<T> = Result<T, (String, u8)>;
 

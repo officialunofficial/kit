@@ -162,8 +162,8 @@ fn start(
     // (`<remote>/<branch>`), hashes — peeling annotated tags to the
     // commit. Branch names keep their historical precedence because
     // resolve_revision checks refs/heads first.
-    let theirs = match super::revspec::resolve_revision(store, layout, branch) {
-        Ok(h) => super::log::peel_tags(store, h),
+    let theirs = match libkit::revspec::resolve_revision(store, layout, branch) {
+        Ok(h) => libkit::revspec::peel_tags(store, h),
         Err(e) => return emit_err(&format!("merge target: {e}"), exit::GENERAL_ERROR),
     };
 

@@ -1,87 +1,101 @@
-//! Shared revision-spec resolver (parent).
+//! Revision specifications.
 //!
-//! [`resolve_revision`] turns a user-supplied revision string into a
-//! single object [`Hash`](tyalias@kit_core::Hash). It is the keystone the diff/checkout/
-//! cherry-pick/bisect commands build on so they all accept the same
-//! grammar instead of each one hand-rolling a `hash::from_hex` call.
+//! [`resolve_revision`] turns a revision string into one object
+//! [`Hash`](tyalias@kit_core::Hash). Every command that names a revision
+//! accepts the same grammar.
 //!
-//! Accepted grammar (a deliberately small subset of `git rev-parse`):
+//! Accepted grammar, a small subset of `git rev-parse`:
 //!
-//! - **Full hash** — exactly 64 hex chars (lower or upper), present in
-//!   the object store.
-//! - **Short hash** — a hex prefix of at least [`MIN_SHORT_HASH`] chars
-//!   that unambiguously names exactly one object in the store. An
-//!   ambiguous prefix (≥ 2 matches) is an error; a prefix matching none
-//!   is an error.
-//! - **Ref name** — a branch (`refs/heads/<name>`), a tag
-//!   (`refs/tags/<name>`), or the literal `HEAD`. Branches win over
-//!   tags on a name collision (matching the precedence the existing
-//!   `checkout` command used).
-//! - **Suffix navigation** — a `<base>` from any of the above followed
-//!   by zero or more `~n` / `^` / `^n` steps walking the commit's
-//!   first-parent chain. `~n` walks `n` first-parents (`~` alone == `~1`);
-//!   `^` / `^n` selects the n-th parent (`^` == `^1`, 1-based). `^0` is
-//!   the commit itself. `HEAD~2`, `main^`, `<hash>~1^2` all parse.
+//! - **Full hash**: exactly 64 hex characters, lower or upper case, that name
+//!   an object in the store.
+//! - **Short hash**: a hex prefix of at least [`MIN_SHORT_HASH`] characters that
+//!   names exactly one object. A prefix with two or more matches is an error.
+//!   A prefix with no match is an error.
+//! - **Ref name**: a branch (`refs/heads/<name>`), a tag (`refs/tags/<name>`),
+//!   a remote-tracking ref (`<remote>/<branch>`), or the literal `HEAD`. A
+//!   branch wins over a tag when both have the name.
+//! - **Suffix navigation**: a base from the forms above, then zero or more
+//!   `~n`, `^` or `^n` steps along the commit graph. `~n` walks `n`
+//!   first parents, and `~` alone means `~1`. `^n` selects the n-th parent
+//!   (1-based), and `^` alone means `^1`. `^0` is the commit itself. For
+//!   example `HEAD~2`, `main^` and `<hash>~1^2`.
 //!
-//! The resolver intentionally does NOT accept pathspecs, `:/text`
-//! message searches, reflog (`@{n}`) syntax, or ranges — `A..B` ranges
-//! are split by the caller (`diff`) before each end reaches here.
+//! The grammar has no pathspecs, no `:/text` message search, no reflog
+//! (`@{n}`) syntax and no ranges. A caller splits `A..B` before it passes
+//! each end here.
+
+use std::io;
 
 use kit_core::hash::{self, HEX_LEN, Hash};
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
-use kit_core::refs;
-use kit_core::store::ObjectStore;
+use kit_core::refs::{self, RefError};
+use kit_core::store::{ObjectStore, StoreError};
 
-/// Minimum length of an accepted short-hash prefix. Shorter prefixes are
-/// rejected as too-ambiguous-by-construction rather than scanned, so a
-/// stray 1–3 char token (e.g. a typo'd ref) fails fast.
+/// The shortest short-hash prefix that the resolver accepts. A shorter token
+/// fails fast instead of triggering a scan, so a mistyped ref name does not
+/// cost a directory read.
 pub const MIN_SHORT_HASH: usize = 4;
 
-/// Errors raised while resolving a revision string.
+/// Longest chain of tag objects that [`peel_tags`] follows.
+const MAX_TAG_DEPTH: usize = 16;
+
+/// Errors from resolving a revision.
 #[derive(Debug, thiserror::Error)]
-pub enum RevError {
+#[non_exhaustive]
+pub enum Error {
     /// The base token matched no ref and no object.
     #[error("unknown revision '{0}'")]
     Unknown(String),
     /// A short-hash prefix matched more than one object.
     #[error("ambiguous short hash '{0}' matches multiple objects")]
     Ambiguous(String),
-    /// A `~`/`^` suffix walked off the end of the commit graph.
+    /// A `~` or `^` suffix walked off the end of the commit graph, or the
+    /// suffix text is malformed.
     #[error("revision '{spec}': {detail}")]
     BadSuffix {
-        /// The full spec the user supplied.
+        /// The full spec that the caller supplied.
         spec: String,
-        /// What specifically went wrong.
+        /// What went wrong.
         detail: String,
     },
-    /// The base resolved but the suffix navigation hit a non-commit
-    /// object (a tree/blob cannot have parents).
+    /// The base resolved, but a suffix step reached an object that has no
+    /// parents, such as a tree or a blob.
     #[error("revision '{0}' resolves to a non-commit object; cannot walk parents")]
     NotACommit(String),
-    /// Underlying ref / store failure.
-    #[error("{0}")]
-    Backend(String),
+    /// HEAD could not be read.
+    #[error("resolve HEAD: {0}")]
+    ReadHead(RefError),
+    /// The object directory could not be scanned for a short hash.
+    #[error("scan objects: {0}")]
+    ScanObjects(io::Error),
+    /// An object could not be read.
+    #[error("read object: {0}")]
+    ReadObject(StoreError),
+    /// The object is not a commit, a remix, a tree or a tag of one of them.
+    #[error("{0} is not a commit, remix, or tree")]
+    NotTreeish(String),
 }
 
 /// Resolve `spec` to a single object [`Hash`](tyalias@kit_core::Hash).
 ///
-/// See the module docstring for the accepted grammar.
+/// The module documentation lists the accepted grammar. The function reads the
+/// repository only. It reads no environment and no working directory.
 ///
 /// # Errors
-/// Returns [`RevError`] when the spec is unknown, ambiguous, or the
-/// suffix navigation is invalid.
+/// Returns [`Error`] when the spec is unknown or ambiguous, when the
+/// suffix navigation is invalid, or when the repository cannot be read.
 pub fn resolve_revision(
     store: &ObjectStore,
     layout: &RepoLayout,
     spec: &str,
-) -> Result<Hash, RevError> {
+) -> Result<Hash, Error> {
     // Split the base from any trailing `~`/`^` navigation. The base is
     // everything up to the first `~` or `^`.
     let split_at = spec.find(['~', '^']).unwrap_or(spec.len());
     let (base, suffix) = spec.split_at(split_at);
     if base.is_empty() {
-        return Err(RevError::Unknown(spec.to_string()));
+        return Err(Error::Unknown(spec.to_string()));
     }
 
     let mut current = resolve_base(store, layout, base)?;
@@ -102,7 +116,7 @@ pub fn resolve_revision(
                 rest = &rest[1 + consumed..];
             }
             _ => {
-                return Err(RevError::BadSuffix {
+                return Err(Error::BadSuffix {
                     spec: spec.to_string(),
                     detail: format!("unexpected character in suffix '{rest}'"),
                 });
@@ -112,15 +126,46 @@ pub fn resolve_revision(
     Ok(current)
 }
 
+/// Follow tag objects to the first object that is not a tag, so an annotated
+/// or signed tag becomes the object it points at. A non-tag object, an
+/// unreadable object, or a chain longer than 16 tags stops the walk. The
+/// function returns the hash where the walk stopped.
+#[must_use]
+pub fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
+    for _ in 0..MAX_TAG_DEPTH {
+        match store.read_object(&h) {
+            Ok(Object::Tag(t)) => h = t.target,
+            _ => break,
+        }
+    }
+    h
+}
+
+/// The tree that `h` names: the tree of a commit or a remix, or `h` itself
+/// for a tree. Tag objects are peeled first.
+///
+/// # Errors
+/// [`Error::ReadObject`] when an object cannot be read. [`Error::NotTreeish`]
+/// when the object is a blob or another kind without a tree.
+pub fn tree_of(store: &ObjectStore, h: &Hash) -> Result<Hash, Error> {
+    let h = peel_tags(store, *h);
+    match store.read_object(&h).map_err(Error::ReadObject)? {
+        Object::Commit(c) => Ok(c.tree_hash),
+        Object::Remix(r) => Ok(r.tree_hash),
+        Object::Tree(_) => Ok(h),
+        _ => Err(Error::NotTreeish(hash::to_hex(&h))),
+    }
+}
+
 /// Resolve the base token (no `~`/`^` suffix) to a hash: ref, then
 /// full/short hash.
-fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<Hash, RevError> {
+fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<Hash, Error> {
     // 1. HEAD.
     if base == "HEAD" {
         return match refs::resolve_head(layout) {
             Ok(Some(h)) => Ok(h),
-            Ok(None) => Err(RevError::Unknown("HEAD".to_string())),
-            Err(e) => Err(RevError::Backend(format!("resolve HEAD: {e}"))),
+            Ok(None) => Err(Error::Unknown("HEAD".to_string())),
+            Err(e) => Err(Error::ReadHead(e)),
         };
     }
 
@@ -131,13 +176,13 @@ fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<
         if let Ok(Some(h)) = refs::read_ref(layout, short) {
             return Ok(h);
         }
-        return Err(RevError::Unknown(base.to_string()));
+        return Err(Error::Unknown(base.to_string()));
     }
     if let Some(short) = base.strip_prefix("refs/tags/") {
         if let Ok(Some(h)) = refs::read_tag(layout, short) {
             return Ok(h);
         }
-        return Err(RevError::Unknown(base.to_string()));
+        return Err(Error::Unknown(base.to_string()));
     }
     if let Some(rest) = base.strip_prefix("refs/remotes/") {
         if let Some((remote, branch)) = rest.split_once('/')
@@ -145,7 +190,7 @@ fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<
         {
             return Ok(h);
         }
-        return Err(RevError::Unknown(base.to_string()));
+        return Err(Error::Unknown(base.to_string()));
     }
 
     // 3. Branch (refs/heads), then tag (refs/tags). `read_ref` /
@@ -177,7 +222,7 @@ fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<
         if store.contains(&h) {
             return Ok(h);
         }
-        return Err(RevError::Unknown(base.to_string()));
+        return Err(Error::Unknown(base.to_string()));
     }
 
     // 5. Short hex prefix.
@@ -185,13 +230,13 @@ fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<
         return resolve_short_hash(store, base);
     }
 
-    Err(RevError::Unknown(base.to_string()))
+    Err(Error::Unknown(base.to_string()))
 }
 
 /// Find the unique object whose hex starts with `prefix`. Errors on
-/// zero matches ([`RevError::Unknown`]) or ≥ 2 matches
-/// ([`RevError::Ambiguous`]).
-fn resolve_short_hash(store: &ObjectStore, prefix: &str) -> Result<Hash, RevError> {
+/// zero matches ([`Error::Unknown`]) or ≥ 2 matches
+/// ([`Error::Ambiguous`]).
+fn resolve_short_hash(store: &ObjectStore, prefix: &str) -> Result<Hash, Error> {
     let lower = prefix.to_ascii_lowercase();
     // Object layout: `objects/<2-hex>/<62-hex>`. The first two hex chars
     // (when present) name the shard directory, so we only scan one
@@ -203,14 +248,14 @@ fn resolve_short_hash(store: &ObjectStore, prefix: &str) -> Result<Hash, RevErro
     let iter = match std::fs::read_dir(&shard_dir) {
         Ok(i) => i,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(RevError::Unknown(prefix.to_string()));
+            return Err(Error::Unknown(prefix.to_string()));
         }
-        Err(e) => return Err(RevError::Backend(format!("scan objects: {e}"))),
+        Err(e) => return Err(Error::ScanObjects(e)),
     };
 
     let mut found: Option<Hash> = None;
     for entry in iter {
-        let entry = entry.map_err(|e| RevError::Backend(format!("scan objects: {e}")))?;
+        let entry = entry.map_err(Error::ScanObjects)?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
@@ -222,11 +267,11 @@ fn resolve_short_hash(store: &ObjectStore, prefix: &str) -> Result<Hash, RevErro
             continue;
         };
         if found.is_some() {
-            return Err(RevError::Ambiguous(prefix.to_string()));
+            return Err(Error::Ambiguous(prefix.to_string()));
         }
         found = Some(h);
     }
-    found.ok_or_else(|| RevError::Unknown(prefix.to_string()))
+    found.ok_or_else(|| Error::Unknown(prefix.to_string()))
 }
 
 /// Walk `n` first-parents from `commit`.
@@ -235,11 +280,11 @@ fn walk_first_parent(
     spec: &str,
     mut commit: Hash,
     n: u32,
-) -> Result<Hash, RevError> {
+) -> Result<Hash, Error> {
     for _ in 0..n {
         let parents = parents_of(store, spec, &commit)?;
         let Some(first) = parents.first() else {
-            return Err(RevError::BadSuffix {
+            return Err(Error::BadSuffix {
                 spec: spec.to_string(),
                 detail: format!(
                     "commit {} has no parent (history root reached)",
@@ -254,32 +299,29 @@ fn walk_first_parent(
 
 /// Select the `n`-th parent of `commit` (1-based). `n == 0` is the
 /// commit itself.
-fn select_parent(store: &ObjectStore, spec: &str, commit: Hash, n: u32) -> Result<Hash, RevError> {
+fn select_parent(store: &ObjectStore, spec: &str, commit: Hash, n: u32) -> Result<Hash, Error> {
     if n == 0 {
         return Ok(commit);
     }
     let parents = parents_of(store, spec, &commit)?;
     let idx = (n - 1) as usize;
-    parents
-        .get(idx)
-        .copied()
-        .ok_or_else(|| RevError::BadSuffix {
-            spec: spec.to_string(),
-            detail: format!(
-                "commit {} has no parent #{n} (only {} parent(s))",
-                hash::to_hex(&commit),
-                parents.len()
-            ),
-        })
+    parents.get(idx).copied().ok_or_else(|| Error::BadSuffix {
+        spec: spec.to_string(),
+        detail: format!(
+            "commit {} has no parent #{n} (only {} parent(s))",
+            hash::to_hex(&commit),
+            parents.len()
+        ),
+    })
 }
 
 /// Read the parent list of a commit-or-remix object.
-fn parents_of(store: &ObjectStore, spec: &str, commit: &Hash) -> Result<Vec<Hash>, RevError> {
+fn parents_of(store: &ObjectStore, spec: &str, commit: &Hash) -> Result<Vec<Hash>, Error> {
     match store.read_object(commit) {
         Ok(Object::Commit(c)) => Ok(c.parents),
         Ok(Object::Remix(r)) => Ok(r.parents),
-        Ok(_) => Err(RevError::NotACommit(spec.to_string())),
-        Err(e) => Err(RevError::Backend(format!("read object: {e}"))),
+        Ok(_) => Err(Error::NotACommit(spec.to_string())),
+        Err(e) => Err(Error::ReadObject(e)),
     }
 }
 
@@ -306,7 +348,7 @@ fn is_hex(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kit_core::object::{Commit, Identity, Object};
+    use kit_core::object::{Blob, Commit, Identity, Object, ObjectType, Tree};
     use kit_core::refs;
     use kit_core::serialize;
     use tempfile::TempDir;
@@ -352,7 +394,7 @@ mod tests {
         let (_d, store, kit) = fresh_repo();
         let hex = "ab".repeat(32);
         let err = resolve_revision(&store, &kit, &hex).unwrap_err();
-        assert!(matches!(err, RevError::Unknown(_)));
+        assert!(matches!(err, Error::Unknown(_)));
     }
 
     #[test]
@@ -378,7 +420,7 @@ mod tests {
         let mut seen: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
         let mut pair: Option<(String, Vec<u8>, Vec<u8>)> = None;
         for i in 0u32..200_000 {
-            let bytes = serialize::serialize(&Object::Blob(kit_core::object::Blob {
+            let bytes = serialize::serialize(&Object::Blob(Blob {
                 data: i.to_le_bytes().to_vec(),
             }))
             .unwrap();
@@ -394,7 +436,7 @@ mod tests {
         store.write(&a).unwrap();
         store.write(&b).unwrap();
         let err = resolve_revision(&store, &kit, &prefix).unwrap_err();
-        assert!(matches!(err, RevError::Ambiguous(_)), "got {err:?}");
+        assert!(matches!(err, Error::Ambiguous(_)), "got {err:?}");
     }
 
     #[test]
@@ -403,7 +445,7 @@ mod tests {
         write_commit(&store, vec![], 3);
         // "ffff" almost certainly does not prefix our single commit.
         let err = resolve_revision(&store, &kit, "ffffffff").unwrap_err();
-        assert!(matches!(err, RevError::Unknown(_)));
+        assert!(matches!(err, Error::Unknown(_)));
     }
 
     #[test]
@@ -463,7 +505,7 @@ mod tests {
         let root = write_commit(&store, vec![], 1);
         refs::write_ref(&kit, "main", &root).unwrap();
         let err = resolve_revision(&store, &kit, "HEAD~1").unwrap_err();
-        assert!(matches!(err, RevError::BadSuffix { .. }));
+        assert!(matches!(err, Error::BadSuffix { .. }));
     }
 
     #[test]
@@ -473,14 +515,14 @@ mod tests {
         let c = write_commit(&store, vec![p1], 2);
         refs::write_ref(&kit, "main", &c).unwrap();
         let err = resolve_revision(&store, &kit, "HEAD^2").unwrap_err();
-        assert!(matches!(err, RevError::BadSuffix { .. }));
+        assert!(matches!(err, Error::BadSuffix { .. }));
     }
 
     #[test]
     fn unknown_ref_errors() {
         let (_d, store, kit) = fresh_repo();
         let err = resolve_revision(&store, &kit, "nope").unwrap_err();
-        assert!(matches!(err, RevError::Unknown(_)));
+        assert!(matches!(err, Error::Unknown(_)));
     }
 
     #[test]
@@ -490,7 +532,7 @@ mod tests {
         let hex = hash::to_hex(&c);
         // A 3-char prefix is below MIN_SHORT_HASH and not a valid ref.
         let err = resolve_revision(&store, &kit, &hex[..3]).unwrap_err();
-        assert!(matches!(err, RevError::Unknown(_)));
+        assert!(matches!(err, Error::Unknown(_)));
     }
 
     #[test]
@@ -501,5 +543,64 @@ mod tests {
         refs::write_ref(&kit, "dup", &branch_c).unwrap();
         refs::write_tag(&kit, "dup", &tag_c).unwrap();
         assert_eq!(resolve_revision(&store, &kit, "dup").unwrap(), branch_c);
+    }
+
+    /// Write a tag object that points at `target`.
+    fn write_tag(store: &ObjectStore, target: Hash, target_type: ObjectType, seed: u8) -> Hash {
+        let tag = kit_core::object::Tag {
+            target,
+            target_type,
+            name: vec![b'v', seed],
+            tagger: author(),
+            signer: [0u8; 32],
+            message: vec![seed],
+            timestamp: u64::from(seed),
+            signature: [0u8; 64],
+        };
+        let bytes = serialize::serialize(&Object::Tag(tag)).unwrap();
+        store.write(&bytes).unwrap()
+    }
+
+    #[test]
+    fn peel_tags_follows_a_chain_to_the_commit() {
+        let (_d, store, _kit) = fresh_repo();
+        let c = write_commit(&store, vec![], 1);
+        let inner = write_tag(&store, c, ObjectType::Commit, 2);
+        let outer = write_tag(&store, inner, ObjectType::Tag, 3);
+        assert_eq!(peel_tags(&store, outer), c);
+        assert_eq!(peel_tags(&store, c), c);
+    }
+
+    #[test]
+    fn peel_tags_returns_an_unreadable_hash_unchanged() {
+        let (_d, store, _kit) = fresh_repo();
+        assert_eq!(peel_tags(&store, [0xee; 32]), [0xee; 32]);
+    }
+
+    #[test]
+    fn tree_of_maps_commit_tag_and_tree_to_the_tree() {
+        let (_d, store, _kit) = fresh_repo();
+        let c = write_commit(&store, vec![], 1);
+        let Object::Commit(commit) = store.read_object(&c).unwrap() else {
+            panic!("expected a commit");
+        };
+        let tagged = write_tag(&store, c, ObjectType::Commit, 2);
+        assert_eq!(tree_of(&store, &c).unwrap(), commit.tree_hash);
+        assert_eq!(tree_of(&store, &tagged).unwrap(), commit.tree_hash);
+        let tree = serialize::serialize(&Object::Tree(Tree { entries: vec![] })).unwrap();
+        let t = store.write(&tree).unwrap();
+        assert_eq!(tree_of(&store, &t).unwrap(), t);
+    }
+
+    #[test]
+    fn tree_of_refuses_a_blob_and_a_missing_object() {
+        let (_d, store, _kit) = fresh_repo();
+        let blob = serialize::serialize(&Object::Blob(Blob { data: vec![1] })).unwrap();
+        let b = store.write(&blob).unwrap();
+        assert!(matches!(tree_of(&store, &b), Err(Error::NotTreeish(_))));
+        assert!(matches!(
+            tree_of(&store, &[0xee; 32]),
+            Err(Error::ReadObject(_))
+        ));
     }
 }

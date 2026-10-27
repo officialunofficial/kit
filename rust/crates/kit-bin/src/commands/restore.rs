@@ -173,7 +173,7 @@ fn resolve_source_tree(
     layout: &RepoLayout,
     spec: &str,
 ) -> Result<Hash, (String, u8)> {
-    let commit = super::revspec::resolve_revision(store, layout, spec)
+    let commit = libkit::revspec::resolve_revision(store, layout, spec)
         .map_err(|e| (format!("bad --source '{spec}': {e}"), exit::GENERAL_ERROR))?;
     match store.read_object(&commit) {
         Ok(Object::Commit(c)) => Ok(c.tree_hash),

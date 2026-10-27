@@ -483,6 +483,30 @@ impl Terminal {
     }
 }
 
+/// Warn that a live `kit serve` process holds the repository at
+/// `worktree_root`.
+fn warn_served(worktree_root: &std::path::Path) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "warning: {} is currently being served by `kit serve`; concurrent worktree \
+         mutation and `gc` are not coordinated with it (SPEC-CONCURRENCY §3.1)",
+        worktree_root.display()
+    );
+}
+
+/// Prints the lock helpers' events as warnings on stderr.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ServedWarning;
+
+impl Observer<libkit::lock::Event> for ServedWarning {
+    fn event(&self, event: &libkit::lock::Event) {
+        if let libkit::lock::Event::RepositoryServed { worktree_root } = event {
+            warn_served(worktree_root);
+        }
+    }
+}
+
 impl Observer<SyncEvent> for Terminal {
     fn event(&self, event: &SyncEvent) {
         match event {
@@ -521,15 +545,7 @@ impl Observer<SyncEvent> for Terminal {
                     "warning: could not persist applied-packs record for remote '{remote}' ({error}); it will be rebuilt on the next fetch"
                 );
             }
-            SyncEvent::RepositoryServed { worktree_root } => {
-                let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(
-                    stderr,
-                    "warning: {} is currently being served by `kit serve`; concurrent worktree \
-                     mutation and `gc` are not coordinated with it (SPEC-CONCURRENCY §3.1)",
-                    worktree_root.display()
-                );
-            }
+            SyncEvent::RepositoryServed { worktree_root } => warn_served(worktree_root),
             _ => {}
         }
     }

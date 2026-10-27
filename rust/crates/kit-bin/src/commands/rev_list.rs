@@ -44,10 +44,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let tip = match super::revspec::resolve_revision(&store, &layout, &opts.rev) {
+    let tip = match libkit::revspec::resolve_revision(&store, &layout, &opts.rev) {
         // Peel annotated/signed tags to the commit they point at, like
         // `log`/`diff`/`branch` (resolve_revision returns the tag object).
-        Ok(h) => super::log::peel_tags(&store, h),
+        Ok(h) => libkit::revspec::peel_tags(&store, h),
         Err(e) => {
             return emit_err(
                 &format!("bad revision '{}': {e}", opts.rev),

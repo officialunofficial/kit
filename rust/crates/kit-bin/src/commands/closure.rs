@@ -14,10 +14,10 @@ use kit_core::verify::{
 };
 use kit_core::{ClosureMode, reachable_objects, reachable_snapshot};
 
-use super::revspec;
 use crate::clap_args;
 use crate::exit;
 use crate::format::{self, JsonObject};
+use libkit::revspec;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ClosureFormat {

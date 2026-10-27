@@ -131,12 +131,12 @@ fn start(
             exit::GENERAL_ERROR,
         );
     }
-    let target: Hash = match super::revspec::resolve_revision(store, layout, hex) {
+    let target: Hash = match libkit::revspec::resolve_revision(store, layout, hex) {
         // Peel annotated/signed tags to their target commit so
         // `kit cherry-pick <annotated-tag>` works like git (a tag is a
         // ref, which the doc comment advertises as acceptable). Mirrors
         // `merge`'s behavior.
-        Ok(h) => super::log::peel_tags(store, h),
+        Ok(h) => libkit::revspec::peel_tags(store, h),
         Err(e) => return emit_err(&format!("bad commit: {e}"), exit::DATAERR),
     };
 

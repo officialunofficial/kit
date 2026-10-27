@@ -157,7 +157,7 @@ fn start(
     // names all work — the same grammar `reset`/`restore`/`cherry-pick`
     // accept. The current branch name recorded in the rebase state
     // (`head_name`) comes from HEAD below, not from this argument.
-    let onto = match super::revspec::resolve_revision(store, layout, branch) {
+    let onto = match libkit::revspec::resolve_revision(store, layout, branch) {
         Ok(h) => h,
         Err(e) => {
             return emit_err(

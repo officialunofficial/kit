@@ -101,7 +101,7 @@ pub fn run(args: &[String]) -> u8 {
     let create_plan: Option<(String, Hash, refs::RefWriteCondition, bool)> =
         if let Some(new) = create_new {
             let start_spec = opts.target.as_deref().unwrap_or("HEAD");
-            let start = match super::revspec::resolve_revision(&store, &layout, start_spec) {
+            let start = match libkit::revspec::resolve_revision(&store, &layout, start_spec) {
                 Ok(h) => h,
                 Err(e) => {
                     return emit_err(
@@ -157,7 +157,7 @@ pub fn run(args: &[String]) -> u8 {
     // writer per branch. Applies to `--force` too, like git.
     let ends_on_branch = created || matches!(refs::read_ref(&layout, name), Ok(Some(_)));
     if ends_on_branch {
-        match super::branch_checked_out_elsewhere(&layout, name) {
+        match libkit::worktrees::checked_out_elsewhere(&layout, name) {
             Ok(Some(at)) => {
                 return emit_err(
                     &format!(
@@ -168,7 +168,7 @@ pub fn run(args: &[String]) -> u8 {
                 );
             }
             Ok(None) => {}
-            Err(e) => return emit_err(&e, exit::DATAERR),
+            Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
         }
     }
 
@@ -176,7 +176,7 @@ pub fn run(args: &[String]) -> u8 {
     // otherwise resolve `<name>` via the shared revspec resolver.
     let commit_hash: Hash = match &create_plan {
         Some((_, start, ..)) => *start,
-        None => match super::revspec::resolve_revision(&store, &layout, name) {
+        None => match libkit::revspec::resolve_revision(&store, &layout, name) {
             Ok(h) => h,
             Err(e) => {
                 return emit_err(

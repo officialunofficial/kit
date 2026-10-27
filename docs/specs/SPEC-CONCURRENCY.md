@@ -97,8 +97,8 @@ startup `kit serve` tries `serve.lock` exclusively, without waiting, and
 only while it holds it (so no other server is up) sweeps the temp files
 crashed uploads left in `packs/`, then drops it and takes the shared lock;
 if the lock is busy it skips the sweep. `worktree.lock`
-and `worktrees.lock` acquisition (`kit-bin`'s `acquire_worktree_lock`
-and `acquire_worktrees_registry_lock`) each follow up with a
+and `worktrees.lock` acquisition (`libkit::lock::acquire_worktree`
+and `libkit::lock::acquire_registry`) each follow up with a
 non-blocking exclusive probe of that same `serve.lock`
 (`kit_core::repo_lock::probe_exclusive`); when the probe finds it busy
 (i.e. at least one `serve` is alive), the command prints a warning to

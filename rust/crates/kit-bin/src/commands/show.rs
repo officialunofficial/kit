@@ -24,10 +24,10 @@ use kit_core::ops::diff_trees;
 use kit_core::store::{DisplaySource, ObjectStore};
 use kit_core::worktree;
 
-use super::revspec;
 use crate::clap_args;
 use crate::exit;
 use crate::format;
+use libkit::revspec;
 
 /// Bound on tag-of-tag recursion, mirroring `diff`/`log`'s peel depth.
 const MAX_TAG_DEPTH: usize = 16;
@@ -176,9 +176,10 @@ fn show_commit_like(
     // Diff the first parent's tree against this tree (None ⇒ empty, so a
     // root commit shows every file as added), reusing `diff`'s renderer.
     let parent_tree = match parent {
-        Some(p) => {
-            Some(super::diff::object_to_tree(store, &p).map_err(|e| (e, exit::GENERAL_ERROR))?)
-        }
+        Some(p) => Some(
+            libkit::revspec::tree_of(store, &p)
+                .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?,
+        ),
         None => None,
     };
     let result = diff_trees(store, parent_tree, Some(tree))
