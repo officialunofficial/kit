@@ -2368,10 +2368,12 @@ pub fn secret_hex_parse_one_iteration(input: &[u8]) {
         }
         Err(error) => {
             assert!(!wellformed, "64 hex digits are accepted");
-            let shown = format!("{error} {error:?}");
             assert!(
-                text.len() < 8 || !shown.contains(text),
-                "a refusal never shows the text"
+                matches!(
+                    error,
+                    libkit::keys::Error::SecretHexLength | libkit::keys::Error::SecretHexDigit
+                ),
+                "a refusal carries no text"
             );
         }
     }

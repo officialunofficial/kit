@@ -91,18 +91,6 @@ pub enum Kind {
     Keystore,
 }
 
-impl Kind {
-    /// The name of the kind in config and on the command line.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::RepoKey => "repo-key",
-            Self::External => "external",
-            Self::Keystore => "keystore",
-        }
-    }
-}
-
 impl FromStr for Kind {
     type Err = Error;
 
@@ -385,9 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn kinds_parse_and_round_trip_their_names() {
-        for kind in [Kind::RepoKey, Kind::External, Kind::Keystore] {
-            assert_eq!(kind.as_str().parse::<Kind>().unwrap(), kind);
+    fn kinds_parse_their_names() {
+        for (name, kind) in [
+            ("repo-key", Kind::RepoKey),
+            ("external", Kind::External),
+            ("keystore", Kind::Keystore),
+        ] {
+            assert_eq!(name.parse::<Kind>().unwrap(), kind);
         }
         let err = "sigstore".parse::<Kind>().unwrap_err();
         assert!(matches!(err, Error::UnknownSignerKind(ref s) if s == "sigstore"));
