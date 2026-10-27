@@ -456,3 +456,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "index_path_arg"
+path = "fuzz_targets/index_path_arg.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

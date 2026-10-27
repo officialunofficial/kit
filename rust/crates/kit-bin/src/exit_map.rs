@@ -5,7 +5,7 @@
 //! and into the text for stderr with [`message`].
 
 use kit_core::store::StoreError;
-use libkit::{blame, branch, diff, head, linked, repo, revspec};
+use libkit::{blame, branch, diff, head, linked, mv, repo, revspec};
 
 use crate::exit;
 
@@ -28,6 +28,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Blame(inner) => blame_exit_code(inner),
         libkit::Error::Branch(inner) => branch_exit_code(inner),
         libkit::Error::Linked(inner) => linked_exit_code(inner),
+        libkit::Error::Mv(inner) => mv_exit_code(inner),
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -171,6 +172,43 @@ fn linked_exit_code(error: &linked::Error) -> u8 {
         | linked::Error::RemoveTree { .. }
         | linked::Error::RemoveStateDir { .. }
         | linked::Error::Prune { .. } => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn mv_exit_code(error: &mv::Error) -> u8 {
+    match error {
+        // Another `kit` holds the lock.
+        mv::Error::Lock(_) => exit::TEMPFAIL,
+        // The caller named a path, a destination or a batch that the
+        // operation refuses.
+        mv::Error::Path(_)
+        | mv::Error::DestinationNotDirectory(_)
+        | mv::Error::SameSourceAndDestination(_)
+        | mv::Error::MoveIntoItself(_)
+        | mv::Error::DuplicateSource(_)
+        | mv::Error::OverlappingSources { .. }
+        | mv::Error::SameDestination(_)
+        | mv::Error::NestedDestinations { .. }
+        | mv::Error::SameDirectoryDestination(_) => exit::USAGE,
+        // A directory cannot be created.
+        mv::Error::CreateDirectory { .. } => exit::CANTCREAT,
+        mv::Error::NotARepository(_)
+        | mv::Error::ReadIndex(_)
+        | mv::Error::RepoRoot(_)
+        | mv::Error::NotTracked(_)
+        | mv::Error::BadSource { .. }
+        | mv::Error::DestinationEscapes(_)
+        | mv::Error::DestinationSymlink(_)
+        | mv::Error::DestinationIsDirectory(_)
+        | mv::Error::DestinationExists(_)
+        | mv::Error::DirectoryDestinationExists(_)
+        | mv::Error::DestinationHasDescendants(_)
+        | mv::Error::DestinationUnderFile(_)
+        | mv::Error::DestinationConflict(_)
+        | mv::Error::Rename { .. }
+        | mv::Error::WriteIndex(_) => exit::GENERAL_ERROR,
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -346,6 +384,22 @@ mod tests {
                 }
                 .into(),
                 exit::GENERAL_ERROR,
+            ),
+            (
+                mv::Error::DuplicateSource("x".to_owned()).into(),
+                exit::USAGE,
+            ),
+            (
+                mv::Error::DestinationExists("x".to_owned()).into(),
+                exit::GENERAL_ERROR,
+            ),
+            (
+                mv::Error::CreateDirectory {
+                    path: path(),
+                    source: std::io::Error::other("x"),
+                }
+                .into(),
+                exit::CANTCREAT,
             ),
             (diff::Error::StagedWithRevision.into(), exit::USAGE),
             (diff::Error::MergeBaseNeedsRevision.into(), exit::USAGE),

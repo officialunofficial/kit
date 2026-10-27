@@ -32,6 +32,10 @@ pub mod identity;
 pub mod linked;
 pub mod lock;
 pub mod log;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod mv;
+pub mod pathspec;
 pub mod repo;
 pub mod revspec;
 pub mod worktrees;

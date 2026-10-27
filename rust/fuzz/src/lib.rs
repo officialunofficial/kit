@@ -2210,6 +2210,49 @@ pub fn branch_glob_one_iteration(input: &[u8]) {
     }
 }
 
+/// Path arguments (`index_path_arg`): `pathspec::index_path_for_arg` never
+/// panics on a relative argument, and gives the same answer twice. An answer
+/// passes `validate_index_path`, and it has no empty, `.` or `..` component.
+/// A name with no separator and no dot gives itself. The function reads the
+/// file system only for an absolute argument, so the target skips those.
+pub fn index_path_arg_one_iteration(input: &[u8]) {
+    use libkit::pathspec::index_path_for_arg;
+    use std::path::Path;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let arg = Path::new(text);
+    if arg.is_absolute() {
+        return;
+    }
+    let root = Path::new("/nonexistent-kit-root");
+    let first = index_path_for_arg(root, arg).ok();
+    assert_eq!(
+        first,
+        index_path_for_arg(root, arg).ok(),
+        "an argument gives the same answer twice"
+    );
+    if let Some(path) = first {
+        assert!(
+            kit_core::index::validate_index_path(&path),
+            "an answer is a valid index path"
+        );
+        assert!(
+            path.split('/')
+                .all(|c| !c.is_empty() && c != "." && c != ".."),
+            "an answer has no empty, `.` or `..` component"
+        );
+    }
+    if !text.is_empty() && !text.contains(['/', '\\', '\0']) && !text.starts_with('.') {
+        assert_eq!(
+            index_path_for_arg(root, arg).ok().as_deref(),
+            Some(text).filter(|t| kit_core::index::validate_index_path(t)),
+            "a plain name gives itself"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3004,6 +3047,28 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, branch_glob_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_index_path_arg() {
+        run_iterated_unit(index_path_arg_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"a",
+            b"a/b/c",
+            b"./a//b/",
+            b"a/../b",
+            b"../a",
+            b"a/..",
+            b".",
+            b"..",
+            b"/",
+            b"a\\b",
+            b"a\0b",
+            b"\xff\xfe",
+        ] {
+            run_one(case, index_path_arg_one_iteration).unwrap();
         }
     }
 }

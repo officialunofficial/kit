@@ -66,6 +66,7 @@ from recurring.
 | `fuzz_targets/diff_args.rs` | `libkit::diff::compute` (never panics on any revisions or paths with any flags; the patch body and the change counts of every entry never panic; `HEAD~1 HEAD` keeps its answer) |
 | `fuzz_targets/blame_line_range.rs` | `libkit::blame::line_range::parse` and `libkit::blame::blame` (a range parses the same twice and sits inside the file; a blame never panics on any range, revision or revision to skip, with or without the reverse walk; `-L 2` on `a.txt` keeps its answer) |
 | `fuzz_targets/branch_glob.rs` | `libkit::branch::glob_match` (never panics on any pattern or name; a match gives the same answer twice; `*` matches every name; a name with no metacharacter matches itself) |
+| `fuzz_targets/index_path_arg.rs` | `libkit::pathspec::index_path_for_arg` (never panics on a relative argument; an argument gives the same answer twice; an answer is a valid index path with no empty, `.` or `..` component; a plain name gives itself) |
 | `fuzz_targets/absolute_config_home.rs` | `libkit::config::xdg_config_home` (a result is always absolute; a set `XDG_CONFIG_HOME` is never repaired; an absolute `HOME` gives `HOME/.config`) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
@@ -122,6 +123,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | The revision and path arguments of `libkit::diff::compute` | `diff_args` |
 | `libkit::blame::line_range::parse`, the revision range of `libkit::blame::blame` | `blame_line_range` |
 | `libkit::branch::glob_match` | `branch_glob` |
+| `libkit::pathspec::index_path_for_arg` | `index_path_arg` |
 | The branch name and the id that `libkit::linked::add` derives from a path | None. It builds a name from a local path, and then `refs::validate_ref_name` or `layout::validate_worktree_id` must accept the name. Unit tests cover the derivation. |
 | `kit_bin::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
 | `kit_transport_ssh::url::parse_kit_ssh_url`, `validate_ssh_path` | `ssh_url_parse` |

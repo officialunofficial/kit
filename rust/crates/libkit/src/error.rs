@@ -43,4 +43,9 @@ pub enum Error {
     #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
     #[error(transparent)]
     Linked(#[from] crate::linked::Error),
+    /// Tracked paths could not be moved.
+    #[cfg(feature = "sync")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+    #[error(transparent)]
+    Mv(#[from] crate::mv::Error),
 }
