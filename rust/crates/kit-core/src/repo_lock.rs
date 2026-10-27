@@ -70,6 +70,32 @@ use std::time::{Duration, Instant};
 /// from a SIGKILL'd `kit` does not wedge the user for more than a moment.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Basename of the repo-level lock that serialises worktree and index
+/// read-modify-write commands (`add`, `rm`, `commit`, `merge`, `checkout`,
+/// `rebase`, `cherry-pick`, `stash`, `sparse-checkout`).
+///
+/// Ref-only mutations (`branch`, `tag`) and config-only mutations do not take
+/// this lock. They rely on ref compare-and-swap and atomic config writes.
+pub const WORKTREE_LOCK: &str = "worktree.lock";
+
+/// Basename of the shared lock that a live `kit serve` process holds for its
+/// whole lifetime (SPEC-CONCURRENCY section 3.1). It lives in the common
+/// directory. Local mutating commands never take it. They only probe it to
+/// detect a live server.
+pub const SERVE_LOCK: &str = "serve.lock";
+
+/// Basename of the common-directory lock that serialises changes to the
+/// linked-worktree registry (`worktree add`, `remove`, `prune`), the branch
+/// checkout guard with its HEAD write (`checkout`, `switch`, `branch -d`,
+/// `branch -m`), and the freeze of the worktree set by `gc`. It differs from
+/// [`WORKTREE_LOCK`], which guards the state of one tree.
+///
+/// Global lock order (SPEC-WORKTREE section 4.3): a process that takes more
+/// than one lock takes `worktrees.lock` first, then the per-tree
+/// `worktree.lock` files, then `refs-history.lock`. Another order lets two
+/// processes stall each other until the timeout.
+pub const WORKTREES_REGISTRY_LOCK: &str = "worktrees.lock";
+
 /// Maximum filename length for a lock name.
 const MAX_NAME_LEN: usize = 255;
 

@@ -7,13 +7,7 @@ use kit_core::repo_lock::{self, RepoLock};
 use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
 
-/// Basename of the repo-level lock that serialises worktree and index
-/// read-modify-write commands.
-pub const WORKTREE_LOCK: &str = "worktree.lock";
-
-/// Basename of the shared lock a live `kit serve` process holds for its
-/// whole lifetime. Local mutating commands never take it; they only probe it.
-pub const SERVE_LOCK: &str = "serve.lock";
+pub use kit_core::repo_lock::{SERVE_LOCK, WORKTREE_LOCK};
 
 /// Tell `observer` when at least one server process is currently alive
 /// against `layout`'s common dir. Detection, not coordination: a probe

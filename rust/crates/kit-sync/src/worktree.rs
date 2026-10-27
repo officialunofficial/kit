@@ -16,7 +16,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
 use kit_core::ops::diff::{DiffKind, diff_trees};
 use kit_core::ops::restore::{RestoreOptions, matches_sparse, restore_tree_to_worktree_with};
-use kit_core::refs::{self, RefError, RefWriteCondition};
+use kit_core::refs::{self, RefError};
 use kit_core::store::ObjectStore;
 use kit_core::worktree as core_worktree;
 
@@ -308,28 +308,7 @@ pub fn read_or_seed_index_from_head(
     }
 }
 
-/// Publish a branch tip and a versioned first-parent ancestry snapshot when
-/// history-mmr is enabled. The helper locks history then the full ref identity;
-/// pending publication is recovered before accepting another write.
-/// Detached HEAD updates do not claim branch
-/// membership and continue through their existing per-worktree path.
-pub fn write_ref_recording_history(
-    layout: &RepoLayout,
-    branch: &str,
-    condition: RefWriteCondition,
-    new_hash: &Hash,
-) -> Result<(), RefError> {
-    #[cfg(feature = "history-mmr")]
-    {
-        let store = ObjectStore::open(layout)
-            .map_err(|e| RefError::InvalidRef(format!("{branch}: open object store: {e}")))?;
-        refs::update_ref_with_ancestry(layout, branch, condition, new_hash, &store)
-    }
-    #[cfg(not(feature = "history-mmr"))]
-    {
-        refs::update_ref(layout, branch, condition, new_hash)
-    }
-}
+pub use kit_core::refs::write_ref_recording_history;
 
 /// [`refs::list_remote_refs_with`], with the per-ref read fanned out across
 /// rayon's pool once there is enough work to amortise dispatch.

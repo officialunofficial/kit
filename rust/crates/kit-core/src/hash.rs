@@ -134,6 +134,23 @@ pub fn from_hex(s: &str) -> Result<Hash, FromHexError> {
     Ok(out)
 }
 
+/// Decode a hex string of any even length into bytes. Upper and lower case
+/// digits are valid. Returns `None` for an odd length or a non-hex byte.
+///
+/// The output is half the length of the input, which the caller already
+/// holds in memory.
+#[must_use]
+pub fn from_hex_bytes(s: &str) -> Option<Vec<u8>> {
+    let bytes = s.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    bytes
+        .chunks_exact(2)
+        .map(|pair| Some((hex_nibble(pair[0]).ok()? << 4) | hex_nibble(pair[1]).ok()?))
+        .collect()
+}
+
 fn hex_nibble(b: u8) -> Result<u8, FromHexError> {
     match b {
         b'0'..=b'9' => Ok(b - b'0'),
@@ -237,6 +254,20 @@ mod tests {
     fn from_hex_rejects_bad_char() {
         let bad: String = "gg".chars().chain("00".repeat(31).chars()).collect();
         assert_eq!(from_hex(&bad), Err(FromHexError::InvalidChar));
+    }
+
+    #[test]
+    fn from_hex_bytes_decodes_either_case() {
+        assert_eq!(from_hex_bytes(""), Some(Vec::new()));
+        assert_eq!(from_hex_bytes("00ffA5"), Some(vec![0x00, 0xff, 0xa5]));
+    }
+
+    #[test]
+    fn from_hex_bytes_rejects_odd_length_and_bad_digits() {
+        assert_eq!(from_hex_bytes("abc"), None);
+        assert_eq!(from_hex_bytes("zz"), None);
+        assert_eq!(from_hex_bytes("0g"), None);
+        assert_eq!(from_hex_bytes("\u{e9}0"), None);
     }
 
     #[test]

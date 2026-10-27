@@ -675,6 +675,36 @@ pub fn update_ref_with_ancestry(
     )
 }
 
+/// Write a branch ref. With the `history-mmr` feature on, the write also
+/// publishes a versioned first-parent ancestry snapshot.
+///
+/// The history-aware path locks the history first, then the full ref
+/// identity. It recovers a pending publication before it accepts the write.
+/// Detached HEAD updates claim no branch membership, so they do not use this
+/// function.
+///
+/// # Errors
+/// The errors of [`update_ref`]. With `history-mmr`, also
+/// [`RefError::InvalidRef`] when the object store or the ancestry cannot be
+/// used.
+pub fn write_ref_recording_history(
+    layout: &RepoLayout,
+    branch: &str,
+    condition: RefWriteCondition,
+    new_hash: &Hash,
+) -> RefResult<()> {
+    #[cfg(feature = "history-mmr")]
+    {
+        let store = crate::store::ObjectStore::open(layout)
+            .map_err(|e| RefError::InvalidRef(format!("{branch}: open object store: {e}")))?;
+        update_ref_with_ancestry(layout, branch, condition, new_hash, &store)
+    }
+    #[cfg(not(feature = "history-mmr"))]
+    {
+        update_ref(layout, branch, condition, new_hash)
+    }
+}
+
 /// Delete a branch after recovering any pending ancestry publication. Archived
 /// generation snapshots remain evidence; the current
 /// descriptor is invalidated before the ref disappears.
@@ -2818,5 +2848,135 @@ mod tests {
             0,
             "an empty batch must not touch any directory"
         );
+    }
+
+    #[cfg(feature = "history-mmr")]
+    mod write_ref_recording_history_tests {
+        use std::sync::{Arc, Barrier};
+
+        use super::*;
+        use crate::history::{AncestrySnapshot, Position, verify_inclusion};
+        use crate::object::{Commit, Identity, Object};
+        use crate::store::ObjectStore;
+
+        fn write_commit(store: &ObjectStore, parents: Vec<Hash>, seed: u8) -> Hash {
+            let commit = Commit::new_unannotated(
+                [seed; 32],
+                parents,
+                Identity::ed25519([seed; 32]),
+                [seed; 32],
+                b"msg".to_vec(),
+                0,
+                [0u8; 64],
+            );
+            let bytes = crate::serialize::serialize(&Object::Commit(commit)).unwrap();
+            store.write(&bytes).unwrap()
+        }
+
+        #[test]
+        fn backfills_a_repo_written_without_history_from_the_object_store() {
+            let td = tempfile::tempdir().unwrap();
+            let layout = RepoLayout::single(td.path());
+            let store = ObjectStore::init(&layout).unwrap();
+
+            // Build a 3-commit chain through the object store and point
+            // `refs/heads/main` at the tip directly. This simulates a repo
+            // written without `history-mmr`: the ref exists, but no canonical
+            // ancestry snapshot exists.
+            let c0 = write_commit(&store, vec![], 1);
+            let c1 = write_commit(&store, vec![c0], 2);
+            let c2 = write_commit(&store, vec![c1], 3);
+            write_ref(&layout, "main", &c2).unwrap();
+
+            // The first history-aware write for this branch: a new commit on
+            // top of the existing tip.
+            let c3 = write_commit(&store, vec![c2], 4);
+            write_ref_recording_history(&layout, "main", RefWriteCondition::Match(c2), &c3)
+                .unwrap();
+
+            assert_eq!(read_ref(&layout, "main").unwrap(), Some(c3));
+
+            // The journal holds the backfilled chain and the new commit.
+            let hist = AncestrySnapshot::load(&layout, "main").unwrap();
+            assert_eq!(hist.len(), 4);
+            let root = hist.root();
+            for (i, c) in [c0, c1, c2, c3].into_iter().enumerate() {
+                let pos = Position(i as u64);
+                let proof = hist.prove(pos).unwrap();
+                assert!(
+                    verify_inclusion(&c, pos, &proof, &root),
+                    "commit at position {i} failed inclusion proof after backfill"
+                );
+            }
+        }
+
+        #[test]
+        fn does_not_backfill_a_fresh_branch() {
+            let td = tempfile::tempdir().unwrap();
+            let layout = RepoLayout::single(td.path());
+            let store = ObjectStore::init(&layout).unwrap();
+
+            // No ref exists: this is the first commit of a new branch, so
+            // there is nothing to backfill.
+            let c0 = write_commit(&store, vec![], 1);
+            write_ref_recording_history(&layout, "main", RefWriteCondition::Missing, &c0).unwrap();
+
+            let hist = AncestrySnapshot::load(&layout, "main").unwrap();
+            assert_eq!(
+                hist.len(),
+                1,
+                "only the one real write, no phantom backfill entries"
+            );
+        }
+
+        /// The length of a chain that already exists on disk, with no journal.
+        /// It simulates a repo that turns on `history-mmr` for the first time.
+        const CONCURRENT_BACKFILL_CHAIN_LEN: usize = 500;
+
+        /// Concurrent first publications build the ancestry under the history
+        /// lock and produce one complete chain with no duplicate leaves.
+        #[test]
+        fn concurrent_backfill_does_not_duplicate_leaves() {
+            let td = tempfile::tempdir().unwrap();
+            let layout = Arc::new(RepoLayout::single(td.path()));
+            let store = ObjectStore::init(&layout).unwrap();
+
+            let mut tip: Option<Hash> = None;
+            for seed in 0..CONCURRENT_BACKFILL_CHAIN_LEN {
+                let seed = u8::try_from(seed % 256).expect("seed % 256 fits in u8");
+                tip = Some(write_commit(&store, tip.into_iter().collect(), seed));
+            }
+            let tip = tip.unwrap();
+            write_ref(&layout, "main", &tip).unwrap();
+
+            // Two independent new commits race to be the first history-aware
+            // write for this branch.
+            let c_a = write_commit(&store, vec![tip], 250);
+            let c_b = write_commit(&store, vec![tip], 251);
+
+            let barrier = Arc::new(Barrier::new(2));
+            let spawn = |commit: Hash| {
+                let (layout, barrier) = (Arc::clone(&layout), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    write_ref_recording_history(&layout, "main", RefWriteCondition::Any, &commit)
+                })
+            };
+            let (t_a, t_b) = (spawn(c_a), spawn(c_b));
+            t_a.join()
+                .expect("thread a must not panic")
+                .expect("writer a must succeed");
+            t_b.join()
+                .expect("thread b must not panic")
+                .expect("writer b must succeed");
+
+            let hist = AncestrySnapshot::load(&layout, "main").unwrap();
+            assert_eq!(
+                hist.len(),
+                CONCURRENT_BACKFILL_CHAIN_LEN as u64 + 1,
+                "the winning tip must have exactly its own first-parent ancestry; \
+             the superseded sibling writer is not an ancestor"
+            );
+        }
     }
 }
