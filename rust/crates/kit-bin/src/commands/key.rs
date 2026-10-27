@@ -4,11 +4,8 @@ use std::io::Write as _;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
-use kit_keystore::{
-    Algorithm, BackendKind, Capabilities, GenerateOptions, ImportOptions, KeyAttrs, KeyLabel,
-    KeyRef, KeySelector, Keystore, SecretKey, open_backend,
-};
-use zeroize::Zeroize;
+use kit_keystore::{Algorithm, Capabilities, KeyAttrs};
+use libkit::keys;
 
 use crate::clap_args;
 use crate::config::{self, Config};
@@ -123,7 +120,7 @@ pub fn run(args: &[String]) -> u8 {
     };
     match opts.command {
         KeyCommand::Generate(opts) => generate(opts),
-        KeyCommand::List(opts) => list(opts),
+        KeyCommand::List(opts) => list(&opts),
         KeyCommand::Import(opts) => import(opts),
         KeyCommand::Export(opts) => export(opts),
         KeyCommand::Delete(opts) => delete(opts),
@@ -146,35 +143,17 @@ fn generate(opts: GenerateOpts) -> u8 {
         opts.device_bound,
         opts.require_user_presence,
     );
-    let selection = match selection_for(&cfg, opts.backend, opts.label, Some(algorithm)) {
+    let selection = match keys::select(&cfg, opts.backend.as_deref(), opts.label, Some(algorithm)) {
         Ok(selection) => selection,
-        Err(code) => return code,
+        Err(error) => return key_error(error),
     };
-    let store = match store_for_backend(selection.backend) {
+    let store = match keys::open(selection.backend) {
         Ok(store) => store,
-        Err(code) => return code,
+        Err(error) => return key_error(error),
     };
-    let label = match KeyLabel::new(selection.label.clone()) {
-        Ok(label) => label,
-        Err(error) => return keystore_error(error),
-    };
-    let Some(generator) = store.generator() else {
-        return keystore_error(kit_keystore::Error::UnsupportedOperation("generate"));
-    };
-    let signer = match generator.generate(
-        &label,
-        algorithm,
-        attrs,
-        GenerateOptions {
-            overwrite: opts.force,
-        },
-    ) {
-        Ok(signer) => signer,
-        Err(error) => return keystore_error(error),
-    };
-    let metadata = match signer.metadata() {
+    let metadata = match keys::generate(&*store, &selection.label, algorithm, attrs, opts.force) {
         Ok(metadata) => metadata,
-        Err(error) => return keystore_error(error),
+        Err(error) => return key_error(error),
     };
     print_metadata(&metadata);
     print_capabilities(&store.capabilities());
@@ -185,42 +164,28 @@ fn generate(opts: GenerateOpts) -> u8 {
     exit::OK
 }
 
-fn list(opts: ListOpts) -> u8 {
+fn list(opts: &ListOpts) -> u8 {
     let cfg = match read_config() {
         Ok(cfg) => cfg,
         Err(code) => return code,
     };
-    let backend = match parse_backend(
-        &opts
-            .backend
-            .unwrap_or_else(|| cfg.key.backend_or_fallback().to_owned()),
-    ) {
+    let backend = match keys::backend(&cfg, opts.backend.as_deref()) {
         Ok(backend) => backend,
-        Err(code) => return code,
+        Err(error) => return key_error(error),
     };
-    let store = match store_for_backend(backend) {
+    let store = match keys::open(backend) {
         Ok(store) => store,
-        Err(code) => return code,
+        Err(error) => return key_error(error),
     };
-    let Some(lister) = store.lister() else {
-        return keystore_error(kit_keystore::Error::UnsupportedOperation("list"));
-    };
-    let mut keys = match lister.list() {
-        Ok(keys) => keys,
-        Err(error) => return keystore_error(error),
+    let listed = match keys::list(&*store) {
+        Ok(listed) => listed,
+        Err(error) => return key_error(error),
     };
     let capabilities = store.capabilities();
-    keys.sort_by(|left, right| {
-        (left.backend(), left.label(), left.algorithm()).cmp(&(
-            right.backend(),
-            right.label(),
-            right.algorithm(),
-        ))
-    });
     let mut stdout = std::io::stdout().lock();
     if opts.json {
         let _ = write!(stdout, "[");
-        for (index, key) in keys.iter().enumerate() {
+        for (index, key) in listed.iter().enumerate() {
             if index > 0 {
                 let _ = write!(stdout, ",");
             }
@@ -239,7 +204,7 @@ fn list(opts: ListOpts) -> u8 {
         }
         let _ = writeln!(stdout, "]");
     } else {
-        for key in keys {
+        for key in listed {
             let _ = writeln!(
                 stdout,
                 "{} {} {} {} extractable={} user_presence={} device_bound={} can_generate={} can_import={} can_export={} can_delete={} supports_listing={} supports_user_presence={} supports_device_bound={} supports_non_extractable={}",
@@ -288,51 +253,29 @@ fn import(opts: ImportOpts) -> u8 {
         opts.device_bound,
         opts.require_user_presence,
     );
-    let selection = match selection_for(&cfg, opts.backend, opts.label, Some(algorithm)) {
+    let selection = match keys::select(&cfg, opts.backend.as_deref(), opts.label, Some(algorithm)) {
         Ok(selection) => selection,
-        Err(code) => return code,
+        Err(error) => return key_error(error),
     };
-    let mut secret = match (opts.hex, opts.file) {
-        (Some(hex), None) => match parse_secret_hex(&hex) {
-            Ok(secret) => secret,
-            Err(code) => return code,
-        },
-        (None, Some(file)) => match kit_core::sign::load_raw_32(Path::new(&file)) {
-            Ok(secret) => *secret,
-            Err(error) => return emit_err(&format!("read key file: {error}"), exit::DATAERR),
-        },
+    let secret = match (opts.hex, opts.file) {
+        (Some(hex), None) => keys::parse_secret_hex(algorithm, &hex),
+        (None, Some(file)) => keys::read_secret_file(algorithm, Path::new(&file)),
         _ => unreachable!(),
     };
-    let wrapped = SecretKey::new(algorithm, secret);
-    secret.zeroize();
-    let store = match store_for_backend(selection.backend) {
+    let secret = match secret {
+        Ok(secret) => secret,
+        Err(error) => return key_error(error),
+    };
+    let store = match keys::open(selection.backend) {
         Ok(store) => store,
-        Err(code) => return code,
+        Err(error) => return key_error(error),
     };
-    let label = match KeyLabel::new(selection.label) {
-        Ok(label) => label,
-        Err(error) => return keystore_error(error),
-    };
-    let Some(importer) = store.importer() else {
-        return keystore_error(kit_keystore::Error::UnsupportedOperation("import"));
-    };
-    let signer = match importer.import(
-        &label,
-        wrapped,
-        attrs,
-        ImportOptions {
-            overwrite: opts.force,
-        },
-    ) {
-        Ok(signer) => signer,
-        Err(error) => return keystore_error(error),
-    };
-    match signer.metadata() {
+    match keys::import(&*store, &selection.label, secret, attrs, opts.force) {
         Ok(metadata) => {
             print_metadata(&metadata);
             exit::OK
         }
-        Err(error) => keystore_error(error),
+        Err(error) => key_error(error),
     }
 }
 
@@ -348,24 +291,17 @@ fn export(opts: ExportOpts) -> u8 {
     if !opts.unsafe_print_secret {
         return emit_err("kit key export requires --unsafe-print-secret", exit::USAGE);
     }
-    let selection = match selection_for(&cfg, opts.backend, opts.label, algorithm) {
+    let selection = match keys::select(&cfg, opts.backend.as_deref(), opts.label, algorithm) {
         Ok(selection) => selection,
-        Err(code) => return code,
+        Err(error) => return key_error(error),
     };
-    let store = match store_for_backend(selection.backend) {
+    let store = match keys::open(selection.backend) {
         Ok(store) => store,
-        Err(code) => return code,
+        Err(error) => return key_error(error),
     };
-    let selector = match KeySelector::new(selection.label, algorithm) {
-        Ok(selector) => selector,
-        Err(error) => return keystore_error(error),
-    };
-    let Some(exporter) = store.exporter() else {
-        return keystore_error(kit_keystore::Error::UnsupportedOperation("export"));
-    };
-    let secret = match exporter.export(&selector) {
+    let secret = match keys::export(&*store, selection.label, algorithm) {
         Ok(secret) => secret,
-        Err(error) => return keystore_error(error),
+        Err(error) => return key_error(error),
     };
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "warning: printing secret key material to stdout");
@@ -388,112 +324,22 @@ fn delete(opts: DeleteOpts) -> u8 {
     if !opts.yes {
         return emit_err("kit key delete requires --yes", exit::USAGE);
     }
-    let selection = match selection_for(&cfg, opts.backend, opts.label, algorithm) {
+    let selection = match keys::select(&cfg, opts.backend.as_deref(), opts.label, algorithm) {
         Ok(selection) => selection,
-        Err(code) => return code,
+        Err(error) => return key_error(error),
     };
-    let store = match store_for_backend(selection.backend) {
+    let store = match keys::open(selection.backend) {
         Ok(store) => store,
-        Err(code) => return code,
+        Err(error) => return key_error(error),
     };
-    let selector = match KeySelector::new(selection.label.clone(), algorithm) {
-        Ok(selector) => selector,
-        Err(error) => return keystore_error(error),
-    };
-    let Some(deleter) = store.deleter() else {
-        return keystore_error(kit_keystore::Error::UnsupportedOperation("delete"));
-    };
-    match deleter.delete(&selector) {
+    match keys::delete(&*store, selection.label.clone(), algorithm) {
         Ok(()) => {
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "deleted {}:{}", selection.backend, selection.label);
             exit::OK
         }
-        Err(error) => keystore_error(error),
+        Err(error) => key_error(error),
     }
-}
-
-#[derive(Debug)]
-struct Selection {
-    backend: BackendKind,
-    label: String,
-}
-
-fn selection_for(
-    cfg: &Config,
-    backend: Option<String>,
-    label: Option<String>,
-    algorithm: Option<Algorithm>,
-) -> Result<Selection, u8> {
-    let explicit_backend = match backend {
-        Some(backend) => Some(parse_backend(&backend)?),
-        None => None,
-    };
-    if let Some(label) = label {
-        let backend = match explicit_backend {
-            Some(backend) => backend,
-            None => parse_backend(cfg.key.backend_or_fallback())?,
-        };
-        return Ok(Selection { backend, label });
-    }
-    let algorithm = algorithm.unwrap_or(Algorithm::Ed25519);
-    let configured_ref = configured_ref_explicit(cfg, algorithm);
-    let key_ref = match configured_ref
-        .unwrap_or_else(|| configured_ref_or_fallback(cfg, algorithm))
-        .parse::<KeyRef>()
-    {
-        Ok(key_ref) => key_ref,
-        Err(error) => {
-            return Err(emit_err(
-                &format!("config key ref: {error}"),
-                exit::CONFIG_ERROR,
-            ));
-        }
-    };
-    let backend = match explicit_backend {
-        Some(backend) => backend,
-        None if configured_ref.is_some() => key_ref.backend(),
-        None => parse_backend(cfg.key.backend_or_fallback())?,
-    };
-    Ok(Selection {
-        backend,
-        label: key_ref.label().to_owned(),
-    })
-}
-
-fn configured_ref_explicit(cfg: &Config, algorithm: Algorithm) -> Option<&str> {
-    match algorithm {
-        Algorithm::Ed25519 if !cfg.key.ed25519_ref.is_empty() => Some(cfg.key.ed25519_ref.as_str()),
-        Algorithm::Secp256k1 if !cfg.key.secp256k1_ref.is_empty() => {
-            Some(cfg.key.secp256k1_ref.as_str())
-        }
-        Algorithm::P256 if !cfg.key.p256_ref.is_empty() => Some(cfg.key.p256_ref.as_str()),
-        _ if !cfg.key.default_ref.is_empty() => Some(cfg.key.default_ref.as_str()),
-        _ => None,
-    }
-}
-
-fn configured_ref_or_fallback(cfg: &Config, algorithm: Algorithm) -> &str {
-    match algorithm {
-        Algorithm::Ed25519 => cfg.key.ed25519_ref_or_fallback(),
-        Algorithm::Secp256k1 => cfg.key.secp256k1_ref_or_fallback(),
-        Algorithm::P256 => cfg.key.p256_ref_or_fallback(),
-    }
-}
-
-fn parse_backend(backend: &str) -> Result<BackendKind, u8> {
-    match backend.parse::<BackendKind>() {
-        Ok(parsed) => Ok(parsed),
-        Err(error) => Err(emit_err(
-            &format!("key backend: {error}"),
-            exit::CONFIG_ERROR,
-        )),
-    }
-}
-
-fn store_for_backend(backend: BackendKind) -> Result<Box<dyn Keystore>, u8> {
-    open_backend(backend)
-        .map_err(|error| emit_err(&format!("keystore backend: {error}"), exit::UNAVAILABLE))
 }
 
 fn read_config() -> Result<Config, u8> {
@@ -639,31 +485,6 @@ fn json_capabilities(capabilities: &Capabilities) -> String {
     )
 }
 
-fn parse_secret_hex(hex: &str) -> Result<[u8; 32], u8> {
-    if hex.len() != 64 {
-        return Err(emit_err(
-            "--hex must be exactly 64 hex characters",
-            exit::DATAERR,
-        ));
-    }
-    let mut out = [0u8; 32];
-    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
-        let high = hex_value(chunk[0])?;
-        let low = hex_value(chunk[1])?;
-        out[index] = (high << 4) | low;
-    }
-    Ok(out)
-}
-
-fn hex_value(byte: u8) -> Result<u8, u8> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(emit_err("invalid hex character", exit::DATAERR)),
-    }
-}
-
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -689,9 +510,13 @@ fn json_escape(value: &str) -> String {
     out
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn keystore_error(error: kit_keystore::Error) -> u8 {
-    emit_err(&format!("keystore: {error}"), exit::DATAERR)
+/// Print a library error and give its exit code.
+fn key_error(error: keys::Error) -> u8 {
+    let error = libkit::Error::from(error);
+    emit_err(
+        &crate::exit_map::message(&error),
+        crate::exit_map::exit_code(&error),
+    )
 }
 
 use super::error as emit_err;

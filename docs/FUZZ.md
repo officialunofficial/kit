@@ -69,6 +69,7 @@ from recurring.
 | `fuzz_targets/index_path_arg.rs` | `libkit::pathspec::index_path_for_arg` (never panics on a relative argument; an argument gives the same answer twice; an answer is a valid index path with no empty, `.` or `..` component; a plain name gives itself) |
 | `fuzz_targets/identity_parse.rs` | `libkit::identity::parse_author` and `libkit::identity::decode_config` (never panic on any text; a text gives the same answer twice; a key that parses has 32 bytes; a DID key that parses is valid; the full form of a key or a DID key parses back to itself) |
 | `fuzz_targets/rebase_todo_parse.rs` | `libkit::rebase::parse_todo` (never panics on any text; a todo list reads the same twice; a result has one action for each commit, names only listed commits and never starts with a squash or a fixup; a full hash names its commit) |
+| `fuzz_targets/secret_hex_parse.rs` | `libkit::keys::parse_secret_hex` (never panics on any text; exactly 64 hex digits in either case are accepted; the secret equals the digits; a refusal never shows the text) |
 | `fuzz_targets/absolute_config_home.rs` | `libkit::config::xdg_config_home` (a result is always absolute; a set `XDG_CONFIG_HOME` is never repaired; an absolute `HOME` gives `HOME/.config`) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
@@ -130,6 +131,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | The branch name and the id that `libkit::linked::add` derives from a path | None. It builds a name from a local path, and then `refs::validate_ref_name` or `layout::validate_worktree_id` must accept the name. Unit tests cover the derivation. |
 | The path arguments of `libkit::add::stage` | None. A named path is checked against the file system, not parsed. Integration tests cover a path outside the repository and a path through a symlink. |
 | `libkit::rebase::parse_todo` | `rebase_todo_parse` |
+| `libkit::keys::parse_secret_hex` | `secret_hex_parse` |
 | `kit_bin::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
 | `kit_transport_ssh::url::parse_kit_ssh_url`, `validate_ssh_path` | `ssh_url_parse` |
 | `kit_transport_s3::sigv4::parse_host` | None. It strips a scheme prefix from a configured endpoint. It does no other parsing. Unit tests cover it. |

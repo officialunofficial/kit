@@ -2341,6 +2341,42 @@ pub fn rebase_todo_parse_one_iteration(input: &[u8]) {
     );
 }
 
+/// Hex secrets (`secret_hex_parse`): `keys::parse_secret_hex` never panics on
+/// any text. It accepts exactly 64 hex digits in either case, and the
+/// secret equals the digits. A refusal never shows the text.
+pub fn secret_hex_parse_one_iteration(input: &[u8]) {
+    use libkit::keys::parse_secret_hex;
+    use libkit::keystore::Algorithm;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let wellformed = text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit());
+    match parse_secret_hex(Algorithm::Ed25519, text) {
+        Ok(secret) => {
+            assert!(wellformed, "only 64 hex digits are accepted");
+            let mut want = [0u8; 32];
+            for (byte, pair) in want.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
+                let digits = core::str::from_utf8(pair).unwrap_or("00");
+                *byte = u8::from_str_radix(digits, 16).unwrap_or(0);
+            }
+            assert_eq!(
+                secret.expose_secret(),
+                &want,
+                "the secret equals the digits"
+            );
+        }
+        Err(error) => {
+            assert!(!wellformed, "64 hex digits are accepted");
+            let shown = format!("{error} {error:?}");
+            assert!(
+                text.len() < 8 || !shown.contains(text),
+                "a refusal never shows the text"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3196,6 +3232,29 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, identity_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_secret_hex_parse() {
+        run_iterated_unit(secret_hex_parse_one_iteration).unwrap();
+        let good = "0a".repeat(32);
+        let upper = "AB".repeat(32);
+        let short = "0".repeat(63);
+        let long = "0".repeat(65);
+        let bad_digit = format!("{}zz", "00".repeat(31));
+        let wide = format!("{}0é", "00".repeat(31));
+        for case in [
+            &b""[..],
+            good.as_bytes(),
+            upper.as_bytes(),
+            short.as_bytes(),
+            long.as_bytes(),
+            bad_digit.as_bytes(),
+            wide.as_bytes(),
+            b"\xff\xfe",
+        ] {
+            run_one(case, secret_hex_parse_one_iteration).unwrap();
         }
     }
 }

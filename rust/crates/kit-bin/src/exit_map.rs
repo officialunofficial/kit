@@ -8,7 +8,7 @@ use kit_core::store::StoreError;
 use kit_core::worktree::WorktreeError;
 use libkit::signing::ErrorKind;
 use libkit::{
-    add, attest_signer, blame, branch, commit, diff, head, linked, merge, mv, rebase, repo,
+    add, attest_signer, blame, branch, commit, diff, head, keys, linked, merge, mv, rebase, repo,
     revspec, signer, status,
 };
 
@@ -38,6 +38,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Add(inner) => add_exit_code(inner),
         libkit::Error::Signer(inner) => signer_exit_code(inner),
         libkit::Error::AttestSigner(inner) => attest_signer_exit_code(inner),
+        libkit::Error::Keys(inner) => keys_exit_code(inner),
         libkit::Error::Commit(inner) => commit_exit_code(inner),
         libkit::Error::Merge(inner) => merge_exit_code(inner),
         libkit::Error::Rebase(inner) => rebase_exit_code(inner),
@@ -467,6 +468,22 @@ pub fn attest_signer_exit_code(error: &attest_signer::Error) -> u8 {
     }
 }
 
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn keys_exit_code(error: &keys::Error) -> u8 {
+    match error {
+        // A backend name or a key reference in the settings is wrong.
+        keys::Error::Backend(_) | keys::Error::ConfigKeyRef(_) => exit::CONFIG_ERROR,
+        // The backend is not built in or not usable here.
+        keys::Error::OpenBackend(_) => exit::UNAVAILABLE,
+        // The keystore refused, or the secret input is malformed.
+        keys::Error::Keystore(_)
+        | keys::Error::SecretHexLength
+        | keys::Error::SecretHexDigit
+        | keys::Error::ReadKeyFile(_) => exit::DATAERR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
 fn head_exit_code(error: &head::Error) -> u8 {
     match error {
         // The state to move from is damaged.
@@ -800,6 +817,25 @@ mod tests {
                 attest_signer::Error::ExternalSignerPath("x".to_owned()).into(),
                 exit::CONFIG_ERROR,
             ),
+            (
+                keys::Error::Backend(kit_keystore::Error::Encoding("x".into())).into(),
+                exit::CONFIG_ERROR,
+            ),
+            (
+                keys::Error::ConfigKeyRef(kit_keystore::Error::Encoding("x".into())).into(),
+                exit::CONFIG_ERROR,
+            ),
+            (
+                keys::Error::OpenBackend(kit_keystore::Error::BackendUnavailable("x".into()))
+                    .into(),
+                exit::UNAVAILABLE,
+            ),
+            (
+                keys::Error::Keystore(kit_keystore::Error::UnsupportedOperation("list")).into(),
+                exit::DATAERR,
+            ),
+            (keys::Error::SecretHexLength.into(), exit::DATAERR),
+            (keys::Error::SecretHexDigit.into(), exit::DATAERR),
         ]
     }
 
@@ -852,5 +888,10 @@ mod tests {
         assert!(message(&head).starts_with("update HEAD: "));
         let traversal: libkit::Error = repo::Error::PathTraversal(path()).into();
         assert!(message(&traversal).contains(".."));
+        let backend: libkit::Error =
+            keys::Error::Backend(kit_keystore::Error::Encoding("x".into())).into();
+        assert!(message(&backend).starts_with("key backend: "));
+        let hex: libkit::Error = keys::Error::SecretHexLength.into();
+        assert_eq!(message(&hex), "--hex must be exactly 64 hex characters");
     }
 }

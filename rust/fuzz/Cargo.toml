@@ -480,3 +480,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "secret_hex_parse"
+path = "fuzz_targets/secret_hex_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

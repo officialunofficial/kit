@@ -108,6 +108,12 @@ it writes a commit.
 
 ## Keys and attestations
 
+`libkit::keys` works on signing keys in a keystore backend. `select` picks the
+backend and the label from explicit values and the `key.*` settings. `open`
+opens the backend. `generate`, `import`, `list`, `export` and `delete` then
+act on any `Keystore`. `parse_secret_hex` and `read_secret_file` read a secret
+key. A secret lives in a `SecretKey`, which wipes its bytes on drop.
+
 `libkit::attest_signer::build` turns an algorithm, a `Kind` and a `Config` into a
 signer. It never creates a key file.
 

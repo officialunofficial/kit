@@ -37,6 +37,7 @@ mod environment;
 mod error;
 pub mod head;
 pub mod identity;
+pub mod keys;
 #[cfg(feature = "sync")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod linked;
