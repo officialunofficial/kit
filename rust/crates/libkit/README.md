@@ -55,7 +55,43 @@ keep a range of lines, skip commits, and detect moved or copied lines.
 that a sibling tree has checked out. `list` can keep the branches that match
 a name pattern, or that contain, or are merged into, a commit.
 
-`libkit::identity` writes an identity in its short and full text forms.
+`libkit::identity` writes an identity in its short and full text forms. It
+also reads the `--author` flag and the `user.identity` setting, and it picks
+the author of a commit.
+
+## The index and the tree
+
+These modules need the `sync` feature. Each one takes a `RepoLayout`, and it
+prints nothing. A program that wants progress or warnings passes an
+`Observer`.
+
+`libkit::status::compute` compares `HEAD`, the index and the tree. It
+refreshes the stat cache of the index, and it can detect renames. `records`
+folds the result into the two-letter codes of `git status --porcelain`.
+`Detail` gives the modes and object ids that the v2 porcelain form needs.
+
+`libkit::add::stage` stages named paths, the whole tree, only the tracked
+files, or single hunks. A `HunkChooser` picks the hunks. A name that the
+ignore files match needs `force`. `stage_tracked` is the tracked-only restage
+for a caller that holds the worktree lock already.
+
+`libkit::mv::mv` moves tracked files and directories, and it stages the move.
+It checks every move before it changes anything.
+
+`libkit::pathspec::index_path_for_arg` turns a path from the command line into
+a path of the index. It refuses a path that leaves the repository.
+
+`libkit::linked` adds, lists, removes and prunes linked trees. Each change
+takes the registry lock.
+
+`libkit::signer::load` opens the signing key that the config names, in a file
+or in a keystore. A `Signer` signs a commit or a tag. The library never makes
+a key.
+
+`libkit::commit::begin` reads the merge state and the commit that an amend
+replaces. `libkit::commit::create` then takes the worktree lock, checks that
+this state still holds, signs the commit, and moves `HEAD` only when the
+branch is still at the tip that the commit was built on.
 
 ## Errors
 

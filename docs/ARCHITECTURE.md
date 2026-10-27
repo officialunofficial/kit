@@ -128,9 +128,12 @@ re-export them.
 
 Every other command is a thin layer over library code. Its logic moves
 into `libkit` over time. The CLI keeps argument parsing, printing and
-exit codes. The logic of `kit log`, `kit show`, `kit diff`, `kit blame` and
-`kit branch` is in `libkit::log`, `libkit::diff`, `libkit::blame` and
-`libkit::branch` already.
+exit codes. The logic of `kit log`, `kit show`, `kit diff`, `kit blame`,
+`kit branch`, `kit worktree`, `kit mv`, `kit status`, `kit add` and
+`kit commit` is in `libkit::log`, `libkit::diff`, `libkit::blame`,
+`libkit::branch`, `libkit::linked`, `libkit::mv`, `libkit::status`,
+`libkit::add` and `libkit::commit` already. The key code of `kit commit`,
+`kit tag` and the other signing commands is in `libkit::signer`.
 
 Two decisions are proposals. They are not part of this release.
 
