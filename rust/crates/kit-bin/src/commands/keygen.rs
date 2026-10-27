@@ -37,7 +37,6 @@ use zeroize::Zeroizing;
 use crate::clap_args;
 use crate::commands::attest_factory;
 use crate::exit;
-use crate::format;
 
 #[derive(Debug, Parser)]
 #[command(name = "kit keygen", about = "Generate a fresh signing key.")]
@@ -149,7 +148,7 @@ fn run_ed25519(key_path: &Path, force: bool, print_pubkey: bool) -> u8 {
         let _ = writeln!(
             stderr,
             "identity: {}",
-            format::short_identity(&kit_core::Identity::ed25519(kp.public.0))
+            libkit::identity::short(&kit_core::Identity::ed25519(kp.public.0))
         );
     }
     if print_pubkey {

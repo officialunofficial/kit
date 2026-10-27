@@ -167,7 +167,7 @@ fn show_commit_like(
     stat: bool,
 ) -> Result<(), (String, u8)> {
     let _ = writeln!(out, "{label} {}", format::hex_hash(hash));
-    let _ = writeln!(out, "Author: {}", format::short_identity(author));
+    let _ = writeln!(out, "Author: {}", libkit::identity::short(author));
     let _ = writeln!(out, "Date:   {}", format::human_date_utc(timestamp));
     let _ = writeln!(out);
     write_indented_message(out, message);
@@ -217,7 +217,7 @@ fn show_tag(
     stat: bool,
 ) -> Result<(), (String, u8)> {
     let _ = writeln!(out, "tag {}", String::from_utf8_lossy(&t.name));
-    let _ = writeln!(out, "Tagger: {}", format::short_identity(&t.tagger));
+    let _ = writeln!(out, "Tagger: {}", libkit::identity::short(&t.tagger));
     let _ = writeln!(out, "Date:   {}", format::human_date_utc(t.timestamp));
     let _ = writeln!(out);
     // git prints the tag message un-indented, then a blank line, then the

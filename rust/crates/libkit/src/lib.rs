@@ -23,6 +23,7 @@ pub mod config;
 mod environment;
 mod error;
 pub mod head;
+pub mod identity;
 pub mod lock;
 pub mod repo;
 pub mod revspec;

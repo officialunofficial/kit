@@ -285,8 +285,8 @@ fn commit_matches(
         return false;
     }
     if let Some(pat) = author
-        && !(format::short_identity(&c.author).contains(pat)
-            || format::full_identity(&c.author).contains(pat))
+        && !(libkit::identity::short(&c.author).contains(pat)
+            || libkit::identity::full(&c.author).contains(pat))
     {
         return false;
     }
@@ -568,7 +568,7 @@ fn render_commit(
                 None => format::hex_hash(hash),
             };
             let _ = writeln!(out, "commit {id}");
-            let _ = writeln!(out, "Author: {}", format::short_identity(&c.author));
+            let _ = writeln!(out, "Author: {}", libkit::identity::short(&c.author));
             let _ = writeln!(out, "Date:   {}", format::human_date_utc(c.timestamp));
             let _ = writeln!(out);
             // Full message body, indented like git. Each line is prefixed
@@ -625,7 +625,7 @@ fn emit_json_entry(
     let _ = write!(
         out,
         ",\"author\":\"{}\"",
-        format::json_escape(&format::full_identity(&c.author))
+        format::json_escape(&libkit::identity::full(&c.author))
     );
     let _ = write!(out, ",\"timestamp\":{}", c.timestamp);
     let _ = write!(out, ",\"title\":\"{}\"", format::json_escape(title));

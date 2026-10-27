@@ -210,7 +210,7 @@ fn pretty_print(
             for p in &c.parents {
                 let _ = writeln!(out, "parent {}", format::hex_hash(p));
             }
-            let _ = writeln!(out, "author {}", format::full_identity(&c.author));
+            let _ = writeln!(out, "author {}", libkit::identity::full(&c.author));
             let _ = writeln!(out, "timestamp {}", c.timestamp);
             let _ = writeln!(out);
             let _ = out.write_all(&c.message);
@@ -220,7 +220,7 @@ fn pretty_print(
             let _ = writeln!(out, "object {}", format::hex_hash(&t.target));
             let _ = writeln!(out, "type {}", t.target_type.name());
             let _ = writeln!(out, "tag {}", String::from_utf8_lossy(&t.name));
-            let _ = writeln!(out, "tagger {}", format::full_identity(&t.tagger));
+            let _ = writeln!(out, "tagger {}", libkit::identity::full(&t.tagger));
             let _ = writeln!(out, "timestamp {}", t.timestamp);
             let _ = writeln!(out);
             let _ = out.write_all(&t.message);

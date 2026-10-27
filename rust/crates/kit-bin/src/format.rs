@@ -19,81 +19,6 @@ pub fn short_hash(h: &Hash, n: usize) -> String {
     full[..take].to_owned()
 }
 
-static HEX_ALPHABET: &[u8; 16] = b"0123456789abcdef";
-
-/// Render a short [`kit_core::Identity`]: for 8-byte opaque keys we
-/// show the LE u64 decimal; otherwise `<kind>:<8-hex>`.
-#[must_use]
-pub fn short_identity(id: &kit_core::Identity) -> String {
-    match id.kind {
-        kit_core::IdentityKind::Opaque if id.bytes.len() == 8 => {
-            let mut arr = [0u8; 8];
-            arr.copy_from_slice(&id.bytes);
-            u64::from_le_bytes(arr).to_string()
-        }
-        // A DidKey payload is a printable-ASCII multibase string, so show a
-        // readable prefix of it (e.g. `did:key:z6MkExam`) rather than hex.
-        kit_core::IdentityKind::DidKey => {
-            let s = String::from_utf8_lossy(&id.bytes);
-            let prefix: String = s.chars().take(8).collect();
-            format!("did:key:{prefix}")
-        }
-        // Printable opaque identities (e.g. an imported git
-        // `Name <email>` carried verbatim) render as their text — the
-        // hex fallback below is for genuinely binary payloads.
-        kit_core::IdentityKind::Opaque if printable_text(&id.bytes).is_some() => {
-            printable_text(&id.bytes).unwrap_or_default().to_owned()
-        }
-        kind => {
-            let kind_name = match kind {
-                kit_core::IdentityKind::Ed25519 => "ed25519",
-                kit_core::IdentityKind::DidKey => "did:key",
-                kit_core::IdentityKind::Opaque => "opaque",
-            };
-            let take = id.bytes.len().min(4);
-            let mut hex = String::with_capacity(take * 2);
-            for b in &id.bytes[..take] {
-                hex.push(HEX_ALPHABET[(b >> 4) as usize] as char);
-                hex.push(HEX_ALPHABET[(b & 0x0F) as usize] as char);
-            }
-            format!("{kind_name}:{hex}")
-        }
-    }
-}
-
-/// The payload as text iff it is valid UTF-8 with no control
-/// characters (terminal-safe to print verbatim).
-fn printable_text(bytes: &[u8]) -> Option<&str> {
-    let s = std::str::from_utf8(bytes).ok()?;
-    (!s.is_empty() && !s.chars().any(char::is_control)).then_some(s)
-}
-
-/// Full-detail rendering of an [`kit_core::Identity`] suitable for
-/// machine-readable output (e.g. JSONL from `kit log --format=json`).
-///
-/// Format mirrors the parser shorthands accepted by `kit config
-/// user.identity` / `--author` so a value emitted here round-trips:
-/// `ed25519:<full-hex>`, `did:key:<multibase>` (the payload verbatim,
-/// matching `--author did:key:…`), `mid:<decimal-u64>` for 8-byte opaque
-/// keys, and `opaque:<full-hex>` for other opaque lengths.
-#[must_use]
-pub fn full_identity(id: &kit_core::Identity) -> String {
-    match id.kind {
-        kit_core::IdentityKind::Opaque if id.bytes.len() == 8 => {
-            let mut arr = [0u8; 8];
-            arr.copy_from_slice(&id.bytes);
-            format!("mid:{}", u64::from_le_bytes(arr))
-        }
-        kit_core::IdentityKind::Ed25519 => format!("ed25519:{}", to_hex(&id.bytes)),
-        // DidKey bytes are the multibase payload (printable ASCII); emit it
-        // verbatim so it round-trips through `--author did:key:<multibase>`.
-        kit_core::IdentityKind::DidKey => {
-            format!("did:key:{}", String::from_utf8_lossy(&id.bytes))
-        }
-        kit_core::IdentityKind::Opaque => format!("opaque:{}", to_hex(&id.bytes)),
-    }
-}
-
 /// Escape a Rust string for inclusion in a JSON string literal.
 /// Sufficient for the small, known fields emitted by `--format=json`
 /// callers (commit messages, hashes, identity strings). Does NOT
@@ -152,15 +77,6 @@ pub fn human_date_utc(secs: u64) -> String {
     let year = if month <= 2 { y + 1 } else { y };
 
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} +0000")
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX_ALPHABET[(b >> 4) as usize] as char);
-        out.push(HEX_ALPHABET[(b & 0x0F) as usize] as char);
-    }
-    out
 }
 
 /// Default abbreviation length for the git-style ref-update summary
@@ -406,26 +322,6 @@ mod tests {
     fn human_date_utc_leap_day() {
         // 1582934400 = 2020-02-29 00:00:00 UTC (leap day).
         assert_eq!(human_date_utc(1_582_934_400), "2020-02-29 00:00:00 +0000");
-    }
-
-    #[test]
-    fn full_identity_mid() {
-        let id = kit_core::Identity {
-            kind: kit_core::IdentityKind::Opaque,
-            bytes: 42u64.to_le_bytes().to_vec(),
-        };
-        assert_eq!(full_identity(&id), "mid:42");
-    }
-
-    #[test]
-    fn full_identity_ed25519() {
-        let id = kit_core::Identity {
-            kind: kit_core::IdentityKind::Ed25519,
-            bytes: vec![0xab; 32],
-        };
-        let s = full_identity(&id);
-        assert!(s.starts_with("ed25519:"));
-        assert_eq!(s.len(), "ed25519:".len() + 64);
     }
 
     #[test]

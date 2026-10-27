@@ -693,7 +693,7 @@ fn render_json(result: &BlameResult) -> u8 {
         let _ = write!(
             stdout,
             ",\"author\":\"{}\"",
-            format::json_escape(&format::full_identity(&line.author))
+            format::json_escape(&libkit::identity::full(&line.author))
         );
         let _ = write!(stdout, ",\"timestamp\":{}", line.timestamp);
         // Line text may contain arbitrary bytes from the source file.
@@ -761,7 +761,7 @@ fn render_porcelain(
             // line-porcelain repeats it for every line.
             let emit_meta = line_porcelain || seen.insert(line.commit_hash);
             if emit_meta {
-                let ident = format::full_identity(&line.author);
+                let ident = libkit::identity::full(&line.author);
                 let summary = summaries
                     .entry(line.commit_hash)
                     .or_insert_with(|| super::commit_subject(store, &line.commit_hash));
