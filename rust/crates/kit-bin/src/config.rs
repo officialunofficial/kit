@@ -23,7 +23,7 @@ pub use libkit::config::{
 use crate::environment;
 
 /// Prints each config event as a warning on stderr.
-struct StderrWarnings;
+pub(crate) struct StderrWarnings;
 
 impl Observer<ConfigEvent> for StderrWarnings {
     fn event(&self, event: &ConfigEvent) {

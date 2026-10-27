@@ -97,8 +97,8 @@ use std::path::Path;
 // `kit-sync` (a pull's fast-forward is built on them); every command keeps
 // reaching them through this module.
 pub(crate) use kit_sync::worktree::{
-    collect_worktree_paths, current_head_tree, fanout_read_batch, index_path_descends_from,
-    index_path_matches_or_descends, index_tracks_path_or_descendant, restore_affects_path,
+    current_head_tree, fanout_read_batch, index_path_descends_from, index_path_matches_or_descends,
+    index_tracks_path_or_descendant, restore_affects_path,
 };
 pub use kit_sync::worktree::{
     ensure_restore_safe, ensure_restore_safe_with_options, read_or_seed_index_from_head,
@@ -134,6 +134,16 @@ pub(crate) fn list_remote_refs_parallel(
     refs::list_remote_refs_with(layout, remote, fanout_read_batch)
 }
 
+/// Run `f` with the store settings of the current command: its environment,
+/// and the config warnings on stderr.
+pub(crate) fn with_store_config<T>(f: impl FnOnce(&libkit::repo::StoreConfig<'_>) -> T) -> T {
+    let environment = crate::environment::current();
+    f(&libkit::repo::StoreConfig {
+        environment: &environment,
+        observer: &crate::config::StderrWarnings,
+    })
+}
+
 /// Open the object store for a mutating command, honoring the repo's
 /// configured durability schedule (`durability.objects`, see
 /// [`crate::config::Config::object_sync_policy`]). Falls back to the
@@ -143,11 +153,7 @@ pub(crate) fn list_remote_refs_parallel(
 pub fn open_store_configured(
     layout: &RepoLayout,
 ) -> Result<ObjectStore, kit_core::store::StoreError> {
-    let mut store = ObjectStore::open(layout)?;
-    if let Ok(cfg) = crate::config::read_or_default(layout) {
-        store.set_sync_policy(cfg.object_sync_policy());
-    }
-    Ok(store)
+    with_store_config(|config| config.open(layout))
 }
 
 /// Read an object's serialised bytes from `store`, mapping a failure to

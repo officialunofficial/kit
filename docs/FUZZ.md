@@ -122,6 +122,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | The revision and path arguments of `libkit::diff::compute` | `diff_args` |
 | `libkit::blame::line_range::parse`, the revision range of `libkit::blame::blame` | `blame_line_range` |
 | `libkit::branch::glob_match` | `branch_glob` |
+| The branch name and the id that `libkit::linked::add` derives from a path | None. It builds a name from a local path, and then `refs::validate_ref_name` or `layout::validate_worktree_id` must accept the name. Unit tests cover the derivation. |
 | `kit_bin::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
 | `kit_transport_ssh::url::parse_kit_ssh_url`, `validate_ssh_path` | `ssh_url_parse` |
 | `kit_transport_s3::sigv4::parse_host` | None. It strips a scheme prefix from a configured endpoint. It does no other parsing. Unit tests cover it. |

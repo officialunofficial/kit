@@ -27,6 +27,9 @@ mod environment;
 mod error;
 pub mod head;
 pub mod identity;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod linked;
 pub mod lock;
 pub mod log;
 pub mod repo;

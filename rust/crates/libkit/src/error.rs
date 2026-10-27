@@ -38,4 +38,9 @@ pub enum Error {
     /// A branch could not be created, deleted, renamed or listed.
     #[error(transparent)]
     Branch(#[from] branch::Error),
+    /// A linked tree could not be added, listed, removed or pruned.
+    #[cfg(feature = "sync")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+    #[error(transparent)]
+    Linked(#[from] crate::linked::Error),
 }

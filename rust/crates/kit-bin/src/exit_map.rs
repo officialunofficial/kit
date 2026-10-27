@@ -5,7 +5,7 @@
 //! and into the text for stderr with [`message`].
 
 use kit_core::store::StoreError;
-use libkit::{blame, branch, diff, head, repo, revspec};
+use libkit::{blame, branch, diff, head, linked, repo, revspec};
 
 use crate::exit;
 
@@ -27,6 +27,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Diff(inner) => diff_exit_code(inner),
         libkit::Error::Blame(inner) => blame_exit_code(inner),
         libkit::Error::Branch(inner) => branch_exit_code(inner),
+        libkit::Error::Linked(inner) => linked_exit_code(inner),
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -124,6 +125,52 @@ fn branch_exit_code(error: &branch::Error) -> u8 {
         | branch::Error::ListRefs(_)
         | branch::Error::OpenStore(_)
         | branch::Error::Ancestry(_) => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn linked_exit_code(error: &linked::Error) -> u8 {
+    match error {
+        // Another `kit` holds a lock.
+        linked::Error::Lock(_) => exit::TEMPFAIL,
+        // The object store is missing.
+        linked::Error::OpenStore(_) => exit::UNAVAILABLE,
+        // The caller named a path that the operation refuses.
+        linked::Error::InsideWorktree { .. }
+        | linked::Error::NoBranchName(_)
+        | linked::Error::NoWorktreeId(_)
+        | linked::Error::RemoveMain
+        | linked::Error::RemoveCurrent
+        | linked::Error::NotLinked(_) => exit::USAGE,
+        // A name or a path is in use, or a file cannot be created.
+        linked::Error::TargetNotEmpty(_)
+        | linked::Error::TargetNotDirectory(_)
+        | linked::Error::BranchExists(_)
+        | linked::Error::CreateStateDir(_)
+        | linked::Error::WriteState { .. }
+        | linked::Error::WriteHead(_)
+        | linked::Error::CreateBranch { .. }
+        | linked::Error::CreateTree { .. }
+        | linked::Error::WritePointer(_) => exit::CANTCREAT,
+        // The state of the repository is wrong for the request: no commit,
+        // a branch in use, local work, or a damaged registry.
+        linked::Error::NoCommits
+        | linked::Error::ResolveHead(_)
+        | linked::Error::CheckedOutElsewhere { .. }
+        | linked::Error::CheckedOutHere(_)
+        | linked::Error::NotACommit(_)
+        | linked::Error::OperationInProgress(_)
+        | linked::Error::Dirty(_)
+        | linked::Error::DirtyCheck(_)
+        | linked::Error::Worktrees(_) => exit::DATAERR,
+        linked::Error::InspectTarget { .. }
+        | linked::Error::UnknownCommitish { .. }
+        | linked::Error::ReadCommit(_)
+        | linked::Error::Restore(_)
+        | linked::Error::RemoveTree { .. }
+        | linked::Error::RemoveStateDir { .. }
+        | linked::Error::Prune { .. } => exit::GENERAL_ERROR,
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -283,6 +330,21 @@ mod tests {
             (branch::Error::NoHeadCommit.into(), exit::GENERAL_ERROR),
             (
                 branch::Error::NotFound("x".to_owned()).into(),
+                exit::GENERAL_ERROR,
+            ),
+            (linked::Error::RemoveMain.into(), exit::USAGE),
+            (linked::Error::NoCommits.into(), exit::DATAERR),
+            (
+                linked::Error::TargetNotEmpty(path()).into(),
+                exit::CANTCREAT,
+            ),
+            (
+                linked::Error::Prune {
+                    id: "x".to_owned(),
+                    source: std::io::Error::other("x"),
+                    pruned: Vec::new(),
+                }
+                .into(),
                 exit::GENERAL_ERROR,
             ),
             (diff::Error::StagedWithRevision.into(), exit::USAGE),

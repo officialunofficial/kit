@@ -4,9 +4,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use kit_core::layout::{self, DiscoverError, RepoLayout};
+use kit_core::observer::Observer;
 use kit_core::store::{KIT_DIR, ObjectStore, StoreError};
 
 use crate::Environment;
+use crate::config::{self, ConfigEvent};
 
 /// Errors from opening or discovering a repository.
 #[derive(Debug, thiserror::Error)]
@@ -119,6 +121,42 @@ impl Repo {
     #[must_use]
     pub fn environment(&self) -> &Environment {
         &self.inner.environment
+    }
+}
+
+/// Where an operation that writes objects takes its durability schedule from.
+///
+/// The schedule is the `durability.objects` setting of the merged config. A
+/// config that cannot be read gives the default schedule, because a broken
+/// config must not change how objects reach the disk. The `observer` hears
+/// each config event, such as an ignored repository key.
+#[derive(Clone, Copy)]
+pub struct StoreConfig<'a> {
+    /// The inputs that the config reads.
+    pub environment: &'a Environment,
+    /// Where config events go.
+    pub observer: &'a dyn Observer<ConfigEvent>,
+}
+
+impl std::fmt::Debug for StoreConfig<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreConfig")
+            .field("environment", &self.environment)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StoreConfig<'_> {
+    /// Open the object store of `layout` with the configured schedule.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the store cannot be opened.
+    pub fn open(&self, layout: &RepoLayout) -> Result<ObjectStore, StoreError> {
+        let mut store = ObjectStore::open(layout)?;
+        if let Ok(cfg) = config::read_or_default(layout, self.environment, self.observer) {
+            store.set_sync_policy(cfg.object_sync_policy());
+        }
+        Ok(store)
     }
 }
 
