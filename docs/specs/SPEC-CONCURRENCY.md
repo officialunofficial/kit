@@ -104,7 +104,7 @@ non-blocking exclusive probe of that same `serve.lock`
 (i.e. at least one `serve` is alive), the command prints a warning to
 stderr and proceeds anyway &mdash; it does not refuse or block. The paths that
 take `worktree.lock` without the helper call the same probe directly
-(`kit-bin`'s `warn_if_served`) right after acquiring it: the per-branch
+(`libkit::lock::warn_if_served`) right after acquiring it: the per-branch
 unpack-and-publish phase of `fetch`/`pull` and the fast-forward phase of
 `pull` (`remote_dispatch::fetch_objects_inner` and `pull_all_with`), and
 `status`'s opportunistic index refresh. So every command that takes

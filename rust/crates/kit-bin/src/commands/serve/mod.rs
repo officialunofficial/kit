@@ -226,7 +226,7 @@ pub fn run(args: &[String]) -> u8 {
 
     // Held for the whole lifetime of this `serve` process
     // (SPEC-CONCURRENCY §3.1): local worktree-mutating commands and `gc`
-    // probe this same lock (see `commands::warn_if_served`) to detect a
+    // probe this same lock (see `libkit::lock::warn_if_served`) to detect a
     // live `serve` and warn. SHARED, not exclusive — SPEC-TRANSPORT
     // documents multiple concurrent `serve` processes against one root
     // (e.g. one per SSH forced-command connection) as a supported

@@ -5,7 +5,7 @@
 //! and into the text for stderr with [`message`].
 
 use kit_core::store::StoreError;
-use libkit::{blame, branch, diff, head, linked, mv, repo, revspec};
+use libkit::{blame, branch, diff, head, linked, mv, repo, revspec, status};
 
 use crate::exit;
 
@@ -29,6 +29,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Branch(inner) => branch_exit_code(inner),
         libkit::Error::Linked(inner) => linked_exit_code(inner),
         libkit::Error::Mv(inner) => mv_exit_code(inner),
+        libkit::Error::Status(inner) => status_exit_code(inner),
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -209,6 +210,22 @@ fn mv_exit_code(error: &mv::Error) -> u8 {
         | mv::Error::DestinationConflict(_)
         | mv::Error::Rename { .. }
         | mv::Error::WriteIndex(_) => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn status_exit_code(error: &status::Error) -> u8 {
+    match error {
+        // The caller gave a threshold that is not a number.
+        status::Error::InvalidRenameThreshold(_) => exit::USAGE,
+        status::Error::NotARepository(_)
+        | status::Error::HeadTree(_)
+        | status::Error::ReadIndex(_)
+        | status::Error::Compare(_)
+        | status::Error::Renames(_)
+        | status::Error::ReadHeadTree(_)
+        | status::Error::SeedIndex(_) => exit::GENERAL_ERROR,
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -400,6 +417,14 @@ mod tests {
                 }
                 .into(),
                 exit::CANTCREAT,
+            ),
+            (
+                status::Error::InvalidRenameThreshold("x".to_owned()).into(),
+                exit::USAGE,
+            ),
+            (
+                status::Error::HeadTree("x".to_owned()).into(),
+                exit::GENERAL_ERROR,
             ),
             (diff::Error::StagedWithRevision.into(), exit::USAGE),
             (diff::Error::MergeBaseNeedsRevision.into(), exit::USAGE),

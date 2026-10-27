@@ -323,18 +323,6 @@ pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<libkit::lock::RepoLo
     libkit::lock::acquire_worktree(layout, &crate::progress::ServedWarning).map_err(lock_failure)
 }
 
-/// Warn on stderr when at least one `kit serve` is currently alive
-/// against `layout`'s common dir.
-///
-/// [`acquire_worktree_lock`] and [`acquire_worktrees_registry_lock`] call
-/// this already. A call site that takes [`WORKTREE_LOCK`] or
-/// [`WORKTREES_REGISTRY_LOCK`] directly, because it holds the lock for only
-/// part of a larger operation, calls this function right after it takes the
-/// lock.
-pub(crate) fn warn_if_served(layout: &RepoLayout) {
-    libkit::lock::warn_if_served(layout, &crate::progress::ServedWarning);
-}
-
 /// Acquire the shared worktree-registry lock (common dir).
 ///
 /// # Errors

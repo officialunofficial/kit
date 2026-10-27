@@ -38,6 +38,9 @@ pub mod mv;
 pub mod pathspec;
 pub mod repo;
 pub mod revspec;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod status;
 pub mod worktrees;
 
 pub use environment::{CredentialSource, Environment, Identity, Token};

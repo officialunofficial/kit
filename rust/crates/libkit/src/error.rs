@@ -48,4 +48,9 @@ pub enum Error {
     #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
     #[error(transparent)]
     Mv(#[from] crate::mv::Error),
+    /// The state of the tree could not be read.
+    #[cfg(feature = "sync")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+    #[error(transparent)]
+    Status(#[from] crate::status::Error),
 }
