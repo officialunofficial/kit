@@ -46,6 +46,7 @@ ceiling_for() {
         kit-git-bridge)        echo 0  ;;
         kit-serve)             echo 0  ;;
         kit-sync)              echo 0  ;;
+        libkit)                echo 0  ;;
         *)                      echo "UNKNOWN" ;;
     esac
 }
@@ -56,7 +57,7 @@ ceiling_for() {
 EXPECTED_CRATES=(
     kit-bin kit-client kit-core kit-keystore kit-attest kit-rpc
     kit-transport-file kit-transport-s3 kit-transport-ssh
-    kit-transport-connect kit-git-bridge kit-serve kit-sync
+    kit-transport-connect kit-git-bridge kit-serve kit-sync libkit
 )
 
 # Features that bring optional first-party crates into the scan. Without
@@ -151,8 +152,8 @@ SEEN=""
 # ceiling.
 while IFS= read -r line; do
     case "$line" in
-        *" kit-"*" "[0-9]*.[0-9]*.[0-9]*)
-            name=$(printf '%s\n' "$line" | sed -nE 's/.* (kit-[a-z0-9-]+) [0-9]+\.[0-9]+\.[0-9]+.*/\1/p')
+        *" kit-"*" "[0-9]*.[0-9]*.[0-9]* | *" libkit "[0-9]*.[0-9]*.[0-9]*)
+            name=$(printf '%s\n' "$line" | sed -nE 's/.* ((kit-[a-z0-9-]+)|libkit) [0-9]+\.[0-9]+\.[0-9]+.*/\1/p')
             if [ -z "$name" ]; then
                 continue
             fi
