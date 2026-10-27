@@ -38,8 +38,8 @@ finds the tree that has a branch checked out.
 ## History, diffs and blame
 
 `libkit::log::history` walks the commits that a revision selection reaches.
-The selection can be a revision, `A..B` or `A...B`. A `Query` limits the walk
-and filters it by author, message, path and date. `libkit::log::date::parse`
+The selection can be a revision, `A..B` or `A...B`. A `Query` limits the walk.
+Its `Filter` selects commits by author, message, date and merge status. `libkit::log::date::parse`
 reads the date forms of `kit log`.
 
 `libkit::diff::compute` returns the changed entries between two trees. The
