@@ -233,7 +233,7 @@ pub(crate) fn bump(opts: &BumpOpts, revoke: Option<&RevokeExtras>) -> u8 {
     } else {
         match canonical_audiences(&opts.audience) {
             Ok(a) => a,
-            Err(e) => return usage_error(&e),
+            Err(e) => return usage_error(&e.to_string()),
         }
     };
     if let Err(e) = check_audiences(&audiences, Some(&target)) {
@@ -260,7 +260,8 @@ pub(crate) fn bump(opts: &BumpOpts, revoke: Option<&RevokeExtras>) -> u8 {
             let new = current
                 .checked_add(opts.by)
                 .ok_or("the epoch would overflow")?;
-            build_epoch(ns, new, &audiences, now, lifetime_ms)?
+            build_epoch(ns, new, &audiences, now, lifetime_ms)
+                .map_err(|e| e.to_string())?
                 .encode()
                 .map_err(|e| format!("invalid statement: {e}"))
         },

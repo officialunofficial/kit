@@ -528,3 +528,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "grants_spec"
+path = "fuzz_targets/grants_spec.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

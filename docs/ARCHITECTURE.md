@@ -143,6 +143,9 @@ command gives them a `libkit::signing::Signing`, and the library asks that
 value for the key when it writes a commit. The plan of
 `kit push` is in `libkit::push`. The transfer stays in `kit-bin`, in the
 `remote_dispatch` module, because it uses the transports and the terminal.
+The header checks, the field spellings and the grant store of `kit grant`,
+`kit epoch` and `kit visibility` are in `libkit::grants`. The owner signing
+and the commands stay in `kit-bin`.
 
 Two decisions are proposals. They are not part of this release.
 

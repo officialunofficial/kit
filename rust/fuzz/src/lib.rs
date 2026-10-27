@@ -2257,6 +2257,86 @@ pub fn remote_validate_one_iteration(input: &[u8]) {
     }
 }
 
+/// The fields of a grant statement (`grants_spec`): `grants::spec::parse_ttl`,
+/// `canonical_capabilities`, `canonical_audiences`, `canonical_ref_scopes` and
+/// `grants::parse_relying_parties` never panic on any text and give the same
+/// answer twice. A lifetime that parses is positive and at most 30 days. A
+/// capability set that parses reads back from its token. An audience list and
+/// a ref scope list that canonicalize stay the same when canonicalized again.
+/// A relying-party list that parses has no id twice. Each line of the input
+/// is one item, and the first line is the lifetime and the capabilities.
+pub fn grants_spec_one_iteration(input: &[u8]) {
+    use libkit::grants::parse_relying_parties;
+    use libkit::grants::spec::{
+        MAX_TTL_SECS, canonical_audiences, canonical_capabilities, canonical_ref_scopes, parse_ttl,
+    };
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let mut lines = text.split('\n');
+    let first = lines.next().unwrap_or("");
+    let items: Vec<String> = lines.map(str::to_owned).collect();
+
+    let ttl = parse_ttl(first).ok();
+    assert_eq!(
+        ttl,
+        parse_ttl(first).ok(),
+        "a lifetime parses the same twice"
+    );
+    if let Some(ms) = ttl {
+        assert!(
+            ms > 0 && ms <= MAX_TTL_SECS.cast_signed() * 1000,
+            "a lifetime that parses is positive and at most 30 days"
+        );
+    }
+
+    let caps = canonical_capabilities(first).ok();
+    assert_eq!(
+        caps,
+        canonical_capabilities(first).ok(),
+        "capabilities parse the same twice"
+    );
+    if let Some(caps) = caps {
+        assert_eq!(
+            canonical_capabilities(caps.token()).ok(),
+            Some(caps),
+            "a capability set reads back from its token"
+        );
+    }
+
+    if let Ok(audiences) = canonical_audiences(&items) {
+        assert_eq!(
+            canonical_audiences(&audiences).ok().as_deref(),
+            Some(audiences.as_slice()),
+            "canonical audiences stay the same"
+        );
+    }
+
+    if let Ok(scopes) = canonical_ref_scopes(&items) {
+        let again: Vec<String> = scopes
+            .entries()
+            .iter()
+            .map(|(pattern, flags)| format!("{pattern}={flags}"))
+            .collect();
+        assert_eq!(
+            canonical_ref_scopes(&again).ok(),
+            Some(scopes),
+            "canonical ref scopes stay the same"
+        );
+    }
+
+    let parties = parse_relying_parties(&items).ok();
+    if let Some(parties) = parties {
+        for (i, party) in parties.iter().enumerate() {
+            assert!(
+                parties[..i].iter().all(|other| other.id() != party.id()),
+                "a relying-party list has no id twice"
+            );
+        }
+    }
+}
+
 /// Path arguments (`index_path_arg`): `pathspec::index_path_for_arg` never
 /// panics on a relative argument, and gives the same answer twice. An answer
 /// passes `validate_index_path`, and it has no empty, `.` or `..` component.
@@ -3420,6 +3500,23 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, remote_validate_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_grants_spec() {
+        run_iterated_unit(grants_spec_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"7d\nhttps://a.example.com\nrefs/heads/main=cu",
+            b"read,write\nhttps://b.example.com\nhttps://a.example.com\nhttps://a.example.com",
+            b"0d\n\n",
+            b"30d\nexample.com https://example.com\nother.test https://other.test",
+            b"31d\nexample.com\nexample.com https://a.test | example.com https://b.test",
+            b"write\nrefs/heads/wip/*=dfuc\nrefs/heads/main=u\nrefs/heads/main=c",
+            b"\xff\xfe",
+        ] {
+            run_one(case, grants_spec_one_iteration).unwrap();
         }
     }
 

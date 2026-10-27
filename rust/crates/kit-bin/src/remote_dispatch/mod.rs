@@ -676,7 +676,8 @@ fn load_user_grants(cfg: &crate::config::Config) -> Vec<crate::grants::store::St
         eprintln!("warning: grant.webauthn_rp: {e}; treating no relying party as pinned");
         Vec::new()
     });
-    let store = match crate::grants::store::GrantStore::open_default() {
+    let store = match crate::grants::store::GrantStore::open_default(&crate::environment::current())
+    {
         Ok(store) => store,
         Err(e) => {
             eprintln!("warning: {e}; using no stored grants");

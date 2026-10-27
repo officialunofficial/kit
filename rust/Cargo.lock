@@ -3289,6 +3289,8 @@ dependencies = [
 name = "libkit"
 version = "0.5.0"
 dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.4.3",
  "kit-attest",
  "kit-core",
  "kit-git-bridge",
@@ -3298,6 +3300,7 @@ dependencies = [
  "kit-transport-file",
  "kit-transport-s3",
  "kit-transport-ssh",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

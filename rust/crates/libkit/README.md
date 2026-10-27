@@ -132,7 +132,7 @@ against the object store. `git::state` lists the state directories.
 `git::patch` turns native commits into patches for `git am`. These
 operations never print. Notices go to an `Observer` as `git::Event` values.
 
-## Remotes and push
+## Remotes, push and grants
 
 `libkit::remote` adds, changes, removes, renames and lists remotes. It checks
 each address and name before it writes the config. A rename moves the
@@ -143,6 +143,11 @@ feature turns this module on.
 remote branch. It reads the tips and does not contact the remote.
 `record_upstream` keeps the upstream after a first push. The `sync` feature
 turns this module on.
+
+`libkit::grants` holds the client side of write grants. It checks grant, epoch
+and visibility headers. `spec` turns the spellings of a person into canonical
+statements. `store` keeps one file for each grant in the directory of the
+user, and it verifies each file on load.
 
 ## Errors
 

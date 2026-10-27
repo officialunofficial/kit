@@ -153,7 +153,7 @@ impl Ctx {
 /// # Errors
 /// An unparsable duration.
 pub fn parse_timeout(text: &str) -> Result<Duration, String> {
-    let ms = parse_ttl(text)?;
+    let ms = parse_ttl(text).map_err(|e| e.to_string())?;
     Ok(Duration::from_millis(u64::try_from(ms).unwrap_or(0)))
 }
 

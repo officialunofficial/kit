@@ -36,7 +36,7 @@ sparse-checkout = ["kit-core/sparse-checkout", "kit-transport-s3?/sparse-checkou
 
 [dependencies]
 kit-core = { version = "=0.5.0", path = "../kit-core" }
-kit-attest = { version = "=0.5.0", path = "../kit-attest" }
+kit-attest = { version = "=0.5.0", path = "../kit-attest", features = ["grants"] }
 kit-keystore = { version = "=0.5.0", path = "../kit-keystore" }
 kit-sync = { version = "=0.5.0", path = "../kit-sync", optional = true }
 kit-git-bridge = { version = "=0.5.0", path = "../kit-git-bridge", optional = true }
@@ -48,9 +48,19 @@ kit-transport-connect = { version = "=0.5.0", path = "../kit-transport-connect",
 # `git-bridge` feature uses them.
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 serde_json = { version = "1.0.154", optional = true }
+# The nonce of a statement.
+getrandom = "0.4.3"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 zeroize = "1.9.1"
+
+# The grant store opens a file without following a symlink.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
+[dev-dependencies]
+# Signs the grants in the tests of the grant store.
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }
 
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated modules.

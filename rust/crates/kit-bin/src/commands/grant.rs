@@ -165,9 +165,9 @@ pub fn run(args: &[String]) -> u8 {
         GrantCommand::List(opts) => list(&opts),
         GrantCommand::Revoke(opts) => {
             let opts = *opts;
-            let store = match GrantStore::open_default() {
+            let store = match GrantStore::open_default(&crate::environment::current()) {
                 Ok(store) => store,
-                Err(e) => return error(&e, exit::CONFIG_ERROR),
+                Err(e) => return error(&e.to_string(), exit::CONFIG_ERROR),
             };
             bump(
                 &BumpOpts {
@@ -212,7 +212,7 @@ fn build_spec(o: &CreateOpts, audiences: Vec<String>) -> Result<GrantSpec, u8> {
             .as_deref()
             .ok_or_else(|| usage_error("--cap is required (read, read,write or write)"))?,
     )
-    .map_err(|e| usage_error(&e))?;
+    .map_err(|e| usage_error(&e.to_string()))?;
     let grantee_text = o
         .grantee
         .as_deref()
@@ -225,9 +225,9 @@ fn build_spec(o: &CreateOpts, audiences: Vec<String>) -> Result<GrantSpec, u8> {
     let ref_scopes = if o.refs.is_empty() {
         None
     } else {
-        Some(canonical_ref_scopes(&o.refs).map_err(|e| usage_error(&e))?)
+        Some(canonical_ref_scopes(&o.refs).map_err(|e| usage_error(&e.to_string()))?)
     };
-    check_ref_scopes(capabilities, ref_scopes.as_ref()).map_err(|e| usage_error(&e))?;
+    check_ref_scopes(capabilities, ref_scopes.as_ref()).map_err(|e| usage_error(&e.to_string()))?;
     let ttl_ms = parse_ttl(&o.ttl).map_err(|e| usage_error(&format!("--ttl: {e}")))?;
     Ok(GrantSpec {
         repo,
@@ -283,7 +283,7 @@ fn create(o: &CreateOpts) -> u8 {
     } else {
         match canonical_audiences(&o.audience) {
             Ok(a) => a,
-            Err(e) => return usage_error(&e),
+            Err(e) => return usage_error(&e.to_string()),
         }
     };
     if !importing && let Err(e) = check_audiences(&audiences, target.as_ref()) {
@@ -326,7 +326,8 @@ fn create(o: &CreateOpts) -> u8 {
         |ns| {
             let mut spec = spec.clone().ok_or("no grant to build")?;
             spec.epoch = epoch_for(ns)?;
-            build_grant(&spec, ns, now)?
+            build_grant(&spec, ns, now)
+                .map_err(|e| e.to_string())?
                 .encode()
                 .map_err(crate::grants::spec::statement_error)
         },
@@ -343,9 +344,9 @@ fn create(o: &CreateOpts) -> u8 {
         Err(e) => return error(&e, exit::DATAERR),
     };
     if o.store {
-        let store = match GrantStore::open_default() {
+        let store = match GrantStore::open_default(&crate::environment::current()) {
             Ok(store) => store,
-            Err(e) => return error(&e, exit::CONFIG_ERROR),
+            Err(e) => return error(&e.to_string(), exit::CONFIG_ERROR),
         };
         match store.add(&signed.header, &ctx.relying_parties) {
             Ok(AddOutcome::Added) => eprintln!("stored in {}", store.dir().display()),
@@ -389,9 +390,9 @@ fn add(o: &AddOpts) -> u8 {
         Ok(verified) => verified,
         Err(e) => return error(&format!("rejected: {e}"), exit::DATAERR),
     };
-    let store = match GrantStore::open_default() {
+    let store = match GrantStore::open_default(&crate::environment::current()) {
         Ok(store) => store,
-        Err(e) => return error(&e, exit::CONFIG_ERROR),
+        Err(e) => return error(&e.to_string(), exit::CONFIG_ERROR),
     };
     let outcome = match store.add(&header, &ctx.relying_parties) {
         Ok(outcome) => outcome,
@@ -479,9 +480,9 @@ fn list(o: &ListOpts) -> u8 {
         Ok(ctx) => ctx,
         Err(code) => return code,
     };
-    let store = match GrantStore::open_default() {
+    let store = match GrantStore::open_default(&crate::environment::current()) {
         Ok(store) => store,
-        Err(e) => return error(&e, exit::CONFIG_ERROR),
+        Err(e) => return error(&e.to_string(), exit::CONFIG_ERROR),
     };
     let report = store.load(&ctx.relying_parties);
     for warning in &report.warnings {

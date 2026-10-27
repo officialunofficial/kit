@@ -5,6 +5,9 @@
 //! module does the canonicalizing a person expects: `--cap write,read` becomes
 //! `read,write`, audiences and ref scopes are sorted and deduplicated, and ref
 //! flags are put in `cufd` order.
+//!
+//! The text of an [`Error`] names the command-line spelling that produced it,
+//! because the spellings are the input of this module.
 
 use kit_attest::grant::text::encode_audiences;
 use kit_attest::grant::{
@@ -12,6 +15,94 @@ use kit_attest::grant::{
     RefFlags, RefPattern, RefScopes, RepoScope, RepositoryIdentity, Visibility,
     VisibilityStatement,
 };
+use kit_core::repo_identity::IdentityError;
+
+/// Errors from reading a spelling or building a statement.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// The duration is empty.
+    #[error("empty duration")]
+    EmptyDuration,
+    /// The duration is not a number with an optional unit.
+    #[error("`{0}` is not a duration (use 30d, 12h, 90m or 3600s)")]
+    BadDuration(String),
+    /// The duration is zero or overflows.
+    #[error("`{0}` is not a positive duration")]
+    NotPositiveDuration(String),
+    /// The duration is longer than a grant may live.
+    #[error("`{0}` exceeds the 30-day maximum grant lifetime (SPEC-WRITE-GRANTS §1.1)")]
+    DurationTooLong(String),
+    /// The duration does not fit the millisecond count.
+    #[error("duration out of range")]
+    DurationOutOfRange,
+    /// A capability is neither `read` nor `write`.
+    #[error("capability `{0}` is not `read` or `write` (use --cap read, read,write or write)")]
+    Capability(String),
+    /// No audience, or more than the statement holds.
+    #[error("expected 1 to {MAX_AUDIENCES} audiences")]
+    AudienceCount,
+    /// An audience breaks the origin rules.
+    #[error("audience `{audience}`: {source}")]
+    Audience {
+        /// The audience.
+        audience: String,
+        /// The rule that failed.
+        source: GrantError,
+    },
+    /// A ref scope has no `=`.
+    #[error("--refs `{0}` must be `pattern=flags` (flags from cufd)")]
+    RefScopeForm(String),
+    /// The pattern of a ref scope is malformed.
+    #[error("--refs `{item}`: {source}")]
+    RefPattern {
+        /// The ref scope.
+        item: String,
+        /// The rule that failed.
+        source: GrantError,
+    },
+    /// A flag of a ref scope is not one of `c`, `u`, `f` and `d`.
+    #[error("--refs `{item}`: flag `{flag}` is not one of c, u, f, d")]
+    RefFlag {
+        /// The ref scope.
+        item: String,
+        /// The flag.
+        flag: char,
+    },
+    /// A ref scope has no flags.
+    #[error("--refs `{0}`: no flags")]
+    RefNoFlags(String),
+    /// More ref scopes than a statement holds.
+    #[error("at most {MAX_REF_SCOPES} ref scopes")]
+    RefScopeCount,
+    /// The merged ref scopes break a rule.
+    #[error("--refs: {0}")]
+    RefScopes(GrantError),
+    /// A read-only grant has ref scopes.
+    #[error(
+        "a read-only grant takes no --refs (ref scopes apply to writes; SPEC-WRITE-GRANTS §3.3)"
+    )]
+    ReadWithRefScopes,
+    /// A grant with write has no ref scopes.
+    #[error(
+        "a grant with write needs at least one --refs pattern=flags (for example --refs 'refs/heads/*=cuf')"
+    )]
+    WriteWithoutRefScopes,
+    /// The repository name is malformed.
+    #[error("--repo `{name}`: {source}")]
+    Repository {
+        /// The name.
+        name: String,
+        /// The rule that failed.
+        source: IdentityError,
+    },
+    /// The lifetime overflows the expiry time.
+    #[error("lifetime out of range")]
+    LifetimeOutOfRange,
+    /// The system has no entropy for the nonce.
+    #[error("no entropy for the statement nonce: {0}")]
+    NoEntropy(getrandom::Error),
+}
 
 /// Longest lifetime `--ttl` accepts (§1.1): 30 days.
 pub const MAX_TTL_SECS: u64 = 2_592_000;
@@ -42,7 +133,7 @@ pub fn statement_lifetime_ms(wait: std::time::Duration) -> i64 {
 ///
 /// # Errors
 /// An unparsable, zero or too-long duration.
-pub fn parse_ttl(text: &str) -> Result<i64, String> {
+pub fn parse_ttl(text: &str) -> Result<i64, Error> {
     let text = text.trim();
     let (digits, unit) = match text.char_indices().last() {
         Some((i, 'd')) => (&text[..i], 86_400),
@@ -50,21 +141,19 @@ pub fn parse_ttl(text: &str) -> Result<i64, String> {
         Some((i, 'm')) => (&text[..i], 60),
         Some((i, 's')) => (&text[..i], 1),
         Some(_) => (text, 1),
-        None => return Err("empty duration".to_owned()),
+        None => return Err(Error::EmptyDuration),
     };
     let value: u64 = digits
         .parse()
-        .map_err(|_| format!("`{text}` is not a duration (use 30d, 12h, 90m or 3600s)"))?;
+        .map_err(|_| Error::BadDuration(text.to_owned()))?;
     let seconds = value
         .checked_mul(unit)
         .filter(|s| *s > 0)
-        .ok_or_else(|| format!("`{text}` is not a positive duration"))?;
+        .ok_or_else(|| Error::NotPositiveDuration(text.to_owned()))?;
     if seconds > MAX_TTL_SECS {
-        return Err(format!(
-            "`{text}` exceeds the 30-day maximum grant lifetime (SPEC-WRITE-GRANTS §1.1)"
-        ));
+        return Err(Error::DurationTooLong(text.to_owned()));
     }
-    i64::try_from(seconds * 1000).map_err(|_| "duration out of range".to_owned())
+    i64::try_from(seconds * 1000).map_err(|_| Error::DurationOutOfRange)
 }
 
 /// Accept `read`, `write` or both in either order, and spell them
@@ -72,17 +161,13 @@ pub fn parse_ttl(text: &str) -> Result<i64, String> {
 ///
 /// # Errors
 /// Anything but a non-empty set of `read` and `write`.
-pub fn canonical_capabilities(text: &str) -> Result<Capabilities, String> {
+pub fn canonical_capabilities(text: &str) -> Result<Capabilities, Error> {
     let (mut read, mut write) = (false, false);
     for part in text.split(',') {
         match part.trim() {
             "read" => read = true,
             "write" => write = true,
-            other => {
-                return Err(format!(
-                    "capability `{other}` is not `read` or `write` (use --cap read, read,write or write)"
-                ));
-            }
+            other => return Err(Error::Capability(other.to_owned())),
         }
     }
     Ok(match (read, write) {
@@ -96,16 +181,18 @@ pub fn canonical_capabilities(text: &str) -> Result<Capabilities, String> {
 ///
 /// # Errors
 /// An audience outside the auth v2 origin rules, or a count outside 1–8.
-pub fn canonical_audiences(items: &[String]) -> Result<Vec<String>, String> {
+pub fn canonical_audiences(items: &[String]) -> Result<Vec<String>, Error> {
     let mut out: Vec<String> = items.iter().map(|a| a.trim().to_owned()).collect();
     out.sort();
     out.dedup();
     if out.is_empty() || out.len() > MAX_AUDIENCES {
-        return Err(format!("expected 1 to {MAX_AUDIENCES} audiences"));
+        return Err(Error::AudienceCount);
     }
     for audience in &out {
-        encode_audiences(std::slice::from_ref(audience))
-            .map_err(|e| format!("audience `{audience}`: {e}"))?;
+        encode_audiences(std::slice::from_ref(audience)).map_err(|source| Error::Audience {
+            audience: audience.clone(),
+            source,
+        })?;
     }
     Ok(out)
 }
@@ -116,13 +203,16 @@ pub fn canonical_audiences(items: &[String]) -> Result<Vec<String>, String> {
 ///
 /// # Errors
 /// A malformed pattern or flag, or more than 16 distinct patterns.
-pub fn canonical_ref_scopes(items: &[String]) -> Result<RefScopes, String> {
+pub fn canonical_ref_scopes(items: &[String]) -> Result<RefScopes, Error> {
     let mut merged: Vec<(RefPattern, RefFlags)> = Vec::new();
     for item in items {
         let (pattern, flags) = item
             .split_once('=')
-            .ok_or_else(|| format!("--refs `{item}` must be `pattern=flags` (flags from cufd)"))?;
-        let pattern = RefPattern::parse(pattern).map_err(|e| format!("--refs `{item}`: {e}"))?;
+            .ok_or_else(|| Error::RefScopeForm(item.clone()))?;
+        let pattern = RefPattern::parse(pattern).map_err(|source| Error::RefPattern {
+            item: item.clone(),
+            source,
+        })?;
         let mut set = RefFlags::EMPTY;
         for c in flags.chars() {
             set = set.union(match c {
@@ -130,15 +220,16 @@ pub fn canonical_ref_scopes(items: &[String]) -> Result<RefScopes, String> {
                 'u' => RefFlags::UPDATE,
                 'f' => RefFlags::FORCE,
                 'd' => RefFlags::DELETE,
-                other => {
-                    return Err(format!(
-                        "--refs `{item}`: flag `{other}` is not one of c, u, f, d"
-                    ));
+                flag => {
+                    return Err(Error::RefFlag {
+                        item: item.clone(),
+                        flag,
+                    });
                 }
             });
         }
         if set.is_empty() {
-            return Err(format!("--refs `{item}`: no flags"));
+            return Err(Error::RefNoFlags(item.clone()));
         }
         match merged.iter_mut().find(|(p, _)| *p == pattern) {
             Some((_, existing)) => *existing = existing.union(set),
@@ -147,33 +238,42 @@ pub fn canonical_ref_scopes(items: &[String]) -> Result<RefScopes, String> {
     }
     merged.sort_by_key(|(pattern, flags)| format!("{pattern}={flags}"));
     if merged.len() > MAX_REF_SCOPES {
-        return Err(format!("at most {MAX_REF_SCOPES} ref scopes"));
+        return Err(Error::RefScopeCount);
     }
-    RefScopes::new(merged).map_err(|e| format!("--refs: {e}"))
+    RefScopes::new(merged).map_err(Error::RefScopes)
 }
 
 /// The repositories a new grant covers.
 #[derive(Debug, Clone)]
 pub enum RepoSelector {
+    /// One repository of the namespace.
     Name(String),
+    /// Every repository of the namespace.
     All,
 }
 
 /// Everything `kit grant create` collects before the owner is known.
 #[derive(Debug, Clone)]
 pub struct GrantSpec {
+    /// The repositories that the grant covers.
     pub repo: RepoSelector,
+    /// The public key of the grantee.
     pub grantee: [u8; 32],
+    /// What the grant allows.
     pub capabilities: Capabilities,
+    /// The audiences, as [`canonical_audiences`] returns them.
     pub audiences: Vec<String>,
+    /// The ref scopes, as [`canonical_ref_scopes`] returns them.
     pub ref_scopes: Option<RefScopes>,
+    /// The epoch of the namespace.
     pub epoch: u64,
+    /// The lifetime in milliseconds, as [`parse_ttl`] returns it.
     pub ttl_ms: i64,
 }
 
-fn nonce() -> Result<[u8; 32], String> {
+fn nonce() -> Result<[u8; 32], Error> {
     let mut nonce = [0u8; 32];
-    getrandom::fill(&mut nonce).map_err(|e| format!("no entropy for the statement nonce: {e}"))?;
+    getrandom::fill(&mut nonce).map_err(Error::NoEntropy)?;
     Ok(nonce)
 }
 
@@ -184,16 +284,10 @@ fn nonce() -> Result<[u8; 32], String> {
 pub fn check_ref_scopes(
     capabilities: Capabilities,
     ref_scopes: Option<&RefScopes>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     match (capabilities, ref_scopes) {
-        (Capabilities::Read, Some(_)) => Err(
-            "a read-only grant takes no --refs (ref scopes apply to writes; SPEC-WRITE-GRANTS §3.3)"
-                .to_owned(),
-        ),
-        (Capabilities::ReadWrite | Capabilities::Write, None) => Err(
-            "a grant with write needs at least one --refs pattern=flags (for example --refs 'refs/heads/*=cuf')"
-                .to_owned(),
-        ),
+        (Capabilities::Read, Some(_)) => Err(Error::ReadWithRefScopes),
+        (Capabilities::ReadWrite | Capabilities::Write, None) => Err(Error::WriteWithoutRefScopes),
         _ => Ok(()),
     }
 }
@@ -202,12 +296,16 @@ pub fn check_ref_scopes(
 ///
 /// # Errors
 /// A scope, ref-scope or lifetime the statement rules refuse.
-pub fn build_grant(spec: &GrantSpec, namespace: &Namespace, now_ms: i64) -> Result<Grant, String> {
+pub fn build_grant(spec: &GrantSpec, namespace: &Namespace, now_ms: i64) -> Result<Grant, Error> {
     let scope = match &spec.repo {
         RepoSelector::All => RepoScope::Namespace,
         RepoSelector::Name(name) => RepoScope::Repository(
-            RepositoryIdentity::parse(&format!("{namespace}/{name}"))
-                .map_err(|e| format!("--repo `{name}`: {e}"))?,
+            RepositoryIdentity::parse(&format!("{namespace}/{name}")).map_err(|source| {
+                Error::Repository {
+                    name: name.clone(),
+                    source,
+                }
+            })?,
         ),
     };
     check_ref_scopes(spec.capabilities, spec.ref_scopes.as_ref())?;
@@ -222,7 +320,7 @@ pub fn build_grant(spec: &GrantSpec, namespace: &Namespace, now_ms: i64) -> Resu
         created_ms: now_ms,
         expiry_ms: now_ms
             .checked_add(spec.ttl_ms)
-            .ok_or("lifetime out of range")?,
+            .ok_or(Error::LifetimeOutOfRange)?,
         nonce: nonce()?,
     })
 }
@@ -237,7 +335,7 @@ pub fn build_epoch(
     audiences: &[String],
     now_ms: i64,
     lifetime_ms: i64,
-) -> Result<EpochStatement, String> {
+) -> Result<EpochStatement, Error> {
     Ok(EpochStatement {
         namespace: *namespace,
         new_epoch,
@@ -258,7 +356,7 @@ pub fn build_visibility(
     audiences: &[String],
     now_ms: i64,
     lifetime_ms: i64,
-) -> Result<VisibilityStatement, String> {
+) -> Result<VisibilityStatement, Error> {
     Ok(VisibilityStatement {
         repository: repository.clone(),
         visibility,

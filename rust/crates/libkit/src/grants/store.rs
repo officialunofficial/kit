@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 use kit_attest::grant::{Grant, OwnerScheme, RelyingParty};
 use kit_core::hash::to_hex_bytes;
 
-use super::{HeaderError, verify_grant_header};
+use super::{HeaderError, read_bounded, verify_grant_header};
+use crate::Environment;
+use crate::config;
 
 /// Most files the store loads.
 pub const MAX_STORE_FILES: usize = 1024;
@@ -31,9 +33,13 @@ const EXTENSION: &str = "grant";
 /// A grant read back from the store, already verified.
 #[derive(Debug, Clone)]
 pub struct StoredGrant {
+    /// The grant id (SPEC-WRITE-GRANTS §3.4).
     pub id: [u8; 32],
+    /// The header value, as the file holds it.
     pub header: String,
+    /// The grant that the header carries.
     pub grant: Grant,
+    /// The scheme of the owner signature.
     pub scheme: OwnerScheme,
 }
 
@@ -41,25 +47,43 @@ pub struct StoredGrant {
 /// problem.
 #[derive(Debug, Default)]
 pub struct LoadReport {
+    /// The grants that verified, in file name order.
     pub grants: Vec<StoredGrant>,
+    /// One line for each problem that the load skipped.
     pub warnings: Vec<String>,
 }
 
 /// What [`GrantStore::add`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddOutcome {
+    /// The grant is new.
     Added,
+    /// The store held the grant already.
     AlreadyStored,
 }
 
+/// Errors from the grant store.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StoreError {
+    /// A file or directory of the store cannot be read, written or listed.
     #[error("grant store {path}: {source}")]
-    Io { path: PathBuf, source: io::Error },
+    Io {
+        /// The path.
+        path: PathBuf,
+        /// Why the access failed.
+        source: io::Error,
+    },
+    /// The verifier rejected the header.
     #[error("{0}")]
     Rejected(#[from] HeaderError),
+    /// The directory of the store is not safe to use.
     #[error("{0}")]
     Unsafe(String),
+    /// The user config has no absolute base directory for the store.
+    #[error("{0}")]
+    NoConfigHome(String),
+    /// The store holds the most grants that it loads.
     #[error(
         "the grant store already holds {MAX_STORE_FILES} grants; remove some with `kit grant revoke --prune` or delete files under {0}"
     )]
@@ -77,23 +101,30 @@ impl GrantStore {
     /// only, so no repository configuration can relocate it.
     ///
     /// # Errors
-    /// No absolute config base directory: a store never falls back to the
-    /// working directory.
-    pub fn default_location() -> Result<PathBuf, String> {
-        Ok(crate::config::xdg_config_home()?.join("kit").join("grants"))
+    /// [`StoreError::NoConfigHome`] when `environment` has no absolute config
+    /// base directory: a store never falls back to the working directory.
+    pub fn default_location(environment: &Environment) -> Result<PathBuf, StoreError> {
+        Ok(config::xdg_config_home(environment)
+            .map_err(StoreError::NoConfigHome)?
+            .join("kit")
+            .join("grants"))
     }
 
+    /// The store at [`Self::default_location`].
+    ///
     /// # Errors
     /// As [`Self::default_location`].
-    pub fn open_default() -> Result<Self, String> {
-        Self::default_location().map(Self::at)
+    pub fn open_default(environment: &Environment) -> Result<Self, StoreError> {
+        Self::default_location(environment).map(Self::at)
     }
 
+    /// The store in the directory `dir`.
     #[must_use]
     pub fn at(dir: PathBuf) -> Self {
         Self { dir }
     }
 
+    /// The directory of the store.
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -297,7 +328,7 @@ fn read_verified(
     if meta.len() > max_bytes {
         return Err(format!("larger than {max_bytes} bytes"));
     }
-    let bytes = super::read_bounded(file, max_bytes).map_err(|e| e.to_string())?;
+    let bytes = read_bounded(file, max_bytes).map_err(|e| e.to_string())?;
     let header = String::from_utf8(bytes).map_err(|_| "not UTF-8".to_owned())?;
     let verified = verify_grant_header(&header, rps).map_err(|e| e.to_string())?;
     if Path::new(name).file_stem().and_then(|s| s.to_str()) != Some(&to_hex_bytes(&verified.id)) {
@@ -366,6 +397,7 @@ fn writable_by_others(_meta: &fs::Metadata) -> Option<&'static str> {
 mod tests {
     use super::super::testutil::signed_grant;
     use super::*;
+    use crate::Environment;
 
     const AUDIENCE: &str = "https://git.example.com";
 
@@ -586,7 +618,23 @@ mod tests {
     fn the_default_location_ignores_the_repository() {
         // It is derived from the XDG base directory alone: no argument, no
         // config field and no repository path can move it.
-        let path = GrantStore::default_location().unwrap();
-        assert!(path.ends_with("kit/grants"), "{}", path.display());
+        let environment = Environment {
+            xdg_config_home: Some(PathBuf::from("/config")),
+            ..Environment::new("/work/repo")
+        };
+        assert_eq!(
+            GrantStore::default_location(&environment).unwrap(),
+            Path::new("/config/kit/grants")
+        );
+        let environment = Environment {
+            home: Some(PathBuf::from("/home/u")),
+            ..Environment::new("/work/repo")
+        };
+        assert_eq!(
+            GrantStore::default_location(&environment).unwrap(),
+            Path::new("/home/u/.config/kit/grants")
+        );
+        let error = GrantStore::default_location(&Environment::new("/work/repo")).unwrap_err();
+        assert!(matches!(error, StoreError::NoConfigHome(_)), "{error:?}");
     }
 }

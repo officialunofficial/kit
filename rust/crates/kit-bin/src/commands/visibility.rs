@@ -145,7 +145,7 @@ fn set(opts: &SetOpts) -> u8 {
         } else {
             match canonical_audiences(&opts.audience) {
                 Ok(a) => a,
-                Err(e) => return usage_error(&e),
+                Err(e) => return usage_error(&e.to_string()),
             }
         };
         if let Err(e) = check_audiences(&audiences, Some(&target)) {
@@ -164,7 +164,8 @@ fn set(opts: &SetOpts) -> u8 {
         let signed = match produce(
             plan,
             |_| {
-                build_visibility(&repository, wanted, &audiences, now, lifetime_ms)?
+                build_visibility(&repository, wanted, &audiences, now, lifetime_ms)
+                    .map_err(|e| e.to_string())?
                     .encode()
                     .map_err(crate::grants::spec::statement_error)
             },
