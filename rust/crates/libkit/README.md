@@ -50,6 +50,11 @@ of each patch and the change counts of each file.
 file. It also walks forward over a `<start>..<end>` range. A `Request` can
 keep a range of lines, skip commits, and detect moved or copied lines.
 
+`libkit::branch` creates, deletes, renames and lists branches. `delete` and
+`rename` take the registry lock for their whole run, and they refuse a branch
+that a sibling tree has checked out. `list` can keep the branches that match
+a name pattern, or that contain, or are merged into, a commit.
+
 `libkit::identity` writes an identity in its short and full text forms.
 
 ## Errors

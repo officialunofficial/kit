@@ -448,3 +448,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "branch_glob"
+path = "fuzz_targets/branch_glob.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

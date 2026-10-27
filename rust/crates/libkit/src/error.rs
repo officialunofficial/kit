@@ -1,6 +1,6 @@
 //! The error type of the library.
 
-use crate::{blame, diff, head, lock, log, repo, revspec, worktrees};
+use crate::{blame, branch, diff, head, lock, log, repo, revspec, worktrees};
 
 /// An error from any library operation.
 ///
@@ -35,4 +35,7 @@ pub enum Error {
     /// A file could not be blamed.
     #[error(transparent)]
     Blame(#[from] blame::Error),
+    /// A branch could not be created, deleted, renamed or listed.
+    #[error(transparent)]
+    Branch(#[from] branch::Error),
 }

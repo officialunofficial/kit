@@ -2,8 +2,10 @@
 //!
 //! The library takes a lock only when a caller asks for it. The caller picks
 //! the scope: it holds the returned guard for as long as the operation must
-//! exclude other writers, then drops the guard. No library operation takes a
-//! lock behind the caller's back.
+//! exclude other writers, then drops the guard. An operation that must exclude
+//! other writers for its whole run, such as [`crate::branch::delete`], takes
+//! the lock itself, and its documentation says so. No other library operation
+//! takes a lock behind the caller's back.
 //!
 //! Each tree has a worktree lock for its index and files. The common
 //! directory has a registry lock for the set of linked trees. A process that

@@ -2187,6 +2187,29 @@ pub fn blame_line_range_one_iteration(input: &[u8]) {
     assert_eq!(pinned.lines[0].line_num, 2);
 }
 
+/// Branch name patterns (`branch_glob`): `branch::glob_match` never panics on
+/// any pattern or name, and gives the same answer twice. A pattern that is
+/// only `*` matches every name. A name matches itself as a pattern when it has
+/// no metacharacter. The text before the first newline is the pattern, and
+/// the rest is the name.
+pub fn branch_glob_one_iteration(input: &[u8]) {
+    use libkit::branch::glob_match;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let (pattern, name) = text.split_once('\n').unwrap_or((text, ""));
+    assert_eq!(
+        glob_match(pattern, name),
+        glob_match(pattern, name),
+        "a match gives the same answer twice"
+    );
+    assert!(glob_match("*", name), "`*` matches every name");
+    if !name.contains(['*', '?', '[', '\\']) {
+        assert!(glob_match(name, name), "a plain name matches itself");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2961,5 +2984,26 @@ mod tests {
             .step_by(2)
             .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).expect("hex byte"))
             .collect()
+    }
+
+    #[test]
+    fn unit_branch_glob() {
+        run_iterated_unit(branch_glob_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"*",
+            b"*\nfeature/login",
+            b"feat*\nfeature",
+            b"v[0-9]\nv3",
+            b"v[!0-9]\nvx",
+            b"a[b\na[b",
+            b"a[\n",
+            b"[]]\n]",
+            b"\\\n\\",
+            b"a*b*c*d*e*f\naxbxcxdxe",
+            b"\xff\xfe",
+        ] {
+            run_one(case, branch_glob_one_iteration).unwrap();
+        }
     }
 }

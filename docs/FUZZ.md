@@ -65,6 +65,7 @@ from recurring.
 | `fuzz_targets/log_parse.rs` | `libkit::log::date::parse` and `libkit::log::history` (a date parses the same twice, and `@<n>` reads as `n`; a walked history has no repeated commit, names only stored commits and never shows a parent before a child) |
 | `fuzz_targets/diff_args.rs` | `libkit::diff::compute` (never panics on any revisions or paths with any flags; the patch body and the change counts of every entry never panic; `HEAD~1 HEAD` keeps its answer) |
 | `fuzz_targets/blame_line_range.rs` | `libkit::blame::line_range::parse` and `libkit::blame::blame` (a range parses the same twice and sits inside the file; a blame never panics on any range, revision or revision to skip, with or without the reverse walk; `-L 2` on `a.txt` keeps its answer) |
+| `fuzz_targets/branch_glob.rs` | `libkit::branch::glob_match` (never panics on any pattern or name; a match gives the same answer twice; `*` matches every name; a name with no metacharacter matches itself) |
 | `fuzz_targets/absolute_config_home.rs` | `libkit::config::xdg_config_home` (a result is always absolute; a set `XDG_CONFIG_HOME` is never repaired; an absolute `HOME` gives `HOME/.config`) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
@@ -120,6 +121,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::log::date::parse`, the selection text of `libkit::log::history` | `log_parse` |
 | The revision and path arguments of `libkit::diff::compute` | `diff_args` |
 | `libkit::blame::line_range::parse`, the revision range of `libkit::blame::blame` | `blame_line_range` |
+| `libkit::branch::glob_match` | `branch_glob` |
 | `kit_bin::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
 | `kit_transport_ssh::url::parse_kit_ssh_url`, `validate_ssh_path` | `ssh_url_parse` |
 | `kit_transport_s3::sigv4::parse_host` | None. It strips a scheme prefix from a configured endpoint. It does no other parsing. Unit tests cover it. |

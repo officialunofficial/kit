@@ -5,7 +5,7 @@
 //! and into the text for stderr with [`message`].
 
 use kit_core::store::StoreError;
-use libkit::{blame, diff, head, repo, revspec};
+use libkit::{blame, branch, diff, head, repo, revspec};
 
 use crate::exit;
 
@@ -26,6 +26,7 @@ pub fn exit_code(error: &libkit::Error) -> u8 {
         libkit::Error::Worktrees(_) | libkit::Error::Log(_) => exit::DATAERR,
         libkit::Error::Diff(inner) => diff_exit_code(inner),
         libkit::Error::Blame(inner) => blame_exit_code(inner),
+        libkit::Error::Branch(inner) => branch_exit_code(inner),
         _ => exit::GENERAL_ERROR,
     }
 }
@@ -98,6 +99,35 @@ fn blame_exit_code(error: &blame::Error) -> u8 {
     }
 }
 
+#[allow(clippy::match_same_arms)] // the table lists each variant, even when its code equals the fallback
+fn branch_exit_code(error: &branch::Error) -> u8 {
+    match error {
+        // Another `kit` holds the registry lock.
+        branch::Error::Lock(_) => exit::TEMPFAIL,
+        // The branch cannot be written.
+        branch::Error::AlreadyExists(_) | branch::Error::Write { .. } => exit::CANTCREAT,
+        // A sibling tree holds the branch, or the registry is damaged, or a
+        // revision of a filter is wrong.
+        branch::Error::CheckedOut { .. }
+        | branch::Error::Worktrees(_)
+        | branch::Error::BadRevision { .. }
+        | branch::Error::NotACommit(_)
+        | branch::Error::ReadRevision { .. } => exit::DATAERR,
+        branch::Error::NoHeadCommit
+        | branch::Error::NotFound(_)
+        | branch::Error::Read { .. }
+        | branch::Error::Delete { .. }
+        | branch::Error::DetachedHead
+        | branch::Error::MovedWhileRenaming(_)
+        | branch::Error::RollbackFailed { .. }
+        | branch::Error::UpdateHead { .. }
+        | branch::Error::ListRefs(_)
+        | branch::Error::OpenStore(_)
+        | branch::Error::Ancestry(_) => exit::GENERAL_ERROR,
+        _ => exit::GENERAL_ERROR,
+    }
+}
+
 fn head_exit_code(error: &head::Error) -> u8 {
     match error {
         // The state to move from is damaged.
@@ -153,6 +183,7 @@ mod tests {
     }
 
     /// Every library error variant with the code that `docs/CLI.md` assigns.
+    #[allow(clippy::too_many_lines)] // a flat table with one row for each variant
     fn table() -> Vec<(libkit::Error, u8)> {
         vec![
             (repo::Error::PathTraversal(path()).into(), exit::USAGE),
@@ -229,6 +260,31 @@ mod tests {
                 exit::NOINPUT,
             ),
             (blame::Error::HeadWithoutCommit.into(), exit::GENERAL_ERROR),
+            (
+                branch::Error::AlreadyExists("x".to_owned()).into(),
+                exit::CANTCREAT,
+            ),
+            (
+                branch::Error::CheckedOut {
+                    branch: "x".to_owned(),
+                    at: path(),
+                }
+                .into(),
+                exit::DATAERR,
+            ),
+            (
+                branch::Error::NotACommit("x".to_owned()).into(),
+                exit::DATAERR,
+            ),
+            (
+                branch::Error::Lock(lock::Error::Registry(LockError::Busy("l".to_owned()))).into(),
+                exit::TEMPFAIL,
+            ),
+            (branch::Error::NoHeadCommit.into(), exit::GENERAL_ERROR),
+            (
+                branch::Error::NotFound("x".to_owned()).into(),
+                exit::GENERAL_ERROR,
+            ),
             (diff::Error::StagedWithRevision.into(), exit::USAGE),
             (diff::Error::MergeBaseNeedsRevision.into(), exit::USAGE),
             (

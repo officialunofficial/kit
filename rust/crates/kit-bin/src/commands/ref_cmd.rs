@@ -16,7 +16,7 @@
 //!   matched" exit-1 convention is a git-inherited existence test, not
 //!   what a structured listing command should do). `--pattern <glob>`
 //!   filters to full ref names matching a shell glob (`*` spans `/`,
-//!   `?`/`[...]` supported — see `super::branch::glob_match`).
+//!   `?`/`[...]` supported — see `libkit::branch::glob_match`).
 //! - `ref cat <name>` prints the resolved hash for exactly one ref,
 //!   following `HEAD`'s symbolic indirection (`HEAD` is kit's only
 //!   symbolic ref: it either names a branch or holds a detached hash).
@@ -118,7 +118,7 @@ fn run_list(layout: &RepoLayout, pattern: Option<&str>) -> u8 {
     rows.sort_by(|a, b| a.name.cmp(&b.name));
 
     if let Some(pat) = pattern {
-        rows.retain(|r| super::branch::glob_match(pat, &r.name));
+        rows.retain(|r| libkit::branch::glob_match(pat, &r.name));
     }
 
     let mut stdout = std::io::stdout().lock();

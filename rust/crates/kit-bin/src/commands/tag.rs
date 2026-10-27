@@ -176,7 +176,7 @@ fn list(layout: &RepoLayout, pattern: Option<&str>, json: bool) -> u8 {
         Err(e) => return emit_err_json(&format!("list tags: {e}"), exit::GENERAL_ERROR, json),
     };
     if let Some(pat) = pattern {
-        tags.retain(|t| super::branch::glob_match(pat, &t.name));
+        tags.retain(|t| libkit::branch::glob_match(pat, &t.name));
     }
     // Open the store so we can peek at annotated-tag objects. Listing
     // still works if this fails.

@@ -279,6 +279,16 @@ pub(crate) fn restore_head_ref(layout: &RepoLayout, target: &Hash) -> Result<(),
     })
 }
 
+/// Print `failure` as `error: <text>` and return its exit code.
+/// [`crate::exit_map`] decides both.
+pub(crate) fn fail(failure: impl Into<libkit::Error>) -> u8 {
+    let failure = failure.into();
+    error(
+        &crate::exit_map::message(&failure),
+        crate::exit_map::exit_code(&failure),
+    )
+}
+
 pub use libkit::lock::{SERVE_LOCK, WORKTREE_LOCK, WORKTREES_REGISTRY_LOCK};
 
 /// The message and exit code for a failed lock.
@@ -521,65 +531,6 @@ fn file_exec_status(meta: &fs::Metadata) -> EntryStatus {
 #[cfg(not(unix))]
 fn file_exec_status(_meta: &fs::Metadata) -> EntryStatus {
     EntryStatus::Blob
-}
-
-// ---------------------------------------------------------------------------
-// History-MMB ref-write helper (feature: history-mmr)
-// ---------------------------------------------------------------------------
-//
-// CLI branch writes publish versioned first-parent ancestry when enabled.
-// History locking precedes the full-ref mutation guard.
-
-/// Delete a non-current branch and invalidate its current ancestry pointer.
-/// Historical generation snapshots are preserved. A later
-/// recreation gets a fresh generation bound to the new chain.
-pub fn delete_ref_recording_history(layout: &RepoLayout, branch: &str) -> Result<(), RefError> {
-    #[cfg(feature = "history-mmr")]
-    {
-        if matches!(refs::read_head(layout)?, refs::Head::Branch(current) if current == branch) {
-            return Err(RefError::CurrentBranch(branch.to_string()));
-        }
-        let store = ObjectStore::open(layout).map_err(|e| RefError::InvalidRef(e.to_string()))?;
-        refs::delete_ref_with_ancestry(layout, branch, None, &store)
-    }
-    #[cfg(not(feature = "history-mmr"))]
-    {
-        refs::delete_ref_safe(layout, branch)
-    }
-}
-
-/// Delete the old name after rename, including its current ancestry pointer.
-/// The caller creates the destination with a distinct full-ref identity first.
-/// This helper permits deleting the checked-out name during HEAD relocation.
-pub fn delete_ref_dropping_history(layout: &RepoLayout, branch: &str) -> Result<(), RefError> {
-    #[cfg(feature = "history-mmr")]
-    {
-        let store = ObjectStore::open(layout).map_err(|e| RefError::InvalidRef(e.to_string()))?;
-        refs::delete_ref_with_ancestry(layout, branch, None, &store)
-    }
-    #[cfg(not(feature = "history-mmr"))]
-    {
-        refs::delete_ref(layout, branch)
-    }
-}
-
-/// Delete a ref only if its tip still matches, invalidating current ancestry
-/// while preserving historical evidence. Used for rename source removal and
-/// destination rollback so a concurrent advance is never deleted.
-pub fn delete_ref_dropping_history_if_matches(
-    layout: &RepoLayout,
-    branch: &str,
-    expected: Hash,
-) -> Result<(), RefError> {
-    #[cfg(feature = "history-mmr")]
-    {
-        let store = ObjectStore::open(layout).map_err(|e| RefError::InvalidRef(e.to_string()))?;
-        refs::delete_ref_with_ancestry(layout, branch, Some(expected), &store)
-    }
-    #[cfg(not(feature = "history-mmr"))]
-    {
-        refs::delete_ref_if_matches(layout, branch, expected)
-    }
 }
 
 /// Current branch name for recovery logging — empty for a detached HEAD

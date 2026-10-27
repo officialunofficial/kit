@@ -20,6 +20,7 @@
 //! ```
 
 pub mod blame;
+pub mod branch;
 pub mod config;
 pub mod diff;
 mod environment;
