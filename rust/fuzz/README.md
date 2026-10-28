@@ -16,7 +16,7 @@ it in.
 
 ```sh
 # libfuzzer-sys harness (nightly)
-cd rust/fuzz && cargo +nightly fuzz run delta
+cd rust/fuzz && cargo +nightly fuzz run --features libfuzzer delta
 
 # plain unit-test harness over the same target bodies — what CI runs,
 # no nightly required

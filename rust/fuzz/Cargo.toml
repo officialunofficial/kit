@@ -1,12 +1,12 @@
 # cargo-fuzz crate. It IS a workspace member (see the root Cargo.toml
 # `members` list), which is only safe because libfuzzer-sys is behind
 # the optional `libfuzzer` feature — the default `cargo build` / `cargo
-# test` never pulls it in (it's nightly-only on stable builds). cargo-fuzz
-# drives the libfuzzer binaries with `--features libfuzzer` itself.
+# test` never pulls it in (it's nightly-only on stable builds). Pass
+# `--features libfuzzer` to `cargo fuzz run`; cargo-fuzz does not add it.
 #
 # Two execution paths:
 #
-# * `cd rust/fuzz && cargo +nightly fuzz run delta` — libfuzzer-sys
+# * `cd rust/fuzz && cargo +nightly fuzz run --features libfuzzer delta` — libfuzzer-sys
 #   harness; the iteration counter inside each target body still
 #   enforces the FUZZ.md guardrails.
 # * `cd rust && cargo test --manifest-path fuzz/Cargo.toml` — plain unit-test
@@ -60,8 +60,8 @@ tar = "0.4.46"
 tempfile = "3.27.0"
 
 # libfuzzer-sys is gated on the `libfuzzer` feature so `cargo test`
-# (stable, no nightly) doesn't pull it in. cargo-fuzz drives the build
-# with `--features libfuzzer` automatically.
+# (stable, no nightly) doesn't pull it in. Pass `--features libfuzzer`
+# to `cargo fuzz run`; cargo-fuzz does not add it.
 libfuzzer-sys = { version = "0.4.13", optional = true }
 
 # `minifuzz` (commonware-invariants) drives the in-process `#[test]`

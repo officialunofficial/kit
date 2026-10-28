@@ -7,7 +7,7 @@ crate at `rust/fuzz/` and run in two modes:
 - `cd rust && cargo test --manifest-path fuzz/Cargo.toml` &mdash; plain unit-test
   harness over the target bodies; stable Rust, no extra tooling. CI runs
   this.
-- `cd rust/fuzz && cargo +nightly fuzz run <target>` &mdash; libfuzzer-sys
+- `cd rust/fuzz && cargo +nightly fuzz run --features libfuzzer <target>` &mdash; libfuzzer-sys
   harness for coverage-guided runs. Same target bodies, same
   guardrails.
 
@@ -200,11 +200,11 @@ For coverage-guided runs (nightly toolchain required):
 
 ```sh
 cd rust/fuzz
-cargo +nightly fuzz run delta
-cargo +nightly fuzz run pack
-cargo +nightly fuzz run tree
-cargo +nightly fuzz run software_key_record
-cargo +nightly fuzz run rpc_decode
+cargo +nightly fuzz run --features libfuzzer delta
+cargo +nightly fuzz run --features libfuzzer pack
+cargo +nightly fuzz run --features libfuzzer tree
+cargo +nightly fuzz run --features libfuzzer software_key_record
+cargo +nightly fuzz run --features libfuzzer rpc_decode
 ```
 
 ## In-process minifuzz (`rpc_decode` pilot)
