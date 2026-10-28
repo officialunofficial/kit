@@ -1,0 +1,75 @@
+# Dependency update configuration.
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      # One pull request per week for minor and patch bumps.
+      # Major bumps get separate pull requests for breaking-change review.
+      actions-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The entry for "/" scans only .github/workflows/. It does not reach
+  # composite actions under .github/actions/, so each one needs its own entry.
+  - package-ecosystem: "github-actions"
+    directory: "/.github/actions/setup-rust"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The fuzz and benches crates are members of this workspace,
+  # so one entry covers them.
+  - package-ecosystem: "cargo"
+    directory: "/rust"
+    # The buffa and connectrpc crates have committed generated code under
+    # kit-rpc/generated. The code compiles only against the runtime version
+    # that matches its generator. A version bump alone leaves the code stale.
+    # Maintainers bump these crates by hand with scripts/regen-*.sh.
+    # scripts/check-generated-fresh.sh enforces this.
+    ignore:
+      - dependency-name: "buffa*"
+      - dependency-name: "connectrpc*"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      cargo-minor:
+        update-types:
+          - "minor"
+          - "patch"

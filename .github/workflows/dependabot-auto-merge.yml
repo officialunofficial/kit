@@ -1,0 +1,38 @@
+name: "Meta: Dependabot auto-merge"
+
+# Enable auto-merge on Dependabot pull requests that are patch or minor bumps.
+# Auto-merge completes only after every required check passes, so a red pull
+# request stays open. Major bumps and pull requests from other authors are
+# untouched.
+#
+# Needs "Allow auto-merge" in the repository settings and required checks on
+# `main`.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Enable auto-merge
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98  # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # A grouped pull request reports the highest update type in the group,
+      # so a group with any major bump is skipped.
+      - name: Enable auto-merge for patch and minor updates
+        if: steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
