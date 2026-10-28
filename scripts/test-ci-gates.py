@@ -251,9 +251,10 @@ class Gates(unittest.TestCase):
         # The release workflows run some of these commands at release time on
         # purpose. They are not gates of a pull request.
         release = {"release.yml", "release-verify.yml"}
-        # These two workflows repeat the gates on purpose, so that contributors
-        # read the result on GitHub. The tests below pin their commands.
-        public = {"rust.yml", "rust-security.yml"}
+        # These workflows repeat the gates on purpose, so that contributors
+        # read the result on GitHub. The tests below pin the commands of the
+        # first two.
+        public = {"rust.yml", "rust-security.yml", "docs-lint.yml", "proto.yml", "third-party-notices.yml"}
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
             if path.name in release or path.name in public:
                 continue

@@ -31,8 +31,8 @@ owns only the work that Cloud Build cannot do:
 | Nightly fuzz (`fuzz.yml`) | GitHub Actions | It needs a floating nightly toolchain, a matrix of one job per target, and crash artifacts that GitHub keeps. |
 | Nightly formal verification (`formal.yml`) | GitHub Actions | It needs Java, Node, Apalache and Kani, which the builder image does not hold. |
 
-Only `rust.yml` and `rust-security.yml` repeat the gate commands of Cloud
-Build. They run the same commands, so a result on one service predicts the
+Only `rust.yml`, `rust-security.yml`, `docs-lint.yml`, `proto.yml` and
+`third-party-notices.yml` repeat the gate commands of Cloud Build. They run the same commands, so a result on one service predicts the
 other. `scripts/test-ci-gates.py` fails when any other workflow file repeats a
 gate command of Cloud Build.
 
@@ -40,6 +40,13 @@ gate command of Cloud Build.
 
 - `rust.yml` stays because contributors read the result on GitHub. Its jobs run the commands of the `fmt`, `lint`, `tests-misc`, `version` and nextest steps. Its `Rust CI gate` job is the one GitHub check to require.
 - `rust-security.yml` stays because it runs on a schedule and shows the result on GitHub. It runs the commands of the `supply` step.
+- `docs-lint.yml` stays because contributors read the spec and path checks on GitHub when they change a document.
+- `actionlint.yml` stays because contributors read the workflow lint on GitHub when they change a workflow. The `workflows` step of `ci.yaml` runs the same tool.
+- `dependabot-auto-merge.yml` stays because it acts on GitHub pull requests of Dependabot. Cloud Build cannot do that.
+- `mutants.yml` stays because it runs for hours. A pull request mutates only the changed lines, and a weekly run sweeps the security crates.
+- `proto.yml` stays because the `buf` breaking check compares a pull request with its base branch on GitHub. It also runs the generated-code check.
+- `release-plz.yml` stays because it opens the release pull request on GitHub. It does nothing until a maintainer enables it with a repository variable.
+- `third-party-notices.yml` stays because contributors read the license check on GitHub when a dependency changes.
 - `macos.yml` stays because Cloud Build has no macOS machines.
 - `release.yml` stays because the signing identity is the workflow itself.
 - `release-verify.yml` stays because a person starts it by hand after a release, and its Homebrew check needs a macOS runner.
