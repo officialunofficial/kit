@@ -106,6 +106,7 @@ from Git, read [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md).
 | [`docs/INSTALL.md`](docs/INSTALL.md) | Install channels, verification, updates |
 | [`docs/CLI.md`](docs/CLI.md) | Subcommands, config keys, exit codes |
 | [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md) | Git users and Git upstreams |
+| [`docs/PARITY.md`](docs/PARITY.md) | Where kit matches Git and where it differs |
 | [`docs/VERIFY.md`](docs/VERIFY.md) | Verify a commit hash without repository access |
 | [`docs/specs/`](docs/specs/README.md) | Wire-format and subsystem specs |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Crate layout |
