@@ -62,7 +62,9 @@ The generator needs Python 3 and `rsvg-convert`. It derives favicon and white
 OG artwork from the existing brand SVGs. The development server runs locally.
 The build checks packaging without deploying anything. The example serves
 only GET and HEAD requests to **/og.png**, returning PNG content and a one-hour
-public cache header. Unknown paths return 404; other methods return 405.
+public cache header. Rendering is shared across concurrent requests and reused
+within each server instance. HEAD returns headers without rendering. Unknown
+paths return 404; other methods return 405.
 
 The exported PNG can be served as a static file without running the example
 server in production. Use a versioned URL when replacing a static card because
@@ -102,7 +104,7 @@ a favicon, change site metadata, or publish an endpoint by themselves.
 
 The favicon and card source are recorded in the
 [logo Kit](https://uno.fun/01a15ada-9a3a-73f1-b3a0-9110d4efd027/kit-logo)
-at revision `ee8bef442098f13d6d6bf2054bea5043bd56f6cbf85ac555541a25667c63183a`.
+at revision `28c453cb9bf894d0a63d08a1fa17a3978b4cf9a2af71592b86845897d78d501c`.
 The browser ICO and SVG files are local exports from that source.
 
 ## References
