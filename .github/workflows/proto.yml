@@ -1,0 +1,65 @@
+name: "CI: Proto"
+
+# Schema gate for the buf workspace in buf.yaml. It covers both proto trees:
+# rust/crates/kit-rpc/proto and proto. The workflow has two jobs:
+#
+#   buf        Runs buf lint and buf breaking over the workspace.
+#   generated  Checks that the generated code under rust/crates/kit-rpc/generated
+#              matches the .proto files.
+#
+# The workflow has no path filter. A wire-breaking or lint-violating change
+# must fail on every pull request, and a skipped check must never read as
+# green.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One run per pull request. A newer push cancels the older run. A push to main
+# is never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  buf:
+    name: buf lint + buf breaking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # buf breaking compares the workspace with its base revision.
+          fetch-depth: 0
+
+      # The input is the workspace root. The comparison base is the default of
+      # buf-action: the base branch of a pull request, or the previous commit
+      # of a push.
+      - name: buf (workspace)
+        uses: bufbuild/buf-action@85aebf73123b5c15fd5528aaecbf9129cddf7fa7  # v1.6.0
+        with:
+          version: "1.66.0"
+          lint: true
+          format: false
+          breaking: true
+          push: false
+          archive: false
+          pr_comment: false
+
+  generated:
+    name: generated code is fresh
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: "rust-proto-generated"
+
+      - name: Regenerate and compare
+        run: bash scripts/check-generated-fresh.sh

@@ -1,0 +1,36 @@
+version: v2
+# Root buf workspace. It covers the two proto trees of kit.
+modules:
+  # kit.rpc.v1 and its signer, ssh and verify sub-protocols. The
+  # sub-protocol packages nest under the shared kit.rpc.v1 vocabulary and
+  # carry no version suffix of their own. Renaming them would rename the
+  # generated Rust modules.
+  - path: rust/crates/kit-rpc/proto
+    lint:
+      ignore_only:
+        PACKAGE_VERSION_SUFFIX:
+          - rust/crates/kit-rpc/proto/kit/rpc/v1/signer
+          - rust/crates/kit-rpc/proto/kit/rpc/v1/ssh
+          - rust/crates/kit-rpc/proto/kit/rpc/v1/verify
+  # kit.common.v1, kit.transport.v1 and grpc.health.v1.
+  - path: proto
+    lint:
+      # grpc.health.v1 is the standard health-checking protocol, copied
+      # unchanged from grpc-proto. Probes and service meshes expect it
+      # byte for byte, so the exceptions cover only that subtree.
+      ignore_only:
+        ENUM_VALUE_PREFIX:
+          - proto/grpc/health/v1
+        ENUM_ZERO_VALUE_SUFFIX:
+          - proto/grpc/health/v1
+        SERVICE_SUFFIX:
+          - proto/grpc/health/v1
+        RPC_REQUEST_RESPONSE_UNIQUE:
+          - proto/grpc/health/v1
+        RPC_REQUEST_STANDARD_NAME:
+          - proto/grpc/health/v1
+        RPC_RESPONSE_STANDARD_NAME:
+          - proto/grpc/health/v1
+breaking:
+  use:
+    - FILE
