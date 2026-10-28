@@ -1,6 +1,8 @@
 # kit
 
-<a href="docs/brand/README.md"><img src="docs/brand/kit-logo-grid.webp" alt="KIT logo with geometric solids and a fading blue perspective grid" width="240"></a>
+<p align="center">
+  <img src="docs/brand/kit-logo-grid.webp" alt="KIT logo with geometric solids and a fading blue perspective grid" width="240">
+</p>
 
 ![status: alpha](https://img.shields.io/badge/status-alpha-orange)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
