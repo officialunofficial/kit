@@ -1,0 +1,49 @@
+name: "CI: Semver"
+
+# Compares the public API of each published crate with the latest release on
+# crates.io. A change that breaks the API without a matching version bump
+# fails the check. In a 0.x release, a minor bump allows a breaking change.
+#
+# kit-bin is out of scope. Its library surface is not a public API (see
+# docs/RELEASE.md). Crates with `publish = false` have no baseline.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "rust/**"
+      - ".github/workflows/semver.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  semver:
+    name: cargo semver-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: semver
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        with:
+          tool: cargo-semver-checks@0.50.0
+
+      # The default baseline is the latest release on crates.io.
+      - name: Check the public API
+        working-directory: rust
+        run: cargo semver-checks --workspace --exclude kit-bin

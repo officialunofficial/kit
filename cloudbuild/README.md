@@ -43,6 +43,7 @@ gate command of Cloud Build.
 - `docs-lint.yml` stays because contributors read the spec and path checks on GitHub when they change a document.
 - `actionlint.yml` stays because contributors read the workflow lint on GitHub when they change a workflow. The `workflows` step of `ci.yaml` runs the same tool.
 - `dependabot-auto-merge.yml` stays because it acts on GitHub pull requests of Dependabot. Cloud Build cannot do that.
+- `semver.yml` stays because the baseline is the latest release on crates.io. It checks the public API of each published crate against that release.
 - `mutants.yml` stays because it runs for hours. A pull request mutates only the changed lines, and a weekly run sweeps the security crates.
 - `proto.yml` stays because the `buf` breaking check compares a pull request with its base branch on GitHub. It also runs the generated-code check.
 - `release-plz.yml` stays because it opens the release pull request on GitHub. It does nothing until a maintainer enables it with a repository variable.
