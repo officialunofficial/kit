@@ -17,11 +17,11 @@ mask fades it toward the edges, keeping attention on the solids and name.
 
 | Variant | Vector | Raster |
 |---|---|---|
-| Fading grid | [SVG](kit-logo-grid.svg) | [PNG](kit-logo-grid.png) |
+| Fading grid | [SVG](kit-logo-grid.svg) | [PNG](kit-logo-grid.png), [WebP](kit-logo-grid.webp) |
 | Clean | [SVG](kit-logo-clean.svg) | [PNG](kit-logo-clean.png) |
 
 The SVGs scale without losing detail. Each PNG is 1000 by 1000 pixels with a
-white background. Use the clean variant when the grid loses detail at small
+white background. The WebP file is the PNG at quality 90. The project README uses it. Use the clean variant when the grid loses detail at small
 sizes. Preserve the colors, proportions, lettering, and border.
 
 These exports are committed so documentation and other consumers can use the
