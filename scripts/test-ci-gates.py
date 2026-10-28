@@ -214,6 +214,20 @@ class Gates(unittest.TestCase):
         audit = re.findall(r"--ignore (RUSTSEC-[\d-]+)", ci_steps()["supply"])
         self.assertTrue(deny)
         self.assertEqual(sorted(deny), sorted(audit))
+        sweep = strip_comments((ROOT / ".github/workflows/rust-security.yml").read_text())
+        self.assertEqual(sorted(deny), sorted(re.findall(r"--ignore (RUSTSEC-[\d-]+)", sweep)))
+
+    def test_public_workflows_have_the_gate_job_and_no_secret(self):
+        text = strip_comments((ROOT / ".github/workflows/rust.yml").read_text())
+        jobs = re.findall(r"(?m)^  ([a-z-]+):$", text.split("\njobs:\n")[1])
+        self.assertIn("ci-gate", jobs)
+        needs = re.search(r"(?m)^    needs: \[(.*)\]$", text).group(1).split(", ")
+        self.assertEqual(sorted(needs), sorted(j for j in jobs if j != "ci-gate"))
+        for name in ("rust.yml", "rust-security.yml"):
+            body = strip_comments((ROOT / ".github/workflows" / name).read_text())
+            with self.subTest(workflow=name):
+                self.assertNotIn("secrets.", body)
+                self.assertRegex(body, r"(?m)^permissions:\n  contents: read$")
 
     def test_no_secret_in_any_cloud_file(self):
         names = re.compile(r"(TOKEN|SECRET|PASSWORD|PASSPHRASE|PRIVATE_KEY|API_KEY|CREDENTIAL)", re.I)
@@ -237,8 +251,11 @@ class Gates(unittest.TestCase):
         # The release workflows run some of these commands at release time on
         # purpose. They are not gates of a pull request.
         release = {"release.yml", "release-verify.yml"}
+        # These two workflows repeat the gates on purpose, so that contributors
+        # read the result on GitHub. The tests below pin their commands.
+        public = {"rust.yml", "rust-security.yml"}
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
-            if path.name in release:
+            if path.name in release or path.name in public:
                 continue
             text = strip_comments(path.read_text())
             for gate in gates:

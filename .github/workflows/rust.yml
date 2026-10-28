@@ -1,0 +1,192 @@
+name: "CI: Rust"
+
+# The public Rust checks. Each job runs the commands of the matching
+# cloudbuild/ci.yaml step, so a contributor sees the same result on GitHub.
+# `Rust CI gate` is the one check to require in branch protection.
+#
+# The Rust version comes from rust/rust-toolchain.toml through the setup-rust
+# action. No job states a version.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run for each pull request. A newer push cancels the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: short
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+          cache-prefix: rust-fmt
+          protoc: "false"
+      - name: Check formatting
+        working-directory: rust
+        run: cargo fmt --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          cache-prefix: rust-clippy
+      - name: Clippy
+        working-directory: rust
+        run: |
+          failed=0
+          cargo fetch --locked || failed=1
+          cargo clippy --locked --all-targets --all-features --workspace -- -D warnings || failed=1
+          for crate in $(cargo metadata --locked --no-deps --format-version 1 \
+              | python3 -I -c 'import json, sys; print(*[p["name"] for p in json.load(sys.stdin)["packages"]])'); do
+            cargo clippy --locked --all-targets -p "$crate" -- -D warnings || failed=1
+          done
+          exit "$failed"
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: rust-msrv
+      - name: Check the declared minimum version
+        working-directory: rust
+        run: |
+          failed=0
+          msrv=$(awk -F\" '/^[[:space:]]*rust-version[[:space:]]*=/ {print $2; exit}' Cargo.toml) || failed=1
+          rustc_v=$(rustc --version | awk '{print $2}') || failed=1
+          echo "declared minimum=$msrv, rustc=$rustc_v"
+          if [ -z "$msrv" ] || [ "$rustc_v" != "$msrv" ]; then
+            echo "::error::The compiler differs from rust-version in Cargo.toml."
+            failed=1
+          fi
+          if ! grep -q "channel = \"$msrv\"" rust-toolchain.toml; then
+            echo "::error::rust-toolchain.toml does not pin the declared minimum version."
+            failed=1
+          fi
+          exit "$failed"
+      - name: Check every target
+        working-directory: rust
+        run: cargo check --locked --workspace --all-targets
+
+  build-and-test:
+    name: build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      KIT_TEST_STRICT: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: rust-build-and-test
+      - name: Doctests and feature sets of libkit
+        working-directory: rust
+        run: |
+          cargo test --locked --doc --workspace --no-fail-fast
+          cargo test --locked -p libkit --no-default-features
+          cargo test --locked -p libkit
+          cargo test --locked -p libkit --no-default-features --features git-bridge,transport-file,transport-ssh
+          cargo test --locked -p libkit --no-default-features --features transport-s3,transport-connect,history-mmr,sparse-checkout
+          cargo test --locked -p libkit --all-features
+      - name: Version contract
+        working-directory: rust
+        run: |
+          cargo build --locked -p kit-bin --bin kit
+          out=$(./target/debug/kit version)
+          expected="kit $(awk -F\" '/^version/ {print $2; exit}' Cargo.toml)"
+          echo "stdout:   [$out]"
+          echo "expected: [$expected]"
+          test "$out" = "$expected"
+
+  nextest:
+    name: nextest
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      KIT_TEST_STRICT: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: rust-nextest
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        with:
+          tool: cargo-nextest
+      - name: Run the tests
+        working-directory: rust
+        run: cargo nextest run --locked --workspace --all-features --no-fail-fast --profile ci
+
+  # The one check to require. It runs when a job fails, is skipped or is
+  # cancelled, and it passes only when every job succeeded.
+  ci-gate:
+    name: Rust CI gate
+    if: always()
+    needs: [fmt, clippy, msrv, build-and-test, nextest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify that every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          failed=0
+          for job in $(jq -r 'keys[]' <<<"$NEEDS"); do
+            result=$(jq -r --arg job "$job" '.[$job].result' <<<"$NEEDS")
+            echo "$job: $result"
+            if [ "$result" != success ]; then
+              echo "::error::The job $job did not succeed (result=$result)."
+              failed=1
+            fi
+          done
+          exit "$failed"

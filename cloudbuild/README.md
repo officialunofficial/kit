@@ -23,17 +23,23 @@ owns only the work that Cloud Build cannot do:
 | Format, lint, tests, docs, generated code, golden checks, writing and unsafe checks, fuzz smoke, supply checks | Cloud Build (`ci.yaml`) | Runs on Linux. |
 | Third-party notices, release artifact check, publish dry run | Cloud Build (`supply.yaml`) | Runs on Linux. |
 | Latest-release probe of the Connect stack | Cloud Build (`connect-latest.yaml`) | Runs on Linux. |
+| Public Rust checks (`rust.yml`) | GitHub Actions | Contributors read the result on GitHub. |
+| Weekly advisory sweep (`rust-security.yml`) | GitHub Actions | It runs on a schedule, and it shows the result on GitHub. |
 | macOS tests (`macos.yml`) | GitHub Actions | Cloud Build has no macOS machines. |
 | Release (`release.yml`) | GitHub Actions | The signing identity is the workflow itself. |
 | Release verification (`release-verify.yml`) | GitHub Actions | It runs by hand after a release, and it needs macOS runners for the Homebrew check. |
 | Nightly fuzz (`fuzz.yml`) | GitHub Actions | It needs a floating nightly toolchain, a matrix of one job per target, and crash artifacts that GitHub keeps. |
 | Nightly formal verification (`formal.yml`) | GitHub Actions | It needs Java, Node, Apalache and Kani, which the builder image does not hold. |
 
-No gate runs on both services. `scripts/test-ci-gates.py` fails when a workflow
-file repeats a gate command of Cloud Build.
+Only `rust.yml` and `rust-security.yml` repeat the gate commands of Cloud
+Build. They run the same commands, so a result on one service predicts the
+other. `scripts/test-ci-gates.py` fails when any other workflow file repeats a
+gate command of Cloud Build.
 
 ### Why each remaining workflow stays
 
+- `rust.yml` stays because contributors read the result on GitHub. Its jobs run the commands of the `fmt`, `lint`, `tests-misc`, `version` and nextest steps. Its `Rust CI gate` job is the one GitHub check to require.
+- `rust-security.yml` stays because it runs on a schedule and shows the result on GitHub. It runs the commands of the `supply` step.
 - `macos.yml` stays because Cloud Build has no macOS machines.
 - `release.yml` stays because the signing identity is the workflow itself.
 - `release-verify.yml` stays because a person starts it by hand after a release, and its Homebrew check needs a macOS runner.
@@ -105,7 +111,8 @@ Make only `kit-ci-pr` a required check. The other pull request triggers use
 path filters. A path filter leaves no check on a pull request that touches
 none of those paths, and a required check that never appears blocks the merge.
 The GitHub workflow `CI: macOS` runs on `main` and on demand, never on a pull
-request, so it is not a required check either.
+request, so it is not a required check either. The GitHub job `Rust CI gate`
+of `rust.yml` runs on every pull request, so a maintainer can require it.
 
 ## Test compilation and linking
 

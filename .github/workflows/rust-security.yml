@@ -1,0 +1,69 @@
+name: "Security: Rust"
+
+# The weekly advisory sweep. A new advisory can match a dependency tree that
+# did not change, so no push or pull request starts this check by itself.
+# The commands are the ones of the `supply` step in cloudbuild/ci.yaml.
+# The --ignore list below equals the ignore list of rust/deny.toml.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo audit and cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: rust-security
+          protoc: "false"
+
+      # The versions equal the versions in cloudbuild/Dockerfile.ci.
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+
+      # rust/deny.toml holds the deadline in a TODO(YYYY-MM-DD) comment.
+      - name: Check that the advisory ignores have not expired
+        run: |
+          deadline=$(grep -oP 'TODO\(\K\d{4}-\d{2}-\d{2}(?=\))' rust/deny.toml | head -n1)
+          if [ -z "$deadline" ]; then
+            echo "::error::rust/deny.toml has no TODO(YYYY-MM-DD) deadline."
+            exit 1
+          fi
+          today=$(date -u +%Y-%m-%d)
+          if [[ "$today" > "$deadline" || "$today" == "$deadline" ]]; then
+            echo "::error::The advisory ignore in rust/deny.toml expired on $deadline (today: $today)."
+            exit 1
+          fi
+          echo "The advisory ignores stay valid until $deadline (today: $today)."
+
+      - name: cargo deny
+        working-directory: rust
+        run: cargo deny --locked check
+
+      - name: cargo audit
+        working-directory: rust
+        run: |
+          cargo audit --deny warnings \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2026-0370 \
+            --ignore RUSTSEC-2026-0371 \
+            --ignore RUSTSEC-2026-0372
