@@ -76,6 +76,7 @@ from recurring.
 | `fuzz_targets/git_claim.rs` | `libkit::git::verify::claim_accepts` (never panics on any payload; a statement that holds exactly the binding is accepted; the same statement is refused for another source) |
 | `fuzz_targets/remote_validate.rs` | `libkit::remote::validate_url` and `libkit::remote::validate_name` (never panic on any text; an answer is the same twice; an address that passes names a `kit+` or `git+` scheme and has no control character; a name that passes has no dot, no control character and is not `default`) |
 | `fuzz_targets/grants_spec.rs` | `libkit::grants::spec::parse_ttl`, `canonical_capabilities`, `canonical_audiences`, `canonical_ref_scopes` and `libkit::grants::parse_relying_parties` (never panic on any text; an answer is the same twice; a lifetime that parses is positive and at most 30 days; a capability set reads back from its token; canonical audiences and ref scopes stay the same when canonicalized again; a relying-party list has no id twice) |
+| `fuzz_targets/transfer_url.rs` | `libkit::transfer::scheme` (never panics on any text; an answer is the same twice; an accepted URL has the prefix of the scheme that it names; a refusal of a URL with `@`, `?` or `#` shows none of those characters) |
 | `fuzz_targets/absolute_config_home.rs` | `libkit::config::xdg_config_home` (a result is always absolute; a set `XDG_CONFIG_HOME` is never repaired; an absolute `HOME` gives `HOME/.config`) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
@@ -144,6 +145,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::git::verify::claim_accepts` | `git_claim` |
 | `libkit::remote::validate_url`, `validate_name` | `remote_validate` |
 | The field spellings of `libkit::grants::spec`, `libkit::grants::parse_relying_parties` | `grants_spec` |
+| `libkit::transfer::scheme` | `transfer_url` |
 | `kit_bin::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
 | `kit_transport_ssh::url::parse_kit_ssh_url`, `validate_ssh_path` | `ssh_url_parse` |
 | `kit_transport_s3::sigv4::parse_host` | None. It strips a scheme prefix from a configured endpoint. It does no other parsing. Unit tests cover it. |

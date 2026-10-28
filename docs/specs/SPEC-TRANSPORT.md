@@ -16,7 +16,7 @@ wire shape and authentication model differ per scheme.
 There is no negotiation between transports and no scheme fallback.
 The URL scheme is part of the remote address; if the scheme is
 unsupported, the dispatcher returns an error rather than guessing
-([`kit-bin`'s `remote_dispatch::open`](../../rust/crates/kit-bin/src/remote_dispatch/mod.rs)
+([`libkit::transfer::open`](../../rust/crates/libkit/src/transfer/open.rs)
 performs the scheme switch).
 
 The SSH wire format is defined in
@@ -121,7 +121,7 @@ Programs MUST NOT pattern-match on the advisory message strings.
 
 | Scheme prefix | Transport | Notes |
 |---|---|---|
-| `kit+memory://…` | In-memory (`MemoryTransport`) | Test / fuzz only. Cannot be opened by `remote_dispatch::open` &mdash; the URL is accepted by `kit remote add` for round-tripping, but actual construction happens in-process. |
+| `kit+memory://…` | In-memory (`MemoryTransport`) | Test / fuzz only. Cannot be opened by `libkit::transfer::open` &mdash; the URL is accepted by `kit remote add` for round-tripping, but actual construction happens in-process. |
 | `kit+file:///abs/path` | Filesystem (`FileTransport`) | Triple slash; everything after `kit+file://` is taken as the on-disk root path. |
 | `kit+https://host/project` | ConnectRPC (`kit-transport-connect`'s `ConnectTransport`) &mdash; see [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) | The `kit+` prefix is stripped before the inner call; production uses `https://`. |
 | `kit+http://localhost…` | Same dispatch as above, plain HTTP for local dev | Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`, `localhost`) per `validate_http_scheme`; any other host returns `InsecureScheme`. |

@@ -20,13 +20,13 @@
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use kit_bin::remote_dispatch::{fetch_all, push_all};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportResult};
 use kit_core::refs::{self, Ref};
 use kit_core::store::ObjectStore;
 use kit_transport_memory::MemoryTransport;
+use libkit::transfer::{fetch_all, push_all};
 
 mod common;
 use common::Repo;

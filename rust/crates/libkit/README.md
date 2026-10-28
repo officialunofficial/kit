@@ -59,6 +59,25 @@ a name pattern, or that contain, or are merged into, a commit.
 also reads the `--author` flag and the `user.identity` setting, and it picks
 the author of a commit.
 
+## Transfer
+
+This module needs the `sync` and `transport-connect` features.
+
+`libkit::transfer` pushes, pulls and fetches over a `RemoteSource` or over a
+`Transport`. It takes every setting as an argument. A `PushSettings` holds the
+durability schedule, the depth at which a push starts a new pack chain, and the
+check of the stored grants. One `transfer::Error` covers every failure of a
+transfer, and `into_published_prefix` reports the advances that a split push
+published before it failed.
+
+`transfer::scheme` reads the URL of a remote and names its transport. It
+touches no network and no file, and its refusals never echo user information
+or a query. `transfer::open` builds the transport. `transfer::check_endpoint` is
+the credential-trust gate: it refuses an ambient credential for an endpoint
+that the repository chose and the user did not trust.
+`transfer::envelope` builds the signer of a Connect request envelope from the
+config.
+
 ## The index and the tree
 
 These modules need the `sync` feature. Each one takes a `RepoLayout`, and it

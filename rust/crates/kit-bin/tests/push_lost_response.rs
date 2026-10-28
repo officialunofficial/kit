@@ -13,12 +13,12 @@ mod common;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::Repo;
-use kit_bin::remote_dispatch::{DispatchError, pull_all, push_all};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportResult};
 use kit_core::refs::{self, Ref};
 use kit_transport_file::FileTransport;
+use libkit::transfer::{Error as TransferError, pull_all, push_all};
 
 /// A [`FileTransport`] whose `update_ref` on a `refs/heads/` name applies
 /// the write, loses the response, and re-issues it: the caller sees only
@@ -132,7 +132,7 @@ fn genuine_non_fast_forward_is_still_rejected() {
     bob.commit_file("f.txt", b"bob", "bob");
     let err = push_all(bob.path(), &tx).unwrap_err();
     assert!(
-        matches!(err, DispatchError::NonFastForwardPush { ref branch } if branch == "main"),
+        matches!(err, TransferError::NonFastForwardPush { ref branch } if branch == "main"),
         "expected NonFastForwardPush, got {err:?}"
     );
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(alice_tip));

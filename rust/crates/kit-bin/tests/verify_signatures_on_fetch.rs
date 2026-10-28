@@ -25,13 +25,13 @@ use std::fs;
 use std::process::Command;
 use std::sync::Arc;
 
-use kit_bin::remote_dispatch::{DispatchError, fetch_all, pull_all, pull_all_with, push_all};
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
 use kit_core::refs;
 use kit_core::serialize::serialize;
 use kit_core::store::ObjectStore;
 use kit_transport_memory::MemoryTransport;
+use libkit::transfer::{Error as TransferError, fetch_all, pull_all, pull_all_with, push_all};
 
 fn kit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_kit")
@@ -101,7 +101,7 @@ fn pull_rejects_a_tampered_commit_signature_and_leaves_bob_untouched() {
     let err = pull_all(bob.path(), tx.as_ref(), "default", None)
         .expect_err("pull must reject a commit whose signature does not verify, by default");
     match &err {
-        DispatchError::UnsignedOrInvalidObject { hash, .. } => {
+        TransferError::UnsignedOrInvalidObject { hash, .. } => {
             assert_eq!(*hash, kit_core::hash::to_hex(&tampered));
         }
         other => panic!("expected UnsignedOrInvalidObject, got: {other:?}"),
@@ -141,7 +141,7 @@ fn fetch_rejects_a_tampered_commit_signature_and_does_not_publish_tracking_ref()
     let err = fetch_all(bob.path(), tx.as_ref(), "default")
         .expect_err("fetch must reject an invalid signature by default");
     assert!(
-        matches!(err, DispatchError::UnsignedOrInvalidObject { .. }),
+        matches!(err, TransferError::UnsignedOrInvalidObject { .. }),
         "expected UnsignedOrInvalidObject, got: {err:?}"
     );
     let bob_layout = RepoLayout::single(bob.path());

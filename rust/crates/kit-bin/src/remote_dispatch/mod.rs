@@ -1,11 +1,13 @@
-//! URL-scheme → `Transport` dispatch for `kit push` / `kit pull`.
+//! The CLI wiring of a remote for `kit push`, `kit pull`, `kit fetch` and
+//! `kit clone`.
 //!
-//! The Rust binary wires all five shipping schemes here: `kit+file://`,
-//! `kit+https://` (and `kit+http://` for local dev), `kit+s3://`, and
-//! `kit+ssh://`. The memory transport is in-process only, so it is
-//! reached via [`push_all`] / [`pull_all`] with an `Arc<MemoryTransport>`
-//! constructed in-process rather than URL-based construction. Integration
-//! tests in the `kit-bin` crate exercise the memory path directly.
+//! [`libkit::transfer`] holds the transfer operations, the reading of a
+//! remote URL, the opening of a transport, the signer of a request envelope
+//! and the credential-trust gate. This module connects them to the process of
+//! the CLI: the terminal progress, the shutdown signal, the admission helper
+//! and the warnings on stderr. The memory transport is in-process only, so
+//! the integration tests drive it through `libkit::transfer::push_all` and
+//! `libkit::transfer::pull_all` with an `Arc<MemoryTransport>`.
 //!
 //! Credentials / environment sources:
 //! - HTTP(S): optional `KIT_API_TOKEN` bearer.
@@ -18,323 +20,24 @@
 //!   checking, known-hosts path, identity file) are wired through via
 //!   `SshTransport::connect_with_options` when config is loaded.
 
-mod envelope_signer;
 mod packmap;
 
 mod upload_receipts;
 
-use crate::progress::Terminal;
-use kit_core::layout::RepoLayout;
 use std::path::Path;
 use std::sync::Arc;
 
 use kit_core::hash::Hash;
-use kit_core::ops::restore;
-use kit_core::pack::{self, PackError};
+use kit_core::layout::RepoLayout;
 use kit_core::protocol::{Transport, TransportError};
-use kit_core::refs;
-use kit_core::store::{ObjectStore, StoreError};
-use kit_core::transfer::PackListError;
-use kit_sync::{Observer, SyncEvent};
+use kit_core::store::SyncPolicy;
+use kit_sync::{Observer, PushLease, SyncEvent};
+use kit_transport_connect::ConnectTransport;
 use kit_transport_connect::admission::{AdmissionPolicy, is_reserved};
-use kit_transport_connect::{
-    ConnectTransport, PENDING_INTERRUPTED_MESSAGE, remote_identity_from_url,
-};
-use kit_transport_file::FileTransport;
-#[cfg(feature = "s3")]
-use kit_transport_s3::S3Transport;
-use kit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_kit_ssh_url};
 use libkit::grants::connect::{ConnectAuthority, LocalGrants};
+use libkit::transfer::{self, Error, Remote, StepAuthority, is_connect_url};
 
-pub use kit_sync::push::{MAX_CHAIN_COMMITS, MAX_SPLIT_STEPS, PushControl, StepAuthority};
-
-use packmap::rebaseline_depth;
-
-/// Errors returned by the push / pull helpers. Mapped to exit codes by
-/// the commands themselves.
-#[derive(Debug, thiserror::Error)]
-pub enum DispatchError {
-    #[error("unsupported URL scheme: {0}")]
-    UnsupportedScheme(String),
-    #[error("malformed URL: {0}")]
-    MalformedUrl(String),
-    #[error(
-        "repository `{identity}` not found at {origin}; check the remote URL path against the server's configured name (an empty path selects `default` on a single-repository deployment)"
-    )]
-    RepositoryNotFound {
-        identity: String,
-        origin: String,
-        source: kit_sync::SourceError,
-    },
-    #[error("no HEAD branch to push")]
-    NoHead,
-    /// A poll-loop checkpoint observed `signal::is_shutdown() == true`
-    /// and aborted partway through. Callers should map this to
-    /// `exit::TEMPFAIL` (75) so retries are safe — the transfer is
-    /// half-finished but the remote is unmodified for any ref we
-    /// hadn't reached yet.
-    #[error("interrupted")]
-    Interrupted,
-    #[error("{0}")]
-    UploadInterrupted(String),
-    #[error("transport: {0}")]
-    Transport(#[from] TransportError),
-    #[error("transport: {0}")]
-    Source(#[source] kit_sync::SourceError),
-    #[error("refs: {0}")]
-    Refs(#[from] refs::RefError),
-    #[error("repo lock: {0}")]
-    RepoLock(#[from] kit_core::repo_lock::LockError),
-    #[error("worktree discovery: {0}")]
-    Discover(#[from] kit_core::layout::DiscoverError),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("store: {0}")]
-    Store(#[from] StoreError),
-    #[error("pack: {0}")]
-    Pack(#[from] PackError),
-    #[error("packlist: {0}")]
-    PackList(#[from] PackListError),
-    #[error("ssh init: {0}")]
-    SshInit(#[from] SshInitError),
-    #[error("pull requires HEAD to point at a branch")]
-    DetachedHead,
-    #[error("remote branch '{0}' not found")]
-    RemoteBranchMissing(String),
-    #[error("pull would not fast-forward branch '{branch}'; merge or rebase first")]
-    NonFastForwardPull { branch: String },
-    #[error("restore safety: {0}")]
-    RestoreSafety(String),
-    #[error("object is not a commit")]
-    NotCommit,
-    #[error("restore: {0}")]
-    Restore(#[from] restore::RestoreError),
-    /// The per-endpoint credential-trust gate refused to build a
-    /// credential-bearing transport for a repo-chosen endpoint the user
-    /// has not explicitly trusted. The wrapped string is the actionable
-    /// message produced by [`crate::config::endpoint_credential_trust`].
-    #[error("{0}")]
-    UntrustedRemote(String),
-    /// A CAS ref write was rejected because the remote moved under us
-    /// (non-fast-forward). Callers map this to an actionable
-    /// fetch-then-retry / `--force-with-lease` hint.
-    #[error(
-        "updates were rejected for branch '{branch}' (non-fast-forward); fetch and merge first, or re-run with --force-with-lease / --force"
-    )]
-    NonFastForwardPush { branch: String },
-    /// The branch's packmap pointer could not be durably advanced under
-    /// sustained concurrent pushes. The branch ref was NOT moved, so the
-    /// remote stays consistent; the push is safe to retry.
-    #[error(
-        "could not establish the pack map for branch '{branch}' under concurrent pushes; retry"
-    )]
-    PackmapContended { branch: String },
-    /// A packmap chain was malformed — it exceeded the depth cap, contained
-    /// a cycle, or a node could not be downloaded/decoded. Indicates a
-    /// corrupt or hostile remote.
-    #[error("pack map chain for branch '{branch}' is malformed (too deep, cyclic, or unreadable)")]
-    PackChainInvalid {
-        branch: String,
-        source: Option<kit_sync::SourceError>,
-    },
-    /// The remote advertised a branch ref but no packmap
-    /// (`refs/kit/packmap/<branch>`) for it. kit speaks a single,
-    /// packmap-only transfer dialect: the push path ALWAYS advertises a
-    /// packmap before moving the branch ref, so a branch with a tip but no
-    /// packmap is a corrupt/incomplete remote, not a format we degrade to.
-    /// We refuse to fetch rather than silently materialise a partial ref.
-    #[error("remote advertised branch '{0}' but no pack map to reconstruct it")]
-    PackmapMissing(String),
-    /// The packmap advertised a pack the remote does not hold. The branch's
-    /// closure cannot be reconstructed, so the fetch is aborted rather than
-    /// publishing a ref to an incomplete history.
-    #[error("remote advertised pack {pack} for branch '{branch}' but does not hold it")]
-    AdvertisedPackMissing {
-        branch: String,
-        pack: String,
-        source: kit_sync::SourceError,
-    },
-    /// After unpacking the branch's whole packmap chain, an object
-    /// reachable from the fetched tip is still absent from the local store —
-    /// the chain did not deliver the full closure. This is a pure integrity
-    /// assertion (no recovery download is attempted): the remote's packmap
-    /// is incomplete, so fetch aborts before publishing the ref.
-    #[error("remote is missing object {0} needed to reconstruct the ref")]
-    RemoteMissingObject(String),
-    /// The fetched tip's object closure exceeds the
-    /// [`kit_core::ops::graph::MAX_REACHABLE`] verification cap, so
-    /// completeness could not be confirmed. On the applied-pack skip path
-    /// this closure walk is the sole guarantee the local store is
-    /// whole; a truncated walk could silently pass over missing objects, so
-    /// we fail closed rather than publish a ref we can't fully verify. This is
-    /// NOT a self-heal trigger.
-    #[error(
-        "fetched history is too large to verify (closure exceeds the {0}-object cap); refusing to publish an unverified ref"
-    )]
-    ClosureTooLarge(usize),
-    /// A commit/remix/tag newly introduced by this fetch failed Ed25519
-    /// signature verification via [`kit_core::sign::verify_commit`] /
-    /// `verify_remix` / `verify_tag` — the exact check `kit verify <rev>`
-    /// runs manually. A hostile remote (THREAT-MODEL §3.1) can
-    /// otherwise push an unsigned or forged history that `clone`/`pull`/
-    /// `fetch` would silently materialise. Deliberately distinct from
-    /// [`RemoteMissingObject`](Self::RemoteMissingObject) so it does NOT
-    /// feed the applied-pack self-heal retry: an invalid signature
-    /// is not evidence of local staleness, and clearing the applied-packs
-    /// record would not make a hostile remote's history valid. Fails
-    /// closed by default; opt out with `--no-verify-signatures` or the
-    /// user-scoped `pull.require_signed = false` config (never settable
-    /// from repo-scoped config — see [`crate::config::REPO_FORBIDDEN_KEYS`]).
-    #[error("object {hash} failed signature verification: {reason}")]
-    UnsignedOrInvalidObject { hash: String, reason: String },
-    /// A remote name passed to the applied-packs record is not a legal
-    /// ref name (per [`kit_core::refs::validate_ref_name`]). A remote name
-    /// *is* a ref name, so this should never occur for a config-registered
-    /// remote; it is defence-in-depth against a malformed name being used as
-    /// a raw path component under `.kit/applied-packs/`.
-    #[error("invalid remote name for applied-packs record: '{0}'")]
-    InvalidRemoteName(String),
-    /// One advance would need more data packs than the server permits per
-    /// advance. `commit` names the single commit or merge that cannot be split
-    /// further when the refusal came from the pre-flight dry seal, before
-    /// anything was published; without it the seal-time backstop fired.
-    #[error(
-        "push needs {packs} data packs but this server permits {limit} per advance{}{}; ask the operator to raise max_pack_bytes",
-        .commit.as_ref().map_or_else(String::new, |c| format!(" ({c} cannot be split further)")),
-        if *.holds_remote_head {
-            " (it is the first commit that contains the remote head: rebase onto the remote head, or merge it in a smaller or earlier commit)"
-        } else {
-            ""
-        }
-    )]
-    PushTooLarge {
-        packs: usize,
-        limit: usize,
-        commit: Option<String>,
-        /// The unsplittable commit is the first that contains the remote head,
-        /// so the split could not cut before it.
-        holds_remote_head: bool,
-    },
-    /// A retry of one advance (a rejected ticket, a lost delta base) re-planned
-    /// the push and the new plan no longer fits one advance. Found by a dry
-    /// seal, so nothing was uploaded for the retry.
-    #[error(
-        "{reason}, and the retry needs {packs} data packs but this server permits {limit} per advance; nothing was uploaded for the retry"
-    )]
-    RetryTooLarge {
-        reason: RetryReason,
-        packs: usize,
-        limit: usize,
-    },
-    /// A split push would exceed a bound (steps or chain length). Nothing was
-    /// published.
-    #[error("{0}")]
-    PushSplitLimit(String),
-    /// The stored grants do not authorize every advance of a split push.
-    /// Nothing was published.
-    #[error("{0}")]
-    PushNotAuthorized(String),
-    /// Force push refused before upload because discovery was unavailable.
-    #[error(
-        "force push requires successful atomic-advance capability discovery; reconnect and retry"
-    )]
-    ForceCapabilityUnknown,
-    /// A split push failed after publishing some advances. `head` is the last
-    /// advance this push published, a first-parent ancestor of the local tip
-    /// (another pusher may have moved the branch since); re-running the push
-    /// resumes from the remote branch unless a concurrent push caused the
-    /// failure.
-    #[error(
-        "{cause}; {published} of {total} advances were published and the last published advance was {head} on branch '{branch}'{}",
-        resume_hint(.cause)
-    )]
-    SplitInterrupted {
-        branch: String,
-        head: String,
-        published: usize,
-        total: usize,
-        cause: Box<DispatchError>,
-    },
-    #[error("upload ticket was rejected after the push was retried")]
-    TicketRejected,
-    #[error("delta base is unavailable after a restart")]
-    DeltaBaseUnavailable,
-    #[error("packlist still names a pack absent from this repository after retry")]
-    PacklistNotInRepository,
-}
-
-/// The closing advice of a split push's failure: resume, unless the failure
-/// was a concurrent push (the branch then moved, and a re-run would only
-/// compare against whatever the other pusher left).
-fn resume_hint(cause: &DispatchError) -> &'static str {
-    if matches!(cause, DispatchError::NonFastForwardPush { .. }) {
-        "; the branch was moved by another push, so fetch and merge before pushing again"
-    } else {
-        "; re-run the push to resume"
-    }
-}
-
-pub use kit_sync::push::RetryReason;
-
-/// The advances a split push published before it failed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublishedPrefix {
-    pub branch: String,
-    pub published: usize,
-    pub total: usize,
-    pub head: String,
-    /// Whether re-running the push is the advice (not after a concurrent push).
-    pub resumable: bool,
-}
-
-impl PublishedPrefix {
-    /// The note printed with any failure that left a prefix published.
-    #[must_use]
-    pub fn note(&self) -> String {
-        format!(
-            "{} of {} advances were published; the last published advance on branch '{}' was {}{}",
-            self.published,
-            self.total,
-            self.branch,
-            self.head,
-            if self.resumable {
-                "; re-run the push to resume"
-            } else {
-                "; the branch was moved by another push, so fetch and merge before pushing again"
-            }
-        )
-    }
-}
-
-impl DispatchError {
-    /// The error a split push failed with, without its published-prefix
-    /// wrapper, and that prefix (`None` when no advance of this branch was published).
-    #[must_use]
-    pub fn into_published_prefix(self) -> (Self, Option<PublishedPrefix>) {
-        match self {
-            Self::SplitInterrupted {
-                branch,
-                head,
-                published,
-                total,
-                cause,
-            } => {
-                let resumable = !matches!(*cause, Self::NonFastForwardPush { .. });
-                (
-                    *cause,
-                    Some(PublishedPrefix {
-                        branch,
-                        published,
-                        total,
-                        head,
-                        resumable,
-                    }),
-                )
-            }
-            other => (other, None),
-        }
-    }
-}
+use crate::progress::Terminal;
 
 /// Open a transport for `endpoint` only after the per-endpoint
 /// credential-trust gate approves it.
@@ -353,7 +56,7 @@ impl DispatchError {
 ///
 /// `layout` is needed only to resolve a repo-key-file envelope signer
 /// when `cfg.merged.transport_auth == "envelope"` (see
-/// `envelope_signer_from_config`) — every caller already has it at
+/// `transfer::envelope::envelope_signer`) — every caller already has it at
 /// hand (it discovered the repo before building `cfg`).
 pub fn open_trusted(
     endpoint: &str,
@@ -362,51 +65,9 @@ pub fn open_trusted(
     cfg: &crate::config::LayeredConfig,
     layout: &RepoLayout,
     terminal: &Arc<Terminal>,
-) -> Result<Remote, DispatchError> {
-    crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
-        .map_err(DispatchError::UntrustedRemote)?;
+) -> Result<Remote, Error> {
+    crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)?;
     open_with_config_for_remote(endpoint, &cfg.merged, layout, Some(remote_name), terminal)
-}
-
-/// A configured native remote. Connect operations use `ClientSource`; other
-/// schemes retain their synchronous transport adapter.
-pub enum Remote {
-    Connect(Arc<ConnectTransport>),
-    Transport(Arc<dyn Transport>),
-}
-
-impl std::fmt::Debug for Remote {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Remote")
-            .field("connect", &matches!(self, Self::Connect(_)))
-            .finish_non_exhaustive()
-    }
-}
-
-impl Remote {
-    /// Lend the configured source for one repository operation.
-    ///
-    /// # Errors
-    /// The host adapter cannot prepare the operation.
-    pub fn with_source<R>(
-        &self,
-        operation: impl FnOnce(&dyn kit_sync::RemoteSource) -> R,
-    ) -> Result<R, DispatchError> {
-        match self {
-            Self::Connect(transport) => transport.with_source(operation).map_err(Into::into),
-            Self::Transport(transport) => Ok(operation(&cli_source(transport.as_ref()))),
-        }
-    }
-
-    /// Bounds used for interruption guidance, from cached discovery.
-    #[must_use]
-    pub fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
-        match self {
-            Self::Connect(transport) => transport.upload_limits(),
-            Self::Transport(transport) => transport.upload_limits(),
-        }
-    }
 }
 
 /// A remote opened for `kit push`: the transport, and (for a signing Connect
@@ -429,9 +90,8 @@ pub(crate) fn open_trusted_for_push(
     cfg: &crate::config::LayeredConfig,
     layout: &RepoLayout,
     terminal: &Arc<Terminal>,
-) -> Result<PushRemote, DispatchError> {
-    crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
-        .map_err(DispatchError::UntrustedRemote)?;
+) -> Result<PushRemote, Error> {
+    crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)?;
     if !is_connect_url(endpoint) {
         return Ok(PushRemote {
             tx: open_with_config_for_remote(
@@ -479,7 +139,7 @@ pub(crate) fn open_with_config(
     cfg: &crate::config::Config,
     layout: &RepoLayout,
     terminal: &Arc<Terminal>,
-) -> Result<Remote, DispatchError> {
+) -> Result<Remote, Error> {
     open_with_config_for_remote(url, cfg, layout, None, terminal)
 }
 
@@ -489,7 +149,7 @@ fn open_with_config_for_remote(
     layout: &RepoLayout,
     remote_name: Option<&str>,
     terminal: &Arc<Terminal>,
-) -> Result<Remote, DispatchError> {
+) -> Result<Remote, Error> {
     if is_connect_url(url) {
         return Ok(Remote::Connect(Arc::new(open_connect_with_config(
             url,
@@ -500,11 +160,7 @@ fn open_with_config_for_remote(
             terminal,
         )?)));
     }
-    open_with_ssh_options(url, &ssh_options_from_config(cfg), None).map(Remote::Transport)
-}
-
-fn is_connect_url(url: &str) -> bool {
-    url.starts_with("kit+https://") || url.starts_with("kit+http://")
+    open_scheme(url, cfg).map(Remote::Transport)
 }
 
 /// [`open_trusted`] for a Connect endpoint, returning the concrete
@@ -524,11 +180,10 @@ pub(crate) fn open_connect_trusted(
     layout: &RepoLayout,
     sign: bool,
     terminal: &Arc<Terminal>,
-) -> Result<ConnectTransport, DispatchError> {
-    crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
-        .map_err(DispatchError::UntrustedRemote)?;
+) -> Result<ConnectTransport, Error> {
+    crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)?;
     if !is_connect_url(endpoint) {
-        return Err(DispatchError::UnsupportedScheme(format!(
+        return Err(Error::UnsupportedScheme(format!(
             "`{endpoint}` is not a kit+https:// or kit+http:// remote; grant epochs and repository visibility are served over Connect"
         )));
     }
@@ -552,7 +207,7 @@ pub(crate) fn open_connect_with_config(
     remote_name: Option<&str>,
     sign: bool,
     terminal: &Arc<Terminal>,
-) -> Result<ConnectTransport, DispatchError> {
+) -> Result<ConnectTransport, Error> {
     Ok(open_connect_parts(url, cfg, layout, remote_name, sign, terminal)?.transport)
 }
 
@@ -572,18 +227,18 @@ fn open_connect_parts(
     remote_name: Option<&str>,
     sign: bool,
     terminal: &Arc<Terminal>,
-) -> Result<ConnectParts, DispatchError> {
+) -> Result<ConnectParts, Error> {
     let envelope_signer = if sign {
         if cfg.transport_auth_envelope() && cfg.trusted_remote_endpoint.trim() != url {
-            return Err(DispatchError::UntrustedRemote(format!(
+            return Err(Error::UntrustedRemote(format!(
                 "refusing request signing for untrusted destination `{url}`; run `kit config trusted_remote_endpoint {url}` before using ambient signing identity"
             )));
         }
-        envelope_signer_from_config(cfg, layout)?
+        transfer::envelope::envelope_signer(cfg, layout, &crate::environment::current())?
     } else {
         None
     };
-    validate_connect_repository(url)?;
+    transfer::validate_connect_repository(url)?;
     let signed = envelope_signer.is_some();
     let signer_key = envelope_signer
         .as_ref()
@@ -594,7 +249,7 @@ fn open_connect_parts(
         && std::env::var_os(kit_transport_connect::tls::CA_FILE_ENV).is_none()
     {
         crate::config::ssl_ca_file_path(cfg, layout).map_err(|error| {
-            DispatchError::Transport(TransportError::TlsConfiguration(error.to_string()))
+            Error::Transport(TransportError::TlsConfiguration(error.to_string()))
         })?
     } else {
         None
@@ -674,613 +329,29 @@ fn open_connect_parts(
     })
 }
 
-/// The configured kit signing key as an owner signer for `kit grant`,
-/// `kit epoch` and `kit visibility`. Same key resolution as
-/// [`envelope_signer_from_config`], without its `transport_auth` gate: the
-/// owner asked for this signature explicitly.
-pub(crate) fn owner_ed25519_signer(
-    cfg: &crate::config::Config,
-    layout: &RepoLayout,
-) -> Result<Arc<dyn kit_transport_connect::EnvelopeSigner>, String> {
-    match cfg.signer.as_str() {
-        "" | "file" => {
-            let key_path = crate::config::resolve_key_path(layout, &cfg.signing_key)
-                .map_err(|e| format!("signing_key: {e}"))?;
-            if !key_path.exists() {
-                return Err(format!(
-                    "no signing key at {} — run `kit keygen` first",
-                    key_path.display()
-                ));
-            }
-            let kp = kit_core::sign::load_key(&key_path).map_err(|e| format!("load key: {e}"))?;
-            Ok(Arc::new(envelope_signer::RepoKeyEnvelopeSigner::new(kp)))
-        }
-        "keystore" => Ok(Arc::new(envelope_signer::KeystoreEnvelopeSigner::open(
-            cfg,
-        )?)),
-        other => Err(format!(
-            "unknown signer `{other}` — expected `file` or `keystore`"
-        )),
-    }
-}
-
-/// Resolve an [`kit_transport_connect::EnvelopeSigner`] from `cfg`, when
-/// `cfg.transport_auth_envelope()` is set — `Ok(None)` otherwise (the
-/// default: bearer-token-only, unchanged from).
-///
-/// Reuses EXACTLY the same signer resolution as `kit commit`'s
-/// [`crate::commands::commit::load_commit_signer`] (`cfg.signer` ==
-/// `""`/`"file"` -> the repo key file at `cfg.signing_key`; `"keystore"`
-/// -> `cfg.key.ed25519_ref_or_fallback()` via `kit-keystore`) rather than
-/// inventing a parallel key path — the write envelope authenticates with
-/// the SAME Ed25519 identity that already signs the user's commits.
-///
-/// Both signer kinds sign the raw envelope digest directly (no
-/// SPEC-SIGNING commit/remix/tag domain prefix): the file path delegates
-/// to the EXISTING `kit_attest::RepoKeySigner` (its `sign` already signs
-/// the given bytes directly — "the PAE's own `\"DSSEv1 \"` prefix is the
-/// domain separator" per its own doc comment — so no new raw-Ed25519 call
-/// site is needed here), the keystore path via `KeySigner::sign`, whose
-/// own contract already documents "Ed25519 signers return the 64-byte
-/// RFC 8032 signature over `msg`" — i.e. no domain digest applied, exactly
-/// what the envelope needs. See `envelope_signer.rs` for both adapters.
-pub(crate) fn envelope_signer_from_config(
-    cfg: &crate::config::Config,
-    layout: &RepoLayout,
-) -> Result<Option<Arc<dyn kit_transport_connect::EnvelopeSigner>>, DispatchError> {
-    if !cfg.transport_auth_envelope() {
-        return Ok(None);
-    }
-    let remote_error = |msg: String| DispatchError::Transport(TransportError::RemoteError(msg));
-    match cfg.signer.as_str() {
-        "" | "file" => {
-            let key_path =
-                crate::config::resolve_key_path(layout, &cfg.signing_key).map_err(|e| {
-                    remote_error(format!("transport_auth = envelope: signing_key: {e}"))
-                })?;
-            if !key_path.exists() {
-                return Err(remote_error(format!(
-                    "transport_auth = envelope requires a signing key at {} — run `kit keygen` first",
-                    key_path.display()
-                )));
-            }
-            let kp = kit_core::sign::load_key(&key_path)
-                .map_err(|e| remote_error(format!("transport_auth = envelope: load key: {e}")))?;
-            Ok(Some(
-                Arc::new(envelope_signer::RepoKeyEnvelopeSigner::new(kp))
-                    as Arc<dyn kit_transport_connect::EnvelopeSigner>,
-            ))
-        }
-        "keystore" => {
-            let signer = envelope_signer::KeystoreEnvelopeSigner::open(cfg)
-                .map_err(|e| remote_error(format!("transport_auth = envelope: {e}")))?;
-            Ok(Some(
-                Arc::new(signer) as Arc<dyn kit_transport_connect::EnvelopeSigner>
-            ))
-        }
-        other => Err(remote_error(format!(
-            "transport_auth = envelope: unknown signer `{other}` — expected `file` or `keystore`"
-        ))),
-    }
-}
-
-/// Map the three `ssh.*` trust-pinning keys from a merged [`Config`] into
-/// the [`SshOptions`] carried to the spawned `ssh(1)` child. An empty
-/// string means "unset" — `build_ssh_command` emits no flag for it, so
-/// the user's `ssh(1)` defaults are inherited. The producer half of the SSH option pair
-/// (the consumer half, `build_ssh_command`, wires the fields
-/// into argv). Sole caller is [`open_with_config`].
-fn ssh_options_from_config(cfg: &crate::config::Config) -> SshOptions {
-    SshOptions {
-        strict_host_key_checking: cfg.ssh_strict_host_key_checking.clone(),
-        user_known_hosts_file: cfg.ssh_user_known_hosts_file.clone(),
-        identity_file: cfg.ssh_identity_file.clone(),
-    }
-}
-
-/// Open a transport for the given URL with **no** SSH trust-pinning.
-/// Returns a type-erased `Arc` so callers can treat all schemes
-/// uniformly.
-///
-/// Low-level scheme dispatch only — it neither enforces the credential
-/// gate nor threads `ssh.*` config. Any caller that has a [`Config`]
-/// must use `open_with_config` (directly, or via `open_trusted`) so
-/// the trust-pinning keys reach the spawned `ssh(1)`; `open` stays
-/// public only for file/memory integration tests that have no ambient
-/// config to resolve.
-///
-/// [`Config`]: crate::config::Config
-pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
-    open_with_ssh_options(url, &SshOptions::default(), None)
-}
-
-/// Scheme dispatch with explicit SSH options and an optional `kit+https://`
-/// / `kit+http://` envelope signer. Identical to [`open`] for every
-/// non-SSH, non-Connect scheme; the `kit+ssh://` branch threads
-/// `ssh_options` into the spawned `ssh(1)` child via
-/// [`SshTransport::connect_with_options`], and the `kit+https://`/
-/// `kit+http://` branch threads `envelope_signer`
-/// into [`ConnectTransport::connect_with_signer`]. Reached via [`open`]
-/// (no config — both `None`/default) and [`open_with_config`] for non-Connect
-/// schemes; `open_with_config` handles Connect URLs itself, so the Connect
-/// branch here is reached only from [`open`].
-fn open_with_ssh_options(
-    url: &str,
-    ssh_options: &SshOptions,
-    envelope_signer: Option<Arc<dyn kit_transport_connect::EnvelopeSigner>>,
-) -> Result<Arc<dyn Transport>, DispatchError> {
-    if url.starts_with("git+") {
-        return Err(DispatchError::UnsupportedScheme(format!(
-            "'{url}' is a git-bridge remote — native push/pull/fetch/clone do not \
-             speak git transports; use `kit git export` / `kit git import` / \
-             `kit git pull` (feature git-bridge)"
-        )));
-    }
-    if let Some(rest) = url.strip_prefix("kit+file://") {
-        // kit+file:///abs/path -> /abs/path
-        let path = Path::new(rest);
-        return Ok(Arc::new(FileTransport::new(path)));
-    }
-    if url.starts_with("kit+memory://") {
-        // Memory transport is in-process; the URL-based path is not
-        // useful on its own but we accept it so `kit remote add`
-        // round-trips cleanly.
-        return Err(DispatchError::UnsupportedScheme(
-            "kit+memory:// must be driven via in-process harness (see tests)".to_string(),
-        ));
-    }
-    if url.starts_with("kit+https://") || url.starts_with("kit+http://") {
-        validate_connect_repository(url)?;
-        // ConnectTransport::connect_with_signer strips the `kit+` prefix
-        // itself and reads KIT_API_TOKEN from the environment (the native
-        // kit.transport.v1 ConnectRPC client). Only the config-less `open`
-        // reaches this branch (`open_with_config` returns early for Connect
-        // URLs), so `envelope_signer` is always `None` here; bearer token and
-        // envelope signing are independent, additive auth modes.
-        let tx = ConnectTransport::connect_with_signer(url, envelope_signer)?;
-        return Ok(Arc::new(tx));
-    }
+/// The CLI front of [`transfer::open`]. A build without `s3` names the CLI
+/// feature in the refusal of a `kit+s3://` URL.
+fn open_scheme(url: &str, cfg: &crate::config::Config) -> Result<Arc<dyn Transport>, Error> {
     #[cfg(not(feature = "s3"))]
     if url.starts_with("kit+s3://") {
-        return Err(DispatchError::UnsupportedScheme(format!(
+        return Err(Error::UnsupportedScheme(format!(
             "'{url}' needs S3 support — rebuild with `--features s3`"
         )));
     }
-    #[cfg(feature = "s3")]
-    if url.starts_with("kit+s3://") {
-        // S3Transport::connect reads KIT_S3_ACCESS_KEY_ID /
-        // KIT_S3_SECRET_ACCESS_KEY from the environment. Missing
-        // credentials surface as AccessDenied on the first signed call,
-        // not at connect time.
-        let tx = S3Transport::connect(url)?;
-        return Ok(Arc::new(tx));
-    }
-    if url.starts_with("kit+ssh://") {
-        // Parse the URL, then spawn `ssh(1)` with the caller-supplied
-        // trust-pinning options. `connect_with_options`
-        // performs the `Hello` / `HelloResponse` handshake. Any failure
-        // here tears the child down before returning, so callers never
-        // see a half-initialised transport.
-        let target = parse_kit_ssh_url(url).map_err(SshInitError::from)?;
-        let tx = SshTransport::connect_with_options(&target, ssh_options)?;
-        return Ok(Arc::new(tx));
-    }
-    if let Some((scheme, rest)) = url
-        .split_once("://")
-        .filter(|(scheme, _)| matches!(*scheme, "https" | "http"))
-    {
-        // Never echo URL userinfo or a query into an error message; a URL
-        // carrying userinfo gets the generic form instead of a rewrite.
-        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
-        let shown = if rest.contains('@') {
-            "<host>/<namespace>/<name>"
-        } else {
-            rest
-        };
-        return Err(DispatchError::UnsupportedScheme(format!(
-            "`{scheme}://{shown}` is not a sync remote: at a server's origin, plain HTTP(S) serves objects by repository path (SPEC-HTTP-OBJECTS); sync remotes use `kit+https://`, for example `kit+https://{shown}`"
-        )));
-    }
-    Err(DispatchError::MalformedUrl(url.to_string()))
+    transfer::open(url, cfg)
 }
 
-fn validate_connect_repository(url: &str) -> Result<(), DispatchError> {
-    remote_identity_from_url(url).map_err(|reason| {
-        // Userinfo and queries are never echoed. A URL carrying either gets a
-        // generic message: its segments can't be trusted to exclude
-        // credential text.
-        if url.contains(['@', '?', '#']) {
-            return DispatchError::MalformedUrl(
-                "the remote URL is not a valid kit+https:// remote; use kit+https://<host>/<namespace>/<name> without userinfo or a query".to_owned(),
-            );
-        }
-        let path = url
-            .split_once("://")
-            .and_then(|(_, rest)| rest.split_once('/'))
-            .map_or("", |(_, path)| path)
-            .trim_matches('/');
-        DispatchError::MalformedUrl(format!("repository identity `{path}` in {url}: {reason}"))
-    })?;
-    Ok(())
-}
-
-/// Push every ref under `refs/heads/` to the remote. Returns the count of
-/// refs pushed. Each branch is published with [`push_branch`], which sends
-/// one delta-compressed pack of the objects the remote lacks, advertises it
-/// via the `refs/kit/packmap/<branch>` ref, then moves the branch ref.
-pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {
-    push_all_with(cwd, tx, None, false, None).map(|pushed| pushed.refs)
-}
-
-/// What a successful push published.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pushed {
-    /// Branches pushed.
-    pub refs: usize,
-    /// Advances published in total (one per branch unless a push was split).
-    pub steps: usize,
-}
-
-/// CAS-aware mirror push (`kit push --all`). Pushes every local
-/// `refs/heads/*` to the remote, using the remote-tracking ref under
-/// `refs/remotes/<remote>/<branch>` as the CAS lease (Missing when no
-/// tracking ref exists, Match otherwise). `force` upgrades every write
-/// to an unconditional `Any`. On success each pushed branch's
-/// remote-tracking ref is advanced to the pushed tip.
+/// Open a transport for the given URL with **no** SSH trust-pinning.
 ///
-/// `remote` is the remote NAME used for the local tracking-ref
-/// namespace; `None` means `default`. A branch too large for one
-/// advance is split (see [`push_branch_steps`]); its tracking ref follows each
-/// published advance, so an interrupted push resumes where it stopped.
-/// `authority` is checked before a split branch uploads anything.
-pub fn push_all_with(
-    cwd: &Path,
-    tx: &dyn Transport,
-    remote: Option<&str>,
-    force: bool,
-    authority: Option<&dyn StepAuthority>,
-) -> Result<Pushed, DispatchError> {
-    push_all_with_source(
-        cwd,
-        &cli_source(tx),
-        remote,
-        force,
-        authority,
-        &Terminal::detached(),
-    )
-}
-
-pub(crate) fn push_all_with_source(
-    cwd: &Path,
-    source: &dyn kit_sync::RemoteSource,
-    remote: Option<&str>,
-    force: bool,
-    authority: Option<&dyn StepAuthority>,
-    terminal: &Terminal,
-) -> Result<Pushed, DispatchError> {
-    let (mut options, warning) = push_options(cwd, authority)?;
-    let observer = PushObserver { terminal, warning };
-    options.control.observer = &observer;
-    options.remote_name = remote.unwrap_or(kit_sync::DEFAULT_REMOTE_NAME);
-    options.target = kit_sync::PushTarget::All { force };
-    let report = kit_sync::push(cwd, source, &options)?;
-    Ok(Pushed {
-        refs: report.refs,
-        steps: report.steps,
-    })
-}
-
-fn push_options<'a>(
-    cwd: &Path,
-    authority: Option<&'a dyn StepAuthority>,
-) -> Result<(kit_sync::PushOptions<'a>, Option<String>), DispatchError> {
-    let layout = kit_core::layout::discover(cwd)?;
-    let mut options = kit_sync::PushOptions::default();
-    if let Ok(cfg) = crate::config::read_or_default(&layout) {
-        options.sync_policy = cfg.object_sync_policy();
-    }
-    let (depth, warning) = packmap::configured_depth();
-    options.rebaseline_threshold = depth;
-    options.control.authority = authority;
-    Ok((options, warning))
-}
-
-/// CAS lease policy for a default (current-branch → upstream) push.
-pub use kit_sync::PushLease;
-
-/// Push the current branch to its upstream and, on success, advance the
-/// local remote-tracking ref `refs/remotes/<remote>/<branch>` to the
-/// pushed tip.
+/// Low-level scheme dispatch only: it neither enforces the credential gate
+/// nor threads `ssh.*` config. Any caller that has a [`Config`] must use
+/// `open_with_config` (directly, or via `open_trusted`) so the trust-pinning
+/// keys reach the spawned `ssh(1)`. `open` stays public only for the
+/// integration tests that have no ambient config to resolve.
 ///
-/// `remote` is the upstream remote NAME (for the tracking-ref
-/// namespace); `branch` is the local branch name; `remote_branch` is the
-/// branch name on the remote (`refs/heads/<remote_branch>`).
-///
-/// Returns the pushed tip and the number of advances it took: more than one
-/// when the push was split along first-parent history (see
-/// [`push_branch_steps`]). The tracking ref follows every published advance.
-#[allow(clippy::too_many_arguments)]
-pub fn push_branch_tracked(
-    cwd: &Path,
-    tx: &dyn Transport,
-    remote: &str,
-    branch: &str,
-    remote_branch: &str,
-    lease: PushLease,
-    authority: Option<&dyn StepAuthority>,
-) -> Result<(Hash, usize), DispatchError> {
-    push_branch_tracked_source(
-        cwd,
-        &cli_source(tx),
-        remote,
-        branch,
-        remote_branch,
-        lease,
-        authority,
-        &Terminal::detached(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn push_branch_tracked_source(
-    cwd: &Path,
-    source: &dyn kit_sync::RemoteSource,
-    remote: &str,
-    branch: &str,
-    remote_branch: &str,
-    lease: PushLease,
-    authority: Option<&dyn StepAuthority>,
-    terminal: &Terminal,
-) -> Result<(Hash, usize), DispatchError> {
-    let (mut options, warning) = push_options(cwd, authority)?;
-    let observer = PushObserver { terminal, warning };
-    options.control.observer = &observer;
-    options.remote_name = remote;
-    options.target = kit_sync::PushTarget::Branch {
-        local: branch.into(),
-        remote: remote_branch.into(),
-        lease,
-    };
-    let report = kit_sync::push(cwd, source, &options)?;
-    Ok((report.tip.ok_or(DispatchError::NotCommit)?, report.steps))
-}
-
-/// Upload and advance a selected branch through the native sync engine.
-/// Does not update local tracking refs; see [`push_branch_tracked`].
-pub fn push_branch(
-    tx: &dyn Transport,
-    store: &ObjectStore,
-    branch: &str,
-    tip: Hash,
-    condition: refs::RefWriteCondition,
-) -> Result<(), DispatchError> {
-    push_branch_with_depth(tx, store, branch, tip, condition, rebaseline_depth())
-}
-
-/// [`push_branch`] with an explicit re-baseline threshold in place of the
-/// configured one (`packmap::rebaseline_depth`: the
-/// `KIT_PACK_REBASELINE_DEPTH` env var, default 64). `0` disables
-/// re-baselining. Semantics are otherwise identical — see [`push_branch`].
-///
-/// This is the depth-policy seam: integration tests inject a small
-/// threshold (e.g. 3) to exercise the re-baseline path in-process with a
-/// handful of pushes, where reaching the default threshold would take ~64
-/// real pushes and the env-var override cannot be set on the test's own
-/// process (`std::env::set_var` is banned by `clippy::disallowed_methods` —
-/// it races other threads on POSIX).
-pub fn push_branch_with_depth(
-    tx: &dyn Transport,
-    store: &ObjectStore,
-    branch: &str,
-    tip: Hash,
-    condition: refs::RefWriteCondition,
-    rebaseline_threshold: usize,
-) -> Result<(), DispatchError> {
-    push_branch_with_limits(
-        tx,
-        store,
-        branch,
-        tip,
-        condition,
-        rebaseline_threshold,
-        pack::MAX_TOTAL_PAYLOAD,
-    )
-}
-
-/// [`push_branch_with_depth`] with an explicit per-pack payload cap in
-/// place of the format's hardcoded [`pack::MAX_TOTAL_PAYLOAD`].
-/// Semantics are otherwise identical — see [`push_branch`].
-///
-/// This is the payload-cap test seam, mirroring the
-/// `rebaseline_threshold` pattern: integration tests inject a tiny cap
-/// (a few KiB) to exercise multi-pack splitting in-process without
-/// moving a multi-GiB plan through it.
-pub fn push_branch_with_limits(
-    tx: &dyn Transport,
-    store: &ObjectStore,
-    branch: &str,
-    tip: Hash,
-    condition: refs::RefWriteCondition,
-    rebaseline_threshold: usize,
-    pack_payload_cap: u64,
-) -> Result<(), DispatchError> {
-    push_branch_steps(
-        tx,
-        store,
-        branch,
-        tip,
-        condition,
-        rebaseline_threshold,
-        pack_payload_cap,
-        &PushControl::default(),
-        &mut |_| Ok(()),
-    )
-    .map(drop)
-}
-
-/// [`push_branch_with_limits`] that splits a push too large for one advance
-/// along the branch's first-parent history (bounded split advances), and reports each
-/// published advance to `on_step` with the commit the remote branch now
-/// points at. Returns the number of advances.
-///
-/// The split applies only when the transport ticketed-uploads
-/// ([`kit_core::protocol::UploadLimits::tickets_per_advance`]) and the conservative estimate of the
-/// push's packs exceeds the data-pack budget of one advance. Otherwise this is
-/// exactly one [`push_branch_with_limits`] call. When it applies, the first
-/// advance uses `condition`, and every later one is a `Match` on the previous
-/// advance's commit, whatever `condition` was, so a long split never
-/// overwrites a concurrent pusher. Each advance uploads its own packs just
-/// before it lands; nothing is pre-uploaded.
-///
-/// A failure after the first advance is returned as
-/// [`DispatchError::SplitInterrupted`], naming the published prefix; running
-/// the push again resumes from it.
-///
-/// # Errors
-/// The wrapper retains CLI progress and cancellation; it replaces the control's observer.
-/// As [`push_branch`], plus the split's own refusals (see
-/// [`plan_push_steps`]), and whatever `on_step` returns.
-#[allow(clippy::too_many_arguments)]
-pub fn push_branch_steps(
-    tx: &dyn Transport,
-    store: &ObjectStore,
-    branch: &str,
-    tip: Hash,
-    condition: refs::RefWriteCondition,
-    rebaseline_threshold: usize,
-    pack_payload_cap: u64,
-    control: &PushControl<'_>,
-    on_step: &mut dyn FnMut(Hash) -> Result<(), kit_sync::PushError>,
-) -> Result<usize, DispatchError> {
-    let terminal = Terminal::detached();
-    let control = PushControl {
-        authority: control.authority,
-        max_steps: control.max_steps,
-        max_chain: control.max_chain,
-        shallow: control.shallow.clone(),
-        observer: &terminal,
-    };
-    kit_sync::push::push_branch_steps(
-        &cli_source(tx),
-        store,
-        branch,
-        tip,
-        condition,
-        rebaseline_threshold,
-        pack_payload_cap,
-        &control,
-        on_step,
-    )
-    .map_err(Into::into)
-}
-
-/// [`pull_all_with`] with signature verification on — the CLI's default.
-/// Existing in-process callers (the integration-test suite)
-/// that construct only validly-signed histories are unaffected.
-pub fn pull_all(
-    cwd: &Path,
-    tx: &dyn Transport,
-    remote: &str,
-    target_branch: Option<&str>,
-) -> Result<usize, DispatchError> {
-    pull_all_with(cwd, tx, remote, target_branch, true)
-}
-
-/// The settings every sync call from the CLI shares: the durability schedule
-/// comes from the layered config exactly as `open_store_configured` reads it,
-/// so a broken config falls back to the batched default rather than changing
-/// write semantics.
-fn sync_options(
-    cwd: &Path,
-    target_branch: Option<&str>,
-    require_signed: bool,
-) -> Result<kit_sync::SyncOptions, DispatchError> {
-    let layout = kit_core::layout::discover(cwd)?;
-    let sync_policy = crate::config::read_or_default(&layout)
-        .map_or(kit_core::store::SyncPolicy::Batch, |cfg| {
-            cfg.object_sync_policy()
-        });
-    Ok(kit_sync::SyncOptions::default()
-        .with_verify_signatures(require_signed)
-        .with_target_branch(target_branch.map(str::to_owned))
-        .with_sync_policy(sync_policy))
-}
-
-/// Fetch remote refs, then fast-forward the current local branch from
-/// `refs/remotes/default/<branch>`; see [`kit_sync::pull`] for the contract.
-/// Returns the number of remote branches fetched.
-///
-/// `require_signed` gates the post-fetch commit/remix/tag signature check:
-/// `true` (the CLI's default, see [`pull_all`]) verifies
-/// every newly-fetched object and fails closed; `false` is the explicit
-/// `--no-verify-signatures` / `pull.require_signed = false` opt-out.
-pub fn pull_all_with(
-    cwd: &Path,
-    tx: &dyn Transport,
-    remote: &str,
-    target_branch: Option<&str>,
-    require_signed: bool,
-) -> Result<usize, DispatchError> {
-    pull_all_with_source(
-        cwd,
-        &cli_source(tx),
-        remote,
-        target_branch,
-        require_signed,
-        &Terminal::detached(),
-    )
-}
-
-pub(crate) fn pull_all_with_source(
-    cwd: &Path,
-    source: &dyn kit_sync::RemoteSource,
-    remote: &str,
-    target_branch: Option<&str>,
-    require_signed: bool,
-    terminal: &Terminal,
-) -> Result<usize, DispatchError> {
-    let options = sync_options(cwd, target_branch, require_signed)?;
-    let report = kit_sync::pull(cwd, source, remote, &options, terminal)?;
-    Ok(report.fetch.branches_fetched)
-}
-
-/// [`fetch_all_with`] with signature verification on — the CLI's default.
-/// Existing in-process callers (the integration-test suite)
-/// that construct only validly-signed histories are unaffected.
-pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
-    fetch_all_with(cwd, tx, remote, true)
-}
-
-/// `fetch` — `pull_all` without the HEAD update. Downloads every object
-/// reachable from each remote ref and writes the ref into
-/// `refs/remotes/<remote>/<branch>`; see [`kit_sync::fetch`].
-///
-/// See [`pull_all_with`] for the `require_signed` contract.
-pub fn fetch_all_with(
-    cwd: &Path,
-    tx: &dyn Transport,
-    remote: &str,
-    require_signed: bool,
-) -> Result<usize, DispatchError> {
-    fetch_all_with_source(
-        cwd,
-        &cli_source(tx),
-        remote,
-        require_signed,
-        &Terminal::detached(),
-    )
-}
-
-pub(crate) fn fetch_all_with_source(
-    cwd: &Path,
-    source: &dyn kit_sync::RemoteSource,
-    remote: &str,
-    require_signed: bool,
-    terminal: &Terminal,
-) -> Result<usize, DispatchError> {
-    let options = sync_options(cwd, None, require_signed)?;
-    let report = kit_sync::fetch(cwd, source, remote, &options, terminal)?;
-    Ok(report.branches_fetched)
+/// [`Config`]: crate::config::Config
+pub fn open(url: &str) -> Result<Arc<dyn Transport>, Error> {
+    open_scheme(url, &crate::config::Config::default())
 }
 
 /// The terminal observer, plus the one-time warning that opens a push.
@@ -1303,329 +374,125 @@ impl Observer<SyncEvent> for PushObserver<'_> {
     }
 }
 
-/// Recognise the Connect client's two interruption messages on a
-/// repository-level call; everything else falls through to the default
-/// classification.
-fn classify_repository_error(error: &kit_sync::SourceError) -> Option<kit_sync::SyncError> {
-    if let kit_sync::SourceError::RemoteError(message) = error {
-        if message.starts_with("upload interrupted; ") {
-            return Some(kit_sync::SyncError::UploadInterrupted(message.clone()));
-        }
-        if message == PENDING_INTERRUPTED_MESSAGE {
-            return Some(kit_sync::SyncError::Interrupted);
-        }
-    }
-    None
+/// The durability schedule of the object store, from the layered config. A
+/// broken config falls back to the batched schedule rather than changing the
+/// write semantics.
+fn sync_policy(layout: &RepoLayout) -> SyncPolicy {
+    crate::config::read_or_default(layout).map_or(SyncPolicy::Batch, |cfg| cfg.object_sync_policy())
 }
 
-/// The sync engine's view of `tx`, with the CLI's error classification.
-fn cli_source(tx: &dyn Transport) -> kit_sync::TransportSource<'_> {
-    kit_sync::TransportSource::new(tx).with_error_classifier(&classify_repository_error)
-}
-
-// Preserve CLI handling as well as display for existing transport failures.
-impl From<kit_sync::SourceError> for DispatchError {
-    fn from(error: kit_sync::SourceError) -> Self {
-        use kit_sync::SourceError as S;
-        let transport = match error {
-            S::PackNotFound => TransportError::PackNotFound,
-            S::AccessDenied => TransportError::AccessDenied,
-            S::AdmissionConfiguration(value) => TransportError::AdmissionConfiguration(value),
-            S::TlsConfiguration(value) => TransportError::TlsConfiguration(value),
-            S::AdmissionHelperFailed(value) => TransportError::AdmissionHelperFailed(value),
-            S::RemoteError(value) if value.starts_with("upload interrupted; ") => {
-                return Self::UploadInterrupted(value);
-            }
-            S::RemoteError(value) if value == PENDING_INTERRUPTED_MESSAGE => {
-                return Self::Interrupted;
-            }
-            S::RemoteError(value) => TransportError::RemoteError(value),
-            S::RefConflict => TransportError::RefConflict,
-            S::InvalidRef(value) => TransportError::InvalidRef(value),
-            S::ConnectionFailed => TransportError::ConnectionFailed,
-            S::ServerError { status } => TransportError::ServerError { status },
-            S::InvalidResponse => TransportError::InvalidResponse,
-            S::ProtocolError => TransportError::ProtocolError,
-            S::PayloadTooLarge(value) => TransportError::PayloadTooLarge(value),
-            S::InsecureScheme => TransportError::InsecureScheme,
-            S::AdmissionRequired { challenges } => TransportError::AdmissionRequired(challenges),
-            other => return Self::Source(other),
-        };
-        Self::Transport(transport)
-    }
-}
-
-impl From<kit_sync::SyncError> for DispatchError {
-    fn from(error: kit_sync::SyncError) -> Self {
-        use kit_sync::SyncError as S;
-        match error {
-            S::Interrupted => Self::Interrupted,
-            S::UploadInterrupted(message) => Self::UploadInterrupted(message),
-            S::RepositoryNotFound {
-                identity,
-                origin,
-                source,
-            } => Self::RepositoryNotFound {
-                identity,
-                origin,
-                source,
-            },
-            S::Source(e) => e.into(),
-            S::Refs(e) => Self::Refs(e),
-            S::RepoLock(e) => Self::RepoLock(e),
-            S::Discover(e) => Self::Discover(e),
-            S::Io(e) => Self::Io(e),
-            S::Store(e) => Self::Store(e),
-            S::Pack(e) => Self::Pack(e),
-            S::PackList(e) => Self::PackList(e),
-            S::DetachedHead => Self::DetachedHead,
-            S::RemoteBranchMissing(b) => Self::RemoteBranchMissing(b),
-            S::NonFastForwardPull { branch } => Self::NonFastForwardPull { branch },
-            S::RestoreSafety(m) => Self::RestoreSafety(m),
-            S::NotCommit => Self::NotCommit,
-            S::Restore(e) => Self::Restore(e),
-            S::PackChainInvalid { branch, source } => Self::PackChainInvalid { branch, source },
-            S::PackmapMissing(b) => Self::PackmapMissing(b),
-            S::AdvertisedPackMissing {
-                branch,
-                pack,
-                source,
-            } => Self::AdvertisedPackMissing {
-                branch,
-                pack,
-                source,
-            },
-            S::RemoteMissingObject(h) => Self::RemoteMissingObject(h),
-            S::ClosureTooLarge(n) => Self::ClosureTooLarge(n),
-            S::UnsignedOrInvalidObject { hash, reason } => {
-                Self::UnsignedOrInvalidObject { hash, reason }
-            }
-            S::InvalidRemoteName(n) => Self::InvalidRemoteName(n),
-        }
-    }
-}
-
-impl From<kit_sync::PushError> for DispatchError {
-    fn from(error: kit_sync::PushError) -> Self {
-        use kit_sync::PushError as P;
-        match error {
-            P::Sync(kit_sync::SyncError::Source(kit_sync::SourceError::PendingVerification {
-                retry_after,
-            })) => Self::Transport(TransportError::PendingVerification { retry_after }),
-            P::Sync(kit_sync::SyncError::Source(kit_sync::SourceError::MembershipNotVisible)) => {
-                Self::Transport(TransportError::MembershipNotVisible)
-            }
-            P::Sync(kit_sync::SyncError::Source(kit_sync::SourceError::RetryAfter { ms })) => {
-                Self::Transport(TransportError::RetryAfter { ms })
-            }
-            P::Sync(error) => error.into(),
-            P::NonFastForwardPush { branch } => Self::NonFastForwardPush { branch },
-            P::PackmapContended { branch } => Self::PackmapContended { branch },
-            P::PushTooLarge {
-                packs,
-                limit,
-                commit,
-                holds_remote_head,
-            } => Self::PushTooLarge {
-                packs,
-                limit,
-                commit,
-                holds_remote_head,
-            },
-            P::RetryTooLarge {
-                reason,
-                packs,
-                limit,
-            } => Self::RetryTooLarge {
-                reason,
-                packs,
-                limit,
-            },
-            P::PushSplitLimit(message) => Self::PushSplitLimit(message),
-            P::PushNotAuthorized(message) => Self::PushNotAuthorized(message),
-            P::ForceCapabilityUnknown => Self::ForceCapabilityUnknown,
-            P::SplitInterrupted {
-                branch,
-                head,
-                published,
-                total,
-                cause,
-            } => Self::SplitInterrupted {
-                branch,
-                head,
-                published,
-                total,
-                cause: Box::new((*cause).into()),
-            },
-            P::TicketRejected => Self::TicketRejected,
-            P::DeltaBaseUnavailable => Self::DeltaBaseUnavailable,
-            P::PacklistNotInRepository => Self::PacklistNotInRepository,
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn plan_push_steps(
-    store: &ObjectStore,
-    tip: Hash,
-    remote_tip: Option<Hash>,
-    limits: kit_core::protocol::UploadLimits,
-    pack_payload_cap: u64,
-    control: &PushControl<'_>,
-    condition: refs::RefWriteCondition,
-    branch: &str,
-) -> Result<Vec<Hash>, DispatchError> {
-    let terminal = Terminal::detached();
-    let control = PushControl {
-        authority: control.authority,
-        max_steps: control.max_steps,
-        max_chain: control.max_chain,
-        shallow: control.shallow.clone(),
-        observer: &terminal,
-    };
-    kit_sync::push::plan_push_steps(
-        store,
-        tip,
-        remote_tip,
-        limits,
-        pack_payload_cap,
-        &control,
-        condition,
-        branch,
+/// Push every branch to the remote; see [`transfer::push_all_with_source`].
+/// `remote` names the tracking refs, and `None` means `default`.
+pub(crate) fn push_all_with_source(
+    cwd: &Path,
+    source: &dyn kit_sync::RemoteSource,
+    remote: Option<&str>,
+    force: bool,
+    authority: Option<&dyn StepAuthority>,
+    terminal: &Terminal,
+) -> Result<transfer::Pushed, Error> {
+    let layout = kit_core::layout::discover(cwd)?;
+    let (settings, observer) = push_inputs(&layout, authority, terminal);
+    transfer::push_all_with_source(
+        cwd,
+        source,
+        remote.unwrap_or(kit_sync::DEFAULT_REMOTE_NAME),
+        force,
+        &settings,
+        &observer,
     )
-    .map_err(Into::into)
+}
+
+/// Push one branch to the remote; see [`transfer::push_branch_tracked_with_source`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_branch_tracked_source(
+    cwd: &Path,
+    source: &dyn kit_sync::RemoteSource,
+    remote: &str,
+    branch: &str,
+    remote_branch: &str,
+    lease: PushLease,
+    authority: Option<&dyn StepAuthority>,
+    terminal: &Terminal,
+) -> Result<(Hash, usize), Error> {
+    let layout = kit_core::layout::discover(cwd)?;
+    let (settings, observer) = push_inputs(&layout, authority, terminal);
+    transfer::push_branch_tracked_with_source(
+        cwd,
+        source,
+        remote,
+        branch,
+        remote_branch,
+        lease,
+        &settings,
+        &observer,
+    )
+}
+
+/// The settings of a push from the config and the environment, and the observer
+/// that shows it on the terminal.
+fn push_inputs<'a>(
+    layout: &RepoLayout,
+    authority: Option<&'a dyn StepAuthority>,
+    terminal: &'a Terminal,
+) -> (transfer::PushSettings<'a>, PushObserver<'a>) {
+    let (rebaseline_threshold, warning) = packmap::configured_depth();
+    (
+        transfer::PushSettings {
+            sync_policy: sync_policy(layout),
+            rebaseline_threshold,
+            authority,
+        },
+        PushObserver { terminal, warning },
+    )
+}
+
+/// Fetch the remote and fast-forward the current branch; see
+/// [`transfer::pull_with_source`].
+pub(crate) fn pull_all_with_source(
+    cwd: &Path,
+    source: &dyn kit_sync::RemoteSource,
+    remote: &str,
+    target_branch: Option<&str>,
+    require_signed: bool,
+    terminal: &Terminal,
+) -> Result<usize, Error> {
+    let layout = kit_core::layout::discover(cwd)?;
+    transfer::pull_with_source(
+        cwd,
+        source,
+        remote,
+        target_branch,
+        require_signed,
+        sync_policy(&layout),
+        terminal,
+    )
+}
+
+/// Fetch the remote; see [`transfer::fetch_with_source`].
+pub(crate) fn fetch_all_with_source(
+    cwd: &Path,
+    source: &dyn kit_sync::RemoteSource,
+    remote: &str,
+    require_signed: bool,
+    terminal: &Terminal,
+) -> Result<usize, Error> {
+    let layout = kit_core::layout::discover(cwd)?;
+    transfer::fetch_with_source(
+        cwd,
+        source,
+        remote,
+        require_signed,
+        sync_policy(&layout),
+        terminal,
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ssh_options_from_config;
     use crate::config::Config;
     use crate::progress::Terminal;
     use kit_core::layout::RepoLayout;
-
-    #[test]
-    fn push_mapping_preserves_transport_scheduling_outcomes() {
-        use kit_core::protocol::TransportError;
-        for transport in [
-            TransportError::PendingVerification {
-                retry_after: std::time::Duration::from_secs(2),
-            },
-            TransportError::MembershipNotVisible,
-            TransportError::RetryAfter { ms: 3 },
-        ] {
-            let expected = format!("transport: {transport}");
-            let source = kit_sync::SourceError::from(transport);
-            let error = super::DispatchError::from(kit_sync::PushError::Sync(
-                kit_sync::SyncError::Source(source),
-            ));
-            assert_eq!(error.to_string().as_bytes(), expected.as_bytes());
-            assert!(matches!(error, super::DispatchError::Transport(_)));
-        }
-    }
-
-    #[test]
-    fn sync_context_mapping_preserves_remote_evidence_and_output_bytes() {
-        use super::DispatchError;
-        use kit_sync::{RemoteDetail, RemoteFailure, SourceError, SyncError};
-
-        fn remote() -> SourceError {
-            SourceError::Remote(Box::new(RemoteFailure {
-                code: "not_found".into(),
-                message: "not visible".into(),
-                details: vec![RemoteDetail {
-                    type_url: "type.example/detail".into(),
-                    value: Some("eA==".into()),
-                }],
-                status: 404,
-                headers: vec![("x-evidence".into(), b"retained".to_vec())],
-            }))
-        }
-
-        for (error, expected) in [
-            (
-                SyncError::Source(remote()),
-                "transport: pack not found on remote",
-            ),
-            (
-                SyncError::RepositoryNotFound {
-                    identity: "repo".into(),
-                    origin: "https://remote.example".into(),
-                    source: remote(),
-                },
-                "repository `repo` not found at https://remote.example; check the remote URL path against the server's configured name (an empty path selects `default` on a single-repository deployment)",
-            ),
-            (
-                SyncError::PackChainInvalid {
-                    branch: "main".into(),
-                    source: Some(remote()),
-                },
-                "pack map chain for branch 'main' is malformed (too deep, cyclic, or unreadable)",
-            ),
-            (
-                SyncError::AdvertisedPackMissing {
-                    branch: "main".into(),
-                    pack: "abc".into(),
-                    source: remote(),
-                },
-                "remote advertised pack abc for branch 'main' but does not hold it",
-            ),
-        ] {
-            let error = DispatchError::from(error);
-            assert_eq!(error.to_string().as_bytes(), expected.as_bytes());
-            let source = std::error::Error::source(&error)
-                .expect("CLI mapping must retain the source cause")
-                .downcast_ref::<SourceError>()
-                .expect("the source cause must stay typed");
-            let SourceError::Remote(remote) = source else {
-                panic!("CLI mapping lost remote evidence")
-            };
-            assert_eq!(remote.code, "not_found");
-            assert_eq!(remote.message, "not visible");
-            assert_eq!(remote.status, 404);
-            assert_eq!(remote.details[0].type_url, "type.example/detail");
-            assert_eq!(remote.details[0].value.as_deref(), Some("eA=="));
-            assert_eq!(
-                remote.headers,
-                vec![("x-evidence".into(), b"retained".to_vec())]
-            );
-        }
-    }
-
-    #[test]
-    fn sync_source_mapping_preserves_transport_output_bytes() {
-        use super::DispatchError;
-        use kit_core::protocol::{AdmissionRequired, TransportError};
-        for error in [
-            TransportError::PackNotFound,
-            TransportError::AccessDenied,
-            TransportError::AdmissionRequired(Box::new(AdmissionRequired::new(
-                Vec::new(),
-                "admit".into(),
-                Vec::new(),
-                Vec::new(),
-            ))),
-            TransportError::AdmissionConfiguration("bad".into()),
-            TransportError::TlsConfiguration("bad".into()),
-            TransportError::AdmissionHelperFailed("bad".into()),
-            TransportError::RemoteError("bad".into()),
-            TransportError::RefConflict,
-            TransportError::InvalidRef("bad".into()),
-            TransportError::ConnectionFailed,
-            TransportError::ServerError { status: 429 },
-            TransportError::ServerError { status: 503 },
-            TransportError::InvalidResponse,
-            TransportError::ProtocolError,
-            TransportError::PayloadTooLarge(42),
-            TransportError::InsecureScheme,
-        ] {
-            let expected = format!("transport: {error}");
-            let error = DispatchError::from(kit_sync::SyncError::from(
-                kit_sync::SourceError::from(error),
-            ));
-            assert_eq!(error.to_string().as_bytes(), expected.as_bytes());
-            assert!(matches!(error, DispatchError::Transport(_)));
-        }
-    }
 
     #[test]
     fn envelope_destination_trust_precedes_missing_key_resolution() {
@@ -1646,7 +513,7 @@ mod tests {
             )
             .expect_err("untrusted signing must fail");
             assert!(
-                matches!(error, super::DispatchError::UntrustedRemote(_)),
+                matches!(error, super::Error::UntrustedRemote(_)),
                 "destination rejection must precede key access: {error}"
             );
             cfg.trusted_remote_endpoint = endpoint.into();
@@ -1677,112 +544,11 @@ mod tests {
         )
         .expect_err("uppercase repository identity must be rejected");
         assert!(
-            matches!(error, super::DispatchError::MalformedUrl(_)),
+            matches!(error, super::Error::MalformedUrl(_)),
             "expected malformed URL, got {error:?}"
         );
         let message = error.to_string();
         assert!(message.contains("Uppercase"), "{message}");
         assert!(!message.contains("invalid response"), "{message}");
-    }
-
-    #[test]
-    fn plain_https_remote_is_refused_with_sync_remote_guidance() {
-        let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
-        let url = format!("https://vcs.example/{uuid}/repo");
-        let error = super::open(&url).err().expect("plain https must fail");
-        assert!(
-            matches!(error, super::DispatchError::UnsupportedScheme(_)),
-            "plain https is an unsupported scheme, not a malformed URL: {error:?}"
-        );
-        let message = error.to_string();
-        assert!(
-            message.contains(&format!("kit+{url}")),
-            "{message} must suggest the kit+ spelling"
-        );
-        assert!(message.contains("SPEC-HTTP-OBJECTS"), "{message}");
-
-        // Userinfo and queries are never echoed.
-        let error = super::open(&format!(
-            "http://user:secret@vcs.example/{uuid}/repo?k=q1#f"
-        ))
-        .err()
-        .expect("plain http must fail");
-        let message = error.to_string();
-        assert!(!message.contains("secret"), "{message}");
-        assert!(
-            !message.contains("q1") && !message.contains("#f"),
-            "{message}"
-        );
-        assert!(message.contains("kit+https://"), "{message}");
-        let error = super::open(&format!("http://vcs.example/{uuid}/repo?k=q1"))
-            .err()
-            .expect("plain http must fail");
-        let message = error.to_string();
-        assert!(!message.contains("q1"), "{message}");
-        assert!(
-            message.contains(&format!("kit+https://vcs.example/{uuid}/repo")),
-            "{message}"
-        );
-        // A rejected identity does not echo the URL's userinfo or query.
-        let error = super::open("kit+https://user:secret@vcs.example/Bad/repo?k=q1")
-            .err()
-            .expect("bad namespace must fail");
-        let message = error.to_string();
-        assert!(
-            !message.contains("secret") && !message.contains("q1"),
-            "{message}"
-        );
-        for url in [
-            "kit+https://user:pa/ss@vcs.example/Bad/repo",
-            "kit+https://user:12/ss@vcs.example/Bad/repo",
-        ] {
-            let message = super::open(url).err().expect("must fail").to_string();
-            assert!(
-                !message.contains("ss@") && !message.contains("pa/"),
-                "{message}"
-            );
-        }
-    }
-
-    #[test]
-    fn connect_url_validation_names_the_offending_segment() {
-        let uuid = "019c88c3-a904-7bd1-8a5d-3182a0c6978a";
-        for (path, offending) in [("/Bad/repo", "`Bad`"), ("/repo/Name", "`Name`")] {
-            let url = format!("kit+https://vcs.example{path}");
-            let error = super::open(&url)
-                .err()
-                .unwrap_or_else(|| panic!("{url} must fail"));
-            let message = error.to_string();
-            assert!(message.contains(offending), "{message}");
-            assert!(message.contains("§7.4"), "{message}");
-        }
-        // An opaque authority-mode namespace validates under the union
-        // grammar and builds a transport.
-        assert!(super::open(&format!("kit+https://vcs.example/{uuid}/repo")).is_ok());
-    }
-
-    #[test]
-    fn populated_config_maps_to_ssh_options() {
-        let cfg = Config {
-            ssh_strict_host_key_checking: "yes".to_string(),
-            ssh_user_known_hosts_file: "/path/to/project.known_hosts".to_string(),
-            ssh_identity_file: "/path/to/id_ed25519".to_string(),
-            ..Config::default()
-        };
-        let opts = ssh_options_from_config(&cfg);
-        assert_eq!(opts.strict_host_key_checking, "yes");
-        assert_eq!(opts.user_known_hosts_file, "/path/to/project.known_hosts");
-        assert_eq!(opts.identity_file, "/path/to/id_ed25519");
-    }
-
-    /// Empty `ssh.*` fields must map to empty `SshOptions` fields so
-    /// `build_ssh_command` emits NO `-o`/`-i` flags and the user's
-    /// `ssh(1)` defaults are inherited unchanged.
-    #[test]
-    fn empty_config_maps_to_empty_ssh_options() {
-        let opts = ssh_options_from_config(&Config::default());
-        assert!(opts.strict_host_key_checking.is_empty());
-        assert!(opts.user_known_hosts_file.is_empty());
-        assert!(opts.identity_file.is_empty());
     }
 }

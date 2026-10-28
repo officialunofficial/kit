@@ -54,7 +54,7 @@ kit-keystore = { path = "../crates/kit-keystore", features = ["fuzzing"] }
 kit-rpc = { path = "../crates/kit-rpc", features = ["arbitrary"] }
 kit-serve = { path = "../crates/kit-serve" }
 kit-bin = { path = "../crates/kit-bin", features = ["fuzzing"] }
-libkit = { path = "../crates/libkit", features = ["git-bridge"] }
+libkit = { path = "../crates/libkit", features = ["git-bridge", "transport-connect"] }
 kit-transport-ssh = { path = "../crates/kit-transport-ssh" }
 tar = "0.4.46"
 tempfile = "3.27.0"
@@ -524,6 +524,14 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "remote_validate"
 path = "fuzz_targets/remote_validate.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "transfer_url"
+path = "fuzz_targets/transfer_url.rs"
 test = false
 doc = false
 bench = false

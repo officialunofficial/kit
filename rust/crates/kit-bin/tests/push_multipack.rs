@@ -18,7 +18,6 @@ use std::fs;
 use std::path::Path;
 
 use common::Repo;
-use kit_bin::remote_dispatch::{pull_all, push_all, push_branch_with_limits};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::protocol::{PackKey, RefWriteCondition, Transport};
@@ -26,6 +25,7 @@ use kit_core::refs;
 use kit_core::store::ObjectStore;
 use kit_core::transfer::{self, PackListNode};
 use kit_transport_memory::MemoryTransport;
+use libkit::transfer::{pull_all, push_all, push_branch_with_limits};
 
 /// Tiny cap that a handful of KiB-sized files reliably exceeds, forcing a
 /// split without moving gigabytes through the test harness.

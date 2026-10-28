@@ -179,7 +179,7 @@ pub struct Config {
     /// envelope, reusing the exact SAME signer resolution as commit
     /// signing — [`Self::signer`] / [`Self::signing_key`] /
     /// [`KeyConfig::ed25519_ref`](KeyConfig::ed25519_ref) — see
-    /// `remote_dispatch::envelope_signer_from_config`. User-scoped only:
+    /// `transfer::envelope::envelope_signer`. User-scoped only:
     /// request authorization is a separate use of the ambient identity.
     /// Destination trust is checked before loading a signing key.
     pub transport_auth: String,

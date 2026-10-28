@@ -2337,6 +2337,45 @@ pub fn grants_spec_one_iteration(input: &[u8]) {
     }
 }
 
+/// Remote URLs (`transfer_url`): `transfer::scheme` never panics on any text
+/// and gives the same answer twice. A URL that is accepted starts with the
+/// prefix of the scheme that it names. A refusal of a URL that carries user
+/// information, a query or a fragment shows none of the characters `@`, `?`
+/// or `#`, so the message cannot echo a secret.
+pub fn transfer_url_one_iteration(input: &[u8]) {
+    use libkit::transfer::{Scheme, scheme};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let first = scheme(text);
+    let again = scheme(text);
+    assert_eq!(
+        first.is_ok(),
+        again.is_ok(),
+        "a URL gives the same answer twice"
+    );
+    match first {
+        Ok(Scheme::File(path)) => assert_eq!(text, format!("kit+file://{path}")),
+        Ok(Scheme::Connect) => assert!(
+            text.starts_with("kit+https://") || text.starts_with("kit+http://"),
+            "a Connect URL names kit+https or kit+http"
+        ),
+        Ok(Scheme::S3) => assert!(text.starts_with("kit+s3://")),
+        Ok(Scheme::Ssh) => assert!(text.starts_with("kit+ssh://")),
+        Ok(_) => {}
+        Err(error) => {
+            if text.contains(['@', '?', '#']) {
+                let message = error.to_string();
+                assert!(
+                    !message.contains(['@', '?', '#']),
+                    "a refusal echoes no user information or query"
+                );
+            }
+        }
+    }
+}
+
 /// Path arguments (`index_path_arg`): `pathspec::index_path_for_arg` never
 /// panics on a relative argument, and gives the same answer twice. An answer
 /// passes `validate_index_path`, and it has no empty, `.` or `..` component.
@@ -3517,6 +3556,25 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, grants_spec_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_transfer_url() {
+        run_iterated_unit(transfer_url_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"kit+file:///srv/repo",
+            b"kit+https://vcs.example/myproj",
+            b"kit+https://user:secret@vcs.example/Bad/repo?k=q",
+            b"https://user:secret@vcs.example/x",
+            b"git+https://user:secret@host/repo",
+            b"kit+memory://",
+            b"kit+s3://h/b/p",
+            b"kit+ssh://git@h/r",
+            b"\xff\xfe",
+        ] {
+            run_one(case, transfer_url_one_iteration).unwrap();
         }
     }
 

@@ -193,16 +193,16 @@ fn pull_one(
                     }
                     exit::OK
                 }
-                Err(remote_dispatch::DispatchError::Interrupted) => {
+                Err(libkit::transfer::Error::Interrupted) => {
                     emit_err_json("pull: interrupted", exit::TEMPFAIL, json)
                 }
-                Err(e @ remote_dispatch::DispatchError::UnsignedOrInvalidObject { .. }) => {
+                Err(e @ libkit::transfer::Error::UnsignedOrInvalidObject { .. }) => {
                     emit_err_json(&format!("pull: {e}"), exit::DATAERR, json)
                 }
                 Err(e) => emit_err_json(&format!("pull: {e}"), exit::GENERAL_ERROR, json),
             }
         }
-        Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
+        Err(libkit::transfer::Error::UntrustedRemote(msg)) => {
             emit_err_json(&msg, exit::CONFIG_ERROR, json)
         }
         Err(e) => emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),

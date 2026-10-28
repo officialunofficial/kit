@@ -8,12 +8,12 @@ use std::fs;
 use std::process::Command;
 use std::sync::Arc;
 
-use kit_bin::remote_dispatch::{DispatchError, fetch_all, pull_all, push_all};
 use kit_core::layout::RepoLayout;
 use kit_core::ops::reachable_objects;
 use kit_core::refs;
 use kit_core::store::ObjectStore;
 use kit_transport_memory::MemoryTransport;
+use libkit::transfer::{Error as TransferError, fetch_all, pull_all, push_all};
 
 fn kit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_kit")
@@ -253,7 +253,7 @@ fn pull_all_refuses_divergent_current_branch() {
         .unwrap();
 
     let err = pull_all(bob.path(), tx.as_ref(), "default", None).unwrap_err();
-    assert!(matches!(err, DispatchError::NonFastForwardPull { .. }));
+    assert!(matches!(err, TransferError::NonFastForwardPull { .. }));
     assert_eq!(
         refs::read_ref(&RepoLayout::single(bob.path()), "main")
             .unwrap()
@@ -299,7 +299,7 @@ fn pull_all_refuses_dirty_worktree_before_fast_forward() {
         .unwrap();
 
     let err = pull_all(bob.path(), tx.as_ref(), "default", None).unwrap_err();
-    assert!(matches!(err, DispatchError::RestoreSafety(_)));
+    assert!(matches!(err, TransferError::RestoreSafety(_)));
     assert_eq!(fs::read(bob.path().join("a.txt")).unwrap(), b"local dirty");
     assert_eq!(
         refs::read_ref(&RepoLayout::single(bob.path()), "main")
@@ -370,7 +370,7 @@ fn pull_all_ref_update_failure_does_not_restore_worktree() {
     fs::set_permissions(&heads_dir, original_perms).unwrap();
 
     assert!(
-        matches!(err, DispatchError::Refs(_)),
+        matches!(err, TransferError::Refs(_)),
         "unexpected error: {err}"
     );
     assert_eq!(fs::read(bob.path().join("a.txt")).unwrap(), b"v1");

@@ -60,7 +60,7 @@ path = "src/main.rs"
 kit-core = { version = "=0.5.0", path = "../kit-core", features = ["batch-verify"] }
 kit-attest = { version = "=0.5.0", path = "../kit-attest", features = ["grants"] }
 kit-keystore = { version = "=0.5.0", path = "../kit-keystore" }
-libkit = { version = "=0.5.0", path = "../libkit", default-features = false, features = ["sync", "transport-connect"] }
+libkit = { version = "=0.5.0", path = "../libkit", default-features = false, features = ["sync", "transport-connect", "transport-file", "transport-ssh"] }
 # The native clone/fetch/pull engine (packmap fetch, signature verification,
 # applied-packs record, fast-forward and rollback). The CLI keeps all
 # printing, config layering, trust gates and exit codes.
@@ -249,7 +249,7 @@ assert_fs = "1.1.4"
 [features]
 default = ["git-bridge"]
 # Enables `kit+s3://` remotes through `kit-transport-s3`. Off by default.
-s3 = ["dep:kit-transport-s3"]
+s3 = ["dep:kit-transport-s3", "libkit/transport-s3"]
 # Enables `kit mcp`'s modern serving path (MCP 2026-07-28, via the official
 # `rmcp` Rust SDK — see the doc comment above rmcp's Cargo.toml entry). Off by
 # default: rmcp brings a hyper server and a tokio runtime, and the default

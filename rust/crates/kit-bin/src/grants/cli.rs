@@ -55,8 +55,16 @@ impl Ctx {
     /// The message to print.
     pub fn plan(&self, args: &OwnerArgs, hint: Option<Namespace>) -> Result<Plan, String> {
         let cfg = &self.layered.merged;
-        let ed25519 =
-            || NativeOwner::ed25519(remote_dispatch::owner_ed25519_signer(cfg, &self.layout)?);
+        let ed25519 = || {
+            NativeOwner::ed25519(
+                libkit::transfer::envelope::owner_signer(
+                    cfg,
+                    &self.layout,
+                    &crate::environment::current(),
+                )
+                .map_err(|error| error.to_string())?,
+            )
+        };
         owner::resolve(
             args,
             hint,

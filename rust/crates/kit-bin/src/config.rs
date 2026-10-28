@@ -126,12 +126,6 @@ pub fn user_config_display() -> String {
     )
 }
 
-/// Real-environment getter used by the runtime credential gate: reads
-/// the named environment variable, treating an empty value as absent.
-fn real_getenv(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
 /// Per-endpoint credential trust check for the shared dispatch choke
 /// point ([`crate::remote_dispatch::open_trusted`]) and named-remote
 /// callers. `repo_chosen` is `true` when the endpoint was selected by
@@ -139,160 +133,28 @@ fn real_getenv(name: &str) -> Option<String> {
 /// `remote.<name>.url` entry), `false` when it was supplied by the user
 /// (user-scoped config or an explicit CLI argument). Trust is keyed on
 /// the resolved ENDPOINT plus this provenance, never on a remote name.
+///
+/// # Errors
+/// As [`libkit::transfer::check_endpoint`].
 pub fn endpoint_credential_trust(
     cfg: &LayeredConfig,
     endpoint: &str,
     repo_chosen: bool,
-) -> Result<(), String> {
-    match trusted_remote_error_for(
-        endpoint.trim(),
+) -> Result<(), libkit::transfer::Error> {
+    libkit::transfer::check_endpoint(
+        endpoint,
         repo_chosen,
-        cfg.user.trusted_remote_endpoint.trim(),
-        &real_getenv,
-    ) {
-        Some(msg) => Err(msg),
-        None => Ok(()),
-    }
-}
-
-/// Core gate, keyed on an explicit endpoint + provenance rather than a
-/// `LayeredConfig`. Returns `Some(error)` when ambient HTTP/S3
-/// credentials would be attached to a repo-chosen endpoint that the
-/// user has not explicitly trusted.
-///
-/// * `endpoint` — the resolved, already-trimmed remote URL.
-/// * `repo_chosen` — whether the repo-scoped config selected this
-///   endpoint (the only case the gate fences; a user-chosen endpoint is
-///   the user's own decision).
-/// * `user_trusted` — the trimmed user-scoped `trusted_remote_endpoint`.
-/// * `getenv` — credential probe (injected for tests).
-fn trusted_remote_error_for<F>(
-    endpoint: &str,
-    repo_chosen: bool,
-    user_trusted: &str,
-    getenv: &F,
-) -> Option<String>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    if endpoint.is_empty() || !repo_chosen {
-        return None;
-    }
-    if user_trusted == endpoint {
-        return None;
-    }
-
-    if endpoint.starts_with("kit+http://") || endpoint.starts_with("kit+https://") {
-        if getenv(kit_transport_connect::TOKEN_ENV).is_some() {
-            return Some(format!(
-                "refusing repo-configured remote `{endpoint}` with ambient {} bearer token; trust it explicitly with `kit config trusted_remote_endpoint {endpoint}` (writes {})",
-                kit_transport_connect::TOKEN_ENV,
-                user_config_display()
-            ));
-        }
-        return None;
-    }
-
-    #[cfg(feature = "s3")]
-    if endpoint.starts_with("kit+s3://")
-        && (getenv(kit_transport_s3::ENV_ACCESS_KEY).is_some()
-            || getenv(kit_transport_s3::ENV_SECRET_KEY).is_some())
-    {
-        return Some(format!(
-            "refusing repo-configured remote `{endpoint}` with ambient S3 credentials; trust it explicitly with `kit config trusted_remote_endpoint {endpoint}` (writes {})",
-            user_config_display()
-        ));
-    }
-
-    None
+        &cfg.user.trusted_remote_endpoint,
+        &user_config_display(),
+        &|name| std::env::var(name).ok().filter(|value| !value.is_empty()),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Derives `repo_chosen` from the flat `remote_endpoint`, as the layered
-    /// callers do.
-    fn gate_for_flat<F>(repo_endpoint: &str, user_trusted: &str, getenv: &F) -> Option<String>
-    where
-        F: Fn(&str) -> Option<String>,
-    {
-        let endpoint = repo_endpoint.trim();
-        trusted_remote_error_for(endpoint, true, user_trusted.trim(), getenv)
-    }
-
-    #[test]
-    fn repo_http_remote_with_token_requires_user_trust() {
-        let msg = gate_for_flat("kit+https://example.invalid/repo", "", &|name| {
-            (name == kit_transport_connect::TOKEN_ENV).then(|| "token".to_string())
-        })
-        .expect("repo-scoped HTTP remote with token must be rejected");
-        assert!(msg.contains("trusted_remote_endpoint"));
-    }
-
-    #[test]
-    fn trusted_http_remote_is_allowed() {
-        let msg = gate_for_flat(
-            "kit+https://example.invalid/repo",
-            "kit+https://example.invalid/repo",
-            &|name| (name == kit_transport_connect::TOKEN_ENV).then(|| "token".to_string()),
-        );
-        assert!(msg.is_none());
-    }
-
-    #[cfg(feature = "s3")]
-    #[test]
-    fn repo_s3_remote_with_env_creds_requires_user_trust() {
-        let msg = gate_for_flat(
-            "kit+s3://s3.example.com/bucket/proj",
-            "",
-            &|name| match name {
-                kit_transport_s3::ENV_ACCESS_KEY => Some("AKIA...".to_string()),
-                _ => None,
-            },
-        )
-        .expect("repo-scoped S3 remote with env creds must be rejected");
-        assert!(msg.contains("trusted_remote_endpoint"));
-    }
-
-    /// The gate keys on PROVENANCE, not mere credential presence: a
-    /// user-chosen endpoint (`repo_chosen == false`) with ambient creds
-    /// is the user's own decision and must NOT be refused, even though
-    /// the same endpoint+creds would be refused if the repo had chosen
-    /// it.
-    #[test]
-    fn user_chosen_http_remote_with_token_is_allowed() {
-        let token =
-            |name: &str| (name == kit_transport_connect::TOKEN_ENV).then(|| "tok".to_string());
-        let ep = "kit+https://example.invalid/repo";
-        // repo_chosen = false (user-scoped or CLI-supplied endpoint).
-        assert!(trusted_remote_error_for(ep, false, "", &token).is_none());
-        // repo_chosen = true with no user trust → refused.
-        assert!(trusted_remote_error_for(ep, true, "", &token).is_some());
-    }
-
-    /// Per-endpoint helper returns `None` when no ambient credentials
-    /// are present, regardless of provenance — an unauthenticated push
-    /// is always safe.
-    #[test]
-    fn repo_http_remote_without_token_is_allowed() {
-        let none = |_: &str| None;
-        let ep = "kit+https://example.invalid/repo";
-        assert!(trusted_remote_error_for(ep, true, "", &none).is_none());
-    }
-
-    /// SSH and file endpoints never carry ambient HTTP/S3 creds, so the
-    /// gate passes them through even when repo-chosen and untrusted.
-    #[test]
-    fn ssh_and_file_endpoints_bypass_credential_gate() {
-        let all = |_: &str| Some("present".to_string());
-        assert!(trusted_remote_error_for("kit+ssh://host/path", true, "", &all).is_none());
-        assert!(trusted_remote_error_for("kit+file:///srv/mirror", true, "", &all).is_none());
-    }
-
-    /// `endpoint_credential_trust` is the public per-endpoint entry the
-    /// dispatch choke point and named-remote callers use. A user-trusted
-    /// endpoint is always allowed.
+    /// A user-trusted endpoint is always allowed.
     #[test]
     fn endpoint_credential_trust_honours_user_trust() {
         let mut cfg = LayeredConfig::default();

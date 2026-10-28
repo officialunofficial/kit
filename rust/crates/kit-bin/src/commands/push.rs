@@ -190,7 +190,7 @@ fn push_current(
         progress.terminal(),
     ) {
         Ok(remote) => remote,
-        Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
+        Err(libkit::transfer::Error::UntrustedRemote(msg)) => {
             return emit_err_json(&msg, exit::CONFIG_ERROR, json);
         }
         Err(e) => return emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
@@ -218,7 +218,7 @@ fn push_current(
         drop(progress);
         outcome
     };
-    match push_outcome.map_err(remote_dispatch::DispatchError::into_published_prefix) {
+    match push_outcome.map_err(libkit::transfer::Error::into_published_prefix) {
         Ok((new_tip, steps)) => {
             // Remember the upstream so a bare `kit push` works next
             // time (Git-like first-push convenience). Only persisted
@@ -270,7 +270,7 @@ fn push_current(
             }
             exit::OK
         }
-        Err((remote_dispatch::DispatchError::NonFastForwardPush { branch: rejected }, prefix)) => {
+        Err((libkit::transfer::Error::NonFastForwardPush { branch: rejected }, prefix)) => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "To {}", resolved.endpoint);
             let _ = writeln!(
@@ -299,12 +299,12 @@ fn push_current(
             }
             emit_err(&msg, exit::GENERAL_ERROR)
         }
-        Err((remote_dispatch::DispatchError::UploadInterrupted(message), prefix)) => emit_err_json(
+        Err((libkit::transfer::Error::UploadInterrupted(message), prefix)) => emit_err_json(
             &with_prefix(format!("push: {message}"), prefix.as_ref()),
             exit::TEMPFAIL,
             json,
         ),
-        Err((remote_dispatch::DispatchError::Interrupted, prefix)) => emit_err_json(
+        Err((libkit::transfer::Error::Interrupted, prefix)) => emit_err_json(
             &with_prefix(
                 interrupted_hint(&resolved.endpoint, tx.upload_limits()).to_owned(),
                 prefix.as_ref(),
@@ -356,7 +356,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
         progress.terminal(),
     ) {
         Ok(remote) => remote,
-        Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
+        Err(libkit::transfer::Error::UntrustedRemote(msg)) => {
             return emit_err_json(&msg, exit::CONFIG_ERROR, json);
         }
         Err(e) => return emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
@@ -378,7 +378,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
         drop(progress);
         outcome
     };
-    match push_outcome.map_err(remote_dispatch::DispatchError::into_published_prefix) {
+    match push_outcome.map_err(libkit::transfer::Error::into_published_prefix) {
         Ok(pushed) => {
             let n = pushed.refs;
             let mut stderr = std::io::stderr().lock();
@@ -398,7 +398,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             }
             exit::OK
         }
-        Err((remote_dispatch::DispatchError::NonFastForwardPush { branch }, prefix)) => {
+        Err((libkit::transfer::Error::NonFastForwardPush { branch }, prefix)) => {
             let msg = with_prefix(
                 format!(
                     "updates were rejected for '{branch}' (non-fast-forward); \
@@ -418,12 +418,12 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             }
             emit_err(&msg, exit::GENERAL_ERROR)
         }
-        Err((remote_dispatch::DispatchError::UploadInterrupted(message), prefix)) => emit_err_json(
+        Err((libkit::transfer::Error::UploadInterrupted(message), prefix)) => emit_err_json(
             &with_prefix(format!("push: {message}"), prefix.as_ref()),
             exit::TEMPFAIL,
             json,
         ),
-        Err((remote_dispatch::DispatchError::Interrupted, prefix)) => emit_err_json(
+        Err((libkit::transfer::Error::Interrupted, prefix)) => emit_err_json(
             &with_prefix(
                 interrupted_hint(&resolved.endpoint, tx.upload_limits()).to_owned(),
                 prefix.as_ref(),
@@ -458,7 +458,7 @@ fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
 }
 
 /// `msg`, followed by the published prefix a split push left behind, if any.
-fn with_prefix(msg: String, prefix: Option<&remote_dispatch::PublishedPrefix>) -> String {
+fn with_prefix(msg: String, prefix: Option<&libkit::transfer::PublishedPrefix>) -> String {
     match prefix {
         Some(prefix) => format!("{msg}; {}", prefix.note()),
         None => msg,
@@ -466,12 +466,12 @@ fn with_prefix(msg: String, prefix: Option<&remote_dispatch::PublishedPrefix>) -
 }
 
 fn emit_push_error(
-    error: remote_dispatch::DispatchError,
-    prefix: Option<&remote_dispatch::PublishedPrefix>,
+    error: libkit::transfer::Error,
+    prefix: Option<&libkit::transfer::PublishedPrefix>,
     json: bool,
 ) -> u8 {
     match error {
-        remote_dispatch::DispatchError::Transport(
+        libkit::transfer::Error::Transport(
             kit_core::protocol::TransportError::AdmissionRequired(required),
         ) => {
             // The hint helps only when no helper ran; after a helper ran, the
@@ -483,7 +483,7 @@ fn emit_push_error(
             };
             emit_err_json(&format!("push: {required}{hint}"), exit::NOPERM, json)
         }
-        remote_dispatch::DispatchError::Transport(
+        libkit::transfer::Error::Transport(
             kit_core::protocol::TransportError::AdmissionConfiguration(message),
         ) => emit_err_json(
             &format!("push: admission configuration: {message}"),

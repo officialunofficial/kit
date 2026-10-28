@@ -168,10 +168,10 @@ pub fn run(args: &[String]) -> u8 {
     };
     let n = match pull_outcome {
         Ok(n) => n,
-        Err(remote_dispatch::DispatchError::Interrupted) => {
+        Err(libkit::transfer::Error::Interrupted) => {
             return emit_err("clone: interrupted", exit::TEMPFAIL);
         }
-        Err(e @ remote_dispatch::DispatchError::UnsignedOrInvalidObject { .. }) => {
+        Err(e @ libkit::transfer::Error::UnsignedOrInvalidObject { .. }) => {
             return emit_err(&format!("pull: {e}"), exit::DATAERR);
         }
         Err(e) => return emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),

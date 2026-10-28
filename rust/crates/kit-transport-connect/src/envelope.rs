@@ -67,7 +67,7 @@ impl RetryIdentity {
 /// `kit-bin` implements this by reusing its EXISTING commit-signing
 /// resolution (`signer` / `signing_key` / `key.ed25519_ref` config, the
 /// same keys `kit commit` reads) rather than inventing a parallel key
-/// path — see `remote_dispatch::envelope_signer_from_config`.
+/// path — see `libkit::transfer::envelope::envelope_signer`.
 pub trait EnvelopeSigner: Send + Sync {
     /// Lowercase-hex (64 chars) Ed25519 public key.
     fn public_key_hex(&self) -> String;

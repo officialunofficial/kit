@@ -33,7 +33,6 @@ use std::thread;
 use std::time::Duration;
 
 use common::{Repo, check_invariants};
-use kit_bin::remote_dispatch::{fetch_all, pull_all, push_all};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::ops::reachable_objects;
@@ -42,6 +41,7 @@ use kit_core::refs::{self, Ref};
 use kit_core::store::ObjectStore;
 use kit_transport_file::FileTransport;
 use kit_transport_memory::MemoryTransport;
+use libkit::transfer::{fetch_all, pull_all, push_all};
 
 /// Delegates to [`common::kit_env`] for the full isolation every other
 /// suite gets (`XDG_CONFIG_HOME` + `HOME` + `EDITOR`/`VISUAL`/`GIT_EDITOR`

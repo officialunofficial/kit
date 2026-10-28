@@ -71,6 +71,9 @@ pub mod signing;
 #[cfg(feature = "sync")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod status;
+#[cfg(all(feature = "sync", feature = "transport-connect"))]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "sync", feature = "transport-connect"))))]
+pub mod transfer;
 pub mod worktrees;
 
 pub use environment::{CredentialSource, Environment, Identity, Token};

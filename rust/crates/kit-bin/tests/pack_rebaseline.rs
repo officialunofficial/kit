@@ -31,9 +31,6 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use common::Repo;
-use kit_bin::remote_dispatch::{
-    DispatchError, fetch_all, pull_all, push_all, push_branch_with_depth,
-};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
@@ -44,6 +41,9 @@ use kit_core::store::ObjectStore;
 use kit_core::transfer::{self, PackListNode};
 use kit_transport_file::FileTransport;
 use kit_transport_memory::MemoryTransport;
+use libkit::transfer::{
+    Error as TransferError, fetch_all, pull_all, push_all, push_branch_with_depth,
+};
 
 /// The small threshold the in-process concurrency tests inject via
 /// `push_branch_with_depth` — reachable with a handful of pushes,
@@ -384,7 +384,7 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, DispatchError::NonFastForwardPush { .. }),
+        matches!(err, TransferError::NonFastForwardPush { .. }),
         "expected NonFastForwardPush, got {err:?}"
     );
 

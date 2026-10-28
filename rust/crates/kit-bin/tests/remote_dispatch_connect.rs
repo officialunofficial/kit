@@ -863,7 +863,7 @@ fn push_then_pull_roundtrip_through_real_connect_server() {
 
     // -- push --------------------------------------------------------
     let tx = remote_dispatch::open(&url).expect("open kit+http (push)");
-    let n = remote_dispatch::push_all(src.path(), tx.as_ref()).expect("push must succeed");
+    let n = libkit::transfer::push_all(src.path(), tx.as_ref()).expect("push must succeed");
     assert_eq!(n, 1, "exactly one branch (main) must be pushed");
     drop(tx);
 
@@ -871,7 +871,7 @@ fn push_then_pull_roundtrip_through_real_connect_server() {
     let dst = tempfile::tempdir().unwrap();
     assert!(run_in(dst.path(), &["init"]).status.success());
     let tx = remote_dispatch::open(&url).expect("open kit+http (pull)");
-    let n = remote_dispatch::pull_all(dst.path(), tx.as_ref(), "default", None).expect("pull");
+    let n = libkit::transfer::pull_all(dst.path(), tx.as_ref(), "default", None).expect("pull");
     assert_eq!(n, 1, "one remote branch must be fetched");
     drop(tx);
 
@@ -1022,7 +1022,7 @@ fn open_rejects_invalid_repository_path_before_connecting() {
             panic!("invalid repository path accepted: {path}");
         };
         assert!(
-            matches!(err, remote_dispatch::DispatchError::MalformedUrl(_)),
+            matches!(err, libkit::transfer::Error::MalformedUrl(_)),
             "{err:?}"
         );
         let message = err.to_string();
@@ -1039,8 +1039,8 @@ fn list_refs_not_found_names_the_repository_and_origin() {
         spawn_server_with_errors(Arc::new(MemoryTransport::new()), vec!["ListRefs"]);
     let origin = format!("http://127.0.0.1:{port}");
     let tx = remote_dispatch::open(&format!("kit+{origin}/myproj")).unwrap();
-    let error = remote_dispatch::fetch_all(repo.path(), tx.as_ref(), "default").unwrap_err();
-    let remote_dispatch::DispatchError::RepositoryNotFound {
+    let error = libkit::transfer::fetch_all(repo.path(), tx.as_ref(), "default").unwrap_err();
+    let libkit::transfer::Error::RepositoryNotFound {
         identity,
         origin: observed,
         ..
@@ -1083,10 +1083,10 @@ fn push_not_found_names_the_repository_for_each_write() {
         if procedure == "UpdateRef" {
             // The first push publishes its refs through AdvanceRefs. An unchanged
             // second push reaches the head-only UpdateRef path.
-            remote_dispatch::push_all(src.path(), tx.as_ref()).unwrap();
+            libkit::transfer::push_all(src.path(), tx.as_ref()).unwrap();
         }
-        let error = remote_dispatch::push_all(src.path(), tx.as_ref()).unwrap_err();
-        let remote_dispatch::DispatchError::RepositoryNotFound {
+        let error = libkit::transfer::push_all(src.path(), tx.as_ref()).unwrap_err();
+        let libkit::transfer::Error::RepositoryNotFound {
             identity,
             origin: observed,
             ..
@@ -1792,7 +1792,7 @@ struct ResetBeforeAdvance<'a> {
 impl ResetBeforeAdvance<'_> {
     fn interleave(&self) {
         if !self.fired.swap(true, Ordering::SeqCst) {
-            remote_dispatch::push_branch_with_depth(
+            libkit::transfer::push_branch_with_depth(
                 self.competing,
                 self.competing_store,
                 "main",
@@ -1926,7 +1926,7 @@ fn run_rebaseline_race(appending: bool) {
     local.commit_file("f.txt", b"base", "base");
     let base = head(&local);
     let store = ObjectStore::open(&RepoLayout::single(local.path())).unwrap();
-    remote_dispatch::push_branch_with_depth(
+    libkit::transfer::push_branch_with_depth(
         &*transport,
         &store,
         "main",
@@ -1937,7 +1937,7 @@ fn run_rebaseline_race(appending: bool) {
     .unwrap();
     local.commit_file("f.txt", b"remote", "remote");
     let remote = head(&local);
-    remote_dispatch::push_branch_with_depth(
+    libkit::transfer::push_branch_with_depth(
         &*transport,
         &store,
         "main",
@@ -1972,7 +1972,7 @@ fn run_rebaseline_race(appending: bool) {
             .count()
     };
     let before = advances(&calls);
-    remote_dispatch::push_branch_with_depth(
+    libkit::transfer::push_branch_with_depth(
         &racing,
         &store,
         "main",
@@ -1998,7 +1998,7 @@ fn run_rebaseline_race(appending: bool) {
     assert_eq!(backend.read_ref("refs/heads/main").unwrap(), Some(target));
 
     let clone = common::Repo::new();
-    remote_dispatch::pull_all(clone.path(), &*transport, "default", None).unwrap();
+    libkit::transfer::pull_all(clone.path(), &*transport, "default", None).unwrap();
     assert_eq!(head(&clone), target);
     assert_eq!(
         std::fs::read(clone.path().join("f.txt")).unwrap(),

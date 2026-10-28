@@ -1117,9 +1117,10 @@ excluded by design and S3 remotes are not yet covered. Wasm/browser clients
 retain browser-managed certificate trust; these native settings do not affect
 them. This changes no wire contract.
 
-This crate is the implementation `kit-bin`'s `remote_dispatch`
-constructs for the `kit+https://` scheme (and loopback-only
+This crate is the implementation that `libkit::transfer` and `kit-bin`'s
+`remote_dispatch` construct for the `kit+https://` scheme (and loopback-only
 `kit+http://`) &mdash; see
+`rust/crates/libkit/src/transfer/open.rs` and
 `rust/crates/kit-bin/src/remote_dispatch/mod.rs`.
 
 **Auth modes** (closing the gap this document

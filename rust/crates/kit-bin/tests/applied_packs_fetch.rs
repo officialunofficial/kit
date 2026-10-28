@@ -14,7 +14,6 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use kit_bin::remote_dispatch::{DispatchError, fetch_all, push_all};
 use kit_core::hash::{self, Hash};
 use kit_core::layout::RepoLayout;
 use kit_core::ops::reachable_objects;
@@ -24,6 +23,7 @@ use kit_core::store::ObjectStore;
 use kit_core::transfer;
 use kit_transport_file::FileTransport;
 use kit_transport_memory::MemoryTransport;
+use libkit::transfer::{Error as TransferError, fetch_all, push_all};
 
 fn kit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_kit")
@@ -385,7 +385,7 @@ fn cross_branch_fetch_persists_progress_before_a_later_branchs_failure_propagate
 
     // Delete the remote's packmap ref for "zzz" only — its branch head ref
     // stays advertised, so `fetch_all` still lists it, but resolving its
-    // packmap now returns `None`, which is `DispatchError::PackmapMissing`.
+    // packmap now returns `None`, which is `TransferError::PackmapMissing`.
     let zzz_packmap_path = remote.path().join("refs/kit/packmap/zzz");
     assert!(
         zzz_packmap_path.exists(),
@@ -398,7 +398,7 @@ fn cross_branch_fetch_persists_progress_before_a_later_branchs_failure_propagate
     let err = fetch_all(bob.path(), &tx, "default")
         .expect_err("zzz's missing packmap must fail the whole fetch");
     assert!(
-        matches!(&err, DispatchError::PackmapMissing(name) if name == "zzz"),
+        matches!(&err, TransferError::PackmapMissing(name) if name == "zzz"),
         "expected PackmapMissing(\"zzz\"), got {err:?}"
     );
 
@@ -677,7 +677,7 @@ fn stale_listing_head_reread_transport_error_stays_an_error() {
     init_repo(bob.path());
     let err = fetch_all(bob.path(), &tx, "default").expect_err("transport error propagates");
     assert!(
-        matches!(err, DispatchError::Transport(_)),
+        matches!(err, TransferError::Transport(_)),
         "expected a transport error, got {err:?}"
     );
 }

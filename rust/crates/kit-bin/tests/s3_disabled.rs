@@ -3,13 +3,14 @@
 #![cfg(not(feature = "s3"))]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
-use kit_bin::remote_dispatch::{DispatchError, open};
+use kit_bin::remote_dispatch::open;
+use libkit::transfer::Error as TransferError;
 
 #[test]
 fn s3_remote_needs_the_s3_feature() {
     let err = open("kit+s3://s3.example.com/bucket/proj").err().unwrap();
     assert!(
-        matches!(err, DispatchError::UnsupportedScheme(_)),
+        matches!(err, TransferError::UnsupportedScheme(_)),
         "{err:?}"
     );
     assert!(err.to_string().contains("--features s3"), "{err}");

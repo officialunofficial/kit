@@ -141,11 +141,22 @@ workflow of a paused operation is in `libkit::conflict`. The key code of
 `libkit::signer`. `libkit::merge` and `libkit::rebase` never load a key. The
 command gives them a `libkit::signing::Signing`, and the library asks that
 value for the key when it writes a commit. The plan of
-`kit push` is in `libkit::push`. The transfer stays in `kit-bin`, in the
-`remote_dispatch` module, because it uses the transports and the terminal.
-The header checks, the field spellings, the grant store and the grant choice
-of a Connect client are in `libkit::grants`. The owner signing and the
-commands of `kit grant`, `kit epoch` and `kit visibility` stay in `kit-bin`.
+`kit push` is in `libkit::push`. The transfer of `kit push`, `kit pull`,
+`kit fetch` and `kit clone` is in `libkit::transfer`. It holds the transfer
+operations, the one error type of a transfer, the reading of a remote URL, the
+opening of a transport, the signer of a request envelope and the
+credential-trust gate. The header checks, the field spellings, the grant store
+and the grant choice of a Connect client are in `libkit::grants`. The owner
+signing of `kit grant`, `kit epoch` and `kit visibility` stays in `kit-bin`.
+
+Three parts of the transfer stay in `kit-bin`, in the `remote_dispatch`
+module.
+
+| Item | Why it stays |
+|---|---|
+| The assembly of a Connect transport | It connects the transport to the terminal progress, to the shutdown signal, to the admission helper process and to the warnings on stderr. These are the process of the CLI. `libkit::transfer` gives it the parts: the opener, the signer, the grant choice and the trust gate. |
+| The cache of upload receipts | It writes its cleanup problems to stderr while an upload runs, and it has no caller to return them to. The path under the repository is a choice of the CLI. An embedder passes any `PartReceiptStore` to the transport. |
+| The reading of `KIT_PACK_REBASELINE_DEPTH` | The library never reads the environment. The CLI reads the variable and passes the depth in `PushSettings`. |
 
 Two decisions are proposals. They are not part of this release.
 

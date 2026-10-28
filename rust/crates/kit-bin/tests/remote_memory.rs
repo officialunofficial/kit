@@ -16,8 +16,8 @@ use std::fs;
 use std::process::Command;
 use std::sync::Arc;
 
-use kit_bin::remote_dispatch::{pull_all, push_all};
 use kit_transport_memory::MemoryTransport;
+use libkit::transfer::{pull_all, push_all};
 
 fn kit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_kit")

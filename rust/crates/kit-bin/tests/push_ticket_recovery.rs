@@ -10,10 +10,6 @@ use std::sync::{
 };
 
 use common::Repo;
-use kit_bin::remote_dispatch::{
-    DispatchError, PushControl, RetryReason, StepAuthority, plan_push_steps, push_all_with,
-    push_branch_steps, push_branch_with_limits,
-};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
@@ -25,6 +21,10 @@ use kit_core::protocol::{
 use kit_core::refs::{self, Ref};
 use kit_core::store::ObjectStore;
 use kit_transport_memory::MemoryTransport;
+use libkit::transfer::{
+    Error as TransferError, PushControl, RetryReason, StepAuthority, plan_push_steps,
+    push_all_with, push_branch_steps, push_branch_with_limits,
+};
 
 #[derive(Clone, Copy)]
 enum Fault {
@@ -195,7 +195,7 @@ impl Transport for TicketTransport {
         if let Some(path) = &self.verify_into
             && matches!(outcome, kit_core::protocol::AdvanceOutcome::Committed)
         {
-            kit_bin::remote_dispatch::fetch_all(path, &self.inner, "origin").unwrap();
+            libkit::transfer::fetch_all(path, &self.inner, "origin").unwrap();
             let layout = RepoLayout::single(path);
             let fetched = refs::read_remote_ref(&layout, "origin", "main")
                 .unwrap()
@@ -213,7 +213,7 @@ fn tip(repo: &Repo) -> Hash {
         .unwrap()
 }
 
-fn push(repo: &Repo, tx: &TicketTransport, cap: u64) -> Result<(), DispatchError> {
+fn push(repo: &Repo, tx: &TicketTransport, cap: u64) -> Result<(), TransferError> {
     let store = ObjectStore::open(&RepoLayout::single(repo.path())).unwrap();
     push_branch_with_limits(
         tx,
@@ -259,7 +259,7 @@ fn typed_ticket_failures_restart_once_and_landed_write_succeeds() {
     let tx = TicketTransport::new(Fault::RejectedTwice);
     assert!(matches!(
         push(&repo, &tx, 4096),
-        Err(DispatchError::TicketRejected)
+        Err(TransferError::TicketRejected)
     ));
     assert_eq!(tx.advances.load(Ordering::SeqCst), 2);
 }
@@ -278,7 +278,7 @@ fn seventh_data_pack_is_refused_before_its_begin_upload() {
     // One commit cannot be split, so the exact local dry seal refuses it
     // before any pack goes up; it names the commit.
     match &err {
-        DispatchError::PushTooLarge {
+        TransferError::PushTooLarge {
             packs: 7,
             limit: 6,
             commit: Some(commit),
@@ -490,7 +490,7 @@ fn push_steps(
     tx: &TicketTransport,
     condition: RefWriteCondition,
     control: &PushControl<'_>,
-) -> (Result<usize, DispatchError>, Vec<Hash>) {
+) -> (Result<usize, TransferError>, Vec<Hash>) {
     let mut heads = Vec::new();
     let result = push_branch_steps(
         tx,
@@ -674,7 +674,7 @@ fn oversize_merge_fails_before_anything_is_published() {
         CAP,
     )
     .unwrap_err();
-    let DispatchError::PushTooLarge {
+    let TransferError::PushTooLarge {
         commit: Some(commit),
         ..
     } = &err
@@ -726,7 +726,7 @@ fn interrupted_split_resumes_from_the_published_prefix() {
         &PushControl::default(),
     );
     let error = result.unwrap_err();
-    let DispatchError::SplitInterrupted {
+    let TransferError::SplitInterrupted {
         published,
         total: reported,
         head,
@@ -738,14 +738,14 @@ fn interrupted_split_resumes_from_the_published_prefix() {
     };
     assert_eq!((*published, *reported), (2, total));
     assert_eq!(*head, kit_core::hash::to_hex(&heads[1]));
-    assert!(matches!(**cause, DispatchError::Transport(_)), "{cause:?}");
+    assert!(matches!(**cause, TransferError::Transport(_)), "{cause:?}");
     let text = error.to_string();
     assert!(text.contains("re-run the push to resume"), "{text}");
     assert!(text.contains("the last published advance was"), "{text}");
     assert_eq!(heads.len(), 2);
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(heads[1]));
     let (interrupted, prefix) = error.into_published_prefix();
-    assert!(matches!(interrupted, DispatchError::Transport(_)));
+    assert!(matches!(interrupted, TransferError::Transport(_)));
     assert_eq!(prefix.unwrap().published, 2);
 
     // The interrupted step's packs, and the advance that never landed.
@@ -791,7 +791,7 @@ fn concurrent_push_between_steps_reports_the_published_prefix() {
         &PushControl::default(),
     );
     let error = result.unwrap_err();
-    let DispatchError::SplitInterrupted {
+    let TransferError::SplitInterrupted {
         published, cause, ..
     } = &error
     else {
@@ -799,7 +799,7 @@ fn concurrent_push_between_steps_reports_the_published_prefix() {
     };
     assert_eq!(*published, 1);
     assert!(
-        matches!(**cause, DispatchError::NonFastForwardPush { .. }),
+        matches!(**cause, TransferError::NonFastForwardPush { .. }),
         "{cause:?}"
     );
     assert_eq!(heads.len(), 1);
@@ -851,7 +851,7 @@ fn each_step_recovers_on_its_own() {
     .0
     .unwrap_err();
     let (cause, prefix) = error.into_published_prefix();
-    assert!(matches!(cause, DispatchError::TicketRejected), "{cause:?}");
+    assert!(matches!(cause, TransferError::TicketRejected), "{cause:?}");
     assert_eq!(prefix.unwrap().published, 1);
 
     // A missing delta base re-plans the step as its full closure; that no
@@ -873,7 +873,7 @@ fn each_step_recovers_on_its_own() {
     assert!(
         matches!(
             cause,
-            DispatchError::RetryTooLarge {
+            TransferError::RetryTooLarge {
                 reason: RetryReason::LostDeltaBase,
                 ..
             }
@@ -957,7 +957,7 @@ fn authority_is_checked_before_any_upload() {
         .0
         .unwrap_err();
     assert!(
-        matches!(&error, DispatchError::PushNotAuthorized(m) if m == "no grant"),
+        matches!(&error, TransferError::PushNotAuthorized(m) if m == "no grant"),
         "{error:?}"
     );
     assert_eq!(tx.uploads.load(Ordering::SeqCst), 0);
@@ -1050,7 +1050,7 @@ fn step_and_chain_bounds_refuse_before_any_advance() {
             .0
             .unwrap_err();
         assert!(
-            matches!(error, DispatchError::PushSplitLimit(_)),
+            matches!(error, TransferError::PushSplitLimit(_)),
             "{error:?}"
         );
         assert_eq!(tx.uploads.load(Ordering::SeqCst), 0);
@@ -1131,7 +1131,7 @@ fn every_published_head_contains_the_remote_head_it_replaced() {
         &PushControl::default(),
     );
     assert!(
-        matches!(result, Err(DispatchError::PushTooLarge { .. })),
+        matches!(result, Err(TransferError::PushTooLarge { .. })),
         "{result:?}"
     );
     assert!(heads.is_empty());

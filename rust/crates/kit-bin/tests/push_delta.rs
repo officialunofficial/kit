@@ -17,7 +17,6 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use kit_bin::remote_dispatch::{DispatchError, pull_all, push_all, push_branch};
 use kit_core::hash;
 use kit_core::layout::RepoLayout;
 use kit_core::ops::reachable_objects;
@@ -25,6 +24,7 @@ use kit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, 
 use kit_core::refs::{self, Ref};
 use kit_core::store::ObjectStore;
 use kit_transport_memory::MemoryTransport;
+use libkit::transfer::{Error as TransferError, pull_all, push_all, push_branch};
 
 fn kit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_kit")
@@ -361,7 +361,7 @@ fn head_not_moved_when_packmap_cannot_be_established() {
 
     let err = push_branch(&tx, &store, "main", tip, RefWriteCondition::Missing).unwrap_err();
     assert!(
-        matches!(err, DispatchError::PackmapContended { .. }),
+        matches!(err, TransferError::PackmapContended { .. }),
         "expected PackmapContended, got {err:?}"
     );
     // The head ref must never have been written.
@@ -438,7 +438,7 @@ fn divergent_concurrent_push_leaves_cloneable_remote() {
     )
     .unwrap_err();
     assert!(
-        matches!(bob_err, DispatchError::NonFastForwardPush { .. }),
+        matches!(bob_err, TransferError::NonFastForwardPush { .. }),
         "expected NonFastForwardPush, got {bob_err:?}"
     );
 
@@ -538,7 +538,7 @@ fn fetch_fails_loudly_when_advertised_pack_is_missing() {
     init_repo(bob.path());
     let err = pull_all(bob.path(), &tx, "default", None).unwrap_err();
     assert!(
-        matches!(err, DispatchError::AdvertisedPackMissing { .. }),
+        matches!(err, TransferError::AdvertisedPackMissing { .. }),
         "expected AdvertisedPackMissing, got {err:?}"
     );
     // Bob must NOT have recorded a remote-tracking ref for the broken branch.
@@ -589,7 +589,7 @@ fn push_blocks_on_a_corrupt_prior_packmap_without_moving_head() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, DispatchError::PackChainInvalid { .. }),
+        matches!(err, TransferError::PackChainInvalid { .. }),
         "expected PackChainInvalid, got {err:?}"
     );
     assert_eq!(
@@ -694,7 +694,7 @@ fn push_blocks_on_a_corrupt_deeper_packmap_node() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, DispatchError::PackChainInvalid { .. }),
+        matches!(err, TransferError::PackChainInvalid { .. }),
         "a deeper broken node must block the push, got {err:?}"
     );
     assert_eq!(
