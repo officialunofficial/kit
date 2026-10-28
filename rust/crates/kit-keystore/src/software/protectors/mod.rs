@@ -7,8 +7,20 @@
 //! reachable from [`super::default_protector_for_write`] /
 //! [`super::default_protector_by_id`].
 
+#[cfg(any(
+    all(target_os = "macos", feature = "macos-keychain"),
+    all(target_os = "linux", feature = "linux-secret-service")
+))]
 use crate::Error;
+#[cfg(any(
+    all(target_os = "macos", feature = "macos-keychain"),
+    all(target_os = "linux", feature = "linux-secret-service")
+))]
 use crate::Result;
+#[cfg(any(
+    all(target_os = "macos", feature = "macos-keychain"),
+    all(target_os = "linux", feature = "linux-secret-service")
+))]
 use crate::types::hex_lower;
 
 #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
@@ -25,6 +37,10 @@ pub(super) use linux_secret_service::{
 
 /// Random opaque handle used by the credential-store protectors as the
 /// account/credential name under which the wrapped DEK is stored.
+#[cfg(any(
+    all(target_os = "macos", feature = "macos-keychain"),
+    all(target_os = "linux", feature = "linux-secret-service")
+))]
 pub(super) fn random_handle() -> Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| Error::Internal("rng failed".into()))?;

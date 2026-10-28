@@ -61,6 +61,10 @@ impl PartialEq<KeyLabel> for &str {
 }
 
 /// Build a validated label from a source-controlled static string.
+#[cfg(any(
+    all(target_os = "macos", feature = "macos-keychain"),
+    all(target_os = "linux", feature = "linux-secret-service")
+))]
 pub(crate) fn static_label(label: &'static str) -> KeyLabel {
     KeyLabel::new(label).expect("static label is valid")
 }
