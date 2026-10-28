@@ -9,6 +9,7 @@ Contents:
 - [What gets published](#what-gets-published)
 - [Pre-release checklist](#pre-release-checklist)
 - [Cutting a release](#cutting-a-release)
+- [The release PR](#the-release-pr)
 - [Publishing to crates.io](#publishing-to-cratesio)
 - [Signing and verification](#signing-and-verification)
 - [Supply-chain policy](#supply-chain-policy)
@@ -194,10 +195,12 @@ disagree, fix the script:
 ## Cutting a release
 
 1. Land everything on `main`. Confirm CI is green.
-2. Bump `[workspace.package].version` in `rust/Cargo.toml` (to a version not yet
-   on crates.io). Update `CHANGELOG.md` (move `Unreleased` items into
+2. Prepare the release PR. Use the release PR that release-plz opens (see
+   [The release PR](#the-release-pr)), or prepare it by hand: bump
+   `[workspace.package].version` in `rust/Cargo.toml` (to a version not yet
+   on crates.io) and update `CHANGELOG.md` (move `Unreleased` items into
    `[X.Y.Z] - YYYY-MM-DD`, leaving a fresh `[Unreleased]` heading above it).
-3. Open a release-prep PR, merge it.
+3. Review the release PR and merge it.
 4. Tag the merge commit on `main`:
    ```sh
    git tag -s vX.Y.Z -m "kit X.Y.Z"
@@ -218,6 +221,21 @@ disagree, fix the script:
    `validate-release-tag` → `build` (× 4 archs) → `sbom` / `third-party-notices` (parallel) →
    `release`.
 6. Run the [smoke test](#smoke-test).
+
+### The release PR
+
+The workflow `.github/workflows/release-plz.yml` runs release-plz. A
+maintainer starts it with `workflow_dispatch`. It does nothing until the
+repository variable `KIT_RELEASE_PLZ_ENABLED` is `true`.
+
+release-plz reads the Conventional Commits since the last `vX.Y.Z` tag. It
+opens one PR that bumps the shared version of all crates and adds the new
+entry to `CHANGELOG.md`. It checks the public API for breaking changes with
+`cargo-semver-checks`. Edit the PR if the entry needs better wording.
+
+release-plz does not tag, publish or create a GitHub release. After the merge,
+a maintainer cuts the signed tag and publishes the crates by hand. The
+settings are in `rust/release-plz.toml`.
 
 ## Publishing to crates.io
 
@@ -622,3 +640,7 @@ repository secret.
 | Variable | Purpose | Required for |
 | --- | --- | --- |
 | `KIT_RELEASE_GPG_FINGERPRINTS` | Space-separated trusted 40-hex GPG fingerprints allowed to sign release tags (public keys must be on `keys.openpgp.org` or `keyserver.ubuntu.com`) | `release.yml` preflight |
+| `KIT_RELEASE_PLZ_ENABLED` | Set to `true` to let `release-plz.yml` run | `release-plz.yml` |
+
+The release PR workflow also needs the secrets `RELEASE_PLZ_APP_ID` and
+`RELEASE_PLZ_APP_PRIVATE_KEY`. They identify a GitHub App that opens the PR.
