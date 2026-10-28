@@ -1,0 +1,109 @@
+name: "CI: Third-party notices"
+
+# Early feedback for the `cargo about generate` step of the release job. The
+# check finds a new dependency with a license outside the accepted list in
+# rust/about.toml when the dependency changes, not at tag time. The list
+# matches the [licenses] allow list of rust/deny.toml. cargo-about and
+# cargo-deny parse license expressions with different code, so this check is
+# not a copy of the cargo-deny gate.
+#
+# The job does not compile the workspace. cargo-about reads the dependency
+# graph from `cargo metadata`, so the job is cheap.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/third-party-notices.yml'
+      - 'rust/Cargo.lock'
+      - 'rust/Cargo.toml'
+      - 'rust/crates/**/Cargo.toml'
+      - 'rust/about.toml'
+      - 'rust/about.hbs'
+  # The pull_request trigger has no path filter, so the required check
+  # (third-party-notices-gate) always appears. The `check` job runs only when
+  # the paths filter below matches. A path-filtered trigger would leave a
+  # required check pending on pull requests that do not touch the dependencies.
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Detects whether the pull request touches the dependency graph or the
+  # cargo-about policy files.
+  changes:
+    name: Detect dependency-graph changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      deps: ${{ steps.filter.outputs.deps }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: filter
+        with:
+          filters: |
+            deps:
+              - '.github/workflows/third-party-notices.yml'
+              - 'rust/Cargo.lock'
+              - 'rust/Cargo.toml'
+              - 'rust/crates/**/Cargo.toml'
+              - 'rust/about.toml'
+              - 'rust/about.hbs'
+
+  check:
+    name: cargo about generate
+    needs: changes
+    if: >-
+      always() &&
+      (github.event_name == 'push' || needs.changes.outputs.deps == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install cargo-about
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        with:
+          tool: cargo-about@0.9.1
+
+      # This is the command of the release job without the upload. The step
+      # must fail on an unapproved license. It does not need to keep the file.
+      - name: Generate THIRD-PARTY-NOTICES
+        working-directory: rust
+        run: cargo about generate --all-features about.hbs -o /dev/null
+
+  # The stable required-check name for branch protection. The job always runs
+  # on a pull request. It passes when `check` succeeded or was skipped because
+  # the pull request touches no dependency paths. It fails when `check` failed
+  # or was cancelled.
+  third-party-notices-gate:
+    name: Third-party notices gate
+    if: always() && github.event_name == 'pull_request'
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the result of the check job
+        shell: bash
+        env:
+          CHECK: ${{ needs.check.result }}
+        run: |
+          echo "check: ${CHECK}"
+          case "${CHECK}" in
+            success|skipped)
+              echo "Third-party notices gate satisfied."
+              ;;
+            *)
+              echo "::error::the check job did not succeed (result=${CHECK})"
+              exit 1
+              ;;
+          esac
