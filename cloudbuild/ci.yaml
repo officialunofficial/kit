@@ -90,6 +90,12 @@ steps:
           failed=0
           cargo fetch --locked || failed=1
           cargo clippy --locked --all-targets --all-features --workspace -- -D warnings || failed=1
+          # One crate alone with its default features can hide code that
+          # the all-features run above keeps alive.
+          for crate in $(cargo metadata --locked --no-deps --format-version 1 \
+              | python3 -I -c 'import json, sys; print(*[p["name"] for p in json.load(sys.stdin)["packages"]])'); do
+            cargo clippy --locked --all-targets -p "$crate" -- -D warnings || failed=1
+          done
           msrv=$(awk -F\" '/^[[:space:]]*rust-version[[:space:]]*=/ {print $2; exit}' Cargo.toml) || failed=1
           rustc_v=$(rustc --version | awk '{print $2}') || failed=1
           echo "declared minimum=$msrv, image rustc=$rustc_v"
