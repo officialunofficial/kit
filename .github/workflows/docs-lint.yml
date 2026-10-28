@@ -1,0 +1,44 @@
+name: "Meta: docs lint"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+      - 'scripts/check-spec-status.sh'
+      - 'scripts/check-doc-paths.sh'
+      - 'scripts/check-writing.sh'
+      - 'scripts/check-writing-patterns.txt'
+      - '.github/workflows/docs-lint.yml'
+  pull_request:
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+      - 'scripts/check-spec-status.sh'
+      - 'scripts/check-doc-paths.sh'
+      - 'scripts/check-writing.sh'
+      - 'scripts/check-writing-patterns.txt'
+      - '.github/workflows/docs-lint.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  docs-lint:
+    name: Docs checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Check every docs/specs/SPEC-*.md has a recognized status
+        run: bash scripts/check-spec-status.sh
+        shell: bash
+
+      - name: Check that doc paths resolve
+        run: bash scripts/check-doc-paths.sh
+        shell: bash
+
+      - name: Check writing rules
+        run: bash scripts/check-writing.sh
+        shell: bash

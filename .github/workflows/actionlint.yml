@@ -1,0 +1,39 @@
+name: "Meta: actionlint"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '.github/actionlint.yaml'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '.github/actionlint.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # The download script and the actionlint release both use tag 1.7.7.
+      - name: Download actionlint
+        id: get_actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+        shell: bash
+
+      # actionlint bundles shellcheck. The gate fails only on error severity,
+      # so style suggestions in existing `run:` blocks do not block a merge.
+      - name: Run actionlint
+        run: |
+          ${{ steps.get_actionlint.outputs.executable }} \
+            -color \
+            -shellcheck="shellcheck -S error"
+        shell: bash
