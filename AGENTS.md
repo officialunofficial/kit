@@ -44,6 +44,9 @@ kit is a content-addressed, signed version-control system. Security comes first.
 
 - Sign every commit.
 - Make one logical change per commit.
-- Write a subject line of 72 characters or fewer, in the imperative mood.
+- Write the subject as a Conventional Commits header: `type(scope): subject`. The type is `feat`, `fix`, `docs`,
+  `refactor`, `perf`, `test`, `build`, `ci` or `chore`. The scope names the crate or area and is optional. Add `!` after
+  the scope for a breaking change.
+- Keep the header at 72 characters or fewer. Write the subject in the imperative mood.
 - Write a body that explains why the change is needed, not only what it does.
 - Add no trailers that name a tool or a model.
