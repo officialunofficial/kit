@@ -1,0 +1,75 @@
+# Open or update the release PR with release-plz.
+#
+# The PR bumps the shared workspace version and updates CHANGELOG.md from
+# Conventional Commits. This workflow does not publish to crates.io, create a
+# tag or create a GitHub release. A maintainer cuts the signed tag that
+# release.yml verifies. A maintainer then publishes the crates by hand. See
+# docs/RELEASE.md and rust/release-plz.toml.
+#
+# The workflow runs only on manual dispatch. It does nothing until the
+# repository variable KIT_RELEASE_PLZ_ENABLED is `true`.
+#
+# Secrets:
+#  - RELEASE_PLZ_APP_ID and RELEASE_PLZ_APP_PRIVATE_KEY identify a GitHub App.
+#    The workflow mints an installation token from them. A PR that the default
+#    token opens does not start other workflows. A PR that the App token opens
+#    does start them.
+
+name: "Release: release-plz PR (manual)"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-plz-pr:
+    name: release-plz PR
+    if: vars.KIT_RELEASE_PLZ_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read the pinned toolchain
+        id: pin
+        run: echo "version=$(bash scripts/toolchain-version.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ steps.pin.outputs.version }}
+
+      # release-plz runs cargo-semver-checks (semver_check = true). It diffs
+      # the public API against the last release to pick the version bump.
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: Mint GitHub App token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - name: Run release-plz release-pr
+        uses: release-plz/action@18641b6c63063cc5ff8786ebf69cd57e8541bae1  # v0.5.140
+        with:
+          command: release-pr
+          manifest_path: rust/Cargo.toml
+          config: rust/release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

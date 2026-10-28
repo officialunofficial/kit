@@ -1,0 +1,144 @@
+# release-plz opens one release PR for the kit workspace. The PR bumps the
+# shared version and updates the root CHANGELOG.md from Conventional Commits.
+#
+# release-plz does not publish, tag or create a GitHub release. A maintainer
+# cuts the signed `vX.Y.Z` tag by hand, because release.yml verifies that the
+# tag is annotated and GPG-signed by an allowlisted fingerprint. A maintainer
+# then runs `cargo publish --workspace --locked` from that tag. See
+# docs/RELEASE.md.
+
+[workspace]
+# Check each public API against the last release and pick the version bump.
+semver_check = true
+# Never publish, even if a release job runs.
+publish = false
+# Never tag or open a GitHub release. The hand-cut signed tag does that work.
+git_tag_enable = false
+git_release_enable = false
+# Only the anchor package below writes a changelog.
+changelog_update = false
+# Run the release job only on a commit that merges a release PR.
+release_always = false
+pr_name = "chore: release v{{ version }}"
+pr_labels = ["release"]
+
+# Every kit crate inherits `version.workspace = true`. One version group moves
+# them all to the same next version.
+#
+# libkit is the anchor. It writes the one root CHANGELOG.md for the whole group
+# and lists the other publishable crates in `changelog_include`, so the file
+# holds the commits of every crate.
+[[package]]
+name = "libkit"
+version_group = "kit"
+changelog_update = true
+changelog_path = "../CHANGELOG.md"
+# release-plz builds the compare links from this template. It points them at
+# the hand-cut `vX.Y.Z` tags.
+git_tag_name = "v{{ version }}"
+changelog_include = [
+  "kit-attest",
+  "kit-bin",
+  "kit-client",
+  "kit-core",
+  "kit-git-bridge",
+  "kit-keystore",
+  "kit-rpc",
+  "kit-serve",
+  "kit-sync",
+  "kit-transport-connect",
+  "kit-transport-file",
+  "kit-transport-memory",
+  "kit-transport-s3",
+  "kit-transport-ssh",
+]
+
+[[package]]
+name = "kit-attest"
+version_group = "kit"
+[[package]]
+name = "kit-bin"
+version_group = "kit"
+[[package]]
+name = "kit-client"
+version_group = "kit"
+[[package]]
+name = "kit-core"
+version_group = "kit"
+[[package]]
+name = "kit-git-bridge"
+version_group = "kit"
+[[package]]
+name = "kit-keystore"
+version_group = "kit"
+[[package]]
+name = "kit-rpc"
+version_group = "kit"
+[[package]]
+name = "kit-serve"
+version_group = "kit"
+[[package]]
+name = "kit-sync"
+version_group = "kit"
+[[package]]
+name = "kit-transport-connect"
+version_group = "kit"
+[[package]]
+name = "kit-transport-file"
+version_group = "kit"
+[[package]]
+name = "kit-transport-memory"
+version_group = "kit"
+[[package]]
+name = "kit-transport-s3"
+version_group = "kit"
+[[package]]
+name = "kit-transport-ssh"
+version_group = "kit"
+
+# These crates set `publish = false` in their manifests. They stay out of the
+# release.
+[[package]]
+name = "kit-benches"
+release = false
+[[package]]
+name = "kit-formal-conformance"
+release = false
+[[package]]
+name = "kit-fuzz"
+release = false
+[[package]]
+name = "kit-sign-file"
+release = false
+[[package]]
+name = "kit-test-util"
+release = false
+
+# The groups follow the Keep a Changelog headings in CHANGELOG.md. Commit
+# types with no user-visible effect do not appear in the file.
+[changelog]
+protect_breaking_commits = true
+header = """# Changelog
+
+All notable changes to kit are in this file.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+"""
+body = """
+
+## [{{ version | trim_start_matches(pat="v") }}]{%- if release_link -%}({{ release_link }}){% endif %} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.breaking %}**Breaking:** {% endif %}{{ commit.message | upper_first }}
+{%- endfor %}
+{% endfor %}"""
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^(fix|perf)", group = "<!-- 1 -->Fixed" },
+  { message = "^(refactor|docs?|revert)", group = "<!-- 2 -->Changed" },
+  { message = "^(chore|style|test|ci|build)", skip = true },
+]
