@@ -1,0 +1,19 @@
+# Review routing for the officialunofficial GitHub org.
+# Format: https://docs.github.com/articles/about-codeowners
+# Every path routes to an existing team, so required reviews resolve.
+
+*                                @officialunofficial/officialunofficial
+
+# Security-sensitive surfaces
+/rust/crates/kit-attest/         @officialunofficial/officialunofficial
+/rust/crates/kit-keystore/       @officialunofficial/officialunofficial
+/rust/crates/kit-rpc/            @officialunofficial/officialunofficial
+
+# CI and release tooling
+/.github/                        @officialunofficial/officialunofficial
+/install.sh                      @officialunofficial/officialunofficial
+/scripts/                        @officialunofficial/officialunofficial
+
+# On-disk and wire formats
+/docs/specs/SPEC-*.md            @officialunofficial/officialunofficial
+/rust/tests/golden/              @officialunofficial/officialunofficial
