@@ -9,8 +9,13 @@
 //! * [`spec`] turns the spellings of a person into the canonical statements
 //!   of SPEC-WRITE-GRANTS §3, §5.1 and §9.1.
 //! * [`store`] keeps one file for each grant and re-verifies each on load.
+//! * [`connect`] chooses the grant that a Connect client presents, and checks
+//!   that the stored grants cover every advance of a split push.
 //! * This module checks a header against the rules of the specification.
 
+#[cfg(all(feature = "sync", feature = "transport-connect"))]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "sync", feature = "transport-connect"))))]
+pub mod connect;
 pub mod spec;
 pub mod store;
 

@@ -60,7 +60,7 @@ path = "src/main.rs"
 kit-core = { version = "=0.5.0", path = "../kit-core", features = ["batch-verify"] }
 kit-attest = { version = "=0.5.0", path = "../kit-attest", features = ["grants"] }
 kit-keystore = { version = "=0.5.0", path = "../kit-keystore" }
-libkit = { version = "=0.5.0", path = "../libkit", default-features = false, features = ["sync"] }
+libkit = { version = "=0.5.0", path = "../libkit", default-features = false, features = ["sync", "transport-connect"] }
 # The native clone/fetch/pull engine (packmap fetch, signature verification,
 # applied-packs record, fast-forward and rollback). The CLI keeps all
 # printing, config layering, trust gates and exit codes.

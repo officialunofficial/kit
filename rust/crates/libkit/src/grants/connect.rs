@@ -1,5 +1,5 @@
 //! Local grant choice for the Connect client, over the user grant store
-//! (`crate::grants::store`).
+//! ([`super::store`]).
 //!
 //! Selection: filter to the grants valid for the
 //! request, rank the higher epoch first, then the P-18 rules (capability
@@ -28,13 +28,16 @@ use kit_transport_connect::{
     ConnectTransport, GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource,
 };
 
-use super::StepAuthority;
 use kit_sync::packmap::packmap_ref;
+use kit_sync::push::StepAuthority;
 
-use crate::grants::store::StoredGrant;
+use super::parse_relying_parties;
+use super::store::{GrantStore, StoredGrant};
+use crate::Environment;
 #[cfg(test)]
 use kit_attest::grant::SignedHeader;
 
+#[derive(Debug)]
 struct Candidate {
     header: String,
     grant: Grant,
@@ -54,10 +57,12 @@ fn permits(flags: RefFlags, condition: GrantCondition) -> bool {
 
 /// A snapshot of encoded, owner-signed grant headers, built from the user
 /// grant store, which re-verified every owner signature when it loaded.
-pub(crate) struct LocalGrants(Vec<Candidate>);
+#[derive(Debug)]
+pub struct LocalGrants(Vec<Candidate>);
 
 impl LocalGrants {
-    pub(crate) fn from_stored(grants: impl IntoIterator<Item = StoredGrant>) -> Self {
+    #[must_use]
+    pub fn from_stored(grants: impl IntoIterator<Item = StoredGrant>) -> Self {
         Self(
             grants
                 .into_iter()
@@ -69,8 +74,36 @@ impl LocalGrants {
         )
     }
 
+    /// The verified grants of the user store, and one warning for each problem
+    /// on the way. A problem never stops the load: an unreadable store or an
+    /// unparsable relying-party pin gives fewer grants, never more.
+    ///
+    /// `relying_parties` is `grant.webauthn_rp` from the user config.
+    #[must_use]
+    pub fn load(relying_parties: &[String], env: &Environment) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
+        let pins = parse_relying_parties(relying_parties).unwrap_or_else(|error| {
+            warnings.push(format!(
+                "grant.webauthn_rp: {error}; treating no relying party as pinned"
+            ));
+            Vec::new()
+        });
+        let grants = match GrantStore::open_default(env) {
+            Ok(store) => {
+                let report = store.load(&pins);
+                warnings.extend(report.warnings);
+                report.grants
+            }
+            Err(error) => {
+                warnings.push(format!("{error}; using no stored grants"));
+                Vec::new()
+            }
+        };
+        (Self::from_stored(grants), warnings)
+    }
+
     #[cfg(test)]
-    pub(crate) fn from_headers(headers: impl IntoIterator<Item = String>) -> Self {
+    fn from_headers(headers: impl IntoIterator<Item = String>) -> Self {
         Self(
             headers
                 .into_iter()
@@ -244,10 +277,36 @@ impl GrantSource for LocalGrants {
 /// server yet accepts `u` alone for them (the server refuses it, "update without
 /// force needs indexed mode", and indexed mode's ancestry check remains a
 /// known gap). The check asks for an `Any` write, which only an `f` grant covers.
-pub(crate) struct ConnectAuthority {
-    pub(crate) transport: Arc<ConnectTransport>,
-    pub(crate) grants: Arc<LocalGrants>,
-    pub(crate) signer_key: String,
+pub struct ConnectAuthority {
+    transport: Arc<ConnectTransport>,
+    grants: Arc<LocalGrants>,
+    signer_key: String,
+}
+
+impl ConnectAuthority {
+    /// An authority over `grants` for the requests that `transport` signs
+    /// with `signer_key`, the public key as hex.
+    #[must_use]
+    pub fn new(
+        transport: Arc<ConnectTransport>,
+        grants: Arc<LocalGrants>,
+        signer_key: String,
+    ) -> Self {
+        Self {
+            transport,
+            grants,
+            signer_key,
+        }
+    }
+}
+
+impl std::fmt::Debug for ConnectAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConnectAuthority")
+            .field("signer_key", &self.signer_key)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StepAuthority for ConnectAuthority {
@@ -952,5 +1011,64 @@ mod tests {
                 .authorize("main", RefWriteCondition::Missing, true)
                 .is_ok()
         );
+    }
+
+    mod load {
+        use super::super::super::store::GrantStore;
+        use super::super::super::testutil::signed_grant;
+        use super::super::LocalGrants;
+        use crate::Environment;
+
+        fn environment(dir: &std::path::Path) -> Environment {
+            Environment {
+                xdg_config_home: Some(dir.to_path_buf()),
+                ..Environment::new(dir)
+            }
+        }
+
+        #[test]
+        fn load_reads_the_verified_grants_of_the_user_store() {
+            let dir = tempfile::tempdir().unwrap();
+            let env = environment(dir.path());
+            let store = GrantStore::open_default(&env).unwrap();
+            let header = signed_grant(1, 1, 0, "https://git.example.com");
+            store.add(&header, &[]).unwrap();
+            let (grants, warnings) = LocalGrants::load(&[], &env);
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(grants.0.len(), 1);
+            assert_eq!(grants.0[0].header, header);
+        }
+
+        #[test]
+        fn load_without_a_config_directory_gives_no_grants_and_one_warning() {
+            let (grants, warnings) = LocalGrants::load(&[], &Environment::default());
+            assert!(grants.0.is_empty());
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].ends_with("; using no stored grants"),
+                "{warnings:?}"
+            );
+        }
+
+        #[test]
+        fn an_invalid_relying_party_warns_and_the_load_goes_on() {
+            let dir = tempfile::tempdir().unwrap();
+            let env = environment(dir.path());
+            let store = GrantStore::open_default(&env).unwrap();
+            store
+                .add(&signed_grant(1, 1, 0, "https://git.example.com"), &[])
+                .unwrap();
+            let (grants, warnings) = LocalGrants::load(
+                &["example.com https://example.com | example.com https://example.com".to_owned()],
+                &env,
+            );
+            assert_eq!(grants.0.len(), 1);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].starts_with("grant.webauthn_rp: ")
+                    && warnings[0].ends_with("; treating no relying party as pinned"),
+                "{warnings:?}"
+            );
+        }
     }
 }

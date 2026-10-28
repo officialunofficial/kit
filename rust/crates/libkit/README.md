@@ -147,7 +147,9 @@ turns this module on.
 `libkit::grants` holds the client side of write grants. It checks grant, epoch
 and visibility headers. `spec` turns the spellings of a person into canonical
 statements. `store` keeps one file for each grant in the directory of the
-user, and it verifies each file on load.
+user, and it verifies each file on load. With the `sync` and `transport-connect`
+features, `connect` chooses the stored grant that a Connect client presents, and
+checks that the stored grants cover every advance of a split push.
 
 ## Errors
 

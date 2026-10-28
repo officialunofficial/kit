@@ -19,7 +19,6 @@
 //!   `SshTransport::connect_with_options` when config is loaded.
 
 mod envelope_signer;
-pub(crate) mod grants;
 mod packmap;
 
 mod upload_receipts;
@@ -45,6 +44,7 @@ use kit_transport_file::FileTransport;
 #[cfg(feature = "s3")]
 use kit_transport_s3::S3Transport;
 use kit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_kit_ssh_url};
+use libkit::grants::connect::{ConnectAuthority, LocalGrants};
 
 pub use kit_sync::push::{MAX_CHAIN_COMMITS, MAX_SPLIT_STEPS, PushControl, StepAuthority};
 
@@ -457,11 +457,8 @@ pub(crate) fn open_trusted_for_push(
         .signer_key
         .zip(parts.grants)
         .map(|(signer_key, grants)| {
-            Arc::new(grants::ConnectAuthority {
-                transport: tx.clone(),
-                grants,
-                signer_key,
-            }) as Arc<dyn StepAuthority>
+            Arc::new(ConnectAuthority::new(tx.clone(), grants, signer_key))
+                as Arc<dyn StepAuthority>
         });
     Ok(PushRemote {
         tx: Remote::Connect(tx),
@@ -563,7 +560,7 @@ pub(crate) fn open_connect_with_config(
 struct ConnectParts {
     transport: ConnectTransport,
     /// The user grants installed on the transport (none without a signer).
-    grants: Option<Arc<grants::LocalGrants>>,
+    grants: Option<Arc<LocalGrants>>,
     /// The signing key's public hex, when requests are signed.
     signer_key: Option<String>,
 }
@@ -637,7 +634,14 @@ fn open_connect_parts(
     });
     // Grants ride only on signed requests (SPEC-WRITE-GRANTS §4.2), so the
     // store is read only when there is a signer to present them with.
-    let grants = signed.then(|| Arc::new(grants::LocalGrants::from_stored(load_user_grants(cfg))));
+    let grants = signed.then(|| {
+        let (grants, warnings) =
+            LocalGrants::load(&cfg.grant_webauthn_rp, &crate::environment::current());
+        for warning in warnings {
+            eprintln!("warning: {warning}");
+        }
+        Arc::new(grants)
+    });
     if let Some(grants) = &grants {
         tx = tx.with_grant_source(grants.clone());
     }
@@ -668,27 +672,6 @@ fn open_connect_parts(
         grants,
         signer_key,
     })
-}
-
-/// The verified grants in the user store, one warning per skipped file.
-fn load_user_grants(cfg: &crate::config::Config) -> Vec<crate::grants::store::StoredGrant> {
-    let rps = crate::grants::parse_relying_parties(&cfg.grant_webauthn_rp).unwrap_or_else(|e| {
-        eprintln!("warning: grant.webauthn_rp: {e}; treating no relying party as pinned");
-        Vec::new()
-    });
-    let store = match crate::grants::store::GrantStore::open_default(&crate::environment::current())
-    {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("warning: {e}; using no stored grants");
-            return Vec::new();
-        }
-    };
-    let report = store.load(&rps);
-    for warning in &report.warnings {
-        eprintln!("warning: {warning}");
-    }
-    report.grants
 }
 
 /// The configured kit signing key as an owner signer for `kit grant`,
