@@ -1,0 +1,52 @@
+# Coverage service configuration.
+# https://docs.codecov.com/docs/codecovyml-reference
+#
+# Policy:
+# - The coverage trend informs a review. It never blocks a merge.
+# - The project target is the moving baseline of main, with a small
+#   tolerance, so a change to a document or a refactor does not trip it.
+# - Generated code, fuzz harnesses, benchmarks and the tests themselves
+#   stay out of the denominator.
+
+codecov:
+  notify:
+    # Wait for the CI run, so a pull request gets one coverage comment.
+    after_n_builds: 1
+    wait_for_ci: true
+  require_ci_to_pass: false
+
+coverage:
+  precision: 1
+  round: nearest
+  range: "60...90"
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        if_ci_failed: success
+        only_pulls: false
+    patch:
+      default:
+        # New code should reach 80%. The transport and cryptography glue
+        # behind optional features needs real sockets and real devices, so
+        # the tolerance is wide.
+        target: 80%
+        threshold: 10%
+        if_ci_failed: success
+
+ignore:
+  - "rust/benches/**"
+  - "rust/fuzz/**"
+  - "rust/tests/golden/**"
+  - "rust/target/**"
+  - "**/build.rs"
+  - "**/tests/**"
+  - "rust/crates/*/generated/**"
+
+comment:
+  layout: "header, diff, files, footer"
+  behavior: default
+  require_changes: true
+  require_base: false
+  require_head: true
