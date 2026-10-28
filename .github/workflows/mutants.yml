@@ -1,0 +1,142 @@
+name: "CI: Mutation testing"
+
+# Mutation testing for the security-critical crates: kit-core, kit-attest and
+# kit-keystore. cargo-mutants makes small semantic changes, such as a flipped
+# comparison or a swapped return value. It then checks that the tests catch
+# each change. A surviving mutant marks code that no test pins.
+#
+# The workflow has two lanes:
+#   mutants-diff  Runs on every pull request. The --in-diff option limits the
+#                 run to the lines that the pull request changes, so the run
+#                 stays short whatever the size of the crates. The run does
+#                 nothing when the pull request touches none of the crates.
+#   mutants-full  Runs weekly and on demand. It sweeps every mutant of
+#                 kit-attest and of kit-keystore. It does not block pull
+#                 requests.
+#
+# kit-core has about 7800 mutants. A full sweep of that crate does not fit in
+# the time limit of one job, so only mutants-diff covers it.
+
+on:
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "0 7 * * 2"  # Tuesdays 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants-diff:
+    name: cargo-mutants (changed lines)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The merge-base diff below needs the full history.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: "rust-mutants-diff"
+          protoc: "false"
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        with:
+          tool: cargo-nextest
+
+      # The triple-dot form diffs against the merge-base. It matches the
+      # "Files changed" tab of the pull request. An empty diff means that the
+      # pull request touches none of the crates, so the next step does nothing.
+      - name: Compute diff against merge-base
+        id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git diff "${BASE_SHA}...${HEAD_SHA}" \
+            -- rust/crates/kit-core rust/crates/kit-attest rust/crates/kit-keystore \
+            > "${RUNNER_TEMP}/mutants.diff"
+          lines=$(wc -l < "${RUNNER_TEMP}/mutants.diff")
+          echo "diff lines in the scoped crates: ${lines}"
+          echo "has_diff=$([ "${lines}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: cargo mutants --in-diff
+        if: steps.diff.outputs.has_diff == 'true'
+        working-directory: rust
+        run: |
+          cargo mutants --in-diff "${RUNNER_TEMP}/mutants.diff" \
+            -p kit-core -p kit-attest -p kit-keystore \
+            --test-tool nextest \
+            --timeout-multiplier 3 \
+            -- --locked --all-features
+
+      - name: Upload mutants report on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: mutants-diff-report
+          path: rust/mutants.out/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  mutants-full:
+    name: cargo-mutants (full sweep, ${{ matrix.crate }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [kit-attest, kit-keystore]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: "rust-mutants-full-${{ matrix.crate }}"
+          protoc: "false"
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2
+        with:
+          tool: cargo-nextest
+
+      - name: cargo mutants (full sweep)
+        working-directory: rust
+        env:
+          CRATE: ${{ matrix.crate }}
+        run: |
+          cargo mutants -p "${CRATE}" \
+            --test-tool nextest \
+            --timeout-multiplier 3 \
+            -- --locked --all-features
+
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: mutants-full-report-${{ matrix.crate }}
+          path: rust/mutants.out/**
+          if-no-files-found: ignore
+          retention-days: 30
