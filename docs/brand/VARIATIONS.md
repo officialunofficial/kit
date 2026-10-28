@@ -61,3 +61,8 @@ The source build produces the approved logos, alternate logos, individual
 shapes, grouped symbols, and comparison sheets. Export both formats from the
 same revision. Preserve the aspect ratios and update the revision reference
 when replacing assets.
+
+## Web assets
+
+[Favicons and social cards](WEB.md) includes a compact K favicon, an Uno-blue
+Open Graph example, source rendering code, and page metadata guidance.
