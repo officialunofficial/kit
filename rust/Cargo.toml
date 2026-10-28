@@ -109,3 +109,10 @@ strip = "symbols"
 # `expect("reason")`.
 panic = "unwind"
 overflow-checks = true
+
+# Profiling build: the release code generation with symbols and line tables,
+# so a sampling profiler can name functions and lines. See docs/PROFILING.md.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
