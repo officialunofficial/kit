@@ -2,26 +2,45 @@
 
 ## Favicon
 
-The favicon uses the outlined K from the wordmark in white on an Uno-blue
-rounded tile. The full four-solid composition and grid are omitted so the
-mark remains legible at tab sizes.
+The favicon uses the complete outlined KIT wordmark in white on an Uno-blue
+rounded tile. A single uniform scale preserves its original 66.51 by 19.79
+unit proportions, letter spacing, and contours. The wordmark fills 60 units
+of the 64-unit canvas width and remains centered vertically.
+
+At 16 pixels, the lettering is about 4.46 pixels tall. Higher-resolution
+exports improve larger and high-density presentations but do not add detail
+to a 16-pixel display slot.
 
 | Asset | Purpose |
 |---|---|
 | [favicon.svg](favicon/favicon.svg) | Scalable browser icon |
-| [favicon.ico](favicon/favicon.ico) | Fallback with 16, 32, and 48 pixel images |
+| [favicon.ico](favicon/favicon.ico) | Fallback with 16, 32, 48, 64, 128, and 256 pixel images |
 | [16 pixel PNG](favicon/favicon-16.png) | Small browser tab preview |
 | [32 pixel PNG](favicon/favicon-32.png) | Raster browser icon |
 | [48 pixel PNG](favicon/favicon-48.png) | Larger browser icon |
+| [64 pixel PNG](favicon/favicon-64.png) | High-density tab icon |
+| [96 pixel PNG](favicon/favicon-96.png) | Search and larger icon surfaces |
+| [128 pixel PNG](favicon/favicon-128.png) | Larger raster icon |
+| [180 pixel PNG](favicon/favicon-180.png) | Rounded raster icon |
+| [192 pixel PNG](favicon/favicon-192.png) | Larger raster icon |
+| [256 pixel PNG](favicon/favicon-256.png) | High-resolution raster icon |
+| [512 pixel PNG](favicon/favicon-512.png) | Largest raster export |
 | [Apple touch PNG](favicon/apple-touch-icon.png) | 180 pixel square touch icon |
 
 The touch icon has a full blue square background so the platform can apply
-its mask. The browser favicon retains transparent rounded corners.
+its mask. The browser favicon retains transparent rounded corners. Every PNG is rendered
+directly from the vector source at its target dimensions.
+
+Google Search requires a square favicon of at least 8 pixels and recommends
+one larger than 48 pixels. Its supported format list includes PNG and ICO.
+Keep a stable, crawlable raster URL on the home page alongside the scalable
+SVG browser icon. Appearance in search results is not guaranteed.
 
 Copy the files to the site's public root and include:
 
 ```html
-<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48 64x64 128x128 256x256">
+<link rel="icon" href="/favicon-96.png" type="image/png" sizes="96x96">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
 <meta name="theme-color" content="#0067ed">
@@ -104,7 +123,7 @@ a favicon, change site metadata, or publish an endpoint by themselves.
 
 The favicon and card source are recorded in the
 [logo Kit](https://uno.fun/01a15ada-9a3a-73f1-b3a0-9110d4efd027/kit-logo)
-at revision `28c453cb9bf894d0a63d08a1fa17a3978b4cf9a2af71592b86845897d78d501c`.
+at revision `1b9054c639c7ede11d7aa43f4d21e9952486ab5fc101ff2677cb7a5c1c69b65b`.
 The browser ICO and SVG files are local exports from that source.
 
 ## References
@@ -114,3 +133,8 @@ The browser ICO and SVG files are local exports from that source.
   documents the layout primitives, data URIs, and rendering response.
 - [Wrangler configuration](https://developers.cloudflare.com/workers/wrangler/configuration/)
   describes local configuration and asset module rules.
+
+- [Google favicon guidance](https://developers.google.com/search/docs/appearance/favicon-in-search)
+  covers square dimensions, raster formats, stable URLs, and crawling.
+- [WebKit SVG icon support](https://webkit.org/blog/17333/webkit-features-in-safari-26-0/)
+  describes scalable favicons in Safari 26.

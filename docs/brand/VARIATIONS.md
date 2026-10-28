@@ -64,5 +64,5 @@ when replacing assets.
 
 ## Web assets
 
-[Favicons and social cards](WEB.md) includes a compact K favicon, an Uno-blue
+[Favicons and social cards](WEB.md) includes a proportional KIT favicon, an Uno-blue
 Open Graph example, source rendering code, and page metadata guidance.
