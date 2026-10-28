@@ -268,6 +268,20 @@ pull request that changes a manifest, the lockfile or the script.
 The dry run prints one warning for each test file that a crate does not
 ship. The warning is expected.
 
+### Semver check
+
+The workflow `.github/workflows/semver.yml` runs `cargo semver-checks` on each
+pull request that changes `rust/`. The baseline is the latest release on
+crates.io. A breaking change fails the check unless the workspace version
+bump allows it. In a 0.x release, a minor bump allows a breaking change.
+The check skips `kit-bin`, whose library surface is not a public API.
+
+Run the same check by hand before you tag:
+
+```sh
+cd rust && cargo semver-checks --workspace --exclude kit-bin
+```
+
 ### What a crate ships
 
 Each publishable crate sets `include` in its `Cargo.toml`. The list names
