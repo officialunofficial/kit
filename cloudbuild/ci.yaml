@@ -453,7 +453,7 @@ steps:
         bash scripts/check-generated-fresh.sh
         sccache --show-stats
 
-  # The writing rules over the tree and over new commit messages. The commit scan
+  # The writing rules over the tree and the form of new commit messages. The commit scan
   # needs a checkout with an origin/main ref and skips itself without one.
   - name: ${_CI_IMAGE}
     id: writing
@@ -470,12 +470,14 @@ steps:
         git config --global --add safe.directory /workspace
         bash scripts/check-writing.sh || status=1
         bash scripts/test-check-writing.sh || status=1
+        bash scripts/test-check-commit-messages.sh || status=1
         base=""
         if git rev-parse --verify --quiet origin/main >/dev/null; then
           base=$(git merge-base HEAD origin/main)
         fi
         if [ -n "$base" ] && [ "$base" != "$(git rev-parse HEAD)" ]; then
           bash scripts/check-writing.sh --commits "$base..HEAD" || status=1
+          python3 -I -B scripts/check-commit-messages.py "$base..HEAD" || status=1
         else
           echo "No base commit: skipping the commit message scan."
         fi

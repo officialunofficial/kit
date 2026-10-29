@@ -88,6 +88,7 @@ ci-scripts:
     bash scripts/check-generated-fresh.sh
     bash scripts/check-writing.sh
     bash scripts/test-check-writing.sh
+    bash scripts/test-check-commit-messages.sh
     bash scripts/check-doc-paths.sh
     bash scripts/test-check-doc-paths.sh
     bash scripts/test-install.sh

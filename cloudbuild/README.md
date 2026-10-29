@@ -84,7 +84,7 @@ archive. They wait for `nextest-archive`.
 | `fuzz-smoke` | The fuzz bodies run as tests. Every libFuzzer target builds and runs for 5 seconds. |
 | `golden` | Spec status, spec magics, crypto stack version, exact dependency versions, format constants and the independent Python checks of the golden vectors. |
 | `generated` | The checked-in protocol code matches the `.proto` files. |
-| `writing` | The writing rules over the tree and over new commit messages, the cited paths and the installer test. |
+| `writing` | The writing rules over the tree and over new commit messages, the Conventional Commits form of new commit messages, the cited paths and the installer test. |
 | `unsafe` | A SAFETY comment on every `unsafe` site, the unsafe policy of every crate root and the cargo-geiger ceilings. |
 | `supply` | `cargo deny`, `cargo audit` and the deadline of the advisory ignore. |
 | `workflows` | `actionlint` over the remaining GitHub workflow files. |
