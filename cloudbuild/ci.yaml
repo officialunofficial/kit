@@ -394,7 +394,7 @@ steps:
             target=$(basename "$path" .rs)
             echo "fuzz target: $target"
             mkdir -p "corpus/$target" "artifacts/$target"
-            "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/$target" \
+            "/tmp/target-fuzz/x86_64-unknown-linux-gnu/release/$target" \
               "-artifact_prefix=artifacts/$target/" -max_total_time=5 "corpus/$target" || failed=1
           done
           exit "$failed"
