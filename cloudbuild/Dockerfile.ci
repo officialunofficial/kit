@@ -19,9 +19,10 @@ FROM rust:${RUST_VERSION}-bookworm
 # python3-venv, python3-pip: the golden checks install their Python packages.
 # mold: links the nextest archive (cloudbuild/ci.yaml).
 # unzip: unpacks protoc below.
+# xz-utils: unpacks the Node tarball below.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        git jq mold pkg-config python3-pip python3-venv unzip \
+        git jq mold pkg-config python3-pip python3-venv unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # protoc: the code generator needs it. The .proto files use Edition 2023, which
@@ -31,6 +32,11 @@ RUN curl -sSL -o /tmp/protoc.zip \
         "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" \
     && unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' \
     && rm -f /tmp/protoc.zip
+
+# Node runs the kit-wasm smoke test (scripts/wasm-smoke.sh).
+ARG NODE_VERSION=22.11.0
+RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+        | tar -xJ -C /usr/local --strip-components=1 --exclude='*.md' --exclude=LICENSE
 
 # rustfmt and clippy for the lint gates. The wasm32 target is for the kit-client
 # build and the generated-code check. The dated nightly toolchain is only for
@@ -54,6 +60,7 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf \
         cargo-about@0.9.1 \
         cargo-fuzz@0.13.2 \
         b3sum@1.8.7 \
+        wasm-bindgen-cli@0.2.129 \
     && curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
         | tar -xz -C /usr/local/bin actionlint \
     && rm -rf "${CARGO_HOME:-/usr/local/cargo}/registry"

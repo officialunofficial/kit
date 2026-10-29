@@ -88,6 +88,14 @@ class Gates(unittest.TestCase):
         for name, version in tools:
             self.assertRegex(version, r"^@\d+\.\d+\.\d+$", f"{name} has no exact version")
 
+    def test_wasm_smoke_tools_match_the_lock_file(self):
+        docker = (CLOUD / "Dockerfile.ci").read_text()
+        lock = (ROOT / "rust/Cargo.lock").read_text()
+        locked = re.search(r'name = "wasm-bindgen"\nversion = "([^"]+)"', lock).group(1)
+        self.assertIn(f"wasm-bindgen-cli@{locked} ", docker)
+        self.assertRegex(docker, r"ARG NODE_VERSION=\d+\.\d+\.\d+")
+        self.assertIn("bash scripts/wasm-smoke.sh", script_of(ci_steps()["wasm"]))
+
     def test_mold_links_only_the_archive_step(self):
         steps = ci_steps()
         for step_id, step in steps.items():

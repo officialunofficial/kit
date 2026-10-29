@@ -318,7 +318,8 @@ steps:
         bash scripts/check-cli-baseline.sh
 
   # kit-client builds for wasm32 with the default and the minimal feature set.
-  # kit-wasm builds for wasm32 as a release build, the way wasm-pack builds it.
+  # kit-wasm builds for wasm32 as a release build. Then the smoke test runs the
+  # generated bindings under Node.
   - name: ${_CI_IMAGE}
     id: wasm
     waitFor: ['-']
@@ -348,6 +349,7 @@ steps:
           cargo build --locked -p kit-wasm --release --target wasm32-unknown-unknown || failed=1
           exit "$failed"
         ) || status=1
+        bash scripts/wasm-smoke.sh || status=1
         sccache --show-stats
         exit "$status"
 

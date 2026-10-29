@@ -58,7 +58,7 @@ gate command of Cloud Build.
 
 | File | Purpose |
 |---|---|
-| `Dockerfile.ci` | The toolchain image: the Rust version of `rust/rust-toolchain.toml`, protoc, mold, nextest, sccache, cargo-deny, cargo-audit, cargo-geiger, cargo-about, cargo-fuzz, b3sum, actionlint, and a dated nightly toolchain for cargo-fuzz. Every tool has one exact version. |
+| `Dockerfile.ci` | The toolchain image: the Rust version of `rust/rust-toolchain.toml`, protoc, mold, nextest, sccache, cargo-deny, cargo-audit, cargo-geiger, cargo-about, cargo-fuzz, b3sum, wasm-bindgen-cli, Node, actionlint, and a dated nightly toolchain for cargo-fuzz. Every tool has one exact version. |
 | `builder.yaml` | Builds `Dockerfile.ci` and pushes the image. It reads the Rust version from `rust/rust-toolchain.toml`. Run it again when `Dockerfile.ci` or that file changes. |
 | `ci.yaml` | The main suite. See the steps below. |
 | `supply.yaml` | The `third-party-notices`, `release-artifact-check` and `publish-dry-run` steps. |
@@ -80,7 +80,7 @@ archive. They wait for `nextest-archive`.
 | `tests-misc` | Doctests, and the `libkit` feature sets. |
 | `version` | `kit version` prints exactly `kit <X.Y.Z>`. |
 | `cli-baseline` | The default `kit` build has no server code. |
-| `wasm` | `kit-client` builds for wasm32 with the default and the minimal feature set. `kit-wasm` builds for wasm32 as a release build. |
+| `wasm` | `kit-client` builds for wasm32 with the default and the minimal feature set. `kit-wasm` builds for wasm32 as a release build. The generated Node bindings then pass `scripts/wasm-smoke.sh`. |
 | `fuzz-smoke` | The fuzz bodies run as tests. Every libFuzzer target builds and runs for 5 seconds. |
 | `golden` | Spec status, spec magics, crypto stack version, exact dependency versions, format constants and the independent Python checks of the golden vectors. |
 | `generated` | The checked-in protocol code matches the `.proto` files. |
