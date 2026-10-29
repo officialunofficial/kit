@@ -5,7 +5,7 @@
 //! key, and prints the summary or the JSON result.
 //!
 //! The module also keeps two helpers for the commands that sign objects:
-//! [`load_commit_signer`] and [`resolve_author`].
+//! `load_commit_signer` and `resolve_author`.
 
 use std::io::Write;
 

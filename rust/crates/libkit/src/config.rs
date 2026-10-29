@@ -732,7 +732,8 @@ fn read_config_text(path: &Path) -> Result<Option<String>, ConfigError> {
 }
 
 /// Apply config `text` to `cfg` under the given scope. `origin` names the
-/// source in errors and events. Config fails closed: see [`apply_file`].
+/// source in errors and events. Config fails closed: the first bad line is an
+/// error.
 ///
 /// # Errors
 /// [`ConfigError::Rejected`] for the first unknown key, line without `=`
