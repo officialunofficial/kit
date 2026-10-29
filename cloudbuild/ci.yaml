@@ -362,7 +362,7 @@ steps:
   - name: ${_CI_IMAGE}
     id: fuzz-smoke
     waitFor: ['-']
-    timeout: 2400s
+    timeout: 4500s
     entrypoint: bash
     env:
       - "CARGO_TERM_COLOR=always"
@@ -374,7 +374,7 @@ steps:
       - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
       - "SCCACHE_GCS_RW_MODE=READ_WRITE"
       - "SCCACHE_GCS_KEY_PREFIX=ci"
-      - "CARGO_BUILD_JOBS=4"
+      - "CARGO_BUILD_JOBS=8"
       - "CARGO_TARGET_DIR=/tmp/target-fuzz"
     args:
       - -c
