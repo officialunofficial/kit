@@ -48,7 +48,6 @@ connectrpc = { version = "0.9.1", default-features = false, features = [
     "client",
     "client-tls",
     "gzip",
-    "zstd",
     "json",
 ] }
 buffa = "0.9.2"
@@ -114,7 +113,6 @@ connectrpc = { version = "0.9.1", default-features = false, features = [
     "client-tls",
     "server",
     "gzip",
-    "zstd",
     "json",
 ] }
 

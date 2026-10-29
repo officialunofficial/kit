@@ -1261,7 +1261,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "wasm-bindgen-futures",
- "zstd 0.13.3",
 ]
 
 [[package]]

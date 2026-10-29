@@ -225,7 +225,7 @@ proptest = "1.12.0"
 # generated Connect codebase end-to-end. `server` is additive on top of
 # `kit-transport-connect`'s own `client`/`client-tls` feature set (Cargo
 # unions dependency features across dependency kinds).
-connectrpc = { version = "0.9.1", default-features = false, features = ["server", "gzip", "zstd", "json"] }
+connectrpc = { version = "0.9.1", default-features = false, features = ["server", "gzip", "json"] }
 http = "1.5.0"
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "io-util"] }
 # Real TLS proxy for the Connect CLI regression matrix.
