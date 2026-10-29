@@ -318,6 +318,7 @@ steps:
         bash scripts/check-cli-baseline.sh
 
   # kit-client builds for wasm32 with the default and the minimal feature set.
+  # kit-wasm builds for wasm32 as a release build, the way wasm-pack builds it.
   - name: ${_CI_IMAGE}
     id: wasm
     waitFor: ['-']
@@ -344,6 +345,7 @@ steps:
           failed=0
           cargo build --locked -p kit-client --target wasm32-unknown-unknown || failed=1
           cargo build --locked -p kit-client --no-default-features --target wasm32-unknown-unknown || failed=1
+          cargo build --locked -p kit-wasm --release --target wasm32-unknown-unknown || failed=1
           exit "$failed"
         ) || status=1
         sccache --show-stats

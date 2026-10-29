@@ -80,7 +80,7 @@ archive. They wait for `nextest-archive`.
 | `tests-misc` | Doctests, and the `libkit` feature sets. |
 | `version` | `kit version` prints exactly `kit <X.Y.Z>`. |
 | `cli-baseline` | The default `kit` build has no server code. |
-| `wasm` | `kit-client` builds for wasm32 with the default and the minimal feature set. |
+| `wasm` | `kit-client` builds for wasm32 with the default and the minimal feature set. `kit-wasm` builds for wasm32 as a release build. |
 | `fuzz-smoke` | The fuzz bodies run as tests. Every libFuzzer target builds and runs for 5 seconds. |
 | `golden` | Spec status, spec magics, crypto stack version, exact dependency versions, format constants and the independent Python checks of the golden vectors. |
 | `generated` | The checked-in protocol code matches the `.proto` files. |
