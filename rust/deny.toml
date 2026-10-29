@@ -100,6 +100,40 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "transitive via zbus-secret-service-keyring-store 1.0.1 -> zbus 5.19.0 for the opt-in Linux secret-service keystore backend; informational unmaintained flag (merged into zbus 6.0), no known defect. Re-justify by 2026-11-19." },
     { id = "RUSTSEC-2026-0371", reason = "same path as RUSTSEC-2026-0370; D-Bus bus-name types on the same-UID session bus only, not attacker-reachable. Re-justify by 2026-11-19." },
     { id = "RUSTSEC-2026-0372", reason = "same path as RUSTSEC-2026-0370; proc-macro crate, compile-time only, no runtime code. Re-justify by 2026-11-19." },
+    # RUSTSEC-2026-0391 and RUSTSEC-2026-0395 to RUSTSEC-2026-0406 (reported
+    # 2026-10-16): memory-safety advisories in zstd 0.13.3 and zstd-safe 7.3.0.
+    # The only path is commonware-storage 2026.9.0, which pins zstd 0.13:
+    #
+    #   kit-core -> commonware-storage -> zstd 0.13.3 -> zstd-safe 7.3.0
+    #
+    # kit-core reaches it through the optional `history-mmr` feature and
+    # through a dev-dependency. kit's own zstd use (pack entries) is zstd
+    # 0.14.3 and is not affected. The `connectrpc` zstd feature, which also
+    # pulled zstd 0.13, is off in every kit crate.
+    #
+    # Not reachable from kit code: `history-mmr` calls only the merkle
+    # types of commonware-storage, which never compress. Only the test
+    # `freezer_archive_spike.rs` turns on the compressed archive path, and
+    # it compresses its own data.
+    #
+    # No upgrade path: commonware-storage 2026.9.0 is the newest release.
+    #
+    # TODO(2026-11-19): re-check for a commonware-storage release that uses
+    # zstd 0.14.3 or later. If one exists, bump it and drop all of these
+    # ignores together.
+    { id = "RUSTSEC-2026-0391", reason = "transitive via commonware-storage 2026.9.0 -> zstd 0.13.3 (zstd-safe 7.3.0); kit never uses its compression outside one test. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0395", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0396", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0397", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0398", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0399", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0400", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0401", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0402", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0403", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0404", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0405", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
+    { id = "RUSTSEC-2026-0406", reason = "same path as RUSTSEC-2026-0391. Re-justify by 2026-11-19." },
 ]
 
 [licenses]
