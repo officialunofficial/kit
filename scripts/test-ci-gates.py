@@ -77,7 +77,7 @@ class Gates(unittest.TestCase):
                     self.assertEqual(f"{match.group(1)}:{match.group(2)}".rstrip('}"'), tag)
         self.assertIn(tag, (CLOUD / "builder.yaml").read_text())
         nightly = re.search(r"toolchain install (nightly-\d{4}-\d{2}-\d{2})", docker).group(1)
-        self.assertIn(f"cargo +{nightly} fuzz run", ci_steps()["fuzz-smoke"])
+        self.assertIn(f"cargo +{nightly} fuzz build", ci_steps()["fuzz-smoke"])
 
     def test_tools_are_pinned_and_mold_is_installed(self):
         docker = (CLOUD / "Dockerfile.ci").read_text()

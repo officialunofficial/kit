@@ -355,10 +355,10 @@ steps:
 
   # The fuzz bodies run as unit tests. Then every libFuzzer target builds and
   # runs for 5 seconds. The nightly toolchain date must equal the date in
-  # Dockerfile.ci. Each cargo-fuzz run is a plain cargo-fuzz call, so the target
-  # directory is the default one of the fuzz crate. The call names the gnu
-  # target, because the prebuilt cargo-fuzz defaults to musl and the sanitizer
-  # does not support musl.
+  # Dockerfile.ci. One cargo-fuzz build compiles every target, because a build
+  # per target links each one again and takes about two minutes. The call names
+  # the gnu target, because the prebuilt cargo-fuzz defaults to musl and the
+  # sanitizer does not support musl. Each target then runs as its binary.
   - name: ${_CI_IMAGE}
     id: fuzz-smoke
     waitFor: ['-']
@@ -389,10 +389,13 @@ steps:
         ) || status=1
         ( cd rust/fuzz || exit 1
           failed=0
+          cargo +nightly-2026-10-01 fuzz build --target x86_64-unknown-linux-gnu --features libfuzzer || failed=1
           for path in fuzz_targets/*.rs; do
             target=$(basename "$path" .rs)
             echo "fuzz target: $target"
-            cargo +nightly-2026-10-01 fuzz run --target x86_64-unknown-linux-gnu "$target" --features libfuzzer -- -max_total_time=5 || failed=1
+            mkdir -p "corpus/$target" "artifacts/$target"
+            "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/$target" \
+              "-artifact_prefix=artifacts/$target/" -max_total_time=5 "corpus/$target" || failed=1
           done
           exit "$failed"
         ) || status=1
