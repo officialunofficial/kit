@@ -77,7 +77,7 @@ fn rejects_non_commit_bytes() {
     assert!(commit_decode(b"not a commit object").is_err());
 }
 
-/// Native port of `rejects_non_commit_bytes` (#505 PR 2/5): CI never runs
+/// Native port of `rejects_non_commit_bytes`: CI never runs
 /// `wasm-pack test` (only `wasm-pack build`), so the wasm-gated test above
 /// never actually executes and the "throws on bad bytes" contract goes
 /// unverified. On native, the same `Err` arm builds a `JsError` via a

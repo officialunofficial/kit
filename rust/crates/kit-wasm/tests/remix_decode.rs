@@ -131,7 +131,7 @@ fn remix_requires_at_least_one_source() {
     assert!(remix_encode_and_sign(TREE_HEX, "", "[]", "m", 1, SEED_HEX).is_err());
 }
 
-/// Native port of `remix_requires_at_least_one_source` (#505 PR 2/5): CI
+/// Native port of `remix_requires_at_least_one_source`: CI
 /// never runs `wasm-pack test`, so the wasm-gated test above never
 /// actually executes. On native the same `Err` arm panics via `JsError`
 /// (wasm-bindgen imported function), so assert the panic through
@@ -159,7 +159,7 @@ fn remix_decode_rejects_commit_bytes() {
     assert!(remix_decode(&commit.bytes()).is_err());
 }
 
-/// Native port of `remix_decode_rejects_commit_bytes` (#505 PR 2/5): same
+/// Native port of `remix_decode_rejects_commit_bytes`: same
 /// CI gap and same `catch_unwind` porting pattern as the ports above.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]

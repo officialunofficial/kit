@@ -199,7 +199,7 @@ fn sign_rejects_short_seed() {
     assert!(ed25519_pubkey_from_seed(&short).is_err());
 }
 
-/// Native port of `sign_rejects_short_seed` (#505 PR 2/5): CI never runs
+/// Native port of `sign_rejects_short_seed`: CI never runs
 /// `wasm-pack test`, so the wasm-gated test above never actually
 /// executes and the "throws on bad seed" contract goes unverified. On
 /// native, the same `JsValue` error path still constructs a `JsError` via

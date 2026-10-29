@@ -1,4 +1,4 @@
-//! Native tests for the verifier-kit wasm exports (issue #1015 PR 4).
+//! Native tests for the verifier-kit wasm exports.
 //!
 //! Golden vectors are the same files `kit-core` consumes. This crate
 //! only reads `MANIFEST.txt` and the committed sidecars — it does not
@@ -370,7 +370,7 @@ fn golden_proof_vectors_via_wasm() {
                 }
             }
             ("tree_entry", "range" | "multi") | ("chunk", "range") => {
-                // PR 4 exports only the single-leaf verifiers. Range/multi
+                // The exports cover only the single-leaf verifiers. Range/multi
                 // stay on kit-core; the MANIFEST digest check above still
                 // pins the bytes.
             }
