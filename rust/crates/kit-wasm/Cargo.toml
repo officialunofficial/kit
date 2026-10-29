@@ -1,0 +1,90 @@
+[package]
+name = "kit-wasm"
+description = "WebAssembly bindings for kit — content-addressed VCS primitives (BLAKE3 hashing, Ed25519 commit signing, in-toto attestations, FastCDC chunking, delta encoding, and Bao verified streaming) for use from JavaScript bundlers, browsers, and edge runtimes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["kit", "vcs", "wasm", "blake3", "ed25519"]
+categories = ["wasm", "cryptography"]
+# Not published to crates.io. The web site builds it with wasm-pack from a
+# pinned tag. wasm-pack copies the metadata above (description, keywords,
+# repository, license, readme) into the generated package.json.
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The bundled wasm-opt in `wasm-pack` predates bulk-memory ops and
+# rejects rustc's 1.95 codegen. Skip it — the blob is already small
+# enough (< 1 MiB) for the demo, and we can run a newer wasm-opt in CI
+# if size becomes a concern.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = false
+
+[lints]
+workspace = true
+
+# `default-features = false`: kit-core's default feature set includes
+# `pack-zstd` (SPEC-PACKFILE v2 per-entry compression, issue #646),
+# which pulls `zstd-sys` — a C lib that cannot target
+# wasm32-unknown-unknown. kit-wasm's bindings never call into
+# `pack.rs` (see `src/`), so opting out costs nothing here and keeps
+# this crate's wasm32 build zstd-sys-free, matching the same
+# wasm-avoidance rationale already documented on kit-core's
+# `commonware-storage` dependency.
+[dependencies]
+kit-core = { version = "=0.5.0", path = "../kit-core", default-features = false }
+kit-attest = { version = "=0.5.0", path = "../kit-attest" }
+wasm-bindgen = "0.2.129"
+hex = "0.4.3"
+# Parses the optional ceremony-policy blob handed to
+# `verify_webauthn_wrapping_with_policy`. Same major (1.x) as the copy
+# kit-attest already pulls in for clientDataJSON parsing, so no new
+# version lands in the dep graph.
+serde_json = "1.0.154"
+# Verified streaming via BLAKE3 tree hashing (outboard + slice proof).
+# Drives the `/streaming` demo's Bao view. `blake3 = "1"` is already the
+# workspace pin (via kit-core); the transitive re-export in
+# `bao::Hash` matches, so no second major shows up in the tree.
+bao = "0.13.1"
+# Direct dep for the raw Ed25519 wasm exports (`ed25519_sign`,
+# `ed25519_pubkey_from_seed`). Same major as the transitive copy
+# kit-core::sign + kit-attest already pull in (default-features off,
+# `alloc` on) — keeps the dep graph at a single dalek version.
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }
+# `Zeroizing<[u8; 32]>` wrappers carry the scrub-on-drop contract for
+# every Rust-side temporary holding a JS-passed seed. The seed can't be
+# scrubbed on the JS side (we can't reach into the ArrayBuffer), but
+# every Rust-side copy must zero on drop — see `attest_keypair`.
+zeroize = { version = "1.9.1", default-features = false }
+
+# Activate the browser randomness backends for every getrandom in the
+# dep graph when compiling for `wasm32-unknown-unknown`. Two major
+# versions coexist today: getrandom 0.4 (used directly by kit-core /
+# ed25519-dalek via their updated deps) and getrandom 0.2 (pulled in
+# transitively by the `k256`/`p256` stack that `kit-attest` uses for
+# FIDO2/WebAuthn verification paths). Each major takes a different
+# feature name, so we enable both here without polluting native builds.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4.3", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2.17", features = ["js"] }
+
+# dalek is a regular dependency above (see `[dependencies]`); tests
+# (`tests/ed25519.rs`) reach the same crate without a separate
+# `[dev-dependencies]` entry, which would risk a duplicate dep version.
+
+# Native-only test deps for the WebAuthn/passkey exports
+# (`tests/webauthn.rs`): forge a passkey-shaped assertion with the
+# deterministic P-256 signer and re-derive the clientDataJSON hash.
+# Versions match the copies kit-attest already pulls in.
+[dev-dependencies]
+sha2 = { version = "0.11.1", default-features = false }
+base64 = "0.23.1"
+serde_json = "1.0.154"

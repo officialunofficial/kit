@@ -1,0 +1,121 @@
+# kit-wasm
+
+WebAssembly bindings for kit &mdash; a content-addressed VCS for creative work. The package exposes the pure byte-format and crypto paths from `kit-core` and `kit-attest` so they can run anywhere a modern JS runtime can: browsers, Cloudflare Workers, Bun, Deno, Node.
+
+No filesystem or network access is performed inside the wasm module. It is a stateless library of object encoders, hashers, signers, verifiers, FastCDC chunkers, delta encoders, and Bao streaming primitives.
+
+## Build
+
+The crate is not on crates.io. Build the JavaScript package with
+[`wasm-pack`](https://rustwasm.github.io/wasm-pack/) from the repository root:
+
+```sh
+cd rust/crates/kit-wasm
+wasm-pack build --target bundler --release
+```
+
+The `bundler` target works with esbuild, Wrangler, Vite, webpack and Rollup.
+Use `--target web` for a direct `<script type="module">`. That target exports
+the classic `await init()` default.
+
+## Usage
+
+The `bundler` build starts the wasm module when you import it. There is no
+`init` export to await. Import the functions you need:
+
+```ts
+import { blake3_hex, commit_verify, attest_build, attest_verify } from "kit-wasm";
+
+const id = blake3_hex(new TextEncoder().encode("hello"));
+console.log(id); // 64-character lowercase hex
+```
+
+## Exported functions
+
+Content-addressing and objects:
+- `blake3_hex(bytes) -> string` &mdash; BLAKE3 of arbitrary bytes as 64-char hex.
+- `blob_encode(bytes) -> { bytes, hash_hex }` &mdash; canonical blob object.
+- `tree_encode(entries_json) -> { bytes, hash_hex }` &mdash; canonical tree object.
+- `commit_encode_and_sign(...)` &mdash; encode and sign a commit object.
+- `commit_verify(commit_bytes) -> bool` &mdash; verify a signed commit.
+
+Signing primitives:
+- `keypair_from_seed(seed_hex)` / `keypair_generate()` &mdash; Ed25519 keys.
+- `sign_bytes_commit_domain(seed_hex, bytes) -> sig_hex`.
+- `verify_bytes_commit_domain(pubkey_hex, bytes, sig_hex) -> bool`.
+
+Attestations (in-toto/DSSE-style envelopes):
+- `attest_keypair(seed_hex, algo)` &mdash; ed25519, secp256k1, or p256.
+- `attest_build(...)` &mdash; build and sign an envelope.
+- `attest_verify(envelope_json, pubkey_hex, algo) -> bool`.
+
+Chunking, delta, and streaming:
+- `chunk_boundaries(bytes)` &mdash; FastCDC chunk boundary report.
+- `chunked_blob_encode(bytes)` &mdash; chunked-blob object construction.
+- `chunked_blob_decode(bytes) -> json` &mdash; `{ total_size, chunk_size, chunks }` from a canonical `ChunkedBlob` (16 MiB cap).
+- `delta_encode(base, target)` &mdash; produce a delta summary.
+- `bao_encode(bytes)` &mdash; Bao outboard over **raw** file bytes (for streaming demos).
+- `bao_slice(...)` / `bao_verify_slice(...)` &mdash; verified streaming of those raw bytes.
+- `blob_bao_encode(content)` &mdash; Bao outboard over **canonical blob bytes**; `hash_hex` equals the blob id.
+- `blob_bao_slice(outboard, content, content_offset, len)` &mdash; content offsets; the +10 canonical shift is inside.
+- `blob_bao_verify_slice(blob_id_hex, slice, content_offset, len)` &mdash; delegates to `kit_core::verify::verify_blob_slice`.
+
+Disclosure and closure verification:
+- `verify_disclosure(commit_id_hex, bundle) -> json` &mdash; path, leaf, signer, payload summary **without** bytes, plus `step_inner_roots` (hex array) and `chunk_inner_root` (hex or `null`). Bundles are capped at 64 MiB (`MAX_BUNDLE_BYTES`).
+- `disclosure_payload_bytes(commit_id_hex, bundle) -> bytes` &mdash; verified payload bytes; re-verifies. Call `verify_disclosure` first; treat a failure of either as a failure.
+- `verify_disclosure_span(commit_id_hex, container) -> VerifiedSpan` &mdash; verify an MKDS v1 multi-chunk span once against a trusted commit. Its `json` getter returns authenticated path, leaf, signer, signature validity, offset, span and chunk indices, byte length and BLAKE3; its `bytes` getter returns the authenticated range bytes. The container is capped at 64 MiB. Errors begin with the `span_*` reject reason, except a malformed `commit_id_hex`, which begins with `invalid_input:` (it is not a SPEC-DISCLOSURE §8.2 condition).
+- `verify_closure_packs(root_hex, mode, packs, pack_lengths_json) -> json` &mdash; `mode` is `"snapshot"` or `"history"`. `packs` is the concatenation of each pack; `pack_lengths_json` is a JSON array of those lengths (for example `"[1024,2048]"`). Concatenated packs are capped independently of a disclosure bundle, at 1 GiB (`MAX_CLOSURE_INPUT_BYTES`, matching the native store's per-object cap) &mdash; a closure is every object reachable from a commit, a realistically much larger shape than a handful of proofs. The result includes `unreferenced_checked: true` because the pack index can enumerate every supplied object.
+- `verify_closure_manifest(expected_root_hex, manifest, packs, pack_lengths_json) -> json` &mdash; same pack framing; the manifest is a locator, never a trust anchor. Both closure exports return `unreferenced_checked` alongside `root`, `mode`, `verified`, `complete`, `missing`, `corrupt`, and `unreferenced`.
+- `verify_tree_entry(tree_id_hex, entry_json, position, proof) -> bool` &mdash; `entry_json` is `{ "name" | "name_hex", "mode", "object_hash" }`. Returns `false` when the proof does not fold to the id; throws on malformed input.
+- `verify_chunk(chunked_id_hex, chunk_id_hex, position, proof) -> bool` &mdash; same accept/reject split. Position 0 is never a chunk.
+- `wrap_object_id(kind, inner_root_hex) -> hex` &mdash; `kind` is `"tree"` or `"chunked_blob"`. Apply after a commonware BMT verifier checked the inner root.
+
+### Verifying a commit hash
+
+A verified disclosure proves the bytes belong to that commit id; `signature_valid` proves the embedded signer produced the commit; binding that signer to a person or org is application policy.
+
+```ts
+import {
+  verify_disclosure,
+  verify_closure_manifest,
+} from "kit-wasm";
+
+const commitId = "…64-char hex…"; // the id you already trust
+const disclosed = JSON.parse(verify_disclosure(commitId, bundle));
+// disclosed.payload has kind/bytes_len/bytes_blake3, not the bytes
+
+const packs = [pack0, pack1];
+const concat = new Uint8Array(packs.reduce((n, p) => n + p.byteLength, 0));
+let off = 0;
+for (const p of packs) {
+  concat.set(p, off);
+  off += p.byteLength;
+}
+const report = JSON.parse(
+  verify_closure_manifest(
+    commitId,
+    manifest,
+    concat,
+    JSON.stringify(packs.map((p) => p.byteLength)),
+  ),
+);
+if (!report.complete) throw new Error("closure is missing or corrupt");
+```
+
+The exact JS surface is generated by `wasm-bindgen`; refer to the
+TypeScript declarations shipped in the package for full signatures.
+
+## Versioning
+
+The crate shares the workspace version. The wasm module wraps the same Rust
+crates as the native `kit` CLI, so objects built here have the same bytes as
+objects built by the CLI.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](./LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](./LICENSE-MIT))
+
+at your option.

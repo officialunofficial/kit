@@ -18,6 +18,7 @@ members = [
     "crates/kit-sign-file",
     "crates/kit-sync",
     "crates/kit-bin",
+    "crates/kit-wasm",
     "fuzz",
     "benches",
     "crates/kit-formal-conformance",
