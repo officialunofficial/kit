@@ -359,9 +359,11 @@ steps:
   # per target links each one again and takes about two minutes. The call names
   # the gnu target, because the prebuilt cargo-fuzz defaults to musl and the
   # sanitizer does not support musl. Each target then runs as its binary.
+  # The step waits for the compile-heavy steps. Eight sanitizer builds next to
+  # them used all the memory of the machine, and the kernel stopped the build.
   - name: ${_CI_IMAGE}
     id: fuzz-smoke
-    waitFor: ['-']
+    waitFor: ['lint', 'nextest-3', 'ignored-lane', 'tests-misc']
     timeout: 4500s
     entrypoint: bash
     env:
@@ -374,7 +376,7 @@ steps:
       - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
       - "SCCACHE_GCS_RW_MODE=READ_WRITE"
       - "SCCACHE_GCS_KEY_PREFIX=ci"
-      - "CARGO_BUILD_JOBS=8"
+      - "CARGO_BUILD_JOBS=6"
       - "CARGO_TARGET_DIR=/tmp/target-fuzz"
     args:
       - -c
@@ -389,7 +391,7 @@ steps:
         ) || status=1
         ( cd rust/fuzz || exit 1
           failed=0
-          cargo +nightly-2026-10-01 fuzz build --target x86_64-unknown-linux-gnu --features libfuzzer || failed=1
+          cargo +nightly-2026-10-01 fuzz build --target x86_64-unknown-linux-gnu --features libfuzzer || exit 1
           for path in fuzz_targets/*.rs; do
             target=$(basename "$path" .rs)
             echo "fuzz target: $target"
