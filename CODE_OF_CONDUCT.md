@@ -62,15 +62,10 @@ requests and its discussions.
 ## Enforcement
 
 Report abusive, harassing or otherwise unacceptable behavior to the
-maintainers listed in [`MAINTAINERS.md`](MAINTAINERS.md). Do not report it in
-a public issue.
+maintainers listed in [`MAINTAINERS.md`](MAINTAINERS.md). Do not report it in a public issue.
 
-kit has no email address for conduct reports. The only private channel is the
-one in [`SECURITY.md`](SECURITY.md). Open a private report through GitHub
-Security Advisories at
-<https://github.com/officialunofficial/kit/security/advisories/new>. Start the
-title with `CONDUCT`. State that the report is about conduct and not about a
-vulnerability.
+Send the report by email to <support@officialunofficial.com>. State that the
+report is about conduct.
 
 The maintainers review and investigate every report promptly and fairly. They
 respect the privacy and security of the person who reports an incident.
