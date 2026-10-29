@@ -6,6 +6,8 @@ states that bar.
 Report a vulnerability in private. Do not open a public issue. Follow
 [`SECURITY.md`](SECURITY.md).
 
+All contributors follow the [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+
 ## License
 
 You license your contribution under MIT OR Apache-2.0. See
