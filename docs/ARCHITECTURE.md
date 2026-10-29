@@ -33,6 +33,7 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 | `kit-sign-file`               | `rust/crates/kit-sign-file/`         | Reference external signer; protocol conformance baseline               |
 
 The `libkit` crate does not re-export `kit-bin`, `kit-serve` or `kit-rpc`.
+[`LIBKIT.md`](LIBKIT.md) is the usage guide.
 `kit-bin` is the command line. `kit-serve` is the self-hosted server. `kit-rpc`
 holds the wire framing for the signer and server protocols. `kit-client`,
 `kit-transport-memory` and the test crates are not re-exported either.

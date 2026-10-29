@@ -110,6 +110,7 @@ from Git, read [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md).
 | [`docs/VERIFY.md`](docs/VERIFY.md) | Verify a commit hash without repository access |
 | [`docs/specs/`](docs/specs/README.md) | Wire-format and subsystem specs |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Crate layout |
+| [`docs/LIBKIT.md`](docs/LIBKIT.md) | Embed kit with the `libkit` crate |
 | [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Security boundaries |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | How a release is cut |
 
@@ -123,7 +124,9 @@ cargo test --workspace
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) lists the checks that a change must pass.
 [`GOVERNANCE.md`](GOVERNANCE.md) and [`MAINTAINERS.md`](MAINTAINERS.md) describe
-who decides. To report a security issue, follow [`SECURITY.md`](SECURITY.md).
+who decides. Everyone who takes part follows the
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). To report a security issue, follow
+[`SECURITY.md`](SECURITY.md).
 
 ## License
 
