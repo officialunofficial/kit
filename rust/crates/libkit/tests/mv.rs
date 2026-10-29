@@ -1,4 +1,5 @@
 //! Move tracked files and directories, and stage the change.
+#![cfg(feature = "sync")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
 
 use std::fs;

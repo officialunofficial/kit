@@ -1,4 +1,5 @@
 //! The library error type.
+#![cfg(feature = "sync")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
 
 use std::error::Error as _;

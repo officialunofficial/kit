@@ -1,4 +1,5 @@
 //! Linked working trees: add, list, remove and prune.
+#![cfg(feature = "sync")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
 
 use std::fs;

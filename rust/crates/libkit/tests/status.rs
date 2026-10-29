@@ -1,4 +1,5 @@
 //! The state of the tree against `HEAD` and the index.
+#![cfg(feature = "sync")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
 
 use std::fs;
