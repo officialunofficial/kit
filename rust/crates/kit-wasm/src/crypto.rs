@@ -68,7 +68,7 @@ pub fn verify_bytes_commit_domain(pubkey_hex: &str, bytes: &[u8], sig_hex: &str)
 }
 
 // ---------------------------------------------------------------------
-// Raw Ed25519 — sign / verify / pubkey-from-seed (issue #90)
+// Raw Ed25519 — sign / verify / pubkey-from-seed
 // ---------------------------------------------------------------------
 //
 // These are byte-level Ed25519 wrappers that match what `@noble/ed25519`

@@ -6,17 +6,26 @@ No filesystem or network access is performed inside the wasm module. It is a sta
 
 ## Build
 
-The crate is not on crates.io. Build the JavaScript package with
-[`wasm-pack`](https://rustwasm.github.io/wasm-pack/) from the repository root:
+The crate is not on crates.io. Build it with the `wasm-bindgen` command-line
+tool. Its version must equal the `wasm-bindgen` version in `rust/Cargo.lock`.
+A different version fails with a schema mismatch.
 
 ```sh
-cd rust/crates/kit-wasm
-wasm-pack build --target bundler --release
+cd rust
+version=$(cargo pkgid -p wasm-bindgen | sed 's/.*[#@]//')
+cargo install --locked wasm-bindgen-cli --version "$version"
+
+cargo build --locked -p kit-wasm --release --target wasm32-unknown-unknown
+wasm-bindgen --target bundler --out-dir pkg \
+  target/wasm32-unknown-unknown/release/kit_wasm.wasm
 ```
 
 The `bundler` target works with esbuild, Wrangler, Vite, webpack and Rollup.
 Use `--target web` for a direct `<script type="module">`. That target exports
 the classic `await init()` default.
+
+The Rust project archived `wasm-pack` with the rustwasm organization, so this
+crate does not use it.
 
 ## Usage
 

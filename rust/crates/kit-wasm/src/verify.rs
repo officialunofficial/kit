@@ -4,7 +4,7 @@
 //! results cross the JS boundary as JSON strings; payload bytes of a
 //! disclosure are returned out-of-band by [`disclosure_payload_bytes`].
 //! Hashes are 64-char lowercase hex. Every input length is checked before
-//! decode work. See issue #1015 (verifier kit) PR 4.
+//! decode work.
 
 use std::io::Read as _;
 
