@@ -361,6 +361,8 @@ steps:
   # sanitizer does not support musl. Each target then runs as its binary.
   # The step waits for the compile-heavy steps. Eight sanitizer builds next to
   # them used all the memory of the machine, and the kernel stopped the build.
+  # Link-time optimization is off, because it needs several gigabytes for each
+  # target and a smoke run of five seconds gains nothing from it.
   - name: ${_CI_IMAGE}
     id: fuzz-smoke
     waitFor: ['lint', 'nextest-3', 'ignored-lane', 'tests-misc']
@@ -377,6 +379,7 @@ steps:
       - "SCCACHE_GCS_RW_MODE=READ_WRITE"
       - "SCCACHE_GCS_KEY_PREFIX=ci"
       - "CARGO_BUILD_JOBS=6"
+      - "CARGO_PROFILE_RELEASE_LTO=off"
       - "CARGO_TARGET_DIR=/tmp/target-fuzz"
     args:
       - -c
