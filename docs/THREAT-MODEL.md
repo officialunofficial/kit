@@ -352,8 +352,9 @@ Without `--trusted`, `kit verify` proves only that the object's
 embedded `signer` produced its signature &mdash; it does not consult trust
 roots at all (SPEC-SIGNING §6.1). A signature from an unlisted,
 attacker-controlled key is indistinguishable from a trusted one unless
-the caller opts into `--trusted`. `kit clone`/`pull`/`fetch` do not run
-any verification by default; that remains a separate, tracked gap.
+the caller opts into `--trusted`. `kit clone`/`pull`/`fetch` run the
+same check by default (§3.1): they verify each signature against its
+embedded `signer`, not against trust roots.
 
 ---
 

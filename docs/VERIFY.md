@@ -83,7 +83,7 @@ for why that ordering is load-bearing, not cosmetic.
 |---|---|
 | Commit (or Remix) object | ~250 B (a few hundred more for a Remix, which carries `sources`) |
 | One tree-entry step | one entry (`name` + mode + 32-byte child id) plus `32 * ceil(log2(M))` sibling bytes, `M` = that directory's entry count |
-| One chunk step | `32 * ceil(log2(N + 1))` sibling bytes, `N` = the file's chunk count (`+1` for the metadata leaf) |
+| One chunk step | at most `32 * 2 * ceil(log2(N + 1))` sibling bytes, `N` = the file's chunk count (`+1` for the metadata leaf); the step is one multi-proof over positions `{0, index + 1}` |
 | A Bao slice of `len` content bytes | roughly one 1 KiB Bao leaf block per 1 KiB of `len`, plus `~64 * log2(blocks)` bytes of Bao tree-hash overhead |
 
 A concrete example, captured from a real v2-bundle run against a small
@@ -91,8 +91,9 @@ demo repo (commit `64ccb22…`, a two-level path `src/lib.rs`, a 40-byte
 range at offset 100): the whole disclosure bundle &mdash; commit bytes, two
 tree-entry steps, and a Bao-slice range payload &mdash; was **684 bytes**. A single file
 directly under the root instead of two levels deep would be smaller still;
-a 1 GiB chunked file's chunk step costs about 14 sibling digests (`log2` of
-~16,384 chunks), regardless of how large the file itself is. Proof size
+a 1 GiB chunked file has about 16,384 chunks at the 64 KiB average, so its
+chunk step carries at most 28 sibling digests (under 1 KiB),
+regardless of how large the file itself is. Proof size
 scales with **tree depth and file chunk count**, never with total
 repository size.
 
