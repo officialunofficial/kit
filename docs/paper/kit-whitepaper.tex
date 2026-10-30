@@ -69,8 +69,9 @@ object set holds every object the commit reaches. We describe the object
 model, the signing scheme, and the disclosure and closure verifiers with their
 order of checks and allocation bounds. We give informal security arguments
 under collision resistance of BLAKE3 and unforgeability of Ed25519
-under one acceptance predicate, report the assurance evidence in the repository, and measure proof
-sizes from the committed golden vectors. \kit{} is alpha software (version
+under one acceptance predicate, report the assurance evidence in the repository, measure proof
+sizes from the committed golden vectors, and measure signature verification
+throughput. \kit{} is alpha software (version
 0.5.0), and several of the specifications we describe are drafts.
 \end{abstract}
 
@@ -111,7 +112,8 @@ untrusted for these claims.
         closure verifier for completeness of a served set (\cref{sec:closure}).
   \item Informal security arguments with their assumptions
         (\cref{sec:security}), the assurance evidence (\cref{sec:assurance}),
-        and proof sizes measured from committed vectors (\cref{sec:eval}).
+        proof sizes measured from committed vectors, and signature
+        verification throughput (\cref{sec:eval}).
 \end{itemize}
 
 \paragraph{Paper structure.}
@@ -928,14 +930,47 @@ pack. A closure costs the reachable objects plus pack framing, and its manifest
 \cref{sec:disclosure,sec:closure}: a bundle at 64~MiB with at most 128 steps of
 at most 32 siblings each; a closure at 10,000,000 objects in 65,536 packs.
 
-\paragraph{Performance.}
-The repository has no published benchmark numbers. docs/PERFORMANCE.md
-describes \texttt{scripts/bench-vs-git.sh}, which times \kit{} against git on
-init, small files, 100~MiB and 1~GiB files, append, status and checkout, and
-\texttt{rust/benches} holds criterion benchmarks; no results are committed. A
-full evaluation should measure disclosure verification time against depth and
-range length, closure throughput (native and wasm), signature verification cost
-on fetch, and the \texttt{bench-vs-git.sh} rows.
+\paragraph{Signature verification.}
+\Cref{tab:ed25519} reports the \texttt{ed25519\_batch} benchmark
+(\texttt{rust/benches}), which verifies $n$ signatures from $n$ distinct keys
+over distinct 32-byte digests, the shape of a fetch that brings in commits from
+many signers. It ran with criterion~0.8 (100 samples, 3~s per measurement) on a
+shared 4-vCPU cloud VM (Intel Xeon at 2.1~GHz, Rust~1.99.1, release profile);
+the table gives the median throughput. ``Parallel'' spreads the work over the
+4~rayon threads; the batch rows use one batch per thread, as fetch does.
+
+\begin{table}[h]
+\centering
+\caption{Ed25519 verification throughput, thousands of signatures per second.}
+\label{tab:ed25519}
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+$n$ & \texttt{verify\_strict} & single & batch & single, parallel & batch, parallel \\
+\midrule
+1    & 19.6 & 16.5 & 15.3 & 17.2 & 14.3 \\
+8    & 19.1 & 17.0 & 24.7 & 30.8 & 38.3 \\
+64   & 17.7 & 16.7 & 30.2 & 61.8 & 74.0 \\
+256  & 18.0 & 17.7 & 33.6 & 56.5 & 78.5 \\
+1024 & 18.0 & 16.0 & 35.3 & 65.0 & 103.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On one thread the batch check verifies about twice as many signatures per
+second as the single check from $n = 256$ up. Across four threads, the batch
+path that fetch uses gains 20\% over single checks at $n = 64$, 39\% at 256
+and 59\% at 1024. The single check of SPEC-SIGNING \S1 runs about 8\% below
+\texttt{ed25519-dalek}'s \texttt{verify\_strict}: it re-encodes $A$ and $R$ to
+check canonicality and multiplies by the cofactor. For one signature the batch
+costs slightly more than the single check. The VM is shared, so differences of
+a few percent are within noise.
+
+\paragraph{Other performance.}
+docs/PERFORMANCE.md describes \texttt{scripts/bench-vs-git.sh}, which times
+\kit{} against git on init, small files, 100~MiB and 1~GiB files, append,
+status and checkout; no results are committed. A full evaluation should also
+measure disclosure verification time against depth and range length, closure
+throughput (native and wasm), and the \texttt{bench-vs-git.sh} rows.
 
 % ---------------------------------------------------------------------------
 \section{Related work}\label{sec:related}
@@ -1030,8 +1065,9 @@ only the public domain constants (VERIFY \S5).
         re-canonicalized. Using one key for commits, attestations and SSH is
         not analyzed (SPEC-SIGNING \S8).
   \item \textbf{Evidence.} The arguments are informal, the formal models are
-        bounded and do not cover these verifiers, and no performance
-        results are published.
+        bounded and do not cover these verifiers, and the only
+        performance results are for signature verification, on one shared
+        VM.
 \end{itemize}
 
 % ---------------------------------------------------------------------------
@@ -1089,9 +1125,9 @@ PYTHON=.venv/bin/python bash scripts/check-golden.sh               # every set
 \end{Verbatim}
 
 \paragraph{Sizes and counts.}
-The two scripts live next to this paper in \texttt{docs/paper/tools/}.
-\texttt{measure\_disclosure.py} imports \texttt{decode\_bundle} from
-\texttt{disclosure\_ref.py}; \texttt{sibling\_count.py} applies
+Two scripts in the \texttt{tools} directory next to this paper reproduce
+these numbers. The first imports \texttt{decode\_bundle} from
+\texttt{disclosure\_ref.py}; the second applies the sibling-selection rule of
 SPEC-MERKLE-OBJECTS \S5.3.
 \begin{Verbatim}[fontsize=\footnotesize]
 python3 -I -B docs/paper/tools/measure_disclosure.py .   # Table 3
@@ -1099,6 +1135,13 @@ python3 -I -B docs/paper/tools/sibling_count.py 16384     # worst case 27 siblin
 stat -c '%s %n' rust/tests/golden/disclosure/*.bin rust/tests/golden/closure/*.bin
 ls rust/fuzz/fuzz_targets/*.rs | wc -l                   # 59
 grep -h '"expect"' rust/tests/golden/{disclosure,proofs,closure}/*.json | sort | uniq -c
+\end{Verbatim}
+
+\paragraph{Signature benchmark.}
+\begin{Verbatim}[fontsize=\footnotesize]
+cd rust                                                    # Table 4
+cargo bench --locked -p kit-benches --bench ed25519_batch \
+  -- --warm-up-time 1 --measurement-time 3
 \end{Verbatim}
 
 \paragraph{Fuzzing, formal checks and an end-to-end run.}
