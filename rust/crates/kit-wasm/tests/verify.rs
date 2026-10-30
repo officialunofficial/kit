@@ -125,7 +125,7 @@ fn golden_disclosure_vectors_via_wasm() {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP-objects MKDS goldens
+// HTTP-objects KDSP goldens
 // ---------------------------------------------------------------------------
 
 fn http_object_body(dir: &std::path::Path, name: &str, sidecar: &Value) -> Vec<u8> {
