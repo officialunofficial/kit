@@ -932,12 +932,14 @@ at most 32 siblings each; a closure at 10,000,000 objects in 65,536 packs.
 
 \paragraph{Signature verification.}
 \Cref{tab:ed25519} reports the \texttt{ed25519\_batch} benchmark
-(\texttt{rust/benches}), which verifies $n$ signatures from $n$ distinct keys
-over distinct 32-byte digests, the shape of a fetch that brings in commits from
-many signers. It ran with criterion~0.8 (100 samples, 3~s per measurement) on a
-shared 4-vCPU cloud VM (Intel Xeon at 2.1~GHz, Rust~1.99.1, release profile);
-the table gives the median throughput. ``Parallel'' spreads the work over the
-4~rayon threads; the batch rows use one batch per thread, as fetch does.
+(\texttt{rust/benches}). Each entry signs a distinct 32-byte digest. In the
+first group every entry has its own key, the shape of a fetch with commits
+from many people; in the second the entries cycle through four keys, the shape
+of a fetch from a small team, where the batch check shares one term per key.
+It ran with criterion~0.8 (100 samples, 3~s per measurement) on a shared
+4-vCPU cloud VM (Intel Xeon at 2.1~GHz, Rust~1.99.1, release profile); the
+table gives the median throughput. ``Parallel'' spreads the work over the
+4~rayon threads; the batch columns use one batch per thread, as fetch does.
 
 \begin{table}[h]
 \centering
@@ -947,23 +949,35 @@ the table gives the median throughput. ``Parallel'' spreads the work over the
 \toprule
 $n$ & \texttt{verify\_strict} & single & batch & single, parallel & batch, parallel \\
 \midrule
-1    & 19.6 & 16.5 & 15.3 & 17.2 & 14.3 \\
-8    & 19.1 & 17.0 & 24.7 & 30.8 & 38.3 \\
-64   & 17.7 & 16.7 & 30.2 & 61.8 & 74.0 \\
-256  & 18.0 & 17.7 & 33.6 & 56.5 & 78.5 \\
-1024 & 18.0 & 16.0 & 35.3 & 65.0 & 103.4 \\
+\multicolumn{6}{@{}l}{\emph{Distinct signers}} \\
+1    & 19.3 & 21.0 & 15.5 & 21.6 & 18.4 \\
+8    & 20.4 & 22.8 & 37.7 & 53.0 & 43.5 \\
+64   & 19.8 & 22.5 & 42.8 & 75.1 & 115.3 \\
+256  & 19.3 & 21.4 & 45.4 & 77.5 & 140.6 \\
+1024 & 19.4 & 21.7 & 52.8 & 84.5 & 148.2 \\
+\midrule
+\multicolumn{6}{@{}l}{\emph{Four signers}} \\
+1    & 20.2 & 22.3 & 17.8 & 22.0 & 18.3 \\
+8    & 20.9 & 21.2 & 46.8 & 50.6 & 42.2 \\
+64   & 19.1 & 21.9 & 73.5 & 74.9 & 160.9 \\
+256  & 20.2 & 22.0 & 90.5 & 83.3 & 212.3 \\
+1024 & 19.9 & 22.3 & 102.1 & 83.4 & 254.5 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-On one thread the batch check verifies about twice as many signatures per
-second as the single check from $n = 256$ up. Across four threads, the batch
-path that fetch uses gains 20\% over single checks at $n = 64$, 39\% at 256
-and 59\% at 1024. The single check of SPEC-SIGNING \S1 runs about 8\% below
-\texttt{ed25519-dalek}'s \texttt{verify\_strict}: it re-encodes $A$ and $R$ to
-check canonicality and multiplies by the cofactor. For one signature the batch
-costs slightly more than the single check. The VM is shared, so differences of
-a few percent are within noise.
+The single check of SPEC-SIGNING \S1 runs 1--15\% faster than
+\texttt{ed25519-dalek}'s \texttt{verify\_strict}: it checks canonical encodings
+on the bytes rather than by re-encoding each point. With distinct signers, the
+batch check verifies 2.1--2.4 times as many signatures per second as the single
+check on one thread from $n = 256$ up, and across four threads the batch path
+that fetch uses gains 54\% over single checks at $n = 64$, 81\% at 256 and 75\%
+at 1024. With four signers the batch shares one term per key: at $n = 1024$ it
+verifies about 102{,}000 signatures per second on one thread, 1.9 times the
+distinct-signer batch, and 255{,}000 on four threads, 1.7 times. For $n \le 8$
+the batch does not pay: one signature takes about 35\% longer as a batch, and
+at $n = 8$ the parallel batch trails parallel single checks. The VM is shared, so differences
+of a few percent are within noise.
 
 \paragraph{Other performance.}
 docs/PERFORMANCE.md describes \texttt{scripts/bench-vs-git.sh}, which times
