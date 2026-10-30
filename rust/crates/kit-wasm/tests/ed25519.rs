@@ -2,8 +2,8 @@
 //! `ed25519_verify`, `ed25519_pubkey_from_seed`).
 //!
 //! These exports let `@officialunofficial/kit-wasm` consumers drop a separate
-//! `@noble/ed25519` dependency: the same `ed25519_dalek::verify_strict`
-//! path kit-attest uses internally is now reachable from JS. Tests run
+//! `@noble/ed25519` dependency: the SPEC-SIGNING §1 predicate that every
+//! kit verifier uses is now reachable from JS. Tests run
 //! on native — the wasm-bindgen wrappers delegate straight to the same
 //! Rust functions the wasm build exports, so covering them here covers
 //! correctness without spinning up a node/browser test driver.
@@ -71,13 +71,13 @@ fn cross_impl_parity_with_dalek() {
 ///       includes `s + L` for many `s`.
 ///
 ///   3b. **Small-order public key** — the all-zero compressed-Y
-///       (the curve identity, order 1). `verify_strict` rejects any
+///       (the curve identity, order 1). The predicate rejects any
 ///       signature under such a key; permissive verifiers happily
 ///       accept a forged signature.
 ///
 /// Demonstrating either rejection — without false-positive accepts on
-/// canonical data — is sufficient evidence that `ed25519_verify` is on
-/// the strict path. We assert both.
+/// canonical data — is sufficient evidence that `ed25519_verify` uses
+/// the SPEC-SIGNING §1 predicate. We assert both.
 #[test]
 fn rejects_hdevalence_strict_vectors() {
     use ed25519_dalek::{Signer, SigningKey};
@@ -130,7 +130,7 @@ fn rejects_hdevalence_strict_vectors() {
     // Mauled-s signature is rejected by our strict verifier.
     assert!(
         !ed25519_verify(&malleated, &found_msg, &pk),
-        "ed25519_verify must reject non-canonical s (verify_strict path)"
+        "ed25519_verify must reject non-canonical s"
     );
 
     // ---- 3b: small-order pubkey (all-zero compressed-Y is order 1) ----
@@ -138,7 +138,7 @@ fn rejects_hdevalence_strict_vectors() {
     let arbitrary_sig = sk.sign(b"any").to_bytes();
     assert!(
         !ed25519_verify(&arbitrary_sig, b"any", &identity_pk),
-        "ed25519_verify must reject identity-element pubkeys (verify_strict A check)"
+        "ed25519_verify must reject identity-element pubkeys"
     );
 }
 

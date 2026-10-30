@@ -49,6 +49,11 @@ commonware-codec = { workspace = true }
 commonware-storage = { workspace = true, features = ["std"], optional = true }
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }
+# The SPEC-SIGNING §1 predicate: canonical point checks, the cofactored
+# equation and its batch form (`sign::verify_ed25519`). `alloc` provides the
+# multiscalar multiplication of the batch check.
+curve25519-dalek = { version = "5.0.0", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.11.1", default-features = false }
 getrandom = "0.4.3"
 # `delta::encode`'s block-hash index (a `HashMap<u64, u32>` keyed by an
 # already well-distributed hash, not attacker-facing key material) uses
@@ -115,18 +120,12 @@ sparse-checkout = []
 fuzzing = []
 
 [dev-dependencies]
-# `hazmat::ExpandedSecretKey` (test-only): builds a torsion-padded
-# signature with a real secret scalar to prove `sign::verify` rejects it.
+# `hazmat::ExpandedSecretKey` (test-only): builds torsion-padded and
+# small-order signatures with a real secret scalar for the `sign::verify_ed25519`
+# tests.
 # Additive on top of the plain `[dependencies]` entry above; never enabled
 # outside test builds.
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc", "hazmat"] }
-# Test-only: computing the same SHA-512 hashes the forgery above needs
-# (secret-key expansion input, and H(R||A||M)) directly, matching the
-# version already resolved transitively via ed25519-dalek/curve25519-dalek.
-sha2 = "0.11.1"
-# Test-only: the base point and 8-torsion points for the forgery above,
-# matching the version ed25519-dalek already resolves.
-curve25519-dalek = "5.0.0"
 # Storage experiments need the deterministic runtime, not the shipped history API.
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true, features = ["std"] }

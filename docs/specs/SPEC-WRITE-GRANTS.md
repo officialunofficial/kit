@@ -282,7 +282,7 @@ statements (§5.1): read "statement" below as either.
 
 | Scheme | Signed message | Blob | Owner identity |
 |---|---|---|---|
-| `ed25519` | The 32-byte BLAKE3 of the canonical statement. Verification uses the strict predicate of [SPEC-SIGNING §1](SPEC-SIGNING.md#1-signing-primitives). | The 64-byte signature. | The public key. Valid only for an `ed25519-` namespace. |
+| `ed25519` | The 32-byte BLAKE3 of the canonical statement. Verification uses the predicate of [SPEC-SIGNING §1](SPEC-SIGNING.md#1-signing-primitives). | The 64-byte signature. | The public key. Valid only for an `ed25519-` namespace. |
 | `secp256k1-eip191` | The EIP-191 version `0x45` personal message: the bytes `"\x19Ethereum Signed Message:\n"`, the statement's byte length in decimal ASCII, then the statement bytes. The digest is the Keccak-256 of that message. | 65 bytes: `r` (32 bytes, big-endian), `s` (32 bytes, big-endian), then `v` in {27, 28}. | The address (§4.1) of the public key recovered from `r`, `s` and recovery id `v - 27`. Valid only for a `0x` namespace. |
 | `webauthn-p256` | A WebAuthn assertion (§4.3). ECDSA P-256 with SHA-256 over `authenticatorData` followed by the SHA-256 of `clientDataJSON`. | Four length-prefixed fields, in order: the public key, exactly 64 bytes (`x` then `y`, each 32 bytes big-endian); `authenticatorData`; `clientDataJSON`; and the 64-byte signature `r‖s`, each 32 bytes big-endian. Nothing follows the fourth field. | The address (§4.1) of the public key. Valid only for a `0x` namespace. |
 
@@ -968,7 +968,7 @@ kit-url-token:v1
 **Signature and encoding.** The token is
 `<statement>.<signature>`: the unpadded base64url of the statement, a
 `.`, and the unpadded base64url of a 64-byte Ed25519 signature over the
-32-byte BLAKE3 of the statement. Verification uses the strict predicate
+32-byte BLAKE3 of the statement. Verification uses the predicate
 of [SPEC-SIGNING §1](SPEC-SIGNING.md#1-signing-primitives). `kit-url-token:v1` is a new
 domain separator.
 
@@ -1214,9 +1214,9 @@ document's rules, independently of the Rust code.
   unknown key id, and each statement rule of §9.4.
 - `reject/verify-*.json`: signed grants that fail verification: the
   `ed25519` scheme on a `0x` namespace, an unadvertised scheme, another
-  key's signature, a 63-byte blob, the SPEC-SIGNING §1 strict checks (a
-  small-order namespace key with `R` = identity and `s` = 0, which the
-  plain RFC 8032 equation accepts; a small-order `R`; `s ≥ L`),
+  key's signature, a 63-byte blob, the SPEC-SIGNING §1 per-entry checks
+  (a small-order namespace key with `R` = identity and `s` = 0, which the
+  equation alone accepts; a small-order `R`; `s ≥ L`),
   `now == expiry`, and `created` one millisecond past the clock lead.
 
 - `secp256k1-eip191.json`: a grant, an epoch statement and a visibility

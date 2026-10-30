@@ -82,7 +82,6 @@ impl Signer for RepoKeySigner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signature as DalekSig, VerifyingKey};
 
     #[test]
     fn signature_verifies_with_dalek() {
@@ -94,16 +93,15 @@ mod tests {
         let sig_bytes = s.sign(pae).unwrap();
         assert_eq!(sig_bytes.len(), 64);
 
-        let vk = VerifyingKey::from_bytes(&pk).unwrap();
-        let sig = DalekSig::from_bytes(sig_bytes.as_slice().try_into().unwrap());
-        // verify_strict: if our signer ever produces a non-canonical
-        // signature (high-s, non-canonical R, etc.) this assertion fails
-        // — a regression guard on the signer output.
-        vk.verify_strict(pae, &sig).expect("verify");
+        let sig: [u8; 64] = sig_bytes.as_slice().try_into().unwrap();
+        // If our signer ever produces a non-canonical signature (high s,
+        // non-canonical R) this assertion fails: a regression guard on
+        // the signer output.
+        kit_core::sign::verify_ed25519(&pk, pae, &sig).expect("verify");
 
         // Tampered PAE must break verification.
         let tampered = b"DSSEv1 28 application/vnd.in-toto+json 2 {X";
-        assert!(vk.verify_strict(tampered, &sig).is_err());
+        assert!(kit_core::sign::verify_ed25519(&pk, tampered, &sig).is_err());
     }
 
     /// DSSE signs the raw PAE bytes directly (this module's `sign`);
@@ -140,10 +138,8 @@ mod tests {
         // bytes — the commit signature was produced over the domain
         // digest, not over `payload` itself.
         let commit_sig = kp.sign(COMMIT_DOMAIN, payload);
-        let vk = VerifyingKey::from_bytes(&kp.public.0).unwrap();
-        let dalek_commit_sig = DalekSig::from_bytes(&commit_sig.0);
         assert!(
-            vk.verify_strict(payload, &dalek_commit_sig).is_err(),
+            kit_core::sign::verify_ed25519(&kp.public.0, payload, &commit_sig.0).is_err(),
             "a commit-domain signature must not verify as a DSSE signature over the same bytes"
         );
     }

@@ -5,7 +5,6 @@
 //! alongside its effects. A valid signature alone does not prevent replay.
 
 use crate::hash::{Hash, hash};
-use ed25519_dalek::{Signature, VerifyingKey};
 
 /// Domain/version. v1 requests are never interpreted as v2 requests.
 pub const DOMAIN: &str = "kit-write:v2";
@@ -360,10 +359,10 @@ impl Operation<'_> {
         {
             return Err(AuthError("expired or future authorization"));
         }
-        let key =
-            VerifyingKey::from_bytes(public_key).map_err(|_| AuthError("invalid public key"))?;
-        key.verify_strict(&digest, &Signature::from_bytes(signature))
-            .map_err(|_| AuthError("invalid signature"))
+        crate::sign::verify_ed25519(public_key, &digest, signature).map_err(|e| match e {
+            crate::object::KitError::InvalidPublicKey => AuthError("invalid public key"),
+            _ => AuthError("invalid signature"),
+        })
     }
 }
 

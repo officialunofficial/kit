@@ -249,7 +249,6 @@ mod tests {
 
     #[test]
     fn the_file_signer_signs_the_raw_digest() {
-        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
         let dir = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(dir.path());
         let key = KeyPair::generate().unwrap();
@@ -271,9 +270,7 @@ mod tests {
         let signature = signer.sign_hex(&digest).unwrap();
         let public: [u8; 32] = hex_to_bytes(&signer.public_key_hex()).try_into().unwrap();
         let signature: [u8; 64] = hex_to_bytes(&signature).try_into().unwrap();
-        VerifyingKey::from_bytes(&public)
-            .unwrap()
-            .verify(&digest, &Signature::from_bytes(&signature))
+        kit_core::sign::verify_ed25519(&public, &digest, &signature)
             .expect("the signature covers the raw digest");
     }
 

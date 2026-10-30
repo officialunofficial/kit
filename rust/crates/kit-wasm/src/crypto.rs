@@ -85,12 +85,10 @@ pub fn verify_bytes_commit_domain(pubkey_hex: &str, bytes: &[u8], sig_hex: &str)
 
 /// Verify a raw Ed25519 signature, with strict canonical-encoding checks.
 ///
-/// Returns `true` only if all of the following hold:
-/// - `sig` decodes as a 64-byte Ed25519 signature with canonical `R` and
-///   canonical `s` (rejects `s + L` and torsion-malleated `R`).
-/// - `pubkey` is a canonical 32-byte `A` encoding (rejects small-subgroup
-///   keys).
-/// - The signature verifies under `verify_strict` over `msg`.
+/// Returns `true` only if the signature passes the SPEC-SIGNING §1
+/// predicate over `msg`: canonical, non-small-order `A` and `R`, canonical
+/// `s`, and the cofactored equation. This is the same check every other
+/// Ed25519 verifier in kit runs.
 ///
 /// Wrong-length `sig` or `pubkey` return `false` (the JS API matches the
 /// noble shape — boolean out, no exceptions on shape errors).

@@ -1,6 +1,6 @@
 ---
 spec: SPEC-SIGNING
-version: 1
+version: 2
 status: stable-normative
 audience: implementers of compatible commit/remix signers and verifiers
 ---
@@ -55,36 +55,50 @@ separates signature domains.
   a real, stated precondition, not a free property of "PureEdDSA."
 - **Verification acceptance predicate:** a signature `(R, S)` over
   message `M` under public key `A` is accepted if and only if all of
-  the following hold &mdash; this is RFC 8032 §5.1.7's verification
-  procedure with its optional additional checks made mandatory:
+  the following hold:
   1. `A` and `R` each decode as **canonical** encodings of points on
      the curve (the top bit is the sign bit; the remaining 255 bits,
      interpreted little-endian, MUST be strictly less than the field
      prime `p = 2²⁵⁵ - 19`; an encoding using a value ≥ p is rejected
-     rather than reduced mod `p`).
-  2. `A` and `R` are **not** low-order points (that is, not in the curve's
-     order-8 torsion subgroup) &mdash; this is the "small-order key/point"
-     rejection.
+     rather than reduced mod `p`, and an encoding of `x = 0` with the
+     sign bit set is rejected).
+  2. `A` and `R` are **not** of small order, that is, `[8]A` and `[8]R`
+     are not the identity. A point with a torsion component and a
+     prime-order component is not of small order and passes this check.
   3. `S` is **canonical**: interpreted as a little-endian integer,
      `0 ≤ S < L` where `L` is the order of the curve's prime-order
      subgroup (`2²⁵² + 27742317777372353535851937790883648493`); a
      value `S ≥ L` is rejected rather than reduced mod `L`.
-  4. The core Ed25519 equation holds over the prime-order subgroup:
-     `[S]B = R + [k]A`, where `B` is the base point and
-     `k = SHA-512(R ‖ A ‖ M) mod L`.
-  A verifier that only performs check 4 (the "batch-friendly"/default
-  RFC 8032 verification equation, which tolerates non-canonical and
-  low-order `R`/`A`/`S` by implicitly reducing them) is **not**
-  conformant with this specification &mdash; checks 1–3 MUST also be
-  enforced. This is the same acceptance criterion as the widely-used
-  `ed25519-dalek` crate's `verify_strict` function, which is offered
-  here purely as a cross-reference for implementers, not as this
-  predicate's definition; `verify_strict` is **not** identical to the
-  ZIP-215 acceptance criterion (ZIP-215 is deliberately *more*
-  permissive &mdash; cofactored, accepting some non-canonical and torsion
-  points that this predicate rejects) and this document does not claim
-  ZIP-215 compatibility.
-- No batched verification. Each verify is independent.
+  4. The **cofactored** equation holds:
+     `[8]([S]B - R - [k]A)` is the identity, where `B` is the base point
+     and `k = SHA-512(R ‖ A ‖ M) mod L`, computed over the encodings of
+     `R` and `A` as received.
+
+  Checks 1–3 look at each signature alone, and check 4 is the equation a
+  randomized batch check can reproduce. So a batch verifier (below) and a
+  single verifier accept exactly the same signatures. Check 4 is the
+  ZIP-215 equation. Checks 1 and 2 are stricter than ZIP-215, which
+  accepts non-canonical encodings and small-order points: with a
+  small-order `A`, `R` = identity and `S` = 0 satisfy check 4 for every
+  message, and a second encoding of `A` or `R` would give one signature,
+  key or object more than one byte form. Check 3 is the same as in
+  ZIP-215.
+
+  Every Ed25519 verification in kit (commits, remixes, tags,
+  attestations, write grants, URL tokens, auth envelopes) MUST apply this
+  predicate, so that every verifier reaches the same verdict on every
+  input. The golden vectors in `rust/tests/golden/ed25519/` pin it.
+- **Batch verification:** a verifier MAY check `n` signatures at once.
+  It MUST first apply checks 1–3 to every entry and reject the batch if
+  any entry fails them. It then draws `n` independent, uniformly random
+  128-bit weights `z_i` from a cryptographically secure source, fresh
+  for each batch and never derived from the batch contents, and accepts
+  the batch if and only if
+  `[8]([Σ z_i S_i]B - Σ [z_i]R_i - Σ [z_i k_i]A_i)` is the identity. A
+  batch of entries that each pass the predicate always passes. A batch
+  with any failing entry passes with probability at most about `2⁻¹²⁸`.
+  When a batch fails, the verifier checks each entry with the predicate
+  to find the failing one.
 
 ---
 
@@ -238,7 +252,7 @@ The tag's `signature` field is `Ed25519.sign(signer_seed, signing_hash)`.
 
 An **annotated, unsigned** tag (`kit tag -a`) carries an all-zero
 `signature` (`0x00`×64). It is a valid object but not a valid signature:
-`verify_tag` over an all-zero signature fails the strict Ed25519 check.
+`verify_tag` over an all-zero signature fails the Ed25519 predicate of §1.
 A **signed** tag (`kit tag -s`) carries a real signature that
 `kit verify <tag>` accepts.
 
@@ -473,7 +487,7 @@ and the mechanism that enforces or detects each.
 | A signature is bound to one object type and schema version | the 6-byte PROLOGUE leads the signing bytes (§3) |
 | `message_hash`/`content_digest` annotations never shift the signing hash | both fields excluded from signing bytes (§3) |
 | Malleable/non-canonical signatures are rejected identically by all verifiers | the §1 acceptance predicate's checks 1–3 (non-canonical/low-order `R` or `A`, non-canonical or out-of-range `S` all fail) (§1) |
-| An annotated-but-unsigned tag never passes verification | all-zero signature fails the strict Ed25519 check (§4a) |
+| An annotated-but-unsigned tag never passes verification | all-zero signature fails the Ed25519 predicate of §1 (§4a) |
 | The verification key is the object's own `signer` field, never caller-supplied | verifier rebuilds signing bytes and parses `signer` from the object (§6) |
 | `author == signer` is never assumed | a verifier MUST NOT accept on identity match; pairing is application policy (§6) |
 | Signing hash is deterministic across machines | all count/length/timestamp fields fixed little-endian; domains are compile-time constants (§2, §3) |
