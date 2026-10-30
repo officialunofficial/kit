@@ -1032,8 +1032,24 @@ only the public domain constants (VERIFY \S5).
   \item \textbf{Identity, time and revocation.} Nothing binds a key to a
         person; fetch verification checks only the embedded key. Timestamps
         are self-reported, and there is no timestamp authority, transparency
-        log, revocation list, signer rotation in the core format or
-        post-quantum signature (SPEC-SIGNING \S10).
+        log, revocation list or signer rotation in the core format
+        (SPEC-SIGNING \S10).
+  \item \textbf{Post-quantum.} The hash layer needs no change: object ids,
+        Merkle proofs, disclosure and closure rest on BLAKE3 alone, and a
+        quantum computer speeds up generic attacks on a hash function without
+        breaking it. Signatures and transport key exchange rest on elliptic
+        curves, which a large quantum computer breaks. Anyone could then sign
+        new commits under old keys, so history would stop proving authorship,
+        and recorded TLS traffic to private repositories could be decrypted.
+        The plan, not yet specified: a new commit-format version whose
+        signature is a hybrid of Ed25519 and ML-DSA-65~\cite{fips204}, valid
+        only if both verify, which adds about 5~KiB per commit with the key
+        carried inline; SLH-DSA~\cite{fips205} for long-lived release keys,
+        because the BLS12-381 threshold design is not post-quantum; and hybrid
+        ML-KEM key exchange in TLS, which \kit{}'s rustls configuration with
+        the \texttt{ring} provider does not offer today. FN-DSA and the
+        candidates of NIST's additional-signatures process have smaller
+        signatures but are not yet standardized~\cite{nistir8610}.
   \item \textbf{Absence and ranges.} Disclosure proves inclusion only;
         non-membership is reserved as payload kind~3 (SPEC-DISCLOSURE \S9).
         \texttt{kit prove --range} rejects ranges across chunks. Git SHA-1 ids

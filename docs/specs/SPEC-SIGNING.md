@@ -465,7 +465,7 @@ cross-protocol analysis above is complete.
 
 ## 10. Non-goals
 
-- No PQ (post-quantum) signatures in v1. Ed25519 only.
+- No post-quantum signatures in this version. Ed25519 only.
 - No signer rotation at the core level. A new `signer` = a new commit.
 - No timestamp authority. `timestamp` is self-reported and unverified.
 - No partial/threshold signatures.
