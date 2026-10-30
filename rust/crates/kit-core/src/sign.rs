@@ -26,6 +26,7 @@ use crate::object::{
 };
 
 use core::fmt;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
@@ -246,8 +247,9 @@ pub fn verify(
 /// order, `s` must be below `L`, and the cofactored equation
 /// `[8]([s]B - R - [k]A) = 0` must hold, with `k = SHA-512(R || A || M) mod L`.
 pub fn verify_ed25519(public: &[u8; 32], message: &[u8], sig: &[u8; 64]) -> Result<(), KitError> {
+    let key = decode_key(public)?;
     let item = Ed25519Item::decode(public, message, sig)?;
-    let r = EdwardsPoint::vartime_double_scalar_mul_basepoint(&item.k, &-item.a, &item.s);
+    let r = EdwardsPoint::vartime_double_scalar_mul_basepoint(&item.k, &-key, &item.s);
     if (r - item.r).mul_by_cofactor().is_identity() {
         Ok(())
     } else {
@@ -263,36 +265,48 @@ pub fn verify_ed25519(public: &[u8; 32], message: &[u8], sig: &[u8; 64]) -> Resu
 /// are 128-bit values from the operating system's random source, drawn
 /// fresh on every call, so whoever built the batch cannot predict them.
 /// The batch then checks
-/// `[8]([sum z_i s_i]B - sum [z_i]R_i - sum [z_i k_i]A_i) = 0`. Because the
-/// equation is cofactored, a torsion component in any entry vanishes in
-/// both this check and [`verify_ed25519`]. On failure the caller learns
-/// only that some entry is invalid; it calls [`verify_ed25519`] per entry
-/// to find which.
+/// `[8]([sum z_i s_i]B - sum [z_i]R_i - sum_A [sum_{i: A_i = A} z_i k_i]A) = 0`:
+/// entries that share a public key share one term, so a batch from few
+/// signers multiplies fewer points. Because the equation is cofactored, a
+/// torsion component in any entry vanishes in both this check and
+/// [`verify_ed25519`]. On failure the caller learns only that some entry is
+/// invalid; it calls [`verify_ed25519`] per entry to find which.
 pub fn verify_ed25519_batch(entries: &[(&[u8; 32], &[u8], &[u8; 64])]) -> Result<(), KitError> {
     if entries.is_empty() {
         return Ok(());
     }
-    let items = entries
-        .iter()
-        .map(|(public, message, sig)| Ed25519Item::decode(public, message, sig))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut weights = vec![0u8; 16 * items.len()];
+    let mut weights = vec![0u8; 16 * entries.len()];
     getrandom::fill(&mut weights).map_err(|_| KitError::RngFailure)?;
-    let z: Vec<Scalar> = weights
-        .chunks_exact(16)
-        .map(|w| {
-            let mut bytes = [0u8; 16];
-            bytes.copy_from_slice(w);
-            Scalar::from(u128::from_le_bytes(bytes))
-        })
-        .collect();
-    let b_coefficient: Scalar = items.iter().zip(&z).map(|(item, z)| z * item.s).sum();
+    let mut key_index: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+    let mut keys: Vec<EdwardsPoint> = Vec::new();
+    let mut key_coefficients: Vec<Scalar> = Vec::new();
+    let mut b_coefficient = Scalar::ZERO;
+    let mut r_coefficients = Vec::with_capacity(entries.len());
+    let mut commitments = Vec::with_capacity(entries.len());
+    for ((public, message, sig), w) in entries.iter().zip(weights.chunks_exact(16)) {
+        let index = if let Some(&index) = key_index.get(*public) {
+            index
+        } else {
+            keys.push(decode_key(public)?);
+            key_coefficients.push(Scalar::ZERO);
+            key_index.insert(**public, keys.len() - 1);
+            keys.len() - 1
+        };
+        let item = Ed25519Item::decode(public, message, sig)?;
+        let mut z = [0u8; 16];
+        z.copy_from_slice(w);
+        let z = Scalar::from(u128::from_le_bytes(z));
+        b_coefficient += z * item.s;
+        r_coefficients.push(-z);
+        commitments.push(item.r);
+        key_coefficients[index] -= z * item.k;
+    }
     let scalars = core::iter::once(b_coefficient)
-        .chain(z.iter().map(|z| -z))
-        .chain(items.iter().zip(&z).map(|(item, z)| -(z * item.k)));
+        .chain(r_coefficients)
+        .chain(key_coefficients);
     let points = core::iter::once(ED25519_BASEPOINT_POINT)
-        .chain(items.iter().map(|item| item.r))
-        .chain(items.iter().map(|item| item.a));
+        .chain(commitments)
+        .chain(keys);
     if EdwardsPoint::vartime_multiscalar_mul(scalars, points)
         .mul_by_cofactor()
         .is_identity()
@@ -303,11 +317,21 @@ pub fn verify_ed25519_batch(entries: &[(&[u8; 32], &[u8], &[u8; 64])]) -> Result
     }
 }
 
-/// One signature after the per-entry checks of SPEC-SIGNING §1: the public
-/// key `A`, the commitment `R`, the scalar `s` and the challenge
-/// `k = SHA-512(R || A || M) mod L`.
+/// Decode a public key with checks 1 and 2 of SPEC-SIGNING §1: a canonical
+/// encoding of a point that is not of small order.
+fn decode_key(public: &[u8; 32]) -> Result<EdwardsPoint, KitError> {
+    let key = canonical_point(public).ok_or(KitError::InvalidPublicKey)?;
+    if key.is_small_order() {
+        return Err(KitError::SignatureInvalid);
+    }
+    Ok(key)
+}
+
+/// One signature after the per-entry checks of SPEC-SIGNING §1: the
+/// commitment `R`, the scalar `s` and the challenge
+/// `k = SHA-512(R || A || M) mod L`. The key `A` is checked by
+/// [`decode_key`].
 struct Ed25519Item {
-    a: EdwardsPoint,
     r: EdwardsPoint,
     s: Scalar,
     k: Scalar,
@@ -315,13 +339,12 @@ struct Ed25519Item {
 
 impl Ed25519Item {
     fn decode(public: &[u8; 32], message: &[u8], sig: &[u8; 64]) -> Result<Self, KitError> {
-        let key = canonical_point(public).ok_or(KitError::InvalidPublicKey)?;
         let mut r_bytes = [0u8; 32];
         r_bytes.copy_from_slice(&sig[..32]);
         let mut s_bytes = [0u8; 32];
         s_bytes.copy_from_slice(&sig[32..]);
         let commitment = canonical_point(&r_bytes).ok_or(KitError::SignatureInvalid)?;
-        if key.is_small_order() || commitment.is_small_order() {
+        if commitment.is_small_order() {
             return Err(KitError::SignatureInvalid);
         }
         let scalar = Option::<Scalar>::from(Scalar::from_canonical_bytes(s_bytes))
@@ -332,7 +355,6 @@ impl Ed25519Item {
         hasher.update(message);
         let challenge = Scalar::from_bytes_mod_order_wide(&hasher.finalize().into());
         Ok(Self {
-            a: key,
             r: commitment,
             s: scalar,
             k: challenge,
@@ -340,12 +362,19 @@ impl Ed25519Item {
     }
 }
 
-/// Decode a point and require that its encoding is the canonical one:
-/// `y < p`, and no sign bit on `x = 0`. Decompression alone reduces `y`
-/// modulo `p`, so the point is re-encoded and compared.
+/// Decode a point and require `y < p`, which decompression alone does not
+/// check: it reduces `y` modulo `p`. The other non-canonical form, a sign
+/// bit on `x = 0`, needs no test here: `x = 0` holds only for the identity
+/// and the point of order 2, which check 2 of SPEC-SIGNING §1 rejects.
 fn canonical_point(bytes: &[u8; 32]) -> Option<EdwardsPoint> {
-    let point = CompressedEdwardsY(*bytes).decompress()?;
-    (point.compress().as_bytes() == bytes).then_some(point)
+    let mut y = *bytes;
+    y[31] &= 0x7f;
+    // y >= p = 2^255 - 19 exactly when the high 248 bits are all set and
+    // the low byte is at least 0xed.
+    if y[31] == 0x7f && y[1..31].iter().all(|b| *b == 0xff) && y[0] >= 0xed {
+        return None;
+    }
+    CompressedEdwardsY(*bytes).decompress()
 }
 
 // -------------------------------------------------------------------
@@ -1164,11 +1193,12 @@ mod tests {
         high[31] = 0x7f;
         assert!(CompressedEdwardsY(high).decompress().is_some());
         assert!(canonical_point(&high).is_none());
-        // x = 0 with the sign bit set.
+        // x = 0 with the sign bit set decodes to the identity, which the
+        // small-order check rejects.
         let mut negative_zero = [0u8; 32];
         negative_zero[0] = 1;
         negative_zero[31] = 0x80;
-        assert!(canonical_point(&negative_zero).is_none());
+        assert!(canonical_point(&negative_zero).unwrap().is_small_order());
 
         let kp = fixed_kp();
         let sig = kp.sign(COMMIT_DOMAIN, b"x");
@@ -1179,6 +1209,78 @@ mod tests {
         assert!(matches!(
             verify_ed25519(&high, &message, &sig.0),
             Err(KitError::InvalidPublicKey)
+        ));
+    }
+
+    /// Together with the small-order check, the byte-level canonical check
+    /// accepts exactly the points whose encoding survives decoding and
+    /// re-encoding, on every edge encoding and on random bytes.
+    #[test]
+    fn canonical_point_matches_re_encoding() {
+        let reference = |bytes: &[u8; 32]| {
+            CompressedEdwardsY(*bytes)
+                .decompress()
+                .filter(|p| p.compress().as_bytes() == bytes)
+        };
+        let mut cases: Vec<[u8; 32]> = Vec::new();
+        // y = p - 1 .. p + 18 with both signs: around the reduction edge.
+        for low in 0xecu8..=0xff {
+            for sign in [0u8, 0x80] {
+                let mut b = [0xffu8; 32];
+                b[0] = low;
+                b[31] = 0x7f | sign;
+                cases.push(b);
+            }
+        }
+        for low in 0u8..19 {
+            for sign in [0u8, 0x80] {
+                let mut b = [0u8; 32];
+                b[0] = low;
+                b[31] = sign;
+                cases.push(b);
+            }
+        }
+        let mut state = [7u8; 32];
+        for _ in 0..4096 {
+            state = Sha512::digest(state)[..32].try_into().unwrap();
+            cases.push(state);
+        }
+        let accepted = |p: Option<EdwardsPoint>| p.filter(|p| !p.is_small_order());
+        for b in &cases {
+            assert_eq!(
+                accepted(canonical_point(b)).map(|p| p.compress()),
+                accepted(reference(b)).map(|p| p.compress()),
+                "encoding {b:02x?}"
+            );
+        }
+    }
+
+    /// Entries that share a key share one term in the batch. A batch from
+    /// two signers verifies, and one bad signature among them fails it.
+    #[test]
+    fn batch_with_repeated_signers() {
+        let keys = [KeyPair::from_seed([1; 32]), KeyPair::from_seed([2; 32])];
+        let mut owned: Vec<([u8; 32], [u8; HASH_LEN], [u8; 64])> = (0..40u8)
+            .map(|i| {
+                let kp = &keys[usize::from(i % 2)];
+                (
+                    kp.public.0,
+                    domain_digest(COMMIT_DOMAIN, &[i]),
+                    kp.sign(COMMIT_DOMAIN, &[i]).0,
+                )
+            })
+            .collect();
+        let refs: Vec<_> = owned.iter().map(|(p, m, s)| (p, &m[..], s)).collect();
+        verify_ed25519_batch(&refs).expect("every entry is valid");
+
+        // Swap the signatures of two entries by the same key.
+        let sig = owned[0].2;
+        owned[0].2 = owned[2].2;
+        owned[2].2 = sig;
+        let refs: Vec<_> = owned.iter().map(|(p, m, s)| (p, &m[..], s)).collect();
+        assert!(matches!(
+            verify_ed25519_batch(&refs),
+            Err(KitError::SignatureInvalid)
         ));
     }
 

@@ -51,8 +51,10 @@ commonware-cryptography = { workspace = true, features = ["std"], optional = tru
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }
 # The SPEC-SIGNING §1 predicate: canonical point checks, the cofactored
 # equation and its batch form (`sign::verify_ed25519`). `alloc` provides the
-# multiscalar multiplication of the batch check.
-curve25519-dalek = { version = "5.0.0", default-features = false, features = ["alloc"] }
+# multiscalar multiplication of the batch check. `precomputed-tables` keeps
+# the basepoint tables that make [s]B fast in signing and verification;
+# `zeroize` clears scalars on drop.
+curve25519-dalek = { version = "5.0.0", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
 sha2 = { version = "0.11.1", default-features = false }
 getrandom = "0.4.3"
 # `delta::encode`'s block-hash index (a `HashMap<u64, u32>` keyed by an

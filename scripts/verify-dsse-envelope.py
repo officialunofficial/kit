@@ -3,16 +3,18 @@
 #
 # Independent reference verifier for a DSSE envelope (see
 # https://github.com/secure-systems-lab/dsse/blob/master/envelope.md),
-# written from the spec using only the widely-used `cryptography` package
-# — deliberately NOT any kit code, and a different language ecosystem
-# than kit-attest's own Rust implementation. The point is to catch a
+# written from the spec in Python — deliberately NOT any kit code, and a
+# different language ecosystem than kit-attest's own Rust implementation. The point is to catch a
 # shared misunderstanding of the DSSE spec (PAE construction, signed-bytes
 # boundary) that a second Rust verifier using the same mental model as the
 # signer wouldn't necessarily catch.
 #
 # Ed25519 only — matches the `algo-ed25519` golden vectors this is meant
 # to cross-check (rust/crates/kit-attest/tests/dsse_roundtrip.rs,
-# golden_attest.rs).
+# golden_attest.rs). Signatures are checked with the SPEC-SIGNING section 1
+# predicate from scripts/golden/disclosure_ref.py (pure Python, written
+# from the spec), so this script reaches the same verdict as every kit
+# verifier.
 #
 # Usage:
 #   python3 verify-dsse-envelope.py <envelope.json> <pubkey-hex>
@@ -24,7 +26,11 @@
 
 import base64
 import json
+import os
 import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden"))
+import disclosure_ref  # noqa: E402
 
 
 def pae(payload_type: bytes, payload: bytes) -> bytes:
@@ -49,19 +55,6 @@ def main() -> int:
         print(f"usage: {sys.argv[0]} <envelope.json> <pubkey-hex>", file=sys.stderr)
         return 2
 
-    try:
-        from cryptography.exceptions import InvalidSignature
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-            Ed25519PublicKey,
-        )
-    except ImportError:
-        print(
-            "verify-dsse-envelope: the 'cryptography' package is not installed "
-            "(pip install cryptography)",
-            file=sys.stderr,
-        )
-        return 1
-
     envelope_path, pubkey_hex = sys.argv[1], sys.argv[2]
 
     with open(envelope_path, "rb") as f:
@@ -75,13 +68,11 @@ def main() -> int:
         return 1
 
     signed_bytes = pae(payload_type, payload)
-    pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey_hex))
+    pubkey = bytes.fromhex(pubkey_hex)
 
     for sig_entry in signatures:
         sig = base64.b64decode(sig_entry["sig"])
-        try:
-            pubkey.verify(sig, signed_bytes)
-        except InvalidSignature:
+        if not disclosure_ref.ed25519_verify(pubkey, signed_bytes, sig):
             print(
                 f"verify-dsse-envelope: signature from keyid "
                 f"{sig_entry.get('keyid', '<none>')} does NOT verify",

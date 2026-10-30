@@ -204,7 +204,7 @@ impl VerifiedSpan {
     }
 }
 
-/// Verify an KDSP v1 span container against a trusted commit id.
+/// Verify a KDSP v1 span container against a trusted commit id.
 ///
 /// The JSON contains `commit_id`, `tree_hash`, `path`, `leaf_id`, `signer`,
 /// `signature_valid`, `offset`, `bytes_len`, `bytes_blake3`, `first`, `last`,

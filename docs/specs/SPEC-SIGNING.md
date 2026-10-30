@@ -61,7 +61,8 @@ separates signature domains.
      interpreted little-endian, MUST be strictly less than the field
      prime `p = 2²⁵⁵ - 19`; an encoding using a value ≥ p is rejected
      rather than reduced mod `p`, and an encoding of `x = 0` with the
-     sign bit set is rejected).
+     sign bit set is rejected). `x = 0` holds only for the identity and
+     the point of order 2, so check 2 rejects that second form as well.
   2. `A` and `R` are **not** of small order, that is, `[8]A` and `[8]R`
      are not the identity. A point with a torsion component and a
      prime-order component is not of small order and passes this check.
