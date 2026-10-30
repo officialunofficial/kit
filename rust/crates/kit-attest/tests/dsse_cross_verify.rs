@@ -1,19 +1,15 @@
 //! Cross-verification of a real kit-attest DSSE envelope against an
 //! INDEPENDENT reference verifier (`scripts/verify-dsse-envelope.py`,
-//! written from the DSSE spec using Python's `cryptography` package —
-//! not kit code, not even the same language). The other tests in this
+//! written from the DSSE spec and SPEC-SIGNING §1 in pure Python — not kit
+//! code, not even the same language). The other tests in this
 //! crate (`dsse_roundtrip.rs`) already cross-check against `ed25519-dalek`
 //! directly; this goes one step further and checks against a completely
 //! independent implementation, which is what would actually catch a
 //! shared misunderstanding of the DSSE PAE construction rather than a
 //! bug specific to one Rust crate.
 //!
-//! `#[ignore]`d: requires `python3` with the `cryptography` package
-//! installed (`pip install cryptography`), which isn't guaranteed on
-//! every CI runner.
-//! Run manually with `cargo test --test dsse_cross_verify -- --ignored`
-//! after `pip install cryptography` when touching DSSE envelope or PAE
-//! code.
+//! Requires `python3` on `PATH`. The script uses only the standard
+//! library.
 #![cfg(feature = "algo-ed25519")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
@@ -72,7 +68,6 @@ fn run_verifier(envelope_path: &std::path::Path, pubkey_hex: &str) -> std::proce
 }
 
 #[test]
-#[ignore = "requires python3 with `pip install cryptography` — see module docs"]
 fn independent_python_verifier_accepts_valid_envelope() {
     let (env, pk) = build_envelope();
     let dir = tempfile::tempdir().unwrap();
@@ -89,7 +84,6 @@ fn independent_python_verifier_accepts_valid_envelope() {
 }
 
 #[test]
-#[ignore = "requires python3 with `pip install cryptography` — see module docs"]
 fn independent_python_verifier_rejects_tampered_payload() {
     let (mut env, pk) = build_envelope();
     let mid = env.payload.len() / 2;
@@ -107,7 +101,6 @@ fn independent_python_verifier_rejects_tampered_payload() {
 }
 
 #[test]
-#[ignore = "requires python3 with `pip install cryptography` — see module docs"]
 fn independent_python_verifier_rejects_wrong_pubkey() {
     let (env, _pk) = build_envelope();
     let wrong_pk = KeyPair::from_seed([0x99; 32]).public.0;
