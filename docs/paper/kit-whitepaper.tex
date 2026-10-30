@@ -1,27 +1,73 @@
-\documentclass[11pt,a4paper]{article}
+\documentclass[10pt,letterpaper]{article}
 
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
 \usepackage{lmodern}
+% Times for text, Helvetica for sans serif, Computer Modern for mathematics
+% and code: the single-column preprint layout of NeurIPS-style papers.
+\renewcommand{\rmdefault}{ptm}
+\usepackage[scaled=0.92]{helvet}
 \usepackage{microtype}
 \DisableLigatures[-]{encoding=T1,family=tt*}
-\usepackage[margin=2cm]{geometry}
+\usepackage[letterpaper,textwidth=5.5in,textheight=9in,top=1in,hcentering]{geometry}
+\usepackage{titlesec}
 \usepackage{amsmath,amssymb,amsthm}
 \usepackage{booktabs}
 \usepackage{enumitem}
 \usepackage{xcolor}
+\usepackage{listings}
+% Palette: one primary colour, one accent and neutrals. All pass contrast
+% on white and stay distinct in grayscale and for common colour blindness.
+\definecolor{kitprimary}{HTML}{0B4F8A}
+\definecolor{kitaccent}{HTML}{B5470F}
+\definecolor{kitmuted}{HTML}{5F6B7A}
+\definecolor{kittint}{HTML}{EEF3F9}
 \usepackage{float}
 \usepackage{fancyvrb}
 \usepackage{upquote}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta}
 \usepackage[numbers,sort&compress]{natbib}
-\usepackage[hidelinks]{hyperref}
+\usepackage[colorlinks,linkcolor=kitprimary,citecolor=kitprimary,urlcolor=kitprimary]{hyperref}
 \usepackage[capitalise,noabbrev]{cleveref}
 
 \setlist{nosep}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5.5pt plus 1pt minus 1pt}
+\titleformat*{\section}{\large\bfseries\color{kitprimary}}
+\titleformat*{\subsection}{\normalsize\bfseries\color{kitprimary}}
+\titlespacing*{\section}{0pt}{12pt plus 4pt minus 2pt}{6pt plus 2pt}
+\titlespacing*{\subsection}{0pt}{9pt plus 3pt minus 2pt}{4pt plus 1pt}
+\renewenvironment{abstract}
+  {\begin{center}\large\bfseries Abstract\end{center}\vspace{-1ex}%
+   \list{}{\leftmargin=0.5in\rightmargin=0.5in}\item\relax}
+  {\endlist}
 \setlength{\textfloatsep}{12pt plus 2pt minus 4pt}
 \setlength{\emergencystretch}{3em}
+
+% Code: pseudocode for the algorithms, shell for the appendix.
+\lstdefinelanguage{kitpseudo}{
+  morekeywords={if,for,each,in,while,return,require,reject,continue,and,or,not,is,
+    last,enumerate},
+  morecomment=[l]{\#},
+  morestring=[b]",
+  sensitive=true,
+}
+\lstdefinestyle{kitcode}{
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\bfseries\color{kitprimary},
+  commentstyle=\itshape\color{kitmuted},
+  stringstyle=\color{kitaccent},
+  backgroundcolor=\color{kittint},
+  columns=fullflexible, keepspaces=true, showstringspaces=false,
+  upquote=true, frame=none, aboveskip=2pt, belowskip=0pt,
+  xleftmargin=4pt, framexleftmargin=4pt,
+}
+\lstdefinestyle{kitalgo}{style=kitcode, language=kitpseudo,
+  numbers=left, numberstyle=\tiny\color{kitmuted}, numbersep=6pt,
+  xleftmargin=16pt}
+\lstdefinestyle{kitshell}{style=kitcode, language=bash, morekeywords={cargo,git,python3},
+  keywordstyle=\color{kitprimary}}
 
 % Pseudocode floats in plain verbatim style.
 \floatstyle{ruled}
@@ -48,17 +94,32 @@
 \newcommand{\sha}{c031e7765689bef163daf8a61190ac2b6aca0ae7}
 \newcommand{\repo}[1]{\href{https://github.com/officialunofficial/kit/blob/\sha/#1}{\expandafter\nolinkurl\expandafter{\romannumeral-`0#1}}}
 
-\title{\kit: An Offline-Verifiable Repository}
-\author{Christopher Wallace\thanks{Corresponding author:
-  \href{mailto:christopher@officialunofficial.com}{\texttt{christopher@officialunofficial.com}}.}
-  \and Vitor Marthendal \and Erica Gregor\\[0.5ex]
-  Official Unofficial, Inc.}
-\date{Version 0.1 (draft), 30 October 2026\\[1ex]
-  \small This work is licensed under the Creative Commons Attribution 4.0
-  International License (CC~BY~4.0).}
+\hypersetup{
+  pdftitle={kit: An Offline-Verifiable Repository},
+  pdfauthor={Christopher Wallace, Vitor Marthendal, Erica Gregor},
+}
 
 \begin{document}
-\maketitle
+
+\begin{center}
+  {\color{kitprimary}\rule{\textwidth}{4pt}}\par\vspace{0.25in}
+  {\LARGE\bfseries \kit: An Offline-Verifiable Repository\par}
+  \vspace{0.29in}{\color{kitprimary}\rule{\textwidth}{1pt}}\par\vspace{0.3in}
+  \begin{tabular}{@{}c@{\hspace{2.5em}}c@{\hspace{2.5em}}c@{}}
+    \textbf{Christopher Wallace}\textsuperscript{$*$} &
+    \textbf{Vitor Marthendal} &
+    \textbf{Erica Gregor} \\
+    Official Unofficial, Inc. & Official Unofficial, Inc. & Official Unofficial, Inc.
+  \end{tabular}\par\vspace{0.3in}
+\end{center}
+
+{\renewcommand{\thefootnote}{}%
+ \footnotetext{\textsuperscript{$*$}Corresponding author:
+   \href{mailto:christopher@officialunofficial.com}{\texttt{christopher@officialunofficial.com}}.}%
+ \footnotetext{Preprint. Version 0.1 (draft), 30 October 2026. This work is
+   licensed under the Creative Commons Attribution 4.0 International License
+   (CC~BY~4.0).}}
+
 
 \begin{abstract}
 A version-control client usually trusts the server, the forge and every mirror
@@ -314,7 +375,7 @@ unique, and a test scans every crate for duplicate definitions.
 \caption{Domain tags and magics on the verification paths of this paper. Their
 bytes never change (SPEC-CONVENTIONS \S4).}
 \label{tab:tags}
-\begin{tabular}{@{}llr@{}}
+\begin{tabular}{@{}lp{1.9in}r@{}}
 \toprule
 Value & Use & Bytes \\
 \midrule
@@ -333,10 +394,10 @@ Value & Use & Bytes \\
 \begin{tikzpicture}[
   every node/.style={font=\footnotesize},
   nd/.style={draw, rounded corners=2pt, minimum height=4.5mm, inner sep=2pt},
-  pth/.style={nd, very thick},
-  sib/.style={nd, fill=black!15, dashed, very thick},
+  pth/.style={nd, very thick, draw=kitprimary},
+  sib/.style={nd, fill=kittint, dashed, very thick, draw=kitprimary},
   ar/.style={-{Stealth[length=1.6mm]}}]
-  \def\dx{3.3}\def\dy{0.78}
+  \def\dx{2.75}\def\dy{0.78}
   \foreach \i in {0,1,2,3} {
     \node[nd] (e\i) at (\i*\dx,0) {$(\mathit{name}_\i, \mathit{mode}_\i, h_\i)$};
     \node[nd] (l\i) at (\i*\dx,\dy) {$L_\i$};
@@ -386,7 +447,7 @@ inner root is an error that a golden rejection vector pins
 (SPEC-MERKLE-OBJECTS \S5.4). A proof over zero positions, a repeated position, a
 position $\ge N$, or a chunk proof at position~0 (the metadata leaf) is
 rejected. \Cref{fig:tree} shows one proof. The proofs are byte-identical to
-\texttt{commonware\_storage::bmt::Proof} at release 2026.9.0, which the
+\path{commonware_storage::bmt::Proof} at release 2026.9.0, which the
 property test \texttt{merkle::tests::proofs\_match\_commonware} pins
 (VERIFY \S5).
 
@@ -493,13 +554,14 @@ chunks $0..i-1$ yield an absolute file offset.
 
 \begin{figure}[t]
 \centering
+\resizebox{\linewidth}{!}{%
 \begin{tikzpicture}[
   every node/.style={font=\footnotesize},
   box/.style={draw, rounded corners=2pt, minimum height=5mm, inner sep=2pt, align=center, minimum width=3.4cm},
   ar/.style={-{Stealth[length=1.6mm]}},
   lab/.style={font=\scriptsize, align=left, anchor=west, text width=10.4cm}]
   \def\dy{1.05}
-  \node[box, very thick] (c) at (0,0) {trusted commit id $c^\star$};
+  \node[box, very thick, draw=kitprimary, fill=kittint] (c) at (0,0) {trusted commit id $c^\star$};
   \node[box] (cb) at (0,-1*\dy) {commit bytes (tree id, signer)};
   \node[box] (s1) at (0,-2*\dy) {step 1: \texttt{src}, $r_1$, $\pi_1$};
   \node[box] (s2) at (0,-3*\dy) {step 2: \texttt{lib.rs}, $r_2$, $\pi_2$};
@@ -514,7 +576,7 @@ chunks $0..i-1$ yield an absolute file offset.
      \emph{recompute Merkle root}: $\pi_2$ folds to $r_2$};
   \node[lab] at (2.1,-3.5*\dy) {the leaf id is the child id of step 2 (mode blob)};
   \node[lab] at (2.1,-4.5*\dy) {\emph{decode Bao slice} against the blob id at offset $o+10$};
-\end{tikzpicture}
+\end{tikzpicture}}
 \caption{Disclosure verification chain for a byte range of \texttt{src/lib.rs}.
 Each arrow binds the lower value to the upper one, which is already
 authenticated. The chain ends at $c^\star$, the only trusted input. The output
@@ -539,7 +601,7 @@ anchor (VERIFY \S5).
 
 \begin{algorithm}[t]
 \caption{Disclosure verification (after SPEC-DISCLOSURE \S4).}\label{alg:disclosure}
-\begin{Verbatim}[fontsize=\footnotesize,numbers=left,numbersep=4pt,xleftmargin=12pt]
+\begin{lstlisting}[style=kitalgo]
 VerifyDisclosure(c*, B):
   if |B| > 64 MiB: reject                     # before any decode
   if B[0..4] != "KDPB" or B[4] != 2: reject   # raw header; v1, v3 are typed errors
@@ -564,7 +626,7 @@ VerifyDisclosure(c*, B):
           Bao slice at offset o+10, length len, against blob or chunk id
           length proofs: empty, or exactly indices 0..i-1, each verified
   return (path, leaf_id, payload, offsets, signer, signature_valid)
-\end{Verbatim}
+\end{lstlisting}
 \end{algorithm}
 
 \paragraph{Bounds before allocation.}
@@ -643,7 +705,7 @@ pack), the 1~GiB object cap and the object decoder's caps
 
 \begin{algorithm}[t]
 \caption{Closure verification over an id-to-object map (after SPEC-DISCLOSURE \S7.4).}\label{alg:closure}
-\begin{Verbatim}[fontsize=\footnotesize,numbers=left,numbersep=4pt,xleftmargin=12pt]
+\begin{lstlisting}[style=kitalgo]
 VerifyClosure(r*, m, manifest, packs):
   decode manifest strictly; require manifest.root == r*; require pack keys match
   for each pack: scan entry types; any delta or compressed entry -> reject
@@ -657,7 +719,7 @@ VerifyClosure(r*, m, manifest, packs):
     for y in children(M[x], m): if y not in seen: seen += y; push(queue, y)
   unreferenced := keys(M) - seen
   return complete = (missing == [] and corrupt == []), missing, corrupt, unreferenced
-\end{Verbatim}
+\end{lstlisting}
 \end{algorithm}
 
 % ---------------------------------------------------------------------------
@@ -877,7 +939,7 @@ decoding it with \texttt{decode\_bundle} from
 tree and a 1,048,577-byte file that FastCDC splits into 15 chunks.
 
 \begin{table}[!htb]
-\centering\small
+\centering\footnotesize\setlength{\tabcolsep}{3pt}
 \caption{Accepting disclosure vectors, in bytes. ``Sibl.'' lists sibling
 digests per step. ``Payload'' is canonical object or chunk bytes, or a Bao
 slice; for \texttt{with\_offsets} the second figure is its one length proof.
@@ -1040,7 +1102,7 @@ tree as verified slices. Because a blob id hashes the canonical bytes, the Bao
 root is the id, and a range needs no extra commitment.
 
 \paragraph{Commonware storage.} \kit{}'s Merkle proofs are byte-identical to
-\texttt{commonware\_storage::bmt::Proof} at 2026.9.0~\cite{commonware}. A
+\path{commonware_storage::bmt::Proof} at 2026.9.0~\cite{commonware}. A
 verifier built on that crate checks a \kit{} proof with the unmodified upstream
 \texttt{verify\_element\_inclusion}, \texttt{verify\_range\_inclusion} or
 \texttt{verify\_multi\_inclusion} after it checks
@@ -1179,7 +1241,7 @@ Guides: \repo{docs/VERIFY.md}, \repo{docs/THREAT-MODEL.md},
 \repo{scripts/check-golden.sh}.\par}
 
 \paragraph{Golden vectors.}
-\begin{Verbatim}[fontsize=\footnotesize]
+\begin{lstlisting}[style=kitshell]
 git checkout c031e7765689bef163daf8a61190ac2b6aca0ae7
 for c in objects proofs disclosure closure; do
   python3 -I -B scripts/golden/${c}_ref.py rust/tests/golden      # prints OK
@@ -1188,42 +1250,43 @@ python3 -m venv .venv && .venv/bin/pip install -r scripts/golden/requirements.tx
 PYTHON=.venv/bin/python bash scripts/check-golden.sh               # every set
 (cd rust && cargo test -p kit-core --test golden_disclosure --test golden_closure \
                       --test golden_proofs)
-\end{Verbatim}
+\end{lstlisting}
 
 \paragraph{Sizes and counts.}
 Two scripts in the \texttt{tools} directory next to this paper reproduce
 these numbers. The first imports \texttt{decode\_bundle} from
 \texttt{disclosure\_ref.py}; the second applies the sibling-selection rule of
 SPEC-MERKLE-OBJECTS \S5.3.
-\begin{Verbatim}[fontsize=\footnotesize]
+\begin{lstlisting}[style=kitshell]
 python3 -I -B docs/paper/tools/measure_disclosure.py .   # Table 3
 python3 -I -B docs/paper/tools/sibling_count.py 16384     # worst case 27 siblings
 stat -c '%s %n' rust/tests/golden/disclosure/*.bin rust/tests/golden/closure/*.bin
 ls rust/fuzz/fuzz_targets/*.rs | wc -l                   # 59
 grep -h '"expect"' rust/tests/golden/{disclosure,proofs,closure}/*.json | sort | uniq -c
-\end{Verbatim}
+\end{lstlisting}
 
 \paragraph{Signature benchmark.}
-\begin{Verbatim}[fontsize=\footnotesize]
+\begin{lstlisting}[style=kitshell]
 cd rust                                                    # Table 4
 cargo bench --locked -p kit-benches --bench ed25519_batch \
   -- --warm-up-time 1 --measurement-time 3
-\end{Verbatim}
+\end{lstlisting}
 
 \paragraph{Fuzzing, formal checks and an end-to-end run.}
 The commit id given to \texttt{verify-proof} and \texttt{closure verify --from}
 must be a literal 64-hex id; these commands do not resolve revisions.
-\begin{Verbatim}[fontsize=\footnotesize]
+\begin{lstlisting}[style=kitshell]
 (cd rust && cargo test --manifest-path fuzz/Cargo.toml)
 (cd rust/fuzz && cargo +nightly fuzz run --features libfuzzer verify_disclosure)
 bash formal/scripts/run-quint.sh; bash formal/scripts/run-kani.sh
 (cd rust && cargo test -p kit-formal-conformance)
 kit prove HEAD src/lib.rs --range 100:40 -o p.bin
-kit verify-proof <64-hex-commit-id> p.bin --expect-path src/lib.rs --payload-out slice.bin
+kit verify-proof <64-hex-commit-id> p.bin --expect-path src/lib.rs \
+  --payload-out slice.bin
 kit closure export HEAD --history -o hist.closure
 kit closure verify <64-hex-commit-id> --from hist.closure --history
 kit verify --trusted HEAD
-\end{Verbatim}
+\end{lstlisting}
 
 \section{Ethical considerations}\label{app:ethics}
 
