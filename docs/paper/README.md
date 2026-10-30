@@ -1,8 +1,9 @@
 # kit whitepaper
 
 `kit-whitepaper.tex` is the whitepaper "kit: An Offline-Verifiable
-Repository". It describes the object model, signing, disclosure and closure
-verification, and the assurance evidence. The specs in
+Repository". It describes proof-shaped object ids and the two verifiers they
+enable: disclosure of a path, chunk or byte range, and closure of a served
+object set. The specs in
 [`docs/specs/`](../specs/README.md) stay normative. Where the paper and a spec
 disagree, the spec wins.
 
@@ -32,9 +33,13 @@ repository root:
 ```sh
 python3 -I -B docs/paper/tools/measure_disclosure.py .
 python3 -I -B docs/paper/tools/sibling_count.py 16384
+python3 -I -B docs/paper/tools/path_cost.py <git-repo>
 ```
 
 `measure_disclosure.py` decodes each accepting disclosure golden vector with
 `scripts/golden/disclosure_ref.py` and splits its size into commit, steps and
 payload. `sibling_count.py` applies the sibling-selection rule of
 SPEC-MERKLE-OBJECTS §5.3 to count the siblings a chunk step carries.
+`path_cost.py` computes, for every file at HEAD of a git repository, the
+disclosure steps kit would need and the git tree bytes on the same path. A
+blobless clone is enough.
