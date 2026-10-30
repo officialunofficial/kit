@@ -35,7 +35,6 @@ buffa
 buffa-build
 buffa-codegen
 buffa-descriptor
-byteorder
 bytes
 cbc
 cc
@@ -153,6 +152,7 @@ kit-transport-connect
 kit-transport-file
 kit-transport-ssh
 libc
+libkit
 linux-raw-sys
 litemap
 log
@@ -230,7 +230,6 @@ socket2
 spki
 sponge-cursor
 stable_deref_trait
-strobe-rs
 subtle
 syn
 sync_wrapper

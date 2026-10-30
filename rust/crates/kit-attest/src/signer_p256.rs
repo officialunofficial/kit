@@ -176,7 +176,7 @@ impl crate::signer::Signer for P256Signer {
 ///
 /// Enforces low-S: any signature with `s > n/2` is rejected even if the
 /// math checks out. This blocks the ECDSA malleability family the same
-/// way `ed25519-dalek::verify_strict` blocks the Ed25519 one.
+/// way the canonical-`s` check of SPEC-SIGNING §1 blocks the Ed25519 one.
 ///
 /// # Errors
 /// * [`Error::P256KeyInvalid`] — malformed pubkey bytes.

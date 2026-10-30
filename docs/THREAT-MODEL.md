@@ -352,8 +352,9 @@ Without `--trusted`, `kit verify` proves only that the object's
 embedded `signer` produced its signature &mdash; it does not consult trust
 roots at all (SPEC-SIGNING §6.1). A signature from an unlisted,
 attacker-controlled key is indistinguishable from a trusted one unless
-the caller opts into `--trusted`. `kit clone`/`pull`/`fetch` do not run
-any verification by default; that remains a separate, tracked gap.
+the caller opts into `--trusted`. `kit clone`/`pull`/`fetch` run the
+same check by default (§3.1): they verify each signature against its
+embedded `signer`, not against trust roots.
 
 ---
 
@@ -487,8 +488,10 @@ matching update here.
 - Keystore capability tests assert that each backend advertises only supported
   algorithms, export/import/listing, user-presence, device-bound, and
   non-extractability properties.
-- `cargo fuzz` targets cover delta decode, pack reader, the object
-  deserializer, and the encrypted software key record parser (`docs/FUZZ.md`).
+- `cargo fuzz` targets cover the parsers of untrusted input,
+  among them delta decode, the pack reader, the object deserializer, the
+  encrypted software key record parser, and the disclosure, closure and
+  span verifiers (`docs/FUZZ.md` lists each target).
 - Integration tests assert that a hostile `<repo>/.kit/config`
   cannot set any user-scoped key (warning plus ignored). Per-key
   coverage lives in `rust/crates/kit-bin/tests/repo_config_forbidden_keys.rs`,

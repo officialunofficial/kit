@@ -20,9 +20,7 @@ workspace = true
 [dependencies]
 # `default-features = false`: the zstd C backend is this crate's own
 # `pack-zstd` feature (on by default), so an embedder can build without it.
-# `batch-verify` is the Ed25519 batch fast path of the post-fetch signature
-# check (pure Rust, no C dependency).
-kit-core = { version = "=0.5.0", path = "../kit-core", default-features = false, features = ["batch-verify"] }
+kit-core = { version = "=0.5.0", path = "../kit-core", default-features = false }
 # Fan-out of signature verification, ref reads and chunk reads.
 rayon = "1.12.0"
 # Private staging directory for downloaded packs.

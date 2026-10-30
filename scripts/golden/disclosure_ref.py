@@ -68,29 +68,43 @@ def _recover_x(y, sign):
 
 
 def _decode_point(b):
+    """SPEC-SIGNING §1 check 1: a canonical encoding (y < p, and no sign bit
+    on x = 0) of a curve point."""
     n = int.from_bytes(b, "little")
     y, sign = n & ((1 << 255) - 1), n >> 255
     if y >= o.P:
         raise ValueError("bad point")
-    return _recover_x(y, sign), y
+    x = _recover_x(y, sign)
+    if x == 0 and sign:
+        raise ValueError("negative zero")
+    return x, y
+
+
+def _small_order(point):
+    return o.scalar_mult(8, point) == (0, 1)
 
 
 def ed25519_verify(public, msg, sig):
-    """RFC 8032 section 5.1.7."""
+    """The SPEC-SIGNING §1 predicate: canonical A and R that are not of small
+    order, S < L, and the cofactored equation [8]([S]B - R - [k]A) = 0."""
     import hashlib
 
+    if len(public) != 32 or len(sig) != 64:
+        return False
     try:
         a = _decode_point(public)
         r = _decode_point(sig[:32])
     except ValueError:
         return False
+    if _small_order(a) or _small_order(r):
+        return False
     s = int.from_bytes(sig[32:], "little")
     if s >= o.L:
         return False
     k = int.from_bytes(hashlib.sha512(sig[:32] + public + msg).digest(), "little") % o.L
-    left = o.scalar_mult(s, o.B)
     right = o.point_add(r, o.scalar_mult(k, a))
-    return left == right
+    diff = o.point_add(o.scalar_mult(s, o.B), ((o.P - right[0]) % o.P, right[1]))
+    return o.scalar_mult(8, diff) == (0, 1)
 
 
 # --------------------------------------------------------------- bao

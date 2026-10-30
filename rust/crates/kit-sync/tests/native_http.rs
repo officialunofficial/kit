@@ -193,8 +193,11 @@ fn cleartext_http_to_a_non_loopback_host_is_refused_unless_allowed() {
         .unwrap()
         .allow_insecure_http(true)
         .with_timeout(Duration::from_millis(200));
-    let err = send(&allowed, "http://203.0.113.9/", 1024).unwrap_err();
-    assert!(!err.contains("non-loopback"), "{err}");
+    // Past the refusal the request may fail to connect or, behind an
+    // egress proxy, get a response; either way it is not refused.
+    if let Err(err) = send(&allowed, "http://203.0.113.9/", 1024) {
+        assert!(!err.contains("non-loopback"), "{err}");
+    }
 }
 
 const READ_URL_PATH: &str = "kit.transport.v1.TransportService/ListRefs";

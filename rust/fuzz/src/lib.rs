@@ -656,6 +656,70 @@ pub fn span_decode_one_iteration(input: &[u8]) {
 const SPAN_CHUNK: usize = 48;
 const SPAN_CHUNKS: usize = 4;
 
+/// Up to 4 Ed25519 entries built from `input`: raw bytes, honest
+/// signatures, and honest signatures with one flipped byte. The batch check
+/// must accept exactly when every entry passes the single check
+/// (SPEC-SIGNING §1). The honest signatures are made once, because signing
+/// in every iteration would not fit [`PER_ITER`] in an unoptimized build.
+pub fn ed25519_batch_one_iteration(input: &[u8]) {
+    use kit_core::sign::{COMMIT_DOMAIN, KeyPair, verify_ed25519, verify_ed25519_batch};
+
+    type Entry = ([u8; 32], [u8; 32], [u8; 64]);
+    static HONEST: std::sync::OnceLock<Vec<Entry>> = std::sync::OnceLock::new();
+    let honest = HONEST.get_or_init(|| {
+        (0..4u8)
+            .map(|i| {
+                let kp = KeyPair::from_seed([i; 32]);
+                let mut signed = (COMMIT_DOMAIN.len() as u16).to_le_bytes().to_vec();
+                signed.extend_from_slice(COMMIT_DOMAIN);
+                signed.push(i);
+                let digest = kit_core::hash::hash(&signed);
+                (kp.public.0, digest, kp.sign(COMMIT_DOMAIN, &[i]).0)
+            })
+            .collect()
+    });
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let fixed = |bytes: &[u8]| -> [u8; 32] {
+        let mut out = [0u8; 32];
+        let n = bytes.len().min(32);
+        out[..n].copy_from_slice(&bytes[..n]);
+        out
+    };
+    let mut entries: Vec<Entry> = Vec::new();
+    for chunk in input.chunks(98).take(4) {
+        let body = &chunk[1..];
+        let pick = usize::from(body.first().copied().unwrap_or(0)) % honest.len();
+        match chunk[0] % 3 {
+            0 => {
+                let mut sig = [0u8; 64];
+                let tail = body.get(64..).unwrap_or(&[]);
+                sig[..32].copy_from_slice(&fixed(body.get(32..).unwrap_or(&[])));
+                sig[32..].copy_from_slice(&fixed(tail));
+                entries.push((fixed(body), fixed(tail), sig));
+            }
+            1 => entries.push(honest[pick]),
+            _ => {
+                let (public, digest, mut sig) = honest[pick];
+                let at = usize::from(body.last().copied().unwrap_or(0)) % 64;
+                sig[at] ^= 1 << (at % 8);
+                entries.push((public, digest, sig));
+            }
+        }
+    }
+    let singles = entries
+        .iter()
+        .all(|(public, message, sig)| verify_ed25519(public, message, sig).is_ok());
+    let refs: Vec<_> = entries
+        .iter()
+        .map(|(public, message, sig)| (public, &message[..], sig))
+        .collect();
+    assert_eq!(
+        verify_ed25519_batch(&refs).is_ok(),
+        singles,
+        "batch and single verification disagree"
+    );
+}
+
 /// A small chunked-file repository for [`verify_span_one_iteration_with`].
 pub struct SpanFixture {
     _dir: tempfile::TempDir,
@@ -3106,6 +3170,19 @@ mod tests {
         over_count.extend_from_slice(&[0, 0xc1, 0x84, 0x3d]);
         for case in [&nonminimal, &over_count] {
             run_one(case, span_decode_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn ed25519_batch_target_runs_within_caps() {
+        run_iterated_unit(ed25519_batch_one_iteration).expect("guardrails held");
+        for case in [
+            &b""[..],
+            &[1u8; 98 * 4][..],
+            &[2u8; 98 * 4][..],
+            &[0xff; 98 * 4][..],
+        ] {
+            run_one(case, ed25519_batch_one_iteration).expect("guardrails held");
         }
     }
 

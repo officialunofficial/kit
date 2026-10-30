@@ -176,7 +176,7 @@ fn disclosed_to_json(d: &Disclosed) -> Result<String, String> {
     .map_err(|e| format!("disclosed JSON: {e}"))
 }
 
-/// A verified MKDS span, including its authenticated metadata and plaintext.
+/// A verified KDSP span, including its authenticated metadata and plaintext.
 ///
 /// Both getters use the result of one verification. The JSON deliberately
 /// excludes the bytes; callers obtain them through [`VerifiedSpan::bytes`].
@@ -204,7 +204,7 @@ impl VerifiedSpan {
     }
 }
 
-/// Verify an MKDS v1 span container against a trusted commit id.
+/// Verify an KDSP v1 span container against a trusted commit id.
 ///
 /// The JSON contains `commit_id`, `tree_hash`, `path`, `leaf_id`, `signer`,
 /// `signature_valid`, `offset`, `bytes_len`, `bytes_blake3`, `first`, `last`,

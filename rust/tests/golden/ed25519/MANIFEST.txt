@@ -1,0 +1,4 @@
+# Ed25519 acceptance vectors for the SPEC-SIGNING section 1 predicate (BLAKE3 hash of file bytes)
+# Update the digests with `python3 scripts/golden/write_manifest.py rust/tests/golden/ed25519`
+# Cross-checked by `python3 scripts/golden/ed25519_ref.py rust/tests/golden`
+vectors.json 3d13a7da6651ae2c233a24bacda607c8292fe89df99d0af6d7bdb27fec8fd2f7
