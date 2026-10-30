@@ -27,16 +27,14 @@ fn entries(n: usize, signers: usize) -> Vec<Entry> {
             seed[..8].copy_from_slice(&((i % signers) as u64).to_le_bytes());
             let kp = KeyPair::from_seed(seed);
             let body = (i as u64).to_le_bytes();
-            let mut signed = (COMMIT_DOMAIN.len() as u16).to_le_bytes().to_vec();
-            signed.extend_from_slice(COMMIT_DOMAIN);
-            signed.extend_from_slice(&body);
-            let digest = kit_core::hash::hash(&signed);
+            let digest = kit_core::hash::domain_digest(COMMIT_DOMAIN, &body);
             (kp.public.0, digest, kp.sign(COMMIT_DOMAIN, &body).0)
         })
         .collect()
 }
 
-/// The check kit used before SPEC-SIGNING §1 became cofactored.
+/// `ed25519-dalek`'s `verify_strict`: cofactorless, the baseline the kit
+/// checks are measured against.
 fn dalek_strict(batch: &[Entry]) {
     use ed25519_dalek::{Signature, VerifyingKey};
     for (public, message, sig) in batch {
@@ -72,7 +70,7 @@ fn batched_parallel(batch: &[Entry]) {
 
 fn bench_ed25519_batch(c: &mut Criterion) {
     let modes: [Mode; 5] = [
-        ("verify_strict (old)", dalek_strict),
+        ("ed25519-dalek verify_strict", dalek_strict),
         ("single", single),
         ("batch", batched),
         ("single, parallel", single_parallel),

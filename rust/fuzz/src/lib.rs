@@ -670,10 +670,7 @@ pub fn ed25519_batch_one_iteration(input: &[u8]) {
         (0..4u8)
             .map(|i| {
                 let kp = KeyPair::from_seed([i; 32]);
-                let mut signed = (COMMIT_DOMAIN.len() as u16).to_le_bytes().to_vec();
-                signed.extend_from_slice(COMMIT_DOMAIN);
-                signed.push(i);
-                let digest = kit_core::hash::hash(&signed);
+                let digest = kit_core::hash::domain_digest(COMMIT_DOMAIN, &[i]);
                 (kp.public.0, digest, kp.sign(COMMIT_DOMAIN, &[i]).0)
             })
             .collect()
