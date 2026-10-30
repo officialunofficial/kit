@@ -136,19 +136,26 @@ fn verify_one_object(h: Hash, obj: &Object) -> Result<(), SyncError> {
 /// A signed object's public key, signing digest and signature.
 type BatchEntry = ([u8; 32], Hash, [u8; 64]);
 
-/// The [`BatchEntry`] of each signed object, or `None` when a signing
-/// digest cannot be computed. The per-object fallback then reports that
-/// object.
+/// The [`BatchEntry`] of each signed object, skipping objects that carry
+/// no signature, or `None` when a signing digest cannot be computed. The
+/// per-object fallback then reports that object.
 fn batch_entries(entries: &[(Hash, Object)]) -> Option<Vec<BatchEntry>> {
     entries
         .iter()
-        .map(|(_, obj)| match obj {
-            Object::Commit(c) => Some((c.signer, sign::commit_signing_hash(c).ok()?, c.signature)),
-            Object::Remix(r) => Some((r.signer, sign::remix_signing_hash(r).ok()?, r.signature)),
-            Object::Tag(t) => Some((t.signer, sign::tag_signing_hash(t).ok()?, t.signature)),
+        .filter_map(|(_, obj)| match obj {
+            Object::Commit(c) => {
+                Some(sign::commit_signing_hash(c).map(|digest| (c.signer, digest, c.signature)))
+            }
+            Object::Remix(r) => {
+                Some(sign::remix_signing_hash(r).map(|digest| (r.signer, digest, r.signature)))
+            }
+            Object::Tag(t) => {
+                Some(sign::tag_signing_hash(t).map(|digest| (t.signer, digest, t.signature)))
+            }
             Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => None,
         })
-        .collect()
+        .collect::<Result<_, _>>()
+        .ok()
 }
 
 /// Check `batch` with one [`sign::verify_ed25519_batch`] call per worker
