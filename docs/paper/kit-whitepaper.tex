@@ -772,15 +772,17 @@ messages \kit{} does not control; SPEC-SIGNING \S8 states that cross-protocol
 separation is not analyzed and recommends separate keys until it is. P-256 and
 secp256k1 attestation keys never sign object digests.
 
-\paragraph{Batch verification.}
-SPEC-SIGNING \S1 says ``No batched verification.'' The fetch path in
-\texttt{kit-sync} uses \texttt{verify\_batch} as a fast path for many objects,
-adds per-entry weak-key and small-order-$R$ checks, and falls back to
-per-object strict verification on failure (\texttt{kit-core/src/sign.rs},
-\texttt{kit-sync/src/verify.rs}). The repository does not establish that this
-path accepts exactly the inputs the strict predicate accepts, so
-\cref{prop:replay} does not rely on it; \texttt{kit verify} uses the strict
-per-object check.
+\paragraph{No batched verification.}
+SPEC-SIGNING \S1 says ``No batched verification.'' Clone, pull and fetch check
+each new commit, remix and tag with the same strict per-object function that
+\texttt{kit verify} calls (\texttt{kit-sync/src/verify.rs}), spread across
+threads. A randomized batch equation accepts a different set of signatures: a
+key holder can add an 8-torsion point to $R$ and choose $s$ so that the
+cofactorless equation misses by that point, which the batch equation ignores
+whenever the coefficient of that entry is a multiple of~8. A test in
+\texttt{kit-core/src/sign.rs} builds such a signature and checks that the
+strict predicate rejects it. Every verifier therefore reaches the same verdict
+on every signature.
 
 % ---------------------------------------------------------------------------
 \section{Assurance}\label{sec:assurance}
@@ -1018,9 +1020,8 @@ only the public domain constants (VERIFY \S5).
         re-canonicalized. Using one key for commits, attestations and SSH is
         not analyzed (SPEC-SIGNING \S8).
   \item \textbf{Evidence.} The arguments are informal, the formal models are
-        bounded and do not cover these verifiers, batched fetch verification
-        and SPEC-SIGNING \S1 disagree, and no performance results are
-        published.
+        bounded and do not cover these verifiers, and no performance
+        results are published.
 \end{itemize}
 
 % ---------------------------------------------------------------------------
