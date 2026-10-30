@@ -362,31 +362,16 @@ impl Ed25519Item {
     }
 }
 
-/// `p - 1 = 2^255 - 20`, little-endian: the y-coordinate of the point of
-/// order 2.
-const Y_MINUS_ONE: [u8; 32] = {
-    let mut y = [0xffu8; 32];
-    y[0] = 0xec;
-    y[31] = 0x7f;
-    y
-};
-
-/// Decode a point and require the canonical encoding: `y < p`, and no sign
-/// bit on `x = 0`. Decompression alone reduces `y` modulo `p` and ignores the
-/// sign of a zero `x`, so both rules are checked on the bytes first.
-/// `x = 0` holds exactly when `y = 1` or `y = p - 1`.
+/// Decode a point and require `y < p`, which decompression alone does not
+/// check: it reduces `y` modulo `p`. The other non-canonical form, a sign
+/// bit on `x = 0`, needs no test here: `x = 0` holds only for the identity
+/// and the point of order 2, which check 2 of SPEC-SIGNING §1 rejects.
 fn canonical_point(bytes: &[u8; 32]) -> Option<EdwardsPoint> {
     let mut y = *bytes;
-    let sign = y[31] >> 7;
     y[31] &= 0x7f;
     // y >= p = 2^255 - 19 exactly when the high 248 bits are all set and
     // the low byte is at least 0xed.
     if y[31] == 0x7f && y[1..31].iter().all(|b| *b == 0xff) && y[0] >= 0xed {
-        return None;
-    }
-    let mut one = [0u8; 32];
-    one[0] = 1;
-    if sign == 1 && (y == one || y == Y_MINUS_ONE) {
         return None;
     }
     CompressedEdwardsY(*bytes).decompress()
@@ -1208,11 +1193,12 @@ mod tests {
         high[31] = 0x7f;
         assert!(CompressedEdwardsY(high).decompress().is_some());
         assert!(canonical_point(&high).is_none());
-        // x = 0 with the sign bit set.
+        // x = 0 with the sign bit set decodes to the identity, which the
+        // small-order check rejects.
         let mut negative_zero = [0u8; 32];
         negative_zero[0] = 1;
         negative_zero[31] = 0x80;
-        assert!(canonical_point(&negative_zero).is_none());
+        assert!(canonical_point(&negative_zero).unwrap().is_small_order());
 
         let kp = fixed_kp();
         let sig = kp.sign(COMMIT_DOMAIN, b"x");
@@ -1226,8 +1212,9 @@ mod tests {
         ));
     }
 
-    /// The byte-level canonical check gives the same verdict as decoding,
-    /// re-encoding and comparing, on every edge encoding and on random bytes.
+    /// Together with the small-order check, the byte-level canonical check
+    /// accepts exactly the points whose encoding survives decoding and
+    /// re-encoding, on every edge encoding and on random bytes.
     #[test]
     fn canonical_point_matches_re_encoding() {
         let reference = |bytes: &[u8; 32]| {
@@ -1258,10 +1245,11 @@ mod tests {
             state = Sha512::digest(state)[..32].try_into().unwrap();
             cases.push(state);
         }
+        let accepted = |p: Option<EdwardsPoint>| p.filter(|p| !p.is_small_order());
         for b in &cases {
             assert_eq!(
-                canonical_point(b).map(|p| p.compress()),
-                reference(b).map(|p| p.compress()),
+                accepted(canonical_point(b)).map(|p| p.compress()),
+                accepted(reference(b)).map(|p| p.compress()),
                 "encoding {b:02x?}"
             );
         }
