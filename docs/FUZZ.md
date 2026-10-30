@@ -36,6 +36,7 @@ from recurring.
 | `fuzz_targets/verify_disclosure.rs` | `verify::verify_disclosure` / `verify::build_disclosure` (never panics; a freshly built bundle over a real `ObjectStore` fixture verifies; a mutated bundle rejects cleanly) |
 | `fuzz_targets/span_decode.rs` | `verify::span::verify_disclosure_span` structural decode (never panics on arbitrary KDSP bytes; lengths and counts are checked before allocation) |
 | `fuzz_targets/verify_span.rs` | `verify::span::{encode_span,verify_disclosure_span}` (a newly encoded committed span verifies; its mutated commit id rejects; arbitrary input never panics) |
+| `fuzz_targets/ed25519_batch.rs` | `sign::verify_ed25519_batch` / `sign::verify_ed25519` (raw, honest and bit-flipped entries; the batch accepts exactly when every entry passes the single check) |
 | `fuzz_targets/pack_entries.rs` | `pack::PackEntries` (never panics on adversarial pack bytes; a pack `PackReader::read` accepts also parses as `PackEntries` with the same entry count) |
 | `fuzz_targets/verify_closure.rs` | `verify::verify_closure` / `verify::verify_closure_packs` / `verify::verify_closure_manifest` / `verify::export_closure` (never panics; a freshly exported snapshot closure verifies; a mutated manifest rejects cleanly; raw adversarial bytes fed directly as pack buffers — whole and split into two — to `verify_closure_packs`/`verify_closure_manifest` never panic and any `Ok` report is internally consistent) |
 | `fuzz_targets/envelope_decode.rs` | `kit_attest::envelope::decode` (every accepted input re-encodes to exactly itself) |

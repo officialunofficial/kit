@@ -20,7 +20,7 @@ use crate::error::SyncError;
 /// pool-dispatch overhead loses to a plain loop below a few entries per
 /// thread and wins clearly above it) but tuned lower: each entry here is
 /// only a `store.read_object` (disk read + BLAKE3 re-hash) plus one
-/// Ed25519 `verify_strict` — cheaper per item than the zstd-compression
+/// Ed25519 check — cheaper per item than the zstd-compression
 /// fan-out `PACK_FANOUT_ENTRIES_PER_THREAD` guards, so fewer entries per
 /// thread are enough to amortize dispatch. Measured with `cargo bench -p
 /// kit-benches --bench verify_fanout`.
@@ -100,10 +100,12 @@ fn verify_chunk_size() -> usize {
 /// (in `stored`'s order) is always the one whose error is returned,
 /// since later chunks are never started.
 ///
-/// Fetch never batches signatures. A randomized batch equation accepts a
-/// different set of signatures than `verify_strict`, so a key holder could
-/// publish a commit that fetch accepts and `kit verify` rejects (SPEC-SIGNING
-/// §1, "No batched verification").
+/// Within each chunk (or the whole slice, below the fan-out threshold),
+/// [`verify_slice`] first checks every signature in one
+/// [`sign::verify_ed25519_batch`] call per worker thread. The batch accepts
+/// exactly the signatures [`sign::verify_ed25519`] accepts (SPEC-SIGNING
+/// §1), so fetch and `kit verify` never disagree. Only when a batch fails
+/// does [`verify_slice`] check each object on its own to name the bad one.
 pub(crate) fn verify_new_object_signatures(
     store: &ObjectStore,
     stored: &[Hash],
@@ -131,6 +133,41 @@ fn verify_one_object(h: Hash, obj: &Object) -> Result<(), SyncError> {
     })
 }
 
+/// A signed object's public key, signing digest and signature.
+type BatchEntry = ([u8; 32], Hash, [u8; 64]);
+
+/// The [`BatchEntry`] of each signed object, or `None` when a signing
+/// digest cannot be computed. The per-object fallback then reports that
+/// object.
+fn batch_entries(entries: &[(Hash, Object)]) -> Option<Vec<BatchEntry>> {
+    entries
+        .iter()
+        .map(|(_, obj)| match obj {
+            Object::Commit(c) => Some((c.signer, sign::commit_signing_hash(c).ok()?, c.signature)),
+            Object::Remix(r) => Some((r.signer, sign::remix_signing_hash(r).ok()?, r.signature)),
+            Object::Tag(t) => Some((t.signer, sign::tag_signing_hash(t).ok()?, t.signature)),
+            Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => None,
+        })
+        .collect()
+}
+
+/// Check `batch` with one [`sign::verify_ed25519_batch`] call per worker
+/// thread, or one call when `parallel` is unset.
+fn verify_batch(batch: &[BatchEntry], parallel: bool) -> bool {
+    let check = |sub: &[BatchEntry]| {
+        let refs: Vec<_> = sub.iter().map(|(p, m, s)| (p, &m[..], s)).collect();
+        sign::verify_ed25519_batch(&refs).is_ok()
+    };
+    if !parallel {
+        return check(batch);
+    }
+    let size = batch
+        .len()
+        .div_ceil(rayon::current_num_threads().max(1))
+        .max(1);
+    batch.par_chunks(size).all(check)
+}
+
 /// Read every object in `hashes` (in parallel iff `parallel`, matching
 /// [`verify_new_object_signatures`]'s existing sequential/rayon split),
 /// then verify their signatures. Every hash is read (there's no cheaper
@@ -138,8 +175,9 @@ fn verify_one_object(h: Hash, obj: &Object) -> Result<(), SyncError> {
 /// retained afterward — see the read step's own comment for why that
 /// matters for a chunk dominated by large blobs.
 ///
-/// Each signed object is checked with [`verify_one_object`], in parallel
-/// iff `parallel`, so the first failure names the offending hash.
+/// The signed objects are checked as a batch first. If the batch fails,
+/// each object is checked with [`verify_one_object`], in parallel iff
+/// `parallel`, so the first failure names the offending hash.
 fn verify_slice(store: &ObjectStore, hashes: &[Hash], parallel: bool) -> Result<(), SyncError> {
     // Every hash in `hashes` still has to be *read* to learn its type —
     // the pack format doesn't index that separately — but only
@@ -173,6 +211,9 @@ fn verify_slice(store: &ObjectStore, hashes: &[Hash], parallel: bool) -> Result<
             .collect::<Result<_, _>>()?
     };
 
+    if batch_entries(&entries).is_some_and(|batch| verify_batch(&batch, parallel)) {
+        return Ok(());
+    }
     if parallel {
         entries
             .par_iter()

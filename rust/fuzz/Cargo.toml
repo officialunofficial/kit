@@ -199,6 +199,13 @@ path = "fuzz_targets/verify_span.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ed25519_batch"
+path = "fuzz_targets/ed25519_batch.rs"
+test = false
+doc = false
+bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]

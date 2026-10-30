@@ -9,12 +9,23 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
-- Clone, pull and fetch verify each signature with the strict per-object
-  check that `kit verify` uses. The batched Ed25519 fast path accepted some
-  torsion-padded signatures that the strict check rejects, so fetch and
-  `kit verify` could disagree on a commit signed by its own key holder. The
-  `batch-verify` feature of `kit-core` and `kit_core::sign::verify_batch` are
-  removed.
+- Every Ed25519 check uses one acceptance predicate (SPEC-SIGNING §1):
+  canonical, non-small-order `A` and `R`, canonical `s`, and the cofactored
+  equation. Commits, tags, attestations, write grants, URL tokens and auth
+  envelopes all call `kit_core::sign::verify_ed25519`. Before, fetch used a
+  batch check that accepted some torsion-padded signatures that `kit verify`
+  rejected, and the transfer envelope test used the loose RFC 8032 check.
+
+### Changed
+
+- The verification equation is cofactored. A signature whose `R` or `A`
+  carries a torsion component, which only the key holder can make, now
+  verifies.
+- Clone, pull and fetch check signatures with
+  `kit_core::sign::verify_ed25519_batch`, which accepts exactly what the
+  single check accepts. Its weights come fresh from the operating system.
+  The `batch-verify` feature of `kit-core` and `kit_core::sign::verify_batch`
+  are removed.
 
 ## [0.5.0] - 2026-10-28
 
