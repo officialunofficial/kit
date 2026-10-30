@@ -348,8 +348,8 @@ set is a typed rejection (`IncompleteLengthProofSet`), never silently
 treated as "absent." And **chunk index 0 never carries any length
 proofs at all**: there is nothing before it to describe, so a non-empty
 set there is rejected the same way as on a plain `Blob` leaf
-(`UnexpectedLengthProofs`) &mdash; a rule tightened in this same PR (see
-`rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*`).
+(`UnexpectedLengthProofs`). The golden vector
+`rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*` pins this rule.
 
 ### Worked example
 
@@ -662,10 +662,12 @@ own test harness should take.
 
 ## 7. Limits and non-goals
 
-- **Ranges cannot cross a chunk boundary**, in this (v1) profile of the
-  disclosure bundle. `kit prove --range` rejects such a request outright
-  (`RangeCrossesChunkBoundary`) rather than silently splitting it into
-  multiple chunk proofs.
+- **A single bundle cannot prove a range that crosses a chunk boundary.**
+  `kit prove --range` rejects such a request (`RangeCrossesChunkBoundary`)
+  rather than silently splitting it into multiple chunk proofs. The KDSP
+  span container ([SPEC-DISCLOSURE §8](specs/SPEC-DISCLOSURE.md#8-multi-chunk-span-container-kdsp-v1))
+  proves such a range: `kit_core::verify::span` builds and verifies it, but
+  `kit prove` does not emit it.
 - **git SHA-1 hashes support full disclosure only.** A git blob is a flat
   SHA-1 digest with no sub-file structure to build a partial proof over; a
   client that already trusts a git SHA-1 verifies it with git's own
