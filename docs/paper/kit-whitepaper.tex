@@ -45,7 +45,7 @@
 \newcommand{\cc}{\mathbin{\|}}
 \newcommand{\str}[1]{\texttt{"\romannumeral-`0#1"}}
 \newcommand{\bytes}[1]{\texttt{\romannumeral-`0#1}}
-\newcommand{\sha}{7f7200e8fbf2a80a93b6f862818f970bca52a83d}
+\newcommand{\sha}{1da700e849f29dcb2a7cf2b7dde998109791fbfd}
 \newcommand{\repo}[1]{\href{https://github.com/officialunofficial/kit/blob/\sha/#1}{\expandafter\nolinkurl\expandafter{\romannumeral-`0#1}}}
 
 \title{\kit: An Offline-Verifiable Repository}
@@ -1068,7 +1068,7 @@ Guides: \repo{docs/VERIFY.md}, \repo{docs/THREAT-MODEL.md},
 
 \paragraph{Golden vectors.}
 \begin{Verbatim}[fontsize=\footnotesize]
-git checkout 7f7200e8fbf2a80a93b6f862818f970bca52a83d
+git checkout 1da700e849f29dcb2a7cf2b7dde998109791fbfd
 for c in objects proofs disclosure closure; do
   python3 -I -B scripts/golden/${c}_ref.py rust/tests/golden      # prints OK
 done
