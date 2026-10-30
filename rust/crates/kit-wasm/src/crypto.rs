@@ -74,14 +74,16 @@ pub fn verify_bytes_commit_domain(pubkey_hex: &str, bytes: &[u8], sig_hex: &str)
 // These are byte-level Ed25519 wrappers that match what `@noble/ed25519`
 // exposes — no domain prefix, no BLAKE3 mixing, no commit framing. The
 // goal is to let JS consumers drop a separate `@noble/ed25519`
-// dependency and route every Ed25519 op through the same `ed25519-dalek`
-// crate kit's commit-signing path uses.
+// dependency and route every Ed25519 op through the code kit's
+// commit-signing path uses.
 //
-// Verify uses the strict path (`verify_ed25519` in `kit-attest`), which
-// rejects the hdevalence malleability vectors. This is deliberately
-// stricter than noble's default loose verify; verifiers that disagree
-// on which signatures are valid produce nondeterministic agreement on
-// commit / attestation hashes downstream.
+// Verify applies the SPEC-SIGNING §1 predicate (`verify_ed25519` in
+// `kit-attest`): canonical, non-small-order `A` and `R`, canonical `s` and
+// the cofactored equation. It accepts a signature whose `R` or `A` carries
+// a torsion component, which only the key holder can make, and rejects
+// small-order and non-canonical points. It differs from noble's default
+// verify; verifiers that disagree on which signatures are valid reach
+// different verdicts on the same commit or attestation.
 
 /// Verify a raw Ed25519 signature, with strict canonical-encoding checks.
 ///
