@@ -49,9 +49,13 @@
 \newcommand{\repo}[1]{\href{https://github.com/officialunofficial/kit/blob/\sha/#1}{\expandafter\nolinkurl\expandafter{\romannumeral-`0#1}}}
 
 \title{\kit: An Offline-Verifiable Repository}
-\author{Christopher Wallace \and Vitor Marthendal \and Erica Gregor\\[0.5ex]
+\author{Christopher Wallace\thanks{Corresponding author:
+  \href{mailto:christopher@officialunofficial.com}{\texttt{christopher@officialunofficial.com}}.}
+  \and Vitor Marthendal \and Erica Gregor\\[0.5ex]
   Official Unofficial, Inc.}
-\date{Draft, \today}
+\date{Version 0.1 (draft), 30 October 2026\\[1ex]
+  \small This work is licensed under the Creative Commons Attribution 4.0
+  International License (CC~BY~4.0).}
 
 \begin{document}
 \maketitle
@@ -123,8 +127,10 @@ untrusted for these claims.
 \cref{sec:security} the security arguments, \cref{sec:assurance} the
 assurance evidence and \cref{sec:eval} the measurements. \Cref{sec:related}
 covers related work, \cref{sec:limits} limitations and draft specifications,
-and \cref{sec:conclusion} concludes. \Cref{app:repro} lists the commands and
-files that reproduce each measurement.
+and \cref{sec:conclusion} concludes. Disclosures of competing interests,
+funding and a vulnerability follow the conclusion. \Cref{app:repro} lists the
+commands and files that reproduce each measurement, \cref{app:ethics} gives
+the ethical considerations and \cref{app:open} lists the artifacts.
 
 \paragraph{Status.} \kit{} is alpha software (version 0.5.0); its command-line
 interface and object formats may change before 1.0. SPEC-OBJECTS and
@@ -937,8 +943,10 @@ first group every entry has its own key, the shape of a fetch with commits
 from many people; in the second the entries cycle through four keys, the shape
 of a fetch from a small team, where the batch check shares one term per key.
 It ran with criterion~0.8 (100 samples, 3~s per measurement) on a shared
-4-vCPU cloud VM (Intel Xeon at 2.1~GHz, Rust~1.99.1, release profile); the
-table gives the median throughput. ``Parallel'' spreads the work over the
+4-vCPU cloud VM (Intel Xeon at 2.1~GHz, Rust~1.99.1, release
+profile)\footnote{Timings on a shared VM are noisy. The measurements will be
+repeated on dedicated hardware before submission.}; the table gives the median
+throughput. ``Parallel'' spreads the work over the
 4~rayon threads; the batch columns use one batch per thread, as fetch does.
 
 \begin{table}[h]
@@ -1061,7 +1069,9 @@ only the public domain constants (VERIFY \S5).
         carried inline; SLH-DSA~\cite{fips205} for long-lived release keys,
         because the BLS12-381 threshold design is not post-quantum; and hybrid
         ML-KEM key exchange in TLS, which \kit{}'s rustls configuration with
-        the \texttt{ring} provider does not offer today. FN-DSA and the
+        the \texttt{ring} provider does not offer today.\footnote{rustls~0.23
+        offers the hybrid X25519MLKEM768 group only through its
+        \texttt{aws-lc-rs} provider.} FN-DSA and the
         candidates of NIST's additional-signatures process have smaller
         signatures but are not yet standardized~\cite{nistir8610}.
   \item \textbf{Absence and ranges.} Disclosure proves inclusion only;
@@ -1114,6 +1124,32 @@ resistance and Ed25519 under the SPEC-SIGNING predicate; the evidence is golden 
 independent reference, fuzz targets and bounded models. Signer identity,
 freshness, absence proofs and remote ancestry remain open, and several
 specifications are drafts.
+
+\section*{Disclosures}
+
+\paragraph{Competing interests.} The authors are employees of Official
+Unofficial, Inc., which develops \kit{}.
+
+\paragraph{Funding.} Official Unofficial, Inc.\ funded this work. No other
+party funded it.
+
+\paragraph{Vulnerability disclosure.} While writing \cref{sec:signing}, the
+authors found that the batch signature check used by clone, pull and fetch in
+\kit{}~0.5.0 accepted some signatures that \texttt{kit verify} rejected: a
+signature whose $R$ carries an 8-torsion component passed the batch whenever
+its weight was a multiple of~8, and the weights were derived from the batch
+contents. Only the holder of the signing key can make such a signature, so the
+flaw let a signer make two \kit{} verifiers disagree; it did not allow
+forgery. The authors maintain \kit{} and fixed the flaw on the main branch in
+the open, with a regression test and a changelog entry, without a private
+advisory. Releases after 0.5.0 carry the fix and the predicate of
+SPEC-SIGNING \S1.
+
+\section*{Acknowledgments}
+
+An AI assistant helped draft the text, the code changes and the measurements
+in this paper under the authors' direction. The authors reviewed the results
+and take full responsibility for the content.
 
 \renewcommand{\bibfont}{\footnotesize}
 \setlength{\bibsep}{1pt}
@@ -1188,5 +1224,57 @@ kit closure export HEAD --history -o hist.closure
 kit closure verify <64-hex-commit-id> --from hist.closure --history
 kit verify --trusted HEAD
 \end{Verbatim}
+
+\section{Ethical considerations}\label{app:ethics}
+
+\paragraph{Stakeholders.} People who clone, pull and fetch \kit{}
+repositories; people who sign commits, tags and attestations; operators of
+servers and mirrors that serve \kit{} repositories; and implementers who reuse
+the specifications, golden vectors or the signature predicate.
+
+\paragraph{Research conduct.} The work studies software the authors maintain.
+It involves no human subjects and no personal data, and it tested no system
+the authors do not control. The benchmarks use synthetic keys on a rented
+virtual machine.
+
+\paragraph{The vulnerability.} The batch-verification flaw described under
+Disclosures affected users of \kit{}~0.5.0. Its harm is limited: only a key
+holder can produce a signature that triggers it, and the result is a
+disagreement between verifiers, not a forgery. The torsion construction that
+exploits it is known in the literature~\cite{taming}, so describing it gives
+an attacker no new capability, while it lets other implementers of batched
+Ed25519 check their own code. The authors therefore fixed it in the open and
+describe it here.
+
+\paragraph{Claims about other work.} The paper describes other systems only
+from their published papers, specifications and documentation, and states
+where a summary comes from general knowledge rather than from the repository.
+
+\section{Open science}\label{app:open}
+
+\paragraph{Artifacts.} Everything needed to check the claims of this paper is
+public in the \kit{} repository at
+\url{https://github.com/officialunofficial/kit}. Every link in the paper names
+one commit:
+\begin{center}\texttt{\sha}\end{center}
+The artifacts are the specifications (\texttt{docs/specs}), the
+golden vectors (\texttt{rust/tests/golden}) and their independent Python
+reference checks (\texttt{scripts/golden}), the fuzz targets
+(\texttt{rust/fuzz}), the formal models (\texttt{formal}), the
+\texttt{ed25519\_batch} benchmark (\texttt{rust/benches}), and the source of
+this paper with its measurement scripts (\texttt{docs/paper}).
+\Cref{app:repro} gives the commands.
+
+\paragraph{Licences.} The code, vectors and scripts are available under the MIT
+or Apache-2.0 licence, at the user's choice. This paper and its figures are
+available under CC~BY~4.0.
+
+\paragraph{Persistence.} Software Heritage archives the public repository;
+the arXiv version of this paper will cite the SWHID of the pinned
+commit~\cite{swhid}.
+
+\paragraph{Limits.} The benchmark machine was a shared cloud VM that cannot be
+reproduced exactly. The benchmark itself runs on any machine with the pinned
+toolchain.
 
 \end{document}

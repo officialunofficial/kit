@@ -9,6 +9,10 @@ disagree, the spec wins.
 The paper links to files at one pinned commit, set by `\sha` in the preamble.
 Update `\sha` when a cited file changes.
 
+The paper text and figures are licensed under CC BY 4.0. The scripts in
+`tools/` follow the repository licence (MIT or Apache-2.0). Bump the version and
+date in `\date` for each version you publish.
+
 ## Build
 
 The build needs TeX Live with `latexmk`, BibTeX and the `latex-extra` packages.
