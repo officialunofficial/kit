@@ -3,9 +3,11 @@
 //! as the baseline, on one thread and spread across the
 //! rayon pool the way fetch spreads them.
 //!
-//! Each entry is a distinct key signing a distinct 32-byte digest, the
-//! shape of a fetch that brings in commits from many signers. The chart
-//! reports signatures verified per second.
+//! Each entry signs a distinct 32-byte digest. The "distinct signers" group
+//! gives every entry its own key, the shape of a fetch with commits from many
+//! people; the "4 signers" group cycles through four keys, the shape of a
+//! fetch from a small team, where the batch check shares one term per key.
+//! The chart reports signatures verified per second.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kit_benches::{Sample, Unit, time_one};
@@ -18,11 +20,11 @@ type Mode = (&'static str, fn(&[Entry]));
 
 const SIZES: [usize; 5] = [1, 8, 64, 256, 1024];
 
-fn entries(n: usize) -> Vec<Entry> {
+fn entries(n: usize, signers: usize) -> Vec<Entry> {
     (0..n)
         .map(|i| {
             let mut seed = [0u8; 32];
-            seed[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            seed[..8].copy_from_slice(&((i % signers) as u64).to_le_bytes());
             let kp = KeyPair::from_seed(seed);
             let body = (i as u64).to_le_bytes();
             let mut signed = (COMMIT_DOMAIN.len() as u16).to_le_bytes().to_vec();
@@ -77,26 +79,28 @@ fn bench_ed25519_batch(c: &mut Criterion) {
         ("batch, parallel", batched_parallel),
     ];
     let mut samples = Vec::new();
-    let mut group = c.benchmark_group("ed25519_batch");
-    for n in SIZES {
-        let batch = entries(n);
-        group.throughput(Throughput::Elements(n as u64));
-        for (name, f) in modes {
-            group.bench_with_input(BenchmarkId::new(name, n), &batch, |b, batch| {
-                b.iter(|| f(batch));
-            });
-            let iters = (4096 / n).clamp(4, 512) as u32;
-            let secs = time_one(iters / 4 + 1, iters, || f(&batch));
-            samples.push(Sample {
-                category: "ed25519 verify".into(),
-                axis: format!("{n} signatures"),
-                library: name.into(),
-                value: n as f64 / secs,
-                unit: Unit::OpsPerSec,
-            });
+    for (group_name, signers) in [("distinct signers", usize::MAX), ("4 signers", 4)] {
+        let mut group = c.benchmark_group(format!("ed25519_batch/{group_name}"));
+        for n in SIZES {
+            let batch = entries(n, signers.min(n));
+            group.throughput(Throughput::Elements(n as u64));
+            for (name, f) in modes {
+                group.bench_with_input(BenchmarkId::new(name, n), &batch, |b, batch| {
+                    b.iter(|| f(batch));
+                });
+                let iters = (4096 / n).clamp(4, 512) as u32;
+                let secs = time_one(iters / 4 + 1, iters, || f(&batch));
+                samples.push(Sample {
+                    category: format!("ed25519 verify, {group_name}"),
+                    axis: format!("{n} signatures"),
+                    library: name.into(),
+                    value: n as f64 / secs,
+                    unit: Unit::OpsPerSec,
+                });
+            }
         }
+        group.finish();
     }
-    group.finish();
     kit_benches::write_summary("ed25519_batch", &samples);
 }
 
