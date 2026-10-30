@@ -55,9 +55,7 @@ path = "src/main.rs"
 # Inter-workspace deps need explicit `version = ...` alongside the
 # path so `cargo publish` accepts them; path-only deps are rejected by
 # the registry. Track workspace.package.version.
-# `batch-verify` (not a default feature — see kit-core's Cargo.toml)
-# is required by `verify_new_object_signatures`'s batch fast path.
-kit-core = { version = "=0.5.0", path = "../kit-core", features = ["batch-verify"] }
+kit-core = { version = "=0.5.0", path = "../kit-core" }
 kit-attest = { version = "=0.5.0", path = "../kit-attest", features = ["grants"] }
 kit-keystore = { version = "=0.5.0", path = "../kit-keystore" }
 libkit = { version = "=0.5.0", path = "../libkit", default-features = false, features = ["sync", "transport-connect", "transport-file", "transport-ssh"] }

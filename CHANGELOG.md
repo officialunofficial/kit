@@ -7,6 +7,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Clone, pull and fetch verify each signature with the strict per-object
+  check that `kit verify` uses. The batched Ed25519 fast path accepted some
+  torsion-padded signatures that the strict check rejects, so fetch and
+  `kit verify` could disagree on a commit signed by its own key holder. The
+  `batch-verify` feature of `kit-core` and `kit_core::sign::verify_batch` are
+  removed.
+
 ## [0.5.0] - 2026-10-28
 
 ### Added

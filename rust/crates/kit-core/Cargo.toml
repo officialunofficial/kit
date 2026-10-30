@@ -49,11 +49,6 @@ commonware-codec = { workspace = true }
 commonware-storage = { workspace = true, features = ["std"], optional = true }
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }
-# Direct dependency (already pulled in transitively by ed25519-dalek
-# regardless of features) needed only under `batch-verify`, to check a
-# signature's `R` component for small-order encoding — see that
-# feature's doc below and `sign::verify_batch`.
-curve25519-dalek = { version = "5.0.0", optional = true }
 getrandom = "0.4.3"
 # `delta::encode`'s block-hash index (a `HashMap<u64, u32>` keyed by an
 # already well-distributed hash, not attacker-facing key material) uses
@@ -116,38 +111,22 @@ pack-zstd = ["dep:zstd"]
 history-mmr = ["dep:commonware-storage", "dep:commonware-cryptography"]
 # Sparse witnesses use the canonical Tree codec and the base BLAKE3 hasher.
 sparse-checkout = []
-# Ed25519 batch signature verification (`sign::verify_batch`): one
-# randomized-coefficient multiscalar-multiplication check across many
-# signatures instead of one scalar multiplication per signature —
-# strictly less total CPU work for the common all-valid case, used by
-# kit-bin's post-fetch signature-verification fan-out
-# (`verify_new_object_signatures`) as a fast path ahead of the
-# existing per-object `verify_strict` loop. Pulls in ed25519-dalek's
-# `batch` feature (`keccak` + `strobe-rs` for the Merlin transcript)
-# and `curve25519-dalek` directly (used to check a signature's `R` for
-# small-order encoding, matching `verify_strict`'s guarantee against
-# that malleability class — see `sign::verify_batch`'s doc comment);
-# all pure Rust, no C deps. NOT a default feature — unlike
-# `pack-zstd`, nothing about kit-core's own API needs it, so making it
-# default would cost every native consumer these extra dependencies
-# for no benefit, including ones with no reason to opt out the way
-# wasm32 crates already do. `kit-bin`, the one consumer that uses it, enables
-# it explicitly on its `kit-core` dependency instead.
-batch-verify = ["ed25519-dalek/batch", "dep:curve25519-dalek"]
 # Exposes private parser seams to the `kit-fuzz` harness. Off by default.
 fuzzing = []
 
 [dev-dependencies]
-# `hazmat::ExpandedSecretKey` (test-only): constructs a genuine
-# small-order-`R` signature forgery to prove `sign::verify_batch`'s `R`
-# small-order check is load-bearing, not redundant with the batch
-# equation itself. Additive on top of the plain `[dependencies]` entry
-# above; never enabled outside test builds.
+# `hazmat::ExpandedSecretKey` (test-only): builds a torsion-padded
+# signature with a real secret scalar to prove `sign::verify` rejects it.
+# Additive on top of the plain `[dependencies]` entry above; never enabled
+# outside test builds.
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc", "hazmat"] }
 # Test-only: computing the same SHA-512 hashes the forgery above needs
 # (secret-key expansion input, and H(R||A||M)) directly, matching the
 # version already resolved transitively via ed25519-dalek/curve25519-dalek.
 sha2 = "0.11.1"
+# Test-only: the base point and 8-torsion points for the forgery above,
+# matching the version ed25519-dalek already resolves.
+curve25519-dalek = "5.0.0"
 # Storage experiments need the deterministic runtime, not the shipped history API.
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true, features = ["std"] }
