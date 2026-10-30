@@ -45,7 +45,7 @@
 \newcommand{\cc}{\mathbin{\|}}
 \newcommand{\str}[1]{\texttt{"\romannumeral-`0#1"}}
 \newcommand{\bytes}[1]{\texttt{\romannumeral-`0#1}}
-\newcommand{\sha}{1da700e849f29dcb2a7cf2b7dde998109791fbfd}
+\newcommand{\sha}{c031e7765689bef163daf8a61190ac2b6aca0ae7}
 \newcommand{\repo}[1]{\href{https://github.com/officialunofficial/kit/blob/\sha/#1}{\expandafter\nolinkurl\expandafter{\romannumeral-`0#1}}}
 
 \title{\kit: An Offline-Verifiable Repository}
@@ -68,8 +68,8 @@ depth and chunk count, not on repository size. It can also check that a served
 object set holds every object the commit reaches. We describe the object
 model, the signing scheme, and the disclosure and closure verifiers with their
 order of checks and allocation bounds. We give informal security arguments
-under collision resistance of BLAKE3 and unforgeability of strictly verified
-Ed25519, report the assurance evidence in the repository, and measure proof
+under collision resistance of BLAKE3 and unforgeability of Ed25519
+under one acceptance predicate, report the assurance evidence in the repository, and measure proof
 sizes from the committed golden vectors. \kit{} is alpha software (version
 0.5.0), and several of the specifications we describe are drafts.
 \end{abstract}
@@ -102,7 +102,7 @@ untrusted for these claims.
         parsed canonical bytes, and trees and chunked files by a domain-wrapped
         binary Merkle root, so one 32-byte id authenticates single entries and
         chunks (\cref{sec:objects}).
-  \item A signing scheme with length-prefixed domain tags and strict Ed25519,
+  \item A signing scheme with length-prefixed domain tags and one Ed25519 predicate for single and batch checks,
         and a binding of DSSE/in-toto attestations to a commit
         (\cref{sec:signing}).
   \item A disclosure bundle and verifier with a fixed order of checks, bounds
@@ -178,9 +178,9 @@ First-parent ancestry (draft, opt-in) & \checkmark & \checkmark & & \checkmark \
         use Bao slices~\cite{bao}, which expose BLAKE3's internal chaining
         values, so A1 also covers collisions of those values.
   \item[A2 (signature).] Ed25519~\cite{ed25519,rfc8032} is EUF-CMA secure
-        under the strict acceptance predicate of SPEC-SIGNING \S1: canonical
-        encodings of $A$ and $R$, no low-order $A$ or $R$, and $0 \le S < L$,
-        in addition to the group equation~\cite{taming}.
+        under the acceptance predicate of SPEC-SIGNING \S1: canonical
+        encodings of $A$ and $R$, neither of small order, $0 \le S < L$, and
+        the cofactored equation $[8]([S]B - R - [k]A) = 0$~\cite{taming}.
   \item[A3 (implementation).] The verifier implements its specification. The
         evidence of \cref{sec:assurance} supports A3; it does not prove it.
   \item[A4 (host).] The verifier's host and every process with the user's UID
@@ -416,10 +416,12 @@ them (VERIFY \S2). The author identity is an attribution claim independent of
 the signer key, and a verifier must not accept a signature because the two
 match (SPEC-SIGNING \S6).
 
-\paragraph{Strict verification and trust.}
+\paragraph{Verification and trust.}
 Verification rebuilds the signing bytes, computes the digest and applies the
 predicate of A2, always with the object's own signer key (SPEC-SIGNING \S6).
-The implementation calls \texttt{ed25519-dalek}'s \texttt{verify\_strict}.
+Every Ed25519 check in \kit{} calls one implementation of that predicate,
+\texttt{kit\_core::sign::verify\_ed25519}, written over
+\texttt{curve25519-dalek}.
 \texttt{kit commit} always signs and stops with an error when no signer is
 configured; the commit layout has no unsigned variant. An annotated tag from
 \texttt{kit tag -a} carries an all-zero signature, which fails verification; a
@@ -763,9 +765,11 @@ a BLAKE3 collision. A DSSE message is a PAE string; the verifier requires the
 has at least $7 + 2 + 1 + 28 + 1 + 1 + 1 = 41$ bytes, while every object-domain
 message has 32. These message sets are disjoint with no hash assumption. A
 signature on a message $\mathit{pk}$ never signed is an Ed25519 forgery (A2).
-The strict predicate also rejects malleated encodings of a valid signature, so
-a third party cannot change the signature bytes, and with them the commit id,
-of a signed commit while keeping it valid~\cite{taming}.
+The predicate rejects a second encoding of $A$, $R$ or $S$, and a new $R$
+changes $k$, so a third party cannot change the signature bytes, and with them
+the commit id, of a signed commit while keeping it valid~\cite{taming}. Only
+the key holder can produce a second valid signature, as with any signature
+scheme.
 \end{proof}
 
 The proposition does not cover a key also used for SSH authentication, whose
@@ -773,17 +777,22 @@ messages \kit{} does not control; SPEC-SIGNING \S8 states that cross-protocol
 separation is not analyzed and recommends separate keys until it is. P-256 and
 secp256k1 attestation keys never sign object digests.
 
-\paragraph{No batched verification.}
-SPEC-SIGNING \S1 says ``No batched verification.'' Clone, pull and fetch check
-each new commit, remix and tag with the same strict per-object function that
-\texttt{kit verify} calls (\texttt{kit-sync/src/verify.rs}), spread across
-threads. A randomized batch equation accepts a different set of signatures: a
-key holder can add an 8-torsion point to $R$ and choose $s$ so that the
-cofactorless equation misses by that point, which the batch equation ignores
-whenever the coefficient of that entry is a multiple of~8. A test in
-\texttt{kit-core/src/sign.rs} builds such a signature and checks that the
-strict predicate rejects it. Every verifier therefore reaches the same verdict
-on every signature.
+\paragraph{Batch verification.}
+Clone, pull and fetch check many signatures at once. A randomized batch check
+agrees with single checks only if both use the same equation: a cofactorless
+single check rejects a signature whose $R$ carries an 8-torsion point, while a
+cofactorless batch accepts it whenever that entry's weight is a multiple of~8.
+SPEC-SIGNING \S1 therefore uses the cofactored equation in both, and keeps the
+checks on encodings, small order and $S$ per entry, where a batch cannot
+change their outcome. The batch draws its 128-bit weights fresh from the
+operating system for every call, so whoever assembled the batch cannot
+predict them. A batch of valid entries always passes; a batch with an invalid
+entry passes with probability about $2^{-128}$. The golden vectors in
+\texttt{rust/tests/golden/ed25519/} pin the verdict on torsion components,
+small-order points, non-canonical encodings and a non-canonical $S$, in Rust
+and in two independent Python transcriptions, and the
+\texttt{ed25519\_batch} fuzz target checks that batch and single verdicts
+agree.
 
 % ---------------------------------------------------------------------------
 \section{Assurance}\label{sec:assurance}
@@ -815,8 +824,8 @@ that decode to a tag. We counted these from the sidecars' \texttt{expect} fields
 reference checks; each printed \texttt{OK}.
 
 \paragraph{Fuzzing.}
-\texttt{rust/fuzz/fuzz\_targets} holds 58 targets, which we counted (docs/FUZZ.md
-lists the same 58). Each runs as a unit-test harness on stable Rust in CI, and
+\texttt{rust/fuzz/fuzz\_targets} holds 59 targets, which we counted (docs/FUZZ.md
+lists the same 59). Each runs as a unit-test harness on stable Rust in CI, and
 the same bodies run under libFuzzer. Targets on the paths of this paper include
 \texttt{merkle\_proof}, \texttt{disclosure\_decode},
 \texttt{verify\_disclosure}, \texttt{span\_decode}, \texttt{verify\_span},
@@ -1035,7 +1044,7 @@ disclosure bundle proves a path, chunk or byte range in hundreds of bytes to a
 few KiB plus the disclosed content, and a closure proves that a served set is
 complete. Both verifiers bound sizes before allocation, check the binding hash
 first and return what they proved. The arguments rest on BLAKE3 collision
-resistance and strict Ed25519; the evidence is golden vectors with an
+resistance and Ed25519 under the SPEC-SIGNING predicate; the evidence is golden vectors with an
 independent reference, fuzz targets and bounded models. Signer identity,
 freshness, absence proofs and remote ancestry remain open, and several
 specifications are drafts.
@@ -1069,7 +1078,7 @@ Guides: \repo{docs/VERIFY.md}, \repo{docs/THREAT-MODEL.md},
 
 \paragraph{Golden vectors.}
 \begin{Verbatim}[fontsize=\footnotesize]
-git checkout 1da700e849f29dcb2a7cf2b7dde998109791fbfd
+git checkout c031e7765689bef163daf8a61190ac2b6aca0ae7
 for c in objects proofs disclosure closure; do
   python3 -I -B scripts/golden/${c}_ref.py rust/tests/golden      # prints OK
 done
@@ -1088,7 +1097,7 @@ SPEC-MERKLE-OBJECTS \S5.3.
 python3 -I -B docs/paper/tools/measure_disclosure.py .   # Table 3
 python3 -I -B docs/paper/tools/sibling_count.py 16384     # worst case 27 siblings
 stat -c '%s %n' rust/tests/golden/disclosure/*.bin rust/tests/golden/closure/*.bin
-ls rust/fuzz/fuzz_targets/*.rs | wc -l                   # 58
+ls rust/fuzz/fuzz_targets/*.rs | wc -l                   # 59
 grep -h '"expect"' rust/tests/golden/{disclosure,proofs,closure}/*.json | sort | uniq -c
 \end{Verbatim}
 
