@@ -20,10 +20,20 @@ use crate::common::{
 // Edge/browser workspace admission limit, not an on-disk format limit.
 pub(crate) const MAX_WORKSPACE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 
-fn decode_workspace_object(bytes: &[u8]) -> Result<Object, String> {
-    if bytes.len() > MAX_WORKSPACE_OBJECT_BYTES {
-        return Err("workspace object exceeds 16 MiB".into());
+/// Refuse `len` bytes of object input past [`MAX_WORKSPACE_OBJECT_BYTES`].
+/// The message states the limit from the constant.
+pub(crate) fn check_workspace_object_len(len: usize) -> Result<(), String> {
+    if len > MAX_WORKSPACE_OBJECT_BYTES {
+        return Err(format!(
+            "workspace object exceeds {} MiB",
+            MAX_WORKSPACE_OBJECT_BYTES / (1024 * 1024)
+        ));
     }
+    Ok(())
+}
+
+fn decode_workspace_object(bytes: &[u8]) -> Result<Object, String> {
+    check_workspace_object_len(bytes.len())?;
     kit_core::deserialize(bytes).map_err(|e| format!("deserialize: {e}"))
 }
 

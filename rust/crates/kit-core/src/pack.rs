@@ -97,6 +97,11 @@ pub const MAX_TOTAL_PAYLOAD: u64 = 4 * 1024 * 1024 * 1024;
 /// sum of every compressed entry's decompressed size (`0x03` and `0x04`)
 /// and every delta's result size (16 GiB). It bounds the CPU, disk and IO
 /// a small hostile pack can force through decompression and staging.
+///
+/// The value is four times [`MAX_TOTAL_PAYLOAD`]. A pack at its wire cap may
+/// expand about four to one. That is more than real objects compress, so an
+/// honest pack stays under the cap, and the work a hostile pack forces stays
+/// a small multiple of the bytes it sent.
 const MAX_TOTAL_DECODED: u64 = 16 * 1024 * 1024 * 1024;
 /// Trailer is a 32-byte raw BLAKE3 digest.
 pub const TRAILER_LEN: usize = 32;

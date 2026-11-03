@@ -21,7 +21,7 @@ use kit_core::verify::{
 
 use crate::chunking::{BaoEncoded, BaoVerify};
 use crate::common::MAX_JSON_BYTES;
-use crate::objects::MAX_WORKSPACE_OBJECT_BYTES;
+use crate::objects::check_workspace_object_len;
 
 /// Hard cap on the concatenated closure packs a wasm verifier will accept,
 /// checked independently of [`MAX_BUNDLE_BYTES`] (a disclosure bundle and a
@@ -38,10 +38,7 @@ fn hash_hex(s: &str) -> Result<[u8; 32], String> {
 }
 
 fn cap_object(bytes: &[u8]) -> Result<(), String> {
-    if bytes.len() > MAX_WORKSPACE_OBJECT_BYTES {
-        return Err("workspace object exceeds 16 MiB".into());
-    }
-    Ok(())
+    check_workspace_object_len(bytes.len())
 }
 
 fn cap_bundle(bytes: &[u8]) -> Result<(), String> {
@@ -369,9 +366,7 @@ fn merkle_bool(r: Result<(), MerkleError>) -> Result<bool, String> {
 }
 
 fn canonical_blob(content: &[u8]) -> Result<Vec<u8>, String> {
-    if content.len() > MAX_WORKSPACE_OBJECT_BYTES {
-        return Err("workspace object exceeds 16 MiB".into());
-    }
+    check_workspace_object_len(content.len())?;
     serialize(&Object::Blob(Blob {
         data: content.to_vec(),
     }))
