@@ -180,6 +180,14 @@ pub fn git_commit_parse_one_iteration(input: &[u8]) {
         // Real invariant: the identity is a slice of the input, so it
         // can never exceed the input length.
         assert!(c.author.identity.len() <= input.len());
+        // Git honors `parent` headers only when they follow `tree`
+        // directly, so every `parent` header of the header block is one
+        // of those lines and the count agrees.
+        let header = input
+            .split(|&b| b == b'\n')
+            .take_while(|line| !line.is_empty());
+        let parent_headers = header.filter(|line| line.starts_with(b"parent ")).count();
+        assert_eq!(parent_headers, c.parents.len(), "a late parent is refused");
     }
 }
 
@@ -1602,6 +1610,86 @@ pub fn ignore_parse_one_iteration(input: &[u8]) {
     let _ = list.is_ignored("a/b/c.txt", false);
     let _ = list.is_ignored("dir", true);
     let _ = kit_core::ops::restore::parse_sparse_patterns(text);
+    // The checked parse agrees with the plain parse when it accepts, and
+    // it refuses only for a reason its limits name.
+    match kit_core::ignore::parse_checked(text) {
+        Ok(checked) => assert_eq!(checked.patterns(), list.patterns()),
+        Err(kit_core::IgnoreError::TooManyPatterns) => {
+            assert!(list.patterns().len() > kit_core::MAX_IGNORE_PATTERNS);
+        }
+        Err(kit_core::IgnoreError::PatternTooLong) => {
+            assert!(text.split('\n').any(|line| {
+                line.strip_suffix('\r').unwrap_or(line).len() > kit_core::MAX_IGNORE_PATTERN_BYTES
+            }));
+        }
+        Err(other) => panic!("unexpected refusal: {other}"),
+    }
+}
+
+/// Entry and ref names (`name_rules`): the tree entry name rules and the
+/// ref name rules never panic, and each accepted name keeps the properties
+/// the specs state for it. A name that breaks one of those properties is
+/// refused, so a rule cannot loosen without this target noticing. An index
+/// path is accepted only when every segment is a valid entry name. A new
+/// ref name is accepted exactly when `validate_ref_name` accepts it.
+pub fn name_rules_one_iteration(input: &[u8]) {
+    use kit_core::object::TreeEntry;
+    use kit_core::refs::{
+        MAX_REF_NAME_BYTES, MAX_REF_SEGMENTS, check_new_ref_name, validate_ref_name,
+        validate_ref_name_grammar,
+    };
+    let input = &input[..input.len().min(MAX_INPUT)];
+
+    // SPEC-OBJECTS section 4.1, the rules that need no table.
+    let lower = input.to_ascii_lowercase();
+    let short_of_reserved = lower
+        .strip_prefix(b"kit~")
+        .or_else(|| lower.strip_prefix(b"git~"))
+        .is_some_and(|digits| !digits.is_empty() && digits.iter().all(u8::is_ascii_digit));
+    let breaks_a_rule = input.is_empty()
+        || input.len() > 255
+        || input.iter().any(|b| matches!(b, 0 | b'/' | b'\\' | b':'))
+        || input == b"."
+        || input == b".."
+        || input.ends_with(b".")
+        || input.ends_with(b" ")
+        || lower == b".kit"
+        || lower == b".git"
+        || short_of_reserved;
+    if breaks_a_rule {
+        assert!(!TreeEntry::validate_name(input), "a rule is not applied");
+    }
+
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    if kit_core::index::validate_index_path(text) {
+        assert!(
+            text.split('/')
+                .all(|segment| TreeEntry::validate_name(segment.as_bytes())),
+            "an index path holds only valid entry names"
+        );
+    }
+
+    let segments = text.split('/');
+    if validate_ref_name_grammar(text) {
+        assert!(text.bytes().filter(|&b| b == b'/').count() < MAX_REF_SEGMENTS);
+        assert!(
+            text.split('/')
+                .all(|s| !s.is_empty() && !s.starts_with('.'))
+        );
+        assert!(text.split('/').all(|s| !s.ends_with(".lock")));
+        assert_ne!(segments.last(), Some("HEAD"));
+        assert!(
+            text.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+        );
+    }
+    if validate_ref_name(text) {
+        assert!(text.len() <= MAX_REF_NAME_BYTES);
+        assert!(validate_ref_name_grammar(text));
+    }
+    assert_eq!(check_new_ref_name(text).is_ok(), validate_ref_name(text));
 }
 
 /// Resumable pack cursor decoder (`pack_cursor_decode`):
@@ -2783,6 +2871,8 @@ mod tests {
             &b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor A <a@x> 5 +0000\ncommitter A <a@x> 5 +0000\n\nm"[..],
             b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor",
             b"gpgsig x\n a\n b\n c\n\nm",
+            b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nparent 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor A <a@x> 5 +0000\ncommitter A <a@x> 5 +0000\n\nm",
+            b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor A <a@x> 5 +0000\nparent 4b825dc642cb6eb9a060e54bf8d69288fbee4904\ncommitter A <a@x> 5 +0000\n\nm",
         ] {
             run_one(case, git_commit_parse_one_iteration).unwrap();
         }
@@ -2958,8 +3048,37 @@ mod tests {
     #[test]
     fn unit_ignore_parse() {
         run_iterated_unit(ignore_parse_one_iteration).unwrap();
-        for case in [&b""[..], b"*.log\n!keep.log\r\n", b"**/a/**\n", b"[\n\\\n"] {
+        let long = "a".repeat(kit_core::MAX_IGNORE_PATTERN_BYTES + 1);
+        let many = "a\n".repeat(kit_core::MAX_IGNORE_PATTERNS + 1);
+        for case in [
+            &b""[..],
+            b"*.log\n!keep.log\r\n",
+            b"**/a/**\n",
+            b"[\n\\\n",
+            long.as_bytes(),
+            many.as_bytes(),
+        ] {
             run_one(case, ignore_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_name_rules() {
+        run_iterated_unit(name_rules_one_iteration).unwrap();
+        let deep = vec!["a"; 33].join("/");
+        let edge = vec!["a"; 32].join("/");
+        for case in [
+            &b""[..],
+            b"a",
+            b".kit::$INDEX_ALLOCATION",
+            b"KIT~1",
+            b"a:b",
+            b"refs/heads/main",
+            b"a/KIT~1",
+            deep.as_bytes(),
+            edge.as_bytes(),
+        ] {
+            run_one(case, name_rules_one_iteration).unwrap();
         }
     }
 
