@@ -83,7 +83,7 @@ key**, and a crashed import is resumed by re-running it.
 ## 2. Reading the upstream
 
 Implementations SHOULD obtain upstream objects via a full
-`git clone --mirror` into the per-remote staging repository (§6) and
+`git clone --bare` into the per-remote staging repository (§6) and
 read objects with `git cat-file --batch` (git owns wire protocol,
 auth, and pack storage; the bridge owns only translation). Commit
 order MUST be a topological parents-first order (`git rev-list
@@ -93,6 +93,10 @@ everything git accepts &mdash; multi-line continuation headers (`gpgsig`,
 person lines in historic commits &mdash; because this is an
 untrusted-input boundary; tolerance means *parse and carry or refuse
 loudly*, never crash or silently alter.
+
+The staging repository holds `refs/heads/*` and `refs/tags/*` only.
+The clone and each fetch MUST NOT bring in other refs, such as
+`refs/replace/*` or `refs/notes/*`.
 
 `objectFormat = sha256` upstreams MUST be refused at clone time.
 

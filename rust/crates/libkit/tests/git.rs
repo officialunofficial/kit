@@ -889,6 +889,34 @@ fn an_import_refuses_what_it_cannot_use() {
 }
 
 #[test]
+fn an_import_fetches_only_heads_and_tags() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let up = upstream(root.path());
+    git(&up, &["tag", "v1"]);
+    let head = git(&up, &["rev-parse", "HEAD"]);
+    git(&up, &["update-ref", "refs/replace/abc", &head]);
+    git(&up, &["update-ref", "refs/notes/commits", &head]);
+    git(&up, &["update-ref", "refs/pull/1/head", &head]);
+
+    let fork = root.path().join("fork");
+    let request = import::Request {
+        url: up.to_str().unwrap(),
+        remote_name: "upstream",
+        key: None,
+    };
+    import::clone(&fork, &request, &Recorder::default()).unwrap();
+    let layout = layout::discover(&fork).unwrap();
+    let staging = map::state_dir(&layout, "upstream")
+        .unwrap()
+        .join("repo.git");
+    let names = git(&staging, &["for-each-ref", "--format=%(refname)"]);
+    assert_eq!(names, "refs/heads/main\nrefs/tags/v1");
+}
+
+#[test]
 fn a_branch_whose_tip_is_not_a_commit_is_skipped() {
     if !git_available() {
         return;

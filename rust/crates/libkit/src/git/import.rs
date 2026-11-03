@@ -1,6 +1,6 @@
 //! Import of a git upstream under an importer key (SPEC-GIT-IMPORT).
 //!
-//! An import clones a `--mirror` staging repository under
+//! An import clones a bare staging repository under
 //! `.kit/git/<remote>/repo.git` and translates it through the bridge under a
 //! dedicated import key. The key is pinned in the state directory. Branches
 //! land in `refs/remotes/<remote>/*`. The fresh-clone form also makes
@@ -293,7 +293,7 @@ fn import_into(
     } else {
         git_in(
             state.as_path(),
-            &["clone", "--mirror", "--quiet", &clone_url, "repo.git"],
+            &["clone", "--bare", "--quiet", &clone_url, "repo.git"],
         )
         .map_err(|e| step(Class::Unavailable, "clone upstream", e))?;
     }
