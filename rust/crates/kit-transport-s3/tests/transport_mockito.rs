@@ -932,3 +932,51 @@ fn list_refs_prefix_respects_path_component_boundary() {
     assert_eq!(refs[0].name, "x");
     assert_eq!(refs[0].hash.unwrap(), h_x);
 }
+
+/// A hostile endpoint that repeats its continuation token must end the
+/// listing with an error after a bounded number of requests.
+#[test]
+fn list_refs_rejects_a_repeated_continuation_token() {
+    let mut server = mockito::Server::new();
+    let page = br#"<ListBucketResult>
+        <IsTruncated>true</IsTruncated>
+        <NextContinuationToken>SAME</NextContinuationToken>
+    </ListBucketResult>"#;
+    let m = server
+        .mock("GET", "/bucket")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(page)
+        .expect_at_most(3)
+        .create();
+
+    let t = build_transport(&server.url());
+    assert!(t.list_refs("refs/heads/").is_err());
+    m.assert();
+}
+
+/// A redirect response is an error. The client must not replay a
+/// request, or its body, at the redirect target.
+#[test]
+fn redirects_are_not_followed() {
+    let mut server = mockito::Server::new();
+    let target = format!("{}/evil", server.url());
+    let _redirect = server
+        .mock("GET", mockito::Matcher::Regex("^/bucket/packs/".into()))
+        .with_status(307)
+        .with_header("location", &target)
+        .create();
+    let evil = server
+        .mock("GET", "/evil")
+        .with_status(200)
+        .with_body("x")
+        .expect(0)
+        .create();
+
+    let t = build_transport(&server.url());
+    assert!(matches!(
+        t.download_pack(&sample_key()),
+        Err(TransportError::ServerError { status: 307 })
+    ));
+    evil.assert();
+}
