@@ -27,7 +27,8 @@ use kit_git_bridge::error::BridgeError;
 use kit_git_bridge::gitobj::{Sha1Id, bytes_hex, sha1_hex};
 use kit_git_bridge::gitsrc::{self, CatFileBatch};
 use kit_git_bridge::import::{
-    DepthMemo, IMPORT_SPEC_VERSION, ImportOptions, ImportSigner, Importer, ObjectSink,
+    DepthMemo, IMPORT_SPEC_VERSION, ImportOptions, ImportSigner, Importer, MAX_TAG_CHAIN,
+    ObjectSink,
 };
 use kit_git_bridge::map::{self, Direction};
 use kit_git_bridge::remoteid::remote_identity;
@@ -640,6 +641,10 @@ fn translate_upstream(
         depth_memo = imp.depth_memo;
         all_pairs.extend_from_slice(&ref_pairs);
         match result {
+            Ok(head) if uref.name.starts_with("refs/heads/") && !peels_to_commit(&store, &head) => {
+                let reason = "branch tip is not a commit or a tag of a commit".to_owned();
+                skip(observer, &mut skipped, &uref.name, reason);
+            }
             Ok(head) => imported.push(Imported {
                 ref_name: uref.name.clone(),
                 git_id: uref.id,
@@ -770,6 +775,20 @@ fn translate_upstream(
         checked_out: None,
         pulled: None,
     })
+}
+
+/// Whether the kit object `head` is a commit, or a chain of at most
+/// [`MAX_TAG_CHAIN`] tags that ends in a commit.
+fn peels_to_commit(store: &ObjectStore, head: &Hash) -> bool {
+    let mut current = *head;
+    for _ in 0..=MAX_TAG_CHAIN {
+        match store.read_object(&current) {
+            Ok(Object::Commit(_)) => return true,
+            Ok(Object::Tag(tag)) => current = tag.target,
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn skip(

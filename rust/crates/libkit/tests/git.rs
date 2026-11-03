@@ -887,3 +887,64 @@ fn an_import_refuses_what_it_cannot_use() {
         "{err:?}"
     );
 }
+
+#[test]
+fn a_branch_whose_tip_is_not_a_commit_is_skipped() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let up = upstream(root.path());
+    let tree_id = git(&up, &["rev-parse", "HEAD^{tree}"]);
+    // `update-ref` refuses a non-commit branch tip, so write the ref files.
+    let heads = up.join(".git/refs/heads");
+    std::fs::write(heads.join("tree-tip"), format!("{tree_id}\n")).unwrap();
+    git(&up, &["tag", "-a", "-m", "to a tree", "tree-tag", &tree_id]);
+    let tag_object = git(&up, &["rev-parse", "tree-tag"]);
+    std::fs::write(heads.join("tag-of-tree"), format!("{tag_object}\n")).unwrap();
+    let commit_id = git(&up, &["rev-parse", "HEAD"]);
+    git(
+        &up,
+        &["tag", "-a", "-m", "to a commit", "commit-tag", &commit_id],
+    );
+    let commit_tag_object = git(&up, &["rev-parse", "commit-tag"]);
+    std::fs::write(
+        heads.join("tag-of-commit"),
+        format!("{commit_tag_object}\n"),
+    )
+    .unwrap();
+
+    let fork = root.path().join("fork");
+    let request = import::Request {
+        url: up.to_str().unwrap(),
+        remote_name: "upstream",
+        key: None,
+    };
+    let summary = import::clone(&fork, &request, &Recorder::default()).unwrap();
+
+    let mut imported: Vec<&str> = summary
+        .imported
+        .iter()
+        .map(|i| i.ref_name.as_str())
+        .filter(|n| n.starts_with("refs/heads/"))
+        .collect();
+    imported.sort_unstable();
+    assert_eq!(
+        imported,
+        ["refs/heads/main", "refs/heads/tag-of-commit"],
+        "{summary:?}"
+    );
+    let mut skipped: Vec<&str> = summary
+        .skipped
+        .iter()
+        .map(|s| s.ref_name.as_str())
+        .collect();
+    skipped.sort_unstable();
+    assert_eq!(skipped, ["refs/heads/tag-of-tree", "refs/heads/tree-tip"]);
+    let layout = layout::discover(&fork).unwrap();
+    assert!(
+        refs::read_remote_ref(&layout, "upstream", "tree-tip")
+            .unwrap()
+            .is_none()
+    );
+}
