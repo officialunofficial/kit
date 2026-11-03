@@ -320,12 +320,14 @@ impl<'s> WriteBatch<'s> {
             }
             !st.created_shards.contains(&shard_dir)
         };
-        if final_path.exists() {
+        let total_len: u64 = parts.iter().map(|p| p.len() as u64).sum();
+        if fs::metadata(&final_path).is_ok_and(|m| m.len() == total_len) {
             // Dedup hit: the object is visible, but if another process
             // renamed it and has not yet flushed the dirent, it may not
             // be durable. We are about to reference it, so flush its
             // shard dir at commit. The `mtime` is left alone (see
-            // `store::refresh_mtime`).
+            // `store::refresh_mtime`). A file of any other length is
+            // damaged, so it falls through and the rename replaces it.
             self.inner
                 .lock()
                 .expect("batch state mutex poisoned")
@@ -967,6 +969,23 @@ mod tests {
         let h = batch.write(&[0u8; 16]).unwrap();
         batch.commit().unwrap();
         assert!(store.contains(&h));
+    }
+
+    #[test]
+    fn dedup_hit_replaces_object_file_of_wrong_length() {
+        let (_dir, store) = fresh_store();
+        let bytes = vec![7u8; 64];
+        let batch = store.batch();
+        let h = batch.write(&bytes).unwrap();
+        batch.commit().unwrap();
+        let path = store.path_for(&h);
+        std::fs::write(&path, &bytes[..10]).unwrap();
+        assert!(store.read(&h).is_err());
+
+        let batch = store.batch();
+        batch.write(&bytes).unwrap();
+        batch.commit().unwrap();
+        assert_eq!(store.read(&h).unwrap(), bytes);
     }
 
     proptest! {
