@@ -428,7 +428,7 @@ pub fn disclosure_payload_bytes(commit_id_hex: &str, bundle: &[u8]) -> Result<Ve
 /// `mode` is `"snapshot"` or `"history"`. `packs` is the concatenation of
 /// each pack's bytes; `pack_lengths_json` is a JSON array of those
 /// lengths in the same order, e.g. `"[1024,2048]"`. Each pack and the
-/// concatenated buffer are capped at 64 MiB.
+/// concatenated buffer are capped at 1 GiB.
 ///
 /// Returns JSON `{ root, mode, verified, complete, unreferenced_checked,
 /// missing, corrupt, unreferenced }`.

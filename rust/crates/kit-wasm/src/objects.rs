@@ -225,12 +225,16 @@ pub fn commit_verify(commit_bytes: &[u8]) -> bool {
 /// [`CommitInfoJs::signature_hex`] (128-hex Ed25519 signature) — the
 /// last two power the navigable commit-detail view.
 ///
+/// This function does not verify the signature. The signer, tree and
+/// signature fields are unverified claims. Call [`commit_verify`] to check
+/// them. Input over 16 MiB is rejected.
+///
 /// # Errors
 /// `commit_bytes` is not a valid serialized object, or it deserializes
 /// to a non-`Commit` object.
 #[wasm_bindgen]
 pub fn commit_decode(bytes: &[u8]) -> Result<CommitInfoJs, JsValue> {
-    let obj = kit_core::deserialize(bytes).map_err(|e| js_err(format!("deserialize: {e}")))?;
+    let obj = decode_workspace_object(bytes).map_err(js_err)?;
     let Object::Commit(c) = obj else {
         return Err(js_err("object is not a commit"));
     };
@@ -347,12 +351,15 @@ pub fn remix_encode_and_sign(
 /// browser uses the sources to render the "fork of …" badge whose
 /// `commit_hash` links to the upstream commit's detail.
 ///
+/// This function does not verify the signature. The signer, tree and
+/// signature fields are unverified claims. Input over 16 MiB is rejected.
+///
 /// # Errors
 /// `bytes` is not a valid serialized object, or it deserializes to a
 /// non-`Remix` object.
 #[wasm_bindgen]
 pub fn remix_decode(bytes: &[u8]) -> Result<RemixInfoJs, JsValue> {
-    let obj = kit_core::deserialize(bytes).map_err(|e| js_err(format!("deserialize: {e}")))?;
+    let obj = decode_workspace_object(bytes).map_err(js_err)?;
     let Object::Remix(r) = obj else {
         return Err(js_err("object is not a remix"));
     };
@@ -390,11 +397,17 @@ pub fn remix_decode(bytes: &[u8]) -> Result<RemixInfoJs, JsValue> {
 ///
 /// # Errors
 /// `bytes` is not a valid serialized object (bad prologue / truncated /
-/// unknown type tag).
+/// unknown type tag), or longer than 16 MiB.
 #[wasm_bindgen]
 pub fn object_kind(bytes: &[u8]) -> Result<String, JsValue> {
-    let obj = kit_core::deserialize(bytes).map_err(|e| js_err(format!("deserialize: {e}")))?;
-    Ok(obj.object_type().name().to_string())
+    object_kind_name(bytes).map_err(js_err)
+}
+
+fn object_kind_name(bytes: &[u8]) -> Result<String, String> {
+    Ok(decode_workspace_object(bytes)?
+        .object_type()
+        .name()
+        .to_string())
 }
 
 // ---------------------------------------------------------------------
@@ -662,6 +675,17 @@ mod tests {
         let oversized = vec![0; MAX_WORKSPACE_OBJECT_BYTES + 1];
         assert_eq!(
             decode_workspace_object(&oversized).unwrap_err(),
+            "workspace object exceeds 16 MiB"
+        );
+    }
+
+    #[test]
+    fn object_kind_rejects_oversize_input() {
+        let blob = blob_encode(b"data").unwrap();
+        assert_eq!(object_kind_name(&blob.bytes).unwrap(), "blob");
+        let oversized = vec![0; MAX_WORKSPACE_OBJECT_BYTES + 1];
+        assert_eq!(
+            object_kind_name(&oversized).unwrap_err(),
             "workspace object exceeds 16 MiB"
         );
     }
