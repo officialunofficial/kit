@@ -158,6 +158,11 @@ MAY round-trip `0x04` bytes opaquely.
 
 Any other mode byte → `InvalidEntryMode`.
 
+A staging or checkout tool MUST reject a symlink target that is empty,
+starts with `/`, contains a `..` segment, or contains NUL, `\` or `:`.
+The rule is the same on every platform, so a tree valid on one host is
+valid on all hosts.
+
 ### 4.3 Rename detection
 
 kit detects **exact** renames: because every blob is named by its BLAKE3
