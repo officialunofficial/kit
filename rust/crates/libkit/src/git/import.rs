@@ -31,7 +31,7 @@ use kit_git_bridge::import::{
     ObjectSink,
 };
 use kit_git_bridge::map::{self, Direction};
-use kit_git_bridge::remoteid::remote_identity;
+use kit_git_bridge::remoteid::{attestation_remote, remote_identity};
 
 use super::state::read_stamp;
 use super::{
@@ -834,7 +834,8 @@ fn mint_attestations(
     prior: &HashMap<&str, &map::RefState>,
     kp: &KeyPair,
 ) -> Result<(), Error> {
-    let remote_url = remote_identity(url);
+    let identity = remote_identity(url);
+    let remote_url = attestation_remote(&identity);
     let obj_store =
         ObjectStore::open(layout).map_err(|e| step(Class::General, "not a kit repo", e))?;
     for Imported {
@@ -858,7 +859,7 @@ fn mint_attestations(
             "{{\"gitCommit\":\"{}\",\"refName\":\"{}\",\"remoteUrl\":\"{}\",\"schemaVersion\":1,\"specVersion\":1}}",
             sha1_hex(git_id),
             json_escape(&kit_ref),
-            json_escape(&remote_url)
+            json_escape(remote_url)
         );
         let head_bytes = obj_store.read(kit_hash).map_err(|e| {
             step(

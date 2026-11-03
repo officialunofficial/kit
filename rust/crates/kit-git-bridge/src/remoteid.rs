@@ -21,6 +21,25 @@ pub fn remote_identity(dest: &str) -> String {
     remote_identity_relative_to(dest, None)
 }
 
+/// The `remoteUrl` of an attestation for a local import source.
+pub const LOCAL_REMOTE: &str = "local";
+
+/// The `remoteUrl` value of a `git-import/v1` attestation for an import
+/// source whose canonical identity is `identity`.
+///
+/// A network identity is public by its nature, so the attestation
+/// carries it. A local identity is a path of the importer's machine.
+/// The attestation, which travels with the repository, carries
+/// [`LOCAL_REMOTE`] in its place.
+#[must_use]
+pub fn attestation_remote(identity: &str) -> &str {
+    if identity.contains("://") {
+        identity
+    } else {
+        LOCAL_REMOTE
+    }
+}
+
 /// As [`remote_identity`], but resolves a non-existent relative local
 /// path against `base` instead of the process's current directory when
 /// `base` is `Some`. Exposed (test-only) so the relative-path test can
@@ -193,6 +212,21 @@ mod tests {
             remote_identity("http://host:80/r"),
             remote_identity("http://HOST/r")
         );
+    }
+
+    #[test]
+    fn an_attestation_names_no_local_path() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = td.path().to_str().unwrap();
+        for source in [dir.to_owned(), format!("file://{dir}")] {
+            let identity = remote_identity(&source);
+            assert_eq!(attestation_remote(&identity), LOCAL_REMOTE, "{source}");
+        }
+        let identity = remote_identity("https://user:secret@GitHub.com:443/org/repo.git");
+        assert_eq!(identity, "https://github.com/org/repo");
+        assert_eq!(attestation_remote(&identity), identity);
+        let identity = remote_identity("git@github.com:org/repo.git");
+        assert_eq!(attestation_remote(&identity), "ssh://github.com/org/repo");
     }
 
     #[test]

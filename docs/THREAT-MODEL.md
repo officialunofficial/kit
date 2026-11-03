@@ -128,7 +128,8 @@ kit defends:
   the local IMPORT key, original raw bytes are retained
   sha1-addressed under `.kit/git/<name>/raw/` as audit evidence, and
   each imported head gets a `git-import/v1` attestation binding the
-  git commit id, canonical remote identity, and kit twin.
+  git commit id, remote identity, and kit twin. For a local source
+  the attestation names the fixed string `local`, not a path.
   `kit git verify` re-checks all of it offline.
 - Tracking-ref containment. Fetches only move
   `refs/remotes/<name>/*` (plus tags); upstream force-pushes rewind

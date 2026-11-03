@@ -889,6 +889,90 @@ fn an_import_refuses_what_it_cannot_use() {
 }
 
 #[test]
+fn an_attestation_of_a_local_import_names_no_path() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let up = upstream(root.path());
+    let fork = root.path().join("fork");
+    let request = import::Request {
+        url: up.to_str().unwrap(),
+        remote_name: "upstream",
+        key: None,
+    };
+    let summary = import::clone(&fork, &request, &Recorder::default()).unwrap();
+
+    let layout = layout::discover(&fork).unwrap();
+    let twin = summary.imported[0].kit_hash;
+    let paths = libkit::attest::store::list(&layout, &twin).unwrap();
+    assert_eq!(paths.len(), 1);
+    let envelope = libkit::attest::store::load(&paths[0]).unwrap();
+    let payload = String::from_utf8(envelope.payload).unwrap();
+    assert!(payload.contains("\"remoteUrl\":\"local\""), "{payload}");
+    assert!(!payload.contains(up.to_str().unwrap()), "{payload}");
+
+    let report = verify::verify(
+        &fork,
+        &verify::Request {
+            remote_name: None,
+            fork_audit: false,
+            refs: &[],
+        },
+    )
+    .unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+}
+
+#[test]
+fn a_claim_for_a_local_source_may_name_the_marker_or_the_path() {
+    use libkit::attest::statement::{Statement, Subject, encode, sha256_hex};
+
+    let twin = [7u8; 32];
+    let git_id = [9u8; 20];
+    let sha256 = sha256_hex(b"head");
+    let binding = ClaimBinding {
+        kit_ref: "refs/remotes/upstream/main",
+        twin: &twin,
+        sha256: &sha256,
+        git_id: &git_id,
+        source: "/srv/up",
+    };
+    let claim = |remote_url: &str| {
+        let predicate = format!(
+            "{{\"gitCommit\":\"{}\",\"refName\":\"{}\",\"remoteUrl\":\"{remote_url}\",\"schemaVersion\":1,\"specVersion\":{}}}",
+            sha1_hex(&git_id),
+            binding.kit_ref,
+            libkit::git_bridge::import::IMPORT_SPEC_VERSION
+        );
+        encode(&Statement {
+            subjects: vec![Subject {
+                name: Some(binding.kit_ref.to_owned()),
+                digest_blake3_hex: to_hex(&twin),
+                digest_sha256_hex: sha256.clone(),
+            }],
+            predicate_type: libkit::git::import::PREDICATE_TYPE.to_owned(),
+            predicate_jcs: predicate.as_bytes(),
+        })
+        .unwrap()
+    };
+    assert!(claim_accepts(claim("local").as_bytes(), &binding));
+    // An attestation from an earlier import names the path itself.
+    assert!(claim_accepts(claim("/srv/up").as_bytes(), &binding));
+    assert!(!claim_accepts(claim("/srv/other").as_bytes(), &binding));
+
+    let network = ClaimBinding {
+        source: "https://example.com/up",
+        ..binding
+    };
+    assert!(claim_accepts(
+        claim("https://example.com/up").as_bytes(),
+        &network
+    ));
+    assert!(!claim_accepts(claim("local").as_bytes(), &network));
+}
+
+#[test]
 fn an_import_fetches_only_heads_and_tags() {
     if !git_available() {
         return;

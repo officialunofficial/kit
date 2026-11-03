@@ -252,7 +252,7 @@ Three layers, from authoritative to advisory:
    {
      "gitCommit": "<40hex sha1 of the upstream head>",
      "refName": "<full kit ref name>",
-     "remoteUrl": "<canonical remote identity, §8>",
+     "remoteUrl": "<attested remote, §8>",
      "schemaVersion": 1,
      "specVersion": 1
    }
@@ -382,8 +382,8 @@ the realistic accident, not an adversary.
 
 ## 8. Canonical remote identity
 
-All bindings, guards, and attestation `remoteUrl` fields use one
-normalization, `remote_identity(dest)`:
+All bindings and guards use one normalization, `remote_identity(dest)`.
+The attestation `remoteUrl` field derives from it (see below):
 
 1. scp-style `[user@]host:path` rewrites to `ssh://host/path`
    (honesty note: a home-relative scp path and an absolute ssh:// path
@@ -397,6 +397,15 @@ normalization, `remote_identity(dest)`:
    path;
 4. local paths AND `file://` URLs (`file:///p`, `file://localhost/p`)
    collapse to the symlink-resolved absolute local path.
+
+**Attested remote.** An attestation travels with the repository, so it
+MUST NOT name a path of the importer's machine. The `remoteUrl` field
+holds the canonical identity when it contains `://`. For a local path
+or a `file://` URL, the field holds the fixed string `local`. The
+identity never holds userinfo, so no credential reaches the field. A
+verifier MUST accept a claim whose `remoteUrl` equals the recorded
+identity or the attested remote of that identity. This accepts an
+attestation of an earlier import, which names the local path itself.
 
 Equivalence examples (all one identity):
 `git@github.com:org/repo.git` ≡ `ssh://github.com/org/repo` ≡
