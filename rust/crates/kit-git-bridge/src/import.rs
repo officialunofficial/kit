@@ -12,7 +12,7 @@
 //! the same key (SPEC-GIT-IMPORT §1.2).
 
 use crate::error::{BridgeError, Refusal};
-use crate::gitobj::Sha1Id;
+use crate::gitobj::{Sha1Id, sha1_hex};
 use crate::gitparse::{self, ModeMapping};
 use crate::gitsrc::{CatFileBatch, GitObjKind};
 use kit_core::object::{
@@ -26,6 +26,10 @@ pub const CHUNK_THRESHOLD: u64 = kit_core::worktree::CHUNK_THRESHOLD;
 
 /// SPEC-GIT-IMPORT §3.4: tag→tag chains beyond this depth refuse.
 pub const MAX_TAG_CHAIN: usize = 16;
+
+/// Cap on commit-to-parent recursion in [`Importer::import_ref`].
+/// Callers with long histories use [`Importer::import_commits`].
+pub const MAX_COMMIT_RECURSION: usize = 64;
 
 /// Tree nesting cap, matching kit-core's `MAX_TREE_DEPTH` defense
 /// (the importer is the most untrusted boundary in the system).
@@ -225,6 +229,45 @@ pub struct DepthMemo {
     heights: HashMap<Sha1Id, usize>,
     chains: HashMap<Sha1Id, usize>,
     refreshed: HashSet<Hash>,
+    /// Commits currently being translated on the recursion stack.
+    commit_depth: usize,
+}
+
+/// The git object kinds an edge may point at. The importer checks the
+/// kind before it recurses into the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// Any kind (a ref tip or a tag target).
+    Any,
+    /// The `tree` header of a commit.
+    Tree,
+    /// A `parent` header of a commit.
+    Commit,
+    /// A tree entry: a blob or a tree, never a commit or a tag.
+    TreeChild,
+}
+
+impl Want {
+    fn allows(self, kind: GitObjKind) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Tree => kind == GitObjKind::Tree,
+            Self::Commit => kind == GitObjKind::Commit,
+            Self::TreeChild => matches!(kind, GitObjKind::Blob | GitObjKind::Tree),
+        }
+    }
+
+    fn allows_twin(self, kind: ObjectType) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Tree => kind == ObjectType::Tree,
+            Self::Commit => kind == ObjectType::Commit,
+            Self::TreeChild => matches!(
+                kind,
+                ObjectType::Blob | ObjectType::ChunkedBlob | ObjectType::Tree
+            ),
+        }
+    }
 }
 
 impl<S: GitSource, K: ObjectSink> std::fmt::Debug for Importer<'_, S, K> {
@@ -241,7 +284,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
     pub fn import_ref(&mut self, tip: &Sha1Id) -> Result<ImportedRef, BridgeError> {
         let mut new_pairs = Vec::new();
         let mut normalized = false;
-        let head = self.object(tip, 0, 0, &mut new_pairs, &mut normalized)?;
+        let head = self.object(tip, Want::Any, 0, 0, &mut new_pairs, &mut normalized)?;
         Ok(ImportedRef {
             head,
             new_pairs,
@@ -269,21 +312,27 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         normalized: &mut bool,
     ) -> Result<Hash, BridgeError> {
         for id in order {
-            self.object(id, 0, 0, new_pairs, normalized)?;
+            self.object(id, Want::Commit, 0, 0, new_pairs, normalized)?;
         }
-        self.object(tip, 0, 0, new_pairs, normalized)
+        self.object(tip, Want::Any, 0, 0, new_pairs, normalized)
     }
 
     /// Translate one git object (memoized through the map).
     fn object(
         &mut self,
         id: &Sha1Id,
+        want: Want,
         tag_depth: usize,
         tree_depth: usize,
         new_pairs: &mut Vec<(Sha1Id, Hash)>,
         normalized: &mut bool,
     ) -> Result<Hash, BridgeError> {
         if let Some(h) = self.map.get(id).copied() {
+            if let Some(kind) = self.sink.kind_of(&h)
+                && !want.allows_twin(kind)
+            {
+                return Err(wrong_kind(id, want));
+            }
             // A hit skips recursion, so the depth caps must be
             // enforced against the MEASURED shape of what the hit
             // stands for — a legal 120-deep subtree wrapped 50 levels
@@ -294,6 +343,9 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
             return Ok(h);
         }
         let (kind, body) = self.source.read_git(id)?;
+        if !want.allows(kind) {
+            return Err(wrong_kind(id, want));
+        }
         let h = match kind {
             GitObjKind::Blob => self.blob(id, &body, new_pairs)?,
             GitObjKind::Tree => {
@@ -503,7 +555,14 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
     ) -> Result<Hash, BridgeError> {
         let fork_mode = self.options.fork_mode;
         let (tree, changed) = translate_tree_metadata(id, body, fork_mode, |child_id| {
-            let child = self.object(child_id, 0, depth + 1, new_pairs, normalized)?;
+            let child = self.object(
+                child_id,
+                Want::TreeChild,
+                0,
+                depth + 1,
+                new_pairs,
+                normalized,
+            )?;
             Ok((child, self.sink.kind_of(&child)))
         })?;
         *normalized |= changed;
@@ -538,11 +597,26 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         if parsed.author.identity.is_empty() || parsed.author.identity.len() > 4096 {
             return Err(Refusal::AuthorPayload { object: hash20(id) }.into());
         }
-        let tree = self.object(&parsed.tree, 0, 0, new_pairs, normalized)?;
+        let tree = self.object(&parsed.tree, Want::Tree, 0, 0, new_pairs, normalized)?;
+        if self.depth_memo.commit_depth >= MAX_COMMIT_RECURSION {
+            return Err(BridgeError::Source(format!(
+                "commit {} has more than {MAX_COMMIT_RECURSION} unmapped ancestors; \
+                 import in parents-first order",
+                sha1_hex(id)
+            )));
+        }
+        self.depth_memo.commit_depth += 1;
         let mut parents = Vec::with_capacity(parsed.parents.len());
         for p in &parsed.parents {
-            parents.push(self.object(p, 0, 0, new_pairs, normalized)?);
+            match self.object(p, Want::Commit, 0, 0, new_pairs, normalized) {
+                Ok(h) => parents.push(h),
+                Err(e) => {
+                    self.depth_memo.commit_depth -= 1;
+                    return Err(e);
+                }
+            }
         }
+        self.depth_memo.commit_depth -= 1;
         // Raw bytes: the full git object body (commit framing is
         // recomputable from kind+len).
         let raw = raw_git_bytes(GitObjKind::Commit, body);
@@ -572,7 +646,14 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         if crate::refname::check_tag_name(&parsed.name).is_err() {
             return Err(Refusal::TagName { object: hash20(id) }.into());
         }
-        let target = self.object(&parsed.object, depth + 1, 0, new_pairs, normalized)?;
+        let target = self.object(
+            &parsed.object,
+            Want::Any,
+            depth + 1,
+            0,
+            new_pairs,
+            normalized,
+        )?;
         let mut tag = unsigned_tag(
             id,
             body,
@@ -586,6 +667,14 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         let bytes = ser(id, &Object::Tag(tag))?;
         self.write_object(&bytes)
     }
+}
+
+/// The edge points at an object of the wrong kind.
+fn wrong_kind(id: &Sha1Id, want: Want) -> BridgeError {
+    BridgeError::from(Refusal::Unparsable {
+        object: hash20(id),
+        detail: format!("object kind is not valid here (expected {want:?})"),
+    })
 }
 
 /// Translate Tree metadata without writing or signing. The resolver supplies
