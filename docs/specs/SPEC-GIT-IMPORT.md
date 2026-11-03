@@ -390,7 +390,7 @@ The attestation `remoteUrl` field derives from it (see below):
    can be different repos on a generic server; the conflation only
    widens the guard &mdash; fail-closed). IPv6 literals keep their
    brackets: `[::1]:path` → `ssh://[::1]/path`;
-2. scheme and host lowercase; userinfo dropped; default ports
+2. scheme and host lowercase; userinfo, query and fragment dropped; default ports
    stripped per scheme (`ssh` 22, `https` 443, `http` 80, `git`
    9418);
 3. exactly one trailing `/` and one trailing `.git` stripped from the
@@ -402,7 +402,8 @@ The attestation `remoteUrl` field derives from it (see below):
 MUST NOT name a path of the importer's machine. The `remoteUrl` field
 holds the canonical identity when it contains `://`. For a local path
 or a `file://` URL, the field holds the fixed string `local`. The
-identity never holds userinfo, so no credential reaches the field. A
+identity never holds userinfo, query or fragment, so no credential
+reaches the field. A
 verifier MUST accept a claim whose `remoteUrl` equals the recorded
 identity or the attested remote of that identity. This accepts an
 attestation of an earlier import, which names the local path itself.

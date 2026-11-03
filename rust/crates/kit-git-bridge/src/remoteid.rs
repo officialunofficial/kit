@@ -56,6 +56,8 @@ fn remote_identity_relative_to(dest: &str, base: Option<&Path>) -> String {
     // Scheme URLs.
     if let Some((scheme, rest)) = dest.split_once("://") {
         let scheme = scheme.to_ascii_lowercase();
+        // A query or a fragment can carry a token, and it names no repository.
+        let rest = rest.find(['?', '#']).map_or(rest, |i| &rest[..i]);
         let (authority, path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, ""),
@@ -211,6 +213,26 @@ mod tests {
         assert_eq!(
             remote_identity("http://host:80/r"),
             remote_identity("http://HOST/r")
+        );
+    }
+
+    #[test]
+    fn a_query_and_a_fragment_are_not_part_of_the_identity() {
+        let plain = remote_identity("https://example.com/org/repo");
+        for spelling in [
+            "https://example.com/org/repo.git?token=abc",
+            "https://example.com/org/repo/#frag",
+            "https://example.com?token=abc",
+        ] {
+            let identity = remote_identity(spelling);
+            assert!(
+                !identity.contains('?') && !identity.contains('#'),
+                "{identity}"
+            );
+        }
+        assert_eq!(
+            remote_identity("https://example.com/org/repo.git?x=1"),
+            plain
         );
     }
 
