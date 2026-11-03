@@ -50,6 +50,7 @@ gate command of Cloud Build.
 - `third-party-notices.yml` stays because contributors read the license check on GitHub when a dependency changes.
 - `macos.yml` stays because Cloud Build has no macOS machines.
 - `release.yml` stays because the signing identity is the workflow itself.
+- `reproducible-build.yml` stays because it builds the release binary twice in two directories with the flags of `release.yml`, which a Cloud Build step has no need to repeat. It compares the hashes on the runner image that `release.yml` uses.
 - `release-verify.yml` stays because a person starts it by hand after a release, and its Homebrew check needs a macOS runner.
 - `fuzz.yml` stays because it needs a floating nightly toolchain and runs one job per target. It also keeps crash artifacts on GitHub. The `fuzz-smoke` step of `ci.yaml` covers the pinned nightly.
 - `formal.yml` stays because it needs Java, Node, Apalache and Kani. The builder image does not hold them, and the jobs run for hours.
@@ -189,5 +190,6 @@ gcloud artifacts docker images describe \
   us-east4-docker.pkg.dev/$PROJECT_ID/docker/kit-ci:rust-<version> \
   --format='value(image_summary.digest)'
 ```
+
 The date of the nightly toolchain appears in `Dockerfile.ci` and in the
 `fuzz-smoke` step. `scripts/test-ci-gates.py` checks all of these places.

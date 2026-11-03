@@ -597,7 +597,8 @@ open a GitHub Security Advisory citing the CVE, update `CHANGELOG.md` under
 Reproducibility is best effort. A kit release binary is a function of a small,
 pinned set of inputs. If all of them match, a machine with the same Rust
 toolchain should produce a byte-identical binary to the one on GitHub Releases.
-No CI job proves this. See [what is not guaranteed](#ci-safety-net-and-what-is-not-guaranteed).
+No CI job proves this. A CI job proves only that two builds of one commit
+agree on one runner. See [what is not guaranteed](#ci-safety-net-and-what-is-not-guaranteed).
 
 ### The inputs
 
@@ -637,13 +638,19 @@ with your host OS, `rustc --version`, the sha256 you got, and the expected one.
 
 ### CI safety net and what is not guaranteed
 
-There is currently **no** automated reproducibility check: no CI job builds
-kit twice and compares the outputs. The manual procedure above is the
-verification path. Restoring an automated double-build job is an open
-follow-up. A divergence between two builds of the same commit means a
-non-deterministic input has crept in (embedded timestamps, random seeds,
-absolute paths in debug info, unsorted directory reads) and must be fixed
-before the next tag.
+The `reproducible-build.yml` workflow builds `kit` twice from one commit. It
+uses `release.yml`'s flags and command for `x86_64-unknown-linux-gnu`. Each
+build runs in its own directory, and the two paths have different lengths. The
+job fails when the sha256 hashes differ. It proves that, on one runner image
+with the pinned toolchain, the binary does not depend on the checkout path or
+the build time.
+
+The job does **not** prove a match with the binary on GitHub Releases. It does
+not prove a match on another operating system, linker or toolchain version. The
+manual procedure above is the verification path for a published binary. A
+divergence between two builds of the same commit means a non-deterministic
+input has crept in (embedded timestamps, random seeds, absolute paths in debug
+info, unsorted directory reads) and must be fixed before the next tag.
 
 Binaries built on your local macOS are not expected to match GitHub's `macos-14`
 runner byte-for-byte unless your OS, SDK, and linker versions match. The Linux
