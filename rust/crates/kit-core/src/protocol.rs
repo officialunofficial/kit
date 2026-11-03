@@ -66,7 +66,7 @@ pub enum TransportError {
     /// Catch-all remote-side failure carrying an advisory message. The
     /// message is for operators; programs MUST NOT pattern-match on its
     /// contents.
-    #[error("remote error: {0}")]
+    #[error("remote error: {}", escape_terminal_text(.0, false))]
     RemoteError(String),
     /// `update_ref` CAS precondition was not satisfied. Per
     /// SPEC-TRANSPORT §7, callers MUST treat this as
@@ -75,7 +75,7 @@ pub enum TransportError {
     #[error("ref CAS precondition failed")]
     RefConflict,
     /// Caller passed a ref name failing SPEC-REFS §3.
-    #[error("invalid ref name: {0}")]
+    #[error("invalid ref name: {}", escape_terminal_text(.0, false))]
     InvalidRef(String),
     /// Network-level failure: DNS, TCP connect, TLS handshake, SSH
     /// subprocess spawn. Retryable (see [`is_retryable`]).
@@ -941,6 +941,14 @@ pub struct UploadLimits {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_text_is_escaped_when_displayed() {
+        let e = TransportError::RemoteError("\x1b[2Jx\u{202e}".into());
+        assert_eq!(e.to_string(), "remote error: \\u{1b}[2Jx\\u{202e}");
+        let e = TransportError::InvalidRef("a\x07b".into());
+        assert_eq!(e.to_string(), "invalid ref name: a\\u{7}b");
+    }
+
     use super::*;
 
     #[test]
