@@ -315,6 +315,9 @@ requests one in-band over the `PinPrompt`/`PinResponse` round trip (§4).
 On the host side, `kit-attest`'s `ExternalSigner` answers a `PinPrompt` via its
 configured `PinProvider`, which defaults to an interactive terminal
 prompt and never sources a PIN from argv or an environment variable.
+The default provider reads the PIN from `/dev/tty`, never from stdin.
+It fails when no controlling terminal exists. A `PinProvider` returns
+the PIN in a buffer that the host wipes when it drops the buffer.
 
 ---
 

@@ -428,7 +428,7 @@ impl ExternalSigner {
                 Ok(pin) => pin,
                 Err(e) => return Err(conv.fail(e)),
             };
-            if let Err(e) = write_frame(stdin, &pin_response_frame(pin)) {
+            if let Err(e) = write_frame(stdin, &pin_response_frame(&pin)) {
                 return Err(conv.fail(Error::ExternalSignerSpawn(format!(
                     "write pin response: {e}"
                 ))));
@@ -1150,10 +1150,10 @@ fn pin_prompt_info(p: &PinPrompt) -> PinPromptInfo {
 
 /// Build the `PinResponse` frame sent back on `stdin` in answer to a
 /// `PinPrompt`.
-fn pin_response_frame(pin: String) -> SignerFrame {
+fn pin_response_frame(pin: &str) -> SignerFrame {
     SignerFrame {
         body: Some(signer_frame::Body::PinResponse(Box::new(
-            PinResponse::default().with_pin(pin),
+            PinResponse::default().with_pin(pin.to_owned()),
         ))),
         ..Default::default()
     }
@@ -1288,8 +1288,11 @@ mod tests {
         #[derive(Debug)]
         struct Canned;
         impl PinProvider for Canned {
-            fn provide_pin(&self, _prompt: &PinPromptInfo) -> Result<String, Error> {
-                Ok("000000".into())
+            fn provide_pin(
+                &self,
+                _prompt: &PinPromptInfo,
+            ) -> Result<zeroize::Zeroizing<String>, Error> {
+                Ok(zeroize::Zeroizing::new("000000".into()))
             }
         }
         let signer = ExternalSigner::new("/usr/bin/foo")
@@ -1299,7 +1302,8 @@ mod tests {
             signer
                 .pin_provider
                 .provide_pin(&PinPromptInfo::default())
-                .unwrap(),
+                .unwrap()
+                .as_str(),
             "000000"
         );
     }
@@ -1329,7 +1333,7 @@ mod tests {
 
     #[test]
     fn pin_response_frame_round_trips_the_pin() {
-        let frame = pin_response_frame("445566".to_owned());
+        let frame = pin_response_frame("445566");
         match frame.body {
             Some(signer_frame::Body::PinResponse(pr)) => {
                 assert_eq!(pr.pin.as_deref(), Some("445566"));
@@ -1995,9 +1999,12 @@ mod tests {
                 pin: String,
             }
             impl PinProvider for FakePinProvider {
-                fn provide_pin(&self, prompt: &PinPromptInfo) -> Result<String, Error> {
+                fn provide_pin(
+                    &self,
+                    prompt: &PinPromptInfo,
+                ) -> Result<zeroize::Zeroizing<String>, Error> {
                     self.seen.borrow_mut().push(prompt.clone());
-                    Ok(self.pin.clone())
+                    Ok(zeroize::Zeroizing::new(self.pin.clone()))
                 }
             }
 
@@ -2033,7 +2040,7 @@ mod tests {
             // send back once `FakePinProvider` supplies `TEST_PIN` — so
             // the fixture can drain it precisely instead of racing EOF.
             let pin_response_len = {
-                let frame = pin_response_frame(TEST_PIN.to_owned());
+                let frame = pin_response_frame(TEST_PIN);
                 let mut buf = Vec::new();
                 write_frame(&mut buf, &frame).unwrap();
                 buf.len()
