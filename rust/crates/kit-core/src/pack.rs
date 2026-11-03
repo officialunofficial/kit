@@ -5779,13 +5779,15 @@ mod kani_proofs {
         h
     }
 
-    fn stub_zstd(_frame: &[u8], _capacity: usize) -> Result<Vec<u8>, PackError> {
+    fn stub_zstd(_frame: &[u8], _capacity: usize, output: &mut Vec<u8>) -> Result<(), PackError> {
         if kani::any() {
             return Err(PackError::ZstdDecompress(String::new()));
         }
         let buf: [u8; 2] = kani::any();
         let n: usize = kani::any_where(|&n| n <= 2);
-        Ok(buf[..n].to_vec())
+        output.clear();
+        output.extend_from_slice(&buf[..n]);
+        Ok(())
     }
 
     /// Symbolic pack with an entry area of exactly `BODY` bytes (header,
@@ -5867,7 +5869,7 @@ mod kani_proofs {
     /// 15 min, and the empty (0-byte) area alone ran out of memory.
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::stub(zstd_decompress_capped, stub_zstd)]
+    #[kani::stub(zstd_decompress_into, stub_zstd)]
     #[kani::unwind(4)]
     fn pack_entries_one_frame() {
         entries_at::<5>();
@@ -5877,7 +5879,7 @@ mod kani_proofs {
     /// one with a 5-byte payload).
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::stub(zstd_decompress_capped, stub_zstd)]
+    #[kani::stub(zstd_decompress_into, stub_zstd)]
     #[kani::unwind(4)]
     fn pack_entries_two_entries() {
         entries_at::<10>();
