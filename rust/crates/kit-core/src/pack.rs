@@ -94,9 +94,9 @@ pub const MAX_ENTRIES: u32 = 10_000_000;
 /// Hard cap on the sum of payload bytes across all entries.
 pub const MAX_TOTAL_PAYLOAD: u64 = 4 * 1024 * 1024 * 1024;
 /// Cap on the total bytes [`PackReader::read`] decodes from one pack: the
-/// sum of every `0x03` entry's decompressed size and every delta's
-/// result size (16 GiB). It bounds the CPU, disk and IO a small hostile
-/// pack can force through decompression and staging.
+/// sum of every compressed entry's decompressed size (`0x03` and `0x04`)
+/// and every delta's result size (16 GiB). It bounds the CPU, disk and IO
+/// a small hostile pack can force through decompression and staging.
 const MAX_TOTAL_DECODED: u64 = 16 * 1024 * 1024 * 1024;
 /// Trailer is a 32-byte raw BLAKE3 digest.
 pub const TRAILER_LEN: usize = 32;
@@ -1146,7 +1146,12 @@ impl PackReader {
         let mut uses: std::collections::HashMap<Hash, BaseUses> = std::collections::HashMap::new();
         for position in 0..parser.entry_count() {
             let entry = parser.next_encoded_entry()?;
-            if let Entry::Raw(EncodedPayload::Zstd(payload)) = entry {
+            if let Entry::Raw(EncodedPayload::Zstd(payload))
+            | Entry::Delta {
+                stream: EncodedPayload::Zstd(payload),
+                ..
+            } = entry
+            {
                 budget.charge_decoded(zstd_entry_len(payload)?)?;
             }
             if let Entry::Delta { base, .. } = entry {
@@ -2797,6 +2802,29 @@ mod tests {
         let (_dir, store) = fresh_store();
         let mut budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
         budget.decoded_cap = 3 * 64 * 1024;
+        assert!(matches!(
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+            Err(PackError::PackfileTooLarge)
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn cumulative_decoded_cap_counts_compressed_delta_streams() {
+        let mut body = Vec::from(MAGIC.as_slice());
+        body.extend_from_slice(&VERSION_V2.to_le_bytes());
+        body.extend_from_slice(&2u32.to_le_bytes());
+        for _ in 0..2 {
+            body.push(0x04);
+            body.extend_from_slice(&u32::try_from(hash::HASH_LEN + 5).unwrap().to_le_bytes());
+            body.extend_from_slice(&[0; hash::HASH_LEN]);
+            body.extend_from_slice(&u32::try_from(MAX_RAW_OBJECT_SIZE).unwrap().to_le_bytes());
+            body.push(0xAA);
+        }
+        let pack = finish_pack_body(body);
+        let (_dir, store) = fresh_store();
+        let mut budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+        budget.decoded_cap = MAX_RAW_OBJECT_SIZE as u64;
         assert!(matches!(
             PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
             Err(PackError::PackfileTooLarge)
