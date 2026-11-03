@@ -34,7 +34,7 @@ macos-keychain = ["dep:security-framework"]
 kit-core = { version = "=0.5.0", path = "../kit-core" }
 kit-attest = { version = "=0.5.0", path = "../kit-attest", optional = true }
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
-ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 getrandom = "0.4.3"
 keyring-core = { version = "1.0.1", optional = true }
 k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
