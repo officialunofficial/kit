@@ -910,3 +910,36 @@ fn mode(path: &Path) -> u32 {
         .mode()
         & 0o777
 }
+
+#[cfg(unix)]
+mod storage_root {
+    use super::super::unix_storage_root;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    #[allow(clippy::unnecessary_wraps)]
+    fn os(s: &str) -> Option<OsString> {
+        Some(OsString::from(s))
+    }
+
+    #[test]
+    fn absolute_xdg_data_home_wins() {
+        let root = unix_storage_root(os("/data"), os("/home/u")).unwrap();
+        assert_eq!(root, PathBuf::from("/data/kit/keys"));
+    }
+
+    #[test]
+    fn empty_or_relative_xdg_falls_back_to_home() {
+        for xdg in ["", "rel/dir", "."] {
+            let root = unix_storage_root(os(xdg), os("/home/u")).unwrap();
+            assert_eq!(root, PathBuf::from("/home/u/.local/share/kit/keys"));
+        }
+    }
+
+    #[test]
+    fn relative_or_missing_home_is_rejected() {
+        assert!(unix_storage_root(None, os("rel")).is_err());
+        assert!(unix_storage_root(os(""), os("")).is_err());
+        assert!(unix_storage_root(None, None).is_err());
+    }
+}
