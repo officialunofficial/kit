@@ -1104,12 +1104,18 @@ mod kani_proofs {
         let _ = spec_at::<9>();
     }
 
-    /// As above for 10 and 11 bytes: one opcode byte, then a 1-byte
-    /// INSERT.
+    /// As above for a 10-byte stream: the header and one opcode byte.
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn delta_spec_opcode() {
+        let _ = spec_at::<10>();
+    }
+
+    /// As above for an 11-byte stream: the header, then a 1-byte INSERT.
+    /// One length per harness keeps CBMC within a 16 GB runner.
     #[kani::proof]
     #[kani::unwind(7)]
     fn delta_spec_insert() {
-        let _ = spec_at::<10>();
         kani::cover!(spec_at::<11>() == Some(1), "ok_insert");
     }
 

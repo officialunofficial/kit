@@ -42,8 +42,24 @@ cargo kani -p kit-rpc --harness rpc_read_frame_no_panic
 ```
 
 Run **one harness at a time** (`--harness` is a substring match; every
-name below is unique as a substring except where noted). Peak CBMC memory
-was ~5.4 GB (`pack_window_cursor_decode`); most harnesses stay under 2 GB.
+name below is unique as a substring except where noted). Peak memory
+(macOS maximum RSS, 2026-11-03) is below 12 GB for most harnesses. These
+harnesses need more than 14 GB, so the nightly job on a 16 GB runner skips
+them (`KANI_SKIP_LARGE=1`):
+
+| Harness | Peak memory |
+|---|---|
+| `pack_writer_roundtrip_raw` | 62 GB |
+| `pack_window_cursor_decode` | 34 GB |
+| `pack_window_cursor_canary_flip_accepted` | 34 GB |
+| `pack_window_cursor_flip_rejected` | 27 GB |
+| `pack_entries_one_frame` | 19 GB |
+| `pack_entries_two_entries` | 18 GB |
+| `delta_spec_copy` | 15 GB |
+
+Run them by hand on a machine with at least 64 GB:
+`bash formal/scripts/run-kani.sh` without `KANI_SKIP_LARGE` runs every
+harness.
 
 **Expected-outcome convention** (same as the Quint `check.sh` scripts):
 a `*_canary_*` harness is `#[kani::should_panic]` and must report
@@ -66,7 +82,8 @@ build. Cap: 15 min per harness.
 |---|---|---|---|---|
 | `delta_decode_no_panic` | `decode` never panics/overflows/reads OOB; `Ok` output length = header `result_len` (§2) | base ≤ 4 B, stream ≤ 20 B, unwind 7 | pass, 3/3 covers | 51 s |
 | `delta_spec_header` | `decode` = §4 reference algorithm (bytes or error class) | base ≤ 3 B, stream 8 and 9 B | pass | 5 s |
-| `delta_spec_insert` | as above | stream 10 and 11 B | pass, 1/1 cover | 450 s |
+| `delta_spec_opcode` | as above | stream 10 B (header + one opcode byte) | pass | 111 s |
+| `delta_spec_insert` | as above | stream 11 B (header + 1-byte INSERT) | pass, 1/1 cover | 150 s |
 | `delta_spec_copy` | as above | stream 16 B (header + one COPY) | pass, 1/1 cover | 199 s |
 | `delta_decode_canary_wrong_length` | canary: "output is one byte longer than declared" | stream ≤ 20 B | falsified (expected) | 51 s |
 | `delta_encode_decode_roundtrip` | `decode(b, encode(b, r)) == r` | `b`, `r` ≤ 3 B each (INSERT-only writer path) | pass | 37 s |

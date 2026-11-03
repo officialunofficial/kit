@@ -225,7 +225,9 @@ documents its own knobs (`ONLY`, `SEL`, `TLC_HEAP`, `*_DEPTH`).
 
 ### Resource use
 
-TLC runs with a 4 GB heap and 2 to 4 workers, Apalache with 4 GB. The
-largest Kani harness peaks at about 5.4 GB. Run one Kani harness at a
-time. The recorded times come from a 15-core arm64 Mac shared with other
+TLC runs with a 4 GB heap and 2 to 4 workers, Apalache with 4 GB. Most
+Kani harnesses peak below 12 GB. Seven harnesses need 15 to 63 GB:
+`run-kani.sh` lists them as large, and the nightly job skips them because
+its runner has 16 GB. Run them by hand on a machine with at least 64 GB.
+Run one Kani harness at a time. The recorded times come from a 15-core arm64 Mac shared with other
 jobs; a CI runner is slower.

@@ -7,8 +7,12 @@
 # automatically. The flags follow that README.
 #
 #   KANI_FILTER=regex  run only the harnesses whose name matches
+#   KANI_SKIP_LARGE=1  skip the harnesses in $large
 #
-# Peak CBMC memory is about 5.4 GB, so the harnesses do not run in parallel.
+# The harnesses run one at a time because each one can use many GB.
+# The harnesses in $large need more than 14 GB, so a 16 GB runner cannot
+# run them. The nightly job sets KANI_SKIP_LARGE=1. Run them by hand on a
+# machine with at least 64 GB.
 # Needs Kani 0.68.0: cargo install --locked kani-verifier --version 0.68.0
 set -euo pipefail
 cd "$(dirname "$0")/../../rust"
@@ -25,8 +29,12 @@ harnesses() {
   awk '/#\[kani::proof\]/{p=1} p && /fn [a-z0-9_]+/{match($0,/fn [a-z0-9_]+/); print substr($0,RSTART+3,RLENGTH-3); p=0}' "$1"
 }
 
+large="delta_spec_copy pack_entries_one_frame pack_entries_two_entries pack_writer_roundtrip_raw
+  pack_window_cursor_decode pack_window_cursor_flip_rejected pack_window_cursor_canary_flip_accepted"
+
 failed=()
 n=0
+skipped=0
 # run LABEL ARGS...: one cargo kani run with the given arguments.
 run() {
   local label=$1 t0=$SECONDS out
@@ -46,6 +54,10 @@ for f in $files; do
   crate=$(cut -d/ -f2 <<<"$f")
   for h in $(harnesses "$f"); do
     [[ -n ${KANI_FILTER:-} && ! $h =~ $KANI_FILTER ]] && continue
+    if [[ -n ${KANI_SKIP_LARGE:-} && " $(echo $large) " == *" $h "* ]]; then
+      skipped=$((skipped + 1))
+      continue
+    fi
     case $crate:$h in
       kit-core:merkle_verify_* | kit-core:merkle_roundtrip_* | kit-core:merkle_canary_* | kit-core:pack_*)
         run "$crate::$h" -p "$crate" --no-default-features -Z stubbing --harness "$h" \
@@ -60,7 +72,7 @@ for f in $files; do
   done
 done
 
-echo "run-kani: $n runs, ${#failed[@]} unexpected"
+echo "run-kani: $n runs, ${#failed[@]} unexpected, $skipped large skipped"
 if ((${#failed[@]})); then
   printf '  %s\n' "${failed[@]}" >&2
   exit 1
