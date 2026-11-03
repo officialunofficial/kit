@@ -60,7 +60,7 @@ fixed values of the fixture. Each check names them in its script.
 ## Vectors without a spec-defined format
 
 `git-import/REFUSALS.txt` names the typed refusal that the Rust code returns for
-four hostile inputs. The directory does not hold the input objects. SPEC-GIT-IMPORT
+seven hostile inputs. The directory does not hold the input objects. SPEC-GIT-IMPORT
 section 3 states the rules that the refusals apply. The reference check does not
 cover this file.
 
