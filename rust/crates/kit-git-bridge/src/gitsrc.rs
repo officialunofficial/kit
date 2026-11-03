@@ -41,6 +41,9 @@ pub fn git_command(repo: &Path) -> Command {
 /// probe).
 pub fn apply_hygiene(c: &mut Command) {
     c.env("GIT_TERMINAL_PROMPT", "0");
+    // A mirrored `refs/replace/*` ref must not change the bytes git
+    // returns for an object id.
+    c.env("GIT_NO_REPLACE_OBJECTS", "1");
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
     c.arg("-c").arg(format!("core.hooksPath={null}"));
 }
@@ -195,7 +198,20 @@ impl CatFileBatch {
         self.stdout
             .read_exact(&mut nl)
             .map_err(|e| BridgeError::Source(format!("cat-file trailer: {e}")))?;
-        Ok((kind, body))
+        // The bytes must hash to the id we asked for. A replacement ref
+        // or a misnamed loose object would otherwise be signed as the
+        // requested commit.
+        let object = crate::gitobj::GitObject {
+            gtype: kind.into(),
+            body,
+        };
+        if object.id() != *id {
+            return Err(BridgeError::Source(format!(
+                "object {hex} does not hash to its id (repo {})",
+                self.repo.display()
+            )));
+        }
+        Ok((kind, object.body))
     }
 }
 
@@ -388,6 +404,44 @@ mod tests {
         run(&["tag", "-a", "v1", "-m", "tag msg"]);
         let head = sha1_from_hex(&run(&["rev-parse", "HEAD"])).unwrap();
         Some((td, head))
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    #[test]
+    fn replace_refs_do_not_change_object_bytes() {
+        let Some((td, _)) = fixture() else { return };
+        let original = sha1_from_hex(&git_in(td.path(), &["rev-parse", "HEAD:a.txt"])).unwrap();
+        let other = git_in(td.path(), &["rev-parse", "HEAD:b.txt"]);
+        git_in(td.path(), &["replace", "-f", &sha1_hex(&original), &other]);
+        let mut batch = CatFileBatch::open(&td.path().join(".git")).unwrap();
+        let (_, body) = batch.read(&original).unwrap();
+        assert_eq!(body, b"hello\n", "the replacement is ignored");
+    }
+
+    #[test]
+    fn misnamed_loose_object_is_refused() {
+        let Some((td, _)) = fixture() else { return };
+        let git_dir = td.path().join(".git");
+        let real = sha1_from_hex(&git_in(td.path(), &["rev-parse", "HEAD:a.txt"])).unwrap();
+        let other = git_in(td.path(), &["rev-parse", "HEAD:b.txt"]);
+        let loose = |hex: &str| git_dir.join("objects").join(&hex[..2]).join(&hex[2..]);
+        let real_hex = sha1_hex(&real);
+        // Put the bytes of the other blob under the real blob's name.
+        let target = loose(&real_hex);
+        std::fs::remove_file(&target).unwrap();
+        std::fs::copy(loose(&other), &target).unwrap();
+        let mut batch = CatFileBatch::open(&git_dir).unwrap();
+        assert!(batch.read(&real).is_err());
     }
 
     #[test]
