@@ -93,7 +93,8 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 
-use bytes::{Buf, BufMut};
+use bytes::{Buf as _, BufMut};
+use commonware_codec::{Buf, Copying};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write};
 
 use crate::hash::{Hash, hash};
@@ -883,10 +884,7 @@ impl EncodeSize for ChunkHdr {
 impl Read for ChunkHdr {
     type Cfg = ();
 
-    fn read_cfg(
-        reader: &mut impl commonware_codec::Buf,
-        (): &Self::Cfg,
-    ) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, (): &Self::Cfg) -> Result<Self, CodecError> {
         let total_size = u64::read(reader)?;
         let chunk_size = u32::read(reader)?;
         let index = u32::read(reader)?;
@@ -935,10 +933,7 @@ impl EncodeSize for LenProof {
 impl Read for LenProof {
     type Cfg = ();
 
-    fn read_cfg(
-        reader: &mut impl commonware_codec::Buf,
-        (): &Self::Cfg,
-    ) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, (): &Self::Cfg) -> Result<Self, CodecError> {
         let index = u32::read(reader)?;
         let chunk_id = Hash::read(reader)?;
         let proof = Proof::read_cfg(reader, &1usize)?;
@@ -977,10 +972,7 @@ impl EncodeSize for Step {
 impl Read for Step {
     type Cfg = ();
 
-    fn read_cfg(
-        reader: &mut impl commonware_codec::Buf,
-        (): &Self::Cfg,
-    ) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, (): &Self::Cfg) -> Result<Self, CodecError> {
         let name = Vec::<u8>::read_range(reader, 1..=255)?;
         let mode_byte = u8::read(reader)?;
         let mode = EntryMode::from_u8(mode_byte).map_err(|_| CodecError::InvalidEnum(mode_byte))?;
@@ -1038,7 +1030,7 @@ fn decode_disclosure(bytes: &[u8]) -> Result<(Hash, Vec<u8>, Vec<Step>, PayloadW
     if version != BUNDLE_VERSION {
         return Err(VerifyError::UnsupportedBundleVersion(version));
     }
-    let mut r = commonware_codec::Copying(&bytes[5..]);
+    let mut r = Copying(&bytes[5..]);
     let commit_id = Hash::read(&mut r)?;
     let commit_bytes = Vec::<u8>::read_range(&mut r, ..=MAX_COMMIT_BYTES)?;
     let steps = Vec::<Step>::read_range(&mut r, ..=MAX_TREE_DEPTH)?;

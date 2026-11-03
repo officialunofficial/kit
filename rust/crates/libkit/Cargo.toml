@@ -35,15 +35,15 @@ history-mmr = ["kit-core/history-mmr", "kit-sync?/history-mmr"]
 sparse-checkout = ["kit-core/sparse-checkout", "kit-transport-s3?/sparse-checkout"]
 
 [dependencies]
-kit-core = { version = "=0.5.0", path = "../kit-core" }
-kit-attest = { version = "=0.5.0", path = "../kit-attest", features = ["grants"] }
-kit-keystore = { version = "=0.5.0", path = "../kit-keystore" }
-kit-sync = { version = "=0.5.0", path = "../kit-sync", optional = true }
-kit-git-bridge = { version = "=0.5.0", path = "../kit-git-bridge", optional = true }
-kit-transport-file = { version = "=0.5.0", path = "../kit-transport-file", optional = true }
-kit-transport-ssh = { version = "=0.5.0", path = "../kit-transport-ssh", optional = true }
-kit-transport-s3 = { version = "=0.5.0", path = "../kit-transport-s3", optional = true }
-kit-transport-connect = { version = "=0.5.0", path = "../kit-transport-connect", optional = true }
+kit-core = { version = "=0.6.0", path = "../kit-core" }
+kit-attest = { version = "=0.6.0", path = "../kit-attest", features = ["grants"] }
+kit-keystore = { version = "=0.6.0", path = "../kit-keystore" }
+kit-sync = { version = "=0.6.0", path = "../kit-sync", optional = true }
+kit-git-bridge = { version = "=0.6.0", path = "../kit-git-bridge", optional = true }
+kit-transport-file = { version = "=0.6.0", path = "../kit-transport-file", optional = true }
+kit-transport-ssh = { version = "=0.6.0", path = "../kit-transport-ssh", optional = true }
+kit-transport-s3 = { version = "=0.6.0", path = "../kit-transport-s3", optional = true }
+kit-transport-connect = { version = "=0.6.0", path = "../kit-transport-connect", optional = true }
 # `serde` and `serde_json` read the claim of an import attestation. Only the
 # `git-bridge` feature uses them.
 serde = { version = "1.0.229", features = ["derive"], optional = true }

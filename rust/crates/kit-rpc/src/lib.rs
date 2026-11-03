@@ -64,6 +64,7 @@ mod framing;
 mod helpers;
 pub use framing::{
     FRAME_RECURSION_LIMIT, FrameError, frame_decode_options, read_frame, write_frame,
+    write_frame_body,
 };
 pub use helpers::{
     CHUNK_DATA_MAX, MAX_REF_NAME, body_name, cond_to_wire, list_response_refs,

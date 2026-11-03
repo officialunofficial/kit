@@ -48,7 +48,7 @@ bytes = "1.12.1"
 commonware-codec = { workspace = true }
 commonware-storage = { workspace = true, features = ["std"], optional = true }
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
-ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 # The SPEC-SIGNING §1 predicate: canonical point checks, the cofactored
 # equation and its batch form (`sign::verify_ed25519`). `alloc` provides the
 # multiscalar multiplication of the batch check. `precomputed-tables` keeps

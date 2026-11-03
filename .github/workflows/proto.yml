@@ -60,6 +60,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           cache-prefix: "rust-proto-generated"
+          targets: "wasm32-unknown-unknown"
 
       - name: Regenerate and compare
         run: bash scripts/check-generated-fresh.sh

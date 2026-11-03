@@ -199,9 +199,9 @@ pub struct ImportedRef {
 /// The import engine. `map` is the sha1→blake3 cache (load it from
 /// the state dir; pairs accumulate across calls).
 ///
-/// Long unmapped parent chains should go through
-/// [`Importer::import_commits`] (parents-first order, recursion depth
-/// 1); [`Importer::import_ref`] recurses through unmapped parents.
+/// [`Importer::import_commits`] takes commits in parents-first order.
+/// [`Importer::import_ref`] finds unmapped ancestors itself, with an
+/// explicit work list, so history depth never grows the call stack.
 pub struct Importer<'a, S: GitSource, K: ObjectSink> {
     pub source: &'a mut S,
     pub sink: &'a mut K,
@@ -227,6 +227,43 @@ pub struct DepthMemo {
     refreshed: HashSet<Hash>,
 }
 
+/// The git object kinds an edge may point at. The importer checks the
+/// kind before it recurses into the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// Any kind (a ref tip or a tag target).
+    Any,
+    /// The `tree` header of a commit.
+    Tree,
+    /// A `parent` header of a commit.
+    Commit,
+    /// A tree entry: a blob or a tree, never a commit or a tag.
+    TreeChild,
+}
+
+impl Want {
+    fn allows(self, kind: GitObjKind) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Tree => kind == GitObjKind::Tree,
+            Self::Commit => kind == GitObjKind::Commit,
+            Self::TreeChild => matches!(kind, GitObjKind::Blob | GitObjKind::Tree),
+        }
+    }
+
+    fn allows_twin(self, kind: ObjectType) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Tree => kind == ObjectType::Tree,
+            Self::Commit => kind == ObjectType::Commit,
+            Self::TreeChild => matches!(
+                kind,
+                ObjectType::Blob | ObjectType::ChunkedBlob | ObjectType::Tree
+            ),
+        }
+    }
+}
+
 impl<S: GitSource, K: ObjectSink> std::fmt::Debug for Importer<'_, S, K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Importer").finish_non_exhaustive()
@@ -241,7 +278,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
     pub fn import_ref(&mut self, tip: &Sha1Id) -> Result<ImportedRef, BridgeError> {
         let mut new_pairs = Vec::new();
         let mut normalized = false;
-        let head = self.object(tip, 0, 0, &mut new_pairs, &mut normalized)?;
+        let head = self.object(tip, Want::Any, 0, 0, &mut new_pairs, &mut normalized)?;
         Ok(ImportedRef {
             head,
             new_pairs,
@@ -269,21 +306,27 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         normalized: &mut bool,
     ) -> Result<Hash, BridgeError> {
         for id in order {
-            self.object(id, 0, 0, new_pairs, normalized)?;
+            self.object(id, Want::Commit, 0, 0, new_pairs, normalized)?;
         }
-        self.object(tip, 0, 0, new_pairs, normalized)
+        self.object(tip, Want::Any, 0, 0, new_pairs, normalized)
     }
 
     /// Translate one git object (memoized through the map).
     fn object(
         &mut self,
         id: &Sha1Id,
+        want: Want,
         tag_depth: usize,
         tree_depth: usize,
         new_pairs: &mut Vec<(Sha1Id, Hash)>,
         normalized: &mut bool,
     ) -> Result<Hash, BridgeError> {
         if let Some(h) = self.map.get(id).copied() {
+            if let Some(kind) = self.sink.kind_of(&h)
+                && !want.allows_twin(kind)
+            {
+                return Err(wrong_kind(id, want));
+            }
             // A hit skips recursion, so the depth caps must be
             // enforced against the MEASURED shape of what the hit
             // stands for — a legal 120-deep subtree wrapped 50 levels
@@ -294,6 +337,9 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
             return Ok(h);
         }
         let (kind, body) = self.source.read_git(id)?;
+        if !want.allows(kind) {
+            return Err(wrong_kind(id, want));
+        }
         let h = match kind {
             GitObjKind::Blob => self.blob(id, &body, new_pairs)?,
             GitObjKind::Tree => {
@@ -302,7 +348,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
                 }
                 self.tree(id, &body, tree_depth, new_pairs, normalized)?
             }
-            GitObjKind::Commit => self.commit(id, &body, new_pairs, normalized)?,
+            GitObjKind::Commit => self.commit_closure(id, &body, new_pairs, normalized)?,
             GitObjKind::Tag => {
                 if tag_depth >= MAX_TAG_CHAIN {
                     return Err(Refusal::TagChain { object: hash20(id) }.into());
@@ -503,12 +549,80 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
     ) -> Result<Hash, BridgeError> {
         let fork_mode = self.options.fork_mode;
         let (tree, changed) = translate_tree_metadata(id, body, fork_mode, |child_id| {
-            let child = self.object(child_id, 0, depth + 1, new_pairs, normalized)?;
+            let child = self.object(
+                child_id,
+                Want::TreeChild,
+                0,
+                depth + 1,
+                new_pairs,
+                normalized,
+            )?;
             Ok((child, self.sink.kind_of(&child)))
         })?;
         *normalized |= changed;
         let bytes = ser(id, &Object::Tree(tree))?;
         self.write_object(&bytes)
+    }
+
+    /// Translate a commit after all of its unmapped ancestors. The walk
+    /// keeps its own work list, so a long history costs heap and no
+    /// stack. Tree and tag nesting stay bounded by their own depth caps.
+    fn commit_closure(
+        &mut self,
+        id: &Sha1Id,
+        body: &[u8],
+        new_pairs: &mut Vec<(Sha1Id, Hash)>,
+        normalized: &mut bool,
+    ) -> Result<Hash, BridgeError> {
+        let mut frames = vec![(*id, self.unmapped_parents(id, body)?)];
+        let mut open = HashSet::from([*id]);
+        loop {
+            let Some((_, pending)) = frames.last_mut() else {
+                return Err(BridgeError::Source("empty commit work list".into()));
+            };
+            if let Some(parent) = pending.pop() {
+                if self.map.contains_key(&parent) {
+                    continue;
+                }
+                if !open.insert(parent) {
+                    return Err(BridgeError::Source("commit ancestry loops".into()));
+                }
+                let (kind, parent_body) = self.source.read_git(&parent)?;
+                if !Want::Commit.allows(kind) {
+                    return Err(wrong_kind(&parent, Want::Commit));
+                }
+                let grandparents = self.unmapped_parents(&parent, &parent_body)?;
+                frames.push((parent, grandparents));
+                continue;
+            }
+            if frames.len() == 1 {
+                return self.commit(id, body, new_pairs, normalized);
+            }
+            let Some((done, _)) = frames.pop() else {
+                return Err(BridgeError::Source("empty commit work list".into()));
+            };
+            open.remove(&done);
+            let (_, done_body) = self.source.read_git(&done)?;
+            let h = self.commit(&done, &done_body, new_pairs, normalized)?;
+            self.map.insert(done, h);
+            new_pairs.push((done, h));
+        }
+    }
+
+    /// The parents of a commit that have no kit twin yet, last first.
+    fn unmapped_parents(&self, id: &Sha1Id, body: &[u8]) -> Result<Vec<Sha1Id>, BridgeError> {
+        let parsed = gitparse::parse_commit(body).map_err(|e| {
+            BridgeError::from(Refusal::Unparsable {
+                object: hash20(id),
+                detail: format!("commit: {e}"),
+            })
+        })?;
+        Ok(parsed
+            .parents
+            .into_iter()
+            .rev()
+            .filter(|p| !self.map.contains_key(p))
+            .collect())
     }
 
     /// §3.2: importer-signed commit.
@@ -538,10 +652,11 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         if parsed.author.identity.is_empty() || parsed.author.identity.len() > 4096 {
             return Err(Refusal::AuthorPayload { object: hash20(id) }.into());
         }
-        let tree = self.object(&parsed.tree, 0, 0, new_pairs, normalized)?;
+        let tree = self.object(&parsed.tree, Want::Tree, 0, 0, new_pairs, normalized)?;
+        // Every parent is mapped by now, so these calls never descend.
         let mut parents = Vec::with_capacity(parsed.parents.len());
         for p in &parsed.parents {
-            parents.push(self.object(p, 0, 0, new_pairs, normalized)?);
+            parents.push(self.object(p, Want::Commit, 0, 0, new_pairs, normalized)?);
         }
         // Raw bytes: the full git object body (commit framing is
         // recomputable from kind+len).
@@ -572,7 +687,14 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         if crate::refname::check_tag_name(&parsed.name).is_err() {
             return Err(Refusal::TagName { object: hash20(id) }.into());
         }
-        let target = self.object(&parsed.object, depth + 1, 0, new_pairs, normalized)?;
+        let target = self.object(
+            &parsed.object,
+            Want::Any,
+            depth + 1,
+            0,
+            new_pairs,
+            normalized,
+        )?;
         let mut tag = unsigned_tag(
             id,
             body,
@@ -586,6 +708,14 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         let bytes = ser(id, &Object::Tag(tag))?;
         self.write_object(&bytes)
     }
+}
+
+/// The edge points at an object of the wrong kind.
+fn wrong_kind(id: &Sha1Id, want: Want) -> BridgeError {
+    BridgeError::from(Refusal::Unparsable {
+        object: hash20(id),
+        detail: format!("object kind is not valid here (expected {want:?})"),
+    })
 }
 
 /// Translate Tree metadata without writing or signing. The resolver supplies

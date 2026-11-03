@@ -290,6 +290,14 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "name_rules"
+path = "fuzz_targets/name_rules.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "index_decode"
 path = "fuzz_targets/index_decode.rs"
 test = false

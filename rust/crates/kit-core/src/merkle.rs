@@ -84,7 +84,8 @@
 
 use std::collections::BTreeSet;
 
-use bytes::{Buf, BufMut};
+use bytes::{Buf as _, BufMut};
+use commonware_codec::{Buf, Copying};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write};
 
 use crate::hash::{HASH_LEN, Hash, Hasher, domain_digest, hash};
@@ -452,10 +453,7 @@ impl Read for Proof {
     /// allocation before any hashing happens.
     type Cfg = usize;
 
-    fn read_cfg(
-        reader: &mut impl commonware_codec::Buf,
-        max_items: &Self::Cfg,
-    ) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, max_items: &Self::Cfg) -> Result<Self, CodecError> {
         let leaf_count = u32::read(reader)?;
         let max_siblings = max_items.saturating_mul(MAX_LEVELS);
         let siblings = Vec::<Hash>::read_range(reader, ..=max_siblings)?;
@@ -486,7 +484,7 @@ impl Proof {
     /// [`MerkleError::MalformedProof`] on a truncated buffer, an
     /// over-`max_items` sibling count, or trailing bytes.
     pub fn decode(bytes: &[u8], max_items: usize) -> Result<Self, MerkleError> {
-        let mut buf = commonware_codec::Copying(bytes);
+        let mut buf = Copying(bytes);
         let proof = Self::read_cfg(&mut buf, &max_items)?;
         if buf.has_remaining() {
             return Err(MerkleError::MalformedProof);
@@ -1439,7 +1437,7 @@ mod tests {
                 .expect("ours must accept upstream's proof bytes");
             // Cross-accept the other way: upstream decodes our bytes.
             let our_bytes = our_proof.encode();
-            let mut our_bytes_buf = commonware_codec::Copying(&our_bytes);
+            let mut our_bytes_buf = Copying(&our_bytes);
             let cw_decoded =
                 <commonware_storage::bmt::Proof<Digest> as commonware_codec::Read>::read_cfg(
                     &mut our_bytes_buf,

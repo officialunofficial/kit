@@ -377,7 +377,7 @@ fn tagger_less_tag_import_hash_is_pinned() {
 /// `REFUSALS.txt` (`<name> <git-sha1> <refusal-variant>`). Catches a
 /// regression where e.g. a gitlink tree starts importing silently.
 #[test]
-#[allow(clippy::too_many_lines)] // four vectors, one harness
+#[allow(clippy::too_many_lines)] // one harness for every refusal vector
 fn refusal_vectors_pinned() {
     let kp = KeyPair::from_seed(KEY_SEED);
     let public = kp.public.0;
@@ -416,6 +416,28 @@ fn refusal_vectors_pinned() {
         .into_bytes(),
     );
     vectors.push(("refuse_tree_name", c));
+
+    // NTFS names: an alternate data stream of `.kit`, the 8.3 short name
+    // of `.kit`, and a drive marker.
+    for (label, name) in [
+        ("refuse_tree_name_stream", ".kit::$INDEX_ALLOCATION"),
+        ("refuse_tree_name_short", "KIT~1"),
+        ("refuse_tree_name_drive", "C:x"),
+    ] {
+        let mut t = Vec::new();
+        t.extend_from_slice(format!("100644 {name}\0").as_bytes());
+        t.extend_from_slice(&blob);
+        let t = src.put(GitObjKind::Tree, t);
+        let c = src.put(
+            GitObjKind::Commit,
+            format!(
+                "tree {}\nauthor A <a@x> 5 +0000\ncommitter A <a@x> 5 +0000\n\n{label}\n",
+                hex(&t)
+            )
+            .into_bytes(),
+        );
+        vectors.push((label, c));
+    }
 
     // Negative committer timestamp.
     let mut t = Vec::new();

@@ -90,7 +90,7 @@ pub const MAX_RAW_OBJECT_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
 ///
 /// 128 is far beyond any legitimately-deep source tree (Git's own working
 /// trees rarely exceed a couple dozen levels) while remaining comfortably
-/// within a default 8 MiB thread stack. Mirrors the `MAX_REF_DEPTH` cap on
+/// within a default 8 MiB thread stack. Mirrors the `MAX_REF_WALK_DEPTH` cap on
 /// the ref-tree walker in `refs.rs`.
 pub const MAX_TREE_DEPTH: usize = 128;
 

@@ -166,8 +166,8 @@ fn freezer_put_get_byte_identical() {
         let mut freezer: Freezer<_, ObjKey, Bytes> =
             Freezer::init(context, cfg, None).await.unwrap();
 
-        // `Freezer::put`/`sync` take `self` by value and `put` borrows
-        // its value in commonware 2026.10.0 — reassign on every call.
+        // `Freezer::put`/`sync` take `self` by value in commonware
+        // 2026.9.0 (were `&mut self`) — reassign on every call.
         for (id, bytes) in &objects {
             (freezer, _) = freezer
                 .put(to_key(id), &Bytes::from(bytes.clone()))
@@ -277,8 +277,8 @@ fn archive_prune_deletes_a_prefix_not_a_single_index() {
         let mut archive: prunable::Archive<FourCap, _, ObjKey, Bytes> =
             prunable::Archive::init(context, cfg).await.unwrap();
 
-        // `Archive::put`/`sync`/`prune` take `self` by value and `put`
-        // borrows its value in commonware 2026.10.0 — reassign on every
+        // `Archive::put`/`sync`/`prune` take `self` by value in
+        // commonware 2026.9.0 (were `&mut self`) — reassign on every
         // call.
         for (i, (id, bytes)) in objects.iter().enumerate() {
             archive = archive
@@ -358,7 +358,7 @@ fn archive_prune_deletes_a_prefix_not_a_single_index() {
 
         // Recovering indices 0 and 1 (kit's GC would never have wanted
         // them deleted) is not possible from here: a `put` below the
-        // prune floor is silently ignored (commonware 2026.10.0's
+        // prune floor is silently ignored (commonware 2026.9.0's
         // `put_internal`, `archive/prunable/storage.rs` — at 2026.7.1
         // the same call returned `Error::AlreadyPrunedTo` instead; the
         // *outcome* kit's GC cares about — the value never comes

@@ -1,0 +1,87 @@
+name: "CI: Reproducible build"
+
+# Builds the release binary twice from one commit, in two different
+# directories, with the flags of release.yml. The job fails when the two
+# sha256 hashes differ.
+#
+# What this proves: on one runner image with the pinned toolchain, the build
+# does not depend on the checkout path, the target directory or the time.
+# What this does not prove: a match with the published binary, or a match
+# across operating systems, linkers or toolchain versions. docs/RELEASE.md
+# states the manual procedure for a published binary.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "rust/**"
+      - "scripts/toolchain-version.sh"
+      - ".github/workflows/reproducible-build.yml"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  double-build:
+    name: Build twice and compare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: reproducible-build
+
+      # Two copies of the commit in two paths of different lengths. A path
+      # that leaks into the binary then changes the hash.
+      - name: Export the commit twice
+        run: |
+          set -euo pipefail
+          for dir in "$RUNNER_TEMP/first" "$RUNNER_TEMP/second-longer-path/nested"; do
+            mkdir -p "$dir"
+            git archive HEAD | tar -x -C "$dir"
+          done
+
+      # The flags and the command match the release build in release.yml.
+      - name: Build both copies
+        run: |
+          set -euo pipefail
+          for dir in "$RUNNER_TEMP/first" "$RUNNER_TEMP/second-longer-path/nested"; do
+            (
+              cd "$dir/rust"
+              export RUSTFLAGS="-C codegen-units=1 -C strip=symbols --remap-path-prefix=${dir}=/build --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+              cargo build \
+                --release \
+                --locked \
+                --target "$TARGET" \
+                -p kit-bin \
+                --bin kit
+            )
+          done
+
+      - name: Compare the hashes
+        run: |
+          set -euo pipefail
+          first=$(sha256sum "$RUNNER_TEMP/first/rust/target/$TARGET/release/kit" | cut -d ' ' -f 1)
+          second=$(sha256sum "$RUNNER_TEMP/second-longer-path/nested/rust/target/$TARGET/release/kit" | cut -d ' ' -f 1)
+          echo "first:  $first"
+          echo "second: $second"
+          if [ "$first" != "$second" ]; then
+            echo "The two builds of one commit differ." >&2
+            exit 1
+          fi

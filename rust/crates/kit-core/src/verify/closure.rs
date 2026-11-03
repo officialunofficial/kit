@@ -11,7 +11,8 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Range;
 
-use bytes::Buf;
+use bytes::Buf as _;
+use commonware_codec::Copying;
 use commonware_codec::{EncodeSize, ReadExt, ReadRangeExt, Write};
 
 use crate::hash::{Hash, hash};
@@ -152,7 +153,7 @@ impl ClosureManifest {
         if version != MANIFEST_VERSION {
             return Err(VerifyError::ClosureManifestUnsupportedVersion(version));
         }
-        let mut r = commonware_codec::Copying(&bytes[5..]);
+        let mut r = Copying(&bytes[5..]);
         let root = Hash::read(&mut r).map_err(|_| VerifyError::ClosureManifestMalformed)?;
         let mode_b = u8::read(&mut r).map_err(|_| VerifyError::ClosureManifestMalformed)?;
         let mode = match mode_b {

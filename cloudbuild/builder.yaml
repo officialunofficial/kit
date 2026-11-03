@@ -1,8 +1,9 @@
 # Build the toolchain image (cloudbuild/Dockerfile.ci) and push it to Artifact
 # Registry. Run it once during setup. Run it again when Dockerfile.ci or
 # rust/rust-toolchain.toml changes. The other cloudbuild/*.yaml files run the
-# image through their _CI_IMAGE substitution. Keep that default equal to the
-# _CI_IMAGE below. The tag must end in rust-<version> of the toolchain file.
+# image through their _CI_IMAGE substitution. Keep the tag of that default equal
+# to the _CI_IMAGE below, and set its digest to the digest of the pushed image
+# (see README.md). The tag must end in rust-<version> of the toolchain file.
 # The step reads the version from that file and fails when the tag differs.
 
 substitutions:

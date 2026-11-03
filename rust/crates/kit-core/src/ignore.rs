@@ -42,12 +42,28 @@ use std::path::Path;
 /// Hard cap on a single ignore file (1 MiB).
 pub const MAX_IGNORE_FILE_BYTES: u64 = 1024 * 1024;
 
+/// Hard cap on the patterns one ignore file may hold. Every path check
+/// walks the list, so the count bounds the work per file visited. Real
+/// ignore files hold a few hundred lines.
+pub const MAX_IGNORE_PATTERNS: usize = 10_000;
+
+/// Hard cap on the length of one pattern line, in bytes. It matches the
+/// longest path name most filesystems accept, so a longer pattern cannot
+/// match a real path.
+pub const MAX_IGNORE_PATTERN_BYTES: usize = 4096;
+
 /// Errors returned by [`load`].
 #[derive(Debug, thiserror::Error)]
 pub enum IgnoreError {
     /// An ignore file exceeded [`MAX_IGNORE_FILE_BYTES`].
     #[error("ignore file too large (>{MAX_IGNORE_FILE_BYTES} bytes)")]
     FileTooLarge,
+    /// The ignore files hold more than [`MAX_IGNORE_PATTERNS`] patterns.
+    #[error("ignore file has more than {MAX_IGNORE_PATTERNS} patterns")]
+    TooManyPatterns,
+    /// A pattern line is longer than [`MAX_IGNORE_PATTERN_BYTES`].
+    #[error("ignore pattern is longer than {MAX_IGNORE_PATTERN_BYTES} bytes")]
+    PatternTooLong,
     /// Underlying I/O failure.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -251,12 +267,18 @@ impl IgnoreList {
 ///
 /// # Errors
 /// - [`IgnoreError::FileTooLarge`] if either file exceeds 1 MiB.
+/// - [`IgnoreError::TooManyPatterns`] or [`IgnoreError::PatternTooLong`] if
+///   the files break the pattern limits. A skipped pattern would leave a
+///   file unignored, so the load fails instead.
 /// - [`IgnoreError::Io`] for other filesystem failures.
 pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
     let mut patterns = Vec::new();
     for name in [".gitignore", ".kitignore"] {
         if let Some(list) = load_one(&dir.join(name))? {
             patterns.extend(list.patterns);
+        }
+        if patterns.len() > MAX_IGNORE_PATTERNS {
+            return Err(IgnoreError::TooManyPatterns);
         }
     }
     Ok(IgnoreList { patterns })
@@ -288,11 +310,12 @@ fn load_one(path: &Path) -> Result<Option<IgnoreList>, IgnoreError> {
     if text.len() as u64 > MAX_IGNORE_FILE_BYTES {
         return Err(IgnoreError::FileTooLarge);
     }
-    Ok(Some(parse(&text)))
+    parse_checked(&text).map(Some)
 }
 
 /// Parse ignore-file content into a list of patterns. Never fails:
-/// malformed-looking lines are silently skipped.
+/// malformed-looking lines are silently skipped. It sets no limits, so
+/// use [`parse_checked`] for content from a repository.
 #[must_use]
 pub fn parse(content: &str) -> IgnoreList {
     let mut patterns = Vec::new();
@@ -304,6 +327,31 @@ pub fn parse(content: &str) -> IgnoreList {
         }
     }
     IgnoreList { patterns }
+}
+
+/// Parse untrusted ignore-file content, refusing what [`parse`] would accept
+/// without limit.
+///
+/// # Errors
+/// - [`IgnoreError::PatternTooLong`] if a non-comment line is longer than
+///   [`MAX_IGNORE_PATTERN_BYTES`].
+/// - [`IgnoreError::TooManyPatterns`] if the content holds more than
+///   [`MAX_IGNORE_PATTERNS`] patterns.
+pub fn parse_checked(content: &str) -> Result<IgnoreList, IgnoreError> {
+    let mut patterns = Vec::new();
+    for raw in content.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if line.len() > MAX_IGNORE_PATTERN_BYTES && !line.starts_with('#') {
+            return Err(IgnoreError::PatternTooLong);
+        }
+        if let Some(p) = parse_line(line) {
+            if patterns.len() == MAX_IGNORE_PATTERNS {
+                return Err(IgnoreError::TooManyPatterns);
+            }
+            patterns.push(p);
+        }
+    }
+    Ok(IgnoreList { patterns })
 }
 
 /// Parse one cleaned line into a [`Pattern`], or `None` for blanks/comments.
@@ -385,49 +433,97 @@ fn finish_pattern(body: &str, negated: bool) -> Option<Pattern> {
 }
 
 /// Match a segment list against a path-segment slice (entire-path match).
+///
+/// Runs in `O(pattern segments * path segments)` glob calls. It tracks the
+/// set of path positions reachable after each pattern segment, so nested
+/// `**` segments cannot cause exponential backtracking.
 fn match_segments(pat: &[Segment], path: &[&str]) -> bool {
-    match pat.split_first() {
-        None => path.is_empty(),
-        Some((Segment::DoubleStar, rest)) => {
-            if rest.is_empty() {
+    let n = path.len();
+    let mut cur = vec![false; n + 1];
+    cur[0] = true;
+    for (i, seg) in pat.iter().enumerate() {
+        let Some(first) = cur.iter().position(|&r| r) else {
+            return false;
+        };
+        match seg {
+            Segment::DoubleStar if i + 1 == pat.len() => {
                 // A trailing `**` matches one or more remaining segments
                 // (git's "everything inside" — not the directory itself).
-                return !path.is_empty();
+                return first < n;
             }
-            // Match zero or more leading segments, then the rest.
-            (0..=path.len()).any(|k| match_segments(rest, &path[k..]))
+            Segment::DoubleStar => {
+                // Zero or more segments: every position from `first` on.
+                for (j, r) in cur.iter_mut().enumerate() {
+                    *r = j >= first;
+                }
+            }
+            Segment::Glob(g) => {
+                let mut next = vec![false; n + 1];
+                for j in first..n {
+                    if cur[j] && segment_match(g.as_bytes(), path[j].as_bytes()) {
+                        next[j + 1] = true;
+                    }
+                }
+                cur = next;
+            }
         }
-        Some((Segment::Glob(g), rest)) => match path.split_first() {
-            Some((first, tail)) => {
-                segment_match(g.as_bytes(), first.as_bytes()) && match_segments(rest, tail)
-            }
-            None => false,
-        },
     }
+    cur[n]
 }
 
 /// Match a single path segment against a single-level glob (`*`/`?`/`[...]`,
 /// `\` escapes, literals). Never crosses `/` (segments contain none).
+///
+/// Every token except `*` consumes exactly one byte, so one backtrack point
+/// (the latest `*`) is enough. The cost is `O(pattern * segment)`.
 fn segment_match(p: &[u8], s: &[u8]) -> bool {
-    match p.split_first() {
-        None => s.is_empty(),
-        Some((&b'*', mut rest)) => {
-            while rest.first() == Some(&b'*') {
-                rest = &rest[1..];
+    let (mut pi, mut si) = (0, 0);
+    // Pattern index after the latest `*`, and the segment index it resumes at.
+    let mut star: Option<(usize, usize)> = None;
+    loop {
+        if pi == p.len() {
+            if si == s.len() {
+                return true;
             }
-            (0..=s.len()).any(|i| segment_match(rest, &s[i..]))
+        } else if p[pi] == b'*' {
+            while p.get(pi) == Some(&b'*') {
+                pi += 1;
+            }
+            star = Some((pi, si));
+            continue;
+        } else if let Some(used) = match_one(&p[pi..], s.get(si).copied()) {
+            pi += used;
+            si += 1;
+            continue;
         }
-        Some((&b'?', rest)) => !s.is_empty() && segment_match(rest, &s[1..]),
-        Some((&b'[', _)) => match match_class(p, s.first().copied()) {
-            Some((matched, plen)) => matched && segment_match(&p[plen..], &s[1..]),
-            // Malformed class (no closing `]`) ⇒ literal `[`.
-            None => s.first() == Some(&b'[') && segment_match(&p[1..], &s[1..]),
+        // Mismatch: let the latest `*` absorb one more byte.
+        match star {
+            Some((spi, ssi)) if ssi < s.len() => {
+                star = Some((spi, ssi + 1));
+                pi = spi;
+                si = ssi + 1;
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// Match one non-`*` pattern token at the front of `p` against `ch`.
+/// Returns the pattern bytes consumed when it matches one byte, else `None`.
+fn match_one(p: &[u8], ch: Option<u8>) -> Option<usize> {
+    let c = ch?;
+    match p[0] {
+        b'?' => Some(1),
+        b'[' => match match_class(p, ch) {
+            Some((matched, plen)) => matched.then_some(plen),
+            // Malformed class (no closing `]`) is a literal `[`.
+            None => (c == b'[').then_some(1),
         },
-        Some((&b'\\', rest)) => match rest.split_first() {
-            Some((&c, rest2)) => s.first() == Some(&c) && segment_match(rest2, &s[1..]),
-            None => s.first() == Some(&b'\\') && s.len() == 1,
+        b'\\' => match p.get(1) {
+            Some(&e) => (c == e).then_some(2),
+            None => (c == b'\\').then_some(1),
         },
-        Some((&c, rest)) => s.first() == Some(&c) && segment_match(rest, &s[1..]),
+        lit => (c == lit).then_some(1),
     }
 }
 
@@ -711,6 +807,57 @@ mod tests {
         assert!(matches!(err, IgnoreError::FileTooLarge));
     }
 
+    #[test]
+    fn load_rejects_too_many_patterns() {
+        let dir = TempDir::new().unwrap();
+        let text = "a\n".repeat(MAX_IGNORE_PATTERNS + 1);
+        std::fs::write(dir.path().join(".kitignore"), text).unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(matches!(err, IgnoreError::TooManyPatterns), "got {err:?}");
+    }
+
+    #[test]
+    fn load_counts_patterns_across_both_files() {
+        let dir = TempDir::new().unwrap();
+        let half = "a\n".repeat(MAX_IGNORE_PATTERNS / 2 + 1);
+        std::fs::write(dir.path().join(".gitignore"), &half).unwrap();
+        std::fs::write(dir.path().join(".kitignore"), &half).unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(matches!(err, IgnoreError::TooManyPatterns), "got {err:?}");
+    }
+
+    #[test]
+    fn load_accepts_the_pattern_count_limit() {
+        let dir = TempDir::new().unwrap();
+        let text = "a\n".repeat(MAX_IGNORE_PATTERNS);
+        std::fs::write(dir.path().join(".kitignore"), text).unwrap();
+        assert_eq!(
+            load(dir.path()).unwrap().patterns().len(),
+            MAX_IGNORE_PATTERNS
+        );
+    }
+
+    #[test]
+    fn load_rejects_a_long_pattern() {
+        let dir = TempDir::new().unwrap();
+        let text = format!("{}\n", "a".repeat(MAX_IGNORE_PATTERN_BYTES + 1));
+        std::fs::write(dir.path().join(".kitignore"), text).unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(matches!(err, IgnoreError::PatternTooLong), "got {err:?}");
+    }
+
+    #[test]
+    fn a_long_comment_is_not_a_pattern() {
+        let text = format!("#{}\nkeep\n", "a".repeat(MAX_IGNORE_PATTERN_BYTES * 2));
+        assert_eq!(parse_checked(&text).unwrap().patterns().len(), 1);
+    }
+
+    #[test]
+    fn a_pattern_at_the_length_limit_is_accepted() {
+        let text = "a".repeat(MAX_IGNORE_PATTERN_BYTES);
+        assert_eq!(parse_checked(&text).unwrap().patterns().len(), 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn load_rejects_symlinked_file() {
@@ -817,5 +964,17 @@ mod tests {
                 proptest::prop_assert_eq!(fast, general, "glob={:?} path={:?}", glob, path);
             }
         }
+    }
+
+    #[test]
+    fn pathological_globs_finish_fast() {
+        let name = "a".repeat(200);
+        let il = parse("*a*a*a*a*a*a*a*a*a*a*b");
+        assert!(!il.is_ignored(&name, false));
+        let il = parse("a/**/a/**/a/**/a/**/a/**/b");
+        let path = vec!["a"; 200].join("/");
+        assert!(!il.is_ignored(&path, false));
+        assert!(glob_match("*a*a*b", "xaxab"));
+        assert!(!glob_match("*a*a*b", "xaxac"));
     }
 }

@@ -83,7 +83,7 @@ key**, and a crashed import is resumed by re-running it.
 ## 2. Reading the upstream
 
 Implementations SHOULD obtain upstream objects via a full
-`git clone --mirror` into the per-remote staging repository (§6) and
+`git clone --bare` into the per-remote staging repository (§6) and
 read objects with `git cat-file --batch` (git owns wire protocol,
 auth, and pack storage; the bridge owns only translation). Commit
 order MUST be a topological parents-first order (`git rev-list
@@ -93,6 +93,10 @@ everything git accepts &mdash; multi-line continuation headers (`gpgsig`,
 person lines in historic commits &mdash; because this is an
 untrusted-input boundary; tolerance means *parse and carry or refuse
 loudly*, never crash or silently alter.
+
+The staging repository holds `refs/heads/*` and `refs/tags/*` only.
+The clone and each fetch MUST NOT bring in other refs, such as
+`refs/replace/*` or `refs/notes/*`.
 
 `objectFormat = sha256` upstreams MUST be refused at clone time.
 
@@ -248,7 +252,7 @@ Three layers, from authoritative to advisory:
    {
      "gitCommit": "<40hex sha1 of the upstream head>",
      "refName": "<full kit ref name>",
-     "remoteUrl": "<canonical remote identity, §8>",
+     "remoteUrl": "<attested remote, §8>",
      "schemaVersion": 1,
      "specVersion": 1
    }
@@ -378,21 +382,31 @@ the realistic accident, not an adversary.
 
 ## 8. Canonical remote identity
 
-All bindings, guards, and attestation `remoteUrl` fields use one
-normalization, `remote_identity(dest)`:
+All bindings and guards use one normalization, `remote_identity(dest)`.
+The attestation `remoteUrl` field derives from it (see below):
 
 1. scp-style `[user@]host:path` rewrites to `ssh://host/path`
    (honesty note: a home-relative scp path and an absolute ssh:// path
    can be different repos on a generic server; the conflation only
    widens the guard &mdash; fail-closed). IPv6 literals keep their
    brackets: `[::1]:path` → `ssh://[::1]/path`;
-2. scheme and host lowercase; userinfo dropped; default ports
+2. scheme and host lowercase; userinfo, query and fragment dropped; default ports
    stripped per scheme (`ssh` 22, `https` 443, `http` 80, `git`
    9418);
 3. exactly one trailing `/` and one trailing `.git` stripped from the
    path;
 4. local paths AND `file://` URLs (`file:///p`, `file://localhost/p`)
    collapse to the symlink-resolved absolute local path.
+
+**Attested remote.** An attestation travels with the repository, so it
+MUST NOT name a path of the importer's machine. The `remoteUrl` field
+holds the canonical identity when it contains `://`. For a local path
+or a `file://` URL, the field holds the fixed string `local`. The
+identity never holds userinfo, query or fragment, so no credential
+reaches the field. A
+verifier MUST accept a claim whose `remoteUrl` equals the recorded
+identity or the attested remote of that identity. This accepts an
+attestation of an earlier import, which names the local path itself.
 
 Equivalence examples (all one identity):
 `git@github.com:org/repo.git` ≡ `ssh://github.com/org/repo` ≡

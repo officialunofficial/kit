@@ -43,13 +43,14 @@ gate command of Cloud Build.
 - `docs-lint.yml` stays because contributors read the spec and path checks on GitHub when they change a document.
 - `actionlint.yml` stays because contributors read the workflow lint on GitHub when they change a workflow. The `workflows` step of `ci.yaml` runs the same tool.
 - `dependabot-auto-merge.yml` stays because it acts on GitHub pull requests of Dependabot. Cloud Build cannot do that.
-- `semver.yml` stays because the baseline is the latest release on crates.io. It checks the public API of each published crate against that release.
+- `semver.yml` stays because it needs the release tags in the git history. It runs `scripts/check-semver.sh`, which checks the public API of each published crate against the latest release tag.
 - `mutants.yml` stays because it runs for hours. A pull request mutates only the changed lines, and a weekly run sweeps the security crates.
 - `proto.yml` stays because the `buf` breaking check compares a pull request with its base branch on GitHub. It also runs the generated-code check.
 - `release-plz.yml` stays because it opens the release pull request on GitHub. It does nothing until a maintainer enables it with a repository variable.
 - `third-party-notices.yml` stays because contributors read the license check on GitHub when a dependency changes.
 - `macos.yml` stays because Cloud Build has no macOS machines.
 - `release.yml` stays because the signing identity is the workflow itself.
+- `reproducible-build.yml` stays because it builds the release binary twice in two directories with the flags of `release.yml`, which a Cloud Build step has no need to repeat. It compares the hashes on the runner image that `release.yml` uses.
 - `release-verify.yml` stays because a person starts it by hand after a release, and its Homebrew check needs a macOS runner.
 - `fuzz.yml` stays because it needs a floating nightly toolchain and runs one job per target. It also keeps crash artifacts on GitHub. The `fuzz-smoke` step of `ci.yaml` covers the pinned nightly.
 - `formal.yml` stays because it needs Java, Node, Apalache and Kani. The builder image does not hold them, and the jobs run for hours.
@@ -179,5 +180,16 @@ Three places cannot read the file. They are the image tag in the `_CI_IMAGE`
 default of every configuration, `msrv` in `clippy.toml` and `rust-version` in
 `rust/Cargo.toml`. Change the toolchain file and those places in one commit.
 Then run `builder.yaml`, which fails when the image tag differs from the file.
+The other configurations run the image by its digest, so a tag that moves
+cannot change what runs. After each run of `builder.yaml`, read the new digest
+and write it after `@` in the `_CI_IMAGE` default of `ci.yaml`,
+`connect-latest.yaml` and `supply.yaml`:
+
+```sh
+gcloud artifacts docker images describe \
+  us-east4-docker.pkg.dev/$PROJECT_ID/docker/kit-ci:rust-<version> \
+  --format='value(image_summary.digest)'
+```
+
 The date of the nightly toolchain appears in `Dockerfile.ci` and in the
 `fuzz-smoke` step. `scripts/test-ci-gates.py` checks all of these places.
