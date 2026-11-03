@@ -42,7 +42,7 @@ use kit_rpc::kit::rpc::v1::signer::{
     Hello, PinPrompt, PinResponse, SignRequest, SignResponse, SignerFrame, signer_frame,
 };
 use kit_rpc::kit::rpc::v1::{Algorithm as RpcAlgorithm, KeyForm, ProtocolVersion};
-use kit_rpc::{FrameError, read_frame, write_frame};
+use kit_rpc::{FrameError, read_frame, write_frame, write_frame_body};
 
 use crate::Error;
 use crate::algorithm::Algorithm;
@@ -464,7 +464,7 @@ impl ExternalSigner {
                 Ok(pin) => pin,
                 Err(e) => return Err(conv.fail(e)),
             };
-            if let Err(e) = write_frame(stdin, &pin_response_frame(&pin)) {
+            if let Err(e) = write_pin_response(stdin, &pin) {
                 return Err(conv.fail(Error::ExternalSignerSpawn(format!(
                     "write pin response: {e}"
                 ))));
@@ -1184,6 +1184,28 @@ fn pin_prompt_info(p: &PinPrompt) -> PinPromptInfo {
     }
 }
 
+/// Write the `PinResponse` frame for `pin` to `w`. The encoded body and
+/// the PIN field of the message are wiped before this function returns.
+fn write_pin_response<W: std::io::Write>(w: &mut W, pin: &str) -> Result<(), FrameError> {
+    use buffa::Message as _;
+    use zeroize::Zeroizing;
+
+    let mut frame = pin_response_frame(pin);
+    // `encode_to_vec` sizes the buffer once, so no grown copy stays behind.
+    let body = Zeroizing::new(frame.encode_to_vec());
+    wipe_pin_response(&mut frame);
+    write_frame_body(w, &body)
+}
+
+/// Wipe the PIN field of a `PinResponse` frame.
+fn wipe_pin_response(frame: &mut SignerFrame) {
+    use zeroize::Zeroize as _;
+
+    if let Some(signer_frame::Body::PinResponse(response)) = &mut frame.body {
+        response.pin.zeroize();
+    }
+}
+
 /// Build the `PinResponse` frame sent back on `stdin` in answer to a
 /// `PinPrompt`.
 fn pin_response_frame(pin: &str) -> SignerFrame {
@@ -1380,6 +1402,25 @@ mod tests {
         assert!(info.wants_pin);
         assert_eq!(info.retries_remaining, 0);
         assert_eq!(info.reason, "");
+    }
+
+    #[test]
+    fn wiping_a_pin_response_clears_the_pin() {
+        let mut frame = pin_response_frame("445566");
+        wipe_pin_response(&mut frame);
+        match frame.body {
+            Some(signer_frame::Body::PinResponse(pr)) => assert!(pr.pin.is_none()),
+            other => panic!("expected PinResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pin_response_is_written_as_one_frame() {
+        let mut expected = Vec::new();
+        write_frame(&mut expected, &pin_response_frame("445566")).unwrap();
+        let mut written = Vec::new();
+        write_pin_response(&mut written, "445566").unwrap();
+        assert_eq!(written, expected);
     }
 
     #[test]
