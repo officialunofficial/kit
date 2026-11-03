@@ -185,6 +185,10 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
         crate::ignore::IgnoreError::FileTooLarge => {
             WorktreeError::Io(io::Error::other("ignore file exceeds 1 MiB"))
         }
+        limit @ (crate::ignore::IgnoreError::TooManyPatterns
+        | crate::ignore::IgnoreError::PatternTooLong) => {
+            WorktreeError::Io(io::Error::other(limit.to_string()))
+        }
     })?;
     // Tracked set for ignore exemption: the caller's index if given, else the
     // on-disk index (missing/unreadable = empty = nothing tracked).

@@ -42,12 +42,28 @@ use std::path::Path;
 /// Hard cap on a single ignore file (1 MiB).
 pub const MAX_IGNORE_FILE_BYTES: u64 = 1024 * 1024;
 
+/// Hard cap on the patterns one ignore file may hold. Every path check
+/// walks the list, so the count bounds the work per file visited. Real
+/// ignore files hold a few hundred lines.
+pub const MAX_IGNORE_PATTERNS: usize = 10_000;
+
+/// Hard cap on the length of one pattern line, in bytes. It matches the
+/// longest path name most filesystems accept, so a longer pattern cannot
+/// match a real path.
+pub const MAX_IGNORE_PATTERN_BYTES: usize = 4096;
+
 /// Errors returned by [`load`].
 #[derive(Debug, thiserror::Error)]
 pub enum IgnoreError {
     /// An ignore file exceeded [`MAX_IGNORE_FILE_BYTES`].
     #[error("ignore file too large (>{MAX_IGNORE_FILE_BYTES} bytes)")]
     FileTooLarge,
+    /// The ignore files hold more than [`MAX_IGNORE_PATTERNS`] patterns.
+    #[error("ignore file has more than {MAX_IGNORE_PATTERNS} patterns")]
+    TooManyPatterns,
+    /// A pattern line is longer than [`MAX_IGNORE_PATTERN_BYTES`].
+    #[error("ignore pattern is longer than {MAX_IGNORE_PATTERN_BYTES} bytes")]
+    PatternTooLong,
     /// Underlying I/O failure.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -251,12 +267,18 @@ impl IgnoreList {
 ///
 /// # Errors
 /// - [`IgnoreError::FileTooLarge`] if either file exceeds 1 MiB.
+/// - [`IgnoreError::TooManyPatterns`] or [`IgnoreError::PatternTooLong`] if
+///   the files break the pattern limits. A skipped pattern would leave a
+///   file unignored, so the load fails instead.
 /// - [`IgnoreError::Io`] for other filesystem failures.
 pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
     let mut patterns = Vec::new();
     for name in [".gitignore", ".kitignore"] {
         if let Some(list) = load_one(&dir.join(name))? {
             patterns.extend(list.patterns);
+        }
+        if patterns.len() > MAX_IGNORE_PATTERNS {
+            return Err(IgnoreError::TooManyPatterns);
         }
     }
     Ok(IgnoreList { patterns })
@@ -288,11 +310,12 @@ fn load_one(path: &Path) -> Result<Option<IgnoreList>, IgnoreError> {
     if text.len() as u64 > MAX_IGNORE_FILE_BYTES {
         return Err(IgnoreError::FileTooLarge);
     }
-    Ok(Some(parse(&text)))
+    parse_checked(&text).map(Some)
 }
 
 /// Parse ignore-file content into a list of patterns. Never fails:
-/// malformed-looking lines are silently skipped.
+/// malformed-looking lines are silently skipped. It sets no limits, so
+/// use [`parse_checked`] for content from a repository.
 #[must_use]
 pub fn parse(content: &str) -> IgnoreList {
     let mut patterns = Vec::new();
@@ -304,6 +327,31 @@ pub fn parse(content: &str) -> IgnoreList {
         }
     }
     IgnoreList { patterns }
+}
+
+/// Parse untrusted ignore-file content, refusing what [`parse`] would accept
+/// without limit.
+///
+/// # Errors
+/// - [`IgnoreError::PatternTooLong`] if a non-comment line is longer than
+///   [`MAX_IGNORE_PATTERN_BYTES`].
+/// - [`IgnoreError::TooManyPatterns`] if the content holds more than
+///   [`MAX_IGNORE_PATTERNS`] patterns.
+pub fn parse_checked(content: &str) -> Result<IgnoreList, IgnoreError> {
+    let mut patterns = Vec::new();
+    for raw in content.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if line.len() > MAX_IGNORE_PATTERN_BYTES && !line.starts_with('#') {
+            return Err(IgnoreError::PatternTooLong);
+        }
+        if let Some(p) = parse_line(line) {
+            if patterns.len() == MAX_IGNORE_PATTERNS {
+                return Err(IgnoreError::TooManyPatterns);
+            }
+            patterns.push(p);
+        }
+    }
+    Ok(IgnoreList { patterns })
 }
 
 /// Parse one cleaned line into a [`Pattern`], or `None` for blanks/comments.
@@ -757,6 +805,57 @@ mod tests {
         std::fs::write(dir.path().join(".kitignore"), oversized).unwrap();
         let err = load(dir.path()).unwrap_err();
         assert!(matches!(err, IgnoreError::FileTooLarge));
+    }
+
+    #[test]
+    fn load_rejects_too_many_patterns() {
+        let dir = TempDir::new().unwrap();
+        let text = "a\n".repeat(MAX_IGNORE_PATTERNS + 1);
+        std::fs::write(dir.path().join(".kitignore"), text).unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(matches!(err, IgnoreError::TooManyPatterns), "got {err:?}");
+    }
+
+    #[test]
+    fn load_counts_patterns_across_both_files() {
+        let dir = TempDir::new().unwrap();
+        let half = "a\n".repeat(MAX_IGNORE_PATTERNS / 2 + 1);
+        std::fs::write(dir.path().join(".gitignore"), &half).unwrap();
+        std::fs::write(dir.path().join(".kitignore"), &half).unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(matches!(err, IgnoreError::TooManyPatterns), "got {err:?}");
+    }
+
+    #[test]
+    fn load_accepts_the_pattern_count_limit() {
+        let dir = TempDir::new().unwrap();
+        let text = "a\n".repeat(MAX_IGNORE_PATTERNS);
+        std::fs::write(dir.path().join(".kitignore"), text).unwrap();
+        assert_eq!(
+            load(dir.path()).unwrap().patterns().len(),
+            MAX_IGNORE_PATTERNS
+        );
+    }
+
+    #[test]
+    fn load_rejects_a_long_pattern() {
+        let dir = TempDir::new().unwrap();
+        let text = format!("{}\n", "a".repeat(MAX_IGNORE_PATTERN_BYTES + 1));
+        std::fs::write(dir.path().join(".kitignore"), text).unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(matches!(err, IgnoreError::PatternTooLong), "got {err:?}");
+    }
+
+    #[test]
+    fn a_long_comment_is_not_a_pattern() {
+        let text = format!("#{}\nkeep\n", "a".repeat(MAX_IGNORE_PATTERN_BYTES * 2));
+        assert_eq!(parse_checked(&text).unwrap().patterns().len(), 1);
+    }
+
+    #[test]
+    fn a_pattern_at_the_length_limit_is_accepted() {
+        let text = "a".repeat(MAX_IGNORE_PATTERN_BYTES);
+        assert_eq!(parse_checked(&text).unwrap().patterns().len(), 1);
     }
 
     #[cfg(unix)]
