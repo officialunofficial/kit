@@ -138,6 +138,9 @@ Plus these rejections:
   suffix; for example `refs/heads/main.lock` is reserved).
 - Final segment equal to `HEAD` → invalid (shadows the repo-level
   `HEAD` pointer; for example `HEAD` and `refs/heads/HEAD` are rejected).
+- More than **32 segments** → invalid (`kit_core::refs::MAX_REF_SEGMENTS`).
+  The bound matches the listing depth cap in §6, so every valid ref is
+  listed.
 - Longer than **512 bytes** → invalid. A ref name is ASCII, so this is
   also its length in characters. The bound keeps every ref inside a
   server's storage key; the constant is
@@ -398,7 +401,8 @@ trailing whitespace plus the optional `\r` before the terminating
 `\n`. Fresh writes always emit the strict 65-byte form.
 
 Listing `.kit/refs/heads/` is recursive (nested directories like
-`feature/x/y` are supported), with a hard depth cap of 32 levels to
+`feature/x/y` are supported), with a hard depth cap of 32 levels (the
+most segments a name may have) to
 defeat adversarial nesting. Files that fail `validate_ref_name` or
 whose bytes do not decode to a valid ref wire are silently skipped
 from listings.

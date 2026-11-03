@@ -160,6 +160,11 @@ pub struct Ref {
 /// (`kit_rpc::MAX_REF_NAME`).
 pub const MAX_REF_NAME_BYTES: usize = 512;
 
+/// Most `/`-separated segments a ref name may have (SPEC-REFS §3). The
+/// listing walker stops at [`MAX_REF_DEPTH`] directory levels, so a name
+/// with more segments would be stored but never listed.
+pub const MAX_REF_SEGMENTS: usize = 32;
+
 /// The wire name prefix of a branch head.
 pub const BRANCH_REF_PREFIX: &str = "refs/heads/";
 /// The wire name prefix of a branch's packmap ref, which a push writes
@@ -347,9 +352,13 @@ fn check_existing_ref_name(name: &str) -> RefResult<()> {
 /// - No segment may end in `.lock` (the canonical lock-file suffix).
 /// - The final segment may not be the literal `HEAD`, since that
 ///   would shadow the repo-level `HEAD` pointer.
+/// - At most [`MAX_REF_SEGMENTS`] segments.
 #[must_use]
 pub fn validate_ref_name_grammar(name: &str) -> bool {
     if name.is_empty() {
+        return false;
+    }
+    if name.bytes().filter(|&c| c == b'/').count() >= MAX_REF_SEGMENTS {
         return false;
     }
     if name.starts_with('/') {
@@ -1383,7 +1392,7 @@ fn list_refs_under_with(
 /// the walker. 32 is far beyond anything a valid ref name (which cannot
 /// contain more than a few `/` separators given the 1–255 path-segment
 /// grammar) could ever require.
-const MAX_REF_DEPTH: usize = 32;
+const MAX_REF_DEPTH: usize = MAX_REF_SEGMENTS;
 
 fn collect_ref_candidates(
     root: &Path,
@@ -1910,25 +1919,46 @@ mod tests {
     }
 
     #[test]
-    fn list_refs_silently_skips_entries_beyond_max_depth() {
+    fn list_refs_skips_directories_nested_beyond_max_depth() {
         // SPEC-REFS §6: listing recurses with a hard depth cap of 32
         // levels to defeat adversarial nesting; anything deeper is
-        // silently skipped (not an error, not a stack overflow).
+        // silently skipped (not an error, not a stack overflow). A
+        // directory tree that bypassed the writer is the only way to
+        // build one, because the grammar bounds segments.
         let (_dir, kit) = fresh_repo();
-        let deep_name = (0..40)
-            .map(|i| format!("d{i}"))
-            .collect::<Vec<_>>()
-            .join("/");
-        write_ref(&kit, &deep_name, &h("deep")).unwrap();
         write_ref(&kit, "main", &h("shallow")).unwrap();
+        let mut deep = kit.common_dir().join(HEADS_DIR);
+        for i in 0..40 {
+            deep.push(format!("d{i}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("leaf"), encode_ref_wire(&h("deep"))).unwrap();
 
         let refs = list_refs(&kit).unwrap();
         let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"main"), "shallow ref must still be listed");
-        assert!(
-            !names.contains(&deep_name.as_str()),
-            "a ref nested beyond MAX_REF_DEPTH must be silently skipped, got {names:?}"
-        );
+        assert_eq!(names.len(), 1, "deep entry must be skipped: {names:?}");
+    }
+
+    /// SPEC-REFS §3: a name has at most `MAX_REF_SEGMENTS` segments, so
+    /// every accepted name is within reach of the listing walker.
+    #[test]
+    fn validate_bounds_segment_count() {
+        let at = vec!["a"; MAX_REF_SEGMENTS].join("/");
+        let over = vec!["a"; MAX_REF_SEGMENTS + 1].join("/");
+        assert!(validate_ref_name(&at));
+        assert!(!validate_ref_name(&over));
+        assert!(!validate_ref_name_grammar(&over));
+        assert!(matches!(
+            check_new_ref_name(&over),
+            Err(RefError::InvalidRefName(_))
+        ));
+        let (_dir, kit) = fresh_repo();
+        assert!(write_ref(&kit, &over, &h("deep")).is_err());
+        write_ref(&kit, &at, &h("edge")).unwrap();
+        let refs = list_refs(&kit).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, at);
     }
 
     /// A `read_batch` that behaves exactly like the sequential default
