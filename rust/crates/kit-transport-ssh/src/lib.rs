@@ -948,7 +948,7 @@ fn perform_client_handshake(io: &mut ChildIo) -> Result<(), SshInitError> {
         }
         Some(ssh_frame::Body::Error(e)) => Err(SshInitError::HandshakeFailed(format!(
             "server error: {}",
-            e.message.unwrap_or_default()
+            kit_core::protocol::sanitize_remote_error_text(&e.message.unwrap_or_default())
         ))),
         other => Err(SshInitError::HandshakeFailed(format!(
             "unexpected hello reply: {}",

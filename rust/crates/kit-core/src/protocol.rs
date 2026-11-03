@@ -205,14 +205,42 @@ impl fmt::Display for AdmissionRequired {
 }
 
 fn write_safe_remote_text(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
+    f.write_str(&escape_terminal_text(value, false))
+}
+
+/// Longest remote error text, in bytes, that a transport keeps.
+pub const MAX_REMOTE_ERROR_TEXT: usize = 256;
+
+/// Escape control and bidi-override characters so that `value` is safe
+/// to print to a terminal.
+///
+/// Each C0, C1 and bidi control becomes `\u{hex}`. With `keep_layout`,
+/// tab and newline pass through unchanged.
+#[must_use]
+pub fn escape_terminal_text(value: &str, keep_layout: bool) -> String {
+    use fmt::Write as _;
+    let mut out = String::with_capacity(value.len());
     for c in value.chars() {
-        if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
-            write!(f, "\\u{{{:x}}}", c as u32)?;
+        let layout = keep_layout && matches!(c, '\t' | '\n');
+        let hostile =
+            c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+        if hostile && !layout {
+            let _ = write!(out, "\\u{{{:x}}}", c as u32);
         } else {
-            write!(f, "{c}")?;
+            out.push(c);
         }
     }
-    Ok(())
+    out
+}
+
+/// Escape remote error text and cut it to [`MAX_REMOTE_ERROR_TEXT`] bytes.
+#[must_use]
+pub fn sanitize_remote_error_text(value: &str) -> String {
+    let mut end = value.len().min(MAX_REMOTE_ERROR_TEXT);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    escape_terminal_text(&value[..end], false)
 }
 
 /// Result alias used throughout this module.
