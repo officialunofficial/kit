@@ -218,7 +218,8 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout, json: bool)
                             .field_str("message", &e.message);
                         let _ = writeln!(stdout, "{}", obj.finish());
                     } else {
-                        let _ = writeln!(stdout, "stash@{{{i}}}: {}", e.message);
+                        let _ =
+                            writeln!(stdout, "stash@{{{i}}}: {}", format::safe_text(&e.message));
                     }
                 }
                 exit::OK

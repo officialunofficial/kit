@@ -834,22 +834,36 @@ fn default_protector_by_id(root: &Path, id: &str) -> Result<Arc<dyn KeyProtector
     }
 }
 
+/// Pick the key root from `XDG_DATA_HOME` and `HOME`.
+///
+/// An empty or relative `XDG_DATA_HOME` counts as unset, as the XDG
+/// base directory spec requires. A relative root would place key
+/// records inside the current directory. `HOME` must be absolute.
+#[cfg(unix)]
+fn unix_storage_root(
+    xdg_data_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    if let Some(data_home) = xdg_data_home.map(PathBuf::from)
+        && data_home.is_absolute()
+    {
+        return Ok(data_home.join("kit").join("keys"));
+    }
+    let Some(home) = home.map(PathBuf::from) else {
+        return Err(Error::BackendUnavailable(
+            "HOME is unset and XDG_DATA_HOME is unset or not absolute".into(),
+        ));
+    };
+    if !home.is_absolute() {
+        return Err(Error::BackendUnavailable("HOME is not absolute".into()));
+    }
+    Ok(home.join(".local").join("share").join("kit").join("keys"))
+}
+
 fn default_storage_root() -> Result<PathBuf> {
     #[cfg(unix)]
     {
-        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
-            return Ok(PathBuf::from(data_home).join("kit").join("keys"));
-        }
-        let Some(home) = std::env::var_os("HOME") else {
-            return Err(Error::BackendUnavailable(
-                "HOME is unset and XDG_DATA_HOME is unset".into(),
-            ));
-        };
-        Ok(PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("kit")
-            .join("keys"))
+        unix_storage_root(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
     }
     #[cfg(windows)]
     {

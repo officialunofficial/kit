@@ -192,6 +192,12 @@ Where `PROLOGUE` is the 6 bytes defined in SPEC-OBJECTS §2:
 These two exclusions keep the annotations out of the signing bytes. They are the only commit-
 struct fields excluded from signing bytes.
 
+Both annotation fields are therefore **unsigned**. Anyone can copy a signed
+commit and set or change `message_hash` or `content_digest`. The copy keeps a
+valid signature. It has a different commit id, because the id covers the whole
+serialized object. A verifier MUST NOT treat the annotations as authenticated.
+A verifier MUST NOT treat "same signature" as "same commit id".
+
 The **signing hash** is then:
 
 ```

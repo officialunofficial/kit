@@ -1,11 +1,9 @@
 name: "CI: Semver"
 
-# Compares the public API of each published crate with the latest release on
-# crates.io. A change that breaks the API without a matching version bump
-# fails the check. In a 0.x release, a minor bump allows a breaking change.
-#
-# kit-bin is out of scope. Its library surface is not a public API (see
-# docs/RELEASE.md). Crates with `publish = false` have no baseline.
+# Compares the public API of each published crate with the latest release
+# tag, built with that tag's Cargo.lock. A change that breaks the API without
+# a matching version bump fails the check. In a 0.x release, a minor bump
+# allows a breaking change. scripts/check-semver.sh holds the details.
 
 on:
   pull_request:
@@ -32,6 +30,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          # The baseline is the latest release tag.
+          fetch-depth: 0
 
       - name: Set up Rust and cache
         uses: ./.github/actions/setup-rust
@@ -43,7 +43,5 @@ jobs:
         with:
           tool: cargo-semver-checks@0.50.0
 
-      # The default baseline is the latest release on crates.io.
       - name: Check the public API
-        working-directory: rust
-        run: cargo semver-checks --workspace --exclude kit-bin
+        run: bash scripts/check-semver.sh

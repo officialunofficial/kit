@@ -90,6 +90,7 @@ pub const MULTIPART_PART_SIZE: usize = 5 * 1024 * 1024;
 
 // Body-size cap for a pack download. Canonical value lives in kit-core.
 use kit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
+use kit_core::ref_listing::{MAX_PAGES, RefListing};
 /// Body-size cap for a ref body (64 hex + newline + slack).
 const REF_BODY_LIMIT: usize = 256;
 /// Cap for list XML / small responses (16 MiB).
@@ -175,6 +176,7 @@ impl S3Transport {
 
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| TransportError::ConnectionFailed)?;
 
@@ -206,6 +208,7 @@ impl S3Transport {
     ) -> Result<Self, TransportError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| TransportError::ConnectionFailed)?;
         Ok(Self {
@@ -908,12 +911,16 @@ impl Transport for S3Transport {
         // more via IsTruncated + NextContinuationToken. Without this loop
         // a namespace with >1000 ref objects returns a silently truncated
         // ref list, corrupting fetch/sync decisions.
-        let mut keys: Vec<String> = Vec::new();
-        let mut continuation: Option<String> = None;
+        // The shared accumulator bounds pages, retained bytes and cursor
+        // size, and rejects unordered pages and a repeated token.
+        let mut listing = RefListing::<String>::new(MAX_PAGES);
         loop {
-            let query = match continuation.as_deref() {
-                Some(token) => Self::build_list_query_continued(&query_prefix, token),
-                None => Self::build_list_query(&query_prefix),
+            if !listing.can_request() {
+                return Err(invalid_listing());
+            }
+            let query = match listing.cursor() {
+                "" => Self::build_list_query(&query_prefix),
+                token => Self::build_list_query_continued(&query_prefix, token),
             };
             let resp = self.http_request(
                 &Method::GET,
@@ -929,12 +936,14 @@ impl Transport for S3Transport {
                 s => return Err(TransportError::ServerError { status: s }),
             }
             let page = parse_list_page(&resp.body);
-            keys.extend(page.keys);
-            match page.next_continuation_token {
-                Some(token) => continuation = Some(token),
-                None => break,
+            if listing
+                .push(page.keys, page.next_continuation_token, |key| key)
+                .map_err(|_| invalid_listing())?
+            {
+                break;
             }
         }
+        let keys = listing.finish().map_err(|_| invalid_listing())?;
 
         let mut out: Vec<Ref> = Vec::new();
         for key in keys {
@@ -1047,6 +1056,10 @@ fn extract_element(s: &str, tag: &str) -> Option<String> {
     let start = s.find(&open)? + open.len();
     let end = s[start..].find(&close)? + start;
     Some(s[start..end].to_owned())
+}
+
+fn invalid_listing() -> TransportError {
+    TransportError::RemoteError("invalid or excessive ref listing".into())
 }
 
 /// Parse a full `ListObjectsV2` XML body into keys + pagination cursor.

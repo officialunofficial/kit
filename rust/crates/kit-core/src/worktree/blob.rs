@@ -147,7 +147,8 @@ impl LoadedBlob {
     /// - [`WorktreeError::Store`] if a chunk is missing.
     /// - [`WorktreeError::Io`] if a chunk is not a `Blob`.
     /// - [`WorktreeError::Object`] if the concatenated chunks do not total
-    ///   the manifest's `total_size`.
+    ///   the manifest's `total_size`. The read stops at the first chunk
+    ///   that takes the running length past `total_size`.
     pub fn into_content<S: crate::store::ObjectSource + ?Sized>(
         self,
         store: &S,
@@ -155,10 +156,20 @@ impl LoadedBlob {
         match self {
             Self::Inline(data) => Ok(data),
             Self::Chunked(manifest) => {
-                let mut data =
-                    Vec::with_capacity(usize::try_from(manifest.total_size).unwrap_or(0));
+                let mut data = Vec::new();
                 for chunk in &manifest.chunks {
-                    data.extend_from_slice(&read_chunk(store, chunk)?);
+                    let part = read_chunk(store, chunk)?;
+                    // Stop at the first chunk that passes `total_size`, so a
+                    // manifest that repeats one chunk cannot grow `data`.
+                    let next = data.len() as u64 + part.len() as u64;
+                    if next > manifest.total_size {
+                        return Err(crate::object::KitError::ChunkedBlobSizeMismatch {
+                            expected: manifest.total_size,
+                            actual: next,
+                        }
+                        .into());
+                    }
+                    data.extend_from_slice(&part);
                 }
                 manifest.check_reassembled_size(data.len())?;
                 Ok(data)
@@ -653,6 +664,55 @@ mod equality_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         (dir, store)
+    }
+
+    /// A source that counts chunk reads, to show where a read loop stops.
+    struct CountingSource<'a> {
+        store: &'a ObjectStore,
+        reads: std::cell::Cell<usize>,
+    }
+
+    impl crate::store::ObjectSource for CountingSource<'_> {
+        fn read(&self, h: &Hash) -> crate::store::StoreResult<Vec<u8>> {
+            self.store.read(h)
+        }
+
+        fn read_object(&self, h: &Hash) -> crate::store::StoreResult<Object> {
+            self.reads.set(self.reads.get() + 1);
+            self.store.read_object(h)
+        }
+    }
+
+    /// A manifest that repeats one chunk must fail as soon as the running
+    /// length passes `total_size`, not after it read every repeat.
+    #[test]
+    fn into_content_stops_when_the_running_length_passes_total_size() {
+        let (_dir, store) = fresh_store();
+        let repeated = chunk(&store, &[7u8; 100]);
+        let manifest = ChunkedBlob {
+            total_size: 250,
+            chunk_size: 0,
+            chunks: vec![repeated; 1000],
+        };
+        let source = CountingSource {
+            store: &store,
+            reads: std::cell::Cell::new(0),
+        };
+        let err = LoadedBlob::Chunked(manifest)
+            .into_content(&source)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WorktreeError::Object(crate::object::KitError::ChunkedBlobSizeMismatch { .. })
+            ),
+            "got {err:?}"
+        );
+        assert!(
+            source.reads.get() <= 3,
+            "read {} chunks",
+            source.reads.get()
+        );
     }
 
     // Direct tests of `chunked_content_eq`'s merge logic against small,

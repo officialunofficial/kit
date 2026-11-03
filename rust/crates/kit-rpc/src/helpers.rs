@@ -156,7 +156,7 @@ pub fn rpc_error_to_transport(e: RpcError, transport: &str) -> TransportError {
     if msg.is_empty() {
         TransportError::RemoteError(format!("{transport} server returned an unspecified error"))
     } else {
-        TransportError::RemoteError(msg)
+        TransportError::RemoteError(kit_core::protocol::sanitize_remote_error_text(&msg))
     }
 }
 
@@ -260,6 +260,23 @@ pub fn list_response_refs(prefix: &str, entries: Vec<RefEntry>) -> TransportResu
 mod tests {
     use super::*;
     use buffa::Message;
+
+    /// Terminal controls and long text in a server error are neutralised
+    /// before the message reaches the caller.
+    #[test]
+    fn rpc_error_text_is_escaped_and_bounded() {
+        let e = RpcError::default()
+            .with_code(ErrorCode::Internal)
+            .with_message(format!("\x1b[2Jok\u{202e}{}", "a".repeat(1000)));
+        match rpc_error_to_transport(e, "ssh") {
+            TransportError::RemoteError(m) => {
+                assert!(!m.contains('\x1b') && !m.contains('\u{202e}'));
+                assert!(m.starts_with("\\u{1b}[2Jok\\u{202e}"));
+                assert!(m.len() < 300);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 
     /// One over-long entry from a pre-bound server is skipped, not a
     /// failed listing; the bound counts the prefix.

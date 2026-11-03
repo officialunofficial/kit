@@ -29,15 +29,20 @@ RUN apt-get update \
 # protoc: the code generator needs it. The .proto files use Edition 2023, which
 # needs protoc 27 or newer.
 ARG PROTOC_VERSION=31.0
-RUN curl -sSL -o /tmp/protoc.zip \
+ARG PROTOC_SHA256=24e2ed32060b7c990d5eb00d642fde04869d7f77c6d443f609353f097799dd42
+RUN curl -fsSL -o /tmp/protoc.zip \
         "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" \
+    && echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c - \
     && unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' \
     && rm -f /tmp/protoc.zip
 
 # Node runs the kit-wasm smoke test (scripts/wasm-smoke.sh).
 ARG NODE_VERSION=22.11.0
-RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
-        | tar -xJ -C /usr/local --strip-components=1 --exclude='*.md' --exclude=LICENSE
+ARG NODE_SHA256=83bf07dd343002a26211cf1fcd46a9d9534219aad42ee02847816940bf610a72
+RUN curl -fsSL -o /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+    && echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --exclude='*.md' --exclude=LICENSE \
+    && rm -f /tmp/node.tar.xz
 
 # rustfmt and clippy for the lint gates. The wasm32 target is for the kit-client
 # build and the generated-code check. The dated nightly toolchain is only for
@@ -50,8 +55,10 @@ RUN rustup component add rustfmt clippy \
 # Prebuilt tool binaries, each at one exact version. cargo-binstall resolves them
 # once here and the image keeps them. Rebuild the image to change a version.
 ARG ACTIONLINT_VERSION=1.7.7
+ARG ACTIONLINT_SHA256=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+ARG BINSTALL_INSTALLER_COMMIT=851112458b5f28a29e5bc14a690c3f283d9dcc6f
 RUN curl -L --proto '=https' --tlsv1.2 -sSf \
-        https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash \
+        "https://raw.githubusercontent.com/cargo-bins/cargo-binstall/${BINSTALL_INSTALLER_COMMIT}/install-from-binstall-release.sh" | bash \
     && cargo binstall -y \
         cargo-nextest@0.9.145 \
         sccache@0.17.0 \
@@ -62,6 +69,8 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf \
         cargo-fuzz@0.13.2 \
         b3sum@1.8.7 \
         wasm-bindgen-cli@0.2.129 \
-    && curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
-        | tar -xz -C /usr/local/bin actionlint \
+    && curl -fsSL -o /tmp/actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+    && echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint \
+    && rm -f /tmp/actionlint.tar.gz \
     && rm -rf "${CARGO_HOME:-/usr/local/cargo}/registry"

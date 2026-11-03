@@ -50,10 +50,7 @@ use crate::refs::{self, HEADS_DIR, REMOTES_DIR, TAGS_DIR};
 /// Longest ref or root file that gc reads: one hex hash plus whitespace.
 const HASH_FILE_MAX_BYTES: u64 = 128;
 
-/// Depth cap for the strict ref walk. Refs nest by `/` in the name;
-/// anything deeper than this on disk is treated as an error (fail
-/// closed) rather than silently truncated.
-const MAX_REF_WALK_DEPTH: usize = 64;
+use crate::refs::MAX_REF_WALK_DEPTH;
 
 /// Errors from collecting the retention root set. Every underlying
 /// source error is wrapped so the collector can fail closed.
@@ -87,7 +84,9 @@ pub enum GcRootsError {
     /// abort rather than treat beyond-cap objects as prunable.
     #[error("object graph exceeds the reachability cap; refusing to compute a partial keep-set")]
     Truncated,
-    /// A ref directory nested deeper than `MAX_REF_WALK_DEPTH`.
+    /// A ref directory nested deeper than [`MAX_REF_WALK_DEPTH`], which is
+    /// deeper than any ref name of the bounded length. Gc cannot tell what
+    /// it holds, so it refuses instead of skipping it.
     #[error("ref tree too deep at {0} (fail closed)")]
     RefTooDeep(String),
     /// `.kit` or `.kit/objects` is a symlink. A deletion-capable gc
@@ -389,13 +388,16 @@ fn walk_ref_roots_strict(
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
+    // Subdirectories wait until this directory handle closes, so a deep
+    // tree holds one open handle at a time.
+    let mut subdirs = Vec::new();
     for entry in rd {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let ft = entry.file_type()?;
         if ft.is_dir() {
-            walk_ref_roots_strict(&entry.path(), &format!("{rel}/{name}"), depth + 1, roots)?;
+            subdirs.push((entry.path(), format!("{rel}/{name}")));
             continue;
         }
         if !ft.is_file() || name.starts_with('.') {
@@ -408,6 +410,9 @@ fn walk_ref_roots_strict(
         if h != hash::ZERO {
             roots.insert(h);
         }
+    }
+    for (path, child_rel) in subdirs {
+        walk_ref_roots_strict(&path, &child_rel, depth + 1, roots)?;
     }
     Ok(())
 }
@@ -655,6 +660,46 @@ mod tests {
             collect_roots(&md).unwrap().contains(&c),
             "nested remote-tracking ref must be a root"
         );
+    }
+
+    /// A ref stored before names had a segment bound can nest as deep as
+    /// the length bound allows. The strict walk still reads it, so its
+    /// closure is live and gc keeps it.
+    #[test]
+    fn gc_keeps_what_a_legacy_deep_ref_reaches() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, kept_blob) = commit_one(&s, b"deep", b"deep", vec![]);
+        let (orphan, orphan_blob) = commit_one(&s, b"orphan", b"orphan", vec![]);
+        let name = vec!["a"; crate::refs::MAX_REF_NAME_BYTES / 2].join("/");
+        write_ref(&md, &format!("refs/heads/{name}"), &kept);
+
+        assert!(collect_roots(&md).unwrap().contains(&kept));
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert!(s.contains(&kept) && s.contains(&kept_blob));
+        assert!(!s.contains(&orphan) && !s.contains(&orphan_blob));
+    }
+
+    /// Past every name the length bound allows, gc cannot tell what the
+    /// ref reaches. It refuses and deletes nothing.
+    #[test]
+    fn gc_refuses_and_deletes_nothing_for_a_ref_nested_beyond_any_name() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"deep", b"deep", vec![]);
+        let (orphan, _) = commit_one(&s, b"orphan", b"orphan", vec![]);
+        let name = vec!["a"; MAX_REF_WALK_DEPTH + 3].join("/");
+        write_ref(&md, &format!("refs/heads/{name}"), &kept);
+
+        assert!(matches!(
+            collect_roots(&md),
+            Err(GcRootsError::RefTooDeep(_))
+        ));
+        assert!(matches!(
+            run_gc(&s, &md, u64::MAX, 0, false),
+            Err(GcRootsError::RefTooDeep(_))
+        ));
+        assert!(s.contains(&kept) && s.contains(&orphan));
     }
 
     #[test]

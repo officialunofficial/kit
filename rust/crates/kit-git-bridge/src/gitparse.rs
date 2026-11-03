@@ -226,9 +226,19 @@ pub fn parse_commit(body: &[u8]) -> Result<GitCommit, GitParseError> {
         &one(&headers, b"tree", "tree missing or duplicated")?,
         "tree",
     )?;
+    // Git honors only the `parent` lines that directly follow `tree`.
+    // A `parent` anywhere else would give the twin ancestry that git
+    // does not have, so it is an error.
+    let after_tree = headers
+        .iter()
+        .position(|(k, _)| k == b"tree")
+        .map_or(0, |i| i + 1);
     let mut parents = Vec::new();
-    for (k, v) in &headers {
+    for (i, (k, v)) in headers.iter().enumerate() {
         if k == b"parent" {
+            if i != after_tree + parents.len() {
+                return Err(GitParseError::Header("parent not directly after tree"));
+            }
             parents.push(id_of(v, "parent")?);
         }
     }
@@ -370,6 +380,31 @@ pub fn map_mode(mode: &[u8]) -> ModeMapping {
 mod tests {
     use super::*;
     use kit_core::object::EntryMode;
+
+    #[test]
+    fn parent_after_author_is_refused() {
+        let h = "1".repeat(40);
+        let body = format!(
+            "tree {h}\nauthor A <a@b> 1 +0000\nparent {h}\ncommitter A <a@b> 1 +0000\n\nm\n"
+        );
+        assert_eq!(
+            parse_commit(body.as_bytes()),
+            Err(GitParseError::Header("parent not directly after tree"))
+        );
+    }
+
+    #[test]
+    fn parent_separated_from_tree_is_refused() {
+        let h = "1".repeat(40);
+        let body = format!(
+            "tree {h}\nparent {h}\nauthor A <a@b> 1 +0000\nparent {h}\ncommitter A <a@b> 1 +0000\n\nm\n"
+        );
+        assert!(parse_commit(body.as_bytes()).is_err());
+        let ok = format!(
+            "tree {h}\nparent {h}\nparent {h}\nauthor A <a@b> 1 +0000\ncommitter A <a@b> 1 +0000\n\nm\n"
+        );
+        assert_eq!(parse_commit(ok.as_bytes()).unwrap().parents.len(), 2);
+    }
 
     #[test]
     fn person_plain() {

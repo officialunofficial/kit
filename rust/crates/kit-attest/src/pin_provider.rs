@@ -16,7 +16,9 @@
 //! supply its own [`PinProvider`] rather than relying on an implicit
 //! environment-variable fallback.
 
-use std::io::{BufRead as _, Write as _};
+use std::io::Write as _;
+
+use zeroize::Zeroizing;
 
 use crate::Error;
 
@@ -41,19 +43,20 @@ pub struct PinPromptInfo {
 
 /// Supplies a PIN when an external signer emits a `PinPrompt` mid-sign.
 pub trait PinProvider: std::fmt::Debug {
-    /// Return the PIN to send back in a `PinResponse`.
+    /// Return the PIN to send back in a `PinResponse`. The buffer is
+    /// wiped when the caller drops it.
     ///
     /// # Errors
     /// Implementations should fail closed rather than silently
     /// supplying an empty or synthetic PIN. Any error here aborts the
     /// whole sign conversation — the child is killed and reaped by
     /// [`ExternalSigner`](crate::signer_external::ExternalSigner).
-    fn provide_pin(&self, prompt: &PinPromptInfo) -> Result<String, Error>;
+    fn provide_pin(&self, prompt: &PinPromptInfo) -> Result<Zeroizing<String>, Error>;
 }
 
 /// Default [`PinProvider`]: prompts interactively on the controlling
 /// terminal (the prompt text goes to stderr, the answer is read from
-/// stdin) and never touches argv or environment variables.
+/// `/dev/tty`, never from stdin) and never touches argv or environment variables.
 ///
 /// Terminal echo is suppressed on Unix via a best-effort `stty -echo`
 /// / `stty echo` toggle around the read — no `unsafe`, no extra
@@ -68,14 +71,14 @@ pub trait PinProvider: std::fmt::Debug {
 pub struct TtyPinProvider;
 
 impl PinProvider for TtyPinProvider {
-    fn provide_pin(&self, prompt: &PinPromptInfo) -> Result<String, Error> {
+    fn provide_pin(&self, prompt: &PinPromptInfo) -> Result<Zeroizing<String>, Error> {
         // A touch/biometric-only prompt has nothing for a human to
         // type; the signer ignores `PinResponse.pin` in that case,
         // but it still expects a `PinResponse` frame to unblock
         // (SPEC-EXTERNAL-SIGNER §4), so answer with an empty PIN
         // rather than prompting for one.
         if !prompt.wants_pin {
-            return Ok(String::new());
+            return Ok(Zeroizing::new(String::new()));
         }
 
         let label = if prompt.reason.is_empty() {
@@ -98,42 +101,74 @@ impl PinProvider for TtyPinProvider {
             .and_then(|()| stderr.flush())
             .map_err(|e| Error::ExternalSignerSpawn(format!("PIN prompt write failed: {e}")))?;
 
-        let echo_was_disabled = disable_terminal_echo();
-        let mut line = String::new();
-        let read_result = std::io::stdin().lock().read_line(&mut line);
+        let mut tty = open_terminal()?;
+        let echo_was_disabled = disable_terminal_echo(&tty);
+        let read_result = read_pin_line(&mut std::io::BufReader::new(&mut tty));
         if echo_was_disabled {
-            restore_terminal_echo();
+            restore_terminal_echo(&tty);
             // `stty -echo` also swallows the visible newline from the
             // Enter keystroke; emit one so anything printed next
             // doesn't run into the prompt line.
             let _ = stderr.write_all(b"\n");
         }
-        read_result.map_err(|e| Error::ExternalSignerSpawn(format!("PIN read failed: {e}")))?;
-
-        Ok(line.trim_end_matches(['\n', '\r']).to_owned())
+        read_result
     }
 }
 
+/// Read one line and strip the line ending. The buffer is wiped on drop.
+fn read_pin_line(reader: &mut impl std::io::BufRead) -> Result<Zeroizing<String>, Error> {
+    let mut line = Zeroizing::new(String::new());
+    reader
+        .read_line(&mut line)
+        .map_err(|e| Error::ExternalSignerSpawn(format!("PIN read failed: {e}")))?;
+    let end = line.trim_end_matches(['\n', '\r']).len();
+    line.truncate(end);
+    Ok(line)
+}
+
+/// Open the controlling terminal. A PIN never comes from stdin, which a
+/// parent process or a pipe can feed. Fail closed when there is no
+/// terminal.
 #[cfg(unix)]
-fn disable_terminal_echo() -> bool {
-    std::process::Command::new("stty")
-        .arg("-echo")
-        .status()
+fn open_terminal() -> Result<std::fs::File, Error> {
+    std::fs::File::open("/dev/tty")
+        .map_err(|e| Error::ExternalSignerSpawn(format!("no controlling terminal for PIN: {e}")))
+}
+
+#[cfg(not(unix))]
+fn open_terminal() -> Result<std::io::Stdin, Error> {
+    Ok(std::io::stdin())
+}
+
+#[cfg(unix)]
+fn disable_terminal_echo(tty: &std::fs::File) -> bool {
+    tty.try_clone()
+        .and_then(|tty| {
+            std::process::Command::new("stty")
+                .arg("-echo")
+                .stdin(tty)
+                .status()
+        })
         .is_ok_and(|status| status.success())
 }
 
 #[cfg(unix)]
-fn restore_terminal_echo() {
-    let _ = std::process::Command::new("stty").arg("echo").status();
+fn restore_terminal_echo(tty: &std::fs::File) {
+    if let Ok(tty) = tty.try_clone() {
+        let _ = std::process::Command::new("stty")
+            .arg("echo")
+            .stdin(tty)
+            .status();
+    }
 }
 
 #[cfg(not(unix))]
-fn disable_terminal_echo() -> bool {
+fn disable_terminal_echo(_tty: &std::io::Stdin) -> bool {
     false
 }
 
 #[cfg(not(unix))]
-fn restore_terminal_echo() {}
+fn restore_terminal_echo(_tty: &std::io::Stdin) {}
 
 #[cfg(test)]
 mod tests {
@@ -145,8 +180,8 @@ mod tests {
     }
 
     impl PinProvider for FakePinProvider {
-        fn provide_pin(&self, _prompt: &PinPromptInfo) -> Result<String, Error> {
-            Ok(self.pin.clone())
+        fn provide_pin(&self, _prompt: &PinPromptInfo) -> Result<Zeroizing<String>, Error> {
+            Ok(Zeroizing::new(self.pin.clone()))
         }
     }
 
@@ -160,7 +195,7 @@ mod tests {
             retries_remaining: 3,
             wants_pin: true,
         };
-        assert_eq!(p.provide_pin(&info).unwrap(), "1234");
+        assert_eq!(p.provide_pin(&info).unwrap().as_str(), "1234");
     }
 
     #[test]
@@ -175,7 +210,7 @@ mod tests {
     struct FailingPinProvider;
 
     impl PinProvider for FailingPinProvider {
-        fn provide_pin(&self, _prompt: &PinPromptInfo) -> Result<String, Error> {
+        fn provide_pin(&self, _prompt: &PinPromptInfo) -> Result<Zeroizing<String>, Error> {
             Err(Error::ExternalSignerFailed(
                 "user declined PIN entry".into(),
             ))
@@ -187,5 +222,17 @@ mod tests {
         let p = FailingPinProvider;
         let err = p.provide_pin(&PinPromptInfo::default()).unwrap_err();
         assert!(matches!(err, Error::ExternalSignerFailed(_)));
+    }
+
+    #[test]
+    fn read_pin_line_strips_line_ending_only() {
+        let mut r = std::io::Cursor::new(b" 12 34 \r\nrest".to_vec());
+        assert_eq!(read_pin_line(&mut r).unwrap().as_str(), " 12 34 ");
+    }
+
+    #[test]
+    fn touch_only_prompt_answers_empty_without_a_terminal() {
+        let info = PinPromptInfo::default();
+        assert_eq!(TtyPinProvider.provide_pin(&info).unwrap().as_str(), "");
     }
 }

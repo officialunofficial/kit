@@ -21,7 +21,7 @@ use kit_core::verify::{
 
 use crate::chunking::{BaoEncoded, BaoVerify};
 use crate::common::MAX_JSON_BYTES;
-use crate::objects::MAX_WORKSPACE_OBJECT_BYTES;
+use crate::objects::check_workspace_object_len;
 
 /// Hard cap on the concatenated closure packs a wasm verifier will accept,
 /// checked independently of [`MAX_BUNDLE_BYTES`] (a disclosure bundle and a
@@ -38,10 +38,7 @@ fn hash_hex(s: &str) -> Result<[u8; 32], String> {
 }
 
 fn cap_object(bytes: &[u8]) -> Result<(), String> {
-    if bytes.len() > MAX_WORKSPACE_OBJECT_BYTES {
-        return Err("workspace object exceeds 16 MiB".into());
-    }
-    Ok(())
+    check_workspace_object_len(bytes.len())
 }
 
 fn cap_bundle(bytes: &[u8]) -> Result<(), String> {
@@ -369,9 +366,7 @@ fn merkle_bool(r: Result<(), MerkleError>) -> Result<bool, String> {
 }
 
 fn canonical_blob(content: &[u8]) -> Result<Vec<u8>, String> {
-    if content.len() > MAX_WORKSPACE_OBJECT_BYTES {
-        return Err("workspace object exceeds 16 MiB".into());
-    }
+    check_workspace_object_len(content.len())?;
     serialize(&Object::Blob(Blob {
         data: content.to_vec(),
     }))
@@ -428,7 +423,7 @@ pub fn disclosure_payload_bytes(commit_id_hex: &str, bundle: &[u8]) -> Result<Ve
 /// `mode` is `"snapshot"` or `"history"`. `packs` is the concatenation of
 /// each pack's bytes; `pack_lengths_json` is a JSON array of those
 /// lengths in the same order, e.g. `"[1024,2048]"`. Each pack and the
-/// concatenated buffer are capped at 64 MiB.
+/// concatenated buffer are capped at 1 GiB.
 ///
 /// Returns JSON `{ root, mode, verified, complete, unreferenced_checked,
 /// missing, corrupt, unreferenced }`.
