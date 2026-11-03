@@ -113,7 +113,9 @@ unchanged. See [SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) §3.2.
 Normative:
 
 - `name_len` ∈ `[1, 255]`. Zero-length name is illegal.
-- Forbidden bytes **anywhere** in name: `0x00`, `/` (`0x2F`), `\` (`0x5C`).
+- Forbidden bytes **anywhere** in name: `0x00`, `/` (`0x2F`), `\` (`0x5C`),
+  `:` (`0x3A`). NTFS reads `:` as an alternate data stream or drive marker
+  (`.kit::$INDEX_ALLOCATION`, `C:x`).
 - Forbidden exact names: `"."`, `".."`.
 - Forbidden trailing characters: `.` (`0x2E`) and SPACE (`0x20`). Windows
   silently strips these, which would alias one entry onto another of the
@@ -123,6 +125,8 @@ Normative:
   case-folding only; names containing non-ASCII bytes are not folded
   (they remain constrained by every other rule above). This is a
   Git CVE-2021-21300 family defense.
+- Forbidden case-insensitively: `kit~N` and `git~N`, where N is one or more
+  ASCII digits. These are the NTFS 8.3 short names of `.kit` and `.git`.
 - Forbidden Windows reserved device names, case-insensitively, with or
   without an extension: `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
   `LPT1`-`LPT9`. Comparison is against the stem (the bytes before the
