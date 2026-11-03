@@ -594,9 +594,10 @@ open a GitHub Security Advisory citing the CVE, update `CHANGELOG.md` under
 
 ## Reproducibility
 
-A kit release binary is a function of a small, pinned set of inputs. If all of
-them match, any machine that can run the same Rust toolchain will produce a
-byte-identical binary to the one published on GitHub Releases.
+Reproducibility is best effort. A kit release binary is a function of a small,
+pinned set of inputs. If all of them match, a machine with the same Rust
+toolchain should produce a byte-identical binary to the one on GitHub Releases.
+No CI job proves this. See [what is not guaranteed](#ci-safety-net-and-what-is-not-guaranteed).
 
 ### The inputs
 
@@ -609,6 +610,8 @@ byte-identical binary to the one published on GitHub Releases.
    tracked in Git.
 5. **Dependency fingerprint** &mdash; `Cargo.lock`, fully pinning every transitive
    dependency. Any `cargo update` is a visible change to that file.
+6. **Path prefixes** &mdash; the release build remaps the checkout path to `/build`
+   and the cargo home to `/cargo`, so host paths stay out of the binary.
 
 ### Reproducing a published binary
 
@@ -620,7 +623,7 @@ cd kit/rust
 # 3. Build for your target with release.yml's command (`-p kit-bin`
 #    selects only the CLI; a bare `--bin kit` unifies other members'
 #    features and differs).
-export RUSTFLAGS="-C codegen-units=1 -C strip=symbols"
+export RUSTFLAGS="-C codegen-units=1 -C strip=symbols --remap-path-prefix=$(cd .. && pwd)=/build --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
 TARGET=x86_64-unknown-linux-gnu
 cargo build --release --locked --target "$TARGET" -p kit-bin --bin kit
 # 4. Hash the binary.

@@ -212,7 +212,9 @@ produces release artifacts.
 
 kit defends:
 
-- Reproducibility of the binary build (`docs/RELEASE.md`).
+- A best-effort reproducible build (`docs/RELEASE.md`). A third party can
+  rebuild the tag and compare hashes. No CI job does this, and the result is
+  not guaranteed to match.
 - Provenance via cosign keyless signatures and CycloneDX SBOM
   (`docs/RELEASE.md`).
 - Pinning third-party actions by SHA so a compromised tag cannot
