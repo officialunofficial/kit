@@ -184,6 +184,56 @@ mod tests {
         assert_eq!(h1.len(), 0);
     }
 
+    /// The empty root follows the SPEC-HISTORY-PROOF §2.3 formula directly.
+    #[test]
+    fn mem_empty_root_matches_spec_formula() {
+        let expected = blake3::hash(&0u64.to_be_bytes());
+        assert_eq!(CommitHistory::open().root(), *expected.as_bytes());
+    }
+
+    /// History roots are a persisted and exchanged format. Pin them so a
+    /// change to the root computation fails here instead of passing silently.
+    #[test]
+    fn mem_roots_are_pinned() {
+        const PINNED: [(u64, &str); 7] = [
+            (
+                1,
+                "8752b573735d4e44e32e9386f5bb348dc6a036327db21f9e79fa9bfed37855de",
+            ),
+            (
+                2,
+                "a4529fb118a453c48b9466a51e09dcad8a35dbca1455d047d70c94d3b339b0e0",
+            ),
+            (
+                3,
+                "7a17663b9038f918b20a1cb0ddcae05855e2f90f3ea5953ee7e87c05a86b1688",
+            ),
+            (
+                4,
+                "2982be9934a1349f87d7bf5a96124b821b13e803ce5a03398a18a75127a238e1",
+            ),
+            (
+                7,
+                "892e3f80855e6ad50fbfb9540b3da343d0321ddb7e8b8f516cd8c64a1e5532fb",
+            ),
+            (
+                8,
+                "b31322bc1e70c1f422e2e560fa42019b7bc62d30e46dad8c1a9bc5956442bdd8",
+            ),
+            (
+                100,
+                "97931b68b8216187d5ff6ffc9bee915888a6e52c8718685d08d4cbeba10b85d2",
+            ),
+        ];
+        for (n, expected) in PINNED {
+            let mut h = CommitHistory::open();
+            for i in 0..n {
+                h.append(&synth(i)).unwrap();
+            }
+            assert_eq!(hex::encode(h.root()), expected, "root for {n} leaves");
+        }
+    }
+
     #[test]
     fn mem_append_returns_dense_positions() {
         let mut h = CommitHistory::open();
