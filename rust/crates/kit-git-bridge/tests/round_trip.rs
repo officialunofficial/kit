@@ -390,6 +390,49 @@ fn fixed_size_chunking_is_refused() {
     );
 }
 
+/// Counts chunk reads so a test can see where the read loop stops.
+struct CountingSource<'a> {
+    store: &'a ObjectStore,
+    reads: std::cell::Cell<usize>,
+}
+
+impl kit_git_bridge::translate::ObjectSource for CountingSource<'_> {
+    fn read_object(&self, h: &Hash) -> Result<Object, BridgeError> {
+        self.reads.set(self.reads.get() + 1);
+        self.store
+            .read_object(h)
+            .map_err(|e| BridgeError::Source(e.to_string()))
+    }
+}
+
+#[test]
+fn repeated_chunk_stops_at_the_declared_total() {
+    let (_d, store) = store();
+    let chunk = put(
+        &store,
+        &Object::Blob(Blob {
+            data: vec![7u8; 600 * 1024],
+        }),
+    );
+    let manifest = kit_core::object::ChunkedBlob {
+        total_size: 1200 * 1024 + 1,
+        chunk_size: 0,
+        chunks: vec![chunk; 1000],
+    };
+    let source = CountingSource {
+        store: &store,
+        reads: std::cell::Cell::new(0),
+    };
+    let hash = Hash::from([1u8; 32]);
+    let err = kit_git_bridge::translate::translate_chunked(&hash, &manifest, &source).unwrap_err();
+    assert!(matches!(err, BridgeError::Source(_)), "got {err}");
+    assert!(
+        source.reads.get() <= 4,
+        "read {} chunks",
+        source.reads.get()
+    );
+}
+
 #[test]
 fn below_threshold_manifest_is_refused() {
     let (_d, store) = store();

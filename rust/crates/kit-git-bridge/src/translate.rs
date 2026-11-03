@@ -106,6 +106,15 @@ pub fn translate_chunked<S: ObjectSource>(
     for chunk_hash in &manifest.chunks {
         match source.read_object(chunk_hash)? {
             Object::Blob(b) => {
+                // Stop at the first chunk that passes the declared total, so
+                // a manifest that repeats one chunk cannot grow `body`.
+                if (body.len() as u64).saturating_add(b.data.len() as u64) > manifest.total_size {
+                    return Err(BridgeError::Source(format!(
+                        "chunked blob {}: chunks exceed the {} bytes the manifest declares",
+                        kit_core::to_hex(hash),
+                        manifest.total_size
+                    )));
+                }
                 lengths.push(b.data.len());
                 body.extend_from_slice(&b.data);
             }
