@@ -139,8 +139,9 @@ Plus these rejections:
 - Final segment equal to `HEAD` → invalid (shadows the repo-level
   `HEAD` pointer; for example `HEAD` and `refs/heads/HEAD` are rejected).
 - More than **32 segments** → invalid (`kit_core::refs::MAX_REF_SEGMENTS`).
-  The bound matches the listing depth cap in §6, so every valid ref is
-  listed.
+  A local ref stored before this bound existed stays valid for a read,
+  a listing, a write and a delete. It is still invalid as a new name
+  and on the wire.
 - Longer than **512 bytes** → invalid. A ref name is ASCII, so this is
   also its length in characters. The bound keeps every ref inside a
   server's storage key; the constant is
@@ -401,9 +402,13 @@ trailing whitespace plus the optional `\r` before the terminating
 `\n`. Fresh writes always emit the strict 65-byte form.
 
 Listing `.kit/refs/heads/` is recursive (nested directories like
-`feature/x/y` are supported), with a hard depth cap of 32 levels (the
-most segments a name may have) to
-defeat adversarial nesting. Files that fail `validate_ref_name` or
+`feature/x/y` are supported), with a hard depth cap of 256 levels
+(`kit_core::refs::MAX_REF_WALK_DEPTH`, half of the 512 byte name bound)
+to defeat adversarial nesting. The cap reaches every ref a name within
+the length bound can name, so a local ref stored before the segment
+bound in §3 is still listed. Garbage collection reads the same
+directories. It fails with an explicit error, and deletes nothing, on a
+directory nested deeper than the cap. Files that fail `validate_ref_name` or
 whose bytes do not decode to a valid ref wire are silently skipped
 from listings.
 
@@ -508,7 +513,7 @@ base/ours/theirs material lives only in this sidecar.
 | A default push cannot silently rewind a remote that advanced | `Match(tracked)`/`Missing` CAS lease on the remote-tracking ref (§2) |
 | Fetched tips never overwrite local branches | fetch writes only `refs/remotes/<remote>/<name>`; `pull` fast-forwards from it (§2) |
 | Local ref reads never observe a torn write | atomic write-then-rename with the SPEC-INDEX §5 temp-name pattern (§6) |
-| Ref parsing is allocation-bounded | 128 B ref / 4 KiB `HEAD` / 1 MiB shallow caps; 32-level listing depth cap (§6) |
+| Ref parsing is allocation-bounded | 128 B ref / 4 KiB `HEAD` / 1 MiB shallow caps; 256-level listing depth cap (§6) |
 | At most one of merge / cherry-pick / rebase is in progress | starting a second operation while state files exist is refused (§6.1) |
 
 The memory transport's CAS is atomic only among threads sharing one

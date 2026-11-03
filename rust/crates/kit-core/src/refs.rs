@@ -160,10 +160,17 @@ pub struct Ref {
 /// (`kit_rpc::MAX_REF_NAME`).
 pub const MAX_REF_NAME_BYTES: usize = 512;
 
-/// Most `/`-separated segments a ref name may have (SPEC-REFS §3). The
-/// listing walker stops at [`MAX_REF_DEPTH`] directory levels, so a name
-/// with more segments would be stored but never listed.
+/// Most `/`-separated segments a new ref name may have (SPEC-REFS §3).
+/// A local ref stored before this bound existed keeps working: see
+/// [`MAX_REF_WALK_DEPTH`].
 pub const MAX_REF_SEGMENTS: usize = 32;
+
+/// Directory levels the ref walkers descend. A name of at most
+/// [`MAX_REF_NAME_BYTES`] bytes has at most half that many segments, so
+/// the walkers reach every ref a length-bounded name can name, including
+/// a ref stored before [`MAX_REF_SEGMENTS`] existed. Deeper directories
+/// are not refs of any bounded name.
+pub const MAX_REF_WALK_DEPTH: usize = MAX_REF_NAME_BYTES / 2;
 
 /// The wire name prefix of a branch head.
 pub const BRANCH_REF_PREFIX: &str = "refs/heads/";
@@ -312,10 +319,14 @@ fn check_local_write(
     name: &str,
     kind: RefNameKind,
 ) -> RefResult<()> {
+    // A ref stored before a bound existed keeps working locally. The
+    // bounds are the per-kind length and the segment count.
+    let stored_before_bounds = name.len() <= MAX_REF_NAME_BYTES
+        && name_grammar_ok(name, usize::MAX)
+        && ref_path(common_dir, sub_dir, name).is_file();
     match check_new_name(name, kind) {
-        Err(RefError::RefNameTooLong { .. })
-            if name.len() <= MAX_REF_NAME_BYTES
-                && ref_path(common_dir, sub_dir, name).is_file() =>
+        Err(RefError::RefNameTooLong { .. } | RefError::InvalidRefName(_))
+            if stored_before_bounds =>
         {
             Ok(())
         }
@@ -324,10 +335,11 @@ fn check_local_write(
 }
 
 /// Check the name of a ref that may already exist, for a read, a listing
-/// or a delete: the grammar only, so a local ref written before
-/// SPEC-REFS §3 bounded names stays visible, resolvable and deletable.
+/// or a delete: the grammar without the segment bound, so a local ref
+/// written before SPEC-REFS §3 bounded names stays visible, resolvable and
+/// deletable.
 fn check_existing_ref_name(name: &str) -> RefResult<()> {
-    if validate_ref_name_grammar(name) {
+    if name_grammar_ok(name, usize::MAX) {
         Ok(())
     } else {
         Err(RefError::InvalidRefName(name.to_string()))
@@ -355,10 +367,16 @@ fn check_existing_ref_name(name: &str) -> RefResult<()> {
 /// - At most [`MAX_REF_SEGMENTS`] segments.
 #[must_use]
 pub fn validate_ref_name_grammar(name: &str) -> bool {
+    name_grammar_ok(name, MAX_REF_SEGMENTS)
+}
+
+/// The SPEC-REFS §3 grammar with `max_segments` as the segment bound.
+/// Only a local ref that already exists passes `usize::MAX`.
+fn name_grammar_ok(name: &str, max_segments: usize) -> bool {
     if name.is_empty() {
         return false;
     }
-    if name.bytes().filter(|&c| c == b'/').count() >= MAX_REF_SEGMENTS {
+    if name.bytes().filter(|&c| c == b'/').count() >= max_segments {
         return false;
     }
     if name.starts_with('/') {
@@ -545,7 +563,7 @@ pub fn read_head(layout: &RepoLayout) -> RefResult<Head> {
     if let Some(branch) = trimmed.strip_prefix(HEAD_REF_PREFIX) {
         // Grammar only: a branch named before SPEC-REFS §3 bounded names
         // stays checked out; a write to it names the limit.
-        if !validate_ref_name_grammar(branch) {
+        if !name_grammar_ok(branch, usize::MAX) {
             return Err(RefError::InvalidHead);
         }
         return Ok(Head::Branch(branch.to_string()));
@@ -992,7 +1010,7 @@ pub fn list_remote_names(layout: &RepoLayout) -> RefResult<Vec<String>> {
             continue;
         }
         if let Some(name) = entry.file_name().to_str()
-            && validate_ref_name_grammar(name)
+            && name_grammar_ok(name, usize::MAX)
         {
             names.push(name.to_owned());
         }
@@ -1387,20 +1405,13 @@ fn list_refs_under_with(
     Ok(out)
 }
 
-/// Cap on ref-tree recursion depth. A malicious or corrupt `.kit/refs/`
-/// directory with deeply nested empty dirs should not stack-overflow
-/// the walker. 32 is far beyond anything a valid ref name (which cannot
-/// contain more than a few `/` separators given the 1–255 path-segment
-/// grammar) could ever require.
-const MAX_REF_DEPTH: usize = MAX_REF_SEGMENTS;
-
 fn collect_ref_candidates(
     root: &Path,
     prefix: &str,
     out: &mut Vec<RefCandidate>,
     depth: usize,
 ) -> RefResult<()> {
-    if depth > MAX_REF_DEPTH {
+    if depth > MAX_REF_WALK_DEPTH {
         // Silently stop — same "skip malformed" posture as below for
         // individual files. Callers get a partial result rather than a
         // stack overflow on adversarial input.
@@ -1416,6 +1427,9 @@ fn collect_ref_candidates(
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(RefError::Io(e)),
     };
+    // Subdirectories wait until this directory handle closes, so a deep
+    // tree holds one open handle at a time.
+    let mut subdirs = Vec::new();
     for entry in iter {
         let entry = entry?;
         let file_name = match entry.file_name().to_str() {
@@ -1429,7 +1443,7 @@ fn collect_ref_candidates(
         };
         let ft = entry.file_type()?;
         if ft.is_dir() {
-            collect_ref_candidates(root, &child_name, out, depth + 1)?;
+            subdirs.push(child_name);
             continue;
         }
         if !ft.is_file() {
@@ -1437,13 +1451,16 @@ fn collect_ref_candidates(
         }
         // Grammar only: a ref named before SPEC-REFS §3 bounded names is
         // still listed, so it can be seen, renamed or deleted.
-        if !validate_ref_name_grammar(&child_name) {
+        if !name_grammar_ok(&child_name, usize::MAX) {
             continue;
         }
         out.push(RefCandidate {
             name: child_name,
             path: entry.path(),
         });
+    }
+    for child_name in subdirs {
+        collect_ref_candidates(root, &child_name, out, depth + 1)?;
     }
     Ok(())
 }
@@ -1919,17 +1936,16 @@ mod tests {
     }
 
     #[test]
-    fn list_refs_skips_directories_nested_beyond_max_depth() {
-        // SPEC-REFS §6: listing recurses with a hard depth cap of 32
-        // levels to defeat adversarial nesting; anything deeper is
-        // silently skipped (not an error, not a stack overflow). A
-        // directory tree that bypassed the writer is the only way to
-        // build one, because the grammar bounds segments.
+    fn list_refs_skips_directories_nested_beyond_the_walk_depth() {
+        // SPEC-REFS §6: listing recurses with a hard depth cap to defeat
+        // adversarial nesting; anything deeper is silently skipped (not an
+        // error, not a stack overflow). A directory tree that bypassed the
+        // writer is the only way to build one.
         let (_dir, kit) = fresh_repo();
         write_ref(&kit, "main", &h("shallow")).unwrap();
         let mut deep = kit.common_dir().join(HEADS_DIR);
-        for i in 0..40 {
-            deep.push(format!("d{i}"));
+        for _ in 0..MAX_REF_WALK_DEPTH + 5 {
+            deep.push("d");
         }
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("leaf"), encode_ref_wire(&h("deep"))).unwrap();
@@ -1938,6 +1954,41 @@ mod tests {
         let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"main"), "shallow ref must still be listed");
         assert_eq!(names.len(), 1, "deep entry must be skipped: {names:?}");
+    }
+
+    /// A local ref stored before names had a segment bound stays listed,
+    /// readable, writable and deletable, however deep it nests, up to
+    /// the longest name the length bound allows. Only a new name is
+    /// held to the segment bound.
+    #[test]
+    fn legacy_deep_ref_stays_visible_and_deletable() {
+        let (_dir, kit) = fresh_repo();
+        let name = vec!["a"; 3 * MAX_REF_SEGMENTS].join("/");
+        assert!(name.len() <= MAX_REF_NAME_BYTES);
+        assert!(!validate_ref_name(&name), "a new or remote name is refused");
+        let path = ref_path(kit.common_dir(), HEADS_DIR, &name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, encode_ref_wire(&h("old"))).unwrap();
+
+        let refs = list_refs(&kit).unwrap();
+        assert_eq!(refs.len(), 1, "listed: {refs:?}");
+        assert_eq!(refs[0].name, name);
+        assert_eq!(read_ref(&kit, &name).unwrap(), Some(h("old")));
+        write_ref(&kit, &name, &h("new")).unwrap();
+        assert_eq!(read_ref(&kit, &name).unwrap(), Some(h("new")));
+        delete_ref(&kit, &name).unwrap();
+        assert_eq!(read_ref(&kit, &name).unwrap(), None);
+
+        let other = vec!["b"; 3 * MAX_REF_SEGMENTS].join("/");
+        assert!(write_ref(&kit, &other, &h("fresh")).is_err());
+    }
+
+    #[test]
+    fn legacy_deep_branch_can_stay_checked_out() {
+        let (_dir, kit) = fresh_repo();
+        let name = vec!["a"; 2 * MAX_REF_SEGMENTS].join("/");
+        fs::write(kit.head_file(), format!("ref: refs/heads/{name}\n")).unwrap();
+        assert!(matches!(read_head(&kit).unwrap(), Head::Branch(b) if b == name));
     }
 
     /// SPEC-REFS §3: a name has at most `MAX_REF_SEGMENTS` segments, so
