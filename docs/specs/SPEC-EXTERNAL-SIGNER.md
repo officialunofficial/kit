@@ -65,7 +65,14 @@ does NOT pass:
 - Any shell metacharacters.
 - The PAE on argv (it goes through stdin).
 - The algorithm on argv (it goes inside `SignRequest`).
-- Any environment variables it didn't already inherit.
+- Any environment variable outside the allowlist below.
+
+kit clears the signer's environment and passes only an allowlist. The
+allowlist holds `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`,
+`TERM`, `LANG`, `TZ`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`,
+`DBUS_SESSION_BUS_ADDRESS`, `SSH_AUTH_SOCK`, `GPG_TTY`, and every
+variable that starts with `LC_` or `XDG_`. Secrets such as
+`KIT_API_TOKEN` and `KIT_S3_*` never reach the signer.
 
 The signer's stdin and stdout are pipes. **stderr is also a pipe** that
 kit drains concurrently for the lifetime of the conversation (it is

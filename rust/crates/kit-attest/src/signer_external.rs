@@ -63,6 +63,38 @@ const MAX_STDERR_DRAIN: usize = 1024 * 1024;
 /// before a hardware lockout).
 const MAX_PIN_PROMPTS: u32 = 8;
 
+/// Exact names of environment variables the signer child inherits.
+/// Every other variable is dropped, so secrets such as `KIT_API_TOKEN`
+/// and `KIT_S3_*` never reach the signer.
+const INHERITED_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TERM",
+    "LANG",
+    "TZ",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "SSH_AUTH_SOCK",
+    "GPG_TTY",
+];
+
+/// Name prefixes of environment variables the signer child inherits.
+const INHERITED_ENV_PREFIXES: &[&str] = &["LC_", "XDG_"];
+
+/// Return `true` if the signer child inherits the variable `name`.
+fn env_is_inherited(name: &str) -> bool {
+    INHERITED_ENV.contains(&name)
+        || INHERITED_ENV_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
 /// Default wall-clock budget for the entire signer conversation
 /// (spawn → request-write → response-read → stderr-drain → child-exit).
 ///
@@ -208,6 +240,10 @@ impl Signer for ExternalSigner {
 
         let child = Command::new(&self.binary_path)
             .args(&self.args)
+            .env_clear()
+            .envs(
+                std::env::vars_os().filter(|(name, _)| name.to_str().is_some_and(env_is_inherited)),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1175,6 +1211,21 @@ fn frame_name(b: &Option<signer_frame::Body>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn env_allowlist_drops_secrets_and_keeps_session_variables() {
+        for name in [
+            "KIT_API_TOKEN",
+            "KIT_S3_SECRET_ACCESS_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+        ] {
+            assert!(!super::env_is_inherited(name), "{name}");
+        }
+        for name in ["PATH", "HOME", "SSH_AUTH_SOCK", "LC_ALL", "XDG_RUNTIME_DIR"] {
+            assert!(super::env_is_inherited(name), "{name}");
+        }
+    }
+
     use super::*;
     use kit_rpc::kit::rpc::v1::Algorithm as RpcAlgorithm;
     use kit_rpc::kit::rpc::v1::signer::WebAuthnData;
