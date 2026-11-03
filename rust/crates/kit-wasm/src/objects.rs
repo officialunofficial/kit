@@ -201,13 +201,13 @@ pub fn commit_encode_and_sign(
 
 /// Verify a commit signature, given the raw on-disk commit bytes.
 /// Returns `true` on pass, `false` on structural or crypto failure.
+/// Input over 16 MiB returns `false`.
 #[wasm_bindgen]
 #[must_use]
 pub fn commit_verify(commit_bytes: &[u8]) -> bool {
-    let Ok(obj) = kit_core::deserialize(commit_bytes) else {
+    let Ok(Object::Commit(c)) = decode_workspace_object(commit_bytes) else {
         return false;
     };
-    let Object::Commit(c) = obj else { return false };
     kit_core::sign::verify_commit(&c).is_ok()
 }
 
@@ -677,6 +677,12 @@ mod tests {
             decode_workspace_object(&oversized).unwrap_err(),
             "workspace object exceeds 16 MiB"
         );
+    }
+
+    #[test]
+    fn commit_verify_rejects_oversize_input() {
+        let oversized = vec![0; MAX_WORKSPACE_OBJECT_BYTES + 1];
+        assert!(!commit_verify(&oversized));
     }
 
     #[test]
