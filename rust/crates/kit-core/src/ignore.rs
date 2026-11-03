@@ -385,49 +385,97 @@ fn finish_pattern(body: &str, negated: bool) -> Option<Pattern> {
 }
 
 /// Match a segment list against a path-segment slice (entire-path match).
+///
+/// Runs in `O(pattern segments * path segments)` glob calls. It tracks the
+/// set of path positions reachable after each pattern segment, so nested
+/// `**` segments cannot cause exponential backtracking.
 fn match_segments(pat: &[Segment], path: &[&str]) -> bool {
-    match pat.split_first() {
-        None => path.is_empty(),
-        Some((Segment::DoubleStar, rest)) => {
-            if rest.is_empty() {
+    let n = path.len();
+    let mut cur = vec![false; n + 1];
+    cur[0] = true;
+    for (i, seg) in pat.iter().enumerate() {
+        let Some(first) = cur.iter().position(|&r| r) else {
+            return false;
+        };
+        match seg {
+            Segment::DoubleStar if i + 1 == pat.len() => {
                 // A trailing `**` matches one or more remaining segments
                 // (git's "everything inside" — not the directory itself).
-                return !path.is_empty();
+                return first < n;
             }
-            // Match zero or more leading segments, then the rest.
-            (0..=path.len()).any(|k| match_segments(rest, &path[k..]))
+            Segment::DoubleStar => {
+                // Zero or more segments: every position from `first` on.
+                for (j, r) in cur.iter_mut().enumerate() {
+                    *r = j >= first;
+                }
+            }
+            Segment::Glob(g) => {
+                let mut next = vec![false; n + 1];
+                for j in first..n {
+                    if cur[j] && segment_match(g.as_bytes(), path[j].as_bytes()) {
+                        next[j + 1] = true;
+                    }
+                }
+                cur = next;
+            }
         }
-        Some((Segment::Glob(g), rest)) => match path.split_first() {
-            Some((first, tail)) => {
-                segment_match(g.as_bytes(), first.as_bytes()) && match_segments(rest, tail)
-            }
-            None => false,
-        },
     }
+    cur[n]
 }
 
 /// Match a single path segment against a single-level glob (`*`/`?`/`[...]`,
 /// `\` escapes, literals). Never crosses `/` (segments contain none).
+///
+/// Every token except `*` consumes exactly one byte, so one backtrack point
+/// (the latest `*`) is enough. The cost is `O(pattern * segment)`.
 fn segment_match(p: &[u8], s: &[u8]) -> bool {
-    match p.split_first() {
-        None => s.is_empty(),
-        Some((&b'*', mut rest)) => {
-            while rest.first() == Some(&b'*') {
-                rest = &rest[1..];
+    let (mut pi, mut si) = (0, 0);
+    // Pattern index after the latest `*`, and the segment index it resumes at.
+    let mut star: Option<(usize, usize)> = None;
+    loop {
+        if pi == p.len() {
+            if si == s.len() {
+                return true;
             }
-            (0..=s.len()).any(|i| segment_match(rest, &s[i..]))
+        } else if p[pi] == b'*' {
+            while p.get(pi) == Some(&b'*') {
+                pi += 1;
+            }
+            star = Some((pi, si));
+            continue;
+        } else if let Some(used) = match_one(&p[pi..], s.get(si).copied()) {
+            pi += used;
+            si += 1;
+            continue;
         }
-        Some((&b'?', rest)) => !s.is_empty() && segment_match(rest, &s[1..]),
-        Some((&b'[', _)) => match match_class(p, s.first().copied()) {
-            Some((matched, plen)) => matched && segment_match(&p[plen..], &s[1..]),
-            // Malformed class (no closing `]`) ⇒ literal `[`.
-            None => s.first() == Some(&b'[') && segment_match(&p[1..], &s[1..]),
+        // Mismatch: let the latest `*` absorb one more byte.
+        match star {
+            Some((spi, ssi)) if ssi < s.len() => {
+                star = Some((spi, ssi + 1));
+                pi = spi;
+                si = ssi + 1;
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// Match one non-`*` pattern token at the front of `p` against `ch`.
+/// Returns the pattern bytes consumed when it matches one byte, else `None`.
+fn match_one(p: &[u8], ch: Option<u8>) -> Option<usize> {
+    let c = ch?;
+    match p[0] {
+        b'?' => Some(1),
+        b'[' => match match_class(p, ch) {
+            Some((matched, plen)) => matched.then_some(plen),
+            // Malformed class (no closing `]`) is a literal `[`.
+            None => (c == b'[').then_some(1),
         },
-        Some((&b'\\', rest)) => match rest.split_first() {
-            Some((&c, rest2)) => s.first() == Some(&c) && segment_match(rest2, &s[1..]),
-            None => s.first() == Some(&b'\\') && s.len() == 1,
+        b'\\' => match p.get(1) {
+            Some(&e) => (c == e).then_some(2),
+            None => (c == b'\\').then_some(1),
         },
-        Some((&c, rest)) => s.first() == Some(&c) && segment_match(rest, &s[1..]),
+        lit => (c == lit).then_some(1),
     }
 }
 
@@ -817,5 +865,17 @@ mod tests {
                 proptest::prop_assert_eq!(fast, general, "glob={:?} path={:?}", glob, path);
             }
         }
+    }
+
+    #[test]
+    fn pathological_globs_finish_fast() {
+        let name = "a".repeat(200);
+        let il = parse("*a*a*a*a*a*a*a*a*a*a*b");
+        assert!(!il.is_ignored(&name, false));
+        let il = parse("a/**/a/**/a/**/a/**/a/**/b");
+        let path = vec!["a"; 200].join("/");
+        assert!(!il.is_ignored(&path, false));
+        assert!(glob_match("*a*a*b", "xaxab"));
+        assert!(!glob_match("*a*a*b", "xaxac"));
     }
 }
