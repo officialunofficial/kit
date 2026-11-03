@@ -777,9 +777,10 @@ fn finish_or_discard_tmp(
 }
 
 /// Read `chunks` in batches of `batch_size` via `read_chunks` and append
-/// each batch to `out`, returning the total bytes written. Writing stops
-/// once the running total passes `limit`, so a manifest cannot make the
-/// restore write more than its declared `total_size`.
+/// each batch to `out`, returning the total bytes written. A batch that
+/// would take the running total past `limit` is not written and fails
+/// with [`object::KitError::ChunkedBlobSizeMismatch`], so a manifest
+/// cannot make the restore write more than its declared `total_size`.
 ///
 /// With more than one batch on a threaded target, the write of batch N
 /// is overlapped with the read of batch N+1: a scoped writer thread
@@ -813,13 +814,10 @@ where
     if batch_size > 1 && chunks.len() > batch_size {
         return std::thread::scope(|scope| {
             let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<Vec<u8>>>(0);
-            let writer = scope.spawn(move || -> io::Result<u64> {
+            let writer = scope.spawn(move || -> RestoreResult<u64> {
                 let mut written: u64 = 0;
                 for bufs in rx {
-                    if written + bufs.iter().map(|b| b.len() as u64).sum::<u64>() > limit {
-                        return Ok(u64::MAX);
-                    }
-                    written += write_batch_vectored(out, &bufs)?;
+                    written += write_batch_within(out, &bufs, written, limit)?;
                 }
                 Ok(written)
             });
@@ -846,7 +844,7 @@ where
             };
             match (read_err, written) {
                 (Some(e), _) => Err(e),
-                (None, w) => Ok(w?),
+                (None, w) => w,
             }
         });
     }
@@ -854,12 +852,29 @@ where
     let mut written: u64 = 0;
     for batch in chunks.chunks(batch_size) {
         let bufs = read_batch(batch)?;
-        if written + bufs.iter().map(|b| b.len() as u64).sum::<u64>() > limit {
-            return Ok(u64::MAX);
-        }
-        written += write_batch_vectored(out, &bufs)?;
+        written += write_batch_within(out, &bufs, written, limit)?;
     }
     Ok(written)
+}
+
+/// Append `bufs` to `out` unless `written` plus their length passes
+/// `limit`. An overrun writes nothing and returns the length it would
+/// have reached.
+fn write_batch_within(
+    out: &mut fs::File,
+    bufs: &[Vec<u8>],
+    written: u64,
+    limit: u64,
+) -> RestoreResult<u64> {
+    let reached = written.saturating_add(bufs.iter().map(|b| b.len() as u64).sum::<u64>());
+    if reached > limit {
+        return Err(object::KitError::ChunkedBlobSizeMismatch {
+            expected: limit,
+            actual: reached,
+        }
+        .into());
+    }
+    Ok(write_batch_vectored(out, bufs)?)
 }
 
 /// Append every buffer in `bufs` to `out` with gathered `writev` calls
@@ -1714,6 +1729,53 @@ mod tests {
             "got {err:?}"
         );
         assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+    }
+
+    /// The worktree restore path reports an overrun with the length the
+    /// write would have reached, not a placeholder, and removes its temp file.
+    /// The sequential and threaded writers must agree.
+    #[test]
+    fn worktree_restore_overrun_error_reports_the_length_it_would_reach() {
+        for chunk_count in [1usize, 2 * RESTORE_CHUNK_BATCH + 1] {
+            let declared = chunk_count as u64 + 9;
+            let (_d, store) = fresh_store();
+            let target = TempDir::new().unwrap();
+            let big = put_blob(&store, &[7u8; 64]);
+            let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
+                total_size: declared,
+                chunk_size: 0,
+                chunks: vec![big; chunk_count],
+            });
+            let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
+            let tree = put_tree_with(
+                &store,
+                vec![TreeEntry {
+                    name: b"out.bin".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: cb_h,
+                }],
+            );
+            let err = restore_tree_to_worktree_with(
+                &store,
+                &tree,
+                None,
+                target.path(),
+                &RestoreOptions::default(),
+                &sequential_read_chunks,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    RestoreError::Object(object::KitError::ChunkedBlobSizeMismatch {
+                        expected,
+                        actual
+                    }) if expected == declared && actual > declared && actual < u64::MAX / 2
+                ),
+                "got {err:?}"
+            );
+            assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+        }
     }
 
     #[cfg(unix)]
