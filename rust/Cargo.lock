@@ -3209,6 +3209,7 @@ name = "kit-transport-file"
 version = "0.5.0"
 dependencies = [
  "kit-core",
+ "libc",
  "tempfile",
 ]
 
