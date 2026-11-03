@@ -66,7 +66,7 @@ pub enum TransportError {
     /// Catch-all remote-side failure carrying an advisory message. The
     /// message is for operators; programs MUST NOT pattern-match on its
     /// contents.
-    #[error("remote error: {}", escape_terminal_text(.0, false))]
+    #[error("remote error: {}", sanitize_remote_error_text(.0))]
     RemoteError(String),
     /// `update_ref` CAS precondition was not satisfied. Per
     /// SPEC-TRANSPORT §7, callers MUST treat this as
@@ -941,6 +941,8 @@ pub struct UploadLimits {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn remote_text_is_escaped_when_displayed() {
         let e = TransportError::RemoteError("\x1b[2Jx\u{202e}".into());
@@ -949,7 +951,20 @@ mod tests {
         assert_eq!(e.to_string(), "invalid ref name: a\\u{7}b");
     }
 
-    use super::*;
+    #[test]
+    fn remote_text_is_cut_when_displayed() {
+        let e = TransportError::RemoteError("a".repeat(10 * MAX_REMOTE_ERROR_TEXT));
+        assert_eq!(
+            e.to_string(),
+            format!("remote error: {}", "a".repeat(MAX_REMOTE_ERROR_TEXT))
+        );
+        // The cut falls inside a multi-byte character: it backs up.
+        let e = TransportError::RemoteError("é".repeat(MAX_REMOTE_ERROR_TEXT));
+        assert_eq!(
+            e.to_string(),
+            format!("remote error: {}", "é".repeat(MAX_REMOTE_ERROR_TEXT / 2))
+        );
+    }
 
     #[test]
     fn pack_key_hex_roundtrip() {
