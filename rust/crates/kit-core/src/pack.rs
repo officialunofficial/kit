@@ -2624,27 +2624,18 @@ fn resolve_delta_target<B: DeltaBaseSource>(
 ) -> Result<Vec<u8>, PackError> {
     // Resolve base: in-pack first, then the external source. An
     // externally resolved base is cached into `in_pack` under its own
-    // hash so a later delta entry referencing the same out-of-pack base
-    // hits the cache-hit branch above instead of paying another full
-    // read + verify + decode. This is safe because
-    // `external_base` has already established that the bytes are the
-    // object `base_hash` names (the store's `read` hash-verifies; an
-    // unverified source is re-derived there). Cloning once here (vs.
-    // the original Arc::clone) is the cost of composing with the
-    // Cow-based `in_pack`, which trades that one-time clone for
-    // zero-copy borrows on the far more common raw-entry path — a net
-    // win, and this clone only happens once per unique out-of-pack
-    // base, not per delta entry.
-    let base_bytes: Cow<'_, [u8]> = if let Some(b) = in_pack.get(&base_hash) {
-        Cow::Borrowed(b.as_ref())
-    } else if let Some(bytes) = external_base(bases, &base_hash)? {
-        in_pack.insert(base_hash, Cow::Owned(bytes.clone()));
-        Cow::Owned(bytes)
-    } else {
-        return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
-    };
+    // hash, so a later delta entry that names the same out-of-pack base
+    // skips another read, verify and decode. `external_base` has already
+    // established that the bytes are the object `base_hash` names. The
+    // delta decodes against the cached copy, so the base is held once.
+    if let std::collections::hash_map::Entry::Vacant(slot) = in_pack.entry(base_hash) {
+        let bytes = external_base(bases, &base_hash)?
+            .ok_or_else(|| PackError::DeltaBaseMissing(hash::to_hex(&base_hash)))?;
+        slot.insert(Cow::Owned(bytes));
+    }
+    let base_bytes: &[u8] = in_pack[&base_hash].as_ref();
     validate_delta_result_size(stream)?;
-    let resolved = delta::decode(base_bytes.as_ref(), stream)?;
+    let resolved = delta::decode(base_bytes, stream)?;
     Ok(resolved)
 }
 
