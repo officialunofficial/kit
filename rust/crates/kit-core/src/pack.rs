@@ -103,6 +103,21 @@ pub const MAX_TOTAL_PAYLOAD: u64 = 4 * 1024 * 1024 * 1024;
 /// honest pack stays under the cap, and the work a hostile pack forces stays
 /// a small multiple of the bytes it sent.
 const MAX_TOTAL_DECODED: u64 = 16 * 1024 * 1024 * 1024;
+/// Bytes of resident bookkeeping that [`PackReader::read`] charges to its
+/// budget for each pack entry, before it allocates any of it. An entry costs
+/// a wire frame in the entry list, a hash in the report, a share of the
+/// base-use map, and a share of one staging window (a temp file path, a
+/// staged-map slot and a stage result). A minimal entry is a few bytes on the
+/// wire, so a pack of ten million of them is small yet needs this much memory
+/// per entry. The charge makes the memory cap, not the entry cap, refuse such
+/// a pack. A test that counts the real peak heap use pins this value. The
+/// measured cost is about 600 bytes per entry, and the value adds a margin
+/// for longer store paths.
+pub const PACK_ENTRY_RESIDENT_COST: usize = 704;
+/// Entries that [`PackReader::read`] stages before it commits them. Each
+/// window holds at most this many temp files and staged-map slots, so a
+/// pack with millions of entries does not fill the disk or the heap.
+const STAGE_WINDOW: usize = 65_536;
 /// Trailer is a 32-byte raw BLAKE3 digest.
 pub const TRAILER_LEN: usize = 32;
 
@@ -1131,8 +1146,9 @@ impl PackReader {
         payload_cap: u64,
         owned_bytes: Option<&AtomicU64>,
     ) -> Result<UnpackReport, PackError> {
-        let budget = ResidentBudget::new(resident_bytes_cap(pack_bytes.len()), owned_bytes);
-        Self::read_with_budget(pack_bytes, store, payload_cap, &budget)
+        let budget = ResidentBudget::new(resident_bytes_cap(pack_bytes.len()), owned_bytes)
+            .with_entry_cost(PACK_ENTRY_RESIDENT_COST);
+        Self::read_with_budget(pack_bytes, store, payload_cap, &budget, STAGE_WINDOW)
     }
 
     fn read_with_budget(
@@ -1140,8 +1156,12 @@ impl PackReader {
         store: &ObjectStore,
         payload_cap: u64,
         budget: &ResidentBudget<'_>,
+        window: usize,
     ) -> Result<UnpackReport, PackError> {
+        let window = window.max(1);
         let mut parser = PackEntries::new_with_payload_cap(pack_bytes, payload_cap)?;
+        // Charge the per-entry bookkeeping before any of it is allocated.
+        budget.reserve_entries(parser.entry_count())?;
         // Step 1 retains only borrowed wire frames. Count uses without
         // decompressing, and remember the final position naming each base.
         let mut entries = Vec::new();
@@ -1166,19 +1186,46 @@ impl PackReader {
             }
             entries.push(entry);
         }
-        let batch = store.batch();
-        // Step 2 keeps the native fan-out. Each worker decompresses its
-        // current raw frame, stages it, and drops unneeded owned bytes.
-        let raw_frames: Vec<_> = entries
-            .iter()
-            .enumerate()
-            .filter_map(|(position, entry)| match entry {
-                Entry::Raw(payload) => Some((position, *payload)),
-                Entry::Delta { .. } => None,
-            })
-            .collect();
-        let raw_results = stage_raw_entries(&batch, &raw_frames, &uses, budget);
-        finish_pack_read(entries, raw_results, uses, budget, store, batch)
+        let mut bases = store;
+        let mut in_pack = std::collections::HashMap::new();
+        let mut report = UnpackReport::default();
+        report
+            .stored
+            .try_reserve_exact(entries.len())
+            .map_err(|_| PackError::PackfileTooLarge)?;
+        // Steps 2 and 3 run one window at a time. Each window stages into
+        // its own batch and commits it, so the temp files and the staged
+        // map stay bounded however many entries the pack holds. A bad
+        // entry leaves earlier windows in the store. They hold verified,
+        // content-addressed objects, and a retry finds them as duplicates.
+        for (index, frames) in entries.chunks(window).enumerate() {
+            let first_position = index * window;
+            let batch = store.batch();
+            // Step 2 keeps the native fan-out. Each worker decompresses its
+            // current raw frame, stages it, and drops unneeded owned bytes.
+            let raw_frames: Vec<_> = frames
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, entry)| match entry {
+                    Entry::Raw(payload) => Some((first_position + offset, *payload)),
+                    Entry::Delta { .. } => None,
+                })
+                .collect();
+            let raw_results = stage_raw_entries(&batch, &raw_frames, &uses, budget);
+            replay_window(
+                frames,
+                first_position,
+                raw_results,
+                &mut uses,
+                &mut in_pack,
+                &mut report,
+                budget,
+                &mut bases,
+                &batch,
+            )?;
+            batch.commit()?;
+        }
+        Ok(report)
     }
 }
 
@@ -1893,31 +1940,34 @@ pub fn decode_entry_with<B: DeltaBaseSource>(
     Ok((id, bytes))
 }
 
-/// Replay staging results in pack order; deferred admissions are strict here.
-fn finish_pack_read<'b>(
-    entries: Vec<Entry<'_>>,
+/// Replay one window's staging results in pack order. Deferred admissions
+/// are strict here. `first_position` is the pack position of `window[0]`.
+#[allow(clippy::too_many_arguments)]
+fn replay_window<'p, 'b>(
+    window: &[Entry<'p>],
+    first_position: usize,
     raw_results: RawStageResults<'b>,
-    mut uses: std::collections::HashMap<Hash, BaseUses>,
+    uses: &mut std::collections::HashMap<Hash, BaseUses>,
+    in_pack: &mut std::collections::HashMap<Hash, ResidentBytes<'p, 'b>>,
+    report: &mut UnpackReport,
     budget: &'b ResidentBudget<'_>,
-    store: &ObjectStore,
-    batch: crate::batch::WriteBatch<'_>,
-) -> Result<UnpackReport, PackError> {
-    let mut bases = store;
+    bases: &mut &ObjectStore,
+    batch: &crate::batch::WriteBatch<'_>,
+) -> Result<(), PackError> {
     let mut raw_results = raw_results.into_iter();
-    let mut in_pack = std::collections::HashMap::new();
-    let mut report = UnpackReport::default();
     // Step 3 exposes bases only at their pack position and releases
     // them immediately after their last use, including cached store bases.
-    for (position, entry) in entries.into_iter().enumerate() {
+    for (offset, entry) in window.iter().copied().enumerate() {
+        let position = first_position + offset;
         match entry {
             Entry::Raw(payload) => {
                 let (stored_hash, retained) = raw_results
                     .next()
                     .expect("raw frame result")
                     .unwrap_or_else(|| {
-                        prepare_and_stage_raw(&batch, position, payload, &uses, budget)
+                        prepare_and_stage_raw(batch, position, payload, uses, budget)
                     })?;
-                if has_remaining_uses(&uses, &stored_hash) {
+                if has_remaining_uses(uses, &stored_hash) {
                     if let Some(bytes) = retained {
                         in_pack.insert(stored_hash, ResidentBytes::Owned(bytes));
                     } else if let EncodedPayload::Plain(bytes) = payload {
@@ -1929,22 +1979,14 @@ fn finish_pack_read<'b>(
             }
             Entry::Delta { base, stream } => {
                 let stream = stream.decode(budget)?;
-                let stored_hash = stage_delta_target(
-                    &mut bases,
-                    &batch,
-                    &mut in_pack,
-                    &mut uses,
-                    budget,
-                    base,
-                    stream.as_ref(),
-                )?;
+                let stored_hash =
+                    stage_delta_target(bases, batch, in_pack, uses, budget, base, stream.as_ref())?;
                 report.delta_count += 1;
                 report.stored.push(stored_hash);
             }
         }
     }
-    batch.commit()?;
-    Ok(report)
+    Ok(())
 }
 
 /// Owned payload cap: `max(2 * MAX_RAW_OBJECT_SIZE, 16 * pack_len)`.
@@ -1970,6 +2012,12 @@ struct ResidentBudget<'a> {
     /// Running total of decoded bytes charged so far, never credited back.
     decoded: AtomicU64,
     decoded_cap: u64,
+    /// Bytes charged per pack entry by [`Self::reserve_entries`]. Zero
+    /// charges nothing.
+    entry_cost: usize,
+    /// Bookkeeping bytes reserved so far. It counts against `cap` beside
+    /// `used` and is never released.
+    entries: std::sync::atomic::AtomicUsize,
 }
 
 impl<'a> ResidentBudget<'a> {
@@ -1982,7 +2030,30 @@ impl<'a> ResidentBudget<'a> {
             owned_bytes,
             decoded: AtomicU64::new(0),
             decoded_cap: MAX_TOTAL_DECODED,
+            entry_cost: 0,
+            entries: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// This budget with a charge of `cost` bytes per pack entry.
+    fn with_entry_cost(mut self, cost: usize) -> Self {
+        self.entry_cost = cost;
+        self
+    }
+
+    /// Charge `count` entries of `entry_cost` bytes each. The charge is
+    /// never released: the bookkeeping lives until the read ends.
+    fn reserve_entries(&self, count: usize) -> Result<(), PackError> {
+        let len = count
+            .checked_mul(self.entry_cost)
+            .ok_or(PackError::PackfileTooLarge)?;
+        let used = self.used.load(Ordering::Relaxed);
+        let total = used.checked_add(len).filter(|&total| total <= self.cap);
+        if total.is_none() {
+            return Err(PackError::PackfileTooLarge);
+        }
+        self.entries.store(len, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Add `len` to the cumulative decoded total, failing past the cap.
@@ -2002,7 +2073,9 @@ impl<'a> ResidentBudget<'a> {
         let previous = self
             .used
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                used.checked_add(len).filter(|&total| total <= self.cap)
+                let reserved = self.entries.load(Ordering::Relaxed);
+                used.checked_add(len)
+                    .filter(|&total| total.saturating_add(reserved) <= self.cap)
             })
             .map_err(|_| PackError::PackfileTooLarge)?;
         #[cfg(test)]
@@ -2718,6 +2791,31 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Replay `entries` as one window and commit it.
+    fn finish_pack_read<'b>(
+        entries: &[Entry<'_>],
+        raw_results: RawStageResults<'b>,
+        mut uses: std::collections::HashMap<Hash, BaseUses>,
+        budget: &'b ResidentBudget<'_>,
+        store: &ObjectStore,
+        batch: crate::batch::WriteBatch<'_>,
+    ) -> Result<UnpackReport, PackError> {
+        let mut report = UnpackReport::default();
+        replay_window(
+            entries,
+            0,
+            raw_results,
+            &mut uses,
+            &mut std::collections::HashMap::new(),
+            &mut report,
+            budget,
+            &mut &*store,
+            &batch,
+        )?;
+        batch.commit()?;
+        Ok(report)
+    }
+
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().unwrap();
         let store = ObjectStore::init(&crate::layout::RepoLayout::single(dir.path())).unwrap();
@@ -2781,12 +2879,13 @@ mod tests {
         let mut budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
         budget.decoded_cap = 3 * CONTENT_LEN as u64;
         assert!(matches!(
-            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW),
             Err(PackError::PackfileTooLarge)
         ));
         assert_eq!(budget.peak.load(Ordering::Relaxed), 0);
         let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
-        PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+        PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW)
+            .unwrap();
     }
 
     #[test]
@@ -2808,7 +2907,7 @@ mod tests {
         let mut budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
         budget.decoded_cap = 3 * 64 * 1024;
         assert!(matches!(
-            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW),
             Err(PackError::PackfileTooLarge)
         ));
     }
@@ -2831,7 +2930,7 @@ mod tests {
         let mut budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
         budget.decoded_cap = MAX_RAW_OBJECT_SIZE as u64;
         assert!(matches!(
-            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW),
             Err(PackError::PackfileTooLarge)
         ));
     }
@@ -2853,7 +2952,8 @@ mod tests {
         let pack = writer.finish().unwrap();
         let (_dir, store) = fresh_store();
         let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
-        PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+        PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW)
+            .unwrap();
         assert!(budget.peak.load(Ordering::Relaxed) <= 512 * 1024);
         assert_eq!(budget.used.load(Ordering::Relaxed), 0);
     }
@@ -2949,7 +3049,8 @@ mod tests {
         let pack = writer.finish().unwrap();
         let (_dir, store) = fresh_store();
         let resident = ResidentBudget::new(target.len(), None);
-        PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &resident).unwrap();
+        PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &resident, STAGE_WINDOW)
+            .unwrap();
         assert_eq!(resident.used.load(Ordering::Relaxed), 0);
         // Each target fits simultaneously resident memory, but all three
         // declared targets together exceed the cumulative DecodeLimits.
@@ -2968,7 +3069,7 @@ mod tests {
         let (_dir, store) = fresh_store();
         let resident = ResidentBudget::new(target.len() - 1, None);
         assert!(matches!(
-            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &resident),
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &resident, STAGE_WINDOW),
             Err(PackError::PackfileTooLarge)
         ));
         assert_eq!(resident.peak.load(Ordering::Relaxed), 0);
@@ -3086,11 +3187,11 @@ mod tests {
             assert!(results.iter().all(Option::is_none));
             drop(in_flight);
 
-            let entries = frames
+            let entries: Vec<_> = frames
                 .iter()
                 .map(|(_, payload)| Entry::Raw(*payload))
                 .collect();
-            let report = finish_pack_read(entries, results, uses, &budget, &store, batch).unwrap();
+            let report = finish_pack_read(&entries, results, uses, &budget, &store, batch).unwrap();
             assert_eq!(report.raw_count, 16);
             assert_eq!(report.delta_count, 0);
             assert_eq!(report.stored, vec![hash::hash(&bytes); 16]);
@@ -3187,7 +3288,7 @@ mod tests {
         drop(in_flight);
         assert!(matches!(
             finish_pack_read(
-                vec![Entry::Raw(earlier), Entry::Raw(later)],
+                &[Entry::Raw(earlier), Entry::Raw(later)],
                 vec![deferred, failed],
                 uses,
                 &budget,
@@ -3279,8 +3380,14 @@ mod tests {
             );
             let (_dir, store) = fresh_store();
             let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
-            let report =
-                PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+            let report = PackReader::read_with_budget(
+                &pack,
+                &store,
+                MAX_TOTAL_PAYLOAD,
+                &budget,
+                STAGE_WINDOW,
+            )
+            .unwrap();
             assert_eq!(report.stored, expected);
             assert_eq!(report.raw_count, 1);
             assert_eq!(report.delta_count, if consume_targets { 6 } else { 3 });
@@ -3295,7 +3402,13 @@ mod tests {
             let (_dir, store) = fresh_store();
             let budget = ResidentBudget::new(TARGET_LEN - 1, None);
             assert!(matches!(
-                PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+                PackReader::read_with_budget(
+                    &pack,
+                    &store,
+                    MAX_TOTAL_PAYLOAD,
+                    &budget,
+                    STAGE_WINDOW
+                ),
                 Err(PackError::PackfileTooLarge)
             ));
             assert!(
@@ -3325,7 +3438,8 @@ mod tests {
         let (_dir, store) = fresh_store();
         let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
         let report =
-            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW)
+                .unwrap();
         assert_eq!(report.raw_count as usize, count);
         assert!(budget.peak.load(Ordering::Relaxed) <= threads * (CONTENT_LEN + 10));
         assert!(budget.peak.load(Ordering::Relaxed) <= budget.cap);
@@ -3333,7 +3447,7 @@ mod tests {
         let (_dir, store) = fresh_store();
         let budget = ResidentBudget::new(CONTENT_LEN - 1, None);
         assert!(matches!(
-            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW),
             Err(PackError::PackfileTooLarge)
         ));
         assert_eq!(
@@ -3454,8 +3568,14 @@ mod tests {
         new_store.write(&external).unwrap();
         let old = parent_reader(&pack, &old_store).unwrap();
         let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
-        let new =
-            PackReader::read_with_budget(&pack, &new_store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+        let new = PackReader::read_with_budget(
+            &pack,
+            &new_store,
+            MAX_TOTAL_PAYLOAD,
+            &budget,
+            STAGE_WINDOW,
+        )
+        .unwrap();
         assert_eq!(new, old);
         assert_eq!(new.stored.len(), 10);
         assert_eq!(new_store.read_call_count(), 1);
@@ -3562,7 +3682,7 @@ mod tests {
         let (_dir, store) = fresh_store();
         let budget = ResidentBudget::new(first.len() + second.len() - 1, None);
         assert!(matches!(
-            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW),
             Err(PackError::PackfileTooLarge)
         ));
         assert_eq!(budget.peak.load(Ordering::Relaxed), first.len());
@@ -3618,7 +3738,8 @@ mod tests {
         let (_dir, store) = fresh_store();
         let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
         let report =
-            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW)
+                .unwrap();
         assert_eq!(report.raw_count, 2 * GROUPS);
         assert_eq!(report.delta_count, 2 * GROUPS);
         assert_eq!(report.stored, expected);
@@ -3693,6 +3814,91 @@ mod tests {
         for blob in &blobs {
             assert_eq!(store.read(&hash::hash(blob)).unwrap(), *blob);
         }
+    }
+
+    fn tiny_blob_pack(count: u32) -> (Vec<u8>, Vec<Hash>) {
+        let mut w = PackWriter::new_raw_only();
+        let mut ids = Vec::new();
+        for i in 0..count {
+            let blob = write_blob_via_serialize(&i.to_le_bytes());
+            let id = hash::hash(&blob);
+            w.push_raw(id, &blob).unwrap();
+            ids.push(id);
+        }
+        (w.finish().unwrap(), ids)
+    }
+
+    #[test]
+    fn unpack_commits_one_batch_per_window() {
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        use std::sync::Arc;
+
+        let (pack, ids) = tiny_blob_pack(30);
+        let (_dir, mut store) = fresh_store();
+        let rec = Arc::new(RecordingSyncer::default());
+        store.set_syncer(rec.clone());
+
+        let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+        let report =
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, 7).unwrap();
+
+        // 30 entries in windows of 7 make five batches of two flushes each.
+        let fulls = rec
+            .events()
+            .iter()
+            .filter(|e| matches!(e, Ev::Full(_)))
+            .count();
+        assert_eq!(fulls, 10);
+        assert_eq!(report.stored, ids);
+        for id in &ids {
+            assert!(store.contains(id));
+        }
+    }
+
+    #[test]
+    fn delta_resolves_its_base_across_a_window_boundary() {
+        let base = write_blob_via_serialize(b"base object that a later window needs");
+        let mut target = base.clone();
+        *target.last_mut().unwrap() ^= 0x01;
+        let mut w = PackWriter::new();
+        w.push_raw(hash::hash(&base), &base).unwrap();
+        for i in 0u32..5 {
+            let filler = write_blob_via_serialize(&i.to_le_bytes());
+            w.push_raw(hash::hash(&filler), &filler).unwrap();
+        }
+        w.push_delta(&hash::hash(&base), &delta::encode(&base, &target).unwrap())
+            .unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+        let report =
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, 2).unwrap();
+        assert_eq!(report.raw_count, 6);
+        assert_eq!(report.delta_count, 1);
+        assert_eq!(store.read(&hash::hash(&target)).unwrap(), target);
+    }
+
+    #[test]
+    fn many_tiny_entries_are_charged_before_any_is_allocated() {
+        const COUNT: u32 = 200;
+        let (pack, ids) = tiny_blob_pack(COUNT);
+        let charge = COUNT as usize * PACK_ENTRY_RESIDENT_COST;
+
+        let (_dir, store) = fresh_store();
+        let budget =
+            ResidentBudget::new(charge - 1, None).with_entry_cost(PACK_ENTRY_RESIDENT_COST);
+        assert!(matches!(
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW),
+            Err(PackError::PackfileTooLarge)
+        ));
+        assert!(ids.iter().all(|id| !store.contains(id)));
+
+        let budget = ResidentBudget::new(charge, None).with_entry_cost(PACK_ENTRY_RESIDENT_COST);
+        let report =
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW)
+                .unwrap();
+        assert_eq!(report.stored, ids);
     }
 
     #[test]
