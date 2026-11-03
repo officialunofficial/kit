@@ -65,7 +65,7 @@
 //! inclusion-proof construction below are both stable
 //! (`docs/specs/SPEC-MERKLE-OBJECTS.md` §5). [`Proof`]'s bytes and sibling
 //! selection are byte-identical to `commonware_storage::bmt::Proof` at the
-//! pinned `2026.9.0` train: a commonware-based verifier can decode a
+//! pinned `2026.10.0` train: a commonware-based verifier can decode a
 //! kit-produced proof with the upstream type and run its own
 //! `verify_element_inclusion` / `verify_range_inclusion` /
 //! `verify_multi_inclusion` against the **inner root** (see
@@ -419,7 +419,7 @@ impl BmtTree {
 ///
 /// Bytes are `u32 BE leaf_count ‖ LEB128-varint(n) ‖ n × 32-byte digest` —
 /// byte-identical to `commonware_storage::bmt::Proof<D>` at the pinned
-/// `2026.9.0` train (`tests::proofs_match_commonware` pins this; see also
+/// `2026.10.0` train (`tests::proofs_match_commonware` pins this; see also
 /// `rust/tests/golden/proofs/`). A commonware-based verifier can decode
 /// these bytes with the upstream type directly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
