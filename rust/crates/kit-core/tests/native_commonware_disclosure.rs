@@ -74,7 +74,7 @@ fn wrap_ok(domain: &[u8], inner_root: &Hash, expected_id: &Hash) -> bool {
 }
 
 fn upstream_element(proof_bytes: &[u8], leaf: Hash, position: u32, inner_root: Hash) -> bool {
-    let mut r: &[u8] = proof_bytes;
+    let mut r = commonware_codec::Copying(proof_bytes);
     let Ok(proof) = UpstreamProof::<Digest>::read_cfg(&mut r, &1usize) else {
         return false;
     };
@@ -93,7 +93,7 @@ fn native_check(bundle: &[u8]) -> Result<(), NativeFail> {
     if version != 2 {
         return Err(NativeFail::Version(version));
     }
-    let mut r: &[u8] = &bundle[5..];
+    let mut r = commonware_codec::Copying(&bundle[5..]);
     let commit_id = Hash::read(&mut r).map_err(|_| NativeFail::Other("commit_id"))?;
     let commit_bytes = Vec::<u8>::read_range(&mut r, ..=4 * 1024 * 1024)
         .map_err(|_| NativeFail::Other("commit_bytes"))?;
@@ -156,7 +156,7 @@ fn check_chunked(
     Ok(())
 }
 
-fn check_payload(r: &mut &[u8], leaf_id: Hash) -> Result<(), NativeFail> {
+fn check_payload(r: &mut commonware_codec::Copying<'_>, leaf_id: Hash) -> Result<(), NativeFail> {
     let payload_kind = u8::read(r).map_err(|_| NativeFail::Other("payload_kind"))?;
     match payload_kind {
         1 => {

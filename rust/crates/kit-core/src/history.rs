@@ -184,10 +184,13 @@ mod tests {
         assert_eq!(h1.len(), 0);
     }
 
-    /// The empty root follows the SPEC-HISTORY-PROOF §2.3 formula directly.
+    /// The empty root follows the SPEC-HISTORY-PROOF §2.3 formula directly:
+    /// the MMB family tag, the forward-fold bagging tag, then the leaf count.
     #[test]
     fn mem_empty_root_matches_spec_formula() {
-        let expected = blake3::hash(&0u64.to_be_bytes());
+        let mut preimage = vec![1, 0];
+        preimage.extend_from_slice(&0u64.to_be_bytes());
+        let expected = blake3::hash(&preimage);
         assert_eq!(CommitHistory::open().root(), *expected.as_bytes());
     }
 
@@ -198,31 +201,31 @@ mod tests {
         const PINNED: [(u64, &str); 7] = [
             (
                 1,
-                "8752b573735d4e44e32e9386f5bb348dc6a036327db21f9e79fa9bfed37855de",
+                "849d07f9c5d9204e3e8b2e2ba2c12eff4c866bdbcb2e2b19ae6d9869b6895811",
             ),
             (
                 2,
-                "a4529fb118a453c48b9466a51e09dcad8a35dbca1455d047d70c94d3b339b0e0",
+                "e5d665289bce9abf6b186b83d337a7b59450bddf17305afa601bf20ddee1fc7f",
             ),
             (
                 3,
-                "7a17663b9038f918b20a1cb0ddcae05855e2f90f3ea5953ee7e87c05a86b1688",
+                "a4f6ed20e3bcb276c8c0128c1051c55d4135c8327839a50ebc826a4f0da6e3aa",
             ),
             (
                 4,
-                "2982be9934a1349f87d7bf5a96124b821b13e803ce5a03398a18a75127a238e1",
+                "a9e360fb66c626ba30392b2970308cd61500726d4e6d508d197ad37ab112d5ba",
             ),
             (
                 7,
-                "892e3f80855e6ad50fbfb9540b3da343d0321ddb7e8b8f516cd8c64a1e5532fb",
+                "415201c8a5727aafb234b96c7afb339cd0691c0fd3b684cbfdab28524a127a5d",
             ),
             (
                 8,
-                "b31322bc1e70c1f422e2e560fa42019b7bc62d30e46dad8c1a9bc5956442bdd8",
+                "b021e76b4942a067a347a1880b4821e49a1a0a11fd2176f710bdb33482b43b17",
             ),
             (
                 100,
-                "97931b68b8216187d5ff6ffc9bee915888a6e52c8718685d08d4cbeba10b85d2",
+                "d118640030363d924a08f4345aa8a0ad1418964edc34f54b0d6cb06e9f5b10d3",
             ),
         ];
         for (n, expected) in PINNED {

@@ -407,7 +407,7 @@ assert!(disclosed.signature_valid);
 
 kit's Binary Merkle Tree proofs (`kit_core::merkle::Proof`) are,
 deliberately, **byte-identical** to `commonware_storage::bmt::Proof` at the
-release train kit pins (`2026.9.0`, `rust/Cargo.toml`): same wire framing
+release train kit pins (`2026.10.0`, `rust/Cargo.toml`): same wire framing
 (`be32(leaf_count) || varint(n) || n * 32-byte digest`), same sibling
 selection algorithm, for single, range, and multi-leaf proofs alike. A verifier already built against the upstream
 `commonware-storage` crate can decode a kit

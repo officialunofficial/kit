@@ -270,7 +270,7 @@ unreachable object does not meet today.
 
 ## Single commonware release train across every manifest and lockfile
 
-**Always:** Commonware requirements use the same lower bound (`2026.9.0`)
+**Always:** Commonware requirements use the same lower bound (`2026.10.0`)
 across manifests. Committed lockfiles select the same release. A move to a
 new release changes every manifest and lockfile in one commit.
 
@@ -382,7 +382,7 @@ The hand-written frame parsing assembles header fields in `u64`, never
 **Always:** `kit_core::merkle::Proof`'s wire bytes (`u32 BE leaf_count ‖
 varint(n) ‖ n × 32-byte digest`) and its level-major, self-duplicate- and
 already-proven-sibling-omitting selection rule are byte-identical to
-`commonware_storage::bmt::Proof` at the pinned `2026.9.0` train, for
+`commonware_storage::bmt::Proof` at the pinned `2026.10.0` train, for
 single, range, and multi-leaf proofs alike — both directions: kit
 decodes and accepts upstream's proof bytes, and upstream decodes and
 accepts kit's.

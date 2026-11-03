@@ -152,7 +152,7 @@ impl ClosureManifest {
         if version != MANIFEST_VERSION {
             return Err(VerifyError::ClosureManifestUnsupportedVersion(version));
         }
-        let mut r: &[u8] = &bytes[5..];
+        let mut r = commonware_codec::Copying(&bytes[5..]);
         let root = Hash::read(&mut r).map_err(|_| VerifyError::ClosureManifestMalformed)?;
         let mode_b = u8::read(&mut r).map_err(|_| VerifyError::ClosureManifestMalformed)?;
         let mode = match mode_b {

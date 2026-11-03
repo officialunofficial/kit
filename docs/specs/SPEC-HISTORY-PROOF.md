@@ -1,6 +1,6 @@
 ---
 spec: SPEC-HISTORY-PROOF
-version: 1
+version: 2
 status: draft-normative
 audience: implementers of first-parent ancestry proofs and local history recovery
 ---
@@ -93,7 +93,7 @@ Its public fields, normatively:
 kit has no inactivity floor: producers (`CommitHistory::root`,
 `CommitHistory::prove`) pass zero inactive peaks, so every proof kit
 emits has `inactive_peaks = 0`. A verifier MUST reject a proof whose
-`inactive_peaks` is nonzero. With commonware-storage 2026.9.0 this
+`inactive_peaks` is nonzero. With commonware-storage 2026.10.0 this
 follows from the root computation rather than from a separate check:
 the decoder accepts any value, but a nonzero `inactive_peaks` adds
 `u64_be(inactive_peaks)` to the root preimage (commonware's
@@ -138,7 +138,7 @@ always writes `inactive_peaks = 0`, that field is the single byte `0x00`
 immediately after the `leaves` varint. For example, a proof of position
 0 in a 2-leaf history encodes as `02 00 01` followed by one 32-byte
 digest (35 bytes). Kit does NOT re-frame this; consumers MUST use
-commonware-codec at the same pinned version (2026.9.0, pinned in
+commonware-codec at the same pinned version (2026.10.0, pinned in
 `rust/Cargo.toml`).
 
 ### 2.3 Root
@@ -146,18 +146,28 @@ commonware-codec at the same pinned version (2026.9.0, pinned in
 The MMB root is a 32-byte BLAKE3 digest computed as
 
 ```text
-root = Blake3(leaf_count_be_u64 || fold(peak_digests))
+root = Blake3(u8(1) || u8(0) || leaf_count_be_u64 || fold(peak_digests))
 ```
+
+The two leading bytes bind the tree family and the bagging policy:
+`u8(1)` is the MMB family tag (an MMR uses `u8(0)`) and `u8(0)` is the
+`Bagging::ForwardFold` tag. A root therefore never equals the root of
+another family or bagging policy over the same peaks.
 
 with `fold(p0, p1, …, pk) = Blake3(Blake3(… Blake3(p0 || p1) … ) || pk)`,
 peaks taken in oldest-to-newest (non-increasing height) order &mdash; the
 same fold formula an MMR root used, just over an MMB's peaks. For an
 **empty** MMB (no commits appended yet) the iteration is empty and the
-root degenerates to `Blake3(u64::to_be_bytes(0))`. This value is
+root degenerates to `Blake3(u8(1) || u8(0) || u64::to_be_bytes(0))`. This value is
 deterministic and well-defined; `kit-core::history::CommitHistory::open().root()`
 returns it. The formula is commonware's root with zero inactive peaks;
 a nonzero inactive-peak count would add a `u64_be(inactive_peaks)` term
-between the two parts, which kit never uses (§2.2).
+after the leaf count, which kit never uses (§2.2).
+
+Snapshot format version 1 (§4.2) stored roots under an earlier formula,
+`Blake3(leaf_count_be_u64 || fold(peak_digests))`, without the two tag
+bytes. That formula is retired. No producer emits it and no verifier
+accepts it.
 
 kit pins commonware's peak-bagging policy to `Bagging::ForwardFold`
 for both producers (`CommitHistory::root` / `CommitHistory::prove`) and
@@ -237,7 +247,7 @@ a GC retention root or a freshness assertion.
 Integers are little-endian. Exact bytes:
 
 ```text
-"KHAN" || u8(1)
+"KHAN" || u8(2)
 repository[32] || generation[32] || tip[32]
 u64(leaf_count) || root[32]
 u16(ref_name_byte_length) || full_ref_name
@@ -247,6 +257,14 @@ BLAKE3(all preceding bytes)[32]
 
 Readers MUST check the checksum, exact length/no trailing bytes, valid branch
 ref name, nonzero count, last leaf equals tip, and the recomputed MMB root.
+
+Writers MUST write version 2. Readers MUST also accept version 1, which has
+the same layout but stores a root under the retired formula of §2.3. For a
+version 1 snapshot a reader checks everything above except the stored root,
+then replaces it with the root it recomputes under §2.3. The checksum still
+covers the whole payload. The next publication that moves the branch tip
+writes version 2.
+Any other version byte is an error.
 Traversal and allocation are capped at 1,000,000 leaves; persisted input is
 bounded at `32 * 1,000,000 + 8192` bytes. Cycles, missing ancestors, non-commit/
 non-remix nodes and excessive depth fail before publication. No existing

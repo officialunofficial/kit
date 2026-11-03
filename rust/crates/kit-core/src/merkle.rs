@@ -65,7 +65,7 @@
 //! inclusion-proof construction below are both stable
 //! (`docs/specs/SPEC-MERKLE-OBJECTS.md` §5). [`Proof`]'s bytes and sibling
 //! selection are byte-identical to `commonware_storage::bmt::Proof` at the
-//! pinned `2026.9.0` train: a commonware-based verifier can decode a
+//! pinned `2026.10.0` train: a commonware-based verifier can decode a
 //! kit-produced proof with the upstream type and run its own
 //! `verify_element_inclusion` / `verify_range_inclusion` /
 //! `verify_multi_inclusion` against the **inner root** (see
@@ -418,7 +418,7 @@ impl BmtTree {
 ///
 /// Bytes are `u32 BE leaf_count ‖ LEB128-varint(n) ‖ n × 32-byte digest` —
 /// byte-identical to `commonware_storage::bmt::Proof<D>` at the pinned
-/// `2026.9.0` train (`tests::proofs_match_commonware` pins this; see also
+/// `2026.10.0` train (`tests::proofs_match_commonware` pins this; see also
 /// `rust/tests/golden/proofs/`). A commonware-based verifier can decode
 /// these bytes with the upstream type directly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -452,7 +452,10 @@ impl Read for Proof {
     /// allocation before any hashing happens.
     type Cfg = usize;
 
-    fn read_cfg(reader: &mut impl Buf, max_items: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(
+        reader: &mut impl commonware_codec::Buf,
+        max_items: &Self::Cfg,
+    ) -> Result<Self, CodecError> {
         let leaf_count = u32::read(reader)?;
         let max_siblings = max_items.saturating_mul(MAX_LEVELS);
         let siblings = Vec::<Hash>::read_range(reader, ..=max_siblings)?;
@@ -483,7 +486,7 @@ impl Proof {
     /// [`MerkleError::MalformedProof`] on a truncated buffer, an
     /// over-`max_items` sibling count, or trailing bytes.
     pub fn decode(bytes: &[u8], max_items: usize) -> Result<Self, MerkleError> {
-        let mut buf = bytes;
+        let mut buf = commonware_codec::Copying(bytes);
         let proof = Self::read_cfg(&mut buf, &max_items)?;
         if buf.has_remaining() {
             return Err(MerkleError::MalformedProof);
@@ -1436,7 +1439,7 @@ mod tests {
                 .expect("ours must accept upstream's proof bytes");
             // Cross-accept the other way: upstream decodes our bytes.
             let our_bytes = our_proof.encode();
-            let mut our_bytes_buf: &[u8] = &our_bytes;
+            let mut our_bytes_buf = commonware_codec::Copying(&our_bytes);
             let cw_decoded =
                 <commonware_storage::bmt::Proof<Digest> as commonware_codec::Read>::read_cfg(
                     &mut our_bytes_buf,
