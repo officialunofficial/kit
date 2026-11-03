@@ -72,9 +72,13 @@ class Gates(unittest.TestCase):
         files = sorted(CLOUD.glob("*.yaml"))
         for path in files:
             text = path.read_text()
-            for match in re.finditer(r"/(kit-ci):(\S+)", text):
+            for match in re.finditer(r"/(kit-ci):([^@\s]+)(@sha256:[0-9a-f]{64})?", text):
                 with self.subTest(file=path.name):
                     self.assertEqual(f"{match.group(1)}:{match.group(2)}".rstrip('}"'), tag)
+                    # The builder pushes the image, so it names the tag only.
+                    # Every other file runs the image by its digest.
+                    if path.name != "builder.yaml":
+                        self.assertIsNotNone(match.group(3), f"{path.name} names the image without a digest")
         self.assertIn(tag, (CLOUD / "builder.yaml").read_text())
         nightly = re.search(r"toolchain install (nightly-\d{4}-\d{2}-\d{2})", docker).group(1)
         self.assertIn(f"cargo +{nightly} fuzz build", ci_steps()["fuzz-smoke"])

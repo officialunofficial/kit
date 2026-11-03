@@ -179,5 +179,15 @@ Three places cannot read the file. They are the image tag in the `_CI_IMAGE`
 default of every configuration, `msrv` in `clippy.toml` and `rust-version` in
 `rust/Cargo.toml`. Change the toolchain file and those places in one commit.
 Then run `builder.yaml`, which fails when the image tag differs from the file.
+The other configurations run the image by its digest, so a tag that moves
+cannot change what runs. After each run of `builder.yaml`, read the new digest
+and write it after `@` in the `_CI_IMAGE` default of `ci.yaml`,
+`connect-latest.yaml` and `supply.yaml`:
+
+```sh
+gcloud artifacts docker images describe \
+  us-east4-docker.pkg.dev/$PROJECT_ID/docker/kit-ci:rust-<version> \
+  --format='value(image_summary.digest)'
+```
 The date of the nightly toolchain appears in `Dockerfile.ci` and in the
 `fuzz-smoke` step. `scripts/test-ci-gates.py` checks all of these places.
