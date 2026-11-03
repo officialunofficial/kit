@@ -1671,7 +1671,6 @@ pub fn name_rules_one_iteration(input: &[u8]) {
         );
     }
 
-    let segments = text.split('/');
     if validate_ref_name_grammar(text) {
         assert!(text.bytes().filter(|&b| b == b'/').count() < MAX_REF_SEGMENTS);
         assert!(
@@ -1679,7 +1678,7 @@ pub fn name_rules_one_iteration(input: &[u8]) {
                 .all(|s| !s.is_empty() && !s.starts_with('.'))
         );
         assert!(text.split('/').all(|s| !s.ends_with(".lock")));
-        assert_ne!(segments.last(), Some("HEAD"));
+        assert_ne!(text.rsplit('/').next(), Some("HEAD"));
         assert!(
             text.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
