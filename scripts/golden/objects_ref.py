@@ -19,6 +19,7 @@
 #     MANIFEST.txt;
 #   * every object parsed strictly: prologue, field order, sort order, name
 #     rules, and no trailing byte;
+#   * the entry name rules against a table of accepted and refused names;
 #   * the signing bytes of the commit, remix and tag vectors rebuilt from the
 #     parsed fields, with the domain string and the u16 length prefix of
 #     SPEC-SIGNING;
@@ -35,6 +36,7 @@
 import hashlib
 import json
 import os
+import re
 import struct
 import sys
 
@@ -134,7 +136,7 @@ RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {
 def check_entry_name(name):
     if not 1 <= len(name) <= 255:
         raise ValueError("name length")
-    if any(b in (0, 0x2F, 0x5C) for b in name):
+    if any(b in (0, 0x2F, 0x3A, 0x5C) for b in name):
         raise ValueError("forbidden byte")
     if name in (b".", b".."):
         raise ValueError("dot name")
@@ -142,9 +144,43 @@ def check_entry_name(name):
         raise ValueError("trailing dot or space")
     if name.lower() in (b".kit", b".git"):
         raise ValueError("reserved name")
+    if re.fullmatch(rb"(kit|git)~[0-9]+", name.lower()):
+        raise ValueError("short name of a reserved name")
     stem = name.split(b".", 1)[0].upper()
     if stem.decode("latin-1") in RESERVED:
         raise ValueError("device name")
+
+
+# SPEC-OBJECTS section 4.1: names that the rules accept and names that they
+# refuse, one case for each rule added for NTFS.
+ACCEPTED_NAMES = [b"a", b"a.b", b"kit", b"kit~", b"kit~a", b"git.txt", b"~1"]
+REFUSED_NAMES = [
+    b"a:b",
+    b".kit::$INDEX_ALLOCATION",
+    b"C:x",
+    b"KIT~1",
+    b"git~12",
+    b"Git~007",
+    b".KIT",
+    b"a.",
+    b"a ",
+    b"aux.c",
+    b"a\\b",
+]
+
+
+def check_name_rules():
+    for name in ACCEPTED_NAMES:
+        try:
+            check_entry_name(name)
+        except ValueError:
+            fail(f"entry name {name!r} must be accepted")
+    for name in REFUSED_NAMES:
+        try:
+            check_entry_name(name)
+        except ValueError:
+            continue
+        fail(f"entry name {name!r} must be refused")
 
 
 def parse_blob(data):
@@ -609,6 +645,7 @@ def main():
         (len(COMMIT_DOMAIN), len(REMIX_DOMAIN), len(TAG_DOMAIN)) == (11, 10, 8),
         "signing domain lengths",
     )
+    check_name_rules()
     files, parsed, cb = check_objects(root)
     check_proof_ids(root, files, parsed, cb)
     check_tags(root)
