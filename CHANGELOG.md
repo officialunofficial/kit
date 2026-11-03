@@ -18,6 +18,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Commonware crates move to 2026.10.0. History roots (`history-mmr`)
+  now bind the MMB family and bagging tags (SPEC-HISTORY-PROOF §2.3), so
+  every root changes. Ancestry snapshots use format 2. A format 1 snapshot
+  still loads with its root recomputed, and the next tip move rewrites it.
+  Descriptors and proofs from an earlier kit do not verify against the new
+  roots. `history::InclusionProof` aliases the 2026.10.0 proof type.
+- Upstream Commonware 2026.10.0 assumes AVX2, BMI2 and ADX on x86-64
+  (Intel Broadwell, AMD Zen or newer).
 - The verification equation is cofactored. A signature whose `R` or `A`
   carries a torsion component, which only the key holder can make, now
   verifies.
