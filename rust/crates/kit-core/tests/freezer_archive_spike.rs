@@ -66,7 +66,7 @@ fn to_key(h: &Hash) -> ObjKey {
     // `Array` impl kit-core already round-trips through in the vendored
     // BMT cross-check (see `merkle.rs`).
     use commonware_codec::DecodeExt as _;
-    FixedBytes::decode(h.as_slice()).unwrap()
+    FixedBytes::decode(commonware_codec::Copying(h.as_slice())).unwrap()
 }
 
 /// Build a handful of *real* kit objects (a small blob, a large blob, a
@@ -133,11 +133,11 @@ fn real_kit_objects() -> (tempfile::TempDir, Vec<(Hash, Vec<u8>)>) {
     (dir, out)
 }
 
-fn freezer_cfg(context: &deterministic::Context, suffix: &str) -> FreezerConfig<RangeCfg<usize>> {
+fn freezer_cfg(suffix: &str) -> FreezerConfig<RangeCfg<usize>> {
     FreezerConfig {
         key_partition: format!("spike-key-{suffix}"),
         key_write_buffer: NZUsize!(64 * 1024),
-        key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         value_partition: format!("spike-value-{suffix}"),
         // Exercise the built-in zstd compression path: a mid zstd level, same
         // shape as `prunable::Config::compression`.
@@ -162,7 +162,7 @@ fn freezer_put_get_byte_identical() {
     let (_dir, objects) = real_kit_objects();
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let cfg = freezer_cfg(&context, "basic");
+        let cfg = freezer_cfg("basic");
         let mut freezer: Freezer<_, ObjKey, Bytes> =
             Freezer::init(context, cfg, None).await.unwrap();
 
@@ -170,7 +170,7 @@ fn freezer_put_get_byte_identical() {
         // 2026.9.0 (were `&mut self`) — reassign on every call.
         for (id, bytes) in &objects {
             (freezer, _) = freezer
-                .put(to_key(id), Bytes::from(bytes.clone()))
+                .put(to_key(id), &Bytes::from(bytes.clone()))
                 .await
                 .unwrap();
         }
@@ -204,7 +204,7 @@ fn freezer_has_no_per_key_delete() {
     let (_dir, objects) = real_kit_objects();
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let cfg = freezer_cfg(&context, "nodelete");
+        let cfg = freezer_cfg("nodelete");
         let mut freezer: Freezer<_, ObjKey, Bytes> =
             Freezer::init(context, cfg, None).await.unwrap();
 
@@ -212,7 +212,7 @@ fn freezer_has_no_per_key_delete() {
         // `freezer_put_get_byte_identical` above.
         for (id, bytes) in &objects {
             (freezer, _) = freezer
-                .put(to_key(id), Bytes::from(bytes.clone()))
+                .put(to_key(id), &Bytes::from(bytes.clone()))
                 .await
                 .unwrap();
         }
@@ -240,15 +240,12 @@ fn freezer_has_no_per_key_delete() {
     });
 }
 
-fn archive_cfg(
-    context: &deterministic::Context,
-    suffix: &str,
-) -> prunable::Config<FourCap, RangeCfg<usize>> {
+fn archive_cfg(suffix: &str) -> prunable::Config<FourCap, RangeCfg<usize>> {
     prunable::Config {
         translator: FourCap,
         metadata_partition: format!("spike-archive-metadata-{suffix}"),
         key_partition: format!("spike-archive-key-{suffix}"),
-        key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         value_partition: format!("spike-archive-value-{suffix}"),
         compression: Some(3),
         codec_config: RangeCfg::from(0..=8 * 1024 * 1024),
@@ -276,7 +273,7 @@ fn archive_prune_deletes_a_prefix_not_a_single_index() {
     assert!(objects.len() >= 5, "need 5 distinct objects for this test");
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let cfg = archive_cfg(&context, "gc");
+        let cfg = archive_cfg("gc");
         let mut archive: prunable::Archive<FourCap, _, ObjKey, Bytes> =
             prunable::Archive::init(context, cfg).await.unwrap();
 
@@ -285,7 +282,7 @@ fn archive_prune_deletes_a_prefix_not_a_single_index() {
         // call.
         for (i, (id, bytes)) in objects.iter().enumerate() {
             archive = archive
-                .put(i as u64, to_key(id), Bytes::from(bytes.clone()))
+                .put(i as u64, to_key(id), &Bytes::from(bytes.clone()))
                 .await
                 .unwrap();
         }
@@ -367,7 +364,7 @@ fn archive_prune_deletes_a_prefix_not_a_single_index() {
         // *outcome* kit's GC cares about — the value never comes
         // back — is unchanged, only how a caller observes it is).
         let archive = archive
-            .put(0, to_key(&objects[0].0), Bytes::from(objects[0].1.clone()))
+            .put(0, to_key(&objects[0].0), &Bytes::from(objects[0].1.clone()))
             .await
             .expect("a put below the prune floor is a silent no-op, not an error");
         assert!(
