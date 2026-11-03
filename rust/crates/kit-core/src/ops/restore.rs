@@ -1524,7 +1524,7 @@ mod tests {
         let c2 = put_blob(&store, b"world!");
         let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
             total_size: 7 + 8 + 6,
-            chunk_size: 64 * 1024,
+            chunk_size: 8,
             chunks: vec![c0, c1, c2],
         });
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();

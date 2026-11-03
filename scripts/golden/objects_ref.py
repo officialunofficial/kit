@@ -20,6 +20,8 @@
 #   * every object parsed strictly: prologue, field order, sort order, name
 #     rules, and no trailing byte;
 #   * the entry name rules against a table of accepted and refused names;
+#   * the chunked blob layout rules against a table of accepted and refused
+#     layouts;
 #   * the signing bytes of the commit, remix and tag vectors rebuilt from the
 #     parsed fields, with the domain string and the u16 length prefix of
 #     SPEC-SIGNING;
@@ -321,6 +323,56 @@ def parse_tag(data):
     }
 
 
+# SPEC-OBJECTS section 7: manifest layouts as (total_size, chunk_size,
+# chunk_count) that a reader accepts and refuses at decode time.
+ACCEPTED_CHUNKED = [
+    (0, 0, 0),
+    (3, 0, 3),
+    (196_608, 65_536, 3),
+    (131_073, 65_536, 3),
+    (1, 65_536, 1),
+    (65_536, 65_536, 1),
+    (1 << 30, 0, 2),
+]
+REFUSED_CHUNKED = [
+    (1, 0, 0),
+    (2, 0, 3),
+    ((1 << 30) + 1, 0, 2),
+    (196_609, 65_536, 3),
+    (131_072, 65_536, 3),
+    (65_536, 65_536, 2),
+    (1, 65_536, 2),
+    (0, 65_536, 1),
+]
+
+
+def check_chunked_layout(total, size, count):
+    if total > 1 << 30:
+        raise ValueError("total_size above the file limit")
+    if count == 0:
+        if total != 0:
+            raise ValueError("total_size without chunks")
+    elif size == 0:
+        if total < count:
+            raise ValueError("total_size below chunk_count")
+    elif not ((count - 1) * size < total <= count * size):
+        raise ValueError("total_size outside the fixed-size layout")
+
+
+def check_chunked_rules():
+    for layout in ACCEPTED_CHUNKED:
+        try:
+            check_chunked_layout(*layout)
+        except ValueError:
+            fail(f"chunked layout {layout} must be accepted")
+    for layout in REFUSED_CHUNKED:
+        try:
+            check_chunked_layout(*layout)
+        except ValueError:
+            continue
+        fail(f"chunked layout {layout} must be refused")
+
+
 def parse_chunked(data):
     r = Reader(data)
     prologue(r, CHUNKED)
@@ -329,6 +381,7 @@ def parse_chunked(data):
     count = r.u32()
     if count > 1_000_000:
         raise ValueError("too many chunks")
+    check_chunked_layout(total, chunk_size, count)
     chunks = [r.take(32) for _ in range(count)]
     r.end()
     return {"total": total, "chunk_size": chunk_size, "chunks": chunks}
@@ -646,6 +699,7 @@ def main():
         "signing domain lengths",
     )
     check_name_rules()
+    check_chunked_rules()
     files, parsed, cb = check_objects(root)
     check_proof_ids(root, files, parsed, cb)
     check_tags(root)

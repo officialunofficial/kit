@@ -322,7 +322,8 @@ repeat chunk_count:
 chunk lengths are recovered by re-reading each chunk blob. See
 SPEC-FASTCDC.
 `chunk_size > 0` indicates fixed-size chunking with the stated size
-(final chunk may be shorter).
+(every chunk but the last is exactly that size, and the final chunk
+holds between 1 and that many bytes).
 
 Reassembly: concatenate each `chunk_hash` blob's contents in order.
 The concatenated length MUST equal `total_size`.
@@ -335,6 +336,8 @@ impossible for its layout:
 - `chunk_count` is above `0` and `total_size` is less than `chunk_count`.
 - `chunk_size` is above `0` and `total_size` is above
   `chunk_count * chunk_size`.
+- `chunk_size` is above `0`, `chunk_count` is above `0` and `total_size` is not
+  above `(chunk_count - 1) * chunk_size`.
 
 Readers MUST NOT size a buffer from `total_size`. Readers MUST stop
 writing when the running byte count passes `total_size`.

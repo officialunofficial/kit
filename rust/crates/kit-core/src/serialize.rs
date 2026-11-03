@@ -633,9 +633,14 @@ fn check_chunked_total_size(
         && if count == 0 {
             total_size == 0
         } else {
-            // Each chunk holds at least one byte. A fixed-size chunk holds
-            // at most `chunk_size` bytes.
-            total_size >= count && (size == 0 || total_size <= count * size)
+            // Each chunk holds at least one byte. With a fixed size, every
+            // chunk but the last holds exactly `chunk_size` bytes and the
+            // last holds between one and `chunk_size` bytes.
+            if size == 0 {
+                total_size >= count
+            } else {
+                total_size > (count - 1) * size && total_size <= count * size
+            }
         };
     if valid {
         Ok(())
@@ -1181,8 +1186,10 @@ mod tests {
         // Zero chunks must mean zero bytes.
         assert!(deserialize(&chunked_bytes(0, 0, 0)).is_ok());
         assert!(deserialize(&chunked_bytes(1, 0, 0)).is_err());
-        // Fixed size: count <= total <= count*size.
+        // Fixed size: (count-1)*size < total <= count*size.
         assert!(deserialize(&chunked_bytes(196_608, 65_536, 3)).is_ok());
+        assert!(deserialize(&chunked_bytes(131_073, 65_536, 3)).is_ok());
+        assert!(deserialize(&chunked_bytes(131_072, 65_536, 3)).is_err());
         assert!(deserialize(&chunked_bytes(196_609, 65_536, 3)).is_err());
         // Content-defined: every chunk holds at least one byte.
         assert!(deserialize(&chunked_bytes(2, 0, 3)).is_err());
