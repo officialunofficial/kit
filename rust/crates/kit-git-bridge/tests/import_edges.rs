@@ -1,6 +1,6 @@
 //! Edge kinds and ancestry depth in the importer: a commit's tree and
 //! parents, and a tree's entries, must name objects of the right git
-//! kind, and recursive import of a long chain must fail cleanly.
+//! kind, and import of a long unmapped chain must succeed with a bounded stack.
 
 #![allow(clippy::drop_non_drop)]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
@@ -9,9 +9,9 @@ use kit_core::object::{Commit, Tag};
 use kit_core::sign::{KeyPair, sign_commit, sign_tag};
 use kit_git_bridge::error::BridgeError;
 use kit_git_bridge::gitobj::{Sha1Id, sha1_hex};
-use kit_git_bridge::gitsrc::GitObjKind;
+use kit_git_bridge::gitsrc::{CatFileBatch, GitObjKind};
 use kit_git_bridge::import::{
-    DepthMemo, ImportOptions, ImportSigner, Importer, MAX_COMMIT_RECURSION, MemGitSource, MemSink,
+    DepthMemo, ImportOptions, ImportSigner, Importer, MemGitSource, MemSink,
 };
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -107,17 +107,122 @@ fn tree_entry_commit_is_refused_before_it_is_imported() {
     assert!(!map.contains_key(&inner), "the commit is never translated");
 }
 
+/// A linear history of `n` commits built by the real `git` binary.
+/// Returns the tip, or `None` when git is not installed.
+fn real_git_chain(dir: &std::path::Path, n: usize) -> Option<Sha1Id> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .ok()
+    };
+    if !git(&["init", "-q", "--initial-branch=main"])?
+        .status
+        .success()
+    {
+        return None;
+    }
+    let mut stream = String::new();
+    for i in 1..=n {
+        let _ = write!(
+            stream,
+            "commit refs/heads/main\nmark :{i}\ncommitter C <c@x> {} +0000\ndata 2\nm\n",
+            1_600_000_000 + i
+        );
+        if i > 1 {
+            let _ = writeln!(stream, "from :{}", i - 1);
+        }
+        let _ = writeln!(stream, "M 100644 inline f\ndata 1\nx\n");
+    }
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["fast-import", "--quiet"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(stream.as_bytes()).ok()?;
+    assert!(child.wait().ok()?.success());
+    let out = git(&["rev-parse", "refs/heads/main"])?;
+    kit_git_bridge::gitobj::sha1_from_hex(String::from_utf8_lossy(&out.stdout).trim())
+}
+
 #[test]
-fn deep_unmapped_chain_fails_without_overflowing_the_stack() {
+fn long_real_git_history_imports_from_its_tip() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(tip) = real_git_chain(dir.path(), 3000) else {
+        return;
+    };
+    let mut src = CatFileBatch::open(&dir.path().join(".git")).unwrap();
+    let kp = KeyPair::from_seed([0x42; 32]);
+    let mut sink = MemSink::default();
+    let mut map = HashMap::new();
+    let mut sc = |c: &Commit| {
+        Ok(sign_commit(c, &kp)
+            .map_err(|e| BridgeError::Source(e.to_string()))?
+            .0)
+    };
+    let mut st = |t: &Tag| {
+        Ok(sign_tag(t, &kp)
+            .map_err(|e| BridgeError::Source(e.to_string()))?
+            .0)
+    };
+    let mut retain = |_: &Sha1Id, _: &[u8]| Ok(());
+    let mut imp = Importer {
+        source: &mut src,
+        sink: &mut sink,
+        signer: ImportSigner {
+            public: kp.public.0,
+            sign_commit: &mut sc,
+            sign_tag: &mut st,
+        },
+        map: &mut map,
+        retain_raw: &mut retain,
+        options: ImportOptions::default(),
+        depth_memo: DepthMemo::default(),
+    };
+    let done = imp.import_ref(&tip).unwrap();
+    drop(imp);
+    assert_eq!(
+        done.new_pairs.len(),
+        3000 + 2,
+        "commits, one tree, one blob"
+    );
+    assert!(map.contains_key(&tip));
+}
+
+#[test]
+fn very_deep_unmapped_chain_imports_without_overflowing_the_stack() {
     let mut src = MemGitSource::default();
     let blob = src.put(GitObjKind::Blob, b"x".to_vec());
     let tree = tree_of(&mut src, "100644", &blob);
     let mut tip = src.put(GitObjKind::Commit, commit_body(&tree, &[], 1));
-    for ts in 2..(MAX_COMMIT_RECURSION as u64 + 20) {
+    for ts in 2..10_000 {
         tip = src.put(GitObjKind::Commit, commit_body(&tree, &[tip], ts));
     }
-    let (r, _) = import(&mut src, &tip);
-    assert!(matches!(r, Err(BridgeError::Source(_))));
+    let (r, map) = import(&mut src, &tip);
+    r.unwrap();
+    assert!(map.contains_key(&tip));
+}
+
+#[test]
+fn merge_ancestry_translates_each_commit_once_in_parent_order() {
+    let mut src = MemGitSource::default();
+    let blob = src.put(GitObjKind::Blob, b"x".to_vec());
+    let tree = tree_of(&mut src, "100644", &blob);
+    let root = src.put(GitObjKind::Commit, commit_body(&tree, &[], 1));
+    let left = src.put(GitObjKind::Commit, commit_body(&tree, &[root], 2));
+    let right = src.put(GitObjKind::Commit, commit_body(&tree, &[root], 3));
+    let merge = src.put(GitObjKind::Commit, commit_body(&tree, &[left, right], 4));
+    let (r, map) = import(&mut src, &merge);
+    r.unwrap();
+    for id in [root, left, right, merge] {
+        assert!(map.contains_key(&id));
+    }
 }
 
 #[test]

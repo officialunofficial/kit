@@ -12,7 +12,7 @@
 //! the same key (SPEC-GIT-IMPORT §1.2).
 
 use crate::error::{BridgeError, Refusal};
-use crate::gitobj::{Sha1Id, sha1_hex};
+use crate::gitobj::Sha1Id;
 use crate::gitparse::{self, ModeMapping};
 use crate::gitsrc::{CatFileBatch, GitObjKind};
 use kit_core::object::{
@@ -26,10 +26,6 @@ pub const CHUNK_THRESHOLD: u64 = kit_core::worktree::CHUNK_THRESHOLD;
 
 /// SPEC-GIT-IMPORT §3.4: tag→tag chains beyond this depth refuse.
 pub const MAX_TAG_CHAIN: usize = 16;
-
-/// Cap on commit-to-parent recursion in [`Importer::import_ref`].
-/// Callers with long histories use [`Importer::import_commits`].
-pub const MAX_COMMIT_RECURSION: usize = 64;
 
 /// Tree nesting cap, matching kit-core's `MAX_TREE_DEPTH` defense
 /// (the importer is the most untrusted boundary in the system).
@@ -203,9 +199,9 @@ pub struct ImportedRef {
 /// The import engine. `map` is the sha1→blake3 cache (load it from
 /// the state dir; pairs accumulate across calls).
 ///
-/// Long unmapped parent chains should go through
-/// [`Importer::import_commits`] (parents-first order, recursion depth
-/// 1); [`Importer::import_ref`] recurses through unmapped parents.
+/// [`Importer::import_commits`] takes commits in parents-first order.
+/// [`Importer::import_ref`] finds unmapped ancestors itself, with an
+/// explicit work list, so history depth never grows the call stack.
 pub struct Importer<'a, S: GitSource, K: ObjectSink> {
     pub source: &'a mut S,
     pub sink: &'a mut K,
@@ -229,8 +225,6 @@ pub struct DepthMemo {
     heights: HashMap<Sha1Id, usize>,
     chains: HashMap<Sha1Id, usize>,
     refreshed: HashSet<Hash>,
-    /// Commits currently being translated on the recursion stack.
-    commit_depth: usize,
 }
 
 /// The git object kinds an edge may point at. The importer checks the
@@ -354,7 +348,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
                 }
                 self.tree(id, &body, tree_depth, new_pairs, normalized)?
             }
-            GitObjKind::Commit => self.commit(id, &body, new_pairs, normalized)?,
+            GitObjKind::Commit => self.commit_closure(id, &body, new_pairs, normalized)?,
             GitObjKind::Tag => {
                 if tag_depth >= MAX_TAG_CHAIN {
                     return Err(Refusal::TagChain { object: hash20(id) }.into());
@@ -570,6 +564,67 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         self.write_object(&bytes)
     }
 
+    /// Translate a commit after all of its unmapped ancestors. The walk
+    /// keeps its own work list, so a long history costs heap and no
+    /// stack. Tree and tag nesting stay bounded by their own depth caps.
+    fn commit_closure(
+        &mut self,
+        id: &Sha1Id,
+        body: &[u8],
+        new_pairs: &mut Vec<(Sha1Id, Hash)>,
+        normalized: &mut bool,
+    ) -> Result<Hash, BridgeError> {
+        let mut frames = vec![(*id, self.unmapped_parents(id, body)?)];
+        let mut open = HashSet::from([*id]);
+        loop {
+            let Some((_, pending)) = frames.last_mut() else {
+                return Err(BridgeError::Source("empty commit work list".into()));
+            };
+            if let Some(parent) = pending.pop() {
+                if self.map.contains_key(&parent) {
+                    continue;
+                }
+                if !open.insert(parent) {
+                    return Err(BridgeError::Source("commit ancestry loops".into()));
+                }
+                let (kind, parent_body) = self.source.read_git(&parent)?;
+                if !Want::Commit.allows(kind) {
+                    return Err(wrong_kind(&parent, Want::Commit));
+                }
+                let grandparents = self.unmapped_parents(&parent, &parent_body)?;
+                frames.push((parent, grandparents));
+                continue;
+            }
+            if frames.len() == 1 {
+                return self.commit(id, body, new_pairs, normalized);
+            }
+            let Some((done, _)) = frames.pop() else {
+                return Err(BridgeError::Source("empty commit work list".into()));
+            };
+            open.remove(&done);
+            let (_, done_body) = self.source.read_git(&done)?;
+            let h = self.commit(&done, &done_body, new_pairs, normalized)?;
+            self.map.insert(done, h);
+            new_pairs.push((done, h));
+        }
+    }
+
+    /// The parents of a commit that have no kit twin yet, last first.
+    fn unmapped_parents(&self, id: &Sha1Id, body: &[u8]) -> Result<Vec<Sha1Id>, BridgeError> {
+        let parsed = gitparse::parse_commit(body).map_err(|e| {
+            BridgeError::from(Refusal::Unparsable {
+                object: hash20(id),
+                detail: format!("commit: {e}"),
+            })
+        })?;
+        Ok(parsed
+            .parents
+            .into_iter()
+            .rev()
+            .filter(|p| !self.map.contains_key(p))
+            .collect())
+    }
+
     /// §3.2: importer-signed commit.
     fn commit(
         &mut self,
@@ -598,25 +653,11 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
             return Err(Refusal::AuthorPayload { object: hash20(id) }.into());
         }
         let tree = self.object(&parsed.tree, Want::Tree, 0, 0, new_pairs, normalized)?;
-        if self.depth_memo.commit_depth >= MAX_COMMIT_RECURSION {
-            return Err(BridgeError::Source(format!(
-                "commit {} has more than {MAX_COMMIT_RECURSION} unmapped ancestors; \
-                 import in parents-first order",
-                sha1_hex(id)
-            )));
-        }
-        self.depth_memo.commit_depth += 1;
+        // Every parent is mapped by now, so these calls never descend.
         let mut parents = Vec::with_capacity(parsed.parents.len());
         for p in &parsed.parents {
-            match self.object(p, Want::Commit, 0, 0, new_pairs, normalized) {
-                Ok(h) => parents.push(h),
-                Err(e) => {
-                    self.depth_memo.commit_depth -= 1;
-                    return Err(e);
-                }
-            }
+            parents.push(self.object(p, Want::Commit, 0, 0, new_pairs, normalized)?);
         }
-        self.depth_memo.commit_depth -= 1;
         // Raw bytes: the full git object body (commit framing is
         // recomputable from kind+len).
         let raw = raw_git_bytes(GitObjKind::Commit, body);
