@@ -270,16 +270,21 @@ ship. The warning is expected.
 
 ### Semver check
 
-The workflow `.github/workflows/semver.yml` runs `cargo semver-checks` on each
-pull request that changes `rust/`. The baseline is the latest release on
-crates.io. A breaking change fails the check unless the workspace version
-bump allows it. In a 0.x release, a minor bump allows a breaking change.
-The check skips `kit-bin`, whose library surface is not a public API.
+The workflow `.github/workflows/semver.yml` runs `scripts/check-semver.sh`
+on each pull request that changes `rust/`. The script runs
+`cargo semver-checks` on each published crate. The baseline is the latest
+release tag, built with the `Cargo.lock` of that tag. A build of the
+published crate resolves its dependencies again, and a later dependency
+release can break that build. The locked build avoids this.
+
+A breaking change fails the check unless the workspace version bump allows
+it. In a 0.x release, a minor bump allows a breaking change. The check skips
+`kit-bin`, whose library surface is not a public API.
 
 Run the same check by hand before you tag:
 
 ```sh
-cd rust && cargo semver-checks --workspace --exclude kit-bin
+bash scripts/check-semver.sh
 ```
 
 ### What a crate ships

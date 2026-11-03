@@ -267,10 +267,17 @@ class Gates(unittest.TestCase):
         # read the result on GitHub. The tests below pin the commands of the
         # first two.
         public = {"rust.yml", "rust-security.yml", "docs-lint.yml", "proto.yml", "third-party-notices.yml"}
+        # These gate scripts run only on GitHub. Cloud Build must not run them.
+        github_only = {"semver.yml": "scripts/check-semver.sh"}
+        cloudbuild = "".join(p.read_text() for p in sorted((ROOT / "cloudbuild").glob("*.yaml")))
+        for script in github_only.values():
+            self.assertNotIn(script, cloudbuild)
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
             if path.name in release or path.name in public:
                 continue
             text = strip_comments(path.read_text())
+            if path.name in github_only:
+                text = text.replace(github_only[path.name], "")
             for gate in gates:
                 if gate in text:
                     self.fail(f"{path.name} repeats the gate command: {gate}")
