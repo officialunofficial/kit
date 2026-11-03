@@ -93,6 +93,11 @@ pub const VERSION_V2: u32 = 2;
 pub const MAX_ENTRIES: u32 = 10_000_000;
 /// Hard cap on the sum of payload bytes across all entries.
 pub const MAX_TOTAL_PAYLOAD: u64 = 4 * 1024 * 1024 * 1024;
+/// Cap on the total bytes [`PackReader::read`] decodes from one pack: the
+/// sum of every `0x03` entry's decompressed size and every delta's
+/// result size (16 GiB). It bounds the CPU, disk and IO a small hostile
+/// pack can force through decompression and staging.
+const MAX_TOTAL_DECODED: u64 = 16 * 1024 * 1024 * 1024;
 /// Trailer is a 32-byte raw BLAKE3 digest.
 pub const TRAILER_LEN: usize = 32;
 
@@ -1141,6 +1146,9 @@ impl PackReader {
         let mut uses: std::collections::HashMap<Hash, BaseUses> = std::collections::HashMap::new();
         for position in 0..parser.entry_count() {
             let entry = parser.next_encoded_entry()?;
+            if let Entry::Raw(EncodedPayload::Zstd(payload)) = entry {
+                budget.charge_decoded(zstd_entry_len(payload)?)?;
+            }
             if let Entry::Delta { base, .. } = entry {
                 let usage = uses.entry(base).or_default();
                 usage.remaining += 1;
@@ -1949,6 +1957,9 @@ struct ResidentBudget<'a> {
     #[cfg(test)]
     peak: std::sync::atomic::AtomicUsize,
     owned_bytes: Option<&'a AtomicU64>,
+    /// Running total of decoded bytes charged so far, never credited back.
+    decoded: AtomicU64,
+    decoded_cap: u64,
 }
 
 impl<'a> ResidentBudget<'a> {
@@ -1959,7 +1970,22 @@ impl<'a> ResidentBudget<'a> {
             #[cfg(test)]
             peak: std::sync::atomic::AtomicUsize::new(0),
             owned_bytes,
+            decoded: AtomicU64::new(0),
+            decoded_cap: MAX_TOTAL_DECODED,
         }
+    }
+
+    /// Add `len` to the cumulative decoded total, failing past the cap.
+    /// Unlike [`Self::charge`], the amount is never released.
+    fn charge_decoded(&self, len: usize) -> Result<(), PackError> {
+        let len = u64::try_from(len).map_err(|_| PackError::PackfileTooLarge)?;
+        self.decoded
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(len)
+                    .filter(|&total| total <= self.decoded_cap)
+            })
+            .map(|_| ())
+            .map_err(|_| PackError::PackfileTooLarge)
     }
 
     fn charge(&self, len: usize) -> Result<Reservation<'_>, PackError> {
@@ -2565,6 +2591,7 @@ fn stage_delta_target<'b, B: DeltaBaseSource>(
         }));
     }
     let result_len = validate_delta_result_size(stream)?;
+    budget.charge_decoded(result_len)?;
     let mut resolved = budget.allocate(result_len)?;
     resolved.bytes =
         delta::decode_preallocated(in_pack[&base_hash].as_ref(), stream, resolved.bytes)?;
@@ -2738,6 +2765,54 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn cumulative_decoded_cap_rejects_before_decompression() {
+        const CONTENT_LEN: usize = 1024 * 1024;
+        let mut writer = PackWriter::new();
+        let mut content = vec![b'a'; CONTENT_LEN];
+        for i in 0..4u64 {
+            content[..8].copy_from_slice(&i.to_le_bytes());
+            let blob = write_blob_via_serialize(&content);
+            writer.push_raw(hash::hash(&blob), &blob).unwrap();
+        }
+        let pack = writer.finish().unwrap();
+        let (_dir, store) = fresh_store();
+        let mut budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+        budget.decoded_cap = 3 * CONTENT_LEN as u64;
+        assert!(matches!(
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+            Err(PackError::PackfileTooLarge)
+        ));
+        assert_eq!(budget.peak.load(Ordering::Relaxed), 0);
+        let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+        PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+    }
+
+    #[test]
+    fn cumulative_decoded_cap_counts_delta_results() {
+        let base = write_blob_via_serialize(&vec![b'a'; 64 * 1024]);
+        let base_hash = hash::hash(&base);
+        let mut writer = PackWriter::new();
+        writer.push_raw(base_hash, &base).unwrap();
+        for i in 0..4u8 {
+            let mut content = vec![b'a'; 64 * 1024];
+            content[0] = b'b' + i;
+            let target = write_blob_via_serialize(&content);
+            writer
+                .push_delta(&base_hash, &delta::encode(&base, &target).unwrap())
+                .unwrap();
+        }
+        let pack = writer.finish().unwrap();
+        let (_dir, store) = fresh_store();
+        let mut budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+        budget.decoded_cap = 3 * 64 * 1024;
+        assert!(matches!(
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+            Err(PackError::PackfileTooLarge)
+        ));
+    }
+
+    #[test]
     fn unreferenced_delta_targets_do_not_accumulate() {
         let base = write_blob_via_serialize(&vec![b'a'; 64 * 1024]);
         let base_hash = hash::hash(&base);
@@ -2803,7 +2878,7 @@ mod tests {
     #[cfg(feature = "pack-zstd")]
     fn junk_zstd_claims_fail_without_zero_filling() {
         for etype in [0x03, 0x04] {
-            for count in [16u32, 64, 256] {
+            for count in [4u32, 8, 16] {
                 let mut body = Vec::from(MAGIC.as_slice());
                 body.extend_from_slice(&VERSION_V2.to_le_bytes());
                 body.extend_from_slice(&count.to_le_bytes());
