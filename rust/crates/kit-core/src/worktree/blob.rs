@@ -155,8 +155,7 @@ impl LoadedBlob {
         match self {
             Self::Inline(data) => Ok(data),
             Self::Chunked(manifest) => {
-                let mut data =
-                    Vec::with_capacity(usize::try_from(manifest.total_size).unwrap_or(0));
+                let mut data = Vec::new();
                 for chunk in &manifest.chunks {
                     data.extend_from_slice(&read_chunk(store, chunk)?);
                 }

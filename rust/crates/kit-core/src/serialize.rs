@@ -607,6 +607,7 @@ fn read_chunked_blob(r: &mut Reader<'_>) -> Result<ChunkedBlob, KitError> {
     if (chunk_count as usize).saturating_mul(HASH_LEN) > r.remaining() {
         return Err(KitError::UnexpectedEof);
     }
+    check_chunked_total_size(total_size, chunk_size, chunk_count)?;
     let mut chunks = Vec::with_capacity(chunk_count as usize);
     for _ in 0..chunk_count {
         chunks.push(r.read_hash()?);
@@ -616,6 +617,31 @@ fn read_chunked_blob(r: &mut Reader<'_>) -> Result<ChunkedBlob, KitError> {
         chunk_size,
         chunks,
     })
+}
+
+/// Reject a `total_size` that the chunk layout cannot produce. Readers
+/// size buffers and disk writes from `total_size`, so it must be bounded
+/// before any caller sees it (SPEC-OBJECTS §7).
+fn check_chunked_total_size(
+    total_size: u64,
+    chunk_size: u32,
+    chunk_count: u32,
+) -> Result<(), KitError> {
+    let count = u64::from(chunk_count);
+    let size = u64::from(chunk_size);
+    let valid = total_size <= crate::worktree::MAX_FILE_BYTES
+        && if count == 0 {
+            total_size == 0
+        } else {
+            // Each chunk holds at least one byte. A fixed-size chunk holds
+            // at most `chunk_size` bytes.
+            total_size >= count && (size == 0 || total_size <= count * size)
+        };
+    if valid {
+        Ok(())
+    } else {
+        Err(KitError::ChunkedBlobTotalSizeInvalid)
+    }
 }
 
 fn read_delta(r: &mut Reader<'_>) -> Result<Delta, KitError> {
@@ -1127,6 +1153,39 @@ mod tests {
         buf.extend_from_slice(&0u32.to_le_bytes()); // chunk_size
         buf.extend_from_slice(&(MAX_CHUNKS + 1).to_le_bytes()); // chunk_count
         assert_eq!(deserialize(&buf), Err(KitError::TooManyChunks));
+    }
+
+    fn chunked_bytes(total: u64, chunk_size: u32, count: u32) -> Vec<u8> {
+        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
+        buf.extend_from_slice(&total.to_le_bytes());
+        buf.extend_from_slice(&chunk_size.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        for i in 0..count {
+            buf.extend_from_slice(&hash(&i.to_le_bytes()));
+        }
+        buf
+    }
+
+    #[test]
+    fn rejects_chunked_blob_total_size_beyond_file_limit() {
+        for total in [u64::MAX, 1 << 62, crate::worktree::MAX_FILE_BYTES + 1] {
+            assert_eq!(
+                deserialize(&chunked_bytes(total, 0, 2)),
+                Err(KitError::ChunkedBlobTotalSizeInvalid)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_chunked_blob_total_size_inconsistent_with_layout() {
+        // Zero chunks must mean zero bytes.
+        assert!(deserialize(&chunked_bytes(0, 0, 0)).is_ok());
+        assert!(deserialize(&chunked_bytes(1, 0, 0)).is_err());
+        // Fixed size: count <= total <= count*size.
+        assert!(deserialize(&chunked_bytes(196_608, 65_536, 3)).is_ok());
+        assert!(deserialize(&chunked_bytes(196_609, 65_536, 3)).is_err());
+        // Content-defined: every chunk holds at least one byte.
+        assert!(deserialize(&chunked_bytes(2, 0, 3)).is_err());
     }
 
     #[test]

@@ -318,6 +318,18 @@ SPEC-FASTCDC.
 Reassembly: concatenate each `chunk_hash` blob's contents in order.
 The concatenated length MUST equal `total_size`.
 
+Readers MUST reject a manifest at decode time when `total_size` is
+impossible for its layout:
+
+- `total_size` is above 1 GiB (1,073,741,824).
+- `chunk_count` is `0` and `total_size` is not `0`.
+- `chunk_count` is above `0` and `total_size` is less than `chunk_count`.
+- `chunk_size` is above `0` and `total_size` is above
+  `chunk_count * chunk_size`.
+
+Readers MUST NOT size a buffer from `total_size`. Readers MUST stop
+writing when the running byte count passes `total_size`.
+
 File-content equality MUST be independent of the chosen valid Blob or
 ChunkedBlob representation. Equal object IDs permit a fast path; otherwise
 comparisons MUST verify the referenced objects and compare the full ordered

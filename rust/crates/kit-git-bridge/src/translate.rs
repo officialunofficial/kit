@@ -101,9 +101,7 @@ pub fn translate_chunked<S: ObjectSource>(
         }
         .into());
     }
-    let total = usize::try_from(manifest.total_size)
-        .map_err(|_| BridgeError::Source("manifest total_size exceeds usize".into()))?;
-    let mut body = Vec::with_capacity(total);
+    let mut body = Vec::new();
     let mut lengths = Vec::with_capacity(manifest.chunks.len());
     for chunk_hash in &manifest.chunks {
         match source.read_object(chunk_hash)? {

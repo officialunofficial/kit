@@ -678,16 +678,22 @@ fn restore_blob(
         Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable)?,
         Object::ChunkedBlob(cb) => {
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
-            let mut written: u64 = 0;
-            for ch in &cb.chunks {
-                let buf = read_chunk_bytes(store, ch)?;
-                tmp.write_all(&buf)?;
-                written += buf.len() as u64;
-            }
-            cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
+            let result = (|| -> RestoreResult<()> {
+                let mut written: u64 = 0;
+                for ch in &cb.chunks {
+                    let buf = read_chunk_bytes(store, ch)?;
+                    written += buf.len() as u64;
+                    if written > cb.total_size {
+                        break;
+                    }
+                    tmp.write_all(&buf)?;
+                }
+                cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
+                Ok(())
+            })();
             #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(tmp);
-            finish_atomic_write(&tmp_path, &final_path, executable)?;
+            finish_or_discard_tmp(result, &tmp_path, &final_path, executable)?;
         }
         _ => return Err(RestoreError::NotABlob),
     }
@@ -731,20 +737,49 @@ where
             // reads out across threads — see this function's and
             // `restore_tree_to_worktree_with`'s docs.
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
-            let written =
-                write_chunk_batches(store, &cb.chunks, batch_size, read_chunks, &mut tmp)?;
-            cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
+            let result = write_chunk_batches(
+                store,
+                &cb.chunks,
+                cb.total_size,
+                batch_size,
+                read_chunks,
+                &mut tmp,
+            )
+            .and_then(|written| {
+                cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))
+                    .map_err(RestoreError::from)
+            });
             #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(tmp);
-            finish_atomic_write(&tmp_path, &final_path, executable)?;
+            finish_or_discard_tmp(result, &tmp_path, &final_path, executable)?;
         }
         _ => return Err(RestoreError::NotABlob),
     }
     Ok(())
 }
 
+/// Rename the tmp file into place when `result` is `Ok`. Otherwise remove
+/// the tmp file and return the error, so a failed restore leaves no
+/// partial file behind.
+fn finish_or_discard_tmp(
+    result: RestoreResult<()>,
+    tmp_path: &Path,
+    final_path: &Path,
+    executable: bool,
+) -> RestoreResult<()> {
+    match result {
+        Ok(()) => Ok(finish_atomic_write(tmp_path, final_path, executable)?),
+        Err(e) => {
+            let _ = fs::remove_file(tmp_path);
+            Err(e)
+        }
+    }
+}
+
 /// Read `chunks` in batches of `batch_size` via `read_chunks` and append
-/// each batch to `out`, returning the total bytes written.
+/// each batch to `out`, returning the total bytes written. Writing stops
+/// once the running total passes `limit`, so a manifest cannot make the
+/// restore write more than its declared `total_size`.
 ///
 /// With more than one batch on a threaded target, the write of batch N
 /// is overlapped with the read of batch N+1: a scoped writer thread
@@ -755,6 +790,7 @@ where
 fn write_chunk_batches<F>(
     store: &ObjectStore,
     chunks: &[Hash],
+    limit: u64,
     batch_size: usize,
     read_chunks: &F,
     out: &mut fs::File,
@@ -780,6 +816,9 @@ where
             let writer = scope.spawn(move || -> io::Result<u64> {
                 let mut written: u64 = 0;
                 for bufs in rx {
+                    if written + bufs.iter().map(|b| b.len() as u64).sum::<u64>() > limit {
+                        return Ok(u64::MAX);
+                    }
                     written += write_batch_vectored(out, &bufs)?;
                 }
                 Ok(written)
@@ -814,7 +853,11 @@ where
 
     let mut written: u64 = 0;
     for batch in chunks.chunks(batch_size) {
-        written += write_batch_vectored(out, &read_batch(batch)?)?;
+        let bufs = read_batch(batch)?;
+        if written + bufs.iter().map(|b| b.len() as u64).sum::<u64>() > limit {
+            return Ok(u64::MAX);
+        }
+        written += write_batch_vectored(out, &bufs)?;
     }
     Ok(written)
 }
@@ -1638,6 +1681,39 @@ mod tests {
             "expected ChunkedBlobSizeMismatch, got {err:?}"
         );
         assert!(!target.path().join("out.txt").exists());
+    }
+
+    /// Chunks that total more than the manifest's `total_size` must fail
+    /// restore without leaving a temp file in the target directory.
+    #[test]
+    fn restore_rejects_chunked_overrun_and_leaves_no_tmp_file() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let big = put_blob(&store, &[7u8; 64]);
+        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 10,
+            chunk_size: 10,
+            chunks: vec![big],
+        });
+        let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"out.bin".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: cb_h,
+            }],
+        );
+        let err =
+            restore_tree(&store, tree, target.path(), &RestoreOptions::default()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RestoreError::Object(object::KitError::ChunkedBlobSizeMismatch { .. })
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
     }
 
     #[cfg(unix)]

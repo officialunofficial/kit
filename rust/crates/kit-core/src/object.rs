@@ -636,6 +636,10 @@ pub enum KitError {
     /// §7: "The concatenated length MUST equal `total_size`").
     #[error("chunked blob reassembles to {actual} bytes, manifest total_size is {expected}")]
     ChunkedBlobSizeMismatch { expected: u64, actual: u64 },
+    /// A `ChunkedBlob`'s `total_size` is impossible for its chunk count
+    /// and chunk size, or above the per-file limit (SPEC-OBJECTS §7).
+    #[error("chunked blob total_size is inconsistent with its chunk layout or too large")]
+    ChunkedBlobTotalSizeInvalid,
     #[error("identity kind byte {0:#04x} is not 0x01..=0x03")]
     UnknownIdentityKind(u8),
     #[error("identity has zero-length payload, or is Ed25519 with len != 32")]
