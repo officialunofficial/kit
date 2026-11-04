@@ -733,13 +733,15 @@ jobs:
   # Publishes the kit-wasm package to npm. npm trusted publishing exchanges the
   # job's OIDC token for a short-lived publish credential, so the job needs no
   # npm token and no repository secret. The trusted publisher on npm names this
-  # file, release.yml. Provenance is generated automatically. Only this job
-  # holds id-token for npm. A version that is already on npm is skipped, so a
-  # re-run is safe.
+  # file, release.yml, and the environment npm. Other jobs of this file hold
+  # id-token too, but their tokens carry no environment, so npm rejects them.
+  # Provenance is generated automatically. A version that is already on npm is
+  # skipped, so a re-run is safe.
   publish-npm:
     name: Publish kit-wasm to npm
     runs-on: ubuntu-latest
     needs: [validate-release-tag, release]
+    environment: npm
     permissions:
       contents: read
       id-token: write       # npm trusted publishing OIDC + provenance
@@ -761,6 +763,7 @@ jobs:
           # The registry answers 200 for a published version and 404 for any
           # other. Any other status stops the job.
           STATUS="$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 \
+            --connect-timeout 10 --max-time 60 \
             "https://registry.npmjs.org/${NPM_PACKAGE/\//%2F}/${VERSION}")"
           case "${STATUS}" in
             200)
@@ -802,6 +805,7 @@ jobs:
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
 
       - name: Check the npm version
         if: steps.registry.outputs.published == 'false'

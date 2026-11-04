@@ -115,7 +115,8 @@ Run top to bottom. Do not skip steps.
       `npm pack --dry-run` in that directory lists the files you expect.
       CI runs the same build.
 - [ ] The trusted publisher of `@officialunofficial/kit-wasm` on npm names
-      `release.yml` (see [Publishing to npm](#publishing-to-npm)).
+      `release.yml` and the environment `npm` (see
+      [Publishing to npm](#publishing-to-npm)).
 - [ ] `KIT_RELEASE_GPG_FINGERPRINTS` repo/org Actions variable contains the
       release tag signing key fingerprint.
 - [ ] The release tag signing public key is published to `keys.openpgp.org` or
@@ -368,8 +369,10 @@ The `publish-npm` job of `release.yml` publishes the `kit-wasm` package as
 the commit that `validate-release-tag` checked. It uses npm trusted
 publishing: the job asks GitHub for an OIDC token and npm exchanges it for a
 short-lived publish credential. No npm token or repository secret exists.
-Only this job holds `id-token: write` for npm. npm adds a provenance
-attestation to the version without a flag.
+The job runs in the GitHub environment `npm`, and the trusted publisher names
+that environment. Other jobs of `release.yml` hold `id-token: write` for
+cosign, but their tokens carry no environment, so npm rejects them. npm adds a
+provenance attestation to the version without a flag.
 
 The job:
 
@@ -394,11 +397,14 @@ first version goes up by hand.
 
 1. An owner of the `officialunofficial` npm scope publishes a first version
    with a throwaway number, for example `0.0.0-init`, using
-   `npm publish --access public --tag init`. Use an npm account with two-factor
-   authentication.
+   `npm publish --access public --tag init`. A directory with a
+   `package.json` (name, version, license, repository) and a one-line README is
+   enough. Use an npm account with two-factor authentication. The registry
+   may set `latest` on this first version, and `latest` stays there until the
+   first release from the workflow.
 2. In the package settings on npmjs.com, add a trusted publisher: provider
    GitHub Actions, organization `officialunofficial`, repository `kit`,
-   workflow filename `release.yml`, no environment. The fields are
+   workflow filename `release.yml`, environment `npm`. The fields are
    case-sensitive, and npm does not check them until a publish.
 3. Push the release tag. A new trusted publisher expires unless it sees a
    successful publish within 2 days. Create it right before the tag, and
@@ -408,14 +414,17 @@ first version goes up by hand.
    @officialunofficial/kit-wasm@0.0.0-init "not a release"`. In the package
    settings, require two-factor authentication and disallow tokens.
 
+Every plain release moves `latest` to its version, so release in version
+order.
+
 Trusted publishing runs only on GitHub-hosted runners and needs npm 11.5.1 or
 newer. The `repository.url` in `package.json` must match the GitHub
 repository, or the provenance check fails. `scripts/wasm-package.sh` writes
 it from the workspace.
 
-A workflow that is dispatched by hand runs the `release.yml` of the ref it
-was dispatched from. A release tag made before the `publish-npm` job existed
-cannot publish to npm.
+A tag runs the `release.yml` it points at, and a workflow that is dispatched by
+hand runs the `release.yml` of the ref it was dispatched from. The tag of a
+release must contain the `publish-npm` job to publish to npm.
 
 ## Signing and verification
 
