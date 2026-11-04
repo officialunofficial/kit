@@ -7,6 +7,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- kit-wasm is published to npm as `@officialunofficial/kit-wasm`. The release
+  workflow builds the package with `scripts/wasm-package.sh` and publishes it
+  with npm trusted publishing.
+
 ## [0.7.0] - 2026-11-04
 
 ### Security

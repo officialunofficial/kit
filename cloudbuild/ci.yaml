@@ -319,7 +319,8 @@ steps:
 
   # kit-client builds for wasm32 with the default and the minimal feature set.
   # kit-wasm builds for wasm32 as a release build. Then the smoke test runs the
-  # generated bindings under Node.
+  # generated bindings under Node. The last check builds the npm package, the
+  # one that release.yml publishes, and lists its files.
   - name: ${_CI_IMAGE}
     id: wasm
     waitFor: ['-']
@@ -350,6 +351,9 @@ steps:
           exit "$failed"
         ) || status=1
         bash scripts/wasm-smoke.sh || status=1
+        ( pkg=$(mktemp -d)
+          bash scripts/wasm-package.sh "$pkg/kit-wasm" && ( cd "$pkg/kit-wasm" && npm pack --dry-run )
+        ) || status=1
         sccache --show-stats
         exit "$status"
 

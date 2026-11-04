@@ -10,8 +10,8 @@ authors.workspace = true
 readme = "README.md"
 keywords = ["kit", "vcs", "wasm", "blake3", "ed25519"]
 categories = ["wasm", "cryptography"]
-# Not published to crates.io. The README describes the build with the
-# wasm-bindgen command-line tool.
+# Not published to crates.io. `release.yml` publishes it to npm as
+# `@officialunofficial/kit-wasm`. `scripts/wasm-package.sh` builds the package.
 publish = false
 
 [lib]
