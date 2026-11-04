@@ -407,6 +407,31 @@ fn build_vectors() -> Vec<Vector> {
 
     let full = base_proof.encode();
     let truncated = full[..full.len() - kit_core::hash::HASH_LEN].to_vec();
+    // A valid multi-leaf proof checked with its positions in descending
+    // order. The proof bytes are those of `tree_9entry_multi_0_4_8`.
+    let descending_entries: Vec<Value> = [8usize, 4, 0]
+        .iter()
+        .map(|&p| hex_entry(&t9.entries[p]))
+        .collect();
+    v.push(vector(
+        "neg_multi_positions_unsorted",
+        "The tree_9entry_multi_0_4_8 proof checked with positions {8, 4, 0}, \
+         which are not strictly ascending.",
+        merkle::build_tree_entries_multi_proof(&t9, [0, 4, 8])
+            .unwrap()
+            .encode(),
+        &id9,
+        3,
+        false,
+        Some("multi-leaf positions are not strictly ascending"),
+        json!({
+            "kind": "tree_entry",
+            "proof_kind": "multi",
+            "positions": [8, 4, 0],
+            "entries": descending_entries,
+        }),
+    ));
+
     v.push(vector(
         "neg_truncated",
         "A valid tree_7entry proof with its last sibling digest chopped off. \

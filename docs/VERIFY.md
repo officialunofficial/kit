@@ -523,6 +523,18 @@ that fold-then-wrap-then-compare, tested and golden-vector-pinned; reach
 for those directly (`merkle::wrap_id` applies the
 same wrap step) rather than hand-rolling the fold loop.
 
+### Multi-leaf proofs: ascending positions
+
+A multi-leaf proof is over a list of positions that is **strictly
+ascending**. Upstream's `multi_proof` and `verify_multi_inclusion` return
+`UnsortedPosition` for a lower position and `DuplicatePosition` for a
+repeated one. kit's builders and verifiers return
+`MerkleError::UnsortedPosition` and `MerkleError::DuplicatePosition` in
+the same cases, so both sides accept the same inputs. Neither side sorts
+its input. A caller that holds (leaf, position) pairs in another order
+sorts them before it calls the verifier. A rejection changes no proof
+byte, root or id.
+
 ### Leaf digest formulas
 
 The leaf digest formulas themselves are kit-specific (they're what makes

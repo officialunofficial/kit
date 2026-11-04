@@ -146,6 +146,10 @@ pub enum MerkleError {
     /// The same position was requested more than once in a multi-proof.
     #[error("merkle position {0} is duplicated")]
     DuplicatePosition(u32),
+    /// A multi-proof position is lower than the position before it.
+    /// Positions must be strictly ascending, in input order.
+    #[error("merkle position {0} is not in ascending order")]
+    UnsortedPosition(u32),
     /// No positions were given to prove/verify.
     #[error("no merkle positions given")]
     NoPositions,
@@ -258,7 +262,10 @@ fn build_bmt(leaves: &[Hash]) -> BmtTree {
 }
 
 /// Returns the sorted, deduplicated `(level, index)` positions of siblings
-/// required to prove inclusion of leaves at the given `positions`. A
+/// required to prove inclusion of leaves at the given `positions`, which
+/// must be strictly ascending and below `leaf_count`. The error names the
+/// first position, in input order, that is out of range, repeats the one
+/// before it, or precedes it. A
 /// sibling is omitted when it would be the node's own duplicate (an odd
 /// trailing node) or is already covered by another proven position —
 /// verifiers reconstruct `H(computed, computed)` / skip re-deriving it
@@ -269,13 +276,17 @@ fn siblings_required_for_multi_proof(
     positions: impl IntoIterator<Item = u32>,
 ) -> Result<BTreeSet<(usize, usize)>, MerkleError> {
     let mut current = BTreeSet::new();
+    let mut previous = None;
     for pos in positions {
         if pos >= leaf_count {
             return Err(MerkleError::PositionOutOfRange(pos));
         }
-        if !current.insert(pos as usize) {
-            return Err(MerkleError::DuplicatePosition(pos));
+        match previous {
+            Some(last) if pos == last => return Err(MerkleError::DuplicatePosition(pos)),
+            Some(last) if pos < last => return Err(MerkleError::UnsortedPosition(pos)),
+            _ => previous = Some(pos),
         }
+        current.insert(pos as usize);
     }
     if current.is_empty() {
         return Err(MerkleError::NoPositions);
@@ -389,7 +400,9 @@ impl BmtTree {
     }
 
     /// Generates a proof for the non-contiguous leaves at `positions`.
-    /// Positions may be given in any order; duplicates are rejected.
+    /// Positions must be strictly ascending: a repeated position is
+    /// [`MerkleError::DuplicatePosition`] and a lower one is
+    /// [`MerkleError::UnsortedPosition`].
     fn multi_proof(&self, positions: impl IntoIterator<Item = u32>) -> Result<Proof, MerkleError> {
         let mut positions = positions.into_iter().peekable();
         let first = *positions.peek().ok_or(MerkleError::NoPositions)?;
@@ -533,8 +546,10 @@ impl Proof {
     }
 
     /// Reconstructs the tree's inner (pre-wrap) root implied by this proof
-    /// for the non-contiguous `elements` (leaf, position pairs). Elements
-    /// may be given in any order; duplicate positions are rejected.
+    /// for the non-contiguous `elements` (leaf, position pairs). Positions
+    /// must be strictly ascending, in input order: a repeated position is
+    /// [`MerkleError::DuplicatePosition`] and a lower one is
+    /// [`MerkleError::UnsortedPosition`].
     pub(crate) fn reconstruct_multi_root(
         &self,
         elements: &[(Hash, u32)],
@@ -554,27 +569,34 @@ impl Proof {
         if elements.is_empty() {
             return Err(MerkleError::NoPositions);
         }
+        // Check every position before any leaf is hashed. The error names
+        // the first position, in input order, that is out of range,
+        // repeats the one before it, or precedes it.
+        let mut previous = None;
         for (_, position) in elements {
             if *position >= self.leaf_count {
                 return Err(MerkleError::PositionOutOfRange(*position));
             }
+            match previous {
+                Some(last) if *position == last => {
+                    return Err(MerkleError::DuplicatePosition(*position));
+                }
+                Some(last) if *position < last => {
+                    return Err(MerkleError::UnsortedPosition(*position));
+                }
+                _ => previous = Some(*position),
+            }
         }
 
-        let mut sorted: Vec<(u32, Hash)> = elements
+        let hashed: Vec<(u32, Hash)> = elements
             .iter()
             .map(|(leaf, pos)| (*pos, position_leaf(*pos, leaf)))
             .collect();
-        sorted.sort_unstable_by_key(|(pos, _)| *pos);
-        for i in 1..sorted.len() {
-            if sorted[i - 1].0 == sorted[i].0 {
-                return Err(MerkleError::DuplicatePosition(sorted[i].0));
-            }
-        }
 
         let levels = levels_in_tree(self.leaf_count);
         let mut level_size = self.leaf_count;
         let mut sibling_iter = self.siblings.iter();
-        let mut current = sorted;
+        let mut current = hashed;
 
         for _ in 0..levels.saturating_sub(1) {
             let mut next_level: Vec<(u32, Hash)> = Vec::with_capacity(current.len().div_ceil(2));
@@ -842,6 +864,7 @@ pub fn build_chunks_range_proof(
 }
 
 /// Build a multi-leaf proof that the chunks at `positions` belong to `cb`.
+/// The positions must be strictly ascending.
 pub fn build_chunks_multi_proof(
     cb: &ChunkedBlob,
     positions: impl IntoIterator<Item = u32>,
@@ -865,7 +888,7 @@ pub fn build_tree_entries_range_proof(
 }
 
 /// Build a multi-leaf proof that the entries at `positions` belong to
-/// `tree`.
+/// `tree`. The positions must be strictly ascending.
 pub fn build_tree_entries_multi_proof(
     tree: &Tree,
     positions: impl IntoIterator<Item = u32>,
@@ -902,8 +925,8 @@ pub fn verify_tree_entries_range(
     check_wrapped(ObjectKind::Tree, &root, tree_id)
 }
 
-/// Verify that `entries` (each with its own position, any order) belong to
-/// the `Tree` whose id is `tree_id`.
+/// Verify that `entries` (each with its own position) belong to the `Tree`
+/// whose id is `tree_id`. The positions must be strictly ascending.
 pub fn verify_tree_entries_multi(
     tree_id: &Hash,
     entries: &[(TreeEntry, u32)],
@@ -950,9 +973,9 @@ pub fn verify_chunks_range(
     check_wrapped(ObjectKind::ChunkedBlob, &root, chunked_id)
 }
 
-/// Verify that `chunks` (each with its own position, any order) belong to
-/// the `ChunkedBlob` whose id is `chunked_id`. Rejects any position `== 0`
-/// (the metadata leaf).
+/// Verify that `chunks` (each with its own position) belong to the
+/// `ChunkedBlob` whose id is `chunked_id`. The positions must be strictly
+/// ascending. Rejects any position `== 0` (the metadata leaf).
 pub fn verify_chunks_multi(
     chunked_id: &Hash,
     chunks: &[(Hash, u32)],
@@ -1202,6 +1225,93 @@ mod tests {
             (t.entries[8].clone(), 8),
         ];
         assert!(verify_tree_entries_multi(&id, &wrong_elements, &multi_proof).is_err());
+    }
+
+    #[test]
+    fn multi_proofs_require_strictly_ascending_positions() {
+        let t = tree(
+            (0..9)
+                .map(|i| entry(&[b'a' + i], EntryMode::Blob, i))
+                .collect(),
+        );
+        let id = compute_tree_id(&t);
+        let proof = build_tree_entries_multi_proof(&t, [0, 4, 8]).unwrap();
+        let pair = |p: u32| (t.entries[p as usize].clone(), p);
+
+        // The builder names the first position that is lower than its
+        // predecessor, in input order.
+        assert_eq!(
+            build_tree_entries_multi_proof(&t, [8, 4, 0]),
+            Err(MerkleError::UnsortedPosition(4))
+        );
+        assert_eq!(
+            build_tree_entries_multi_proof(&t, [0, 8, 4]),
+            Err(MerkleError::UnsortedPosition(4))
+        );
+        assert_eq!(
+            build_tree_entries_multi_proof(&t, [0, 4, 4]),
+            Err(MerkleError::DuplicatePosition(4))
+        );
+        assert_eq!(
+            build_tree_entries_multi_proof(&t, [0, 4, 9]),
+            Err(MerkleError::PositionOutOfRange(9))
+        );
+        // A duplicate that is not adjacent is still a descent.
+        assert_eq!(
+            build_tree_entries_multi_proof(&t, [0, 4, 8, 4]),
+            Err(MerkleError::UnsortedPosition(4))
+        );
+
+        // The verifier rejects the same orders against a valid proof.
+        verify_tree_entries_multi(&id, &[pair(0), pair(4), pair(8)], &proof).unwrap();
+        assert_eq!(
+            verify_tree_entries_multi(&id, &[pair(8), pair(4), pair(0)], &proof),
+            Err(MerkleError::UnsortedPosition(4))
+        );
+        assert_eq!(
+            verify_tree_entries_multi(&id, &[pair(0), pair(8), pair(4)], &proof),
+            Err(MerkleError::UnsortedPosition(4))
+        );
+        assert_eq!(
+            verify_tree_entries_multi(&id, &[pair(0), pair(4), pair(4)], &proof),
+            Err(MerkleError::DuplicatePosition(4))
+        );
+        // Range errors and order errors are reported in input order.
+        assert_eq!(
+            verify_tree_entries_multi(&id, &[pair(4), pair(0), (t.entries[0].clone(), 9)], &proof),
+            Err(MerkleError::UnsortedPosition(0))
+        );
+        assert_eq!(
+            verify_tree_entries_multi(&id, &[pair(4), (t.entries[0].clone(), 9), pair(0)], &proof),
+            Err(MerkleError::PositionOutOfRange(9))
+        );
+
+        let c = cb(100, 0, &[1, 2, 3, 4]);
+        let chunked_id = compute_chunked_id(&c);
+        let chunk_proof = build_chunks_multi_proof(&c, [1, 3]).unwrap();
+        verify_chunks_multi(
+            &chunked_id,
+            &[(c.chunks[0], 1), (c.chunks[2], 3)],
+            &chunk_proof,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_chunks_multi(
+                &chunked_id,
+                &[(c.chunks[2], 3), (c.chunks[0], 1)],
+                &chunk_proof
+            ),
+            Err(MerkleError::UnsortedPosition(1))
+        );
+        assert_eq!(
+            build_chunks_multi_proof(&c, [3, 1]),
+            Err(MerkleError::UnsortedPosition(1))
+        );
+        // The size calculator applies the same rule as the builder.
+        assert_eq!(
+            proof_encoded_size(9, [8, 4, 0]),
+            Err(MerkleError::UnsortedPosition(4))
+        );
     }
 
     #[test]
@@ -1522,6 +1632,60 @@ mod tests {
                     our_multi
                         .verify_multi_inclusion(&elements, &ours.root)
                         .expect("ours must accept its own multi proof");
+
+                    // --- non-canonical order: both sides must reject ---
+                    // The strategy draws ascending positions. Reversing them
+                    // makes the first descent land on `positions[len - 2]`.
+                    // Repeating the first one makes a duplicate.
+                    let mut cases = vec![(
+                        std::iter::repeat_n(positions[0], 2)
+                            .chain(positions.iter().skip(1).copied())
+                            .collect::<Vec<u32>>(),
+                        MerkleError::DuplicatePosition as fn(u32) -> MerkleError,
+                        positions[0],
+                        format!("duplicate position: {}", positions[0]),
+                    )];
+                    if positions.len() >= 2 {
+                        let first_descent = positions[positions.len() - 2];
+                        cases.push((
+                            positions.iter().rev().copied().collect(),
+                            MerkleError::UnsortedPosition as fn(u32) -> MerkleError,
+                            first_descent,
+                            format!("unsorted position: {first_descent}"),
+                        ));
+                    }
+                    for (bad, error, named, upstream_message) in cases {
+                        assert_eq!(
+                            ours.multi_proof(bad.iter().copied()),
+                            Err(error(named)),
+                            "builder must reject {bad:?} at n={n}"
+                        );
+                        assert_eq!(
+                            cw_tree
+                                .multi_proof(bad.iter().copied())
+                                .unwrap_err()
+                                .to_string(),
+                            upstream_message
+                        );
+                        let bad_elements: Vec<(Hash, u32)> =
+                            bad.iter().map(|&p| (leaves[p as usize], p)).collect();
+                        let bad_cw_elements: Vec<(Digest, u32)> = bad
+                            .iter()
+                            .map(|&p| (Digest(leaves[p as usize]), p))
+                            .collect();
+                        assert_eq!(
+                            our_multi.verify_multi_inclusion(&bad_elements, &ours.root),
+                            Err(error(named)),
+                            "verifier must reject {bad:?} at n={n}"
+                        );
+                        assert_eq!(
+                            cw_multi
+                                .verify_multi_inclusion::<Blake3>(&bad_cw_elements, &cw_root)
+                                .unwrap_err()
+                                .to_string(),
+                            upstream_message
+                        );
+                    }
                 }
             }
         }
