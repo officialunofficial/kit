@@ -1,8 +1,8 @@
 # Cutting a kit release
 
 This is the single release runbook. It covers the checklist,
-signing and verification, supply-chain policy, reproducibility and
-crates.io publishing.
+signing and verification, supply-chain policy, reproducibility, crates.io
+publishing and npm publishing.
 
 Contents:
 
@@ -11,6 +11,7 @@ Contents:
 - [Cutting a release](#cutting-a-release)
 - [The release PR](#the-release-pr)
 - [Publishing to crates.io](#publishing-to-cratesio)
+- [Publishing to npm](#publishing-to-npm)
 - [Signing and verification](#signing-and-verification)
 - [Supply-chain policy](#supply-chain-policy)
 - [Reproducibility](#reproducibility)
@@ -20,9 +21,10 @@ Contents:
 
 A single `vX.Y.Z` tag drives the binary release through
 [`.github/workflows/release.yml`](../.github/workflows/release.yml).
-A maintainer publishes the crates to crates.io by hand from the same tag.
+The same workflow publishes the `kit-wasm` package to npm. A maintainer
+publishes the crates to crates.io by hand from the same tag.
 
-Both steps use the same signed tag. Before `release.yml` publishes anything,
+All three steps use the same signed tag. Before `release.yml` publishes anything,
 it verifies that the tag is strict semver, annotated, GPG-signed by an
 allowlisted release fingerprint, and points at a commit reachable from
 `origin/main`. It then produces:
@@ -68,7 +70,11 @@ allowlisted release fingerprint, and points at a commit reachable from
    to `main` (and pushes to it), and checks the golden list is current, so
    drift shows up before a tag rather than at it.
 
-2. **crates.io** &mdash; every workspace crate without `publish = false`, in
+2. **npm** &mdash; the `kit-wasm` package, published as
+   `@officialunofficial/kit-wasm` at the version of the tag. See
+   [Publishing to npm](#publishing-to-npm).
+
+3. **crates.io** &mdash; every workspace crate without `publish = false`, in
    dependency order. See [Publishing to crates.io](#publishing-to-cratesio).
 
 ## Pre-release checklist
@@ -105,6 +111,11 @@ Run top to bottom. Do not skip steps.
       `vX.Y.Z` examples in `install.sh` usage text.
 - [ ] [Signing and verification](#signing-and-verification) and
       [Reproducibility](#reproducibility) still accurate for this release.
+- [ ] `bash scripts/wasm-package.sh <empty dir>` builds the npm package, and
+      `npm pack --dry-run` in that directory lists the files you expect.
+      CI runs the same build.
+- [ ] The trusted publisher of `@officialunofficial/kit-wasm` on npm names
+      `release.yml` (see [Publishing to npm](#publishing-to-npm)).
 - [ ] `KIT_RELEASE_GPG_FINGERPRINTS` repo/org Actions variable contains the
       release tag signing key fingerprint.
 - [ ] The release tag signing public key is published to `keys.openpgp.org` or
@@ -135,6 +146,11 @@ Run top to bottom. Do not skip steps.
 - [ ] `kit-X.Y.Z.provenance.jsonl` (SLSA build provenance) present, and
       `gh attestation verify <archive> --repo officialunofficial/kit`
       succeeds for at least one archive.
+- [ ] The `publish-npm` job succeeded, and `npm view
+      @officialunofficial/kit-wasm@X.Y.Z version` prints `X.Y.Z`.
+- [ ] `npm audit signatures` passes in a project that installs
+      `@officialunofficial/kit-wasm@X.Y.Z`. It checks the registry signature
+      and the provenance attestation.
 
 ### Smoke test
 
@@ -344,6 +360,62 @@ publish. Keep the token out of the repository.
   so no `libpcsclite` is needed (`kit-keystore`'s `backend-yubikey` is off by
   default). No `protoc` is needed, because `kit-rpc` ships its generated
   code in `generated/`.
+
+## Publishing to npm
+
+The `publish-npm` job of `release.yml` publishes the `kit-wasm` package as
+`@officialunofficial/kit-wasm`. It runs after the GitHub Release exists, on
+the commit that `validate-release-tag` checked. It uses npm trusted
+publishing: the job asks GitHub for an OIDC token and npm exchanges it for a
+short-lived publish credential. No npm token or repository secret exists.
+Only this job holds `id-token: write` for npm. npm adds a provenance
+attestation to the version without a flag.
+
+The job:
+
+1. Asks the registry whether the version is on npm, and ends if it is. npm
+   versions are immutable, so a re-run of the workflow after a publish does
+   nothing.
+2. Installs the pinned Rust toolchain, the `wasm-bindgen` version of
+   `rust/Cargo.lock` and Node 24, and stops when npm is older than 11.5.1.
+3. Runs `scripts/wasm-package.sh`, checks that `package.json` has the name
+   and the version of the tag, and lists the files with `npm pack --dry-run`.
+4. Runs `npm publish --access public`. The tag `latest` moves to the new
+   version. A version with a prerelease suffix, such as `0.8.0-rc.1`, gets the
+   tag `next` and never becomes `latest`.
+
+The version on npm equals the version of the tag and of the workspace. A
+build that has to change after a publish needs a new version.
+
+### One-time setup
+
+npm can configure a trusted publisher only for a package that exists, so the
+first version goes up by hand.
+
+1. An owner of the `officialunofficial` npm scope publishes a first version
+   with a throwaway number, for example `0.0.0-init`, using
+   `npm publish --access public --tag init`. Use an npm account with two-factor
+   authentication.
+2. In the package settings on npmjs.com, add a trusted publisher: provider
+   GitHub Actions, organization `officialunofficial`, repository `kit`,
+   workflow filename `release.yml`, no environment. The fields are
+   case-sensitive, and npm does not check them until a publish.
+3. Push the release tag. A new trusted publisher expires unless it sees a
+   successful publish within 2 days. Create it right before the tag, and
+   delete and create it again if it expires.
+4. After the first publish from the workflow, remove the throwaway version:
+   `npm dist-tag rm @officialunofficial/kit-wasm init` and `npm deprecate
+   @officialunofficial/kit-wasm@0.0.0-init "not a release"`. In the package
+   settings, require two-factor authentication and disallow tokens.
+
+Trusted publishing runs only on GitHub-hosted runners and needs npm 11.5.1 or
+newer. The `repository.url` in `package.json` must match the GitHub
+repository, or the provenance check fails. `scripts/wasm-package.sh` writes
+it from the workspace.
+
+A workflow that is dispatched by hand runs the `release.yml` of the ref it
+was dispatched from. A release tag made before the `publish-npm` job existed
+cannot publish to npm.
 
 ## Signing and verification
 
@@ -663,8 +735,9 @@ x86_64 build is the most reliable reproducibility target for third parties.
 
 ## Required GitHub Actions secrets and variables
 
-cosign keyless signing runs on the GitHub OIDC token. No release step needs a
-repository secret.
+cosign keyless signing runs on the GitHub OIDC token. npm trusted publishing
+runs on the same kind of token. No release step needs a repository secret or
+an npm token.
 
 | Variable | Purpose | Required for |
 | --- | --- | --- |

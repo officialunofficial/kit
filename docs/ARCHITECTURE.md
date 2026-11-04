@@ -28,7 +28,7 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 | `kit-sync`                    | `rust/crates/kit-sync/`              | Native clone/fetch/pull for `.kit` repositories as a library: typed reports, no printing, no ambient config; `kit clone`/`fetch`/`pull` are thin wrappers over it |
 | `libkit`                      | `rust/crates/libkit/`                | The facade crate for embedders. It re-exports `kit-core`, `kit-attest` and `kit-keystore` always. It re-exports `kit-sync` under the default feature `sync`. The features `git-bridge`, `transport-file`, `transport-ssh`, `transport-s3` and `transport-connect` add one crate each. The features `history-mmr` and `sparse-checkout` forward to `kit-core`. |
 | `kit-bin`                     | `rust/crates/kit-bin/`               | The `kit` binary; thin glue over the library crates                   |
-| `kit-wasm`                    | `rust/crates/kit-wasm/`              | WebAssembly bindings for the byte-format and crypto paths; not published to crates.io |
+| `kit-wasm`                    | `rust/crates/kit-wasm/`              | WebAssembly bindings for the byte-format and crypto paths; published to npm as `@officialunofficial/kit-wasm`, not to crates.io |
 | `kit-fuzz`                    | `rust/fuzz/`                          | cargo-fuzz harnesses (`docs/FUZZ.md`)                                  |
 | `kit-sign-file`               | `rust/crates/kit-sign-file/`         | Reference external signer; protocol conformance baseline               |
 

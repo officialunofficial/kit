@@ -4,24 +4,42 @@ WebAssembly bindings for kit &mdash; a content-addressed VCS for creative work. 
 
 No filesystem or network access is performed inside the wasm module. It is a stateless library of object encoders, hashers, signers, verifiers, FastCDC chunkers, delta encoders, and Bao streaming primitives.
 
-## Build
+## Install
 
-The crate is not on crates.io. Build it with the `wasm-bindgen` command-line
-tool. Its version must equal the `wasm-bindgen` version in `rust/Cargo.lock`.
-A different version fails with a schema mismatch.
+The package is on npm, not on crates.io:
 
 ```sh
-cd rust
-version=$(cargo pkgid -p wasm-bindgen | sed 's/.*[#@]//')
-cargo install --locked wasm-bindgen-cli --version "$version"
-
-cargo build --locked -p kit-wasm --release --target wasm32-unknown-unknown
-wasm-bindgen --target bundler --out-dir pkg \
-  target/wasm32-unknown-unknown/release/kit_wasm.wasm
+npm install @officialunofficial/kit-wasm
 ```
 
-The `bundler` target works with esbuild, Wrangler, Vite, webpack and Rollup.
-Use `--target web` for a direct `<script type="module">`. That target exports
+The package uses the `bundler` target of `wasm-bindgen`. It works with esbuild,
+Wrangler, Vite, webpack and Rollup, which load the `.wasm` file for you. The
+version of the package equals the version of the kit release.
+
+Each release publishes the package from the release workflow with npm trusted
+publishing. The version on npm carries a provenance attestation. Check it with
+`npm audit signatures`.
+
+## Build from source
+
+The build needs the `wasm-bindgen` command-line tool. Its version must equal
+the `wasm-bindgen` version in `rust/Cargo.lock`. A different version fails with
+a schema mismatch.
+
+```sh
+version=$(cd rust && cargo pkgid -p wasm-bindgen | sed 's/.*[#@]//')
+cargo install --locked wasm-bindgen-cli --version "$version"
+
+bash scripts/wasm-package.sh pkg
+```
+
+The script builds the crate for `wasm32-unknown-unknown`, runs `wasm-bindgen`
+with the `bundler` target, and writes `package.json` into the output
+directory, which must be missing or empty. It is the same script that the
+release workflow runs.
+
+For a direct `<script type="module">`, run `wasm-bindgen --target web` on
+`rust/target/wasm32-unknown-unknown/release/kit_wasm.wasm`. That target exports
 the classic `await init()` default.
 
 The Rust project archived `wasm-pack` with the rustwasm organization, so this
@@ -33,7 +51,7 @@ The `bundler` build starts the wasm module when you import it. There is no
 `init` export to await. Import the functions you need:
 
 ```ts
-import { blake3_hex, commit_verify, attest_build, attest_verify } from "kit-wasm";
+import { blake3_hex, commit_verify, attest_build, attest_verify } from "@officialunofficial/kit-wasm";
 
 const id = blake3_hex(new TextEncoder().encode("hello"));
 console.log(id); // 64-character lowercase hex
@@ -87,7 +105,7 @@ A verified disclosure proves the bytes belong to that commit id; `signature_vali
 import {
   verify_disclosure,
   verify_closure_manifest,
-} from "kit-wasm";
+} from "@officialunofficial/kit-wasm";
 
 const commitId = "…64-char hex…"; // the id you already trust
 const disclosed = JSON.parse(verify_disclosure(commitId, bundle));

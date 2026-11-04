@@ -15,6 +15,8 @@ name: "Release: Artifacts"
 #      (actions/attest-build-provenance) over the archives, in addition to
 #      the cosign signatures.
 #   5. Aggregates all artifacts into a GitHub Release.
+#   6. Publishes the kit-wasm package to npm as @officialunofficial/kit-wasm
+#      with npm trusted publishing (OIDC). The job holds no npm token.
 #
 # macOS binaries are intentionally NOT codesigned or notarized — we do not
 # hold an Apple Developer ID. Trust is established via cosign keyless
@@ -26,7 +28,7 @@ name: "Release: Artifacts"
 # specific `prefix-key`, partitioned away from the keys that PR-event
 # workflows write to. This prevents a malicious PR from poisoning a cache
 # that this workflow (which carries `id-token: write`) would later
-# deserialize.
+# deserialize. The npm job builds without a cache for the same reason.
 #
 # No secrets are needed for cosign keyless — OIDC token comes from GitHub.
 
@@ -727,3 +729,114 @@ jobs:
             A CycloneDX SBOM (`sbom.cdx.json`) is attached. Reflects the
             Rust crate graph of the whole workspace, including library and
             test dependencies, plus toolchain and OS libraries.
+
+  # Publishes the kit-wasm package to npm. npm trusted publishing exchanges the
+  # job's OIDC token for a short-lived publish credential, so the job needs no
+  # npm token and no repository secret. The trusted publisher on npm names this
+  # file, release.yml. Provenance is generated automatically. Only this job
+  # holds id-token for npm. A version that is already on npm is skipped, so a
+  # re-run is safe.
+  publish-npm:
+    name: Publish kit-wasm to npm
+    runs-on: ubuntu-latest
+    needs: [validate-release-tag, release]
+    permissions:
+      contents: read
+      id-token: write       # npm trusted publishing OIDC + provenance
+    env:
+      NPM_PACKAGE: "@officialunofficial/kit-wasm"
+      VERSION: ${{ needs.validate-release-tag.outputs.version }}
+    steps:
+      - name: Checkout (at resolved tag)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.validate-release-tag.outputs.commit }}
+          persist-credentials: false
+
+      - name: Check whether the version is on npm
+        id: registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The registry answers 200 for a published version and 404 for any
+          # other. Any other status stops the job.
+          STATUS="$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 \
+            "https://registry.npmjs.org/${NPM_PACKAGE/\//%2F}/${VERSION}")"
+          case "${STATUS}" in
+            200)
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::${NPM_PACKAGE}@${VERSION} is already on npm; skipping the publish."
+              ;;
+            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "ERROR: the registry answered ${STATUS} for ${NPM_PACKAGE}@${VERSION}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Read the pinned toolchain
+        if: steps.registry.outputs.published == 'false'
+        id: pin
+        run: |
+          echo "version=$(bash scripts/toolchain-version.sh)" >> "$GITHUB_OUTPUT"
+          # wasm-bindgen must match the version in rust/Cargo.lock.
+          echo "wasm_bindgen=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, "", $0); print; exit }' rust/Cargo.lock)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust ${{ steps.pin.outputs.version }} + wasm32 target
+        if: steps.registry.outputs.published == 'false'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ steps.pin.outputs.version }}
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen ${{ steps.pin.outputs.wasm_bindgen }}
+        if: steps.registry.outputs.published == 'false'
+        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68  # v2
+        with:
+          tool: wasm-bindgen@${{ steps.pin.outputs.wasm_bindgen }}
+
+      # Trusted publishing needs npm 11.5.1 or newer.
+      - name: Set up Node
+        if: steps.registry.outputs.published == 'false'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Check the npm version
+        if: steps.registry.outputs.published == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          HAVE="$(npm --version)"
+          if [ "$(printf '%s\n' "11.5.1" "${HAVE}" | sort -V | head -n 1)" != "11.5.1" ]; then
+            echo "ERROR: npm ${HAVE} is older than 11.5.1, which trusted publishing needs" >&2
+            exit 1
+          fi
+
+      - name: Build the package
+        if: steps.registry.outputs.published == 'false'
+        shell: bash
+        run: bash scripts/wasm-package.sh "${RUNNER_TEMP}/kit-wasm"
+
+      - name: Check the package
+        if: steps.registry.outputs.published == 'false'
+        shell: bash
+        working-directory: ${{ runner.temp }}/kit-wasm
+        run: |
+          set -euo pipefail
+          test "$(node -p 'require("./package.json").version')" = "${VERSION}"
+          test "$(node -p 'require("./package.json").name')" = "${NPM_PACKAGE}"
+          npm pack --dry-run
+
+      # A version with a prerelease suffix goes to the next tag, so it never
+      # becomes latest.
+      - name: Publish to npm
+        if: steps.registry.outputs.published == 'false'
+        shell: bash
+        working-directory: ${{ runner.temp }}/kit-wasm
+        run: |
+          set -euo pipefail
+          TAG=latest
+          case "${VERSION}" in *-*) TAG=next ;; esac
+          npm publish --access public --tag "${TAG}"
