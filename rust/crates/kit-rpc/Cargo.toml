@@ -49,6 +49,7 @@ transport-messages = ["dep:serde", "buffa/json"]
 arbitrary = ["dep:arbitrary", "buffa/arbitrary"]
 
 [dependencies]
+# The `zstd` feature stays off: it pulls zstd 0.13, which has open advisories.
 connectrpc = { version = "0.9.1", default-features = false, features = ["gzip", "json"], optional = true }
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 arbitrary = { version = "1.5.0", optional = true }

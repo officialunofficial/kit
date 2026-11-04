@@ -296,14 +296,12 @@ feature, no `install.ps1` or Scoop packaging, and no
 `[target.'cfg(windows)'.dependencies]` stanza in any `Cargo.toml`.
 `BackendKind` has no Windows Credential Manager variant.
 
-**Because:** commonware-runtime 2026.9.0's storage-sync path calls
-`libc::sync()` on every non-Linux target (`kit-core`'s
-dev-dependencies pull it in) — `libc::sync()` does not exist on `x86_64-pc-windows-msvc`, so the
-workspace and its test suite no longer build there. Maintaining a Windows
-CI/release leg that cannot actually build or test the workspace would ship
-an untested binary, so Windows was dropped as a supported target
-rather than worked around. Windows users run kit under WSL, which uses
-the Linux binary.
+**Because:** the Commonware library, which kit builds on, states that
+Windows is not a supported target and that running it there may result in
+undefined behavior. Maintaining a Windows CI/release leg for a workspace
+built on an unsupported base would ship a binary that no test can vouch
+for, so Windows was dropped as a supported target rather than worked
+around. Windows users run kit under WSL, which uses the Linux binary.
 
 **If violated:** a reintroduced Windows CI leg goes red on every PR (the
 workspace fails to build there); a reintroduced Windows release leg ships

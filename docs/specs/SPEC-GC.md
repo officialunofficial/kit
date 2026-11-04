@@ -31,11 +31,11 @@ reachable from a root is live; everything else is reclaimable. An
 incomplete root set means deleting a live object &mdash; silent corruption.
 This spec pins that root set so gc has one normative definition to honor.
 
-The store stays loose files because gc removes single objects. Their ids are
+The store keeps objects as loose files because gc removes single objects. Their ids are
 spread over the whole BLAKE3 keyspace, and unreachability has no link to
 insertion order. The Commonware `Freezer` has no per-key delete: its only
 removal, `destroy`, drops the whole structure. The `prunable::Archive` removes
-by `prune(min_index)`, which drops every index below the bound. Neither can
+by `prune(min)`, which drops every index below the bound. Neither can
 remove one interior object and keep older and newer live objects.
 
 ## Retention roots
