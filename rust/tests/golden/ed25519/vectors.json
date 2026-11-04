@@ -1,0 +1,93 @@
+{
+  "spec": "SPEC-SIGNING \u00a71",
+  "cases": [
+    {
+      "name": "valid",
+      "public": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "message": "3458c7149c914c2916707aa9af08d655be25a5ce81df0a042614ff89c528b2e7",
+      "signature": "9ffecca750c0b807e03830e2f56a47a95951edb45de1f048ab94cbfa95a6c6f2af9d1a24e458193f2c55098c6060c6d879d83aa03448128a72cf32bd936f6108",
+      "expect": "accept",
+      "why": "an RFC 8032 signature"
+    },
+    {
+      "name": "torsion-r",
+      "public": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "message": "3458c7149c914c2916707aa9af08d655be25a5ce81df0a042614ff89c528b2e7",
+      "signature": "7362cde457d783d2ea3b6ef46737b73bdc8be7e9c45e0d73bb2ac6e31b1d5a9647af04a307113650adf81fbe848149aeb321b3a489342ec21b1b90af6f12510a",
+      "expect": "accept",
+      "why": "R carries an 8-torsion component; the cofactored equation ignores it"
+    },
+    {
+      "name": "torsion-a",
+      "public": "1f4f580e73ac208f06760190e9edc6f5916775dabd9c1cdca393175c2d6d1083",
+      "message": "3458c7149c914c2916707aa9af08d655be25a5ce81df0a042614ff89c528b2e7",
+      "signature": "78021b25eb446235a4af5246fa0f72589a72c7d78f77da0bb35c8cefd541819a354bf0736db2f8dd942007dfd0f9319f237d892799aabb03d95f6b956ccd1e06",
+      "expect": "accept",
+      "why": "A carries an 8-torsion component and is not of small order"
+    },
+    {
+      "name": "wrong-message",
+      "public": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "message": "221c0f6dd35d1e0e2ae61364740686c3de958345465f2e2a037cb76f85b14498",
+      "signature": "9ffecca750c0b807e03830e2f56a47a95951edb45de1f048ab94cbfa95a6c6f2af9d1a24e458193f2c55098c6060c6d879d83aa03448128a72cf32bd936f6108",
+      "expect": "reject",
+      "why": "the signature covers another message"
+    },
+    {
+      "name": "small-order-a",
+      "public": "0100000000000000000000000000000000000000000000000000000000000000",
+      "message": "3458c7149c914c2916707aa9af08d655be25a5ce81df0a042614ff89c528b2e7",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "reject",
+      "why": "A is the identity; R = identity, s = 0 satisfies the equation for every message"
+    },
+    {
+      "name": "small-order-r",
+      "public": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "message": "3458c7149c914c2916707aa9af08d655be25a5ce81df0a042614ff89c528b2e7",
+      "signature": "0100000000000000000000000000000000000000000000000000000000000000c07343e9dd72f6310b4a792d2a4d79cc04f065e13ad4391b84f21b913f9d3f05",
+      "expect": "reject",
+      "why": "R is the identity and s = k * a satisfies the equation"
+    },
+    {
+      "name": "torsion-only-r",
+      "public": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "message": "3458c7149c914c2916707aa9af08d655be25a5ce81df0a042614ff89c528b2e7",
+      "signature": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a0000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "reject",
+      "why": "R is an 8-torsion point"
+    },
+    {
+      "name": "s-not-canonical",
+      "public": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "message": "3458c7149c914c2916707aa9af08d655be25a5ce81df0a042614ff89c528b2e7",
+      "signature": "9ffecca750c0b807e03830e2f56a47a95951edb45de1f048ab94cbfa95a6c6f29c711081febb2b9702f2002f3f5aa5ed79d83aa03448128a72cf32bd936f6118",
+      "expect": "reject",
+      "why": "s + L names the same scalar but s >= L"
+    },
+    {
+      "name": "r-not-canonical",
+      "public": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "message": "3458c7149c914c2916707aa9af08d655be25a5ce81df0a042614ff89c528b2e7",
+      "signature": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7faf9d1a24e458193f2c55098c6060c6d879d83aa03448128a72cf32bd936f6108",
+      "expect": "reject",
+      "why": "R is encoded with y >= p"
+    },
+    {
+      "name": "a-not-canonical",
+      "public": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "message": "3458c7149c914c2916707aa9af08d655be25a5ce81df0a042614ff89c528b2e7",
+      "signature": "9ffecca750c0b807e03830e2f56a47a95951edb45de1f048ab94cbfa95a6c6f2af9d1a24e458193f2c55098c6060c6d879d83aa03448128a72cf32bd936f6108",
+      "expect": "reject",
+      "why": "A is encoded with y >= p"
+    },
+    {
+      "name": "a-negative-zero",
+      "public": "0100000000000000000000000000000000000000000000000000000000000080",
+      "message": "3458c7149c914c2916707aa9af08d655be25a5ce81df0a042614ff89c528b2e7",
+      "signature": "9ffecca750c0b807e03830e2f56a47a95951edb45de1f048ab94cbfa95a6c6f2af9d1a24e458193f2c55098c6060c6d879d83aa03448128a72cf32bd936f6108",
+      "expect": "reject",
+      "why": "A sets the sign bit on x = 0"
+    }
+  ]
+}

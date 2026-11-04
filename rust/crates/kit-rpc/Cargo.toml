@@ -52,7 +52,7 @@ arbitrary = ["dep:arbitrary", "buffa/arbitrary"]
 connectrpc = { version = "0.9.1", default-features = false, features = ["gzip", "json"], optional = true }
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 arbitrary = { version = "1.5.0", optional = true }
-buffa = "0.9.1"
+buffa = "0.9.2"
 thiserror = "2.0.21"
 # kit-rpc now also re-exports a small set of shared transport-side
 # frame helpers (cond_to_wire, rpc_error_to_transport, ref_entry_to_ref,
@@ -70,11 +70,11 @@ thiserror = "2.0.21"
 # kit-rpc (kit-bin, kit-attest,
 # kit-transport-ssh) also depends on kit-core directly with default
 # features on, so their builds still get `pack-zstd` via that edge.
-kit-core = { version = "=0.5.0", path = "../kit-core", default-features = false }
+kit-core = { version = "=0.6.0", path = "../kit-core", default-features = false }
 
 [build-dependencies]
 connectrpc-build = { version = "0.9.0", optional = true }
-buffa-build = "0.9.1"
+buffa-build = "0.9.2"
 
 # cargo-machete scans only the Rust sources under src/. It cannot see these
 # dependencies, so it lists them as unused. Each one is used.

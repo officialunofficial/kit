@@ -375,7 +375,7 @@ translated history is kit-side, in two pinned modes:
 **Shallow (default).** For a single git commit/tag, rebuild the kit
 signing bytes (SPEC-SIGNING §3/§4a) directly from the carried
 headers + message + timestamp &mdash; this requires no other objects &mdash; and
-check the Ed25519 signature (`verify_strict`) under the appropriate
+check the Ed25519 signature (SPEC-SIGNING §1 predicate) under the appropriate
 domain. Shallow verification proves the carried fields are exactly
 what the original signer signed; it does *not* prove the surrounding
 git tree/parent SHA-1s correspond to those BLAKE3 hashes.

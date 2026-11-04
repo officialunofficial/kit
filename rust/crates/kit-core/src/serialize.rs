@@ -607,6 +607,7 @@ fn read_chunked_blob(r: &mut Reader<'_>) -> Result<ChunkedBlob, KitError> {
     if (chunk_count as usize).saturating_mul(HASH_LEN) > r.remaining() {
         return Err(KitError::UnexpectedEof);
     }
+    check_chunked_total_size(total_size, chunk_size, chunk_count)?;
     let mut chunks = Vec::with_capacity(chunk_count as usize);
     for _ in 0..chunk_count {
         chunks.push(r.read_hash()?);
@@ -616,6 +617,36 @@ fn read_chunked_blob(r: &mut Reader<'_>) -> Result<ChunkedBlob, KitError> {
         chunk_size,
         chunks,
     })
+}
+
+/// Reject a `total_size` that the chunk layout cannot produce. Readers
+/// size buffers and disk writes from `total_size`, so it must be bounded
+/// before any caller sees it (SPEC-OBJECTS §7).
+fn check_chunked_total_size(
+    total_size: u64,
+    chunk_size: u32,
+    chunk_count: u32,
+) -> Result<(), KitError> {
+    let count = u64::from(chunk_count);
+    let size = u64::from(chunk_size);
+    let valid = total_size <= crate::worktree::MAX_FILE_BYTES
+        && if count == 0 {
+            total_size == 0
+        } else {
+            // Each chunk holds at least one byte. With a fixed size, every
+            // chunk but the last holds exactly `chunk_size` bytes and the
+            // last holds between one and `chunk_size` bytes.
+            if size == 0 {
+                total_size >= count
+            } else {
+                total_size > (count - 1) * size && total_size <= count * size
+            }
+        };
+    if valid {
+        Ok(())
+    } else {
+        Err(KitError::ChunkedBlobTotalSizeInvalid)
+    }
 }
 
 fn read_delta(r: &mut Reader<'_>) -> Result<Delta, KitError> {
@@ -1129,6 +1160,41 @@ mod tests {
         assert_eq!(deserialize(&buf), Err(KitError::TooManyChunks));
     }
 
+    fn chunked_bytes(total: u64, chunk_size: u32, count: u32) -> Vec<u8> {
+        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
+        buf.extend_from_slice(&total.to_le_bytes());
+        buf.extend_from_slice(&chunk_size.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        for i in 0..count {
+            buf.extend_from_slice(&hash(&i.to_le_bytes()));
+        }
+        buf
+    }
+
+    #[test]
+    fn rejects_chunked_blob_total_size_beyond_file_limit() {
+        for total in [u64::MAX, 1 << 62, crate::worktree::MAX_FILE_BYTES + 1] {
+            assert_eq!(
+                deserialize(&chunked_bytes(total, 0, 2)),
+                Err(KitError::ChunkedBlobTotalSizeInvalid)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_chunked_blob_total_size_inconsistent_with_layout() {
+        // Zero chunks must mean zero bytes.
+        assert!(deserialize(&chunked_bytes(0, 0, 0)).is_ok());
+        assert!(deserialize(&chunked_bytes(1, 0, 0)).is_err());
+        // Fixed size: (count-1)*size < total <= count*size.
+        assert!(deserialize(&chunked_bytes(196_608, 65_536, 3)).is_ok());
+        assert!(deserialize(&chunked_bytes(131_073, 65_536, 3)).is_ok());
+        assert!(deserialize(&chunked_bytes(131_072, 65_536, 3)).is_err());
+        assert!(deserialize(&chunked_bytes(196_609, 65_536, 3)).is_err());
+        // Content-defined: every chunk holds at least one byte.
+        assert!(deserialize(&chunked_bytes(2, 0, 3)).is_err());
+    }
+
     #[test]
     fn rejects_remix_out_of_order_sources() {
         // read_remix's decode-path sort check: sources must be strictly
@@ -1389,7 +1455,9 @@ mod kani_proofs {
         if n.is_empty() || n.len() > 255 {
             return false;
         }
-        if n.iter().any(|&b| b == 0 || b == b'/' || b == b'\\') {
+        if n.iter()
+            .any(|&b| b == 0 || b == b'/' || b == b'\\' || b == b':')
+        {
             return false;
         }
         if n == b"." || n == b".." || matches!(n[n.len() - 1], b'.' | b' ') {
@@ -1397,6 +1465,12 @@ mod kani_proofs {
         }
         let up: Vec<u8> = n.iter().map(u8::to_ascii_uppercase).collect();
         if up == b".KIT" || up == b".GIT" {
+            return false;
+        }
+        if up.len() >= 5
+            && (up[..4] == *b"KIT~" || up[..4] == *b"GIT~")
+            && up[4..].iter().all(u8::is_ascii_digit)
+        {
             return false;
         }
         let stem = match up.iter().position(|&b| b == b'.') {

@@ -3,6 +3,7 @@
 
 /// Mirrors the signed variants of kit_core::object::Object — Blob, Tree,
 /// ChunkedBlob, and Delta carry no signature and are never sent here.
+#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 #[repr(i32)]

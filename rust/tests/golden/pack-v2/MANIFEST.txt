@@ -1,7 +1,8 @@
-# SPEC-PACKFILE v2 fixtures, written by the C zstd encoder (pack-zstd)
+# SPEC-PACKFILE fixtures. The zstd packs are written by the C encoder (pack-zstd);
+# the boundary_ packs need no encoder.
 # Produced by `KIT_WRITE_GOLDEN=1 cargo test -p kit-core --test golden_pack`
 # Format: <file> <blake3-hex-of-file-bytes>
-# See docs/specs/SPEC-PACKFILE.md section 10, vector 20.
+# See docs/specs/SPEC-PACKFILE.md section 10, vectors 20 to 22.
 raw_4k_repeat.bin 7341c264369dc37847bb0275e3248e9ff6b64c8bb5f5cdd97e249f4e3a32948f
 raw_4k_repeat.json d6c7679252ab8bdd9a59a34b17684561f86c673db806338ceda580ce29e5e1cd
 delta_repeat.bin 0633a89c681e83a2152aec2956dc75cd5030770a089e1cdcdf37e2c3155aa36d
@@ -12,3 +13,11 @@ tree_and_commit.bin 466c3da3c5585711c0f559a8e8b36e247235f9f68fef8eeb1eafd7bc47f5
 tree_and_commit.json 62f0b3315b3e7fc2efa04f83845666e3b42ad23c34f161ddeed1d285f3533275
 large_literals.bin 1ab31a3fdc82dbcd767f57c2a46ec1c8f3289bd86db6d748fcce4d045a7ee2f6
 large_literals.json d3cb7ec1e6cd7610545f55e376d8b3d631eabb599c8bc0360ea18a6920030b07
+boundary_payload_high_bit.bin fed2a78654cd29b51631075297c9003ff801b143f646610b0a91bdb78c2d5a51
+boundary_payload_high_bit.json a7c1374fcd0cd7d6ea4fc6dd7db343d48a388e785ebe9f9cfd5da04bf82b472e
+boundary_payload_u32_max.bin 22481a855e0361eded73a4164dee2ccb076b6e39c6954908f39d0e3b7283db43
+boundary_payload_u32_max.json 686b85dcaafa0d9e215fcf6a79f23c478bc8b13fab68a119481ff10a89eeb01e
+boundary_earlier_delta_base.bin ebe419ce30637180b67b487e2496d436d1fdd62d05f171a42a4a82af48912666
+boundary_earlier_delta_base.json 2a6fc6fd02383e422ac983019f86244e59c8f4d1dc87865b5c4db664154c6878
+boundary_later_delta_base.bin 4dab3ff6aa4184f28cc1cfbaf315e9ed2ac01798be93f5ff9e44af35a2e21f6d
+boundary_later_delta_base.json 0e6b24cd4519ce71b38dac5c446b9a6ffdb7f6d5d4e8449b085a7c426d3fc787

@@ -688,14 +688,14 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         None,
     ));
     vectors.push((
-        "neg_mkdp_as_mkds",
+        "neg_kdpb_as_kdsp",
         fixture.commit_id,
         files["in_chunk_range.bin"].clone(),
         Some("span_magic"),
         None,
     ));
     vectors.push((
-        "neg_mkds_anchor",
+        "neg_kdsp_anchor",
         fixture.commit_id,
         encoded_span(fixture.commit_id, offset, 20, &valid, &chunk_bundles),
         Some("span_anchor_invalid"),
@@ -947,7 +947,7 @@ fn boundary_aware_builder_matches_committed_bytes() {
                 hints,
             )
             .unwrap();
-            let (RangeProof::Mkdp(bytes) | RangeProof::Mkds(bytes)) = proof else {
+            let (RangeProof::Kdpb(bytes) | RangeProof::Kdsp(bytes)) = proof else {
                 unreachable!("non-exhaustive RangeProof")
             };
             assert_eq!(
@@ -967,7 +967,7 @@ fn boundary_aware_builder_matches_committed_bytes() {
         None,
     )
     .unwrap();
-    let RangeProof::Mkdp(bytes) = proof else {
+    let RangeProof::Kdpb(bytes) = proof else {
         panic!("plain Blob must use KDPB")
     };
     assert_eq!(bytes, fs::read(directory().join("blob_range.bin")).unwrap());
@@ -1039,12 +1039,12 @@ proptest! {
         let first = boundaries.partition_point(|&start| start <= offset) - 1;
         let last = boundaries.partition_point(|&start| start < offset + len) - 1;
         let actual = match proof {
-            RangeProof::Mkdp(bytes) => {
+            RangeProof::Kdpb(bytes) => {
                 prop_assert_eq!(first, last);
                 let disclosed = verify_disclosure(&fixture.commit_id, &bytes).unwrap();
                 body(&disclosed).to_vec()
             }
-            RangeProof::Mkds(bytes) => {
+            RangeProof::Kdsp(bytes) => {
                 prop_assert!(first < last);
                 verify_disclosure_span(&fixture.commit_id, &bytes).unwrap().bytes
             }

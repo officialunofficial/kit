@@ -1,0 +1,1343 @@
+\documentclass[10pt,letterpaper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+% Times for text, Helvetica for sans serif, Computer Modern for mathematics
+% and code: the single-column preprint layout of NeurIPS-style papers.
+\renewcommand{\rmdefault}{ptm}
+\usepackage[scaled=0.92]{helvet}
+\usepackage{microtype}
+\DisableLigatures[-]{encoding=T1,family=tt*}
+\usepackage[letterpaper,textwidth=5.5in,textheight=9in,top=1in,hcentering]{geometry}
+\usepackage{titlesec}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+% Palette: one primary colour, one accent and neutrals. All pass contrast
+% on white and stay distinct in grayscale and for common colour blindness.
+\definecolor{kitprimary}{HTML}{0B4F8A}
+\definecolor{kitaccent}{HTML}{B5470F}
+\definecolor{kitmuted}{HTML}{5F6B7A}
+\definecolor{kittint}{HTML}{EEF3F9}
+\usepackage{float}
+\usepackage{fancyvrb}
+\usepackage{upquote}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[colorlinks,linkcolor=kitprimary,citecolor=kitprimary,urlcolor=kitprimary]{hyperref}
+\usepackage[capitalise,noabbrev]{cleveref}
+
+\setlist{nosep}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5.5pt plus 1pt minus 1pt}
+\titleformat*{\section}{\large\bfseries\color{kitprimary}}
+\titleformat*{\subsection}{\normalsize\bfseries\color{kitprimary}}
+\titlespacing*{\section}{0pt}{12pt plus 4pt minus 2pt}{6pt plus 2pt}
+\titlespacing*{\subsection}{0pt}{9pt plus 3pt minus 2pt}{4pt plus 1pt}
+\renewenvironment{abstract}
+  {\begin{center}\large\bfseries Abstract\end{center}\vspace{-1ex}%
+   \list{}{\leftmargin=0.5in\rightmargin=0.5in}\item\relax}
+  {\endlist}
+\setlength{\textfloatsep}{12pt plus 2pt minus 4pt}
+\setlength{\emergencystretch}{3em}
+
+% Code: pseudocode for the algorithms, shell for the appendix.
+\lstdefinelanguage{kitpseudo}{
+  morekeywords={if,for,each,in,while,return,require,reject,continue,and,or,not,is,
+    last,enumerate},
+  morecomment=[l]{\#},
+  morestring=[b]",
+  sensitive=true,
+}
+\lstdefinestyle{kitcode}{
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\bfseries\color{kitprimary},
+  commentstyle=\itshape\color{kitmuted},
+  stringstyle=\color{kitaccent},
+  backgroundcolor=\color{kittint},
+  columns=fullflexible, keepspaces=true, showstringspaces=false,
+  upquote=true, frame=none, aboveskip=2pt, belowskip=0pt,
+  xleftmargin=4pt, framexleftmargin=4pt,
+}
+\lstdefinestyle{kitalgo}{style=kitcode, language=kitpseudo,
+  numbers=left, numberstyle=\tiny\color{kitmuted}, numbersep=6pt,
+  xleftmargin=16pt}
+\lstdefinestyle{kitshell}{style=kitcode, language=bash, morekeywords={cargo,git,python3},
+  keywordstyle=\color{kitprimary}}
+
+% Pseudocode floats in plain verbatim style.
+\floatstyle{ruled}
+\newfloat{algorithm}{tbp}{loa}
+\floatname{algorithm}{Algorithm}
+\crefname{algorithm}{Algorithm}{Algorithms}
+
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+\crefname{definition}{Definition}{Definitions}
+\crefname{lemma}{Lemma}{Lemmas}
+\crefname{proposition}{Proposition}{Propositions}
+
+\newcommand{\kit}{\textsf{kit}}
+\newcommand{\Hb}{\mathsf{H}}
+\newcommand{\D}{\mathsf{D}}
+\newcommand{\BMT}{\mathsf{BMT}}
+\newcommand{\cc}{\mathbin{\|}}
+\newcommand{\str}[1]{\texttt{"\romannumeral-`0#1"}}
+\newcommand{\bytes}[1]{\texttt{\romannumeral-`0#1}}
+\newcommand{\sha}{c031e7765689bef163daf8a61190ac2b6aca0ae7}
+\newcommand{\repo}[1]{\href{https://github.com/officialunofficial/kit/blob/\sha/#1}{\expandafter\nolinkurl\expandafter{\romannumeral-`0#1}}}
+
+\hypersetup{
+  pdftitle={kit: An Offline-Verifiable Repository},
+  pdfauthor={Christopher Wallace, Vitor Marthendal, Erica Gregor},
+}
+
+\begin{document}
+
+\begin{center}
+  {\color{kitprimary}\rule{\textwidth}{4pt}}\par\vspace{0.25in}
+  {\LARGE\bfseries \kit: An Offline-Verifiable Repository\par}
+  \vspace{0.29in}{\color{kitprimary}\rule{\textwidth}{1pt}}\par\vspace{0.3in}
+  \begin{tabular}{@{}c@{\hspace{2.5em}}c@{\hspace{2.5em}}c@{}}
+    \textbf{Christopher Wallace}\textsuperscript{$*$} &
+    \textbf{Vitor Marthendal} &
+    \textbf{Erica Gregor} \\
+    Official Unofficial, Inc. & Official Unofficial, Inc. & Official Unofficial, Inc.
+  \end{tabular}\par\vspace{0.3in}
+\end{center}
+
+{\renewcommand{\thefootnote}{}%
+ \footnotetext{\textsuperscript{$*$}Corresponding author:
+   \href{mailto:christopher@officialunofficial.com}{\texttt{christopher@officialunofficial.com}}.}%
+ \footnotetext{Preprint. Version 0.1 (draft), 30 October 2026. This work is
+   licensed under the Creative Commons Attribution 4.0 International License
+   (CC~BY~4.0).}}
+
+
+\begin{abstract}
+A version-control client usually trusts the server, the forge and every mirror
+that hands it bytes. \kit{} is a content-addressed, signed version-control
+system that removes that trust for claims about content. A \kit{} commit id is
+a 32-byte BLAKE3 digest that commits to a mandatory Ed25519 signature, to the
+parent ids and to a tree whose id is a domain-wrapped binary Merkle root. From
+one trusted commit id, a verifier can check offline that a path, a chunk or a
+byte range belongs to the commit, with a bundle whose size depends on path
+depth and chunk count, not on repository size. It can also check that a served
+object set holds every object the commit reaches. We describe the object
+model, the signing scheme, and the disclosure and closure verifiers with their
+order of checks and allocation bounds. We give informal security arguments
+under collision resistance of BLAKE3 and unforgeability of Ed25519
+under one acceptance predicate, report the assurance evidence in the repository, measure proof
+sizes from the committed golden vectors, and measure signature verification
+throughput. \kit{} is alpha software (version
+0.5.0), and several of the specifications we describe are drafts.
+\end{abstract}
+
+% ---------------------------------------------------------------------------
+\section{Introduction}\label{sec:intro}
+
+A developer who clones a repository trusts the host that serves it. If the
+host swaps a file, drops a commit or serves a stale tree, most clients do not
+notice, because the identifiers they hold do not cover enough. In git, commit
+signing is optional and object ids are SHA-1 by default~\cite{git}. A git tree
+id commits to the full entry list of a directory, so a proof that one file
+belongs to a commit carries every directory listing on its path, and a check
+that a mirror served all of a commit's objects requires a full fetch and walk.
+
+\kit{} asks one question of every format: what can a verifier check, offline,
+from a single commit id $c^\star$ it already trusts? A \kit{} verifier can
+check, with no network access and no trust in the party that served the bytes,
+that the commit carries a valid signature; that a path, a chunk or a byte range
+is part of $c^\star$; that a set of served objects contains every object
+$c^\star$ reaches; and, with a user-managed trust-roots file, that the signer
+or an attestation about the commit comes from a trusted key. The verifier must
+still obtain $c^\star$ from a source it trusts, such as a release note, a signed
+tag or a colleague. After that, the server, the forge and every mirror are
+untrusted for these claims.
+
+\paragraph{Our contributions.}
+\begin{itemize}
+  \item An object model in which flat objects are named by BLAKE3 over strictly
+        parsed canonical bytes, and trees and chunked files by a domain-wrapped
+        binary Merkle root, so one 32-byte id authenticates single entries and
+        chunks (\cref{sec:objects}).
+  \item A signing scheme with length-prefixed domain tags and one Ed25519 predicate for single and batch checks,
+        and a binding of DSSE/in-toto attestations to a commit
+        (\cref{sec:signing}).
+  \item A disclosure bundle and verifier with a fixed order of checks, bounds
+        checked before allocation, and an output that reports what was proved
+        rather than what the bundle claims (\cref{sec:disclosure}), and a
+        closure verifier for completeness of a served set (\cref{sec:closure}).
+  \item Informal security arguments with their assumptions
+        (\cref{sec:security}), the assurance evidence (\cref{sec:assurance}),
+        proof sizes measured from committed vectors, and signature
+        verification throughput (\cref{sec:eval}).
+\end{itemize}
+
+\paragraph{Paper structure.}
+\Cref{sec:model} defines parties, trust inputs and assumptions.
+\Cref{sec:objects,sec:signing} define objects, signatures and attestations.
+\Cref{sec:disclosure,sec:closure} describe the two verifiers,
+\cref{sec:security} the security arguments, \cref{sec:assurance} the
+assurance evidence and \cref{sec:eval} the measurements. \Cref{sec:related}
+covers related work, \cref{sec:limits} limitations and draft specifications,
+and \cref{sec:conclusion} concludes. Disclosures of competing interests,
+funding and a vulnerability follow the conclusion. \Cref{app:repro} lists the
+commands and files that reproduce each measurement, \cref{app:ethics} gives
+the ethical considerations and \cref{app:open} lists the artifacts.
+
+\paragraph{Status.} \kit{} is alpha software (version 0.5.0); its command-line
+interface and object formats may change before 1.0. SPEC-OBJECTS and
+SPEC-FASTCDC are \emph{stable}; SPEC-MERKLE-OBJECTS, SPEC-SIGNING and
+SPEC-TRANSPORT are \emph{stable-normative}; SPEC-DISCLOSURE,
+SPEC-HISTORY-PROOF, SPEC-HTTP-OBJECTS, SPEC-WRITE-GRANTS and
+SPEC-RELEASE-THRESHOLD are \emph{draft-normative}; SPEC-ATTESTATIONS is a
+draft whose core is implemented. All specifications are in
+\texttt{docs/specs/}.
+
+% ---------------------------------------------------------------------------
+\section{System and threat model}\label{sec:model}
+
+\paragraph{Parties.}
+An \emph{author} holds an Ed25519 signing seed and creates commits, remixes and
+tags. A \emph{verifier} checks a claim about content. An \emph{untrusted
+server} is any party that stores or forwards bytes: a forge, a mirror, an
+object-store bucket, a data-availability provider or a network peer. The
+adversary controls every untrusted server and chooses every byte the verifier
+receives, including refs, packs, bundles, manifests and attestation envelopes.
+It can generate keys and sign its own commits.
+
+\paragraph{Trust inputs.}
+The verifier trusts one commit id $c^\star$ (or a remix or tag id) obtained out
+of band. For claims about \emph{who} signed, it also trusts a trust-roots file
+that lists the user's trusted keys. \kit{} reads this file from the user's
+configuration directory (\texttt{\$XDG\_CONFIG\_HOME/kit/trust-roots.toml}) and
+refuses a file inside the repository unless the user names it with
+\texttt{--trust-roots}, so a hostile clone cannot plant its own keys
+(THREAT-MODEL \S5). \Cref{tab:inputs} shows what each check needs.
+
+\begin{table}[t]
+\centering\small
+\caption{Inputs that each check needs. ``Bytes'' are untrusted bytes from any
+source.}\label{tab:inputs}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Check & Commit id & Bytes & Trust roots & Local repository \\
+\midrule
+Signature valid under embedded key & \checkmark & \checkmark & & \\
+Disclosure of a path, chunk or range & \checkmark & \checkmark & & \\
+Closure completeness & \checkmark & \checkmark & & \\
+Signer is trusted (\texttt{--trusted}) & \checkmark & \checkmark & \checkmark & \\
+Attestation about the commit & \checkmark & \checkmark & \checkmark & \\
+First-parent ancestry (draft, opt-in) & \checkmark & \checkmark & & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Assumptions.}
+\begin{description}[leftmargin=1.5em]
+  \item[A1 (hash).] BLAKE3~\cite{blake3} is collision resistant. Range proofs
+        use Bao slices~\cite{bao}, which expose BLAKE3's internal chaining
+        values, so A1 also covers collisions of those values.
+  \item[A2 (signature).] Ed25519~\cite{ed25519,rfc8032} is EUF-CMA secure
+        under the acceptance predicate of SPEC-SIGNING \S1: canonical
+        encodings of $A$ and $R$, neither of small order, $0 \le S < L$, and
+        the cofactored equation $[8]([S]B - R - [k]A) = 0$~\cite{taming}.
+  \item[A3 (implementation).] The verifier implements its specification. The
+        evidence of \cref{sec:assurance} supports A3; it does not prove it.
+  \item[A4 (host).] The verifier's host and every process with the user's UID
+        are trusted (THREAT-MODEL \S3.3).
+\end{description}
+\kit{} signs a BLAKE3 digest, not the raw signing bytes, so the unforgeability
+of a commit signature rests on A1 and A2 together (SPEC-SIGNING \S1).
+
+\paragraph{What \kit{} defends.}
+Against a hostile remote author or server, \kit{} defends the integrity of
+objects, packs, refs and attestations: tampered bytes fail the hash check on
+read, and pack readers refuse oversize allocations (THREAT-MODEL \S3.1). A
+cloned repository's \texttt{.kit/config} cannot select a key file, an external
+signer, a keystore backend or a trust-roots file (THREAT-MODEL \S4). By
+default, \texttt{clone}, \texttt{pull} and \texttt{fetch} verify the signature
+of every commit, remix and tag a fetch introduces before they publish the
+remote-tracking ref; a failure leaves refs and the working tree unchanged
+(docs/CLI.md). The opt-out is user-scoped only. This check uses the key
+embedded in each object, not the trust roots.
+
+\paragraph{What \kit{} does not defend.}
+THREAT-MODEL \S1, \S3 and \S7 exclude: the meaning of an attestation predicate
+(``kit moves bytes; the consumer decides what they mean''); properties a signer
+does not provide, such as trusted time, since timestamps are self-reported;
+the host kernel, the user's terminal and shell history, and any process with
+the same UID; and recovery from a compromised key, since there is no in-band
+revocation and the user publishes a new key and re-signs history from that
+point on. Two further limits follow from the trust inputs. \emph{Availability}:
+a server can refuse to serve or serve another commit; the verifier detects the
+mismatch with $c^\star$ but cannot force delivery. \emph{Freshness}: whether
+$c^\star$ is the latest commit of a branch is a property of the channel that
+delivered it. A valid signature binds a commit to a key, not to a person;
+binding a key to an identity is the caller's policy (SPEC-SIGNING \S6.1).
+
+% ---------------------------------------------------------------------------
+\section{Object model}\label{sec:objects}
+
+\paragraph{Notation.}
+$\Hb(x)$ is BLAKE3 in default mode with a 32-byte output, $x \cc y$ is
+concatenation, $\mathrm{le}_k$ and $\mathrm{be}_k$ are $k$-bit little- and
+big-endian encodings, and $|x|$ is a length in bytes. Object ids and signing
+digests use one domain-separation function (SPEC-MERKLE-OBJECTS \S2,
+SPEC-SIGNING \S2.1):
+\begin{equation}\label{eq:dd}
+  \D(d, x) \;=\; \Hb\bigl(\mathrm{le}_{16}(|d|) \cc d \cc x\bigr).
+\end{equation}
+
+\paragraph{Prologue and strict parsing.}
+Every object starts with a six-byte prologue: a type byte, the magic
+\bytes{KOB1} and the schema version \bytes{0x01} (SPEC-OBJECTS \S2). The seven
+types are blob, tree, commit, remix, chunked blob, delta and tag; deltas are
+pack-only. Integers in object bodies are little-endian, and every
+variable-length field carries its length. A reader rejects an unknown type,
+magic or version (there is no earlier version to fall back to); any byte after
+the declared layout (\texttt{TrailingData}); tree entries that are unsorted or
+repeated (\texttt{InvalidEntryOrder}); entry names that are empty, longer than
+255 bytes, contain \bytes{0x00}, \bytes{/} or \bytes{\textbackslash}, equal
+\str{.} or \str{..}, end in a dot or space, equal \texttt{.kit} or
+\texttt{.git} in any ASCII case, or name a Windows device; modes other than
+blob, tree, symlink and executable; more than $10^6$ entries or chunks, $10^3$
+parents or $10^4$ remix sources; identities that are empty or longer than 4096
+bytes; and objects over 1~GiB. A store without the format marker
+\texttt{bmt-v1} is refused. On every read, the store recomputes the id with the
+type-dependent rule below and fails with \texttt{HashMismatch} on a mismatch
+(SPEC-OBJECTS \S10).
+
+\paragraph{Flat and Merkle ids.}
+Commits, remixes, tags and blobs are \emph{flat}; trees and chunked blobs are
+\emph{Merkle} objects (SPEC-OBJECTS \S10, SPEC-MERKLE-OBJECTS \S2).
+
+\begin{definition}[Flat id]\label{def:flat}
+For a flat object $o$ with canonical bytes $\beta(o)$,
+$\mathrm{id}(o) = \Hb(\beta(o))$. A blob with data $x$ has
+$\mathrm{id} = \Hb(\bytes{0x01} \cc \str{KOB1} \cc \bytes{0x01} \cc
+\mathrm{le}_{32}(|x|) \cc x)$, and the id of a commit covers every field of the
+commit, the signature included.
+\end{definition}
+
+\begin{definition}[Binary Merkle tree, SPEC-MERKLE-OBJECTS \S1.1]\label{def:bmt}
+For leaf digests $L_0, \dots, L_{N-1}$, level~0 holds
+$n^0_i = \Hb(\mathrm{be}_{32}(i) \cc L_i)$, or the single node
+$\Hb(\varepsilon)$ if $N = 0$. Each higher level pairs adjacent nodes as
+$\Hb(\mathit{left} \cc \mathit{right})$; an odd last node pairs with itself.
+Folding ends at one node $t$, and
+$\BMT(L_0, \dots, L_{N-1}) = \Hb(\mathrm{be}_{32}(N) \cc t)$.
+\end{definition}
+
+\begin{definition}[Tree id, SPEC-MERKLE-OBJECTS \S3.2]\label{def:tree}
+A tree with entries $(\mathit{name}_i, \mathit{mode}_i, h_i)_{i<M}$ in
+canonical order has leaves
+$L_i = \D\bigl(\str{kit-tree-entry-v1},\, \mathrm{le}_{32}(|\mathit{name}_i|)
+\cc \mathit{name}_i \cc \mathit{mode}_i \cc h_i\bigr)$ and id
+$\mathrm{id}(T) = \D\bigl(\str{kit.tree\textbackslash 0},\, \BMT(L_0, \dots,
+L_{M-1})\bigr)$.
+\end{definition}
+
+\begin{definition}[Chunked-blob id, SPEC-MERKLE-OBJECTS \S3.1]\label{def:chunked}
+A chunked blob with total size $s$, chunk-size field $z$ and chunk ids
+$c_0, \dots, c_{K-1}$ has leaves
+$L_0 = \D(\str{kit-cblob-meta-v1}, \mathrm{le}_{64}(s) \cc \mathrm{le}_{32}(z))$
+and $L_{i+1} = c_i$, and id $\mathrm{id}(B) =
+\D\bigl(\str{kit.chunked\textbackslash 0},\, \BMT(L_0, \dots, L_K)\bigr)$.
+Chunk $i$ sits at position $i+1$.
+\end{definition}
+
+The \emph{inner root} of a Merkle object is its $\BMT$ value before the outer
+wrap. Binding $N$ stops a tree of $N$ leaves from colliding with one of $N+1$
+leaves whose last leaf repeats. The outer wrap makes ids type-distinct: without
+it, an empty tree and an empty chunked blob, or a one-entry tree and a one-chunk
+blob over the same child, could share an id. The metadata leaf binds $s$ and
+$z$, which the chunk list does not determine, and the length prefix in a tree
+leaf stops $(\str{ab}, m, h)$ and $(\str{a}, m, \str{b} \cc h')$ from aliasing.
+The empty tree's pinned id \texttt{b29117ce\ldots 6f27ef7} matches our
+recomputation from \cref{def:bmt,def:tree}. The construction equals
+\texttt{commonware\_storage::bmt}~\cite{commonware}; \kit{} computes it over the
+\texttt{blake3} crate so that object identity compiles to \texttt{wasm32}, and a
+native test cross-checks the roots. \Cref{tab:tags} lists the domain tags and
+magics. SPEC-CONVENTIONS \S4 requires every tag, magic and predicate URI to be
+unique, and a test scans every crate for duplicate definitions.
+
+\begin{table}[t]
+\centering\small\setlength{\tabcolsep}{4pt}
+\caption{Domain tags and magics on the verification paths of this paper. Their
+bytes never change (SPEC-CONVENTIONS \S4).}
+\label{tab:tags}
+\begin{tabular}{@{}lp{1.9in}r@{}}
+\toprule
+Value & Use & Bytes \\
+\midrule
+\str{kit.commit\textbackslash 0}, \str{kit.remix\textbackslash 0}, \str{kit.tag\textbackslash 0} & signing digests (SPEC-SIGNING \S2) & 11, 10, 8 \\
+\str{kit.tree\textbackslash 0}, \str{kit.chunked\textbackslash 0} & Merkle id wraps (SPEC-MERKLE-OBJECTS \S2) & 9, 12 \\
+\str{kit-tree-entry-v1}, \str{kit-cblob-meta-v1} & entry and chunk-metadata leaves & 17, 17 \\
+\str{DSSEv1\ } & DSSE pre-authentication encoding & 7 \\
+\midrule
+\bytes{KOB1}, \bytes{KDPB}, \bytes{KDSP}, \bytes{KCLM} & object, bundle, span, closure manifest magics & 4 each \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  every node/.style={font=\footnotesize},
+  nd/.style={draw, rounded corners=2pt, minimum height=4.5mm, inner sep=2pt},
+  pth/.style={nd, very thick, draw=kitprimary},
+  sib/.style={nd, fill=kittint, dashed, very thick, draw=kitprimary},
+  ar/.style={-{Stealth[length=1.6mm]}}]
+  \def\dx{2.75}\def\dy{0.78}
+  \foreach \i in {0,1,2,3} {
+    \node[nd] (e\i) at (\i*\dx,0) {$(\mathit{name}_\i, \mathit{mode}_\i, h_\i)$};
+    \node[nd] (l\i) at (\i*\dx,\dy) {$L_\i$};
+    \draw[ar] (e\i) -- (l\i);
+  }
+  \node[nd]  (n0) at (0,2*\dy) {$n_0$};
+  \node[nd]  (n1) at (\dx,2*\dy) {$n_1$};
+  \node[pth] (n2) at (2*\dx,2*\dy) {$n_2$};
+  \node[sib] (n3) at (3*\dx,2*\dy) {$n_3$};
+  \foreach \i in {0,1,2,3} { \draw[ar] (l\i) -- (n\i); }
+  \node[sib] (p01) at (0.5*\dx,3*\dy) {$p_{01}$};
+  \node[pth] (p23) at (2.5*\dx,3*\dy) {$p_{23}$};
+  \draw[ar] (n0) -- (p01); \draw[ar] (n1) -- (p01);
+  \draw[ar] (n2) -- (p23); \draw[ar] (n3) -- (p23);
+  \node[pth] (t) at (1.5*\dx,4*\dy) {$t$};
+  \draw[ar] (p01) -- (t); \draw[ar] (p23) -- (t);
+  \node[pth] (r) at (1.5*\dx,5*\dy) {inner root $r = \Hb(\mathrm{be}_{32}(4) \cc t)$};
+  \draw[ar] (t) -- (r);
+  \node[pth] (id) at (1.5*\dx,6*\dy) {$\mathrm{id}(T) = \D(\str{kit.tree\textbackslash 0}, r)$};
+  \draw[ar] (r) -- (id);
+  \foreach \y/\t in {1/{$\D(\str{kit-tree-entry-v1}, \ldots)$},
+                     2/{$\Hb(\mathrm{be}_{32}(i) \cc L_i)$},
+                     3/{$\Hb(\mathit{left} \cc \mathit{right})$},
+                     4/{$\Hb(p_{01} \cc p_{23})$}}
+    \node[anchor=west, font=\scriptsize] at (3*\dx+0.6,\y*\dy) {\t};
+\end{tikzpicture}
+\caption{A four-entry tree id. The proof that entry~2 belongs to
+$\mathrm{id}(T)$ carries the shaded siblings $n_3$ and $p_{01}$ in level-major
+order; its wire bytes are
+$\mathrm{be}_{32}(4) \cc \mathrm{varint}(2) \cc n_3 \cc p_{01}$. The verifier
+recomputes the thick nodes, wraps $r$ and compares the result with the id it
+trusts, never with a bare $r$.}
+\label{fig:tree}
+\end{figure}
+
+\paragraph{Inclusion proofs.}
+A proof is a leaf count and a list of sibling digests, encoded as
+$\mathrm{be}_{32}(N) \cc \mathrm{varint}(n) \cc s_1 \cc \dots \cc s_n$
+(SPEC-MERKLE-OBJECTS \S5.2). Siblings are listed bottom-up, by ascending index
+within a level, and omitted when a node pairs with itself or when the proof
+already reconstructs them. The decoder rejects more than
+$\mathit{max\_items} \times 32$ siblings before reading any, where
+$\mathit{max\_items}$ is the number of positions to verify, and rejects
+trailing bytes. The verifier folds the leaf to an inner root, wraps it with the
+type domain and compares the result with the trusted id; comparing with a bare
+inner root is an error that a golden rejection vector pins
+(SPEC-MERKLE-OBJECTS \S5.4). A proof over zero positions, a repeated position, a
+position $\ge N$, or a chunk proof at position~0 (the metadata leaf) is
+rejected. \Cref{fig:tree} shows one proof. The proofs are byte-identical to
+\path{commonware_storage::bmt::Proof} at release 2026.9.0, which the
+property test \texttt{merkle::tests::proofs\_match\_commonware} pins
+(VERIFY \S5).
+
+\paragraph{Content-defined chunking.}
+Files larger than 1~MiB are split with FastCDC~\cite{fastcdc}, using a gear
+table seeded from \str{KITFCDC} and min/avg/max = 16/64/256~KiB
+(SPEC-FASTCDC \S4). Each chunk is a blob, and a chunked blob with $z = 0$
+enters the parent tree. Two conformant chunkers produce the same boundaries and
+id. The representation is not unique: readers accept a large file stored as one
+blob or under another valid layout (SPEC-FASTCDC \S1, SPEC-OBJECTS \S7), so the
+same bytes can have more than one id. Equal ids allow a fast path; otherwise
+\kit{} compares file content by bytes.
+
+% ---------------------------------------------------------------------------
+\section{Signing and attestations}\label{sec:signing}
+
+\paragraph{The signed digest.}
+A commit's \emph{signing bytes} are its prologue, tree id, parent count and
+ids, author identity, length-prefixed message, timestamp and signer key
+(SPEC-SIGNING \S3). The signature and the two annotation slots
+\texttt{message\_hash} and \texttt{content\_digest} are excluded. The signer
+signs, with PureEdDSA, the 32-byte digest
+\begin{equation}\label{eq:sig}
+  \mu_{\text{commit}} = \D\bigl(\str{kit.commit\textbackslash 0},\;
+  \mathit{signing\_bytes}\bigr).
+\end{equation}
+Remixes and tags use \str{kit.remix\textbackslash 0} and
+\str{kit.tag\textbackslash 0} (SPEC-SIGNING \S4, \S4a). The domains have
+lengths 11, 10 and 8, so the length prefix alone separates them, and the
+strings also differ at byte~4 (SPEC-SIGNING \S5). Signing a fixed-size digest
+lets an external signer such as a hardware token handle 32 bytes for any
+object size. The annotation slots are inside the commit id but outside the
+signature: the id check authenticates them and the signature says nothing about
+them (VERIFY \S2). The author identity is an attribution claim independent of
+the signer key, and a verifier must not accept a signature because the two
+match (SPEC-SIGNING \S6).
+
+\paragraph{Verification and trust.}
+Verification rebuilds the signing bytes, computes the digest and applies the
+predicate of A2, always with the object's own signer key (SPEC-SIGNING \S6).
+Every Ed25519 check in \kit{} calls one implementation of that predicate,
+\texttt{kit\_core::sign::verify\_ed25519}, written over
+\texttt{curve25519-dalek}.
+\texttt{kit commit} always signs and stops with an error when no signer is
+configured; the commit layout has no unsigned variant. An annotated tag from
+\texttt{kit tag -a} carries an all-zero signature, which fails verification; a
+signed tag comes from \texttt{kit tag -s}. \kit{} separates two checks.
+\emph{Signature valid}: \texttt{kit verify}, push verification and fetch
+verification check that the embedded key produced the signature, which an
+adversary's own key also passes. \emph{Signer trusted}: \texttt{kit verify
+--trusted} (or \texttt{--trust-roots}) also looks the key up in the trust roots
+and fails closed when it is absent (SPEC-SIGNING \S6.1). The trust-roots parser
+is hand-written, rejects the whole file on an unknown key or kind, and treats a
+missing file as an empty registry under which nothing is trusted
+(SPEC-ATTESTATIONS \S6.5).
+
+\paragraph{Attestations.}
+\kit{} records claims about a commit as in-toto v1 Statements~\cite{intoto} in
+DSSE envelopes~\cite{dsse} with payload type
+\texttt{application/vnd.in-toto+json} (SPEC-ATTESTATIONS). Statement and
+envelope are serialized with RFC~8785 JCS~\cite{rfc8785}, and the strict
+decoder accepts only the bytes the encoder emits. \texttt{subject[0].digest}
+carries the commit id under \texttt{blake3} and a \texttt{sha256} digest of the
+same commit bytes, for tools that read only SHA-256 subjects. DSSE signs
+$\mathrm{PAE}(\mathit{type}, \mathit{payload}) = \str{DSSEv1}\,\mathrm{SP}\,
+|\mathit{type}|\,\mathrm{SP}\,\mathit{type}\,\mathrm{SP}\,
+|\mathit{payload}|\,\mathrm{SP}\,\mathit{payload}$ with decimal lengths. An
+attestation's id is $\Hb(\text{envelope bytes})$, and an envelope is capped at
+1~MiB before allocation. The verifier decodes strictly and rejects a first
+subject whose \texttt{blake3} digest is not the commit being checked, before it
+checks any signature; the directory an envelope is stored under is not
+evidence (\texttt{libkit/src/attestation.rs}). It looks up each key id in the
+trust roots (Ed25519 with strict verification, P-256 or secp256k1). An
+envelope verifies if one signature from a trusted key verifies; there is no
+N-of-M policy. A valid attestation shows that a trusted key signed a predicate
+about the commit, not that the predicate is true. Push and fetch do not move
+attestations; only the git bridge publishes its own on a ref.
+
+% ---------------------------------------------------------------------------
+\section{Verifiable disclosure}\label{sec:disclosure}
+
+A disclosure bundle proves that one path, chunk or byte range belongs to a
+commit (SPEC-DISCLOSURE, \emph{draft-normative}, version~4). The verifier takes
+a trusted commit id and the bundle and nothing else. It proves inclusion only:
+not that nothing else exists under a directory, and not who holds the signing
+key (SPEC-DISCLOSURE \S1).
+
+\paragraph{Bundle format.}
+A bundle (wire version~2) holds the magic \bytes{KDPB}, a version byte, the
+commit id, the commit bytes ($\le 4$~MiB), at most 128 steps, root first, and a
+payload (SPEC-DISCLOSURE \S3). Fixed-width integers are big-endian and lengths
+are LEB128 varints. A step carries an entry name, mode, child id, the parent
+tree's bare inner root, the entry's position and a single-leaf proof. The
+payload is \emph{Object} (the leaf's canonical bytes; a tree when the path is
+empty), \emph{Chunk} (total size, chunk-size field, index, inner root, a proof
+over positions $\{0, i+1\}$ and the chunk bytes), or \emph{Range} (an optional
+chunk header with the chunk id, an offset and length, a Bao slice, and optional
+length proofs for preceding chunks). A Bao slice covers the canonical blob
+bytes, so the Bao root is the blob id and content offset $o$ is Bao offset
+$o + 10$ (prologue plus length field). A length proof is a Bao slice over bytes
+$0..10$ of a preceding chunk; it authenticates that chunk's \texttt{le32}
+length without its content (SPEC-DISCLOSURE \S4.1). Length proofs for all
+chunks $0..i-1$ yield an absolute file offset.
+
+\begin{figure}[t]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
+  every node/.style={font=\footnotesize},
+  box/.style={draw, rounded corners=2pt, minimum height=5mm, inner sep=2pt, align=center, minimum width=3.4cm},
+  ar/.style={-{Stealth[length=1.6mm]}},
+  lab/.style={font=\scriptsize, align=left, anchor=west, text width=10.4cm}]
+  \def\dy{1.05}
+  \node[box, very thick, draw=kitprimary, fill=kittint] (c) at (0,0) {trusted commit id $c^\star$};
+  \node[box] (cb) at (0,-1*\dy) {commit bytes (tree id, signer)};
+  \node[box] (s1) at (0,-2*\dy) {step 1: \texttt{src}, $r_1$, $\pi_1$};
+  \node[box] (s2) at (0,-3*\dy) {step 2: \texttt{lib.rs}, $r_2$, $\pi_2$};
+  \node[box] (bl) at (0,-4*\dy) {leaf blob id};
+  \node[box] (pl) at (0,-5*\dy) {disclosed bytes};
+  \draw[ar] (cb) -- (c);  \draw[ar] (s1) -- (cb); \draw[ar] (s2) -- (s1);
+  \draw[ar] (bl) -- (s2); \draw[ar] (pl) -- (bl);
+  \node[lab] at (2.1,-0.5*\dy) {\emph{recompute hash}: $\Hb(\text{commit bytes}) = c^\star$};
+  \node[lab] at (2.1,-1.5*\dy) {\emph{check domain wrap}: $\D(\str{kit.tree\textbackslash 0}, r_1) =$ tree id;
+     \emph{recompute Merkle root}: $\pi_1$ folds the entry leaf to $r_1$};
+  \node[lab] at (2.1,-2.5*\dy) {\emph{check domain wrap}: $\D(\str{kit.tree\textbackslash 0}, r_2) =$ child id of step 1;
+     \emph{recompute Merkle root}: $\pi_2$ folds to $r_2$};
+  \node[lab] at (2.1,-3.5*\dy) {the leaf id is the child id of step 2 (mode blob)};
+  \node[lab] at (2.1,-4.5*\dy) {\emph{decode Bao slice} against the blob id at offset $o+10$};
+\end{tikzpicture}}
+\caption{Disclosure verification chain for a byte range of \texttt{src/lib.rs}.
+Each arrow binds the lower value to the upper one, which is already
+authenticated. The chain ends at $c^\star$, the only trusted input. The output
+is the authenticated path $[(\texttt{src}, \text{tree}), (\texttt{lib.rs},
+\text{blob})]$, the leaf id and the bytes.}
+\label{fig:chain}
+\end{figure}
+
+\paragraph{Verification algorithm.}
+\Cref{alg:disclosure} restates the numbered requirements of SPEC-DISCLOSURE
+\S4, and \cref{fig:chain} shows the chain it checks. Size is checked before
+decoding, the header as raw bytes before the codec body, and the hash that
+binds everything to the caller's input, $\Hb(\text{commit bytes}) = c^\star$,
+before any structure is interpreted. Each step is checked against the previous
+step's output, never against an independently supplied root. The verifier first
+checks that the declared inner root wraps to the expected id, then requires the
+proof to fold to exactly that inner root; a bundle fails if either check fails,
+even when the other passes. The inner root is carried so that a verifier built
+on the upstream commonware proof type can run its unmodified
+\texttt{verify\_element\_inclusion} after the wrap check; it adds no trust
+anchor (VERIFY \S5).
+
+\begin{algorithm}[t]
+\caption{Disclosure verification (after SPEC-DISCLOSURE \S4).}\label{alg:disclosure}
+\begin{lstlisting}[style=kitalgo]
+VerifyDisclosure(c*, B):
+  if |B| > 64 MiB: reject                     # before any decode
+  if B[0..4] != "KDPB" or B[4] != 2: reject   # raw header; v1, v3 are typed errors
+  decode body; bound every Vec before allocation; reject trailing bytes
+  if B.commit_id != c*: reject                # fast sanity check
+  if H(B.commit_bytes) != c*: reject          # the binding step
+  obj := strict_decode(B.commit_bytes); require obj is Commit or Remix
+  expected := obj.tree_hash; if len(B.steps) > 128: reject
+  for i, s in enumerate(B.steps):
+    validate_name(s.name)                     # SPEC-OBJECTS 4.1
+    if D("kit.tree\0", s.inner_root) != expected: reject InnerRootMismatch
+    leaf := D("kit-tree-entry-v1", le32(|s.name|) || s.name || s.mode || s.child_id)
+    if fold(leaf, s.position, s.proof) != s.inner_root: reject
+    if i is not last and s.mode != Tree: reject
+    expected := s.child_id
+  path := [(s.name, s.mode) for s in B.steps]; leaf_id := expected
+  Object: id_of(strict_decode(bytes)) == leaf_id
+  Chunk:  D("kit.chunked\0", inner_root) == leaf_id
+          meta := D("kit-cblob-meta-v1", le64(total) || le32(cs))  # computed here
+          multi-proof {0: meta, i+1: H(bytes)} folds to inner_root
+  Range:  len > 0; [chunk header: as Chunk, with chunk_id in place of H(bytes)]
+          Bao slice at offset o+10, length len, against blob or chunk id
+          length proofs: empty, or exactly indices 0..i-1, each verified
+  return (path, leaf_id, payload, offsets, signer, signature_valid)
+\end{lstlisting}
+\end{algorithm}
+
+\paragraph{Bounds before allocation.}
+A hostile prover controls every length field, and none sizes an allocation
+before it is checked against a fixed cap (VERIFY \S6, SPEC-DISCLOSURE \S5):
+64~MiB per bundle, 4~MiB of commit bytes, 128 steps, 1 to 255 name bytes,
+$\mathit{max\_items} \times 32$ siblings per proof (checked before any sibling
+is read), 1~GiB per object or chunk payload, $10^6$ length proofs and 8~KiB per
+length-proof slice. A proof's leaf count is compared, never used to size an
+allocation. The 64~MiB bundle cap is checked first, so it binds before the
+1~GiB payload cap.
+
+\paragraph{Return what was proved.}
+The verifier never trusts a path, offset, position or length from the prover.
+It returns what it proved: the authenticated path as (name, mode) pairs, the
+leaf id, the offset, the chunk index, and the absolute offset when length
+proofs cover all preceding chunks (VERIFY \S2). The caller compares these with
+its request. A bundle that discloses \texttt{README.md} when the caller asked
+for \texttt{secrets.env} verifies, and the caller must notice that the path
+differs; \texttt{kit verify-proof --expect-path} does this and fails closed
+with exit code 65. The result also reports the signer and whether the
+signature is valid under the embedded key. The library reports an invalid
+signature rather than rejecting the bundle; \texttt{kit verify-proof} fails on
+it only with \texttt{--trusted}, which also requires a trusted signer
+(\texttt{kit-bin/src/commands/verify\_proof.rs}).
+
+\paragraph{Ranges across chunks.}
+A KDPB range lies inside one blob or chunk. The KDSP container
+(SPEC-DISCLOSURE \S8) proves a range across chunk boundaries by wrapping an
+unchanged KDPB anchor range, which proves the absolute offset of the first
+chunk, and whole-chunk KDPB bundles for consecutive chunks, with 19 ordered
+reject reasons. \texttt{kit-core} implements it and the wasm build uses it;
+\texttt{kit prove --range} rejects a range that crosses a boundary.
+
+% ---------------------------------------------------------------------------
+\section{Closure verification}\label{sec:closure}
+
+Disclosure answers ``is this in the commit?''; a closure answers ``did you send
+all of it?'' (SPEC-DISCLOSURE \S7). The verifier takes a trusted root id (a
+commit, remix or tag) and a set of objects, usually raw packs plus a manifest,
+and checks that every object reachable from the root is present and re-hashes
+to its id.
+
+\paragraph{Modes.}
+$\mathrm{children}(o, m)$ defines what an object references in mode $m$. A
+commit or remix references its tree, and its parents only in \emph{history}
+mode; a tree its entries; a chunked blob its chunks; a tag its target. A remix's
+foreign \texttt{sources} and a delta's base are never followed. \emph{Snapshot}
+mode, the default, covers the root and its tree closure; history mode adds
+every ancestor and its tree, the set that push and fetch ship.
+
+\paragraph{Raw-only packs and the manifest.}
+A closure pack holds raw (\texttt{0x00}) entries only. The verifier scans entry
+types before any decompression and rejects a delta or compressed entry as a
+profile violation naming the pack and entry, so a build without zstd and
+without an object store, such as the wasm verifier, can check a closure. The
+manifest (\bytes{KCLM}) holds a version, the root, the mode and up to 65,536
+pack keys, each BLAKE3 over a whole pack. It only locates packs: the verifier
+takes the root from its caller, rejects a manifest with another root
+(\texttt{ClosureRootMismatch}), and requires the pack keys to match the packs
+in order.
+
+\paragraph{Outcomes.}
+The report lists \emph{missing} ids (reached, but no bytes supplied),
+\emph{corrupt} bytes (do not deserialize, keyed by their BLAKE3; or, on a
+fetch-by-id path, bytes whose id differs from the requested id) and
+\emph{unreferenced} objects (deserialize, never reached; reported only when the
+supplied set can be enumerated, \texttt{unreferenced\_checked}) (VERIFY \S3).
+The closure is complete when \emph{missing} and \emph{corrupt} are empty;
+unreferenced extras are allowed because a provider may serve a superset. On the
+map path, a bit-flipped object that still deserializes gets a different id and
+surfaces as \emph{missing} plus \emph{unreferenced}, not as \emph{corrupt}. The
+verifier reuses the pack caps (10,000,000 entries and 4~GiB of payload per
+pack), the 1~GiB object cap and the object decoder's caps
+(SPEC-DISCLOSURE \S7.5). \Cref{alg:closure} summarizes the map path.
+
+\begin{algorithm}[t]
+\caption{Closure verification over an id-to-object map (after SPEC-DISCLOSURE \S7.4).}\label{alg:closure}
+\begin{lstlisting}[style=kitalgo]
+VerifyClosure(r*, m, manifest, packs):
+  decode manifest strictly; require manifest.root == r*; require pack keys match
+  for each pack: scan entry types; any delta or compressed entry -> reject
+  require total objects <= 10,000,000; M := {}; corrupt := []
+  for each supplied entry b:
+    o := strict_decode(b) or (corrupt += H(b); continue)
+    M[id_of(o)] := o                          # flat: H(b); Merkle: wrapped BMT root
+  missing := []; seen := {r*}; queue := [r*]  # BFS from the trusted root only
+  while queue: x := pop(queue)
+    if x not in M: missing += x; continue
+    for y in children(M[x], m): if y not in seen: seen += y; push(queue, y)
+  unreferenced := keys(M) - seen
+  return complete = (missing == [] and corrupt == []), missing, corrupt, unreferenced
+\end{lstlisting}
+\end{algorithm}
+
+% ---------------------------------------------------------------------------
+\section{Security analysis}\label{sec:security}
+
+The arguments below are informal and not machine-checked. They reduce a failure
+to a BLAKE3 collision or an Ed25519 forgery. We fix an \emph{honest state}: the
+repository content $S$ the author committed, with commit object $C$ and
+$c^\star = \Hb(\beta(C))$.
+
+\begin{lemma}[Encoding injectivity]\label{lem:inj}
+Every hash input in \cref{eq:dd} and \cref{def:flat,def:bmt,def:tree,def:chunked}
+is a fixed layout of fixed-width and length-prefixed fields, so distinct field
+tuples give distinct inputs; and strict parsing gives each accepted object
+exactly one encoding.
+\end{lemma}
+\begin{proof}[Sketch]
+A length precedes each variable-length field and every other field has a fixed
+width, so the bytes determine the fields. In \cref{eq:dd},
+$\mathrm{le}_{16}(|d|) \cc d$ is self-delimiting. Rejecting trailing bytes,
+unsorted or repeated entries and non-minimal varints leaves one encoding per
+object.
+\end{proof}
+
+\begin{lemma}[BMT binding]\label{lem:bmt}
+Under A1, no efficient adversary finds distinct leaf sequences with equal
+$\BMT$ values. If a proof for position $p$ folds leaf $L$ to
+$\BMT(L_0, \dots, L_{N-1})$, then $L = L_p$ unless a collision was found.
+\end{lemma}
+\begin{proof}[Sketch]
+$\Hb(\mathrm{be}_{32}(N) \cc t) = \Hb(\mathrm{be}_{32}(N') \cc t')$ with
+distinct inputs is a collision, so $N = N'$ and $t = t'$, and $N$ fixes the
+tree shape. Descending, equal parents give equal children or a collision; at
+level~0, $\Hb(\mathrm{be}_{32}(i) \cc L_i) = \Hb(\mathrm{be}_{32}(i) \cc L'_i)$
+gives $L_i = L'_i$ or a collision. For a proof, the verifier derives the path
+from $(N, p)$, rejects $p \ge N$ and consumes each sibling once; the same
+descent along the path gives $L = L_p$ or a collision.
+\end{proof}
+
+\begin{proposition}[Disclosure binds bytes to the commit]\label{prop:disclosure}
+Assume A1 and A3. If \cref{alg:disclosure} accepts $B$ against $c^\star$ and
+returns path $\pi = [(n_1, m_1), \ldots, (n_k, m_k)]$, leaf id $\ell$ and bytes
+$x$, then, unless a BLAKE3 collision was found, $S$ has a path
+$n_1/\cdots/n_k$ with modes $m_1, \ldots, m_k$ ending at $\ell$, and $x$ is the
+canonical bytes of $\ell$ (\emph{Object}); chunk $i$ of $\ell$, with the
+returned total size and chunk-size field (\emph{Chunk}); or the content at the
+returned offset and length of the blob $\ell$ or of its chunk $i$
+(\emph{Range}). A returned absolute offset is the offset of $x$ in the file.
+\end{proposition}
+\begin{proof}[Sketch]
+Line~6 gives $\Hb(\text{commit bytes}) = \Hb(\beta(C))$, so the commit bytes
+are $\beta(C)$, and the tree id, signer and signature are those of $C$. Induct
+over steps with the invariant ``\emph{expected} is the id of the tree at
+$n_1/\cdots/n_j$ in $S$''. The wrap check and \cref{lem:inj} make $r_j$ the
+honest inner root; the fold check and \cref{lem:bmt} make the recomputed leaf
+the honest leaf at $p_j$; \cref{lem:inj} on the leaf domain makes
+$(n_j, m_j, \mathit{child}_j)$ the honest entry; the mode check keeps every
+non-final child a tree. For \emph{Object}, $\mathrm{id}(x) = \ell$ pins the
+flat bytes, or the Merkle leaves and so, by canonical encoding, the bytes. For
+\emph{Chunk}, the wrap check and a multi-proof whose metadata leaf the verifier
+computes itself make, by \cref{lem:bmt}, the total size, the chunk-size field
+and $\Hb(x)$, the chunk id, honest. For \emph{Range}, the Bao root is $\Hb$ of
+the canonical bytes, and a slice that decodes to other bytes gives a collision
+of BLAKE3 or its chaining values (A1). Each length proof pins the
+\texttt{le32} length of a chunk whose id is bound to its position, and the set
+must cover exactly $0..i-1$, so the absolute offset is the honest sum.
+\end{proof}
+
+\begin{remark}
+\Cref{prop:disclosure} concerns the authenticated path, not the requested one.
+It says nothing about absence, and its signature output states only validity
+under the key in $C$.
+\end{remark}
+
+\begin{proposition}[A complete closure contains every reachable object]\label{prop:closure}
+Assume A1 and A3. Let $R_m(r^\star)$ be the ids reachable from the root
+$r^\star$ of $S$ under $\mathrm{children}(\cdot, m)$. If \cref{alg:closure}
+reports \emph{complete}, then for every $x \in R_m(r^\star)$ the supplied set
+holds an object $o$ with $\mathrm{id}(o) = x$, and $o$ is the honest object of
+$S$ with id $x$, unless a BLAKE3 collision was found.
+\end{proposition}
+\begin{proof}[Sketch]
+$M$ keys each object by its recomputed id, never by a server-given name, and
+the walk starts at the caller's $r^\star$, not at the manifest root. Induct on
+breadth-first depth. Completeness means $M[r^\star]$ exists, and
+$\mathrm{id}(M[r^\star]) = r^\star$ makes it the honest root or yields a
+collision (\cref{lem:inj}; \cref{lem:bmt} for a Merkle type). If a visited
+object is honest, $\mathrm{children}$, a deterministic function of it, returns
+the honest children; each is in $M$, and then honest by the same argument, or
+reported missing. An empty \emph{missing} list therefore means every
+$x \in R_m(r^\star)$ was found.
+\end{proof}
+
+The proposition covers what $\mathrm{children}$ follows: parents only in
+history mode, never remix sources or delta bases. It says nothing about the
+signer or about whether the history is the latest.
+
+\begin{proposition}[Signature non-replay across domains]\label{prop:replay}
+Assume A1 and A2. An adversary that obtains signatures under an honest key
+$\mathit{pk}$ on commits, remixes, tags and DSSE envelopes of its choice cannot
+output an object or envelope that verifies under $\mathit{pk}$ in its own
+domain unless $\mathit{pk}$ signed exactly that message, except with the
+probability of an Ed25519 forgery or a BLAKE3 collision.
+\end{proposition}
+\begin{proof}[Sketch]
+For the object domains, the signed message is
+$\mu = \D(d_t, \mathit{signing\_bytes})$, and the hash inputs begin with
+$\mathrm{le}_{16}(|d_t|) \cc d_t$ for lengths 11, 10 and 8, so inputs in
+different domains differ before any adversary-chosen byte. Equal digests across
+domains, or within one domain for different signing bytes (\cref{lem:inj}), are
+a BLAKE3 collision. A DSSE message is a PAE string; the verifier requires the
+28-byte payload type \texttt{application/vnd.in-toto+json}, so an accepted PAE
+has at least $7 + 2 + 1 + 28 + 1 + 1 + 1 = 41$ bytes, while every object-domain
+message has 32. These message sets are disjoint with no hash assumption. A
+signature on a message $\mathit{pk}$ never signed is an Ed25519 forgery (A2).
+The predicate rejects a second encoding of $A$, $R$ or $S$, and a new $R$
+changes $k$, so a third party cannot change the signature bytes, and with them
+the commit id, of a signed commit while keeping it valid~\cite{taming}. Only
+the key holder can produce a second valid signature, as with any signature
+scheme.
+\end{proof}
+
+The proposition does not cover a key also used for SSH authentication, whose
+messages \kit{} does not control; SPEC-SIGNING \S8 states that cross-protocol
+separation is not analyzed and recommends separate keys until it is. P-256 and
+secp256k1 attestation keys never sign object digests.
+
+\paragraph{Batch verification.}
+Clone, pull and fetch check many signatures at once. A randomized batch check
+agrees with single checks only if both use the same equation: a cofactorless
+single check rejects a signature whose $R$ carries an 8-torsion point, while a
+cofactorless batch accepts it whenever that entry's weight is a multiple of~8.
+SPEC-SIGNING \S1 therefore uses the cofactored equation in both, and keeps the
+checks on encodings, small order and $S$ per entry, where a batch cannot
+change their outcome. The batch draws its 128-bit weights fresh from the
+operating system for every call, so whoever assembled the batch cannot
+predict them. A batch of valid entries always passes; a batch with an invalid
+entry passes with probability about $2^{-128}$. The golden vectors in
+\texttt{rust/tests/golden/ed25519/} pin the verdict on torsion components,
+small-order points, non-canonical encodings and a non-canonical $S$, in Rust
+and in two independent Python transcriptions, and the
+\texttt{ed25519\_batch} fuzz target checks that batch and single verdicts
+agree.
+
+% ---------------------------------------------------------------------------
+\section{Assurance}\label{sec:assurance}
+
+\paragraph{Golden vectors and an independent reference.}
+Each directory under \texttt{rust/tests/golden/} holds byte-exact vectors for
+one format, with \texttt{.json} sidecars and a \texttt{MANIFEST.txt} that pins
+each vector's BLAKE3 (\texttt{rust/tests/golden/README.md}). Each set passes a
+Rust test in the owning crate, which reads only the committed files, and a
+Python check in \texttt{scripts/golden} that shares no code with the Rust
+crates and reads only the specification. Every Python check uses a pure-Python
+BLAKE3, and two also compare it with the official \texttt{b3sum}. The object,
+proof, disclosure and closure checks implement Ed25519 from RFC~8032; the grant
+and part-upload checks use the pinned \texttt{pycryptodome} and \texttt{ecdsa}
+packages. \texttt{scripts/check-golden.sh} checks every manifest and runs each
+check under \texttt{python -I -B}. Two directories, \texttt{blame-stash} and
+\texttt{diff-merge}, hold text output that no specification defines and have
+no reference check.
+
+For the verifiers of this paper the corpus holds 10 accepting and 18 rejecting
+disclosure vectors, 12 accepting and 7 rejecting proof vectors, and 13 closure
+vectors: 4 complete (one with an unreferenced extra), 3 incomplete (missing
+chunk, corrupt blob, wrong root) and 6 rejected (delta entry, compressed entry,
+pack-hash mismatch, manifest root mismatch, manifest version~2, manifest
+trailing byte). Disclosure rejections include a forged inner root, swapped steps,
+a forged total size, a Bao slice at the wrong offset, 129 steps and commit bytes
+that decode to a tag. We counted these from the sidecars' \texttt{expect} fields and ran the
+\texttt{objects}, \texttt{proofs}, \texttt{disclosure} and \texttt{closure}
+reference checks; each printed \texttt{OK}.
+
+\paragraph{Fuzzing.}
+\texttt{rust/fuzz/fuzz\_targets} holds 59 targets, which we counted (docs/FUZZ.md
+lists the same 59). Each runs as a unit-test harness on stable Rust in CI, and
+the same bodies run under libFuzzer. Targets on the paths of this paper include
+\texttt{merkle\_proof}, \texttt{disclosure\_decode},
+\texttt{verify\_disclosure}, \texttt{span\_decode}, \texttt{verify\_span},
+\texttt{verify\_closure}, \texttt{tree}, \texttt{pack},
+\texttt{pack\_entries}, \texttt{envelope\_decode} and
+\texttt{trust\_roots\_parse}. FUZZ.md states that every public function that
+decodes or parses bytes or text has a target or a written reason why not.
+
+\paragraph{Formal models.}
+docs/FORMAL.md labels each result \emph{exhaustive (finite instance)} (TLC~\cite{tlc}),
+\emph{bounded (length $k$)} (Apalache~\cite{apalache}), \emph{bounded (input
+size)} (Kani~\cite{kani}), \emph{simulated} (\texttt{quint run}~\cite{quint}) or
+\emph{tested}, and states that ``Bounded'' never means ``proved'' and that no
+result is a proof for unbounded inputs. Each invariant has a mutant, a canary
+or a Kani \texttt{should\_panic} harness that the checker must flag. Merkle
+proof decode, fold and builder round trip are \emph{bounded} (0 to 2 siblings,
+leaf counts up to 8); object deserializers are \emph{bounded} (bodies up to 12
+bytes); ref compare-and-swap is \emph{exhaustive} on two slices of 3.4M and
+3.5M states and \emph{bounded} (length 8) on the full operation space; history
+publication and crash recovery are \emph{exhaustive} over 200,388 states, with
+the liveness property \texttt{IntentEventuallyCleared} over 400,776 states. The
+checks found defects that were fixed in code with regression tests: Kani found
+that the range-proof builder returned the all-default proof for the empty tree,
+where SPEC-MERKLE-OBJECTS \S5.4 requires a refusal, and the scrub model found a
+boundary error at exactly 604,800~s. They also corrected specification text.
+FORMAL.md states the limits: Kani replaces BLAKE3 with a deterministic mixer;
+only the refs model is replayed against the code, for 5 sampled traces; garbage
+collection and the git-bridge locks are not modelled; and the results trust
+Quint, Apalache, TLC and CBMC. No model covers
+\cref{prop:disclosure,prop:closure,prop:replay}.
+
+% ---------------------------------------------------------------------------
+\section{Evaluation}\label{sec:eval}
+
+\paragraph{Method.}
+We measured every accepting vector in \texttt{rust/tests/golden/disclosure/} by
+decoding it with \texttt{decode\_bundle} from
+\texttt{scripts/golden/disclosure\_ref.py} and summing each field
+(\cref{app:repro}). Totals equal the file sizes and the sidecars'
+\texttt{size} fields. The fixture has a 279-byte signed commit, a 5-entry root
+tree and a 1,048,577-byte file that FastCDC splits into 15 chunks.
+
+\begin{table}[!htb]
+\centering\footnotesize\setlength{\tabcolsep}{3pt}
+\caption{Accepting disclosure vectors, in bytes. ``Sibl.'' lists sibling
+digests per step. ``Payload'' is canonical object or chunk bytes, or a Bao
+slice; for \texttt{with\_offsets} the second figure is its one length proof.
+Every bundle also holds a 5-byte header, the 32-byte commit id and the 279-byte
+commit with a 2-byte length.}
+\label{tab:sizes}
+\begin{tabular}{@{}lrrlrl@{}}
+\toprule
+Vector & Total & Steps & Sibl. & Payload & Kind (chunk proof) \\
+\midrule
+\texttt{root\_tree}                 &    558 &   0 & --      &    236 & object \\
+\texttt{executable\_file}           &    527 & 178 & 3       &     28 & object \\
+\texttt{shallow\_file}              &    533 & 182 & 3       &     30 & object \\
+\texttt{nested\_file\_3levels}      &    635 & 272 & 1, 0, 0 &     42 & object \\
+\texttt{small\_blob\_range\_last\_partial\_block} & 1,114 & 180 & 3 & 594 & range, 512 B \\
+\texttt{small\_blob\_range\_first\_block}  & 2,138 & 180 & 3 & 1,618 & range, 1,024 B \\
+\texttt{small\_blob\_range\_whole}  &  2,138 & 180 & 3       &  1,618 & range, 1,536 B \\
+\texttt{chunked\_range\_no\_offsets}   & 2,087 & 182 & 3   &  1,352 & range, 64 B (4 sibl.) \\
+\texttt{chunked\_range\_with\_offsets} & 3,610 & 182 & 3   & 1,352 + 1,523 & range, 64 B (4 sibl.) \\
+\texttt{chunked\_file\_chunk1}      & 19,258 & 182 & 3       & 18,572 & chunk (4 sibl.) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Results.}
+\Cref{tab:sizes} shows that a whole small file costs 527 to 635 bytes, of which
+318 are the header, commit id and commit. A step costs
+$75 + |\mathit{name}| + 32n$ bytes for $n$ siblings and short names. The
+proof for \texttt{sub}, the last entry of the 5-entry root, needs one sibling
+instead of three because the odd trailing node pairs with itself, and the two
+one-entry subdirectories need none. A range is dominated by its Bao slice,
+which carries each 1~KiB block it touches plus parent nodes: 1,352 bytes for 64
+content bytes and 1,618 bytes for a whole 1,536-byte blob. The absolute offset
+adds one length proof for chunk~0: 1,523 bytes, of which 1,352 are its slice.
+A whole-chunk disclosure is about the chunk's size.
+
+\paragraph{Formulas.}
+VERIFY \S1 bounds a tree step by the entry plus $32\lceil \log_2 M \rceil$
+sibling bytes for $M$ entries, a chunk step by $32 \cdot 2\lceil \log_2 (K+1)
+\rceil$ for $K$ chunks, and a Bao slice of $\ell$ content bytes at about one
+1~KiB block per KiB plus $64 \log_2(\text{blocks})$ bytes. For a 1~GiB file at
+the 64~KiB average, $K \approx 16{,}384$, and the formula bounds a chunk step
+at 30 siblings. Applying the selection rule of SPEC-MERKLE-OBJECTS \S5.3 to
+every chunk index gives an exact worst case of 27 (864 bytes), since the paths from positions $0$ and $i+1$ meet by the top level and
+odd trailing nodes need none. The same computation reproduces the sibling
+counts of \cref{tab:sizes}. Proof size grows with path depth and the logarithm
+of directory size and chunk count, not with repository size. VERIFY \S1 also
+reports a 684-byte bundle for a 40-byte range two levels deep in a demo
+repository; that is not a committed vector.
+
+\paragraph{Closure vectors and bounds.}
+The snapshot closure vector verifies 10 objects from a 37,740-byte pack and a
+71-byte manifest; the history vector verifies 13 objects from a 38,161-byte
+pack. A closure costs the reachable objects plus pack framing, and its manifest
+32 bytes per pack. One verification is capped as in
+\cref{sec:disclosure,sec:closure}: a bundle at 64~MiB with at most 128 steps of
+at most 32 siblings each; a closure at 10,000,000 objects in 65,536 packs.
+
+\paragraph{Signature verification.}
+\Cref{tab:ed25519} reports the \texttt{ed25519\_batch} benchmark
+(\texttt{rust/benches}). Each entry signs a distinct 32-byte digest. In the
+first group every entry has its own key, the shape of a fetch with commits
+from many people; in the second the entries cycle through four keys, the shape
+of a fetch from a small team, where the batch check shares one term per key.
+It ran with criterion~0.8 (100 samples, 3~s per measurement) on a shared
+4-vCPU cloud VM (Intel Xeon at 2.1~GHz, Rust~1.99.1, release
+profile)\footnote{Timings on a shared VM are noisy. The measurements will be
+repeated on dedicated hardware before submission.}; the table gives the median
+throughput. ``Parallel'' spreads the work over the
+4~rayon threads; the batch columns use one batch per thread, as fetch does.
+
+\begin{table}[h]
+\centering
+\caption{Ed25519 verification throughput, thousands of signatures per second.}
+\label{tab:ed25519}
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+$n$ & \texttt{verify\_strict} & single & batch & single, parallel & batch, parallel \\
+\midrule
+\multicolumn{6}{@{}l}{\emph{Distinct signers}} \\
+1    & 19.3 & 21.0 & 15.5 & 21.6 & 18.4 \\
+8    & 20.4 & 22.8 & 37.7 & 53.0 & 43.5 \\
+64   & 19.8 & 22.5 & 42.8 & 75.1 & 115.3 \\
+256  & 19.3 & 21.4 & 45.4 & 77.5 & 140.6 \\
+1024 & 19.4 & 21.7 & 52.8 & 84.5 & 148.2 \\
+\midrule
+\multicolumn{6}{@{}l}{\emph{Four signers}} \\
+1    & 20.2 & 22.3 & 17.8 & 22.0 & 18.3 \\
+8    & 20.9 & 21.2 & 46.8 & 50.6 & 42.2 \\
+64   & 19.1 & 21.9 & 73.5 & 74.9 & 160.9 \\
+256  & 20.2 & 22.0 & 90.5 & 83.3 & 212.3 \\
+1024 & 19.9 & 22.3 & 102.1 & 83.4 & 254.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The single check of SPEC-SIGNING \S1 runs 1--15\% faster than
+\texttt{ed25519-dalek}'s \texttt{verify\_strict}: it checks canonical encodings
+on the bytes rather than by re-encoding each point. With distinct signers, the
+batch check verifies 2.1--2.4 times as many signatures per second as the single
+check on one thread from $n = 256$ up, and across four threads the batch path
+that fetch uses gains 54\% over single checks at $n = 64$, 81\% at 256 and 75\%
+at 1024. With four signers the batch shares one term per key: at $n = 1024$ it
+verifies about 102{,}000 signatures per second on one thread, 1.9 times the
+distinct-signer batch, and 255{,}000 on four threads, 1.7 times. For $n \le 8$
+the batch does not pay: one signature takes about 35\% longer as a batch, and
+at $n = 8$ the parallel batch trails parallel single checks. The VM is shared, so differences
+of a few percent are within noise.
+
+\paragraph{Other performance.}
+docs/PERFORMANCE.md describes \texttt{scripts/bench-vs-git.sh}, which times
+\kit{} against git on init, small files, 100~MiB and 1~GiB files, append,
+status and checkout; no results are committed. A full evaluation should also
+measure disclosure verification time against depth and range length, closure
+throughput (native and wasm), and the \texttt{bench-vs-git.sh} rows.
+
+% ---------------------------------------------------------------------------
+\section{Related work}\label{sec:related}
+
+\paragraph{git.} Git~\cite{git} made content addressing the norm for version
+control. Its ids are SHA-1 by default, a hash with practical
+collisions~\cite{stevens2017shattered,leurent2020shambles}, and a SHA-256
+format exists. Signing is optional, and a tree id hashes the full listing, so a
+per-file proof carries every listing on its path. \kit{} makes the signature a
+mandatory field inside the id and names trees by Merkle roots. It does not
+interoperate with git on disk or on the wire; its git bridge translates
+objects (docs/PARITY.md).
+
+\paragraph{gittuf.} Yelgundhalli et al.~\cite{gittuf} add to git a policy layer,
+not enforced by the forge, that records which keys may change which refs and
+files. \kit{} has no such layer; its trust roots are a flat list of keys.
+
+\paragraph{Sigstore and gitsign.} Sigstore~\cite{sigstore} binds short-lived
+certificates to OIDC identities and logs signatures in a transparency log;
+gitsign~\cite{gitsign} applies it to git commits. \kit{} uses long-lived Ed25519
+keys and no log; its \texttt{SigstoreCa} trust root is a placeholder that
+returns \texttt{UnsupportedTrustRoot}. \kit{}'s release artifacts, not its
+repository content, are signed with cosign (THREAT-MODEL \S3.5).
+
+\paragraph{in-toto and TUF.} \kit{} uses in-toto statements and DSSE
+envelopes~\cite{intoto,dsse} with the commit as subject, adding a strict
+canonical decoder and a subject check before signature checks. TUF~\cite{tuf}
+provides roles, thresholds, key rotation and freshness for update metadata;
+\kit{}'s trust roots have none of these.
+
+\paragraph{Software Heritage.} SWHIDs~\cite{swhid} give archived source code
+intrinsic identifiers compatible with git. \kit{} ids are also intrinsic and
+add a mandatory signature and per-entry and per-chunk proofs.
+
+\paragraph{Certificate Transparency and Merkle structures.} CT~\cite{rfc6962}
+made Merkle inclusion and consistency proofs over public logs practical, on a
+construction that goes back to Merkle~\cite{merkle1987}. \kit{} applies
+inclusion proofs to directory entries and file chunks, without a log. Merkle
+Mountain Ranges~\cite{mmr} support append-only logs; \kit{}'s draft ancestry
+feature uses a Merkle Mountain Belt~\cite{mmb}, where an append merges at most
+one pair of peaks (SPEC-HISTORY-PROOF \S1).
+
+\paragraph{BLAKE3 and Bao.} Bao~\cite{bao} exposes the BLAKE3~\cite{blake3}
+tree as verified slices. Because a blob id hashes the canonical bytes, the Bao
+root is the id, and a range needs no extra commitment.
+
+\paragraph{Commonware storage.} \kit{}'s Merkle proofs are byte-identical to
+\path{commonware_storage::bmt::Proof} at 2026.9.0~\cite{commonware}. A
+verifier built on that crate checks a \kit{} proof with the unmodified upstream
+\texttt{verify\_element\_inclusion}, \texttt{verify\_range\_inclusion} or
+\texttt{verify\_multi\_inclusion} after it checks
+$\D(\mathit{type\_domain}, \mathit{inner\_root}) = \mathit{trusted\_id}$, using
+only the public domain constants (VERIFY \S5).
+
+% ---------------------------------------------------------------------------
+\section{Limitations and future work}\label{sec:limits}
+
+\begin{itemize}
+  \item \textbf{Identity, time and revocation.} Nothing binds a key to a
+        person; fetch verification checks only the embedded key. Timestamps
+        are self-reported, and there is no timestamp authority, transparency
+        log, revocation list or signer rotation in the core format
+        (SPEC-SIGNING \S10).
+  \item \textbf{Post-quantum.} The hash layer needs no change: object ids,
+        Merkle proofs, disclosure and closure rest on BLAKE3 alone, and a
+        quantum computer speeds up generic attacks on a hash function without
+        breaking it. Signatures and transport key exchange rest on elliptic
+        curves, which a large quantum computer breaks. Anyone could then sign
+        new commits under old keys, so history would stop proving authorship,
+        and recorded TLS traffic to private repositories could be decrypted.
+        The plan, not yet specified: a new commit-format version whose
+        signature is a hybrid of Ed25519 and ML-DSA-65~\cite{fips204}, valid
+        only if both verify, which adds about 5~KiB per commit with the key
+        carried inline; SLH-DSA~\cite{fips205} for long-lived release keys,
+        because the BLS12-381 threshold design is not post-quantum; and hybrid
+        ML-KEM key exchange in TLS, which \kit{}'s rustls configuration with
+        the \texttt{ring} provider does not offer today.\footnote{rustls~0.23
+        offers the hybrid X25519MLKEM768 group only through its
+        \texttt{aws-lc-rs} provider.} FN-DSA and the
+        candidates of NIST's additional-signatures process have smaller
+        signatures but are not yet standardized~\cite{nistir8610}.
+  \item \textbf{Absence and ranges.} Disclosure proves inclusion only;
+        non-membership is reserved as payload kind~3 (SPEC-DISCLOSURE \S9).
+        \texttt{kit prove --range} rejects ranges across chunks. Git SHA-1 ids
+        support full disclosure only (VERIFY \S7).
+  \item \textbf{Ancestry (draft).} SPEC-HISTORY-PROOF is
+        \emph{draft-normative} and covers the opt-in \texttt{history-mmr}
+        feature, off in default builds. Its proofs show membership in the
+        first-parent chain ending at an exact tip, against a descriptor trusted
+        from the local repository only; a remote root cannot authenticate
+        itself, and remote descriptors and freshness are not implemented.
+  \item \textbf{Release thresholds (draft, not implemented).}
+        SPEC-RELEASE-THRESHOLD describes BLS12-381 M-of-N release signatures.
+        No code signs, aggregates or verifies them; only protocol identifier 5
+        is reserved. A trust-roots file with a \texttt{bls12381-thr} entry is
+        rejected as a whole (\texttt{verify\_attest.rs}).
+  \item \textbf{HTTP proofs (draft).} SPEC-HTTP-OBJECTS specifies range proofs
+        over plain HTTP via \texttt{?proof=1\&range=a-b}. The shipped handlers
+        refuse proof requests; the KDPB and KDSP formats and client
+        verification exist.
+  \item \textbf{Write grants (draft).} SPEC-WRITE-GRANTS is a draft. Its status
+        header says the grant codecs, three owner schemes and the stateless
+        verifier (steps 1 to 10) are implemented and the Connect server
+        enforces grants. The revocation step reads server state, so revocation
+        is not offline-verifiable; \texttt{ssh} and \texttt{enc} grant
+        registration is not implemented.
+  \item \textbf{Attestations and keys.} Push and fetch do not move
+        attestations; there is no N-of-M policy or predicate filter, and
+        \texttt{--add-signature} is planned. Third-party envelopes must be
+        re-canonicalized. Using one key for commits, attestations and SSH is
+        not analyzed (SPEC-SIGNING \S8).
+  \item \textbf{Evidence.} The arguments are informal, the formal models are
+        bounded and do not cover these verifiers, and the only
+        performance results are for signature verification, on one shared
+        VM.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\section{Conclusion}\label{sec:conclusion}
+
+\kit{} makes a commit id the single trust anchor for content. Strict parsing
+gives each object one encoding, domain-wrapped Merkle ids make entries and
+chunks provable, and a mandatory signature sits inside the id. On that base, a
+disclosure bundle proves a path, chunk or byte range in hundreds of bytes to a
+few KiB plus the disclosed content, and a closure proves that a served set is
+complete. Both verifiers bound sizes before allocation, check the binding hash
+first and return what they proved. The arguments rest on BLAKE3 collision
+resistance and Ed25519 under the SPEC-SIGNING predicate; the evidence is golden vectors with an
+independent reference, fuzz targets and bounded models. Signer identity,
+freshness, absence proofs and remote ancestry remain open, and several
+specifications are drafts.
+
+\section*{Disclosures}
+
+\paragraph{Competing interests.} The authors are employees of Official
+Unofficial, Inc., which develops \kit{}.
+
+\paragraph{Funding.} Official Unofficial, Inc.\ funded this work. No other
+party funded it.
+
+\paragraph{Vulnerability disclosure.} While writing \cref{sec:signing}, the
+authors found that the batch signature check used by clone, pull and fetch in
+\kit{}~0.5.0 accepted some signatures that \texttt{kit verify} rejected: a
+signature whose $R$ carries an 8-torsion component passed the batch whenever
+its weight was a multiple of~8, and the weights were derived from the batch
+contents. Only the holder of the signing key can make such a signature, so the
+flaw let a signer make two \kit{} verifiers disagree; it did not allow
+forgery. The authors maintain \kit{} and fixed the flaw on the main branch in
+the open, with a regression test and a changelog entry, without a private
+advisory. Releases after 0.5.0 carry the fix and the predicate of
+SPEC-SIGNING \S1.
+
+\section*{Acknowledgments}
+
+An AI assistant helped draft the text, the code changes and the measurements
+in this paper under the authors' direction. The authors reviewed the results
+and take full responsibility for the content.
+
+\renewcommand{\bibfont}{\footnotesize}
+\setlength{\bibsep}{1pt}
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+% ---------------------------------------------------------------------------
+\appendix
+\section{Reproducing results}\label{app:repro}
+
+{\sloppy\small Paths are relative to the repository root at commit \texttt{\sha}; links point
+to that commit. Specifications: \repo{docs/specs/SPEC-OBJECTS.md},
+\repo{docs/specs/SPEC-MERKLE-OBJECTS.md}, \repo{docs/specs/SPEC-FASTCDC.md},
+\repo{docs/specs/SPEC-SIGNING.md}, \repo{docs/specs/SPEC-ATTESTATIONS.md},
+\repo{docs/specs/SPEC-DISCLOSURE.md} (draft-normative); drafts
+\repo{docs/specs/SPEC-HISTORY-PROOF.md},
+\repo{docs/specs/SPEC-RELEASE-THRESHOLD.md},
+\repo{docs/specs/SPEC-HTTP-OBJECTS.md}, \repo{docs/specs/SPEC-WRITE-GRANTS.md}.
+Guides: \repo{docs/VERIFY.md}, \repo{docs/THREAT-MODEL.md},
+\repo{docs/FORMAL.md}, \repo{docs/FUZZ.md}, \repo{docs/PERFORMANCE.md},
+\repo{rust/tests/golden/README.md}. Vectors:
+\repo{rust/tests/golden/disclosure/MANIFEST.txt},
+\repo{rust/tests/golden/proofs/MANIFEST.txt},
+\repo{rust/tests/golden/closure/MANIFEST.txt}. Reference checks:
+\repo{scripts/golden/disclosure_ref.py}, \repo{scripts/golden/proofs_ref.py},
+\repo{scripts/golden/closure_ref.py}, \repo{scripts/golden/objects_ref.py},
+\repo{scripts/check-golden.sh}.\par}
+
+\paragraph{Golden vectors.}
+\begin{lstlisting}[style=kitshell]
+git checkout c031e7765689bef163daf8a61190ac2b6aca0ae7
+for c in objects proofs disclosure closure; do
+  python3 -I -B scripts/golden/${c}_ref.py rust/tests/golden      # prints OK
+done
+python3 -m venv .venv && .venv/bin/pip install -r scripts/golden/requirements.txt
+PYTHON=.venv/bin/python bash scripts/check-golden.sh               # every set
+(cd rust && cargo test -p kit-core --test golden_disclosure --test golden_closure \
+                      --test golden_proofs)
+\end{lstlisting}
+
+\paragraph{Sizes and counts.}
+Two scripts in the \texttt{tools} directory next to this paper reproduce
+these numbers. The first imports \texttt{decode\_bundle} from
+\texttt{disclosure\_ref.py}; the second applies the sibling-selection rule of
+SPEC-MERKLE-OBJECTS \S5.3.
+\begin{lstlisting}[style=kitshell]
+python3 -I -B docs/paper/tools/measure_disclosure.py .   # Table 3
+python3 -I -B docs/paper/tools/sibling_count.py 16384     # worst case 27 siblings
+stat -c '%s %n' rust/tests/golden/disclosure/*.bin rust/tests/golden/closure/*.bin
+ls rust/fuzz/fuzz_targets/*.rs | wc -l                   # 59
+grep -h '"expect"' rust/tests/golden/{disclosure,proofs,closure}/*.json | sort | uniq -c
+\end{lstlisting}
+
+\paragraph{Signature benchmark.}
+\begin{lstlisting}[style=kitshell]
+cd rust                                                    # Table 4
+cargo bench --locked -p kit-benches --bench ed25519_batch \
+  -- --warm-up-time 1 --measurement-time 3
+\end{lstlisting}
+
+\paragraph{Fuzzing, formal checks and an end-to-end run.}
+The commit id given to \texttt{verify-proof} and \texttt{closure verify --from}
+must be a literal 64-hex id; these commands do not resolve revisions.
+\begin{lstlisting}[style=kitshell]
+(cd rust && cargo test --manifest-path fuzz/Cargo.toml)
+(cd rust/fuzz && cargo +nightly fuzz run --features libfuzzer verify_disclosure)
+bash formal/scripts/run-quint.sh; bash formal/scripts/run-kani.sh
+(cd rust && cargo test -p kit-formal-conformance)
+kit prove HEAD src/lib.rs --range 100:40 -o p.bin
+kit verify-proof <64-hex-commit-id> p.bin --expect-path src/lib.rs \
+  --payload-out slice.bin
+kit closure export HEAD --history -o hist.closure
+kit closure verify <64-hex-commit-id> --from hist.closure --history
+kit verify --trusted HEAD
+\end{lstlisting}
+
+\section{Ethical considerations}\label{app:ethics}
+
+\paragraph{Stakeholders.} People who clone, pull and fetch \kit{}
+repositories; people who sign commits, tags and attestations; operators of
+servers and mirrors that serve \kit{} repositories; and implementers who reuse
+the specifications, golden vectors or the signature predicate.
+
+\paragraph{Research conduct.} The work studies software the authors maintain.
+It involves no human subjects and no personal data, and it tested no system
+the authors do not control. The benchmarks use synthetic keys on a rented
+virtual machine.
+
+\paragraph{The vulnerability.} The batch-verification flaw described under
+Disclosures affected users of \kit{}~0.5.0. Its harm is limited: only a key
+holder can produce a signature that triggers it, and the result is a
+disagreement between verifiers, not a forgery. The torsion construction that
+exploits it is known in the literature~\cite{taming}, so describing it gives
+an attacker no new capability, while it lets other implementers of batched
+Ed25519 check their own code. The authors therefore fixed it in the open and
+describe it here.
+
+\paragraph{Claims about other work.} The paper describes other systems only
+from their published papers, specifications and documentation, and states
+where a summary comes from general knowledge rather than from the repository.
+
+\section{Open science}\label{app:open}
+
+\paragraph{Artifacts.} Everything needed to check the claims of this paper is
+public in the \kit{} repository at
+\url{https://github.com/officialunofficial/kit}. Every link in the paper names
+one commit:
+\begin{center}\texttt{\sha}\end{center}
+The artifacts are the specifications (\texttt{docs/specs}), the
+golden vectors (\texttt{rust/tests/golden}) and their independent Python
+reference checks (\texttt{scripts/golden}), the fuzz targets
+(\texttt{rust/fuzz}), the formal models (\texttt{formal}), the
+\texttt{ed25519\_batch} benchmark (\texttt{rust/benches}), and the source of
+this paper with its measurement scripts (\texttt{docs/paper}).
+\Cref{app:repro} gives the commands.
+
+\paragraph{Licences.} The code, vectors and scripts are available under the MIT
+or Apache-2.0 licence, at the user's choice. This paper and its figures are
+available under CC~BY~4.0.
+
+\paragraph{Persistence.} Software Heritage archives the public repository;
+the arXiv version of this paper will cite the SWHID of the pinned
+commit~\cite{swhid}.
+
+\paragraph{Limits.} The benchmark machine was a shared cloud VM that cannot be
+reproduced exactly. The benchmark itself runs on any machine with the pinned
+toolchain.
+
+\end{document}

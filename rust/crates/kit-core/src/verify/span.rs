@@ -446,9 +446,9 @@ pub fn verify_disclosure_span(trusted: &Hash, bytes: &[u8]) -> Result<DisclosedS
 #[non_exhaustive]
 pub enum RangeProof {
     /// One KDPB v2 Range bundle.
-    Mkdp(Vec<u8>),
+    Kdpb(Vec<u8>),
     /// One KDSP v1 container.
-    Mkds(Vec<u8>),
+    Kdsp(Vec<u8>),
 }
 
 /// Proof format, independent of encoded bytes.
@@ -456,9 +456,9 @@ pub enum RangeProof {
 #[non_exhaustive]
 pub enum RangeProofKind {
     /// The range lies within one chunk (or a plain Blob): one KDPB v2 bundle.
-    Mkdp,
+    Kdpb,
     /// The range crosses a chunk boundary: one KDSP v1 container.
-    Mkds,
+    Kdsp,
 }
 
 /// Pure prefetch plan for a chunked file. `needed_chunk_indices` contains
@@ -560,9 +560,9 @@ pub fn plan_range_proof(
     let last = last.ok_or(RangeProofError::OutOfBounds)?;
     Ok(Plan {
         kind: if first == last {
-            RangeProofKind::Mkdp
+            RangeProofKind::Kdpb
         } else {
-            RangeProofKind::Mkds
+            RangeProofKind::Kdsp
         },
         first,
         last,
@@ -756,7 +756,7 @@ pub fn build_range_proof_from<S: ObjectSource + ?Sized>(
             )?;
             encoded_disclosure_size(&commit_bytes, &steps, &payload)?;
             let proof = encode_disclosure(commit_id, &commit_bytes, &steps, &payload);
-            return Ok(RangeProof::Mkdp(proof));
+            return Ok(RangeProof::Kdpb(proof));
         }
         Object::ChunkedBlob(cb) => cb,
         _ => return Err(VerifyError::SelectorLeafMismatch.into()),
@@ -819,7 +819,7 @@ pub fn build_range_proof_from<S: ObjectSource + ?Sized>(
                 let payload = range_payload(&cb, i, &chunk_bytes, local_offset, len, preceding)?;
                 encoded_disclosure_size(&commit_bytes, &steps, &payload)?;
                 let proof = encode_disclosure(commit_id, &commit_bytes, &steps, &payload);
-                return Ok(RangeProof::Mkdp(proof));
+                return Ok(RangeProof::Kdpb(proof));
             }
             let payload =
                 range_payload(&cb, i, &chunk_bytes, 0, 1, std::mem::take(&mut preceding))?;
@@ -864,7 +864,7 @@ pub fn build_range_proof_from<S: ObjectSource + ?Sized>(
     if proof.len() > MAX_BUNDLE_BYTES {
         return Err(RangeProofError::ProofTooLarge);
     }
-    Ok(RangeProof::Mkds(proof))
+    Ok(RangeProof::Kdsp(proof))
 }
 
 fn checked_blob_source<S: ObjectSource + ?Sized>(
@@ -1172,17 +1172,17 @@ mod tests {
         let one = plan_range_proof(&[10, 20, 30], 5, 5).unwrap();
         assert_eq!(
             (one.kind, one.first, one.last),
-            (RangeProofKind::Mkdp, 0, 0)
+            (RangeProofKind::Kdpb, 0, 0)
         );
         let two = plan_range_proof(&[10, 20, 30], 9, 2).unwrap();
         assert_eq!(
             (two.kind, two.first, two.last),
-            (RangeProofKind::Mkds, 0, 1)
+            (RangeProofKind::Kdsp, 0, 1)
         );
         let later = plan_range_proof(&[10, 20, 30], 12, 18).unwrap();
         assert_eq!(
             (later.kind, later.first, later.last),
-            (RangeProofKind::Mkdp, 1, 1)
+            (RangeProofKind::Kdpb, 1, 1)
         );
         assert_eq!(later.needed_chunk_indices, vec![0, 1]);
         assert!(matches!(
@@ -1255,7 +1255,7 @@ mod tests {
             reads: RefCell::new(Vec::new()),
         };
         PRECEDING_PEAK.with(|peak| peak.set(0));
-        let RangeProof::Mkds(proof) =
+        let RangeProof::Kdsp(proof) =
             build_range_proof_from(&source, &commit_id, &[b"file"], 2047, 2, None).unwrap()
         else {
             panic!("expected KDSP")
@@ -1276,7 +1276,7 @@ mod tests {
         PRECEDING_PEAK.with(|peak| peak.set(0));
         assert!(matches!(
             build_range_proof_from(&source, &commit_id, &[b"file"], 6200, 1, None).unwrap(),
-            RangeProof::Mkdp(_)
+            RangeProof::Kdpb(_)
         ));
         PRECEDING_PEAK.with(|peak| assert_eq!(peak.get(), 1));
         assert!(matches!(
@@ -1433,7 +1433,7 @@ mod tests {
                 span.len,
             )
             .unwrap();
-            assert_eq!(plan.kind, RangeProofKind::Mkds);
+            assert_eq!(plan.kind, RangeProofKind::Kdsp);
             assert_eq!(plan.encoded_size, bytes.len() as u64);
         }
     }

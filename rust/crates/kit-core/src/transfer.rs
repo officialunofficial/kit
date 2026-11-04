@@ -143,9 +143,9 @@ pub fn decode_packlist(bytes: &[u8]) -> Result<PackListNode, PackListError> {
     if version != PACKLIST_VERSION {
         return Err(PackListError::UnsupportedVersion(version));
     }
-    // Body: `Option<Hash>` then a length-capped `Vec<Hash>`. `&[u8]` is a
-    // `bytes::Buf`; the `RangeCfg` enforces the entry cap at decode time.
-    let mut buf: &[u8] = &bytes[PACKLIST_HEADER_LEN..];
+    // Body: `Option<Hash>` then a length-capped `Vec<Hash>`. `Copying` reads
+    // the borrowed slice; the `RangeCfg` enforces the entry cap at decode time.
+    let mut buf = commonware_codec::Copying(&bytes[PACKLIST_HEADER_LEN..]);
     let prev = <Option<Hash>>::read(&mut buf).map_err(|_| PackListError::Malformed)?;
     let packs = <Vec<Hash>>::read_range(&mut buf, 0..=PACKLIST_MAX_ENTRIES as usize)
         .map_err(|_| PackListError::Malformed)?;

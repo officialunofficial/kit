@@ -32,19 +32,19 @@ pub mod get_receipt_request {
             Self::Some(Selector::from(v))
         }
     }
-    impl serde::Serialize for Selector {
-        fn serialize<S: serde::Serializer>(
+    impl ::serde::Serialize for Selector {
+        fn serialize<S: ::serde::Serializer>(
             &self,
             s: S,
         ) -> ::core::result::Result<S::Ok, S::Error> {
-            use serde::ser::SerializeMap;
+            use ::serde::ser::SerializeMap;
             let mut map = s.serialize_map(Some(1))?;
             match self {
                 Self::Advance(v) => {
-                    map.serialize_entry("advance", v)?;
+                    map.serialize_entry("advance", &**v)?;
                 }
                 Self::Lease(v) => {
-                    map.serialize_entry("lease", v)?;
+                    map.serialize_entry("lease", &**v)?;
                 }
             }
             map.end()
@@ -80,19 +80,19 @@ pub mod upload_pack_request {
             Self::Some(Body::from(v))
         }
     }
-    impl serde::Serialize for Body {
-        fn serialize<S: serde::Serializer>(
+    impl ::serde::Serialize for Body {
+        fn serialize<S: ::serde::Serializer>(
             &self,
             s: S,
         ) -> ::core::result::Result<S::Ok, S::Error> {
-            use serde::ser::SerializeMap;
+            use ::serde::ser::SerializeMap;
             let mut map = s.serialize_map(Some(1))?;
             match self {
                 Self::Header(v) => {
-                    map.serialize_entry("header", v)?;
+                    map.serialize_entry("header", &**v)?;
                 }
                 Self::Chunk(v) => {
-                    map.serialize_entry("chunk", v)?;
+                    map.serialize_entry("chunk", &**v)?;
                 }
             }
             map.end()
@@ -140,22 +140,22 @@ pub mod download_pack_response {
             Self::Some(Body::from(v))
         }
     }
-    impl serde::Serialize for Body {
-        fn serialize<S: serde::Serializer>(
+    impl ::serde::Serialize for Body {
+        fn serialize<S: ::serde::Serializer>(
             &self,
             s: S,
         ) -> ::core::result::Result<S::Ok, S::Error> {
-            use serde::ser::SerializeMap;
+            use ::serde::ser::SerializeMap;
             let mut map = s.serialize_map(Some(1))?;
             match self {
                 Self::Header(v) => {
-                    map.serialize_entry("header", v)?;
+                    map.serialize_entry("header", &**v)?;
                 }
                 Self::Chunk(v) => {
-                    map.serialize_entry("chunk", v)?;
+                    map.serialize_entry("chunk", &**v)?;
                 }
                 Self::Location(v) => {
-                    map.serialize_entry("location", v)?;
+                    map.serialize_entry("location", &**v)?;
                 }
             }
             map.end()
@@ -192,19 +192,19 @@ pub mod begin_upload_response {
             Self::Some(Result::from(v))
         }
     }
-    impl serde::Serialize for Result {
-        fn serialize<S: serde::Serializer>(
+    impl ::serde::Serialize for Result {
+        fn serialize<S: ::serde::Serializer>(
             &self,
             s: S,
         ) -> ::core::result::Result<S::Ok, S::Error> {
-            use serde::ser::SerializeMap;
+            use ::serde::ser::SerializeMap;
             let mut map = s.serialize_map(Some(1))?;
             match self {
                 Self::AlreadyPresent(v) => {
-                    map.serialize_entry("alreadyPresent", v)?;
+                    map.serialize_entry("alreadyPresent", &**v)?;
                 }
                 Self::Ticket(v) => {
-                    map.serialize_entry("ticket", v)?;
+                    map.serialize_entry("ticket", &**v)?;
                 }
             }
             map.end()
@@ -231,16 +231,16 @@ pub mod upload_part_request {
             Self::Some(Msg::from(v))
         }
     }
-    impl serde::Serialize for Msg {
-        fn serialize<S: serde::Serializer>(
+    impl ::serde::Serialize for Msg {
+        fn serialize<S: ::serde::Serializer>(
             &self,
             s: S,
         ) -> ::core::result::Result<S::Ok, S::Error> {
-            use serde::ser::SerializeMap;
+            use ::serde::ser::SerializeMap;
             let mut map = s.serialize_map(Some(1))?;
             match self {
                 Self::Header(v) => {
-                    map.serialize_entry("header", v)?;
+                    map.serialize_entry("header", &**v)?;
                 }
                 Self::Chunk(v) => {
                     map.serialize_entry("chunk", &::buffa::json_helpers::ProtoJson(v))?;
@@ -259,12 +259,12 @@ pub mod set_repo_visibility_request {
         SignedStatement(::buffa::alloc::string::String),
     }
     impl ::buffa::Oneof for Mode {}
-    impl serde::Serialize for Mode {
-        fn serialize<S: serde::Serializer>(
+    impl ::serde::Serialize for Mode {
+        fn serialize<S: ::serde::Serializer>(
             &self,
             s: S,
         ) -> ::core::result::Result<S::Ok, S::Error> {
-            use serde::ser::SerializeMap;
+            use ::serde::ser::SerializeMap;
             let mut map = s.serialize_map(Some(1))?;
             match self {
                 Self::Visibility(v) => {
@@ -297,12 +297,12 @@ pub mod issue_object_url_request {
             Self::Some(Target::from(v))
         }
     }
-    impl serde::Serialize for Target {
-        fn serialize<S: serde::Serializer>(
+    impl ::serde::Serialize for Target {
+        fn serialize<S: ::serde::Serializer>(
             &self,
             s: S,
         ) -> ::core::result::Result<S::Ok, S::Error> {
-            use serde::ser::SerializeMap;
+            use ::serde::ser::SerializeMap;
             let mut map = s.serialize_map(Some(1))?;
             match self {
                 Self::ObjectId(v) => {
@@ -312,7 +312,7 @@ pub mod issue_object_url_request {
                     )?;
                 }
                 Self::RefPath(v) => {
-                    map.serialize_entry("refPath", v)?;
+                    map.serialize_entry("refPath", &**v)?;
                 }
             }
             map.end()

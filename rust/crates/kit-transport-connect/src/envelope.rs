@@ -378,7 +378,7 @@ mod tests {
     mod parity {
         use super::*;
         use bytes::Bytes;
-        use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
+        use ed25519_dalek::{Signer as _, SigningKey};
         use http_body_util::Full;
         use std::convert::Infallible;
         use std::sync::Mutex;
@@ -430,7 +430,7 @@ mod tests {
         }
 
         /// Independent re-derivation of the unary canonical string and
-        /// `verify_strict` check, deliberately NOT calling
+        /// signature check, deliberately NOT calling
         /// `canonical_envelope` — see module doc above.
         fn verify_unary_from_headers(procedure: &str, headers: &HeaderMap, body: &[u8]) -> bool {
             let get = |n: &str| headers.get(n).and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -464,13 +464,13 @@ mod tests {
             let Ok(sig_bytes) = hex::decode(signature) else {
                 return false;
             };
-            let Ok(vk) = VerifyingKey::from_bytes(&pk_bytes.try_into().unwrap_or([0u8; 32])) else {
+            let Ok(pk) = <[u8; 32]>::try_from(pk_bytes) else {
                 return false;
             };
-            let Ok(sig) = ed25519_dalek::Signature::from_slice(&sig_bytes) else {
+            let Ok(sig) = <[u8; 64]>::try_from(sig_bytes) else {
                 return false;
             };
-            vk.verify_strict(&signing_digest, &sig).is_ok()
+            kit_core::sign::verify_ed25519(&pk, &signing_digest, &sig).is_ok()
         }
 
         fn verify_stream_from_headers(procedure: &str, headers: &HeaderMap) -> bool {
@@ -505,13 +505,13 @@ mod tests {
             let Ok(sig_bytes) = hex::decode(signature) else {
                 return false;
             };
-            let Ok(vk) = VerifyingKey::from_bytes(&pk_bytes.try_into().unwrap_or([0u8; 32])) else {
+            let Ok(pk) = <[u8; 32]>::try_from(pk_bytes) else {
                 return false;
             };
-            let Ok(sig) = ed25519_dalek::Signature::from_slice(&sig_bytes) else {
+            let Ok(sig) = <[u8; 64]>::try_from(sig_bytes) else {
                 return false;
             };
-            vk.verify_strict(&signing_digest, &sig).is_ok()
+            kit_core::sign::verify_ed25519(&pk, &signing_digest, &sig).is_ok()
         }
 
         fn build_request(procedure: &str, body: &'static [u8]) -> Request<ClientBody> {

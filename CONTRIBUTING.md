@@ -6,6 +6,8 @@ states that bar.
 Report a vulnerability in private. Do not open a public issue. Follow
 [`SECURITY.md`](SECURITY.md).
 
+All contributors follow the [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+
 ## License
 
 You license your contribution under MIT OR Apache-2.0. See
@@ -52,6 +54,7 @@ cargo test --locked --workspace
 cd ..
 bash scripts/check-writing.sh
 bash scripts/test-check-writing.sh
+bash scripts/test-check-commit-messages.sh
 bash scripts/check-unsafe-safety.sh
 bash scripts/check-unsafe-policy.sh
 bash scripts/check-doc-paths.sh
@@ -142,3 +145,7 @@ does now.
 - Keep the header at 72 characters or fewer. Write the subject in the imperative mood.
 - Write a body that explains why the change is needed.
 - Add no trailer that names a tool or a model.
+
+`scripts/check-commit-messages.py` checks the header form, the type, the header length and the trailers. It checks
+the commits of a pull request only, and it skips merge commits. CI runs it. It cannot check the imperative mood, so a
+reviewer does.

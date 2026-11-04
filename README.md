@@ -1,6 +1,8 @@
 # kit
 
-<a href="docs/brand/README.md"><img src="docs/brand/kit-logo-grid.webp" alt="KIT logo with geometric solids and a fading blue perspective grid" width="240"></a>
+<p align="center">
+  <img src="docs/brand/kit-logo-grid.webp" alt="KIT logo with geometric solids and a fading blue perspective grid" width="240">
+</p>
 
 ![status: alpha](https://img.shields.io/badge/status-alpha-orange)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
@@ -104,9 +106,11 @@ from Git, read [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md).
 | [`docs/INSTALL.md`](docs/INSTALL.md) | Install channels, verification, updates |
 | [`docs/CLI.md`](docs/CLI.md) | Subcommands, config keys, exit codes |
 | [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md) | Git users and Git upstreams |
+| [`docs/PARITY.md`](docs/PARITY.md) | Where kit matches Git and where it differs |
 | [`docs/VERIFY.md`](docs/VERIFY.md) | Verify a commit hash without repository access |
 | [`docs/specs/`](docs/specs/README.md) | Wire-format and subsystem specs |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Crate layout |
+| [`docs/LIBKIT.md`](docs/LIBKIT.md) | Embed kit with the `libkit` crate |
 | [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Security boundaries |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | How a release is cut |
 
@@ -120,7 +124,9 @@ cargo test --workspace
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) lists the checks that a change must pass.
 [`GOVERNANCE.md`](GOVERNANCE.md) and [`MAINTAINERS.md`](MAINTAINERS.md) describe
-who decides. To report a security issue, follow [`SECURITY.md`](SECURITY.md).
+who decides. Everyone who takes part follows the
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). To report a security issue, follow
+[`SECURITY.md`](SECURITY.md).
 
 ## License
 

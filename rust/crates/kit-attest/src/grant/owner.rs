@@ -1,7 +1,6 @@
 //! Owner-signature dispatch (SPEC-WRITE-GRANTS §4): `ed25519`,
 //! `secp256k1-eip191` and `webauthn-p256` (the last in [`super::webauthn`]).
 
-use ed25519_dalek::{Signature, VerifyingKey};
 use kit_core::repo_identity::Namespace;
 
 use super::webauthn::{WebAuthnBinding, verify_webauthn};
@@ -21,9 +20,8 @@ const EIP191_BLOB_LEN: usize = 65;
 ///
 /// * `ed25519`: the blob is exactly 64 bytes (`SignatureLength`), and the
 ///   signature verifies under the namespace's key over the 32-byte BLAKE3
-///   of `statement` with the strict predicate of SPEC-SIGNING §1
-///   (`VerifyingKey::verify_strict`: canonical `s < L`, no small-order key
-///   or `R`), else `BadSignature`. The key is the namespace itself, so the
+///   of `statement` with the predicate of SPEC-SIGNING §1
+///   (`kit_core::sign::verify_ed25519`), else `BadSignature`. The key is the namespace itself, so the
 ///   derived owner always equals it (§7 step 4).
 /// * `secp256k1-eip191`: the blob is exactly 65 bytes `r ‖ s ‖ v`
 ///   (`SignatureLength`); `v` is 27 or 28 (`SignatureRecoveryId`); `r` and
@@ -93,10 +91,8 @@ pub(crate) fn verify_owner(
 fn verify_ed25519(statement: &[u8], blob: &[u8], key: &[u8; 32]) -> Result<(), GrantError> {
     let signature: &[u8; ED25519_BLOB_LEN] =
         blob.try_into().map_err(|_| GrantError::SignatureLength)?;
-    let key = VerifyingKey::from_bytes(key).map_err(|_| GrantError::BadSignature)?;
     let digest = kit_core::hash::hash(statement);
-    key.verify_strict(&digest, &Signature::from_bytes(signature))
-        .map_err(|_| GrantError::BadSignature)
+    kit_core::sign::verify_ed25519(key, &digest, signature).map_err(|_| GrantError::BadSignature)
 }
 
 fn verify_eip191(statement: &[u8], blob: &[u8], namespace: &Address) -> Result<(), GrantError> {

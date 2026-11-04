@@ -93,7 +93,7 @@ pub fn checked_out_elsewhere(layout: &RepoLayout, branch: &str) -> Result<Option
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use kit_core::store::ObjectStore;
 
@@ -151,13 +151,15 @@ mod tests {
     fn a_branch_in_a_sibling_tree_is_found_from_either_side() {
         let tmp = tempfile::tempdir().unwrap();
         let (main_layout, linked) = scaffold(tmp.path());
+        // `discover` resolves symlinks, so compare the real paths.
+        let real = |root: Option<PathBuf>| root.map(|root| root.canonicalize().unwrap());
         assert_eq!(
-            checked_out_elsewhere(&main_layout, "topic").unwrap(),
-            Some(tmp.path().join("tree"))
+            real(checked_out_elsewhere(&main_layout, "topic").unwrap()),
+            Some(tmp.path().join("tree").canonicalize().unwrap())
         );
         assert_eq!(
-            checked_out_elsewhere(&linked, "main").unwrap(),
-            Some(tmp.path().join("main"))
+            real(checked_out_elsewhere(&linked, "main").unwrap()),
+            Some(tmp.path().join("main").canonicalize().unwrap())
         );
     }
 

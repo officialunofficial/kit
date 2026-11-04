@@ -1,0 +1,47 @@
+name: "CI: Semver"
+
+# Compares the public API of each published crate with the latest release
+# tag, built with that tag's Cargo.lock. A change that breaks the API without
+# a matching version bump fails the check. In a 0.x release, a minor bump
+# allows a breaking change. scripts/check-semver.sh holds the details.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "rust/**"
+      - ".github/workflows/semver.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  semver:
+    name: cargo semver-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          # The baseline is the latest release tag.
+          fetch-depth: 0
+
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: semver
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68  # v2
+        with:
+          tool: cargo-semver-checks@0.50.0
+
+      - name: Check the public API
+        run: bash scripts/check-semver.sh

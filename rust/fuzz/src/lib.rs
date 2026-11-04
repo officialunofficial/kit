@@ -180,6 +180,14 @@ pub fn git_commit_parse_one_iteration(input: &[u8]) {
         // Real invariant: the identity is a slice of the input, so it
         // can never exceed the input length.
         assert!(c.author.identity.len() <= input.len());
+        // Git honors `parent` headers only when they follow `tree`
+        // directly, so every `parent` header of the header block is one
+        // of those lines and the count agrees.
+        let header = input
+            .split(|&b| b == b'\n')
+            .take_while(|line| !line.is_empty());
+        let parent_headers = header.filter(|line| line.starts_with(b"parent ")).count();
+        assert_eq!(parent_headers, c.parents.len(), "a late parent is refused");
     }
 }
 
@@ -656,6 +664,67 @@ pub fn span_decode_one_iteration(input: &[u8]) {
 const SPAN_CHUNK: usize = 48;
 const SPAN_CHUNKS: usize = 4;
 
+/// Up to 4 Ed25519 entries built from `input`: raw bytes, honest
+/// signatures, and honest signatures with one flipped byte. The batch check
+/// must accept exactly when every entry passes the single check
+/// (SPEC-SIGNING §1). The honest signatures are made once, because signing
+/// in every iteration would not fit [`PER_ITER`] in an unoptimized build.
+pub fn ed25519_batch_one_iteration(input: &[u8]) {
+    use kit_core::sign::{COMMIT_DOMAIN, KeyPair, verify_ed25519, verify_ed25519_batch};
+
+    type Entry = ([u8; 32], [u8; 32], [u8; 64]);
+    static HONEST: std::sync::OnceLock<Vec<Entry>> = std::sync::OnceLock::new();
+    let honest = HONEST.get_or_init(|| {
+        (0..4u8)
+            .map(|i| {
+                let kp = KeyPair::from_seed([i; 32]);
+                let digest = kit_core::hash::domain_digest(COMMIT_DOMAIN, &[i]);
+                (kp.public.0, digest, kp.sign(COMMIT_DOMAIN, &[i]).0)
+            })
+            .collect()
+    });
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let fixed = |bytes: &[u8]| -> [u8; 32] {
+        let mut out = [0u8; 32];
+        let n = bytes.len().min(32);
+        out[..n].copy_from_slice(&bytes[..n]);
+        out
+    };
+    let mut entries: Vec<Entry> = Vec::new();
+    for chunk in input.chunks(98).take(4) {
+        let body = &chunk[1..];
+        let pick = usize::from(body.first().copied().unwrap_or(0)) % honest.len();
+        match chunk[0] % 3 {
+            0 => {
+                let mut sig = [0u8; 64];
+                let tail = body.get(64..).unwrap_or(&[]);
+                sig[..32].copy_from_slice(&fixed(body.get(32..).unwrap_or(&[])));
+                sig[32..].copy_from_slice(&fixed(tail));
+                entries.push((fixed(body), fixed(tail), sig));
+            }
+            1 => entries.push(honest[pick]),
+            _ => {
+                let (public, digest, mut sig) = honest[pick];
+                let at = usize::from(body.last().copied().unwrap_or(0)) % 64;
+                sig[at] ^= 1 << (at % 8);
+                entries.push((public, digest, sig));
+            }
+        }
+    }
+    let singles = entries
+        .iter()
+        .all(|(public, message, sig)| verify_ed25519(public, message, sig).is_ok());
+    let refs: Vec<_> = entries
+        .iter()
+        .map(|(public, message, sig)| (public, &message[..], sig))
+        .collect();
+    assert_eq!(
+        verify_ed25519_batch(&refs).is_ok(),
+        singles,
+        "batch and single verification disagree"
+    );
+}
+
 /// A small chunked-file repository for [`verify_span_one_iteration_with`].
 pub struct SpanFixture {
     _dir: tempfile::TempDir,
@@ -767,7 +836,7 @@ pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
     let expected = &plaintext
         [usize::try_from(offset).expect("offset")..usize::try_from(offset + len).expect("end")];
     let container = match proof {
-        RangeProof::Mkdp(bytes) => {
+        RangeProof::Kdpb(bytes) => {
             let disclosed = kit_core::verify::verify_disclosure(&commit_id, &bytes)
                 .expect("fresh KDPB must verify");
             assert!(matches!(
@@ -776,7 +845,7 @@ pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
             ));
             return;
         }
-        RangeProof::Mkds(bytes) => bytes,
+        RangeProof::Kdsp(bytes) => bytes,
         _ => unreachable!("non-exhaustive RangeProof"),
     };
     let verified = kit_core::verify::span::verify_disclosure_span(&commit_id, &container)
@@ -1541,6 +1610,85 @@ pub fn ignore_parse_one_iteration(input: &[u8]) {
     let _ = list.is_ignored("a/b/c.txt", false);
     let _ = list.is_ignored("dir", true);
     let _ = kit_core::ops::restore::parse_sparse_patterns(text);
+    // The checked parse agrees with the plain parse when it accepts, and
+    // it refuses only for a reason its limits name.
+    match kit_core::ignore::parse_checked(text) {
+        Ok(checked) => assert_eq!(checked.patterns(), list.patterns()),
+        Err(kit_core::IgnoreError::TooManyPatterns) => {
+            assert!(list.patterns().len() > kit_core::MAX_IGNORE_PATTERNS);
+        }
+        Err(kit_core::IgnoreError::PatternTooLong) => {
+            assert!(text.split('\n').any(|line| {
+                line.strip_suffix('\r').unwrap_or(line).len() > kit_core::MAX_IGNORE_PATTERN_BYTES
+            }));
+        }
+        Err(other) => panic!("unexpected refusal: {other}"),
+    }
+}
+
+/// Entry and ref names (`name_rules`): the tree entry name rules and the
+/// ref name rules never panic, and each accepted name keeps the properties
+/// the specs state for it. A name that breaks one of those properties is
+/// refused, so a rule cannot loosen without this target noticing. An index
+/// path is accepted only when every segment is a valid entry name. A new
+/// ref name is accepted exactly when `validate_ref_name` accepts it.
+pub fn name_rules_one_iteration(input: &[u8]) {
+    use kit_core::object::TreeEntry;
+    use kit_core::refs::{
+        MAX_REF_NAME_BYTES, MAX_REF_SEGMENTS, check_new_ref_name, validate_ref_name,
+        validate_ref_name_grammar,
+    };
+    let input = &input[..input.len().min(MAX_INPUT)];
+
+    // SPEC-OBJECTS section 4.1, the rules that need no table.
+    let lower = input.to_ascii_lowercase();
+    let short_of_reserved = lower
+        .strip_prefix(b"kit~")
+        .or_else(|| lower.strip_prefix(b"git~"))
+        .is_some_and(|digits| !digits.is_empty() && digits.iter().all(u8::is_ascii_digit));
+    let breaks_a_rule = input.is_empty()
+        || input.len() > 255
+        || input.iter().any(|b| matches!(b, 0 | b'/' | b'\\' | b':'))
+        || input == b"."
+        || input == b".."
+        || input.ends_with(b".")
+        || input.ends_with(b" ")
+        || lower == b".kit"
+        || lower == b".git"
+        || short_of_reserved;
+    if breaks_a_rule {
+        assert!(!TreeEntry::validate_name(input), "a rule is not applied");
+    }
+
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    if kit_core::index::validate_index_path(text) {
+        assert!(
+            text.split('/')
+                .all(|segment| TreeEntry::validate_name(segment.as_bytes())),
+            "an index path holds only valid entry names"
+        );
+    }
+
+    if validate_ref_name_grammar(text) {
+        assert!(text.bytes().filter(|&b| b == b'/').count() < MAX_REF_SEGMENTS);
+        assert!(
+            text.split('/')
+                .all(|s| !s.is_empty() && !s.starts_with('.'))
+        );
+        assert!(text.split('/').all(|s| !s.ends_with(".lock")));
+        assert_ne!(text.rsplit('/').next(), Some("HEAD"));
+        assert!(
+            text.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+        );
+    }
+    if validate_ref_name(text) {
+        assert!(text.len() <= MAX_REF_NAME_BYTES);
+        assert!(validate_ref_name_grammar(text));
+    }
+    assert_eq!(check_new_ref_name(text).is_ok(), validate_ref_name(text));
 }
 
 /// Resumable pack cursor decoder (`pack_cursor_decode`):
@@ -2722,6 +2870,8 @@ mod tests {
             &b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor A <a@x> 5 +0000\ncommitter A <a@x> 5 +0000\n\nm"[..],
             b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor",
             b"gpgsig x\n a\n b\n c\n\nm",
+            b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nparent 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor A <a@x> 5 +0000\ncommitter A <a@x> 5 +0000\n\nm",
+            b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor A <a@x> 5 +0000\nparent 4b825dc642cb6eb9a060e54bf8d69288fbee4904\ncommitter A <a@x> 5 +0000\n\nm",
         ] {
             run_one(case, git_commit_parse_one_iteration).unwrap();
         }
@@ -2897,8 +3047,37 @@ mod tests {
     #[test]
     fn unit_ignore_parse() {
         run_iterated_unit(ignore_parse_one_iteration).unwrap();
-        for case in [&b""[..], b"*.log\n!keep.log\r\n", b"**/a/**\n", b"[\n\\\n"] {
+        let long = "a".repeat(kit_core::MAX_IGNORE_PATTERN_BYTES + 1);
+        let many = "a\n".repeat(kit_core::MAX_IGNORE_PATTERNS + 1);
+        for case in [
+            &b""[..],
+            b"*.log\n!keep.log\r\n",
+            b"**/a/**\n",
+            b"[\n\\\n",
+            long.as_bytes(),
+            many.as_bytes(),
+        ] {
             run_one(case, ignore_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_name_rules() {
+        run_iterated_unit(name_rules_one_iteration).unwrap();
+        let deep = vec!["a"; 33].join("/");
+        let edge = vec!["a"; 32].join("/");
+        for case in [
+            &b""[..],
+            b"a",
+            b".kit::$INDEX_ALLOCATION",
+            b"KIT~1",
+            b"a:b",
+            b"refs/heads/main",
+            b"a/KIT~1",
+            deep.as_bytes(),
+            edge.as_bytes(),
+        ] {
+            run_one(case, name_rules_one_iteration).unwrap();
         }
     }
 
@@ -3106,6 +3285,19 @@ mod tests {
         over_count.extend_from_slice(&[0, 0xc1, 0x84, 0x3d]);
         for case in [&nonminimal, &over_count] {
             run_one(case, span_decode_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn ed25519_batch_target_runs_within_caps() {
+        run_iterated_unit(ed25519_batch_one_iteration).expect("guardrails held");
+        for case in [
+            &b""[..],
+            &[1u8; 98 * 4][..],
+            &[2u8; 98 * 4][..],
+            &[0xff; 98 * 4][..],
+        ] {
+            run_one(case, ed25519_batch_one_iteration).expect("guardrails held");
         }
     }
 

@@ -1,5 +1,6 @@
 //! Replaying the commits of a branch onto another base, with a pause for
 //! conflicts and an editor for the todo list.
+#![cfg(feature = "sync")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
 
 mod common;

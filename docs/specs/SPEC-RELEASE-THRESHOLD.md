@@ -297,8 +297,9 @@ design.
 
 No code in this repository signs, aggregates or verifies a threshold
 signature. `kit-attest` has no BLS algorithm variant. `kit-keystore`
-stores no shares. A trust-roots file entry of kind `bls12381-thr` is
-ignored, so a keyid of that kind reports as unknown. The algorithm
+stores no shares. A trust-roots file that contains an entry of kind
+`bls12381-thr` fails to load as a whole, as any unknown kind does, and the
+command exits with a configuration error. The algorithm
 identifier `ALGORITHM_BLS12381_THRESHOLD = 5` stays reserved in
 `common.proto`.
 

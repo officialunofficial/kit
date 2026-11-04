@@ -26,12 +26,15 @@ use crate::object::{
 };
 
 use core::fmt;
+use std::collections::BTreeMap;
 use std::path::Path;
 
-use ed25519_dalek::{
-    PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH, SIGNATURE_LENGTH, Signature as DalekSignature, Signer,
-    SigningKey, VerifyingKey,
-};
+use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
+use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
+use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::traits::{IsIdentity, VartimeMultiscalarMul};
+use ed25519_dalek::{PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH, SIGNATURE_LENGTH, Signer, SigningKey};
+use sha2::{Digest as _, Sha512};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -225,125 +228,153 @@ impl KeyPair {
 }
 
 /// Verify a signature over `BLAKE3(len_le16(domain) || domain || signing_bytes)`
-/// against the embedded public key. Returns `Ok(())` on success.
-///
-/// Uses [`VerifyingKey::verify_strict`], which enforces ZIP-215 / RFC 8032
-/// strict-verification semantics:
-///
-/// - The signature's `R` component is checked to be a canonical (i.e.
-/// least-representation) encoding of a curve point — torsion-component
-/// malleability is rejected.
-/// - The signature's `s` component is checked to be canonical mod the
-/// group order — high-s malleability is rejected.
-/// - The public key's `A` component is checked to be canonical — small-
-/// subgroup attacks are rejected.
-///
-/// The looser default `VerifyingKey::verify` accepts non-canonical
-/// encodings. kit holds the stricter line.
+/// against the embedded public key with [`verify_ed25519`].
 pub fn verify(
     public: &PublicKey,
     domain: &[u8],
     signing_bytes: &[u8],
     sig: &Signature,
 ) -> Result<(), KitError> {
-    let vk = VerifyingKey::from_bytes(&public.0).map_err(|_| KitError::InvalidPublicKey)?;
-    let dalek_sig = DalekSignature::from_bytes(&sig.0);
     let digest = domain_digest(domain, signing_bytes);
-    vk.verify_strict(&digest, &dalek_sig)
-        .map_err(|_| KitError::SignatureInvalid)
+    verify_ed25519(&public.0, &digest, &sig.0)
 }
 
-/// Batch-verify many Ed25519 signatures over pre-computed digests in one
-/// pass. Each entry is `(public_key, digest, sig)`, where `digest` is
-/// exactly what [`verify`] computes internally — `BLAKE3(len_le16(domain)
-/// || domain || signing_bytes)` — so callers typically supply
-/// [`commit_signing_hash`]/[`remix_signing_hash`]/[`tag_signing_hash`]'s
-/// output directly. Returns `Ok(())` only if every signature is valid.
+/// The Ed25519 acceptance predicate of SPEC-SIGNING §1. Every Ed25519
+/// check in kit calls this function or [`verify_ed25519_batch`], so all
+/// verifiers reach the same verdict on every input.
 ///
-/// Uses [`ed25519_dalek::verify_batch`]'s randomized-coefficient
-/// multiscalar-multiplication equation: verifying `n` signatures this way
-/// costs roughly one multiscalar multiplication over `2n + 1` points
-/// instead of `n` independent double-scalar multiplications, which is
-/// strictly less total work than calling [`verify`] `n` times — the
-/// speedup [`ed25519_dalek`]'s own benchmarks put at 20-30%+ over
-/// individually-verified batches of 4 and up. The trade-off: on failure
-/// this only proves *at least one* entry is invalid, never which one —
-/// callers that need to attribute the failure to a specific entry (kit
-/// does, to report which fetched object was unsigned/forged) must fall
-/// back to calling [`verify`] (or [`verify_commit`]/[`verify_remix`]/
-/// [`verify_tag`]) per entry on `Err`.
+/// `A` and `R` must be canonical encodings of points that are not of small
+/// order, `s` must be below `L`, and the cofactored equation
+/// `[8]([s]B - R - [k]A) = 0` must hold, with `k = SHA-512(R || A || M) mod L`.
+pub fn verify_ed25519(public: &[u8; 32], message: &[u8], sig: &[u8; 64]) -> Result<(), KitError> {
+    let key = decode_key(public)?;
+    let item = Ed25519Item::decode(public, message, sig)?;
+    let r = EdwardsPoint::vartime_double_scalar_mul_basepoint(&item.k, &-key, &item.s);
+    if (r - item.r).mul_by_cofactor().is_identity() {
+        Ok(())
+    } else {
+        Err(KitError::SignatureInvalid)
+    }
+}
+
+/// Check many `(public key, message, signature)` triples with one
+/// randomized equation. Accepts exactly when [`verify_ed25519`] accepts
+/// every entry, except with probability about `2^-128`.
 ///
-/// `verify_batch` itself performs neither of `verify_strict`'s two extra
-/// malleability checks on its own — by the batch equation's own design
-/// (see `ed25519-dalek`'s README §"Malleability"), folding per-entry
-/// checks into the batch multiscalar multiplication would defeat the
-/// point of a high-throughput check, so the crate deliberately leaves
-/// them out and documents `VerifyingKey::is_weak` as the caller's
-/// responsibility (its README covers only the public-key half; the
-/// signature-`R` half is the same class of check, just undocumented as
-/// a batch caveat). This function performs both itself, per entry,
-/// before running the batch equation:
-///
-/// - `VerifyingKey::is_weak` — a weak (small-order) *public key* can
-///   produce a signature valid for nearly any message, so a batch
-///   containing one could accept a forgery `verify_strict` would reject.
-/// - a small-order *signature `R`* — checked directly here via
-///   `curve25519-dalek` (`CompressedEdwardsY::decompress` +
-///   `EdwardsPoint::is_small_order`, the same check `verify_strict`
-///   performs internally), matching `verify_strict`'s stated defense
-///   against "torsion-component malleability" for `R` (see [`verify`]'s
-///   doc comment) rather than leaving that half unchecked.
-///
-/// Confirmed by direct experiment against `ed25519-dalek` (not just
-/// from its docs) that this second check is real, not redundant: taking
-/// a genuine signature from a normal (non-weak) key and replacing its
-/// `R` with `R + T` for a nonzero 8-torsion point `T` is rejected by
-/// `ed25519-dalek`'s own loose `verify` too — its cofactorless
-/// recompute-and-compare of `R` can't be fooled by adding a torsion
-/// component this way, so that specific construction isn't a live
-/// forgery path against `verify_batch` either. What the added check
-/// closes is the one small-order value *within* the base subgroup —
-/// `R = identity` — which uniquely can satisfy the equation without
-/// tripping the "doesn't decompress to the base subgroup" failure the
-/// experiment hit (at the cost of the signer's own private key to
-/// compute a matching `s`; the resulting signature is an alternate
-/// valid *encoding* for a message that key already authorized, not an
-/// unauthorized forgery). Kept regardless: it costs one cheap
-/// decompress-and-check per entry, and it makes this function's accept
-/// set a true subset of `verify`'s rather than a documented
-/// approximation of one — the kind of gap this codebase does not leave
-/// open once it's identified (see the CHANGELOG's own history of this
-/// exact "close the residual gap even when the win is small" call).
-#[cfg(feature = "batch-verify")]
-pub fn verify_batch(entries: &[(PublicKey, Hash, Signature)]) -> Result<(), KitError> {
+/// Each entry passes the same per-entry checks first. The weights `z_i`
+/// are 128-bit values from the operating system's random source, drawn
+/// fresh on every call, so whoever built the batch cannot predict them.
+/// The batch then checks
+/// `[8]([sum z_i s_i]B - sum [z_i]R_i - sum_A [sum_{i: A_i = A} z_i k_i]A) = 0`:
+/// entries that share a public key share one term, so a batch from few
+/// signers multiplies fewer points. Because the equation is cofactored, a
+/// torsion component in any entry vanishes in both this check and
+/// [`verify_ed25519`]. On failure the caller learns only that some entry is
+/// invalid; it calls [`verify_ed25519`] per entry to find which.
+pub fn verify_ed25519_batch(entries: &[(&[u8; 32], &[u8], &[u8; 64])]) -> Result<(), KitError> {
     if entries.is_empty() {
         return Ok(());
     }
-    let mut verifying_keys = Vec::with_capacity(entries.len());
-    for (public, _, sig) in entries {
-        let vk = VerifyingKey::from_bytes(&public.0).map_err(|_| KitError::InvalidPublicKey)?;
-        if vk.is_weak() {
-            return Err(KitError::SignatureInvalid);
-        }
-        let dalek_sig = DalekSignature::from_bytes(&sig.0);
-        let r_is_small_order = curve25519_dalek::edwards::CompressedEdwardsY(*dalek_sig.r_bytes())
-            .decompress()
-            .is_none_or(|r| r.is_small_order());
-        if r_is_small_order {
-            return Err(KitError::SignatureInvalid);
-        }
-        verifying_keys.push(vk);
+    let mut weights = vec![0u8; 16 * entries.len()];
+    getrandom::fill(&mut weights).map_err(|_| KitError::RngFailure)?;
+    let mut key_index: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+    let mut keys: Vec<EdwardsPoint> = Vec::new();
+    let mut key_coefficients: Vec<Scalar> = Vec::new();
+    let mut b_coefficient = Scalar::ZERO;
+    let mut r_coefficients = Vec::with_capacity(entries.len());
+    let mut commitments = Vec::with_capacity(entries.len());
+    for ((public, message, sig), w) in entries.iter().zip(weights.chunks_exact(16)) {
+        let index = if let Some(&index) = key_index.get(*public) {
+            index
+        } else {
+            keys.push(decode_key(public)?);
+            key_coefficients.push(Scalar::ZERO);
+            key_index.insert(**public, keys.len() - 1);
+            keys.len() - 1
+        };
+        let item = Ed25519Item::decode(public, message, sig)?;
+        let mut z = [0u8; 16];
+        z.copy_from_slice(w);
+        let z = Scalar::from(u128::from_le_bytes(z));
+        b_coefficient += z * item.s;
+        r_coefficients.push(-z);
+        commitments.push(item.r);
+        key_coefficients[index] -= z * item.k;
     }
-    let messages: Vec<&[u8]> = entries
-        .iter()
-        .map(|(_, digest, _)| digest.as_slice())
-        .collect();
-    let signatures: Vec<DalekSignature> = entries
-        .iter()
-        .map(|(_, _, sig)| DalekSignature::from_bytes(&sig.0))
-        .collect();
-    ed25519_dalek::verify_batch(&messages, &signatures, &verifying_keys)
-        .map_err(|_| KitError::SignatureInvalid)
+    let scalars = core::iter::once(b_coefficient)
+        .chain(r_coefficients)
+        .chain(key_coefficients);
+    let points = core::iter::once(ED25519_BASEPOINT_POINT)
+        .chain(commitments)
+        .chain(keys);
+    if EdwardsPoint::vartime_multiscalar_mul(scalars, points)
+        .mul_by_cofactor()
+        .is_identity()
+    {
+        Ok(())
+    } else {
+        Err(KitError::SignatureInvalid)
+    }
+}
+
+/// Decode a public key with checks 1 and 2 of SPEC-SIGNING §1: a canonical
+/// encoding of a point that is not of small order.
+fn decode_key(public: &[u8; 32]) -> Result<EdwardsPoint, KitError> {
+    let key = canonical_point(public).ok_or(KitError::InvalidPublicKey)?;
+    if key.is_small_order() {
+        return Err(KitError::SignatureInvalid);
+    }
+    Ok(key)
+}
+
+/// One signature after the per-entry checks of SPEC-SIGNING §1: the
+/// commitment `R`, the scalar `s` and the challenge
+/// `k = SHA-512(R || A || M) mod L`. The key `A` is checked by
+/// [`decode_key`].
+struct Ed25519Item {
+    r: EdwardsPoint,
+    s: Scalar,
+    k: Scalar,
+}
+
+impl Ed25519Item {
+    fn decode(public: &[u8; 32], message: &[u8], sig: &[u8; 64]) -> Result<Self, KitError> {
+        let mut r_bytes = [0u8; 32];
+        r_bytes.copy_from_slice(&sig[..32]);
+        let mut s_bytes = [0u8; 32];
+        s_bytes.copy_from_slice(&sig[32..]);
+        let commitment = canonical_point(&r_bytes).ok_or(KitError::SignatureInvalid)?;
+        if commitment.is_small_order() {
+            return Err(KitError::SignatureInvalid);
+        }
+        let scalar = Option::<Scalar>::from(Scalar::from_canonical_bytes(s_bytes))
+            .ok_or(KitError::SignatureInvalid)?;
+        let mut hasher = Sha512::new();
+        hasher.update(r_bytes);
+        hasher.update(public);
+        hasher.update(message);
+        let challenge = Scalar::from_bytes_mod_order_wide(&hasher.finalize().into());
+        Ok(Self {
+            r: commitment,
+            s: scalar,
+            k: challenge,
+        })
+    }
+}
+
+/// Decode a point and require `y < p`, which decompression alone does not
+/// check: it reduces `y` modulo `p`. The other non-canonical form, a sign
+/// bit on `x = 0`, needs no test here: `x = 0` holds only for the identity
+/// and the point of order 2, which check 2 of SPEC-SIGNING §1 rejects.
+fn canonical_point(bytes: &[u8; 32]) -> Option<EdwardsPoint> {
+    let mut y = *bytes;
+    y[31] &= 0x7f;
+    // y >= p = 2^255 - 19 exactly when the high 248 bits are all set and
+    // the low byte is at least 0xed.
+    if y[31] == 0x7f && y[1..31].iter().all(|b| *b == 0xff) && y[0] >= 0xed {
+        return None;
+    }
+    CompressedEdwardsY(*bytes).decompress()
 }
 
 // -------------------------------------------------------------------
@@ -990,14 +1021,11 @@ mod tests {
 
     /// Regression guard on strict-verification compliance.
     ///
-    /// Our `verify()` uses [`ed25519_dalek::VerifyingKey::verify_strict`],
-    /// which rejects the Ed25519 malleability vectors documented at
-    /// <https://hdevalence.ca/blog/2020-10-04-its-25519am>. This test
-    /// asserts that signatures produced by our own signer pass the
-    /// strict check — if `ed25519-dalek` ever starts producing
-    /// non-canonical `R` or high-`s` signatures, this fails first.
+    /// Signatures from our own signer must pass [`verify_ed25519`]. If
+    /// `ed25519-dalek` ever produced a non-canonical `R` or a high `s`,
+    /// this test fails first.
     #[test]
-    fn our_signatures_pass_strict_verify() {
+    fn our_signatures_verify() {
         let kp = fixed_kp();
         // Sample the signature space across several different inputs;
         // a subtle drift in `s` normalization (e.g. if the underlying
@@ -1015,7 +1043,7 @@ mod tests {
         {
             let sig = kp.sign(COMMIT_DOMAIN, input);
             verify(&kp.public, COMMIT_DOMAIN, input, &sig)
-                .unwrap_or_else(|e| panic!("input #{i} failed strict verify: {e:?}"));
+                .unwrap_or_else(|e| panic!("input #{i} failed to verify: {e:?}"));
         }
     }
 
@@ -1024,7 +1052,7 @@ mod tests {
     /// (`L` = the Ed25519 base-point order). `s + L` is congruent to
     /// the original `s` modulo `L` — the same scalar the verification
     /// equation cares about — but is not the canonical
-    /// least-representative encoding RFC 8032 / `verify_strict`
+    /// least-representative encoding SPEC-SIGNING §1
     /// requires. This is the classic Ed25519 high-`s` malleability
     /// vector (<https://hdevalence.ca/blog/2020-10-04-its-25519am>),
     /// constructed deterministically rather than by mutating a random
@@ -1067,154 +1095,225 @@ mod tests {
         ));
     }
 
-    // ------------------------------------------------------------------
-    // Batch verification (`verify_batch`)
-    // ------------------------------------------------------------------
-
-    #[cfg(feature = "batch-verify")]
-    #[test]
-    fn verify_batch_accepts_many_valid_signatures_under_distinct_keys() {
-        let entries: Vec<(PublicKey, Hash, Signature)> = (0..40u8)
-            .map(|i| {
-                let kp = KeyPair::from_seed([i; 32]);
-                let msg = format!("batch entry #{i}");
-                let digest = domain_digest(COMMIT_DOMAIN, msg.as_bytes());
-                let sig = kp.sign(COMMIT_DOMAIN, msg.as_bytes());
-                (kp.public, digest, sig)
-            })
-            .collect();
-        verify_batch(&entries).expect("every entry is validly signed");
-    }
-
-    #[cfg(feature = "batch-verify")]
-    #[test]
-    fn verify_batch_empty_is_ok() {
-        verify_batch(&[]).expect("an empty batch trivially verifies");
-    }
-
-    #[cfg(feature = "batch-verify")]
-    #[test]
-    fn verify_batch_rejects_one_tampered_signature_among_many_valid() {
-        let mut entries: Vec<(PublicKey, Hash, Signature)> = (0..16u8)
-            .map(|i| {
-                let kp = KeyPair::from_seed([i; 32]);
-                let msg = format!("batch entry #{i}");
-                let digest = domain_digest(COMMIT_DOMAIN, msg.as_bytes());
-                let sig = kp.sign(COMMIT_DOMAIN, msg.as_bytes());
-                (kp.public, digest, sig)
-            })
-            .collect();
-        // Every entry individually verifies (against its digest,
-        // matching what `verify` checks internally) before tampering.
-        for (pk, digest, sig) in &entries {
-            let vk = VerifyingKey::from_bytes(&pk.0).unwrap();
-            let dalek_sig = DalekSignature::from_bytes(&sig.0);
-            vk.verify_strict(digest, &dalek_sig)
-                .expect("fixture entry must verify before tampering");
-        }
-        entries[8].2.0[0] ^= 0xff;
-        let err = verify_batch(&entries).expect_err("a tampered entry must fail the batch");
-        assert!(matches!(err, KitError::SignatureInvalid));
-    }
-
-    /// A genuine weak-key forgery, not just a mismatched signature: with
-    /// `A` (the public key) equal to the curve's neutral element, the
-    /// verification equation `[s]B == R + [k]A'` degenerates to `[s]B ==
-    /// R` for every `k` (since `[k]A' = [k]·0 = 0` regardless of `k`), so
-    /// `R = identity, s = 0` satisfies it for *any* message — no secret
-    /// key involved. `VerifyingKey::verify` (loose) accepts this for
-    /// arbitrary messages; only the weak-key check `verify_strict` (and
-    /// this module's `verify_batch`) adds is what rejects it. Confirmed
-    /// against `ed25519_dalek::VerifyingKey` directly (loose `verify`
-    /// accepts, `verify_strict` rejects) before relying on it here, so
-    /// this test is exercising `verify_batch`'s own weak-key guard
-    /// specifically — not incidentally failing for an unrelated reason
-    /// the way pairing the identity key with an arbitrary *valid*
-    /// signature (from a different key) would.
-    #[cfg(feature = "batch-verify")]
-    #[test]
-    fn verify_batch_rejects_a_weak_public_key_forgery() {
-        let mut pk_bytes = [0u8; 32];
-        pk_bytes[0] = 1; // compressed identity point (the neutral element)
-        let identity_pk = PublicKey(pk_bytes);
-        assert!(
-            VerifyingKey::from_bytes(&identity_pk.0)
-                .expect("identity point decodes")
-                .is_weak(),
-            "the compressed identity point must be flagged weak"
-        );
-
-        let mut sig_bytes = [0u8; 64];
-        sig_bytes[0] = 1; // R = identity; s = 0 (remaining bytes already zero)
-        let forged_sig = Signature(sig_bytes);
-        let digest = domain_digest(COMMIT_DOMAIN, b"any message at all, no key needed");
-
-        let entries = vec![(identity_pk, digest, forged_sig)];
-        let err = verify_batch(&entries).expect_err("a weak-key forgery must be rejected");
-        assert!(matches!(err, KitError::SignatureInvalid));
-    }
-
-    /// Isolates the small-order-`R` check from the weak-public-key check
-    /// above: a genuinely *normal* (non-weak) key's real secret scalar
-    /// is used to solve `[s]B = R + [k]A` for `R = identity` — the one
-    /// small-order point that also lies in the base subgroup, so it's
-    /// the only one this equation can be solved for at all (every other
-    /// small-order `R` can't, per `verify_batch`'s doc comment; that's
-    /// also why this construction needs the real secret key, unlike an
-    /// outside forger who doesn't have it — see the same doc comment).
-    ///
-    /// Confirms the construction is load-bearing, not just malformed
-    /// input: loose `verify` (no `R`/weak-key check) accepts it — so the
-    /// batch equation, which performs the identical check, would too —
-    /// while `verify_strict` and this module's `verify_batch` both
-    /// reject it via their small-order checks.
-    #[cfg(feature = "batch-verify")]
-    #[test]
-    fn verify_batch_rejects_a_small_order_r_forgery_from_a_normal_key() {
-        use curve25519_dalek::scalar::Scalar;
-        use ed25519_dalek::Verifier as _;
+    /// A signature built from a real secret scalar `a`, a nonce `r` and an
+    /// optional torsion point added to `R`. Returns the signature bytes.
+    fn sign_with_r_offset(kp: &KeyPair, message: &[u8], r: u64, offset: EdwardsPoint) -> [u8; 64] {
         use ed25519_dalek::hazmat::ExpandedSecretKey;
-        use sha2::{Digest as _, Sha512};
 
-        let kp = fixed_kp();
-        let vk = VerifyingKey::from_bytes(&kp.public.0).unwrap();
-        assert!(!vk.is_weak(), "sanity: this key must not be weak");
-
-        // Expand the secret scalar exactly as real signing does (RFC
-        // 8032 §5.1.5): a = clamp(SHA-512(seed))[0..32].
         let expanded_hash: [u8; 64] = Sha512::digest(kp.secret.0).into();
-        let esk = ExpandedSecretKey::from_bytes(&expanded_hash);
-
-        let mut r_bytes = [0u8; 32];
-        r_bytes[0] = 1; // R = compressed identity
-
-        let digest = domain_digest(COMMIT_DOMAIN, b"small-order-R forgery probe");
-        // k = H(R || A || digest) mod L — the same hash-to-scalar step
-        // `verify`/`verify_batch` both perform internally.
+        let a = ExpandedSecretKey::from_bytes(&expanded_hash).scalar;
+        let r = Scalar::from(r);
+        let r_bytes = (r * ED25519_BASEPOINT_POINT + offset).compress().to_bytes();
         let mut h = Sha512::new();
         h.update(r_bytes);
         h.update(kp.public.0);
-        h.update(digest);
-        let k_bytes: [u8; 64] = h.finalize().into();
-        let k = Scalar::from_bytes_mod_order_wide(&k_bytes);
+        h.update(message);
+        let k = Scalar::from_bytes_mod_order_wide(&h.finalize().into());
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&r_bytes);
+        sig[32..].copy_from_slice((r + k * a).as_bytes());
+        sig
+    }
 
-        // s = k*a solves [s]B = [k]A = R + [k]A, since R = identity = [0]B.
-        let s = k * esk.scalar;
-        let mut sig_bytes = [0u8; 64];
-        sig_bytes[..32].copy_from_slice(&r_bytes);
-        sig_bytes[32..].copy_from_slice(s.as_bytes());
-        let forged_sig = DalekSignature::from_bytes(&sig_bytes);
+    /// A key holder can pad `R` with an 8-torsion point. The cofactored
+    /// equation accepts the result, and so does the batch check, whatever
+    /// its random weights: the two never disagree on it.
+    #[test]
+    fn torsion_padded_r_verifies_alone_and_in_a_batch() {
+        use curve25519_dalek::constants::EIGHT_TORSION;
 
-        vk.verify(&digest, &forged_sig)
-            .expect("forged signature must satisfy the loose verification equation");
-        assert!(
-            vk.verify_strict(&digest, &forged_sig).is_err(),
-            "verify_strict must reject the small-order R"
-        );
+        let kp = fixed_kp();
+        let message = domain_digest(COMMIT_DOMAIN, b"torsion-padded R probe");
+        for (i, torsion) in EIGHT_TORSION.iter().enumerate().skip(1) {
+            let sig = sign_with_r_offset(&kp, &message, 7 + i as u64, *torsion);
+            verify_ed25519(&kp.public.0, &message, &sig)
+                .unwrap_or_else(|e| panic!("torsion point {i}: {e:?}"));
+            let honest = kp.sign(COMMIT_DOMAIN, b"honest");
+            let honest_digest = domain_digest(COMMIT_DOMAIN, b"honest");
+            for _ in 0..16 {
+                verify_ed25519_batch(&[
+                    (&kp.public.0, &message[..], &sig),
+                    (&kp.public.0, &honest_digest[..], &honest.0),
+                ])
+                .unwrap_or_else(|e| panic!("batch with torsion point {i}: {e:?}"));
+            }
+        }
+    }
 
-        let entries = vec![(kp.public, digest, Signature(sig_bytes))];
-        let err = verify_batch(&entries).expect_err("a small-order-R forgery must be rejected");
-        assert!(matches!(err, KitError::SignatureInvalid));
+    /// With the identity as public key, `R` = identity and `s` = 0 satisfy
+    /// the equation for every message. The small-order check rejects it.
+    #[test]
+    fn verify_rejects_the_universal_weak_key_signature() {
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        let mut sig = [0u8; 64];
+        sig[0] = 1;
+        let message = domain_digest(COMMIT_DOMAIN, b"any message");
+        assert!(matches!(
+            verify_ed25519(&identity, &message, &sig),
+            Err(KitError::SignatureInvalid)
+        ));
+        assert!(verify_ed25519_batch(&[(&identity, &message[..], &sig)]).is_err());
+    }
+
+    /// `R` = identity with `s = k * a` satisfies the equation for a normal
+    /// key. The small-order check on `R` rejects it.
+    #[test]
+    fn verify_rejects_a_small_order_r() {
+        use ed25519_dalek::hazmat::ExpandedSecretKey;
+
+        let kp = fixed_kp();
+        let message = domain_digest(COMMIT_DOMAIN, b"small-order R probe");
+        let expanded_hash: [u8; 64] = Sha512::digest(kp.secret.0).into();
+        let a = ExpandedSecretKey::from_bytes(&expanded_hash).scalar;
+        let mut r_bytes = [0u8; 32];
+        r_bytes[0] = 1;
+        let mut h = Sha512::new();
+        h.update(r_bytes);
+        h.update(kp.public.0);
+        h.update(message);
+        let k = Scalar::from_bytes_mod_order_wide(&h.finalize().into());
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&r_bytes);
+        sig[32..].copy_from_slice((k * a).as_bytes());
+        assert!(matches!(
+            verify_ed25519(&kp.public.0, &message, &sig),
+            Err(KitError::SignatureInvalid)
+        ));
+        assert!(verify_ed25519_batch(&[(&kp.public.0, &message[..], &sig)]).is_err());
+    }
+
+    /// A `y` coordinate at or above `p` names the same point as `y - p`.
+    /// The canonical-encoding check rejects it for both `A` and `R`.
+    #[test]
+    fn verify_rejects_non_canonical_point_encodings() {
+        // y = 2^255 - 19 + 1: the identity's y-coordinate (1) plus p.
+        let mut high = [0xffu8; 32];
+        high[0] = 0xee;
+        high[31] = 0x7f;
+        assert!(CompressedEdwardsY(high).decompress().is_some());
+        assert!(canonical_point(&high).is_none());
+        // x = 0 with the sign bit set decodes to the identity, which the
+        // small-order check rejects.
+        let mut negative_zero = [0u8; 32];
+        negative_zero[0] = 1;
+        negative_zero[31] = 0x80;
+        assert!(canonical_point(&negative_zero).unwrap().is_small_order());
+
+        let kp = fixed_kp();
+        let sig = kp.sign(COMMIT_DOMAIN, b"x");
+        let message = domain_digest(COMMIT_DOMAIN, b"x");
+        let mut bad_r = sig.0;
+        bad_r[..32].copy_from_slice(&high);
+        assert!(verify_ed25519(&kp.public.0, &message, &bad_r).is_err());
+        assert!(matches!(
+            verify_ed25519(&high, &message, &sig.0),
+            Err(KitError::InvalidPublicKey)
+        ));
+    }
+
+    /// Together with the small-order check, the byte-level canonical check
+    /// accepts exactly the points whose encoding survives decoding and
+    /// re-encoding, on every edge encoding and on random bytes.
+    #[test]
+    fn canonical_point_matches_re_encoding() {
+        let reference = |bytes: &[u8; 32]| {
+            CompressedEdwardsY(*bytes)
+                .decompress()
+                .filter(|p| p.compress().as_bytes() == bytes)
+        };
+        let mut cases: Vec<[u8; 32]> = Vec::new();
+        // y = p - 1 .. p + 18 with both signs: around the reduction edge.
+        for low in 0xecu8..=0xff {
+            for sign in [0u8, 0x80] {
+                let mut b = [0xffu8; 32];
+                b[0] = low;
+                b[31] = 0x7f | sign;
+                cases.push(b);
+            }
+        }
+        for low in 0u8..19 {
+            for sign in [0u8, 0x80] {
+                let mut b = [0u8; 32];
+                b[0] = low;
+                b[31] = sign;
+                cases.push(b);
+            }
+        }
+        let mut state = [7u8; 32];
+        for _ in 0..4096 {
+            state = Sha512::digest(state)[..32].try_into().unwrap();
+            cases.push(state);
+        }
+        let accepted = |p: Option<EdwardsPoint>| p.filter(|p| !p.is_small_order());
+        for b in &cases {
+            assert_eq!(
+                accepted(canonical_point(b)).map(|p| p.compress()),
+                accepted(reference(b)).map(|p| p.compress()),
+                "encoding {b:02x?}"
+            );
+        }
+    }
+
+    /// Entries that share a key share one term in the batch. A batch from
+    /// two signers verifies, and one bad signature among them fails it.
+    #[test]
+    fn batch_with_repeated_signers() {
+        let keys = [KeyPair::from_seed([1; 32]), KeyPair::from_seed([2; 32])];
+        let mut owned: Vec<([u8; 32], [u8; HASH_LEN], [u8; 64])> = (0..40u8)
+            .map(|i| {
+                let kp = &keys[usize::from(i % 2)];
+                (
+                    kp.public.0,
+                    domain_digest(COMMIT_DOMAIN, &[i]),
+                    kp.sign(COMMIT_DOMAIN, &[i]).0,
+                )
+            })
+            .collect();
+        let refs: Vec<_> = owned.iter().map(|(p, m, s)| (p, &m[..], s)).collect();
+        verify_ed25519_batch(&refs).expect("every entry is valid");
+
+        // Swap the signatures of two entries by the same key.
+        let sig = owned[0].2;
+        owned[0].2 = owned[2].2;
+        owned[2].2 = sig;
+        let refs: Vec<_> = owned.iter().map(|(p, m, s)| (p, &m[..], s)).collect();
+        assert!(matches!(
+            verify_ed25519_batch(&refs),
+            Err(KitError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn batch_accepts_valid_entries_and_rejects_one_bad_entry() {
+        let keys: Vec<KeyPair> = (0..24u8).map(|i| KeyPair::from_seed([i; 32])).collect();
+        let messages: Vec<[u8; HASH_LEN]> = (0..24u8)
+            .map(|i| domain_digest(COMMIT_DOMAIN, &[i]))
+            .collect();
+        let mut sigs: Vec<[u8; 64]> = keys
+            .iter()
+            .zip(0..24u8)
+            .map(|(kp, i)| kp.sign(COMMIT_DOMAIN, &[i]).0)
+            .collect();
+        let entries = |sigs: &[[u8; 64]]| -> Vec<([u8; 32], [u8; HASH_LEN], [u8; 64])> {
+            keys.iter()
+                .zip(&messages)
+                .zip(sigs)
+                .map(|((kp, m), s)| (kp.public.0, *m, *s))
+                .collect()
+        };
+        let owned = entries(&sigs);
+        let refs: Vec<_> = owned.iter().map(|(p, m, s)| (p, &m[..], s)).collect();
+        verify_ed25519_batch(&refs).expect("every entry is valid");
+        verify_ed25519_batch(&[]).expect("an empty batch has nothing to reject");
+
+        sigs[11][40] ^= 1;
+        let owned = entries(&sigs);
+        let refs: Vec<_> = owned.iter().map(|(p, m, s)| (p, &m[..], s)).collect();
+        assert!(matches!(
+            verify_ed25519_batch(&refs),
+            Err(KitError::SignatureInvalid)
+        ));
     }
 
     // ------------------------------------------------------------------
