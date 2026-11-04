@@ -1693,26 +1693,26 @@ mod kani_proofs {
         verify_with::<0>(u32::MAX);
     }
 
-    /// As above with one arbitrary sibling digest and `leaf_count <= 8`
-    /// (<= 3 fold levels; any `u32` leaf count ran out of memory). Run
+    /// As above with one arbitrary sibling digest and `leaf_count <= 16`
+    /// (<= 4 fold levels; any `u32` leaf count ran out of memory). Run
     /// with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`.
     #[kani::proof]
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::unwind(5)]
+    #[kani::unwind(6)]
     fn merkle_verify_s1() {
-        kani::cover!(verify_with::<1>(8), "accepts_one_sibling_proof");
+        kani::cover!(verify_with::<1>(16), "accepts_one_sibling_proof");
     }
 
-    /// As above with two arbitrary sibling digests and `leaf_count <= 8`.
+    /// As above with two arbitrary sibling digests and `leaf_count <= 16`.
     #[kani::proof]
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::unwind(5)]
+    #[kani::unwind(6)]
     fn merkle_verify_s2() {
-        kani::cover!(verify_with::<2>(8), "accepts_two_sibling_proof");
+        kani::cover!(verify_with::<2>(16), "accepts_two_sibling_proof");
     }
 
     /// Independent single-leaf proof builder following
@@ -1821,6 +1821,20 @@ mod kani_proofs {
     fn merkle_roundtrip_two_chunks() {
         chunk_rt::<2>(1);
         chunk_rt::<2>(2);
+    }
+
+    /// As above for a 3-chunk blob (4 leaves, a full 2-level tree), every
+    /// chunk position, each concrete.
+    #[kani::proof]
+    #[kani::stub(h2, toy_h2)]
+    #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(5)]
+    fn merkle_roundtrip_three_chunks() {
+        chunk_rt::<3>(1);
+        chunk_rt::<3>(2);
+        chunk_rt::<3>(3);
     }
 
     /// SPEC-MERKLE-OBJECTS §5.4 builder rule: "A builder MUST refuse any

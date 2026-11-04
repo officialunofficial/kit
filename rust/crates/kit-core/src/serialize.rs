@@ -1492,13 +1492,15 @@ mod kani_proofs {
     }
 
     /// `TreeEntry::validate_name` agrees with the §4.1 model on every
-    /// name of 0..=6 bytes (enough for `.kit`, `COM1`, `LPT9.x`,
-    /// `con.txt`-style stems and every trailing-byte rule).
+    /// name of 0..=8 bytes. The bound covers `.kit`, `COM1`, `LPT9.x`,
+    /// `con.txt`-style stems, the 8.3 aliases up to `kit~1234` and every
+    /// trailing-byte rule.
     #[kani::proof]
-    #[kani::unwind(8)]
+    #[kani::unwind(10)]
     fn serialize_validate_name_matches_spec() {
-        each_len!(name_at; 0 1 2 3 4 5 6);
+        each_len!(name_at; 0 1 2 3 4 5 6 7 8);
         kani::cover!(TreeEntry::validate_name(b"com0.x"), "com0_allowed");
+        kani::cover!(!TreeEntry::validate_name(b"kit~123"), "short_alias_refused");
     }
 
     fn blob_rt<const N: usize>() {

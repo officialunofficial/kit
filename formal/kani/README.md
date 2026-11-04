@@ -61,7 +61,9 @@ properties satisfied`); they show the asserted `Ok` paths are reachable.
 ## Results (2026-09-26, macOS arm64, 15 cores, shared with other jobs)
 
 Time is wall-clock per `cargo kani` invocation including the (cached)
-build. Cap: 15 min per harness.
+build. Cap: 15 min per harness. The rows of the harnesses with wider
+bounds, and of the new harnesses, come from a run on 2026-11-04 on the
+same kind of machine.
 
 ### kit-core: delta (`--no-default-features -Z stubbing`)
 
@@ -72,7 +74,7 @@ build. Cap: 15 min per harness.
 | `delta_spec_insert` | as above | stream 10 and 11 B | pass, 1/1 cover | 450 s |
 | `delta_spec_copy` | as above | stream 16 B (header + one COPY) | pass, 1/1 cover | 199 s |
 | `delta_decode_canary_wrong_length` | canary: "output is one byte longer than declared" | stream ≤ 20 B | falsified (expected) | 51 s |
-| `delta_encode_decode_roundtrip` | `decode(b, encode(b, r)) == r` | `b`, `r` ≤ 3 B each (INSERT-only writer path) | pass | 37 s |
+| `delta_encode_decode_roundtrip` | `decode(b, encode(b, r)) == r` | `b`, `r` ≤ 4 B each (INSERT-only writer path) | pass | 76 s |
 
 ### kit-core: serialize
 
@@ -81,7 +83,7 @@ build. Cap: 15 min per harness.
 | `serialize_prologue_no_panic` | prologue/dispatch/§11 trailing rule never panic, per-type readers stubbed nondeterministically | input ≤ 12 B | pass, 1/1 cover | 89 s |
 | `serialize_read_other_types_no_panic` | blob/commit/remix/tag/chunked/delta readers never panic | body ≤ 12 B | pass, 1/1 cover | 125 s |
 | `serialize_read_tree_one_entry` | `read_tree` in bounds; `Ok` ⇒ 1 entry matching the wire `name_len`/hash (§4.1 stubbed) | 42-B body, count pinned to 1 | pass, 1/1 cover | 33 s |
-| `serialize_validate_name_matches_spec` | `TreeEntry::validate_name` = §4.1 model | names ≤ 6 B | pass, 1/1 cover | 25 s |
+| `serialize_validate_name_matches_spec` | `TreeEntry::validate_name` = §4.1 model | names ≤ 8 B | pass, 2/2 covers | 49 s |
 | `serialize_blob_roundtrip` | `deserialize(serialize(blob)) == blob` | blob ≤ 4 B | pass | 95 s |
 | `serialize_canary_trailing_byte_accepted` | canary: "one trailing byte still deserializes" | 1-B blob + 1 B | falsified (expected) | 40 s |
 
@@ -93,10 +95,11 @@ build. Cap: 15 min per harness.
 | `merkle_proof_decode_empty_proof` | accepts exactly `be32(n) ‖ varint(0)` (§5.2) | 5 B | pass, 1/1 cover | 11 s |
 | `merkle_proof_decode_one_sibling` | 1-sibling proof decodes to the wire count/digest | 37 B, varint pinned to 1 | pass | 5 s |
 | `merkle_verify_s0` | fold succeeds iff `pos < leaf_count` and sibling count = §5.3; chunk pos 0 rejected (§5.5) | 0 siblings, any `u32` leaf count/position, unwind 34 | pass | 92 s |
-| `merkle_verify_s1` | as above | 1 sibling, leaf count ≤ 8 | pass, 1/1 cover | 19 s |
-| `merkle_verify_s2` | as above | 2 siblings, leaf count ≤ 8 | pass, 1/1 cover | 23 s |
+| `merkle_verify_s1` | as above | 1 sibling, leaf count ≤ 16 | pass, 1/1 cover | 25 s |
+| `merkle_verify_s2` | as above | 2 siblings, leaf count ≤ 16 | pass, 1/1 cover | 42 s |
 | `merkle_roundtrip_one_chunk` | independent §1.1/§5.3 builder's proof accepted by `verify_chunk` | 1 symbolic chunk | pass | 11 s |
 | `merkle_roundtrip_two_chunks` | as above, both positions | 2 symbolic chunks | pass | 26 s |
+| `merkle_roundtrip_three_chunks` | as above, every position | 3 symbolic chunks (4 leaves, full tree) | pass | 36 s |
 | `merkle_canary_tampered_leaf_verifies` | canary: "any leaf verifies under a genuine proof" | 2 chunks | falsified (expected) | 15 s |
 | `merkle_builder_empty_tree_refuses` | **new**: §5.4 builder rule: every single-leaf, multi-leaf and range request against the empty `Tree` is refused | any `u32` position/start/end | pass after the fix (FINDING 1; failed before with `start = end = 0`), 1/1 cover | 8 s |
 
@@ -126,13 +129,14 @@ build. Cap: 15 min per harness.
 | `software_key_record_decode_15b_no_panic` | as above | 15 B | pass | 58 s |
 | `software_key_record_roundtrip` | `decode(encode(r)) == r` | empty variable fields, any algorithm 1–3, attrs, nonce | pass | 27 s |
 | `software_key_record_rejects_algorithm_4` | §6.1.1 "MUST reject id `0x04`" | minimal record, symbolic attrs/nonce | pass | 27 s |
+| `software_key_record_rejects_unknown_algorithm` | §6.1.1 registry: decode accepts iff the id is `0x01`–`0x03` | minimal record, symbolic id/attrs/nonce | pass | 32 s |
 | `software_key_record_canary_trailing_byte_accepted` | canary: "valid record + 1 trailing byte still decodes" | 59 + 1 B | falsified (expected) | 21 s |
 
 ### kit-rpc
 
 | Harness | Property | Bound | Result | Time |
 |---|---|---|---|---|
-| `rpc_read_frame_no_panic` | `read_frame` never panics; accepts iff full prefix, in-cap length and full body; `BodyTruncated.actual` is the true count | streams ≤ 6 B, opaque message | pass | 17 s |
+| `rpc_read_frame_no_panic` | `read_frame` never panics; accepts iff full prefix, in-cap length and full body; `BodyTruncated.actual` is the true count | streams ≤ 8 B, opaque message | pass | 48 s |
 | `rpc_canary_over_cap_length_accepted` | canary: "an over-cap length prefix is accepted" | 4-B prefix | falsified (expected) | 6 s |
 
 ## Findings
