@@ -71,7 +71,7 @@ thiserror = "2.0.21"
 # kit-rpc (kit-bin, kit-attest,
 # kit-transport-ssh) also depends on kit-core directly with default
 # features on, so their builds still get `pack-zstd` via that edge.
-kit-core = { version = "=0.6.0", path = "../kit-core", default-features = false }
+kit-core = { version = "=0.7.0", path = "../kit-core", default-features = false }
 
 [build-dependencies]
 connectrpc-build = { version = "0.9.0", optional = true }
