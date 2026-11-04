@@ -42,7 +42,7 @@ complete deployment-wide takedown claims are forbidden.
 Scope: who may write to, or read from, a repository on a
 multi-repository [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md)
 deployment. The auth v2 contract
-([SPEC-TRANSPORT-CONNECT §7.1](SPEC-TRANSPORT-CONNECT.md#71-reference-worker))
+([SPEC-TRANSPORT-CONNECT §7.1](SPEC-TRANSPORT-CONNECT.md#71-reference-server))
 proves which Ed25519 key signed a request. This document decides whether
 that key may act on the named repository
 ([SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md#74-repository-addressing)).
