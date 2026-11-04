@@ -9,6 +9,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking:** a multi-leaf proof requires strictly ascending positions.
+  The builders (`build_tree_entries_multi_proof`,
+  `build_chunks_multi_proof`) and the verifiers (`verify_tree_entries_multi`,
+  `verify_chunks_multi`) read the positions in input order and reject a
+  position that is lower than the one before it with the new variant
+  `MerkleError::UnsortedPosition`. Before, they sorted the positions. This
+  matches the Commonware BMT, so both sides accept the same inputs.
+  A repeated position is still `DuplicatePosition`. Proof bytes, roots and
+  ids do not change (SPEC-MERKLE-OBJECTS §5.4).
 - The `history-mmr` feature of `kit-core` builds the Commonware storage and
   cryptography crates without their `std` feature. The normal dependency graph
   of the feature drops from 364 to 135 crates. The deterministic runtime, the

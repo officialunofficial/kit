@@ -210,12 +210,18 @@ or too many siblings for the claimed `leaf_count`/position MUST be
 rejected.
 
 **Range and multi-leaf**: a range proof (a contiguous `start..=end`) and
-a multi-leaf proof (an arbitrary position set — sorted internally; a
-repeated position MUST be rejected) fold every proven leaf up
+a multi-leaf proof (a list of positions) fold every proven leaf up
 level-by-level together, consuming exactly the siblings §5.3 selected —
 reusing an already-computed digest from elsewhere in the same proof
 wherever §5.3 omitted it as already-proven, rather than expecting it on
 the wire.
+
+**The positions of a multi-leaf proof MUST be strictly ascending, in
+input order.** A builder and a verifier MUST read each position once, in
+the order given, and MUST reject the first position that is not below
+`leaf_count`, equals the position before it, or is lower than the position
+before it. Neither sorts its input. A rejection changes no proof byte,
+root or id: a proof over ascending positions is the same proof as before.
 
 **A proof over zero positions MUST be rejected**, regardless of
 `leaf_count` — including against the empty `Tree`'s id (§4) with the
@@ -283,7 +289,8 @@ proofs (single-leaf, a range proof, and the metadata-leaf rejection of
 §5.5, all against the real `chunked_blob_cs0_3chunks` object), and
 negative vectors for a wrong position, a swapped sibling, a truncated
 proof, an off-by-one `leaf_count`, an inner-root-vs-id confusion (§5.4),
-and a trailing byte after the encoded proof.
+a trailing byte after the encoded proof, and a multi-leaf proof whose
+positions are not ascending.
 
 ### 5.7 Compatibility with commonware
 
@@ -301,7 +308,8 @@ id, exactly as a kit-native verifier does. A native-only cross-check
 test in `rust/crates/kit-core/src/merkle.rs` pins this byte-identity and
 cross-acceptance claim across many tree sizes and proof shapes
 (single/range/multi), including that a mutated proof is rejected by
-both sides.
+both sides and that both sides reject a multi-leaf position list that is
+repeated or not ascending (§5.4).
 
 ## 6. Invariants
 
@@ -316,6 +324,7 @@ both sides.
 | inclusion-proof sibling/position/leaf tampered | the folded value no longer matches (§5.4) |
 | inclusion-proof `leaf_count` tampered | the finalize step binds it, same as §1.1 step 3 |
 | inclusion proof checked against the wrong object id (bare root, or another type's id) | the `domain_digest(TYPE_DOMAIN, …)` wrap in the comparison (§5.4) |
+| multi-leaf positions repeated or not ascending | both the builder and the verifier read the positions in input order and reject the first one that is not above its predecessor (§5.4) |
 | inclusion-proof sibling count forged to force large allocation | the `max_items * MAX_LEVELS` decode bound (§5.2) |
 | chunk proof of position 0 (the metadata leaf) accepted as a chunk | chunk verification rejects position 0 explicitly (§5.5) |
 | a proof built for a position the object does not have (including position 0 of the empty `Tree`) | builders refuse any position `>= leaf_count` (§5.4) |

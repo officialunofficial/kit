@@ -407,7 +407,35 @@ which builds many randomised trees and single/range/multi position sets,
 asserts kit's encoded bytes equal upstream's `commonware_codec::Encode`
 output, cross-decodes each side's bytes with the other's type, and
 confirms both verifiers reject a mutated proof (flipped sibling byte,
-dropped/added sibling, wrong `leaf_count`).
+dropped/added sibling, wrong `leaf_count`). The same test checks that
+both builders and both verifiers reject a position list that is repeated or
+not ascending (next entry).
+
+## Multi-leaf proof positions are strictly ascending
+
+**Always:** `merkle::BmtTree::multi_proof`, `proof_encoded_size` and every
+multi-leaf verifier (`verify_tree_entries_multi`, `verify_chunks_multi`)
+read the positions once, in input order. A chunk verifier first rejects
+position 0, the metadata leaf. Each then rejects the first position that
+is out of range (`PositionOutOfRange`), equals the position before it
+(`DuplicatePosition`) or is lower than the position before it
+(`UnsortedPosition`). No code path sorts the positions.
+
+**Because:** SPEC-MERKLE-OBJECTS §5.4 and §5.7 promise that a
+commonware-based verifier and kit accept the same inputs. Upstream
+rejects a position list that is not strictly ascending. A kit that sorted
+would accept a non-canonical form that upstream rejects, and the two
+verifiers would disagree on the same bytes.
+
+**If violated:** one verifier accepts a proof request that the other
+rejects, so a caller that checks with kit and relays to an upstream-based
+verifier (or the reverse) sees different results for the same input.
+
+**Enforced by:** `merkle::tests::multi_proofs_require_strictly_ascending_positions`,
+the descending and repeated cases of `proofs_match_commonware` (which also
+compare the upstream errors), the negative vector
+`neg_multi_positions_unsorted` under `rust/tests/golden/proofs/`, and the
+independent check `scripts/golden/proofs_ref.py`.
 
 ## Disclosure verification is against object ids only
 

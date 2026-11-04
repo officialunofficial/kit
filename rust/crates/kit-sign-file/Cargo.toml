@@ -25,11 +25,11 @@ path = "src/main.rs"
 # The attest crate supplies the canonical Algorithm enum, the typed errors
 # and the per-algorithm signers. All three algorithms are on, so one binary
 # signs under ed25519, secp256k1 or p256 depending on the request.
-kit-attest = { version = "=0.6.0", path = "../kit-attest", default-features = false, features = ["algo-ed25519", "algo-secp256k1", "algo-p256"] }
+kit-attest = { version = "=0.7.0", path = "../kit-attest", default-features = false, features = ["algo-ed25519", "algo-secp256k1", "algo-p256"] }
 # `KeyPair::from_seed` builds the Ed25519 signer.
-kit-core = { version = "=0.6.0", path = "../kit-core" }
+kit-core = { version = "=0.7.0", path = "../kit-core" }
 # The wire schemas and the length-prefixed framing of the subprocess protocol.
-kit-rpc = { version = "=0.6.0", path = "../kit-rpc" }
+kit-rpc = { version = "=0.7.0", path = "../kit-rpc" }
 buffa = "0.9.2"
 zeroize = "1.9.1"
 
