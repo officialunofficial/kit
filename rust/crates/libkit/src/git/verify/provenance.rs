@@ -2,6 +2,7 @@
 
 use kit_core::{Hash, layout::RepoLayout, store::ObjectStore};
 use kit_git_bridge::gitobj::{Sha1Id, sha1_hex};
+use kit_git_bridge::remoteid::attestation_remote;
 use serde::Deserialize;
 
 use crate::git::import::PREDICATE_TYPE;
@@ -77,7 +78,9 @@ pub fn claim_accepts(payload: &[u8], binding: &ClaimBinding<'_>) -> bool {
             .is_none_or(|h| h == binding.sha256)
         && claim.predicate.ref_name == binding.kit_ref
         && claim.predicate.git_commit == sha1_hex(binding.git_id)
-        && claim.predicate.remote_url == binding.source
+        // An attestation of an earlier import names the local path itself.
+        && (claim.predicate.remote_url == binding.source
+            || claim.predicate.remote_url == attestation_remote(binding.source))
         && claim.predicate.schema_version == 1
         && claim.predicate.spec_version == kit_git_bridge::import::IMPORT_SPEC_VERSION
 }

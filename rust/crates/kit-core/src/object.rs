@@ -199,6 +199,11 @@ impl TreeEntry {
     ///   `COM1`-`COM9`, `LPT1`-`LPT9`), with or without an extension,
     ///   case-insensitively.
     ///
+    /// - `:` anywhere, which names NTFS alternate data streams and
+    ///   drive-relative paths (`.kit::$INDEX_ALLOCATION`, `C:x`).
+    /// - `kit~N` / `git~N` (digits only), the NTFS 8.3 short names of
+    ///   `.kit` and `.git`, case-insensitively.
+    ///
     /// ASCII case-folding is sufficient because all other byte-level
     /// rules above are ASCII-only; names with non-ASCII bytes bypass
     /// these extra checks but remain constrained by the base rules.
@@ -210,7 +215,7 @@ impl TreeEntry {
         if name == b"." || name == b".." {
             return false;
         }
-        if name.iter().any(|&b| matches!(b, 0 | b'/' | b'\\')) {
+        if name.iter().any(|&b| matches!(b, 0 | b'/' | b'\\' | b':')) {
             return false;
         }
         // Trailing `.` or space — Windows strips these, causing aliasing
@@ -220,6 +225,9 @@ impl TreeEntry {
         }
         // Case-insensitive `.kit` / `.git`.
         if name.eq_ignore_ascii_case(b".kit") || name.eq_ignore_ascii_case(b".git") {
+            return false;
+        }
+        if is_short_name_alias(name) {
             return false;
         }
         // Reserved Windows device names — the stem (before the first `.`)
@@ -233,6 +241,18 @@ impl TreeEntry {
         }
         true
     }
+}
+
+/// Returns `true` when `name` is `kit~N` or `git~N` (N one or more
+/// ASCII digits), case-insensitively: the NTFS 8.3 aliases of `.kit`
+/// and `.git`.
+fn is_short_name_alias(name: &[u8]) -> bool {
+    if name.len() < 5 || name[3] != b'~' {
+        return false;
+    }
+    let head = &name[..3];
+    (head.eq_ignore_ascii_case(b"kit") || head.eq_ignore_ascii_case(b"git"))
+        && name[4..].iter().all(u8::is_ascii_digit)
 }
 
 /// Returns `true` when `stem` (ASCII bytes, case-insensitive) matches a
@@ -636,6 +656,10 @@ pub enum KitError {
     /// §7: "The concatenated length MUST equal `total_size`").
     #[error("chunked blob reassembles to {actual} bytes, manifest total_size is {expected}")]
     ChunkedBlobSizeMismatch { expected: u64, actual: u64 },
+    /// A `ChunkedBlob`'s `total_size` is impossible for its chunk count
+    /// and chunk size, or above the per-file limit (SPEC-OBJECTS §7).
+    #[error("chunked blob total_size is inconsistent with its chunk layout or too large")]
+    ChunkedBlobTotalSizeInvalid,
     #[error("identity kind byte {0:#04x} is not 0x01..=0x03")]
     UnknownIdentityKind(u8),
     #[error("identity has zero-length payload, or is Ed25519 with len != 32")]
@@ -890,6 +914,24 @@ mod tests {
         // Unrelated names starting with `.m` or `.g` are fine.
         assert!(TreeEntry::validate_name(b".kitignore"));
         assert!(TreeEntry::validate_name(b".gitignore"));
+    }
+
+    #[test]
+    fn tree_entry_name_rejects_ntfs_streams_and_short_names() {
+        for n in [
+            b".kit::$INDEX_ALLOCATION".as_slice(),
+            b".git::$INDEX_ALLOCATION",
+            b"C:x",
+            b"a:b",
+            b"KIT~1",
+            b"git~1",
+            b"Git~12",
+        ] {
+            assert!(!TreeEntry::validate_name(n), "accepted {n:?}");
+        }
+        assert!(TreeEntry::validate_name(b"kit~"));
+        assert!(TreeEntry::validate_name(b"kit~a"));
+        assert!(TreeEntry::validate_name(b"kitten~1"));
     }
 
     #[test]

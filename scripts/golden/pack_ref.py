@@ -51,6 +51,8 @@ except ImportError:
 
 
 MAX_RAW_OBJECT_SIZE = 1 << 30
+# Vectors 21 and 22 of SPEC-PACKFILE section 10 carry this file name prefix.
+BOUNDARY = "boundary_"
 
 
 def apply_delta(base, stream):
@@ -157,12 +159,84 @@ def parse_pack(data):
     return version, entries
 
 
+def frames(pack):
+    """The (entry type, payload) pairs of a pack, from the framing alone."""
+    r = o.Reader(pack[:-32])
+    r.take(8)
+    out = []
+    for _ in range(r.u32()):
+        kind = r.u8()
+        out.append((kind, r.take(r.u32())))
+    r.end()
+    return out
+
+
+def check_boundaries(root, man, names):
+    """SPEC-PACKFILE section 10, vectors 21 and 22."""
+    expect(
+        names
+        == [
+            "boundary_earlier_delta_base",
+            "boundary_later_delta_base",
+            "boundary_payload_high_bit",
+            "boundary_payload_u32_max",
+        ],
+        f"boundary vectors: {names}",
+    )
+    for name in names:
+        sidecar = o.read(root, "pack-v2", name + ".json")
+        meta = json.loads(sidecar)
+        expect(man.get(name + ".json") == blake3(sidecar).hex(), f"{name}: MANIFEST.txt sidecar entry")
+        pack = o.read(root, "pack-v2", meta["bin"])
+        expect(len(pack) == meta["size"], f"{name}: size")
+        expect(blake3(pack).hex() == meta["pack_key"], f"{name}: pack_key")
+        expect(man.get(meta["bin"]) == meta["pack_key"], f"{name}: MANIFEST.txt pack entry")
+        # Every boundary pack has a valid trailer, so only the content can fail.
+        expect(blake3(pack[:-32]) == pack[-32:], f"{name}: trailer")
+        expect(pack[:4] == b"KIT\x00" and struct.unpack("<I", pack[4:8])[0] == 1, f"{name}: header")
+        expected = meta["expected"]
+        if name.startswith("boundary_payload_"):
+            # One 0x00 entry whose declared length is unsigned and exceeds the tail.
+            expect(struct.unpack("<I", pack[8:12])[0] == 1, f"{name}: entry count")
+            expect(pack[12] == 0, f"{name}: entry type")
+            (declared,) = struct.unpack("<I", pack[13:17])
+            expect(declared == meta["declared_payload_len"], f"{name}: declared length")
+            expect(declared in (1 << 31, (1 << 32) - 1), f"{name}: boundary length")
+            expect(declared > len(pack) - 32 - 17, f"{name}: length exceeds the tail")
+            expect(expected == "UnexpectedEof", f"{name}: expected")
+            continue
+        try:
+            version, entries = parse_pack(pack)
+        except (ValueError, c.Reject) as e:
+            expect(
+                expected == "DeltaBaseMissing" and str(e) == "delta base is not earlier in the pack",
+                f"{name}: refused with {e}",
+            )
+            # The framing is valid: the entries are the earlier pack's, with the
+            # last two swapped.
+            expect(len(frames(pack)) == meta["framing_entries"], f"{name}: framing entries")
+            continue
+        expect(expected == "Complete" and version == 1, f"{name}: accepted")
+        expect([e["type"] for e in entries] == [0, 2, 2], f"{name}: entry types")
+        for i, (got, want) in enumerate(zip(entries, meta["entries"])):
+            expect(got["id"].hex() == want["id"], f"{name} entry {i}: object id")
+            expect(len(got["obj"]) == want["len"], f"{name} entry {i}: length")
+            expect(blake3(got["obj"]).hex() == want["blake3_of_bytes"], f"{name} entry {i}: digest")
+    earlier = frames(o.read(root, "pack-v2", "boundary_earlier_delta_base.bin"))
+    later = frames(o.read(root, "pack-v2", "boundary_later_delta_base.bin"))
+    expect(
+        later == [earlier[0], earlier[2], earlier[1]],
+        "later pack: the frames are the earlier pack's with entries 1 and 2 swapped",
+    )
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit("usage: pack_ref.py <rust/tests/golden>")
     root = sys.argv[1]
     man = o.manifest(root, "pack-v2")
-    names = sorted(f[:-5] for f in os.listdir(os.path.join(root, "pack-v2")) if f.endswith(".json"))
+    listed = sorted(f[:-5] for f in os.listdir(os.path.join(root, "pack-v2")) if f.endswith(".json"))
+    names = [n for n in listed if not n.startswith(BOUNDARY)]
     files = {}
     for name in names:
         sidecar = o.read(root, "pack-v2", name + ".json")
@@ -191,6 +265,7 @@ def main():
                 expect(got["frame_offset"] == want["frame_offset"], f"{tag}: frame_offset")
                 expect(got["frame_len"] == want["frame_len"], f"{tag}: frame_len")
     expect(len(names) >= 4, "fewer than four pack vectors")
+    check_boundaries(root, man, [n for n in listed if n.startswith(BOUNDARY)])
 
     # Negative checks on the pack rules (SPEC-PACKFILE section 3).
     raw = parse_pack(files["tree_and_commit"])[1][0]["obj"]

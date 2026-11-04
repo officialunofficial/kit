@@ -68,18 +68,14 @@ for content):
 - Total length ≤ 4096 bytes (`MAX_PATH_LEN`).
 - No path segment is `"."` or `".."`.
 - No segment is empty (rejects `//`, leading/trailing `/`).
-- No byte in any segment is `0x00` (NUL) or `\\` (backslash).
-- The path is not `.kit` or `.git`, and does not start with `.kit/`
-  or `.git/`. (Repo metadata cannot be staged.)
+- Every segment passes the SPEC-OBJECTS §4.1 entry name rules. This
+  rejects NUL, backslash, `:`, trailing dot or space, Windows reserved
+  names, and `.kit`, `.git`, `kit~N` and `git~N` in any segment and
+  any case. Repo metadata cannot be staged.
 - The index is a single-stage resolved staging area: it never holds
   more than one live entry per path (no unmerged/conflict stages).
 
-These rules are **looser** than SPEC-OBJECTS §4.1: per-segment Windows
-reserved-name, trailing dot/space, and case-insensitive `.kit`/`.git`
-checks are NOT enforced at the index layer. Staging code that needs to
-guarantee a clean commit MUST additionally validate via the
-SPEC-OBJECTS §4.1 grammar before writing the tree object &mdash; the index
-itself is local-only and a more permissive checkpoint.
+The segment rules are the same on every platform.
 
 ---
 
@@ -227,7 +223,7 @@ re-emits current filenames byte-identically and records every fixture BLAKE3 in
 | A header cannot force pathological allocation | `entry_count` checked against the minimum entry size and remaining buffer → `IndexError::Corrupt`; 64 MiB cap → `IndexError::TooLarge` (§5) |
 | The file encodes exactly its declared entries | trailing bytes rejected (§5) |
 | Each path has exactly one live interpretation | duplicate exact paths → `IndexError::DuplicatePath` (§5) |
-| No staged path escapes the worktree or names repo metadata | path grammar: non-empty, no leading `/`, no `.`/`..`/empty segments, no NUL or backslash, not `.kit`/`.git` → `IndexError::InvalidPath` / `Corrupt` (§2) |
+| No staged path escapes the worktree or names repo metadata | path grammar: non-empty, no leading `/`, no `.`/`..`/empty segments, every segment valid per SPEC-OBJECTS §4.1 → `IndexError::InvalidPath` / `Corrupt` (§2) |
 | Every entry has a defined kind, and removals carry no object | status whitelist → `IndexError::BadStatus` (§3); `removed` entries MUST carry `[0;32]`, enforced at read time → `IndexError::RemovedHasHash` (§2, §3) |
 | The stat cache never changes an observable result | cache is an optimization only &mdash; all five match conditions must hold, and racy entries (not safely older than the index file's mtime) are re-hashed (§4) |
 | A cache hit reflects the bytes that were actually hashed | cache fields recorded from the opened descriptor used for hashing, never a stat taken after verification (§4) |

@@ -40,6 +40,7 @@ from recurring.
 | `fuzz_targets/pack_entries.rs` | `pack::PackEntries` (never panics on adversarial pack bytes; a pack `PackReader::read` accepts also parses as `PackEntries` with the same entry count) |
 | `fuzz_targets/verify_closure.rs` | `verify::verify_closure` / `verify::verify_closure_packs` / `verify::verify_closure_manifest` / `verify::export_closure` (never panics; a freshly exported snapshot closure verifies; a mutated manifest rejects cleanly; raw adversarial bytes fed directly as pack buffers — whole and split into two — to `verify_closure_packs`/`verify_closure_manifest` never panic and any `Ok` report is internally consistent) |
 | `fuzz_targets/envelope_decode.rs` | `kit_attest::envelope::decode` (every accepted input re-encodes to exactly itself) |
+| `fuzz_targets/name_rules.rs` | `TreeEntry::validate_name`, `index::validate_index_path`, `refs::validate_ref_name`, `refs::validate_ref_name_grammar`, `refs::check_new_ref_name` (never panic; a name that breaks a stated rule is refused; an index path holds only valid entry names; a new ref name is accepted exactly when `validate_ref_name` accepts it) |
 | `fuzz_targets/ref_wire_decode.rs` | `refs::decode_ref_wire` / `refs::parse_lowercase_hash` (an accepted hash survives an encode and decode round trip) |
 | `fuzz_targets/index_decode.rs` | `index::deserialize` (an accepted index survives a serialize and deserialize round trip) |
 | `fuzz_targets/history_order_decode.rs` | `TimestampDiscovery::decode` (every accepted input re-encodes to exactly itself) |
@@ -48,7 +49,7 @@ from recurring.
 | `fuzz_targets/git_object_parse.rs` | `gitobj::GitObject::parse_raw` and the `kit-git-bridge` header, timestamp and person parsers (an accepted raw object re-renders to exactly the input) |
 | `fuzz_targets/repo_identity_parse.rs` | The `repo_identity` namespace, repository and remote identity `parse` functions (an accepted value re-parses from its text form to the same text) |
 | `fuzz_targets/commitment_parse.rs` | `write_auth::ContentCommitment::parse` (an accepted commitment displays as exactly the input text) |
-| `fuzz_targets/ignore_parse.rs` | `ignore::parse` / `ops::restore::parse_sparse_patterns` (never panics on any text) |
+| `fuzz_targets/ignore_parse.rs` | `ignore::parse` / `ignore::parse_checked` / `ops::restore::parse_sparse_patterns` (never panics on any text; the checked parse agrees with the plain parse and refuses only past the pattern count or length limit) |
 | `fuzz_targets/grant_parse.rs` | `Grant::parse` / `SignedHeader::parse` (an accepted input re-encodes to exactly itself) |
 | `fuzz_targets/epoch_visibility_parse.rs` | `EpochStatement::parse` / `VisibilityStatement::parse` / `UrlTokenStatement::parse` / `TokenTarget::parse`, the URL token verifier, the stateless grant verifiers and the `webauthn-p256` blob and client data parsers |
 | `fuzz_targets/config_parse.rs` | `libkit::config::apply_text` (a repository config never sets a user-scoped key) |
@@ -115,7 +116,8 @@ Each one has a fuzz target, or a written reason why it has none.
 | `kit_core::ops::stash::deserialize_list` | `stash_list` |
 | `kit_core::repo_identity` every `parse` and `parse_bare_allowed` | `repo_identity_parse` |
 | `kit_core::write_auth::ContentCommitment::parse` | `commitment_parse` |
-| `kit_core::ignore::parse`, `ops::restore::parse_sparse_patterns` | `ignore_parse` |
+| `kit_core::ignore::parse`, `parse_checked`, `ops::restore::parse_sparse_patterns` | `ignore_parse` |
+| `kit_core::object::TreeEntry::validate_name`, `kit_core::index::validate_index_path`, `kit_core::refs::validate_ref_name`, `validate_ref_name_grammar`, `check_new_ref_name` | `name_rules` |
 | `kit_core::worktree::chunked_blob_from_bytes` | `chunked_blob_build` |
 | `kit_git_bridge::gitparse` `parse_commit`, `parse_tag`, `parse_tree`, `parse_person` | `git_commit_parse`, `git_tag_parse`, `git_tree_parse`, `git_object_parse` |
 | `kit_git_bridge::gitobj::GitObject::parse_raw`, `author::parse_timestamp`, `headers` `parse_identity`, `parse_hash`, `parse_signature` | `git_object_parse` |
@@ -221,7 +223,7 @@ bytes) yet still a plain `#[test]` on stable, and on failure prints a
 `Builder::default().with_reproduce("0x...")`.
 
 `commonware-invariants` is a **dev-dependency only** (pinned to the
-commonware train fixed in `rust/Cargo.toml`, `2026.9.x` as of this revision); the libfuzzer binaries never link it. The
+commonware train fixed in `rust/Cargo.toml`, `2026.10.x` as of this revision); the libfuzzer binaries never link it. The
 same six guardrails apply: `with_search_limit(MAX_ITER)` caps iterations,
 `with_seed(RNG_SEED)` keeps the run deterministic, and the body still
 truncates to `MAX_INPUT` and runs under the per-iteration wall-clock cap.

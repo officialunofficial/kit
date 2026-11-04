@@ -29,8 +29,8 @@ workspace = true
 # wasm-avoidance rationale already documented on kit-core's
 # `commonware-storage` dependency.
 [dependencies]
-kit-core = { version = "=0.5.0", path = "../kit-core", default-features = false }
-kit-attest = { version = "=0.5.0", path = "../kit-attest" }
+kit-core = { version = "=0.6.0", path = "../kit-core", default-features = false }
+kit-attest = { version = "=0.6.0", path = "../kit-attest" }
 wasm-bindgen = "0.2.129"
 hex = "0.4.3"
 # Parses the optional ceremony-policy blob handed to

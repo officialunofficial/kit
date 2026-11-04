@@ -13,7 +13,20 @@ use crate::refs::ancestry_state::{self, Transaction};
 use crate::refs::{self, RefMutation, RefWriteCondition};
 use crate::store::ObjectStore;
 
-const MAGIC: &[u8; 5] = b"KHAN\x01";
+const MAGIC: &[u8; 5] = b"KHAN\x02";
+/// Snapshot format 1 has the same layout but stores a root under the retired
+/// root formula of SPEC-HISTORY-PROOF §2.3. Readers accept it and recompute
+/// the root; writers never produce it.
+const MAGIC_V1: &[u8; 5] = b"KHAN\x01";
+
+/// Which snapshot format a payload uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Format {
+    /// The stored root uses the current formula and must match the rebuild.
+    Current,
+    /// The stored root uses the retired formula and cannot be checked.
+    V1,
+}
 /// Bound both graph walking and persisted allocation (32 MiB of leaf hashes).
 pub(crate) const MAX_ANCESTRY_LEAVES: usize = 1_000_000;
 const MAX_SNAPSHOT_BYTES: u64 = (MAX_ANCESTRY_LEAVES as u64) * 32 + 8192;
@@ -165,7 +178,7 @@ impl AncestrySnapshot {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, HistoryError> {
-        let (claimed, chain) = decode_descriptor_and_chain(bytes)?;
+        let (format, claimed, chain) = decode_descriptor_and_chain(bytes)?;
         let invalid = || HistoryError::Corrupted("malformed ancestry snapshot".into());
         let snapshot = Self::build(
             claimed.repository,
@@ -173,7 +186,10 @@ impl AncestrySnapshot {
             claimed.generation,
             chain,
         )?;
-        if snapshot.descriptor.tip != claimed.tip || snapshot.descriptor.root != claimed.root {
+        // A format 1 root uses the retired formula, so only the rebuilt root
+        // is meaningful. The checksum still covers every stored byte.
+        let root_ok = format == Format::V1 || snapshot.descriptor.root == claimed.root;
+        if snapshot.descriptor.tip != claimed.tip || !root_ok {
             return Err(invalid());
         }
         Ok(snapshot)
@@ -200,14 +216,18 @@ fn descriptor_header_invalid() -> HistoryError {
 /// prefix read) is left for the caller. Shared by [`decode_descriptor_and_chain`]
 /// (which continues on to parse and checksum-verify the chain) and
 /// [`read_current_descriptor`] (which reads only this prefix from disk).
-fn parse_descriptor_header(input: &mut &[u8]) -> Result<AncestryDescriptor, HistoryError> {
+fn parse_descriptor_header(
+    input: &mut &[u8],
+) -> Result<(Format, AncestryDescriptor), HistoryError> {
     fn digest(input: &mut &[u8]) -> Option<Hash> {
         take(input, 32)?.try_into().ok()
     }
     let invalid = descriptor_header_invalid;
-    if take(input, 5) != Some(MAGIC.as_slice()) {
-        return Err(invalid());
-    }
+    let format = match take(input, 5) {
+        Some(m) if m == MAGIC.as_slice() => Format::Current,
+        Some(m) if m == MAGIC_V1.as_slice() => Format::V1,
+        _ => return Err(invalid()),
+    };
     let repository = digest(input).ok_or_else(invalid)?;
     let generation = digest(input).ok_or_else(invalid)?;
     let tip = digest(input).ok_or_else(invalid)?;
@@ -234,14 +254,17 @@ fn parse_descriptor_header(input: &mut &[u8]) -> Result<AncestryDescriptor, Hist
     {
         return Err(invalid());
     }
-    Ok(AncestryDescriptor {
-        repository,
-        full_ref,
-        generation,
-        tip,
-        leaf_count: count,
-        root,
-    })
+    Ok((
+        format,
+        AncestryDescriptor {
+            repository,
+            full_ref,
+            generation,
+            tip,
+            leaf_count: count,
+            root,
+        },
+    ))
 }
 
 /// Parse a snapshot's wire bytes into its claimed descriptor and full
@@ -257,7 +280,7 @@ fn parse_descriptor_header(input: &mut &[u8]) -> Result<AncestryDescriptor, Hist
 /// why skipping the checksum is safe there.
 fn decode_descriptor_and_chain(
     bytes: &[u8],
-) -> Result<(AncestryDescriptor, Vec<Hash>), HistoryError> {
+) -> Result<(Format, AncestryDescriptor, Vec<Hash>), HistoryError> {
     let invalid = descriptor_header_invalid;
     // `DESCRIPTOR_HEADER_LEN` (header) + 32 (trailing payload checksum,
     // `decode_descriptor_and_chain`'s own — not part of the header
@@ -276,7 +299,7 @@ fn decode_descriptor_and_chain(
         return Err(invalid());
     }
     let mut input = payload;
-    let descriptor = parse_descriptor_header(&mut input)?;
+    let (format, descriptor) = parse_descriptor_header(&mut input)?;
     if input.len() as u64 != descriptor.leaf_count * 32 {
         return Err(invalid());
     }
@@ -284,7 +307,7 @@ fn decode_descriptor_and_chain(
         .chunks_exact(32)
         .map(|c| c.try_into().expect("32-byte chunk"))
         .collect();
-    Ok((descriptor, chain))
+    Ok((format, descriptor, chain))
 }
 
 /// Fixed size of a descriptor header up to (not including) the ref
@@ -547,7 +570,9 @@ fn read_current_descriptor(dir: &Path) -> Result<Option<AncestryDescriptor>, His
         ));
     };
     let mut input = prefix.as_slice();
-    let descriptor = parse_descriptor_header(&mut input)?;
+    // `advance` never reads `root` from this descriptor, so a format 1 root
+    // under the retired formula is harmless here.
+    let (_, descriptor) = parse_descriptor_header(&mut input)?;
     if descriptor.generation != generation {
         return Err(HistoryError::Corrupted(
             "ancestry generation mismatch".into(),
@@ -564,7 +589,7 @@ fn read_current_descriptor(dir: &Path) -> Result<Option<AncestryDescriptor>, His
 fn read_snapshot_chain(dir: &Path, generation: Hash) -> Result<Vec<Hash>, HistoryError> {
     let raw = ancestry_state::read_bounded(&snapshot_path(dir, generation), MAX_SNAPSHOT_BYTES)?
         .ok_or_else(|| HistoryError::Corrupted("missing ancestry generation snapshot".into()))?;
-    let (descriptor, chain) = decode_descriptor_and_chain(&raw)?;
+    let (_, descriptor, chain) = decode_descriptor_and_chain(&raw)?;
     if descriptor.generation != generation {
         return Err(HistoryError::Corrupted(
             "ancestry generation mismatch".into(),
@@ -1388,6 +1413,91 @@ mod tests {
         fs::write(dir.join("transaction"), b"broken").unwrap();
         assert!(refs::pending_history_roots(&layout).is_err());
         assert!(crate::ops::gc::live_objects(&store, &layout).is_err());
+    }
+
+    /// Rewrite the active snapshot with a new version byte and stored root,
+    /// keeping a valid payload checksum. Returns the snapshot path.
+    fn rewrite_active_snapshot(layout: &RepoLayout, version: u8, root: Hash) -> PathBuf {
+        let snapshot = AncestrySnapshot::load(layout, "main").unwrap();
+        let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+        let path = snapshot_path(&dir, snapshot.descriptor().generation);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[4] = version;
+        // magic (5) + repository, generation and tip (3 * 32) + count (8).
+        bytes[109..141].copy_from_slice(&root);
+        let payload_len = bytes.len() - 32;
+        let checksum = hash::hash(&bytes[..payload_len]);
+        bytes[payload_len..].copy_from_slice(&checksum);
+        fs::write(&path, &bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn writers_emit_the_current_snapshot_format() {
+        let (_dir, layout, store) = repo();
+        let a = commit(&store, vec![], b"a");
+        update(&layout, &store, "main", a);
+        let snapshot = AncestrySnapshot::load(&layout, "main").unwrap();
+        let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+        let bytes = fs::read(snapshot_path(&dir, snapshot.descriptor().generation)).unwrap();
+        assert_eq!(&bytes[..5], MAGIC);
+    }
+
+    /// A format 1 snapshot stores a root under the retired formula. It loads
+    /// with the recomputed root, and the next tip move writes the current format.
+    #[test]
+    fn format_1_snapshot_loads_with_the_recomputed_root() {
+        let (_dir, layout, store) = repo();
+        let a = commit(&store, vec![], b"a");
+        let b = commit(&store, vec![a], b"b");
+        update(&layout, &store, "main", b);
+        let expected = AncestrySnapshot::load(&layout, "main").unwrap();
+        let retired_root = [0x5a; 32];
+        rewrite_active_snapshot(&layout, 1, retired_root);
+
+        let loaded = AncestrySnapshot::load(&layout, "main").unwrap();
+        assert_eq!(loaded.descriptor(), expected.descriptor());
+        let proof = loaded.prove(Position(0)).unwrap();
+        assert!(verify_ancestry(
+            &a,
+            Position(0),
+            &proof,
+            loaded.descriptor(),
+            &loaded.trusted_descriptor(),
+            expected.descriptor(),
+        ));
+
+        let c = commit(&store, vec![b], b"c");
+        update(&layout, &store, "main", c);
+        let advanced = AncestrySnapshot::load(&layout, "main").unwrap();
+        assert_eq!(
+            advanced.descriptor().generation,
+            expected.descriptor().generation
+        );
+        let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+        let bytes = fs::read(snapshot_path(&dir, advanced.descriptor().generation)).unwrap();
+        assert_eq!(&bytes[..5], MAGIC);
+    }
+
+    /// The current format must match its stored root even when the checksum
+    /// is valid, and an unknown version byte fails closed.
+    #[test]
+    fn wrong_root_or_unknown_snapshot_version_fails_closed() {
+        let (_dir, layout, store) = repo();
+        let a = commit(&store, vec![], b"a");
+        update(&layout, &store, "main", a);
+        let root = AncestrySnapshot::load(&layout, "main").unwrap().root();
+
+        let mut wrong = root;
+        wrong[0] ^= 1;
+        rewrite_active_snapshot(&layout, 2, wrong);
+        assert!(AncestrySnapshot::load(&layout, "main").is_err());
+
+        let (_dir, layout, store) = repo();
+        let a = commit(&store, vec![], b"a");
+        update(&layout, &store, "main", a);
+        rewrite_active_snapshot(&layout, 3, root);
+        assert!(AncestrySnapshot::load(&layout, "main").is_err());
     }
 
     /// `advance`'s `write_scrub_state` call is documented as purely

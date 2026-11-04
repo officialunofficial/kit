@@ -8,7 +8,8 @@
 #
 #   KANI_FILTER=regex  run only the harnesses whose name matches
 #
-# Peak CBMC memory is about 5.4 GB, so the harnesses do not run in parallel.
+# Peak memory reaches 63 GB, so the harnesses do not run in parallel and CI
+# does not run them. Run this script by hand on a machine with at least 64 GB.
 # Needs Kani 0.68.0: cargo install --locked kani-verifier --version 0.68.0
 set -euo pipefail
 cd "$(dirname "$0")/../../rust"

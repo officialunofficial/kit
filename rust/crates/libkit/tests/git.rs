@@ -887,3 +887,187 @@ fn an_import_refuses_what_it_cannot_use() {
         "{err:?}"
     );
 }
+
+#[test]
+fn an_attestation_of_a_local_import_names_no_path() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let up = upstream(root.path());
+    let fork = root.path().join("fork");
+    let request = import::Request {
+        url: up.to_str().unwrap(),
+        remote_name: "upstream",
+        key: None,
+    };
+    let summary = import::clone(&fork, &request, &Recorder::default()).unwrap();
+
+    let layout = layout::discover(&fork).unwrap();
+    let twin = summary.imported[0].kit_hash;
+    let paths = libkit::attest::store::list(&layout, &twin).unwrap();
+    assert_eq!(paths.len(), 1);
+    let envelope = libkit::attest::store::load(&paths[0]).unwrap();
+    let payload = String::from_utf8(envelope.payload).unwrap();
+    assert!(payload.contains("\"remoteUrl\":\"local\""), "{payload}");
+    assert!(!payload.contains(up.to_str().unwrap()), "{payload}");
+
+    let report = verify::verify(
+        &fork,
+        &verify::Request {
+            remote_name: None,
+            fork_audit: false,
+            refs: &[],
+        },
+    )
+    .unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+}
+
+#[test]
+fn a_claim_for_a_local_source_may_name_the_marker_or_the_path() {
+    use libkit::attest::statement::{Statement, Subject, encode, sha256_hex};
+
+    let twin = [7u8; 32];
+    let git_id = [9u8; 20];
+    let sha256 = sha256_hex(b"head");
+    let binding = ClaimBinding {
+        kit_ref: "refs/remotes/upstream/main",
+        twin: &twin,
+        sha256: &sha256,
+        git_id: &git_id,
+        source: "/srv/up",
+    };
+    let claim = |remote_url: &str| {
+        let predicate = format!(
+            "{{\"gitCommit\":\"{}\",\"refName\":\"{}\",\"remoteUrl\":\"{remote_url}\",\"schemaVersion\":1,\"specVersion\":{}}}",
+            sha1_hex(&git_id),
+            binding.kit_ref,
+            libkit::git_bridge::import::IMPORT_SPEC_VERSION
+        );
+        encode(&Statement {
+            subjects: vec![Subject {
+                name: Some(binding.kit_ref.to_owned()),
+                digest_blake3_hex: to_hex(&twin),
+                digest_sha256_hex: sha256.clone(),
+            }],
+            predicate_type: libkit::git::import::PREDICATE_TYPE.to_owned(),
+            predicate_jcs: predicate.as_bytes(),
+        })
+        .unwrap()
+    };
+    assert!(claim_accepts(claim("local").as_bytes(), &binding));
+    // An attestation from an earlier import names the path itself.
+    assert!(claim_accepts(claim("/srv/up").as_bytes(), &binding));
+    assert!(!claim_accepts(claim("/srv/other").as_bytes(), &binding));
+
+    let network = ClaimBinding {
+        source: "https://example.com/up",
+        ..binding
+    };
+    assert!(claim_accepts(
+        claim("https://example.com/up").as_bytes(),
+        &network
+    ));
+    assert!(!claim_accepts(claim("local").as_bytes(), &network));
+}
+
+#[test]
+fn an_import_fetches_only_heads_and_tags() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let up = upstream(root.path());
+    git(&up, &["tag", "v1"]);
+    let head = git(&up, &["rev-parse", "HEAD"]);
+    git(&up, &["update-ref", "refs/replace/abc", &head]);
+    git(&up, &["update-ref", "refs/notes/commits", &head]);
+    git(&up, &["update-ref", "refs/pull/1/head", &head]);
+
+    let fork = root.path().join("fork");
+    let request = import::Request {
+        url: up.to_str().unwrap(),
+        remote_name: "upstream",
+        key: None,
+    };
+    import::clone(&fork, &request, &Recorder::default()).unwrap();
+    let layout = layout::discover(&fork).unwrap();
+    let staging = map::state_dir(&layout, "upstream")
+        .unwrap()
+        .join("repo.git");
+    let names = git(&staging, &["for-each-ref", "--format=%(refname)"]);
+    assert_eq!(names, "refs/heads/main\nrefs/tags/v1");
+}
+
+#[test]
+fn a_branch_whose_tip_is_not_a_commit_is_skipped() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let up = upstream(root.path());
+    let tree_id = git(&up, &["rev-parse", "HEAD^{tree}"]);
+    // `update-ref` refuses a non-commit branch tip, so write the ref files.
+    let heads = up.join(".git/refs/heads");
+    std::fs::write(heads.join("tree-tip"), format!("{tree_id}\n")).unwrap();
+    git(&up, &["tag", "-a", "-m", "to a tree", "tree-tag", &tree_id]);
+    let tag_object = git(&up, &["rev-parse", "tree-tag"]);
+    std::fs::write(heads.join("tag-of-tree"), format!("{tag_object}\n")).unwrap();
+    let commit_id = git(&up, &["rev-parse", "HEAD"]);
+    git(
+        &up,
+        &["tag", "-a", "-m", "to a commit", "commit-tag", &commit_id],
+    );
+    let commit_tag_object = git(&up, &["rev-parse", "commit-tag"]);
+    std::fs::write(
+        heads.join("tag-of-commit"),
+        format!("{commit_tag_object}\n"),
+    )
+    .unwrap();
+
+    let fork = root.path().join("fork");
+    let request = import::Request {
+        url: up.to_str().unwrap(),
+        remote_name: "upstream",
+        key: None,
+    };
+    // Some git releases refuse to clone a non-commit branch tip. Then git
+    // itself keeps the tip out, and the import fails before it writes a ref.
+    let summary = match import::clone(&fork, &request, &Recorder::default()) {
+        Ok(summary) => summary,
+        Err(error) => {
+            assert!(
+                format!("{error:?}").contains("non-commit object"),
+                "{error:?}"
+            );
+            return;
+        }
+    };
+
+    let mut imported: Vec<&str> = summary
+        .imported
+        .iter()
+        .map(|i| i.ref_name.as_str())
+        .filter(|n| n.starts_with("refs/heads/"))
+        .collect();
+    imported.sort_unstable();
+    assert_eq!(
+        imported,
+        ["refs/heads/main", "refs/heads/tag-of-commit"],
+        "{summary:?}"
+    );
+    let mut skipped: Vec<&str> = summary
+        .skipped
+        .iter()
+        .map(|s| s.ref_name.as_str())
+        .collect();
+    skipped.sort_unstable();
+    assert_eq!(skipped, ["refs/heads/tag-of-tree", "refs/heads/tree-tip"]);
+    let layout = layout::discover(&fork).unwrap();
+    assert!(
+        refs::read_remote_ref(&layout, "upstream", "tree-tip")
+            .unwrap()
+            .is_none()
+    );
+}

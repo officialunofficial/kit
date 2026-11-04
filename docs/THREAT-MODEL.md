@@ -128,7 +128,8 @@ kit defends:
   the local IMPORT key, original raw bytes are retained
   sha1-addressed under `.kit/git/<name>/raw/` as audit evidence, and
   each imported head gets a `git-import/v1` attestation binding the
-  git commit id, canonical remote identity, and kit twin.
+  git commit id, remote identity, and kit twin. For a local source
+  the attestation names the fixed string `local`, not a path.
   `kit git verify` re-checks all of it offline.
 - Tracking-ref containment. Fetches only move
   `refs/remotes/<name>/*` (plus tags); upstream force-pushes rewind
@@ -212,7 +213,11 @@ produces release artifacts.
 
 kit defends:
 
-- Reproducibility of the binary build (`docs/RELEASE.md`).
+- A best-effort reproducible build (`docs/RELEASE.md`). A third party can
+  rebuild the tag and compare hashes. A CI job builds the Linux binary twice
+  in two directories and compares the hashes. That job proves the build does
+  not depend on the path. It does not prove a match with the published
+  binary, and the result is not guaranteed to match.
 - Provenance via cosign keyless signatures and CycloneDX SBOM
   (`docs/RELEASE.md`).
 - Pinning third-party actions by SHA so a compromised tag cannot
@@ -504,7 +509,8 @@ matching update here.
 - CI matrix: `cargo fmt --check`, `cargo clippy --all-targets --
   -D warnings`, `cargo test --workspace --locked`, keystore backend feature
   jobs for Linux/macOS with opt-in live native-backend roundtrips,
-  `cargo deny`, reproducible-build smoke, `kit version` byte-exact assertion.
+  `cargo deny`, double-build hash comparison, `kit version` byte-exact
+  assertion.
   Windows is not a supported build/test/release target (see
   `docs/INVARIANTS.md`).
 

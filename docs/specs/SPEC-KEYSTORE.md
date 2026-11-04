@@ -595,6 +595,9 @@ Storage:
 - Software keystore storage is user-scoped, not repo-scoped.
 - Default storage root is `$XDG_DATA_HOME/kit/keys/` on Unix-like platforms,
   falling back to `~/.local/share/kit/keys/` when `XDG_DATA_HOME` is unset.
+  An empty or relative `XDG_DATA_HOME` counts as unset. The fallback
+  fails if `HOME` is not an absolute path. The root is never relative
+  to the current directory.
   Non-Unix platforms must use the platform's per-user application data
   directory or a documented equivalent.
 - `software:<label>` maps to exactly one encrypted key record under that

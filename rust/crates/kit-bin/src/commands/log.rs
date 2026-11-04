@@ -257,7 +257,7 @@ fn render_commit(
     match fmt {
         Format::Oneline => {
             let id = format::short_hash(hash, abbrev.unwrap_or(DEFAULT_ABBREV));
-            let _ = writeln!(out, "{id} {title}");
+            let _ = writeln!(out, "{id} {}", format::safe_text(title));
         }
         Format::Default => {
             let id = match abbrev {
@@ -265,7 +265,11 @@ fn render_commit(
                 None => format::hex_hash(hash),
             };
             let _ = writeln!(out, "commit {id}");
-            let _ = writeln!(out, "Author: {}", libkit::identity::short(&c.author));
+            let _ = writeln!(
+                out,
+                "Author: {}",
+                format::safe_text(&libkit::identity::short(&c.author))
+            );
             let _ = writeln!(out, "Date:   {}", format::human_date_utc(c.timestamp));
             let _ = writeln!(out);
             // Full message body, indented like git. Each line is prefixed
@@ -274,7 +278,7 @@ fn render_commit(
                 if line.is_empty() {
                     let _ = writeln!(out);
                 } else {
-                    let _ = writeln!(out, "    {line}");
+                    let _ = writeln!(out, "    {}", format::safe_text(line));
                 }
             }
             let _ = writeln!(out);

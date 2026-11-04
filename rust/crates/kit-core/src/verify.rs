@@ -93,7 +93,8 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 
-use bytes::{Buf, BufMut};
+use bytes::{Buf as _, BufMut};
+use commonware_codec::{Buf, Copying};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write};
 
 use crate::hash::{Hash, hash};
@@ -1029,7 +1030,7 @@ fn decode_disclosure(bytes: &[u8]) -> Result<(Hash, Vec<u8>, Vec<Step>, PayloadW
     if version != BUNDLE_VERSION {
         return Err(VerifyError::UnsupportedBundleVersion(version));
     }
-    let mut r: &[u8] = &bytes[5..];
+    let mut r = Copying(&bytes[5..]);
     let commit_id = Hash::read(&mut r)?;
     let commit_bytes = Vec::<u8>::read_range(&mut r, ..=MAX_COMMIT_BYTES)?;
     let steps = Vec::<Step>::read_range(&mut r, ..=MAX_TREE_DEPTH)?;

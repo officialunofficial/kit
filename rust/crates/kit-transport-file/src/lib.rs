@@ -46,9 +46,42 @@ use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
+/// Open the pack at `path` for reading, never through a link, and check
+/// on the open handle that it is a regular file.
+///
+/// # Errors
+/// The open fails, which includes a link at `path`. A file that is not
+/// regular has kind `InvalidInput`.
+fn open_pack_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open a link itself, not its target.
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "pack is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
 use kit_core::bounded_read;
 use kit_core::hash::Hash;
-use kit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, TransportResult};
+use kit_core::protocol::{
+    PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, Transport, TransportError,
+    TransportResult,
+};
 use kit_core::refs::{
     REF_FILE_MAX_BYTES, Ref, decode_ref_wire, encode_ref_wire, validate_ref_name,
     validate_ref_name_grammar, validate_ref_prefix,
@@ -831,13 +864,32 @@ impl Transport for FileTransport {
 
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
         let path = self.pack_path(key);
-        match fs::read(&path) {
-            Ok(bytes) => Ok(bytes),
-            Err(e) if e.kind() == ErrorKind::NotFound => Err(TransportError::PackNotFound),
-            Err(e) => Err(TransportError::RemoteError(format!(
-                "download_pack I/O error: {e}"
-            ))),
+        let io_err = |e: io::Error| match e.kind() {
+            ErrorKind::NotFound => TransportError::PackNotFound,
+            _ => TransportError::RemoteError(format!("download_pack I/O error: {e}")),
+        };
+        // The open refuses a link, and the checks read the open handle, so
+        // a swap of the path after the open changes nothing.
+        let file = open_pack_file(&path).map_err(|e| {
+            if e.kind() == ErrorKind::InvalidInput {
+                TransportError::RemoteError("download_pack: pack is not a regular file".into())
+            } else {
+                io_err(e)
+            }
+        })?;
+        let len = file.metadata().map_err(io_err)?.len();
+        if len > PACK_BODY_LIMIT {
+            return Err(TransportError::PayloadTooLarge(
+                usize::try_from(len).unwrap_or(usize::MAX),
+            ));
         }
+        bounded_read::read_capped_from(file, PACK_BODY_LIMIT).map_err(|e| {
+            if e.kind() == ErrorKind::InvalidData {
+                TransportError::PayloadTooLarge(PACK_BODY_LIMIT_USIZE.saturating_add(1))
+            } else {
+                io_err(e)
+            }
+        })
     }
 
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
@@ -1019,6 +1071,60 @@ mod tests {
         let key = pack_key_for(data);
         t.upload_pack(data, &key).unwrap();
         assert!(dir.path().join("packs").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_pack_refuses_a_symlink() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let data = b"real pack";
+        let key = pack_key_for(data);
+        t.upload_pack(data, &key).unwrap();
+        let outside = dir.path().join("outside");
+        fs::write(&outside, b"secret").unwrap();
+        let link = t.pack_path(&key);
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(matches!(
+            t.download_pack(&key),
+            Err(TransportError::RemoteError(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pack_file_is_opened_without_following_a_link() {
+        let dir = tmp();
+        let target = dir.path().join("target");
+        fs::write(&target, b"secret").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // The open itself refuses the link, so no check can race it.
+        assert!(open_pack_file(&link).is_err());
+        assert!(open_pack_file(&target).is_ok());
+        assert!(
+            open_pack_file(dir.path()).is_err(),
+            "a directory is no pack"
+        );
+    }
+
+    #[test]
+    fn download_pack_refuses_a_pack_over_the_body_limit() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let key = PackKey::new([0x55u8; 32]);
+        t.upload_pack(b"seed", &key).unwrap();
+        // A sparse file, so the test writes no data.
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(t.pack_path(&key))
+            .unwrap();
+        f.set_len(PACK_BODY_LIMIT + 1).unwrap();
+        assert!(matches!(
+            t.download_pack(&key),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
     }
 
     #[test]

@@ -242,10 +242,24 @@ pub fn json_string_array<S: AsRef<str>>(items: &[S]) -> String {
     out
 }
 
+/// Escape terminal controls in untrusted text. Tab and newline stay.
+#[must_use]
+pub fn safe_text(s: &str) -> String {
+    kit_core::protocol::escape_terminal_text(s, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kit_core::hash;
+
+    #[test]
+    fn safe_text_escapes_controls_but_keeps_layout() {
+        assert_eq!(
+            safe_text("a\x1b]0;x\x07\u{202e}b\tc\nd\u{9b}"),
+            "a\\u{1b}]0;x\\u{7}\\u{202e}b\tc\nd\\u{9b}"
+        );
+    }
 
     #[test]
     fn hex_hash_is_64_chars() {

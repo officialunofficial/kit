@@ -586,7 +586,7 @@ caller obligations are therefore:
 
 The one case where a re-issue reports the true outcome is a Connect
 deployment that keeps the auth v2 replay ledger
-([SPEC-TRANSPORT-CONNECT §7.1](SPEC-TRANSPORT-CONNECT.md#71-reference-worker)):
+([SPEC-TRANSPORT-CONNECT §7.1](SPEC-TRANSPORT-CONNECT.md#71-reference-server)):
 `kit-transport-connect` reuses one nonce and validity window for every
 attempt of one logical call (`RetryIdentity`), so the server returns the
 committed attempt's stored result. That covers only re-issues within one

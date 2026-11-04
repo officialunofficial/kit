@@ -1,0 +1,10 @@
+{
+  "bin": "boundary_later_delta_base.bin",
+  "description": "Delta B moved after delta C: the framing is valid and the base of C comes later.",
+  "expected": "DeltaBaseMissing",
+  "framing_entries": 3,
+  "name": "boundary_later_delta_base",
+  "pack_key": "4dab3ff6aa4184f28cc1cfbaf315e9ed2ac01798be93f5ff9e44af35a2e21f6d",
+  "size": 189,
+  "version": 1
+}

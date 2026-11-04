@@ -240,7 +240,7 @@ def check_content_headers(root):
 # ----------------------------------------------------------- KDPB / KDSP
 
 
-def mkdp_summary(result):
+def kdpb_summary(result):
     """Reduce a verified KDPB result to the fields of an http-objects sidecar."""
     payload = result["payload"]
     kind = {"object": "Object", "chunk": "Chunk", "range": "Range"}[payload["kind"]]
@@ -265,13 +265,13 @@ def mkdp_summary(result):
     }
 
 
-def check_mkdp(root, name):
+def check_kdpb(root, name):
     meta = json.loads(o.read(root, D, name + ".json"))
     data = o.read(root, D, name + ".bin")
     expect(len(data) == meta["size"] and blake3(data).hex() == meta["blake3"], f"{name}: size or digest")
     commit = bytes.fromhex(meta["commit"])
     try:
-        got = mkdp_summary(d.verify_bundle(data, commit))
+        got = kdpb_summary(d.verify_bundle(data, commit))
     except d.Reject as e:
         o.fail(f"{name}: unexpected reject ({e})")
         return
@@ -672,7 +672,7 @@ def main():
             continue
         meta = json.loads(o.read(root, D, name + ".json"))
         if "disclosed" in meta["expect"]:
-            check_mkdp(root, name)
+            check_kdpb(root, name)
         else:
             check_span(root, name)
     if o.FAILURES:

@@ -741,8 +741,9 @@ pub fn read_or_seed_from_head(layout: &RepoLayout, store: &ObjectStore) -> Resul
     }
 }
 
-/// Validate a staged path: non-empty, relative, no traversal, no NUL,
-/// no backslash, never under `.kit/` or `.git/`.
+/// Validate a staged path: non-empty, relative, no traversal, and every
+/// segment passes [`crate::object::TreeEntry::validate_name`]. Repo
+/// metadata names (`.kit`, `.git`) are rejected in any segment and case.
 #[must_use]
 pub fn validate_index_path(path: &str) -> bool {
     if path.is_empty() {
@@ -754,23 +755,9 @@ pub fn validate_index_path(path: &str) -> bool {
     if path.len() > MAX_PATH_LEN {
         return false;
     }
-    if path == ".kit" || path == ".git" {
-        return false;
-    }
-    if path.starts_with(".kit/") || path.starts_with(".git/") {
-        return false;
-    }
     for part in path.split('/') {
-        if part.is_empty() {
+        if !crate::object::TreeEntry::validate_name(part.as_bytes()) {
             return false;
-        }
-        if part == "." || part == ".." {
-            return false;
-        }
-        for &c in part.as_bytes() {
-            if c == 0 || c == b'\\' {
-                return false;
-            }
         }
     }
     true
@@ -1453,6 +1440,11 @@ mod tests {
         assert!(!validate_index_path(".kit"));
         assert!(!validate_index_path(".git"));
         assert!(!validate_index_path(".kit/objects"));
+        assert!(!validate_index_path(".KIT/objects"));
+        assert!(!validate_index_path("sub/.git/config"));
+        assert!(!validate_index_path(".kit::$INDEX_ALLOCATION/x"));
+        assert!(!validate_index_path("KIT~1/x"));
+        assert!(!validate_index_path("C:x"));
         assert!(!validate_index_path(".git/HEAD"));
         assert!(!validate_index_path("a\\b"));
         assert!(!validate_index_path("a//b"));

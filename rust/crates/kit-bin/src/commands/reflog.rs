@@ -149,9 +149,10 @@ pub fn run(args: &[String]) -> u8 {
                 };
                 let _ = writeln!(
                     stdout,
-                    "{} {}@{{{selector}}}: {title}{mark}",
+                    "{} {}@{{{selector}}}: {}{mark}",
                     format::short_hash(&commit, 8),
                     branch,
+                    format::safe_text(&title),
                 );
             }
             Format::Json => {

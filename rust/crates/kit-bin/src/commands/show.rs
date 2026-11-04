@@ -162,7 +162,11 @@ fn show_commit_like(
     stat: bool,
 ) -> Result<(), (String, u8)> {
     let _ = writeln!(out, "{label} {}", format::hex_hash(hash));
-    let _ = writeln!(out, "Author: {}", libkit::identity::short(author));
+    let _ = writeln!(
+        out,
+        "Author: {}",
+        format::safe_text(&libkit::identity::short(author))
+    );
     let _ = writeln!(out, "Date:   {}", format::human_date_utc(timestamp));
     let _ = writeln!(out);
     write_indented_message(out, message);
@@ -208,15 +212,23 @@ fn show_tag(
     tag_depth: usize,
     stat: bool,
 ) -> Result<(), (String, u8)> {
-    let _ = writeln!(out, "tag {}", String::from_utf8_lossy(&t.name));
-    let _ = writeln!(out, "Tagger: {}", libkit::identity::short(&t.tagger));
+    let _ = writeln!(
+        out,
+        "tag {}",
+        format::safe_text(&String::from_utf8_lossy(&t.name))
+    );
+    let _ = writeln!(
+        out,
+        "Tagger: {}",
+        format::safe_text(&libkit::identity::short(&t.tagger))
+    );
     let _ = writeln!(out, "Date:   {}", format::human_date_utc(t.timestamp));
     let _ = writeln!(out);
     // git prints the tag message un-indented, then a blank line, then the
     // target object.
     let msg = String::from_utf8_lossy(&t.message);
     for line in msg.lines() {
-        let _ = writeln!(out, "{line}");
+        let _ = writeln!(out, "{}", format::safe_text(line));
     }
     let _ = writeln!(out);
 
@@ -234,7 +246,7 @@ fn write_indented_message(out: &mut impl Write, message: &[u8]) {
         if line.is_empty() {
             let _ = writeln!(out);
         } else {
-            let _ = writeln!(out, "    {line}");
+            let _ = writeln!(out, "    {}", format::safe_text(line));
         }
     }
 }

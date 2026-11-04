@@ -1,6 +1,6 @@
 //! Import of a git upstream under an importer key (SPEC-GIT-IMPORT).
 //!
-//! An import clones a `--mirror` staging repository under
+//! An import clones a bare staging repository under
 //! `.kit/git/<remote>/repo.git` and translates it through the bridge under a
 //! dedicated import key. The key is pinned in the state directory. Branches
 //! land in `refs/remotes/<remote>/*`. The fresh-clone form also makes
@@ -27,10 +27,11 @@ use kit_git_bridge::error::BridgeError;
 use kit_git_bridge::gitobj::{Sha1Id, bytes_hex, sha1_hex};
 use kit_git_bridge::gitsrc::{self, CatFileBatch};
 use kit_git_bridge::import::{
-    DepthMemo, IMPORT_SPEC_VERSION, ImportOptions, ImportSigner, Importer, ObjectSink,
+    DepthMemo, IMPORT_SPEC_VERSION, ImportOptions, ImportSigner, Importer, MAX_TAG_CHAIN,
+    ObjectSink,
 };
 use kit_git_bridge::map::{self, Direction};
-use kit_git_bridge::remoteid::remote_identity;
+use kit_git_bridge::remoteid::{attestation_remote, remote_identity};
 
 use super::state::read_stamp;
 use super::{
@@ -292,7 +293,7 @@ fn import_into(
     } else {
         git_in(
             state.as_path(),
-            &["clone", "--mirror", "--quiet", &clone_url, "repo.git"],
+            &["clone", "--bare", "--quiet", &clone_url, "repo.git"],
         )
         .map_err(|e| step(Class::Unavailable, "clone upstream", e))?;
     }
@@ -640,6 +641,10 @@ fn translate_upstream(
         depth_memo = imp.depth_memo;
         all_pairs.extend_from_slice(&ref_pairs);
         match result {
+            Ok(head) if uref.name.starts_with("refs/heads/") && !peels_to_commit(&store, &head) => {
+                let reason = "branch tip is not a commit or a tag of a commit".to_owned();
+                skip(observer, &mut skipped, &uref.name, reason);
+            }
             Ok(head) => imported.push(Imported {
                 ref_name: uref.name.clone(),
                 git_id: uref.id,
@@ -772,6 +777,20 @@ fn translate_upstream(
     })
 }
 
+/// Whether the kit object `head` is a commit, or a chain of at most
+/// [`MAX_TAG_CHAIN`] tags that ends in a commit.
+fn peels_to_commit(store: &ObjectStore, head: &Hash) -> bool {
+    let mut current = *head;
+    for _ in 0..=MAX_TAG_CHAIN {
+        match store.read_object(&current) {
+            Ok(Object::Commit(_)) => return true,
+            Ok(Object::Tag(tag)) => current = tag.target,
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn skip(
     observer: &dyn Observer<Event>,
     skipped: &mut Vec<Skipped>,
@@ -815,7 +834,8 @@ fn mint_attestations(
     prior: &HashMap<&str, &map::RefState>,
     kp: &KeyPair,
 ) -> Result<(), Error> {
-    let remote_url = remote_identity(url);
+    let identity = remote_identity(url);
+    let remote_url = attestation_remote(&identity);
     let obj_store =
         ObjectStore::open(layout).map_err(|e| step(Class::General, "not a kit repo", e))?;
     for Imported {
@@ -839,7 +859,7 @@ fn mint_attestations(
             "{{\"gitCommit\":\"{}\",\"refName\":\"{}\",\"remoteUrl\":\"{}\",\"schemaVersion\":1,\"specVersion\":1}}",
             sha1_hex(git_id),
             json_escape(&kit_ref),
-            json_escape(&remote_url)
+            json_escape(remote_url)
         );
         let head_bytes = obj_store.read(kit_hash).map_err(|e| {
             step(

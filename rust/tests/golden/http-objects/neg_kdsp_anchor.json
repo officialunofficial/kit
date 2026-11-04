@@ -6,7 +6,7 @@
     "expand_to": null,
     "reject_reason": "span_anchor_invalid"
   },
-  "name": "neg_mkds_anchor",
+  "name": "neg_kdsp_anchor",
   "recipe": {
     "segments": [
       {

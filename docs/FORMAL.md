@@ -184,7 +184,8 @@ These findings and exclusions remain open within the stated model bounds.
 
 The scripts under [`formal/scripts`](../formal/scripts) run the layers.
 [`.github/workflows/formal.yml`](../.github/workflows/formal.yml) runs the
-same scripts nightly and on `workflow_dispatch`. Each script prints one line
+same scripts nightly and on `workflow_dispatch`, except `run-kani.sh`, which
+a developer runs by hand (see [Resource use](#resource-use)). Each script prints one line
 per check and fails on any unexpected outcome. Times below are from a shared
 15-core arm64 Mac. The Quint layer takes about an hour, which is why the
 checks run nightly and not on every pull request. Most of that time is the
@@ -200,7 +201,7 @@ checks run nightly and not on every pull request. Most of that time is the
 ### Install the tools
 
 The pins live in `formal/scripts/setup-apalache.sh` (Apalache) and
-`formal.yml` (Quint, Kani).
+`formal.yml` (Quint) and `formal/scripts/run-kani.sh` (Kani).
 
 On macOS:
 
@@ -225,7 +226,8 @@ documents its own knobs (`ONLY`, `SEL`, `TLC_HEAP`, `*_DEPTH`).
 
 ### Resource use
 
-TLC runs with a 4 GB heap and 2 to 4 workers, Apalache with 4 GB. The
-largest Kani harness peaks at about 5.4 GB. Run one Kani harness at a
-time. The recorded times come from a 15-core arm64 Mac shared with other
+TLC runs with a 4 GB heap and 2 to 4 workers, Apalache with 4 GB. Kani
+harnesses peak at up to 63 GB (`pack_writer_roundtrip_raw`), so CI does
+not run them. Run `run-kani.sh` by hand on a machine with at least 64 GB.
+Run one Kani harness at a time. The recorded times come from a 15-core arm64 Mac shared with other
 jobs; a CI runner is slower.

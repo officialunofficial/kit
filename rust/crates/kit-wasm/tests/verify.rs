@@ -415,19 +415,25 @@ fn blob_bao_hash_equals_blob_id_and_round_trips() {
 
 #[test]
 fn oversize_inputs_return_err() {
+    const OVER_CAP: usize = 5_000_000;
     let oversized = vec![0u8; 16 * 1024 * 1024 + 1];
     assert!(chunked_blob_decode(&oversized).is_err());
     assert!(blob_bao_encode(&oversized).is_err());
 
-    // Length-declaring header: MKDP v1 + 32-byte id + a commit_bytes
-    // varint of 5_000_000 and no payload. Decode must fail without
-    // allocating that many bytes.
-    let mut tiny = Vec::from(*b"MKDP");
-    tiny.push(1);
-    tiny.extend_from_slice(&[0u8; 32]);
-    tiny.extend_from_slice(&[0xC0, 0x96, 0x31]);
+    // A well-framed KDPB v2 bundle whose commit_bytes length (5_000_000)
+    // is above the 4 MiB cap. The bytes, an empty step list and an empty
+    // object payload follow, so the body is otherwise complete. Only the
+    // cap rejects it, and it does so as a malformed body. A decoder without
+    // the cap would read it and fail later with a different error.
+    let mut oversize_commit = Vec::from(*b"KDPB");
+    oversize_commit.push(2);
+    oversize_commit.extend_from_slice(&[0u8; 32]);
+    oversize_commit.extend_from_slice(&[0xC0, 0x96, 0xB1, 0x02]);
+    oversize_commit.resize(oversize_commit.len() + OVER_CAP, 0);
+    oversize_commit.extend_from_slice(&[0, 0, 0]);
     let commit_hex = "00".repeat(32);
-    assert!(verify_disclosure(&commit_hex, &tiny).is_err());
+    let err = verify_disclosure(&commit_hex, &oversize_commit).unwrap_err();
+    assert_eq!(err, kit_core::verify::VerifyError::Malformed.to_string());
 
     assert!(
         verify_closure_packs(&commit_hex, "snapshot", &[], "[4294967295]").is_err(),
