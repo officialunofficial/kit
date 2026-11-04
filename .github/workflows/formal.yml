@@ -3,12 +3,15 @@ name: "Nightly: Formal verification"
 # The formal-verification layers of docs/FORMAL.md, one job per layer. Each
 # job calls a script under formal/scripts, so a developer runs the same
 # command locally. The jobs run nightly and on demand, not per pull request:
-# the Quint job runs exhaustive TLC instances and the Kani job runs about 40
-# CBMC harnesses one at a time, which is too long to gate every pull request.
+# the Quint job runs exhaustive TLC instances, which is too long to gate
+# every pull request.
+#
+# The Kani harnesses do not run here. Many need more memory than a hosted
+# runner has, so a developer runs formal/scripts/run-kani.sh by hand.
 #
 # Tool pins: Quint 0.32.0 (npm), Apalache 0.62.2 (release archive, sha256
-# checked by formal/scripts/setup-apalache.sh), Java 21 (Temurin), Kani
-# 0.68.0, Rust from rust/rust-toolchain.toml.
+# checked by formal/scripts/setup-apalache.sh), Java 21 (Temurin), Rust
+# from rust/rust-toolchain.toml. formal/scripts/run-kani.sh pins Kani.
 #
 # Every result these jobs report is bounded or sampled. A green run is not a
 # proof.
@@ -25,7 +28,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   QUINT_VERSION: "0.32.0"
-  KANI_VERSION: "0.68.0"
 
 jobs:
   quint:
@@ -57,31 +59,6 @@ jobs:
 
       - name: Fixtures reproduce from the model
         run: CHECK=1 bash formal/scripts/gen-refs-traces.sh
-
-  kani:
-    name: kani (harnesses up to 14 GB)
-    # ubuntu-latest has too little memory for most harnesses. This org
-    # runner has 16 GB.
-    runs-on: ubuntu-amd64-runner
-    timeout-minutes: 240
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      # protoc: the kit-rpc harnesses build kit-rpc (buffa-build).
-      - name: Set up Rust and cache
-        uses: ./.github/actions/setup-rust
-        with:
-          cache-prefix: "formal-kani"
-          protoc: "true"
-
-      - name: Install Kani
-        run: |
-          cargo install --locked kani-verifier --version "${KANI_VERSION}"
-          cargo kani setup
-
-      # The large harnesses need more than 14 GB. formal/kani/README.md says how to run them.
-      - name: Kani harnesses
-        run: KANI_SKIP_LARGE=1 bash formal/scripts/run-kani.sh
 
   conformance:
     name: conformance (ITF replay)
