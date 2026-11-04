@@ -1455,7 +1455,9 @@ mod kani_proofs {
         if n.is_empty() || n.len() > 255 {
             return false;
         }
-        if n.iter().any(|&b| b == 0 || b == b'/' || b == b'\\') {
+        if n.iter()
+            .any(|&b| b == 0 || b == b'/' || b == b'\\' || b == b':')
+        {
             return false;
         }
         if n == b"." || n == b".." || matches!(n[n.len() - 1], b'.' | b' ') {
@@ -1463,6 +1465,12 @@ mod kani_proofs {
         }
         let up: Vec<u8> = n.iter().map(u8::to_ascii_uppercase).collect();
         if up == b".KIT" || up == b".GIT" {
+            return false;
+        }
+        if up.len() >= 5
+            && (up[..4] == *b"KIT~" || up[..4] == *b"GIT~")
+            && up[4..].iter().all(u8::is_ascii_digit)
+        {
             return false;
         }
         let stem = match up.iter().position(|&b| b == b'.') {

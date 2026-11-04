@@ -29,7 +29,7 @@ owns only the work that Cloud Build cannot do:
 | Release (`release.yml`) | GitHub Actions | The signing identity is the workflow itself. |
 | Release verification (`release-verify.yml`) | GitHub Actions | It runs by hand after a release, and it needs macOS runners for the Homebrew check. |
 | Nightly fuzz (`fuzz.yml`) | GitHub Actions | It needs a floating nightly toolchain, a matrix of one job per target, and crash artifacts that GitHub keeps. |
-| Nightly formal verification (`formal.yml`) | GitHub Actions | It needs Java, Node, Apalache and Kani, which the builder image does not hold. |
+| Nightly formal verification (`formal.yml`) | GitHub Actions | It needs Java, Node and Apalache, which the builder image does not hold. |
 
 Only `rust.yml`, `rust-security.yml`, `docs-lint.yml`, `proto.yml` and
 `third-party-notices.yml` repeat the gate commands of Cloud Build. They run the same commands, so a result on one service predicts the
@@ -53,7 +53,7 @@ gate command of Cloud Build.
 - `reproducible-build.yml` stays because it builds the release binary twice in two directories with the flags of `release.yml`, which a Cloud Build step has no need to repeat. It compares the hashes on the runner image that `release.yml` uses.
 - `release-verify.yml` stays because a person starts it by hand after a release, and its Homebrew check needs a macOS runner.
 - `fuzz.yml` stays because it needs a floating nightly toolchain and runs one job per target. It also keeps crash artifacts on GitHub. The `fuzz-smoke` step of `ci.yaml` covers the pinned nightly.
-- `formal.yml` stays because it needs Java, Node, Apalache and Kani. The builder image does not hold them, and the jobs run for hours.
+- `formal.yml` stays because it needs Java, Node and Apalache. The builder image does not hold them, and the jobs run for hours.
 
 ## Files
 
