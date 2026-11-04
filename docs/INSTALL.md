@@ -127,7 +127,7 @@ by default. Direct release URLs are best when you want a pinned artifact.
 **Download a pinned release for your platform:**
 
 ```sh
-VERSION=0.6.0
+VERSION=0.7.0
 TARGET=aarch64-apple-darwin
 curl -LO "https://github.com/officialunofficial/kit/releases/download/v${VERSION}/kit-${VERSION}-${TARGET}.tar.gz"
 tar -xzf "kit-${VERSION}-${TARGET}.tar.gz"
@@ -136,7 +136,7 @@ tar -xzf "kit-${VERSION}-${TARGET}.tar.gz"
 **Pin a version (recommended for CI):**
 
 ```sh
-VERSION=0.6.0
+VERSION=0.7.0
 TARGET=x86_64-unknown-linux-gnu
 TAG="v${VERSION}"
 URL="https://github.com/officialunofficial/kit/releases/download/${TAG}/kit-${VERSION}-${TARGET}.tar.gz"
@@ -194,7 +194,7 @@ version:
 
 ```sh
 $ kit version
-kit 0.6.0
+kit 0.7.0
 ```
 
 The exact format `kit <X.Y.Z>\n` (no extra whitespace, no banner) is
@@ -215,7 +215,7 @@ binary can update itself:
 ```sh
 kit self update            # update to the latest release
 kit self update --check    # just report whether an update exists
-kit self update --version v0.6.0   # pin a specific release
+kit self update --version v0.7.0   # pin a specific release
 ```
 
 `self update` downloads the release archive for your platform. It needs
