@@ -6,6 +6,8 @@
 
 use crate::hash::{Hash, hash};
 
+pub mod replay;
+
 /// Domain/version. v1 requests are never interpreted as v2 requests.
 pub const DOMAIN: &str = "kit-write:v2";
 /// Maximum validity interval; replay records must survive at least until expiry.
