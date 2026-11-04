@@ -467,10 +467,10 @@ deep inside the pack alone are permanent. Wire or profile ceilings,
 decoded-byte budgets (a format-intrinsic per-object ceiling such as the
 decompression limit is a property of the bytes and permanent), an external base's depth, membership misses and every
 execution or acquisition failure are transient. The in-pack decoded-byte
-budget is a deployment limit and is transient. The reference classification is
-`FailureCode::persistence` in `kit-primitives`; a membership miss is
-retryable while the input's age is below the visibility bound and a content
-verdict afterwards (`classify_membership_miss`).
+budget is a deployment limit and is transient. A membership miss is retryable
+while the input's age is below the relay-lag bound
+([SPEC-TRANSPORT-CONNECT §5](SPEC-TRANSPORT-CONNECT.md)) and a content verdict
+afterwards.
 
 ---
 
@@ -551,8 +551,10 @@ The conformance vectors below are exercised in
 `rust/crates/kit-core/tests/golden_pack.rs` and the unit tests in
 `rust/crates/kit-core/src/pack.rs::tests` and `pack/zstd_tests.rs`.
 They are inline byte pins rather than on-disk goldens, so any framing
-drift fails the test suite immediately; vector 20 is the exception, a set of
-committed C-encoded packs that give decode-only builds real bytes.
+drift fails the test suite immediately; vectors 20 to 22 are the exception,
+sets of committed packs under `rust/tests/golden/pack-v2/`. Vector 20 gives
+decode-only builds real C-encoded bytes. Vectors 21 and 22 pin framing
+boundaries.
 Reader-error vectors map to `PackError` variants on the Rust API
 surface; the spec-level names below stay protocol-neutral.
 
@@ -633,16 +635,18 @@ surface; the spec-level names below stay protocol-neutral.
 21. **Unsigned length boundaries:** lengths `2^31` and `2^32 - 1` in a
     short, correctly checksummed pack are interpreted without sign extension
     or wraparound. The general reader returns `UnexpectedEof`; an indexed
-    reader may first refuse its smaller encoded-entry ceiling. Portable bytes
-    are in `kit-primitives/fixtures/framing/payload-high-bit.bin` and
-    `payload-u32-max.bin`; `unsigned_payload_boundaries_do_not_wrap_or_allocate_claims`
-    exercises the general reader.
+    reader may first refuse its smaller encoded-entry ceiling. The committed
+    packs `boundary_payload_high_bit.bin` and `boundary_payload_u32_max.bin` in
+    `rust/tests/golden/pack-v2/` hold one `0x00` entry that declares the
+    length and carries no payload. The test
+    `unsigned_payload_boundaries_do_not_wrap_or_allocate_claims` exercises the
+    general reader.
 22. **Earlier reconstructed base:** raw A, delta B based on A, then delta C
     based on B resolves all three objects. Moving B after C fails base
-    eligibility with `DeltaBaseMissing`. Portable bytes are in
-    `kit-primitives/fixtures/framing/earlier-delta-base.bin` and
-    `later-delta-base.bin`; `earlier_reconstructed_delta_is_an_eligible_base`
-    exercises both orders.
+    eligibility with `DeltaBaseMissing`. The committed packs
+    `boundary_earlier_delta_base.bin` and `boundary_later_delta_base.bin` in
+    `rust/tests/golden/pack-v2/` hold the two orders. The test
+    `earlier_reconstructed_delta_is_an_eligible_base` exercises both.
 
 ---
 

@@ -648,10 +648,11 @@ mod pack_v2_fixtures {
             let dir = dir();
             fs::create_dir_all(&dir).unwrap();
             let mut manifest = String::from(
-                "# SPEC-PACKFILE v2 fixtures, written by the C zstd encoder (pack-zstd)\n\
+                "# SPEC-PACKFILE fixtures. The zstd packs are written by the C encoder (pack-zstd);\n\
+                 # the boundary_ packs need no encoder.\n\
                  # Produced by `KIT_WRITE_GOLDEN=1 cargo test -p kit-core --test golden_pack`\n\
                  # Format: <file> <blake3-hex-of-file-bytes>\n\
-                 # See docs/specs/SPEC-PACKFILE.md section 10, vector 20.\n",
+                 # See docs/specs/SPEC-PACKFILE.md section 10, vectors 20 to 22.\n",
             );
             for (name, description, pushes) in fixtures() {
                 let mut w = PackWriter::new();
@@ -681,16 +682,132 @@ mod pack_v2_fixtures {
                     "pack_key": to_hex(&pack_key(&pack)),
                     "entries": entries,
                 });
-                let json_bytes = serde_json::to_string_pretty(&sidecar).unwrap() + "\n";
-                for (file, bytes) in [
-                    (format!("{name}.bin"), pack),
-                    (format!("{name}.json"), json_bytes.into_bytes()),
-                ] {
-                    let _ = writeln!(manifest, "{file} {}", to_hex(&hash::hash(&bytes)));
-                    fs::write(dir.join(&file), bytes).unwrap();
-                }
+                write_vector(&dir, &mut manifest, name, pack, &sidecar);
+            }
+            for (name, pack, sidecar) in boundary_vectors() {
+                write_vector(&dir, &mut manifest, &name, pack, &sidecar);
             }
             fs::write(dir.join("MANIFEST.txt"), manifest).unwrap();
+        }
+
+        /// Write `<name>.bin` and `<name>.json`, and list both in the manifest.
+        fn write_vector(
+            dir: &std::path::Path,
+            manifest: &mut String,
+            name: &str,
+            pack: Vec<u8>,
+            sidecar: &serde_json::Value,
+        ) {
+            let json_bytes = serde_json::to_string_pretty(sidecar).unwrap() + "\n";
+            for (file, bytes) in [
+                (format!("{name}.bin"), pack),
+                (format!("{name}.json"), json_bytes.into_bytes()),
+            ] {
+                let _ = writeln!(manifest, "{file} {}", to_hex(&hash::hash(&bytes)));
+                fs::write(dir.join(&file), bytes).unwrap();
+            }
+        }
+
+        /// A version 1 pack from `(entry type, payload)` frames, with a valid
+        /// trailer. Nothing checks the entry rules, so a test can frame a
+        /// pack that a reader must refuse.
+        fn framed_pack(entries: &[(u8, Vec<u8>)]) -> Vec<u8> {
+            let mut pack = b"KIT\0".to_vec();
+            pack.extend(1u32.to_le_bytes());
+            pack.extend(u32::try_from(entries.len()).unwrap().to_le_bytes());
+            for (etype, payload) in entries {
+                pack.push(*etype);
+                pack.extend(u32::try_from(payload.len()).unwrap().to_le_bytes());
+                pack.extend(payload);
+            }
+            let trailer = hash::hash(&pack);
+            pack.extend(trailer);
+            pack
+        }
+
+        /// A pack whose only entry declares `declared` payload bytes and
+        /// carries none, with a valid trailer.
+        fn declared_length_pack(declared: u32) -> Vec<u8> {
+            let mut pack = b"KIT\0".to_vec();
+            pack.extend(1u32.to_le_bytes());
+            pack.extend(1u32.to_le_bytes());
+            pack.push(0x00);
+            pack.extend(declared.to_le_bytes());
+            let trailer = hash::hash(&pack);
+            pack.extend(trailer);
+            pack
+        }
+
+        /// Vectors 21 and 22 of SPEC-PACKFILE section 10. They need no zstd
+        /// frame, so every build can read them.
+        fn boundary_vectors() -> Vec<(String, Vec<u8>, serde_json::Value)> {
+            let sidecar = |name: &str, description: &str, pack: &[u8], expected: &str| {
+                json!({
+                    "name": name,
+                    "description": description,
+                    "bin": format!("{name}.bin"),
+                    "size": pack.len(),
+                    "version": 1,
+                    "pack_key": to_hex(&pack_key(pack)),
+                    "expected": expected,
+                })
+            };
+            let mut vectors = Vec::new();
+            for (name, declared) in [
+                ("boundary_payload_high_bit", 1u32 << 31),
+                ("boundary_payload_u32_max", u32::MAX),
+            ] {
+                let pack = declared_length_pack(declared);
+                let mut side = sidecar(
+                    name,
+                    "A payload length that the short pack cannot hold, with a valid trailer.",
+                    &pack,
+                    "UnexpectedEof",
+                );
+                side["declared_payload_len"] = json!(declared);
+                vectors.push((name.to_owned(), pack, side));
+            }
+
+            let a = raw(&blob(b"base".to_vec()));
+            let b = raw(&blob(b"middle".to_vec()));
+            let c = raw(&blob(b"target".to_vec()));
+            let raw_frame = |p: &Push| (0x00, p.bytes.clone());
+            // A `0x02` entry: the id of the base, then the delta stream.
+            let delta_frame = |base: &Push, target: &Push| {
+                let mut payload = id(&base.bytes).to_vec();
+                payload.extend(delta::encode(&base.bytes, &target.bytes).unwrap());
+                (0x02, payload)
+            };
+            let earlier = framed_pack(&[raw_frame(&a), delta_frame(&a, &b), delta_frame(&b, &c)]);
+            let mut side = sidecar(
+                "boundary_earlier_delta_base",
+                "Raw A, delta B on A, delta C on B: each base is an earlier entry.",
+                &earlier,
+                "Complete",
+            );
+            side["entries"] = json!(
+                [(0x00_u8, &a), (0x02, &b), (0x02, &c)]
+                    .iter()
+                    .map(|(etype, p)| json!({
+                        "type": etype,
+                        "id": to_hex(&id(&p.bytes)),
+                        "len": p.bytes.len(),
+                        "blake3_of_bytes": to_hex(&hash::hash(&p.bytes)),
+                    }))
+                    .collect::<Vec<_>>()
+            );
+            vectors.push(("boundary_earlier_delta_base".to_owned(), earlier, side));
+
+            let later = framed_pack(&[raw_frame(&a), delta_frame(&b, &c), delta_frame(&a, &b)]);
+            let mut side = sidecar(
+                "boundary_later_delta_base",
+                "Delta B moved after delta C: the framing is valid and the base of C comes later.",
+                &later,
+                "DeltaBaseMissing",
+            );
+            side["framing_entries"] = json!(3);
+            vectors.push(("boundary_later_delta_base".to_owned(), later, side));
+            vectors
         }
 
         #[test]
@@ -713,6 +830,7 @@ mod pack_v2_fixtures {
         let names: Vec<String> = manifest()
             .into_iter()
             .filter_map(|(f, _)| f.strip_suffix(".bin").map(str::to_string))
+            .filter(|name| !name.starts_with("boundary_"))
             .collect();
         assert_eq!(names.len(), 5, "MANIFEST.txt lists {names:?}");
         for name in names {
@@ -769,6 +887,87 @@ mod pack_v2_fixtures {
                 );
             }
         }
+    }
+
+    /// Vector 21: a payload length of `2^31` or `2^32 - 1` in a short pack
+    /// is read as an unsigned length. It neither wraps nor sizes any
+    /// allocation, and the general reader refuses it as a short read.
+    #[test]
+    fn unsigned_payload_boundaries_do_not_wrap_or_allocate_claims() {
+        use kit_core::pack::{
+            DecodeLimits, NoExternalBases, PackEntries, PackError, decode_entries_with,
+        };
+
+        for name in ["boundary_payload_high_bit", "boundary_payload_u32_max"] {
+            let pack = load(&format!("{name}.bin"));
+            let side = sidecar(name);
+            assert_eq!(side["expected"], "UnexpectedEof", "{name}");
+            let declared = u32::from_le_bytes(pack[13..17].try_into().unwrap());
+            assert_eq!(u64::from(declared), side["declared_payload_len"], "{name}");
+            // The trailer is valid, so only the length can be at fault.
+            let split = pack.len() - 32;
+            assert_eq!(hash::hash(&pack[..split]), pack[split..], "{name}: trailer");
+            assert!(matches!(
+                PackEntries::new(&pack),
+                Err(PackError::UnexpectedEof)
+            ));
+            assert!(matches!(
+                decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |_| {
+                    Ok(())
+                }),
+                Err(PackError::UnexpectedEof)
+            ));
+        }
+    }
+
+    /// Vector 22: a delta whose base is an earlier delta result resolves.
+    /// Moving that base after the delta leaves it without an earlier base.
+    #[test]
+    fn earlier_reconstructed_delta_is_an_eligible_base() {
+        use kit_core::pack::{
+            DecodeLimits, NoExternalBases, PackEntries, PackError, decode_entries_with,
+        };
+
+        let pack = load("boundary_earlier_delta_base.bin");
+        let side = sidecar("boundary_earlier_delta_base");
+        let mut objects = Vec::new();
+        let report = decode_entries_with(
+            &pack,
+            &mut NoExternalBases,
+            DecodeLimits::default(),
+            |entry| {
+                objects.push(entry.bytes.to_vec());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!((report.raw_count, report.delta_count), (1, 2));
+        let want = side["entries"].as_array().unwrap();
+        assert_eq!(objects.len(), want.len());
+        for (object, w) in objects.iter().zip(want) {
+            assert_eq!(hash::hash(object), hex_field(w, "blake3_of_bytes"));
+            let obj = kit_core::serialize::deserialize(object).unwrap();
+            assert_eq!(
+                kit_core::object::id_from_object(&obj, object),
+                hex_field(w, "id")
+            );
+        }
+
+        let later = load("boundary_later_delta_base.bin");
+        let side = sidecar("boundary_later_delta_base");
+        assert_eq!(side["expected"], "DeltaBaseMissing");
+        // The framing is valid: only the order of the bases is wrong.
+        let count = usize::try_from(side["framing_entries"].as_u64().unwrap()).unwrap();
+        assert_eq!(PackEntries::new(&later).unwrap().count(), count);
+        assert!(matches!(
+            decode_entries_with(
+                &later,
+                &mut NoExternalBases,
+                DecodeLimits::default(),
+                |_| { Ok(()) }
+            ),
+            Err(PackError::DeltaBaseMissing(_))
+        ));
     }
 
     /// SPEC-DISCLOSURE §7.2: the closure profile is raw-only and rejects a

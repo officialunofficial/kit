@@ -1,0 +1,29 @@
+{
+  "bin": "boundary_earlier_delta_base.bin",
+  "description": "Raw A, delta B on A, delta C on B: each base is an earlier entry.",
+  "entries": [
+    {
+      "blake3_of_bytes": "caff2c28c1460f7107bc983871cf0eeed16780826d7503c354bce077d0d18a7e",
+      "id": "caff2c28c1460f7107bc983871cf0eeed16780826d7503c354bce077d0d18a7e",
+      "len": 14,
+      "type": 0
+    },
+    {
+      "blake3_of_bytes": "bd7ea3e3d0d81ab6478bef5e05ad264803ff6e5a2a74526036f94907d73a4371",
+      "id": "bd7ea3e3d0d81ab6478bef5e05ad264803ff6e5a2a74526036f94907d73a4371",
+      "len": 16,
+      "type": 2
+    },
+    {
+      "blake3_of_bytes": "3815c069124705c06ac2c1ea280f29585c51e253db6f249a5c81b09367bca562",
+      "id": "3815c069124705c06ac2c1ea280f29585c51e253db6f249a5c81b09367bca562",
+      "len": 16,
+      "type": 2
+    }
+  ],
+  "expected": "Complete",
+  "name": "boundary_earlier_delta_base",
+  "pack_key": "ebe419ce30637180b67b487e2496d436d1fdd62d05f171a42a4a82af48912666",
+  "size": 189,
+  "version": 1
+}
