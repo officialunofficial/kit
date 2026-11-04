@@ -836,7 +836,7 @@ pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
     let expected = &plaintext
         [usize::try_from(offset).expect("offset")..usize::try_from(offset + len).expect("end")];
     let container = match proof {
-        RangeProof::Mkdp(bytes) => {
+        RangeProof::Kdpb(bytes) => {
             let disclosed = kit_core::verify::verify_disclosure(&commit_id, &bytes)
                 .expect("fresh KDPB must verify");
             assert!(matches!(
@@ -845,7 +845,7 @@ pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
             ));
             return;
         }
-        RangeProof::Mkds(bytes) => bytes,
+        RangeProof::Kdsp(bytes) => bytes,
         _ => unreachable!("non-exhaustive RangeProof"),
     };
     let verified = kit_core::verify::span::verify_disclosure_span(&commit_id, &container)

@@ -296,7 +296,7 @@ impl ChunkedRangeSizer {
                 if single {
                     self.finished = true;
                     return Ok(Some(EncodedRangePlan {
-                        kind: RangeProofKind::Mkdp,
+                        kind: RangeProofKind::Kdpb,
                         first: index,
                         last: index,
                         encoded_size: range_size,
@@ -309,7 +309,7 @@ impl ChunkedRangeSizer {
             let encoded_size =
                 self.check(self.container + varint_size((index - first_index + 1) as u64))?;
             (self.end <= next).then_some(EncodedRangePlan {
-                kind: RangeProofKind::Mkds,
+                kind: RangeProofKind::Kdsp,
                 first: first_index,
                 last: index,
                 encoded_size,
@@ -499,7 +499,7 @@ mod tests {
         ));
         let result = chunked_range_proof_size(200, &[], 50000, &[100], 99, 1).unwrap();
         assert_eq!((result.first, result.last), (0, 0));
-        assert!(matches!(result.kind, RangeProofKind::Mkdp));
+        assert!(matches!(result.kind, RangeProofKind::Kdpb));
     }
 
     #[test]
@@ -600,13 +600,13 @@ mod tests {
                 let built =
                     build_range_proof_from(&store, &id, &[&name], offset, len, None).unwrap();
                 let bytes = match built {
-                    RangeProof::Mkdp(bytes) => {
-                        assert_eq!(plan.kind, RangeProofKind::Mkdp);
+                    RangeProof::Kdpb(bytes) => {
+                        assert_eq!(plan.kind, RangeProofKind::Kdpb);
                         super::super::verify_disclosure(&id, &bytes).unwrap();
                         bytes
                     }
-                    RangeProof::Mkds(bytes) => {
-                        assert_eq!(plan.kind, RangeProofKind::Mkds);
+                    RangeProof::Kdsp(bytes) => {
+                        assert_eq!(plan.kind, RangeProofKind::Kdsp);
                         verify_disclosure_span(&id, &bytes).unwrap();
                         bytes
                     }

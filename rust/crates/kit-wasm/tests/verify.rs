@@ -419,10 +419,10 @@ fn oversize_inputs_return_err() {
     assert!(chunked_blob_decode(&oversized).is_err());
     assert!(blob_bao_encode(&oversized).is_err());
 
-    // Length-declaring header: MKDP v1 + 32-byte id + a commit_bytes
+    // Length-declaring header: KDPB v1 + 32-byte id + a commit_bytes
     // varint of 5_000_000 and no payload. Decode must fail without
     // allocating that many bytes.
-    let mut tiny = Vec::from(*b"MKDP");
+    let mut tiny = Vec::from(*b"KDPB");
     tiny.push(1);
     tiny.extend_from_slice(&[0u8; 32]);
     tiny.extend_from_slice(&[0xC0, 0x96, 0x31]);
