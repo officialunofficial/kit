@@ -854,6 +854,244 @@ mod tests {
     }
 
     #[test]
+    fn authorized_digest_views_decode_the_canonical_fields() {
+        let (fixture, headers) = part_golden();
+        let context = Context {
+            audience: fixture["audience"].as_str().unwrap(),
+            repository: fixture["repository"].as_str().unwrap(),
+        };
+        let authorized = verify_headers_with(
+            context,
+            fixture["procedure"].as_str().unwrap(),
+            ExpectedCommitment::PartStream,
+            fixture["created_at"].as_i64().unwrap() + 1,
+            &headers,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::hash::to_hex(&authorized.signer_key().unwrap()),
+            fixture["public_key"].as_str().unwrap()
+        );
+        assert_eq!(
+            crate::hash::to_hex(&authorized.scope_id().unwrap()),
+            authorized.scope
+        );
+        assert_eq!(
+            crate::hash::to_hex(&authorized.fingerprint_id().unwrap()),
+            fixture["signing_digest"].as_str().unwrap()
+        );
+        for bad in [
+            "",
+            "ab",
+            &"AB".repeat(32),
+            &"zz".repeat(32),
+            &"ab".repeat(33),
+        ] {
+            let hand_built = Authorized {
+                scope: bad.into(),
+                public_key: bad.into(),
+                nonce: String::new(),
+                fingerprint: bad.into(),
+                commitment: String::new(),
+                expires_at: 0,
+            };
+            let error = Err(AuthError("malformed auth v2 authorization"));
+            assert_eq!(hand_built.signer_key(), error);
+            assert_eq!(hand_built.scope_id(), error);
+            assert_eq!(hand_built.fingerprint_id(), error);
+        }
+    }
+
+    #[test]
+    fn header_name_lists_follow_the_contract() {
+        assert_eq!(HEADER_NAMES.len(), 10);
+        for (index, name) in HEADER_NAMES.iter().enumerate() {
+            assert_eq!(*name, name.to_ascii_lowercase());
+            assert!(!HEADER_NAMES[..index].contains(name), "{name}");
+        }
+        // The trigger set is every header except addressing and the nonce.
+        let triggers: Vec<&str> = HEADER_NAMES
+            .into_iter()
+            .filter(|name| *name != "x-repository" && *name != "idempotency-key")
+            .collect();
+        let mut listed = TRIGGER_HEADER_NAMES.to_vec();
+        listed.sort_unstable();
+        let mut expected = triggers;
+        expected.sort_unstable();
+        assert_eq!(listed, expected);
+    }
+
+    /// Positions in [`HEADER_NAMES`].
+    const REPOSITORY_INDEX: usize = 2;
+    const DIGEST_INDEX: usize = 5;
+    const NONCE_INDEX: usize = 9;
+
+    fn presence(
+        counts: &[usize; 10],
+        requires_digest: bool,
+    ) -> Result<EnvelopePresence, &'static str> {
+        inspect_headers(counts, requires_digest).map_err(|e| e.0)
+    }
+
+    #[test]
+    fn trigger_headers_require_complete_unique_envelopes() {
+        for requires_digest in [true, false] {
+            assert_eq!(
+                presence(&[0; 10], requires_digest),
+                Ok(EnvelopePresence::Absent)
+            );
+            let mut complete = [1; 10];
+            if !requires_digest {
+                complete[DIGEST_INDEX] = 0;
+            }
+            assert_eq!(
+                presence(&complete, requires_digest),
+                Ok(EnvelopePresence::Present)
+            );
+            for index in 0..HEADER_NAMES.len() {
+                let name = HEADER_NAMES[index];
+                // One header alone: addressing and the nonce stay anonymous.
+                let mut single = [0; 10];
+                single[index] = 1;
+                if index == REPOSITORY_INDEX || index == NONCE_INDEX {
+                    assert_eq!(
+                        presence(&single, requires_digest),
+                        Ok(EnvelopePresence::Absent),
+                        "unsigned {name}"
+                    );
+                } else {
+                    assert!(presence(&single, requires_digest).is_err(), "single {name}");
+                }
+                // One header missing from a complete envelope.
+                let mut missing = complete;
+                missing[index] = 0;
+                assert_eq!(
+                    presence(&missing, requires_digest).is_err(),
+                    index != REPOSITORY_INDEX && (index != DIGEST_INDEX || requires_digest),
+                    "missing {name}"
+                );
+                // A repeated header never passes, whatever the count.
+                for count in [2, usize::MAX] {
+                    let mut duplicate = complete;
+                    duplicate[index] = count;
+                    assert_eq!(
+                        presence(&duplicate, requires_digest),
+                        Err("duplicate auth v2 header"),
+                        "duplicate {name}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_addressing_or_nonce_without_a_trigger_is_absent() {
+        // Only a trigger starts the envelope check. The host owns the policy
+        // for the other two headers of an unsigned request.
+        for index in [REPOSITORY_INDEX, NONCE_INDEX] {
+            let mut counts = [0; 10];
+            counts[index] = 2;
+            assert_eq!(presence(&counts, true), Ok(EnvelopePresence::Absent));
+        }
+    }
+
+    #[test]
+    fn missing_repository_is_addressing_not_an_envelope_failure() {
+        let mut counts = [1; 10];
+        counts[REPOSITORY_INDEX] = 0;
+        assert_eq!(presence(&counts, true), Ok(EnvelopePresence::Present));
+        counts[REPOSITORY_INDEX] = 2;
+        assert_eq!(presence(&counts, true), Err("duplicate auth v2 header"));
+    }
+
+    #[test]
+    fn missing_header_precedence_keeps_the_duplicate_check_first() {
+        let mut counts = [0; 10];
+        counts[7] = 1;
+        assert_eq!(presence(&counts, true), Err("auth v2 required"));
+        counts[7] = 2;
+        assert_eq!(presence(&counts, true), Err("duplicate auth v2 header"));
+        // A present repository does not displace the order of the others.
+        counts[7] = 1;
+        counts[2] = 1;
+        assert_eq!(presence(&counts, true), Err("auth v2 required"));
+    }
+
+    /// For each missing header, the reason equals the one that
+    /// `verify_headers_with` gives for the same envelope.
+    #[test]
+    fn missing_header_reasons_match_the_verifier() {
+        let key = SigningKey::from_bytes(&[42; 32]);
+        let nonce = "ab".repeat(32);
+        let body = format!("body:{}", "cd".repeat(32));
+        let unary = operation_with(&body, &nonce);
+        let (part, part_headers) = part_golden();
+        let part_context = Context {
+            audience: part["audience"].as_str().unwrap(),
+            repository: part["repository"].as_str().unwrap(),
+        };
+        // (headers, context, commitment, now, requires_digest)
+        let cases = [
+            (
+                signed_headers(&unary, &key),
+                unary.context,
+                ExpectedCommitment::Exact(&body),
+                unary.created_at,
+                true,
+            ),
+            (
+                part_headers,
+                part_context,
+                ExpectedCommitment::PartStream,
+                part["created_at"].as_i64().unwrap(),
+                false,
+            ),
+        ];
+        for (headers, context, commitment, now, requires_digest) in cases {
+            let procedure = if requires_digest {
+                UPLOAD_PART
+            } else {
+                part["procedure"].as_str().unwrap()
+            };
+            verify_headers_with(context, procedure, commitment, now, &headers).unwrap();
+            for index in 0..HEADER_NAMES.len() {
+                let mut counts = [1; 10];
+                counts[DIGEST_INDEX] = usize::from(requires_digest);
+                counts[index] = 0;
+                let mut broken = headers.clone();
+                *[
+                    &mut broken.version,
+                    &mut broken.audience,
+                    &mut broken.repository,
+                    &mut broken.public_key,
+                    &mut broken.signature,
+                    &mut broken.digest,
+                    &mut broken.commitment,
+                    &mut broken.created_at,
+                    &mut broken.expires_at,
+                    &mut broken.idempotency_key,
+                ][index] = None;
+                if index == REPOSITORY_INDEX || (index == DIGEST_INDEX && !requires_digest) {
+                    // Addressing, or a digest that streams may omit.
+                    assert_eq!(
+                        presence(&counts, requires_digest),
+                        Ok(EnvelopePresence::Present)
+                    );
+                    continue;
+                }
+                let reference =
+                    verify_headers_with(context, procedure, commitment, now, &broken).unwrap_err();
+                assert_eq!(
+                    presence(&counts, requires_digest),
+                    Err(reference.0),
+                    "missing {}",
+                    HEADER_NAMES[index]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ambiguous_origins_are_rejected() {
         for origin in [
             "https://HOST",
@@ -896,6 +1134,100 @@ pub struct Headers {
     pub expires_at: Option<String>,
     /// Stable operation nonce; retained across transport retries.
     pub idempotency_key: Option<String>,
+}
+
+/// The auth v2 header names, lowercase, in the field order of [`Headers`]:
+/// version, audience, repository, public key, signature, digest, content
+/// commitment, creation time, expiry and nonce.
+pub const HEADER_NAMES: [&str; 10] = [
+    "x-envelope-version",
+    "x-audience",
+    "x-repository",
+    "x-public-key",
+    "x-signature",
+    "x-digest",
+    "x-content-commitment",
+    "x-created-at",
+    "x-expires-at",
+    "idempotency-key",
+];
+
+/// The headers that mark a request as signed (SPEC-TRANSPORT-CONNECT §7.1).
+/// `x-repository` addresses a request and `idempotency-key` names a retry, so
+/// neither one alone makes a request signed.
+pub const TRIGGER_HEADER_NAMES: [&str; 8] = [
+    "x-public-key",
+    "x-signature",
+    "x-digest",
+    "x-created-at",
+    "x-expires-at",
+    "x-envelope-version",
+    "x-audience",
+    "x-content-commitment",
+];
+
+/// Whether a request carries an auth v2 envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EnvelopePresence {
+    /// No trigger header occurs. The unsigned-request policy of the host applies.
+    Absent,
+    /// Every required header occurs exactly once. The values still need
+    /// [`verify_headers_with`].
+    Present,
+}
+
+/// Check how often each header occurs, before a transport merges repeated
+/// fields into one value. `counts` follows [`HEADER_NAMES`].
+///
+/// A request with no [`TRIGGER_HEADER_NAMES`] header is [`EnvelopePresence::Absent`].
+/// A request with one must carry the whole envelope, and no header may repeat,
+/// so a partial or ambiguous envelope never becomes an anonymous request.
+/// Unary requests require `x-digest`. Streams may leave it out. A missing
+/// `x-repository` is not an error here, because the host classifies it by
+/// routing, but a repeated one is. Empty values count as present. Without a
+/// trigger, the host checks the addressing and nonce headers itself.
+///
+/// This checks multiplicity and completeness only. [`verify_headers_with`]
+/// checks the values. A missing header reports the reason that
+/// [`verify_headers_with`] reports for it.
+///
+/// # Errors
+/// `duplicate auth v2 header`, or the reason for the first missing header.
+pub fn inspect_headers(
+    counts: &[usize; 10],
+    requires_digest: bool,
+) -> Result<EnvelopePresence, AuthError> {
+    if !HEADER_NAMES
+        .iter()
+        .zip(counts)
+        .any(|(name, count)| *count != 0 && TRIGGER_HEADER_NAMES.contains(name))
+    {
+        return Ok(EnvelopePresence::Absent);
+    }
+    if counts.iter().any(|count| *count > 1) {
+        return Err(AuthError("duplicate auth v2 header"));
+    }
+    // Indexes follow `HEADER_NAMES`, in the order that `verify_headers_with`
+    // reads the headers.
+    let missing = [
+        (0, "auth v2 required"),
+        (1, "missing auth v2 header"),
+        (6, "missing auth v2 header"),
+        (7, "missing validity header"),
+        (8, "missing validity header"),
+        (9, "missing auth v2 header"),
+        (5, "body digest mismatch"),
+        (3, "missing signature header"),
+        (4, "missing signature header"),
+    ];
+    match missing
+        .into_iter()
+        .find(|&(index, _)| counts[index] == 0 && (index != 5 || requires_digest))
+    {
+        Some((_, reason)) => Err(AuthError(reason)),
+        None => Ok(EnvelopePresence::Present),
+    }
 }
 
 /// Validated identity and operation binding for a transactional effect adapter.
@@ -954,6 +1286,36 @@ impl Authorized {
     pub fn content_commitment(&self) -> Result<ContentCommitment, AuthError> {
         ContentCommitment::parse(&self.commitment)
     }
+
+    /// The signer's Ed25519 public key, decoded from [`Self::public_key`].
+    ///
+    /// # Errors
+    /// `malformed auth v2 authorization`, for a hand-built value only.
+    pub fn signer_key(&self) -> Result<[u8; 32], AuthError> {
+        decoded(&self.public_key)
+    }
+
+    /// The replay scope as a digest, decoded from [`Self::scope`].
+    ///
+    /// # Errors
+    /// `malformed auth v2 authorization`, for a hand-built value only.
+    pub fn scope_id(&self) -> Result<Hash, AuthError> {
+        decoded(&self.scope)
+    }
+
+    /// The operation fingerprint as a digest, decoded from [`Self::fingerprint`].
+    ///
+    /// # Errors
+    /// `malformed auth v2 authorization`, for a hand-built value only.
+    pub fn fingerprint_id(&self) -> Result<Hash, AuthError> {
+        decoded(&self.fingerprint)
+    }
+}
+
+/// A field that the verifier produced is canonical hex. A hand-built value
+/// may not be.
+fn decoded(value: &str) -> Result<[u8; 32], AuthError> {
+    hex32(value).ok_or(AuthError("malformed auth v2 authorization"))
 }
 
 /// Verify adapter headers against deployment-owned context and actual content.
