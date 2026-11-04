@@ -7,6 +7,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- The decoders of the range disclosure bundle, the pack list node and the
+  closure manifest reserve memory for a list in proportion to the input,
+  not to the declared length. Before, about 1 MB of input could reserve
+  about 96 MB. Accepted and rejected inputs do not change.
+
 ### Changed
 
 - **Breaking:** a multi-leaf proof requires strictly ascending positions.

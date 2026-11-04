@@ -41,6 +41,8 @@ pub mod hash;
 // the server and embedders (SPEC-HISTORY-ORDER). Pure and wasm-safe: no I/O,
 // no features.
 pub mod history_order;
+// Length-prefixed list decoding whose reservation follows the input.
+pub(crate) mod list_decode;
 pub mod merkle;
 pub mod object;
 pub mod observer;

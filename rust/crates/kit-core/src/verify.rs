@@ -97,7 +97,8 @@ use bytes::{Buf as _, BufMut};
 use commonware_codec::{Buf, Copying};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write};
 
-use crate::hash::{Hash, hash};
+use crate::hash::{HASH_LEN, Hash, hash};
+use crate::list_decode::read_list;
 use crate::merkle::{self, MerkleError, ObjectKind, Proof};
 use crate::object::{EntryMode, KitError, MAGIC, Object, ObjectType, SCHEMA_VERSION, TreeEntry};
 use crate::sign::{verify_commit, verify_remix};
@@ -912,6 +913,13 @@ struct LenProof {
     slice: Vec<u8>,
 }
 
+impl LenProof {
+    /// The fewest bytes one entry occupies: the `index`, the chunk id, a
+    /// proof with no siblings (`leaf_count` and a one-byte sibling count)
+    /// and an empty slice (a one-byte length).
+    const MIN_ENCODED_LEN: usize = 4 + HASH_LEN + (4 + 1) + 1;
+}
+
 impl Write for LenProof {
     fn write(&self, writer: &mut impl BufMut) {
         self.index.write(writer);
@@ -1061,8 +1069,12 @@ fn decode_disclosure(bytes: &[u8]) -> Result<(Hash, Vec<u8>, Vec<Step>, PayloadW
             let offset_in_blob = u64::read(&mut r)?;
             let len = u64::read(&mut r)?;
             let slice = Vec::<u8>::read_range(&mut r, ..=MAX_BUNDLE_BYTES)?;
-            let chunk_len_proofs =
-                Vec::<LenProof>::read_range(&mut r, ..=crate::serialize::MAX_CHUNKS as usize)?;
+            let chunk_len_proofs = read_list::<LenProof>(
+                &mut r,
+                crate::serialize::MAX_CHUNKS as usize,
+                LenProof::MIN_ENCODED_LEN,
+                &(),
+            )?;
             PayloadWire::Range {
                 chunk,
                 offset_in_blob,
@@ -1645,6 +1657,7 @@ mod tests {
     use crate::sign::{KeyPair, sign_commit};
     use crate::store::ObjectStore;
     use crate::worktree::store_file_object;
+    use commonware_codec::Encode as _;
 
     /// A small deterministic repo: root tree with a shallow file, a
     /// 3-level-nested file, an executable file, and a chunked (> 1 MiB)
@@ -2815,5 +2828,49 @@ mod tests {
         {
             assert!(verify_disclosure(&f.commit_id, &bundle).is_err());
         }
+    }
+
+    /// A hostile range payload declares the largest proof count and holds
+    /// almost no input. The decoder fails on the first missing entry.
+    #[test]
+    fn range_payload_with_a_huge_proof_count_and_short_input_is_malformed() {
+        let commit_id = [0u8; 32];
+        let empty = PayloadWire::Range {
+            chunk: None,
+            offset_in_blob: 0,
+            len: 0,
+            slice: Vec::new(),
+            chunk_len_proofs: Vec::new(),
+        };
+        let mut bundle = encode_disclosure(&commit_id, &[], &[], &empty);
+        // The empty proof list is the last byte: a zero length prefix.
+        assert_eq!(bundle.pop(), Some(0));
+        bundle.extend_from_slice(&(crate::serialize::MAX_CHUNKS as usize).encode());
+        bundle.extend_from_slice(&[0u8; 100]);
+        assert!(matches!(
+            verify_disclosure(&commit_id, &bundle),
+            Err(VerifyError::Malformed)
+        ));
+        // One more than the cap is also malformed, on the length alone.
+        let mut over = encode_disclosure(&commit_id, &[], &[], &empty);
+        assert_eq!(over.pop(), Some(0));
+        over.extend_from_slice(&(crate::serialize::MAX_CHUNKS as usize + 1).encode());
+        assert!(matches!(
+            verify_disclosure(&commit_id, &over),
+            Err(VerifyError::Malformed)
+        ));
+    }
+
+    /// `MIN_ENCODED_LEN` bounds the reservation, so it must be the true
+    /// smallest encoding of an entry.
+    #[test]
+    fn len_proof_minimum_encoded_len_is_the_smallest_entry() {
+        let smallest = LenProof {
+            index: 0,
+            chunk_id: ZERO,
+            proof: Proof::default(),
+            slice: Vec::new(),
+        };
+        assert_eq!(smallest.encode_size(), LenProof::MIN_ENCODED_LEN);
     }
 }

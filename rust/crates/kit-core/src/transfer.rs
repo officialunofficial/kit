@@ -32,6 +32,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::delta;
 use crate::hash::{self, Hash};
+use crate::list_decode::read_list;
 use crate::object::{Object, ObjectType};
 use crate::store::{ObjectStore, StoreError};
 
@@ -131,7 +132,7 @@ pub fn encode_packlist(prev: Option<Hash>, packs: &[Hash]) -> Result<Vec<u8>, Pa
 /// trailing bytes).
 pub fn decode_packlist(bytes: &[u8]) -> Result<PackListNode, PackListError> {
     use bytes::Buf as _;
-    use commonware_codec::{ReadExt, ReadRangeExt};
+    use commonware_codec::ReadExt;
 
     if bytes.len() < PACKLIST_HEADER_LEN {
         return Err(PackListError::TooShort);
@@ -143,11 +144,12 @@ pub fn decode_packlist(bytes: &[u8]) -> Result<PackListNode, PackListError> {
     if version != PACKLIST_VERSION {
         return Err(PackListError::UnsupportedVersion(version));
     }
-    // Body: `Option<Hash>` then a length-capped `Vec<Hash>`. `Copying` reads
-    // the borrowed slice; the `RangeCfg` enforces the entry cap at decode time.
+    // Body: `Option<Hash>` then a length-capped list of hashes. `Copying`
+    // reads the borrowed slice; `read_list` enforces the entry cap at decode
+    // time and reserves only what the input can hold.
     let mut buf = commonware_codec::Copying(&bytes[PACKLIST_HEADER_LEN..]);
     let prev = <Option<Hash>>::read(&mut buf).map_err(|_| PackListError::Malformed)?;
-    let packs = <Vec<Hash>>::read_range(&mut buf, 0..=PACKLIST_MAX_ENTRIES as usize)
+    let packs = read_list::<Hash>(&mut buf, PACKLIST_MAX_ENTRIES as usize, hash::HASH_LEN, &())
         .map_err(|_| PackListError::Malformed)?;
     // Trailing bytes after the declared body are a malformed packlist.
     if buf.has_remaining() {
@@ -965,6 +967,18 @@ mod tests {
         vec![[1u8; 32]; over_cap - 1].write(&mut at_cap);
         let decoded = decode_packlist(&at_cap).expect("at-cap list must decode");
         assert_eq!(decoded.packs.len(), PACKLIST_MAX_ENTRIES as usize);
+    }
+
+    #[test]
+    fn packlist_with_a_huge_count_and_short_input_is_malformed() {
+        use commonware_codec::Encode as _;
+        let mut node = Vec::new();
+        node.extend_from_slice(PACKLIST_MAGIC);
+        node.push(PACKLIST_VERSION);
+        node.push(0); // no previous node
+        node.extend_from_slice(&(PACKLIST_MAX_ENTRIES as usize).encode());
+        node.extend_from_slice(&[1u8; 100]);
+        assert_eq!(decode_packlist(&node), Err(PackListError::Malformed));
     }
 
     #[test]
