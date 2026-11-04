@@ -734,7 +734,8 @@ jobs:
   # job's OIDC token for a short-lived publish credential, so the job needs no
   # npm token and no repository secret. The trusted publisher on npm names this
   # file, release.yml, and the environment npm. Other jobs of this file hold
-  # id-token too, but their tokens carry no environment, so npm rejects them.
+  # id-token too, but their tokens carry no environment, so they do not match
+  # the trusted publisher.
   # Provenance is generated automatically. A version that is already on npm is
   # skipped, so a re-run is safe.
   publish-npm:

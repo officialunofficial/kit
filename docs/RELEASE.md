@@ -371,8 +371,9 @@ publishing: the job asks GitHub for an OIDC token and npm exchanges it for a
 short-lived publish credential. No npm token or repository secret exists.
 The job runs in the GitHub environment `npm`, and the trusted publisher names
 that environment. Other jobs of `release.yml` hold `id-token: write` for
-cosign, but their tokens carry no environment, so npm rejects them. npm adds a
-provenance attestation to the version without a flag.
+cosign, but their tokens carry no environment, so they do not match the
+trusted publisher. npm adds a provenance attestation to the version without a
+flag.
 
 The job:
 
@@ -402,14 +403,18 @@ first version goes up by hand.
    enough. Use an npm account with two-factor authentication. The registry
    may set `latest` on this first version, and `latest` stays there until the
    first release from the workflow.
-2. In the package settings on npmjs.com, add a trusted publisher: provider
+2. In the repository settings on GitHub, create the environment `npm`. Under
+   deployment branches and tags, allow only tags that match `v*`. Without that
+   rule, a branch whose copy of `release.yml` names the environment gets a
+   token that npm accepts. Required reviewers are optional.
+3. In the package settings on npmjs.com, add a trusted publisher: provider
    GitHub Actions, organization `officialunofficial`, repository `kit`,
    workflow filename `release.yml`, environment `npm`. The fields are
    case-sensitive, and npm does not check them until a publish.
-3. Push the release tag. A new trusted publisher expires unless it sees a
+4. Push the release tag. A new trusted publisher expires unless it sees a
    successful publish within 2 days. Create it right before the tag, and
    delete and create it again if it expires.
-4. After the first publish from the workflow, remove the throwaway version:
+5. After the first publish from the workflow, remove the throwaway version:
    `npm dist-tag rm @officialunofficial/kit-wasm init` and `npm deprecate
    @officialunofficial/kit-wasm@0.0.0-init "not a release"`. In the package
    settings, require two-factor authentication and disallow tokens.
