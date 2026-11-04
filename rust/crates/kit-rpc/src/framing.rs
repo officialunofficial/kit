@@ -334,14 +334,14 @@ mod kani_proofs {
         }
     }
 
-    /// `read_frame` over every <= 6-byte stream (4-byte length prefix +
-    /// <= 2 body bytes): never panics, rejects an over-cap length prefix
+    /// `read_frame` over every <= 8-byte stream (4-byte length prefix +
+    /// <= 4 body bytes): never panics, rejects an over-cap length prefix
     /// before allocating, and reports a short body with the true received
     /// count; a complete body is handed to the decoder (`Ok`).
     #[kani::proof]
-    #[kani::unwind(5)]
+    #[kani::unwind(6)]
     fn rpc_read_frame_no_panic() {
-        each_len!(read_at; 0 1 2 3 4 5 6);
+        each_len!(read_at; 0 1 2 3 4 5 6 7 8);
     }
 
     /// Canary: the checker must falsify "an over-cap length prefix is

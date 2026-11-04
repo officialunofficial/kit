@@ -809,6 +809,33 @@ mod kani_proofs {
         assert!(EncryptedKeyRecord::decode(&bytes).is_err());
     }
 
+    /// SPEC-KEYSTORE §6.1.1 registry: a decoder rejects every algorithm
+    /// id outside `0x01..=0x03` (fail closed on an unknown id), and
+    /// accepts each registered id. The id byte is symbolic.
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::unwind(26)]
+    fn software_key_record_rejects_unknown_algorithm() {
+        let mut bytes = EncryptedKeyRecord {
+            algorithm: Algorithm::Ed25519,
+            public_key: Vec::new(),
+            keyid: String::new(),
+            attrs: attrs_from_bits(kani::any::<u8>() & 0b111).expect("valid bits"),
+            protector: String::new(),
+            nonce: kani::any(),
+            wrapped_dek: Vec::new(),
+            ciphertext: Vec::new(),
+        }
+        .encode()
+        .expect("encodes");
+        let id: u8 = kani::any();
+        bytes[9] = id;
+        assert_eq!(
+            EncryptedKeyRecord::decode(&bytes).is_ok(),
+            (1..=3).contains(&id)
+        );
+    }
+
     /// Canary: the checker must falsify "a valid record with one
     /// trailing byte still decodes" (§6.1.1 trailing-bytes rule), showing
     /// the rejection path the no-panic harness relies on is live.

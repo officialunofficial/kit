@@ -1153,13 +1153,13 @@ mod kani_proofs {
     }
 
     /// `decode(base, encode(base, result)) == result` for every
-    /// `base`, `result` of <= 3 bytes (each length pair checked at its
+    /// `base`, `result` of <= 4 bytes (each length pair checked at its
     /// concrete size; below `BLOCK_SIZE`, so the writer emits header +
     /// INSERTs only — COPY emission is covered by the proptest
     /// round-trip in `tests`).
     #[kani::proof]
     #[kani::stub(random_seed, fixed_seed)]
-    #[kani::unwind(5)]
+    #[kani::unwind(6)]
     fn delta_encode_decode_roundtrip() {
         macro_rules! each_r {
             ($b:literal) => {
@@ -1167,11 +1167,13 @@ mod kani_proofs {
                 roundtrip_at::<$b, 1>();
                 roundtrip_at::<$b, 2>();
                 roundtrip_at::<$b, 3>();
+                roundtrip_at::<$b, 4>();
             };
         }
         each_r!(0);
         each_r!(1);
         each_r!(2);
         each_r!(3);
+        each_r!(4);
     }
 }
