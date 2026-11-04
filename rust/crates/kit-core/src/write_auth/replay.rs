@@ -10,8 +10,8 @@ use crate::hash::Hash;
 
 /// The replay record that the host found for (audience, repository, signer,
 /// nonce), after authentication. `R` is the host's stored result. The host
-/// never supplies a challenge, a transient refusal or a pending answer as a
-/// stored result.
+/// stores only a success or a refusal that [`storable_rejection`] allows, so a
+/// committed result is never a challenge or a transient refusal.
 #[derive(Debug)]
 pub struct ReplayObservation<'a, R> {
     /// Fingerprint of the authenticated operation that created the record,
@@ -32,60 +32,19 @@ pub enum ReplayStateView<'a, R> {
         resumable: bool,
     },
     /// The write finished, and its result is stored.
-    Committed(RecordedResult<'a, R>),
+    Committed(&'a R),
 }
 
-/// A stored terminal result: a success, or a permanent refusal.
-///
-/// A permanent refusal can be built only through [`storable_rejection`], so a
-/// challenge, a transient refusal and an unknown code have no representation.
-#[derive(Debug)]
-#[must_use]
-pub struct RecordedResult<'a, R> {
-    result: &'a R,
-    rejection: Option<PermanentCode>,
-}
-
-impl<'a, R> RecordedResult<'a, R> {
-    /// A success that the host has seen committed. Do not pass an error or a
-    /// pending answer here.
-    pub const fn success(result: &'a R) -> Self {
-        Self {
-            result,
-            rejection: None,
-        }
-    }
-
-    /// A refusal, if it may be stored as a terminal result. `code` is the
-    /// Connect code, and `admission_challenge` is true for an admission
-    /// challenge (§5.1). Returns `None` when the refusal must not be stored.
-    #[must_use]
-    pub const fn rejection(result: &'a R, code: &str, admission_challenge: bool) -> Option<Self> {
-        match storable_rejection(code, admission_challenge) {
-            Some(code) => Some(Self {
-                result,
-                rejection: Some(code),
-            }),
-            None => None,
-        }
-    }
-
-    /// The code of the refusal, or `None` for a success.
-    #[must_use]
-    pub const fn rejection_code(&self) -> Option<PermanentCode> {
-        self.rejection
-    }
-}
-
-/// The outcome of the replay lookup.
+/// The outcome of the replay lookup. A host matches every variant, so a new
+/// outcome fails to compile there and never falls into a default arm.
 #[derive(Debug, PartialEq, Eq)]
-#[non_exhaustive]
 #[must_use]
 pub enum ReplayDecision<'a, R> {
     /// No record exists. The write is new and continues to authorization.
     Fresh,
     /// The same operation finished. Return this stored result and repeat no
-    /// effect.
+    /// effect. A committed write that still awaits its storage receipt first
+    /// finishes signing and stores the signed envelope (§7.1, step 2).
     Recorded(&'a R),
     /// The same operation is in flight and the host can resume it.
     Resume,
@@ -113,7 +72,7 @@ pub fn classify_replay<'a, R>(
         None => ReplayDecision::Fresh,
         Some(record) if record.fingerprint != *fingerprint => ReplayDecision::Conflict,
         Some(record) => match record.state {
-            ReplayStateView::Committed(stored) => ReplayDecision::Recorded(stored.result),
+            ReplayStateView::Committed(stored) => ReplayDecision::Recorded(stored),
             ReplayStateView::InFlight { resumable: true } => ReplayDecision::Resume,
             ReplayStateView::InFlight { resumable: false } => ReplayDecision::InFlight,
         },
@@ -175,7 +134,9 @@ impl PermanentCode {
 /// The code of a refusal that may be stored as a terminal result, or `None`.
 ///
 /// Only the seven permanent codes qualify, and an admission challenge never
-/// does, whatever its code. The host stores no rejection details.
+/// does, whatever its code. The host stores no rejection details. The host
+/// calls this only for a refusal after the reserve step. An authorization or
+/// admission denial before that step gets no record (§5.1, §7.5).
 #[must_use]
 pub const fn storable_rejection(code: &str, admission_challenge: bool) -> Option<PermanentCode> {
     if admission_challenge {
@@ -198,10 +159,7 @@ mod tests {
     fn stored<'a>(name: &str, saved: &'a Saved) -> Option<ReplayStateView<'a, Saved>> {
         Some(match name {
             "absent" => return None,
-            "committed" => ReplayStateView::Committed(RecordedResult::success(saved)),
-            "rejected" => ReplayStateView::Committed(
-                RecordedResult::rejection(saved, "not_found", false).unwrap(),
-            ),
+            "committed" => ReplayStateView::Committed(saved),
             "resumable" => ReplayStateView::InFlight { resumable: true },
             "in flight" => ReplayStateView::InFlight { resumable: false },
             _ => panic!("unknown state {name}"),
@@ -217,11 +175,6 @@ mod tests {
             ("absent", ReplayDecision::Fresh, ReplayDecision::Fresh),
             (
                 "committed",
-                ReplayDecision::Recorded(&saved),
-                ReplayDecision::Conflict,
-            ),
-            (
-                "rejected",
                 ReplayDecision::Recorded(&saved),
                 ReplayDecision::Conflict,
             ),
@@ -275,26 +228,15 @@ mod tests {
 
     #[test]
     fn only_the_seven_permanent_codes_are_storable() {
-        let saved = Saved("refusal");
         for (code, storable) in CODES {
             let permanent = storable_rejection(code, false);
             assert_eq!(permanent.is_some(), storable, "{code}");
-            assert_eq!(permanent, PermanentCode::from_code(code), "{code}");
             if let Some(permanent) = permanent {
                 assert_eq!(permanent.as_str(), code);
             }
-            let recorded = RecordedResult::rejection(&saved, code, false);
-            assert_eq!(recorded.is_some(), storable, "{code}");
-            assert_eq!(
-                recorded.and_then(|recorded| recorded.rejection_code()),
-                permanent,
-                "{code}"
-            );
             // An admission challenge is never stored, whatever its code.
             assert_eq!(storable_rejection(code, true), None, "challenge {code}");
-            assert!(RecordedResult::rejection(&saved, code, true).is_none());
         }
-        assert_eq!(RecordedResult::success(&saved).rejection_code(), None);
     }
 
     #[test]
