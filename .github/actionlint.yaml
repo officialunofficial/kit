@@ -1,0 +1,4 @@
+# Runner labels that actionlint does not know. The org provides them.
+self-hosted-runner:
+  labels:
+    - ubuntu-amd64-runner

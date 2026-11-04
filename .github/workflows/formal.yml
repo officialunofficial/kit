@@ -60,7 +60,9 @@ jobs:
 
   kani:
     name: kani (harnesses up to 14 GB)
-    runs-on: ubuntu-latest
+    # ubuntu-latest has too little memory for most harnesses. This org
+    # runner has 16 GB.
+    runs-on: ubuntu-amd64-runner
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -77,8 +79,7 @@ jobs:
           cargo install --locked kani-verifier --version "${KANI_VERSION}"
           cargo kani setup
 
-      # The large harnesses need more than 14 GB, and this runner has
-      # 16 GB. formal/kani/README.md says how to run them.
+      # The large harnesses need more than 14 GB. formal/kani/README.md says how to run them.
       - name: Kani harnesses
         run: KANI_SKIP_LARGE=1 bash formal/scripts/run-kani.sh
 
