@@ -13,6 +13,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   closure manifest reserve memory for a list in proportion to the input,
   not to the declared length. Before, about 1 MB of input could reserve
   about 96 MB. Accepted and rejected inputs do not change.
+- `PackDecodeCursor` no longer keeps a record for every frame of a pack. It
+  held about 190 bytes for each 5-byte frame, so a 50 MB pack of empty frames
+  pinned 1.9 GB before the first entry was decoded. The cursor now keeps its
+  position and parses each frame when `resume` reaches it, and it keeps only
+  the decompressed payload of a `0x03` or `0x04` frame, in a 24-byte slot. A
+  pack of empty raw frames adds no allocation. Errors, their order and the
+  wire format do not change.
+
+### Added
+
+- `PackEntries` implements `Clone`.
 
 ### Changed
 
