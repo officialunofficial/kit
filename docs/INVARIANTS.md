@@ -303,8 +303,8 @@ built on an unsupported base would ship a binary that no test can vouch
 for, so Windows was dropped as a supported target rather than worked
 around. Windows users run kit under WSL, which uses the Linux binary.
 
-**If violated:** a reintroduced Windows CI leg goes red on every PR (the
-workspace fails to build there); a reintroduced Windows release leg ships
+**If violated:** a reintroduced Windows CI leg tests a target that the
+Commonware library does not support; a reintroduced Windows release leg ships
 a binary no test ever exercised; a reintroduced
 `backend-windows-credential` feature reopens a semver-breaking
 `BackendKind` variant on a published crate (`kit-keystore`) without the

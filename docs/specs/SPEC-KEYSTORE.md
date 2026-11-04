@@ -774,8 +774,8 @@ Requirements:
 
 Windows is not a supported kit target (see
 `docs/INVARIANTS.md`): the Commonware library that kit builds on states
-that Windows is not a supported target. The `backend-windows-credential` feature, the
-`WindowsCredentialManager` `BackendKind` variant, and the Windows
+that Windows is not a supported target. The `backend-windows-credential`
+feature, the `WindowsCredentialManager` `BackendKind` variant, and the Windows
 Credential Manager implementation described in this section were
 removed rather than shipped untested. `"windows-credential"` is now an
 unrecognized backend name (`Error::BackendUnavailable`, not a
