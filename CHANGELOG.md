@@ -7,6 +7,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The `history-mmr` feature of `kit-core` builds the Commonware storage and
+  cryptography crates without their `std` feature. The normal dependency graph
+  of the feature drops from 364 to 135 crates. The deterministic runtime, the
+  zstd 0.13 library, `blst` and an HTTP server crate no longer build with it.
+  Roots, proofs and ids do not change.
+
 ## [0.6.0] - 2026-11-04
 
 ### Security

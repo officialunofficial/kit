@@ -46,8 +46,8 @@ bytes = "1.12.1"
 # `commonware_storage::bmt` does not offer. A native-only test checks it
 # byte-for-byte against `commonware_storage::bmt` (see dev-dependencies).
 commonware-codec = { workspace = true }
-commonware-storage = { workspace = true, features = ["std"], optional = true }
-commonware-cryptography = { workspace = true, features = ["std"], optional = true }
+commonware-storage = { workspace = true, optional = true }
+commonware-cryptography = { workspace = true, optional = true }
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 # The SPEC-SIGNING §1 predicate: canonical point checks, the cofactored
 # equation and its batch form (`sign::verify_ed25519`). `alloc` provides the
@@ -76,13 +76,10 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 zeroize = { version = "1.9.1", features = ["derive"] }
 # Per-entry pack payload compression (SPEC-PACKFILE v2).
-# `zstd-sys` is a C lib that cannot target wasm32 (see the comment on
-# `commonware-storage` above) — this is `optional = true`, gated by the
-# `pack-zstd` feature below, so a wasm32 consumer (which needs `pack.rs` to
-# compile but never calls into pack compression) can opt out via
-# `default-features = false`. 0.13.3 is already resolved transitively
-# via the commonware dependency stack. This direct dependency uses the
-# newer safe wrapper while sharing the same underlying zstd C library.
+# `zstd-sys` is a C lib that cannot target wasm32. This dependency is
+# `optional = true`, gated by the `pack-zstd` feature below, so a wasm32
+# consumer (which needs `pack.rs` to compile but never calls into pack
+# compression) can opt out via `default-features = false`.
 zstd = { version = "0.14.3", optional = true }
 # POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
 # Windows path uses default ACLs as documented in `docs/specs/SPEC-SIGNING.md`.
@@ -128,14 +125,11 @@ fuzzing = []
 # Additive on top of the plain `[dependencies]` entry above; never enabled
 # outside test builds.
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc", "hazmat"] }
-# Storage experiments need the deterministic runtime, not the shipped history API.
-commonware-runtime = { workspace = true }
-commonware-utils = { workspace = true, features = ["std"] }
 serde_json = "1.0.154"
 # Native-only: cross-check `merkle.rs` against the canonical
 # `commonware_storage::bmt`. Both must give the same roots and proof bytes.
-commonware-storage = { workspace = true, features = ["std"] }
-commonware-cryptography = { workspace = true, features = ["std"] }
+commonware-storage = { workspace = true }
+commonware-cryptography = { workspace = true }
 hex = "0.4.3"
 # Property-based testing: auto-shrinks counterexamples on round-trip
 # / invariant assertions.
