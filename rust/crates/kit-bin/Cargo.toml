@@ -55,30 +55,30 @@ path = "src/main.rs"
 # Inter-workspace deps need explicit `version = ...` alongside the
 # path so `cargo publish` accepts them; path-only deps are rejected by
 # the registry. Track workspace.package.version.
-kit-core = { version = "=0.7.0", path = "../kit-core" }
-kit-attest = { version = "=0.7.0", path = "../kit-attest", features = ["grants"] }
-kit-keystore = { version = "=0.7.0", path = "../kit-keystore" }
-libkit = { version = "=0.7.0", path = "../libkit", default-features = false, features = ["sync", "transport-connect", "transport-file", "transport-ssh"] }
+kit-core = { version = "=0.7.1", path = "../kit-core" }
+kit-attest = { version = "=0.7.1", path = "../kit-attest", features = ["grants"] }
+kit-keystore = { version = "=0.7.1", path = "../kit-keystore" }
+libkit = { version = "=0.7.1", path = "../libkit", default-features = false, features = ["sync", "transport-connect", "transport-file", "transport-ssh"] }
 # The native clone/fetch/pull engine (packmap fetch, signature verification,
 # applied-packs record, fast-forward and rollback). The CLI keeps all
 # printing, config layering, trust gates and exit codes.
-kit-sync = { version = "=0.7.0", path = "../kit-sync" }
+kit-sync = { version = "=0.7.1", path = "../kit-sync" }
 # `kit-transport-memory` is a dev-only (test) dependency — see
 # `[dev-dependencies]`. It is intentionally NOT a normal dependency so it
 # does not ship in `cargo install kit-bin`.
-kit-transport-file = { version = "=0.7.0", path = "../kit-transport-file" }
+kit-transport-file = { version = "=0.7.1", path = "../kit-transport-file" }
 # `kit-transport-connect` supplies native host policy and the transport
 # facade for Connect dispatch. `kit-client` owns the per-RPC protocol and
 # `kit-sync::ClientSource` drives repository operations. The adapter is
 # unconditional; the CLI hosts no Connect HTTP server.
-kit-transport-connect = { version = "=0.7.0", path = "../kit-transport-connect" }
-kit-transport-ssh = { version = "=0.7.0", path = "../kit-transport-ssh" }
+kit-transport-connect = { version = "=0.7.1", path = "../kit-transport-connect" }
+kit-transport-ssh = { version = "=0.7.1", path = "../kit-transport-ssh" }
 # The engine of `kit serve`: the ssh frame session over a repository on disk.
 # It builds no async runtime.
-kit-serve = { version = "=0.7.0", path = "../kit-serve" }
+kit-serve = { version = "=0.7.1", path = "../kit-serve" }
 # Optional: `kit+s3://` remotes on S3-compatible storage. Off by
 # default so the baseline build has no S3 client. Turn on via `--features s3`.
-kit-transport-s3 = { version = "=0.7.0", path = "../kit-transport-s3", optional = true }
+kit-transport-s3 = { version = "=0.7.1", path = "../kit-transport-s3", optional = true }
 # Optional: the tokio runtime `kit mcp --http` (the `mcp-v2` feature) runs
 # on, with the hyper server. Off by default, so the default `kit-bin`
 # build stays server-free (scripts/check-cli-baseline.sh): tokio is in the
@@ -127,7 +127,7 @@ tower-service = { version = "0.3.3", optional = true }
 # root.
 http-body-util = { version = "0.1.5", optional = true }
 bytes = { version = "1.12.1", optional = true }
-kit-rpc = { version = "=0.7.0", path = "../kit-rpc" }
+kit-rpc = { version = "=0.7.1", path = "../kit-rpc" }
 buffa = "0.9.2"
 # `wrap_help` is intentionally disabled so help-text output stays
 # deterministic across terminal widths. `derive` is enabled so the
@@ -184,10 +184,10 @@ libc = "0.2.191"
 signal-hook = { version = "0.4.5", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-kit-keystore = { version = "=0.7.0", path = "../kit-keystore", features = ["backend-macos-keychain"] }
+kit-keystore = { version = "=0.7.1", path = "../kit-keystore", features = ["backend-macos-keychain"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-kit-keystore = { version = "=0.7.0", path = "../kit-keystore", features = ["backend-linux-secret-service"] }
+kit-keystore = { version = "=0.7.1", path = "../kit-keystore", features = ["backend-linux-secret-service"] }
 
 [build-dependencies]
 # build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by
