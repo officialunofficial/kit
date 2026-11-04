@@ -13,9 +13,10 @@ use std::ops::Range;
 
 use bytes::Buf as _;
 use commonware_codec::Copying;
-use commonware_codec::{EncodeSize, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, ReadExt, Write};
 
-use crate::hash::{Hash, hash};
+use crate::hash::{HASH_LEN, Hash, hash};
+use crate::list_decode::read_list;
 use crate::object::{Object, ObjectType};
 use crate::ops::graph::{ClosureMode, children};
 use crate::pack::{self, PackEntries, PackEntry, PackWriter, pack_key};
@@ -161,7 +162,7 @@ impl ClosureManifest {
             MODE_HISTORY => ClosureMode::History,
             _ => return Err(VerifyError::ClosureManifestMalformed),
         };
-        let packs = Vec::<Hash>::read_range(&mut r, ..=MAX_CLOSURE_PACKS)
+        let packs = read_list::<Hash>(&mut r, MAX_CLOSURE_PACKS, HASH_LEN, &())
             .map_err(|_| VerifyError::ClosureManifestMalformed)?;
         if r.has_remaining() {
             return Err(VerifyError::ClosureManifestMalformed);
@@ -1388,6 +1389,25 @@ mod tests {
                 pack_index: 0,
                 entry_index: 1
             }
+        ));
+    }
+
+    #[test]
+    fn manifest_with_a_huge_pack_count_and_short_input_is_malformed() {
+        use commonware_codec::Encode as _;
+        let m = ClosureManifest {
+            root: [0u8; 32],
+            mode: ClosureMode::Snapshot,
+            packs: vec![],
+        };
+        let mut bytes = m.encode();
+        // The empty pack list is the last byte: a zero length prefix.
+        assert_eq!(bytes.pop(), Some(0));
+        bytes.extend_from_slice(&MAX_CLOSURE_PACKS.encode());
+        bytes.extend_from_slice(&[0u8; 100]);
+        assert!(matches!(
+            ClosureManifest::decode(&bytes),
+            Err(VerifyError::ClosureManifestMalformed)
         ));
     }
 

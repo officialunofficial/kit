@@ -3255,6 +3255,12 @@ mod tests {
         for case in [&b""[..], &b"KPKL\x01"[..], &[0xFF; 64]] {
             run_one(case, merkle_packlist_one_iteration).expect("guardrails held");
         }
+        // A pack list that declares 1,000,000 packs and holds 100 bytes.
+        let mut huge_count = b"KPKL\x01".to_vec();
+        huge_count.push(0); // no previous node
+        huge_count.extend_from_slice(&[0xC0, 0x84, 0x3D]); // 1,000,000
+        huge_count.extend_from_slice(&[0; 100]);
+        run_one(&huge_count, merkle_packlist_one_iteration).expect("guardrails held");
     }
 
     #[test]
@@ -3271,6 +3277,18 @@ mod tests {
         for case in [&b""[..], b"KDPB\x01", &[0xFF; 64][..]] {
             run_one(case, disclosure_decode_one_iteration).expect("guardrails held");
         }
+        // A range payload that declares 1,000,000 length proofs and holds
+        // 100 bytes after the count.
+        let mut huge_count = b"KDPB\x02".to_vec();
+        huge_count.extend_from_slice(&[0; 32]); // commit id
+        huge_count.extend_from_slice(&[0, 0]); // no commit bytes, no steps
+        huge_count.push(2); // range payload
+        huge_count.push(0); // no chunk header
+        huge_count.extend_from_slice(&[0; 16]); // offset and length
+        huge_count.push(0); // empty slice
+        huge_count.extend_from_slice(&[0xC0, 0x84, 0x3D]); // 1,000,000
+        huge_count.extend_from_slice(&[0; 100]);
+        run_one(&huge_count, disclosure_decode_one_iteration).expect("guardrails held");
     }
 
     #[test]
