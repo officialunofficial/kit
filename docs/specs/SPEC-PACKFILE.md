@@ -469,8 +469,9 @@ decompression limit is a property of the bytes and permanent), an external base'
 execution or acquisition failure are transient. The in-pack decoded-byte
 budget is a deployment limit and is transient. A membership miss is retryable
 while the input's age is below the relay-lag bound
-([SPEC-TRANSPORT-CONNECT §5](SPEC-TRANSPORT-CONNECT.md)) and a content verdict
-afterwards.
+([SPEC-TRANSPORT-CONNECT §5](SPEC-TRANSPORT-CONNECT.md#5-error-taxonomy--transporterror-to-connect-code),
+[§7.9](SPEC-TRANSPORT-CONNECT.md#79-consistency-and-paging)) and a content
+verdict afterwards.
 
 ---
 
@@ -639,7 +640,7 @@ surface; the spec-level names below stay protocol-neutral.
     packs `boundary_payload_high_bit.bin` and `boundary_payload_u32_max.bin` in
     `rust/tests/golden/pack-v2/` hold one `0x00` entry that declares the
     length and carries no payload. The test
-    `unsigned_payload_boundaries_do_not_wrap_or_allocate_claims` exercises the
+    `unsigned_payload_boundaries_are_short_reads` exercises the
     general reader.
 22. **Earlier reconstructed base:** raw A, delta B based on A, then delta C
     based on B resolves all three objects. Moving B after C fails base

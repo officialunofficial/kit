@@ -890,10 +890,10 @@ mod pack_v2_fixtures {
     }
 
     /// Vector 21: a payload length of `2^31` or `2^32 - 1` in a short pack
-    /// is read as an unsigned length. It neither wraps nor sizes any
-    /// allocation, and the general reader refuses it as a short read.
+    /// is read as an unsigned length. It does not wrap, and the general
+    /// reader refuses it as a short read.
     #[test]
-    fn unsigned_payload_boundaries_do_not_wrap_or_allocate_claims() {
+    fn unsigned_payload_boundaries_are_short_reads() {
         use kit_core::pack::{
             DecodeLimits, NoExternalBases, PackEntries, PackError, decode_entries_with,
         };

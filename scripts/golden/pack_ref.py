@@ -159,6 +159,18 @@ def parse_pack(data):
     return version, entries
 
 
+def frames(pack):
+    """The (entry type, payload) pairs of a pack, from the framing alone."""
+    r = o.Reader(pack[:-32])
+    r.take(8)
+    out = []
+    for _ in range(r.u32()):
+        kind = r.u8()
+        out.append((kind, r.take(r.u32())))
+    r.end()
+    return out
+
+
 def check_boundaries(root, man, names):
     """SPEC-PACKFILE section 10, vectors 21 and 22."""
     expect(
@@ -190,7 +202,7 @@ def check_boundaries(root, man, names):
             (declared,) = struct.unpack("<I", pack[13:17])
             expect(declared == meta["declared_payload_len"], f"{name}: declared length")
             expect(declared in (1 << 31, (1 << 32) - 1), f"{name}: boundary length")
-            expect(declared > len(pack) - 32 - 17, f"{name}: length fits the tail")
+            expect(declared > len(pack) - 32 - 17, f"{name}: length exceeds the tail")
             expect(expected == "UnexpectedEof", f"{name}: expected")
             continue
         try:
@@ -200,14 +212,9 @@ def check_boundaries(root, man, names):
                 expected == "DeltaBaseMissing" and str(e) == "delta base is not earlier in the pack",
                 f"{name}: refused with {e}",
             )
-            # The framing is valid: three entries, each with a bounded length.
-            r = o.Reader(pack[:-32])
-            r.take(8)
-            expect(r.u32() == meta["framing_entries"], f"{name}: framing entries")
-            for _ in range(meta["framing_entries"]):
-                r.u8()
-                r.take(r.u32())
-            r.end()
+            # The framing is valid: the entries are the earlier pack's, with the
+            # last two swapped.
+            expect(len(frames(pack)) == meta["framing_entries"], f"{name}: framing entries")
             continue
         expect(expected == "Complete" and version == 1, f"{name}: accepted")
         expect([e["type"] for e in entries] == [0, 2, 2], f"{name}: entry types")
@@ -215,6 +222,12 @@ def check_boundaries(root, man, names):
             expect(got["id"].hex() == want["id"], f"{name} entry {i}: object id")
             expect(len(got["obj"]) == want["len"], f"{name} entry {i}: length")
             expect(blake3(got["obj"]).hex() == want["blake3_of_bytes"], f"{name} entry {i}: digest")
+    earlier = frames(o.read(root, "pack-v2", "boundary_earlier_delta_base.bin"))
+    later = frames(o.read(root, "pack-v2", "boundary_later_delta_base.bin"))
+    expect(
+        later == [earlier[0], earlier[2], earlier[1]],
+        "later pack: the frames are the earlier pack's with entries 1 and 2 swapped",
+    )
 
 
 def main():
