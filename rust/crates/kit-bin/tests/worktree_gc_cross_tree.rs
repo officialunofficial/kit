@@ -134,9 +134,11 @@ fn gc_blocks_on_a_sibling_worktree_lock() {
     assert!(out.status.success());
 
     // Hold the SIBLING's worktree lock the way a concurrent kit
-    // process would (the sentinel protocol: exclusive-create).
-    let lock = repo.kit_dir().join("worktrees/topic/worktree.lock");
-    std::fs::write(&lock, b"").unwrap();
+    // process would: take the kernel lock on its sentinel. A sentinel
+    // file alone does not count as held.
+    let sibling_state = repo.kit_dir().join("worktrees/topic");
+    let held = kit_core::repo_lock::acquire_default(&sibling_state, "worktree.lock")
+        .expect("acquire sibling worktree lock");
 
     let out = repo.run(&["gc", "--grace-secs", "0"]);
     assert!(
@@ -151,6 +153,6 @@ fn gc_blocks_on_a_sibling_worktree_lock() {
     );
 
     // Release and retry: gc proceeds.
-    std::fs::remove_file(&lock).unwrap();
+    drop(held);
     repo.ok(&["gc", "--grace-secs", "0"]);
 }
