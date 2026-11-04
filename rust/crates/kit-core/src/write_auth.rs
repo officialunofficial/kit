@@ -922,8 +922,10 @@ mod tests {
     }
 
     /// Positions in [`HEADER_NAMES`].
+    const VERSION_INDEX: usize = 0;
     const REPOSITORY_INDEX: usize = 2;
     const DIGEST_INDEX: usize = 5;
+    const CREATED_AT_INDEX: usize = 7;
     const NONCE_INDEX: usize = 9;
 
     fn presence(
@@ -967,7 +969,7 @@ mod tests {
                 missing[index] = 0;
                 assert_eq!(
                     presence(&missing, requires_digest).is_err(),
-                    index != REPOSITORY_INDEX && (index != DIGEST_INDEX || requires_digest),
+                    index != DIGEST_INDEX || requires_digest,
                     "missing {name}"
                 );
                 // A repeated header never passes, whatever the count.
@@ -996,10 +998,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_repository_is_addressing_not_an_envelope_failure() {
+    fn signed_request_without_repository_is_incomplete() {
         let mut counts = [1; 10];
         counts[REPOSITORY_INDEX] = 0;
-        assert_eq!(presence(&counts, true), Ok(EnvelopePresence::Present));
+        assert_eq!(presence(&counts, true), Err("missing auth v2 header"));
         counts[REPOSITORY_INDEX] = 2;
         assert_eq!(presence(&counts, true), Err("duplicate auth v2 header"));
     }
@@ -1007,18 +1009,21 @@ mod tests {
     #[test]
     fn missing_header_precedence_keeps_the_duplicate_check_first() {
         let mut counts = [0; 10];
-        counts[7] = 1;
+        counts[CREATED_AT_INDEX] = 1;
         assert_eq!(presence(&counts, true), Err("auth v2 required"));
-        counts[7] = 2;
+        counts[CREATED_AT_INDEX] = 2;
         assert_eq!(presence(&counts, true), Err("duplicate auth v2 header"));
         // A present repository does not displace the order of the others.
-        counts[7] = 1;
-        counts[2] = 1;
+        counts[CREATED_AT_INDEX] = 1;
+        counts[REPOSITORY_INDEX] = 1;
         assert_eq!(presence(&counts, true), Err("auth v2 required"));
+        // With the version present, the audience-side headers come next.
+        counts[VERSION_INDEX] = 1;
+        assert_eq!(presence(&counts, true), Err("missing auth v2 header"));
     }
 
-    /// For each missing header, the reason equals the one that
-    /// `verify_headers_with` gives for the same envelope.
+    /// One or two headers of a signed envelope are missing. The result
+    /// equals the one that `verify_headers_with` gives for the same envelope.
     #[test]
     fn missing_header_reasons_match_the_verifier() {
         let key = SigningKey::from_bytes(&[42; 32]);
@@ -1054,40 +1059,46 @@ mod tests {
                 part["procedure"].as_str().unwrap()
             };
             verify_headers_with(context, procedure, commitment, now, &headers).unwrap();
-            for index in 0..HEADER_NAMES.len() {
-                let mut counts = [1; 10];
-                counts[DIGEST_INDEX] = usize::from(requires_digest);
-                counts[index] = 0;
-                let mut broken = headers.clone();
-                *[
-                    &mut broken.version,
-                    &mut broken.audience,
-                    &mut broken.repository,
-                    &mut broken.public_key,
-                    &mut broken.signature,
-                    &mut broken.digest,
-                    &mut broken.commitment,
-                    &mut broken.created_at,
-                    &mut broken.expires_at,
-                    &mut broken.idempotency_key,
-                ][index] = None;
-                if index == REPOSITORY_INDEX || (index == DIGEST_INDEX && !requires_digest) {
-                    // Addressing, or a digest that streams may omit.
+            for first in 0..10 {
+                for second in first..10 {
+                    let mut counts = [1; 10];
+                    counts[DIGEST_INDEX] = usize::from(requires_digest);
+                    let mut broken = headers.clone();
+                    for index in [first, second] {
+                        counts[index] = 0;
+                        *field(&mut broken, index) = None;
+                    }
+                    // A stream without a digest verifies, so the envelope is
+                    // complete.
+                    let want =
+                        match verify_headers_with(context, procedure, commitment, now, &broken) {
+                            Ok(_) => Ok(EnvelopePresence::Present),
+                            Err(reason) => Err(reason.0),
+                        };
                     assert_eq!(
                         presence(&counts, requires_digest),
-                        Ok(EnvelopePresence::Present)
+                        want,
+                        "missing headers {first} and {second}"
                     );
-                    continue;
                 }
-                let reference =
-                    verify_headers_with(context, procedure, commitment, now, &broken).unwrap_err();
-                assert_eq!(
-                    presence(&counts, requires_digest),
-                    Err(reference.0),
-                    "missing {}",
-                    HEADER_NAMES[index]
-                );
             }
+        }
+    }
+
+    /// The `Headers` field at a position of [`HEADER_NAMES`].
+    fn field(headers: &mut Headers, index: usize) -> &mut Option<String> {
+        match index {
+            0 => &mut headers.version,
+            1 => &mut headers.audience,
+            2 => &mut headers.repository,
+            3 => &mut headers.public_key,
+            4 => &mut headers.signature,
+            5 => &mut headers.digest,
+            6 => &mut headers.commitment,
+            7 => &mut headers.created_at,
+            8 => &mut headers.expires_at,
+            9 => &mut headers.idempotency_key,
+            _ => unreachable!("ten headers"),
         }
     }
 
@@ -1183,10 +1194,10 @@ pub enum EnvelopePresence {
 /// A request with no [`TRIGGER_HEADER_NAMES`] header is [`EnvelopePresence::Absent`].
 /// A request with one must carry the whole envelope, and no header may repeat,
 /// so a partial or ambiguous envelope never becomes an anonymous request.
-/// Unary requests require `x-digest`. Streams may leave it out. A missing
-/// `x-repository` is not an error here, because the host classifies it by
-/// routing, but a repeated one is. Empty values count as present. Without a
-/// trigger, the host checks the addressing and nonce headers itself.
+/// Unary requests require `x-digest`. Streams may leave it out. A signed
+/// request without `x-repository` is incomplete, like one without any other
+/// envelope header. Empty values count as present. Without a trigger, the
+/// host checks the addressing and nonce headers itself.
 ///
 /// This checks multiplicity and completeness only. [`verify_headers_with`]
 /// checks the values. A missing header reports the reason that
@@ -1213,6 +1224,7 @@ pub fn inspect_headers(
     let missing = [
         (0, "auth v2 required"),
         (1, "missing auth v2 header"),
+        (2, "missing auth v2 header"),
         (6, "missing auth v2 header"),
         (7, "missing validity header"),
         (8, "missing validity header"),
