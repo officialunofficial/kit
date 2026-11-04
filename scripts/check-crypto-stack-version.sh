@@ -83,7 +83,7 @@ check_commonware_family() {
   if [ "${#lockfiles[@]}" -gt 0 ]; then
     # Cargo.lock entries look like:
     #   name = "commonware-cryptography"
-    #   version = "2026.9.0"
+    #   version = "2026.10.0"
     # on consecutive lines. Grab the version line immediately after
     # each matching name line.
     lock_versions=$(

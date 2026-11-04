@@ -28,33 +28,18 @@ ignore = [
     # cannot patch; the containment is the no_rsa_decrypt.rs guard, which
     # still scans for `piv::decrypt_data` workspace-wide and still passes.
     { id = "RUSTSEC-2023-0071", reason = "transitive via yubikey 0.9.0-pre.0 cert parsing; kit never calls the affected RSA decrypt path (see kit-keystore/tests/no_rsa_decrypt.rs). Re-justify by 2026-11-19." },
-    # `paste` (macro crate) marked unmaintained 2024-10-07. Pulled
-    # transitively by commonware-* (via blst/aws-lc-sys macro
-    # expansion) when the optional `history-mmr` / `sparse-checkout`
-    # features are enabled. No
-    # runtime exposure: paste expands at compile time, produces no
-    # binary code we own. The dependency comes in via the commonware
-    # crates (https://github.com/commonwarexyz/monorepo) — once
-    # commonware migrates off paste this ignore goes. Re-justify by
+    # `paste` (macro crate) marked unmaintained 2024-10-07. Every build of
+    # kit-core pulls it in through `commonware-codec`, which is not an
+    # optional dependency. No runtime exposure: paste expands at compile
+    # time and produces no binary code we own. The dependency comes in via
+    # the commonware crates (https://github.com/commonwarexyz/monorepo) —
+    # once commonware migrates off paste this ignore goes. Re-justify by
     # 2026-11-19.
     #
-    # Re-confirmed 2026-07-15 on the commonware 2026.7.0 train: `paste`
-    # v1.0.15 is still transitively present (`cargo deny check
-    # advisories` still fires this one; unlike RUSTSEC-2025-0055 below,
-    # it is not stale).
-    #
-    # Re-confirmed again 2026-08-21: unchanged on the same train.
+    # Re-confirmed 2026-11-04 on the commonware 2026.10.0 train:
     # `cargo tree -i paste` shows v1.0.15 entering as a proc-macro via
-    # commonware-codec -> commonware-coding -> kit-core, so it still
-    # expands at compile time and contributes no runtime code.
-    #
-    # Re-confirmed 2026-09-04 on the commonware 2026.9.0 train
-    # (bump from 2026.7.1): `cargo tree -i paste` still shows v1.0.15
-    # entering as a proc-macro, now via commonware-codec ->
-    # commonware-cryptography -> commonware-runtime -> commonware-storage
-    # -> kit-core (the exact intermediate crates shifted; the macro-only,
-    # compile-time-only shape did not).
-    { id = "RUSTSEC-2024-0436", reason = "transitive via commonware-* feature-gated deps; macro-only, no runtime exposure. Re-justify by 2026-11-19." },
+    # commonware-codec -> kit-core.
+    { id = "RUSTSEC-2024-0436", reason = "transitive via commonware-codec; macro-only, no runtime exposure. Re-justify by 2026-11-19." },
     # RUSTSEC-2025-0055 (tracing-subscriber 0.2.25 ANSI-escape log
     # injection) REMOVED 2026-07-15: it came in via commonware-runtime
     # 2026.5.x -> arkworks (ark-ed-on-bls12-381-bandersnatch ->

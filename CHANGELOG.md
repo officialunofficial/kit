@@ -41,6 +41,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of the feature drops from 364 to 135 crates. The deterministic runtime, the
   zstd 0.13 library, `blst` and an HTTP server crate no longer build with it.
   Roots, proofs and ids do not change.
+- Commonware 2026.10.0 states AVX2, BMI2 and ADX as its supported x86-64
+  floor and tests only at or above it. This corrects the 0.6.0 note on that
+  floor. No Commonware code that kit builds checks for these features or needs
+  them: their SIMD paths and the BLAKE3 code that kit uses detect the CPU
+  features at run time. Kit sets no CPU floor of its own.
 
 ## [0.6.0] - 2026-11-04
 

@@ -87,15 +87,14 @@ pub mod protocol;
 // Append-only MMB (Merkle Mountain Belt) over the commit
 // chain for O(log n) inclusion proofs. Feature-gated so the
 // `commonware-storage` dep tree only materialises for downstream callers
-// that opt in. Persisted (journaled) MMB is in this build; commit-field
-// integration is planned — see docs/specs/SPEC-HISTORY-PROOF.md.
+// that opt in. The MMB lives in memory; durable state is the ancestry
+// snapshot. Commit-field integration is planned — see
+// docs/specs/SPEC-HISTORY-PROOF.md.
 #[cfg(feature = "history-mmr")]
 pub mod history;
 
-// Verifiable sparse-checkout. Feature-gated
-// because the upstream `commonware-storage::AuthenticatedBitMap` is
-// ALPHA-tier and pulls in `commonware-runtime` /
-// `commonware-cryptography`. Off by default.
+// Verifiable sparse-checkout. Feature-gated and off by default. It uses
+// no Commonware code.
 #[cfg(feature = "sparse-checkout")]
 pub mod sparse;
 
