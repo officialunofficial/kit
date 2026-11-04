@@ -171,7 +171,7 @@ pack-internal encoding detail, not part of object identity).
 A closure is carried as one or more [SPEC-PACKFILE](specs/SPEC-PACKFILE.md)
 v1 packs containing **only raw (`0x00`) entries** &mdash; no compression, no
 deltas. This is deliberate: a verifier built without `pack-zstd` (for example a wasm32
-build, which stays blst/zstd-free per SPEC-MERKLE-OBJECTS' constraint) has no
+build, which stays zstd-free) has no
 way to decompress a `0x03`/`0x04` entry and no store to resolve a delta base
 against. A verifier MUST scan entry *types* before doing any decompression
 work, and reject a delta or compressed entry outright as a profile
@@ -444,7 +444,7 @@ verifier, in order:
    against that now-trusted `inner_root`.
 
 ```rust
-use commonware_codec::Read as _;
+use commonware_codec::{Copying, Read as _};
 use commonware_cryptography::blake3::{Blake3, Digest};
 use commonware_storage::bmt::Proof as UpstreamProof;
 use kit_core::hash::domain_digest;
@@ -464,14 +464,20 @@ assert_eq!(
 // len(b"kit.tree\x00"); le16/le32 are 2/4-byte little-endian integers.
 
 // Step 2: upstream's own check, unmodified, against the now-trusted root.
-let mut r: &[u8] = proof_bytes;
+let mut r = Copying(proof_bytes);
 let proof = UpstreamProof::<Digest>::read_cfg(&mut r, &1usize)?;
-proof.verify_element_inclusion::<Blake3>(&Digest(leaf), position, &Digest(prover_inner_root))?;
+proof.verify_element_inclusion::<Blake3>(
+    &Digest(leaf),
+    position,
+    &Digest(prover_inner_root),
+)?;
 ```
 
-(Verified by compiling and running this exact two-step sequence, including
-a negative case for a forged `prover_inner_root` failing step 1, against a
-real `Tree` while writing this document.)
+`commonware_codec` reads from its own `Buf` trait, which a plain `&[u8]` does
+not implement. `Copying` wraps the slice so that it does. The test
+`rust/crates/kit-core/tests/verify_doc_samples.rs` compiles and runs the code
+lines of this sample and of the next one against a real `Tree`, and fails if
+this document stops printing them.
 
 A v2 disclosure bundle carries that inner root on every `Step` and
 chunk header, so a commonware-native verifier reads it from the decoded
@@ -484,7 +490,8 @@ assert_eq!(
     domain_digest(b"kit.tree\x00", &step.inner_root),
     trusted_tree_id,
 );
-let mut r: &[u8] = &step.proof.encode();
+let proof_bytes = step.proof.encode();
+let mut r = Copying(&proof_bytes[..]);
 let proof = UpstreamProof::<Digest>::read_cfg(&mut r, &1usize)?;
 proof.verify_element_inclusion::<Blake3>(
     &Digest(leaf),

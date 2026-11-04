@@ -389,11 +389,12 @@ accepts kit's.
 normative compatibility promise, so a commonware-based verifier (for
 example, any other client) can decode and verify a kit proof with the
 upstream type directly, applying only kit's outer type-domain wrap
-(`wrap_id`) on top. kit cannot depend on `commonware-storage`'s `bmt`
-module directly for this (it drags in `commonware-cryptography`'s
-unconditional `blst` C dependency — see `merkle.rs`'s module docs), so the
-construction is implemented in `kit-core` and the byte-identity claim has
-no compiler to enforce it.
+(`wrap_id`) on top. kit does not call `commonware-storage`'s `bmt`
+module for this: its verifiers take a root and do not return the rebuilt
+one, and its empty-tree proof differs from SPEC-MERKLE-OBJECTS §5.4 (see
+`merkle.rs`'s module docs). The construction is implemented in `kit-core`,
+and only the tests that compare it with upstream enforce the byte-identity
+claim.
 
 **If violated:** a proof kit produces would fail to decode, or would
 decode but fail to verify, against an otherwise-correct commonware-based
