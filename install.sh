@@ -13,7 +13,7 @@
 # Usage:
 #   curl kit.storage | sh
 #   curl -sSfL https://kit.storage/install.sh | sh
-#   curl -sSfL https://kit.storage/install.sh | sh -s -- --version v0.6.0
+#   curl -sSfL https://kit.storage/install.sh | sh -s -- --version v0.7.0
 #   # The raw GitHub URL serves the same script as a fallback:
 #   #   curl -sSfL https://raw.githubusercontent.com/officialunofficial/kit/main/install.sh | sh
 #
@@ -39,7 +39,7 @@
 #     compare against this file and warn loudly on a silent downgrade.
 #
 # Environment overrides:
-#   KIT_VERSION             explicit tag (e.g. v0.6.0). Default: 'latest'.
+#   KIT_VERSION             explicit tag (e.g. v0.7.0). Default: 'latest'.
 #   KIT_INSTALL_DIR         install prefix. Default: ~/.local/bin.
 #   KIT_STATE_DIR           state dir for installed-tag bookkeeping.
 #                            Default: ~/.local/state/kit.
@@ -54,7 +54,7 @@
 #
 # For private-repo installs, use `gh release download` instead — it
 # handles auth natively:
-#   gh release download v0.6.0 --repo officialunofficial/kit \
+#   gh release download v0.7.0 --repo officialunofficial/kit \
 #     --pattern 'kit-[0-9]*-<target>.tar.gz' --dir .
 # (`kit-[0-9]*`, not `kit-*`, which would also match unrelated assets.)
 #
@@ -84,7 +84,7 @@ Usage:
   sh install.sh [--version <tag>] [--prefix <dir>] [--insecure-skip-cosign]
 
 Flags:
-  --version <tag>           Pin to a specific release tag (e.g. v0.6.0).
+  --version <tag>           Pin to a specific release tag (e.g. v0.7.0).
                             RECOMMENDED for production / reproducible installs.
   --prefix <dir>            Install prefix. Default: ~/.local/bin.
   --insecure-skip-cosign    Skip cosign signature verification. DANGEROUS — use
@@ -113,7 +113,7 @@ skip_cosign="${KIT_SKIP_COSIGN:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --version)               [ $# -ge 2 ] || die "--version requires a tag (e.g. --version v0.6.0)"; version="$2"; shift 2 ;;
+    --version)               [ $# -ge 2 ] || die "--version requires a tag (e.g. --version v0.7.0)"; version="$2"; shift 2 ;;
     --prefix)                [ $# -ge 2 ] || die "--prefix requires a directory (e.g. --prefix /usr/local/bin)"; install_dir="$2"; shift 2 ;;
     --insecure-skip-cosign)  skip_cosign="1"; shift ;;
     --help|-h)               print_help; exit 0 ;;

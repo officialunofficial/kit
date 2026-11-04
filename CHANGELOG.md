@@ -7,6 +7,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-04
+
 ### Security
 
 - The decoders of the range disclosure bundle, the pack list node and the
@@ -18,8 +20,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pinned 1.9 GB before the first entry was decoded. The cursor now keeps its
   position and parses each frame when `resume` reaches it, and it keeps only
   the decompressed payload of a `0x03` or `0x04` frame, in a 24-byte slot. A
-  pack of empty raw frames adds no allocation. Errors, their order and the
-  wire format do not change.
+  pack of empty raw frames adds no allocation. `decode_entries_with` runs on
+  the cursor and gets the same bound. Errors, their order and the wire format
+  do not change.
 
 ### Added
 
@@ -34,8 +37,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   position that is lower than the one before it with the new variant
   `MerkleError::UnsortedPosition`. Before, they sorted the positions. This
   matches the Commonware BMT, so both sides accept the same inputs.
-  A repeated position is still `DuplicatePosition`. Proof bytes, roots and
-  ids do not change (SPEC-MERKLE-OBJECTS §5.4).
+  A position equal to the one before it is `DuplicatePosition`, and a repeat
+  that is not adjacent is `UnsortedPosition`. The checks run in input order,
+  so an input with more than one fault can report a different error than in
+  0.6.0: on nine leaves, the verifiers give `DuplicatePosition(4)` for
+  `[4, 4, 9]`, not `PositionOutOfRange(9)`. Proof bytes, roots and ids do
+  not change (SPEC-MERKLE-OBJECTS §5.4).
 - The `history-mmr` feature of `kit-core` builds the Commonware storage and
   cryptography crates without their `std` feature. The normal dependency graph
   of the feature drops from 364 to 135 crates. The deterministic runtime, the
