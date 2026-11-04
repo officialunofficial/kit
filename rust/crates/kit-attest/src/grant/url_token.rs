@@ -9,7 +9,7 @@
 //! [`UrlTokenStatement::issued_ms`].
 
 use base64::Engine as _;
-use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
 use kit_core::repo_identity::RepositoryIdentity;
 use kit_core::write_auth::{is_hex, validate_audience};
 
@@ -306,11 +306,8 @@ pub fn verify_url_token(
         .as_slice()
         .try_into()
         .map_err(|_| GrantError::SignatureLength)?;
-    key.verify_strict(
-        &kit_core::hash::hash(&bytes),
-        &Signature::from_bytes(signature),
-    )
-    .map_err(|_| GrantError::BadSignature)?;
+    kit_core::sign::verify_ed25519(key.as_bytes(), &kit_core::hash::hash(&bytes), signature)
+        .map_err(|_| GrantError::BadSignature)?;
     if statement.audience != request.audience {
         return Err(GrantError::AudienceNotListed);
     }

@@ -1,4 +1,5 @@
 //! Merging a branch into `HEAD`, with a pause and a resume for conflicts.
+#![cfg(feature = "sync")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
 
 mod common;

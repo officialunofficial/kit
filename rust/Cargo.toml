@@ -18,13 +18,14 @@ members = [
     "crates/kit-sign-file",
     "crates/kit-sync",
     "crates/kit-bin",
+    "crates/kit-wasm",
     "fuzz",
     "benches",
     "crates/kit-formal-conformance",
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
@@ -34,15 +35,15 @@ authors = ["Official Unofficial, Inc."]
 # Each version is a caret requirement. Its lower bound equals the version in
 # Cargo.lock. scripts/check-dependency-versions.py checks this table.
 [workspace.dependencies]
-commonware-macros = { version = "2026.9.0", default-features = false }
+commonware-macros = { version = "2026.10.0", default-features = false }
 # default-features = false matches the strictest consumer (kit-attest and
 # kit-core). A consumer that needs the default feature set must use a direct
 # dependency, because `workspace = true` cannot re-enable default features.
-commonware-storage = { version = "2026.9.0", default-features = false }
-commonware-cryptography = { version = "2026.9.0", default-features = false }
-commonware-runtime = { version = "2026.9.0" }
-commonware-codec = { version = "2026.9.0", default-features = false }
-commonware-utils = { version = "2026.9.0", default-features = false }
+commonware-storage = { version = "2026.10.0", default-features = false }
+commonware-cryptography = { version = "2026.10.0", default-features = false }
+commonware-runtime = { version = "2026.10.0" }
+commonware-codec = { version = "2026.10.0", default-features = false }
+commonware-utils = { version = "2026.10.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -109,3 +110,10 @@ strip = "symbols"
 # `expect("reason")`.
 panic = "unwind"
 overflow-checks = true
+
+# Profiling build: the release code generation with symbols and line tables,
+# so a sampling profiler can name functions and lines. See docs/PROFILING.md.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

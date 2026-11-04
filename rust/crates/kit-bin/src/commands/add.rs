@@ -1,6 +1,6 @@
 //! `kit add <path>` / `kit add .` — stage a file (or the whole
 //! worktree) into `.kit/index`. `add -p` additionally stages individual
-//! hunks interactively (see [`StdinChooser`]).
+//! hunks interactively (see `StdinChooser`).
 //!
 //! The logic is in [`libkit::add`]. This module parses the arguments, asks
 //! for the hunks of `-p` and prints.

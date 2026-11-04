@@ -101,13 +101,20 @@ pub fn translate_chunked<S: ObjectSource>(
         }
         .into());
     }
-    let total = usize::try_from(manifest.total_size)
-        .map_err(|_| BridgeError::Source("manifest total_size exceeds usize".into()))?;
-    let mut body = Vec::with_capacity(total);
+    let mut body = Vec::new();
     let mut lengths = Vec::with_capacity(manifest.chunks.len());
     for chunk_hash in &manifest.chunks {
         match source.read_object(chunk_hash)? {
             Object::Blob(b) => {
+                // Stop at the first chunk that passes the declared total, so
+                // a manifest that repeats one chunk cannot grow `body`.
+                if (body.len() as u64).saturating_add(b.data.len() as u64) > manifest.total_size {
+                    return Err(BridgeError::Source(format!(
+                        "chunked blob {}: chunks exceed the {} bytes the manifest declares",
+                        kit_core::to_hex(hash),
+                        manifest.total_size
+                    )));
+                }
                 lengths.push(b.data.len());
                 body.extend_from_slice(&b.data);
             }

@@ -184,6 +184,59 @@ mod tests {
         assert_eq!(h1.len(), 0);
     }
 
+    /// The empty root follows the SPEC-HISTORY-PROOF §2.3 formula directly:
+    /// the MMB family tag, the forward-fold bagging tag, then the leaf count.
+    #[test]
+    fn mem_empty_root_matches_spec_formula() {
+        let mut preimage = vec![1, 0];
+        preimage.extend_from_slice(&0u64.to_be_bytes());
+        let expected = blake3::hash(&preimage);
+        assert_eq!(CommitHistory::open().root(), *expected.as_bytes());
+    }
+
+    /// History roots are a persisted and exchanged format. Pin them so a
+    /// change to the root computation fails here instead of passing silently.
+    #[test]
+    fn mem_roots_are_pinned() {
+        const PINNED: [(u64, &str); 7] = [
+            (
+                1,
+                "849d07f9c5d9204e3e8b2e2ba2c12eff4c866bdbcb2e2b19ae6d9869b6895811",
+            ),
+            (
+                2,
+                "e5d665289bce9abf6b186b83d337a7b59450bddf17305afa601bf20ddee1fc7f",
+            ),
+            (
+                3,
+                "a4f6ed20e3bcb276c8c0128c1051c55d4135c8327839a50ebc826a4f0da6e3aa",
+            ),
+            (
+                4,
+                "a9e360fb66c626ba30392b2970308cd61500726d4e6d508d197ad37ab112d5ba",
+            ),
+            (
+                7,
+                "415201c8a5727aafb234b96c7afb339cd0691c0fd3b684cbfdab28524a127a5d",
+            ),
+            (
+                8,
+                "b021e76b4942a067a347a1880b4821e49a1a0a11fd2176f710bdb33482b43b17",
+            ),
+            (
+                100,
+                "d118640030363d924a08f4345aa8a0ad1418964edc34f54b0d6cb06e9f5b10d3",
+            ),
+        ];
+        for (n, expected) in PINNED {
+            let mut h = CommitHistory::open();
+            for i in 0..n {
+                h.append(&synth(i)).unwrap();
+            }
+            assert_eq!(hex::encode(h.root()), expected, "root for {n} leaves");
+        }
+    }
+
     #[test]
     fn mem_append_returns_dense_positions() {
         let mut h = CommitHistory::open();

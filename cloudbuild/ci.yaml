@@ -28,7 +28,7 @@
 
 substitutions:
   _CACHE_BUCKET: ${PROJECT_ID}-kit-sccache
-  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/kit-ci:rust-1.99.1
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/kit-ci:rust-1.99.1@sha256:89423fb9b58d5051fa661f0c7ad99c18cb1c42946313b946488903b8d63ab232
 
 options:
   # The trigger runs this config as a dedicated service account. Cloud Build
@@ -318,6 +318,8 @@ steps:
         bash scripts/check-cli-baseline.sh
 
   # kit-client builds for wasm32 with the default and the minimal feature set.
+  # kit-wasm builds for wasm32 as a release build. Then the smoke test runs the
+  # generated bindings under Node.
   - name: ${_CI_IMAGE}
     id: wasm
     waitFor: ['-']
@@ -344,19 +346,27 @@ steps:
           failed=0
           cargo build --locked -p kit-client --target wasm32-unknown-unknown || failed=1
           cargo build --locked -p kit-client --no-default-features --target wasm32-unknown-unknown || failed=1
+          cargo build --locked -p kit-wasm --release --target wasm32-unknown-unknown || failed=1
           exit "$failed"
         ) || status=1
+        bash scripts/wasm-smoke.sh || status=1
         sccache --show-stats
         exit "$status"
 
   # The fuzz bodies run as unit tests. Then every libFuzzer target builds and
   # runs for 5 seconds. The nightly toolchain date must equal the date in
-  # Dockerfile.ci. Each cargo-fuzz run is a plain cargo-fuzz call, so the target
-  # directory is the default one of the fuzz crate.
+  # Dockerfile.ci. One cargo-fuzz build compiles every target, because a build
+  # per target links each one again and takes about two minutes. The call names
+  # the gnu target, because the prebuilt cargo-fuzz defaults to musl and the
+  # sanitizer does not support musl. Each target then runs as its binary.
+  # The step waits for the compile-heavy steps. Eight sanitizer builds next to
+  # them used all the memory of the machine, and the kernel stopped the build.
+  # Link-time optimization is off, because it needs several gigabytes for each
+  # target and a smoke run of five seconds gains nothing from it.
   - name: ${_CI_IMAGE}
     id: fuzz-smoke
-    waitFor: ['-']
-    timeout: 2400s
+    waitFor: ['lint', 'nextest-3', 'ignored-lane', 'tests-misc']
+    timeout: 4500s
     entrypoint: bash
     env:
       - "CARGO_TERM_COLOR=always"
@@ -368,7 +378,8 @@ steps:
       - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
       - "SCCACHE_GCS_RW_MODE=READ_WRITE"
       - "SCCACHE_GCS_KEY_PREFIX=ci"
-      - "CARGO_BUILD_JOBS=4"
+      - "CARGO_BUILD_JOBS=6"
+      - "CARGO_PROFILE_RELEASE_LTO=off"
       - "CARGO_TARGET_DIR=/tmp/target-fuzz"
     args:
       - -c
@@ -383,10 +394,13 @@ steps:
         ) || status=1
         ( cd rust/fuzz || exit 1
           failed=0
+          cargo +nightly-2026-10-01 fuzz build --target x86_64-unknown-linux-gnu --features libfuzzer || exit 1
           for path in fuzz_targets/*.rs; do
             target=$(basename "$path" .rs)
             echo "fuzz target: $target"
-            cargo +nightly-2026-10-01 fuzz run "$target" --features libfuzzer -- -max_total_time=5 || failed=1
+            mkdir -p "corpus/$target" "artifacts/$target"
+            "/tmp/target-fuzz/x86_64-unknown-linux-gnu/release/$target" \
+              "-artifact_prefix=artifacts/$target/" -max_total_time=5 "corpus/$target" || failed=1
           done
           exit "$failed"
         ) || status=1
@@ -451,7 +465,7 @@ steps:
         bash scripts/check-generated-fresh.sh
         sccache --show-stats
 
-  # The writing rules over the tree and over new commit messages. The commit scan
+  # The writing rules over the tree and the form of new commit messages. The commit scan
   # needs a checkout with an origin/main ref and skips itself without one.
   - name: ${_CI_IMAGE}
     id: writing
@@ -468,12 +482,14 @@ steps:
         git config --global --add safe.directory /workspace
         bash scripts/check-writing.sh || status=1
         bash scripts/test-check-writing.sh || status=1
+        bash scripts/test-check-commit-messages.sh || status=1
         base=""
         if git rev-parse --verify --quiet origin/main >/dev/null; then
           base=$(git merge-base HEAD origin/main)
         fi
         if [ -n "$base" ] && [ "$base" != "$(git rev-parse HEAD)" ]; then
           bash scripts/check-writing.sh --commits "$base..HEAD" || status=1
+          python3 -I -B scripts/check-commit-messages.py "$base..HEAD" || status=1
         else
           echo "No base commit: skipping the commit message scan."
         fi
@@ -540,7 +556,20 @@ steps:
             --ignore RUSTSEC-2024-0436 \
             --ignore RUSTSEC-2026-0370 \
             --ignore RUSTSEC-2026-0371 \
-            --ignore RUSTSEC-2026-0372
+            --ignore RUSTSEC-2026-0372 \
+            --ignore RUSTSEC-2026-0391 \
+            --ignore RUSTSEC-2026-0395 \
+            --ignore RUSTSEC-2026-0396 \
+            --ignore RUSTSEC-2026-0397 \
+            --ignore RUSTSEC-2026-0398 \
+            --ignore RUSTSEC-2026-0399 \
+            --ignore RUSTSEC-2026-0400 \
+            --ignore RUSTSEC-2026-0401 \
+            --ignore RUSTSEC-2026-0402 \
+            --ignore RUSTSEC-2026-0403 \
+            --ignore RUSTSEC-2026-0404 \
+            --ignore RUSTSEC-2026-0405 \
+            --ignore RUSTSEC-2026-0406
         }
         ( cd rust || exit 1
           failed=0

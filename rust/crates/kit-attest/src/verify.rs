@@ -13,8 +13,6 @@
 
 use std::collections::HashMap;
 
-#[cfg(feature = "algo-ed25519")]
-use ed25519_dalek::{Signature as DalekSig, VerifyingKey};
 use serde::Deserialize;
 
 use crate::Error;
@@ -293,19 +291,14 @@ pub fn verify_signature(
 
 /// Verify an Ed25519 signature over `pae` under `pk`.
 ///
-/// Uses `verify_strict`, which enforces canonical R, s mod L, and
-/// canonical A encoding. Rejects the Ed25519 malleability vectors
-/// documented at <https://hdevalence.ca/blog/2020-10-04-its-25519am> —
-/// attestation verification MUST be deterministic (all honest verifiers
-/// reach the same verdict on the same signature), which the default
-/// loose `verify()` does not guarantee.
+/// Uses the SPEC-SIGNING §1 predicate ([`kit_core::sign::verify_ed25519`]),
+/// so attestation verification reaches the same verdict as every other
+/// Ed25519 check in kit.
 ///
 /// Returns [`Reason::Ok`] on success and [`Reason::SignatureMismatch`]
-/// on any failure (malformed `pk`, wrong `sig_bytes` length, or strict
-/// verification reject). Public so downstream consumers — notably
-/// wasm32 builds — can share this exact strict
-/// verifier instead of re-implementing it (and re-relitigating which
-/// malleability cases to reject).
+/// on any failure (malformed `pk`, wrong `sig_bytes` length, or a
+/// rejected signature). Public so downstream consumers, notably wasm32
+/// builds, share this verifier instead of re-implementing it.
 #[cfg(feature = "algo-ed25519")]
 #[must_use]
 pub fn verify_ed25519(pk: [u8; 32], sig_bytes: &[u8], pae: &[u8]) -> Reason {
@@ -314,11 +307,7 @@ pub fn verify_ed25519(pk: [u8; 32], sig_bytes: &[u8], pae: &[u8]) -> Reason {
     }
     let mut arr = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
     arr.copy_from_slice(sig_bytes);
-    let Ok(vk) = VerifyingKey::from_bytes(&pk) else {
-        return Reason::SignatureMismatch;
-    };
-    let sig = DalekSig::from_bytes(&arr);
-    if vk.verify_strict(pae, &sig).is_ok() {
+    if kit_core::sign::verify_ed25519(&pk, pae, &arr).is_ok() {
         Reason::Ok
     } else {
         Reason::SignatureMismatch

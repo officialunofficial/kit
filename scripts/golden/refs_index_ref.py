@@ -45,13 +45,14 @@ def check_path(path):
     if not 0 < len(path) <= MAX_PATH:
         raise ValueError("path length")
     text = path.decode("utf-8")
-    if text.startswith("/") or "\\" in text or "\x00" in text:
-        raise ValueError("forbidden byte or leading slash")
+    if text.startswith("/"):
+        raise ValueError("leading slash")
     segments = text.split("/")
     if any(s in ("", ".", "..") for s in segments):
         raise ValueError("bad segment")
-    if segments[0] in (".kit", ".git"):
-        raise ValueError("reserved path")
+    # SPEC-INDEX section 2: every segment passes the SPEC-OBJECTS 4.1 rules.
+    for segment in segments:
+        o.check_entry_name(segment.encode())
 
 
 def parse_index(data):

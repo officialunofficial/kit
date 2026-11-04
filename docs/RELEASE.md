@@ -268,6 +268,25 @@ pull request that changes a manifest, the lockfile or the script.
 The dry run prints one warning for each test file that a crate does not
 ship. The warning is expected.
 
+### Semver check
+
+The workflow `.github/workflows/semver.yml` runs `scripts/check-semver.sh`
+on each pull request that changes `rust/`. The script runs
+`cargo semver-checks` on each published crate. The baseline is the latest
+release tag, built with the `Cargo.lock` of that tag. A build of the
+published crate resolves its dependencies again, and a later dependency
+release can break that build. The locked build avoids this.
+
+A breaking change fails the check unless the workspace version bump allows
+it. In a 0.x release, a minor bump allows a breaking change. The check skips
+`kit-bin`, whose library surface is not a public API.
+
+Run the same check by hand before you tag:
+
+```sh
+bash scripts/check-semver.sh
+```
+
 ### What a crate ships
 
 Each publishable crate sets `include` in its `Cargo.toml`. The list names
@@ -580,9 +599,11 @@ open a GitHub Security Advisory citing the CVE, update `CHANGELOG.md` under
 
 ## Reproducibility
 
-A kit release binary is a function of a small, pinned set of inputs. If all of
-them match, any machine that can run the same Rust toolchain will produce a
-byte-identical binary to the one published on GitHub Releases.
+Reproducibility is best effort. A kit release binary is a function of a small,
+pinned set of inputs. If all of them match, a machine with the same Rust
+toolchain should produce a byte-identical binary to the one on GitHub Releases.
+No CI job proves this. A CI job proves only that two builds of one commit
+agree on one runner. See [what is not guaranteed](#ci-safety-net-and-what-is-not-guaranteed).
 
 ### The inputs
 
@@ -595,6 +616,8 @@ byte-identical binary to the one published on GitHub Releases.
    tracked in Git.
 5. **Dependency fingerprint** &mdash; `Cargo.lock`, fully pinning every transitive
    dependency. Any `cargo update` is a visible change to that file.
+6. **Path prefixes** &mdash; the release build remaps the checkout path to `/build`
+   and the cargo home to `/cargo`, so host paths stay out of the binary.
 
 ### Reproducing a published binary
 
@@ -606,7 +629,7 @@ cd kit/rust
 # 3. Build for your target with release.yml's command (`-p kit-bin`
 #    selects only the CLI; a bare `--bin kit` unifies other members'
 #    features and differs).
-export RUSTFLAGS="-C codegen-units=1 -C strip=symbols"
+export RUSTFLAGS="-C codegen-units=1 -C strip=symbols --remap-path-prefix=$(cd .. && pwd)=/build --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
 TARGET=x86_64-unknown-linux-gnu
 cargo build --release --locked --target "$TARGET" -p kit-bin --bin kit
 # 4. Hash the binary.
@@ -620,13 +643,19 @@ with your host OS, `rustc --version`, the sha256 you got, and the expected one.
 
 ### CI safety net and what is not guaranteed
 
-There is currently **no** automated reproducibility check: no CI job builds
-kit twice and compares the outputs. The manual procedure above is the
-verification path. Restoring an automated double-build job is an open
-follow-up. A divergence between two builds of the same commit means a
-non-deterministic input has crept in (embedded timestamps, random seeds,
-absolute paths in debug info, unsorted directory reads) and must be fixed
-before the next tag.
+The `reproducible-build.yml` workflow builds `kit` twice from one commit. It
+uses `release.yml`'s flags and command for `x86_64-unknown-linux-gnu`. Each
+build runs in its own directory, and the two paths have different lengths. The
+job fails when the sha256 hashes differ. It proves that, on one runner image
+with the pinned toolchain, the binary does not depend on the checkout path or
+the build time.
+
+The job does **not** prove a match with the binary on GitHub Releases. It does
+not prove a match on another operating system, linker or toolchain version. The
+manual procedure above is the verification path for a published binary. A
+divergence between two builds of the same commit means a non-deterministic
+input has crept in (embedded timestamps, random seeds, absolute paths in debug
+info, unsorted directory reads) and must be fixed before the next tag.
 
 Binaries built on your local macOS are not expected to match GitHub's `macos-14`
 runner byte-for-byte unless your OS, SDK, and linker versions match. The Linux

@@ -73,22 +73,19 @@ pub type WorktreeResult<T> = Result<T, WorktreeError>;
 mod blob;
 pub use blob::{LoadedBlob, content_eq, content_eq_bytes, content_fingerprint, read_blob};
 
-/// Validate a symlink target: must be relative and contain no `..`
-/// segments.
+/// Validate a symlink target: non-empty, relative, and free of `..`
+/// segments. The rule is the same on every platform, so it also rejects
+/// `\`, `:` and NUL, which Windows reads as separators, drive prefixes
+/// or stream markers.
 #[must_use]
 pub fn validate_symlink_target(target: &str) -> bool {
-    if target.is_empty() {
+    if target.is_empty() || target.starts_with('/') {
         return false;
     }
-    if target.starts_with('/') {
+    if target.bytes().any(|b| matches!(b, 0 | b'\\' | b':')) {
         return false;
     }
-    for part in target.split('/') {
-        if part == ".." {
-            return false;
-        }
-    }
-    true
+    target.split('/').all(|part| part != "..")
 }
 
 /// A hash-time stat observation: while building a tree we re-hashed
@@ -187,6 +184,10 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
         crate::ignore::IgnoreError::Io(io) => WorktreeError::Io(io),
         crate::ignore::IgnoreError::FileTooLarge => {
             WorktreeError::Io(io::Error::other("ignore file exceeds 1 MiB"))
+        }
+        limit @ (crate::ignore::IgnoreError::TooManyPatterns
+        | crate::ignore::IgnoreError::PatternTooLong) => {
+            WorktreeError::Io(io::Error::other(limit.to_string()))
         }
     })?;
     // Tracked set for ignore exemption: the caller's index if given, else the
@@ -1595,6 +1596,12 @@ mod tests {
         assert!(!validate_symlink_target("/etc/passwd"));
         assert!(!validate_symlink_target("../escape"));
         assert!(!validate_symlink_target("a/../b"));
+        assert!(!validate_symlink_target("..\\..\\x"));
+        assert!(!validate_symlink_target("a\\b"));
+        assert!(!validate_symlink_target("C:\\Users"));
+        assert!(!validate_symlink_target("C:x"));
+        assert!(!validate_symlink_target("a\0b"));
+        assert!(!validate_symlink_target("\\\\server\\share"));
     }
 
     #[test]

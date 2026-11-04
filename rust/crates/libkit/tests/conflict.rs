@@ -1,4 +1,5 @@
 //! The conflict material of a paused operation: written, checked and undone.
+#![cfg(feature = "sync")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
 
 mod common;

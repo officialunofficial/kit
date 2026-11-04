@@ -28,9 +28,9 @@
 #     so signature and header bytes must be equal), and every accept, reject
 #     and reject/verify-* context re-run through a stateless verifier written
 #     here from §4, §5.2, §7 and §9.1. Signatures are checked with the
-#     SPEC-SIGNING §1 strict predicate: canonical, non-small-order A and R
-#     and S < L are enforced here, because pycryptodome's RFC 8032 verify
-#     alone accepts, for example, the identity key with R = identity, s = 0.
+#     SPEC-SIGNING §1 predicate, written here over affine Edwards arithmetic:
+#     canonical, non-small-order A and R, S < L, and the cofactored equation
+#     [8]([S]B - R - [k]A) = 0.
 #   * the ECDSA owner schemes (§4, §4.1, §4.3, §4.4), written from the spec
 #     with other libraries than the Rust code uses:
 #       - secp256k1-eip191: Keccak-256 from pycryptodome
@@ -512,21 +512,37 @@ def ed_small_order(point):
     return point == ED_IDENTITY
 
 
-def ed25519_verify_strict(public, message, signature):
-    """SPEC-SIGNING §1: canonical, non-small-order A and R; S < L; then the
-    RFC 8032 equation (pycryptodome). True iff every check passes."""
+ED_B = (
+    15112221349535400772501151409588531511454012693041857206046113283949847762202,
+    46316835694926478169428394003475163141307993866256225615783033603165251855960,
+)
+
+
+def ed_mul(k, point):
+    """[k]P by double-and-add."""
+    result = ED_IDENTITY
+    while k:
+        if k & 1:
+            result = ed_add(result, point)
+        point = ed_add(point, point)
+        k >>= 1
+    return result
+
+
+def ed25519_verify(public, message, signature):
+    """SPEC-SIGNING §1: canonical, non-small-order A and R; S < L; and the
+    cofactored equation [8]([S]B - R - [k]A) = 0. True iff every check passes."""
     a = ed_decode(public)
     r = ed_decode(signature[:32])
     if a is None or r is None or ed_small_order(a) or ed_small_order(r):
         return False
-    if int.from_bytes(signature[32:], "little") >= ED_L:
+    s = int.from_bytes(signature[32:], "little")
+    if s >= ED_L:
         return False
-    eddsa = eddsa_module()
-    try:
-        eddsa.new(eddsa.import_public_key(encoded=public), "rfc8032").verify(message, signature)
-    except ValueError:
-        return False
-    return True
+    k = int.from_bytes(hashlib.sha512(signature[:32] + public + message).digest(), "little") % ED_L
+    right = ed_add(r, ed_mul(k, a))
+    diff = ed_add(ed_mul(s, ED_B), ((ED_P - right[0]) % ED_P, right[1]))
+    return ed_mul(8, diff) == ED_IDENTITY
 
 
 def b64url_decode(segment):
@@ -544,7 +560,7 @@ def owner_signature(schemes, scheme, statement, blob, namespace, rps=()):
         if len(blob) != 64:
             return "signature length"
         public = bytes.fromhex(namespace[len("ed25519-"):])
-        if not ed25519_verify_strict(public, blake3(statement), blob):
+        if not ed25519_verify(public, blake3(statement), blob):
             return "bad signature"
         return None
     if not namespace.startswith("0x"):
@@ -1022,18 +1038,18 @@ def ed25519_self_test():
     public = ed25519_public(seed)
     message = blake3(b"self-test")
     good = ed25519_sign(seed, b"self-test")  # signs BLAKE3(b"self-test") == message
-    assert ed25519_verify_strict(public, message, good)
+    assert ed25519_verify(public, message, good)
     identity = (1).to_bytes(32, "little")
     forged = identity + bytes(32)  # R = identity, s = 0
-    # The cofactored equation holds for the identity key, so a lax
-    # verifier accepts it; the strict predicate must not.
-    assert not ed25519_verify_strict(identity, message, forged)
+    # The cofactored equation holds for the identity key; only the
+    # small-order check rejects it.
+    assert not ed25519_verify(identity, message, forged)
     order2 = (ED_P - 1).to_bytes(32, "little")
     assert ed_small_order(ed_decode(order2)) and ed_small_order(ed_decode(bytes(32)))
     assert not ed_small_order(ed_decode(public))
-    assert not ed25519_verify_strict(public, message, identity + good[32:])
+    assert not ed25519_verify(public, message, identity + good[32:])
     high_s = good[:32] + (int.from_bytes(good[32:], "little") + ED_L).to_bytes(32, "little")
-    assert not ed25519_verify_strict(public, message, high_s)
+    assert not ed25519_verify(public, message, high_s)
     assert ed_decode(ED_P.to_bytes(32, "little")) is None  # y = p: non-canonical
 
 
@@ -1424,7 +1440,7 @@ def verify_url_token(token, public, request):
     signature = b64url_decode(signature_text)
     if len(signature) != 64:
         return "signature length"
-    if not ed25519_verify_strict(public, blake3(statement), signature):
+    if not ed25519_verify(public, blake3(statement), signature):
         return "bad signature"
     if f[1] != request["audience"]:
         return "audience not listed"

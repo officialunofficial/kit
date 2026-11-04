@@ -42,8 +42,11 @@ cargo kani -p kit-rpc --harness rpc_read_frame_no_panic
 ```
 
 Run **one harness at a time** (`--harness` is a substring match; every
-name below is unique as a substring except where noted). Peak CBMC memory
-was ~5.4 GB (`pack_window_cursor_decode`); most harnesses stay under 2 GB.
+name below is unique as a substring except where noted). Peak memory
+(macOS maximum RSS, 2026-11-03) is below 15 GB for most harnesses, and
+`pack_writer_roundtrip_raw` needs 63 GB. CI does not run the harnesses:
+run `bash formal/scripts/run-kani.sh` by hand on a machine with at least
+64 GB.
 
 **Expected-outcome convention** (same as the Quint `check.sh` scripts):
 a `*_canary_*` harness is `#[kani::should_panic]` and must report

@@ -128,7 +128,8 @@ kit defends:
   the local IMPORT key, original raw bytes are retained
   sha1-addressed under `.kit/git/<name>/raw/` as audit evidence, and
   each imported head gets a `git-import/v1` attestation binding the
-  git commit id, canonical remote identity, and kit twin.
+  git commit id, remote identity, and kit twin. For a local source
+  the attestation names the fixed string `local`, not a path.
   `kit git verify` re-checks all of it offline.
 - Tracking-ref containment. Fetches only move
   `refs/remotes/<name>/*` (plus tags); upstream force-pushes rewind
@@ -212,7 +213,11 @@ produces release artifacts.
 
 kit defends:
 
-- Reproducibility of the binary build (`docs/RELEASE.md`).
+- A best-effort reproducible build (`docs/RELEASE.md`). A third party can
+  rebuild the tag and compare hashes. A CI job builds the Linux binary twice
+  in two directories and compares the hashes. That job proves the build does
+  not depend on the path. It does not prove a match with the published
+  binary, and the result is not guaranteed to match.
 - Provenance via cosign keyless signatures and CycloneDX SBOM
   (`docs/RELEASE.md`).
 - Pinning third-party actions by SHA so a compromised tag cannot
@@ -352,8 +357,9 @@ Without `--trusted`, `kit verify` proves only that the object's
 embedded `signer` produced its signature &mdash; it does not consult trust
 roots at all (SPEC-SIGNING §6.1). A signature from an unlisted,
 attacker-controlled key is indistinguishable from a trusted one unless
-the caller opts into `--trusted`. `kit clone`/`pull`/`fetch` do not run
-any verification by default; that remains a separate, tracked gap.
+the caller opts into `--trusted`. `kit clone`/`pull`/`fetch` run the
+same check by default (§3.1): they verify each signature against its
+embedded `signer`, not against trust roots.
 
 ---
 
@@ -487,8 +493,10 @@ matching update here.
 - Keystore capability tests assert that each backend advertises only supported
   algorithms, export/import/listing, user-presence, device-bound, and
   non-extractability properties.
-- `cargo fuzz` targets cover delta decode, pack reader, the object
-  deserializer, and the encrypted software key record parser (`docs/FUZZ.md`).
+- `cargo fuzz` targets cover the parsers of untrusted input,
+  among them delta decode, the pack reader, the object deserializer, the
+  encrypted software key record parser, and the disclosure, closure and
+  span verifiers (`docs/FUZZ.md` lists each target).
 - Integration tests assert that a hostile `<repo>/.kit/config`
   cannot set any user-scoped key (warning plus ignored). Per-key
   coverage lives in `rust/crates/kit-bin/tests/repo_config_forbidden_keys.rs`,
@@ -501,7 +509,8 @@ matching update here.
 - CI matrix: `cargo fmt --check`, `cargo clippy --all-targets --
   -D warnings`, `cargo test --workspace --locked`, keystore backend feature
   jobs for Linux/macOS with opt-in live native-backend roundtrips,
-  `cargo deny`, reproducible-build smoke, `kit version` byte-exact assertion.
+  `cargo deny`, double-build hash comparison, `kit version` byte-exact
+  assertion.
   Windows is not a supported build/test/release target (see
   `docs/INVARIANTS.md`).
 

@@ -65,7 +65,16 @@ where
     W: std::io::Write,
     M: Message,
 {
-    let body = msg.encode_to_vec();
+    write_frame_body(w, &msg.encode_to_vec())
+}
+
+/// Writes an already encoded message body to `w` as one frame. The
+/// caller owns `body`, so it can wipe the buffer after the call. The
+/// length rules are those of [`write_frame`].
+pub fn write_frame_body<W>(w: &mut W, body: &[u8]) -> Result<(), FrameError>
+where
+    W: std::io::Write,
+{
     let len: u32 = body
         .len()
         .try_into()
@@ -74,7 +83,7 @@ where
         return Err(FrameError::LengthTooLarge(len));
     }
     w.write_all(&len.to_le_bytes())?;
-    w.write_all(&body)?;
+    w.write_all(body)?;
     w.flush()?;
     Ok(())
 }
@@ -156,6 +165,24 @@ mod tests {
         let mut cur = Cursor::new(buf);
         let out: SignerFrame = read_frame(&mut cur).expect("read");
         assert_eq!(in_msg, out);
+    }
+
+    #[test]
+    fn a_body_written_alone_has_the_frame_layout() {
+        let msg = err_frame(ErrorCode::UserDeclined, "user said no");
+        let mut framed = Vec::new();
+        write_frame(&mut framed, &msg).expect("write");
+        let mut from_body = Vec::new();
+        write_frame_body(&mut from_body, &msg.encode_to_vec()).expect("write body");
+        assert_eq!(from_body, framed);
+
+        let mut out = Vec::new();
+        let too_long = vec![0u8; MAX_FRAME_BYTES as usize + 1];
+        assert!(matches!(
+            write_frame_body(&mut out, &too_long),
+            Err(FrameError::LengthTooLarge(_))
+        ));
+        assert!(out.is_empty());
     }
 
     #[test]

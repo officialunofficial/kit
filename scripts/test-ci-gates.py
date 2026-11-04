@@ -72,12 +72,16 @@ class Gates(unittest.TestCase):
         files = sorted(CLOUD.glob("*.yaml"))
         for path in files:
             text = path.read_text()
-            for match in re.finditer(r"/(kit-ci):(\S+)", text):
+            for match in re.finditer(r"/(kit-ci):([^@\s]+)(@sha256:[0-9a-f]{64})?", text):
                 with self.subTest(file=path.name):
                     self.assertEqual(f"{match.group(1)}:{match.group(2)}".rstrip('}"'), tag)
+                    # The builder pushes the image, so it names the tag only.
+                    # Every other file runs the image by its digest.
+                    if path.name != "builder.yaml":
+                        self.assertIsNotNone(match.group(3), f"{path.name} names the image without a digest")
         self.assertIn(tag, (CLOUD / "builder.yaml").read_text())
         nightly = re.search(r"toolchain install (nightly-\d{4}-\d{2}-\d{2})", docker).group(1)
-        self.assertIn(f"cargo +{nightly} fuzz run", ci_steps()["fuzz-smoke"])
+        self.assertIn(f"cargo +{nightly} fuzz build", ci_steps()["fuzz-smoke"])
 
     def test_tools_are_pinned_and_mold_is_installed(self):
         docker = (CLOUD / "Dockerfile.ci").read_text()
@@ -87,6 +91,14 @@ class Gates(unittest.TestCase):
         self.assertGreaterEqual(len(tools), 8)
         for name, version in tools:
             self.assertRegex(version, r"^@\d+\.\d+\.\d+$", f"{name} has no exact version")
+
+    def test_wasm_smoke_tools_match_the_lock_file(self):
+        docker = (CLOUD / "Dockerfile.ci").read_text()
+        lock = (ROOT / "rust/Cargo.lock").read_text()
+        locked = re.search(r'name = "wasm-bindgen"\nversion = "([^"]+)"', lock).group(1)
+        self.assertIn(f"wasm-bindgen-cli@{locked} ", docker)
+        self.assertRegex(docker, r"ARG NODE_VERSION=\d+\.\d+\.\d+")
+        self.assertIn("bash scripts/wasm-smoke.sh", script_of(ci_steps()["wasm"]))
 
     def test_mold_links_only_the_archive_step(self):
         steps = ci_steps()
@@ -255,10 +267,17 @@ class Gates(unittest.TestCase):
         # read the result on GitHub. The tests below pin the commands of the
         # first two.
         public = {"rust.yml", "rust-security.yml", "docs-lint.yml", "proto.yml", "third-party-notices.yml"}
+        # These gate scripts run only on GitHub. Cloud Build must not run them.
+        github_only = {"semver.yml": "scripts/check-semver.sh"}
+        cloudbuild = "".join(p.read_text() for p in sorted((ROOT / "cloudbuild").glob("*.yaml")))
+        for script in github_only.values():
+            self.assertNotIn(script, cloudbuild)
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
             if path.name in release or path.name in public:
                 continue
             text = strip_comments(path.read_text())
+            if path.name in github_only:
+                text = text.replace(github_only[path.name], "")
             for gate in gates:
                 if gate in text:
                     self.fail(f"{path.name} repeats the gate command: {gate}")

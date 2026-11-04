@@ -902,7 +902,7 @@ kit-write:v2
 <nonce>
 ```
 
-The signature is strict Ed25519 over the 32-byte BLAKE3 of those bytes. The
+The signature is Ed25519 over the 32-byte BLAKE3 of those bytes, checked with the SPEC-SIGNING §1 predicate. The
 origin is the URL's lowercase ASCII HTTP(S) origin with no userinfo, path,
 query, fragment, trailing dot, or default port. `<repository>` is the full
 repository identity of §7.4, exactly as `X-Repository` carries it.

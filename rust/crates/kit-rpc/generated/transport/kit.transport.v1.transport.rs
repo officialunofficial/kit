@@ -5,6 +5,7 @@
 /// CAS semantics for UpdateRef / AdvanceRefs. Wire numbers are load-bearing
 /// and match kit.rpc.v1.ssh.RefExpectation (rust/crates/kit-rpc/proto/
 /// ssh.proto) byte-for-byte — do NOT renumber; new variants append.
+#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(i32)]
 pub enum RefExpectation {
@@ -179,6 +180,7 @@ impl ::buffa::Enumeration for RefExpectation {
 /// kit_core::protocol::AdvanceOutcome exactly (three variants, no
 /// zero/UNSPECIFIED — a call either completes or returns a Connect error,
 /// so there is no "unset" outcome on the wire).
+#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(i32)]
 pub enum AdvanceOutcome {
@@ -347,6 +349,7 @@ impl ::buffa::Enumeration for AdvanceOutcome {
         ]
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(i32)]
 pub enum RepoVisibility {
@@ -3783,18 +3786,21 @@ impl ::buffa::ExtensionSet for GetReceiptRequest {
         &mut self.__buffa_unknown_fields
     }
 }
-impl<'de> serde::Deserialize<'de> for GetReceiptRequest {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de> ::serde::Deserialize<'de> for GetReceiptRequest {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
     ) -> ::core::result::Result<Self, D::Error> {
         struct _V;
-        impl<'de> serde::de::Visitor<'de> for _V {
+        impl<'de> ::serde::de::Visitor<'de> for _V {
             type Value = GetReceiptRequest;
-            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            fn expecting(
+                &self,
+                f: &mut ::core::fmt::Formatter<'_>,
+            ) -> ::core::fmt::Result {
                 f.write_str("struct GetReceiptRequest")
             }
             #[allow(clippy::field_reassign_with_default)]
-            fn visit_map<A: serde::de::MapAccess<'de>>(
+            fn visit_map<A: ::serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
             ) -> ::core::result::Result<GetReceiptRequest, A::Error> {
@@ -3815,7 +3821,7 @@ impl<'de> serde::Deserialize<'de> for GetReceiptRequest {
                             if let Some(v) = v {
                                 if __oneof_selector.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'selector'",
                                         ),
                                     );
@@ -3839,7 +3845,7 @@ impl<'de> serde::Deserialize<'de> for GetReceiptRequest {
                             if let Some(v) = v {
                                 if __oneof_selector.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'selector'",
                                         ),
                                     );
@@ -3852,7 +3858,7 @@ impl<'de> serde::Deserialize<'de> for GetReceiptRequest {
                             }
                         }
                         _ => {
-                            map.next_value::<serde::de::IgnoredAny>()?;
+                            map.next_value::<::serde::de::IgnoredAny>()?;
                         }
                     }
                 }
@@ -5060,18 +5066,21 @@ impl ::buffa::ExtensionSet for UploadPackRequest {
         &mut self.__buffa_unknown_fields
     }
 }
-impl<'de> serde::Deserialize<'de> for UploadPackRequest {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de> ::serde::Deserialize<'de> for UploadPackRequest {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
     ) -> ::core::result::Result<Self, D::Error> {
         struct _V;
-        impl<'de> serde::de::Visitor<'de> for _V {
+        impl<'de> ::serde::de::Visitor<'de> for _V {
             type Value = UploadPackRequest;
-            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            fn expecting(
+                &self,
+                f: &mut ::core::fmt::Formatter<'_>,
+            ) -> ::core::fmt::Result {
                 f.write_str("struct UploadPackRequest")
             }
             #[allow(clippy::field_reassign_with_default)]
-            fn visit_map<A: serde::de::MapAccess<'de>>(
+            fn visit_map<A: ::serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
             ) -> ::core::result::Result<UploadPackRequest, A::Error> {
@@ -5092,7 +5101,7 @@ impl<'de> serde::Deserialize<'de> for UploadPackRequest {
                             if let Some(v) = v {
                                 if __oneof_body.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'body'",
                                         ),
                                     );
@@ -5116,7 +5125,7 @@ impl<'de> serde::Deserialize<'de> for UploadPackRequest {
                             if let Some(v) = v {
                                 if __oneof_body.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'body'",
                                         ),
                                     );
@@ -5129,7 +5138,7 @@ impl<'de> serde::Deserialize<'de> for UploadPackRequest {
                             }
                         }
                         _ => {
-                            map.next_value::<serde::de::IgnoredAny>()?;
+                            map.next_value::<::serde::de::IgnoredAny>()?;
                         }
                     }
                 }
@@ -5998,18 +6007,21 @@ impl ::buffa::ExtensionSet for DownloadPackResponse {
         &mut self.__buffa_unknown_fields
     }
 }
-impl<'de> serde::Deserialize<'de> for DownloadPackResponse {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de> ::serde::Deserialize<'de> for DownloadPackResponse {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
     ) -> ::core::result::Result<Self, D::Error> {
         struct _V;
-        impl<'de> serde::de::Visitor<'de> for _V {
+        impl<'de> ::serde::de::Visitor<'de> for _V {
             type Value = DownloadPackResponse;
-            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            fn expecting(
+                &self,
+                f: &mut ::core::fmt::Formatter<'_>,
+            ) -> ::core::fmt::Result {
                 f.write_str("struct DownloadPackResponse")
             }
             #[allow(clippy::field_reassign_with_default)]
-            fn visit_map<A: serde::de::MapAccess<'de>>(
+            fn visit_map<A: ::serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
             ) -> ::core::result::Result<DownloadPackResponse, A::Error> {
@@ -6030,7 +6042,7 @@ impl<'de> serde::Deserialize<'de> for DownloadPackResponse {
                             if let Some(v) = v {
                                 if __oneof_body.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'body'",
                                         ),
                                     );
@@ -6054,7 +6066,7 @@ impl<'de> serde::Deserialize<'de> for DownloadPackResponse {
                             if let Some(v) = v {
                                 if __oneof_body.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'body'",
                                         ),
                                     );
@@ -6078,7 +6090,7 @@ impl<'de> serde::Deserialize<'de> for DownloadPackResponse {
                             if let Some(v) = v {
                                 if __oneof_body.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'body'",
                                         ),
                                     );
@@ -6091,7 +6103,7 @@ impl<'de> serde::Deserialize<'de> for DownloadPackResponse {
                             }
                         }
                         _ => {
-                            map.next_value::<serde::de::IgnoredAny>()?;
+                            map.next_value::<::serde::de::IgnoredAny>()?;
                         }
                     }
                 }
@@ -7448,18 +7460,21 @@ impl ::buffa::ExtensionSet for BeginUploadResponse {
         &mut self.__buffa_unknown_fields
     }
 }
-impl<'de> serde::Deserialize<'de> for BeginUploadResponse {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de> ::serde::Deserialize<'de> for BeginUploadResponse {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
     ) -> ::core::result::Result<Self, D::Error> {
         struct _V;
-        impl<'de> serde::de::Visitor<'de> for _V {
+        impl<'de> ::serde::de::Visitor<'de> for _V {
             type Value = BeginUploadResponse;
-            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            fn expecting(
+                &self,
+                f: &mut ::core::fmt::Formatter<'_>,
+            ) -> ::core::fmt::Result {
                 f.write_str("struct BeginUploadResponse")
             }
             #[allow(clippy::field_reassign_with_default)]
-            fn visit_map<A: serde::de::MapAccess<'de>>(
+            fn visit_map<A: ::serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
             ) -> ::core::result::Result<BeginUploadResponse, A::Error> {
@@ -7480,7 +7495,7 @@ impl<'de> serde::Deserialize<'de> for BeginUploadResponse {
                             if let Some(v) = v {
                                 if __oneof_result.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'result'",
                                         ),
                                     );
@@ -7504,7 +7519,7 @@ impl<'de> serde::Deserialize<'de> for BeginUploadResponse {
                             if let Some(v) = v {
                                 if __oneof_result.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'result'",
                                         ),
                                     );
@@ -7517,7 +7532,7 @@ impl<'de> serde::Deserialize<'de> for BeginUploadResponse {
                             }
                         }
                         _ => {
-                            map.next_value::<serde::de::IgnoredAny>()?;
+                            map.next_value::<::serde::de::IgnoredAny>()?;
                         }
                     }
                 }
@@ -8230,18 +8245,21 @@ impl ::buffa::ExtensionSet for UploadPartRequest {
         &mut self.__buffa_unknown_fields
     }
 }
-impl<'de> serde::Deserialize<'de> for UploadPartRequest {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de> ::serde::Deserialize<'de> for UploadPartRequest {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
     ) -> ::core::result::Result<Self, D::Error> {
         struct _V;
-        impl<'de> serde::de::Visitor<'de> for _V {
+        impl<'de> ::serde::de::Visitor<'de> for _V {
             type Value = UploadPartRequest;
-            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            fn expecting(
+                &self,
+                f: &mut ::core::fmt::Formatter<'_>,
+            ) -> ::core::fmt::Result {
                 f.write_str("struct UploadPartRequest")
             }
             #[allow(clippy::field_reassign_with_default)]
-            fn visit_map<A: serde::de::MapAccess<'de>>(
+            fn visit_map<A: ::serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
             ) -> ::core::result::Result<UploadPartRequest, A::Error> {
@@ -8262,7 +8280,7 @@ impl<'de> serde::Deserialize<'de> for UploadPartRequest {
                             if let Some(v) = v {
                                 if __oneof_msg.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'msg'",
                                         ),
                                     );
@@ -8276,9 +8294,9 @@ impl<'de> serde::Deserialize<'de> for UploadPartRequest {
                         }
                         "chunk" => {
                             struct _DeserSeed;
-                            impl<'de> serde::de::DeserializeSeed<'de> for _DeserSeed {
+                            impl<'de> ::serde::de::DeserializeSeed<'de> for _DeserSeed {
                                 type Value = ::buffa::alloc::vec::Vec<u8>;
-                                fn deserialize<D: serde::Deserializer<'de>>(
+                                fn deserialize<D: ::serde::Deserializer<'de>>(
                                     self,
                                     d: D,
                                 ) -> ::core::result::Result<
@@ -8297,7 +8315,7 @@ impl<'de> serde::Deserialize<'de> for UploadPartRequest {
                             if let Some(v) = v {
                                 if __oneof_msg.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'msg'",
                                         ),
                                     );
@@ -8308,7 +8326,7 @@ impl<'de> serde::Deserialize<'de> for UploadPartRequest {
                             }
                         }
                         _ => {
-                            map.next_value::<serde::de::IgnoredAny>()?;
+                            map.next_value::<::serde::de::IgnoredAny>()?;
                         }
                     }
                 }
@@ -9465,18 +9483,21 @@ impl ::buffa::ExtensionSet for SetRepoVisibilityRequest {
         &mut self.__buffa_unknown_fields
     }
 }
-impl<'de> serde::Deserialize<'de> for SetRepoVisibilityRequest {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de> ::serde::Deserialize<'de> for SetRepoVisibilityRequest {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
     ) -> ::core::result::Result<Self, D::Error> {
         struct _V;
-        impl<'de> serde::de::Visitor<'de> for _V {
+        impl<'de> ::serde::de::Visitor<'de> for _V {
             type Value = SetRepoVisibilityRequest;
-            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            fn expecting(
+                &self,
+                f: &mut ::core::fmt::Formatter<'_>,
+            ) -> ::core::fmt::Result {
                 f.write_str("struct SetRepoVisibilityRequest")
             }
             #[allow(clippy::field_reassign_with_default)]
-            fn visit_map<A: serde::de::MapAccess<'de>>(
+            fn visit_map<A: ::serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
             ) -> ::core::result::Result<SetRepoVisibilityRequest, A::Error> {
@@ -9499,7 +9520,7 @@ impl<'de> serde::Deserialize<'de> for SetRepoVisibilityRequest {
                             if let Some(v) = v {
                                 if __oneof_mode.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'mode'",
                                         ),
                                     );
@@ -9525,7 +9546,7 @@ impl<'de> serde::Deserialize<'de> for SetRepoVisibilityRequest {
                             if let Some(v) = v {
                                 if __oneof_mode.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'mode'",
                                         ),
                                     );
@@ -9538,7 +9559,7 @@ impl<'de> serde::Deserialize<'de> for SetRepoVisibilityRequest {
                             }
                         }
                         _ => {
-                            map.next_value::<serde::de::IgnoredAny>()?;
+                            map.next_value::<::serde::de::IgnoredAny>()?;
                         }
                     }
                 }
@@ -9869,18 +9890,21 @@ impl ::buffa::ExtensionSet for IssueObjectUrlRequest {
         &mut self.__buffa_unknown_fields
     }
 }
-impl<'de> serde::Deserialize<'de> for IssueObjectUrlRequest {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de> ::serde::Deserialize<'de> for IssueObjectUrlRequest {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
     ) -> ::core::result::Result<Self, D::Error> {
         struct _V;
-        impl<'de> serde::de::Visitor<'de> for _V {
+        impl<'de> ::serde::de::Visitor<'de> for _V {
             type Value = IssueObjectUrlRequest;
-            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            fn expecting(
+                &self,
+                f: &mut ::core::fmt::Formatter<'_>,
+            ) -> ::core::fmt::Result {
                 f.write_str("struct IssueObjectUrlRequest")
             }
             #[allow(clippy::field_reassign_with_default)]
-            fn visit_map<A: serde::de::MapAccess<'de>>(
+            fn visit_map<A: ::serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
             ) -> ::core::result::Result<IssueObjectUrlRequest, A::Error> {
@@ -9895,9 +9919,9 @@ impl<'de> serde::Deserialize<'de> for IssueObjectUrlRequest {
                         "ttlSeconds" | "ttl_seconds" => {
                             __f_ttl_seconds = Some({
                                 struct _S;
-                                impl<'de> serde::de::DeserializeSeed<'de> for _S {
+                                impl<'de> ::serde::de::DeserializeSeed<'de> for _S {
                                     type Value = ::core::option::Option<u32>;
-                                    fn deserialize<D: serde::Deserializer<'de>>(
+                                    fn deserialize<D: ::serde::Deserializer<'de>>(
                                         self,
                                         d: D,
                                     ) -> ::core::result::Result<
@@ -9912,9 +9936,9 @@ impl<'de> serde::Deserialize<'de> for IssueObjectUrlRequest {
                         }
                         "objectId" | "object_id" => {
                             struct _DeserSeed;
-                            impl<'de> serde::de::DeserializeSeed<'de> for _DeserSeed {
+                            impl<'de> ::serde::de::DeserializeSeed<'de> for _DeserSeed {
                                 type Value = ::buffa::alloc::vec::Vec<u8>;
-                                fn deserialize<D: serde::Deserializer<'de>>(
+                                fn deserialize<D: ::serde::Deserializer<'de>>(
                                     self,
                                     d: D,
                                 ) -> ::core::result::Result<
@@ -9933,7 +9957,7 @@ impl<'de> serde::Deserialize<'de> for IssueObjectUrlRequest {
                             if let Some(v) = v {
                                 if __oneof_target.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'target'",
                                         ),
                                     );
@@ -9957,7 +9981,7 @@ impl<'de> serde::Deserialize<'de> for IssueObjectUrlRequest {
                             if let Some(v) = v {
                                 if __oneof_target.is_some() {
                                     return Err(
-                                        serde::de::Error::custom(
+                                        ::serde::de::Error::custom(
                                             "multiple oneof fields set for 'target'",
                                         ),
                                     );
@@ -9970,7 +9994,7 @@ impl<'de> serde::Deserialize<'de> for IssueObjectUrlRequest {
                             }
                         }
                         _ => {
-                            map.next_value::<serde::de::IgnoredAny>()?;
+                            map.next_value::<::serde::de::IgnoredAny>()?;
                         }
                     }
                 }

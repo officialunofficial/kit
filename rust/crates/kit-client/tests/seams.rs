@@ -606,6 +606,17 @@ fn per_attempt_headers_ride_along_unsigned_and_reserved_names_are_refused() {
     assert_eq!(header(&request, "x-request-id"), "abc");
     assert!(request.headers().contains_key("traceparent"));
     assert!(request.headers().contains_key("x-signature"));
+    // The envelope headers on the wire are exactly the names of kit-core.
+    let sent: std::collections::BTreeSet<&str> = request
+        .headers()
+        .keys()
+        .map(http::HeaderName::as_str)
+        .filter(|name| name.starts_with("x-") || *name == "idempotency-key")
+        .filter(|name| *name != "x-request-id")
+        .collect();
+    let named: std::collections::BTreeSet<&str> =
+        kit_core::write_auth::HEADER_NAMES.into_iter().collect();
+    assert_eq!(sent, named);
 
     for reserved in [
         "X-Signature",

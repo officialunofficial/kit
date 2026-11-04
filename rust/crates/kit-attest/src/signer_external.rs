@@ -42,7 +42,7 @@ use kit_rpc::kit::rpc::v1::signer::{
     Hello, PinPrompt, PinResponse, SignRequest, SignResponse, SignerFrame, signer_frame,
 };
 use kit_rpc::kit::rpc::v1::{Algorithm as RpcAlgorithm, KeyForm, ProtocolVersion};
-use kit_rpc::{FrameError, read_frame, write_frame};
+use kit_rpc::{FrameError, read_frame, write_frame, write_frame_body};
 
 use crate::Error;
 use crate::algorithm::Algorithm;
@@ -62,6 +62,38 @@ const MAX_STDERR_DRAIN: usize = 1024 * 1024;
 /// CTAP/TPM/PKCS#11 retry counter (typically well under 8 attempts
 /// before a hardware lockout).
 const MAX_PIN_PROMPTS: u32 = 8;
+
+/// Exact names of environment variables the signer child inherits.
+/// Every other variable is dropped, so secrets such as `KIT_API_TOKEN`
+/// and `KIT_S3_*` never reach the signer.
+const INHERITED_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TERM",
+    "LANG",
+    "TZ",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "SSH_AUTH_SOCK",
+    "GPG_TTY",
+];
+
+/// Name prefixes of environment variables the signer child inherits.
+const INHERITED_ENV_PREFIXES: &[&str] = &["LC_", "XDG_"];
+
+/// Return `true` if the signer child inherits the variable `name`.
+fn env_is_inherited(name: &str) -> bool {
+    INHERITED_ENV.contains(&name)
+        || INHERITED_ENV_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
 
 /// Default wall-clock budget for the entire signer conversation
 /// (spawn → request-write → response-read → stderr-drain → child-exit).
@@ -208,6 +240,10 @@ impl Signer for ExternalSigner {
 
         let child = Command::new(&self.binary_path)
             .args(&self.args)
+            .env_clear()
+            .envs(
+                std::env::vars_os().filter(|(name, _)| name.to_str().is_some_and(env_is_inherited)),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -428,7 +464,7 @@ impl ExternalSigner {
                 Ok(pin) => pin,
                 Err(e) => return Err(conv.fail(e)),
             };
-            if let Err(e) = write_frame(stdin, &pin_response_frame(pin)) {
+            if let Err(e) = write_pin_response(stdin, &pin) {
                 return Err(conv.fail(Error::ExternalSignerSpawn(format!(
                     "write pin response: {e}"
                 ))));
@@ -1148,12 +1184,34 @@ fn pin_prompt_info(p: &PinPrompt) -> PinPromptInfo {
     }
 }
 
+/// Write the `PinResponse` frame for `pin` to `w`. The encoded body and
+/// the PIN field of the message are wiped before this function returns.
+fn write_pin_response<W: std::io::Write>(w: &mut W, pin: &str) -> Result<(), FrameError> {
+    use buffa::Message as _;
+    use zeroize::Zeroizing;
+
+    let mut frame = pin_response_frame(pin);
+    // `encode_to_vec` sizes the buffer once, so no grown copy stays behind.
+    let body = Zeroizing::new(frame.encode_to_vec());
+    wipe_pin_response(&mut frame);
+    write_frame_body(w, &body)
+}
+
+/// Wipe the PIN field of a `PinResponse` frame.
+fn wipe_pin_response(frame: &mut SignerFrame) {
+    use zeroize::Zeroize as _;
+
+    if let Some(signer_frame::Body::PinResponse(response)) = &mut frame.body {
+        response.pin.zeroize();
+    }
+}
+
 /// Build the `PinResponse` frame sent back on `stdin` in answer to a
 /// `PinPrompt`.
-fn pin_response_frame(pin: String) -> SignerFrame {
+fn pin_response_frame(pin: &str) -> SignerFrame {
     SignerFrame {
         body: Some(signer_frame::Body::PinResponse(Box::new(
-            PinResponse::default().with_pin(pin),
+            PinResponse::default().with_pin(pin.to_owned()),
         ))),
         ..Default::default()
     }
@@ -1175,6 +1233,21 @@ fn frame_name(b: &Option<signer_frame::Body>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn env_allowlist_drops_secrets_and_keeps_session_variables() {
+        for name in [
+            "KIT_API_TOKEN",
+            "KIT_S3_SECRET_ACCESS_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+        ] {
+            assert!(!super::env_is_inherited(name), "{name}");
+        }
+        for name in ["PATH", "HOME", "SSH_AUTH_SOCK", "LC_ALL", "XDG_RUNTIME_DIR"] {
+            assert!(super::env_is_inherited(name), "{name}");
+        }
+    }
+
     use super::*;
     use kit_rpc::kit::rpc::v1::Algorithm as RpcAlgorithm;
     use kit_rpc::kit::rpc::v1::signer::WebAuthnData;
@@ -1288,8 +1361,11 @@ mod tests {
         #[derive(Debug)]
         struct Canned;
         impl PinProvider for Canned {
-            fn provide_pin(&self, _prompt: &PinPromptInfo) -> Result<String, Error> {
-                Ok("000000".into())
+            fn provide_pin(
+                &self,
+                _prompt: &PinPromptInfo,
+            ) -> Result<zeroize::Zeroizing<String>, Error> {
+                Ok(zeroize::Zeroizing::new("000000".into()))
             }
         }
         let signer = ExternalSigner::new("/usr/bin/foo")
@@ -1299,7 +1375,8 @@ mod tests {
             signer
                 .pin_provider
                 .provide_pin(&PinPromptInfo::default())
-                .unwrap(),
+                .unwrap()
+                .as_str(),
             "000000"
         );
     }
@@ -1328,8 +1405,27 @@ mod tests {
     }
 
     #[test]
+    fn wiping_a_pin_response_clears_the_pin() {
+        let mut frame = pin_response_frame("445566");
+        wipe_pin_response(&mut frame);
+        match frame.body {
+            Some(signer_frame::Body::PinResponse(pr)) => assert!(pr.pin.is_none()),
+            other => panic!("expected PinResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pin_response_is_written_as_one_frame() {
+        let mut expected = Vec::new();
+        write_frame(&mut expected, &pin_response_frame("445566")).unwrap();
+        let mut written = Vec::new();
+        write_pin_response(&mut written, "445566").unwrap();
+        assert_eq!(written, expected);
+    }
+
+    #[test]
     fn pin_response_frame_round_trips_the_pin() {
-        let frame = pin_response_frame("445566".to_owned());
+        let frame = pin_response_frame("445566");
         match frame.body {
             Some(signer_frame::Body::PinResponse(pr)) => {
                 assert_eq!(pr.pin.as_deref(), Some("445566"));
@@ -1995,9 +2091,12 @@ mod tests {
                 pin: String,
             }
             impl PinProvider for FakePinProvider {
-                fn provide_pin(&self, prompt: &PinPromptInfo) -> Result<String, Error> {
+                fn provide_pin(
+                    &self,
+                    prompt: &PinPromptInfo,
+                ) -> Result<zeroize::Zeroizing<String>, Error> {
                     self.seen.borrow_mut().push(prompt.clone());
-                    Ok(self.pin.clone())
+                    Ok(zeroize::Zeroizing::new(self.pin.clone()))
                 }
             }
 
@@ -2033,7 +2132,7 @@ mod tests {
             // send back once `FakePinProvider` supplies `TEST_PIN` — so
             // the fixture can drain it precisely instead of racing EOF.
             let pin_response_len = {
-                let frame = pin_response_frame(TEST_PIN.to_owned());
+                let frame = pin_response_frame(TEST_PIN);
                 let mut buf = Vec::new();
                 write_frame(&mut buf, &frame).unwrap();
                 buf.len()

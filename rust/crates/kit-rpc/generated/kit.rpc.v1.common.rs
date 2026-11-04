@@ -4,6 +4,7 @@
 /// ----------------------------------------------------------------------------
 /// Algorithms — every signature algorithm kit speaks. Wire numbers are
 /// load-bearing. Do NOT renumber. New algorithms append.
+#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 #[repr(i32)]
@@ -117,6 +118,7 @@ impl ::buffa::Enumeration for Algorithm {
 }
 /// How the secret is presented to the signer. Some signers operate on
 /// raw bytes; others on opaque handles to keys held inside hardware.
+#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 #[repr(i32)]
@@ -200,6 +202,7 @@ impl ::buffa::Enumeration for KeyForm {
 /// ----------------------------------------------------------------------------
 /// Errors. Every protocol response that can fail has an `Error` field;
 /// callers MUST check `code` before using any other field.
+#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 #[repr(i32)]
@@ -362,6 +365,7 @@ impl ::buffa::Enumeration for ErrorCode {
 /// version. v1 is the only thing v0.1.x speaks; a future breaking
 /// revision will introduce PROTOCOL_VERSION_2 and a sibling
 /// signer2.proto / ssh2.proto rather than mutating the v1 schemas.
+#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 #[repr(i32)]

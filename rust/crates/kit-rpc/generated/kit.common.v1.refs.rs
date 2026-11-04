@@ -4,6 +4,7 @@
 /// ----------------------------------------------------------------------------
 /// CAS semantics for ref-update RPCs across every kit wire protocol.
 /// Wire numbers are load-bearing. Do NOT renumber; new variants append.
+#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 #[repr(i32)]

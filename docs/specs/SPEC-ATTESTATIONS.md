@@ -322,8 +322,8 @@ For each envelope attached to the commit:
    `Registry` (§6.3). On hit, run the algorithm-specific verifier
    over `PAE(payloadType, payload)` + signature bytes:
    - `TrustRoot::Ed25519PubKey([u8; 32])` &mdash; the SPEC-SIGNING §1
-     acceptance predicate (rejects malleability: non-canonical R,
-     out-of-range S, non-canonical or low-order A/R).
+     acceptance predicate (rejects non-canonical or small-order A/R and
+     out-of-range S; cofactored equation).
    - `TrustRoot::P256PubKeySec1(Vec<u8>)` &mdash; ECDSA-P-256/SHA-256 over
      a SEC1-encoded pubkey (33-byte compressed or 65-byte
      uncompressed).
@@ -738,9 +738,9 @@ Protects against:
 - **In-repo trust-roots planting.** `kit verify-attest` refuses to
   read a trust-roots file under the repo's `.kit/` directory unless
   the user passes `--trust-roots` explicitly.
-- **Ed25519 malleability.** Verify uses `verify_strict` (rejects
-  non-canonical R/A and s ≥ ℓ), so honest verifiers reach the same
-  verdict on the same signature bytes.
+- **Ed25519 malleability.** Verify uses the SPEC-SIGNING §1 predicate
+  (rejects non-canonical or small-order R/A and s ≥ ℓ), so honest
+  verifiers reach the same verdict on the same signature bytes.
 
 Does NOT protect against:
 - **A malicious predicate body.** Interpreting the predicate is the
@@ -800,7 +800,7 @@ not protect. This table maps each guarantee to its enforcement point.
 | A hostile clone cannot plant trust roots | in-repo trust-roots file rejected unless `--trust-roots` is explicit (§6.5, §10) |
 | Missing trust roots fail closed | empty registry ⇒ every signature `UnknownKeyid` ⇒ no envelope verifies (§6.5) |
 | A hostile repo cannot redirect signing | `attest.*` signer/key/path keys are user-scoped only (§9) |
-| Ed25519 verdicts are identical across honest verifiers | `verify_strict` rejects malleable encodings (§5.3, §10) |
+| Ed25519 verdicts are identical across honest verifiers | every verifier applies the SPEC-SIGNING §1 predicate (§5.3, §10) |
 | A malicious predicate body cannot subvert kit | the predicate is never parsed beyond "is a JSON object" (§1, §10) |
 | No partial envelope reaches disk | any signer failure aborts before write; writes are tmp + fsync + rename atomic (§5.1, §3) |
 | Malformed reads are bounded | 1 MiB envelope size cap (§3) |

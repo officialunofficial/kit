@@ -4,10 +4,8 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 
+use kit_transport_connect::TOKEN_ENV;
 use libkit::{CredentialSource, Environment, Token};
-
-/// Environment variable that holds the bearer token for HTTP(S) remotes.
-const API_TOKEN_VAR: &str = "KIT_API_TOKEN";
 
 /// Build the environment from the process working directory, the process
 /// environment and the `-c` overrides from the command line.
@@ -16,7 +14,7 @@ const API_TOKEN_VAR: &str = "KIT_API_TOKEN";
 /// keep their meaning. The CLI has no author name or email setting, so the
 /// identity stays empty.
 pub(crate) fn from_process(config_overrides: Vec<(String, String)>) -> Environment {
-    let credentials = std::env::var(API_TOKEN_VAR)
+    let credentials = std::env::var(TOKEN_ENV)
         .ok()
         .filter(|token| !token.is_empty())
         .map(|token| CredentialSource::BearerToken(Token::new(token)))

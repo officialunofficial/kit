@@ -156,7 +156,10 @@ pub use pack::{
 };
 
 // Refs, index, worktree, ignore, and repo_lock.
-pub use ignore::{IgnoreError, IgnoreList, MAX_IGNORE_FILE_BYTES, Pattern, glob_match};
+pub use ignore::{
+    IgnoreError, IgnoreList, MAX_IGNORE_FILE_BYTES, MAX_IGNORE_PATTERN_BYTES, MAX_IGNORE_PATTERNS,
+    Pattern, glob_match,
+};
 pub use index::{
     EntryStatus, INDEX_FILE, Index, IndexEntry, IndexError, IndexResult, MAGIC as INDEX_MAGIC,
     MAX_INDEX_BYTES, MAX_PATH_LEN, validate_index_path,

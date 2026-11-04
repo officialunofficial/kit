@@ -214,6 +214,58 @@ fn chunked_blob_matches_golden() {
     assert_object_matches("chunked_blob", &obj);
 }
 
+/// SPEC-OBJECTS section 7: the manifest layouts that the decoder accepts and
+/// refuses, as `(total_size, chunk_size, chunk_count)`. The reference check
+/// in `scripts/golden/objects_ref.py` holds the same table.
+const ACCEPTED_CHUNKED: &[(u64, u32, u32)] = &[
+    (0, 0, 0),
+    (3, 0, 3),
+    (196_608, 65_536, 3),
+    (131_073, 65_536, 3),
+    (1, 65_536, 1),
+    (65_536, 65_536, 1),
+    (1 << 30, 0, 2),
+];
+const REFUSED_CHUNKED: &[(u64, u32, u32)] = &[
+    (1, 0, 0),
+    (2, 0, 3),
+    ((1 << 30) + 1, 0, 2),
+    (196_609, 65_536, 3),
+    (131_072, 65_536, 3),
+    (65_536, 65_536, 2),
+    (1, 65_536, 2),
+    (0, 65_536, 1),
+];
+
+fn chunked_manifest_bytes(total: u64, chunk_size: u32, count: u32) -> Vec<u8> {
+    let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
+    buf.extend_from_slice(&total.to_le_bytes());
+    buf.extend_from_slice(&chunk_size.to_le_bytes());
+    buf.extend_from_slice(&count.to_le_bytes());
+    for i in 0..count {
+        buf.extend_from_slice(&hash(&i.to_le_bytes()));
+    }
+    buf
+}
+
+#[test]
+fn chunked_blob_layout_rules_match_spec() {
+    for &(total, size, count) in ACCEPTED_CHUNKED {
+        let bytes = chunked_manifest_bytes(total, size, count);
+        assert!(
+            deserialize(&bytes).is_ok(),
+            "layout ({total}, {size}, {count}) must be accepted"
+        );
+    }
+    for &(total, size, count) in REFUSED_CHUNKED {
+        let bytes = chunked_manifest_bytes(total, size, count);
+        assert!(
+            deserialize(&bytes).is_err(),
+            "layout ({total}, {size}, {count}) must be refused"
+        );
+    }
+}
+
 // ---- SPEC-OBJECTS §13 mandatory vectors ----
 
 #[test]

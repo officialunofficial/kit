@@ -25,7 +25,7 @@
 
 substitutions:
   _CACHE_BUCKET: ${PROJECT_ID}-kit-sccache
-  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/kit-ci:rust-1.99.1
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/kit-ci:rust-1.99.1@sha256:89423fb9b58d5051fa661f0c7ad99c18cb1c42946313b946488903b8d63ab232
 
 options:
   logging: CLOUD_LOGGING_ONLY

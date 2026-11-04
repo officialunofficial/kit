@@ -113,7 +113,9 @@ unchanged. See [SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) §3.2.
 Normative:
 
 - `name_len` ∈ `[1, 255]`. Zero-length name is illegal.
-- Forbidden bytes **anywhere** in name: `0x00`, `/` (`0x2F`), `\` (`0x5C`).
+- Forbidden bytes **anywhere** in name: `0x00`, `/` (`0x2F`), `\` (`0x5C`),
+  `:` (`0x3A`). NTFS reads `:` as an alternate data stream or drive marker
+  (`.kit::$INDEX_ALLOCATION`, `C:x`).
 - Forbidden exact names: `"."`, `".."`.
 - Forbidden trailing characters: `.` (`0x2E`) and SPACE (`0x20`). Windows
   silently strips these, which would alias one entry onto another of the
@@ -123,6 +125,8 @@ Normative:
   case-folding only; names containing non-ASCII bytes are not folded
   (they remain constrained by every other rule above). This is a
   Git CVE-2021-21300 family defense.
+- Forbidden case-insensitively: `kit~N` and `git~N`, where N is one or more
+  ASCII digits. These are the NTFS 8.3 short names of `.kit` and `.git`.
 - Forbidden Windows reserved device names, case-insensitively, with or
   without an extension: `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
   `LPT1`-`LPT9`. Comparison is against the stem (the bytes before the
@@ -153,6 +157,11 @@ file with the POSIX executable bit set at staging time. Non-POSIX hosts
 MAY round-trip `0x04` bytes opaquely.
 
 Any other mode byte → `InvalidEntryMode`.
+
+A staging or checkout tool MUST reject a symlink target that is empty,
+starts with `/`, contains a `..` segment, or contains NUL, `\` or `:`.
+The rule is the same on every platform, so a tree valid on one host is
+valid on all hosts.
 
 ### 4.3 Rename detection
 
@@ -313,10 +322,25 @@ repeat chunk_count:
 chunk lengths are recovered by re-reading each chunk blob. See
 SPEC-FASTCDC.
 `chunk_size > 0` indicates fixed-size chunking with the stated size
-(final chunk may be shorter).
+(every chunk but the last is exactly that size, and the final chunk
+holds between 1 and that many bytes).
 
 Reassembly: concatenate each `chunk_hash` blob's contents in order.
 The concatenated length MUST equal `total_size`.
+
+Readers MUST reject a manifest at decode time when `total_size` is
+impossible for its layout:
+
+- `total_size` is above 1 GiB (1,073,741,824).
+- `chunk_count` is `0` and `total_size` is not `0`.
+- `chunk_count` is above `0` and `total_size` is less than `chunk_count`.
+- `chunk_size` is above `0` and `total_size` is above
+  `chunk_count * chunk_size`.
+- `chunk_size` is above `0`, `chunk_count` is above `0` and `total_size` is not
+  above `(chunk_count - 1) * chunk_size`.
+
+Readers MUST NOT size a buffer from `total_size`. Readers MUST stop
+writing when the running byte count passes `total_size`.
 
 File-content equality MUST be independent of the chosen valid Blob or
 ChunkedBlob representation. Equal object IDs permit a fast path; otherwise

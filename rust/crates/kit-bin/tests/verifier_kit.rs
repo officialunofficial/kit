@@ -58,8 +58,8 @@ fn fixture_repo() -> Repo {
 fn prove_verify_root_tree() {
     let repo = fixture_repo();
     let commit = head(&repo);
-    repo.ok(&["prove", "HEAD", "-o", "root.mkdp"]);
-    let out = repo.ok(&["verify-proof", &commit, "root.mkdp"]);
+    repo.ok(&["prove", "HEAD", "-o", "root.kdpb"]);
+    let out = repo.ok(&["verify-proof", &commit, "root.kdpb"]);
     let text = stdout(&out);
     assert!(text.starts_with("ok: object / @"), "got: {text}");
     assert!(text.contains("valid signature"), "{text}");
@@ -69,11 +69,11 @@ fn prove_verify_root_tree() {
 fn prove_verify_small_file() {
     let repo = fixture_repo();
     let commit = head(&repo);
-    let out = repo.ok(&["prove", "HEAD", "a.txt", "-o", "a.mkdp"]);
+    let out = repo.ok(&["prove", "HEAD", "a.txt", "-o", "a.kdpb"]);
     let status = stdout(&out);
     assert!(status.contains("proof:"), "{status}");
     assert!(status.contains("a.txt"), "{status}");
-    let out = repo.ok(&["verify-proof", &commit, "a.mkdp", "--expect-path", "a.txt"]);
+    let out = repo.ok(&["verify-proof", &commit, "a.kdpb", "--expect-path", "a.txt"]);
     let text = stdout(&out);
     assert!(text.contains("ok: object a.txt"), "{text}");
 }
@@ -82,11 +82,11 @@ fn prove_verify_small_file() {
 fn prove_verify_nested_file() {
     let repo = fixture_repo();
     let commit = head(&repo);
-    repo.ok(&["prove", "HEAD", "src/nested.txt", "-o", "n.mkdp"]);
+    repo.ok(&["prove", "HEAD", "src/nested.txt", "-o", "n.kdpb"]);
     let out = repo.ok(&[
         "verify-proof",
         &commit,
-        "n.mkdp",
+        "n.kdpb",
         "--expect-path",
         "src/nested.txt",
     ]);
@@ -107,8 +107,8 @@ fn prove_verify_chunk_and_range() {
     repo.ok(&["commit", "-m", "chunked"]);
     let commit = head(&repo);
 
-    repo.ok(&["prove", "HEAD", "big.bin", "--chunk", "0", "-o", "c.mkdp"]);
-    let out = repo.ok(&["verify-proof", &commit, "c.mkdp"]);
+    repo.ok(&["prove", "HEAD", "big.bin", "--chunk", "0", "-o", "c.kdpb"]);
+    let out = repo.ok(&["verify-proof", &commit, "c.kdpb"]);
     assert!(
         stdout(&out).contains("ok: chunk big.bin"),
         "{}",
@@ -116,12 +116,12 @@ fn prove_verify_chunk_and_range() {
     );
 
     repo.ok(&[
-        "prove", "HEAD", "big.bin", "--range", "0:100", "-o", "r.mkdp",
+        "prove", "HEAD", "big.bin", "--range", "0:100", "-o", "r.kdpb",
     ]);
     let out = repo.ok(&[
         "verify-proof",
         &commit,
-        "r.mkdp",
+        "r.kdpb",
         "--payload-out",
         "slice.bin",
     ]);
@@ -141,9 +141,9 @@ fn prove_verify_chunk_and_range() {
         "0:100",
         "--with-offsets",
         "-o",
-        "ro.mkdp",
+        "ro.kdpb",
     ]);
-    let out = repo.ok(&["verify-proof", &commit, "ro.mkdp"]);
+    let out = repo.ok(&["verify-proof", &commit, "ro.kdpb"]);
     assert!(
         stdout(&out).contains("ok: range big.bin"),
         "{}",
@@ -155,11 +155,11 @@ fn prove_verify_chunk_and_range() {
 fn expect_path_mismatch_is_dataerr() {
     let repo = fixture_repo();
     let commit = head(&repo);
-    repo.ok(&["prove", "HEAD", "a.txt", "-o", "a.mkdp"]);
+    repo.ok(&["prove", "HEAD", "a.txt", "-o", "a.kdpb"]);
     let out = repo.run(&[
         "verify-proof",
         &commit,
-        "a.mkdp",
+        "a.kdpb",
         "--expect-path",
         "other.txt",
     ]);
@@ -175,13 +175,13 @@ fn expect_path_mismatch_is_dataerr() {
 fn tampered_bundle_fails() {
     let repo = fixture_repo();
     let commit = head(&repo);
-    repo.ok(&["prove", "HEAD", "a.txt", "-o", "a.mkdp"]);
-    let path = repo.path().join("a.mkdp");
+    repo.ok(&["prove", "HEAD", "a.txt", "-o", "a.kdpb"]);
+    let path = repo.path().join("a.kdpb");
     let mut bytes = fs::read(&path).unwrap();
     let i = bytes.len() / 2;
     bytes[i] ^= 0xff;
     fs::write(&path, bytes).unwrap();
-    let out = repo.run(&["verify-proof", &commit, "a.mkdp"]);
+    let out = repo.run(&["verify-proof", &commit, "a.kdpb"]);
     assert_eq!(out.status.code(), Some(65));
     assert!(stdout(&out).contains("bad:"), "{}", stdout(&out));
 }
@@ -190,14 +190,14 @@ fn tampered_bundle_fails() {
 fn trusted_signer_and_unlisted() {
     let repo = fixture_repo();
     let commit = head(&repo);
-    repo.ok(&["prove", "HEAD", "a.txt", "-o", "a.mkdp"]);
+    repo.ok(&["prove", "HEAD", "a.txt", "-o", "a.kdpb"]);
     let hex = signer_hex();
     let good = repo.path().join("good.toml");
     write_trust_roots(&good, &hex);
     let out = repo.ok(&[
         "verify-proof",
         &commit,
-        "a.mkdp",
+        "a.kdpb",
         "--trusted",
         "--trust-roots",
         good.to_str().unwrap(),
@@ -209,7 +209,7 @@ fn trusted_signer_and_unlisted() {
     let out = repo.run(&[
         "verify-proof",
         &commit,
-        "a.mkdp",
+        "a.kdpb",
         "--trusted",
         "--trust-roots",
         bad.to_str().unwrap(),
@@ -226,7 +226,7 @@ fn trusted_signer_and_unlisted() {
 fn prove_and_verify_json_keys() {
     let repo = fixture_repo();
     let commit = head(&repo);
-    let out = repo.ok(&["prove", "HEAD", "a.txt", "-o", "a.mkdp", "--format=json"]);
+    let out = repo.ok(&["prove", "HEAD", "a.txt", "-o", "a.kdpb", "--format=json"]);
     let js = stdout(&out);
     for key in [
         "commit_id",
@@ -238,7 +238,7 @@ fn prove_and_verify_json_keys() {
     ] {
         assert!(json_has(&js, key), "prove json missing {key}: {js}");
     }
-    let out = repo.ok(&["verify-proof", &commit, "a.mkdp", "--format=json"]);
+    let out = repo.ok(&["verify-proof", &commit, "a.kdpb", "--format=json"]);
     let js = stdout(&out);
     for key in [
         "commit_id",
