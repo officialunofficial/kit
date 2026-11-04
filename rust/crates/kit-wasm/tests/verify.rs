@@ -433,7 +433,7 @@ fn oversize_inputs_return_err() {
     oversize_commit.extend_from_slice(&[0, 0, 0]);
     let commit_hex = "00".repeat(32);
     let err = verify_disclosure(&commit_hex, &oversize_commit).unwrap_err();
-    assert!(err.contains("body is malformed"), "unexpected error: {err}");
+    assert_eq!(err, kit_core::verify::VerifyError::Malformed.to_string());
 
     assert!(
         verify_closure_packs(&commit_hex, "snapshot", &[], "[4294967295]").is_err(),
