@@ -268,4 +268,49 @@ mod compressed {
         assert_eq!(seen, vec![id_of(&a), id_of(&c), id_of(&b)]);
         assert_eq!(report.raw_count, 3);
     }
+
+    #[test]
+    fn a_missing_base_of_a_compressed_delta_keeps_its_stream_for_the_retry() {
+        let a = blob(&[1u8; 300]);
+        let c = blob(&[3u8; 300]);
+        let base = blob(b"external base object");
+        let target = blob(b"external base object, edited");
+        let stream = delta::encode(&base, &target).unwrap();
+        let mut payload = id_of(&base).to_vec();
+        payload.extend(u32::try_from(stream.len()).unwrap().to_le_bytes());
+        payload.extend(zstd::bulk::compress(&stream, 3).unwrap());
+        let pack = framed(2, &[zstd_raw(&a), (0x04, payload), zstd_raw(&c)]);
+
+        let mut supplied = Supplied::default();
+        supplied.0.insert(id_of(&base), base.clone());
+        let mut expected = Vec::new();
+        let baseline = kit_core::pack::decode_entries_with(
+            &pack,
+            &mut supplied,
+            DecodeLimits::default(),
+            |entry| {
+                expected.push((entry.id, entry.bytes.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let mut cursor = PackDecodeCursor::new(&pack, DecodeLimits::default()).unwrap();
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let err = resume_all(&mut cursor, &mut NoExternalBases, &mut seen).unwrap_err();
+            assert!(matches!(err, PackError::DeltaBaseMissing(_)), "{err:?}");
+            assert_eq!(seen, vec![id_of(&a)]);
+        }
+        let mut retried = Vec::new();
+        let report = cursor
+            .resume(&mut supplied, |entry| {
+                retried.push((entry.id, entry.bytes.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(report, baseline);
+        assert_eq!(retried, expected[1..]);
+        assert_eq!(retried[1].0, id_of(&c));
+    }
 }

@@ -74,6 +74,7 @@ use crate::object::{KitError, Object};
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
 pub use rewrite::{Rewritten, rewrite_excluding};
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -152,6 +153,8 @@ const ZSTD_LEVEL: i32 = 3;
 /// prefix. Part of the wire format regardless of whether this build
 /// can itself produce/consume `0x03`/`0x04` entries.
 const ZSTD_LEN_PREFIX: usize = 4;
+/// The shortest zstd frame: magic, two header bytes and one block header.
+const MIN_ZSTD_FRAME_LEN: usize = 9;
 
 /// Packfile errors. Distinct from [`KitError`] so callers can match on
 /// pack-specific failures (trailer mismatch, base-missing) without
@@ -1517,8 +1520,11 @@ fn le_u32_at(bytes: &[u8], at: usize) -> Option<u64> {
 /// has validated the framing (every frame lies inside the body, which is
 /// why the bounds here can only fall short on a malformed pack) and
 /// before anything is decompressed. A payload too short to carry its
-/// prefix is left for the drain to reject.
-fn charge_compressed_claims(pack: &[u8], budget: &mut DecodeBudget) -> Result<(), PackError> {
+/// prefix is left for the drain to reject. Returns the number of such
+/// entries long enough to hold a zstd frame, which sizes the slots that the
+/// cursor reserves for their decompressed payloads.
+fn charge_compressed_claims(pack: &[u8], budget: &mut DecodeBudget) -> Result<usize, PackError> {
+    let mut compressed = 0usize;
     let split = pack.len() - TRAILER_LEN;
     let mut pos = HEADER_LEN;
     while pos < split {
@@ -1531,6 +1537,12 @@ fn charge_compressed_claims(pack: &[u8], budget: &mut DecodeBudget) -> Result<()
             return Err(PackError::UnexpectedEof);
         }
         let payload = &pack[start..start + payload_len];
+        let smallest = match etype {
+            0x03 => ZSTD_LEN_PREFIX + MIN_ZSTD_FRAME_LEN,
+            0x04 => hash::HASH_LEN + ZSTD_LEN_PREFIX + MIN_ZSTD_FRAME_LEN,
+            _ => usize::MAX,
+        };
+        compressed += usize::from(payload_len >= smallest);
         let claim = match etype {
             0x03 => le_u32_at(payload, 0),
             0x04 => le_u32_at(payload, hash::HASH_LEN),
@@ -1541,19 +1553,7 @@ fn charge_compressed_claims(pack: &[u8], budget: &mut DecodeBudget) -> Result<()
         }
         pos = start + payload_len;
     }
-    Ok(())
-}
-
-#[derive(Debug)]
-struct CursorFrame<'a> {
-    entry: PackEntry<'a>,
-    frame_offset: u64,
-    frame_length: u64,
-    wire_type: u8,
-    delta_base: Option<Hash>,
-    /// A wire-cap violation of this frame, reported when the decode reaches it
-    /// rather than at preflight, so an earlier entry's refusal comes first.
-    cap: Option<PackError>,
+    Ok(compressed)
 }
 
 /// A store-less pack decoder that pauses at an unresolved external base.
@@ -1563,10 +1563,23 @@ struct CursorFrame<'a> {
 /// once across calls to [`Self::resume`]; a missing base leaves its frame at
 /// the cursor so the caller can supply that base and resume. Other errors
 /// end the decode. The same cumulative budget spans every resume call.
+///
+/// The cursor keeps no record per frame. It holds the position of the next
+/// frame and parses that frame when [`Self::resume`] reaches it. Only the
+/// decompressed payloads of `0x03`/`0x04` frames are kept. Each takes a
+/// 24-byte slot, which the decode budget does not charge, beside the bytes
+/// that it does charge.
 #[derive(Debug)]
 pub struct PackDecodeCursor<'a> {
-    entries: Vec<Option<CursorFrame<'a>>>,
-    next: usize,
+    /// Positioned at the next frame to decode.
+    frames: PackEntries<'a>,
+    /// Decompressed payloads of the `0x03`/`0x04` frames not yet decoded,
+    /// in pack order.
+    decompressed: VecDeque<Cow<'a, [u8]>>,
+    limits: DecodeLimits,
+    /// Set while a frame is being decoded. A frame that fails leaves it set,
+    /// which ends the decode.
+    failed: bool,
     budget: DecodeBudget,
     charged: std::collections::HashMap<Hash, u64>,
     uses: std::collections::HashMap<Hash, usize>,
@@ -1589,57 +1602,59 @@ impl<'a> PackDecodeCursor<'a> {
             used: 0,
             max: limits.max_decoded_bytes,
         };
-        charge_compressed_claims(pack, &mut budget)?;
+        let compressed = charge_compressed_claims(pack, &mut budget)?;
 
-        let mut entries = Vec::with_capacity(pack_entries.entry_count());
+        // A pristine copy of the iterator becomes the decode position.
+        let frames = pack_entries.clone();
+        // The count covers only frames long enough to hold a zstd frame, so
+        // the slots reserved follow the input size.
+        let mut decompressed = VecDeque::with_capacity(compressed);
         while let Some(entry) = pack_entries.next() {
             let entry = entry?;
             let payload = pack_entries
                 .last_payload_range()
                 .ok_or(PackError::UnexpectedEof)?;
-            let cap = limits
-                .check_frame(
-                    pack[payload.start - ENTRY_FRAME_LEN],
-                    &pack[payload.clone()],
-                )
-                .err();
-            let offset = payload
-                .start
-                .checked_sub(ENTRY_FRAME_LEN)
-                .ok_or(PackError::UnexpectedEof)?;
-            let delta_base = match &entry {
-                PackEntry::Delta { base, .. } => Some(*base),
-                PackEntry::Raw { .. } => None,
-            };
-            entries.push(Some(CursorFrame {
-                entry,
-                frame_offset: offset as u64,
-                frame_length: (payload.end - offset) as u64,
-                wire_type: pack[offset],
-                delta_base,
-                cap,
-            }));
+            if matches!(pack[payload.start - ENTRY_FRAME_LEN], 0x03 | 0x04) {
+                decompressed.push_back(match entry {
+                    PackEntry::Raw { bytes } => bytes,
+                    PackEntry::Delta { stream, .. } => stream,
+                });
+            }
         }
 
         // As in decode_entries_with, all delta result claims precede the
         // first object validation; base charges are added only on use.
         let mut uses = std::collections::HashMap::new();
-        for frame in entries.iter().flatten() {
-            if let PackEntry::Delta { base, stream } = &frame.entry {
-                if let Some(result_len) = le_u32_at(stream, 5) {
-                    budget.charge(result_len)?;
+        let mut scan = frames.clone();
+        let mut owned = decompressed.iter();
+        while scan.yielded < scan.count {
+            match scan.next_encoded_entry()? {
+                Entry::Raw(EncodedPayload::Zstd(_)) => {
+                    owned.next();
                 }
-                let n = uses.entry(*base).or_insert(0usize);
-                *n = n.saturating_add(1);
+                Entry::Raw(EncodedPayload::Plain(_)) => {}
+                Entry::Delta { base, stream } => {
+                    let stream = match stream {
+                        EncodedPayload::Plain(bytes) => bytes,
+                        EncodedPayload::Zstd(_) => owned
+                            .next()
+                            .map(AsRef::as_ref)
+                            .ok_or(PackError::PackfileCorrupted)?,
+                    };
+                    if let Some(result_len) = le_u32_at(stream, 5) {
+                        budget.charge(result_len)?;
+                    }
+                    let n = uses.entry(base).or_insert(0usize);
+                    *n = n.saturating_add(1);
+                }
             }
         }
         Ok(Self {
-            report: Some(DecodeReport {
-                ids: Vec::with_capacity(entries.len()),
-                ..DecodeReport::default()
-            }),
-            entries,
-            next: 0,
+            frames,
+            decompressed,
+            limits,
+            failed: false,
+            report: Some(DecodeReport::default()),
             budget,
             charged: std::collections::HashMap::new(),
             uses,
@@ -1698,22 +1713,41 @@ impl<'a> PackDecodeCursor<'a> {
             budget: &mut self.budget,
             charged: &mut self.charged,
         };
-        while self.next < self.entries.len() {
-            let frame = self.entries[self.next]
-                .take()
-                .ok_or(PackError::PackfileCorrupted)?;
-            let CursorFrame {
-                entry,
-                frame_offset,
-                frame_length,
-                wire_type,
-                delta_base,
-                cap,
-            } = frame;
-            if let Some(cap) = cap {
-                return Err(cap);
-            }
+        if self.failed {
+            return Err(PackError::PackfileCorrupted);
+        }
+        while self.frames.yielded < self.frames.count {
+            let resume_at = (self.frames.pos, self.frames.yielded);
+            // A frame that fails from here on ends the decode.
+            self.failed = true;
+            let encoded = self.frames.next_encoded_entry()?;
+            let payload = self
+                .frames
+                .last_payload_range()
+                .ok_or(PackError::UnexpectedEof)?;
+            let offset = payload
+                .start
+                .checked_sub(ENTRY_FRAME_LEN)
+                .ok_or(PackError::UnexpectedEof)?;
+            let wire_type = self.frames.bytes[offset];
+            let frame_offset = offset as u64;
+            let frame_length = (payload.end - offset) as u64;
+            self.limits
+                .check_frame(wire_type, &self.frames.bytes[payload])?;
+            let delta_base = match encoded {
+                Entry::Delta { base, .. } => Some(base),
+                Entry::Raw(_) => None,
+            };
             before(delta_base)?;
+            let entry = match encoded {
+                Entry::Raw(payload) => PackEntry::Raw {
+                    bytes: materialize(payload, &mut self.decompressed)?,
+                },
+                Entry::Delta { base, stream } => PackEntry::Delta {
+                    base,
+                    stream: materialize(stream, &mut self.decompressed)?,
+                },
+            };
             match entry {
                 PackEntry::Raw { bytes } => {
                     let object = validate_storable_object(&bytes)?;
@@ -1758,14 +1792,12 @@ impl<'a> PackDecodeCursor<'a> {
                                     bases.charged.remove(&base);
                                 }
                             }
-                            self.entries[self.next] = Some(CursorFrame {
-                                entry: PackEntry::Delta { base, stream },
-                                frame_offset,
-                                frame_length,
-                                wire_type,
-                                delta_base,
-                                cap: None,
-                            });
+                            // Leave the frame at the cursor for a retry.
+                            if wire_type == 0x04 {
+                                self.decompressed.push_front(stream);
+                            }
+                            (self.frames.pos, self.frames.yielded) = resume_at;
+                            self.failed = false;
                             return Err(error);
                         }
                         Err(error) => return Err(error),
@@ -1799,7 +1831,7 @@ impl<'a> PackDecodeCursor<'a> {
                     report.ids.push(id);
                 }
             }
-            self.next += 1;
+            self.failed = false;
         }
         self.report.take().ok_or(PackError::PackfileCorrupted)
     }
@@ -2411,7 +2443,7 @@ pub enum PackEntry<'a> {
 ///
 /// [`PackReader::read`] consumes the same private frame parser, deferring
 /// decompression until validation/staging or delta application.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PackEntries<'a> {
     bytes: &'a [u8],
     version: u32,
@@ -2579,6 +2611,18 @@ impl<'a> PackEntries<'a> {
 
     fn next_entry(&mut self) -> Result<PackEntry<'a>, PackError> {
         decode_encoded_payload(self.next_encoded_entry()?)
+    }
+}
+
+/// The bytes of one payload that the cursor preflight already decoded: a
+/// plain payload borrows the pack, a compressed one is the next buffer kept.
+fn materialize<'a>(
+    payload: EncodedPayload<'a>,
+    decompressed: &mut VecDeque<Cow<'a, [u8]>>,
+) -> Result<Cow<'a, [u8]>, PackError> {
+    match payload {
+        EncodedPayload::Plain(bytes) => Ok(Cow::Borrowed(bytes)),
+        EncodedPayload::Zstd(_) => decompressed.pop_front().ok_or(PackError::PackfileCorrupted),
     }
 }
 
