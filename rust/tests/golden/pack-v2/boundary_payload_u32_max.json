@@ -1,0 +1,10 @@
+{
+  "bin": "boundary_payload_u32_max.bin",
+  "declared_payload_len": 4294967295,
+  "description": "A payload length that the short pack cannot hold, with a valid trailer.",
+  "expected": "UnexpectedEof",
+  "name": "boundary_payload_u32_max",
+  "pack_key": "22481a855e0361eded73a4164dee2ccb076b6e39c6954908f39d0e3b7283db43",
+  "size": 49,
+  "version": 1
+}

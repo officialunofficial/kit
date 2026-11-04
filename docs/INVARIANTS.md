@@ -374,8 +374,8 @@ The hand-written frame parsing assembles header fields in `u64`, never
 `rejects_adversarial_frames`, `rejects_reserved_sequence_mode_bits`,
 `enforces_window_and_block_limits` and
 `rejects_oversized_literals_and_block_bodies`), plus
-`golden_pack::pack_v2_fixtures::pack_v2_fixtures_decode` over
-`rust/tests/golden/pack-v2/`.
+`golden_pack::pack_v2_fixtures::pack_v2_fixtures_decode` over the zstd packs
+of `rust/tests/golden/pack-v2/`. The `boundary_` packs there hold no zstd frame.
 
 ## BMT inclusion-proof bytes and sibling selection match commonware exactly
 
