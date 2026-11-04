@@ -1588,9 +1588,8 @@ et al. for the on-disk format.
 Report issues at the project's source repository. Known limitations:
 .Bl -bullet
 .It
-Windows is not a supported target: the workspace and its test suite do
-not build there (commonware-runtime's non-Linux storage-sync path calls
-a libc function absent on Windows). Windows users should run
+Windows is not a supported target: the Commonware library that kit builds
+on does not support it. Windows users should run
 .Nm
 under WSL, which runs the Linux binary.
 .It

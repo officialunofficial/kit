@@ -773,11 +773,9 @@ Requirements:
 ### 6.4 Windows backend (removed)
 
 Windows is not a supported kit target (see
-`docs/INVARIANTS.md`): commonware-runtime 2026.9.0's non-Linux
-storage-sync path calls `libc::sync()`, which does not exist on
-`x86_64-pc-windows-msvc`, so the workspace and its test suite no longer
-build there. The `backend-windows-credential` feature, the
-`WindowsCredentialManager` `BackendKind` variant, and the Windows
+`docs/INVARIANTS.md`): the Commonware library that kit builds on states
+that Windows is not a supported target. The `backend-windows-credential`
+feature, the `WindowsCredentialManager` `BackendKind` variant, and the Windows
 Credential Manager implementation described in this section were
 removed rather than shipped untested. `"windows-credential"` is now an
 unrecognized backend name (`Error::BackendUnavailable`, not a
