@@ -31,8 +31,8 @@ linux-secret-service = [
 macos-keychain = ["dep:security-framework"]
 
 [dependencies]
-kit-core = { version = "=0.7.0", path = "../kit-core" }
-kit-attest = { version = "=0.7.0", path = "../kit-attest", optional = true }
+kit-core = { version = "=0.7.1", path = "../kit-core" }
+kit-attest = { version = "=0.7.1", path = "../kit-attest", optional = true }
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 getrandom = "0.4.3"
