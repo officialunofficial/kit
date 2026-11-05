@@ -45,6 +45,10 @@ harness = false
 name = "store_write"
 harness = false
 
+[[bench]]
+name = "ignore_match"
+harness = false
+
 # The library carries the sample types and the timing helpers.
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
