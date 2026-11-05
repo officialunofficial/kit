@@ -256,6 +256,25 @@ mod adversarial {
         c.compress(content).unwrap()
     }
 
+    /// Compressed blocks bound the output loosely, at 128 KiB each. A claim
+    /// past that bound is a wrong claim on a sound frame, not a corrupt frame.
+    #[test]
+    fn a_claim_past_the_blocks_of_a_sound_frame_is_a_size_mismatch() {
+        let content = b"a long run of compressible text, repeated. ".repeat(5000);
+        let frame = compress_with(&content, &[CParameter::WindowLog(18)]);
+        assert!(content.len() > 128 << 10 && content.len() < 256 << 10);
+        for claim in [content.len() + 1, 300 << 10] {
+            let got = decode("claim past the blocks", &entry(claim, &frame));
+            assert!(
+                matches!(
+                    got,
+                    Err(PackError::DecompressedSizeMismatch(c, d)) if c == claim && d == content.len()
+                ),
+                "{got:?}"
+            );
+        }
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)] // one flat table
     fn rejects_adversarial_frames() {

@@ -7,6 +7,18 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- `PackReader::read` limits the bytes it decodes from a pack to 32,768 times
+  the pack size, with a floor of 2 GiB and the old 16 GiB as the ceiling.
+  Before, a pack of a few kilobytes could force 16 GiB of decompression.
+  Real packs expand 2 to 4 times, and an honest pack of deltas of small files
+  expands at most about 12,000 times.
+- A zstd entry is checked against its claimed decompressed size before the
+  reader reserves a buffer for it. The blocks of the frame must be able to
+  decode to the claim. Before, a 15-byte entry could make the reader reserve
+  1 GiB.
+
 ## [0.7.1] - 2026-11-04
 
 ### Added
