@@ -200,7 +200,9 @@ pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, KitError> {
         }
     }
 
-    let mut insert_buf: Vec<u8> = Vec::with_capacity(MAX_INSERT_LEN);
+    // Start of the pending literal run: `result[lit_start..ti]` has no match
+    // yet. A COPY or the end of input writes the run as INSERT opcodes.
+    let mut lit_start = 0usize;
     let mut ti = 0usize;
     // Rolling hash of `result[ti..ti + BLOCK_SIZE]`, `None` when it needs a
     // fresh (non-incremental) `block_hash` — after a COPY jumps `ti`
@@ -217,7 +219,7 @@ pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, KitError> {
             if let Some(&base_pos) = index.get(&h) {
                 let base_pos_usize = base_pos as usize;
                 if &base[base_pos_usize..base_pos_usize + BLOCK_SIZE] == target_block {
-                    flush_insert(&mut out, &mut insert_buf);
+                    emit_inserts(&mut out, &result[lit_start..ti]);
 
                     // Greedy forward extension, capped at u16::MAX.
                     let mut match_len = BLOCK_SIZE;
@@ -235,6 +237,7 @@ pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, KitError> {
                         u16::try_from(match_len).expect("<= u16::MAX"),
                     );
                     ti += match_len;
+                    lit_start = ti;
                     // The window jumped past wherever it was rolled to —
                     // recompute from scratch next time it's needed.
                     window_hash = None;
@@ -245,7 +248,6 @@ pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, KitError> {
             window_hash = None;
         }
         if !matched {
-            insert_buf.push(result[ti]);
             // Roll the window forward by the one byte we just consumed,
             // as long as a full window still fits ahead of the new `ti`
             // and we had a hash to roll (the branch above already
@@ -257,12 +259,9 @@ pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, KitError> {
                     .then(|| roll_forward(h, result[ti], result[ti + BLOCK_SIZE]))
             });
             ti += 1;
-            if insert_buf.len() == MAX_INSERT_LEN {
-                flush_insert(&mut out, &mut insert_buf);
-            }
         }
     }
-    flush_insert(&mut out, &mut insert_buf);
+    emit_inserts(&mut out, &result[lit_start..]);
     Ok(out)
 }
 
@@ -440,14 +439,12 @@ fn emit_copy(out: &mut Vec<u8>, offset: u32, length: u16) {
     out.extend_from_slice(&length.to_le_bytes());
 }
 
-fn flush_insert(out: &mut Vec<u8>, buf: &mut Vec<u8>) {
-    if buf.is_empty() {
-        return;
+/// Write `literal` as INSERT opcodes of at most [`MAX_INSERT_LEN`] bytes.
+fn emit_inserts(out: &mut Vec<u8>, literal: &[u8]) {
+    for run in literal.chunks(MAX_INSERT_LEN) {
+        out.push(u8::try_from(run.len()).expect("<= 127"));
+        out.extend_from_slice(run);
     }
-    debug_assert!(buf.len() <= MAX_INSERT_LEN);
-    out.push(u8::try_from(buf.len()).expect("<= 127"));
-    out.extend_from_slice(buf);
-    buf.clear();
 }
 
 /// Multiplier for `block_hash`'s polynomial hash. [`roll_forward`] slides
