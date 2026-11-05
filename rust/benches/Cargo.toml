@@ -49,6 +49,10 @@ harness = false
 name = "ignore_match"
 harness = false
 
+[[bench]]
+name = "restore_chunk_fanout"
+harness = false
+
 # The library carries the sample types and the timing helpers.
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
