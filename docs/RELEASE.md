@@ -107,8 +107,10 @@ Run top to bottom. Do not skip steps.
       `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD`.
 - [ ] Version bumped wherever it is hard-coded: README install snippets,
       `docs/INSTALL.md` (three sites: two
-      `VERSION=` snippets and the expected `kit version` output), and the
-      `vX.Y.Z` examples in `install.sh` usage text.
+      `VERSION=` snippets and the expected `kit version` output),
+      `docs/LIBKIT.md` (the two `libkit` dependency snippets), the `"=X.Y.Z"`
+      example in `CONTRIBUTING.md`, and the `vX.Y.Z` examples in `install.sh`
+      usage text.
 - [ ] [Signing and verification](#signing-and-verification) and
       [Reproducibility](#reproducibility) still accurate for this release.
 - [ ] `bash scripts/wasm-package.sh <empty dir>` builds the npm package, and
