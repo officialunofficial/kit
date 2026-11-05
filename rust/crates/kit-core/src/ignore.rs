@@ -214,24 +214,25 @@ impl IgnoreList {
         if base.eq_ignore_ascii_case(".kit") || base.eq_ignore_ascii_case(".git") {
             return true;
         }
-        let path: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
-        if path.is_empty() {
-            return false;
-        }
-        // Last match wins, so walk in reverse and return the first
-        // (highest-index) match — equivalent to scanning forward and
-        // keeping the last, but skips every earlier pattern once a
-        // deciding match is found instead of always paying for the full
-        // list.
-        for p in self.patterns.iter().rev() {
-            if p.dir_only && !is_dir {
-                continue;
+        with_segments(trimmed, |path| {
+            if path.is_empty() {
+                return false;
             }
-            if p.matches(&path) {
-                return !p.negated;
+            // Last match wins, so walk in reverse and return the first
+            // (highest-index) match — equivalent to scanning forward and
+            // keeping the last, but skips every earlier pattern once a
+            // deciding match is found instead of always paying for the full
+            // list.
+            for p in self.patterns.iter().rev() {
+                if p.dir_only && !is_dir {
+                    continue;
+                }
+                if p.matches(path) {
+                    return !p.negated;
+                }
             }
-        }
-        false
+            false
+        })
     }
 
     /// Like [`is_ignored`](Self::is_ignored), but also returns `true` when any
@@ -257,6 +258,26 @@ impl IgnoreList {
         }
         self.is_ignored(trimmed, is_dir)
     }
+}
+
+/// Path depth that [`with_segments`] keeps on the stack.
+const STACK_SEGMENTS: usize = 16;
+
+/// Split `trimmed` on `/`, drop empty segments, and pass them to `f`.
+/// Paths up to [`STACK_SEGMENTS`] deep use a stack buffer. Deeper paths
+/// spill to a `Vec`.
+fn with_segments<R>(trimmed: &str, f: impl FnOnce(&[&str]) -> R) -> R {
+    let mut buf = [""; STACK_SEGMENTS];
+    let mut len = 0;
+    for seg in trimmed.split('/').filter(|s| !s.is_empty()) {
+        if len == STACK_SEGMENTS {
+            let all: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+            return f(&all);
+        }
+        buf[len] = seg;
+        len += 1;
+    }
+    f(&buf[..len])
 }
 
 /// Load and merge `.gitignore` then `.kitignore` from `dir`. Returns an
@@ -583,6 +604,37 @@ pub fn glob_match(pattern: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_paths_match_at_and_beyond_the_stack_buffer() {
+        let list = parse("*.log\nbuild/\n/top\n");
+        for depth in [
+            1,
+            STACK_SEGMENTS - 1,
+            STACK_SEGMENTS,
+            STACK_SEGMENTS + 1,
+            40,
+        ] {
+            let dirs = vec!["d"; depth].join("/");
+            assert!(
+                list.is_ignored(&format!("{dirs}/x.log"), false),
+                "depth {depth}"
+            );
+            assert!(
+                !list.is_ignored(&format!("{dirs}/x.rs"), false),
+                "depth {depth}"
+            );
+            assert!(
+                list.is_ignored(&format!("{dirs}/build"), true),
+                "depth {depth}"
+            );
+            assert!(
+                !list.is_ignored(&format!("{dirs}/top"), false),
+                "depth {depth}"
+            );
+        }
+        assert!(list.is_ignored("//d///x.log//", false));
+    }
     use tempfile::TempDir;
 
     #[test]
