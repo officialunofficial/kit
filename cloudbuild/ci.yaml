@@ -560,7 +560,8 @@ steps:
             --ignore RUSTSEC-2024-0436 \
             --ignore RUSTSEC-2026-0370 \
             --ignore RUSTSEC-2026-0371 \
-            --ignore RUSTSEC-2026-0372
+            --ignore RUSTSEC-2026-0372 \
+            --ignore RUSTSEC-2026-0440
         }
         ( cd rust || exit 1
           failed=0

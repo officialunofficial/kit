@@ -85,6 +85,12 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "transitive via zbus-secret-service-keyring-store 1.0.1 -> zbus 5.19.0 for the opt-in Linux secret-service keystore backend; informational unmaintained flag (merged into zbus 6.0), no known defect. Re-justify by 2026-11-19." },
     { id = "RUSTSEC-2026-0371", reason = "same path as RUSTSEC-2026-0370; D-Bus bus-name types on the same-UID session bus only, not attacker-reachable. Re-justify by 2026-11-19." },
     { id = "RUSTSEC-2026-0372", reason = "same path as RUSTSEC-2026-0370; proc-macro crate, compile-time only, no runtime code. Re-justify by 2026-11-19." },
+    # RUSTSEC-2026-0440: astral-tokio-tar is unmaintained. It enters only as
+    # a dev-dependency: testcontainers 0.27.3 -> testcontainers-modules ->
+    # kit-transport-s3 tests. It never ships in a kit binary. The newest
+    # testcontainers release (0.28.0) still depends on it, so no upgrade
+    # path exists yet. Drop this ignore when testcontainers moves off it.
+    { id = "RUSTSEC-2026-0440", reason = "dev-dependency only, via testcontainers for the s3 transport tests; unmaintained flag, no known defect, not in any shipped binary. Re-justify by 2026-11-19." },
 ]
 
 [licenses]
