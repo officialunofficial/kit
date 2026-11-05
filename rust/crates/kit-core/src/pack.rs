@@ -94,16 +94,44 @@ pub const VERSION_V2: u32 = 2;
 pub const MAX_ENTRIES: u32 = 10_000_000;
 /// Hard cap on the sum of payload bytes across all entries.
 pub const MAX_TOTAL_PAYLOAD: u64 = 4 * 1024 * 1024 * 1024;
-/// Cap on the total bytes [`PackReader::read`] decodes from one pack: the
-/// sum of every compressed entry's decompressed size (`0x03` and `0x04`)
-/// and every delta's result size (16 GiB). It bounds the CPU, disk and IO
-/// a small hostile pack can force through decompression and staging.
+/// Absolute ceiling on the total bytes [`PackReader::read`] decodes from one
+/// pack: the sum of every compressed entry's decompressed size (`0x03` and
+/// `0x04`) and every delta's result size (16 GiB). It bounds the CPU, disk
+/// and IO a small hostile pack can force through decompression and staging.
 ///
 /// The value is four times [`MAX_TOTAL_PAYLOAD`]. A pack at its wire cap may
 /// expand about four to one. That is more than real objects compress, so an
-/// honest pack stays under the cap, and the work a hostile pack forces stays
-/// a small multiple of the bytes it sent.
+/// honest pack stays under the cap. A smaller pack gets a lower cap, see
+/// [`decoded_bytes_cap`].
 const MAX_TOTAL_DECODED: u64 = 16 * 1024 * 1024 * 1024;
+/// Decoded bytes that [`PackReader::read`] allows any pack, however small:
+/// a compressed delta stream of up to 1 GiB plus its 1 GiB result.
+const MIN_TOTAL_DECODED: u64 = 2 * MAX_RAW_OBJECT_SIZE as u64;
+/// Decoded bytes allowed per wire byte of a pack, above [`MIN_TOTAL_DECODED`].
+///
+/// Real packs expand about 2 to 4 times. The most that an honest pack can
+/// expand is a delta of a file that is too small to chunk: a blob of up to
+/// 1 MiB takes about 170 wire bytes as a near copy of its base, or about 90
+/// when zstd shrinks the delta stream. A pack of such deltas expands 6,000 to
+/// 12,000 times. The ratio is about three times the larger figure.
+const DECODED_PER_WIRE_BYTE: u64 = 32_768;
+
+/// The cap on decoded bytes for a pack of `pack_len` bytes: a multiple of the
+/// pack size, no lower than [`MIN_TOTAL_DECODED`] and no higher than
+/// [`MAX_TOTAL_DECODED`]. A few kilobytes of hostile input cannot force the
+/// full ceiling of decompression work.
+fn decoded_bytes_cap(pack_len: usize) -> u64 {
+    (pack_len as u64)
+        .saturating_mul(DECODED_PER_WIRE_BYTE)
+        .clamp(MIN_TOTAL_DECODED, MAX_TOTAL_DECODED)
+}
+
+/// The budget of one [`PackReader::read`] of a pack of `pack_len` bytes.
+fn read_budget(pack_len: usize, owned_bytes: Option<&AtomicU64>) -> ResidentBudget<'_> {
+    ResidentBudget::new(resident_bytes_cap(pack_len), owned_bytes)
+        .with_entry_cost(PACK_ENTRY_RESIDENT_COST)
+        .with_decoded_cap(decoded_bytes_cap(pack_len))
+}
 /// Bytes of resident bookkeeping that [`PackReader::read`] charges to its
 /// budget for each pack entry, before it allocates any of it. An entry costs
 /// a wire frame in the entry list, a hash in the report, a share of the
@@ -703,7 +731,8 @@ fn maybe_compress(_data: &[u8]) -> Option<Vec<u8>> {
 /// that claim, and the actual decompressed length is re-checked
 /// against the claim afterward.
 fn decompress_zstd_entry(payload: &[u8]) -> Result<Vec<u8>, PackError> {
-    let len = zstd_entry_len(payload)?;
+    let (len, frame) = zstd_claim(payload)?;
+    check_zstd_claim(frame, len)?;
     let mut output = Vec::new();
     output
         .try_reserve_exact(len)
@@ -723,6 +752,50 @@ fn zstd_claim(payload: &[u8]) -> Result<(usize, &[u8]), PackError> {
     }
     let frame = &payload[ZSTD_LEN_PREFIX..];
     Ok((uncompressed_len, frame))
+}
+
+/// Check a claimed decompressed size against its zstd frame, from the frame
+/// and block headers alone. Callers run it before they reserve a buffer, so a
+/// few bytes cannot make them reserve more than the frame can decode to. The
+/// frame cannot declare a content size above the claim, and the claim cannot
+/// exceed what the frame's blocks can produce.
+#[cfg(feature = "pack-zstd")]
+fn check_zstd_claim(frame: &[u8], claim: usize) -> Result<(), PackError> {
+    let bounds = check_zstd_frame_bounds(frame)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))?;
+    check_single_zstd_frame(frame)?;
+    // The errors match what a decode of the same frame reports. A frame
+    // larger than its claim does not fit the buffer. A frame smaller than its
+    // claim is left to the decode, unless its blocks cannot reach the claim.
+    let declared = bounds.declared_size;
+    if declared.is_some_and(|size| size > claim as u64) {
+        return Err(PackError::ZstdDecompress(
+            "zstd frame exceeds its claim".to_string(),
+        ));
+    }
+    if claim as u64 > bounds.max_output {
+        let to_usize = |size: u64| usize::try_from(size).unwrap_or(usize::MAX);
+        return Err(match declared {
+            // A content size above what the blocks can hold, or below what
+            // raw and RLE blocks hold exactly, is a corrupt frame.
+            Some(size)
+                if size > bounds.max_output || (bounds.exact && size != bounds.max_output) =>
+            {
+                PackError::ZstdDecompress("zstd content size does not match its blocks".to_string())
+            }
+            Some(size) => PackError::DecompressedSizeMismatch(claim, to_usize(size)),
+            None => PackError::DecompressedSizeMismatch(claim, to_usize(bounds.max_output)),
+        });
+    }
+    Ok(())
+}
+
+/// Without `pack-zstd` no frame can be decoded, so no buffer is reserved for one.
+#[cfg(not(feature = "pack-zstd"))]
+fn check_zstd_claim(_frame: &[u8], _claim: usize) -> Result<(), PackError> {
+    Err(PackError::ZstdDecompress(
+        "this build was compiled without the `pack-zstd` feature".to_string(),
+    ))
 }
 
 fn zstd_entry_len(payload: &[u8]) -> Result<usize, PackError> {
@@ -774,9 +847,28 @@ fn zstd_decompress_into(
     capacity: usize,
     output: &mut Vec<u8>,
 ) -> Result<(), PackError> {
-    check_zstd_frame_bounds(frame).map_err(|error| PackError::ZstdDecompress(error.to_string()))?;
+    check_zstd_frame_bounds(frame)
+        .map(drop)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))?;
     // `ZSTD_decompressDCtx` (behind `bulk::decompress`) would otherwise
     // decode concatenated frames and skip skippable ones.
+    check_single_zstd_frame(frame)?;
+    let mut decoder =
+        zstd::bulk::Decompressor::new().map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
+    decoder
+        .decompress_to_buffer(frame, output)
+        .map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
+    if output.len() > capacity {
+        return Err(PackError::ZstdDecompress(
+            "zstd frame exceeds its claim".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// The payload must be exactly one Zstandard frame, with nothing after it.
+#[cfg(feature = "pack-zstd")]
+fn check_single_zstd_frame(frame: &[u8]) -> Result<(), PackError> {
     match zstd::zstd_safe::find_frame_compressed_size(frame) {
         Ok(n) if n == frame.len() => {}
         Ok(n) => {
@@ -790,16 +882,6 @@ fn zstd_decompress_into(
                 zstd::zstd_safe::get_error_name(code).to_string(),
             ));
         }
-    }
-    let mut decoder =
-        zstd::bulk::Decompressor::new().map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
-    decoder
-        .decompress_to_buffer(frame, output)
-        .map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
-    if output.len() > capacity {
-        return Err(PackError::ZstdDecompress(
-            "zstd frame exceeds its claim".to_string(),
-        ));
     }
     Ok(())
 }
@@ -882,12 +964,28 @@ fn read_delta_header_prefix(
     zstd_decompress_into(frame, 0, &mut Vec::new())
 }
 
+/// What the headers of one zstd frame say about its output.
+#[cfg(feature = "pack-zstd")]
+#[derive(PartialEq, Eq)]
+struct ZstdFrameBounds {
+    /// The frame's content size, when its header has one.
+    declared_size: Option<u64>,
+    /// The most bytes that the frame's blocks can decode to.
+    max_output: u64,
+    /// Whether `max_output` is the exact size: no block is compressed.
+    exact: bool,
+}
+
 /// Inspect frame and block headers without allocating decoder working memory.
 /// The check enforces the window cap and RFC 8878 §3.1.1.2.4
 /// block maximum, including raw/RLE blocks the C one-shot decoder accepts.
 /// It also rejects reserved sequence-mode bits.
+///
+/// On success it returns the content size that the frame declares, if any,
+/// and the most bytes its blocks can decode to. An RLE or raw block decodes
+/// to its size field, and a compressed block to at most the block maximum.
 #[cfg(feature = "pack-zstd")]
-fn check_zstd_frame_bounds(frame: &[u8]) -> Result<(), &'static str> {
+fn check_zstd_frame_bounds(frame: &[u8]) -> Result<ZstdFrameBounds, &'static str> {
     const MALFORMED: &str = "malformed zstd frame";
     if !frame.starts_with(&ZSTD_FRAME_MAGIC) {
         return Err(MALFORMED);
@@ -911,12 +1009,17 @@ fn check_zstd_frame_bounds(frame: &[u8]) -> Result<(), &'static str> {
     let mut pos = fcs_start + fcs_len;
     // Even a frame without FCS must have its entire dictionary field.
     frame.get(..pos).ok_or(MALFORMED)?;
-    let window = if single_segment {
+    let declared_size = if fcs_len == 0 {
+        None
+    } else {
         let mut size = 0u64;
         for i in 0..fcs_len {
             size |= u64::from(byte(fcs_start + i)?) << (8 * i);
         }
-        if fcs_len == 2 { size + 256 } else { size }
+        Some(if fcs_len == 2 { size + 256 } else { size })
+    };
+    let window = if single_segment {
+        declared_size.unwrap_or_default()
     } else {
         let descriptor = byte(ZSTD_FRAME_MAGIC.len() + 1)?;
         let base = 1u64 << (10 + (descriptor >> 3));
@@ -926,6 +1029,8 @@ fn check_zstd_frame_bounds(frame: &[u8]) -> Result<(), &'static str> {
         return Err("zstd frame window exceeds the 8 MiB cap");
     }
     let block_maximum = window.min(128 << 10);
+    let mut max_output = 0u64;
+    let mut exact = true;
     loop {
         let header_end = pos.checked_add(3).ok_or(MALFORMED)?;
         let bytes = frame.get(pos..header_end).ok_or(MALFORMED)?;
@@ -940,6 +1045,12 @@ fn check_zstd_frame_bounds(frame: &[u8]) -> Result<(), &'static str> {
             3 => return Err("zstd block has its reserved type set"),
             _ => size,
         };
+        max_output += if (header >> 1) & 3 == 2 {
+            exact = false;
+            block_maximum
+        } else {
+            size as u64
+        };
         let body_end = pos.checked_add(body_len).ok_or(MALFORMED)?;
         let body = frame.get(pos..body_end).ok_or(MALFORMED)?;
         if (header >> 1) & 3 == 2 && zstd_sequence_modes(body)? & 3 != 0 {
@@ -947,7 +1058,11 @@ fn check_zstd_frame_bounds(frame: &[u8]) -> Result<(), &'static str> {
         }
         pos = body_end;
         if header & 1 == 1 {
-            return Ok(());
+            return Ok(ZstdFrameBounds {
+                declared_size,
+                max_output,
+                exact,
+            });
         }
     }
 }
@@ -1149,8 +1264,7 @@ impl PackReader {
         payload_cap: u64,
         owned_bytes: Option<&AtomicU64>,
     ) -> Result<UnpackReport, PackError> {
-        let budget = ResidentBudget::new(resident_bytes_cap(pack_bytes.len()), owned_bytes)
-            .with_entry_cost(PACK_ENTRY_RESIDENT_COST);
+        let budget = read_budget(pack_bytes.len(), owned_bytes);
         Self::read_with_budget(pack_bytes, store, payload_cap, &budget, STAGE_WINDOW)
     }
 
@@ -2073,6 +2187,12 @@ impl<'a> ResidentBudget<'a> {
         self
     }
 
+    /// This budget with a cap of `cap` decoded bytes.
+    fn with_decoded_cap(mut self, cap: u64) -> Self {
+        self.decoded_cap = cap;
+        self
+    }
+
     /// Charge `count` entries of `entry_cost` bytes each. The charge is
     /// never released: the bookkeeping lives until the read ends.
     fn reserve_entries(&self, count: usize) -> Result<(), PackError> {
@@ -2185,8 +2305,10 @@ impl<'p> EncodedPayload<'p> {
         match self {
             Self::Plain(bytes) => Ok(ResidentBytes::Borrowed(bytes)),
             Self::Zstd(payload) => {
-                let len = zstd_entry_len(payload)?;
-                let mut output = budget.allocate(len)?;
+                let (len, frame) = zstd_claim(payload)?;
+                let reservation = budget.charge(len)?;
+                check_zstd_claim(frame, len)?;
+                let mut output = reservation.allocate()?;
                 decompress_zstd_into(payload, &mut output.bytes)?;
                 Ok(ResidentBytes::Owned(output))
             }
@@ -2201,10 +2323,11 @@ impl<'p> EncodedPayload<'p> {
         match self {
             Self::Plain(bytes) => Ok(Some(ResidentBytes::Borrowed(bytes))),
             Self::Zstd(payload) => {
-                let len = zstd_entry_len(payload)?;
+                let (len, frame) = zstd_claim(payload)?;
                 let Ok(reservation) = budget.charge(len) else {
                     return Ok(None);
                 };
+                check_zstd_claim(frame, len)?;
                 let mut output = reservation.allocate()?;
                 decompress_zstd_into(payload, &mut output.bytes)?;
                 Ok(Some(ResidentBytes::Owned(output)))
@@ -2908,6 +3031,36 @@ mod tests {
     }
 
     #[test]
+    fn decoded_cap_follows_the_pack_size_between_the_floor_and_the_ceiling() {
+        assert_eq!(decoded_bytes_cap(0), MIN_TOTAL_DECODED);
+        assert_eq!(decoded_bytes_cap(1 << 10), MIN_TOTAL_DECODED);
+        let at_floor = (MIN_TOTAL_DECODED / DECODED_PER_WIRE_BYTE) as usize;
+        assert_eq!(decoded_bytes_cap(at_floor), MIN_TOTAL_DECODED);
+        let mid = 128 << 10;
+        assert_eq!(decoded_bytes_cap(mid), mid as u64 * DECODED_PER_WIRE_BYTE);
+        assert!(decoded_bytes_cap(mid) > MIN_TOTAL_DECODED);
+        assert!(decoded_bytes_cap(mid) < MAX_TOTAL_DECODED);
+        assert_eq!(decoded_bytes_cap(64 << 20), MAX_TOTAL_DECODED);
+        assert_eq!(decoded_bytes_cap(usize::MAX), MAX_TOTAL_DECODED);
+    }
+
+    #[test]
+    fn reader_budget_uses_the_pack_size_for_its_decoded_cap() {
+        let budget = read_budget(300, None);
+        assert_eq!(budget.decoded_cap, MIN_TOTAL_DECODED);
+        assert!(budget.charge_decoded(MAX_RAW_OBJECT_SIZE).is_ok());
+        assert!(budget.charge_decoded(MAX_RAW_OBJECT_SIZE).is_ok());
+        assert!(matches!(
+            budget.charge_decoded(1),
+            Err(PackError::PackfileTooLarge)
+        ));
+        assert_eq!(
+            read_budget(1 << 20, None).decoded_cap,
+            decoded_bytes_cap(1 << 20)
+        );
+    }
+
+    #[test]
     #[cfg(feature = "pack-zstd")]
     fn cumulative_decoded_cap_rejects_before_decompression() {
         const CONTENT_LEN: usize = 1024 * 1024;
@@ -3064,9 +3217,19 @@ mod tests {
                 }
                 let pack = finish_pack_body(body);
                 let (_dir, store) = fresh_store();
+                // The read caps decoded bytes by the pack size. Lift that cap
+                // here: the test is about junk frames, not the cap.
+                let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None)
+                    .with_entry_cost(PACK_ENTRY_RESIDENT_COST);
                 let started = std::time::Instant::now();
                 assert!(matches!(
-                    PackReader::read(&pack, &store),
+                    PackReader::read_with_budget(
+                        &pack,
+                        &store,
+                        MAX_TOTAL_PAYLOAD,
+                        &budget,
+                        STAGE_WINDOW
+                    ),
                     Err(PackError::ZstdDecompress(_))
                 ));
                 let elapsed = started.elapsed();
@@ -5823,6 +5986,13 @@ mod kani_proofs {
         h
     }
 
+    fn stub_zstd_claim(_frame: &[u8], _claim: usize) -> Result<(), PackError> {
+        if kani::any() {
+            return Err(PackError::ZstdDecompress(String::new()));
+        }
+        Ok(())
+    }
+
     fn stub_zstd(_frame: &[u8], _capacity: usize, output: &mut Vec<u8>) -> Result<(), PackError> {
         if kani::any() {
             return Err(PackError::ZstdDecompress(String::new()));
@@ -5914,6 +6084,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
     #[kani::stub(zstd_decompress_into, stub_zstd)]
+    #[kani::stub(check_zstd_claim, stub_zstd_claim)]
     #[kani::unwind(4)]
     fn pack_entries_one_frame() {
         entries_at::<5>();
@@ -5924,6 +6095,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
     #[kani::stub(zstd_decompress_into, stub_zstd)]
+    #[kani::stub(check_zstd_claim, stub_zstd_claim)]
     #[kani::unwind(4)]
     fn pack_entries_two_entries() {
         entries_at::<10>();
