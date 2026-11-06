@@ -97,7 +97,7 @@ pub fn run(args: &[String]) -> u8 {
     // git prints this before doing any work; match the shape. Honest
     // per-object transfer progress streams on stderr during the
     // pull below, and kit's own object-transfer summary follows at the
-    // end — kit deliberately never fabricates git's
+    // end — kit does not print git's
     // Enumerating/Counting/Compressing/`Total N (delta D)` lines (see
     // docs/CLI.md).
     {

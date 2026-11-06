@@ -112,9 +112,8 @@ The summaries have the shape of the Git summaries:
   `Switched to a new branch '<name>'`.
 - `reset --hard` prints `HEAD is now at <id> <subject>`.
 
-kit does not print the Git object-count and delta-compression lines. kit
-transfers one object per pack and has no cross-branch delta graph. Those
-numbers would be invented.
+kit does not print the Git object-count and delta-compression lines. It prints
+its own `Writing objects` and `Unpacking objects` lines with real counts.
 
 ## Documented divergences
 

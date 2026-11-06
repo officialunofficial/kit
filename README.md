@@ -11,7 +11,9 @@ kit is a content-addressed version control system written in Rust. It has
 commits, refs, branches and remotes. It treats signatures and attestations as
 part of the object model.
 
-- Every object ID is the BLAKE3 hash of the canonical bytes of the object.
+- Every object ID is a BLAKE3 hash. A tree or a chunked blob uses the
+  domain-bound root of a BLAKE3 Merkle tree over its contents. Any other object
+  uses the hash of its canonical bytes.
 - Every commit carries an Ed25519 signature.
 - `kit attest` stores in-toto v1 Statements in DSSE envelopes. The commit hash
   is the subject.

@@ -832,7 +832,7 @@ fn build_and_upload_packs(
             }
             w.push_prepared_raw(entry)?;
             // Honest progress: one real object just got staged into
-            // the outgoing pack. Never git's fabricated
+            // the outgoing pack. Never git's
             // Enumerating/Counting/Compressing lines — see `SyncEvent`.
             report_packed(sink, observer);
         }
@@ -881,7 +881,7 @@ fn build_and_upload_packs(
 }
 
 /// Honest progress: one real object just got staged into the outgoing
-/// pack. Never git's fabricated Enumerating/Counting/Compressing lines — see
+/// pack. Never git's Enumerating/Counting/Compressing lines — see
 /// `SyncEvent`. A dry seal stages nothing to send and reports nothing.
 fn report_packed(sink: PackSink<'_>, observer: &dyn Observer<SyncEvent>) {
     if matches!(sink, PackSink::Upload { .. }) {

@@ -65,7 +65,7 @@ fn repo_with_many_files(n: usize) -> tempfile::TempDir {
 /// subprocess's stderr is piped, not a tty, so without the override
 /// the reporter would auto-disable): must print multiple `Writing
 /// objects:` lines with monotonically increasing, real object counts,
-/// ending in a `, done.` line — never git's fabricated
+/// ending in a `, done.` line — never git's
 /// Enumerating/Counting/Compressing/delta lines.
 #[test]
 fn push_reports_honest_monotonic_progress_when_forced_on() {
@@ -103,9 +103,7 @@ fn push_reports_honest_monotonic_progress_when_forced_on() {
         stderr.contains("done."),
         "expected a final ', done.' line: {stderr}"
     );
-    // Never fabricate git's compression/delta-graph numbers — kit's
-    // transport is one-object-per-pack and computes no cross-branch
-    // delta graph (docs/CLI.md).
+    // kit does not print git's count and delta lines (docs/CLI.md).
     assert!(!stderr.contains("Compressing objects"), "stderr: {stderr}");
     assert!(!stderr.contains("Enumerating objects"), "stderr: {stderr}");
     assert!(!stderr.contains("Total "), "stderr: {stderr}");
