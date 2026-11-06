@@ -99,6 +99,32 @@ file object for a symlink produces an index that cannot be committed.
 holds at most one chunk per side plus manifests; rename fingerprints are
 memoized for one diff and confirmed by byte comparison.
 
+## The line diff has a fixed search budget
+
+**Always:** the line diff search stops at 4096 edits and keeps at most one
+position per diagonal per edit step, about 64 MiB. Up to the limit its output is
+the minimal Myers result. Past the limit a diff keeps the point of the last step
+that retains the most lines, with the common trailing lines it has not passed,
+and marks the rest changed. That script still turns the old side into the new
+side. A text merge reports a conflict when the diff of a side stops at the limit
+or an input is above the chunk threshold, so it never merges on a non-minimal
+script. The line tables and output of a diff still grow with the file.
+
+**Because:** edit distance and line count come from the content. A search that
+grows with either lets a small file exhaust memory. The limit is a constant, so
+every machine produces the same output.
+
+**If violated:** a rewritten file can exhaust memory in `diff`, `show`, `merge`,
+`cherry-pick`, `rebase` or `revert`, or the result can depend on the machine. A
+merge on a non-minimal script could be clean where a minimal script conflicts.
+
+**Enforced by:** core `rust/crates/kit-core/tests/line_diff_memory.rs`,
+`ops::diff::tests::proptest_search_matches_unbounded_reference`,
+`ops::diff::tests::proptest_script_stays_correct_at_any_limit`,
+`ops::diff::tests::proptest_merge_limit_only_adds_conflicts`,
+`ops::diff::tests::merge_refuses_a_blob_above_the_chunk_threshold`, and
+`ops::revert::tests::reverting_over_rewritten_short_lines_conflicts`.
+
 ## Requested transport identities are checked before effects
 
 **Always:** fetched packs and metadata match their requested keys. Sparse selections are

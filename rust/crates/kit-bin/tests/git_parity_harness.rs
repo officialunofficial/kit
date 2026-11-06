@@ -1465,6 +1465,28 @@ fn diff_unified_modify_matches_git() {
     assert_parity_diff("diff (modify)", &h.git(&["diff"]), &h.kit(&["diff"]));
 }
 
+/// Every line of the file changes, so the edit distance is past the search
+/// limit of the line diff. The output stays the same as git's.
+#[test]
+fn diff_unified_full_rewrite_past_the_search_limit_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let rewrite = |tag: &str| {
+        let mut out = Vec::new();
+        for i in 0..6000 {
+            out.extend_from_slice(format!("{tag}{i}\n").as_bytes());
+        }
+        out
+    };
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("f.txt", &rewrite("old"));
+    h.commit_both(&["f.txt"], "init");
+    h.write_both("f.txt", &rewrite("new"));
+    assert_parity_diff("diff (rewrite)", &h.git(&["diff"]), &h.kit(&["diff"]));
+}
+
 #[test]
 fn diff_unified_multi_hunk_matches_git() {
     if !git_available() {

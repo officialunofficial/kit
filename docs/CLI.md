@@ -145,7 +145,10 @@ Working-tree commands:
   Myers diff with git's change-compaction, so the output **byte-matches
   `git diff`** apart from the abbreviated `index` ids, which are BLAKE3
   prefixes rather than SHA-1 (git's optional indent heuristic is not
-  applied).
+  applied). The search for a minimal diff stops at 4096 line edits, which
+  keeps its memory near 64 MiB. Past that, `diff` and `show` keep the best
+  alignment that the search reached, and report the rest as replaced.
+  Such a patch still applies, but it can be larger than git's.
   `--name-only` instead lists one changed path per line; `--name-status`
   prefixes each with a status letter (`A`/`D`/`M`; `T` marks a kit mode
   change). `--stat` shows a diffstat: one `<name> | <count> <graph>` row
@@ -888,8 +891,9 @@ workflow. A path where both sides changed the **same regular file on
 disjoint lines** is auto-merged line-by-line (the union of both edits, no
 markers) &mdash; changes on different lines merge cleanly even when adjacent. A
 conflict is only raised when the two sides' changed regions **overlap**
-(modify the same or interleaving lines), or for binary files. When a 3-way
-merge cannot auto-resolve a path, the command:
+(modify the same or interleaving lines), for binary files, for a file above
+the 1 MiB chunk threshold, or when the line diff of a side stops at its limit
+of 4096 edits. When a 3-way merge cannot auto-resolve a path, the command:
 
 1. Applies the merge's **clean (non-conflicting) changes** to the index
    and worktree (so, for example, files the operation adds/removes/modifies away
