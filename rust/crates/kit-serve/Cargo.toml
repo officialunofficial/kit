@@ -20,9 +20,9 @@ workspace = true
 [dependencies]
 # Inter-workspace deps need an explicit `version` next to the path so
 # `cargo publish` accepts them.
-kit-core = { version = "=0.7.1", path = "../kit-core" }
-kit-rpc = { version = "=0.7.1", path = "../kit-rpc" }
-kit-transport-file = { version = "=0.7.1", path = "../kit-transport-file" }
+kit-core = { version = "=0.7.2", path = "../kit-core" }
+kit-rpc = { version = "=0.7.2", path = "../kit-rpc" }
+kit-transport-file = { version = "=0.7.2", path = "../kit-transport-file" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
