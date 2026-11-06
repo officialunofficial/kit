@@ -4,11 +4,8 @@
 //! a transfer runs: objects staged into the outgoing pack, bytes handed to
 //! the transport, and objects unpacked from a downloaded pack.
 //!
-//! It deliberately never reports git's fabricated
-//! `Enumerating/Counting/Compressing objects` or `Total N (delta D)`
-//! lines — kit's transport is one-object-per-pack and computes no
-//! cross-branch delta graph, so those numbers would be invented (see
-//! `docs/CLI.md`).
+//! It does not print git's `Enumerating/Counting/Compressing objects` or
+//! `Total N (delta D)` lines (see `docs/CLI.md`).
 //!
 //! ## The terminal observer
 //!

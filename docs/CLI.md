@@ -1104,10 +1104,9 @@ Remote / sync:
   `Writing objects: N objects, B bytes` while building/uploading the
   outgoing pack, `Unpacking objects: N objects` while applying a
   downloaded one. The counts are real (objects actually staged/unpacked,
-  bytes actually handed to the transport); kit never fabricates git's
-  `Enumerating/Counting/Compressing objects` or `Total N (delta D)` lines
-  &mdash; kit's transport is one-object-per-pack and computes no cross-branch
-  delta graph. Progress shows only when stderr is a tty; `-q`/`--quiet`
+  bytes actually handed to the transport); kit does not print git's
+  `Enumerating/Counting/Compressing objects` or `Total N (delta D)` lines.
+  Progress shows only when stderr is a tty; `-q`/`--quiet`
   forces it off, and `KIT_PROGRESS=always`/`never` overrides the
   tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
 - `kit serve [--idle-timeout-secs <secs>] [--max-session-secs <secs>] <path>` &mdash; internal SSH
@@ -1544,9 +1543,7 @@ These are documented behaviors, not bugs:
   `[main <hash>] <subject>` plus diffstat, `Fast-forward`).
 - **git's object-count / delta-compression progress lines**
   (`Enumerating/Counting/Compressing objects`, `Total N (delta D)`) are
-  **not** emitted: kit's transport is one-object-per-pack and computes
-  no cross-branch delta graph, so those specific numbers would be
-  fabricated. `clone`/`push`/`pull`/`fetch` do stream an honest
+  **not** emitted. `clone`/`push`/`pull`/`fetch` stream an honest
   `Writing objects: N objects, B bytes` / `Unpacking objects: N objects`
   progress line &mdash; real counts only; see "Transfer progress"
   above.

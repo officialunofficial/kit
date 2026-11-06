@@ -51,15 +51,15 @@ pub fn effective_uid() -> u32 {
 }
 
 /// Domain separator used when signing commit objects. The trailing
-/// `\x00` is load-bearing — see `docs/specs/SPEC-SIGNING.md` §2. Twelve bytes.
+/// `\x00` is load-bearing — see `docs/specs/SPEC-SIGNING.md` §2. Eleven bytes.
 pub const COMMIT_DOMAIN: &[u8] = b"kit.commit\x00";
 
-/// Domain separator used when signing remix objects. Eleven bytes
+/// Domain separator used when signing remix objects. Ten bytes
 /// including the trailing `\x00`.
 pub const REMIX_DOMAIN: &[u8] = b"kit.remix\x00";
 
 /// Domain separator used when signing annotated/signed tag objects.
-/// Nine bytes including the trailing `\x00`.
+/// Eight bytes including the trailing `\x00`.
 ///
 /// DELIBERATELY DISTINCT from [`COMMIT_DOMAIN`] / [`REMIX_DOMAIN`] so a
 /// tag signature can never be replayed as a commit/remix signature, or
