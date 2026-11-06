@@ -745,7 +745,7 @@ divergence between two builds of the same commit means a non-deterministic
 input has crept in (embedded timestamps, random seeds, absolute paths in debug
 info, unsorted directory reads) and must be fixed before the next tag.
 
-Binaries built on your local macOS are not expected to match GitHub's `macos-14`
+Binaries built on your local macOS are not expected to match GitHub's `macos-26`
 runner byte-for-byte unless your OS, SDK, and linker versions match. The Linux
 x86_64 build is the most reliable reproducibility target for third parties.
 

@@ -208,11 +208,11 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-26
             archive_ext: tar.gz
           # x86_64 macOS built on the arm64 host via rustup cross-compile.
           - target: x86_64-apple-darwin
-            runner: macos-14
+            runner: macos-26
             archive_ext: tar.gz
           # Pin both Linux runners to keep the linked glibc requirement stable.
           - target: x86_64-unknown-linux-gnu
