@@ -1,0 +1,7 @@
+{
+  "last_commonware_release": null,
+  "last_findings": "2026-11-06: main CI green on d1f1030; PR 38 clean and green; nothing to fix.",
+  "lessons": [
+    "The state branch did not exist on first run; create it from main."
+  ]
+}
