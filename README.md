@@ -42,7 +42,7 @@ repository signed at a semver tag.
 To pin a version, pass `--version`:
 
 ```sh
-curl -sSfL https://kit.storage/install.sh | sh -s -- --version v0.7.1
+curl -sSfL https://kit.storage/install.sh | sh -s -- --version v0.7.2
 ```
 
 To build from source, use Rust 1.99 or newer:

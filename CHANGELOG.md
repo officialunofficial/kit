@@ -7,6 +7,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-06
+
 ### Security
 
 - `PackReader::read` limits the bytes it decodes from a pack to 32,768 times
