@@ -394,7 +394,14 @@ History / commits:
   `-M`/`-C`) and with merges (the search runs per relevant parent,
   first-parent-wins, same as the positional default). This is a
   **documented divergence** &mdash; the default `--ignore-rev` fall-through stays
-  byte-identical to git; see "Divergences from Git" below. Blame is
+  byte-identical to git; see "Divergences from Git" below.
+  Blame rejects files above 100,000 lines, including file-history roots.
+  After trimming the common prefix, the LCS comparison table is capped at
+  64 MiB. Larger comparisons use the line diff's bounded Myers search. It
+  stays minimal up to 4096 edits; beyond that, unaligned lines keep the newer
+  commit as their origin. Reassembly, line buffers, and attribution memory
+  grow linearly with file size; the table cap is not a total memory cap.
+  The history walk is
   **merge-aware by default** (like `git blame`): at a merge, a line is
   credited to whichever parent's side actually wrote it, so a line merged in
   from a side branch is attributed to its authoring commit rather than the
@@ -1647,10 +1654,11 @@ which routes them to the user scope automatically.
 | `attest.signer` | `repo-key` / `keystore` / `external` | `repo-key` | User-scoped attestation signer |
 | `grant.webauthn_rp` | `<rp_id> <origin>...` (repeatable; `\|` separates entries in one value) | unset | User-scoped only. Pins the `WebAuthn` relying parties `kit grant`/`epoch`/`visibility` accept for `webauthn-p256` signatures; unset refuses them |
 
-Keystore backend names include `software`, `software-raw`, `macos-keychain`,
-`linux-secret-service`, `systemd-creds`, and `yubikey`
-when the target build enables the corresponding backend feature. Security-
-sensitive selector keys are ignored from repo-local config; set them in
+Implemented keystore backends are `software`, `software-raw`, `macos-keychain`,
+and `linux-secret-service`. The OS backends require the matching target and
+feature. `systemd-creds` and `yubikey` are reserved names that return
+`BackendUnavailable`. Security-sensitive selector keys are ignored from
+repo-local config; set them in
 `$XDG_CONFIG_HOME/kit/config` or with explicit command flags.
 
 ### HTTPS certificate trust

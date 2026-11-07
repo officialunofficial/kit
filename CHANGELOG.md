@@ -7,6 +7,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Blame caps its LCS comparison table at 64 MiB after trimming the common
+  prefix. Larger comparisons use the bounded line diff search. Reassembly,
+  line buffers, and attribution memory still grow with file size.
+- Mutation testing of changed lines uses paths relative to the Rust workspace.
+
 ## [0.7.2] - 2026-11-06
 
 ### Security

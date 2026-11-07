@@ -125,6 +125,29 @@ merge on a non-minimal script could be clean where a minimal script conflicts.
 `ops::diff::tests::merge_refuses_a_blob_above_the_chunk_threshold`, and
 `ops::revert::tests::reverting_over_rewritten_short_lines_conflicts`.
 
+## Blame bounds its line comparison table
+
+**Always:** blame checks loaded line counts, including file-history roots.
+After trimming the common prefix, the LCS table is capped at 64 MiB before
+allocation. Larger comparisons use the line diff's bounded Myers search,
+which stays minimal up to 4096 edits. Beyond that, unmatched lines keep the
+newer origin. Within the LCS budget, duplicate-line matching is unchanged.
+Both paths honor whitespace normalization. Reassembly, line buffers, and
+attribution memory grow linearly with file size; the table cap does not
+bound the whole call.
+
+**Because:** a per-side line limit alone allows a quadratic table of tens of
+GiB for short lines. A bounded fallback preserves ordinary small edits to
+large files without allocating that table.
+
+**If violated:** a rewritten file can exhaust comparison memory during blame,
+or a small edit to an ordinary file can fail instead of retaining its origins.
+
+**Enforced by:** `ops::blame::tests::blame_attributes_a_rewritten_file_above_the_table_budget`,
+`blame_keeps_unchanged_origins_after_a_first_line_edit`,
+`blame_checks_the_line_limit_at_a_root`, `blame_table_budget_accepts_the_boundary`,
+and the counting allocator in `rust/crates/kit-core/tests/line_diff_memory.rs`.
+
 ## Requested transport identities are checked before effects
 
 **Always:** fetched packs and metadata match their requested keys. Sparse selections are

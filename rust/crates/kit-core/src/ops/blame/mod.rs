@@ -10,9 +10,9 @@
 //! reproducing the older linear-history attribution. Reverse blame
 //! ([`blame_file_reverse`]) is first-parent only by definition.
 //!
-//! Line matching uses a simple LCS DP table. For typical source files
-//! (a few thousand lines) this is fine; binary blobs / generated code
-//! are not in scope.
+//! Line matching uses an LCS table capped at 64 MiB after trimming the
+//! common prefix. Larger comparisons use the bounded line diff search;
+//! unaligned lines keep the newer commit as their origin.
 //!
 //! Output formatting (used by goldens) is `<short>\t<line_num>\t<text>`,
 //! where `<short>` is the 12-char prefix of the commit hash. See
@@ -32,11 +32,14 @@ mod walk;
 
 use walk::{WalkCtx, attribute_commit, build_file_dag, topo_order};
 
-/// Hard cap on the per-side line count fed to the LCS matcher. The DP
-/// table is O(m*n) u32 entries: at 100 000 lines × 100 000 lines this
-/// is ≈ 40 GiB, so we refuse anything past this limit rather than let
-/// an attacker-supplied blob drive the decoder into swap/OOM.
+/// Hard cap on the line count of a loaded blame file, including a root.
+/// Reassembly and splitting precede the check and use memory linear in file size.
 pub const BLAME_MAX_LINES: usize = 100_000;
+
+/// The LCS table may hold at most 64 MiB. Check before allocating, independent
+/// of the memory available on the machine. Larger comparisons use the bounded
+/// line diff search. Prefix trimming keeps small trailing edits on the LCS path.
+const BLAME_MAX_TABLE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Per-line blame attribution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,9 +276,8 @@ pub enum BlameError {
     /// of `<end>`, so there is no forward chain to walk between them.
     #[error("reverse blame: '{start}' is not a first-parent ancestor of '{end}'")]
     ReverseRange { start: String, end: String },
-    /// Either side of the LCS input exceeded [`BLAME_MAX_LINES`].
-    /// Returned rather than allocating a DP table proportional to the
-    /// attacker-supplied line counts.
+    /// A loaded file or matcher input exceeded [`BLAME_MAX_LINES`].
+    /// Reassembly and splitting precede the check; attribution follows it.
     #[error("file has too many lines for blame ({lines} > {max})", max = BLAME_MAX_LINES)]
     FileTooLarge { lines: usize },
     #[error(transparent)]
@@ -310,7 +312,7 @@ pub fn blame_file(
 /// # Errors
 /// - [`BlameError::FileNotFound`] if the file does not exist at `head_hash`.
 /// - [`BlameError::NotACommit`] if `head_hash` is not a commit object.
-/// - [`BlameError::FileTooLarge`] if any blob fed to the matcher has more than
+/// - [`BlameError::FileTooLarge`] if any loaded blob has more than
 ///   [`BLAME_MAX_LINES`] lines.
 ///
 /// # Note
@@ -670,7 +672,9 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
         }
         _ => return Err(BlameError::NotABlob),
     };
-    Ok(split_lines(&data))
+    let lines = split_lines(&data);
+    check_line_count(lines.len())?;
+    Ok(lines)
 }
 
 /// Whitespace-insensitive comparison key for a line: every ASCII
@@ -722,8 +726,8 @@ fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
 /// the matched parent index, or `None` if it is new/changed.
 ///
 /// This is the **single, size-checked** matcher and the one place that
-/// owns *matching policy* — the [`BLAME_MAX_LINES`] fast-fail (which is
-/// also the only guard against the O(m·n) DP-table blow-up), `-w`
+/// owns *matching policy* — the [`BLAME_MAX_LINES`] fast-fail, the fixed
+/// table budget, `-w`
 /// whitespace normalization, and the position-stable LCS tie-breaking —
 /// so [`blame_file_with`] only has to replay the mapping. It is the
 /// extension point for future matching modes.
@@ -804,11 +808,8 @@ fn ignore_fallthrough(mapping: &[Option<usize>], old_len: usize) -> Vec<Option<u
     fall
 }
 
-/// Reject a side whose line count would drive the O(m*n) DP table past
-/// [`BLAME_MAX_LINES`]. Shared by the matcher (and reused for the size-cap
-/// regression tests). Checked against the untrimmed lengths, which only
-/// ever bounds [`match_lines_core`]'s trimmed core tighter — see
-/// [`match_lines`].
+/// Check the untrimmed line counts. Loading and splitting use memory linear
+/// in file size; this check precedes attribution and comparison allocations.
 fn check_line_count(lines: usize) -> BlameOutcome<()> {
     if lines > BLAME_MAX_LINES {
         return Err(BlameError::FileTooLarge { lines });
@@ -850,11 +851,9 @@ fn check_line_count(lines: usize) -> BlameOutcome<()> {
 /// test (differential against [`match_lines_core`] run unelided on the
 /// same input).
 ///
-/// NOTE: [`match_lines_core`] allocates an O(m*n) DP table over the
-/// trimmed remainder with no size guard, so it is kept private; all
-/// callers go through the size-checked [`match_lines_with_options`]
-/// entry point.
-#[must_use]
+/// The trimmed table must fit the fixed byte budget. Larger comparisons use
+/// the bounded Myers search of the line diff, which can leave more lines
+/// unmatched above its edit limit. Such lines keep the newer origin.
 fn match_lines<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<usize>> {
     let m = old_lines.len();
     let n = new_lines.len();
@@ -875,18 +874,25 @@ fn match_lines<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<u
 
 /// The O(m*n) DP core behind [`match_lines`]: plain LCS line matching
 /// with no prefix/suffix elision, over whatever slice it's given.
-#[must_use]
 fn match_lines_core<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<usize>> {
     let m = old_lines.len();
     let n = new_lines.len();
-    // dp is (m+1) x (n+1).
-    let mut dp = vec![vec![0u32; n + 1]; m + 1];
+    // Charge the whole table before allocation. A flat table has no per-row
+    // allocation overhead, so the byte limit covers all of its storage.
+    let Some(cells) = (m + 1)
+        .checked_mul(n + 1)
+        .filter(|&cells| cells <= BLAME_MAX_TABLE_BYTES / size_of::<u32>())
+    else {
+        return super::diff::matching_line_indices(old_lines, new_lines);
+    };
+    let cols = n + 1;
+    let mut dp = vec![0u32; cells];
     for i in 1..=m {
         for j in 1..=n {
             if old_lines[i - 1].as_ref() == new_lines[j - 1].as_ref() {
-                dp[i][j] = dp[i - 1][j - 1] + 1;
+                dp[i * cols + j] = dp[(i - 1) * cols + j - 1] + 1;
             } else {
-                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+                dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + j - 1]);
             }
         }
     }
@@ -895,7 +901,7 @@ fn match_lines_core<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Opt
     let mut j = n;
     // Reconstruct via the dp relations rather than a greedy diagonal-first
     // rule. When `new[j-1]` isn't required for an optimal LCS
-    // (`dp[i][j] == dp[i][j-1]`), leave it unmatched so that an *earlier*
+    // (`dp[i * cols + j] == dp[i * cols + j - 1]`), leave it unmatched so an earlier
     // equal line takes the match instead; likewise drop an unneeded
     // `old[i-1]`. Only when neither can be dropped is it a true diagonal
     // match. This keeps duplicate lines — and, under `-w`, lines that are
@@ -903,9 +909,9 @@ fn match_lines_core<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Opt
     // its original commit while a genuinely new duplicate is attributed to
     // the newer one (matching git).
     while i > 0 && j > 0 {
-        if dp[i][j] == dp[i][j - 1] {
+        if dp[i * cols + j] == dp[i * cols + j - 1] {
             j -= 1;
-        } else if dp[i][j] == dp[i - 1][j] {
+        } else if dp[i * cols + j] == dp[(i - 1) * cols + j] {
             i -= 1;
         } else {
             mapping[j - 1] = Some(i - 1);
@@ -3746,6 +3752,81 @@ mod tests {
             r.lines[0].commit_hash, p1,
             "the boundary copy tie prefers the first parent (git parity) — unlike the interior tie"
         );
+    }
+
+    #[test]
+    fn blame_attributes_a_rewritten_file_above_the_table_budget() {
+        let (_d, store) = fresh_store();
+        let old = b"a\n".repeat(BLAME_MAX_LINES);
+        let new = b"b\n".repeat(BLAME_MAX_LINES);
+        let parent = put_file_commit(&store, "f", &old, vec![], 1, 100);
+        let head = put_file_commit(&store, "f", &new, vec![parent], 1, 200);
+        for ignore_whitespace in [false, true] {
+            let opts = BlameOptions {
+                ignore_whitespace,
+                ..BlameOptions::default()
+            };
+            let result = blame_file_with(&store, head, "f", &opts).unwrap();
+            assert_eq!(result.lines.len(), BLAME_MAX_LINES);
+            assert!(result.lines.iter().all(|line| line.commit_hash == head));
+        }
+    }
+
+    #[test]
+    fn blame_keeps_unchanged_origins_after_a_first_line_edit() {
+        let (_d, store) = fresh_store();
+        let mut old = String::new();
+        for i in 0..4096 {
+            writeln!(old, "line {i}").unwrap();
+        }
+        let new = old.replacen("line 0\n", "edited\n", 1);
+        let parent = put_file_commit(&store, "f", old.as_bytes(), vec![], 1, 100);
+        let head = put_file_commit(&store, "f", new.as_bytes(), vec![parent], 1, 200);
+        let result = blame_file(&store, head, "f").unwrap();
+        assert_eq!(result.lines.len(), 4096);
+        assert_eq!(result.lines[0].commit_hash, head);
+        for (i, line) in result.lines.iter().enumerate().skip(1) {
+            assert_eq!(line.commit_hash, parent);
+            assert_eq!(line.orig_line_num, i + 1);
+            assert_eq!(line.text, format!("line {i}").as_bytes());
+        }
+    }
+
+    #[test]
+    fn blame_checks_the_line_limit_at_a_root() {
+        let (_d, store) = fresh_store();
+        let lines = BLAME_MAX_LINES + 1;
+        let root = put_file_commit(&store, "f", &b"a\n".repeat(lines), vec![], 1, 100);
+        assert!(matches!(blame_file(&store, root, "f"),
+            Err(BlameError::FileTooLarge { lines: count }) if count == lines));
+    }
+
+    #[test]
+    fn blame_table_budget_applies_after_prefix_trimming() {
+        let mut old = vec![b"same".to_vec(); BLAME_MAX_LINES];
+        let mut new = old.clone();
+        old[BLAME_MAX_LINES - 1] = b"old".to_vec();
+        new[BLAME_MAX_LINES - 1] = b"new".to_vec();
+        let mapping = match_lines_with_options(&old, &new, &BlameOptions::default()).unwrap();
+        assert_eq!(mapping.len(), BLAME_MAX_LINES);
+        assert!(
+            mapping[..BLAME_MAX_LINES - 1]
+                .iter()
+                .enumerate()
+                .all(|(i, &line)| line == Some(i))
+        );
+        assert_eq!(mapping[BLAME_MAX_LINES - 1], None);
+    }
+
+    #[test]
+    fn blame_table_budget_accepts_the_boundary() {
+        // 4096 squared u32 cells fill exactly 64 MiB.
+        let old = vec![b"old"; 4095];
+        let new = vec![b"new"; 4095];
+        assert_eq!(match_lines(&old, &new), vec![None; 4095]);
+        let old = vec![b"old"; 4096];
+        assert_eq!(match_lines(&old, &new), vec![None; 4095]);
+        assert_eq!(match_lines(&new, &old), vec![None; 4096]);
     }
 
     #[test]

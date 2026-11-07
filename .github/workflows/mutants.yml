@@ -69,7 +69,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          git diff "${BASE_SHA}...${HEAD_SHA}" \
+          git diff --relative=rust "${BASE_SHA}...${HEAD_SHA}" \
             -- rust/crates/kit-core rust/crates/kit-attest rust/crates/kit-keystore \
             > "${RUNNER_TEMP}/mutants.diff"
           lines=$(wc -l < "${RUNNER_TEMP}/mutants.diff")
@@ -80,11 +80,12 @@ jobs:
         if: steps.diff.outputs.has_diff == 'true'
         working-directory: rust
         run: |
-          cargo mutants --in-diff "${RUNNER_TEMP}/mutants.diff" \
+          # Tests include docs outside the Rust workspace. Keep this checkout.
+          cargo mutants --in-place --in-diff "${RUNNER_TEMP}/mutants.diff" \
             -p kit-core -p kit-attest -p kit-keystore \
             --test-tool nextest \
             --timeout-multiplier 3 \
-            -- --locked --all-features
+            --all-features --cargo-arg=--locked
 
       - name: Upload mutants report on failure
         if: failure()
@@ -127,10 +128,10 @@ jobs:
         env:
           CRATE: ${{ matrix.crate }}
         run: |
-          cargo mutants -p "${CRATE}" \
+          cargo mutants --in-place -p "${CRATE}" \
             --test-tool nextest \
             --timeout-multiplier 3 \
-            -- --locked --all-features
+            --all-features --cargo-arg=--locked
 
       - name: Upload mutants report
         if: always()

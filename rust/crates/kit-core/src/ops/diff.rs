@@ -1038,6 +1038,37 @@ fn edit_script(
     }
 }
 
+/// Match whole lines with the fixed-budget Myers search. Above its edit
+/// limit, unaligned lines remain unmatched rather than inheriting an origin.
+/// Blame uses this when its LCS table would exceed its byte budget.
+pub(super) fn matching_line_indices<T: AsRef<[u8]>>(old: &[T], new: &[T]) -> Vec<Option<usize>> {
+    fn to_lines<T: AsRef<[u8]>>(lines: &[T]) -> Vec<DiffLine<'_>> {
+        lines
+            .iter()
+            .map(|line| DiffLine {
+                text: line.as_ref(),
+                has_newline: false,
+            })
+            .collect()
+    }
+    let changes = myers_changed(
+        &to_lines(old),
+        &to_lines(new),
+        WhitespaceMode::Exact,
+        MAX_EDIT_DISTANCE,
+    );
+    let mut kept_old = changes
+        .old
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, changed)| (!changed).then_some(i));
+    changes
+        .new
+        .into_iter()
+        .map(|changed| if changed { None } else { kept_old.next() })
+        .collect()
+}
+
 /// The per-line changed flags of one diff.
 struct LineChanges {
     old: Vec<bool>,
@@ -3155,5 +3186,28 @@ mod tests {
             unified_hunks_opts(&old, &new, DEFAULT_CONTEXT_LINES, WhitespaceMode::Exact).unwrap();
         assert_eq!(DEFAULT_CONTEXT_LINES, 3);
         assert_eq!(context_line_count(&hunks), 6);
+    }
+    #[test]
+    fn backtrack_tie_keeps_the_earlier_duplicate() {
+        // Replacing the first line leaves either old duplicate as an equally
+        // short alignment. The tie keeps old[0] and deletes old[1].
+        let old = split_lines(b"a\na\n");
+        let new = split_lines(b"b\na\n");
+        let changes = myers_changed(&old, &new, WhitespaceMode::Exact, 2);
+        assert!(changes.minimal);
+        assert_eq!(changes.old, vec![false, true]);
+        assert_eq!(changes.new, vec![true, false]);
+    }
+
+    #[test]
+    fn stopped_search_tie_keeps_the_common_tail() {
+        // One insertion reaches the first new "a", but keeps no more lines
+        // than the origin plus the common tail. The origin wins that tie.
+        let old = split_lines(b"a\n");
+        let new = split_lines(b"b\na\na\na\n");
+        let changes = myers_changed(&old, &new, WhitespaceMode::Exact, 1);
+        assert!(!changes.minimal);
+        assert_eq!(changes.old, vec![false]);
+        assert_eq!(changes.new, vec![true, true, true, false]);
     }
 }
