@@ -7,6 +7,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The file transport and `kit serve` lock each ref instead of the whole root.
+  A ref write holds the repo lock shared and the lock of the one of 256
+  stripes that the ref maps to, so writes to refs in different stripes no
+  longer wait for one another (SPEC-REFS §5.1.1). On one ext4 disk, 32 writers
+  to 32 refs went from about 1,100 to about 2,500 writes per second. Writes to
+  one ref still serialize, and `FileTransport::with_ref_lock` still excludes
+  every ref write. `FileTransport::with_ref_lock_for` is the single-ref
+  entry point.
+
 ### Fixed
 
 - Blame caps its LCS comparison table at 64 MiB after trimming the common

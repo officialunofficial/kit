@@ -291,8 +291,8 @@ while it holds it (no other server is up) sweeps the temp files crashed
 uploads left in `packs/` (`.<hex>.tmp.<pid>.<seq>`, at least an hour
 old), then takes it shared as above.
 
-**Because:** `kit-transport-file`'s only lock (`<root>/.kit/refs/.lock`)
-serializes file-transport instances against *each other*, not against
+**Because:** `kit-transport-file`'s locks (`<root>/.kit/refs/.lock` and
+`<root>/.kit/refs/refs-<hh>.lock`) serialize file-transport instances against *each other*, not against
 local worktree mutation or `gc` (SPEC-CONCURRENCY §3.1). Running `kit
 gc` or a worktree-mutating command directly against a root a live `kit
 serve` is also operating on is unsupported and uncoordinated; without
