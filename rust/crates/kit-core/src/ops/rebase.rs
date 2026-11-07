@@ -14,9 +14,10 @@
 //!
 //! [`collect_commits_to_replay`] walks the first-parent chain from
 //! the rebase head until it hits `onto` or any ancestor of `onto`.
-//! It returns commits in oldest-first order. The ancestor walk is
-//! inlined here as a private helper (DFS, capped at `10_000` commits)
-//! to keep the module self-contained.
+//! It returns commits in oldest-first order. It reads every commit it
+//! walks and every ancestor of `onto`, and fails when one cannot be read:
+//! a walk that ended there would replay part of the branch, or commits
+//! the base already holds.
 
 use std::collections::HashSet;
 use std::fs;
@@ -72,6 +73,18 @@ pub enum RebaseError {
     /// Replaying only the newest of them would drop the rest.
     #[error("the branch has more than {0} commits to replay; nothing was rebased")]
     TooManyCommits(usize),
+    /// A commit to replay cannot be read. Replaying the commits above it
+    /// would drop it and every commit below it.
+    #[error("commit {} cannot be read: {source}; nothing was rebased", hash::to_hex(.hash))]
+    UnreadableCommit {
+        /// The commit that cannot be read.
+        hash: Hash,
+        /// Why the read failed.
+        source: crate::store::StoreError,
+    },
+    /// A parent on the branch names an object that is not a commit.
+    #[error("object {} on the branch is not a commit; nothing was rebased", hash::to_hex(.0))]
+    NotACommit(Hash),
 }
 
 /// Result alias.
@@ -241,11 +254,14 @@ pub fn cleanup_rebase(layout: &RepoLayout) -> RebaseResult<()> {
 /// `onto_hash` or any ancestor of it. Returns commits in oldest-first
 /// order (ready for replay). More than `MAX_REPLAY_DEPTH` commits to replay
 /// is an error, and so is a base with more ancestors than one walk visits:
-/// a partial ancestor set would replay commits the base already holds.
+/// a partial ancestor set would replay commits the base already holds. So
+/// is a commit that cannot be read, on either side.
 ///
 /// # Errors
-/// - [`RebaseError::Store`] / [`RebaseError::Object`] for store failures,
-///   and [`RebaseError::Store`] when the base has too many ancestors.
+/// - [`RebaseError::Store`] when an ancestor of the base cannot be read
+///   or the base has too many ancestors.
+/// - [`RebaseError::UnreadableCommit`] / [`RebaseError::NotACommit`] when a
+///   commit to replay cannot be read or is another kind of object.
 /// - [`RebaseError::TooManyCommits`] when the branch is too long to replay.
 pub fn collect_commits_to_replay(
     store: &ObjectStore,
@@ -280,6 +296,7 @@ fn collect_commits_with_caps(
         &mut onto_ancestors,
         max_ancestors,
         ONTO_ANCESTOR_LIMIT,
+        crate::ops::graph::Missing::Fails,
     )?;
 
     let mut commits: Vec<Hash> = Vec::new();
@@ -291,12 +308,21 @@ fn collect_commits_with_caps(
         if commits.len() >= max_replay {
             return Err(RebaseError::TooManyCommits(max_replay));
         }
-        commits.push(current);
-
-        let Ok(obj) = store.read_object(&current) else {
-            break;
+        // Every commit of the range must be read: ending the walk at one
+        // that cannot be read would drop it and every commit below it.
+        let commit = match store.read_object(&current) {
+            Ok(Object::Commit(commit)) => commit,
+            Ok(_) => return Err(RebaseError::NotACommit(current)),
+            Err(source) => {
+                return Err(RebaseError::UnreadableCommit {
+                    hash: current,
+                    source,
+                });
+            }
         };
-        let Object::Commit(commit) = obj else { break };
+        commits.push(current);
+        // A root commit ends the range: the branch shares no history with
+        // the base.
         let Some(&parent) = commit.parents.first() else {
             break;
         };
@@ -488,6 +514,69 @@ mod tests {
                 ONTO_ANCESTOR_LIMIT
             ))
         ));
+    }
+
+    #[test]
+    fn an_unreadable_commit_fails_the_walk_and_never_returns_a_part() {
+        let (dir, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let tree = put_tree(&store, "f.txt", blob);
+        // base - o1 (onto), and base - h1 - h2 - h3 (head).
+        let base = put_commit(&store, tree, vec![], 1);
+        let o1 = put_commit(&store, tree, vec![base], 2);
+        let h1 = put_commit(&store, tree, vec![base], 3);
+        let h2 = put_commit(&store, tree, vec![h1], 4);
+        let h3 = put_commit(&store, tree, vec![h2], 5);
+        assert_eq!(
+            collect_commits_to_replay(&store, h3, o1).unwrap(),
+            [h1, h2, h3]
+        );
+
+        // A missing commit in the middle of the branch.
+        let missing = hash::hash(b"a commit that is not in the store");
+        let above_missing = put_commit(&store, tree, vec![missing], 6);
+        let err = collect_commits_to_replay(&store, above_missing, o1).unwrap_err();
+        assert!(
+            matches!(err, RebaseError::UnreadableCommit { hash, .. } if hash == missing),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("nothing was rebased"), "{err}");
+
+        // A parent that is not a commit.
+        let above_tree = put_commit(&store, tree, vec![tree], 7);
+        let err = collect_commits_to_replay(&store, above_tree, o1).unwrap_err();
+        assert!(
+            matches!(err, RebaseError::NotACommit(hash) if hash == tree),
+            "{err:?}"
+        );
+
+        // A missing commit in the history of the base: its ancestor set would
+        // lack `base`, and the walk would replay `base` again.
+        let onto_above_missing = put_commit(&store, tree, vec![missing], 8);
+        let err = collect_commits_to_replay(&store, h1, onto_above_missing).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RebaseError::Store(crate::store::StoreError::ObjectNotFound(_))
+            ),
+            "{err:?}"
+        );
+
+        // A corrupt commit in the middle of the branch: flip one byte of h2.
+        let hex = hash::to_hex(&h2);
+        let path = RepoLayout::single(dir.path())
+            .objects_dir()
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        let mut bytes = fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        fs::write(&path, &bytes).unwrap();
+        let err = collect_commits_to_replay(&store, h3, o1).unwrap_err();
+        assert!(
+            matches!(err, RebaseError::UnreadableCommit { hash, .. } if hash == h2),
+            "{err:?}"
+        );
     }
 
     #[test]

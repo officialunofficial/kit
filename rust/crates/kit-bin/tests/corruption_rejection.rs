@@ -227,3 +227,68 @@ fn tampered_tag_signature_is_rejected_by_verify() {
     let hex = to_hex(&new);
     assert_rejected(&repo, &["verify", &hex], "tampered tag signature");
 }
+
+// ---------------------------------------------------------------------------
+// Rebase over an unreadable commit
+// ---------------------------------------------------------------------------
+
+/// main = base - O1 - O2; feature = base - A - B - C, checked out. Returns the
+/// hex ids of O1 and B.
+fn rebase_fixture(repo: &Repo) -> (String, String) {
+    repo.commit_file("base.txt", b"base\n", "base");
+    repo.ok(&["branch", "feature"]);
+    repo.commit_file("o1.txt", b"o1\n", "O1");
+    let o1 = String::from_utf8(repo.ok(&["rev-parse", "HEAD"]).stdout).unwrap();
+    repo.commit_file("o2.txt", b"o2\n", "O2");
+    repo.ok(&["checkout", "feature"]);
+    repo.commit_file("a.txt", b"a\n", "A");
+    repo.commit_file("b.txt", b"b\n", "B");
+    let b = String::from_utf8(repo.ok(&["rev-parse", "HEAD"]).stdout).unwrap();
+    repo.commit_file("c.txt", b"c\n", "C");
+    (o1.trim().to_owned(), b.trim().to_owned())
+}
+
+/// `kit rebase main` fails and leaves the branch, `HEAD`, the files and the
+/// rebase state as they were.
+fn assert_rebase_changes_nothing(repo: &Repo, case: &str) {
+    let layout = RepoLayout::single(repo.path());
+    let tip = refs::read_ref(&layout, "feature").unwrap();
+    assert_rejected(repo, &["rebase", "main"], case);
+    assert_eq!(
+        fs::read_to_string(repo.kit_dir().join("HEAD")).unwrap(),
+        "ref: refs/heads/feature\n",
+        "{case}: HEAD moved"
+    );
+    assert_eq!(refs::read_ref(&layout, "feature").unwrap(), tip, "{case}");
+    assert!(
+        common::operation_residue(&repo.kit_dir(), "rebase").is_none(),
+        "{case}: rebase state left behind"
+    );
+    for (file, present) in [("a.txt", true), ("c.txt", true), ("o2.txt", false)] {
+        assert_eq!(repo.path().join(file).exists(), present, "{case}: {file}");
+    }
+}
+
+#[test]
+fn rebase_over_an_unreadable_commit_fails_and_changes_nothing() {
+    let repo = Repo::new();
+    let (_, b) = rebase_fixture(&repo);
+    fs::remove_file(object_file(&repo, &b)).unwrap();
+    assert_rebase_changes_nothing(&repo, "missing commit in the branch");
+
+    let repo = Repo::new();
+    let (_, b) = rebase_fixture(&repo);
+    let path = object_file(&repo, &b);
+    let mut bytes = fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(&path, &bytes).unwrap();
+    assert_rebase_changes_nothing(&repo, "corrupt commit in the branch");
+
+    // Without O1 the ancestors of main would lack `base`, and the rebase
+    // would replay `base` again.
+    let repo = Repo::new();
+    let (o1, _) = rebase_fixture(&repo);
+    fs::remove_file(object_file(&repo, &o1)).unwrap();
+    assert_rebase_changes_nothing(&repo, "missing commit in the base");
+}

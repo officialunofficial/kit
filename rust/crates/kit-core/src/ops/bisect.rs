@@ -270,6 +270,7 @@ fn enumerate_range_with_cap(
             &mut good_set,
             max_ancestors,
             GOOD_ANCESTOR_LIMIT,
+            crate::ops::graph::Missing::EndsPath,
         )?;
     }
 

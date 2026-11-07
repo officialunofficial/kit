@@ -847,7 +847,9 @@ Branches / refs:
   Restore steps refuse to overwrite staged changes, dirty tracked files,
   or untracked path collisions. On conflict the rebase pauses with
   resumable state; `--skip` drops the current commit. See "Resolving
-  conflicts" below.
+  conflicts" below. A commit to replay that is missing, corrupt or not a
+  commit, or a missing ancestor of the base, fails the rebase before any
+  change.
   `-i`/`--interactive` opens the todo list in `$EDITOR` before any
   mutation. Each line is `<command> <commit> <subject>`, oldest-first
   (top is applied first). Reorder lines to reorder commits; delete a line

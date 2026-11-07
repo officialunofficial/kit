@@ -30,6 +30,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   They used to stop there silently: a rebase could replay only the newest
   commits of a long branch, or replay commits its base already holds, and
   bisect could offer commits that are known good.
+- `kit rebase` fails before it changes anything when a commit to replay
+  is missing, corrupt or not a commit, or an ancestor of the base is
+  missing. It used to end the walk there. It then dropped a missing commit of the branch
+  and every commit below it, and after a missing commit in the base's
+  history it replayed commits the base already holds.
 - Blame caps its LCS comparison table at 64 MiB after trimming the common
   prefix. Larger comparisons use the bounded line diff search. Reassembly,
   line buffers, and attribution memory still grow with file size.
