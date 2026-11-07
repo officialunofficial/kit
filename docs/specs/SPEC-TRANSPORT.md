@@ -394,8 +394,9 @@ Deployments with many concurrent writers use the Connect service.
 finds, or fails. A `GET` that fails, after the retries of §6.5, with an error
 status fails the whole listing with that error. Only a `404` skips the ref,
 because the ref was deleted after the page was listed; the result is then an
-older listing (SPEC-TRANSPORT-CONNECT §7.9 allows one). A body that is not a
-canonical ref wire is skipped, as the file transport skips such a file.
+older listing (SPEC-TRANSPORT-CONNECT §7.9 allows one). A `200` whose body is
+not a canonical 65-byte ref wire (SPEC-REFS §1) fails the whole listing, as it
+fails `read_ref`.
 
 ### 6.1 Object layout
 

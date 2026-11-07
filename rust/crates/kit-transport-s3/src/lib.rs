@@ -957,10 +957,11 @@ impl Transport for S3Transport {
             // inherent O(N) round-trip cost of the object-per-ref layout
             // (the hash lives only in the object body, so ListObjectsV2
             // cannot return it). A failed read fails the listing, whether
-            // a transport error (post-retry) or an error status: silently
-            // dropping a ref would reintroduce the short-listing bug that
-            // the pagination above exists to prevent. Only a 404 skips the
-            // ref: it was deleted after the listing, as in an older one.
+            // a transport error (post-retry), an error status or a
+            // malformed body: silently dropping a ref would reintroduce
+            // the short-listing bug that the pagination above exists to
+            // prevent. Only a 404 skips the ref: it was deleted after the
+            // listing, as in an older one.
             let ref_resp =
                 self.http_request(&Method::GET, repo_key, "", None, &[], Some(REF_BODY_LIMIT))?;
             match ref_resp.status {
@@ -969,9 +970,9 @@ impl Transport for S3Transport {
                 403 | 401 => return Err(TransportError::AccessDenied),
                 s => return Err(TransportError::ServerError { status: s }),
             }
-            let Ok(h) = parse_ref_body(&ref_resp.body) else {
-                continue;
-            };
+            // A 200 whose body is not a canonical ref wire is a corrupt
+            // or foreign object; it fails the listing as `read_ref` fails.
+            let h = parse_ref_body(&ref_resp.body)?;
             // Strip the (trimmed) prefix and the separating '/' so the
             // returned name is suffix-only per the Transport contract.
             // S3's `ListObjectsV2` `prefix` query is a literal string
