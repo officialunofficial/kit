@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! multiwriter <row> --dir <scratch> [--target file|serve] [--runs R]
-//!             [--sizes a,b,..] [--steps S]
+//!             [--sizes a,b,..] [--steps S] [--load W]
 //! ```
 //!
 //! `<row>` is `ref-write`, `ref-commit`, `push-distinct`, `push-shared`,
@@ -10,6 +10,8 @@
 //! it afterwards. The `serve` target reaches `kit serve` through
 //! `kit+ssh://`, so it needs `KIT_SSH_PROGRAM` pointing at a wrapper that runs
 //! `kit serve <path>` locally (`scripts/bench-multiwriter.sh` writes one).
+//! `--load W` runs the `fetch-noop` fetches while W threads write tags on the
+//! same root.
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -34,6 +36,7 @@ struct Args {
     runs: usize,
     sizes: Option<Vec<usize>>,
     steps: Option<usize>,
+    load: usize,
 }
 
 const MAX_RUNS: usize = 100;
@@ -48,6 +51,7 @@ fn parse_args() -> Result<Args, String> {
         runs: 5,
         sizes: None,
         steps: None,
+        load: 0,
     };
     while let Some(flag) = it.next() {
         let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
@@ -62,6 +66,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--runs" => args.runs = number(&value)?.clamp(1, MAX_RUNS),
             "--steps" => args.steps = Some(number(&value)?),
+            "--load" => args.load = number(&value)?,
             "--sizes" => {
                 let sizes = value
                     .split(',')
@@ -201,10 +206,18 @@ fn run(args: &Args) -> Result<(), String> {
                 "fetch-noop" => {
                     let reader = multiwriter::fetch_noop_setup(connect, &dirs.local, n)?;
                     let fetches = args.steps.unwrap_or(5);
-                    for _ in 0..fetches {
-                        let run = multiwriter::fetch_noop(connect, &reader)?;
+                    let runs = if args.load == 0 {
+                        (0..fetches)
+                            .map(|_| multiwriter::fetch_noop(connect, &reader))
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        multiwriter::fetch_noop_under_load(connect, &reader, args.load, fetches)?
+                    };
+                    for run in runs {
                         a.push(ms(run.elapsed));
                         b.push(run.requests.total() as f64);
+                        c.push(ms(run.requests.cursor_time));
+                        d.push(run.requests.cursor_offered as f64);
                     }
                 }
                 _ => {
@@ -265,7 +278,12 @@ fn run(args: &Args) -> Result<(), String> {
                 args.target,
                 n,
                 args.runs,
-                &[("ms", &a), ("requests", &b)],
+                &[
+                    ("ms", &a),
+                    ("requests", &b),
+                    ("cursor_ms", &c),
+                    ("cursor_offered", &d),
+                ],
             ),
             _ => report(
                 row,

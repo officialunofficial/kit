@@ -62,6 +62,12 @@ fn every_row_runs_at_tiny_sizes() {
     } else {
         assert!(run.requests.list >= 1);
     }
+    let runs = multiwriter::fetch_noop_under_load(&connect, &reader, 2, 2).unwrap();
+    assert_eq!(runs.len(), 2);
+    for run in runs {
+        assert_eq!(run.packs_downloaded, 0);
+        assert_eq!(run.requests.cursor, 1);
+    }
 
     let base = case("fetch-grow");
     let run = multiwriter::fetch_grow(&file(base.join("remote")), &base.join("local"), 3).unwrap();

@@ -89,7 +89,7 @@ Each value is the mean and the sample standard deviation over the runs.
 |---|---|
 | `KIT_BENCH_TARGETS` | `file`, `serve`, or both (the default). |
 | `KIT_BENCH_RUNS` | Runs per size. The default is 5. |
-| `KIT_BENCH_ARGS` | Extra arguments for every row: `--sizes 1,8` overrides the sizes, `--steps N` the operations per writer. |
+| `KIT_BENCH_ARGS` | Extra arguments for every row: `--sizes 1,8` overrides the sizes, `--steps N` the operations per writer, `--load W` the writers during `fetch-noop`. |
 
 | Row | Workload | Reports |
 |---|---|---|
@@ -97,7 +97,7 @@ Each value is the mean and the sample standard deviation over the runs.
 | `ref-commit` | N threads, N in 1, 2, 4, 8, 16, 32. Each makes 150 multi-ref commits of its own branch head, packmap and tag: `Missing`, then `Match` of the previous value. No two threads name a common ref, so no commit may conflict. The `kit serve` target offers no multi-ref commit. | Ref writes and commits per second. |
 | `push-distinct` | N pushers, N in 1, 8, 64, 512. Each pushes 4 commits to its own branch. | Pushes per second, p50 and p99 latency. |
 | `push-shared` | N pushers, N in 1, 8, 32, each landing 4 commits on one branch. A rejected push fetches, commits again on the new tip and retries. | Pushes per second, latency including retries, rejected attempts per landed push, and for the slowest 1% of landed pushes: attempts, time in rejected attempts, time in fetches after them, and the rest (local commits and the attempt that landed). Pushers retry at once, without a wait. Each landed push can cost up to N - 1 rejected attempts, so large N takes a long time. |
-| `fetch-noop` | M branches, M in 10, 100, 1,000, 10,000, and a clone that already holds them. Setup waits 3 s after its last write, because the file transport offers no cursor while a ref directory was modified in the last 2 s. Five fetches per run. | Fetch time and remote requests. |
+| `fetch-noop` | M branches, M in 10, 100, 1,000, 10,000, and a clone that already holds them. Setup waits 3 s after its last write, because the file transport offers no cursor while a ref directory was modified in the last 2 s. Five fetches per run. With `--load W`, W threads write their own tags on the same root during the fetches. | Fetch time, remote requests, time in repository cursor reads, and cursor reads that returned a cursor. |
 | `fetch-grow` | One push, a clone, then K pushes to the branch, K in 10, 100, 1,000. A fetch into the clone, and a fetch into an empty repository. | Time, packs downloaded and remote requests of each fetch, pack list nodes on the chain, and the mean time of the last 10 pushes. |
 
 Every `ref-write` writer opens its own transport, as a separate process

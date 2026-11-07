@@ -642,6 +642,10 @@ pub struct Requests {
     pub node: usize,
     /// Pack downloads.
     pub pack: usize,
+    /// Repository cursor reads that returned a cursor.
+    pub cursor_offered: usize,
+    /// Time spent in repository cursor reads.
+    pub cursor_time: Duration,
 }
 
 impl Requests {
@@ -697,8 +701,16 @@ impl RemoteSource for Counting<'_> {
     }
 
     fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, SourceError> {
-        self.bump(|c| c.cursor += 1);
-        self.inner.repo_cursor()
+        let t0 = Instant::now();
+        let cursor = self.inner.repo_cursor();
+        let spent = t0.elapsed();
+        let offered = matches!(cursor, Ok(Some(_)));
+        self.bump(|c| {
+            c.cursor += 1;
+            c.cursor_offered += usize::from(offered);
+            c.cursor_time += spent;
+        });
+        cursor
     }
 
     fn supports_push(&self) -> bool {
@@ -790,6 +802,59 @@ pub fn fetch_noop(connect: &Connect, reader: &Path) -> Result<FetchRun, String> 
         elapsed,
         requests: source.take(),
         packs_downloaded: 0,
+    })
+}
+
+/// `fetch-noop` while `writers` threads write their own tags on the same
+/// root without pause: `fetches` fetches of an unchanged set of branches,
+/// each of which must download nothing. After the fetches each tag must
+/// hold its writer's last value.
+pub fn fetch_noop_under_load(
+    connect: &Connect,
+    reader: &Path,
+    writers: usize,
+    fetches: usize,
+) -> Result<Vec<FetchRun>, String> {
+    check_bounds(writers, fetches)?;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let barrier = Barrier::new(writers + 1);
+    std::thread::scope(|s| -> Result<Vec<FetchRun>, String> {
+        let handles: Vec<_> = (0..writers)
+            .map(|w| {
+                let (barrier, stop) = (&barrier, &stop);
+                s.spawn(move || -> Result<(), String> {
+                    let tx = connect();
+                    barrier.wait();
+                    let tx = tx?;
+                    let name = format!("refs/tags/load-w{w}");
+                    let mut prev = None;
+                    let mut step = 0;
+                    while !stop.load(Ordering::Relaxed) && step < MAX_STEPS {
+                        let value = ref_value(w, step);
+                        let condition =
+                            prev.map_or(RefWriteCondition::Missing, RefWriteCondition::Match);
+                        tx.update_ref(&name, condition, &value)
+                            .map_err(|e| format!("{name} step {step}: {e}"))?;
+                        prev = Some(value);
+                        step += 1;
+                    }
+                    let got = tx
+                        .read_ref(&name)
+                        .map_err(|e| format!("read {name}: {e}"))?;
+                    if got != prev {
+                        return Err(format!("lost write: {name} does not hold its last value"));
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        barrier.wait();
+        let runs = (0..fetches)
+            .map(|_| fetch_noop(connect, reader))
+            .collect::<Result<Vec<_>, _>>();
+        stop.store(true, Ordering::Relaxed);
+        join_all(handles)?;
+        runs
     })
 }
 
