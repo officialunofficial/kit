@@ -945,67 +945,110 @@ impl Transport for S3Transport {
         }
         let keys = listing.finish().map_err(|_| invalid_listing())?;
 
-        let mut out: Vec<Ref> = Vec::new();
-        for key in keys {
-            let Some(repo_key) = self.strip_effective_prefix(&key) else {
-                continue;
-            };
-            if !validate_ref_name(repo_key) {
-                continue;
-            }
-            // Resolve each key to its hash via a second GET. This is an
-            // inherent O(N) round-trip cost of the object-per-ref layout
-            // (the hash lives only in the object body, so ListObjectsV2
-            // cannot return it). A failed read fails the listing, whether
-            // a transport error (post-retry) or an error status: silently
-            // dropping a ref would reintroduce the short-listing bug that
-            // the pagination above exists to prevent. Only a 404 skips the
-            // ref: it was deleted after the listing, as in an older one.
-            let ref_resp =
-                self.http_request(&Method::GET, repo_key, "", None, &[], Some(REF_BODY_LIMIT))?;
-            match ref_resp.status {
-                200 => {}
-                404 => continue,
-                403 | 401 => return Err(TransportError::AccessDenied),
-                s => return Err(TransportError::ServerError { status: s }),
-            }
-            let Ok(h) = parse_ref_body(&ref_resp.body) else {
-                continue;
-            };
-            // Strip the (trimmed) prefix and the separating '/' so the
-            // returned name is suffix-only per the Transport contract.
-            // S3's `ListObjectsV2` `prefix` query is a literal string
-            // prefix with no path-component awareness, so a request for
-            // ".../refs/heads/feat" can legitimately come back with a key
-            // for ".../refs/heads/featx" — this client-side check is the
-            // only place that boundary is enforced (SPEC-REFS §4); it
-            // MUST NOT accept a match that isn't followed by either a
-            // `/` or end-of-string.
-            let suffix = if prefix_trimmed.is_empty() {
-                repo_key
-            } else if let Some(after) = repo_key.strip_prefix(prefix_trimmed) {
-                match after.strip_prefix('/') {
-                    Some(stripped) => stripped,
-                    None if after.is_empty() => after,
-                    None => continue,
+        // Each candidate is a listed key that names a ref of this listing,
+        // with its suffix-only name. S3's `ListObjectsV2` `prefix` query is
+        // a literal string prefix with no path-component awareness, so a
+        // request for ".../refs/heads/feat" can legitimately come back with
+        // a key for ".../refs/heads/featx": this client-side check is the
+        // only place that boundary is enforced (SPEC-REFS §4); it MUST NOT
+        // accept a match that isn't followed by either a `/` or the end.
+        let candidates: Vec<(&str, &str)> = keys
+            .iter()
+            .filter_map(|key| {
+                let repo_key = self.strip_effective_prefix(key)?;
+                if !validate_ref_name(repo_key) {
+                    return None;
                 }
-            } else {
-                // Doesn't even string-match the requested prefix — an
-                // unexpected/adversarial listing response, not a ref of
-                // this listing.
-                continue;
-            };
-            if !validate_ref_name(suffix) {
-                continue;
+                let suffix = if prefix_trimmed.is_empty() {
+                    repo_key
+                } else {
+                    let after = repo_key.strip_prefix(prefix_trimmed)?;
+                    match after.strip_prefix('/') {
+                        Some(stripped) => stripped,
+                        None if after.is_empty() => after,
+                        None => return None,
+                    }
+                };
+                validate_ref_name(suffix).then_some((repo_key, suffix))
+            })
+            .collect();
+
+        // Resolve each key to its hash via a second GET, at most
+        // MAX_PARALLEL_REF_READS at once. This is an inherent O(N) request
+        // cost of the object-per-ref layout (the hash lives only in the
+        // object body, so ListObjectsV2 cannot return it). A failed read
+        // fails the listing, whether a transport error (post-retry) or an
+        // error status: silently dropping a ref would reintroduce the
+        // short-listing bug that the pagination above exists to prevent.
+        // Only a 404 skips the ref: it was deleted after the listing, as in
+        // an older one. The first failure in key order is the one returned,
+        // as a sequential walk would return it.
+        let reads = read_bounded(&candidates, MAX_PARALLEL_REF_READS, |(repo_key, _)| {
+            let resp =
+                self.http_request(&Method::GET, repo_key, "", None, &[], Some(REF_BODY_LIMIT))?;
+            match resp.status {
+                200 => Ok(parse_ref_body(&resp.body).ok()),
+                404 => Ok(None),
+                403 | 401 => Err(TransportError::AccessDenied),
+                s => Err(TransportError::ServerError { status: s }),
             }
-            out.push(Ref {
-                name: suffix.to_owned(),
-                hash: Some(h),
-            });
+        });
+        let mut out: Vec<Ref> = Vec::with_capacity(candidates.len());
+        for ((_, suffix), read) in candidates.iter().zip(reads) {
+            if let Some(h) = read? {
+                out.push(Ref {
+                    name: (*suffix).to_owned(),
+                    hash: Some(h),
+                });
+            }
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
+}
+
+/// The most ref reads [`Transport::list_refs`] keeps in flight at once.
+const MAX_PARALLEL_REF_READS: usize = 16;
+
+/// `read` applied to every item, by at most `limit` threads, each result in
+/// the item's position. Once a read fails, no thread starts another; every
+/// item before a failed one was started before it, so the first failure in
+/// item order is the one a sequential walk would meet. Items never started
+/// report [`TransportError::ConnectionFailed`] and sit after that failure.
+fn read_bounded<T: Sync, R: Send>(
+    items: &[T],
+    limit: usize,
+    read: impl Fn(&T) -> TransportResult<R> + Sync,
+) -> Vec<TransportResult<R>> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Mutex, PoisonError};
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let slots: Vec<Mutex<Option<TransportResult<R>>>> =
+        items.iter().map(|_| Mutex::new(None)).collect();
+    thread::scope(|scope| {
+        for _ in 0..limit.min(items.len()) {
+            scope.spawn(|| {
+                while !failed.load(Ordering::Acquire) {
+                    let i = next.fetch_add(1, Ordering::AcqRel);
+                    let Some(item) = items.get(i) else { break };
+                    let result = read(item);
+                    if result.is_err() {
+                        failed.store(true, Ordering::Release);
+                    }
+                    *slots[i].lock().unwrap_or_else(PoisonError::into_inner) = Some(result);
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .unwrap_or(Err(TransportError::ConnectionFailed))
+        })
+        .collect()
 }
 
 fn parse_ref_body(body: &[u8]) -> TransportResult<Hash> {
@@ -1211,6 +1254,55 @@ impl HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn read_bounded_keeps_order_and_stays_under_its_limit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let items: Vec<usize> = (0..200).collect();
+        let (now, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let out = read_bounded(&items, 16, |i| {
+            let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(n, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(1));
+            now.fetch_sub(1, Ordering::SeqCst);
+            Ok(i * 2)
+        });
+        let out: Vec<usize> = out.into_iter().map(Result::unwrap).collect();
+        assert_eq!(out, items.iter().map(|i| i * 2).collect::<Vec<_>>());
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(peak <= 16, "{peak} reads in flight");
+        assert!(peak > 1, "the reads ran in parallel");
+    }
+
+    #[test]
+    fn read_bounded_returns_the_first_failure_in_item_order() {
+        let items: Vec<usize> = (0..100).collect();
+        let out = read_bounded(&items, 8, |&i| {
+            if i == 30 || i == 31 {
+                return Err(TransportError::ServerError {
+                    status: u16::try_from(500 + i).unwrap(),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            Ok(i)
+        });
+        let first = out.into_iter().collect::<TransportResult<Vec<_>>>();
+        assert!(matches!(
+            first,
+            Err(TransportError::ServerError { status: 530 })
+        ));
+        // A failure stops new reads: far fewer than all items ran.
+        let started = std::sync::atomic::AtomicUsize::new(0);
+        let _ = read_bounded(&items, 4, |&i| {
+            started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if i == 0 {
+                Err(TransportError::ConnectionFailed)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(started.load(std::sync::atomic::Ordering::SeqCst) < items.len());
+    }
+
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -426,6 +426,10 @@ because the ref was deleted after the page was listed; the result is then an
 older listing (SPEC-TRANSPORT-CONNECT §7.9 allows one). A body that is not a
 canonical ref wire is skipped, as the file transport skips such a file.
 
+**Reference-server behavior.** The client keeps at most 16 of those `GET`s in
+flight. It returns the first failure in key order, as one read after another
+would, and starts no new read after a failure.
+
 ### 6.1 Object layout
 
 The table below lists canonical repository-relative keys. For a URL of
