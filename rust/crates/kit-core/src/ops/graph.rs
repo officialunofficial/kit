@@ -1,8 +1,8 @@
 //! Commit-graph traversal helpers.
 //!
 //! This module exposes [`collect_ancestor_set`]. Higher-level walks
-//! (`is_ancestor`, `find_merge_base`) live in [`super::merge`] alongside
-//! the merge algorithm that consumes them.
+//! (`is_ancestor`, `find_merge_base` and their strict variants) live in
+//! [`super::merge`] alongside the merge algorithm that consumes them.
 //!
 //! Bound: at most [`MAX_ANCESTORS`] (`10_000`) commits are visited per
 //! call. A walk that would visit more fails with

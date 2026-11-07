@@ -38,7 +38,10 @@ pub use graph::{
     ClosureMode, children, collect_ancestor_set, reachable_closure, reachable_closure_checked,
     reachable_objects, reachable_snapshot,
 };
-pub use merge::{Conflict, ConflictKind, MergeResult, find_merge_base, is_ancestor, merge_trees};
+pub use merge::{
+    Conflict, ConflictKind, MergeResult, find_merge_base, find_merge_base_strict, is_ancestor,
+    is_ancestor_strict, merge_trees,
+};
 pub use recovery::{RecoveryEntry, RecoveryError, RetentionPolicy};
 pub use restore::{
     RESTORE_CHUNK_BATCH, RestoreOptions, RestoreReport, restore_tree_to_worktree,

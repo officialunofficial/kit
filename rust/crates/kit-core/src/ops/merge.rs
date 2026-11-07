@@ -13,12 +13,17 @@
 //! merge commit's secondary parent are still found. Among multiple
 //! common ancestors we pick the one with the smallest total depth:
 //! (depth in A's ancestor tree) + (depth in B's BFS).
+//!
+//! `find_merge_base` and `is_ancestor` end a path at a missing object, for
+//! push and its shallow boundaries. `find_merge_base_strict` and
+//! `is_ancestor_strict` give the same answers on a healthy store and fail
+//! with an error that names the commit where a commit cannot be read.
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::hash::Hash;
 use crate::object::{EntryMode, Object, Tree, TreeEntry};
+use crate::ops::graph::{AncestorError, read_history_commit};
 use crate::serialize;
 use crate::store::{MAX_TREE_DEPTH, ObjectSink, ObjectSource, StoreError};
 
@@ -126,6 +131,12 @@ pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
 /// BFS. This is NOT necessarily a unique LCA when histories cross
 /// multiple times, but it is the behaviour the tests pin.
 ///
+/// This walk is lenient on purpose: a missing object, or an object that
+/// is not a commit, ends its path. Push walks histories whose shallow
+/// boundaries the caller supplies, and it relies on that. Everywhere else a
+/// missing commit is corruption, and the answer would come from part of the
+/// history: use [`find_merge_base_strict`], which fails instead.
+///
 /// # Errors
 ///
 /// Propagates [`StoreError`] from any commit-object read other than
@@ -178,6 +189,12 @@ pub fn find_merge_base<S: ObjectSource + ?Sized>(
 /// Returns `true` when `ancestor` is reachable from `descendant` by
 /// walking parent pointers. `ancestor == descendant` returns `true`.
 ///
+/// This walk is lenient on purpose, like [`find_merge_base`]: a missing
+/// object, or an object that is not a commit, ends its path, so a missing
+/// commit can turn `true` into `false`. Push relies on that for shallow
+/// boundaries. Everywhere else use [`is_ancestor_strict`], which fails
+/// instead.
+///
 /// # Errors
 ///
 /// Propagates [`StoreError`] from commit-object reads (other than
@@ -212,6 +229,145 @@ pub fn is_ancestor<S: ObjectSource + ?Sized>(
         }
     }
     Ok(false)
+}
+
+/// The most commits that each side of a strict walk reads. It matches the
+/// history walk of `kit log`.
+const MAX_STRICT_WALK_COMMITS: usize = 1_000_000;
+
+/// The limit [`find_merge_base_strict`] reports when one of its two walks
+/// reaches [`MAX_STRICT_WALK_COMMITS`].
+const MERGE_BASE_LIMIT: &str = "1,000,000-commit merge-base walk";
+
+/// The limit [`is_ancestor_strict`] reports when its walk reaches
+/// [`MAX_STRICT_WALK_COMMITS`].
+const ANCESTRY_LIMIT: &str = "1,000,000-commit ancestry walk";
+
+/// [`find_merge_base`] that reads every commit it walks. On a healthy store
+/// it returns the same commit; where a store lacks a commit of the walk it
+/// fails instead of answering from part of the history.
+///
+/// # Errors
+///
+/// [`AncestorError::Unreadable`] when a commit of either walk is missing or
+/// corrupt, and [`AncestorError::NotACommit`] when a parent names another
+/// kind of object, a remix included. Both name the object. Fails with
+/// [`AncestorError::Limit`] when either walk would read more than
+/// 1,000,000 commits; it never answers from part of the history.
+pub fn find_merge_base_strict<S: ObjectSource + ?Sized>(
+    store: &S,
+    a: Hash,
+    b: Hash,
+) -> Result<Option<Hash>, AncestorError> {
+    find_merge_base_strict_with_cap(store, a, b, MAX_STRICT_WALK_COMMITS)
+}
+
+/// [`find_merge_base_strict`] with `cap` in place of
+/// [`MAX_STRICT_WALK_COMMITS`].
+fn find_merge_base_strict_with_cap<S: ObjectSource + ?Sized>(
+    store: &S,
+    a: Hash,
+    b: Hash,
+    cap: usize,
+) -> Result<Option<Hash>, AncestorError> {
+    if a == b {
+        return Ok(Some(a));
+    }
+    // Both walks are breadth-first and mark a commit when they queue it, so
+    // each commit is queued once, at its smallest depth. That is the depth
+    // the lenient walks keep, and the order in which they first reach it.
+    let mut depth_a: HashMap<Hash, usize> = HashMap::new();
+    let mut queue: VecDeque<(Hash, usize)> = VecDeque::new();
+    depth_a.insert(a, 0);
+    queue.push_back((a, 0));
+    while let Some((node, depth)) = queue.pop_front() {
+        for p in read_history_commit(store, node)?.parents {
+            if !depth_a.contains_key(&p) {
+                if depth_a.len() >= cap {
+                    return Err(strict_limit(MERGE_BASE_LIMIT));
+                }
+                depth_a.insert(p, depth + 1);
+                queue.push_back((p, depth + 1));
+            }
+        }
+    }
+
+    let mut seen_b: HashSet<Hash> = HashSet::new();
+    seen_b.insert(b);
+    queue.push_back((b, 0));
+    let mut best: Option<(Hash, usize)> = None;
+    while let Some((node, depth)) = queue.pop_front() {
+        if let Some((_, best_total)) = best
+            && depth > best_total
+        {
+            break;
+        }
+        if let Some(&ancestor_depth) = depth_a.get(&node) {
+            let total = ancestor_depth + depth;
+            if best.is_none_or(|(_, t)| total < t) {
+                best = Some((node, total));
+            }
+        }
+        for p in read_history_commit(store, node)?.parents {
+            if !seen_b.contains(&p) {
+                if seen_b.len() >= cap {
+                    return Err(strict_limit(MERGE_BASE_LIMIT));
+                }
+                seen_b.insert(p);
+                queue.push_back((p, depth + 1));
+            }
+        }
+    }
+    Ok(best.map(|(h, _)| h))
+}
+
+/// [`is_ancestor`] that reads every commit it walks. On a healthy store it
+/// returns the same answer; where a store lacks a commit of the walk it
+/// fails instead of answering `false`.
+///
+/// # Errors
+///
+/// [`AncestorError::Unreadable`] when a commit of the walk is missing or
+/// corrupt, and [`AncestorError::NotACommit`] when a parent names another
+/// kind of object, a remix included. Both name the object. Fails with
+/// [`AncestorError::Limit`] when the walk would read more than 1,000,000
+/// commits.
+pub fn is_ancestor_strict<S: ObjectSource + ?Sized>(
+    store: &S,
+    ancestor: Hash,
+    descendant: Hash,
+) -> Result<bool, AncestorError> {
+    is_ancestor_strict_with_cap(store, ancestor, descendant, MAX_STRICT_WALK_COMMITS)
+}
+
+/// [`is_ancestor_strict`] with `cap` in place of
+/// [`MAX_STRICT_WALK_COMMITS`].
+fn is_ancestor_strict_with_cap<S: ObjectSource + ?Sized>(
+    store: &S,
+    ancestor: Hash,
+    descendant: Hash,
+    cap: usize,
+) -> Result<bool, AncestorError> {
+    let mut seen: HashSet<Hash> = HashSet::new();
+    let mut stack: Vec<Hash> = vec![descendant];
+    while let Some(current) = stack.pop() {
+        if current == ancestor {
+            return Ok(true);
+        }
+        if seen.contains(&current) {
+            continue;
+        }
+        if seen.len() >= cap {
+            return Err(strict_limit(ANCESTRY_LIMIT));
+        }
+        seen.insert(current);
+        stack.extend(read_history_commit(store, current)?.parents);
+    }
+    Ok(false)
+}
+
+fn strict_limit(limit: &'static str) -> AncestorError {
+    AncestorError::Limit(StoreError::OperationLimitExceeded(limit))
 }
 
 // ---------------------------------------------------------------------
@@ -1162,5 +1318,331 @@ mod tests {
         let r = merge_trees(&s, Some(base), Some(ours), Some(theirs)).unwrap();
         assert!(r.has_conflicts(), "same-line edits must still conflict");
         assert_eq!(r.conflicts[0].kind, ConflictKind::ModifyModify);
+    }
+}
+
+/// The strict walks on a store with missing, corrupt and odd objects.
+#[cfg(test)]
+#[allow(clippy::many_single_char_names)] // single-letter commit names follow the fixture diagrams
+mod strict_tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::hash;
+    use crate::layout::RepoLayout;
+    use crate::object::{Blob, Commit, Identity, Remix};
+    use crate::store::ObjectStore;
+
+    fn fresh_store() -> (TempDir, ObjectStore) {
+        let dir = TempDir::new().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        (dir, store)
+    }
+
+    fn put(store: &ObjectStore, object: &Object) -> Hash {
+        store.write(&serialize::serialize(object).unwrap()).unwrap()
+    }
+
+    fn put_tree(store: &ObjectStore) -> Hash {
+        let blob = put(
+            store,
+            &Object::Blob(Blob {
+                data: b"f".to_vec(),
+            }),
+        );
+        put(
+            store,
+            &Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"f".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob,
+                }],
+            }),
+        )
+    }
+
+    fn put_commit(store: &ObjectStore, tree: Hash, parents: Vec<Hash>, ts: u64) -> Hash {
+        put(
+            store,
+            &Object::Commit(Commit::new_unannotated(
+                tree,
+                parents,
+                Identity::ed25519([0; 32]),
+                [0; 32],
+                b"msg".to_vec(),
+                ts,
+                [0; 64],
+            )),
+        )
+    }
+
+    fn object_path(dir: &TempDir, h: &Hash) -> PathBuf {
+        let hex = hash::to_hex(h);
+        RepoLayout::single(dir.path())
+            .objects_dir()
+            .join(&hex[..2])
+            .join(&hex[2..])
+    }
+
+    fn remove(dir: &TempDir, h: &Hash) {
+        fs::remove_file(object_path(dir, h)).unwrap();
+    }
+
+    /// Flip the last byte of the object `h`.
+    fn corrupt(dir: &TempDir, h: &Hash) {
+        let path = object_path(dir, h);
+        let mut bytes = fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        fs::write(&path, &bytes).unwrap();
+    }
+
+    /// main = r - p - m - g; side = r - p - x - merge(x, g).
+    /// Returns the store and [r, p, m, g, x, merge].
+    fn fixture() -> (TempDir, ObjectStore, [Hash; 6]) {
+        let (dir, store) = fresh_store();
+        let tree = put_tree(&store);
+        let r = put_commit(&store, tree, vec![], 1);
+        let p = put_commit(&store, tree, vec![r], 2);
+        let m = put_commit(&store, tree, vec![p], 3);
+        let g = put_commit(&store, tree, vec![m], 4);
+        let x = put_commit(&store, tree, vec![p], 5);
+        let merge = put_commit(&store, tree, vec![x, g], 6);
+        (dir, store, [r, p, m, g, x, merge])
+    }
+
+    /// Assert that `result` failed and named `culprit`.
+    fn assert_names<T: std::fmt::Debug>(result: Result<T, AncestorError>, culprit: &Hash) {
+        let err = result.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                AncestorError::Unreadable { hash, .. } | AncestorError::NotACommit(hash)
+                    if hash == culprit
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_healthy_store_gives_the_lenient_answers() {
+        let (_d, store, [_, p, _, g, x, merge]) = fixture();
+        assert_eq!(find_merge_base_strict(&store, g, p).unwrap(), Some(p));
+        assert_eq!(find_merge_base_strict(&store, x, g).unwrap(), Some(p));
+        assert_eq!(find_merge_base_strict(&store, merge, g).unwrap(), Some(g));
+        assert!(is_ancestor_strict(&store, p, g).unwrap());
+        assert!(!is_ancestor_strict(&store, x, g).unwrap());
+    }
+
+    #[test]
+    fn a_missing_commit_fails_the_walk_on_either_side() {
+        let (dir, store, [_, p, m, g, x, merge]) = fixture();
+        remove(&dir, &m);
+        // The lenient walks answer from the part of the history they can
+        // read: no common ancestor, and not an ancestor.
+        assert_eq!(find_merge_base(&store, g, p).unwrap(), None);
+        assert!(!is_ancestor(&store, p, g).unwrap());
+        // The commit is missing from the first side, then from the second.
+        assert_names(find_merge_base_strict(&store, g, p), &m);
+        assert_names(find_merge_base_strict(&store, p, g), &m);
+        assert_names(find_merge_base_strict(&store, x, g), &m);
+        assert_names(is_ancestor_strict(&store, p, g), &m);
+        assert_names(is_ancestor_strict(&store, p, merge), &m);
+    }
+
+    #[test]
+    fn a_corrupt_commit_fails_the_walk_on_either_side() {
+        let (dir, store, [_, p, m, g, x, _]) = fixture();
+        corrupt(&dir, &m);
+        assert_names(find_merge_base_strict(&store, g, p), &m);
+        assert_names(find_merge_base_strict(&store, x, g), &m);
+        assert_names(is_ancestor_strict(&store, p, g), &m);
+    }
+
+    #[test]
+    fn a_parent_that_is_not_a_commit_fails_the_walk() {
+        let (_d, store, [_, p, _, g, _, _]) = fixture();
+        let tree = put_tree(&store);
+        let odd = put_commit(&store, tree, vec![g, tree], 7);
+        assert_names(find_merge_base_strict(&store, odd, p), &tree);
+        assert_names(find_merge_base_strict(&store, p, odd), &tree);
+        assert_names(is_ancestor_strict(&store, p, odd), &tree);
+    }
+
+    /// The walk of the second side stops once no deeper commit can give a
+    /// better base. A commit it never reaches cannot change the answer, so
+    /// its absence is no error.
+    #[test]
+    fn a_missing_commit_below_the_answer_is_never_read() {
+        let (dir, store) = fresh_store();
+        let tree = put_tree(&store);
+        let r = put_commit(&store, tree, vec![], 1);
+        let q = put_commit(&store, tree, vec![r], 2);
+        let z = put_commit(&store, tree, vec![], 3);
+        let y = put_commit(&store, tree, vec![z], 4);
+        let b = put_commit(&store, tree, vec![q, y], 5);
+        remove(&dir, &z);
+        assert_eq!(find_merge_base_strict(&store, q, b).unwrap(), Some(q));
+    }
+
+    /// r - a1, r - b1; ma = merge(a1, b1) and mb = merge(b1, a1) have two
+    /// merge bases, a1 and b1. ta sits on ma. Returns [a1, b1, ma, mb, ta].
+    fn criss_cross() -> (TempDir, ObjectStore, [Hash; 5]) {
+        let (dir, store) = fresh_store();
+        let tree = put_tree(&store);
+        let r = put_commit(&store, tree, vec![], 1);
+        let a1 = put_commit(&store, tree, vec![r], 2);
+        let b1 = put_commit(&store, tree, vec![r], 3);
+        let ma = put_commit(&store, tree, vec![a1, b1], 4);
+        let mb = put_commit(&store, tree, vec![b1, a1], 5);
+        let ta = put_commit(&store, tree, vec![ma], 6);
+        (dir, store, [a1, b1, ma, mb, ta])
+    }
+
+    #[test]
+    fn a_criss_cross_with_a_missing_commit_fails() {
+        let (_d, store, [_, b1, _, mb, ta]) = criss_cross();
+        let healthy = find_merge_base_strict(&store, ta, mb).unwrap();
+        assert_eq!(healthy, find_merge_base(&store, ta, mb).unwrap());
+        assert_eq!(healthy, Some(b1));
+
+        // Without ma the first side reaches no merge base.
+        let (dir, store, [_, _, ma, mb, ta]) = criss_cross();
+        remove(&dir, &ma);
+        assert_eq!(find_merge_base(&store, ta, mb).unwrap(), None);
+        assert_names(find_merge_base_strict(&store, ta, mb), &ma);
+
+        // Each merge base candidate missing in turn.
+        for which in 0..2 {
+            let (dir, store, hashes) = criss_cross();
+            remove(&dir, &hashes[which]);
+            assert_names(
+                find_merge_base_strict(&store, hashes[4], hashes[3]),
+                &hashes[which],
+            );
+        }
+    }
+
+    /// A remix is not a commit to the strict walks. The lenient walks end
+    /// the path at a remix, so they find a merge base where the strict
+    /// walks fail.
+    #[test]
+    fn a_remix_in_the_history_fails_the_strict_walks() {
+        let (_d, store) = fresh_store();
+        let tree = put_tree(&store);
+        let r = put_commit(&store, tree, vec![], 1);
+        let remix = put(
+            &store,
+            &Object::Remix(Remix {
+                tree_hash: tree,
+                parents: vec![r],
+                sources: Vec::new(),
+                author: Identity::ed25519([0; 32]),
+                signer: [0; 32],
+                message: b"remix".to_vec(),
+                timestamp: 2,
+                signature: [0; 64],
+            }),
+        );
+        let a = put_commit(&store, tree, vec![remix], 3);
+        let b = put_commit(&store, tree, vec![remix], 4);
+        assert_eq!(find_merge_base(&store, a, b).unwrap(), Some(remix));
+        assert!(!is_ancestor(&store, r, a).unwrap());
+        assert_names(find_merge_base_strict(&store, a, b), &remix);
+        assert_names(is_ancestor_strict(&store, r, a), &remix);
+    }
+
+    #[test]
+    fn a_walk_over_the_cap_fails_and_names_the_limit() {
+        let (_d, store) = fresh_store();
+        let tree = put_tree(&store);
+        let mut chain = vec![put_commit(&store, tree, vec![], 0)];
+        for ts in 1..4 {
+            let parent = chain[chain.len() - 1];
+            chain.push(put_commit(&store, tree, vec![parent], ts));
+        }
+        let (root, tip) = (chain[0], chain[3]);
+        let limit = |err: AncestorError, name: &str| {
+            assert!(
+                matches!(&err, AncestorError::Limit(StoreError::OperationLimitExceeded(l)) if *l == name),
+                "{err:?}"
+            );
+        };
+        // Four commits on each side fit a cap of four, not of three.
+        for (a, b) in [(tip, root), (root, tip)] {
+            assert_eq!(
+                find_merge_base_strict_with_cap(&store, a, b, 4).unwrap(),
+                Some(root)
+            );
+            limit(
+                find_merge_base_strict_with_cap(&store, a, b, 3).unwrap_err(),
+                MERGE_BASE_LIMIT,
+            );
+        }
+        let other = put_commit(&store, tree, vec![], 9);
+        assert!(!is_ancestor_strict_with_cap(&store, other, tip, 4).unwrap());
+        limit(
+            is_ancestor_strict_with_cap(&store, other, tip, 3).unwrap_err(),
+            ANCESTRY_LIMIT,
+        );
+    }
+
+    /// On random healthy histories the strict walks give exactly the
+    /// answers of the lenient walks: chains, merges of two or three
+    /// parents, repeated parents, criss-cross merges, several roots, and
+    /// equal or skewed timestamps.
+    #[test]
+    fn a_healthy_history_gives_the_lenient_answers() {
+        for seed in 1..=80u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut below = |n: usize| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                usize::try_from(state >> 33).unwrap() % n
+            };
+            let (_d, store) = fresh_store();
+            let tree = put_tree(&store);
+            let n = 1 + below(30);
+            let mut hashes: Vec<Hash> = Vec::new();
+            for i in 0..n {
+                let mut parents = Vec::new();
+                if i > 0 && below(15) != 0 {
+                    match below(8) {
+                        0 | 1 => {
+                            for _ in 0..2 + below(2) {
+                                parents.push(hashes[below(i)]);
+                            }
+                        }
+                        2 => parents.push(hashes[below(i)]),
+                        _ => parents.push(hashes[i - 1]),
+                    }
+                }
+                let ts = match seed % 3 {
+                    0 => 7,
+                    1 => i as u64,
+                    _ => below(5) as u64,
+                };
+                hashes.push(put_commit(&store, tree, parents, ts));
+            }
+            for &a in &hashes {
+                for &b in &hashes {
+                    assert_eq!(
+                        find_merge_base_strict(&store, a, b).unwrap(),
+                        find_merge_base(&store, a, b).unwrap(),
+                        "seed {seed}"
+                    );
+                    assert_eq!(
+                        is_ancestor_strict(&store, a, b).unwrap(),
+                        is_ancestor(&store, a, b).unwrap(),
+                        "seed {seed}"
+                    );
+                }
+            }
+        }
     }
 }

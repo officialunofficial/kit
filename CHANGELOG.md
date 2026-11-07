@@ -7,6 +7,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `find_merge_base_strict` and `is_ancestor_strict` in kit-core read every
+  commit they walk. On a healthy store they give the answers of
+  `find_merge_base` and `is_ancestor`; where a commit is missing, corrupt
+  or not a commit they fail with an `AncestorError` that names it, and a
+  walk that would read more than 1,000,000 commits on either side fails
+  with an error that names the limit. `find_merge_base` and `is_ancestor`
+  keep ending a path at a missing object, for push and its shallow
+  boundaries.
+
 ### Changed
 
 - `kit log -n N` from one revision streams the history while each commit
