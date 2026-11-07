@@ -2,7 +2,8 @@
 //!
 //! The refs are the files that [`FileTransport`] reads and writes. Every ref
 //! write takes its ref lock, so `kit+file://` remotes and this server
-//! serialize on the same lock. Reads take no lock, because every write is one
+//! serialize writes to one ref on the same lock, while writes to different
+//! refs proceed in parallel. Reads take no lock, because every write is one
 //! atomic rename.
 
 use std::fmt;
@@ -185,7 +186,7 @@ impl Repo {
     }
 
     /// Set the ref `name` to `new` if `condition` holds. The check and the
-    /// write are one step under the ref lock.
+    /// write are one step under the lock of that ref.
     pub(crate) fn update_ref(
         &self,
         name: &str,
@@ -195,11 +196,11 @@ impl Repo {
         if !is_served_ref_name(name) {
             return Err(RefFileError::InvalidName(name.to_owned()));
         }
-        self.tx.with_ref_lock(|refs| {
+        self.tx.with_ref_lock_for(name, |lock| {
             // A ref file that holds no id fails a `MISSING` or `MATCH`
             // write, so no condition passes over it. `ANY` replaces it.
             if condition != RefWriteCondition::Any {
-                let current = refs.read_ref(name)?;
+                let current = lock.read()?;
                 let holds = match condition {
                     RefWriteCondition::Missing => current.is_none(),
                     RefWriteCondition::Match(want) => current == Some(want),
@@ -209,10 +210,10 @@ impl Repo {
                     return Ok(RefUpdate::Conflict { current });
                 }
             }
-            match refs.update_ref(name, condition, new) {
+            match lock.update(condition, new) {
                 Ok(()) => Ok(RefUpdate::Committed),
                 Err(RefFileError::Conflict) => Ok(RefUpdate::Conflict {
-                    current: refs.read_ref(name)?,
+                    current: lock.read()?,
                 }),
                 Err(e) => Err(e),
             }

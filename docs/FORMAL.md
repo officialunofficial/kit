@@ -73,6 +73,7 @@ ones a spec reader is most likely to look for.
 | Spec clause | Property | Status | Non-vacuity |
 |---|---|---|---|
 | SPEC-REFS §5, §5.1 (CAS per lock domain) | `NoLostUpdateLocal`, `NoLostUpdateFile`, `NoLostUpdateMem` | exhaustive on two slices of `refs2` (2 processes, one ref, 3.4M and 3.5M states); bounded (length 8) on the full op space | mutants `refs2_noRefLock`, `refs2_noFileLock`, `refs2_memNoMutex` |
+| SPEC-REFS §5.1.1 (file transport stripe locks) | none | not modelled. The model's `file` domain is one lock; the code takes the repo lock shared and one stripe lock per ref. `kit-transport-file` unit tests cover the races, and the replay row below covers single-threaded traces | - |
 | SPEC-CONCURRENCY §4 (lock order) | `NoDeadlock`, `LockOrderRespected`, `LockOwnership` | as above | `refs3_misorder`, `refs2_racyAcquire` |
 | SPEC-CONCURRENCY §3.2 (recovery log) | `ExpireHoldsSuperset`, `NoRecordExpireInterleave` | as above | `refs2_gcSkipTrees` |
 | SPEC-CONCURRENCY §2, §3.1 (`serve.lock`, `server.lock`, startup sweep) | `SweepAlone`, `NoLiveUploadSwept`, `OneKitServer`, `UpServersHoldServeShared`, `NoMissedDetection` | exhaustive (`serve2` 18,812 states, `serve3` 152,012) | `serve2_sweepUnlocked`, `serve2_sweepUnderShared`, `serve2_serverSkipsServe`, `serve2_serverLockShared` |

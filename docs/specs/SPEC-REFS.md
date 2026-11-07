@@ -293,7 +293,7 @@ not exist or contains a different hash → `RefConflict`.
 | Transport | `.any`      | `.missing`                            | `.match`                                                       | Notes |
 |-----------|-------------|---------------------------------------|----------------------------------------------------------------|-------|
 | memory    | atomic*     | atomic*                               | atomic* &mdash; the read-check-write runs under the instance's one `Mutex` | *In-process only: every verb of one `MemoryTransport` instance holds its `Mutex` for the whole operation, so concurrent threads sharing the instance cannot interleave. Never shared across processes. |
-| file      | atomic      | atomic (via `O_EXCL` create)          | atomic &mdash; OS exclusive file lock (`<root>/.kit/refs/.lock`) serializes the read-check-write across processes | Lock guard released on drop (including panic-unwind). |
+| file      | atomic      | atomic (via `O_EXCL` create)          | atomic &mdash; OS exclusive lock of the ref's stripe (`<root>/.kit/refs/refs-<hh>.lock`, §5.1.1) serializes the read-check-write for that ref across processes | Lock guards released on drop (including panic-unwind). Writes to refs in different stripes run in parallel. |
 | s3        | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<md5-of-wire>"`                         | Requires a store that supports conditional writes. |
 | http      | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<hex-hash>"`                            | Worker-flavored server. Generic S3 and nginx do NOT conform. |
 | ssh       | atomic      | atomic (`OP_WRITE_REF_IF_ABSENT` path via condition byte) | atomic (`CONDITION_MATCH` with 32-byte expected hash)          | Server enforces CAS; client trusts `STATUS_ERROR`. |
@@ -309,7 +309,7 @@ above. As of, the local `kit-core`
 disk (without going through the file transport) is also atomic across
 processes: every write condition takes a dedicated `<common_dir>/refs-<ref>.lock`
 OS exclusive lock (distinct from the file transport's
-`<root>/.kit/refs/.lock`, but the same blocking-kernel-lock primitive)
+locks under `<root>/.kit/refs/`, but the same blocking-kernel-lock primitive)
 around the read-check-write, so two uncoordinated callers on the same
 repo &mdash; for example `branch -m` and `commit`, or `update-ref` from two linked
 worktrees &mdash; can no longer both observe a stale `current` value and both
@@ -320,14 +320,44 @@ conditional and unconditional deletes MUST serialize on the same full-ref
 identity. This
 includes branch, tag, remote-tracking, and batched remote-tracking mutations.
 Any has no value precondition but MUST NOT bypass another operation's critical
-section. File transport Any/Missing/Match writes share its separate `RefLock`;
-that transport does not acquire the direct local full-ref guard.
+section. File transport Any/Missing/Match writes share its separate locks
+(§5.1.1); that transport does not acquire the direct local full-ref guard.
 The complete nesting order, including history → ref mutation locks, is
 SPEC-CONCURRENCY §4. `every_ref_mutation_waits_for_the_cas_guard` and
 `every_write_condition_waits_for_the_file_cas_guard` enforce participation.
 
-*Coordination with local worktree operations:* `<root>/.kit/refs/.lock`
-by itself only serializes the file transport against concurrent instances
+#### 5.1.1 File transport ref locks
+
+**Protocol requirement.** Every process that writes a ref file under a
+transport root takes two OS locks under `<root>/.kit/refs/`:
+
+- The repo lock `.lock`. A write to one ref holds it shared. A step that
+  reads and writes several files as one holds it exclusive.
+- The stripe lock `refs-<hh>.lock`. A write to one ref holds it exclusive.
+  `<hh>` is the lowercase hex of the first byte of the BLAKE3 digest of the
+  full ref name. For example `refs/heads/main` maps to `refs-ec.lock`.
+
+A writer takes the repo lock first, then the stripe lock. A step that holds
+the repo lock exclusive takes no stripe lock. Every write condition takes
+these locks, `.any` included. A write holds them from its read of the
+current value until its rename and directory fsync complete.
+
+Two writes to one ref serialize. Writes to refs in different stripes run in
+parallel. Writes to two refs in one stripe serialize. A step that holds the
+repo lock exclusive excludes every ref write on the root. The mapping from
+a ref to its stripe is part of this contract, because processes of
+different implementations on one root must pick the same file.
+
+A writer that takes the repo lock exclusive for every write excludes every
+writer above and stays conformant. It gives up the parallelism.
+
+Two writers under different stripe locks can race to create a ref and a ref
+below it, such as `refs/heads/a` and `refs/heads/a/b`. At most one
+succeeds. The other MUST fail with `InvalidRef`, the error that a clash found
+before the write reports, and MUST NOT leave a temporary file behind.
+
+*Coordination with local worktree operations:* the file transport's locks
+by themselves only serialize it against concurrent instances
 of itself &mdash; it does not, on its own, coordinate against a `commit`,
 `checkout`, or `gc` running locally against the same directory via the
 `worktrees.lock`/`worktree.lock`/`refs-history-<branch>.lock`/

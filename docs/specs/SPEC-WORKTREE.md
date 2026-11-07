@@ -156,7 +156,7 @@ the registry cannot be enumerated.
 This document originates the `worktree.lock`/`worktrees.lock` primitives
 and their per-command holder details below; the total lock order across
 *all* kit locks (including `refs-history-<branch>.lock` and the
-file-transport's `refs/.lock`), and the enumeration of every writer, is
+file-transport's ref locks), and the enumeration of every writer, is
 owned by SPEC-CONCURRENCY &mdash; see that document for the authoritative
 order. This section states only the two locks this document defines and how the
 commands specified here use them.

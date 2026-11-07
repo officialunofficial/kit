@@ -141,6 +141,13 @@ cover the whole space to their bounds.
   effects (a starting `kit serve` skips its sweep, a starting server waits)
   are liveness only. Lock waits never time out (the 5 s timeout is
   abstracted, as in `refs.qnt`). Stop and crash are one action.
+- The file domain is one lock (id 7 in `refs.qnt`), the `.lock` file. The
+  code takes that lock shared and the exclusive lock of one of 256 stripes
+  for a write to one ref (SPEC-REFS §5.1.1), so single-ref writes to refs in
+  different stripes run in parallel. The model serializes them. A step that
+  holds the repo lock exclusive (`FileTransport::with_ref_lock`) still
+  excludes every file write, as lock 7 does. The `NoLostUpdateFile` result
+  therefore describes one lock, not the stripe locks.
 - A SQLite-metadata layout server deployment keeps refs in SQLite (the root marker makes
   `FileTransport` refuse ref writes on that root) and is not modelled;
   neither is a layout server's S3 spool sweep (under `server.lock`, used
