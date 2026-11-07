@@ -22,7 +22,6 @@ baseline build lean:
 | `git-bridge` (default) | `kit git …` (SPEC-GIT-BRIDGE/SPEC-GIT-IMPORT). |
 | `sparse-checkout` | Verifiable sparse-checkout. |
 | `history-mmr` | Append-only Merkle Mountain Belt ref-write journal. |
-| `bls-threshold` | BLS12-381 threshold-signing exhaustiveness (compile-time only today). |
 
 See the top-level README and `docs/CLI.md` for the full command reference
 and agent-integration notes (`kit mcp`).

@@ -394,7 +394,10 @@ History / commits:
   `-M`/`-C`) and with merges (the search runs per relevant parent,
   first-parent-wins, same as the positional default). This is a
   **documented divergence** &mdash; the default `--ignore-rev` fall-through stays
-  byte-identical to git; see "Divergences from Git" below. Blame is
+  byte-identical to git; see "Divergences from Git" below.
+  Each input is limited to 100,000 lines. After trimming the common prefix,
+  the line comparison table must fit within 64 MiB. Larger comparisons fail
+  without partial attribution. The history walk is
   **merge-aware by default** (like `git blame`): at a merge, a line is
   credited to whichever parent's side actually wrote it, so a line merged in
   from a side branch is attributed to its authoring commit rather than the
@@ -1647,10 +1650,11 @@ which routes them to the user scope automatically.
 | `attest.signer` | `repo-key` / `keystore` / `external` | `repo-key` | User-scoped attestation signer |
 | `grant.webauthn_rp` | `<rp_id> <origin>...` (repeatable; `\|` separates entries in one value) | unset | User-scoped only. Pins the `WebAuthn` relying parties `kit grant`/`epoch`/`visibility` accept for `webauthn-p256` signatures; unset refuses them |
 
-Keystore backend names include `software`, `software-raw`, `macos-keychain`,
-`linux-secret-service`, `systemd-creds`, and `yubikey`
-when the target build enables the corresponding backend feature. Security-
-sensitive selector keys are ignored from repo-local config; set them in
+Implemented keystore backends are `software`, `software-raw`, `macos-keychain`,
+and `linux-secret-service`. The OS backends require the matching target and
+feature. `systemd-creds` and `yubikey` are reserved names that return
+`BackendUnavailable`. Security-sensitive selector keys are ignored from
+repo-local config; set them in
 `$XDG_CONFIG_HOME/kit/config` or with explicit command flags.
 
 ### HTTPS certificate trust

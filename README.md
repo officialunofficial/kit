@@ -17,8 +17,8 @@ part of the object model.
 - Every commit carries an Ed25519 signature.
 - `kit attest` stores in-toto v1 Statements in DSSE envelopes. The commit hash
   is the subject.
-- Large files split into content-defined chunks. A small edit stores only the
-  edit.
+- Files above 1 MiB split into content-defined chunks. Unchanged chunks are
+  reused; an edit stores the changed chunks and a new manifest.
 
 > [!NOTE]
 > kit is alpha software (pre-1.0). The specs in [`docs/specs/`](docs/specs/README.md)

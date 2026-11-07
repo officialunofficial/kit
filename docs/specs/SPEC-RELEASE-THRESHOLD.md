@@ -228,11 +228,9 @@ signature. Pass/fail is binary; there is no per-share verdict at the
 aggregated layer (that's a feature, not a bug &mdash; the aggregate is the
 unit of consensus).
 
-`kit_attest::bls_threshold_verify` exposes this as a single function.
-`TrustRoot::Bls12381ThresholdPubKey` is wired into `verify_envelope`'s
-registry dispatch (`kit-attest/src/verify.rs`, feature-gated behind
-`bls-threshold`), so callers verifying a full DSSE envelope get this
-check automatically without calling `bls_threshold_verify` directly.
+No verifier API or trust-root variant for this scheme is implemented. The
+requirements above describe the proposed verification behavior; see §6 for
+current implementation status.
 
 ---
 
