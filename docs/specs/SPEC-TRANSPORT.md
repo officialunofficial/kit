@@ -47,6 +47,7 @@ internal `Mutex` so the trait object remains object-safe.
 | `read_ref(name)` | Read a ref's current hash, or `None` if absent. |
 | `list_refs(prefix)` | List refs whose full name starts with `prefix`. Returned names have `prefix` stripped per SPEC-REFS §4. |
 | `write_ref(name, hash)` | Convenience: `update_ref(name, RefWriteCondition::Any, hash)`. A default trait impl delegates here, so transports only need to implement `update_ref`. |
+| `repo_cursor()` | The repository cursor (§1.2), or none when the transport does not offer one. The default offers none. |
 
 Consumers MUST verify that downloaded pack and auxiliary-blob bytes hash to
 the caller's requested PackKey before parsing them into authoritative state,
@@ -92,6 +93,34 @@ up a `RefConflict` with `read_ref` before treating it as a true conflict
 (§7).
 
 ---
+
+### 1.2 Repository cursor (additive, opt-in)
+
+**Protocol requirement.** A transport that offers a repository cursor
+returns an opaque byte string of 1 to 64 bytes that names the state of the
+repository's refs. A client compares two cursors for equality and for nothing
+else: a cursor carries no order.
+
+- Every write that changes a ref MUST change the cursor before the write
+  reports success. A cursor read after a write reported success therefore
+  differs from every cursor read before that write began.
+- Equal cursors mean no ref changed between the two reads, apart from writes
+  still in progress at the later read. A client that reads the cursor, then
+  lists the refs, may reuse that listing while a fresh cursor equals the one it
+  read first. The listing misses no write that completed before the fresh
+  cursor was read.
+- A repository that is deleted and created again MUST NOT return a cursor
+  that the old repository returned.
+- Reading the cursor MUST NOT read the refs one by one. Its cost does not grow
+  with the number of refs.
+
+A cursor never replaces `read_ref` for a compare-and-swap. A client that
+needs one ref's current value reads it.
+
+**Reference-server behavior.** The memory transport's cursor is a number
+unique to the instance and the count of its committed ref writes. The file
+transport's is described in SPEC-REFS §5.1.2. The SSH, S3 and Connect
+transports offer none: their wire carries no cursor yet.
 
 ## 2. Error taxonomy
 

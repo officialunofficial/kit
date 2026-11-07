@@ -7,6 +7,16 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Transports can offer a repository cursor, an opaque value that changes
+  whenever a ref changes (SPEC-TRANSPORT §1.2). The memory and file transports
+  offer one; the file transport keeps a write count in each stripe lock file
+  (SPEC-REFS §5.1.2). A fetch whose remote cursor matches the one its last
+  complete fetch saw makes no other request. On one ext4 disk, a fetch of an
+  unchanged `kit+file://` remote with 10,000 branches went from about 9 s and
+  20,001 requests to under 60 ms and one.
+
 ### Changed
 
 - The file transport and `kit serve` lock each ref instead of the whole root.

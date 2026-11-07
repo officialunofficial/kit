@@ -51,7 +51,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError, RwLock};
 
@@ -88,8 +88,8 @@ fn open_pack_file(path: &Path) -> io::Result<fs::File> {
 use kit_core::bounded_read;
 use kit_core::hash::Hash;
 use kit_core::protocol::{
-    PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, Transport, TransportError,
-    TransportResult,
+    PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, RepoCursor, Transport,
+    TransportError, TransportResult,
 };
 use kit_core::refs::{
     REF_FILE_MAX_BYTES, Ref, decode_ref_wire, encode_ref_wire, validate_ref_name,
@@ -280,6 +280,70 @@ pub fn create_dir_all_durably(dir: &Path) -> io::Result<()> {
 /// files stays fixed however many refs the root holds.
 const REF_LOCK_STRIPES: usize = 256;
 
+/// Bytes of a stripe version: the count of writes to refs in the stripe,
+/// little-endian, at the start of the stripe's lock file (SPEC-REFS
+/// §5.1.2). An empty lock file counts zero.
+const STRIPE_VERSION_LEN: usize = 8;
+
+/// The file under `<root>/.kit/refs/` that holds the root's random id.
+const REPO_ID_FILE: &str = ".repo-id";
+
+/// Bytes of the root's random id.
+const REPO_ID_LEN: usize = 16;
+
+/// Domain separator of the file transport's repository cursor digest.
+const REPO_CURSOR_DOMAIN: &[u8] = b"kit.file-repo-cursor\0";
+
+/// The file name of a stripe's lock, `refs-<hh>.lock`.
+fn stripe_lock_name(stripe: usize) -> String {
+    format!("refs-{stripe:02x}.lock")
+}
+
+/// The stripe version at the start of `file`. Zero for an empty file; any
+/// length but zero and [`STRIPE_VERSION_LEN`] is `InvalidData`.
+fn read_stripe_version(mut file: &fs::File) -> io::Result<u64> {
+    let mut buf = [0u8; STRIPE_VERSION_LEN + 1];
+    file.seek(io::SeekFrom::Start(0))?;
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    match filled {
+        0 => Ok(0),
+        STRIPE_VERSION_LEN => {
+            let mut le = [0u8; STRIPE_VERSION_LEN];
+            le.copy_from_slice(&buf[..STRIPE_VERSION_LEN]);
+            Ok(u64::from_le_bytes(le))
+        }
+        _ => Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "stripe lock file holds no version",
+        )),
+    }
+}
+
+/// Add one to the stripe version in `file`.
+fn bump_version_in(mut file: &fs::File) -> io::Result<()> {
+    let next = read_stripe_version(file)?.wrapping_add(1);
+    file.seek(io::SeekFrom::Start(0))?;
+    file.write_all(&next.to_le_bytes())
+}
+
+/// The kernel's boot id, which changes on every boot. `None` where the
+/// system offers none.
+fn boot_id() -> Option<Vec<u8>> {
+    const BOOT_ID_MAX: u64 = 64;
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    bounded_read::read_capped(Path::new("/proc/sys/kernel/random/boot_id"), BOOT_ID_MAX)
+        .ok()
+        .filter(|id| !id.is_empty())
+}
+
 /// The lock stripe of the ref `name`: the first byte of the BLAKE3 digest
 /// of its UTF-8 bytes.
 fn ref_stripe(name: &str) -> usize {
@@ -335,11 +399,7 @@ impl RefLock {
 
     /// Acquire the exclusive lock of one stripe.
     fn acquire_stripe(root: &Path, stripe: usize) -> io::Result<Self> {
-        Self::open(
-            root,
-            &format!("refs-{stripe:02x}.lock"),
-            LockMode::Exclusive,
-        )
+        Self::open(root, &stripe_lock_name(stripe), LockMode::Exclusive)
     }
 
     fn open(root: &Path, file_name: &str, mode: LockMode) -> io::Result<Self> {
@@ -586,8 +646,12 @@ impl FileTransport {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let _repo_lock = RefLock::acquire_shared(&self.root).map_err(RefFileError::Io)?;
-        let _stripe_lock = RefLock::acquire_stripe(&self.root, stripe).map_err(RefFileError::Io)?;
-        Ok(f(&LockedRef { tx: self, name }))
+        let stripe_lock = RefLock::acquire_stripe(&self.root, stripe).map_err(RefFileError::Io)?;
+        Ok(f(&LockedRef {
+            tx: self,
+            name,
+            stripe: &stripe_lock.file,
+        }))
     }
 
     /// The ref's id, strictly: like [`Transport::read_ref`], but a ref file
@@ -740,7 +804,135 @@ impl FileTransport {
     /// The other fails, and a failure that leaves a clash on disk is
     /// [`RefFileError::InvalidName`], as the check before the write reports
     /// it, never a bare I/O error or a false conflict.
+    /// The CAS write of one ref file, then one more count on its stripe
+    /// version (SPEC-REFS §5.1.2) whenever the write may have changed the
+    /// file. The caller holds the ref's stripe lock or the repo lock
+    /// exclusive.
     fn write_ref_file(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+    ) -> Result<(), RefFileError> {
+        self.write_ref_file_in(name, condition, hash, None)
+    }
+
+    /// [`Self::write_ref_file`], counting through `stripe`, the open lock
+    /// file of the ref's stripe, when the caller holds it.
+    fn write_ref_file_in(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+        stripe: Option<&fs::File>,
+    ) -> Result<(), RefFileError> {
+        let written = self.write_ref_file_uncounted(name, condition, hash);
+        #[cfg(test)]
+        tests::BETWEEN_WRITE_AND_COUNT.with(|hook| {
+            if let Some(f) = hook.borrow_mut().as_mut() {
+                f();
+            }
+        });
+        if matches!(written, Ok(()) | Err(RefFileError::Io(_))) {
+            match stripe {
+                Some(file) => bump_version_in(file),
+                None => self.bump_stripe_version(name),
+            }
+            .map_err(RefFileError::Io)?;
+        }
+        written
+    }
+
+    /// Count one more write to the stripe of `name`, after the write's
+    /// rename. Only a holder of that stripe's lock, or of the repo lock
+    /// exclusive, calls this, so the read and the write of the count are
+    /// one step.
+    fn bump_stripe_version(&self, name: &str) -> io::Result<()> {
+        let path = self.lock_dir().join(stripe_lock_name(ref_stripe(name)));
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        bump_version_in(&file)
+    }
+
+    /// `<root>/.kit/refs/`, which holds the lock files.
+    fn lock_dir(&self) -> PathBuf {
+        kit_core::layout::RepoLayout::single(&self.root).refs_dir()
+    }
+
+    /// The repository cursor (SPEC-TRANSPORT §1.2): the BLAKE3 digest of
+    /// [`REPO_CURSOR_DOMAIN`], the root's random id, the kernel's boot id
+    /// and the 256 stripe versions. Each stripe version is read under that
+    /// stripe's lock held shared, after the repo lock held shared, so no
+    /// write is half counted. No ref file is read.
+    ///
+    /// A count is written without fsync. A process crash keeps it, because
+    /// the page cache survives the process. An operating system crash can
+    /// lose it, and then the boot id changes, so no cursor read before the
+    /// crash equals one read after it. Where the boot id cannot be read, the
+    /// transport offers no cursor.
+    ///
+    /// # Errors
+    /// [`RefFileError::Corrupt`] for a lock file or id file that holds
+    /// neither nothing nor a valid value, or I/O.
+    pub fn repo_cursor_digest(&self) -> Result<Option<Hash>, RefFileError> {
+        let Some(boot) = boot_id() else {
+            return Ok(None);
+        };
+        let id = self.repo_id()?;
+        let mut input = Vec::with_capacity(
+            REPO_CURSOR_DOMAIN.len()
+                + id.len()
+                + boot.len()
+                + REF_LOCK_STRIPES * STRIPE_VERSION_LEN,
+        );
+        input.extend_from_slice(REPO_CURSOR_DOMAIN);
+        input.extend_from_slice(&id);
+        input.extend_from_slice(&boot);
+        let _repo_guard = self
+            .repo_gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _repo_lock = RefLock::acquire_shared(&self.root).map_err(RefFileError::Io)?;
+        for stripe in 0..REF_LOCK_STRIPES {
+            let _stripe_guard = self.stripe_gates[stripe]
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let lock = RefLock::open(&self.root, &stripe_lock_name(stripe), LockMode::Shared)
+                .map_err(RefFileError::Io)?;
+            let version = read_stripe_version(&lock.file).map_err(|e| {
+                if e.kind() == ErrorKind::InvalidData {
+                    RefFileError::Corrupt(stripe_lock_name(stripe))
+                } else {
+                    RefFileError::Io(e)
+                }
+            })?;
+            input.extend_from_slice(&version.to_le_bytes());
+        }
+        Ok(Some(kit_core::hash::hash(&input)))
+    }
+
+    /// The root's random id, created by the first caller that needs it.
+    /// A root that is deleted and created again gets a new one.
+    fn repo_id(&self) -> Result<[u8; REPO_ID_LEN], RefFileError> {
+        let path = self.lock_dir().join(REPO_ID_FILE);
+        let mut fresh = [0u8; REPO_ID_LEN];
+        getrandom::fill(&mut fresh)
+            .map_err(|e| RefFileError::Io(io::Error::other(e.to_string())))?;
+        // Exactly one creator wins the exclusive create; every caller then
+        // reads the winner's id.
+        write_create_new(&path, &fresh, true).map_err(RefFileError::Io)?;
+        let bytes =
+            bounded_read::read_capped(&path, REPO_ID_LEN as u64).map_err(RefFileError::Io)?;
+        bytes
+            .try_into()
+            .map_err(|_| RefFileError::Corrupt(REPO_ID_FILE.to_owned()))
+    }
+
+    fn write_ref_file_uncounted(
         &self,
         name: &str,
         condition: RefWriteCondition,
@@ -928,7 +1120,14 @@ impl LockedRefs<'_> {
         if path.is_dir() {
             return Ok(false);
         }
-        let removed = remove_durably(&path).map_err(RefFileError::Io)?;
+        let removed = remove_durably(&path);
+        // Count the stripe whenever the file may be gone (SPEC-REFS §5.1.2).
+        if !matches!(removed, Ok(false)) {
+            self.tx
+                .bump_stripe_version(name)
+                .map_err(RefFileError::Io)?;
+        }
+        let removed = removed.map_err(RefFileError::Io)?;
         if removed {
             self.tx.prune_empty_parents(&path, name);
         }
@@ -968,6 +1167,9 @@ impl LockedRefs<'_> {
 pub struct LockedRef<'a> {
     tx: &'a FileTransport,
     name: &'a str,
+    /// The stripe's lock file, held exclusive, which also holds the
+    /// stripe version.
+    stripe: &'a fs::File,
 }
 
 impl LockedRef<'_> {
@@ -986,7 +1188,8 @@ impl LockedRef<'_> {
     /// [`RefFileError::InvalidName`], [`RefFileError::Escape`],
     /// [`RefFileError::Conflict`], or I/O.
     pub fn update(&self, condition: RefWriteCondition, hash: &Hash) -> Result<(), RefFileError> {
-        self.tx.write_ref_file(self.name, condition, hash)
+        self.tx
+            .write_ref_file_in(self.name, condition, hash, Some(self.stripe))
     }
 }
 
@@ -1064,6 +1267,13 @@ impl Transport for FileTransport {
         // Every condition participates: an unconditional write must not
         // interleave between a Match read and its publication.
         Ok(self.with_ref_lock_for(name, |lock| lock.update(condition, hash))??)
+    }
+
+    fn repo_cursor(&self) -> TransportResult<Option<RepoCursor>> {
+        match self.repo_cursor_digest()? {
+            Some(digest) => RepoCursor::new(&digest).map(Some),
+            None => Ok(None),
+        }
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
@@ -2507,5 +2717,216 @@ mod tests {
         let name = a.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with(".abc.tmp."), "{name}");
         assert!(temp_path(Path::new("/")).is_err());
+    }
+
+    type Hook = Option<Box<dyn FnMut()>>;
+
+    thread_local! {
+        /// Runs inside a ref write, after the rename and before the count.
+        pub(super) static BETWEEN_WRITE_AND_COUNT: std::cell::RefCell<Hook> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The count comes after the rename: between them the ref already holds
+    /// the new value and its stripe still holds the old count. A count
+    /// before the rename would let a reader pair the new cursor with the
+    /// old ref.
+    #[test]
+    fn a_write_counts_after_its_rename() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        let name = "refs/heads/main";
+        tx.update_ref(name, RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        let stripe = tx.lock_dir().join(stripe_lock_name(ref_stripe(name)));
+        let count = |path: &Path| read_stripe_version(&fs::File::open(path).unwrap()).unwrap();
+        let before = count(&stripe);
+        let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+        let (seen_in, ref_path, stripe_in) = (seen.clone(), tx.ref_path(name), stripe.clone());
+        BETWEEN_WRITE_AND_COUNT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let current = read_ref_raw(&ref_path).unwrap();
+                seen_in.set(Some((current, count(&stripe_in))));
+            }));
+        });
+        tx.update_ref(name, RefWriteCondition::Match(value(0, 0)), &value(0, 1))
+            .unwrap();
+        BETWEEN_WRITE_AND_COUNT.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(seen.get(), Some((Some(value(0, 1)), before)));
+        assert_eq!(count(&stripe), before + 1);
+    }
+
+    fn cursor(tx: &FileTransport) -> Hash {
+        tx.repo_cursor_digest().unwrap().expect("a cursor on Linux")
+    }
+
+    fn value(writer: usize, step: usize) -> Hash {
+        let mut h = [0u8; 32];
+        h[0] = 1;
+        h[1] = u8::try_from(writer).unwrap();
+        h[2..10].copy_from_slice(&(step as u64).to_le_bytes());
+        h
+    }
+
+    /// The step of `writer` that `h` names.
+    fn step_of(h: &Hash) -> u64 {
+        u64::from_le_bytes(h[2..10].try_into().unwrap())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn every_committed_write_changes_the_cursor() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        let mut seen = std::collections::HashSet::new();
+        assert!(seen.insert(cursor(&tx)));
+        let name = "refs/heads/main";
+        tx.update_ref(name, RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        assert!(seen.insert(cursor(&tx)), "a Missing write");
+        tx.update_ref(name, RefWriteCondition::Match(value(0, 0)), &value(0, 1))
+            .unwrap();
+        assert!(seen.insert(cursor(&tx)), "a Match write");
+        tx.update_ref(name, RefWriteCondition::Any, &value(0, 1))
+            .unwrap();
+        assert!(seen.insert(cursor(&tx)), "an Any write of the same value");
+        tx.with_ref_lock(|refs| {
+            refs.update_ref("refs/heads/b", RefWriteCondition::Any, &value(1, 0))
+        })
+        .unwrap()
+        .unwrap();
+        assert!(
+            seen.insert(cursor(&tx)),
+            "a write under the exclusive repo lock"
+        );
+        assert!(
+            tx.with_ref_lock(|refs| refs.delete_ref(name))
+                .unwrap()
+                .unwrap()
+        );
+        assert!(seen.insert(cursor(&tx)), "a delete");
+        // A failed CAS changes nothing, and the cursor may stay.
+        let before = cursor(&tx);
+        let failed = tx.update_ref("refs/heads/b", RefWriteCondition::Missing, &value(1, 1));
+        assert!(matches!(failed, Err(TransportError::RefConflict)));
+        assert_eq!(cursor(&tx), before);
+        // Reading the cursor writes no ref.
+        assert_eq!(tx.list_refs("refs/").unwrap().len(), 1);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_recreated_root_never_reuses_a_cursor() {
+        let dir = tmp();
+        let root = dir.path().join("root");
+        let first = {
+            let tx = FileTransport::new(&root);
+            tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+                .unwrap();
+            cursor(&tx)
+        };
+        fs::remove_dir_all(&root).unwrap();
+        let tx = FileTransport::new(&root);
+        tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        assert_ne!(cursor(&tx), first);
+    }
+
+    #[test]
+    fn a_lock_file_without_a_version_is_corrupt() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        let stripe = tx
+            .lock_dir()
+            .join(stripe_lock_name(ref_stripe("refs/heads/main")));
+        fs::write(&stripe, b"abc").unwrap();
+        let err = tx.update_ref("refs/heads/main", RefWriteCondition::Any, &value(0, 1));
+        assert!(err.is_err(), "a garbled count fails the write");
+        if cfg!(target_os = "linux") {
+            assert!(matches!(
+                tx.repo_cursor_digest(),
+                Err(RefFileError::Corrupt(_))
+            ));
+        }
+    }
+
+    /// Writers advance their own refs while a reader takes (cursor, listing)
+    /// pairs. Whenever a later cursor equals an earlier one, the earlier
+    /// listing already holds every write that completed before the later
+    /// cursor was read.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_equal_cursor_misses_no_completed_write() {
+        // The race this checks is narrow, so the scenario runs many times.
+        for _ in 0..20 {
+            equal_cursor_round();
+        }
+    }
+
+    fn equal_cursor_round() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        const WRITERS: usize = 2;
+        const STEPS: usize = 40;
+        let dir = tmp();
+        let done: Vec<AtomicU64> = (0..WRITERS).map(|_| AtomicU64::new(0)).collect();
+        let finished = AtomicU64::new(0);
+        std::thread::scope(|s| {
+            for w in 0..WRITERS {
+                let (done, finished, root) = (&done, &finished, dir.path());
+                s.spawn(move || {
+                    let tx = FileTransport::new(root);
+                    let name = format!("refs/heads/w{w}");
+                    for step in 1..=STEPS {
+                        tx.update_ref(&name, RefWriteCondition::Any, &value(w, step))
+                            .unwrap();
+                        done[w].store(step as u64, Ordering::SeqCst);
+                        // Quiet gaps let the reader see equal cursors.
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    finished.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+            let tx = FileTransport::new(dir.path());
+            let mut history: Vec<(Hash, Vec<u64>)> = Vec::new();
+            let mut equal = 0usize;
+            let mut after_last_write = 0;
+            loop {
+                let all_done = finished.load(Ordering::SeqCst) == WRITERS as u64;
+                // Writes completed before the cursor read.
+                let completed: Vec<u64> = done.iter().map(|d| d.load(Ordering::SeqCst)).collect();
+                let c = cursor(&tx);
+                let listing = tx.list_refs("refs/heads/").unwrap();
+                let mut steps = vec![0u64; WRITERS];
+                for r in &listing {
+                    let w: usize = r.name.trim_start_matches('w').parse().unwrap();
+                    steps[w] = step_of(&r.hash.unwrap());
+                }
+                for (earlier, earlier_steps) in &history {
+                    if *earlier == c {
+                        equal += 1;
+                        for w in 0..WRITERS {
+                            assert!(
+                                earlier_steps[w] >= completed[w],
+                                "writer {w}: listing at step {}, a write of step {} completed before an equal cursor",
+                                earlier_steps[w],
+                                completed[w]
+                            );
+                        }
+                    }
+                }
+                history.push((c, steps));
+                if all_done {
+                    after_last_write += 1;
+                    if after_last_write == 2 {
+                        break;
+                    }
+                }
+            }
+            // The last two observations follow the last write, so their
+            // cursors are equal and the check above ran.
+            assert!(equal > 0);
+        });
     }
 }

@@ -22,6 +22,8 @@ workspace = true
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it.
 kit-core = { version = "=0.7.2", path = "../kit-core" }
+# The random id of a root, part of its repository cursor.
+getrandom = "0.4.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"

@@ -25,6 +25,12 @@ pub trait RemoteSource {
     /// Download a pack. `ref_name` is the branch hint.
     fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError>;
 
+    /// The remote's repository cursor (SPEC-TRANSPORT §1.2), or `None` when
+    /// it offers none.
+    fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, SourceError> {
+        Ok(None)
+    }
+
     /// Whether this source implements the native push operations. Read-only
     /// sources refuse push before any local tracking or remote mutation.
     fn supports_push(&self) -> bool {
@@ -251,6 +257,10 @@ impl RemoteSource for TransportSource<'_> {
 
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         self.transport.read_ref(name).map_err(SourceError::from)
+    }
+
+    fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, SourceError> {
+        self.transport.repo_cursor().map_err(SourceError::from)
     }
 
     fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {

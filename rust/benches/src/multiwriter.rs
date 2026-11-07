@@ -490,6 +490,8 @@ fn shared_history(
 /// Remote requests one fetch made, by kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Requests {
+    /// Repository cursor reads.
+    pub cursor: usize,
     /// Ref listings.
     pub list: usize,
     /// Single ref reads.
@@ -504,7 +506,7 @@ impl Requests {
     /// Every request.
     #[must_use]
     pub fn total(&self) -> usize {
-        self.list + self.read_ref + self.node + self.pack
+        self.cursor + self.list + self.read_ref + self.node + self.pack
     }
 }
 
@@ -550,6 +552,11 @@ impl RemoteSource for Counting<'_> {
     fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
         self.bump(|c| c.pack += 1);
         self.inner.download_pack_via_ref(key, ref_name)
+    }
+
+    fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, SourceError> {
+        self.bump(|c| c.cursor += 1);
+        self.inner.repo_cursor()
     }
 
     fn supports_push(&self) -> bool {

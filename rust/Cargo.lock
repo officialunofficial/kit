@@ -2434,6 +2434,7 @@ dependencies = [
  "kit-keystore",
  "kit-rpc",
  "kit-serve",
+ "kit-sync",
  "kit-transport-ssh",
  "libfuzzer-sys",
  "libkit",
@@ -2581,6 +2582,7 @@ dependencies = [
 name = "kit-transport-file"
 version = "0.7.2"
 dependencies = [
+ "getrandom 0.4.3",
  "kit-core",
  "libc",
  "tempfile",

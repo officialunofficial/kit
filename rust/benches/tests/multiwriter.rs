@@ -44,7 +44,12 @@ fn every_row_runs_at_tiny_sizes() {
     let reader = multiwriter::fetch_noop_setup(&connect, &base.join("local"), 3).unwrap();
     let run = multiwriter::fetch_noop(&connect, &reader).unwrap();
     assert_eq!(run.packs_downloaded, 0);
-    assert!(run.requests.list >= 1);
+    if cfg!(target_os = "linux") {
+        // The file transport offers a cursor there: one read, nothing else.
+        assert_eq!(run.requests.total(), 1);
+    } else {
+        assert!(run.requests.list >= 1);
+    }
 
     let base = case("fetch-grow");
     let run = multiwriter::fetch_grow(&file(base.join("remote")), &base.join("local"), 3).unwrap();

@@ -61,6 +61,29 @@ let pulled = pull(&dir, &source, "default", &SyncOptions::default(), &NoopObserv
 `SyncOptions` is `#[non_exhaustive]`: start from `SyncOptions::default()` and
 use the `with_*` setters.
 
+### Unchanged remotes
+
+When the remote offers a repository cursor (SPEC-TRANSPORT §1.2), fetch reads
+it before it lists the branches. After a fetch that completes, it records the
+cursor, a digest of the remote-tracking refs and whether it verified
+signatures. The next fetch makes no other request when all of these hold: the
+fresh cursor equals the recorded one, the tracking refs still match the
+digest, the object of every tracked tip is in the store, a fetch that verifies
+signatures follows one that did, and a named target branch has a tracking
+ref. `FetchReport::remote_unchanged` reports the skip. It skips the closure
+check of the tips, so an object lost below a tip heals on the next fetch that
+does work, not on this one.
+
+The disposable record lives in **.kit/applied-packs/.cursors/**. Its filename
+is lowercase BLAKE3 over the remote name, repository and origin, each with an
+eight-byte little-endian byte-length prefix (empty when the source has no
+address). File contents are five LF-separated fields, without a final LF:
+`kit-fetch-cursor-v1`, the cursor in lowercase hex, the lowercase tracking
+digest, `1` or `0` for signature verification, and lowercase BLAKE3 of the
+preceding four fields including their three separators. Readers cap input at
+512 bytes. Missing, unreadable, or invalid records cause a full fetch. You can
+delete these files.
+
 ### Incremental fetch checkpoints
 
 With signature verification enabled, fetch records the last fully applied

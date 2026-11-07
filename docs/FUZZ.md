@@ -41,6 +41,7 @@ from recurring.
 | `fuzz_targets/verify_closure.rs` | `verify::verify_closure` / `verify::verify_closure_packs` / `verify::verify_closure_manifest` / `verify::export_closure` (never panics; a freshly exported snapshot closure verifies; a mutated manifest rejects cleanly; raw adversarial bytes fed directly as pack buffers — whole and split into two — to `verify_closure_packs`/`verify_closure_manifest` never panic and any `Ok` report is internally consistent) |
 | `fuzz_targets/envelope_decode.rs` | `kit_attest::envelope::decode` (every accepted input re-encodes to exactly itself) |
 | `fuzz_targets/name_rules.rs` | `TreeEntry::validate_name`, `index::validate_index_path`, `refs::validate_ref_name`, `refs::validate_ref_name_grammar`, `refs::check_new_ref_name` (never panic; a name that breaks a stated rule is refused; an index path holds only valid entry names; a new ref name is accepted exactly when `validate_ref_name` accepts it) |
+| `fuzz_targets/fetch_cursor_record.rs` | `kit_sync::cursor::parse` (an accepted record survives a write and a parse) |
 | `fuzz_targets/ref_wire_decode.rs` | `refs::decode_ref_wire` / `refs::parse_lowercase_hash` (an accepted hash survives an encode and decode round trip) |
 | `fuzz_targets/index_decode.rs` | `index::deserialize` (an accepted index survives a serialize and deserialize round trip) |
 | `fuzz_targets/history_order_decode.rs` | `TimestampDiscovery::decode` (every accepted input re-encodes to exactly itself) |
@@ -110,6 +111,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `kit_core::sparse::decode_sparse_response`, `decode_sparse_cache` | `sparse_wire_decode` |
 | `kit_core::verify` closure manifest `decode` | `verify_closure` |
 | `kit_core::refs::decode_ref_wire`, `parse_lowercase_hash` | `ref_wire_decode` |
+| `kit_sync::cursor::parse` | `fetch_cursor_record` |
 | `kit_core::index::deserialize` | `index_decode` |
 | `kit_core::history_order` `TimestampDiscovery::decode` | `history_order_decode` |
 | `kit_core::ops::conflict_state::deserialize_conflicts` | `conflict_state_decode` |

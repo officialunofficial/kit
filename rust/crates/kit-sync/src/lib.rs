@@ -31,6 +31,8 @@ mod checkpoint;
 #[cfg(feature = "client")]
 mod client_source;
 mod clone;
+#[doc(hidden)]
+pub mod cursor;
 mod error;
 #[doc(hidden)]
 pub mod fanout;

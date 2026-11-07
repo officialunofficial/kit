@@ -360,6 +360,31 @@ below it, such as `refs/heads/a` and `refs/heads/a/b`. At most one
 succeeds. The other MUST fail with `InvalidRef`, the error that a clash found
 before the write reports, and MUST NOT leave a temporary file behind.
 
+#### 5.1.2 File transport stripe versions
+
+**Protocol requirement.** A stripe lock file holds the stripe version: the
+count of writes to refs in that stripe, as 8 bytes little-endian at the start
+of the file. An empty file holds version 0. Any other length is corrupt, and a
+writer or reader that finds it MUST fail rather than guess.
+
+Every write that may have changed a ref file, a delete included, MUST add one
+to the version of the ref's stripe after its rename or unlink and before it
+reports, while it still holds the stripe lock or the repo lock exclusive. A
+write that fails its condition changes no file and need not count. The count
+need not be durable, as long as a cursor derived from the counts changes
+across an operating system crash, the one event that can lose a count that a
+write already made. Every process that writes refs under a root MUST count, or the root's
+repository cursor can report an unchanged state that has changed.
+
+**Reference-server behavior.** The file transport derives its repository
+cursor (SPEC-TRANSPORT §1.2) from a random 16-byte id of the root, created once
+in `<root>/.kit/refs/.repo-id`, the kernel's boot id, and the 256 stripe
+versions. It reads each version holding the repo lock shared, then that
+stripe's lock shared, so it never sees half a count. It reads no ref file.
+The boot id changes on every boot, so a count lost in a crash never makes a
+cursor repeat. Where the system offers no boot id, the transport offers no
+cursor.
+
 *Coordination with local worktree operations:* the file transport's locks
 by themselves only serialize it against concurrent instances
 of itself &mdash; it does not, on its own, coordinate against a `commit`,
