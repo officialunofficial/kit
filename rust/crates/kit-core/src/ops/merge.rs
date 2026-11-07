@@ -1489,6 +1489,24 @@ mod strict_tests {
         assert_eq!(find_merge_base_strict(&store, q, b).unwrap(), Some(q));
     }
 
+    /// The walk of the second side reads every commit up to the depth of the
+    /// best base so far, that depth included, and stops at the first commit
+    /// below it. A missing commit at that depth fails the walk; one level
+    /// deeper it is never read.
+    #[test]
+    fn the_walk_reads_every_commit_at_the_depth_of_the_answer() {
+        let (dir, store) = fresh_store();
+        let tree = put_tree(&store);
+        let r = put_commit(&store, tree, vec![], 1);
+        let q = put_commit(&store, tree, vec![r], 2);
+        let y = put_commit(&store, tree, vec![], 3);
+        // b reaches q and y at depth 1; q is the base, with a total depth of 1.
+        let b = put_commit(&store, tree, vec![q, y], 4);
+        assert_eq!(find_merge_base_strict(&store, q, b).unwrap(), Some(q));
+        remove(&dir, &y);
+        assert_names(find_merge_base_strict(&store, q, b), &y);
+    }
+
     /// r - a1, r - b1; ma = merge(a1, b1) and mb = merge(b1, a1) have two
     /// merge bases, a1 and b1. ta sits on ma. Returns [a1, b1, ma, mb, ta].
     fn criss_cross() -> (TempDir, ObjectStore, [Hash; 5]) {
