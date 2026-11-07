@@ -54,8 +54,8 @@ RUN rustup component add rustfmt clippy \
 
 # Prebuilt tool binaries, each at one exact version. cargo-binstall resolves them
 # once here and the image keeps them. Rebuild the image to change a version.
-ARG ACTIONLINT_VERSION=1.7.12
-ARG ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+ARG ACTIONLINT_VERSION=1.7.7
+ARG ACTIONLINT_SHA256=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
 ARG BINSTALL_INSTALLER_COMMIT=851112458b5f28a29e5bc14a690c3f283d9dcc6f
 RUN curl -L --proto '=https' --tlsv1.2 -sSf \
         "https://raw.githubusercontent.com/cargo-bins/cargo-binstall/${BINSTALL_INSTALLER_COMMIT}/install-from-binstall-release.sh" | bash \

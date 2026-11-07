@@ -1,0 +1,6 @@
+# Runner labels unknown to actionlint 1.7.7 in the pinned CI builder.
+# macos-26 is a GitHub-hosted label. Remove this override only after both
+# version pins advance and the Cloud Build builder digest uses the newer binary.
+self-hosted-runner:
+  labels:
+    - macos-26
