@@ -82,9 +82,21 @@ pub enum RebaseError {
         /// Why the read failed.
         source: crate::store::StoreError,
     },
-    /// A parent on the branch names an object that is not a commit.
-    #[error("object {} on the branch is not a commit; nothing was rebased", hash::to_hex(.0))]
+    /// A parent on the branch or in the history of the base names an
+    /// object that is not a commit.
+    #[error("object {} in the history is not a commit; nothing was rebased", hash::to_hex(.0))]
     NotACommit(Hash),
+}
+
+impl From<crate::ops::graph::AncestorError> for RebaseError {
+    fn from(err: crate::ops::graph::AncestorError) -> Self {
+        use crate::ops::graph::AncestorError;
+        match err {
+            AncestorError::Unreadable { hash, source } => Self::UnreadableCommit { hash, source },
+            AncestorError::NotACommit(hash) => Self::NotACommit(hash),
+            AncestorError::Limit(source) => Self::Store(source),
+        }
+    }
 }
 
 /// Result alias.
@@ -258,10 +270,10 @@ pub fn cleanup_rebase(layout: &RepoLayout) -> RebaseResult<()> {
 /// is a commit that cannot be read, on either side.
 ///
 /// # Errors
-/// - [`RebaseError::Store`] when an ancestor of the base cannot be read
-///   or the base has too many ancestors.
+/// - [`RebaseError::Store`] when the base has too many ancestors.
 /// - [`RebaseError::UnreadableCommit`] / [`RebaseError::NotACommit`] when a
-///   commit to replay cannot be read or is another kind of object.
+///   commit to replay or an ancestor of the base cannot be read or is
+///   another kind of object.
 /// - [`RebaseError::TooManyCommits`] when the branch is too long to replay.
 pub fn collect_commits_to_replay(
     store: &ObjectStore,
@@ -290,13 +302,12 @@ fn collect_commits_with_caps(
     }
 
     let mut onto_ancestors: HashSet<Hash> = HashSet::new();
-    crate::ops::graph::collect_ancestor_set_with_cap(
+    crate::ops::graph::collect_history_with_cap(
         store,
         onto_hash,
         &mut onto_ancestors,
         max_ancestors,
         ONTO_ANCESTOR_LIMIT,
-        crate::ops::graph::Missing::Fails,
     )?;
 
     let mut commits: Vec<Hash> = Vec::new();
@@ -555,10 +566,15 @@ mod tests {
         let onto_above_missing = put_commit(&store, tree, vec![missing], 8);
         let err = collect_commits_to_replay(&store, h1, onto_above_missing).unwrap_err();
         assert!(
-            matches!(
-                err,
-                RebaseError::Store(crate::store::StoreError::ObjectNotFound(_))
-            ),
+            matches!(err, RebaseError::UnreadableCommit { hash, .. } if hash == missing),
+            "{err:?}"
+        );
+
+        // A parent in the history of the base that is not a commit.
+        let onto_above_tree = put_commit(&store, tree, vec![tree], 9);
+        let err = collect_commits_to_replay(&store, h1, onto_above_tree).unwrap_err();
+        assert!(
+            matches!(err, RebaseError::NotACommit(hash) if hash == tree),
             "{err:?}"
         );
 
