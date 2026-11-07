@@ -351,6 +351,28 @@ pub struct PushRun {
     pub elapsed: Duration,
     /// Time of each landed push, its retries included, sorted.
     pub latencies: Vec<Duration>,
+    /// Where the time of each landed push went, in the order of
+    /// `latencies`. Empty for rows that do not split it.
+    pub parts: Vec<PushParts>,
+}
+
+/// A landed push's time and its parts.
+type TimedPush = (Duration, PushParts);
+
+/// Where the time of one landed `push-shared` push went. The pusher never
+/// waits between attempts.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PushParts {
+    /// Committing locally, once per attempt.
+    pub commit: Duration,
+    /// Push attempts that were rejected.
+    pub rejected: Duration,
+    /// Fetches after a rejection.
+    pub fetch: Duration,
+    /// The push attempt that landed.
+    pub landed: Duration,
+    /// Attempts, the landed one included.
+    pub attempts: usize,
 }
 
 impl PushRun {
@@ -370,6 +392,39 @@ impl PushRun {
     #[must_use]
     pub fn retries_per_success(&self) -> f64 {
         self.conflicts as f64 / self.pushes as f64
+    }
+
+    /// The mean parts of the landed pushes at or above quantile `q` of
+    /// latency, and how many there are.
+    #[must_use]
+    pub fn parts_above(&self, q: f64) -> (PushParts, usize) {
+        let cut = self.quantile(q);
+        let slow: Vec<&PushParts> = self
+            .latencies
+            .iter()
+            .zip(&self.parts)
+            .filter(|(l, _)| **l >= cut)
+            .map(|(_, p)| p)
+            .collect();
+        let n = slow.len().max(1);
+        let n32 = u32::try_from(n).unwrap_or(u32::MAX);
+        let sum = slow.iter().fold(PushParts::default(), |acc, p| PushParts {
+            commit: acc.commit + p.commit,
+            rejected: acc.rejected + p.rejected,
+            fetch: acc.fetch + p.fetch,
+            landed: acc.landed + p.landed,
+            attempts: acc.attempts + p.attempts,
+        });
+        (
+            PushParts {
+                commit: sum.commit / n32,
+                rejected: sum.rejected / n32,
+                fetch: sum.fetch / n32,
+                landed: sum.landed / n32,
+                attempts: sum.attempts / n,
+            },
+            slow.len(),
+        )
     }
 }
 
@@ -451,6 +506,7 @@ pub fn push_distinct(
         conflicts: 0,
         elapsed,
         latencies,
+        parts: Vec::new(),
     })
 }
 
@@ -475,7 +531,7 @@ pub fn push_shared(
         let handles: Vec<_> = (0..pushers)
             .map(|p| {
                 let (barrier, key, conflicts) = (&barrier, &key, &conflicts);
-                s.spawn(move || -> Result<(Vec<Hash>, Vec<Duration>), String> {
+                s.spawn(move || -> Result<(Vec<Hash>, Vec<TimedPush>), String> {
                     let pusher = Pusher::create(&scratch.join(format!("p{p}")), key);
                     barrier.wait();
                     let pusher = pusher?;
@@ -484,23 +540,34 @@ pub fn push_shared(
                     for step in 0..steps {
                         let t0 = Instant::now();
                         let mut attempt = 0usize;
+                        let mut parts = PushParts::default();
                         let tip = loop {
+                            parts.attempts += 1;
+                            let tc = Instant::now();
                             let parent = pusher.tracked(SHARED_BRANCH)?;
                             let tip = pusher.commit(SHARED_BRANCH, parent, seed(p, step))?;
+                            parts.commit += tc.elapsed();
+                            let tp = Instant::now();
                             let tx = connect()?;
                             match pusher.push(&TransportSource::new(&*tx), SHARED_BRANCH) {
-                                Ok(()) => break tip,
+                                Ok(()) => {
+                                    parts.landed += tp.elapsed();
+                                    break tip;
+                                }
                                 Err(e) if is_conflict(&e) && attempt < MAX_STEPS => {
+                                    parts.rejected += tp.elapsed();
                                     attempt += 1;
                                     conflicts.fetch_add(1, Ordering::Relaxed);
                                     drop(tx);
+                                    let tf = Instant::now();
                                     let tx = connect()?;
                                     pusher.fetch(&TransportSource::new(&*tx))?;
+                                    parts.fetch += tf.elapsed();
                                 }
                                 Err(e) => return Err(format!("push p{p} step {step}: {e}")),
                             }
                         };
-                        latencies.push(t0.elapsed());
+                        latencies.push((t0.elapsed(), parts));
                         landed.push(tip);
                     }
                     Ok((landed, latencies))
@@ -518,6 +585,8 @@ pub fn push_shared(
         expected.extend(landed);
         latencies.extend(lat);
     }
+    latencies.sort_unstable_by_key(|(l, _)| *l);
+    let (latencies, parts): (Vec<Duration>, Vec<PushParts>) = latencies.into_iter().unzip();
     let history = shared_history(connect, &scratch.join("check"), &key, pushers * steps)?;
     if history != expected {
         return Err(format!(
@@ -526,12 +595,12 @@ pub fn push_shared(
             expected.len()
         ));
     }
-    latencies.sort_unstable();
     Ok(PushRun {
         pushes: pushers * steps,
         conflicts: conflicts.load(Ordering::Relaxed),
         elapsed,
         latencies,
+        parts,
     })
 }
 
