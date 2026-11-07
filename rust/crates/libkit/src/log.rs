@@ -24,7 +24,6 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use kit_core::hash::{self, Hash};
 use kit_core::object::{Commit, Object};
-use kit_core::ops::graph::collect_ancestor_set;
 use kit_core::ops::merge::find_merge_base;
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
@@ -33,7 +32,8 @@ use crate::{Repo, identity, revspec};
 
 pub mod date;
 
-/// The most commits that one walk collects. A larger history stops here.
+/// The most commits that one walk reads. A walk that would read more fails
+/// with [`Error::TooManyCommits`]. It never returns part of the history.
 const MAX_LOG_COMMITS: usize = 1_000_000;
 
 /// Errors from walking the history.
@@ -61,6 +61,13 @@ pub enum Error {
     /// An object in the walk is not a commit.
     #[error("not a commit: {}", hash::to_hex(.0))]
     NotACommit(Hash),
+    /// The walk reaches more commits than one walk may read. Nothing is
+    /// returned, because a part of the history would look complete.
+    #[error("the walk reaches more than {limit} commits; no history is shown")]
+    TooManyCommits {
+        /// The most commits that one walk may read.
+        limit: usize,
+    },
     /// A commit in the walk could not be read.
     #[error("read {}: {source}", hash::to_hex(.hash))]
     ReadCommit {
@@ -151,19 +158,11 @@ pub struct Entry {
 /// variants report an object that is missing or is not a commit.
 pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> {
     let store = repo.store();
-    let Some((tips, excluded)) = resolve_selection(repo, &parse_selection(query.start.as_deref()))?
-    else {
+    let selection = parse_selection(query.start.as_deref());
+    let Some((tips, excluded)) = resolve_selection(repo, &selection, MAX_LOG_COMMITS)? else {
         return Ok(None);
     };
-    let ordered = ordered_commits(store, &tips, &excluded, query.first_parent)?;
-    let limit = query.limit.unwrap_or(usize::MAX);
-    Ok(Some(
-        ordered
-            .into_iter()
-            .filter(|entry| query.filter.matches(&entry.commit))
-            .take(limit)
-            .collect(),
-    ))
+    select(store, &tips, &excluded, query, MAX_LOG_COMMITS).map(Some)
 }
 
 /// Walk the history of `tips` in the order of [`history`], with no
@@ -172,9 +171,52 @@ pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> 
 ///
 /// # Errors
 /// [`Error::NotACommit`] or [`Error::ReadCommit`] when an object of the walk
-/// is not a commit or cannot be read.
+/// is not a commit or cannot be read. [`Error::TooManyCommits`] when the
+/// history is larger than one walk may read.
 pub fn walk(store: &ObjectStore, tips: &[Hash], first_parent: bool) -> Result<Vec<Entry>, Error> {
-    ordered_commits(store, tips, &HashSet::new(), first_parent)
+    let mut entries = Vec::new();
+    emit_sorted(
+        store,
+        tips,
+        &HashSet::new(),
+        first_parent,
+        (0, MAX_LOG_COMMITS),
+        |entry| {
+            entries.push(entry);
+            true
+        },
+    )?;
+    Ok(entries)
+}
+
+/// The commits of the walk that pass the filter of `query`, in order, and
+/// at most its limit.
+fn select(
+    store: &ObjectStore,
+    tips: &[Hash],
+    excluded: &HashSet<Hash>,
+    query: &Query,
+    max_commits: usize,
+) -> Result<Vec<Entry>, Error> {
+    let limit = query.limit.unwrap_or(usize::MAX);
+    let mut entries = Vec::new();
+    if limit == 0 {
+        return Ok(entries);
+    }
+    emit_sorted(
+        store,
+        tips,
+        excluded,
+        query.first_parent,
+        (0, max_commits),
+        |entry| {
+            if query.filter.matches(&entry.commit) {
+                entries.push(entry);
+            }
+            entries.len() < limit
+        },
+    )?;
+    Ok(entries)
 }
 
 /// The first line of the message of a commit or remix. The result is empty
@@ -235,7 +277,13 @@ fn parse_selection(text: Option<&str>) -> Selection {
     Selection::Single(text.to_owned())
 }
 
-fn resolve_selection(repo: &Repo, selection: &Selection) -> Result<Option<WalkSet>, Error> {
+/// Resolve the selection. The excluded side of a range may hold at most
+/// `max_commits` commits.
+fn resolve_selection(
+    repo: &Repo,
+    selection: &Selection,
+    max_commits: usize,
+) -> Result<Option<WalkSet>, Error> {
     let mut excluded: HashSet<Hash> = HashSet::new();
     let tips: Vec<Hash> = match selection {
         Selection::Default => match resolve_tip(repo, None)? {
@@ -251,8 +299,8 @@ fn resolve_selection(repo: &Repo, selection: &Selection) -> Result<Option<WalkSe
                 return Ok(None);
             };
             if let Some(base) = resolve_tip(repo, Some(exclude))? {
-                collect_ancestor_set(repo.store(), base, &mut excluded)
-                    .map_err(Error::WalkRangeBase)?;
+                collect_excluded(repo.store(), base, &mut excluded, max_commits)
+                    .map_err(|e| e.into_error(Error::WalkRangeBase))?;
             }
             vec![include]
         }
@@ -264,8 +312,8 @@ fn resolve_selection(repo: &Repo, selection: &Selection) -> Result<Option<WalkSe
             if let (Some(a), Some(b)) = (a, b)
                 && let Some(base) = find_merge_base(repo.store(), a, b).map_err(Error::MergeBase)?
             {
-                collect_ancestor_set(repo.store(), base, &mut excluded)
-                    .map_err(Error::WalkMergeBase)?;
+                collect_excluded(repo.store(), base, &mut excluded, max_commits)
+                    .map_err(|e| e.into_error(Error::WalkMergeBase))?;
             }
             let tips: Vec<Hash> = a.into_iter().chain(b).collect();
             if tips.is_empty() {
@@ -324,16 +372,96 @@ impl PartialEq for HeapItem {
 
 impl Eq for HeapItem {}
 
-/// Collect the commits reachable from `tips` and not in `excluded`, in date
-/// order. The order is reverse-chronological, and a parent never comes
-/// before any of its children. Equal timestamps keep the natural order from
-/// child to parent. The walk collects at most [`MAX_LOG_COMMITS`] commits.
-fn ordered_commits(
+/// Why the excluded side of a range could not be collected.
+enum ExcludeError {
+    /// It holds more commits than one walk may read.
+    TooMany(usize),
+    /// An object could not be read.
+    Store(StoreError),
+}
+
+impl ExcludeError {
+    fn into_error(self, store: fn(StoreError) -> Error) -> Error {
+        match self {
+            Self::TooMany(limit) => Error::TooManyCommits { limit },
+            Self::Store(source) => store(source),
+        }
+    }
+}
+
+/// Add `base` and all of its ancestors to `excluded`. The walk records
+/// `base` even when its object is missing. A missing object or an object of
+/// another kind ends the walk on that path. Any other read error fails the
+/// walk. More than `max_commits` commits in `excluded` fails the walk too,
+/// because a part of the set would let excluded commits through.
+fn collect_excluded(
+    store: &ObjectStore,
+    base: Hash,
+    excluded: &mut HashSet<Hash>,
+    max_commits: usize,
+) -> Result<(), ExcludeError> {
+    let mut stack = vec![base];
+    while let Some(current) = stack.pop() {
+        if excluded.contains(&current) {
+            continue;
+        }
+        if excluded.len() >= max_commits {
+            return Err(ExcludeError::TooMany(max_commits));
+        }
+        excluded.insert(current);
+        match store.read_object(&current) {
+            Ok(Object::Commit(commit)) => stack.extend(commit.parents),
+            Ok(_) | Err(StoreError::ObjectNotFound(_)) => {}
+            Err(source) => return Err(ExcludeError::Store(source)),
+        }
+    }
+    Ok(())
+}
+
+/// Read the commit `hash`.
+fn read_commit(store: &ObjectStore, hash: Hash) -> Result<Commit, Error> {
+    match store.read_object(&hash) {
+        Ok(Object::Commit(commit)) => Ok(commit),
+        Ok(_) => Err(Error::NotACommit(hash)),
+        Err(source) => Err(Error::ReadCommit { hash, source }),
+    }
+}
+
+/// The parents of `commit` that the walk follows.
+fn walked_parents<'a>(
+    commit: &'a Commit,
+    excluded: &'a HashSet<Hash>,
+    first_parent: bool,
+) -> impl Iterator<Item = Hash> + 'a {
+    let parents: &[Hash] = if first_parent {
+        commit.parents.get(..1).unwrap_or(&[])
+    } else {
+        &commit.parents
+    };
+    parents
+        .iter()
+        .copied()
+        .filter(|parent| !excluded.contains(parent))
+}
+
+/// Collect every commit reachable from `tips` and not in `excluded`, then
+/// pass them to `emit` in date order until `emit` returns `false`. The order
+/// is reverse-chronological, and a parent never comes before any of its
+/// children. Equal timestamps keep the natural order from child to parent,
+/// and the hash breaks a remaining tie. `cap` holds the commits that the
+/// walk has read already and the most commits that the whole walk may read.
+///
+/// # Errors
+/// [`Error::TooManyCommits`] when the walk reaches more commits than the
+/// cap allows. Otherwise a read error of a commit.
+fn emit_sorted(
     store: &ObjectStore,
     tips: &[Hash],
     excluded: &HashSet<Hash>,
     first_parent: bool,
-) -> Result<Vec<Entry>, Error> {
+    (streamed, max_commits): (usize, usize),
+    mut emit: impl FnMut(Entry) -> bool,
+) -> Result<(), Error> {
     // Collect the candidates. A depth-first walk over the parents skips the
     // excluded commits.
     let mut commits: HashMap<Hash, Commit> = HashMap::new();
@@ -342,24 +470,11 @@ fn ordered_commits(
         if excluded.contains(&hash) || commits.contains_key(&hash) {
             continue;
         }
-        if commits.len() >= MAX_LOG_COMMITS {
-            break;
+        if streamed.saturating_add(commits.len()) >= max_commits {
+            return Err(Error::TooManyCommits { limit: max_commits });
         }
-        let commit = match store.read_object(&hash) {
-            Ok(Object::Commit(commit)) => commit,
-            Ok(_) => return Err(Error::NotACommit(hash)),
-            Err(source) => return Err(Error::ReadCommit { hash, source }),
-        };
-        let parents: &[Hash] = if first_parent {
-            commit.parents.get(..1).unwrap_or(&[])
-        } else {
-            &commit.parents
-        };
-        for parent in parents {
-            if !excluded.contains(parent) {
-                stack.push(*parent);
-            }
-        }
+        let commit = read_commit(store, hash)?;
+        stack.extend(walked_parents(&commit, excluded, first_parent));
         commits.insert(hash, commit);
     }
 
@@ -385,9 +500,11 @@ fn ordered_commits(
             });
         }
     }
-    let mut ordered = Vec::with_capacity(commits.len());
     while let Some(item) = heap.pop() {
-        let commit = commits[&item.hash].clone();
+        // Each commit enters the heap once, when its last child is emitted.
+        let Some(commit) = commits.remove(&item.hash) else {
+            continue;
+        };
         for parent in &commit.parents {
             if let Some(degree) = in_degree.get_mut(parent) {
                 *degree -= 1;
@@ -399,12 +516,14 @@ fn ordered_commits(
                 }
             }
         }
-        ordered.push(Entry {
+        if !emit(Entry {
             hash: item.hash,
             commit,
-        });
+        }) {
+            return Ok(());
+        }
     }
-    Ok(ordered)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -512,6 +631,95 @@ mod tests {
             parse_selection(Some("a...")),
             Selection::Symmetric { a, b } if a == "a" && b == "HEAD"
         ));
+    }
+
+    /// A store in a temporary directory.
+    fn temp_store() -> (tempfile::TempDir, ObjectStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
+        (dir, store)
+    }
+
+    /// Write a commit. `seed` makes commits with equal fields distinct.
+    fn put(store: &ObjectStore, parents: Vec<Hash>, timestamp: u64, seed: u32) -> Hash {
+        let message = format!("commit {seed}");
+        let commit = commit_for(parents, alice(), &message, timestamp);
+        store
+            .write(&kit_core::serialize::serialize(&Object::Commit(commit)).unwrap())
+            .unwrap()
+    }
+
+    /// A linear history of `n` commits, oldest first.
+    fn chain(store: &ObjectStore, n: u32) -> Vec<Hash> {
+        let mut hashes: Vec<Hash> = Vec::new();
+        for i in 0..n {
+            let parents = hashes.last().copied().into_iter().collect();
+            hashes.push(put(store, parents, u64::from(i), i));
+        }
+        hashes
+    }
+
+    fn query_with(limit: Option<usize>, first_parent: bool) -> Query {
+        Query {
+            first_parent,
+            limit,
+            ..Query::default()
+        }
+    }
+
+    fn ids(entries: &[Entry]) -> Vec<Hash> {
+        entries.iter().map(|entry| entry.hash).collect()
+    }
+
+    #[test]
+    fn a_linear_walk_over_the_cap_fails_and_never_returns_a_prefix() {
+        let (_dir, store) = temp_store();
+        let hashes = chain(&store, 5);
+        let tip = [hashes[4]];
+        let none = HashSet::new();
+        for first_parent in [false, true] {
+            let all = query_with(None, first_parent);
+            let err = select(&store, &tip, &none, &all, 4).unwrap_err();
+            assert!(matches!(err, Error::TooManyCommits { limit: 4 }), "{err:?}");
+            assert!(err.to_string().contains("more than 4 commits"));
+            assert_eq!(select(&store, &tip, &none, &all, 5).unwrap().len(), 5);
+        }
+    }
+
+    #[test]
+    fn a_merge_walk_over_the_cap_fails_and_never_returns_a_prefix() {
+        let (_dir, store) = temp_store();
+        // root - a - m - tip, with side between root and m.
+        let root = put(&store, vec![], 1, 0);
+        let a = put(&store, vec![root], 2, 1);
+        let side = put(&store, vec![root], 3, 2);
+        let merge = put(&store, vec![a, side], 4, 3);
+        let tip = put(&store, vec![merge], 5, 4);
+        let none = HashSet::new();
+        let all = query_with(None, false);
+        for cap in 0..5 {
+            let err = select(&store, &[tip], &none, &all, cap).unwrap_err();
+            assert!(matches!(err, Error::TooManyCommits { limit } if limit == cap));
+        }
+        let walked = select(&store, &[tip], &none, &all, 5).unwrap();
+        assert_eq!(ids(&walked), [tip, merge, side, a, root]);
+        let two_tips = select(&store, &[a, side], &none, &all, 2).unwrap_err();
+        assert!(matches!(two_tips, Error::TooManyCommits { limit: 2 }));
+    }
+
+    #[test]
+    fn an_excluded_side_over_the_cap_fails() {
+        let (_dir, store) = temp_store();
+        let hashes = chain(&store, 5);
+        let mut excluded = HashSet::new();
+        let err = collect_excluded(&store, hashes[4], &mut excluded, 4)
+            .err()
+            .unwrap()
+            .into_error(Error::WalkRangeBase);
+        assert!(matches!(err, Error::TooManyCommits { limit: 4 }), "{err:?}");
+        let mut excluded = HashSet::new();
+        assert!(collect_excluded(&store, hashes[4], &mut excluded, 5).is_ok());
+        assert_eq!(excluded.len(), 5);
     }
 
     #[test]
