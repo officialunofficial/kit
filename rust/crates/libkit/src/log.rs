@@ -175,12 +175,12 @@ pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> 
 /// history is larger than one walk may read.
 pub fn walk(store: &ObjectStore, tips: &[Hash], first_parent: bool) -> Result<Vec<Entry>, Error> {
     let mut entries = Vec::new();
-    emit_sorted(
+    walk_ordered(
         store,
         tips,
         &HashSet::new(),
         first_parent,
-        (0, MAX_LOG_COMMITS),
+        MAX_LOG_COMMITS,
         |entry| {
             entries.push(entry);
             true
@@ -190,7 +190,7 @@ pub fn walk(store: &ObjectStore, tips: &[Hash], first_parent: bool) -> Result<Ve
 }
 
 /// The commits of the walk that pass the filter of `query`, in order, and
-/// at most its limit.
+/// at most its limit. The walk stops once the limit is reached.
 fn select(
     store: &ObjectStore,
     tips: &[Hash],
@@ -203,12 +203,12 @@ fn select(
     if limit == 0 {
         return Ok(entries);
     }
-    emit_sorted(
+    walk_ordered(
         store,
         tips,
         excluded,
         query.first_parent,
-        (0, max_commits),
+        max_commits,
         |entry| {
             if query.filter.matches(&entry.commit) {
                 entries.push(entry);
@@ -444,12 +444,65 @@ fn walked_parents<'a>(
         .filter(|parent| !excluded.contains(parent))
 }
 
-/// Collect every commit reachable from `tips` and not in `excluded`, then
-/// pass them to `emit` in date order until `emit` returns `false`. The order
-/// is reverse-chronological, and a parent never comes before any of its
+/// Pass the commits reachable from `tips` and not in `excluded` to `emit`,
+/// in date order, until `emit` returns `false`. The order is
+/// reverse-chronological, and a parent never comes before any of its
 /// children. Equal timestamps keep the natural order from child to parent,
-/// and the hash breaks a remaining tie. `cap` holds the commits that the
-/// walk has read already and the most commits that the whole walk may read.
+/// and the hash breaks a remaining tie.
+///
+/// A commit is ready once every child of it in the walk is emitted. With one
+/// tip, the walk starts as a chain: while each commit has at most one walked
+/// parent, no later commit can be a child of an earlier one, because commit
+/// ids form no cycle. So the chain streams in order, and a limit stops it
+/// early. The first commit with two walked parents hands the rest to
+/// [`emit_sorted`], which needs every remaining commit first, because a child
+/// can lie at any depth and timestamps do not bound it.
+///
+/// # Errors
+/// [`Error::TooManyCommits`] when the walk would read more than
+/// `max_commits` commits. Otherwise a read error of a commit.
+fn walk_ordered(
+    store: &ObjectStore,
+    tips: &[Hash],
+    excluded: &HashSet<Hash>,
+    first_parent: bool,
+    max_commits: usize,
+    mut emit: impl FnMut(Entry) -> bool,
+) -> Result<(), Error> {
+    let [tip] = *tips else {
+        return emit_sorted(store, tips, excluded, first_parent, (0, max_commits), emit);
+    };
+    let mut streamed = 0usize;
+    let mut next = Some(tip);
+    while let Some(hash) = next {
+        if excluded.contains(&hash) {
+            return Ok(());
+        }
+        let commit = read_commit(store, hash)?;
+        let (parent, merge) = {
+            let mut parents = walked_parents(&commit, excluded, first_parent);
+            (parents.next(), parents.next().is_some())
+        };
+        if merge {
+            let cap = (streamed, max_commits);
+            return emit_sorted(store, &[hash], excluded, first_parent, cap, emit);
+        }
+        if streamed >= max_commits {
+            return Err(Error::TooManyCommits { limit: max_commits });
+        }
+        streamed += 1;
+        next = parent;
+        if !emit(Entry { hash, commit }) {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// Collect every commit reachable from `tips` and not in `excluded`, then
+/// pass them to `emit` in the order of [`walk_ordered`] until `emit` returns
+/// `false`. `cap` holds the commits that the walk has streamed already and
+/// the most commits that the whole walk may read.
 ///
 /// # Errors
 /// [`Error::TooManyCommits`] when the walk reaches more commits than the
@@ -683,6 +736,11 @@ mod tests {
             assert!(matches!(err, Error::TooManyCommits { limit: 4 }), "{err:?}");
             assert!(err.to_string().contains("more than 4 commits"));
             assert_eq!(select(&store, &tip, &none, &all, 5).unwrap().len(), 5);
+            // A limit that the walk reaches before the cap is a complete
+            // answer.
+            let two = query_with(Some(2), first_parent);
+            let first = select(&store, &tip, &none, &two, 4).unwrap();
+            assert_eq!(ids(&first), [hashes[4], hashes[3]]);
         }
     }
 
@@ -720,6 +778,202 @@ mod tests {
         let mut excluded = HashSet::new();
         assert!(collect_excluded(&store, hashes[4], &mut excluded, 5).is_ok());
         assert_eq!(excluded.len(), 5);
+    }
+
+    /// The order of the walk as one sort over the whole history: collect
+    /// every candidate, emit in date order, filter, then cut at the limit.
+    /// The streamed walk has to match it exactly.
+    fn reference(
+        store: &ObjectStore,
+        tips: &[Hash],
+        excluded: &HashSet<Hash>,
+        query: &Query,
+    ) -> Vec<Hash> {
+        let mut commits: HashMap<Hash, Commit> = HashMap::new();
+        let mut stack: Vec<Hash> = tips.to_vec();
+        while let Some(hash) = stack.pop() {
+            if excluded.contains(&hash) || commits.contains_key(&hash) {
+                continue;
+            }
+            let Ok(Object::Commit(commit)) = store.read_object(&hash) else {
+                panic!("the generated history is complete");
+            };
+            let parents: &[Hash] = if query.first_parent {
+                commit.parents.get(..1).unwrap_or(&[])
+            } else {
+                &commit.parents
+            };
+            stack.extend(parents.iter().filter(|p| !excluded.contains(*p)));
+            commits.insert(hash, commit);
+        }
+        let mut in_degree: HashMap<Hash, usize> = commits.keys().map(|h| (*h, 0)).collect();
+        for commit in commits.values() {
+            for parent in &commit.parents {
+                if let Some(degree) = in_degree.get_mut(parent) {
+                    *degree += 1;
+                }
+            }
+        }
+        let mut heap: BinaryHeap<HeapItem> = commits
+            .iter()
+            .filter(|(hash, _)| in_degree[*hash] == 0)
+            .map(|(hash, commit)| HeapItem {
+                timestamp: commit.timestamp,
+                hash: *hash,
+            })
+            .collect();
+        let mut ordered = Vec::new();
+        while let Some(item) = heap.pop() {
+            let commit = &commits[&item.hash];
+            for parent in &commit.parents {
+                if let Some(degree) = in_degree.get_mut(parent) {
+                    *degree -= 1;
+                    if *degree == 0 {
+                        heap.push(HeapItem {
+                            timestamp: commits[parent].timestamp,
+                            hash: *parent,
+                        });
+                    }
+                }
+            }
+            if query.filter.matches(commit) {
+                ordered.push(item.hash);
+            }
+        }
+        // Every candidate is emitted once.
+        assert!(in_degree.values().all(|degree| *degree == 0));
+        ordered.truncate(query.limit.unwrap_or(usize::MAX));
+        ordered
+    }
+
+    /// A small deterministic generator, so a failing seed reproduces.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % n as u64).unwrap()
+        }
+
+        fn chance(&mut self, percent: u64) -> bool {
+            self.next() % 100 < percent
+        }
+    }
+
+    /// A random history: long chains, merges of two or three parents
+    /// (sometimes the same parent twice), several roots, and timestamps
+    /// that rise, tie, fall or jump at random.
+    fn random_history(store: &ObjectStore, rng: &mut Rng, n: usize) -> Vec<Hash> {
+        let clock = rng.below(4);
+        let mut hashes: Vec<Hash> = Vec::new();
+        for i in 0..n {
+            let mut parents = Vec::new();
+            if i > 0 && !rng.chance(5) {
+                if rng.chance(20) {
+                    for _ in 0..2 + rng.below(2) {
+                        parents.push(hashes[rng.below(i)]);
+                    }
+                } else if rng.chance(10) {
+                    parents.push(hashes[rng.below(i)]);
+                } else {
+                    parents.push(hashes[i - 1]);
+                }
+            }
+            let step = u64::try_from(i).unwrap();
+            let timestamp = match clock {
+                0 => step,
+                1 => 7,
+                2 => 1_000 - step,
+                _ => rng.next() % 8,
+            };
+            hashes.push(put(store, parents, timestamp, u32::try_from(i).unwrap()));
+        }
+        hashes
+    }
+
+    #[test]
+    fn the_streamed_walk_matches_one_sort_over_the_whole_history() {
+        let mut compared = 0usize;
+        for seed in 1..=60u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let (_dir, store) = temp_store();
+            let n = 1 + rng.below(40);
+            let hashes = random_history(&store, &mut rng, n);
+            let tip = if rng.chance(50) {
+                hashes[n - 1]
+            } else {
+                hashes[rng.below(n)]
+            };
+            let other = hashes[rng.below(n)];
+            let mut base = HashSet::new();
+            collect_excluded(&store, other, &mut base, usize::MAX)
+                .ok()
+                .unwrap();
+            let none = HashSet::new();
+            let selections: [(Vec<Hash>, &HashSet<Hash>); 4] = [
+                (vec![tip], &none),
+                (vec![tip], &base),
+                (vec![tip, other], &none),
+                (vec![other, tip], &base),
+            ];
+            let filters = [
+                Filter::default(),
+                Filter {
+                    no_merges: true,
+                    ..Filter::default()
+                },
+                Filter {
+                    since: Some(4),
+                    ..Filter::default()
+                },
+            ];
+            let limits = [
+                None,
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(20),
+                Some(n),
+                Some(n + 1),
+            ];
+            for (tips, excluded) in &selections {
+                for first_parent in [false, true] {
+                    for filter in &filters {
+                        for limit in limits {
+                            let query = Query {
+                                start: None,
+                                first_parent,
+                                filter: filter.clone(),
+                                limit,
+                            };
+                            let expected = reference(&store, tips, excluded, &query);
+                            let got = select(&store, tips, excluded, &query, usize::MAX).unwrap();
+                            assert_eq!(ids(&got), expected, "seed {seed}");
+                            compared += 1;
+                        }
+                    }
+                    // The cap counts every commit of the walk, streamed or
+                    // sorted: the walk fails exactly when it would read more.
+                    let all = query_with(None, first_parent);
+                    let size = reference(&store, tips, excluded, &all).len();
+                    assert!(select(&store, tips, excluded, &all, size).is_ok());
+                    if size > 0 {
+                        let err = select(&store, tips, excluded, &all, size - 1).unwrap_err();
+                        assert!(
+                            matches!(err, Error::TooManyCommits { limit } if limit == size - 1),
+                            "seed {seed}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 60 * 4 * 2 * 3 * 7);
     }
 
     #[test]

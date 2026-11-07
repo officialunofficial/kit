@@ -25,6 +25,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `kit log -n N` from one revision streams the history while each commit
+  has at most one followed parent, and stops after N commits. On one ext4
+  disk with 1,000,000 linear commits, `kit log -n 20` went from about 8 s
+  and 1.2 GB to about 4 ms and 8 MB, and the full log from about 8.2 s and
+  1.2 GB to about 5.2 s and 415 MB. With `--first-parent` the whole walk
+  streams. A history with a merge near the tip still reads every reachable
+  commit before it prints. The output is unchanged.
 - `kit serve` names its limit when a session sends more than 10,000 frames,
   and SPEC-TRANSPORT §4.4 states what fits: an unchanged fetch costs one
   frame plus two per branch over ssh, so one session fetches at most 4,999
