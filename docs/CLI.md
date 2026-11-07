@@ -307,6 +307,9 @@ History / commits:
   One walk reads at most 1,000,000 commits, counting the excluded side of
   a range. A walk that would read more fails with an error that names the
   limit; `kit log` never prints part of a history as if it were all of it.
+  A commit of the walk, or of the excluded side of a range, that is
+  missing, corrupt or not a commit fails the walk with an error that names
+  it; it never drops out of the history.
   With `-n`, a walk from one revision reads only the commits it needs while
   each commit has at most one followed parent, so `-n 20` on a linear
   history or with `--first-parent` reads about 20 commits. From the first

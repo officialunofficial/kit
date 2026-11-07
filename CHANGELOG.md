@@ -79,6 +79,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to end the walk there. It then dropped a missing commit of the branch
   and every commit below it, and after a missing commit in the base's
   history it replayed commits the base already holds.
+- The excluded side of a `kit log` range (`A..B`, `A...B`) fails when one
+  of its commits is missing, corrupt or not a commit. It used to skip such
+  a commit, so the range printed ancestors of `A` that it leaves out. The
+  error is `libkit::log::Error::ReadCommit` or `NotACommit`, as on the
+  included side; the `WalkRangeBase` and `WalkMergeBase` variants are gone.
 - `kit bisect` fails when a commit of the range, or an ancestor of a good
   commit, is missing, corrupt or not a commit. The range walk used to end
   at such a commit and the good walk used to skip it, so bisect could miss
