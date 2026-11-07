@@ -10,7 +10,8 @@
 //
 // A file system stamps a time at a coarse grain, so two writes in one grain
 // leave one time. The transport offers no cursor while any directory time is
-// at most WINDOW old, or ahead of the clock.
+// at most WINDOW old, or ahead of the clock. It checks the times before it
+// reads a count, so a withheld read reads none and has no effect here.
 //
 // The client remembers one cursor with the number of writes completed when
 // it read it (`kept`). `stale` records a read whose cursor equals the kept

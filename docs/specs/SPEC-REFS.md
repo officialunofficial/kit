@@ -394,7 +394,11 @@ the repo lock exclusive and count nothing. File systems stamp times at a
 coarse granularity, so two writes close together can leave one time. While
 any of these directories was modified less than 2 s before the read, or
 after it, the transport offers no cursor for that read, and a client fetches
-in full. It offers none either while a directory vanishes during the read,
+in full. It reads the directory times before any version, under the same
+hold of the repo lock, so a read that offers no cursor takes no stripe lock
+and never waits behind a write. The order is safe: a writer that keeps no
+count holds the repo lock exclusive and cannot write during the read, and
+the versions alone cover every writer that counts. It offers none either while a directory vanishes during the read,
 when `<root>/refs` is not a directory, or when there are more than 65,536
 directories. Reading the cursor lists each directory, so its cost grows with
 the number of directory entries; it reads no ref file.

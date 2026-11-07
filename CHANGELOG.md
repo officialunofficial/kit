@@ -25,6 +25,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The file transport reads the ref directory times before the stripe
+  versions when it reads the repository cursor, so a read that offers no
+  cursor takes no stripe lock (SPEC-REFS §5.1.2). Under write load a read
+  always offers none, since some ref directory is always fresh. On one ext4
+  disk with 1,000 branches, a cursor read during writes by 8 threads went
+  from 33 to 46 ms to about 2 ms, and by 32 threads from 400 to 680 ms to
+  about 2 ms. The fetch is still a full fetch, about 1.6 to 2.1 s.
 - `kit log -n N` from one revision streams the history while each commit
   has at most one followed parent, and stops after N commits. On one ext4
   disk with 1,000,000 linear commits, `kit log -n 20` went from about 8 s

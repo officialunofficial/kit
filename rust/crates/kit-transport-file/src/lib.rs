@@ -1189,7 +1189,8 @@ impl FileTransport {
     ///
     /// The directory times cover writers that keep no count. While any of
     /// them is less than [`RACY_WINDOW`] old, the transport offers no
-    /// cursor, so a client fetches in full.
+    /// cursor, so a client fetches in full. The times are read first, so
+    /// such a read reads no count and takes no stripe lock.
     ///
     /// A count is written without fsync. A process crash keeps it, because
     /// the page cache survives the process. An operating system crash can
@@ -1227,6 +1228,14 @@ impl FileTransport {
             .read()
             .unwrap_or_else(PoisonError::into_inner);
         let _repo_lock = RefLock::acquire_shared(&self.root).map_err(RefFileError::Io)?;
+        // The times come first: a fresh one withholds the cursor whatever
+        // the counts hold, so such a read takes no stripe lock and never
+        // waits behind a write. They are digested after the counts, as
+        // before, and both parts are read under one hold of the repo lock.
+        let mut stamps = Vec::new();
+        if !self.stamp_ref_dirs(now, &mut stamps)? {
+            return Ok(None);
+        }
         for stripe in 0..REF_LOCK_STRIPES {
             let _stripe_guard = self.stripe_gates[stripe]
                 .lock()
@@ -1242,9 +1251,7 @@ impl FileTransport {
             })?;
             input.extend_from_slice(&version.to_le_bytes());
         }
-        if !self.stamp_ref_dirs(now, &mut input)? {
-            return Ok(None);
-        }
+        input.extend_from_slice(&stamps);
         Ok(Some(kit_core::hash::hash(&input)))
     }
 
@@ -3449,7 +3456,7 @@ mod tests {
         assert!(err.is_err(), "a garbled count fails the write");
         if cfg!(target_os = "linux") {
             assert!(matches!(
-                tx.repo_cursor_digest(),
+                tx.repo_cursor_digest_at(settled_now()),
                 Err(RefFileError::Corrupt(_))
             ));
         }
@@ -3618,6 +3625,47 @@ mod tests {
             .set_modified(ahead)
             .unwrap();
         assert_eq!(tx.repo_cursor_digest_at(settled_now()).unwrap(), None);
+    }
+
+    /// A read that finds a fresh ref directory offers no cursor whatever the
+    /// counts hold, so it reads no count and never waits behind a write that
+    /// holds a stripe lock. A read past the window still waits for it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_withheld_cursor_does_not_wait_for_a_held_stripe() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        let fresh = std::time::SystemTime::now();
+        let lock = RefLock::acquire_stripe(dir.path(), ref_stripe("refs/heads/main")).unwrap();
+        let (send, recv) = mpsc::channel();
+        let reader = |now: std::time::SystemTime| {
+            let (root, send) = (dir.path().to_path_buf(), send.clone());
+            std::thread::spawn(move || {
+                let t = FileTransport::new(root);
+                send.send(t.repo_cursor_digest_at(now).map_err(|e| e.to_string()))
+                    .unwrap();
+            })
+        };
+        let withheld = reader(fresh);
+        let got = recv.recv_timeout(Duration::from_secs(5));
+        let settled = reader(settled_now());
+        let premature = recv.recv_timeout(Duration::from_millis(100));
+        drop(lock);
+        withheld.join().unwrap();
+        settled.join().unwrap();
+        assert_eq!(got, Ok(Ok(None)), "a withheld cursor waited for a stripe");
+        assert!(
+            matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)),
+            "a cursor read bypassed a held stripe lock: {premature:?}"
+        );
+        assert!(matches!(
+            recv.recv_timeout(Duration::from_secs(5)),
+            Ok(Ok(Some(_)))
+        ));
     }
 
     /// Two ref names in different stripes, and a third in the first one's
