@@ -37,6 +37,16 @@ SPEC-CONCURRENCY with a layout server. A layout server is a server that embeds t
   `WRITER_PREF` selects a repo lock that makes a new shared hold wait
   behind a waiting exclusive request, as an in-process read-write lock
   may; `false` is an OS flock, which grants it.
+- **Nested ref names** (SPEC-REFS §5.1.1): with `NESTED`, ref 1 is named
+  below ref 0 (`refs/heads/a/b` below `refs/heads/a`). A create of either
+  fails with the outcome "clash" (`InvalidRef`) while the other exists, as
+  the file system refuses the rename or the directory, and writes
+  nothing. `NoNestedPair` (at most one of the two exists) is a Safety
+  conjunct. `WitnessNestedCreatesOverlap` shows that single-ref creates of
+  the two names in different stripes run at once, and `refs2_nestedCollide`
+  shows that one stripe serializes them. `WitnessNestedClash` shows the
+  losing write reporting the clash. The `refs2_nestedUnchecked` mutant
+  (`CLASH_UNCHECKED`) lets a create succeed although the other name exists.
 - **Cross-domain gap covers layout server** (§3.1): a layout server
   fs-layout deployment writes refs through `FileTransport` under the same
   locks (`FsLayoutStore::apply` -> `FileTransport::with_ref_lock`), so in
@@ -94,7 +104,7 @@ refs or values.
 
 | Checker | Instance | Bound | Result |
 |---------|----------|-------|--------|
-| `quint test` | `refs_test` (29 runs), `refs_wpref_test` (2), `refs_collide_test` (1), `serve_test` (13), `served_test` (7) | pinned traces | all pass |
+| `quint test` | `refs_test` (29 runs), `refs_wpref_test` (2), `refs_collide_test` (1), `refs_nested_test` (1), `refs_nested_unchecked_test` (1), `serve_test` (13), `served_test` (7) | pinned traces | all pass |
 | `quint run` | `refs3`, `refs2` Safety | 20000 samples x 40 steps, seed 0x1 (the stripe-lock model was last run at 2000 samples: one 20000-sample run takes about 20 minutes on a 4-CPU machine) | ok |
 | `quint run` | `serve2`, `serve3`, `served` Safety | same | ok |
 | TLC | `serve2` Safety | exhaustive: 2 server slots (each may start as either binary), 1 local command, 3 uploaders | ok, 18,812 states |
@@ -104,6 +114,8 @@ refs or values.
 | TLC | `refs2` Safety, slice `chain` | same, ops `commit`, `amend`, `branch`, `checkout`, `gc` on one ref | ok, 3,538,512 states |
 | TLC | `refs2` Safety, slice `file` | same, ops `file` and `fileTx` on both refs | ok, 308,475 states |
 | TLC | `refs2_collide` Safety and `WitnessStripesOverlap`, slice `file` | same, both refs in one stripe | ok, 277,371 states (the witness is unreachable) |
+| TLC | `refs2_nested` Safety, slice `file` | same, ref 1 named below ref 0, two stripes | ok, 178,671 states |
+| TLC | `refs2_nestedCollide` Safety and `WitnessNestedCreatesOverlap`, slice `file` | same, both names in one stripe | ok, 154,095 states (the witness is unreachable) |
 | TLC | `refs3_wpref` Safety, slice `file3` | 3 processes, ops `file` and `fileTx` on one ref, writer-preferring repo lock | ok, 2,198,691 states |
 | TLC | `refs3_stripeFirstFlock` `NoDeadlock`, slice `file3` | same, flock repo lock, single-ref writes may take the stripe first | ok, 7,902,603 states: with a flock repo lock the opposite order does not deadlock |
 | Apalache 0.62.2 | `refs2` Safety (full op space) | length `REFS_DEPTH` = 8 (~22 min under load) | ok for the model before the stripe locks; not rerun since |
@@ -128,6 +140,8 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 | `refs2_txShared` | `FileStepAlone` | a multi-file step needs the repo lock exclusive |
 | `refs3_stripeFirst` | `NoDeadlock` (writer-preferring repo lock), `LockOrderRespected` | the order repo lock, then stripe lock, prevents a deadlock between a write in order, a write out of order and a waiting multi-file step |
 | `refs2` | `WitnessStripesOverlap` | writes to refs in different stripes overlap; `refs2_collide` shows it unreachable with one stripe |
+| `refs2_nestedUnchecked` | `NoNestedPair` | a create must fail while the other nested name exists |
+| `refs2_nested` | `WitnessNestedCreatesOverlap`, `WitnessNestedClash` | creates of a ref and a ref below it in different stripes overlap, and the loser reports the clash; `refs2_nestedCollide` shows the overlap unreachable with one stripe |
 | `refs3` | `WitnessCrossDomainGap` | documented §3.1 gap (local vs `kit serve` or a layout server, when the served root is the common dir) |
 | `serve2_sweepUnlocked` | `SweepAlone`, `NoLiveUploadSwept` | the sweep needs the exclusive hold |
 | `serve2_sweepUnderShared` | `SweepAlone`, `NoLiveUploadSwept` | a shared hold does not exclude other servers' uploads |
@@ -165,9 +179,10 @@ cover the whole space to their bounds.
 - The 256 stripes are two: ref 0 and ref 1 each have one (ids 10 and
   11), or share id 10 under `COLLIDE`. The stripe mapping itself (the first
   byte of the BLAKE3 digest of the ref name) is pure arithmetic, left to the
-  `kit-transport-file` unit tests. So is the clash between a ref and a ref
-  below it (`refs/heads/a`, `refs/heads/a/b`) under different stripe locks:
-  the model's refs are not nested.
+  `kit-transport-file` unit tests. Nested names (`NESTED`) are one pair,
+  and a clash is one atomic outcome of the commit step: the temp file, the
+  directory creation and the clean-up of a losing write are left to the
+  `kit-transport-file` unit tests.
 - Each file-transport instance's in-process locks mirror its OS locks and
   are not modelled apart from them; `WRITER_PREF` covers the in-process
   read-write lock's possible writer preference.

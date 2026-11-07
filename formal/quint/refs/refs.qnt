@@ -150,6 +150,14 @@ module refs {
   // waits (writer preference, as an in-process read-write lock may). An OS
   // flock grants it, which is the `false` setting.
   const WRITER_PREF: bool
+  // Ref 1 is named below ref 0, as `refs/heads/a/b` is below
+  // `refs/heads/a`. A file system holds at most one of them: a create of
+  // either fails while the other exists, and the writer reports the clash
+  // (`InvalidRef`, outcome "clash") and writes nothing.
+  const NESTED: bool
+  // Mutant: a create of a nested name succeeds although the other exists,
+  // as a store that is not a file system could. Only for non-vacuity.
+  const CLASH_UNCHECKED: bool
   pure val TREES: Set[int] = Set(0, 1)
   pure val REFS: Set[int] = Set(0, 1)
   pure val VALUES: Set[int] = Set(1, 2)
@@ -272,7 +280,10 @@ module refs {
     nondet d0 = VALUES.union(Set(ABSENT)).oneOf()
     nondet d1 = VALUES.union(Set(ABSENT)).oneOf()
     nondet m0 = VALUES.union(Set(ABSENT)).oneOf()
-    initFixed(f, d0, d1, m0)
+    all {
+      NESTED implies (d0 == ABSENT or d1 == ABSENT),
+      initFixed(f, d0, d1, m0),
+    }
   }
 
   action init = initWith(FAULTS)
@@ -377,16 +388,22 @@ module refs {
     val store = storeOf(op.kind)
     val actual = if (store == "mem") mem.get(op.ref) else disk.get(op.ref)
     // Decision as implemented per SPEC-REFS §5.1 / refs.rs RefMutation:
-    val ok = match op.cond {
+    val condOk = match op.cond {
       | Any => (not(op.del)) or actual != ABSENT   // delete_ref: NotFound on the actual file
       | Missing => if (store == "mem") st.observed == ABSENT  // HashMap: read under the Mutex
                    else actual == ABSENT                // O_EXCL / create_new
       | Match(e) => st.observed == e and ((not(op.del)) or actual != ABSENT)
     }
+    // A create of a nested name fails while the other name exists, whatever
+    // the condition: the file system refuses the rename or the directory.
+    val clash = NESTED and not(CLASH_UNCHECKED) and store == "disk" and not(op.del)
+      and disk.get(1 - op.ref) != ABSENT
+    val ok = condOk and not(clash)
     val newVal = if (op.del) ABSENT else op.value
     val dom = domainOf(op.kind)
     val lost = ok and not(condHolds(op.cond, actual))
-    val outcome = if (ok) "ok" else if (op.del and op.cond == Any) "notfound" else "conflict"
+    val outcome = if (ok) "ok" else if (clash) "clash"
+      else if (op.del and op.cond == Any) "notfound" else "conflict"
     all {
       st.pc == "commit",
       mem' = if (ok and store == "mem") mem.set(op.ref, newVal) else mem,
@@ -572,9 +589,14 @@ module refs {
   // ...hence record and expire never interleave and no entry is lost.
   val NoRecordExpireInterleave: bool = not(recordDuringExpire) and lostRecords == Set()
 
+  // At most one of two nested names exists (NESTED): a lost race leaves
+  // no second name behind.
+  val NoNestedPair: bool = NESTED implies (disk.get(0) == ABSENT or disk.get(1) == ABSENT)
+
   val Safety: bool = and {
     LockOwnership, LockOrderRespected, NoDeadlock, NoLostUpdateWithinDomain,
     ExpireHoldsSuperset, NoRecordExpireInterleave, OneFileWriterPerRef, FileStepAlone,
+    NoNestedPair,
   }
 
   // ---------------------------------------------- witnesses (expected FALSE)
@@ -599,90 +621,120 @@ module refs {
       p != q and inFileSection(p) and inFileSection(q)
         and procs.get(p).op.kind == "file" and procs.get(q).op.kind == "file"
         and procs.get(p).op.ref != procs.get(q).op.ref)))
+  // SPEC-REFS §5.1.1: single-ref creates of two nested names in different
+  // stripes run at once, so neither lock decides which name wins.
+  // Reachable with two stripes; unreachable under COLLIDE.
+  val WitnessNestedCreatesOverlap: bool =
+    not(NESTED and disk.get(0) == ABSENT and disk.get(1) == ABSENT
+      and PROCS.exists(p => PROCS.exists(q =>
+        p != q and inFileSection(p) and inFileSection(q)
+          and procs.get(p).op.kind == "file" and procs.get(q).op.kind == "file"
+          and procs.get(p).op.ref != procs.get(q).op.ref
+          and not(procs.get(p).op.del) and not(procs.get(q).op.del))))
+  // A single-ref write loses to the other nested name and reports the clash.
+  val WitnessNestedClash: bool =
+    not(lastAction.name == "commitRef" and lastAction.outcome == "clash" and lastAction.op.kind == "file")
   val WitnessTwoLocksContended: bool =
     not(PROCS.exists(p => PROCS.exists(q => waitsFor(p, q) and procs.get(q).nHeld >= 2)))
 }
 
 // ------------------------------------------------------------ instances
 // FAULTS literal: { misorder, noRefLock, noFileLock, gcSkipTrees, racyAcquire, memNoMutex,
-// noStripeLock, stripeFirst, txShared }. COLLIDE and WRITER_PREF: see the consts.
+// noStripeLock, stripeFirst, txShared }. COLLIDE, WRITER_PREF, NESTED and CLASH_UNCHECKED:
+// see the consts.
 // 3 processes: every wait-for cycle shape (2- and 3-cycles). quint run.
 module refs3 {
   import refs(PROCS = Set("p1", "p2", "p3"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 // 2 processes: Apalache instance (lost update, cross-domain gap, 2-cycle
 // deadlock and record/expire interleaving all need only 2 processes).
 module refs2 {
   import refs(PROCS = Set("p1", "p2"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 // Mutants (non-vacuity): each must violate the named invariant.
 module refs3_misorder {    // NoDeadlock, LockOrderRespected
   import refs(PROCS = Set("p1", "p2", "p3"),
               FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 module refs2_misorder {    // NoDeadlock, LockOrderRespected
   import refs(PROCS = Set("p1", "p2"),
               FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 module refs2_noRefLock {   // NoLostUpdateLocal
   import refs(PROCS = Set("p1", "p2"),
               FAULTS = { misorder: false, noRefLock: true, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 module refs2_noFileLock {  // NoLostUpdateFile
   import refs(PROCS = Set("p1", "p2"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: true, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 module refs2_gcSkipTrees { // NoRecordExpireInterleave, ExpireHoldsSuperset
   import refs(PROCS = Set("p1", "p2"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: true, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 module refs2_racyAcquire { // LockOwnership
   import refs(PROCS = Set("p1", "p2"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: true, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 module refs2_memNoMutex {  // NoLostUpdateMem (the old SPEC-REFS §5.1 memory row)
   import refs(PROCS = Set("p1", "p2"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: true, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 // File transport stripe locks (SPEC-REFS §5.1.1).
 module refs2_collide {  // WitnessStripesOverlap holds: one stripe serializes both refs
   import refs(PROCS = Set("p1", "p2"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = true, WRITER_PREF = false).*
+              COLLIDE = true, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 module refs3_wpref {  // Safety under a writer-preferring repo lock
   import refs(PROCS = Set("p1", "p2", "p3"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = true).*
+              COLLIDE = false, WRITER_PREF = true, NESTED = false, CLASH_UNCHECKED = false).*
 }
 module refs2_noStripeLock {  // OneFileWriterPerRef, NoLostUpdateFile
   import refs(PROCS = Set("p1", "p2"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: true, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 module refs2_txShared {  // FileStepAlone, NoLostUpdateFile
   import refs(PROCS = Set("p1", "p2"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: true },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
 }
 module refs3_stripeFirst {  // NoDeadlock (writer-preferring repo lock), LockOrderRespected
   import refs(PROCS = Set("p1", "p2", "p3"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: true, txShared: false },
-              COLLIDE = false, WRITER_PREF = true).*
+              COLLIDE = false, WRITER_PREF = true, NESTED = false, CLASH_UNCHECKED = false).*
 }
 module refs3_stripeFirstFlock {  // LockOrderRespected; NoDeadlock holds (flock grants the shared hold)
   import refs(PROCS = Set("p1", "p2", "p3"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: true, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).*
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).*
+}
+// Nested names (`refs/heads/a` and `refs/heads/a/b`), single-ref writes.
+module refs2_nested {  // Safety; WitnessNestedCreatesOverlap and WitnessNestedClash reachable
+  import refs(PROCS = Set("p1", "p2"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false, NESTED = true, CLASH_UNCHECKED = false).*
+}
+module refs2_nestedCollide {  // WitnessNestedCreatesOverlap holds: one stripe serializes the creates
+  import refs(PROCS = Set("p1", "p2"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = true, WRITER_PREF = false, NESTED = true, CLASH_UNCHECKED = false).*
+}
+module refs2_nestedUnchecked {  // NoNestedPair
+  import refs(PROCS = Set("p1", "p2"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false, NESTED = true, CLASH_UNCHECKED = true).*
 }

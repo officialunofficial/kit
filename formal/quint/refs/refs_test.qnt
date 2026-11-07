@@ -6,7 +6,7 @@
 module refs_test {
   import refs(PROCS = Set("p1", "p2", "p3"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = false).* from "./refs"
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).* from "./refs"
 
   pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
     { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
@@ -361,7 +361,7 @@ module refs_wpref_test {
   // exclusive request, as an in-process read-write lock may.
   import refs(PROCS = Set("p1", "p2", "p3"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = false, WRITER_PREF = true).* from "./refs"
+              COLLIDE = false, WRITER_PREF = true, NESTED = false, CLASH_UNCHECKED = false).* from "./refs"
 
   pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
     { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
@@ -396,7 +396,7 @@ module refs_collide_test {
   // Both refs map to one stripe.
   import refs(PROCS = Set("p1", "p2", "p3"),
               FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
-              COLLIDE = true, WRITER_PREF = false).* from "./refs"
+              COLLIDE = true, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).* from "./refs"
 
   pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
     { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
@@ -411,4 +411,54 @@ module refs_collide_test {
       .then(readRef("p1")).then(commitRef("p1")).then(release("p1"))
       .then(acquire("p2")).then(readRef("p2")).then(commitRef("p2"))
       .expect(and { Safety, disk.get(0) == 2, disk.get(1) == 2 })
+}
+
+module refs_nested_test {
+  // Ref 1 is named below ref 0 (`refs/heads/a/b` below `refs/heads/a`),
+  // in another stripe.
+  import refs(PROCS = Set("p1", "p2", "p3"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false, NESTED = true, CLASH_UNCHECKED = false).* from "./refs"
+
+  pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
+    { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
+
+  // Both creates read an absent name under their own stripe, so both are
+  // in their critical sections at once. The first commit wins; the second
+  // reports the clash and writes nothing, and every lock is released.
+  run nestedCreatesRaceTest =
+    initFixed(NO_FAULTS, ABSENT, ABSENT, ABSENT)
+      .then(begin("p1", op("file", 0, 0, Missing, 1, false), false))
+      .then(begin("p2", op("file", 0, 1, Any, 2, false), false))
+      .then(acquire("p1")).then(acquire("p1")).then(readRef("p1"))
+      .then(acquire("p2")).then(acquire("p2")).then(readRef("p2"))
+      .expect(not(WitnessNestedCreatesOverlap))
+      .then(commitRef("p2")).then(release("p2"))
+      .then(commitRef("p1"))
+      .expect(and { Safety, lastAction.outcome == "clash", disk.get(0) == ABSENT, disk.get(1) == 2 })
+      .then(release("p1"))
+      // The root stays writable: a multi-file step and a write to the
+      // winner both commit.
+      .then(begin("p3", op("fileTx", 0, 1, Match(2), 1, false), false))
+      .then(acquire("p3")).then(readRef("p3")).then(commitRef("p3")).then(release("p3"))
+      .expect(and { Safety, disk.get(1) == 1, owner.keys().forall(l => owner.get(l) == FREE), sharers == Set() })
+}
+
+module refs_nested_unchecked_test {
+  import refs(PROCS = Set("p1", "p2", "p3"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false, NESTED = true, CLASH_UNCHECKED = true).* from "./refs"
+
+  pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
+    { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
+
+  // MUTANT: a create that ignores the clash leaves both names behind.
+  run mutantNestedPairTest =
+    initFixed(NO_FAULTS, ABSENT, ABSENT, ABSENT)
+      .then(begin("p1", op("file", 0, 0, Missing, 1, false), false))
+      .then(begin("p2", op("file", 0, 1, Missing, 2, false), false))
+      .then(acquire("p1")).then(acquire("p1")).then(readRef("p1"))
+      .then(acquire("p2")).then(acquire("p2")).then(readRef("p2"))
+      .then(commitRef("p2")).then(commitRef("p1"))
+      .expect(not(NoNestedPair))
 }

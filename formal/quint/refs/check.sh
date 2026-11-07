@@ -123,7 +123,7 @@ tlc() {
 quint typecheck refs.qnt && quint typecheck serve.qnt
 quint typecheck refs_test.qnt && quint typecheck serve_test.qnt
 quint test refs_test.qnt --main refs_test >/dev/null && note "test refs_test" ok || bad "test refs_test" failed
-for m in refs_wpref_test refs_collide_test; do
+for m in refs_wpref_test refs_collide_test refs_nested_test refs_nested_unchecked_test; do
   quint test refs_test.qnt --main "$m" >/dev/null && note "test $m" ok || bad "test $m" failed
 done
 quint test serve_test.qnt --main serve_test >/dev/null && note "test serve_test" ok || bad "test serve_test" failed
@@ -151,6 +151,11 @@ qrun refs.qnt refs2_noStripeLock OneFileWriterPerRef violation
 qrun refs.qnt refs2_txShared FileStepAlone violation
 qrun refs.qnt refs2_txShared NoLostUpdateFile violation
 qrun refs.qnt refs3_stripeFirst LockOrderRespected violation
+# Nested names (`refs/heads/a` and `refs/heads/a/b`), single-ref writes.
+qrun refs.qnt refs2_nested Safety ok
+qrun refs.qnt refs2_nested WitnessNestedClash violation
+qrun refs.qnt refs2_nestedCollide Safety ok
+qrun refs.qnt refs2_nestedUnchecked NoNestedPair violation
 # The no-stripe-lock lost update needs two Match writes to one ref that both
 # read before either commits, and random simulation rarely builds it:
 # refs_test.qnt pins it, and TLC finds it in the `file` slice below.
@@ -230,6 +235,13 @@ if [[ ${TLC:-1} == 1 ]]; then
   tlc refs.qnt refs2_collide WitnessStripesOverlap ok "$RV" "$RC" "$FD" "$DOMC" file
   tlc refs.qnt refs2_noStripeLock NoLostUpdateFile violation "$RV" "$RC" "$FD" "$DOMC" file
   tlc refs.qnt refs2_txShared FileStepAlone violation "$RV" "$RC" "$FD" "$DOMC" file
+  # The same slice with ref 1 named below ref 0: two creates race in
+  # different stripes, and one stripe serializes them.
+  tlc refs.qnt refs2_nested Safety ok "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_nested WitnessNestedCreatesOverlap violation "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_nestedCollide Safety ok "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_nestedCollide WitnessNestedCreatesOverlap ok "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_nestedUnchecked NoNestedPair violation "$RV" "$RC" "$FD" "$DOMC" file
   # Slice "file3": three processes on one ref, enough for a wait-for cycle
   # through two writes to the ref and one multi-file step. Three processes
   # on both refs exceed the 30-minute / 4 GB budget (over 4 M distinct
