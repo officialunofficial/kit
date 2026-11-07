@@ -7,6 +7,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Blame caps its line comparison table at 64 MiB after trimming the common
+  prefix. Larger comparisons return an error without partial attribution.
+
 ## [0.7.2] - 2026-11-06
 
 ### Security

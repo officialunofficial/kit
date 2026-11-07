@@ -1,5 +1,6 @@
 //! One line diff or text merge of a file up to 1 MiB stays under a fixed memory
-//! ceiling however many of its lines changed.
+//! ceiling however many of its lines changed. Blame refuses a rewritten file
+//! at its line limit without exceeding the same ceiling.
 //!
 //! These tests watch the bytes that a call holds at once. The allocator refuses
 //! to pass a hard ceiling, so a search that grows with the input aborts here
@@ -166,4 +167,46 @@ fn a_search_near_the_limit_stays_under_the_ceiling() {
     let (merged, peak) = peak_of(|| merge_blob_3way(&base, &ours, &theirs));
     assert!(merged.is_some());
     assert_within_ceiling("merge_blob_3way", peak);
+}
+
+#[test]
+fn blame_of_rewritten_short_lines_stays_under_the_ceiling() {
+    use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use kit_core::ops::blame::{BLAME_MAX_LINES, BlameError, blame_file};
+    use kit_core::{hash::Hash, layout::RepoLayout, serialize, store::ObjectStore};
+
+    let _guard = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+    let put = |object| {
+        store
+            .write(&serialize::serialize(&object).unwrap())
+            .unwrap()
+    };
+    let commit = |tag, parents: Vec<Hash>| {
+        let blob = put(Object::Blob(Blob {
+            data: short_lines(tag, 2 * BLAME_MAX_LINES),
+        }));
+        let tree = put(Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"f".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }],
+        }));
+        put(Object::Commit(Commit::new_unannotated(
+            tree,
+            parents,
+            Identity::opaque([1; 8]),
+            [0; 32],
+            b"rewrite".to_vec(),
+            100,
+            [0; 64],
+        )))
+    };
+    let parent = commit(b'a', vec![]);
+    let head = commit(b'b', vec![parent]);
+    let (result, peak) = peak_of(|| blame_file(&store, head, "f"));
+    assert!(matches!(result, Err(BlameError::ComparisonTooLarge)));
+    assert_within_ceiling("blame_file", peak);
 }
