@@ -26,7 +26,6 @@ use std::path::{Path, PathBuf};
 
 use crate::hash::{self, HEX_LEN, Hash};
 use crate::layout::RepoLayout;
-use crate::object::Object;
 use crate::store::ObjectStore;
 
 /// Directory under `.kit/` that holds the persisted rebase state.
@@ -44,8 +43,12 @@ const MAX_HASH_FILE_BYTES: u64 = 128;
 const MAX_HASH_LIST_BYTES: u64 = 1024 * 1024;
 
 /// Maximum commits [`collect_commits_to_replay`] replays. A longer branch
-/// fails with [`RebaseError::TooManyCommits`].
+/// fails with [`REPLAY_LIMIT`].
 const MAX_REPLAY_DEPTH: usize = 10_000;
+
+/// The limit a rebase reports when the branch has more than
+/// [`MAX_REPLAY_DEPTH`] commits to replay.
+const REPLAY_LIMIT: &str = "10,000-commit replay of a rebase";
 
 /// The limit a rebase reports when the ancestors of its base exceed
 /// [`crate::ops::graph::MAX_ANCESTORS`].
@@ -69,32 +72,20 @@ pub enum RebaseError {
     /// Object-store failure during the walk.
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
-    /// The branch has more commits to replay than one rebase replays.
-    /// Replaying only the newest of them would drop the rest.
-    #[error("the branch has more than {0} commits to replay; nothing was rebased")]
-    TooManyCommits(usize),
-    /// A commit to replay cannot be read. Replaying the commits above it
-    /// would drop it and every commit below it.
-    #[error("commit {} cannot be read: {source}; nothing was rebased", hash::to_hex(.hash))]
-    UnreadableCommit {
-        /// The commit that cannot be read.
-        hash: Hash,
-        /// Why the read failed.
-        source: crate::store::StoreError,
-    },
-    /// A parent on the branch or in the history of the base names an
-    /// object that is not a commit.
-    #[error("object {} in the history is not a commit; nothing was rebased", hash::to_hex(.0))]
-    NotACommit(Hash),
 }
 
+/// A commit to replay or of the history of the base that cannot be read
+/// gives [`RebaseError::Store`] with the store error that names it, and a
+/// walk over its cap gives [`RebaseError::Store`] with
+/// [`crate::store::StoreError::OperationLimitExceeded`] naming the limit. A
+/// parent that is not a commit gives [`RebaseError::Io`] of kind
+/// [`io::ErrorKind::InvalidData`] that carries the
+/// [`crate::ops::graph::AncestorError`] naming it.
 impl From<crate::ops::graph::AncestorError> for RebaseError {
     fn from(err: crate::ops::graph::AncestorError) -> Self {
-        use crate::ops::graph::AncestorError;
-        match err {
-            AncestorError::Unreadable { hash, source } => Self::UnreadableCommit { hash, source },
-            AncestorError::NotACommit(hash) => Self::NotACommit(hash),
-            AncestorError::Limit(source) => Self::Store(source),
+        match err.into_store_or_invalid_data() {
+            Ok(store) => Self::Store(store),
+            Err(io) => Self::Io(io),
         }
     }
 }
@@ -270,11 +261,12 @@ pub fn cleanup_rebase(layout: &RepoLayout) -> RebaseResult<()> {
 /// is a commit that cannot be read, on either side.
 ///
 /// # Errors
-/// - [`RebaseError::Store`] when the base has too many ancestors.
-/// - [`RebaseError::UnreadableCommit`] / [`RebaseError::NotACommit`] when a
-///   commit to replay or an ancestor of the base cannot be read or is
-///   another kind of object.
-/// - [`RebaseError::TooManyCommits`] when the branch is too long to replay.
+/// - [`RebaseError::Store`] naming the limit when the base has too many
+///   ancestors or the branch is too long to replay.
+/// - [`RebaseError::Store`] with the store error that names a commit to
+///   replay or an ancestor of the base that cannot be read, and
+///   [`RebaseError::Io`] of kind [`io::ErrorKind::InvalidData`] for one that
+///   is another kind of object; see [`RebaseError`].
 pub fn collect_commits_to_replay(
     store: &ObjectStore,
     head_hash: Hash,
@@ -317,20 +309,13 @@ fn collect_commits_with_caps(
             break;
         }
         if commits.len() >= max_replay {
-            return Err(RebaseError::TooManyCommits(max_replay));
+            return Err(RebaseError::Store(
+                crate::store::StoreError::OperationLimitExceeded(REPLAY_LIMIT),
+            ));
         }
         // Every commit of the range must be read: ending the walk at one
         // that cannot be read would drop it and every commit below it.
-        let commit = match store.read_object(&current) {
-            Ok(Object::Commit(commit)) => commit,
-            Ok(_) => return Err(RebaseError::NotACommit(current)),
-            Err(source) => {
-                return Err(RebaseError::UnreadableCommit {
-                    hash: current,
-                    source,
-                });
-            }
-        };
+        let commit = crate::ops::graph::read_history_commit(store, current)?;
         commits.push(current);
         // A root commit ends the range: the branch shares no history with
         // the base.
@@ -457,7 +442,7 @@ pub fn rebase_dir_path(layout: &RepoLayout) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object::{Commit, Identity, Tree, TreeEntry};
+    use crate::object::{Commit, Identity, Object, Tree, TreeEntry};
     use crate::serialize;
     use tempfile::TempDir;
 
@@ -516,8 +501,16 @@ mod tests {
         let all = collect_commits_with_caps(&store, h3, o2, 3, 3).unwrap();
         assert_eq!(all, [h1, h2, h3]);
         let long = collect_commits_with_caps(&store, h3, o2, 2, 3).unwrap_err();
-        assert!(matches!(long, RebaseError::TooManyCommits(2)), "{long:?}");
-        assert!(long.to_string().contains("more than 2 commits"));
+        assert!(
+            matches!(
+                long,
+                RebaseError::Store(crate::store::StoreError::OperationLimitExceeded(
+                    REPLAY_LIMIT
+                ))
+            ),
+            "{long:?}"
+        );
+        assert!(long.to_string().contains(REPLAY_LIMIT), "{long}");
         let deep = collect_commits_with_caps(&store, h3, o2, 3, 2).unwrap_err();
         assert!(matches!(
             deep,
@@ -525,6 +518,17 @@ mod tests {
                 ONTO_ANCESTOR_LIMIT
             ))
         ));
+    }
+
+    /// Assert that `err` names `culprit`.
+    fn assert_names(err: &RebaseError, culprit: &Hash) {
+        let named = match err {
+            RebaseError::Store(e) => crate::ops::graph::store_error_names(e, culprit),
+            RebaseError::Io(e) => crate::ops::graph::invalid_data_names(e, culprit),
+            _ => false,
+        };
+        assert!(named, "{err:?}");
+        assert!(err.to_string().contains(&hash::to_hex(culprit)), "{err}");
     }
 
     #[test]
@@ -547,36 +551,23 @@ mod tests {
         let missing = hash::hash(b"a commit that is not in the store");
         let above_missing = put_commit(&store, tree, vec![missing], 6);
         let err = collect_commits_to_replay(&store, above_missing, o1).unwrap_err();
-        assert!(
-            matches!(err, RebaseError::UnreadableCommit { hash, .. } if hash == missing),
-            "{err:?}"
-        );
-        assert!(err.to_string().contains("nothing was rebased"), "{err}");
+        assert_names(&err, &missing);
 
         // A parent that is not a commit.
         let above_tree = put_commit(&store, tree, vec![tree], 7);
         let err = collect_commits_to_replay(&store, above_tree, o1).unwrap_err();
-        assert!(
-            matches!(err, RebaseError::NotACommit(hash) if hash == tree),
-            "{err:?}"
-        );
+        assert_names(&err, &tree);
 
         // A missing commit in the history of the base: its ancestor set would
         // lack `base`, and the walk would replay `base` again.
         let onto_above_missing = put_commit(&store, tree, vec![missing], 8);
         let err = collect_commits_to_replay(&store, h1, onto_above_missing).unwrap_err();
-        assert!(
-            matches!(err, RebaseError::UnreadableCommit { hash, .. } if hash == missing),
-            "{err:?}"
-        );
+        assert_names(&err, &missing);
 
         // A parent in the history of the base that is not a commit.
         let onto_above_tree = put_commit(&store, tree, vec![tree], 9);
         let err = collect_commits_to_replay(&store, h1, onto_above_tree).unwrap_err();
-        assert!(
-            matches!(err, RebaseError::NotACommit(hash) if hash == tree),
-            "{err:?}"
-        );
+        assert_names(&err, &tree);
 
         // A corrupt commit in the middle of the branch: flip one byte of h2.
         let hex = hash::to_hex(&h2);
@@ -589,10 +580,7 @@ mod tests {
         bytes[last] ^= 0xff;
         fs::write(&path, &bytes).unwrap();
         let err = collect_commits_to_replay(&store, h3, o1).unwrap_err();
-        assert!(
-            matches!(err, RebaseError::UnreadableCommit { hash, .. } if hash == h2),
-            "{err:?}"
-        );
+        assert_names(&err, &h2);
     }
 
     #[test]

@@ -41,6 +41,10 @@ pub const BLAME_MAX_LINES: usize = 100_000;
 /// blamed.
 pub const BLAME_MAX_REVERSE_COMMITS: usize = 1_000_000;
 
+/// The limit a reverse blame reports when its first-parent chain exceeds
+/// [`BLAME_MAX_REVERSE_COMMITS`].
+const REVERSE_LIMIT: &str = "1,000,000-commit first-parent chain of a reverse blame";
+
 /// The LCS table may hold at most 64 MiB. Check before allocating, independent
 /// of the memory available on the machine. Larger comparisons use the bounded
 /// line diff search. Prefix trimming keeps small trailing edits on the LCS path.
@@ -281,13 +285,6 @@ pub enum BlameError {
     /// of `<end>`, so there is no forward chain to walk between them.
     #[error("reverse blame: '{start}' is not a first-parent ancestor of '{end}'")]
     ReverseRange { start: String, end: String },
-    /// `--reverse`: the first-parent chain from `<end>` holds more than
-    /// `limit` commits before it reaches `<start>`.
-    #[error("reverse blame: the range has more than {limit} commits; nothing is blamed")]
-    ReverseTooLong {
-        /// The cap that was reached.
-        limit: usize,
-    },
     /// A loaded file or matcher input exceeded [`BLAME_MAX_LINES`].
     /// Reassembly and splitting precede the check; attribution follows it.
     #[error("file has too many lines for blame ({lines} > {max})", max = BLAME_MAX_LINES)]
@@ -437,9 +434,11 @@ impl From<&ReverseEntry> for Attribution {
 ///
 /// # Errors
 /// [`BlameError::ReverseRange`] if `start` is not reached on `end`'s
-/// first-parent chain. [`BlameError::ReverseTooLong`] if the walk would
-/// hold more than [`BLAME_MAX_REVERSE_COMMITS`] commits; it never returns
-/// part of the chain.
+/// first-parent chain. [`BlameError::Store`] with
+/// [`crate::store::StoreError::OperationLimitExceeded`] naming
+/// [`REVERSE_LIMIT`] if the walk would hold more than
+/// [`BLAME_MAX_REVERSE_COMMITS`] commits; it never returns part of the
+/// chain.
 fn collect_reverse_chain(
     store: &ObjectStore,
     start_hash: Hash,
@@ -468,7 +467,9 @@ fn collect_reverse_chain_with_cap(
     let mut reached_start = false;
     while let Some(commit_hash) = current {
         if chain.len() >= cap {
-            return Err(BlameError::ReverseTooLong { limit: cap });
+            return Err(BlameError::Store(
+                crate::store::StoreError::OperationLimitExceeded(REVERSE_LIMIT),
+            ));
         }
         let Object::Commit(commit) = store.read_object(&commit_hash)? else {
             return Err(BlameError::NotACommit);
@@ -529,8 +530,8 @@ fn collect_reverse_chain_with_cap(
 /// - [`BlameError::NotACommit`] if either endpoint is not a commit.
 /// - [`BlameError::FileTooLarge`] if any blob on the chain exceeds
 ///   [`BLAME_MAX_LINES`].
-/// - [`BlameError::ReverseTooLong`] if the first-parent walk from `<end>`
-///   holds more than [`BLAME_MAX_REVERSE_COMMITS`] commits.
+/// - [`BlameError::Store`] naming the limit if the first-parent walk from
+///   `<end>` holds more than [`BLAME_MAX_REVERSE_COMMITS`] commits.
 pub fn blame_file_reverse(
     store: &ObjectStore,
     start_hash: Hash,
@@ -2502,17 +2503,27 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert!(
-            matches!(err, BlameError::ReverseTooLong { limit: 2 }),
+            matches!(
+                err,
+                BlameError::Store(crate::store::StoreError::OperationLimitExceeded(
+                    REVERSE_LIMIT
+                ))
+            ),
             "{err:?}"
         );
-        assert!(err.to_string().contains("more than 2 commits"), "{err}");
+        assert!(err.to_string().contains(REVERSE_LIMIT), "{err}");
         // A start off the chain walks to the root under the same cap.
         let other = put_file_commit(&store, "f.txt", b"z\n", vec![], 9, 900);
         let err = super::collect_reverse_chain_with_cap(&store, other, c3, "f.txt", 2)
             .map(|_| ())
             .unwrap_err();
         assert!(
-            matches!(err, BlameError::ReverseTooLong { limit: 2 }),
+            matches!(
+                err,
+                BlameError::Store(crate::store::StoreError::OperationLimitExceeded(
+                    REVERSE_LIMIT
+                ))
+            ),
             "{err:?}"
         );
         assert_eq!(BLAME_MAX_REVERSE_COMMITS, 1_000_000);

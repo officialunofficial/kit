@@ -61,10 +61,22 @@ pub enum BisectError {
     Object(#[from] crate::object::KitError),
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
-    /// A commit of the range or of the history of a good commit cannot be
-    /// read, or the ancestors of a good commit exceed the cap.
-    #[error(transparent)]
-    History(#[from] crate::ops::graph::AncestorError),
+}
+
+/// A commit of the range or of the history of a good commit that cannot be
+/// read gives [`BisectError::Store`] with the store error that names it, and
+/// a walk over its cap gives [`BisectError::Store`] with
+/// [`crate::store::StoreError::OperationLimitExceeded`] naming the limit. A
+/// parent that is not a commit gives [`BisectError::Io`] of kind
+/// [`io::ErrorKind::InvalidData`] that carries the
+/// [`crate::ops::graph::AncestorError`] naming it.
+impl From<crate::ops::graph::AncestorError> for BisectError {
+    fn from(err: crate::ops::graph::AncestorError) -> Self {
+        match err.into_store_or_invalid_data() {
+            Ok(store) => Self::Store(store),
+            Err(io) => Self::Io(io),
+        }
+    }
 }
 
 /// Result alias.
@@ -252,10 +264,12 @@ pub fn bisect_file_path(layout: &RepoLayout) -> PathBuf {
 /// good.
 ///
 /// # Errors
-/// [`BisectError::History`] when a commit of either walk cannot be read or
-/// is another kind of object, or when a good commit has more ancestors, or
-/// the range more candidates, than one walk visits. It never returns part of
-/// the range.
+/// [`BisectError::Store`] with the store error that names a commit of either
+/// walk that cannot be read, or naming the limit when a good commit has more
+/// ancestors, or the range more candidates, than one walk visits.
+/// [`BisectError::Io`] of kind [`io::ErrorKind::InvalidData`], carrying the
+/// [`crate::ops::graph::AncestorError`] that names it, for a parent that is
+/// not a commit. It never returns part of the range.
 pub fn enumerate_range(
     store: &ObjectStore,
     bad: Hash,
@@ -298,10 +312,8 @@ fn enumerate_range_with_cap(
             continue;
         }
         if candidates.len() >= max_ancestors {
-            return Err(BisectError::History(
-                crate::ops::graph::AncestorError::Limit(
-                    crate::store::StoreError::OperationLimitExceeded(CANDIDATE_LIMIT),
-                ),
+            return Err(BisectError::Store(
+                crate::store::StoreError::OperationLimitExceeded(CANDIDATE_LIMIT),
             ));
         }
         let commit = crate::ops::graph::read_history_commit(store, current)?;
@@ -368,8 +380,8 @@ pub fn pick_midpoint_skip(candidates: &[Hash], skipped: &BTreeSet<Hash>) -> Hash
 /// - Otherwise return [`BisectStep::NeedMore`].
 ///
 /// # Errors
-/// - [`BisectError::History`] when a commit of the range cannot be read;
-///   see [`enumerate_range`].
+/// - [`BisectError::Store`] or [`BisectError::Io`] when a commit of the
+///   range cannot be read; see [`enumerate_range`].
 pub fn next_step(store: &ObjectStore, state: &BisectState) -> BisectResult<BisectStep> {
     let Some(bad) = state.bad_hash else {
         return Ok(BisectStep::NeedMore);
@@ -429,7 +441,6 @@ pub fn next_step(store: &ObjectStore, state: &BisectState) -> BisectResult<Bisec
 mod tests {
     use super::*;
     use crate::object::{Commit, Identity, Object, Tree, TreeEntry};
-    use crate::ops::graph::AncestorError;
     use crate::serialize;
     use tempfile::TempDir;
 
@@ -676,8 +687,8 @@ mod tests {
         let err = enumerate_range_with_cap(&store, c4, &[c3], 2).unwrap_err();
         assert!(matches!(
             err,
-            BisectError::History(crate::ops::graph::AncestorError::Limit(
-                crate::store::StoreError::OperationLimitExceeded(GOOD_ANCESTOR_LIMIT)
+            BisectError::Store(crate::store::StoreError::OperationLimitExceeded(
+                GOOD_ANCESTOR_LIMIT
             ))
         ));
         assert_eq!(
@@ -700,8 +711,8 @@ mod tests {
         assert!(
             matches!(
                 err,
-                BisectError::History(crate::ops::graph::AncestorError::Limit(
-                    crate::store::StoreError::OperationLimitExceeded(CANDIDATE_LIMIT)
+                BisectError::Store(crate::store::StoreError::OperationLimitExceeded(
+                    CANDIDATE_LIMIT
                 ))
             ),
             "{err:?}"
@@ -740,15 +751,13 @@ mod tests {
     /// Assert that the range fails and names `culprit`.
     fn assert_fails_naming(store: &ObjectStore, bad: Hash, good: Hash, culprit: &Hash) {
         let err = enumerate_range(store, bad, &[good]).unwrap_err();
-        assert!(
-            matches!(
-                &err,
-                BisectError::History(
-                    AncestorError::Unreadable { hash, .. } | AncestorError::NotACommit(hash)
-                ) if hash == culprit
-            ),
-            "{err:?}"
-        );
+        let named = match &err {
+            BisectError::Store(e) => crate::ops::graph::store_error_names(e, culprit),
+            BisectError::Io(e) => crate::ops::graph::invalid_data_names(e, culprit),
+            _ => false,
+        };
+        assert!(named, "{err:?}");
+        assert!(err.to_string().contains(&hash::to_hex(culprit)), "{err}");
     }
 
     #[test]
