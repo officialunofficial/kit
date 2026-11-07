@@ -660,7 +660,13 @@ pub struct GrowRun {
     pub cold: FetchRun,
     /// Pack list nodes on the branch's chain after the pushes.
     pub chain_nodes: usize,
+    /// Mean time of the last [`LATE_PUSHES`] pushes, which validate the
+    /// longest chain.
+    pub late_push: Duration,
 }
+
+/// Pushes at the end of `fetch-grow` whose mean time it reports.
+pub const LATE_PUSHES: usize = 10;
 
 /// How long `fetch-noop` setup waits after its last write, longer than the
 /// window in which the file transport withholds its cursor.
@@ -689,10 +695,16 @@ pub fn fetch_grow(connect: &Connect, scratch: &Path, pushes: usize) -> Result<Gr
     push(0)?;
     let reader = Pusher::create(&scratch.join("reader"), &key)?;
     reader.fetch(&TransportSource::new(&*connect()?))?;
+    let mut late = Duration::ZERO;
     for step in 1..=pushes {
         tip = pusher.commit(GROW_BRANCH, Some(tip), seed(0, step))?;
+        let t0 = Instant::now();
         push(step)?;
+        if step + LATE_PUSHES > pushes {
+            late += t0.elapsed();
+        }
     }
+    let late_push = late / u32::try_from(LATE_PUSHES.min(pushes)).unwrap_or(1);
     let measure = |repo: &Pusher<'_>| -> Result<FetchRun, String> {
         let tx = connect()?;
         let source = Counting::new(&*tx);
@@ -715,6 +727,7 @@ pub fn fetch_grow(connect: &Connect, scratch: &Path, pushes: usize) -> Result<Gr
         incremental,
         cold,
         chain_nodes,
+        late_push,
     })
 }
 

@@ -1482,6 +1482,17 @@ pub fn fetch_cursor_record_one_iteration(input: &[u8]) {
     );
 }
 
+/// File transport intent record parser (`ref_intent_parse`):
+/// `kit_transport_file::intent::parse` never panics, and an accepted record
+/// encodes to exactly its input.
+pub fn ref_intent_parse_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Some(intent) = kit_transport_file::intent::parse(input) {
+        assert_eq!(intent.encode(), input);
+        assert!(!intent.entries().is_empty());
+    }
+}
+
 /// Index file decoder (`index_decode`): `index::deserialize` never panics,
 /// and an accepted index survives a serialize and deserialize round trip.
 pub fn index_decode_one_iteration(input: &[u8]) {
@@ -2891,6 +2902,22 @@ mod tests {
         ] {
             run_one(case, git_commit_parse_one_iteration).unwrap();
         }
+    }
+
+    #[test]
+    fn unit_ref_intent_parse() {
+        run_iterated_unit(ref_intent_parse_one_iteration).unwrap();
+        // A valid record, so the round trip runs.
+        let intent =
+            kit_transport_file::intent::Intent::new(vec![kit_transport_file::intent::Entry {
+                name: "refs/heads/main".to_owned(),
+                old: None,
+                new: [1u8; 32],
+            }])
+            .unwrap();
+        let bytes = intent.encode();
+        assert!(kit_transport_file::intent::parse(&bytes).is_some());
+        run_one(&bytes, ref_intent_parse_one_iteration).unwrap();
     }
 
     #[test]

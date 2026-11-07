@@ -2435,6 +2435,7 @@ dependencies = [
  "kit-rpc",
  "kit-serve",
  "kit-sync",
+ "kit-transport-file",
  "kit-transport-ssh",
  "libfuzzer-sys",
  "libkit",

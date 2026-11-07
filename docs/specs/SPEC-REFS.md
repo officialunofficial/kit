@@ -293,7 +293,7 @@ not exist or contains a different hash → `RefConflict`.
 | Transport | `.any`      | `.missing`                            | `.match`                                                       | Notes |
 |-----------|-------------|---------------------------------------|----------------------------------------------------------------|-------|
 | memory    | atomic*     | atomic*                               | atomic* &mdash; the read-check-write runs under the instance's one `Mutex` | *In-process only: every verb of one `MemoryTransport` instance holds its `Mutex` for the whole operation, so concurrent threads sharing the instance cannot interleave. Never shared across processes. |
-| file      | atomic      | atomic (via `O_EXCL` create)          | atomic &mdash; OS exclusive lock of the ref's stripe (`<root>/.kit/refs/refs-<hh>.lock`, §5.1.1) serializes the read-check-write for that ref across processes | Lock guards released on drop (including panic-unwind). Writes to refs in different stripes run in parallel. |
+| file      | atomic      | atomic (via `O_EXCL` create)          | atomic &mdash; OS exclusive lock of the ref's stripe (`<root>/.kit/refs/refs-<hh>.lock`, §5.1.1) serializes the read-check-write for that ref across processes | Lock guards released on drop (including panic-unwind). Writes to refs in different stripes run in parallel. `advance_refs` commits the head and packmap as one step (§5.1.3). |
 | s3        | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<md5-of-wire>"`                         | Requires a store that supports conditional writes. |
 | http      | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<hex-hash>"`                            | Worker-flavored server. Generic S3 and nginx do NOT conform. |
 | ssh       | atomic      | atomic (`OP_WRITE_REF_IF_ABSENT` path via condition byte) | atomic (`CONDITION_MATCH` with 32-byte expected hash)          | Server enforces CAS; client trusts `STATUS_ERROR`. |
@@ -420,6 +420,61 @@ Raw writes that change a ref invalidate its active descriptor; deletion also
 invalidates it, so an ABA rewrite or delete/recreate cannot reuse a generation.
 A pending history intent blocks raw mutation until recovered. Neither this
 metadata nor the guard changes the 65-byte ref wire format.
+
+#### 5.1.3 File transport multi-ref commits
+
+**Protocol requirement.** When the file transport commits several refs as
+one step, as `advance_refs` commits a branch head and its packmap, every
+named ref takes its new id or none does. This holds for every writer and
+every reader, and across a crash of the committing process. A commit whose
+condition fails for any named ref changes no ref.
+
+A commit takes the repo lock shared, then the stripe lock of every named ref,
+each stripe once, in ascending stripe index (§5.1.1; two refs can share a
+stripe). Under these locks it checks every condition and adds one to every
+touched stripe version (§5.1.2). It then makes an intent record durable in
+`<root>/.kit/refs/intents/`: written to a temporary file whose name starts
+with a dot, synced, renamed to a name that does not, and the directory
+synced. The record becoming durable is the commit point. The commit then
+writes each ref file as §5.1 does, adds one to its stripe version, and
+removes the record.
+
+The record is the line `kit-ref-intent-v1`, then one line per named ref in
+ascending byte order of the name: the ref's id when the commit checked it, as
+64 lowercase hex digits or `-` if the ref was absent, a space, the new id, a
+space, and the full ref name. Every line ends with a newline. A record with
+anything else, no ref, or a name given twice is corrupt.
+
+Every process that reads or writes refs under the root MUST honor a pending
+record:
+
+- A read of a ref named in a pending record whose file still holds the
+  record's old id reports the record's new id. A listing does the same, and
+  includes a named ref that was absent.
+- A write that holds a stripe lock and finds a pending record naming a ref in
+  that stripe finishes the record before its own step. A live commit holds
+  the stripes of every ref it names, so such a record was left by a crash. The
+  writer releases its locks, takes the record's stripes in ascending order,
+  writes the new id of every named ref whose file still holds the old id,
+  adds one to that ref's stripe version, removes the record, and starts
+  again. Recovery only goes forward.
+- A step that holds the repo lock exclusive finishes every pending record
+  first.
+- A record that is corrupt, or more pending records than the implementation
+  bounds, fails the read or write. Nothing guesses.
+
+A reader that reads two refs reads them one at a time. It can see one ref
+before a commit and the other after it, as with any two single-ref writes.
+The guarantee is that no state with some named refs new and others old is
+ever visible, and that a crash never leaves one.
+
+**Reference-server behavior.** A commit names at most 64 refs. The record is
+`intents/<32 hex digits>.intent`. More than 512 pending records fail closed.
+The intent directory is outside `<root>/refs`, so the repository cursor
+covers a commit through its stripe versions, which it counts before the
+commit point. kit 0.7.2 and earlier read no records and commit nothing this
+way. A write from one of them to a ref named in a pending record can be
+overwritten when the record is finished.
 
 ### 5.2 ETag encoding divergence
 

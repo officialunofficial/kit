@@ -19,6 +19,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The file transport commits a branch head and its packmap as one step
+  (SPEC-REFS §5.1.3), so a push to a `kit+file://` remote can re-baseline a
+  long pack chain. Under the stripe locks of both refs it makes an intent
+  record durable; readers report the record's new ids, and the next writer
+  on either stripe finishes a record a crash left behind. On one ext4 disk,
+  after 1,000 pushes a fetch downloads 41 packs instead of 1,000 and takes
+  about 0.7 s instead of 2.1 to 2.6 s, and 32 pushers on one branch land
+  about 20 pushes per second instead of 1.8. One push alone costs about 3 ms
+  more, for the intent record's three extra fsyncs.
 - The file transport and `kit serve` lock each ref instead of the whole root.
   A ref write holds the repo lock shared and the lock of the one of 256
   stripes that the ref maps to, so writes to refs in different stripes no

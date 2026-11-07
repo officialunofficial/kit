@@ -104,69 +104,35 @@ fn all_ancestor_commit_hashes(store: &ObjectStore, tip: Hash) -> HashSet<Hash> {
 // `kit+file://` remote (env-var injection via subprocess, see module docs).
 // ---------------------------------------------------------------------------
 
-/// Force-push safety: `kit+file://` (`FileTransport`) uses the DEFAULT,
-/// non-transactional `advance_refs` (packmap-then-head) — it does not
-/// override [`Transport::supports_atomic_advance`], so it inherits `false`.
-/// A proactive re-baseline reset writes a fresh node with `prev = None`,
-/// which is NOT a superset of the prior chain (unlike an ordinary append);
-/// committing one while losing the paired head CAS would strand the
-/// (unmoved) head pointing at a commit the packmap can no longer
-/// reconstruct. So even after 4 pushes cross the depth-3 threshold, the
-/// chain on a non-atomic transport must keep appending — never reset — and
-/// the remote must stay fully clonable throughout.
-///
-/// An earlier version of this test asserted the opposite: that the chain
-/// collapses to one self-contained node here.
-/// That assertion described exactly the unsafe behavior this test now rules out: on a
-/// non-atomic transport, a divergent push racing at this same depth
-/// threshold could commit a packmap reset, lose the head CAS, and leave
-/// the remote with a head pointing at an unreconstructable closure (see
-/// `RemoteMissingObject`). The re-baseline mechanism itself is still
-/// covered — on the transactional path — by
-/// `divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable`
-/// below, which uses `AtomicTransport`.
+/// `kit+file://` (`FileTransport`) commits the head and packmap in one
+/// step (SPEC-REFS §5.1.3), so the re-baseline gate runs on it: the fourth
+/// push at depth 3 resets the chain to one self-contained node, and the
+/// remote stays clonable with every commit's hash unchanged.
 #[test]
-fn four_pushes_at_depth_3_over_a_non_atomic_transport_never_reset() {
+fn four_pushes_at_depth_3_over_the_file_transport_reset_the_chain() {
     let alice = Repo::new();
     let remote = tempfile::tempdir().unwrap();
     let url = file_url(remote.path());
     alice.ok(&["remote", "add", &url]);
 
     let mut tips = Vec::new();
+    let tx = FileTransport::new(remote.path());
     for i in 0..4u32 {
         alice.commit_file("f.txt", i.to_string().as_bytes(), &format!("c{i}"));
         tips.push(head_hash(alice.path()));
         alice.ok_env(&["push"], &[("KIT_PACK_REBASELINE_DEPTH", "3")]);
+        let expected = if i < 3 { i as usize + 1 } else { 1 };
+        assert_eq!(packmap_chain(&tx, "main").len(), expected, "after push {i}");
     }
     let final_tip = *tips.last().unwrap();
-
-    let tx = FileTransport::new(remote.path());
     let chain = packmap_chain(&tx, "main");
-    assert_eq!(
-        chain.len(),
-        4,
-        "a non-atomic transport must never reset the chain, even past the \
-         re-baseline threshold — it must keep appending, one node per push"
+    assert!(chain[0].prev.is_none(), "the fourth push reset the chain");
+    assert!(
+        chain_is_all_raw(&tx, &chain),
+        "a reset node is self-contained"
     );
-    // `packmap_chain` walks newest-first: every node but the oldest must
-    // chain to a `Some` prev, i.e. no reset (`prev = None`) happened
-    // partway through the chain.
-    for (idx, node) in chain.iter().enumerate() {
-        if idx + 1 < chain.len() {
-            assert!(
-                node.prev.is_some(),
-                "node {idx} unexpectedly reset to prev = None on a non-atomic transport"
-            );
-        }
-    }
-    assert_eq!(
-        tx.read_ref("refs/heads/main").unwrap(),
-        Some(final_tip),
-        "head must resolve to the latest tip"
-    );
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(final_tip));
 
-    // The remote stays clonable, and a fresh clone reconstructs every
-    // commit with unchanged hashes.
     let dest = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
     let out = common::kit(dest.path(), xdg.path(), &["clone", &url, "bob"]);
@@ -183,6 +149,40 @@ fn four_pushes_at_depth_3_over_a_non_atomic_transport_never_reset() {
     }
     assert_eq!(ancestry.len(), 4, "all 4 commits, and only those, present");
     assert_eq!(fs::read(bob.join("f.txt")).unwrap(), b"3");
+}
+
+/// Force-push safety: a transport with the DEFAULT, non-transactional
+/// `advance_refs` (packmap-then-head; here the memory transport) inherits
+/// `supports_atomic_advance() == false`. A re-baseline reset writes a fresh
+/// node with `prev = None`, which is NOT a superset of the prior chain;
+/// committing one while losing the paired head CAS would strand the head at
+/// a closure the packmap cannot reconstruct. So even after 4 pushes cross
+/// the depth-3 threshold, the chain on such a transport keeps appending.
+#[test]
+fn four_pushes_at_depth_3_over_a_non_atomic_transport_never_reset() {
+    let alice = Repo::new();
+    let tx = MemoryTransport::new();
+    assert!(!tx.supports_atomic_advance());
+    let store = ObjectStore::open(&RepoLayout::single(alice.path())).unwrap();
+    let mut prior = None;
+    for i in 0..4u32 {
+        alice.commit_file("f.txt", i.to_string().as_bytes(), &format!("c{i}"));
+        let tip = head_hash(alice.path());
+        let condition = prior.map_or(RefWriteCondition::Missing, RefWriteCondition::Match);
+        push_branch_with_depth(&tx, &store, "main", tip, condition, TEST_DEPTH).unwrap();
+        prior = Some(tip);
+    }
+    let chain = packmap_chain(&tx, "main");
+    assert_eq!(chain.len(), 4, "one node per push, never a reset");
+    for (idx, node) in chain.iter().enumerate() {
+        if idx + 1 < chain.len() {
+            assert!(
+                node.prev.is_some(),
+                "node {idx} reset on a non-atomic transport"
+            );
+        }
+    }
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), prior);
 }
 
 #[test]
@@ -237,8 +237,8 @@ fn depth_zero_disables_rebaseline() {
 /// This models the transactional advance of a production remote, such
 /// as the native HTTP transport.
 ///
-/// The plain default `advance_refs` (used by [`MemoryTransport`] /
-/// [`FileTransport`] and exercised by the other tests in this file and in
+/// The plain default `advance_refs` (used by [`MemoryTransport`] and
+/// exercised by the other tests in this file and in
 /// `push_delta.rs`) commits packmap-then-head sequentially; that is
 /// documented as safe when a losing head race still leaves an *appended*
 /// (superset) packmap. The re-baseline reset (`prev = None`) breaks

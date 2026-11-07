@@ -47,13 +47,20 @@
 //! [`FileTransport::with_ref_lock`] takes the repo lock exclusive instead,
 //! which excludes every ref write, and hands it to callers that read,
 //! decide and write several files as one step, through [`LockedRefs`].
+//!
+//! [`Transport::advance_refs`] commits a branch head and its packmap as one
+//! step: an intent record made durable under the stripe locks of both refs
+//! is the commit point, readers report its new ids, and the next writer on
+//! either stripe finishes a record a crash left (SPEC-REFS §5.1.3).
 
 #![forbid(unsafe_code)]
+
+pub mod intent;
 
 use std::fs;
 use std::io::{self, ErrorKind, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, PoisonError, RwLock};
+use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
 
 /// Open the pack at `path` for reading, never through a link, and check
 /// on the open handle that it is a regular file.
@@ -88,8 +95,8 @@ fn open_pack_file(path: &Path) -> io::Result<fs::File> {
 use kit_core::bounded_read;
 use kit_core::hash::Hash;
 use kit_core::protocol::{
-    PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, RepoCursor, Transport,
-    TransportError, TransportResult,
+    AdvanceOutcome, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, RepoCursor,
+    Transport, TransportError, TransportResult,
 };
 use kit_core::refs::{
     REF_FILE_MAX_BYTES, Ref, decode_ref_wire, encode_ref_wire, validate_ref_name,
@@ -303,6 +310,15 @@ const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The most ref directories a cursor covers. A root with more offers none.
 const MAX_CURSOR_DIRS: usize = 1 << 16;
+
+/// The directory under `<root>/.kit/refs/` that holds the intent records of
+/// multi-ref commits (SPEC-REFS §5.1.3).
+const INTENT_DIR: &str = "intents";
+
+/// The most pending intent records a reader or writer accepts. Each live
+/// commit holds at least one stripe, and a crashed one leaves at most one
+/// record per stripe, so more means something else wrote there.
+const MAX_PENDING_INTENTS: usize = 2 * REF_LOCK_STRIPES;
 
 /// The file name of a stripe's lock, `refs-<hh>.lock`.
 fn stripe_lock_name(stripe: usize) -> String {
@@ -622,6 +638,11 @@ impl FileTransport {
             .write()
             .unwrap_or_else(PoisonError::into_inner);
         let _xproc_guard = RefLock::acquire(&self.root).map_err(RefFileError::Io)?;
+        // The exclusive repo lock excludes every commit, so every pending
+        // intent is one a crashed commit left: finish it first.
+        for (path, intent) in self.pending_intents()? {
+            self.finish_intent(&path, &intent, |name| self.bump_stripe_version(name))?;
+        }
         Ok(f(&LockedRefs { tx: self }))
     }
 
@@ -647,21 +668,295 @@ impl FileTransport {
         if !validate_ref_name(name) {
             return Err(RefFileError::InvalidName(name.to_owned()));
         }
-        let stripe = ref_stripe(name);
-        let _repo_guard = self
-            .repo_gate
-            .read()
-            .unwrap_or_else(PoisonError::into_inner);
-        let _stripe_guard = self.stripe_gates[stripe]
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let _repo_lock = RefLock::acquire_shared(&self.root).map_err(RefFileError::Io)?;
-        let stripe_lock = RefLock::acquire_stripe(&self.root, stripe).map_err(RefFileError::Io)?;
+        let held = self.lock_stripes(&[ref_stripe(name)])?;
         Ok(f(&LockedRef {
             tx: self,
             name,
-            stripe: &stripe_lock.file,
+            stripe: &held.stripe_locks[0].1.file,
         }))
+    }
+
+    /// Take the locks of `stripes` (sorted, each once): the repo lock
+    /// shared, then each stripe lock exclusive in ascending order, each
+    /// after its in-process mirror. A pending intent that names a ref in
+    /// one of them was left by a crashed commit, because a live commit
+    /// holds the stripes of every ref it names: the locks are dropped, the
+    /// intent is finished under its own stripes, and the locks are taken
+    /// again.
+    fn lock_stripes(&self, stripes: &[usize]) -> Result<HeldStripes<'_>, RefFileError> {
+        for _ in 0..=MAX_PENDING_INTENTS {
+            let held = self.acquire_stripes(stripes)?;
+            let orphans: Vec<_> = self
+                .pending_intents()?
+                .into_iter()
+                .filter(|(_, intent)| {
+                    intent_stripes(intent)
+                        .iter()
+                        .any(|s| stripes.binary_search(s).is_ok())
+                })
+                .collect();
+            if orphans.is_empty() {
+                return Ok(held);
+            }
+            drop(held);
+            for (path, intent) in orphans {
+                self.recover_intent(&path, &intent)?;
+            }
+        }
+        Err(RefFileError::Io(io::Error::other(
+            "pending intents keep appearing on the stripes of this write",
+        )))
+    }
+
+    /// Take the locks of `stripes` as [`Self::lock_stripes`] does, without
+    /// looking at intents.
+    fn acquire_stripes(&self, stripes: &[usize]) -> Result<HeldStripes<'_>, RefFileError> {
+        debug_assert!(stripes.windows(2).all(|w| w[0] < w[1]));
+        let repo_gate = self
+            .repo_gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let stripe_gates = stripes
+            .iter()
+            .map(|&s| {
+                self.stripe_gates[s]
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+            })
+            .collect();
+        let repo_lock = RefLock::acquire_shared(&self.root).map_err(RefFileError::Io)?;
+        let mut stripe_locks = Vec::with_capacity(stripes.len());
+        for &s in stripes {
+            stripe_locks.push((
+                s,
+                RefLock::acquire_stripe(&self.root, s).map_err(RefFileError::Io)?,
+            ));
+        }
+        Ok(HeldStripes {
+            stripe_locks,
+            _repo_lock: repo_lock,
+            _stripe_gates: stripe_gates,
+            _repo_gate: repo_gate,
+        })
+    }
+
+    /// `<root>/.kit/refs/intents/`.
+    fn intent_dir(&self) -> PathBuf {
+        self.lock_dir().join(INTENT_DIR)
+    }
+
+    /// Every intent record in [`Self::intent_dir`], skipping temp files
+    /// (their names start with a dot) and records removed while it reads.
+    /// One directory listing when there are none.
+    ///
+    /// # Errors
+    /// [`RefFileError::Corrupt`] for a record that does not parse or more
+    /// than [`MAX_PENDING_INTENTS`] of them, or I/O.
+    fn pending_intents(&self) -> Result<Vec<(PathBuf, intent::Intent)>, RefFileError> {
+        let dir = self.intent_dir();
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(RefFileError::Io(e)),
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(RefFileError::Io)?;
+            if entry.file_name().as_encoded_bytes().starts_with(b".") {
+                continue;
+            }
+            if out.len() == MAX_PENDING_INTENTS {
+                return Err(RefFileError::Corrupt(INTENT_DIR.to_owned()));
+            }
+            let path = entry.path();
+            match bounded_read::read_capped(&path, intent::MAX_INTENT_BYTES as u64) {
+                Ok(bytes) => {
+                    let parsed = intent::parse(&bytes).ok_or_else(|| {
+                        RefFileError::Corrupt(format!(
+                            "{INTENT_DIR}/{}",
+                            entry.file_name().display()
+                        ))
+                    })?;
+                    out.push((path, parsed));
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) if e.kind() == ErrorKind::InvalidData => {
+                    return Err(RefFileError::Corrupt(INTENT_DIR.to_owned()));
+                }
+                Err(e) => return Err(RefFileError::Io(e)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Finish the crashed commit of `intent` at `path` under the locks of
+    /// its stripes. Another process may have finished it already.
+    fn recover_intent(&self, path: &Path, intent: &intent::Intent) -> Result<(), RefFileError> {
+        let stripes = intent_stripes(intent);
+        let held = self.acquire_stripes(&stripes)?;
+        // Re-read under the locks: a record still there is still pending.
+        let current = match bounded_read::read_capped(path, intent::MAX_INTENT_BYTES as u64) {
+            Ok(bytes) => intent::parse(&bytes),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(RefFileError::Io(e)),
+        };
+        if current.as_ref() != Some(intent) {
+            return Err(RefFileError::Corrupt(INTENT_DIR.to_owned()));
+        }
+        self.finish_intent(path, intent, |name| held.bump(ref_stripe(name)))
+    }
+
+    /// Write the new id of every entry of `intent` whose ref file still
+    /// holds the old one, counting each write through `count`, then remove
+    /// the record. The caller holds the stripes of every entry, or the repo
+    /// lock exclusive.
+    fn finish_intent(
+        &self,
+        path: &Path,
+        intent: &intent::Intent,
+        count: impl Fn(&str) -> io::Result<()>,
+    ) -> Result<(), RefFileError> {
+        for entry in intent.entries() {
+            let dest = self.ref_path(&entry.name);
+            if read_ref_raw(&dest).map_err(RefFileError::Io)? == entry.old {
+                write_atomic(&dest, &encode_ref_wire(&entry.new), true)
+                    .map_err(RefFileError::Io)?;
+                count(&entry.name).map_err(RefFileError::Io)?;
+            }
+        }
+        remove_durably(path).map_err(RefFileError::Io)?;
+        Ok(())
+    }
+
+    /// Commit `updates` as one step (SPEC-REFS §5.1.3): every ref takes
+    /// its new id, or none does. Returns the indices of the updates whose
+    /// condition did not hold, in request order; empty when the commit
+    /// happened. A conflict changes nothing.
+    ///
+    /// The locks of every named ref's stripe are taken in ascending stripe
+    /// order, after the repo lock shared. Under them every condition is
+    /// checked, the touched stripe versions are counted, and the intent
+    /// record is made durable: that is the commit point. Then each ref file
+    /// is renamed into place and counted, and the record is removed. A
+    /// crash after the commit point leaves the record; readers report its
+    /// new ids, and the next writer on one of its stripes finishes it.
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`] for an invalid name, a name given
+    /// twice, two names that clash (one is a directory of the other), a
+    /// name that clashes with a ref on disk, or more than
+    /// [`intent::MAX_COMMIT_REFS`] updates or none.
+    /// [`RefFileError::Escape`], or I/O. An I/O error after the commit
+    /// point leaves the commit to the next writer; the caller re-reads.
+    fn commit_refs_in(
+        &self,
+        updates: &[(&str, RefWriteCondition, Hash)],
+    ) -> Result<Vec<usize>, RefFileError> {
+        if updates.is_empty() || updates.len() > intent::MAX_COMMIT_REFS {
+            return Err(RefFileError::InvalidName(format!(
+                "a commit names 1 to {} refs, not {}",
+                intent::MAX_COMMIT_REFS,
+                updates.len()
+            )));
+        }
+        for (i, (name, _, _)) in updates.iter().enumerate() {
+            if !validate_ref_name(name) {
+                return Err(RefFileError::InvalidName((*name).to_owned()));
+            }
+            let clash = updates[..i].iter().any(|(other, _, _)| {
+                other == name
+                    || other.strip_prefix(name).is_some_and(|r| r.starts_with('/'))
+                    || name.strip_prefix(other).is_some_and(|r| r.starts_with('/'))
+            });
+            if clash {
+                return Err(RefFileError::InvalidName((*name).to_owned()));
+            }
+        }
+        self.refuse_if_meta_elsewhere()?;
+        for (name, _, _) in updates {
+            let dest = self.ref_path(name);
+            self.guard_ref_path(&dest)?;
+            if self.ref_clash(&dest) {
+                return Err(RefFileError::InvalidName((*name).to_owned()));
+            }
+        }
+        let mut stripes: Vec<usize> = updates.iter().map(|(n, _, _)| ref_stripe(n)).collect();
+        stripes.sort_unstable();
+        stripes.dedup();
+        let held = self.lock_stripes(&stripes)?;
+
+        let mut entries = Vec::with_capacity(updates.len());
+        let mut failed = Vec::new();
+        for (i, (name, condition, new)) in updates.iter().enumerate() {
+            let dest = self.ref_path(name);
+            let old = read_ref_raw(&dest).map_err(RefFileError::Io)?;
+            let holds = match condition {
+                RefWriteCondition::Any => true,
+                RefWriteCondition::Missing => match fs::symlink_metadata(&dest) {
+                    Ok(_) => false,
+                    Err(e) if e.kind() == ErrorKind::NotFound => true,
+                    Err(e) => return Err(RefFileError::Io(e)),
+                },
+                RefWriteCondition::Match(expected) => old == Some(*expected),
+            };
+            if !holds {
+                failed.push(i);
+            }
+            entries.push(intent::Entry {
+                name: (*name).to_owned(),
+                old,
+                new: *new,
+            });
+        }
+        if !failed.is_empty() {
+            return Ok(failed);
+        }
+        let record = intent::Intent::new(entries)
+            .ok_or_else(|| RefFileError::InvalidName("a commit's ref names".to_owned()))?;
+
+        // Count before the commit point: a crash after it leaves new ids
+        // visible through the record, and the cursor must already differ.
+        for &(s, _) in &held.stripe_locks {
+            held.bump(s).map_err(RefFileError::Io)?;
+        }
+        commit_step(CommitStep::Counted);
+        let mut name = [0u8; 16];
+        getrandom::fill(&mut name)
+            .map_err(|e| RefFileError::Io(io::Error::other(e.to_string())))?;
+        let path = self
+            .intent_dir()
+            .join(format!("{}.intent", kit_core::hash::to_hex_bytes(&name)));
+        create_dir_all_durably(&self.intent_dir()).map_err(RefFileError::Io)?;
+        write_atomic(&path, &record.encode(), false).map_err(RefFileError::Io)?;
+        commit_step(CommitStep::Durable);
+        for (i, entry) in record.entries().iter().enumerate() {
+            write_atomic(
+                &self.ref_path(&entry.name),
+                &encode_ref_wire(&entry.new),
+                true,
+            )
+            .map_err(RefFileError::Io)?;
+            held.bump(ref_stripe(&entry.name))
+                .map_err(RefFileError::Io)?;
+            commit_step(CommitStep::Applied(i));
+        }
+        remove_durably(&path).map_err(RefFileError::Io)?;
+        Ok(Vec::new())
+    }
+
+    /// `value` read from the file of `name`, as the pending intents report
+    /// it: the new id of an entry naming `name` whose old id the file still
+    /// holds.
+    fn overlay(
+        intents: &[(PathBuf, intent::Intent)],
+        name: &str,
+        value: Option<Hash>,
+    ) -> Option<Hash> {
+        intents
+            .iter()
+            .filter_map(|(_, intent)| intent.entry(name))
+            .find(|entry| entry.old == value)
+            .map_or(value, |entry| Some(entry.new))
     }
 
     /// The ref's id, strictly: like [`Transport::read_ref`], but a ref file
@@ -682,16 +977,17 @@ impl FileTransport {
         if path.exists() {
             self.guard_ref_path(&path)?;
         }
-        match bounded_read::read_capped(&path, REF_FILE_MAX_BYTES) {
-            Ok(bytes) => decode_ref_wire(&bytes)
-                .map(Some)
-                .ok_or_else(|| RefFileError::Corrupt(name.to_owned())),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        let value = match bounded_read::read_capped(&path, REF_FILE_MAX_BYTES) {
+            Ok(bytes) => Some(
+                decode_ref_wire(&bytes).ok_or_else(|| RefFileError::Corrupt(name.to_owned()))?,
+            ),
+            Err(e) if e.kind() == ErrorKind::NotFound => None,
             Err(e) if e.kind() == ErrorKind::InvalidData => {
-                Err(RefFileError::Corrupt(name.to_owned()))
+                return Err(RefFileError::Corrupt(name.to_owned()));
             }
-            Err(e) => Err(RefFileError::Io(e)),
-        }
+            Err(e) => return Err(RefFileError::Io(e)),
+        };
+        Ok(Self::overlay(&self.pending_intents()?, name, value))
     }
 
     /// Every ref file under `prefix` (a directory, e.g. `refs/`), with its
@@ -747,6 +1043,14 @@ impl FileTransport {
                 }
             }
         }
+        let intents = self.pending_intents()?;
+        overlay_listing(
+            &intents,
+            &format!("{trimmed}/"),
+            &mut out,
+            |(name, value)| (name.as_str(), value),
+            |name, value| (name.to_owned(), Some(value)),
+        );
         out.sort();
         Ok(out)
     }
@@ -1412,8 +1716,9 @@ impl Transport for FileTransport {
         if path.exists() {
             self.check_ref_path(&path)?;
         }
-        read_ref_raw(&path)
-            .map_err(|e| TransportError::RemoteError(format!("read_ref I/O error: {e}")))
+        let value = read_ref_raw(&path)
+            .map_err(|e| TransportError::RemoteError(format!("read_ref I/O error: {e}")))?;
+        Ok(Self::overlay(&self.pending_intents()?, name, value))
     }
 
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
@@ -1430,9 +1735,150 @@ impl Transport for FileTransport {
 
         let mut out = Vec::new();
         collect_refs(&dir, &dir, &mut out)?;
+        let full = if prefix_trimmed.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix_trimmed}/")
+        };
+        let intents = self.pending_intents()?;
+        // Listed names are relative to the prefix; intents name full refs.
+        let mut full_out: Vec<(String, Option<Hash>)> = out
+            .into_iter()
+            .map(|r| (format!("{full}{}", r.name), r.hash))
+            .collect();
+        overlay_listing(
+            &intents,
+            &full,
+            &mut full_out,
+            |(name, value)| (name.as_str(), value),
+            |name, value| (name.to_owned(), Some(value)),
+        );
+        let mut out: Vec<Ref> = full_out
+            .into_iter()
+            .map(|(name, hash)| Ref {
+                name: name[full.len()..].to_owned(),
+                hash,
+            })
+            .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
+
+    /// Both refs in one commit (SPEC-REFS §5.1.3): both change, or neither
+    /// does, across a crash too. A failed packmap condition is reported
+    /// first, as the ordered default does.
+    fn advance_refs(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+    ) -> TransportResult<AdvanceOutcome> {
+        let failed = self.commit_refs_in(&[
+            (packmap_ref, packmap_condition, *packmap_value),
+            (head_ref, head_condition, *head_value),
+        ])?;
+        Ok(match failed.first() {
+            None => AdvanceOutcome::Committed,
+            Some(0) => AdvanceOutcome::PackmapConflict,
+            Some(_) => AdvanceOutcome::HeadConflict,
+        })
+    }
+
+    fn supports_atomic_advance(&self) -> bool {
+        true
+    }
+}
+
+/// Apply the pending `intents` to a listing of full ref names under
+/// `prefix` (`""` for every ref): an entry whose file still holds the old
+/// id reports the new one, and one whose ref is absent from the listing is
+/// added when its old id was absent too.
+fn overlay_listing<T>(
+    intents: &[(PathBuf, intent::Intent)],
+    prefix: &str,
+    listing: &mut Vec<T>,
+    view: impl Fn(&mut T) -> (&str, &mut Option<Hash>),
+    make: impl Fn(&str, Hash) -> T,
+) {
+    for (_, intent) in intents {
+        for entry in intent.entries() {
+            if !entry.name.starts_with(prefix) {
+                continue;
+            }
+            let mut found = false;
+            for item in listing.iter_mut() {
+                let (name, value) = view(item);
+                if name == entry.name {
+                    found = true;
+                    if *value == entry.old {
+                        *value = Some(entry.new);
+                    }
+                }
+            }
+            if !found && entry.old.is_none() {
+                listing.push(make(&entry.name, entry.new));
+            }
+        }
+    }
+}
+
+/// The sorted, distinct stripes of the refs `intent` names.
+fn intent_stripes(intent: &intent::Intent) -> Vec<usize> {
+    let mut stripes: Vec<usize> = intent
+        .entries()
+        .iter()
+        .map(|e| ref_stripe(&e.name))
+        .collect();
+    stripes.sort_unstable();
+    stripes.dedup();
+    stripes
+}
+
+/// The locks [`FileTransport::lock_stripes`] holds. Fields drop in order:
+/// the stripe locks, the repo lock, then the in-process mirrors.
+struct HeldStripes<'a> {
+    stripe_locks: Vec<(usize, RefLock)>,
+    _repo_lock: RefLock,
+    _stripe_gates: Vec<MutexGuard<'a, ()>>,
+    _repo_gate: RwLockReadGuard<'a, ()>,
+}
+
+impl HeldStripes<'_> {
+    /// Count one more write on `stripe`, which must be held.
+    fn bump(&self, stripe: usize) -> io::Result<()> {
+        let (_, lock) = self
+            .stripe_locks
+            .iter()
+            .find(|(s, _)| *s == stripe)
+            .ok_or_else(|| io::Error::other("a count on a stripe that is not held"))?;
+        bump_version_in(&lock.file)
+    }
+}
+
+/// A point in [`FileTransport::commit_refs_in`] where a test can stop it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitStep {
+    /// The stripe versions are counted; the intent is not yet written.
+    Counted,
+    /// The intent is durable: the commit point.
+    Durable,
+    /// The ref of the intent's entry with this index is written.
+    Applied(usize),
+}
+
+/// Run the test hook at `step`, which may panic to stand in for a crash.
+fn commit_step(step: CommitStep) {
+    #[cfg(test)]
+    tests::COMMIT_HOOK.with(|hook| {
+        if let Some(f) = hook.borrow_mut().as_mut() {
+            f(step);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = step;
 }
 
 // ---------------------------------------------------------------------------
@@ -2845,10 +3291,14 @@ mod tests {
     }
 
     type Hook = Option<Box<dyn FnMut()>>;
+    type StepHook = Option<Box<dyn FnMut(CommitStep)>>;
 
     thread_local! {
         /// Runs inside a ref write, after the rename and before the count.
         pub(super) static BETWEEN_WRITE_AND_COUNT: std::cell::RefCell<Hook> =
+            const { std::cell::RefCell::new(None) };
+        /// Runs at each step of a multi-ref commit.
+        pub(super) static COMMIT_HOOK: std::cell::RefCell<StepHook> =
             const { std::cell::RefCell::new(None) };
     }
 
@@ -3148,5 +3598,393 @@ mod tests {
             .set_modified(ahead)
             .unwrap();
         assert_eq!(tx.repo_cursor_digest_at(settled_now()).unwrap(), None);
+    }
+
+    /// Two ref names in different stripes, and a third in the first one's
+    /// stripe.
+    fn commit_names() -> (String, String, String) {
+        let head = "refs/heads/main".to_owned();
+        let packmap = "refs/kit/packmap/main".to_owned();
+        assert_ne!(ref_stripe(&head), ref_stripe(&packmap));
+        let same = (0..10_000)
+            .map(|i| format!("refs/heads/s{i}"))
+            .find(|n| ref_stripe(n) == ref_stripe(&head))
+            .unwrap();
+        (head, packmap, same)
+    }
+
+    fn intents_on_disk(tx: &FileTransport) -> usize {
+        fs::read_dir(tx.intent_dir()).map_or(0, |d| {
+            d.filter(|e| {
+                !e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .as_encoded_bytes()
+                    .starts_with(b".")
+            })
+            .count()
+        })
+    }
+
+    /// Advance `head` and `packmap` from step 0 to step 1, stopping at
+    /// `crash` with a panic, as a process killed there would.
+    fn crashed_advance(tx: &FileTransport, head: &str, packmap: &str, crash: CommitStep) {
+        COMMIT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |step| {
+                assert!(step != crash, "crash at {step:?}");
+            }));
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tx.advance_refs(
+                head,
+                RefWriteCondition::Match(value(0, 0)),
+                &value(0, 1),
+                packmap,
+                RefWriteCondition::Match(value(1, 0)),
+                &value(1, 1),
+            )
+        }));
+        COMMIT_HOOK.with(|hook| *hook.borrow_mut() = None);
+        assert!(result.is_err(), "the commit reached {crash:?}");
+    }
+
+    const CRASH_POINTS: [CommitStep; 4] = [
+        CommitStep::Counted,
+        CommitStep::Durable,
+        CommitStep::Applied(0),
+        CommitStep::Applied(1),
+    ];
+
+    /// A commit that stops at any step leaves both refs old or both new to
+    /// every reader, never one of each; the cursor already differs once
+    /// the new ids are visible; and the next writer on either stripe, a
+    /// multi-file step or another commit puts both files in place and
+    /// removes the record.
+    #[test]
+    fn a_crashed_commit_is_all_or_nothing_and_rolls_forward() {
+        for crash in CRASH_POINTS {
+            for recovery in 0..3 {
+                let dir = tmp();
+                let tx = FileTransport::new(dir.path());
+                let (head, packmap, same) = commit_names();
+                tx.update_ref(&head, RefWriteCondition::Missing, &value(0, 0))
+                    .unwrap();
+                tx.update_ref(&packmap, RefWriteCondition::Missing, &value(1, 0))
+                    .unwrap();
+                let before = cursor(&tx);
+                crashed_advance(&tx, &head, &packmap, crash);
+
+                let committed = crash != CommitStep::Counted;
+                let want = if committed {
+                    (Some(value(0, 1)), Some(value(1, 1)))
+                } else {
+                    (Some(value(0, 0)), Some(value(1, 0)))
+                };
+                let reader = FileTransport::new(dir.path());
+                assert_eq!(
+                    (
+                        reader.read_ref(&head).unwrap(),
+                        reader.read_ref(&packmap).unwrap()
+                    ),
+                    want,
+                    "read_ref after a crash at {crash:?}"
+                );
+                assert_eq!(
+                    (
+                        reader.read_ref_strict(&head).unwrap(),
+                        reader.read_ref_strict(&packmap).unwrap()
+                    ),
+                    want
+                );
+                let listed: Vec<_> = reader
+                    .list_refs("refs/")
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| r.hash)
+                    .collect();
+                assert_eq!(listed, vec![want.0, want.1], "list_refs at {crash:?}");
+                let files: Vec<_> = reader
+                    .list_ref_files("refs/")
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, h)| h)
+                    .collect();
+                assert_eq!(files, vec![want.0, want.1]);
+                assert_ne!(cursor(&reader), before, "a crash at {crash:?} counted");
+                assert_eq!(intents_on_disk(&tx), usize::from(committed));
+
+                match recovery {
+                    0 => reader
+                        .update_ref(&same, RefWriteCondition::Missing, &value(2, 0))
+                        .unwrap(),
+                    1 => reader.with_ref_lock(|_| ()).unwrap(),
+                    _ => assert_eq!(
+                        reader
+                            .commit_refs_in(&[(&same, RefWriteCondition::Missing, value(2, 0))])
+                            .unwrap(),
+                        Vec::<usize>::new()
+                    ),
+                }
+                assert_eq!(intents_on_disk(&tx), 0, "recovery {recovery} at {crash:?}");
+                assert_eq!(
+                    (
+                        read_ref_raw(&tx.ref_path(&head)).unwrap(),
+                        read_ref_raw(&tx.ref_path(&packmap)).unwrap()
+                    ),
+                    want,
+                    "the files after recovery {recovery} at {crash:?}"
+                );
+            }
+        }
+    }
+
+    /// While a commit runs, a reader sees both refs old before the commit
+    /// point and both new from it on.
+    #[test]
+    fn a_reader_during_a_commit_sees_both_refs_or_neither() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        let (head, packmap, _) = commit_names();
+        tx.update_ref(&head, RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        tx.update_ref(&packmap, RefWriteCondition::Missing, &value(1, 0))
+            .unwrap();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (seen_in, root, h, p) = (
+            seen.clone(),
+            dir.path().to_owned(),
+            head.clone(),
+            packmap.clone(),
+        );
+        COMMIT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |step| {
+                let reader = FileTransport::new(&root);
+                let pair = (reader.read_ref(&h).unwrap(), reader.read_ref(&p).unwrap());
+                seen_in.borrow_mut().push((step, pair));
+            }));
+        });
+        let outcome = tx.advance_refs(
+            &head,
+            RefWriteCondition::Match(value(0, 0)),
+            &value(0, 1),
+            &packmap,
+            RefWriteCondition::Match(value(1, 0)),
+            &value(1, 1),
+        );
+        COMMIT_HOOK.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(outcome.unwrap(), AdvanceOutcome::Committed);
+        let old = (Some(value(0, 0)), Some(value(1, 0)));
+        let new = (Some(value(0, 1)), Some(value(1, 1)));
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                (CommitStep::Counted, old),
+                (CommitStep::Durable, new),
+                (CommitStep::Applied(0), new),
+                (CommitStep::Applied(1), new),
+            ]
+        );
+        assert_eq!(intents_on_disk(&tx), 0);
+    }
+
+    /// A failed condition changes nothing and names the right ref; a
+    /// packmap conflict is reported first.
+    #[test]
+    fn a_conflicting_advance_changes_nothing() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        let (head, packmap, _) = commit_names();
+        tx.update_ref(&head, RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        tx.update_ref(&packmap, RefWriteCondition::Missing, &value(1, 0))
+            .unwrap();
+        let advance = |h: Hash, p: Hash| {
+            tx.advance_refs(
+                &head,
+                RefWriteCondition::Match(h),
+                &value(0, 9),
+                &packmap,
+                RefWriteCondition::Match(p),
+                &value(1, 9),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            advance(value(0, 0), value(1, 5)),
+            AdvanceOutcome::PackmapConflict
+        );
+        assert_eq!(
+            advance(value(0, 5), value(1, 5)),
+            AdvanceOutcome::PackmapConflict
+        );
+        assert_eq!(
+            advance(value(0, 5), value(1, 0)),
+            AdvanceOutcome::HeadConflict
+        );
+        assert_eq!(tx.read_ref(&head).unwrap(), Some(value(0, 0)));
+        assert_eq!(tx.read_ref(&packmap).unwrap(), Some(value(1, 0)));
+        assert_eq!(intents_on_disk(&tx), 0);
+        assert!(tx.supports_atomic_advance());
+        // Missing on a present ref conflicts; on an absent one it creates.
+        let created = tx.advance_refs(
+            "refs/heads/new",
+            RefWriteCondition::Missing,
+            &value(2, 0),
+            "refs/kit/packmap/new",
+            RefWriteCondition::Missing,
+            &value(3, 0),
+        );
+        assert_eq!(created.unwrap(), AdvanceOutcome::Committed);
+        assert_eq!(tx.read_ref("refs/heads/new").unwrap(), Some(value(2, 0)));
+    }
+
+    /// Two refs in one stripe take that stripe once.
+    #[test]
+    fn a_commit_of_two_refs_in_one_stripe_completes() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        let (head, _, same) = commit_names();
+        let failed = tx
+            .commit_refs_in(&[
+                (&head, RefWriteCondition::Missing, value(0, 0)),
+                (&same, RefWriteCondition::Any, value(1, 0)),
+            ])
+            .unwrap();
+        assert!(failed.is_empty());
+        assert_eq!(tx.read_ref(&same).unwrap(), Some(value(1, 0)));
+    }
+
+    #[test]
+    fn a_commit_refuses_names_that_cannot_land_together() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        let any = RefWriteCondition::Any;
+        for request in [
+            vec![],
+            vec![
+                ("refs/heads/a", any, value(0, 0)),
+                ("refs/heads/a", any, value(0, 1)),
+            ],
+            vec![
+                ("refs/heads/a", any, value(0, 0)),
+                ("refs/heads/a/b", any, value(0, 1)),
+            ],
+            vec![("refs/heads/.a", any, value(0, 0))],
+        ] {
+            assert!(
+                matches!(
+                    tx.commit_refs_in(&request),
+                    Err(RefFileError::InvalidName(_))
+                ),
+                "{request:?}"
+            );
+        }
+        let names: Vec<String> = (0..=intent::MAX_COMMIT_REFS)
+            .map(|i| format!("refs/heads/b{i}"))
+            .collect();
+        let many: Vec<_> = names
+            .iter()
+            .map(|n| (n.as_str(), any, value(0, 0)))
+            .collect();
+        assert!(matches!(
+            tx.commit_refs_in(&many),
+            Err(RefFileError::InvalidName(_))
+        ));
+        assert_eq!(intents_on_disk(&tx), 0);
+        assert!(tx.list_refs("refs/").unwrap().is_empty());
+    }
+
+    /// A record that does not parse fails reads closed.
+    #[test]
+    fn a_garbled_intent_fails_reads() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        create_dir_all_durably(&tx.intent_dir()).unwrap();
+        fs::write(tx.intent_dir().join("x.intent"), b"nonsense").unwrap();
+        assert!(tx.read_ref("refs/heads/main").is_err());
+        assert!(matches!(
+            tx.read_ref_strict("refs/heads/main"),
+            Err(RefFileError::Corrupt(_))
+        ));
+        assert!(
+            tx.update_ref("refs/heads/main", RefWriteCondition::Any, &value(0, 0))
+                .is_err()
+        );
+    }
+
+    /// Writers advancing their own branches never conflict; writers on one
+    /// branch land one at a time and every advance is either committed or
+    /// a conflict that left the branch as another writer set it.
+    #[test]
+    fn concurrent_advances_conflict_only_on_a_shared_branch() {
+        const WRITERS: usize = 4;
+        const STEPS: usize = 20;
+        let dir = tmp();
+        std::thread::scope(|s| {
+            for w in 0..WRITERS {
+                let root = dir.path();
+                s.spawn(move || {
+                    let tx = FileTransport::new(root);
+                    let (head, packmap) =
+                        (format!("refs/heads/w{w}"), format!("refs/kit/packmap/w{w}"));
+                    let mut prev: Option<(Hash, Hash)> = None;
+                    for step in 0..STEPS {
+                        let cond = |h: Option<Hash>| {
+                            h.map_or(RefWriteCondition::Missing, RefWriteCondition::Match)
+                        };
+                        let outcome = tx
+                            .advance_refs(
+                                &head,
+                                cond(prev.map(|p| p.0)),
+                                &value(w, step),
+                                &packmap,
+                                cond(prev.map(|p| p.1)),
+                                &value(w + WRITERS, step),
+                            )
+                            .unwrap();
+                        assert_eq!(outcome, AdvanceOutcome::Committed);
+                        prev = Some((value(w, step), value(w + WRITERS, step)));
+                    }
+                });
+            }
+        });
+        let tx = FileTransport::new(dir.path());
+        assert_eq!(tx.list_refs("refs/").unwrap().len(), 2 * WRITERS);
+        // One shared branch: the packmap, advanced by Match, never loses a
+        // committed step.
+        let committed = AtomicU64::new(0);
+        std::thread::scope(|s| {
+            for w in 0..WRITERS {
+                let (root, committed) = (dir.path(), &committed);
+                s.spawn(move || {
+                    let tx = FileTransport::new(root);
+                    for step in 0..STEPS {
+                        let head = tx.read_ref("refs/heads/w0").unwrap().unwrap();
+                        let packmap = tx.read_ref("refs/kit/packmap/w0").unwrap().unwrap();
+                        let next = value(16 + w, step);
+                        match tx
+                            .advance_refs(
+                                "refs/heads/w0",
+                                RefWriteCondition::Match(head),
+                                &next,
+                                "refs/kit/packmap/w0",
+                                RefWriteCondition::Match(packmap),
+                                &next,
+                            )
+                            .unwrap()
+                        {
+                            AdvanceOutcome::Committed => {
+                                committed.fetch_add(1, Ordering::SeqCst);
+                            }
+                            AdvanceOutcome::PackmapConflict | AdvanceOutcome::HeadConflict => {}
+                        }
+                    }
+                });
+            }
+        });
+        assert!(committed.load(Ordering::SeqCst) >= 1);
+        let head = tx.read_ref("refs/heads/w0").unwrap();
+        assert_eq!(head, tx.read_ref("refs/kit/packmap/w0").unwrap());
+        assert_eq!(intents_on_disk(&tx), 0);
     }
 }

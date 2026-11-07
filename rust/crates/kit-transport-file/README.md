@@ -17,6 +17,16 @@ backend for `kit+file://` remotes and for repositories served via
   refs/tags/v1.0          — nested dirs created on demand
 ```
 
+## Multi-ref commits
+
+`advance_refs` commits a branch head and its packmap as one step
+(SPEC-REFS §5.1.3), so `supports_atomic_advance` is true and a push may
+re-baseline a long pack chain. Under the stripe locks of both refs, in
+ascending stripe order, it checks both conditions, then makes an intent
+record durable under `<root>/.kit/refs/intents/`: that is the commit point.
+Readers report the record's new ids until the ref files hold them, and the
+next writer on either stripe finishes a record a crash left behind.
+
 ## CAS atomicity guarantees
 
 | Variant    | Mechanism                                                        | Race behavior |

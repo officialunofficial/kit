@@ -97,7 +97,7 @@ Each value is the mean and the sample standard deviation over the runs.
 | `push-distinct` | N pushers, N in 1, 8, 64, 512. Each pushes 4 commits to its own branch. | Pushes per second, p50 and p99 latency. |
 | `push-shared` | N pushers, N in 1, 8, 32, each landing 4 commits on one branch. A rejected push fetches, commits again on the new tip and retries. | Pushes per second, latency including retries, rejected attempts per landed push. Each landed push can cost up to N - 1 rejected attempts, so large N takes a long time. |
 | `fetch-noop` | M branches, M in 10, 100, 1,000, 10,000, and a clone that already holds them. Setup waits 3 s after its last write, because the file transport offers no cursor while a ref directory was modified in the last 2 s. Five fetches per run. | Fetch time and remote requests. |
-| `fetch-grow` | One push, a clone, then K pushes to the branch, K in 10, 100, 1,000. A fetch into the clone, and a fetch into an empty repository. | Time, packs downloaded and remote requests of each fetch, and pack list nodes on the chain. |
+| `fetch-grow` | One push, a clone, then K pushes to the branch, K in 10, 100, 1,000. A fetch into the clone, and a fetch into an empty repository. | Time, packs downloaded and remote requests of each fetch, pack list nodes on the chain, and the mean time of the last 10 pushes. |
 
 Every `ref-write` writer opens its own transport, as a separate process
 would. Every pusher has its own local repository, and every push and fetch

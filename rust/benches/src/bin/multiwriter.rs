@@ -164,6 +164,7 @@ fn run(args: &Args) -> Result<(), String> {
         let mut e = Vec::with_capacity(args.runs);
         let mut f = Vec::with_capacity(args.runs);
         let mut g = Vec::with_capacity(args.runs);
+        let mut h = Vec::with_capacity(args.runs);
         for r in 0..args.runs {
             let dirs = RunDirs::new(&args.dir, &format!("{row}-{n}-{r}"))?;
             let connect = connector(args.target, &dirs.root);
@@ -203,6 +204,7 @@ fn run(args: &Args) -> Result<(), String> {
                     e.push(run.cold.packs_downloaded as f64);
                     f.push(run.cold.requests.total() as f64);
                     g.push(run.chain_nodes as f64);
+                    h.push(ms(run.late_push));
                 }
             }
         }
@@ -240,6 +242,7 @@ fn run(args: &Args) -> Result<(), String> {
                     ("clone_packs", &e),
                     ("clone_requests", &f),
                     ("chain_nodes", &g),
+                    ("late_push_ms", &h),
                 ],
             ),
         }

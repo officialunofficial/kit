@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Reproduce every quint-refs check: refs.qnt (ref CAS and
 # lock order), serve.qnt (serve.lock / server.lock, the startup upload
-# sweep, the served-name rule) and cursor.qnt (the file transport's
-# repository cursor with writers that do not count).
+# sweep, the served-name rule), cursor.qnt (the file transport's
+# repository cursor with writers that do not count) and commit.qnt (the file
+# transport's multi-ref commits, crashes and recovery).
 #
 #   ./check.sh               quint typecheck + test + run, then TLC
 #   TLC=0 ./check.sh         skip TLC
@@ -123,7 +124,7 @@ tlc() {
 # ---- typecheck + deterministic scenarios ------------------------------------
 quint typecheck refs.qnt && quint typecheck serve.qnt
 quint typecheck refs_test.qnt && quint typecheck serve_test.qnt
-quint typecheck cursor.qnt
+quint typecheck cursor.qnt && quint typecheck commit.qnt
 quint test refs_test.qnt --main refs_test >/dev/null && note "test refs_test" ok || bad "test refs_test" failed
 for m in refs_wpref_test refs_collide_test; do
   quint test refs_test.qnt --main "$m" >/dev/null && note "test $m" ok || bad "test $m" failed
@@ -189,6 +190,15 @@ qrun serve.qnt served_listNoSkip ListingServedOnly violation
 qrun cursor.qnt cursor2 Safety ok
 qrun cursor.qnt cursor2 CanaryNoCursorOffered violation
 
+# ---- commit.qnt: random simulation ------------------------------------------
+qrun commit.qnt commit2 Safety ok
+qrun commit.qnt commit2 CanaryNoRecordLeft violation
+qrun commit.qnt commit2 CanaryNoParallelCommits violation
+qrun commit.qnt commit2_noOverlay Atomic violation
+qrun commit.qnt commit2_partialRecovery Atomic violation
+qrun commit.qnt commit2_noRecovery Atomic violation
+qrun commit.qnt commit2_descending NoDeadlock violation
+
 # ---- TLC: exhaustive (serve.qnt, cursor.qnt) / constrained (refs.qnt) --------
 if [[ ${TLC:-1} == 1 ]]; then
   # cursor.qnt is finite (clock and writes bounded): exhaustive.
@@ -197,6 +207,12 @@ if [[ ${TLC:-1} == 1 ]]; then
   tlc cursor.qnt cursor2_noGuard NoStaleSkip violation "" ""
   tlc cursor.qnt cursor2_noStamps NoStaleSkip violation "" ""
   tlc cursor.qnt cursor2_shortWindow NoStaleSkip violation "" ""
+  # commit.qnt is finite (operations and crashes bounded): exhaustive.
+  tlc commit.qnt commit2 Safety ok "" ""
+  tlc commit.qnt commit2_noOverlay Atomic violation "" ""
+  tlc commit.qnt commit2_partialRecovery Atomic violation "" ""
+  tlc commit.qnt commit2_noRecovery Atomic violation "" ""
+  tlc commit.qnt commit2_descending NoDeadlock violation "" ""
   # serve.qnt is finite: exhaustive, no VIEW, no CONSTRAINT.
   tlc serve.qnt serve2 Safety ok "" ""
   tlc serve.qnt serve3 Safety ok "" ""
