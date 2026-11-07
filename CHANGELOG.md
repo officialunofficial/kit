@@ -35,6 +35,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   missing. It used to end the walk there. It then dropped a missing commit of the branch
   and every commit below it, and after a missing commit in the base's
   history it replayed commits the base already holds.
+- `kit blame --reverse` fails with an error that names the limit when the
+  first-parent walk from the end of its range holds more than 1,000,000
+  commits. It used to collect the whole chain with no limit.
 - Blame caps its LCS comparison table at 64 MiB after trimming the common
   prefix. Larger comparisons use the bounded line diff search. Reassembly,
   line buffers, and attribution memory still grow with file size.
