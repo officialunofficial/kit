@@ -1720,6 +1720,32 @@ pub fn chunked_blob_build_one_iteration(input: &[u8]) {
     assert_eq!(manifest.total_size, input.len() as u64);
     assert_eq!(manifest.chunk_size, 0);
     assert_eq!(manifest.chunks.is_empty(), input.is_empty());
+
+    // The chunker itself, at a small size so a bounded input yields many
+    // cuts: every chunk is non-empty and at most `max_size`, the chunks
+    // cover the input, and the parallel and streaming cutters agree with
+    // the sequential iterator.
+    use kit_core::chunker::{ChunkIterator, ChunkReader, FastCdc};
+    let cdc = FastCdc::custom(64, 256, 1024);
+    let ends: Vec<usize> = ChunkIterator::new(cdc, input)
+        .map(|b| {
+            assert!(b.length > 0 && b.length <= cdc.max_size());
+            b.offset + b.length
+        })
+        .collect();
+    assert_eq!(ends.last().copied().unwrap_or(0), input.len());
+    assert_eq!(cdc.cut_ends(input, true, 4), ends);
+    let mut reader = ChunkReader::with_threads(cdc, input, 1);
+    let mut end = 0;
+    let mut streamed = Vec::new();
+    while let Some(chunk) = reader
+        .next_chunk_ref()
+        .expect("a slice never fails to read")
+    {
+        end += chunk.len();
+        streamed.push(end);
+    }
+    assert_eq!(streamed, ends);
 }
 
 /// Trust-roots file text (`trust_roots_parse`): `parse` never panics. An

@@ -32,11 +32,12 @@
 //! This is git's `core.fsyncMethod=batch` design (bulk-checkin) and
 //! `SQLite`'s macOS sync strategy:
 //!
-//! Every staged file gets a real per-file writeback at commit time —
-//! Apple `fcntl(F_BARRIERFSYNC)`, Linux `fdatasync`, Windows
-//! `FlushFileBuffers` — issued **concurrently** from a scoped-thread
-//! pool so the cost is device latency at queue depth, not
-//! latency×objects. The trailing constant-count full flushes
+//! Every staged file gets a real per-file writeback before the batch's
+//! full flush — Apple `fcntl(F_BARRIERFSYNC)`, Linux `fdatasync`,
+//! Windows `FlushFileBuffers`. Each barrier is issued from a background
+//! worker pool as soon as its file is staged, so device latency overlaps
+//! the caller's chunking and hashing and runs at queue depth, not
+//! latency×objects; `commit` joins the pool before flushing. The trailing constant-count full flushes
 //! (`F_FULLFSYNC` on Apple) cover ordering and the dirent updates.
 //! This holds on every filesystem; it does not depend on ext4
 //! ordered-data journaling.
@@ -50,7 +51,8 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 
 use tempfile::TempPath;
 
@@ -161,8 +163,8 @@ impl Syncer for RealSyncer {
         // just metadata-journaling ones in ordered-data mode — XFS,
         // btrfs, ext4 data=writeback, and NTFS get the same guarantee.
         // The cost is bounded: barriers are issued concurrently from a
-        // thread pool at commit, so wall-clock is latency/queue-depth,
-        // not latency×objects.
+        // background pool while the batch is staged, so wall-clock is
+        // latency/queue-depth, overlapped with the caller's work.
         Self::file_barrier(file)
     }
 
@@ -251,6 +253,9 @@ struct BatchState {
 pub struct WriteBatch<'s> {
     store: &'s ObjectStore,
     policy: SyncPolicy,
+    // Declared before `inner` so a dropped batch joins its barrier
+    // workers before the staged temp files are unlinked.
+    early: EarlyBarriers,
     // Interior mutability so `&self` writes work and a future parallel
     // ingest can share one batch across worker threads.
     inner: Mutex<BatchState>,
@@ -261,6 +266,7 @@ impl<'s> WriteBatch<'s> {
         Self {
             store,
             policy,
+            early: EarlyBarriers::new(store.syncer().clone()),
             inner: Mutex::new(BatchState::default()),
         }
     }
@@ -357,18 +363,33 @@ impl<'s> WriteBatch<'s> {
                 st.created_shards.insert(shard_dir);
             }
             SyncPolicy::Batch => {
-                // No flush here: barriers for every staged file are
-                // issued concurrently at commit() — sequential
-                // per-file barriers would re-serialise the batch on
-                // device latency (measured ~4.6ms per F_BARRIERFSYNC
-                // on Apple SSDs, ~8s for a 100 MiB ingest).
+                // No flush on this thread: the barrier is queued to the
+                // background pool below — sequential per-file barriers
+                // would re-serialise the batch on device latency
+                // (measured ~4.6ms per F_BARRIERFSYNC on Apple SSDs,
+                // ~8s for a 100 MiB ingest).
                 let mut st = self.inner.lock().expect("batch state mutex poisoned");
                 // Lost race against a concurrent writer of the same
                 // object within this batch: keep theirs, drop our tmp
                 // (content-addressed — byte-identical by construction).
-                st.staged.entry(h).or_insert_with(|| tmp.into_temp_path());
+                let staged_path = match st.staged.entry(h) {
+                    std::collections::hash_map::Entry::Occupied(_) => None,
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        let path = tmp.into_temp_path();
+                        let owned = path.to_path_buf();
+                        slot.insert(path);
+                        Some(owned)
+                    }
+                };
                 st.touched_shards.insert(shard_dir.clone());
                 st.created_shards.insert(shard_dir);
+                drop(st);
+                // Start this file's barrier now, on a background
+                // worker, so its device latency overlaps the caller's
+                // chunking and hashing instead of piling up at commit.
+                if let Some(path) = staged_path {
+                    self.early.submit(path);
+                }
             }
         }
         Ok(h)
@@ -407,27 +428,33 @@ impl<'s> WriteBatch<'s> {
     /// Panics only if a previous write panicked while holding the batch
     /// mutex.
     pub fn commit(self) -> StoreResult<()> {
-        let st = self.inner.into_inner().expect("batch state mutex poisoned");
-        let syncer = self.store.syncer();
-        match self.policy {
+        let Self {
+            store,
+            policy,
+            early,
+            inner,
+        } = self;
+        // Join the background barrier workers first: every barrier
+        // they took has completed once this returns. Paths no worker
+        // reached (none could be spawned) come back to be barriered
+        // here.
+        let leftover = early.finish()?;
+        let st = inner.into_inner().expect("batch state mutex poisoned");
+        let syncer = store.syncer();
+        match policy {
             // Every write was already made durable and visible.
             SyncPolicy::PerObject => Ok(()),
             SyncPolicy::Batch => {
                 let staged: Vec<(Hash, TempPath)> = st.staged.into_iter().collect();
-                // 1. Barrier every staged file, concurrently. Each
-                //    barrier initiates writeback for its file and
-                //    orders it ahead of the full flush below; issuing
-                //    them from worker threads overlaps their device
-                //    latency (queue depth) instead of paying it
-                //    serially per file. All barriers complete (joined)
+                // 1. Barrier every staged file. Each barrier initiates
+                //    writeback for its file and orders it ahead of the
+                //    full flush below. Most were issued in the
+                //    background as the files were written (see
+                //    `EarlyBarriers`); any left over run here,
+                //    concurrently. All barriers complete (joined)
                 //    before the flush is issued.
-                parallel_io(staged.len(), |i| {
-                    // Write-capable handle: the barrier maps to
-                    // `FlushFileBuffers` on Windows, which rejects a
-                    // read-only handle. `write(true)` opens the existing
-                    // temp without truncating it.
-                    let f = OpenOptions::new().write(true).open(&staged[i].1)?;
-                    syncer.barrier(&f, &staged[i].1)
+                parallel_io(leftover.len(), |i| {
+                    barrier_path(syncer.as_ref(), &leftover[i])
                 })?;
                 // 2. One full flush — any staged file serves as the
                 //    anchor; the barriers ordered every staged write
@@ -445,7 +472,7 @@ impl<'s> WriteBatch<'s> {
                 //    can never reference a non-durable object. Final
                 //    paths derive from the hashes (single layout rule).
                 for (h, tmp) in staged {
-                    syncer.rename(tmp, &self.store.path_for(&h))?;
+                    syncer.rename(tmp, &store.path_for(&h))?;
                 }
                 // 4. Dirent barriers, once per touched shard dir,
                 //    concurrently (sorted first so the work list is
@@ -457,10 +484,162 @@ impl<'s> WriteBatch<'s> {
                     // 5. Terminal device flush: makes the dirent
                     //    barriers (and, on platforms where step 2 was
                     //    a barrier-anchored flush, everything) durable.
-                    syncer.device_flush(self.store.objects_root())?;
+                    syncer.device_flush(store.objects_root())?;
                 }
                 Ok(())
             }
+        }
+    }
+}
+
+/// Open a staged temp file and issue its write barrier.
+fn barrier_path(syncer: &dyn Syncer, path: &Path) -> io::Result<()> {
+    // Write-capable handle: the barrier maps to `FlushFileBuffers` on
+    // Windows, which rejects a read-only handle. `write(true)` opens the
+    // existing temp without truncating it.
+    let f = OpenOptions::new().write(true).open(path)?;
+    syncer.barrier(&f, path)
+}
+
+/// Background pool that issues each staged file's write barrier as soon
+/// as the file is written, instead of all of them at [`WriteBatch::commit`].
+///
+/// A barrier spends almost all its time blocked on the device. Issued
+/// early, that wait overlaps the caller's chunking and hashing; a large
+/// `kit add` used to spend close to half its wall clock in the barrier
+/// burst at commit. The durability contract is unchanged: `commit`
+/// joins every worker (so every barrier has completed) before the full
+/// flush, the renames still come after the flush, and a barrier error
+/// fails the commit.
+///
+/// Workers are spawned lazily, one more whenever a path is queued and
+/// none is idle, up to [`MAX_SYNC_WORKERS`], so a small batch costs one
+/// thread or none. If a thread cannot be spawned (wasm, resource
+/// limits), queued paths are handed back to `commit`, which barriers
+/// them itself.
+#[derive(Debug)]
+struct EarlyBarriers {
+    shared: Arc<EarlyShared>,
+    // `submit` takes `&self` (one batch is shared by reference across
+    // ingest threads), so the handle list needs its own lock.
+    workers: Mutex<Vec<JoinHandle<()>>>,
+}
+
+#[derive(Debug)]
+struct EarlyShared {
+    syncer: Arc<dyn Syncer>,
+    state: Mutex<EarlyState>,
+    wake: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct EarlyState {
+    queue: std::collections::VecDeque<PathBuf>,
+    idle: usize,
+    closed: bool,
+    error: Option<io::Error>,
+}
+
+impl EarlyBarriers {
+    fn new(syncer: Arc<dyn Syncer>) -> Self {
+        Self {
+            shared: Arc::new(EarlyShared {
+                syncer,
+                state: Mutex::new(EarlyState::default()),
+                wake: Condvar::new(),
+            }),
+            workers: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Queue `path` for a barrier, spawning a worker if none is idle.
+    fn submit(&self, path: PathBuf) {
+        let mut st = self.shared.state.lock().expect("barrier queue poisoned");
+        st.queue.push_back(path);
+        let want_worker = st.idle == 0;
+        drop(st);
+        if want_worker {
+            let mut workers = self.workers.lock().expect("barrier workers poisoned");
+            if workers.len() < MAX_SYNC_WORKERS {
+                let shared = Arc::clone(&self.shared);
+                // A failed spawn is not an error: the path stays queued
+                // and `finish` hands it back to `commit`.
+                if let Ok(h) = std::thread::Builder::new()
+                    .name("kit-barrier".into())
+                    .spawn(move || barrier_worker(&shared))
+                {
+                    workers.push(h);
+                }
+            }
+        } else {
+            self.shared.wake.notify_one();
+        }
+    }
+
+    /// Stop accepting work, join every worker, and return the paths no
+    /// worker reached. Fails with the first barrier error, if any.
+    fn finish(self) -> io::Result<Vec<PathBuf>> {
+        let (queue, error) = self.shutdown();
+        match error {
+            Some(e) => Err(e),
+            None => Ok(queue),
+        }
+    }
+
+    fn shutdown(&self) -> (Vec<PathBuf>, Option<io::Error>) {
+        self.shared
+            .state
+            .lock()
+            .expect("barrier queue poisoned")
+            .closed = true;
+        self.shared.wake.notify_all();
+        let workers = std::mem::take(&mut *self.workers.lock().expect("barrier workers poisoned"));
+        for h in workers {
+            // A panicking worker has dropped its path without a barrier;
+            // surface that as an error rather than a silent skip.
+            if h.join().is_err() {
+                let mut st = self.shared.state.lock().expect("barrier queue poisoned");
+                st.error
+                    .get_or_insert_with(|| io::Error::other("barrier worker panicked"));
+            }
+        }
+        let mut st = self.shared.state.lock().expect("barrier queue poisoned");
+        (st.queue.drain(..).collect(), st.error.take())
+    }
+}
+
+impl Drop for EarlyBarriers {
+    fn drop(&mut self) {
+        // An aborted batch: wait for in-flight barriers so no worker is
+        // still holding a temp file when the batch unlinks it.
+        let _ = self.shutdown();
+    }
+}
+
+/// Worker loop: barrier queued paths until the pool is closed and the
+/// queue is empty. After the first error the rest of the queue is
+/// skipped, since `commit` will fail anyway.
+fn barrier_worker(shared: &EarlyShared) {
+    loop {
+        let mut st = shared.state.lock().expect("barrier queue poisoned");
+        let path = loop {
+            if st.error.is_some() {
+                st.queue.clear();
+            }
+            if let Some(p) = st.queue.pop_front() {
+                break p;
+            }
+            if st.closed {
+                return;
+            }
+            st.idle += 1;
+            st = shared.wake.wait(st).expect("barrier queue poisoned");
+            st.idle -= 1;
+        };
+        drop(st);
+        if let Err(e) = barrier_path(shared.syncer.as_ref(), &path) {
+            let mut st = shared.state.lock().expect("barrier queue poisoned");
+            st.error.get_or_insert(e);
         }
     }
 }
@@ -573,16 +752,26 @@ pub(crate) mod testing {
     #[derive(Debug, Default)]
     pub(crate) struct RecordingSyncer {
         events: Mutex<Vec<Ev>>,
+        fail_barriers: std::sync::atomic::AtomicBool,
     }
 
     impl RecordingSyncer {
         pub(crate) fn events(&self) -> Vec<Ev> {
             self.events.lock().unwrap().clone()
         }
+
+        /// Make every later [`Syncer::barrier`] call fail.
+        pub(crate) fn fail_barriers(&self) {
+            self.fail_barriers
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     impl Syncer for RecordingSyncer {
         fn barrier(&self, _file: &File, path: &Path) -> io::Result<()> {
+            if self.fail_barriers.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(io::Error::other("injected barrier failure"));
+            }
             self.events
                 .lock()
                 .unwrap()
@@ -930,6 +1119,66 @@ mod tests {
         batch.commit().unwrap();
         assert_eq!(rec.events().len(), before);
         let _ = write_h;
+    }
+
+    #[test]
+    fn barriers_start_before_commit() {
+        // Barriers are issued in the background as files are staged, so
+        // their device latency overlaps the caller's work. Every staged
+        // file must get its barrier without commit() being called.
+        let (_dir, store, rec) = recording_store();
+        let batch = store.batch();
+        for bytes in fifty_distinct_objects() {
+            batch.write(&bytes).unwrap();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let barriers = || {
+            rec.events()
+                .iter()
+                .filter(|e| matches!(e, Ev::Barrier(_)))
+                .count()
+        };
+        while barriers() < 50 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            barriers(),
+            50,
+            "every staged file is barriered before commit"
+        );
+        assert!(
+            !rec.events()
+                .iter()
+                .any(|e| matches!(e, Ev::Full(_) | Ev::Rename { .. })),
+            "nothing is flushed or published before commit"
+        );
+        batch.commit().unwrap();
+        let barriers_after = barriers();
+        assert_eq!(barriers_after, 50, "commit must not barrier a file twice");
+    }
+
+    #[test]
+    fn barrier_failure_fails_commit_and_publishes_nothing() {
+        let (_dir, store, rec) = recording_store();
+        rec.fail_barriers();
+        let batch = store.batch();
+        let hashes: Vec<Hash> = fifty_distinct_objects()
+            .iter()
+            .map(|b| batch.write(b).unwrap())
+            .collect();
+        assert!(
+            batch.commit().is_err(),
+            "a failed barrier must fail the commit"
+        );
+        assert!(
+            hashes.iter().all(|h| !store.contains(h)),
+            "no object may become visible after a failed barrier"
+        );
+        assert!(
+            !rec.events().iter().any(|e| matches!(e, Ev::Rename { .. })),
+            "nothing is renamed into place"
+        );
+        assert_eq!(any_file_count(&store), 0, "temp files are cleaned up");
     }
 
     // ---- Cycle 3: equivalence & limits ---------------------------------
