@@ -1296,7 +1296,9 @@ Remote / sync:
   native commits as `git am`-able mbox patches (oldest first, merges
   skipped) &mdash; the contribution path that needs no writable fork. A
   single rev means `<rev>..HEAD`; for example,
-  `kit git format-patch upstream/main -o patches/`.
+  `kit git format-patch upstream/main -o patches/`. A commit of either side
+  of the range that is missing, corrupt or not a commit fails the command
+  before it writes a patch.
 
   The `git-bridge` feature, on by default, provides the `kit git`
   subcommands. They shell out to `git`.

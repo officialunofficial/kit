@@ -85,7 +85,8 @@ pub fn split_range(range: &str) -> (&str, &str) {
 ///
 /// # Errors
 /// An error when `cwd` is not inside a kit repository, when an end of the
-/// range does not name a commit, or when the history has a cycle.
+/// range does not name a commit, when a commit of either side cannot be read
+/// or names a parent that is not a commit, or when the history has a cycle.
 pub fn series(cwd: &Path, range: &str) -> Result<Series, Error> {
     let (layout, store) = open_repo(cwd)?;
     let (a, b) = split_range(range);
@@ -102,16 +103,16 @@ pub fn series(cwd: &Path, range: &str) -> Result<Series, Error> {
         }
     }
 
-    // Ancestors of A drop out of the patch series.
+    // Ancestors of A drop out of the patch series. Every one is read: a
+    // walk that ended at a commit it could not read would leave its
+    // ancestors in the series.
     let mut excluded: HashSet<Hash> = HashSet::new();
     let mut stack = vec![exclude_tip];
     while let Some(h) = stack.pop() {
         if !excluded.insert(h) {
             continue;
         }
-        if let Ok(Object::Commit(c)) = store.read_object(&h) {
-            stack.extend(c.parents.iter().copied());
-        }
+        stack.extend(read_commit(&store, h)?.parents);
     }
     let mut commits: HashMap<Hash, Commit> = HashMap::new();
     let mut stack = vec![include_tip];
@@ -119,19 +120,7 @@ pub fn series(cwd: &Path, range: &str) -> Result<Series, Error> {
         if excluded.contains(&h) || commits.contains_key(&h) {
             continue;
         }
-        let c = match store.read_object(&h) {
-            Ok(Object::Commit(c)) => c,
-            Ok(_) => {
-                return Err(step(Class::Data, "not a commit", kit_core::to_hex(&h)));
-            }
-            Err(e) => {
-                return Err(step(
-                    Class::Data,
-                    format!("read {}", kit_core::to_hex(&h)),
-                    e,
-                ));
-            }
-        };
+        let c = read_commit(&store, h)?;
         stack.extend(c.parents.iter().copied());
         commits.insert(h, c);
     }
@@ -172,6 +161,19 @@ pub fn series(cwd: &Path, range: &str) -> Result<Series, Error> {
         start: a.to_owned(),
         end: b.to_owned(),
     })
+}
+
+/// Read the commit `h` of a range.
+fn read_commit(store: &ObjectStore, h: Hash) -> Result<Commit, Error> {
+    match store.read_object(&h) {
+        Ok(Object::Commit(c)) => Ok(c),
+        Ok(_) => Err(step(Class::Data, "not a commit", kit_core::to_hex(&h))),
+        Err(e) => Err(step(
+            Class::Data,
+            format!("read {}", kit_core::to_hex(&h)),
+            e,
+        )),
+    }
 }
 
 impl Series {
