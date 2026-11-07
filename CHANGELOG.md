@@ -25,6 +25,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `kit serve` names its limit when a session sends more than 10,000 frames,
+  and SPEC-TRANSPORT §4.4 states what fits: an unchanged fetch costs one
+  frame plus two per branch over ssh, so one session fetches at most 4,999
+  branches.
 - The file transport commits a branch head and its packmap as one step
   (SPEC-REFS §5.1.3), so a push to a `kit+file://` remote can re-baseline a
   long pack chain. Under the stripe locks of both refs it makes an intent

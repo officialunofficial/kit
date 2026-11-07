@@ -11,7 +11,10 @@ mod session;
 mod upload;
 mod verbs;
 
-pub use budget::{MAX_BYTES_PER_CONN, MAX_FRAMES_PER_CONN, frame_byte_estimate, upload_limits};
+pub use budget::{
+    FRAME_BUDGET_EXCEEDED, MAX_BYTES_PER_CONN, MAX_FRAMES_PER_CONN, frame_byte_estimate,
+    upload_limits,
+};
 pub use io::{ReadFrames, WriteFrames};
 pub use packs::DOWNLOAD_CHUNK_MAX;
 pub use refs::{MAX_REF_NAME_BYTES, REF_NAME_OUTSIDE_REFS, REF_NAME_TOO_LONG, is_served_ref_name};
