@@ -435,7 +435,9 @@ History / commits:
   diagnostics). A line that never survives a step stays on `<start>`
   (git marks such lines with a leading `^`; kit's tab format carries no
   `^`, consistent with its existing boundary-marker omission). `-w` and
-  `-L` compose with `--reverse`. Default emits
+  `-L` compose with `--reverse`. A range whose first-parent walk from
+  `<end>` holds more than 1,000,000 commits fails with an error that names
+  the limit and blames nothing. Default emits
   `<short12>\t<line_num>\t<text>` per line; `--format=json` emits JSONL
   with keys `hash`, `line_num`, `author`, `timestamp`, `text`.
 - `kit verify <rev> [--trusted] [--trust-roots <path>]` &mdash; verify the
