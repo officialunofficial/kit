@@ -47,6 +47,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   commit, is missing, corrupt or not a commit. The range walk used to end
   at such a commit and the good walk used to skip it, so bisect could miss
   candidates or offer commits that are known good.
+- The two sides of a `kit log` range share one budget of 1,000,000
+  commits, as the documentation says. Each side used to have its own, so
+  a range could read up to twice the limit.
 - `kit blame --reverse` fails with an error that names the limit when the
   first-parent walk from the end of its range holds more than 1,000,000
   commits. It used to collect the whole chain with no limit.

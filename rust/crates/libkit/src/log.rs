@@ -174,7 +174,7 @@ pub fn walk(store: &ObjectStore, tips: &[Hash], first_parent: bool) -> Result<Ve
         tips,
         &HashSet::new(),
         first_parent,
-        MAX_LOG_COMMITS,
+        (0, MAX_LOG_COMMITS),
         |entry| {
             entries.push(entry);
             true
@@ -184,7 +184,9 @@ pub fn walk(store: &ObjectStore, tips: &[Hash], first_parent: bool) -> Result<Ve
 }
 
 /// The commits of the walk that pass the filter of `query`, in order, and
-/// at most its limit. The walk stops once the limit is reached.
+/// at most its limit. The walk stops once the limit is reached. The commits
+/// of `excluded` count against `max_commits`, so both sides of a range share
+/// one budget.
 fn select(
     store: &ObjectStore,
     tips: &[Hash],
@@ -202,7 +204,7 @@ fn select(
         tips,
         excluded,
         query.first_parent,
-        max_commits,
+        (excluded.len(), max_commits),
         |entry| {
             if query.filter.matches(&entry.commit) {
                 entries.push(entry);
@@ -433,21 +435,32 @@ fn walked_parents<'a>(
 /// [`emit_sorted`], which needs every remaining commit first, because a child
 /// can lie at any depth and timestamps do not bound it.
 ///
+/// `budget` holds the commits that were read before the walk, such as the
+/// excluded side of a range, and the most commits that the whole walk may
+/// read, those included.
+///
 /// # Errors
-/// [`Error::TooManyCommits`] when the walk would read more than
-/// `max_commits` commits. Otherwise a read error of a commit.
+/// [`Error::TooManyCommits`] when the walk would read more commits than the
+/// budget allows. Otherwise a read error of a commit.
 fn walk_ordered(
     store: &ObjectStore,
     tips: &[Hash],
     excluded: &HashSet<Hash>,
     first_parent: bool,
-    max_commits: usize,
+    (spent, max_commits): (usize, usize),
     mut emit: impl FnMut(Entry) -> bool,
 ) -> Result<(), Error> {
     let [tip] = *tips else {
-        return emit_sorted(store, tips, excluded, first_parent, (0, max_commits), emit);
+        return emit_sorted(
+            store,
+            tips,
+            excluded,
+            first_parent,
+            (spent, max_commits),
+            emit,
+        );
     };
-    let mut streamed = 0usize;
+    let mut streamed = spent;
     let mut next = Some(tip);
     while let Some(hash) = next {
         if excluded.contains(&hash) {
@@ -476,8 +489,8 @@ fn walk_ordered(
 
 /// Collect every commit reachable from `tips` and not in `excluded`, then
 /// pass them to `emit` in the order of [`walk_ordered`] until `emit` returns
-/// `false`. `cap` holds the commits that the walk has streamed already and
-/// the most commits that the whole walk may read.
+/// `false`. `cap` holds the commits that the walk has read already and the
+/// most commits that the whole walk may read.
 ///
 /// # Errors
 /// [`Error::TooManyCommits`] when the walk reaches more commits than the
@@ -752,6 +765,37 @@ mod tests {
         assert_eq!(excluded.len(), 5);
     }
 
+    #[test]
+    fn both_sides_of_a_range_share_one_budget() {
+        // base - e1 - e2 is excluded; i1 - i2 - i3 sit on top of e2.
+        let (_dir, store) = temp_store();
+        let hashes = chain(&store, 6);
+        let all = query_with(None, false);
+        for (tip, cap, fits) in [
+            (hashes[5], 5, false),
+            (hashes[5], 6, true),
+            (hashes[4], 5, true),
+        ] {
+            // Each side alone fits a cap of 5: three excluded commits, and at
+            // most three included ones.
+            let mut excluded = HashSet::new();
+            collect_excluded(&store, hashes[2], &mut excluded, cap).unwrap();
+            let result = select(&store, &[tip], &excluded, &all, cap);
+            if fits {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                let err = result.unwrap_err();
+                assert!(matches!(err, Error::TooManyCommits { limit: 5 }), "{err:?}");
+            }
+        }
+        // The sorted walk of two tips counts the excluded side too.
+        let mut excluded = HashSet::new();
+        collect_excluded(&store, hashes[1], &mut excluded, 4).unwrap();
+        let err = select(&store, &[hashes[5], hashes[4]], &excluded, &all, 4).unwrap_err();
+        assert!(matches!(err, Error::TooManyCommits { limit: 4 }), "{err:?}");
+        assert!(select(&store, &[hashes[5], hashes[4]], &excluded, &all, 6).is_ok());
+    }
+
     /// root - fork - mid - good, and fork - side; tip = merge(side, good).
     /// Returns [root, fork, mid, good, side, tip].
     fn range_fixture() -> (tempfile::TempDir, ObjectStore, [Hash; 6]) {
@@ -1019,11 +1063,12 @@ mod tests {
                         }
                     }
                     // The cap counts every commit of the walk, streamed or
-                    // sorted: the walk fails exactly when it would read more.
+                    // sorted, and every excluded commit: the walk fails
+                    // exactly when it would read more.
                     let all = query_with(None, first_parent);
-                    let size = reference(&store, tips, excluded, &all).len();
+                    let size = reference(&store, tips, excluded, &all).len() + excluded.len();
                     assert!(select(&store, tips, excluded, &all, size).is_ok());
-                    if size > 0 {
+                    if size > excluded.len() {
                         let err = select(&store, tips, excluded, &all, size - 1).unwrap_err();
                         assert!(
                             matches!(err, Error::TooManyCommits { limit } if limit == size - 1),

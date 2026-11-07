@@ -305,8 +305,9 @@ History / commits:
   all. All of these filters apply **before** `-n <limit>`, so `-n` caps
   the filtered result, matching git.
   One walk reads at most 1,000,000 commits, counting the excluded side of
-  a range. A walk that would read more fails with an error that names the
-  limit; `kit log` never prints part of a history as if it were all of it.
+  a range: both sides of a range share that budget. A walk that would read
+  more fails with an error that names the limit; `kit log` never prints
+  part of a history as if it were all of it.
   A commit of the walk, or of the excluded side of a range, that is
   missing, corrupt or not a commit fails the walk with an error that names
   it; it never drops out of the history.
