@@ -316,7 +316,22 @@ misbehaving or malicious client (see
 - `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on cumulative request payload bytes.
 
 Each cap trips emits an `Error{ ERROR_CODE_INVALID_REQUEST }` and
-closes the connection with `exit::PROTOCOL_ERROR`.
+closes the connection with `exit::PROTOCOL_ERROR`. The frame cap's reply
+names it: `per-connection frame budget exceeded: at most 10000 frames per
+session (SPEC-TRANSPORT 4.4)`.
+
+**Reference-server behavior.** What fits in one session follows from the
+frame cap. A fetch costs one `ListRefs` frame, then per branch a `ReadRef` of
+the packmap and a `DownloadPack` of each node of its pack list, even when no
+branch changed: the SSH transport names no repository, so a fetch keeps no
+per-branch checkpoint for it and walks each pack list again. With one node
+per pack list that is one frame plus two per branch, so one session fetches
+at most 4,999 branches; a fetch of more fails closed with the reply above.
+`kit fetch`, `kit pull` and `kit clone` open one session each. A push walks
+the branch's whole pack list over its session, and an SSH push never
+re-baselines the pack list, so a push's frames grow with the number of
+pushes the branch has had. The cap is not raised: it is what bounds
+a client that sends requests without end.
 
 Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
 the declared upload length and additionally cap the number of chunk
