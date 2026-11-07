@@ -11,12 +11,14 @@ kit is a content-addressed version control system written in Rust. It has
 commits, refs, branches and remotes. It treats signatures and attestations as
 part of the object model.
 
-- Every object ID is the BLAKE3 hash of the canonical bytes of the object.
+- Every object ID is a BLAKE3 hash. A tree or a chunked blob uses the
+  domain-bound root of a BLAKE3 Merkle tree over its contents. Any other object
+  uses the hash of its canonical bytes.
 - Every commit carries an Ed25519 signature.
 - `kit attest` stores in-toto v1 Statements in DSSE envelopes. The commit hash
   is the subject.
-- Large files split into content-defined chunks. A small edit stores only the
-  edit.
+- Files above 1 MiB split into content-defined chunks. Unchanged chunks are
+  reused; an edit stores the changed chunks and a new manifest.
 
 > [!NOTE]
 > kit is alpha software (pre-1.0). The specs in [`docs/specs/`](docs/specs/README.md)
@@ -40,7 +42,7 @@ repository signed at a semver tag.
 To pin a version, pass `--version`:
 
 ```sh
-curl -sSfL https://kit.storage/install.sh | sh -s -- --version v0.7.1
+curl -sSfL https://kit.storage/install.sh | sh -s -- --version v0.7.2
 ```
 
 To build from source, use Rust 1.99 or newer:

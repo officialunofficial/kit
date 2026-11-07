@@ -527,8 +527,9 @@ fn collapse_ws(line: &[u8]) -> Vec<u8> {
 /// differ` line instead of hunks, matching Git.
 ///
 /// The algorithm is the greedy Myers diff with Git-style hunk compaction
-/// (see [`unified_hunks`]); the hunks byte-match `git diff`. Trailing-newline
-/// handling follows Git's `\ No newline at end of file` convention.
+/// (see [`unified_hunks`]); the hunks byte-match `git diff` up to 4096 edits,
+/// and past that they may be larger. Trailing-newline handling follows Git's
+/// `\ No newline at end of file` convention.
 ///
 /// Note this returns a `String` via lossy UTF-8 conversion, so a non-UTF-8
 /// (but non-binary) blob's raw bytes are not preserved here — use
@@ -557,6 +558,12 @@ pub fn text_patch(old_bytes: &[u8], new_bytes: &[u8], old_path: &str, new_path: 
 /// Splitting the hunk body out lets callers wrap it in a git-shaped
 /// `diff --git` header (with `/dev/null` for adds/deletes) while keeping the
 /// algorithm — Myers diff with git-style hunk compaction — in one place.
+///
+/// The search stops after 4096 edits, which keeps its memory near 64 MiB.
+/// It keeps the matches it found up to that point and the common trailing
+/// lines, and reports what lies between them as replaced. The hunks still turn
+/// the old blob into the new one, but they may no longer be minimal. The line
+/// tables and the output still grow with the blobs.
 #[must_use]
 pub fn unified_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<u8>> {
     unified_hunks_opts(old_bytes, new_bytes, PATCH_CONTEXT, WhitespaceMode::Exact)
@@ -581,8 +588,8 @@ pub fn unified_hunks_opts(
     }
     let old_lines = split_lines(old_bytes);
     let new_lines = split_lines(new_bytes);
-    let ops = edit_script(&old_lines, &new_lines, mode);
-    let hunks = group_hunks(&ops, context);
+    let script = edit_script(&old_lines, &new_lines, mode, MAX_EDIT_DISTANCE);
+    let hunks = group_hunks(&script.ops, context);
     let mut out = Vec::new();
     for hunk in &hunks {
         render_hunk(&mut out, hunk, &old_lines, &new_lines);
@@ -645,8 +652,13 @@ pub fn enumerate_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<PatchHu
     }
     let old_lines = split_lines(old_bytes);
     let new_lines = split_lines(new_bytes);
-    let ops = edit_script(&old_lines, &new_lines, WhitespaceMode::Exact);
-    let hunks = group_hunks(&ops, PATCH_CONTEXT);
+    let script = edit_script(
+        &old_lines,
+        &new_lines,
+        WhitespaceMode::Exact,
+        MAX_EDIT_DISTANCE,
+    );
+    let hunks = group_hunks(&script.ops, PATCH_CONTEXT);
     Some(
         hunks
             .iter()
@@ -655,7 +667,7 @@ pub fn enumerate_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<PatchHu
     )
 }
 
-fn to_patch_hunk(hunk: &Hunk, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> PatchHunk {
+fn to_patch_hunk(hunk: &Hunk<'_>, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> PatchHunk {
     let lines = hunk
         .ops
         .iter()
@@ -757,17 +769,38 @@ struct MergeRegion {
 /// conflict. Identical `ours`/`theirs` merge trivially. Unlike a full
 /// diff3 this does not auto-resolve *identical overlapping* edits (those
 /// stay a conflict): it errs toward conflict, never toward a wrong merge.
+///
+/// Two limits keep the memory bounded, and both return `None`: an input above
+/// [`crate::worktree::CHUNK_THRESHOLD`], the size at which a file stops being
+/// a single blob, and a side whose line diff stops at its limit of 4096 edits.
 #[must_use]
 pub fn merge_blob_3way(base: &[u8], ours: &[u8], theirs: &[u8]) -> Option<Vec<u8>> {
     if ours == theirs {
         return Some(ours.to_vec());
     }
+    let above_threshold = |blob: &[u8]| {
+        u64::try_from(blob.len()).unwrap_or(u64::MAX) > crate::worktree::CHUNK_THRESHOLD
+    };
+    if above_threshold(base) || above_threshold(ours) || above_threshold(theirs) {
+        return None;
+    }
+    merge_within_edits(base, ours, theirs, MAX_EDIT_DISTANCE)
+}
+
+/// The text merge behind [`merge_blob_3way`], with the edit limit as an
+/// argument so tests can reach it on small inputs.
+fn merge_within_edits(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    max_edits: usize,
+) -> Option<Vec<u8>> {
     if is_binary(base) || is_binary(ours) || is_binary(theirs) {
         return None;
     }
     let base_lines = split_lines(base);
-    let ours_regions = changed_regions(&base_lines, &split_lines(ours));
-    let theirs_regions = changed_regions(&base_lines, &split_lines(theirs));
+    let ours_regions = changed_regions(&base_lines, &split_lines(ours), max_edits)?;
+    let theirs_regions = changed_regions(&base_lines, &split_lines(theirs), max_edits)?;
     if regions_overlap(&ours_regions, &theirs_regions) {
         return None;
     }
@@ -779,12 +812,22 @@ pub fn merge_blob_3way(base: &[u8], ours: &[u8], theirs: &[u8]) -> Option<Vec<u8
 }
 
 /// Group the edit script `base → side` into base-anchored changed regions
-/// (no context — adjacent equal lines bound each region).
-fn changed_regions(base: &[DiffLine<'_>], side: &[DiffLine<'_>]) -> Vec<MergeRegion> {
+/// (no context — adjacent equal lines bound each region). Returns `None` when
+/// the search hit `max_edits`: a clean merge on a non-minimal alignment could
+/// differ from the merge on a minimal one, so the merge must not use it.
+fn changed_regions(
+    base: &[DiffLine<'_>],
+    side: &[DiffLine<'_>],
+    max_edits: usize,
+) -> Option<Vec<MergeRegion>> {
+    let script = edit_script(base, side, WhitespaceMode::Exact, max_edits);
+    if !script.minimal {
+        return None;
+    }
     let mut regions: Vec<MergeRegion> = Vec::new();
     let mut cur: Option<MergeRegion> = None;
     let mut base_idx = 0usize; // next unconsumed base line
-    for op in edit_script(base, side, WhitespaceMode::Exact) {
+    for op in script.ops {
         match op {
             DiffOp::Equal(bi, _) => {
                 if let Some(r) = cur.take() {
@@ -816,7 +859,7 @@ fn changed_regions(base: &[DiffLine<'_>], side: &[DiffLine<'_>]) -> Vec<MergeReg
     if let Some(r) = cur.take() {
         regions.push(r);
     }
-    regions
+    Some(regions)
 }
 
 /// `true` if any ours-region overlaps any theirs-region on base lines.
@@ -885,7 +928,13 @@ pub fn diff_line_counts(old_bytes: &[u8], new_bytes: &[u8]) -> Option<(usize, us
     let new_lines = split_lines(new_bytes);
     let mut added = 0;
     let mut deleted = 0;
-    for op in edit_script(&old_lines, &new_lines, WhitespaceMode::Exact) {
+    let script = edit_script(
+        &old_lines,
+        &new_lines,
+        WhitespaceMode::Exact,
+        MAX_EDIT_DISTANCE,
+    );
+    for op in script.ops {
         match op {
             DiffOp::Insert(_) => added += 1,
             DiffOp::Delete(_) => deleted += 1,
@@ -954,16 +1003,77 @@ enum DiffOp {
     Insert(usize),
 }
 
+/// The most edits the line diff searches for. The search keeps `d + 1`
+/// positions for edit step `d`, about 64 MiB at this limit. It also caps the
+/// search time at about `2 * MAX_EDIT_DISTANCE` passes over the input. Every
+/// machine stops at the same point, so the output does not depend on the
+/// memory it has.
+const MAX_EDIT_DISTANCE: usize = 4096;
+
+/// An edit script and whether the search behind it finished.
+struct EditScript {
+    ops: Vec<DiffOp>,
+    /// `true` when the search found a minimal script. `false` when it hit its
+    /// edit limit and the script may be larger than minimal.
+    minimal: bool,
+}
+
 /// Compute a line-level edit script using the greedy Myers diff, then
 /// canonicalize hunk boundaries the way git's xdiff does (slide each run of
 /// changed lines as far down as identical neighbours allow). The result
 /// matches `git diff`'s hunks for the common cases — same algorithm, same
 /// boundary convention — modulo git's optional indent heuristic.
-fn edit_script(old: &[DiffLine<'_>], new: &[DiffLine<'_>], mode: WhitespaceMode) -> Vec<DiffOp> {
-    let (mut old_changed, mut new_changed) = myers_changed(old, new, mode);
-    compact_changes(old, &mut old_changed, mode);
-    compact_changes(new, &mut new_changed, mode);
-    script_from_flags(old, new, &old_changed, &new_changed)
+fn edit_script(
+    old: &[DiffLine<'_>],
+    new: &[DiffLine<'_>],
+    mode: WhitespaceMode,
+    max_edits: usize,
+) -> EditScript {
+    let mut changes = myers_changed(old, new, mode, max_edits);
+    compact_changes(old, &mut changes.old, mode);
+    compact_changes(new, &mut changes.new, mode);
+    EditScript {
+        ops: script_from_flags(old, new, &changes.old, &changes.new),
+        minimal: changes.minimal,
+    }
+}
+
+/// Match whole lines with the fixed-budget Myers search. Above its edit
+/// limit, unaligned lines remain unmatched rather than inheriting an origin.
+/// Blame uses this when its LCS table would exceed its byte budget.
+pub(super) fn matching_line_indices<T: AsRef<[u8]>>(old: &[T], new: &[T]) -> Vec<Option<usize>> {
+    fn to_lines<T: AsRef<[u8]>>(lines: &[T]) -> Vec<DiffLine<'_>> {
+        lines
+            .iter()
+            .map(|line| DiffLine {
+                text: line.as_ref(),
+                has_newline: false,
+            })
+            .collect()
+    }
+    let changes = myers_changed(
+        &to_lines(old),
+        &to_lines(new),
+        WhitespaceMode::Exact,
+        MAX_EDIT_DISTANCE,
+    );
+    let mut kept_old = changes
+        .old
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, changed)| (!changed).then_some(i));
+    changes
+        .new
+        .into_iter()
+        .map(|changed| if changed { None } else { kept_old.next() })
+        .collect()
+}
+
+/// The per-line changed flags of one diff.
+struct LineChanges {
+    old: Vec<bool>,
+    new: Vec<bool>,
+    minimal: bool,
 }
 
 /// Run the greedy Myers diff and mark which old lines are deletions and which
@@ -1000,7 +1110,8 @@ fn myers_changed(
     old: &[DiffLine<'_>],
     new: &[DiffLine<'_>],
     mode: WhitespaceMode,
-) -> (Vec<bool>, Vec<bool>) {
+    max_edits: usize,
+) -> LineChanges {
     let n = old.len();
     let m = new.len();
 
@@ -1010,8 +1121,7 @@ fn myers_changed(
         prefix += 1;
     }
 
-    let (mid_old_changed, mid_new_changed) =
-        myers_changed_core(&old[prefix..], &new[prefix..], mode);
+    let mid = myers_changed_core(&old[prefix..], &new[prefix..], mode, max_edits);
 
     // Build the full-length result directly instead of zero-filling `n`/`m`
     // elements up front and then overwriting the post-prefix half via
@@ -1020,11 +1130,15 @@ fn myers_changed(
     // reallocates.
     let mut old_changed = Vec::with_capacity(n);
     old_changed.resize(prefix, false);
-    old_changed.extend(mid_old_changed);
+    old_changed.extend(mid.old);
     let mut new_changed = Vec::with_capacity(m);
     new_changed.resize(prefix, false);
-    new_changed.extend(mid_new_changed);
-    (old_changed, new_changed)
+    new_changed.extend(mid.new);
+    LineChanges {
+        old: old_changed,
+        new: new_changed,
+        minimal: mid.minimal,
+    }
 }
 
 // Myers indexes paths by signed diagonal `k = x - y`, so the V array and
@@ -1041,29 +1155,42 @@ fn myers_changed_core(
     old: &[DiffLine<'_>],
     new: &[DiffLine<'_>],
     mode: WhitespaceMode,
-) -> (Vec<bool>, Vec<bool>) {
+    max_edits: usize,
+) -> LineChanges {
     let n = old.len();
     let m = new.len();
     let mut old_changed = vec![false; n];
     let mut new_changed = vec![false; m];
     if n == 0 {
         new_changed.fill(true);
-        return (old_changed, new_changed);
+        return LineChanges {
+            old: old_changed,
+            new: new_changed,
+            minimal: true,
+        };
     }
     if m == 0 {
         old_changed.fill(true);
-        return (old_changed, new_changed);
+        return LineChanges {
+            old: old_changed,
+            new: new_changed,
+            minimal: true,
+        };
     }
 
-    let max = n + m;
+    let max = (n + m).min(max_edits);
     let offset = max as isize; // shift so diagonal k maps to a non-negative index
     let mut v = vec![0isize; 2 * max + 1];
-    let mut trace: Vec<Vec<isize>> = Vec::new();
+    // Row `d` holds the furthest x on the diagonals -d, -d + 2, ..., d after
+    // `d` edits, so it starts at cell d * (d + 1) / 2. The backtrack reads
+    // nothing else, so `trace` grows with the edit count and not with the
+    // input. Reserving the whole triangle avoids a copy on growth and leaves
+    // unused pages untouched.
+    let mut trace: Vec<isize> = Vec::with_capacity((max + 1) * (max + 2) / 2);
 
     let idx = |k: isize| (k + offset) as usize;
-    let mut found = max as isize;
+    let mut found = None;
     'outer: for d in 0..=max as isize {
-        trace.push(v.clone());
         let mut k = -d;
         while k <= d {
             // Greedy: extend the furthest-reaching path on diagonal k.
@@ -1081,40 +1208,95 @@ fn myers_changed_core(
                 y += 1;
             }
             v[idx(k)] = x;
+            trace.push(x);
             if x as usize >= n && y as usize >= m {
-                found = d;
+                found = Some(d);
                 break 'outer;
             }
             k += 2;
         }
     }
 
-    // Backtrack through the saved V snapshots to recover the edits.
-    let mut x = n as isize;
-    let mut y = m as isize;
-    for d in (0..=found).rev() {
-        let vd = &trace[d as usize];
+    // Where the backtrack starts, and how many trailing lines it keeps past
+    // that point. A finished search starts at the end of both sides.
+    let (last_step, end_x, end_y, tail) = found.map_or_else(
+        || stopped_search_end(old, new, mode, &v),
+        |d| (d, n as isize, m as isize, 0),
+    );
+    old_changed[end_x as usize..n - tail].fill(true);
+    new_changed[end_y as usize..m - tail].fill(true);
+
+    // Backtrack through the saved rows to recover the edits. Step 0 consumes
+    // only matched lines, so it sets no flag.
+    let (mut x, mut y) = (end_x, end_y);
+    for d in (1..=last_step).rev() {
+        let row = &trace[(d * (d - 1) / 2) as usize..];
+        let prev = |k: isize| row[((k + d - 1) / 2) as usize];
         let k = x - y;
-        let down = k == -d || (k != d && vd[idx(k - 1)] < vd[idx(k + 1)]);
+        let down = k == -d || (k != d && prev(k - 1) < prev(k + 1));
         let prev_k = if down { k + 1 } else { k - 1 };
-        let prev_x = vd[idx(prev_k)];
+        let prev_x = prev(prev_k);
         let prev_y = prev_x - prev_k;
         // Walk back down the snake (matched lines) — no flags set there.
         while x > prev_x && y > prev_y {
             x -= 1;
             y -= 1;
         }
-        if d > 0 {
-            if down {
-                new_changed[(y - 1) as usize] = true; // insertion
-                y -= 1;
-            } else {
-                old_changed[(x - 1) as usize] = true; // deletion
-                x -= 1;
-            }
+        if down {
+            new_changed[(y - 1) as usize] = true; // insertion
+            y -= 1;
+        } else {
+            old_changed[(x - 1) as usize] = true; // deletion
+            x -= 1;
         }
     }
-    (old_changed, new_changed)
+    LineChanges {
+        old: old_changed,
+        new: new_changed,
+        minimal: found.is_some(),
+    }
+}
+
+/// The point of a stopped search to backtrack from, as `(step, x, y, tail)`:
+/// the one that keeps the most lines. `v` holds the furthest x on each diagonal
+/// after the last step, and that step is half of `v.len() - 1`.
+///
+/// A point keeps its matches and the common trailing lines it has not passed.
+/// A point past either end has no path to backtrack. The origin competes too,
+/// so the result never keeps fewer lines than the common leading and trailing
+/// runs.
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::many_single_char_names
+)]
+fn stopped_search_end(
+    old: &[DiffLine<'_>],
+    new: &[DiffLine<'_>],
+    mode: WhitespaceMode,
+    v: &[isize],
+) -> (isize, isize, isize, usize) {
+    let (n, m) = (old.len(), new.len());
+    let last_step = (v.len() / 2) as isize;
+    let mut suffix = 0;
+    while suffix < n.min(m) && lines_equal(&old[n - 1 - suffix], &new[m - 1 - suffix], mode) {
+        suffix += 1;
+    }
+    let tail = |x: isize, y: isize| suffix.min(n - x as usize).min(m - y as usize);
+    let kept = |step: isize, x: isize, y: isize| (x + y - step) / 2 + tail(x, y) as isize;
+    let (step, x, y) = (-last_step..=last_step)
+        .step_by(2)
+        .map(|k| (v[(k + last_step) as usize], k))
+        .map(|(x, k)| (x, x - k))
+        .filter(|&(x, y)| x as usize <= n && y as usize <= m)
+        .fold((0, 0, 0), |end, (x, y)| {
+            if kept(last_step, x, y) > kept(end.0, end.1, end.2) {
+                (last_step, x, y)
+            } else {
+                end
+            }
+        });
+    (step, x, y, tail(x, y))
 }
 
 /// Slide each maximal run of changed lines downward while the line leaving the
@@ -1189,17 +1371,17 @@ fn lines_equal(a: &DiffLine<'_>, b: &DiffLine<'_>, mode: WhitespaceMode) -> bool
 
 /// A contiguous group of edits plus surrounding context, with the
 /// 1-based starting line numbers and lengths for the `@@` header.
-struct Hunk {
+struct Hunk<'a> {
     old_start: usize,
     old_len: usize,
     new_start: usize,
     new_len: usize,
-    ops: Vec<DiffOp>,
+    ops: &'a [DiffOp],
 }
 
 /// Group an edit script into hunks, each padded with up to `context`
 /// unchanged lines and merged when their context windows touch.
-fn group_hunks(ops: &[DiffOp], context: usize) -> Vec<Hunk> {
+fn group_hunks(ops: &[DiffOp], context: usize) -> Vec<Hunk<'_>> {
     // Indices of ops that are actual changes.
     let change_positions: Vec<usize> = ops
         .iter()
@@ -1229,7 +1411,7 @@ fn group_hunks(ops: &[DiffOp], context: usize) -> Vec<Hunk> {
         .collect()
 }
 
-fn build_hunk(slice: &[DiffOp]) -> Hunk {
+fn build_hunk(slice: &[DiffOp]) -> Hunk<'_> {
     let mut old_start = None;
     let mut new_start = None;
     let mut old_len = 0usize;
@@ -1258,7 +1440,7 @@ fn build_hunk(slice: &[DiffOp]) -> Hunk {
         old_len,
         new_start: new_start.map_or(0, |s| s + 1),
         new_len,
-        ops: slice.to_vec(),
+        ops: slice,
     }
 }
 
@@ -1272,14 +1454,14 @@ fn hunk_range(start: usize, len: usize) -> String {
     }
 }
 
-fn render_hunk(out: &mut Vec<u8>, hunk: &Hunk, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) {
+fn render_hunk(out: &mut Vec<u8>, hunk: &Hunk<'_>, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) {
     let header = format!(
         "@@ -{} +{} @@\n",
         hunk_range(hunk.old_start, hunk.old_len),
         hunk_range(hunk.new_start, hunk.new_len)
     );
     out.extend_from_slice(header.as_bytes());
-    for op in &hunk.ops {
+    for op in hunk.ops {
         match *op {
             DiffOp::Equal(oi, _) => emit_line(out, b' ', &old[oi]),
             DiffOp::Delete(oi) => emit_line(out, b'-', &old[oi]),
@@ -2326,15 +2508,14 @@ mod tests {
             old in proptest::collection::vec(0u8..3, 0..10),
             new in proptest::collection::vec(0u8..3, 0..10),
         ) {
-            fn to_lines(v: &[u8]) -> Vec<DiffLine<'_>> {
-                const SYMBOLS: [&[u8]; 3] = [b"0", b"1", b"2"];
-                v.iter().map(|&n| DiffLine { text: SYMBOLS[n as usize], has_newline: true }).collect()
-            }
             let old_lines = to_lines(&old);
             let new_lines = to_lines(&new);
-            let elided = myers_changed(&old_lines, &new_lines, WhitespaceMode::Exact);
-            let ground_truth = myers_changed_core(&old_lines, &new_lines, WhitespaceMode::Exact);
-            proptest::prop_assert_eq!(elided, ground_truth);
+            let elided = myers_changed(&old_lines, &new_lines, WhitespaceMode::Exact, usize::MAX);
+            let ground_truth =
+                myers_changed_core(&old_lines, &new_lines, WhitespaceMode::Exact, usize::MAX);
+            proptest::prop_assert!(elided.minimal);
+            proptest::prop_assert_eq!(elided.old, ground_truth.old);
+            proptest::prop_assert_eq!(elided.new, ground_truth.new);
         }
 
         /// Patch round-trip on lines built from a random shared prefix/suffix
@@ -2368,6 +2549,442 @@ mod tests {
             proptest::prop_assert_eq!(apply_hunks_subset(&old, &hunks, &all), new);
             proptest::prop_assert_eq!(apply_hunks_subset(&old, &hunks, &[]), old);
         }
+    }
+
+    // ---- bounded search ----
+
+    fn to_lines(v: &[u8]) -> Vec<DiffLine<'_>> {
+        const SYMBOLS: [&[u8]; 3] = [b"0", b"1", b"2"];
+        v.iter()
+            .map(|&n| DiffLine {
+                text: SYMBOLS[n as usize],
+                has_newline: true,
+            })
+            .collect()
+    }
+
+    fn to_blob(v: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &n in v {
+            out.extend_from_slice(&[b'0' + n, b'\n']);
+        }
+        out
+    }
+
+    /// Numbered lines from `range`, each prefixed by `tag`.
+    fn numbered(tag: &str, range: std::ops::Range<usize>) -> Vec<u8> {
+        let mut out = Vec::new();
+        for i in range {
+            out.extend_from_slice(format!("{tag}{i}\n").as_bytes());
+        }
+        out
+    }
+
+    /// Whether `hunks` turn `old` into `new`, and applying none keeps `old`.
+    fn hunks_round_trip(old: &[u8], new: &[u8], hunks: &[PatchHunk]) -> bool {
+        let all: Vec<usize> = (0..hunks.len()).collect();
+        apply_hunks_subset(old, hunks, &all) == new && apply_hunks_subset(old, hunks, &[]) == old
+    }
+
+    /// The search with no limit and a full copy of `v` per step, as a reference
+    /// for the bounded search.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+    fn unbounded_reference(old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> (Vec<bool>, Vec<bool>) {
+        let (n, m) = (old.len(), new.len());
+        let mut old_changed = vec![false; n];
+        let mut new_changed = vec![false; m];
+        if n == 0 || m == 0 {
+            old_changed.fill(true);
+            new_changed.fill(true);
+            return (old_changed, new_changed);
+        }
+        let max = n + m;
+        let offset = max as isize;
+        let idx = |k: isize| (k + offset) as usize;
+        let mut v = vec![0isize; 2 * max + 1];
+        let mut trace = Vec::new();
+        let mut found = 0;
+        'outer: for d in 0..=max as isize {
+            trace.push(v.clone());
+            let mut k = -d;
+            while k <= d {
+                let mut x = if k == -d || (k != d && v[idx(k - 1)] < v[idx(k + 1)]) {
+                    v[idx(k + 1)]
+                } else {
+                    v[idx(k - 1)] + 1
+                };
+                let mut y = x - k;
+                while (x as usize) < n
+                    && (y as usize) < m
+                    && lines_equal(&old[x as usize], &new[y as usize], WhitespaceMode::Exact)
+                {
+                    x += 1;
+                    y += 1;
+                }
+                v[idx(k)] = x;
+                if x as usize >= n && y as usize >= m {
+                    found = d;
+                    break 'outer;
+                }
+                k += 2;
+            }
+        }
+        let (mut x, mut y) = (n as isize, m as isize);
+        for d in (0..=found).rev() {
+            let vd: &Vec<isize> = &trace[d as usize];
+            let k = x - y;
+            let down = k == -d || (k != d && vd[idx(k - 1)] < vd[idx(k + 1)]);
+            let prev_k = if down { k + 1 } else { k - 1 };
+            let prev_x = vd[idx(prev_k)];
+            let prev_y = prev_x - prev_k;
+            while x > prev_x && y > prev_y {
+                x -= 1;
+                y -= 1;
+            }
+            if d > 0 {
+                if down {
+                    new_changed[(y - 1) as usize] = true;
+                    y -= 1;
+                } else {
+                    old_changed[(x - 1) as usize] = true;
+                    x -= 1;
+                }
+            }
+        }
+        (old_changed, new_changed)
+    }
+
+    /// `base` with `edits` applied: each `(position, symbol)` overwrites a line,
+    /// or inserts one when the symbol is 3.
+    fn edited(base: &[u8], edits: &[(usize, u8)]) -> Vec<u8> {
+        let mut out = base.to_vec();
+        for &(position, symbol) in edits {
+            let at = position % (out.len() + 1);
+            if symbol < 3 && at < out.len() {
+                out[at] = symbol;
+            } else {
+                out.insert(at, symbol % 3);
+            }
+        }
+        out
+    }
+
+    proptest::proptest! {
+        /// The search stays exact whenever it finishes: a limit at or above the
+        /// true edit distance gives the flags of the unbounded reference, and a
+        /// lower limit reports that it stopped.
+        #[test]
+        fn proptest_search_matches_unbounded_reference(
+            old in proptest::collection::vec(0u8..3, 0..40),
+            new in proptest::collection::vec(0u8..3, 0..40),
+            extra in 0usize..8,
+            below in 1usize..8,
+        ) {
+            let (old_lines, new_lines) = (to_lines(&old), to_lines(&new));
+            let (old_ref, new_ref) = unbounded_reference(&old_lines, &new_lines);
+            let distance = old_ref.iter().chain(&new_ref).filter(|&&c| c).count();
+
+            let exact = myers_changed(
+                &old_lines,
+                &new_lines,
+                WhitespaceMode::Exact,
+                distance.max(1) + extra,
+            );
+            proptest::prop_assert!(exact.minimal);
+            proptest::prop_assert_eq!(exact.old, old_ref);
+            proptest::prop_assert_eq!(exact.new, new_ref);
+
+            // An empty side after the common leading lines needs no search.
+            let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+            if distance > below && prefix < old.len() && prefix < new.len() {
+                let stopped =
+                    myers_changed(&old_lines, &new_lines, WhitespaceMode::Exact, below);
+                proptest::prop_assert!(!stopped.minimal);
+            }
+        }
+
+        /// At any limit the script still turns old into new, and each line it
+        /// keeps is equal on both sides.
+        #[test]
+        fn proptest_script_stays_correct_at_any_limit(
+            old in proptest::collection::vec(0u8..3, 0..40),
+            new in proptest::collection::vec(0u8..3, 0..40),
+            max_edits in 1usize..20,
+        ) {
+            let (old_lines, new_lines) = (to_lines(&old), to_lines(&new));
+            let script = edit_script(&old_lines, &new_lines, WhitespaceMode::Exact, max_edits);
+            let mut replayed_old = Vec::new();
+            let mut replayed_new = Vec::new();
+            for op in &script.ops {
+                match *op {
+                    DiffOp::Equal(i, j) => {
+                        proptest::prop_assert_eq!(old[i], new[j]);
+                        replayed_old.push(old[i]);
+                        replayed_new.push(new[j]);
+                    }
+                    DiffOp::Delete(i) => replayed_old.push(old[i]),
+                    DiffOp::Insert(j) => replayed_new.push(new[j]),
+                }
+            }
+            proptest::prop_assert_eq!(&replayed_old, &old);
+            proptest::prop_assert_eq!(&replayed_new, &new);
+
+            // It keeps at least the common leading and trailing runs.
+            let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+            let suffix = old[prefix..]
+                .iter()
+                .rev()
+                .zip(new[prefix..].iter().rev())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let kept = script.ops.iter().filter(|op| matches!(op, DiffOp::Equal(_, _))).count();
+            proptest::prop_assert!(kept >= prefix + suffix);
+
+            let hunks: Vec<PatchHunk> = group_hunks(&script.ops, PATCH_CONTEXT)
+                .iter()
+                .map(|h| to_patch_hunk(h, &old_lines, &new_lines))
+                .collect();
+            proptest::prop_assert!(hunks_round_trip(&to_blob(&old), &to_blob(&new), &hunks));
+        }
+
+        /// A lower limit only ever adds conflicts: the merge either refuses or
+        /// gives the bytes of the merge with no limit, and it matches that
+        /// merge whenever both sides fit the limit.
+        #[test]
+        fn proptest_merge_limit_only_adds_conflicts(
+            base in proptest::collection::vec(0u8..3, 0..40),
+            ours_edits in proptest::collection::vec((0usize..40, 0u8..4), 0..6),
+            theirs_edits in proptest::collection::vec((0usize..40, 0u8..4), 0..6),
+            max_edits in 1usize..20,
+        ) {
+            let (ours, theirs) = (edited(&base, &ours_edits), edited(&base, &theirs_edits));
+            let (base_blob, ours_blob, theirs_blob) =
+                (to_blob(&base), to_blob(&ours), to_blob(&theirs));
+            let unlimited = merge_within_edits(&base_blob, &ours_blob, &theirs_blob, usize::MAX);
+            let limited = merge_within_edits(&base_blob, &ours_blob, &theirs_blob, max_edits);
+            if limited.is_some() {
+                proptest::prop_assert_eq!(&limited, &unlimited);
+            }
+            let distance = |side: &[u8]| {
+                let (o, n) = unbounded_reference(&to_lines(&base), &to_lines(side));
+                o.iter().chain(&n).filter(|&&c| c).count()
+            };
+            if distance(&ours) <= max_edits && distance(&theirs) <= max_edits {
+                proptest::prop_assert_eq!(limited, unlimited);
+            }
+        }
+    }
+
+    #[test]
+    fn search_is_minimal_up_to_the_limit_and_coarse_past_it() {
+        let tail = numbered("same", 0..50);
+        let old = [numbered("old", 0..2048), tail.clone()].concat();
+        let at_limit = [numbered("new", 0..2048), tail.clone()].concat();
+        let past_limit = [numbered("new", 0..2049), tail].concat();
+        let old_lines = split_lines(&old);
+
+        let script = edit_script(
+            &old_lines,
+            &split_lines(&at_limit),
+            WhitespaceMode::Exact,
+            MAX_EDIT_DISTANCE,
+        );
+        assert!(script.minimal);
+
+        let script = edit_script(
+            &old_lines,
+            &split_lines(&past_limit),
+            WhitespaceMode::Exact,
+            MAX_EDIT_DISTANCE,
+        );
+        assert!(!script.minimal);
+        assert_eq!(diff_line_counts(&old, &past_limit), Some((2049, 2048)));
+    }
+
+    #[test]
+    fn every_line_of_a_large_file_rewritten_round_trips() {
+        let rewrite = |tag: &str| {
+            let mut out = Vec::new();
+            for i in 0..13_107 {
+                out.extend_from_slice(format!("{tag}{i:078}\n").as_bytes());
+            }
+            out
+        };
+        let (old, new) = (rewrite("a"), rewrite("b"));
+        assert_eq!(diff_line_counts(&old, &new), Some((13_107, 13_107)));
+        let hunks = enumerate_hunks(&old, &new).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert!(hunks_round_trip(&old, &new, &hunks));
+    }
+
+    #[test]
+    fn one_large_block_past_the_limit_stays_one_tight_hunk() {
+        let (head, tail) = (numbered("head", 0..40), numbered("tail", 0..40));
+        let without = [head.clone(), tail.clone()].concat();
+        let with = [head, numbered("block", 0..5000), tail].concat();
+
+        for (old, new, counts) in [(&without, &with, (5000, 0)), (&with, &without, (0, 5000))] {
+            assert_eq!(diff_line_counts(old, new), Some(counts));
+            let hunks = enumerate_hunks(old, new).unwrap();
+            assert_eq!(hunks.len(), 1);
+            assert!(hunks_round_trip(old, new, &hunks));
+        }
+    }
+
+    #[test]
+    fn a_block_sharing_lines_with_the_tail_stays_exact_past_the_limit() {
+        // Every tenth line of both the block and the tail is the same, so the
+        // search finds chance matches that would give up the tail.
+        let with_closers = |tag: &str, lines: usize| {
+            let mut out = Vec::new();
+            for i in 0..lines {
+                if i % 10 == 0 {
+                    out.extend_from_slice(b"}\n");
+                } else {
+                    out.extend_from_slice(format!("{tag}{i}\n").as_bytes());
+                }
+            }
+            out
+        };
+        let head = numbered("head", 0..40);
+        let tail = with_closers("tail", 2000);
+        let without = [head.clone(), tail.clone()].concat();
+        let with = [head, with_closers("block", 5000), tail].concat();
+
+        assert_eq!(diff_line_counts(&without, &with), Some((5000, 0)));
+        assert_eq!(diff_line_counts(&with, &without), Some((0, 5000)));
+        let hunks = enumerate_hunks(&without, &with).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert!(hunks_round_trip(&without, &with, &hunks));
+    }
+
+    #[test]
+    fn a_stopped_search_keeps_more_lines_than_the_tail_when_it_can() {
+        // Two equal blocks swap places, which costs 6,000 edits. The search
+        // passes the common trailing lines of the file when that keeps one
+        // whole block, so 3,000 lines stay where the tail alone would keep 50.
+        let first = numbered("first", 0..3000);
+        let second = numbered("second", 0..3000);
+        let end = numbered("end", 0..50);
+        let old = [first.clone(), second.clone(), end.clone()].concat();
+        let new = [second, first, end].concat();
+        assert_eq!(diff_line_counts(&old, &new), Some((3000, 3000)));
+    }
+
+    #[test]
+    fn scattered_edits_past_the_limit_keep_most_of_the_alignment() {
+        // 2,100 changed lines cost 4,200 edits, 104 past the limit. The search
+        // covers all but the end of the file, so most hunks stay exact.
+        let old = numbered("line", 0..6300);
+        let mut new = Vec::new();
+        for i in 0..6300 {
+            let tag = if i % 3 == 0 { "edit" } else { "line" };
+            new.extend_from_slice(format!("{tag}{i}\n").as_bytes());
+        }
+        let script = edit_script(
+            &split_lines(&old),
+            &split_lines(&new),
+            WhitespaceMode::Exact,
+            MAX_EDIT_DISTANCE,
+        );
+        assert!(!script.minimal);
+
+        let (added, deleted) = diff_line_counts(&old, &new).unwrap();
+        assert!(added > 2100 && added < 2300, "added {added}");
+        assert_eq!(added, deleted);
+        let hunks = enumerate_hunks(&old, &new).unwrap();
+        assert!(hunks_round_trip(&old, &new, &hunks));
+    }
+
+    #[test]
+    fn coarse_block_honors_the_whitespace_mode() {
+        let old = [numbered("old", 0..3000), b"keep  this\n".to_vec()].concat();
+        let new = [numbered("new", 0..3000), b"keep this\n".to_vec()].concat();
+        let (old_lines, new_lines) = (split_lines(&old), split_lines(&new));
+        for (mode, tail_changed) in [
+            (WhitespaceMode::Exact, true),
+            (WhitespaceMode::IgnoreSpaceChange, false),
+            (WhitespaceMode::IgnoreAllSpace, false),
+        ] {
+            let changes = myers_changed(&old_lines, &new_lines, mode, MAX_EDIT_DISTANCE);
+            assert!(!changes.minimal);
+            assert_eq!(changes.old[3000], tail_changed);
+            assert_eq!(changes.new[3000], tail_changed);
+        }
+    }
+
+    #[test]
+    fn merge_refuses_a_side_past_the_edit_limit() {
+        let tail = numbered("tail", 0..100);
+        let base = [numbered("old", 0..2100), tail.clone()].concat();
+        let ours = [numbered("new", 0..2100), tail.clone()].concat();
+        let mut theirs = base.clone();
+        theirs.extend_from_slice(b"theirs\n");
+
+        // A large change at the very end needs no search, so it stays exact.
+        let appended = [base.clone(), numbered("more", 0..5000)].concat();
+        assert_eq!(
+            merge_blob_3way(&base, &appended, &base),
+            Some(appended.clone())
+        );
+
+        assert_eq!(merge_blob_3way(&base, &ours, &theirs), None);
+        // The same inputs merge clean with no limit, so the limit added this
+        // conflict.
+        let merged = [ours.clone(), b"theirs\n".to_vec()].concat();
+        assert_eq!(
+            merge_within_edits(&base, &ours, &theirs, usize::MAX),
+            Some(merged)
+        );
+    }
+
+    #[test]
+    fn merge_stays_exact_up_to_the_edit_limit() {
+        let tail = numbered("tail", 0..100);
+        let base = [numbered("old", 0..2048), tail.clone()].concat();
+        let ours = [numbered("new", 0..2048), tail].concat();
+        let mut theirs = base.clone();
+        theirs.extend_from_slice(b"theirs\n");
+        let merged = [ours.clone(), b"theirs\n".to_vec()].concat();
+        assert_eq!(merge_blob_3way(&base, &ours, &theirs), Some(merged));
+    }
+
+    #[test]
+    fn merge_of_rewritten_short_lines_conflicts() {
+        let blob = |line: &[u8; 2]| line.repeat(16 * 1024);
+        assert_eq!(
+            merge_blob_3way(&blob(b"a\n"), &blob(b"b\n"), &blob(b"c\n")),
+            None
+        );
+    }
+
+    #[test]
+    fn merge_refuses_a_blob_above_the_chunk_threshold() {
+        let threshold = usize::try_from(crate::worktree::CHUNK_THRESHOLD).unwrap();
+        let blob = |len: usize| {
+            let mut out = Vec::new();
+            for i in 0..=len / 80 {
+                out.extend_from_slice(format!("{i:079}\n").as_bytes());
+            }
+            out.truncate(len);
+            out
+        };
+        let sides = |base: &[u8]| {
+            let (mut ours, mut theirs) = (base.to_vec(), base.to_vec());
+            ours[0] = b'z';
+            theirs[threshold - 1000] = b'z';
+            (ours, theirs)
+        };
+
+        let at_threshold = blob(threshold);
+        let (ours, theirs) = sides(&at_threshold);
+        assert!(merge_blob_3way(&at_threshold, &ours, &theirs).is_some());
+
+        // One input above the threshold is enough to refuse.
+        let grown = |blob: &[u8]| [blob, b"\n"].concat();
+        assert_eq!(merge_blob_3way(&grown(&at_threshold), &ours, &theirs), None);
+        assert_eq!(merge_blob_3way(&at_threshold, &grown(&ours), &theirs), None);
+        assert_eq!(merge_blob_3way(&at_threshold, &ours, &grown(&theirs)), None);
     }
 
     // ---- merge_blob_3way ----
@@ -2569,5 +3186,28 @@ mod tests {
             unified_hunks_opts(&old, &new, DEFAULT_CONTEXT_LINES, WhitespaceMode::Exact).unwrap();
         assert_eq!(DEFAULT_CONTEXT_LINES, 3);
         assert_eq!(context_line_count(&hunks), 6);
+    }
+    #[test]
+    fn backtrack_tie_keeps_the_earlier_duplicate() {
+        // Replacing the first line leaves either old duplicate as an equally
+        // short alignment. The tie keeps old[0] and deletes old[1].
+        let old = split_lines(b"a\na\n");
+        let new = split_lines(b"b\na\n");
+        let changes = myers_changed(&old, &new, WhitespaceMode::Exact, 2);
+        assert!(changes.minimal);
+        assert_eq!(changes.old, vec![false, true]);
+        assert_eq!(changes.new, vec![true, false]);
+    }
+
+    #[test]
+    fn stopped_search_tie_keeps_the_common_tail() {
+        // One insertion reaches the first new "a", but keeps no more lines
+        // than the origin plus the common tail. The origin wins that tie.
+        let old = split_lines(b"a\n");
+        let new = split_lines(b"b\na\na\na\n");
+        let changes = myers_changed(&old, &new, WhitespaceMode::Exact, 1);
+        assert!(!changes.minimal);
+        assert_eq!(changes.old, vec![false]);
+        assert_eq!(changes.new, vec![true, true, true, false]);
     }
 }

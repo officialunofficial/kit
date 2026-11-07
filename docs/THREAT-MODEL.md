@@ -384,8 +384,8 @@ selected via `attest.secp256k1_key_path` and `attest.p256_key_path`.
 
 ### 6.1 Keystore backends
 
-Issue-complete V1 adds user-scoped software, OS-native, Linux desktop/headless,
-and YubiKey-backed keystore backends selected by `kit key ...`,
+User-scoped software, macOS Keychain, and Linux Secret Service backends are
+selected by `kit key ...`,
 `signer = keystore`, and `attest.signer = keystore`.
 
 Security assumptions:
@@ -393,8 +393,7 @@ Security assumptions:
 - Keystores are user-scoped, not repo-scoped. On Unix-like systems the software
   default root is `$XDG_DATA_HOME/kit/keys/`, falling back to
   `~/.local/share/kit/keys/`; `software-raw` persists under a raw-specific
-  subtree, and `systemd-creds` uses a separate user data subtree for encrypted
-  credential files.
+  subtree.
 - Keystore selectors (`signer`, `key.backend`, and every `key.*_ref`) are
   user-scoped. A hostile repo cannot select a backend, label, key reference, or
   signing mode.
@@ -407,31 +406,21 @@ Security assumptions:
 - `software-raw:<label>` is the explicit raw-file backend. It
   keeps deterministic raw-key behavior for tests and is not the secure
   default.
-- Linux Secret Service, macOS Keychain, and `systemd-creds` store
-  extractable 32-byte signing secrets behind their
+- Linux Secret Service and macOS Keychain store extractable 32-byte signing
+  secrets behind their
   platform protection boundary. They do not claim hardware binding,
   non-extractability, or user presence unless a future implementation changes
   the storage primitive and capability report together.
 - Linux Secret Service is a desktop/session backend and may fail when no D-Bus
-  service is available or the session is locked. `systemd-creds` is the
-  headless/server Linux backend and shells out with argv tokens, not shell
-  interpolation. The encrypted `software` backend auto-selects Secret Service
-  only when a desktop session is detected and the protector opens cleanly;
-  Secret Service errors fail closed rather than silently falling back to a
-  weaker protector. `systemd-creds` is selected for headless/server Linux when
-  no desktop Secret Service session is detected, and writes fail closed if no
-  usable protector is available.
-- YubiKey OpenPGP exposes existing Ed25519 signing-slot keys. YubiKey PIV
-  exposes existing P-256 certificate-backed slots (`piv-9a`, `piv-9c`,
-  `piv-9e`). Both are non-extractable and device-bound from kit's point of
-  view. Keystore V1 does not accept YubiKey PINs through environment variables;
-  PIN- or touch-required signing fails closed with typed authentication errors
-  until a bounded prompt provider is implemented.
-- FIDO2/CTAP WebAuthn signatures remain wired through the external signer path
-  because the current keystore `KeySigner` API returns only a signature and
-  cannot carry WebAuthn authenticator data plus client data JSON. The YubiKey
-  keystore fails closed for `fido2-*`/`ctap-*` P-256 labels rather than emitting
-  incomplete assertions.
+  service is available or the session is locked. The encrypted `software`
+  backend selects Secret Service only when a desktop session is detected and
+  the protector opens cleanly. Errors fail closed. No headless Linux protector
+  is implemented.
+- `systemd-creds` and YubiKey are reserved backend names. Opening either returns
+  `BackendUnavailable`; neither stores keys nor signs. Hardware binding,
+  OpenPGP/PIV slot discovery, PIN/touch handling, and FIDO2/CTAP label routing
+  are not implemented in these backends. WebAuthn assertions use the external
+  signer path, whose protocol carries the full assertion metadata.
 - Signing commands never auto-generate keystore keys. Users must run
   `kit key generate` or `kit key import` explicitly.
 

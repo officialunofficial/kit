@@ -145,7 +145,10 @@ Working-tree commands:
   Myers diff with git's change-compaction, so the output **byte-matches
   `git diff`** apart from the abbreviated `index` ids, which are BLAKE3
   prefixes rather than SHA-1 (git's optional indent heuristic is not
-  applied).
+  applied). The search for a minimal diff stops at 4096 line edits, which
+  keeps its memory near 64 MiB. Past that, `diff` and `show` keep the best
+  alignment that the search reached, and report the rest as replaced.
+  Such a patch still applies, but it can be larger than git's.
   `--name-only` instead lists one changed path per line; `--name-status`
   prefixes each with a status letter (`A`/`D`/`M`; `T` marks a kit mode
   change). `--stat` shows a diffstat: one `<name> | <count> <graph>` row
@@ -391,7 +394,14 @@ History / commits:
   `-M`/`-C`) and with merges (the search runs per relevant parent,
   first-parent-wins, same as the positional default). This is a
   **documented divergence** &mdash; the default `--ignore-rev` fall-through stays
-  byte-identical to git; see "Divergences from Git" below. Blame is
+  byte-identical to git; see "Divergences from Git" below.
+  Blame rejects files above 100,000 lines, including file-history roots.
+  After trimming the common prefix, the LCS comparison table is capped at
+  64 MiB. Larger comparisons use the line diff's bounded Myers search. It
+  stays minimal up to 4096 edits; beyond that, unaligned lines keep the newer
+  commit as their origin. Reassembly, line buffers, and attribution memory
+  grow linearly with file size; the table cap is not a total memory cap.
+  The history walk is
   **merge-aware by default** (like `git blame`): at a merge, a line is
   credited to whichever parent's side actually wrote it, so a line merged in
   from a side branch is attributed to its authoring commit rather than the
@@ -888,8 +898,9 @@ workflow. A path where both sides changed the **same regular file on
 disjoint lines** is auto-merged line-by-line (the union of both edits, no
 markers) &mdash; changes on different lines merge cleanly even when adjacent. A
 conflict is only raised when the two sides' changed regions **overlap**
-(modify the same or interleaving lines), or for binary files. When a 3-way
-merge cannot auto-resolve a path, the command:
+(modify the same or interleaving lines), for binary files, for a file above
+the 1 MiB chunk threshold, or when the line diff of a side stops at its limit
+of 4096 edits. When a 3-way merge cannot auto-resolve a path, the command:
 
 1. Applies the merge's **clean (non-conflicting) changes** to the index
    and worktree (so, for example, files the operation adds/removes/modifies away
@@ -1100,10 +1111,9 @@ Remote / sync:
   `Writing objects: N objects, B bytes` while building/uploading the
   outgoing pack, `Unpacking objects: N objects` while applying a
   downloaded one. The counts are real (objects actually staged/unpacked,
-  bytes actually handed to the transport); kit never fabricates git's
-  `Enumerating/Counting/Compressing objects` or `Total N (delta D)` lines
-  &mdash; kit's transport is one-object-per-pack and computes no cross-branch
-  delta graph. Progress shows only when stderr is a tty; `-q`/`--quiet`
+  bytes actually handed to the transport); kit does not print git's
+  `Enumerating/Counting/Compressing objects` or `Total N (delta D)` lines.
+  Progress shows only when stderr is a tty; `-q`/`--quiet`
   forces it off, and `KIT_PROGRESS=always`/`never` overrides the
   tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
 - `kit serve [--idle-timeout-secs <secs>] [--max-session-secs <secs>] <path>` &mdash; internal SSH
@@ -1540,9 +1550,7 @@ These are documented behaviors, not bugs:
   `[main <hash>] <subject>` plus diffstat, `Fast-forward`).
 - **git's object-count / delta-compression progress lines**
   (`Enumerating/Counting/Compressing objects`, `Total N (delta D)`) are
-  **not** emitted: kit's transport is one-object-per-pack and computes
-  no cross-branch delta graph, so those specific numbers would be
-  fabricated. `clone`/`push`/`pull`/`fetch` do stream an honest
+  **not** emitted. `clone`/`push`/`pull`/`fetch` stream an honest
   `Writing objects: N objects, B bytes` / `Unpacking objects: N objects`
   progress line &mdash; real counts only; see "Transfer progress"
   above.
@@ -1646,10 +1654,11 @@ which routes them to the user scope automatically.
 | `attest.signer` | `repo-key` / `keystore` / `external` | `repo-key` | User-scoped attestation signer |
 | `grant.webauthn_rp` | `<rp_id> <origin>...` (repeatable; `\|` separates entries in one value) | unset | User-scoped only. Pins the `WebAuthn` relying parties `kit grant`/`epoch`/`visibility` accept for `webauthn-p256` signatures; unset refuses them |
 
-Keystore backend names include `software`, `software-raw`, `macos-keychain`,
-`linux-secret-service`, `systemd-creds`, and `yubikey`
-when the target build enables the corresponding backend feature. Security-
-sensitive selector keys are ignored from repo-local config; set them in
+Implemented keystore backends are `software`, `software-raw`, `macos-keychain`,
+and `linux-secret-service`. The OS backends require the matching target and
+feature. `systemd-creds` and `yubikey` are reserved names that return
+`BackendUnavailable`. Security-sensitive selector keys are ignored from
+repo-local config; set them in
 `$XDG_CONFIG_HOME/kit/config` or with explicit command flags.
 
 ### HTTPS certificate trust

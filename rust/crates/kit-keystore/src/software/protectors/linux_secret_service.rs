@@ -78,8 +78,8 @@ impl KeyProtector for LinuxSecretServiceProtector {
 }
 
 /// Heuristic for whether a desktop session (and thus a Secret Service
-/// provider) is likely available, used to decide whether to prefer this
-/// protector over systemd-creds.
+/// provider) is likely available. Without one, encrypted software writes
+/// fail closed because no headless Linux protector is implemented.
 pub(crate) fn linux_desktop_session_available() -> bool {
     std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
         || std::env::var_os("XDG_CURRENT_DESKTOP").is_some()

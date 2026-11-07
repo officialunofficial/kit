@@ -185,6 +185,21 @@ mod tests {
     }
 
     #[test]
+    fn reverting_over_rewritten_short_lines_conflicts() {
+        let (_d, s) = store();
+        let blob = |line: &[u8; 2]| line.repeat(16 * 1024);
+        let parent_tree = make_tree(&s, vec![entry(b"f", put_blob(&s, &blob(b"a\n")))]);
+        let parent = make_commit(&s, parent_tree, &[], "parent");
+        let target_tree = make_tree(&s, vec![entry(b"f", put_blob(&s, &blob(b"b\n")))]);
+        let target = make_commit(&s, target_tree, &[parent], "target");
+        let ours = make_tree(&s, vec![entry(b"f", put_blob(&s, &blob(b"c\n")))]);
+
+        let r = revert(&s, target, ours).unwrap();
+        assert_eq!(r.conflicts.len(), 1);
+        assert_eq!(r.conflicts[0].kind, ConflictKind::ModifyModify);
+    }
+
+    #[test]
     fn reverting_an_add_removes_the_file() {
         let (_d, s) = store();
         let blob_a = put_blob(&s, b"aaa");

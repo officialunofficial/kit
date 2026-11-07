@@ -24,15 +24,15 @@ by SPEC-EXTERNAL-SIGNER, not here.
 ## 1. Purpose
 
 `kit` treats signatures as trust anchors for commits, remix objects, and
-DSSE-wrapped in-toto attestations. Today, long-term signing keys are raw
+DSSE-wrapped in-toto attestations. The default repo-key signer reads raw
 32-byte files under `.kit/keys/`, protected by strict local filesystem
-hardening. That is a useful baseline, but it is not a
-cross-platform vault policy.
+hardening. Keystore signing selects encrypted software records or OS-backed
+storage through user-scoped configuration.
 
 `kit-keystore` provides a generic signing-key vault abstraction over
-software, OS-native, and hardware-backed key stores. It is deliberately a
-signing keystore, not a protocol lifecycle system. It returns signer handles;
-callers decide what those signers are allowed to sign.
+software and OS-native key stores. Hardware backend names are reserved. It
+returns signing handles without managing their protocol lifecycle. Callers
+decide what those signers are allowed to sign.
 
 `kit-keystore` provides the crate, API, CLI, config, a software backend (both
 a deterministic raw-file mode and an encrypted-at-rest mode), OS-native
@@ -61,12 +61,7 @@ Shipped against this spec:
 - Software-raw backend (`software-raw:<label>`), reusing
   `kit_core::sign::{load_raw_32, save_raw_32}` hardening.
 - OS-native backends behind feature flags: `macos-keychain`,
-  `linux-secret-service`, `systemd-creds`. (Windows is not a supported
-  target &mdash; see §6.4.)
-- `YubiKey` backend behind `backend-yubikey` &mdash; OpenPGP signing slot (Ed25519)
-  and PIV signing slot (P-256). secp256k1 is reported `UnsupportedAlgorithm`;
-  FIDO2/CTAP keys are not handled in this backend and remain on the external
-  signer path.
+  `linux-secret-service`. Windows is not a supported target (see §6.4).
 - `kit key {generate,list,import,export,delete}` CLI with the flags and
   defaults specified in §9.
 - Keystore-backed commit signing (`signer = keystore`) and attestation
@@ -76,6 +71,9 @@ Shipped against this spec:
 
 Not yet shipped against this spec:
 
+- `systemd-creds` and YubiKey backends. Their `BackendKind` variants and
+  key-ref tokens exist, but `open_backend` returns `BackendUnavailable`.
+  Neither `backend-systemd-creds` nor `backend-yubikey` is a Cargo feature.
 - In-memory backend (`BackendKind::Memory` exists in the enum, but no
   `MemoryKeystore` is implemented in this build).
 - External signer keystore bridge (`BackendKind::External`) &mdash; `open_backend`
@@ -419,10 +417,9 @@ recovery byte, while that scheme signs a Keccak-256 digest and needs `v`.
   The digest is signed as given; the signer adds no hashing or domain
   separation.
 - Only a secp256k1 key held by the `software` or `software-raw` backend
-  implements it. Every other signer &mdash; the OS-native backends and
-  `YubiKey`, where secp256k1 is anyway `UnsupportedAlgorithm` &mdash; keeps the
-  default, which fails closed with `UnsupportedOperation`. A non-secp256k1
-  software key returns `UnsupportedAlgorithm`.
+  implements it. The OS-native signers keep the default, which fails closed
+  with `UnsupportedOperation`. The YubiKey backend cannot be opened.
+  A non-secp256k1 software key returns `UnsupportedAlgorithm`.
 - It never exports secret material, and callers must not fall back to
   `KeyExporter` when it is unsupported: the caller reports that the key
   cannot sign natively and offers the import path (an external wallet
@@ -634,14 +631,12 @@ Storage-security modes:
   - Bind record version, backend token, label, algorithm, public key, key ID,
     and key attributes as AEAD associated data.
   - Protect or wrap the DEK with an OS-native protection mechanism for the
-    current platform: macOS Keychain, Linux Secret Service, or
-    `systemd-creds` for headless/server Linux.
+    current platform: macOS Keychain or Linux Secret Service.
   - On Linux, the `software` backend may auto-select Secret Service only when a
     desktop session is detected and the protector opens cleanly. Secret Service
     errors must fail closed rather than silently falling back to a weaker
-    protector. The backend may select `systemd-creds` for headless/server use
-    when no desktop Secret Service session is detected, and must fail closed if
-    no usable protector is available.
+    protector. With no desktop session or usable Secret Service, writes fail
+    closed. No headless Linux protector is implemented.
   - Fail closed if no configured OS protection mechanism is available.
   - Never derive the encryption key from a kit-managed password, hidden
     passphrase, repo data, or environment variable.
@@ -802,7 +797,9 @@ Requirements:
 
 ### 6.6 systemd-creds backend
 
-Feature name: `backend-systemd-creds`.
+Not implemented. `open_backend(BackendKind::SystemdCreds)` returns
+`BackendUnavailable`. The requirements below describe the reserved backend;
+`backend-systemd-creds` is not a Cargo feature.
 
 Default target: Linux headless/server.
 
@@ -818,7 +815,9 @@ Requirements:
 
 ### 6.7 YubiKey backend
 
-Feature name: `backend-yubikey`.
+Not implemented. `open_backend(BackendKind::YubiKey)` returns
+`BackendUnavailable`. The requirements below describe the reserved backend;
+`backend-yubikey` is not a Cargo feature.
 
 Requirements:
 
@@ -838,22 +837,9 @@ Requirements:
 
 Current implementation status:
 
-- The shipped YubiKey backend covers OpenPGP signing slots (Ed25519) and PIV
-  signing slots (P-256). secp256k1 is reported as `UnsupportedAlgorithm`.
-- The backend is read-only over the keystore API: `can_generate`,
-  `can_import`, `can_export`, and `can_delete` are all false; provisioning is
-  done out of band with `ykman` / `gpg --card-edit`.
-- `Capabilities::supports_user_presence` is derived from the discovered slot
-  policies (`PinPolicy != Never` or `TouchPolicy ∈ { Always, Cached }`).
-  `supports_device_bound` and `supports_non_extractable` are true iff at least
-  one signing key was discovered.
-- FIDO2/CTAP slots are not exposed by this backend at all. They remain on the
-  external signer path. The "fail closed through the keystore API for
-  FIDO2/CTAP labels" requirement is enforced explicitly: a `fido2-`/`ctap-`
-  prefixed label hits a dedicated guard that returns `UnsupportedOperation`
-  (directing callers to the CTAP external signer), while any other label that
-  does not resolve to an OpenPGP or PIV signing slot returns `KeyNotFound`.
-  Both fail closed.
+No hardware discovery, slot signing, capability reporting, or FIDO2/CTAP label
+routing is implemented in this backend. Every YubiKey key ref fails at backend
+construction, regardless of its label. External WebAuthn signers use §12.
 
 ### 6.8 External and cloud backends
 
@@ -960,8 +946,8 @@ Precedence:
 - CLI flags override config for the command being run because they are explicit
   user input.
 - A configured full key ref's backend must not be ignored. For example,
-  `key.default_ref = yubikey:main` selects the YubiKey backend for signing; it
-  must not be silently reinterpreted as `software:main` because
+  `key.default_ref = yubikey:main` returns `BackendUnavailable`; it must not
+  be silently reinterpreted as `software:main` because
   `key.backend = software` is also set.
 
 ### 8.2 Repo-forbidden keys
@@ -1414,15 +1400,10 @@ the per-section requirements above remain normative.
   (XChaCha20-Poly1305, length-prefixed AAD, OS protector wrapping the DEK).
 - Move raw-file persistence to `software-raw`. **Shipped** as
   `SoftwareRawKeystore`.
-- Implement macOS Keychain, Linux Secret Service, `systemd-creds`, and
-  YubiKey OpenPGP/PIV/FIDO2 backends behind feature flags with honest
-  capabilities. **Shipped** for macOS Keychain (`macos-keychain`), Linux
-  Secret Service (`linux-secret-service`), `systemd-creds`
-  (`systemd-creds`), and YubiKey OpenPGP + PIV (`backend-yubikey`).
-  **Not shipped:** a dedicated YubiKey FIDO2/CTAP routing in this backend
-  &mdash; FIDO2 stays on the external signer path per §6.7. **Removed:**
-  the Windows Credential Manager backend (§6.4) &mdash; Windows is not a
-  supported target.
+- macOS Keychain (`macos-keychain`) and Linux Secret Service
+  (`linux-secret-service`) are shipped behind feature flags.
+- `systemd-creds` and YubiKey are not implemented. Their reserved backend
+  names return `BackendUnavailable`. Windows is not supported (§6.4).
 - Add backend factory/resolution so CLI, commit signing, and attestation signing
   route by full key ref. **Shipped** &mdash; `open_backend` plus `selection_for`
   in `commands/key.rs`, mirrored in commit and attest paths.
@@ -1444,15 +1425,12 @@ the per-section requirements above remain normative.
 
 ## 16. Design decisions and defaults
 
-- `kit-keystore` includes macOS Keychain, Linux Secret Service,
-  `systemd-creds`, and YubiKey backends with capability
-  reports limited to what they actually implement.
+- `kit-keystore` includes macOS Keychain and Linux Secret Service backends.
+  The reserved `systemd-creds` and YubiKey backends return `BackendUnavailable`.
 - The encrypted software-file design is OS-protected envelope encryption. The
   `software` backend is encrypted-at-rest; raw-file storage is explicit via
   `software-raw`.
-- YubiKey support includes OpenPGP/PIV discovery and FIDO2/CTAP fail-closed
-  routing; bounded PIN/touch prompt signing is out of scope unless this spec
-  is amended.
+- YubiKey discovery, signing, and label routing are not implemented.
 - Commit signing and attestation signing deliberately share the same
   per-algorithm `key.*_ref` defaults; attestation-only key refs are out of
   scope unless a future need is identified and this spec is amended.
@@ -1497,4 +1475,4 @@ here adds a new requirement.
 | A configured full key ref's backend is authoritative | the ref routes to its backend; never reinterpreted via `key.backend` (§7, §8.1) |
 | Keystore signing is byte-equal to raw-file signing where determinism allows | golden equivalence vectors for deterministic software backends; verification-equivalence otherwise (§2.8, §14.3) |
 | The keystore never invents protocol-level domain separation | `sign` signs the supplied bytes under existing kit semantics (commit hash per §10, DSSE PAE per §11) (§5.6) |
-| FIDO2/CTAP labels fail closed through the keystore API | dedicated label guard returns `UnsupportedOperation`, routing to the external signer path (§6.7) |
+| YubiKey key refs fail closed | backend construction returns `BackendUnavailable` for every label (§6.7) |

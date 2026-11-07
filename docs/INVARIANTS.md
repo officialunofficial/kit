@@ -99,6 +99,55 @@ file object for a symlink produces an index that cannot be committed.
 holds at most one chunk per side plus manifests; rename fingerprints are
 memoized for one diff and confirmed by byte comparison.
 
+## The line diff has a fixed search budget
+
+**Always:** the line diff search stops at 4096 edits and keeps at most one
+position per diagonal per edit step, about 64 MiB. Up to the limit its output is
+the minimal Myers result. Past the limit a diff keeps the point of the last step
+that retains the most lines, with the common trailing lines it has not passed,
+and marks the rest changed. That script still turns the old side into the new
+side. A text merge reports a conflict when the diff of a side stops at the limit
+or an input is above the chunk threshold, so it never merges on a non-minimal
+script. The line tables and output of a diff still grow with the file.
+
+**Because:** edit distance and line count come from the content. A search that
+grows with either lets a small file exhaust memory. The limit is a constant, so
+every machine produces the same output.
+
+**If violated:** a rewritten file can exhaust memory in `diff`, `show`, `merge`,
+`cherry-pick`, `rebase` or `revert`, or the result can depend on the machine. A
+merge on a non-minimal script could be clean where a minimal script conflicts.
+
+**Enforced by:** core `rust/crates/kit-core/tests/line_diff_memory.rs`,
+`ops::diff::tests::proptest_search_matches_unbounded_reference`,
+`ops::diff::tests::proptest_script_stays_correct_at_any_limit`,
+`ops::diff::tests::proptest_merge_limit_only_adds_conflicts`,
+`ops::diff::tests::merge_refuses_a_blob_above_the_chunk_threshold`, and
+`ops::revert::tests::reverting_over_rewritten_short_lines_conflicts`.
+
+## Blame bounds its line comparison table
+
+**Always:** blame checks loaded line counts, including file-history roots.
+After trimming the common prefix, the LCS table is capped at 64 MiB before
+allocation. Larger comparisons use the line diff's bounded Myers search,
+which stays minimal up to 4096 edits. Beyond that, unmatched lines keep the
+newer origin. Within the LCS budget, duplicate-line matching is unchanged.
+Both paths honor whitespace normalization. Reassembly, line buffers, and
+attribution memory grow linearly with file size; the table cap does not
+bound the whole call.
+
+**Because:** a per-side line limit alone allows a quadratic table of tens of
+GiB for short lines. A bounded fallback preserves ordinary small edits to
+large files without allocating that table.
+
+**If violated:** a rewritten file can exhaust comparison memory during blame,
+or a small edit to an ordinary file can fail instead of retaining its origins.
+
+**Enforced by:** `ops::blame::tests::blame_attributes_a_rewritten_file_above_the_table_budget`,
+`blame_keeps_unchanged_origins_after_a_first_line_edit`,
+`blame_checks_the_line_limit_at_a_root`, `blame_table_budget_accepts_the_boundary`,
+and the counting allocator in `rust/crates/kit-core/tests/line_diff_memory.rs`.
+
 ## Requested transport identities are checked before effects
 
 **Always:** fetched packs and metadata match their requested keys. Sparse selections are

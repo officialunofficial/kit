@@ -106,8 +106,8 @@ Run top to bottom. Do not skip steps.
 - [ ] `CHANGELOG.md` has an entry for this version; move items from
       `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD`.
 - [ ] Version bumped wherever it is hard-coded: README install snippets,
-      `docs/INSTALL.md` (three sites: two
-      `VERSION=` snippets and the expected `kit version` output),
+      `docs/INSTALL.md` (four sites: two `VERSION=` snippets, the expected
+      `kit version` output, and the pinned `kit self update` example),
       `docs/LIBKIT.md` (the two `libkit` dependency snippets), the `"=X.Y.Z"`
       example in `CONTRIBUTING.md`, and the `vX.Y.Z` examples in `install.sh`
       usage text.
@@ -359,10 +359,9 @@ publish. Keep the token out of the repository.
 - **Partial publish**: if a publish fails mid-train, the crates that landed
   cannot be published again. Run the next attempt with `--exclude` for each
   crate that landed.
-- **Native deps**: `cargo publish` builds each crate with **default** features,
-  so no `libpcsclite` is needed (`kit-keystore`'s `backend-yubikey` is off by
-  default). No `protoc` is needed, because `kit-rpc` ships its generated
-  code in `generated/`.
+- **Native deps**: `cargo publish` builds each crate with **default** features.
+  No `protoc` is needed, because `kit-rpc` ships its generated code in
+  `generated/`. No hardware keystore backend is implemented.
 
 ## Publishing to npm
 
@@ -597,11 +596,10 @@ a small, auditable set of inputs. This section is the contract.
 - **Rust dependencies:** fully pinned via `Cargo.lock`. Every transitive dep is
   hash-pinned on each release build. The workspace's direct deps are kept
   deliberately small &mdash; see `rust/Cargo.toml` and each crate's `[dependencies]`.
-- **System libs:** default release builds link musl (Linux) or the platform C
-  runtime (macOS). Optional keystore backend features may use platform services
-  (Security.framework, D-Bus Secret Service, PC/SC, `systemd-creds`). These
-  are off by default, platform-gated, and fail closed
-  when the required service or device is unavailable. The Linux Secret Service
+- **System libs:** default release builds link glibc (Linux) or the platform C
+  runtime (macOS). OS keystore features use Security.framework or D-Bus Secret
+  Service. They are platform-gated and fail closed when the service is
+  unavailable. The Linux Secret Service
   feature selects the pure-Rust crypto runtime, not OpenSSL. Production
   `kit-bin` builds enable the target-appropriate software protector feature so
   `software:<label>` stores encrypted records by default, while the
@@ -628,35 +626,22 @@ Every new direct dependency added to a workspace `Cargo.toml` must:
 ### Keystore backend dependency review
 
 The optional keystore backend and envelope-encryption dependencies
-were reviewed for the V1 keystore. All are pinned in `Cargo.toml`, reflected in
-`Cargo.lock`, sourced from crates.io, accepted by `cargo deny`, and isolated
-from default builds unless listed as always-on.
+are sourced from crates.io. `Cargo.toml` sets their lower bounds, and
+`Cargo.lock` pins their resolved versions. The library enables OS backends
+only through features; production CLI builds enable the matching OS feature.
 
 | Dependency | Use | Gate | License |
 |---|---|---|---|
-| `chacha20poly1305 = 0.10.1` | XChaCha20-Poly1305 software-key envelope encryption | always-on keystore crypto | Apache-2.0 OR MIT |
-| `zeroize = 1.8.2` | Secret-memory clearing | always-on keystore crypto | Apache-2.0 OR MIT |
+| `chacha20poly1305 = 0.11.0` | XChaCha20-Poly1305 software-key envelope encryption | always-on keystore crypto | Apache-2.0 OR MIT |
+| `zeroize = 1.9.1` | Secret-memory clearing | always-on keystore crypto | Apache-2.0 OR MIT |
 | `security-framework = 3.7.0` | macOS Keychain bindings | `backend-macos-keychain` (macOS only) | MIT OR Apache-2.0 |
-| `keyring-core = 1.0.0` | Shared keyring abstraction | `backend-linux-secret-service` | MIT OR Apache-2.0 |
-| `zbus-secret-service-keyring-store = 1.0.0` | Linux Secret Service store | `backend-linux-secret-service` (Linux only; OpenSSL-free) | MIT OR Apache-2.0 |
-| `card-backend-pcsc = 0.5.1` | PC/SC card discovery | `backend-yubikey` | MIT OR Apache-2.0 |
-| `openpgp-card = 0.6.1` | OpenPGP card protocol | `backend-yubikey` | MIT OR Apache-2.0 |
-| `secrecy = 0.10.3` | PIN handling wrappers | `backend-yubikey` | Apache-2.0 OR MIT |
-| `der = 0.8.0` | DER parsing for PIV certs | `backend-yubikey` | Apache-2.0 OR MIT |
-| `yubikey = 0.9.0-pre.0` | YubiKey PIV discovery plus signing | `backend-yubikey` | BSD-2-Clause |
+| `keyring-core = 1.0.1` | Shared keyring abstraction | `backend-linux-secret-service` | MIT OR Apache-2.0 |
+| `zbus-secret-service-keyring-store = 1.0.1` | Linux Secret Service store | `backend-linux-secret-service` (Linux only; OpenSSL-free) | MIT OR Apache-2.0 |
 
-The `yubikey` prerelease is accepted because V1 PIV support needs mature PIV
-APDUs and no stable alternative matched the API; risk is contained by optional
-feature gating, existing-key-only support, fail-closed behavior, CI feature
-builds, and manual hardware validation. Remaining direct support deps are
-exact-pinned (`ed25519-dalek`, `getrandom`, `k256`, `p256`, `sha2`, `thiserror`,
-dev-only `tempfile`).
-
-`cargo deny check` finishes with `advisories ok, bans ok, licenses ok, sources
-ok`. Remaining warnings are duplicate crate versions from ecosystem splits and
-optional YubiKey/RustCrypto prerelease transitive stacks; they stay
-warnings, not release blockers, because they introduce no unapproved sources,
-yanked crates, or denied licenses. Live OS-native keystore tests are opt-in via
+`systemd-creds` and YubiKey are reserved backend names with no implementation
+or Cargo feature. No PC/SC or YubiKey dependency is in the keystore manifest.
+The remaining direct dependencies are listed in
+`rust/crates/kit-keystore/Cargo.toml`. Live OS backend tests are opt-in via
 `KIT_RUN_NATIVE_KEYSTORE_TESTS=1`.
 
 ### GitHub Actions dependencies
@@ -745,7 +730,7 @@ divergence between two builds of the same commit means a non-deterministic
 input has crept in (embedded timestamps, random seeds, absolute paths in debug
 info, unsorted directory reads) and must be fixed before the next tag.
 
-Binaries built on your local macOS are not expected to match GitHub's `macos-14`
+Binaries built on your local macOS are not expected to match GitHub's `macos-26`
 runner byte-for-byte unless your OS, SDK, and linker versions match. The Linux
 x86_64 build is the most reliable reproducibility target for third parties.
 

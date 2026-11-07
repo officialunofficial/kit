@@ -7,6 +7,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Blame caps its LCS comparison table at 64 MiB after trimming the common
+  prefix. Larger comparisons use the bounded line diff search. Reassembly,
+  line buffers, and attribution memory still grow with file size.
+- Mutation testing of changed lines uses paths relative to the Rust workspace.
+
+## [0.7.2] - 2026-11-06
+
 ### Security
 
 - `PackReader::read` limits the bytes it decodes from a pack to 32,768 times
@@ -18,6 +27,18 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reader reserves a buffer for it. The blocks of the frame must be able to
   decode to the claim. Before, a 15-byte entry could make the reader reserve
   1 GiB.
+
+### Fixed
+
+- The search of the line diff behind `diff`, `show`, `format-patch`, `add -p`
+  and the text merge now uses about 64 MiB at most, whatever the input. It stops
+  at 4096 line edits. Before, its memory grew with edits times lines, so
+  rewriting a 1 MiB text file with 80-byte lines cost about 10 GiB. Output is
+  unchanged up to the limit. Past it, a diff keeps the best alignment that the
+  search reached and reports the rest as replaced, and a text merge reports a
+  conflict. The line tables and output of a diff still grow with the file.
+- The text merge reports a conflict for a single blob above the 1 MiB chunk
+  threshold, the same as for a chunked file.
 
 ## [0.7.1] - 2026-11-04
 

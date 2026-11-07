@@ -407,7 +407,8 @@ fn abbrev(h: Option<Hash>) -> String {
 /// Emit a git-shaped `diff --git` header plus unified-diff hunks for one
 /// changed entry. The `index <old>..<new>` ids are abbreviated BLAKE3
 /// prefixes (longer than git's SHA-1 prefixes for the same `core.abbrev`),
-/// the one inherent divergence; everything else matches `git diff`.
+/// the one inherent divergence; everything else matches `git diff` until the
+/// line diff stops at its edit limit, where the hunks can be larger.
 ///
 /// Shared with `kit show` and `format-patch`, so a commit's diff body is
 /// byte-identical to `kit diff <parent> <commit>` when both use the default
