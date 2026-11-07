@@ -530,6 +530,13 @@ base/ours/theirs material lives only in this sidecar.
    wire.
 8. **HTTP hex-hash ETag**: compute `If-Match: "<64-hex>"` for a known
    hash; server echoes back matching state.
+9. **File transport lock stripes** (§5.1.1): for each full ref name, its
+   stripe (the first byte of the BLAKE3 digest of the name, two lowercase
+   hex digits) and its lock file `refs-<hh>.lock`. The vectors cover
+   `refs/heads/main` (stripe `ec`), a tag, a ref and a ref below it, the
+   grammar's edge characters, a name of 32 segments, names of 512 bytes, two
+   names that share a stripe, and every stripe in `00`..`0f` and `f0`..`ff`.
+   Fixtures: `rust/tests/golden/ref-locks/`.
 
 ---
 

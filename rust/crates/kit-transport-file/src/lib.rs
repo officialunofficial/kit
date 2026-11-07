@@ -286,6 +286,12 @@ fn ref_stripe(name: &str) -> usize {
     usize::from(kit_core::hash::hash(name.as_bytes())[0])
 }
 
+/// The lock file of stripe `stripe` under `<root>/.kit/refs/`:
+/// `refs-<hh>.lock`, `<hh>` the stripe as two lowercase hex digits.
+fn stripe_lock_file(stripe: usize) -> String {
+    format!("refs-{stripe:02x}.lock")
+}
+
 /// RAII guard around an OS-level file lock under `<root>/.kit/refs/`. The
 /// repo lock `.lock` is held exclusive by a step that reads and writes
 /// several files as one ([`FileTransport::with_ref_lock`]) and shared by a
@@ -335,11 +341,7 @@ impl RefLock {
 
     /// Acquire the exclusive lock of one stripe.
     fn acquire_stripe(root: &Path, stripe: usize) -> io::Result<Self> {
-        Self::open(
-            root,
-            &format!("refs-{stripe:02x}.lock"),
-            LockMode::Exclusive,
-        )
+        Self::open(root, &stripe_lock_file(stripe), LockMode::Exclusive)
     }
 
     fn open(root: &Path, file_name: &str, mode: LockMode) -> io::Result<Self> {
@@ -2076,6 +2078,40 @@ mod tests {
 
     /// The stripe is the first byte of the BLAKE3 digest of the name. Every
     /// process on a root must agree on it, so the mapping is pinned.
+    /// The golden vectors of SPEC-REFS section 5.1.1:
+    /// `rust/tests/golden/ref-locks/vectors.txt` lists, for each ref name,
+    /// its stripe and lock file. `scripts/golden/ref_locks_ref.py` checks
+    /// the same file independently.
+    #[test]
+    fn every_golden_ref_maps_to_its_stripe_and_lock_file() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/ref-locks");
+        let raw = fs::read(dir.join("vectors.txt")).unwrap();
+        let manifest = fs::read_to_string(dir.join("MANIFEST.txt")).unwrap();
+        let pinned = manifest
+            .lines()
+            .find_map(|l| l.strip_prefix("vectors.txt "))
+            .unwrap();
+        assert_eq!(
+            kit_core::hash::to_hex(&blake3_hash(&raw)),
+            pinned,
+            "vectors.txt does not match MANIFEST.txt"
+        );
+        let text = std::str::from_utf8(&raw).unwrap();
+        let mut count = 0;
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let fields: Vec<&str> = line.split(' ').collect();
+            let [name, hh, lock] = fields[..] else {
+                panic!("malformed vector {line:?}");
+            };
+            assert!(validate_ref_name(name), "{name}");
+            let stripe = usize::from_str_radix(hh, 16).unwrap();
+            assert_eq!(ref_stripe(name), stripe, "{name}");
+            assert_eq!(stripe_lock_file(ref_stripe(name)), lock, "{name}");
+            count += 1;
+        }
+        assert_eq!(count, 57);
+    }
+
     #[test]
     fn the_stripe_of_a_ref_is_pinned() {
         // First bytes of the BLAKE3 digests, computed with an independent

@@ -1,0 +1,71 @@
+# Ref lock stripes (SPEC-REFS 5.1.1): <full ref name> <stripe> <lock file>.
+# The stripe is the first byte of the BLAKE3 digest of the name's bytes, as
+# two lowercase hex digits. The lock file is refs-<stripe>.lock under
+# <root>/.kit/refs/. Checked by scripts/golden/ref_locks_ref.py.
+# The spec's example.
+refs/heads/main ec refs-ec.lock
+# The packmap of a branch.
+refs/kit/packmap/main 7b refs-7b.lock
+# A tag.
+refs/tags/v1.0.0 e2 refs-e2.lock
+# A ref and a ref below it.
+refs/heads/a 1b refs-1b.lock
+refs/heads/a/b 02 refs-02.lock
+# Edge characters of the grammar.
+refs/heads/0 0e refs-0e.lock
+refs/heads/A.b_c-D 0a refs-0a.lock
+refs/heads/MiXeD-Case 2c refs-2c.lock
+refs/heads/release/2024_09 5b refs-5b.lock
+refs/heads/x- 6e refs-6e.lock
+refs/heads/v1.0.0-rc.1_build 8e refs-8e.lock
+# 32 segments, the most a name may have.
+refs/heads/s1/s2/s3/s4/s5/s6/s7/s8/s9/s10/s11/s12/s13/s14/s15/s16/s17/s18/s19/s20/s21/s22/s23/s24/s25/s26/s27/s28/s29/s30 06 refs-06.lock
+# 512 bytes, the longest name.
+refs/heads/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 26 refs-26.lock
+refs/tags/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz 81 refs-81.lock
+# Ordinary names, one in each stripe 00..0f and f0..ff.
+refs/heads/topic-76 00 refs-00.lock
+refs/heads/topic-516 01 refs-01.lock
+refs/heads/topic-52 02 refs-02.lock
+refs/heads/topic-130 03 refs-03.lock
+refs/heads/topic-205 04 refs-04.lock
+refs/heads/topic-150 05 refs-05.lock
+refs/heads/topic-34 06 refs-06.lock
+refs/heads/topic-302 07 refs-07.lock
+refs/heads/topic-453 08 refs-08.lock
+refs/heads/topic-176 09 refs-09.lock
+refs/heads/topic-120 0a refs-0a.lock
+refs/heads/topic-24 0b refs-0b.lock
+refs/heads/topic-138 0c refs-0c.lock
+refs/heads/topic-131 0d refs-0d.lock
+refs/heads/topic-610 0e refs-0e.lock
+refs/heads/topic-334 0f refs-0f.lock
+refs/heads/topic-305 f0 refs-f0.lock
+refs/heads/topic-116 f1 refs-f1.lock
+refs/heads/topic-314 f2 refs-f2.lock
+refs/heads/topic-563 f3 refs-f3.lock
+refs/heads/topic-620 f4 refs-f4.lock
+refs/heads/topic-48 f5 refs-f5.lock
+refs/heads/topic-78 f6 refs-f6.lock
+refs/heads/topic-570 f7 refs-f7.lock
+refs/heads/topic-51 f8 refs-f8.lock
+refs/heads/topic-295 f9 refs-f9.lock
+refs/heads/topic-276 fa refs-fa.lock
+refs/heads/topic-74 fb refs-fb.lock
+refs/heads/topic-39 fc refs-fc.lock
+refs/heads/topic-55 fd refs-fd.lock
+refs/heads/topic-49 fe refs-fe.lock
+refs/heads/topic-270 ff refs-ff.lock
+# Ordinary names in other stripes.
+refs/heads/dev 3d refs-3d.lock
+refs/heads/feature/login 9a refs-9a.lock
+refs/heads/fix/issue-x 71 refs-71.lock
+refs/tags/v2.3.4 3c refs-3c.lock
+refs/remotes/origin/main cd refs-cd.lock
+refs/heads/docs 82 refs-82.lock
+refs/heads/hotfix 41 refs-41.lock
+refs/notes/commits 1d refs-1d.lock
+refs/heads/staging e1 refs-e1.lock
+refs/heads/team/alice/wip c8 refs-c8.lock
+# Shares refs/heads/main's stripe.
+refs/heads/shared-242 ec refs-ec.lock
