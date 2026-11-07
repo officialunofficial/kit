@@ -1608,3 +1608,36 @@ fn a_recreated_remote_never_matches_an_old_cursor() {
     let (report, _) = counted_fetch(&again, &target, &SyncOptions::default());
     assert!(!report.remote_unchanged);
 }
+
+/// An unchanged cursor checks that the object of each tracked tip is in the
+/// store, not the closure below it. An object below a tip that the store
+/// lost stays missing through such a fetch. The next fetch that does its
+/// full work, because the cursor changed or no record matches, checks the
+/// closure and fetches the chain again.
+#[test]
+fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    let blob = Object::Blob(Blob {
+        data: b"one\n".to_vec(),
+    })
+    .id()
+    .unwrap();
+    assert!(store.contains(&blob));
+    store.remove_object(&blob).unwrap();
+
+    let options = SyncOptions::default();
+    let (report, calls) = counted_fetch(&remote, &target, &options);
+    assert!(report.remote_unchanged && calls == 0);
+    assert!(!store.contains(&blob), "the skip does not walk the closure");
+
+    std::fs::remove_dir_all(layout.applied_packs_dir().join(".cursors")).unwrap();
+    let (report, _) = counted_fetch(&remote, &target, &options);
+    assert!(!report.remote_unchanged);
+    assert!(store.contains(&blob), "a full fetch heals the closure");
+}

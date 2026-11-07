@@ -111,11 +111,24 @@ else: a cursor carries no order.
   cursor was read.
 - A repository that is deleted and created again MUST NOT return a cursor
   that the old repository returned.
-- Reading the cursor MUST NOT read the refs one by one. Its cost does not grow
-  with the number of refs.
+- Reading the cursor MUST NOT read the refs one by one. It may list where
+  they are kept, as the file transport lists its ref directories.
 
 A cursor never replaces `read_ref` for a compare-and-swap. A client that
 needs one ref's current value reads it.
+
+A transport that cannot vouch for its cursor at the moment of a read offers
+none for that read. A client then does its full work, which is always
+correct.
+
+**Reference-client behavior.** A fetch reads the cursor before it lists the
+refs and records it after a complete fetch. A later fetch returns without
+another request when the cursor, the remote-tracking refs and the signature
+policy are as that fetch recorded them, and the object of every tracked tip is
+in the local store. It checks the tips and not the closure below them. An
+object below a tip that the local store lost stays missing through such a
+fetch. The next fetch that does its full work, because the cursor changed or
+no record matches it, checks the closure and fetches the chain again.
 
 **Reference-server behavior.** The memory transport's cursor is a number
 unique to the instance and the count of its committed ref writes. The file

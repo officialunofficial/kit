@@ -30,6 +30,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The file transport's repository cursor also covers the times of every
+  directory under `<root>/refs` (SPEC-REFS §5.1.2). kit 0.7.2 and earlier
+  write refs without counting, so on a root they shared with a newer kit a
+  fetch could skip a change. The transport now offers no cursor while a ref
+  directory was modified in the last 2 s, and a fetch then works in full.
+  Reading the cursor lists the ref directories: on one ext4 disk a no-change
+  fetch of 10,000 branches went from about 50 ms to about 60 ms.
 - Blame caps its LCS comparison table at 64 MiB after trimming the common
   prefix. Larger comparisons use the bounded line diff search. Reassembly,
   line buffers, and attribution memory still grow with file size.

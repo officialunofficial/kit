@@ -611,6 +611,9 @@ pub fn fetch_noop_setup(connect: &Connect, scratch: &Path, refs: usize) -> Resul
                 .map_err(|e| format!("{name}: {e}"))?;
         }
     }
+    // A file transport root offers no cursor while a ref directory was
+    // modified in the last 2 s; wait that out, as an idle remote would.
+    std::thread::sleep(SETTLE);
     let reader = Pusher::create(&scratch.join("reader"), &key)?;
     let tx = connect()?;
     let report = reader.fetch(&TransportSource::new(&*tx))?;
@@ -658,6 +661,10 @@ pub struct GrowRun {
     /// Pack list nodes on the branch's chain after the pushes.
     pub chain_nodes: usize,
 }
+
+/// How long `fetch-noop` setup waits after its last write, longer than the
+/// window in which the file transport withholds its cursor.
+const SETTLE: Duration = Duration::from_secs(3);
 
 /// Ref writes `fetch-noop` setup makes over one connection, two per branch.
 const SETUP_BATCH: usize = 1_000;

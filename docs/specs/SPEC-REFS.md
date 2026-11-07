@@ -385,6 +385,20 @@ The boot id changes on every boot, so a count lost in a crash never makes a
 cursor repeat. Where the system offers no boot id, the transport offers no
 cursor.
 
+The cursor also covers the path, inode number, modification time and change
+time of every directory under `<root>/refs`, read under the same shared repo
+lock, without reading any ref file. A rename or unlink in a directory changes
+its times, so a writer that keeps no count still changes the cursor when it
+writes a ref under `refs/`. kit 0.7.2 and earlier are such writers: they hold
+the repo lock exclusive and count nothing. File systems stamp times at a
+coarse granularity, so two writes close together can leave one time. While
+any of these directories was modified less than 2 s before the read, or
+after it, the transport offers no cursor for that read, and a client fetches
+in full. It offers none either while a directory vanishes during the read,
+when `<root>/refs` is not a directory, or when there are more than 65,536
+directories. Reading the cursor lists each directory, so its cost grows with
+the number of directory entries; it reads no ref file.
+
 *Coordination with local worktree operations:* the file transport's locks
 by themselves only serialize it against concurrent instances
 of itself &mdash; it does not, on its own, coordinate against a `commit`,

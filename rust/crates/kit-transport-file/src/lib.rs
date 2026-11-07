@@ -294,6 +294,16 @@ const REPO_ID_LEN: usize = 16;
 /// Domain separator of the file transport's repository cursor digest.
 const REPO_CURSOR_DOMAIN: &[u8] = b"kit.file-repo-cursor\0";
 
+/// How old the modification time of every ref directory must be before
+/// the file transport offers a cursor. A file system stamps times at a
+/// coarse granularity (a clock tick on Linux, up to 2 s on FAT), so two
+/// writes close together can leave one time. A time older than this window
+/// changes on any later write.
+const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The most ref directories a cursor covers. A root with more offers none.
+const MAX_CURSOR_DIRS: usize = 1 << 16;
+
 /// The file name of a stripe's lock, `refs-<hh>.lock`.
 fn stripe_lock_name(stripe: usize) -> String {
     format!("refs-{stripe:02x}.lock")
@@ -865,9 +875,16 @@ impl FileTransport {
 
     /// The repository cursor (SPEC-TRANSPORT §1.2): the BLAKE3 digest of
     /// [`REPO_CURSOR_DOMAIN`], the root's random id, the kernel's boot id
-    /// and the 256 stripe versions. Each stripe version is read under that
-    /// stripe's lock held shared, after the repo lock held shared, so no
-    /// write is half counted. No ref file is read.
+    /// and the 256 stripe versions, then the times of every directory under
+    /// `<root>/refs` ([`Self::stamp_ref_dirs`]). Each stripe version is read
+    /// under that stripe's lock held shared, after the repo lock held
+    /// shared, so no write is half counted. The directories are read under
+    /// the same shared repo lock, which excludes a writer that holds it
+    /// exclusive and keeps no count. No ref file is read.
+    ///
+    /// The directory times cover writers that keep no count. While any of
+    /// them is less than [`RACY_WINDOW`] old, the transport offers no
+    /// cursor, so a client fetches in full.
     ///
     /// A count is written without fsync. A process crash keeps it, because
     /// the page cache survives the process. An operating system crash can
@@ -879,6 +896,14 @@ impl FileTransport {
     /// [`RefFileError::Corrupt`] for a lock file or id file that holds
     /// neither nothing nor a valid value, or I/O.
     pub fn repo_cursor_digest(&self) -> Result<Option<Hash>, RefFileError> {
+        self.repo_cursor_digest_at(std::time::SystemTime::now())
+    }
+
+    /// [`Self::repo_cursor_digest`] read at `now`.
+    fn repo_cursor_digest_at(
+        &self,
+        now: std::time::SystemTime,
+    ) -> Result<Option<Hash>, RefFileError> {
         let Some(boot) = boot_id() else {
             return Ok(None);
         };
@@ -912,7 +937,107 @@ impl FileTransport {
             })?;
             input.extend_from_slice(&version.to_le_bytes());
         }
+        if !self.stamp_ref_dirs(now, &mut input)? {
+            return Ok(None);
+        }
         Ok(Some(kit_core::hash::hash(&input)))
+    }
+
+    /// Append to `out` the path, inode number, modification time and change
+    /// time of every directory under `<root>/refs`, sorted by path, or a
+    /// marker when there is none. A rename or unlink in a directory changes
+    /// its times, so a writer that keeps no stripe count still changes them.
+    /// No directory entry is read beyond its type, and no ref file is read.
+    ///
+    /// `false` when no cursor can be trusted: a directory was modified less
+    /// than [`RACY_WINDOW`] before `now` or after it, one vanished during
+    /// the walk (a write is in progress), `<root>/refs` is not a directory,
+    /// or there are more than [`MAX_CURSOR_DIRS`].
+    #[cfg(unix)]
+    fn stamp_ref_dirs(
+        &self,
+        now: std::time::SystemTime,
+        out: &mut Vec<u8>,
+    ) -> Result<bool, RefFileError> {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+        let top = self.root.join("refs");
+        match fs::symlink_metadata(&top) {
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                out.push(0);
+                return Ok(true);
+            }
+            Err(e) => return Err(RefFileError::Io(e)),
+            Ok(meta) if !meta.is_dir() => return Ok(false),
+            Ok(_) => {}
+        }
+        let Some(trusted_before) = now.checked_sub(RACY_WINDOW) else {
+            return Ok(false);
+        };
+        let mut stamps: Vec<(Vec<u8>, [i64; 5])> = Vec::new();
+        let mut pending = vec![(Vec::new(), top)];
+        while let Some((rel, dir)) = pending.pop() {
+            if stamps.len() == MAX_CURSOR_DIRS {
+                return Ok(false);
+            }
+            let meta = match fs::symlink_metadata(&dir) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(RefFileError::Io(e)),
+            };
+            if !meta.is_dir() || meta.modified().map_err(RefFileError::Io)? >= trusted_before {
+                return Ok(false);
+            }
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(RefFileError::Io(e)),
+            };
+            for entry in entries {
+                let entry = entry.map_err(RefFileError::Io)?;
+                if entry.file_type().map_err(RefFileError::Io)?.is_dir() {
+                    let mut sub = rel.clone();
+                    sub.push(b'/');
+                    sub.extend_from_slice(entry.file_name().as_bytes());
+                    pending.push((sub, entry.path()));
+                }
+            }
+            // The inode number fits in an i64 bit for bit; only equality
+            // matters.
+            #[allow(clippy::cast_possible_wrap)]
+            let ino = meta.ino() as i64;
+            stamps.push((
+                rel,
+                [
+                    ino,
+                    meta.mtime(),
+                    meta.mtime_nsec(),
+                    meta.ctime(),
+                    meta.ctime_nsec(),
+                ],
+            ));
+        }
+        stamps.sort();
+        out.push(1);
+        for (rel, fields) in &stamps {
+            out.extend_from_slice(&(rel.len() as u64).to_le_bytes());
+            out.extend_from_slice(rel);
+            for field in fields {
+                out.extend_from_slice(&field.to_le_bytes());
+            }
+        }
+        Ok(true)
+    }
+
+    /// No directory times to cover where the platform offers none, so no
+    /// cursor.
+    #[cfg(not(unix))]
+    fn stamp_ref_dirs(
+        &self,
+        _now: std::time::SystemTime,
+        _out: &mut Vec<u8>,
+    ) -> Result<bool, RefFileError> {
+        Ok(false)
     }
 
     /// The root's random id, created by the first caller that needs it.
@@ -2756,8 +2881,17 @@ mod tests {
         assert_eq!(count(&stripe), before + 1);
     }
 
+    /// A clock past the window in which a fresh directory time is not
+    /// trusted, as if every write so far had settled.
+    fn settled_now() -> std::time::SystemTime {
+        std::time::SystemTime::now() + RACY_WINDOW + std::time::Duration::from_secs(1)
+    }
+
+    /// The cursor once every write so far has settled.
     fn cursor(tx: &FileTransport) -> Hash {
-        tx.repo_cursor_digest().unwrap().expect("a cursor on Linux")
+        tx.repo_cursor_digest_at(settled_now())
+            .unwrap()
+            .expect("a cursor on Linux")
     }
 
     fn value(writer: usize, step: usize) -> Hash {
@@ -2805,11 +2939,10 @@ mod tests {
                 .unwrap()
         );
         assert!(seen.insert(cursor(&tx)), "a delete");
-        // A failed CAS changes nothing, and the cursor may stay.
-        let before = cursor(&tx);
+        // A failed CAS changes no ref. Its temporary file may still move a
+        // directory time, and with it the cursor, which only costs a fetch.
         let failed = tx.update_ref("refs/heads/b", RefWriteCondition::Missing, &value(1, 1));
         assert!(matches!(failed, Err(TransportError::RefConflict)));
-        assert_eq!(cursor(&tx), before);
         // Reading the cursor writes no ref.
         assert_eq!(tx.list_refs("refs/").unwrap().len(), 1);
     }
@@ -2928,5 +3061,92 @@ mod tests {
             // cursors are equal and the check above ran.
             assert!(equal > 0);
         });
+    }
+
+    /// A write as kit 0.7.2 makes it: the repo lock exclusive, the ref file
+    /// by a temporary file and a rename, no stripe count. `None` deletes.
+    fn old_writer(root: &Path, name: &str, value: Option<&Hash>) {
+        let _lock = RefLock::acquire(root).unwrap();
+        let dest = root.join(name);
+        match value {
+            Some(hash) => {
+                fs::create_dir_all(dest.parent().unwrap()).unwrap();
+                let tmp = temp_path(&dest).unwrap();
+                fs::write(&tmp, encode_ref_wire(hash)).unwrap();
+                fs::rename(&tmp, &dest).unwrap();
+            }
+            None => fs::remove_file(&dest).unwrap(),
+        }
+    }
+
+    /// Set the modification time of every directory under `<root>/refs`
+    /// `age` into the past, as if the last write were that old.
+    fn age_ref_dirs(root: &Path, age: std::time::Duration) {
+        let when = std::time::SystemTime::now() - age;
+        let mut dirs = vec![root.join("refs")];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    dirs.push(entry.path());
+                }
+            }
+            fs::File::open(&dir).unwrap().set_modified(when).unwrap();
+        }
+    }
+
+    /// A writer that takes the repo lock exclusive and writes no count, as
+    /// kit 0.7.2 does, still changes the cursor: a create, an overwrite, a
+    /// create in a new directory, an overwrite there and a delete each leave a cursor that
+    /// differs from the one before, or no cursor.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_writer_that_does_not_count_still_changes_the_cursor() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        let steps: [(&str, Option<Hash>); 5] = [
+            ("refs/heads/main", Some(value(0, 1))),
+            ("refs/heads/other", Some(value(1, 0))),
+            ("refs/heads/topic/x", Some(value(2, 0))),
+            ("refs/heads/topic/x", Some(value(2, 1))),
+            ("refs/heads/other", None),
+        ];
+        for (name, write) in steps {
+            age_ref_dirs(dir.path(), std::time::Duration::from_secs(60));
+            let before = tx.repo_cursor_digest().unwrap();
+            assert!(before.is_some(), "a settled root offers a cursor");
+            old_writer(dir.path(), name, write.as_ref());
+            assert_ne!(
+                tx.repo_cursor_digest().unwrap(),
+                before,
+                "{name}: an uncounted write left the cursor equal"
+            );
+            // Once the write is old enough to trust, the cursor is offered
+            // again and still differs.
+            let settled = tx.repo_cursor_digest_at(settled_now()).unwrap();
+            assert!(settled.is_some() && settled != before, "{name}");
+        }
+    }
+
+    /// Right after a write the directory's time is too fresh to tell a
+    /// later write in the same clock tick apart, so no cursor is offered.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_cursor_is_withheld_while_a_ref_directory_is_fresh() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        assert_eq!(tx.repo_cursor_digest().unwrap(), None);
+        assert!(tx.repo_cursor_digest_at(settled_now()).unwrap().is_some());
+        // A directory time ahead of the clock is no more trusted.
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3_600);
+        fs::File::open(dir.path().join("refs/heads"))
+            .unwrap()
+            .set_modified(ahead)
+            .unwrap();
+        assert_eq!(tx.repo_cursor_digest_at(settled_now()).unwrap(), None);
     }
 }

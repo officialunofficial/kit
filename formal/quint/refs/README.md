@@ -9,6 +9,7 @@ SPEC-CONCURRENCY with a layout server. A layout server is a server that embeds t
 | `refs_test.qnt` | Pinned interleavings for `refs.qnt`, mutants and witnesses included |
 | `serve.qnt` | `serveLocks`: `serve.lock` (shared by `kit serve` and a layout server), `server.lock` (exclusive, a layout server), the startup sweep of crashed uploads under an exclusive `serve.lock`, the worktree probe (SPEC-CONCURRENCY §2, §3.1). `servedNames`: SPEC-REFS v3 §2 served names and the §3 512-byte bound, as far as they affect safety |
 | `serve_test.qnt` | Pinned interleavings for `serve.qnt` (`serve_test`, `served_test`) |
+| `cursor.qnt` | SPEC-REFS §5.1.2 and SPEC-TRANSPORT §1.2: the file transport's repository cursor (stripe counts and ref directory times, withheld while a time is too fresh to trust) against writers that count and writers that do not, with coarse file-system timestamps |
 | `check.sh` | Runs every check below and compares each result with the expected one |
 
 ## Server rules covered
@@ -108,6 +109,8 @@ refs or values.
 | TLC | `refs3_stripeFirstFlock` `NoDeadlock`, slice `file3` | same, flock repo lock, single-ref writes may take the stripe first | ok, 7,902,603 states: with a flock repo lock the opposite order does not deadlock |
 | Apalache 0.62.2 | `refs2` Safety (full op space) | length `REFS_DEPTH` = 8 (~22 min under load) | ok for the model before the stripe locks; not rerun since |
 | Apalache 0.62.2 | `serve2` Safety, `served` Safety | length 12 / 8 | ok |
+| `quint run` | `cursor2` Safety | 20000 samples x 40 steps, seed 0x1 | ok |
+| TLC | `cursor2` Safety | exhaustive: 2 directories, grain 3, window 3, clock up to 12, 4 writes by either kind of writer, one kept cursor | ok, 39,794 states |
 
 Every mutant and witness in the table below was reached by TLC and/or
 Apalache as well as by its pinned `quint test` scenario (TLC state counts
@@ -138,6 +141,10 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 | `served_checkAfterRead` | `RefuseBeforeStorage`, `ExplicitRefusal` | pre-v3 behaviour (answering `main` from storage / as absent) |
 | `served_headCheckedLate` | `RefuseBeforeStorage`, `RefusedWritesNothing` | both AdvanceRefs names must be checked before the first write |
 | `served_listNoSkip` | `ListingServedOnly` | stray refs must be skipped in listings |
+| `cursor2_noGuard` | `NoStaleSkip` | without the window, two writes in one grain leave an equal cursor |
+| `cursor2_noStamps` | `NoStaleSkip` | counts alone miss a writer that does not count |
+| `cursor2_shortWindow` | `NoStaleSkip` | a window shorter than the grain is not enough |
+| `cursor2` | `CanaryNoEqualCursor` | a cursor is offered and confirmed equal (the model is not vacuous) |
 
 Canaries (`Canary*`, `Witness*` reachability) confirm the interesting
 states are visited: a sweep removes a crashed upload's file, a start skips
