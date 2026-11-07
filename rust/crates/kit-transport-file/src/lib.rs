@@ -2235,6 +2235,107 @@ mod tests {
         }
     }
 
+    /// Every temp file left under `dir`, at any depth.
+    fn temp_files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut todo = vec![dir.to_path_buf()];
+        while let Some(d) = todo.pop() {
+            for e in fs::read_dir(&d).unwrap().filter_map(Result::ok) {
+                let path = e.path();
+                if path.is_dir() {
+                    todo.push(path);
+                } else if e.file_name().to_string_lossy().contains(".tmp.") {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    /// A ref whose stripe is `stripe`, named so it clashes with nothing.
+    fn ref_in_stripe(stripe: usize) -> String {
+        (0..100_000)
+            .map(|k| format!("refs/tags/victim-{k}"))
+            .find(|n| ref_stripe(n) == stripe)
+            .unwrap()
+    }
+
+    /// Single-ref creates of `refs/heads/a` and `refs/heads/a/b`, in
+    /// different stripes, race on a fresh root each round, under every
+    /// write condition that can create. Whatever the interleaving, the root
+    /// stays usable: one name wins and reads back, the loser reports
+    /// `InvalidRef`, no temp file is left, refs in both stripes can still be
+    /// written, and the exclusive multi-file step still runs.
+    #[test]
+    fn a_ref_and_a_ref_below_it_race_and_leave_the_root_usable() {
+        use std::sync::{Arc, Barrier};
+        let (parent, child) = (0..1000)
+            .map(|i| (format!("refs/heads/a{i}"), format!("refs/heads/a{i}/b")))
+            .find(|(p, c)| ref_stripe(p) != ref_stripe(c))
+            .unwrap();
+        let victims = [
+            ref_in_stripe(ref_stripe(&parent)),
+            ref_in_stripe(ref_stripe(&child)),
+        ];
+        let conditions = [RefWriteCondition::Missing, RefWriteCondition::Any];
+        for round in 0..200usize {
+            let dir = tmp();
+            let barrier = Arc::new(Barrier::new(2));
+            let run = |name: String, condition: RefWriteCondition, v: &[u8]| {
+                let root = dir.path().to_path_buf();
+                let barrier = Arc::clone(&barrier);
+                let id = blake3_hash(v);
+                std::thread::spawn(move || {
+                    let t = FileTransport::new(root);
+                    barrier.wait();
+                    (t.update_ref(&name, condition, &id), id)
+                })
+            };
+            let a = run(parent.clone(), conditions[round % 2], b"parent");
+            let b = run(child.clone(), conditions[(round / 2) % 2], b"child");
+            let ((ra, ia), (rb, ib)) = (a.join().unwrap(), b.join().unwrap());
+            for r in [&ra, &rb] {
+                assert!(
+                    matches!(r, Ok(()) | Err(TransportError::InvalidRef(_))),
+                    "round {round}: a clash must be InvalidRef, got {r:?}"
+                );
+            }
+            assert_eq!(
+                usize::from(ra.is_ok()) + usize::from(rb.is_ok()),
+                1,
+                "round {round}: exactly one of the two names must win"
+            );
+            let t = FileTransport::new(dir.path());
+            let (winner, id, loser) = if ra.is_ok() {
+                (&parent, ia, &child)
+            } else {
+                (&child, ib, &parent)
+            };
+            assert_eq!(t.read_ref(winner).unwrap(), Some(id), "round {round}");
+            let leaked = temp_files_under(&dir.path().join("refs"));
+            assert!(leaked.is_empty(), "round {round}: temp files {leaked:?}");
+            for v in &victims {
+                t.update_ref(v, RefWriteCondition::Missing, &blake3_hash(v.as_bytes()))
+                    .unwrap();
+            }
+            let listed: Vec<String> = t
+                .list_refs("refs/heads/")
+                .unwrap()
+                .into_iter()
+                .map(|r| r.name)
+                .collect();
+            // The loser is absent. A read by its name can fail instead: its
+            // path runs through, or is, the winner's file system entry.
+            let want = winner.strip_prefix("refs/heads/").unwrap();
+            assert_eq!(listed, [want], "round {round}: loser {loser}");
+            t.with_ref_lock(|refs| {
+                refs.update_ref(winner, RefWriteCondition::Match(id), &blake3_hash(b"next"))
+            })
+            .unwrap()
+            .unwrap();
+        }
+    }
+
     #[test]
     fn writers_to_different_refs_all_commit() {
         use std::sync::Arc;
