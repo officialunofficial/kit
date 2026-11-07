@@ -48,16 +48,10 @@ pub enum Error {
         /// Why it did not resolve.
         source: revspec::Error,
     },
-    /// The ancestors of the excluded side of a range could not be read.
-    #[error("walk range base: {0}")]
-    WalkRangeBase(StoreError),
     /// The merge base of the two sides of a symmetric range could not be
     /// found.
     #[error("merge base: {0}")]
     MergeBase(StoreError),
-    /// The ancestors of the merge base could not be read.
-    #[error("walk merge base: {0}")]
-    WalkMergeBase(StoreError),
     /// An object in the walk is not a commit.
     #[error("not a commit: {}", hash::to_hex(.0))]
     NotACommit(Hash),
@@ -299,8 +293,7 @@ fn resolve_selection(
                 return Ok(None);
             };
             if let Some(base) = resolve_tip(repo, Some(exclude))? {
-                collect_excluded(repo.store(), base, &mut excluded, max_commits)
-                    .map_err(|e| e.into_error(Error::WalkRangeBase))?;
+                collect_excluded(repo.store(), base, &mut excluded, max_commits)?;
             }
             vec![include]
         }
@@ -312,8 +305,7 @@ fn resolve_selection(
             if let (Some(a), Some(b)) = (a, b)
                 && let Some(base) = find_merge_base(repo.store(), a, b).map_err(Error::MergeBase)?
             {
-                collect_excluded(repo.store(), base, &mut excluded, max_commits)
-                    .map_err(|e| e.into_error(Error::WalkMergeBase))?;
+                collect_excluded(repo.store(), base, &mut excluded, max_commits)?;
             }
             let tips: Vec<Hash> = a.into_iter().chain(b).collect();
             if tips.is_empty() {
@@ -372,48 +364,31 @@ impl PartialEq for HeapItem {
 
 impl Eq for HeapItem {}
 
-/// Why the excluded side of a range could not be collected.
-enum ExcludeError {
-    /// It holds more commits than one walk may read.
-    TooMany(usize),
-    /// An object could not be read.
-    Store(StoreError),
-}
-
-impl ExcludeError {
-    fn into_error(self, store: fn(StoreError) -> Error) -> Error {
-        match self {
-            Self::TooMany(limit) => Error::TooManyCommits { limit },
-            Self::Store(source) => store(source),
-        }
-    }
-}
-
-/// Add `base` and all of its ancestors to `excluded`. The walk records
-/// `base` even when its object is missing. A missing object or an object of
-/// another kind ends the walk on that path. Any other read error fails the
-/// walk. More than `max_commits` commits in `excluded` fails the walk too,
-/// because a part of the set would let excluded commits through.
+/// Add `base` and all of its ancestors to `excluded`, reading every one of
+/// them. A walk that ended at a commit it could not read would leave its
+/// ancestors out of `excluded`, and the range would show them.
+///
+/// # Errors
+/// [`Error::ReadCommit`] or [`Error::NotACommit`] when a commit of the walk
+/// cannot be read or is another kind of object. [`Error::TooManyCommits`]
+/// when `excluded` would hold more than `max_commits` commits, because a
+/// part of the set would let excluded commits through.
 fn collect_excluded(
     store: &ObjectStore,
     base: Hash,
     excluded: &mut HashSet<Hash>,
     max_commits: usize,
-) -> Result<(), ExcludeError> {
+) -> Result<(), Error> {
     let mut stack = vec![base];
     while let Some(current) = stack.pop() {
         if excluded.contains(&current) {
             continue;
         }
         if excluded.len() >= max_commits {
-            return Err(ExcludeError::TooMany(max_commits));
+            return Err(Error::TooManyCommits { limit: max_commits });
         }
         excluded.insert(current);
-        match store.read_object(&current) {
-            Ok(Object::Commit(commit)) => stack.extend(commit.parents),
-            Ok(_) | Err(StoreError::ObjectNotFound(_)) => {}
-            Err(source) => return Err(ExcludeError::Store(source)),
-        }
+        stack.extend(read_commit(store, current)?.parents);
     }
     Ok(())
 }
@@ -770,14 +745,83 @@ mod tests {
         let (_dir, store) = temp_store();
         let hashes = chain(&store, 5);
         let mut excluded = HashSet::new();
-        let err = collect_excluded(&store, hashes[4], &mut excluded, 4)
-            .err()
-            .unwrap()
-            .into_error(Error::WalkRangeBase);
+        let err = collect_excluded(&store, hashes[4], &mut excluded, 4).unwrap_err();
         assert!(matches!(err, Error::TooManyCommits { limit: 4 }), "{err:?}");
         let mut excluded = HashSet::new();
         assert!(collect_excluded(&store, hashes[4], &mut excluded, 5).is_ok());
         assert_eq!(excluded.len(), 5);
+    }
+
+    /// root - fork - mid - good, and fork - side; tip = merge(side, good).
+    /// Returns [root, fork, mid, good, side, tip].
+    fn range_fixture() -> (tempfile::TempDir, ObjectStore, [Hash; 6]) {
+        let (dir, store) = temp_store();
+        let root = put(&store, vec![], 1, 0);
+        let fork = put(&store, vec![root], 2, 1);
+        let mid = put(&store, vec![fork], 3, 2);
+        let good = put(&store, vec![mid], 4, 3);
+        let side = put(&store, vec![fork], 5, 4);
+        let tip = put(&store, vec![side, good], 6, 5);
+        (dir, store, [root, fork, mid, good, side, tip])
+    }
+
+    /// The loose object file of `hash`.
+    fn object_path(dir: &tempfile::TempDir, hash: &Hash) -> std::path::PathBuf {
+        let hex = hash::to_hex(hash);
+        kit_core::layout::RepoLayout::single(dir.path())
+            .objects_dir()
+            .join(&hex[..2])
+            .join(&hex[2..])
+    }
+
+    #[test]
+    fn an_excluded_side_with_an_unreadable_commit_fails() {
+        let (_dir, store, [.., good, side, tip]) = range_fixture();
+        let mut excluded = HashSet::new();
+        assert!(collect_excluded(&store, good, &mut excluded, 100).is_ok());
+        let all = query_with(None, false);
+        let range = select(&store, &[tip], &excluded, &all, 100).unwrap();
+        assert_eq!(ids(&range), [tip, side]);
+
+        // Without mid the excluded side would lack fork and root, and
+        // `good..tip` would print them.
+        let (dir, store, [_, _, mid, good, ..]) = range_fixture();
+        std::fs::remove_file(object_path(&dir, &mid)).unwrap();
+        let err = collect_excluded(&store, good, &mut HashSet::new(), 100).unwrap_err();
+        assert!(
+            matches!(err, Error::ReadCommit { hash, .. } if hash == mid),
+            "{err:?}"
+        );
+
+        // A corrupt commit: flip one byte of mid.
+        let (dir, store, [_, _, mid, good, ..]) = range_fixture();
+        let path = object_path(&dir, &mid);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        std::fs::write(&path, &bytes).unwrap();
+        let err = collect_excluded(&store, good, &mut HashSet::new(), 100).unwrap_err();
+        assert!(
+            matches!(err, Error::ReadCommit { hash, .. } if hash == mid),
+            "{err:?}"
+        );
+
+        // A parent that is not a commit.
+        let (_dir, store, [root, ..]) = range_fixture();
+        let not_a_commit = store
+            .write(
+                &kit_core::serialize::serialize(&Object::Tree(kit_core::object::Tree {
+                    entries: vec![],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let above = put(&store, vec![root, not_a_commit], 7, 6);
+        let err = collect_excluded(&store, above, &mut HashSet::new(), 100).unwrap_err();
+        assert!(
+            matches!(err, Error::NotACommit(hash) if hash == not_a_commit),
+            "{err:?}"
+        );
     }
 
     /// The order of the walk as one sort over the whole history: collect
@@ -803,7 +847,7 @@ mod tests {
             } else {
                 &commit.parents
             };
-            stack.extend(parents.iter().filter(|p| !excluded.contains(*p)));
+            stack.extend(parents.iter().filter(|fork| !excluded.contains(*fork)));
             commits.insert(hash, commit);
         }
         let mut in_degree: HashMap<Hash, usize> = commits.keys().map(|h| (*h, 0)).collect();
@@ -897,6 +941,23 @@ mod tests {
         hashes
     }
 
+    /// The excluded side as a lenient walk collects it: a missing object or
+    /// another kind of object ends a path. On a healthy history the strict
+    /// walk has to collect the same set.
+    fn lenient_excluded(store: &ObjectStore, base: Hash) -> HashSet<Hash> {
+        let mut excluded = HashSet::new();
+        let mut stack = vec![base];
+        while let Some(current) = stack.pop() {
+            if !excluded.insert(current) {
+                continue;
+            }
+            if let Ok(Object::Commit(commit)) = store.read_object(&current) {
+                stack.extend(commit.parents);
+            }
+        }
+        excluded
+    }
+
     #[test]
     fn the_streamed_walk_matches_one_sort_over_the_whole_history() {
         let mut compared = 0usize;
@@ -912,9 +973,8 @@ mod tests {
             };
             let other = hashes[rng.below(n)];
             let mut base = HashSet::new();
-            collect_excluded(&store, other, &mut base, usize::MAX)
-                .ok()
-                .unwrap();
+            collect_excluded(&store, other, &mut base, usize::MAX).unwrap();
+            assert_eq!(base, lenient_excluded(&store, other), "seed {seed}");
             let none = HashSet::new();
             let selections: [(Vec<Hash>, &HashSet<Hash>); 4] = [
                 (vec![tip], &none),

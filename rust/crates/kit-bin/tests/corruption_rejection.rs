@@ -326,6 +326,48 @@ fn corrupt_object(repo: &Repo, hex: &str) {
     fs::write(&path, &bytes).unwrap();
 }
 
+/// Run `kit <args>` and assert it fails and prints nothing to stdout.
+fn assert_rejected_silently(repo: &Repo, args: &[&str], case: &str) {
+    assert_rejected(repo, args, case);
+    let out = repo.run(args);
+    assert!(out.stdout.is_empty(), "{case}: printed a partial answer");
+}
+
+#[test]
+fn a_log_range_over_an_unreadable_commit_fails_and_prints_nothing() {
+    let repo = Repo::new();
+    range_fixture(&repo);
+    let healthy = repo.ok(&["log", "--oneline", "main..side"]).stdout;
+    let subjects: Vec<String> = String::from_utf8(healthy)
+        .unwrap()
+        .lines()
+        .map(|line| line.split_once(' ').unwrap().1.to_owned())
+        .collect();
+    assert_eq!(subjects, ["Merge branch 'main'", "x"]);
+
+    // Without m the excluded side would lack p and r, and the range would
+    // print them.
+    let repo = Repo::new();
+    let (m, _) = range_fixture(&repo);
+    fs::remove_file(object_file(&repo, &m)).unwrap();
+    for range in ["main..side", "side...main"] {
+        assert_rejected_silently(
+            &repo,
+            &["log", range],
+            "missing commit on the excluded side",
+        );
+    }
+
+    let repo = Repo::new();
+    let (m, _) = range_fixture(&repo);
+    corrupt_object(&repo, &m);
+    assert_rejected_silently(
+        &repo,
+        &["log", "main..side"],
+        "corrupt commit on the excluded side",
+    );
+}
+
 #[test]
 fn bisect_over_an_unreadable_commit_fails_and_offers_nothing() {
     let bisect = |repo: &Repo, good: &str| {
@@ -356,4 +398,38 @@ fn bisect_over_an_unreadable_commit_fails_and_offers_nothing() {
     check_exit(&out, "corrupt commit in the good set").unwrap();
     assert!(!out.status.success(), "corrupt commit in the good set");
     assert!(out.stdout.is_empty(), "offered a candidate");
+}
+
+/// Write a commit on top of main whose second parent is main's tree, and
+/// return its hex id.
+fn commit_above_a_tree(repo: &Repo) -> String {
+    let layout = RepoLayout::single(repo.path());
+    let store = ObjectStore::open(&layout).unwrap();
+    let main = refs::read_ref(&layout, "main").unwrap().unwrap();
+    let Object::Commit(c) = store.read_object(&main).unwrap() else {
+        panic!("main is not a commit");
+    };
+    let odd = kit_core::object::Commit::new_unannotated(
+        c.tree_hash,
+        vec![main, c.tree_hash],
+        c.author.clone(),
+        c.signer,
+        b"odd".to_vec(),
+        c.timestamp + 1,
+        [0; 64],
+    );
+    to_hex(
+        &store
+            .write(&serialize(&Object::Commit(odd)).unwrap())
+            .unwrap(),
+    )
+}
+
+#[test]
+fn a_range_over_a_parent_that_is_not_a_commit_fails() {
+    let repo = Repo::new();
+    range_fixture(&repo);
+    let range = format!("{}..side", commit_above_a_tree(&repo));
+    let case = "a parent on the excluded side that is not a commit";
+    assert_rejected_silently(&repo, &["log", &range], case);
 }
