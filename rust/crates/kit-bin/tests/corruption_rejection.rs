@@ -400,6 +400,31 @@ fn bisect_over_an_unreadable_commit_fails_and_offers_nothing() {
     assert!(out.stdout.is_empty(), "offered a candidate");
 }
 
+#[test]
+fn a_patch_series_over_an_unreadable_commit_fails_and_writes_nothing() {
+    let repo = Repo::new();
+    range_fixture(&repo);
+    let healthy = repo
+        .ok(&["git", "format-patch", "--stdout", "main..side"])
+        .stdout;
+    let healthy = String::from_utf8(healthy).unwrap();
+    assert_eq!(healthy.matches("\nSubject: ").count(), 1, "{healthy}");
+    assert!(healthy.contains("\nSubject: [PATCH] x\n"), "{healthy}");
+
+    // Without m the excluded side would lack p and r, and the series would
+    // hold patches for them.
+    let repo = Repo::new();
+    let (m, _) = range_fixture(&repo);
+    fs::remove_file(object_file(&repo, &m)).unwrap();
+    let args = ["git", "format-patch", "--stdout", "main..side"];
+    assert_rejected_silently(&repo, &args, "missing commit on the excluded side");
+
+    let repo = Repo::new();
+    let (m, _) = range_fixture(&repo);
+    corrupt_object(&repo, &m);
+    assert_rejected_silently(&repo, &args, "corrupt commit on the excluded side");
+}
+
 /// Write a commit on top of main whose second parent is main's tree, and
 /// return its hex id.
 fn commit_above_a_tree(repo: &Repo) -> String {
@@ -432,4 +457,6 @@ fn a_range_over_a_parent_that_is_not_a_commit_fails() {
     let range = format!("{}..side", commit_above_a_tree(&repo));
     let case = "a parent on the excluded side that is not a commit";
     assert_rejected_silently(&repo, &["log", &range], case);
+    let args = ["git", "format-patch", "--stdout", &range];
+    assert_rejected_silently(&repo, &args, case);
 }
