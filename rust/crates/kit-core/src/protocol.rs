@@ -569,6 +569,78 @@ impl<'a> RepositoryAddress<'a> {
 /// The most bytes a [`RepoCursor`] holds (SPEC-TRANSPORT §1.2).
 pub const REPO_CURSOR_MAX_LEN: usize = 64;
 
+/// The most refs one [`Transport::commit_refs`] names.
+pub const MAX_COMMIT_REFS: usize = 64;
+
+/// One ref write of a [`Transport::commit_refs`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefUpdate {
+    /// The full ref name.
+    pub name: String,
+    /// The condition the ref must meet for the commit to happen.
+    pub condition: RefWriteCondition,
+    /// The id the ref takes.
+    pub value: Hash,
+}
+
+/// Result of a [`Transport::commit_refs`] that ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CommitRefsOutcome {
+    /// Every ref took its new id.
+    Committed,
+    /// The condition of `name` did not hold, and no ref changed. When
+    /// several fail, `name` is the first in byte order.
+    Conflict {
+        /// A ref of the request whose condition failed.
+        name: String,
+    },
+}
+
+/// Check a [`Transport::commit_refs`] request before any lock is taken
+/// (SPEC-TRANSPORT §1.3): 1 to [`MAX_COMMIT_REFS`] valid names, none given
+/// twice, none a directory of another, and the packmap of every branch
+/// head in the request, `refs/kit/packmap/<branch>` for
+/// `refs/heads/<branch>`, in the request too.
+///
+/// # Errors
+/// [`TransportError::InvalidRef`] naming the first offending ref.
+pub fn check_commit_request(updates: &[RefUpdate]) -> TransportResult<()> {
+    if updates.is_empty() || updates.len() > MAX_COMMIT_REFS {
+        return Err(TransportError::InvalidRef(format!(
+            "a commit names 1 to {MAX_COMMIT_REFS} refs, not {}",
+            updates.len()
+        )));
+    }
+    let mut names: Vec<&str> = updates.iter().map(|u| u.name.as_str()).collect();
+    names.sort_unstable();
+    for name in &names {
+        if !crate::refs::validate_ref_name(name) {
+            return Err(TransportError::InvalidRef((*name).to_owned()));
+        }
+    }
+    // At most MAX_COMMIT_REFS names, so the pairwise check stays small.
+    for (i, later) in names.iter().enumerate() {
+        let clash = names[..i].iter().any(|earlier| {
+            later
+                .strip_prefix(earlier)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        });
+        if clash {
+            return Err(TransportError::InvalidRef((*later).to_owned()));
+        }
+    }
+    for name in &names {
+        if let Some(branch) = name.strip_prefix("refs/heads/") {
+            let packmap = format!("{}{branch}", crate::refs::PACKMAP_REF_PREFIX);
+            if names.binary_search(&packmap.as_str()).is_err() {
+                return Err(TransportError::InvalidRef((*name).to_owned()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An opaque token for the state of a repository's refs (SPEC-TRANSPORT
 /// §1.2). Two cursors of one repository compare equal only when its refs are
 /// unchanged between them. A cursor carries no order: compare it for
@@ -609,6 +681,21 @@ pub trait Transport: Send + Sync {
     /// The repository cursor (SPEC-TRANSPORT §1.2), or `None` when the
     /// transport does not offer one. Reading it reads no ref.
     fn repo_cursor(&self) -> TransportResult<Option<RepoCursor>> {
+        Ok(None)
+    }
+
+    /// Commit every update of `updates` as one step (SPEC-TRANSPORT §1.3):
+    /// every ref takes its new id, or, when any condition fails, none does
+    /// and the outcome names a failed ref. `None` when the transport offers
+    /// no such commit, which is the default; a caller MUST NOT then write
+    /// the refs one by one in its place.
+    ///
+    /// # Errors
+    /// [`TransportError::InvalidRef`] for a request that
+    /// [`check_commit_request`] refuses, or a transport error. After an
+    /// error the commit may have happened; the caller re-reads.
+    fn commit_refs(&self, updates: &[RefUpdate]) -> TransportResult<Option<CommitRefsOutcome>> {
+        check_commit_request(updates)?;
         Ok(None)
     }
 
@@ -1055,6 +1142,41 @@ mod tests {
         for d in &delays[1..] {
             assert!(*d <= cap);
         }
+    }
+
+    /// The default `commit_refs` offers no commit, so a caller cannot take
+    /// one-by-one writes for an atomic commit; it still refuses a request
+    /// that breaks the rules.
+    #[test]
+    fn the_default_offers_no_multi_ref_commit() {
+        let tx = RecordingTransport::default();
+        let update = |name: &str| RefUpdate {
+            name: name.to_owned(),
+            condition: RefWriteCondition::Any,
+            value: [1; 32],
+        };
+        let paired = [update("refs/heads/main"), update("refs/kit/packmap/main")];
+        assert_eq!(tx.commit_refs(&paired).unwrap(), None);
+        for bad in [
+            vec![],
+            vec![update("refs/heads/main")],
+            vec![update("refs/tags/a"), update("refs/tags/a")],
+            vec![
+                update("refs/tags/a"),
+                update("refs/tags/a-b"),
+                update("refs/tags/a/b"),
+            ],
+        ] {
+            assert!(
+                matches!(tx.commit_refs(&bad), Err(TransportError::InvalidRef(_))),
+                "{bad:?}"
+            );
+        }
+        let many: Vec<RefUpdate> = (0..=MAX_COMMIT_REFS)
+            .map(|i| update(&format!("refs/tags/t{i}")))
+            .collect();
+        assert!(check_commit_request(&many).is_err());
+        assert!(check_commit_request(&many[..MAX_COMMIT_REFS]).is_ok());
     }
 
     // -----------------------------------------------------------------

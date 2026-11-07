@@ -29,6 +29,7 @@ getrandom = "0.4.3"
 libc = "0.2.191"
 
 [dev-dependencies]
+kit-test-util = { path = "../kit-test-util" }
 tempfile = "3.27.0"
 
 [package.metadata.docs.rs]

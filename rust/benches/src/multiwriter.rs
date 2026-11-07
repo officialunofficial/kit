@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
-use kit_core::protocol::{PackKey, RefWriteCondition, Transport};
+use kit_core::protocol::{CommitRefsOutcome, PackKey, RefUpdate, RefWriteCondition, Transport};
 use kit_core::refs::{self, Ref};
 use kit_core::sign::{self, KeyPair};
 use kit_core::store::ObjectStore;
@@ -142,6 +142,79 @@ pub fn ref_write(connect: &Connect, writers: usize, steps: usize) -> Result<RefW
     }
     Ok(RefWriteRun {
         writes: writers * steps,
+        elapsed,
+    })
+}
+
+/// Refs each `ref-commit` step commits together: the writer's branch head,
+/// its packmap and a tag.
+pub const REFS_PER_COMMIT: usize = 3;
+
+/// `ref-commit`: `writers` threads, each making `steps` multi-ref commits
+/// of its own branch head, packmap and tag. The first commit is `Missing`
+/// on all three, every later one `Match` of the previous value. No commit
+/// may conflict, since no two writers name a common ref. After the run
+/// each ref must hold its writer's last value. `writes` counts refs.
+pub fn ref_commit(connect: &Connect, writers: usize, steps: usize) -> Result<RefWriteRun, String> {
+    check_bounds(writers, steps)?;
+    let names = |w: usize| {
+        [
+            format!("refs/heads/w{w}"),
+            format!("refs/kit/packmap/w{w}"),
+            format!("refs/tags/w{w}"),
+        ]
+    };
+    let barrier = Barrier::new(writers + 1);
+    let elapsed = std::thread::scope(|s| -> Result<Duration, String> {
+        let handles: Vec<_> = (0..writers)
+            .map(|w| {
+                let barrier = &barrier;
+                s.spawn(move || -> Result<(), String> {
+                    let tx = connect();
+                    barrier.wait();
+                    let tx = tx?;
+                    let mut prev = None;
+                    for step in 0..steps {
+                        let value = ref_value(w, step);
+                        let condition =
+                            prev.map_or(RefWriteCondition::Missing, RefWriteCondition::Match);
+                        let updates: Vec<RefUpdate> = names(w)
+                            .into_iter()
+                            .map(|name| RefUpdate {
+                                name,
+                                condition,
+                                value,
+                            })
+                            .collect();
+                        match tx.commit_refs(&updates) {
+                            Ok(Some(CommitRefsOutcome::Committed)) => {}
+                            Ok(None) => return Err("the target offers no multi-ref commit".into()),
+                            other => return Err(format!("writer {w} step {step}: {other:?}")),
+                        }
+                        prev = Some(value);
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        barrier.wait();
+        let start = Instant::now();
+        join_all(handles)?;
+        Ok(start.elapsed())
+    })?;
+    let tx = connect()?;
+    for w in 0..writers {
+        for name in names(w) {
+            let got = tx
+                .read_ref(&name)
+                .map_err(|e| format!("read {name}: {e}"))?;
+            if got != Some(ref_value(w, steps - 1)) {
+                return Err(format!("lost commit: {name} does not hold its last value"));
+            }
+        }
+    }
+    Ok(RefWriteRun {
+        writes: writers * steps * REFS_PER_COMMIT,
         elapsed,
     })
 }

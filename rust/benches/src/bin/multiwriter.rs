@@ -5,8 +5,8 @@
 //!             [--sizes a,b,..] [--steps S]
 //! ```
 //!
-//! `<row>` is `ref-write`, `push-distinct`, `push-shared`, `fetch-noop` or
-//! `fetch-grow`. Every run uses a fresh remote root under `--dir` and removes
+//! `<row>` is `ref-write`, `ref-commit`, `push-distinct`, `push-shared`,
+//! `fetch-noop` or `fetch-grow`. Every run uses a fresh remote root under `--dir` and removes
 //! it afterwards. The `serve` target reaches `kit serve` through
 //! `kit+ssh://`, so it needs `KIT_SSH_PROGRAM` pointing at a wrapper that runs
 //! `kit serve <path>` locally (`scripts/bench-multiwriter.sh` writes one).
@@ -148,7 +148,7 @@ fn report(row: &str, target: Target, n: usize, runs: usize, fields: &[(&str, &[f
 fn run(args: &Args) -> Result<(), String> {
     let row = args.row.as_str();
     let default_sizes: &[usize] = match row {
-        "ref-write" => &[1, 2, 4, 8, 16, 32],
+        "ref-write" | "ref-commit" => &[1, 2, 4, 8, 16, 32],
         "push-distinct" => &[1, 8, 64, 512],
         "push-shared" => &[1, 8, 32],
         "fetch-noop" => &[10, 100, 1_000, 10_000],
@@ -173,6 +173,11 @@ fn run(args: &Args) -> Result<(), String> {
                 "ref-write" => {
                     let run = multiwriter::ref_write(connect, n, args.steps.unwrap_or(150))?;
                     a.push(run.rate());
+                }
+                "ref-commit" => {
+                    let run = multiwriter::ref_commit(connect, n, args.steps.unwrap_or(150))?;
+                    a.push(run.rate());
+                    b.push(run.rate() / multiwriter::REFS_PER_COMMIT as f64);
                 }
                 "push-distinct" | "push-shared" => {
                     let steps = args.steps.unwrap_or(4);
@@ -210,6 +215,13 @@ fn run(args: &Args) -> Result<(), String> {
         }
         match row {
             "ref-write" => report(row, args.target, n, args.runs, &[("writes/s", &a)]),
+            "ref-commit" => report(
+                row,
+                args.target,
+                n,
+                args.runs,
+                &[("writes/s", &a), ("commits/s", &b)],
+            ),
             "push-distinct" | "push-shared" => report(
                 row,
                 args.target,

@@ -424,7 +424,8 @@ metadata nor the guard changes the 65-byte ref wire format.
 #### 5.1.3 File transport multi-ref commits
 
 **Protocol requirement.** When the file transport commits several refs as
-one step, as `advance_refs` commits a branch head and its packmap, every
+one step, as `advance_refs` commits a branch head and its packmap and
+`commit_refs` commits any request (SPEC-TRANSPORT §1.3), every
 named ref takes its new id or none does. This holds for every writer and
 every reader, and across a crash of the committing process. A commit whose
 condition fails for any named ref changes no ref.

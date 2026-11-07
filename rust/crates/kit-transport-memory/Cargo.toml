@@ -23,6 +23,9 @@ workspace = true
 # path so `cargo publish` accepts it.
 kit-core = { version = "=0.7.2", path = "../kit-core" }
 
+[dev-dependencies]
+kit-test-util = { path = "../kit-test-util" }
+
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated API.
 all-features = true

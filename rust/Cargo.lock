@@ -2544,6 +2544,9 @@ dependencies = [
 [[package]]
 name = "kit-test-util"
 version = "0.7.2"
+dependencies = [
+ "kit-core",
+]
 
 [[package]]
 name = "kit-transport-connect"
@@ -2585,6 +2588,7 @@ version = "0.7.2"
 dependencies = [
  "getrandom 0.4.3",
  "kit-core",
+ "kit-test-util",
  "libc",
  "tempfile",
 ]
@@ -2594,6 +2598,7 @@ name = "kit-transport-memory"
 version = "0.7.2"
 dependencies = [
  "kit-core",
+ "kit-test-util",
 ]
 
 [[package]]

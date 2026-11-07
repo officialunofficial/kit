@@ -48,6 +48,7 @@ internal `Mutex` so the trait object remains object-safe.
 | `list_refs(prefix)` | List refs whose full name starts with `prefix`. Returned names have `prefix` stripped per SPEC-REFS §4. |
 | `write_ref(name, hash)` | Convenience: `update_ref(name, RefWriteCondition::Any, hash)`. A default trait impl delegates here, so transports only need to implement `update_ref`. |
 | `repo_cursor()` | The repository cursor (§1.2), or none when the transport does not offer one. The default offers none. |
+| `commit_refs(updates)` | Commit several conditioned ref writes as one step (§1.3), or report that the transport offers no such commit. The default offers none. |
 
 Consumers MUST verify that downloaded pack and auxiliary-blob bytes hash to
 the caller's requested PackKey before parsing them into authoritative state,
@@ -134,6 +135,44 @@ no record matches it, checks the closure and fetches the chain again.
 unique to the instance and the count of its committed ref writes. The file
 transport's is described in SPEC-REFS §5.1.2. The SSH, S3 and Connect
 transports offer none: their wire carries no cursor yet.
+
+### 1.3 Multi-ref commit (additive, opt-in)
+
+**Protocol requirement.** A transport that offers `commit_refs` takes a
+request of 1 to 64 updates, each a full ref name, a write condition
+(`Any`, `Missing` or `Match`) and a new id. It MUST refuse a request with
+`InvalidRef`, before it takes any lock or changes any ref, when the request
+names no ref or more than 64, a name is invalid (SPEC-REFS §3) or named twice,
+one name is a directory of another, or a branch head `refs/heads/<b>` comes
+without its packmap `refs/kit/packmap/<b>` in the same request. A head that
+moves must not move without its packmap; a caller that keeps the packmap
+names it with `Match` of its current id and that id.
+
+For an accepted request:
+
+- Every named ref takes its new id, or none does. A commit is one step to
+  every writer and every reader: no read returns the new id of one named ref
+  and, later, the old id of another, and a crash of the committing process
+  never leaves some named refs new and others old once the transport has
+  recovered.
+- When a condition fails, no ref changes and the outcome names a ref of the
+  request whose condition failed: the first in byte order when several fail.
+  A request never conflicts because of a ref it does not name.
+- Two requests that name no common ref never conflict with each other. They
+  may wait for each other.
+- Every commit changes the repository cursor (§1.2) before it reports.
+- A transport that does not offer `commit_refs` says so. A caller MUST NOT
+  write the refs one by one in its place.
+
+A transport error leaves the outcome unknown, as for `update_ref` (§7): the
+caller re-reads the refs.
+
+**Reference-server behavior.** The memory transport checks and writes every
+update under its one `Mutex`. The file transport commits through an intent
+record under the stripe locks of every named ref, in ascending stripe order
+(SPEC-REFS §5.1.3); two requests whose refs share a stripe wait for each
+other. The SSH, S3 and Connect transports offer none: their wire carries no
+multi-ref commit yet.
 
 ## 2. Error taxonomy
 

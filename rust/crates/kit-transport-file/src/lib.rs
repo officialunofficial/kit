@@ -95,8 +95,9 @@ fn open_pack_file(path: &Path) -> io::Result<fs::File> {
 use kit_core::bounded_read;
 use kit_core::hash::Hash;
 use kit_core::protocol::{
-    AdvanceOutcome, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, RepoCursor,
-    Transport, TransportError, TransportResult,
+    AdvanceOutcome, CommitRefsOutcome, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefUpdate,
+    RefWriteCondition, RepoCursor, Transport, TransportError, TransportResult,
+    check_commit_request,
 };
 use kit_core::refs::{
     REF_FILE_MAX_BYTES, Ref, decode_ref_wire, encode_ref_wire, validate_ref_name,
@@ -1789,6 +1790,25 @@ impl Transport for FileTransport {
 
     fn supports_atomic_advance(&self) -> bool {
         true
+    }
+
+    /// One commit of every update (SPEC-REFS §5.1.3). A conflict names the
+    /// first failed ref in byte order.
+    fn commit_refs(&self, updates: &[RefUpdate]) -> TransportResult<Option<CommitRefsOutcome>> {
+        check_commit_request(updates)?;
+        let request: Vec<_> = updates
+            .iter()
+            .map(|u| (u.name.as_str(), u.condition, u.value))
+            .collect();
+        let failed = self.commit_refs_in(&request)?;
+        Ok(Some(
+            match failed.iter().map(|&i| updates[i].name.as_str()).min() {
+                None => CommitRefsOutcome::Committed,
+                Some(name) => CommitRefsOutcome::Conflict {
+                    name: name.to_owned(),
+                },
+            },
+        ))
     }
 }
 
@@ -3986,5 +4006,31 @@ mod tests {
         let head = tx.read_ref("refs/heads/w0").unwrap();
         assert_eq!(head, tx.read_ref("refs/kit/packmap/w0").unwrap());
         assert_eq!(intents_on_disk(&tx), 0);
+    }
+
+    #[test]
+    fn commit_refs_matches_the_model() {
+        let dirs: std::cell::RefCell<Vec<TempDir>> = std::cell::RefCell::new(Vec::new());
+        kit_test_util::commit_refs::check_against_model(
+            &|| {
+                let dir = tmp();
+                let tx = FileTransport::new(dir.path());
+                dirs.borrow_mut().push(dir);
+                Box::new(tx)
+            },
+            16,
+            40,
+        );
+        let dir = tmp();
+        kit_test_util::commit_refs::check_refusals(&FileTransport::new(dir.path()));
+        assert_eq!(intents_on_disk(&FileTransport::new(dir.path())), 0);
+    }
+
+    #[test]
+    fn disjoint_commits_never_conflict() {
+        let dir = tmp();
+        let root = dir.path().to_owned();
+        let make = move || -> Box<dyn Transport> { Box::new(FileTransport::new(&root)) };
+        kit_test_util::commit_refs::check_disjoint_writers(&make, 8, 25);
     }
 }

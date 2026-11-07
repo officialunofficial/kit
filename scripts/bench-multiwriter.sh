@@ -18,7 +18,7 @@ SCRATCH="${1:?usage: bench-multiwriter.sh <scratch-dir> [row ...]}"
 shift
 ROWS=("$@")
 if [ "${#ROWS[@]}" -eq 0 ]; then
-  ROWS=(ref-write push-distinct push-shared fetch-noop fetch-grow)
+  ROWS=(ref-write ref-commit push-distinct push-shared fetch-noop fetch-grow)
 fi
 TARGETS="${KIT_BENCH_TARGETS:-file serve}"
 RUNS="${KIT_BENCH_RUNS:-5}"

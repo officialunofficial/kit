@@ -29,6 +29,10 @@ fn every_row_runs_at_tiny_sizes() {
     let run = multiwriter::ref_write(&file(base.join("remote")), 3, 4).unwrap();
     assert_eq!(run.writes, 12);
 
+    let base = case("ref-commit");
+    let run = multiwriter::ref_commit(&file(base.join("remote")), 3, 4).unwrap();
+    assert_eq!(run.writes, 3 * 4 * multiwriter::REFS_PER_COMMIT);
+
     let base = case("push-distinct");
     let run =
         multiwriter::push_distinct(&file(base.join("remote")), &base.join("local"), 3, 2).unwrap();

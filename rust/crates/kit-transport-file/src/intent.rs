@@ -22,8 +22,8 @@ use kit_core::refs::{MAX_REF_NAME_BYTES, parse_lowercase_hash, validate_ref_name
 /// The first line of every intent record.
 const MAGIC: &[u8] = b"kit-ref-intent-v1\n";
 
-/// The most refs one commit names.
-pub const MAX_COMMIT_REFS: usize = 64;
+/// The most refs one commit names (SPEC-TRANSPORT §1.3).
+pub use kit_core::protocol::MAX_COMMIT_REFS;
 
 /// The largest intent record: the magic and [`MAX_COMMIT_REFS`] lines of
 /// two ids, two spaces, a name and a newline.

@@ -94,6 +94,7 @@ Each value is the mean and the sample standard deviation over the runs.
 | Row | Workload | Reports |
 |---|---|---|
 | `ref-write` | N threads, N in 1, 2, 4, 8, 16, 32. Each makes 150 compare-and-swap writes to its own ref: `Missing`, then `Match` of the previous value. | Writes per second. |
+| `ref-commit` | N threads, N in 1, 2, 4, 8, 16, 32. Each makes 150 multi-ref commits of its own branch head, packmap and tag: `Missing`, then `Match` of the previous value. No two threads name a common ref, so no commit may conflict. The `kit serve` target offers no multi-ref commit. | Ref writes and commits per second. |
 | `push-distinct` | N pushers, N in 1, 8, 64, 512. Each pushes 4 commits to its own branch. | Pushes per second, p50 and p99 latency. |
 | `push-shared` | N pushers, N in 1, 8, 32, each landing 4 commits on one branch. A rejected push fetches, commits again on the new tip and retries. | Pushes per second, latency including retries, rejected attempts per landed push. Each landed push can cost up to N - 1 rejected attempts, so large N takes a long time. |
 | `fetch-noop` | M branches, M in 10, 100, 1,000, 10,000, and a clone that already holds them. Setup waits 3 s after its last write, because the file transport offers no cursor while a ref directory was modified in the last 2 s. Five fetches per run. | Fetch time and remote requests. |
@@ -108,8 +109,8 @@ code behind `kit push` and `kit fetch`. The workload is deterministic: ref
 values, file contents, commit times and the signing key derive from the
 writer and step numbers, so every run writes the same bytes.
 
-Each row checks its result before it reports a number. After `ref-write`, each
-ref must hold its writer's last value. After `push-distinct`, each branch must
+Each row checks its result before it reports a number. After `ref-write` and
+`ref-commit`, each ref must hold its writer's last value. After `push-distinct`, each branch must
 hold its pusher's last commit. After `push-shared`, the first-parent history of
 the branch must hold exactly the commits the pushers landed. The fetch rows
 must end at the pushed tip, and `fetch-noop` must download nothing. A lost

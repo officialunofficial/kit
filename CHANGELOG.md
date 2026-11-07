@@ -9,6 +9,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `Transport::commit_refs` commits up to 64 conditioned ref writes as one
+  step: every ref changes or none does, a conflict names the first failed
+  ref, and requests that name no common ref never conflict
+  (SPEC-TRANSPORT §1.3). A branch head must come with its packmap. The
+  memory and file transports offer it; the SSH, S3 and Connect wires carry
+  no such commit yet, and the default offers none.
 - Transports can offer a repository cursor, an opaque value that changes
   whenever a ref changes (SPEC-TRANSPORT §1.2). The memory and file transports
   offer one; the file transport keeps a write count in each stripe lock file

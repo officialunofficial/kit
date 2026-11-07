@@ -33,7 +33,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use kit_core::hash::Hash;
 use kit_core::protocol::{
-    PackKey, RefWriteCondition, RepoCursor, Transport, TransportError, TransportResult,
+    CommitRefsOutcome, PackKey, RefUpdate, RefWriteCondition, RepoCursor, Transport,
+    TransportError, TransportResult, check_commit_request,
 };
 use kit_core::refs::{
     Ref, decode_ref_wire, encode_ref_wire, validate_ref_name, validate_ref_prefix,
@@ -176,6 +177,36 @@ impl Transport for MemoryTransport {
         g.refs.insert(name.to_owned(), encode_ref_wire(hash));
         g.generation = g.generation.wrapping_add(1);
         Ok(())
+    }
+
+    /// Every update under the one `Mutex`: every condition is checked
+    /// before any ref is written, so the commit is one step to every
+    /// thread sharing the instance (SPEC-TRANSPORT §1.3).
+    fn commit_refs(&self, updates: &[RefUpdate]) -> TransportResult<Option<CommitRefsOutcome>> {
+        check_commit_request(updates)?;
+        let mut g = self.inner.lock().expect("MemoryTransport mutex poisoned");
+        let failed = updates
+            .iter()
+            .filter(|u| {
+                let current = g.refs.get(&u.name).and_then(|wire| decode_ref_wire(wire));
+                match u.condition {
+                    RefWriteCondition::Any => false,
+                    RefWriteCondition::Missing => current.is_some(),
+                    RefWriteCondition::Match(expected) => current != Some(expected),
+                }
+            })
+            .map(|u| u.name.as_str())
+            .min();
+        if let Some(name) = failed {
+            return Ok(Some(CommitRefsOutcome::Conflict {
+                name: name.to_owned(),
+            }));
+        }
+        for u in updates {
+            g.refs.insert(u.name.clone(), encode_ref_wire(&u.value));
+        }
+        g.generation = g.generation.wrapping_add(1);
+        Ok(Some(CommitRefsOutcome::Committed))
     }
 
     /// The instance number and the count of committed ref writes. Both are
@@ -559,5 +590,54 @@ mod tests {
         let a = MemoryTransport::new();
         let b = MemoryTransport::new();
         assert_ne!(a.repo_cursor().unwrap(), b.repo_cursor().unwrap());
+    }
+
+    #[test]
+    fn commit_refs_matches_the_model() {
+        kit_test_util::commit_refs::check_against_model(
+            &|| Box::new(MemoryTransport::new()),
+            64,
+            40,
+        );
+        kit_test_util::commit_refs::check_refusals(&MemoryTransport::new());
+    }
+
+    #[test]
+    fn disjoint_commits_never_conflict() {
+        let shared = std::sync::Arc::new(MemoryTransport::new());
+        let make = move || -> Box<dyn Transport> { Box::new(Shared(shared.clone())) };
+        kit_test_util::commit_refs::check_disjoint_writers(&make, 8, 50);
+    }
+
+    /// One instance shared by every thread, as the memory transport is.
+    struct Shared(std::sync::Arc<MemoryTransport>);
+
+    impl Transport for Shared {
+        fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+            self.0.upload_pack(bytes, key)
+        }
+        fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+            self.0.download_pack(key)
+        }
+        fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+            self.0.pack_exists(key)
+        }
+        fn update_ref(
+            &self,
+            name: &str,
+            condition: RefWriteCondition,
+            hash: &Hash,
+        ) -> TransportResult<()> {
+            self.0.update_ref(name, condition, hash)
+        }
+        fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
+            self.0.read_ref(name)
+        }
+        fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
+            self.0.list_refs(prefix)
+        }
+        fn commit_refs(&self, updates: &[RefUpdate]) -> TransportResult<Option<CommitRefsOutcome>> {
+            self.0.commit_refs(updates)
+        }
     }
 }

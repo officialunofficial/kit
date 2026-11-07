@@ -3,6 +3,8 @@
 //! Not published — add this crate to `[dev-dependencies]` only.
 #![forbid(unsafe_code)]
 
+pub mod commit_refs;
+
 use std::process::{Command, Stdio};
 
 /// True if `name` can be spawned as a subprocess (i.e. it resolves on
