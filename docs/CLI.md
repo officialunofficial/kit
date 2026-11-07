@@ -395,9 +395,13 @@ History / commits:
   first-parent-wins, same as the positional default). This is a
   **documented divergence** &mdash; the default `--ignore-rev` fall-through stays
   byte-identical to git; see "Divergences from Git" below.
-  Each input is limited to 100,000 lines. After trimming the common prefix,
-  the line comparison table must fit within 64 MiB. Larger comparisons fail
-  without partial attribution. The history walk is
+  Blame rejects files above 100,000 lines, including file-history roots.
+  After trimming the common prefix, the LCS comparison table is capped at
+  64 MiB. Larger comparisons use the line diff's bounded Myers search. It
+  stays minimal up to 4096 edits; beyond that, unaligned lines keep the newer
+  commit as their origin. Reassembly, line buffers, and attribution memory
+  grow linearly with file size; the table cap is not a total memory cap.
+  The history walk is
   **merge-aware by default** (like `git blame`): at a merge, a line is
   credited to whichever parent's side actually wrote it, so a line merged in
   from a side branch is attributed to its authoring commit rather than the

@@ -11,7 +11,8 @@
 //! ([`blame_file_reverse`]) is first-parent only by definition.
 //!
 //! Line matching uses an LCS table capped at 64 MiB after trimming the
-//! common prefix. Larger comparisons return an error without an attribution.
+//! common prefix. Larger comparisons use the bounded line diff search;
+//! unaligned lines keep the newer commit as their origin.
 //!
 //! Output formatting (used by goldens) is `<short>\t<line_num>\t<text>`,
 //! where `<short>` is the 12-char prefix of the commit hash. See
@@ -31,13 +32,13 @@ mod walk;
 
 use walk::{WalkCtx, attribute_commit, build_file_dag, topo_order};
 
-/// Hard cap on the per-side line count fed to the LCS matcher. This bounds
-/// per-line buffers separately from the fixed LCS table budget.
+/// Hard cap on the line count of a loaded blame file, including a root.
+/// Reassembly and splitting precede the check and use memory linear in file size.
 pub const BLAME_MAX_LINES: usize = 100_000;
 
 /// The LCS table may hold at most 64 MiB. Check before allocating, independent
-/// of the memory available on the machine, so every machine refuses the same
-/// comparisons. Prefix trimming lets small changes to large files stay exact.
+/// of the memory available on the machine. Larger comparisons use the bounded
+/// line diff search. Prefix trimming keeps small trailing edits on the LCS path.
 const BLAME_MAX_TABLE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Per-line blame attribution.
@@ -275,14 +276,10 @@ pub enum BlameError {
     /// of `<end>`, so there is no forward chain to walk between them.
     #[error("reverse blame: '{start}' is not a first-parent ancestor of '{end}'")]
     ReverseRange { start: String, end: String },
-    /// Either side of the LCS input exceeded [`BLAME_MAX_LINES`].
-    /// Returned rather than allocating a DP table proportional to the
-    /// attacker-supplied line counts.
+    /// A loaded file or matcher input exceeded [`BLAME_MAX_LINES`].
+    /// Reassembly and splitting precede the check; attribution follows it.
     #[error("file has too many lines for blame ({lines} > {max})", max = BLAME_MAX_LINES)]
     FileTooLarge { lines: usize },
-    /// The LCS table would exceed its fixed memory budget.
-    #[error("line comparison exceeds the blame memory limit (64 MiB)")]
-    ComparisonTooLarge,
     #[error(transparent)]
     Object(#[from] crate::object::KitError),
     #[error(transparent)]
@@ -315,9 +312,8 @@ pub fn blame_file(
 /// # Errors
 /// - [`BlameError::FileNotFound`] if the file does not exist at `head_hash`.
 /// - [`BlameError::NotACommit`] if `head_hash` is not a commit object.
-/// - [`BlameError::FileTooLarge`] if any blob fed to the matcher has more than
+/// - [`BlameError::FileTooLarge`] if any loaded blob has more than
 ///   [`BLAME_MAX_LINES`] lines.
-/// - [`BlameError::ComparisonTooLarge`] if the trimmed LCS table exceeds 64 MiB.
 ///
 /// # Note
 /// The merge-aware walk processes the file's whole ancestor subgraph (every
@@ -499,7 +495,6 @@ fn collect_reverse_chain(
 /// - [`BlameError::NotACommit`] if either endpoint is not a commit.
 /// - [`BlameError::FileTooLarge`] if any blob on the chain exceeds
 ///   [`BLAME_MAX_LINES`].
-/// - [`BlameError::ComparisonTooLarge`] if the trimmed LCS table exceeds 64 MiB.
 pub fn blame_file_reverse(
     store: &ObjectStore,
     start_hash: Hash,
@@ -677,7 +672,9 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
         }
         _ => return Err(BlameError::NotABlob),
     };
-    Ok(split_lines(&data))
+    let lines = split_lines(&data);
+    check_line_count(lines.len())?;
+    Ok(lines)
 }
 
 /// Whitespace-insensitive comparison key for a line: every ASCII
@@ -737,7 +734,6 @@ fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
 ///
 /// # Errors
 /// - [`BlameError::FileTooLarge`] if either side exceeds [`BLAME_MAX_LINES`].
-/// - [`BlameError::ComparisonTooLarge`] if the trimmed table exceeds 64 MiB.
 fn match_lines_with_options(
     old_lines: &[Vec<u8>],
     new_lines: &[Vec<u8>],
@@ -752,9 +748,9 @@ fn match_lines_with_options(
         // pairs the lines; the caller still emits the raw bytes.
         let old_keys: Vec<Vec<u8>> = old_lines.iter().map(|l| strip_ws(l)).collect();
         let new_keys: Vec<Vec<u8>> = new_lines.iter().map(|l| strip_ws(l)).collect();
-        match_lines(&old_keys, &new_keys)
+        Ok(match_lines(&old_keys, &new_keys))
     } else {
-        match_lines(old_lines, new_lines)
+        Ok(match_lines(old_lines, new_lines))
     }
 }
 
@@ -812,8 +808,8 @@ fn ignore_fallthrough(mapping: &[Option<usize>], old_len: usize) -> Vec<Option<u
     fall
 }
 
-/// Bound per-line buffers by checking the untrimmed line counts. The table
-/// has its own byte budget after prefix trimming in [`match_lines_core`].
+/// Check the untrimmed line counts. Loading and splitting use memory linear
+/// in file size; this check precedes attribution and comparison allocations.
 fn check_line_count(lines: usize) -> BlameOutcome<()> {
     if lines > BLAME_MAX_LINES {
         return Err(BlameError::FileTooLarge { lines });
@@ -855,12 +851,10 @@ fn check_line_count(lines: usize) -> BlameOutcome<()> {
 /// test (differential against [`match_lines_core`] run unelided on the
 /// same input).
 ///
-/// The trimmed table must fit the fixed byte budget; otherwise the comparison
-/// returns [`BlameError::ComparisonTooLarge`] without a partial mapping.
-fn match_lines<T: AsRef<[u8]>>(
-    old_lines: &[T],
-    new_lines: &[T],
-) -> BlameOutcome<Vec<Option<usize>>> {
+/// The trimmed table must fit the fixed byte budget. Larger comparisons use
+/// the bounded Myers search of the line diff, which can leave more lines
+/// unmatched above its edit limit. Such lines keep the newer origin.
+fn match_lines<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<usize>> {
     let m = old_lines.len();
     let n = new_lines.len();
 
@@ -870,28 +864,27 @@ fn match_lines<T: AsRef<[u8]>>(
         prefix += 1;
     }
 
-    let mid_mapping = match_lines_core(&old_lines[prefix..], &new_lines[prefix..])?;
+    let mid_mapping = match_lines_core(&old_lines[prefix..], &new_lines[prefix..]);
 
     let mut mapping = Vec::with_capacity(n);
     mapping.extend((0..prefix).map(Some));
     mapping.extend(mid_mapping.into_iter().map(|o| o.map(|i| i + prefix)));
-    Ok(mapping)
+    mapping
 }
 
 /// The O(m*n) DP core behind [`match_lines`]: plain LCS line matching
 /// with no prefix/suffix elision, over whatever slice it's given.
-fn match_lines_core<T: AsRef<[u8]>>(
-    old_lines: &[T],
-    new_lines: &[T],
-) -> BlameOutcome<Vec<Option<usize>>> {
+fn match_lines_core<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<usize>> {
     let m = old_lines.len();
     let n = new_lines.len();
     // Charge the whole table before allocation. A flat table has no per-row
     // allocation overhead, so the byte limit covers all of its storage.
-    let cells = (m + 1)
+    let Some(cells) = (m + 1)
         .checked_mul(n + 1)
         .filter(|&cells| cells <= BLAME_MAX_TABLE_BYTES / size_of::<u32>())
-        .ok_or(BlameError::ComparisonTooLarge)?;
+    else {
+        return super::diff::matching_line_indices(old_lines, new_lines);
+    };
     let cols = n + 1;
     let mut dp = vec![0u32; cells];
     for i in 1..=m {
@@ -926,7 +919,7 @@ fn match_lines_core<T: AsRef<[u8]>>(
             j -= 1;
         }
     }
-    Ok(mapping)
+    mapping
 }
 
 /// Pinned text formatting for goldens. Format:
@@ -1708,7 +1701,7 @@ mod tests {
     #[test]
     fn lcs_identical_lines() {
         let lines: Vec<&[u8]> = vec![b"a", b"b", b"c"];
-        let m = match_lines(&lines, &lines).unwrap();
+        let m = match_lines(&lines, &lines);
         assert_eq!(m, vec![Some(0), Some(1), Some(2)]);
     }
 
@@ -1716,7 +1709,7 @@ mod tests {
     fn lcs_completely_different() {
         let old: Vec<&[u8]> = vec![b"a", b"b", b"c"];
         let new: Vec<&[u8]> = vec![b"x", b"y", b"z"];
-        let m = match_lines(&old, &new).unwrap();
+        let m = match_lines(&old, &new);
         assert_eq!(m, vec![None, None, None]);
     }
 
@@ -1728,7 +1721,7 @@ mod tests {
         // diagonal-first backtrack would instead pair the last occurrence.
         let old: Vec<&[u8]> = vec![b"ab"];
         let new: Vec<&[u8]> = vec![b"ab", b"ab"];
-        assert_eq!(match_lines(&old, &new).unwrap(), vec![Some(0), None]);
+        assert_eq!(match_lines(&old, &new), vec![Some(0), None]);
     }
 
     #[test]
@@ -1739,7 +1732,7 @@ mod tests {
         // still get this right since it only elides the leading run.
         let old: Vec<&[u8]> = vec![b"a"];
         let new: Vec<&[u8]> = vec![b"b", b"a", b"a"];
-        assert_eq!(match_lines(&old, &new).unwrap(), vec![None, Some(0), None]);
+        assert_eq!(match_lines(&old, &new), vec![None, Some(0), None]);
     }
 
     proptest::proptest! {
@@ -1759,8 +1752,8 @@ mod tests {
         ) {
             let old_lines: Vec<[u8; 1]> = old.iter().map(|b| [*b]).collect();
             let new_lines: Vec<[u8; 1]> = new.iter().map(|b| [*b]).collect();
-            let elided = match_lines(&old_lines, &new_lines).unwrap();
-            let reference = match_lines_core(&old_lines, &new_lines).unwrap();
+            let elided = match_lines(&old_lines, &new_lines);
+            let reference = match_lines_core(&old_lines, &new_lines);
             proptest::prop_assert_eq!(elided, reference);
         }
     }
@@ -3762,7 +3755,7 @@ mod tests {
     }
 
     #[test]
-    fn blame_refuses_a_rewritten_file_above_the_table_budget() {
+    fn blame_attributes_a_rewritten_file_above_the_table_budget() {
         let (_d, store) = fresh_store();
         let old = b"a\n".repeat(BLAME_MAX_LINES);
         let new = b"b\n".repeat(BLAME_MAX_LINES);
@@ -3773,11 +3766,39 @@ mod tests {
                 ignore_whitespace,
                 ..BlameOptions::default()
             };
-            assert!(matches!(
-                blame_file_with(&store, head, "f", &opts),
-                Err(BlameError::ComparisonTooLarge)
-            ));
+            let result = blame_file_with(&store, head, "f", &opts).unwrap();
+            assert_eq!(result.lines.len(), BLAME_MAX_LINES);
+            assert!(result.lines.iter().all(|line| line.commit_hash == head));
         }
+    }
+
+    #[test]
+    fn blame_keeps_unchanged_origins_after_a_first_line_edit() {
+        let (_d, store) = fresh_store();
+        let mut old = String::new();
+        for i in 0..4096 {
+            writeln!(old, "line {i}").unwrap();
+        }
+        let new = old.replacen("line 0\n", "edited\n", 1);
+        let parent = put_file_commit(&store, "f", old.as_bytes(), vec![], 1, 100);
+        let head = put_file_commit(&store, "f", new.as_bytes(), vec![parent], 1, 200);
+        let result = blame_file(&store, head, "f").unwrap();
+        assert_eq!(result.lines.len(), 4096);
+        assert_eq!(result.lines[0].commit_hash, head);
+        for (i, line) in result.lines.iter().enumerate().skip(1) {
+            assert_eq!(line.commit_hash, parent);
+            assert_eq!(line.orig_line_num, i + 1);
+            assert_eq!(line.text, format!("line {i}").as_bytes());
+        }
+    }
+
+    #[test]
+    fn blame_checks_the_line_limit_at_a_root() {
+        let (_d, store) = fresh_store();
+        let lines = BLAME_MAX_LINES + 1;
+        let root = put_file_commit(&store, "f", &b"a\n".repeat(lines), vec![], 1, 100);
+        assert!(matches!(blame_file(&store, root, "f"),
+            Err(BlameError::FileTooLarge { lines: count }) if count == lines));
     }
 
     #[test]
@@ -3802,16 +3823,10 @@ mod tests {
         // 4096 squared u32 cells fill exactly 64 MiB.
         let old = vec![b"old"; 4095];
         let new = vec![b"new"; 4095];
-        assert_eq!(match_lines(&old, &new).unwrap(), vec![None; 4095]);
+        assert_eq!(match_lines(&old, &new), vec![None; 4095]);
         let old = vec![b"old"; 4096];
-        assert!(matches!(
-            match_lines(&old, &new),
-            Err(BlameError::ComparisonTooLarge)
-        ));
-        assert!(matches!(
-            match_lines(&new, &old),
-            Err(BlameError::ComparisonTooLarge)
-        ));
+        assert_eq!(match_lines(&old, &new), vec![None; 4095]);
+        assert_eq!(match_lines(&new, &old), vec![None; 4096]);
     }
 
     #[test]

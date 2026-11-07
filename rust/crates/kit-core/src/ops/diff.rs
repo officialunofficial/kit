@@ -1038,6 +1038,37 @@ fn edit_script(
     }
 }
 
+/// Match whole lines with the fixed-budget Myers search. Above its edit
+/// limit, unaligned lines remain unmatched rather than inheriting an origin.
+/// Blame uses this when its LCS table would exceed its byte budget.
+pub(super) fn matching_line_indices<T: AsRef<[u8]>>(old: &[T], new: &[T]) -> Vec<Option<usize>> {
+    fn to_lines<T: AsRef<[u8]>>(lines: &[T]) -> Vec<DiffLine<'_>> {
+        lines
+            .iter()
+            .map(|line| DiffLine {
+                text: line.as_ref(),
+                has_newline: false,
+            })
+            .collect()
+    }
+    let changes = myers_changed(
+        &to_lines(old),
+        &to_lines(new),
+        WhitespaceMode::Exact,
+        MAX_EDIT_DISTANCE,
+    );
+    let mut kept_old = changes
+        .old
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, changed)| (!changed).then_some(i));
+    changes
+        .new
+        .into_iter()
+        .map(|changed| if changed { None } else { kept_old.next() })
+        .collect()
+}
+
 /// The per-line changed flags of one diff.
 struct LineChanges {
     old: Vec<bool>,

@@ -1,6 +1,6 @@
 //! One line diff or text merge of a file up to 1 MiB stays under a fixed memory
-//! ceiling however many of its lines changed. Blame refuses a rewritten file
-//! at its line limit without exceeding the same ceiling.
+//! ceiling however many of its lines changed. Blame compares a rewritten file
+//! at its line limit within the same ceiling. Its other buffers grow with file size.
 //!
 //! These tests watch the bytes that a call holds at once. The allocator refuses
 //! to pass a hard ceiling, so a search that grows with the input aborts here
@@ -183,9 +183,9 @@ fn blame_of_rewritten_short_lines_stays_under_the_ceiling() {
             .write(&serialize::serialize(&object).unwrap())
             .unwrap()
     };
-    let commit = |tag, parents: Vec<Hash>| {
+    let commit = |tag, lines, parents: Vec<Hash>| {
         let blob = put(Object::Blob(Blob {
-            data: short_lines(tag, 2 * BLAME_MAX_LINES),
+            data: short_lines(tag, 2 * lines),
         }));
         let tree = put(Object::Tree(Tree {
             entries: vec![TreeEntry {
@@ -204,9 +204,21 @@ fn blame_of_rewritten_short_lines_stays_under_the_ceiling() {
             [0; 64],
         )))
     };
-    let parent = commit(b'a', vec![]);
-    let head = commit(b'b', vec![parent]);
+    let parent = commit(b'a', BLAME_MAX_LINES, vec![]);
+    let head = commit(b'b', BLAME_MAX_LINES, vec![parent]);
     let (result, peak) = peak_of(|| blame_file(&store, head, "f"));
-    assert!(matches!(result, Err(BlameError::ComparisonTooLarge)));
+    let result = result.unwrap();
+    assert_eq!(result.lines.len(), BLAME_MAX_LINES);
+    assert!(result.lines.iter().all(|line| line.commit_hash == head));
+    eprintln!("rewritten blame peak: {peak} bytes");
     assert_within_ceiling("blame_file", peak);
+    drop(result);
+
+    // Reassembly and splitting still grow with input size. The root line
+    // check prevents attribution buffers for a file above the line limit.
+    let root = commit(b'a', MIB / 2, vec![]);
+    let (result, peak) = peak_of(|| blame_file(&store, root, "f"));
+    assert!(matches!(result, Err(BlameError::FileTooLarge { lines }) if lines == MIB / 2));
+    eprintln!("one MiB root blame peak: {peak} bytes");
+    assert_within_ceiling("root blame_file", peak);
 }
