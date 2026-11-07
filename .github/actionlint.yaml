@@ -1,6 +1,0 @@
-# Runner labels that the pinned actionlint does not know yet. macos-26 is a
-# GitHub-hosted label; actionlint 1.7.8 added it. Remove this file when the pins
-# in .github/workflows/actionlint.yml and cloudbuild/Dockerfile.ci pass 1.7.7.
-self-hosted-runner:
-  labels:
-    - macos-26

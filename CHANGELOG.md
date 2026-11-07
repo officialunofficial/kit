@@ -11,6 +11,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Blame caps its line comparison table at 64 MiB after trimming the common
   prefix. Larger comparisons return an error without partial attribution.
+- Mutation testing of changed lines uses paths relative to the Rust workspace.
 
 ## [0.7.2] - 2026-11-06
 
