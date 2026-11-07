@@ -47,21 +47,41 @@ pub fn collect_ancestor_set<S: BuildHasher>(
     start: Hash,
     set: &mut HashSet<Hash, S>,
 ) -> Result<(), StoreError> {
-    collect_ancestor_set_with_cap(store, start, set, MAX_ANCESTORS, ANCESTOR_LIMIT)
+    collect_ancestor_set_with_cap(
+        store,
+        start,
+        set,
+        MAX_ANCESTORS,
+        ANCESTOR_LIMIT,
+        Missing::EndsPath,
+    )
 }
 
-/// [`collect_ancestor_set`] with a caller-supplied cap and the limit name
-/// its error reports.
+/// What an ancestor walk does at an object that is not in the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Missing {
+    /// Keep the hash in the set and follow no parents from it.
+    EndsPath,
+    /// Fail with [`StoreError::ObjectNotFound`]. A missing commit may have
+    /// ancestors the walk then never sees, so a caller that leaves the set
+    /// out needs this.
+    Fails,
+}
+
+/// [`collect_ancestor_set`] with a caller-supplied cap, the limit name its
+/// error reports, and what a missing object does.
 ///
 /// # Errors
 ///
 /// As [`collect_ancestor_set`], with `cap` in place of [`MAX_ANCESTORS`].
+/// With [`Missing::Fails`], [`StoreError::ObjectNotFound`] propagates too.
 pub(crate) fn collect_ancestor_set_with_cap<S: BuildHasher>(
     store: &(impl ObjectSource + ?Sized),
     start: Hash,
     set: &mut HashSet<Hash, S>,
     cap: usize,
     limit: &'static str,
+    missing: Missing,
 ) -> Result<(), StoreError> {
     let mut stack: Vec<Hash> = vec![start];
     let mut count: usize = 0;
@@ -81,9 +101,10 @@ pub(crate) fn collect_ancestor_set_with_cap<S: BuildHasher>(
                     stack.push(parent);
                 }
             }
-            // Non-commit (or unreadable) — stop walking from this node,
-            // but we keep the hash in `set`.
-            Ok(_) | Err(StoreError::ObjectNotFound(_)) => {}
+            // A non-commit has no parents, so no ancestor lies behind it.
+            // A missing object may: see [`Missing`].
+            Ok(_) => {}
+            Err(StoreError::ObjectNotFound(_)) if missing == Missing::EndsPath => {}
             Err(e) => return Err(e),
         }
     }
@@ -403,13 +424,16 @@ mod tests {
         let c2 = make_commit(&s, tree, &[c1], "c2--");
         let c3 = make_commit(&s, tree, &[c2], "c3----");
         let mut set = HashSet::new();
-        let err = collect_ancestor_set_with_cap(&s, c3, &mut set, 2, ANCESTOR_LIMIT).unwrap_err();
+        let err =
+            collect_ancestor_set_with_cap(&s, c3, &mut set, 2, ANCESTOR_LIMIT, Missing::EndsPath)
+                .unwrap_err();
         assert!(matches!(
             err,
             StoreError::OperationLimitExceeded(ANCESTOR_LIMIT)
         ));
         let mut set = HashSet::new();
-        collect_ancestor_set_with_cap(&s, c3, &mut set, 3, ANCESTOR_LIMIT).unwrap();
+        collect_ancestor_set_with_cap(&s, c3, &mut set, 3, ANCESTOR_LIMIT, Missing::EndsPath)
+            .unwrap();
         assert_eq!(set.len(), 3);
         // The error names the cap.
         assert!(ANCESTOR_LIMIT.starts_with("10,000-"));

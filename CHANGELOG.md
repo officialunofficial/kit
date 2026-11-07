@@ -67,6 +67,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   They used to stop there silently: a rebase could replay only the newest
   commits of a long branch, or replay commits its base already holds, and
   bisect could offer commits that are known good.
+- `kit rebase` fails before it changes anything when a commit to replay
+  is missing, corrupt or not a commit, or an ancestor of the base is
+  missing. It used to end the walk there. It then dropped a missing commit of the branch
+  and every commit below it, and after a missing commit in the base's
+  history it replayed commits the base already holds.
 - The file transport's repository cursor also covers the times of every
   directory under `<root>/refs` (SPEC-REFS §5.1.2). kit 0.7.2 and earlier
   write refs without counting, so on a root they shared with a newer kit a
