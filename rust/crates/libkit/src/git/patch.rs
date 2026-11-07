@@ -22,6 +22,10 @@ use super::{Class, Error, open_repo, step};
 use crate::diff::PatchBody;
 use crate::revspec;
 
+/// The most commits that the two walks of one series read together. It
+/// matches the history walk of `kit log`.
+const MAX_SERIES_COMMITS: usize = 1_000_000;
+
 /// A range of commits, as patches.
 #[derive(Debug)]
 pub struct Series {
@@ -103,27 +107,7 @@ pub fn series(cwd: &Path, range: &str) -> Result<Series, Error> {
         }
     }
 
-    // Ancestors of A drop out of the patch series. Every one is read: a
-    // walk that ended at a commit it could not read would leave its
-    // ancestors in the series.
-    let mut excluded: HashSet<Hash> = HashSet::new();
-    let mut stack = vec![exclude_tip];
-    while let Some(h) = stack.pop() {
-        if !excluded.insert(h) {
-            continue;
-        }
-        stack.extend(read_commit(&store, h)?.parents);
-    }
-    let mut commits: HashMap<Hash, Commit> = HashMap::new();
-    let mut stack = vec![include_tip];
-    while let Some(h) = stack.pop() {
-        if excluded.contains(&h) || commits.contains_key(&h) {
-            continue;
-        }
-        let c = read_commit(&store, h)?;
-        stack.extend(c.parents.iter().copied());
-        commits.insert(h, c);
-    }
+    let mut commits = collect_range(&store, exclude_tip, include_tip, MAX_SERIES_COMMITS)?;
 
     // Oldest first: parents before children, the timestamp as the tiebreak.
     let mut remaining: Vec<Hash> = commits.keys().copied().collect();
@@ -161,6 +145,59 @@ pub fn series(cwd: &Path, range: &str) -> Result<Series, Error> {
         start: a.to_owned(),
         end: b.to_owned(),
     })
+}
+
+/// The commits reachable from `include_tip` and not from `exclude_tip`.
+///
+/// Ancestors of `exclude_tip` drop out of the patch series. Every one is
+/// read: a walk that ended at a commit it could not read would leave its
+/// ancestors in the series. Both walks share one budget of `cap` commits,
+/// checked before each commit is read.
+///
+/// # Errors
+/// An error that names the commit when a commit of either side cannot be
+/// read or names a parent that is not a commit, and an error that names
+/// `cap` when the two walks would read more commits than that. It never
+/// returns part of the range.
+fn collect_range(
+    store: &ObjectStore,
+    exclude_tip: Hash,
+    include_tip: Hash,
+    cap: usize,
+) -> Result<HashMap<Hash, Commit>, Error> {
+    let over_cap = || {
+        step(
+            Class::Data,
+            "patch series",
+            format!("the range reaches more than {cap} commits; no patch is written"),
+        )
+    };
+    let mut excluded: HashSet<Hash> = HashSet::new();
+    let mut stack = vec![exclude_tip];
+    while let Some(h) = stack.pop() {
+        if excluded.contains(&h) {
+            continue;
+        }
+        if excluded.len() >= cap {
+            return Err(over_cap());
+        }
+        excluded.insert(h);
+        stack.extend(read_commit(store, h)?.parents);
+    }
+    let mut commits: HashMap<Hash, Commit> = HashMap::new();
+    let mut stack = vec![include_tip];
+    while let Some(h) = stack.pop() {
+        if excluded.contains(&h) || commits.contains_key(&h) {
+            continue;
+        }
+        if excluded.len().saturating_add(commits.len()) >= cap {
+            return Err(over_cap());
+        }
+        let c = read_commit(store, h)?;
+        stack.extend(c.parents.iter().copied());
+        commits.insert(h, c);
+    }
+    Ok(commits)
 }
 
 /// Read the commit `h` of a range.
@@ -404,6 +441,43 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_range_over_the_cap_fails_and_never_returns_a_part() {
+        use kit_core::layout::RepoLayout;
+        use kit_core::object::Identity;
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        let mut chain: Vec<Hash> = Vec::new();
+        for ts in 0..6u64 {
+            let commit = Commit::new_unannotated(
+                [0; 32],
+                chain.last().copied().into_iter().collect(),
+                Identity::ed25519([0; 32]),
+                [0; 32],
+                b"msg".to_vec(),
+                ts,
+                [0; 64],
+            );
+            let bytes = kit_core::serialize::serialize(&Object::Commit(commit)).unwrap();
+            chain.push(store.write(&bytes).unwrap());
+        }
+        // Three excluded commits and three in the series: six together.
+        let (base, tip) = (chain[2], chain[5]);
+        assert_eq!(collect_range(&store, base, tip, 6).unwrap().len(), 3);
+        // An empty series still reads its whole excluded side.
+        assert!(collect_range(&store, tip, base, 6).unwrap().is_empty());
+        let err = collect_range(&store, tip, base, 5).unwrap_err();
+        assert!(err.to_string().contains("more than 5 commits"), "{err}");
+        for cap in [2, 3, 5] {
+            let err = collect_range(&store, base, tip, cap).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("more than {cap} commits")),
+                "{err}"
+            );
+        }
+    }
 
     #[test]
     fn rfc2822_known_dates() {

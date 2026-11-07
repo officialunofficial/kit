@@ -1301,7 +1301,9 @@ Remote / sync:
   single rev means `<rev>..HEAD`; for example,
   `kit git format-patch upstream/main -o patches/`. A commit of either side
   of the range that is missing, corrupt or not a commit fails the command
-  before it writes a patch.
+  before it writes a patch. Both sides of the range together may read at
+  most 1,000,000 commits; a range that would read more fails with an error
+  that names the limit, before it writes a patch.
 
   The `git-bridge` feature, on by default, provides the `kit git`
   subcommands. They shell out to `git`.

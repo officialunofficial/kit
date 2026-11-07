@@ -52,6 +52,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a range could read up to twice the limit.
 - `kit bisect` fails with an error that names the limit when a range has
   more than 10,000 candidates. Its candidate walk used to have no limit.
+- `kit git format-patch` fails before it writes a patch when the two sides
+  of its range would read more than 1,000,000 commits together, with an
+  error that names the limit. Both walks used to have no limit.
 - `kit blame --reverse` fails with an error that names the limit when the
   first-parent walk from the end of its range holds more than 1,000,000
   commits. It used to collect the whole chain with no limit.
