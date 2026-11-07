@@ -19,6 +19,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is inside one root. Writes to one ref still serialize, and `FileTransport::with_ref_lock` still excludes
   every ref write. `FileTransport::with_ref_lock_for` is the single-ref
   entry point.
+- The file transport advances a branch head and its packmap under the locks
+  of both refs (SPEC-REFS §5.1.1). It checks both conditions before it
+  writes either, so a conflict changes nothing, and it puts the packmap back
+  when the head write fails. An advance that creates a ref holds the repo
+  lock exclusive, so a clash with a ref created at the same time is reported
+  as `InvalidRef` and leaves nothing behind. The file transport still offers
+  no atomic advance: a reader can see the new packmap with the old head.
 
 ### Fixed
 

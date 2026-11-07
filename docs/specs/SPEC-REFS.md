@@ -360,6 +360,21 @@ below it, such as `refs/heads/a` and `refs/heads/a/b`. At most one
 succeeds. The other MUST fail with `InvalidRef`, the error that a clash found
 before the write reports, and MUST NOT leave a temporary file behind.
 
+An advance of a branch head and its packmap (`advance_refs`) holds the
+repo lock shared and the exclusive locks of both refs' stripes, taken in
+ascending stripe order, a stripe shared by both refs once, when both ref
+files exist. When either file is missing, the advance creates a ref, and it
+holds the repo lock exclusive instead, so that a ref created under another
+stripe cannot clash with it after its check. Under these locks it checks
+both conditions before it writes either, reporting a packmap conflict
+first, then writes the packmap, then the head. A failed head write puts the
+packmap's previous bytes back. Readers take no lock: a reader that reads
+the head and then the packmap never sees a packmap older than that head,
+but between the two writes, and after a crash between them, it sees the new
+packmap with the old head. That state is consistent only when the new
+packmap also reconstructs the old head's closure, so the file transport
+does not offer an atomic advance.
+
 *Coordination with local worktree operations:* the file transport's locks
 by themselves only serialize it against concurrent instances
 of itself &mdash; it does not, on its own, coordinate against a `commit`,
