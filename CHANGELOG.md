@@ -61,6 +61,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   print the newest commits as if they were the whole history. The excluded
   side of a range (`A..B`, `A...B`) shares that limit; it used to stop
   silently at 10,000 commits, which let excluded commits through.
+- `collect_ancestor_set`, `kit rebase` and `kit bisect` fail with an error
+  that names the limit when an ancestor walk reaches 10,000 commits, and
+  a rebase fails when the branch has more than 10,000 commits to replay.
+  They used to stop there silently: a rebase could replay only the newest
+  commits of a long branch, or replay commits its base already holds, and
+  bisect could offer commits that are known good.
 - The file transport's repository cursor also covers the times of every
   directory under `<root>/refs` (SPEC-REFS §5.1.2). kit 0.7.2 and earlier
   write refs without counting, so on a root they shared with a newer kit a

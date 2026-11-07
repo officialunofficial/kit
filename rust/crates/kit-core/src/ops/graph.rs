@@ -5,9 +5,10 @@
 //! the merge algorithm that consumes them.
 //!
 //! Bound: at most [`MAX_ANCESTORS`] (`10_000`) commits are visited per
-//! call. Beyond that the walk stops silently — callers asking about
-//! pathologically deep histories get a partial answer rather than an
-//! OOM.
+//! call. A walk that would visit more fails with
+//! [`StoreError::OperationLimitExceeded`] and never returns a partial set:
+//! a caller that leaves out an incomplete ancestor set would let ancestors
+//! through.
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::hash::BuildHasher;
@@ -19,6 +20,10 @@ use crate::store::{ObjectSource, ObjectStore, StoreError};
 /// Hard cap on commits visited per call.
 pub const MAX_ANCESTORS: usize = 10_000;
 
+/// The limit [`collect_ancestor_set`] reports when it reaches
+/// [`MAX_ANCESTORS`].
+pub const ANCESTOR_LIMIT: &str = "10,000-commit ancestor walk";
+
 /// Collect the set of all ancestor commits of `start`, including
 /// `start` itself, by DFS over `Commit::parents`. The walk:
 ///
@@ -27,12 +32,14 @@ pub const MAX_ANCESTORS: usize = 10_000;
 ///   short-circuits the parent walk for that node).
 /// * Treats non-commit objects at a hash as terminators (no parents to
 ///   follow).
-/// * Stops cleanly after [`MAX_ANCESTORS`] inserts.
+/// * Fails with [`StoreError::OperationLimitExceeded`] naming
+///   [`ANCESTOR_LIMIT`] when it would insert more than [`MAX_ANCESTORS`]
+///   commits. `set` may then hold part of the ancestors; do not use it.
 ///
 /// # Errors
 ///
 /// All source errors, including resource-budget exhaustion, propagate except
-/// [`StoreError::ObjectNotFound`].
+/// [`StoreError::ObjectNotFound`]. Reaching the cap is an error.
 /// `ObjectNotFound` is *swallowed* — see test
 /// `handles_non_existent_parent_gracefully`.
 pub fn collect_ancestor_set<S: BuildHasher>(
@@ -40,17 +47,32 @@ pub fn collect_ancestor_set<S: BuildHasher>(
     start: Hash,
     set: &mut HashSet<Hash, S>,
 ) -> Result<(), StoreError> {
-    let mut stack: Vec<Hash> = Vec::new();
-    stack.push(start);
+    collect_ancestor_set_with_cap(store, start, set, MAX_ANCESTORS, ANCESTOR_LIMIT)
+}
 
+/// [`collect_ancestor_set`] with a caller-supplied cap and the limit name
+/// its error reports.
+///
+/// # Errors
+///
+/// As [`collect_ancestor_set`], with `cap` in place of [`MAX_ANCESTORS`].
+pub(crate) fn collect_ancestor_set_with_cap<S: BuildHasher>(
+    store: &(impl ObjectSource + ?Sized),
+    start: Hash,
+    set: &mut HashSet<Hash, S>,
+    cap: usize,
+    limit: &'static str,
+) -> Result<(), StoreError> {
+    let mut stack: Vec<Hash> = vec![start];
     let mut count: usize = 0;
     while let Some(current) = stack.pop() {
-        if count >= MAX_ANCESTORS {
-            break;
-        }
-        if !set.insert(current) {
+        if set.contains(&current) {
             continue;
         }
+        if count >= cap {
+            return Err(StoreError::OperationLimitExceeded(limit));
+        }
+        set.insert(current);
         count += 1;
 
         match store.read_object(&current) {
@@ -371,6 +393,27 @@ mod tests {
         };
         let bytes = serialize::serialize(&Object::Commit(c)).unwrap();
         s.write(&bytes).unwrap()
+    }
+
+    #[test]
+    fn an_ancestor_walk_over_its_cap_fails_and_never_returns_a_prefix() {
+        let (_d, s) = store();
+        let tree = make_single_file_tree(&s, b"f", b"data");
+        let c1 = make_commit(&s, tree, &[], "c1");
+        let c2 = make_commit(&s, tree, &[c1], "c2--");
+        let c3 = make_commit(&s, tree, &[c2], "c3----");
+        let mut set = HashSet::new();
+        let err = collect_ancestor_set_with_cap(&s, c3, &mut set, 2, ANCESTOR_LIMIT).unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::OperationLimitExceeded(ANCESTOR_LIMIT)
+        ));
+        let mut set = HashSet::new();
+        collect_ancestor_set_with_cap(&s, c3, &mut set, 3, ANCESTOR_LIMIT).unwrap();
+        assert_eq!(set.len(), 3);
+        // The error names the cap.
+        assert!(ANCESTOR_LIMIT.starts_with("10,000-"));
+        assert_eq!(MAX_ANCESTORS, 10_000);
     }
 
     #[test]
