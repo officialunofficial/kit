@@ -292,3 +292,68 @@ fn rebase_over_an_unreadable_commit_fails_and_changes_nothing() {
     fs::remove_file(object_file(&repo, &o1)).unwrap();
     assert_rebase_changes_nothing(&repo, "missing commit in the base");
 }
+
+// ---------------------------------------------------------------------------
+// History walks over an unreadable commit
+// ---------------------------------------------------------------------------
+
+/// main = r - p - m - g; side = r - p - x - merge(x, g), checked out. Returns
+/// the hex ids of m and g.
+fn range_fixture(repo: &Repo) -> (String, String) {
+    let head = |repo: &Repo| {
+        let out = repo.ok(&["rev-parse", "HEAD"]).stdout;
+        String::from_utf8(out).unwrap().trim().to_owned()
+    };
+    repo.commit_file("r.txt", b"r\n", "r");
+    repo.commit_file("p.txt", b"p\n", "p");
+    repo.ok(&["branch", "side"]);
+    repo.commit_file("m.txt", b"m\n", "m");
+    let m = head(repo);
+    repo.commit_file("g.txt", b"g\n", "g");
+    let g = head(repo);
+    repo.ok(&["checkout", "side"]);
+    repo.commit_file("x.txt", b"x\n", "x");
+    repo.ok(&["merge", "main"]);
+    (m, g)
+}
+
+/// Flip the last byte of the loose object `hex`.
+fn corrupt_object(repo: &Repo, hex: &str) {
+    let path = object_file(repo, hex);
+    let mut bytes = fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(&path, &bytes).unwrap();
+}
+
+#[test]
+fn bisect_over_an_unreadable_commit_fails_and_offers_nothing() {
+    let bisect = |repo: &Repo, good: &str| {
+        repo.ok(&["bisect", "start"]);
+        repo.ok(&["bisect", "bad"]);
+        repo.run(&["bisect", "good", good])
+    };
+    let repo = Repo::new();
+    let (_, g) = range_fixture(&repo);
+    let out = bisect(&repo, &g);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("(2 candidates remaining)"));
+
+    // Without m the good set would lack p and r, and bisect would offer them
+    // although they are known good.
+    let repo = Repo::new();
+    let (m, g) = range_fixture(&repo);
+    fs::remove_file(object_file(&repo, &m)).unwrap();
+    let out = bisect(&repo, &g);
+    check_exit(&out, "missing commit in the good set").unwrap();
+    assert!(!out.status.success(), "missing commit in the good set");
+    assert!(out.stdout.is_empty(), "offered a candidate");
+
+    let repo = Repo::new();
+    let (m, g) = range_fixture(&repo);
+    corrupt_object(&repo, &m);
+    let out = bisect(&repo, &g);
+    check_exit(&out, "corrupt commit in the good set").unwrap();
+    assert!(!out.status.success(), "corrupt commit in the good set");
+    assert!(out.stdout.is_empty(), "offered a candidate");
+}

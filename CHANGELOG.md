@@ -75,10 +75,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   commits of a long branch, or replay commits its base already holds, and
   bisect could offer commits that are known good.
 - `kit rebase` fails before it changes anything when a commit to replay
-  is missing, corrupt or not a commit, or an ancestor of the base is
-  missing. It used to end the walk there. It then dropped a missing commit of the branch
+  or an ancestor of the base is missing, corrupt or not a commit. It used
+  to end the walk there. It then dropped a missing commit of the branch
   and every commit below it, and after a missing commit in the base's
   history it replayed commits the base already holds.
+- `kit bisect` fails when a commit of the range, or an ancestor of a good
+  commit, is missing, corrupt or not a commit. The range walk used to end
+  at such a commit and the good walk used to skip it, so bisect could miss
+  candidates or offer commits that are known good.
 - `kit blame --reverse` fails with an error that names the limit when the
   first-parent walk from the end of its range holds more than 1,000,000
   commits. It used to collect the whole chain with no limit.

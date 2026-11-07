@@ -13,7 +13,7 @@
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
-use crate::hash::Hash;
+use crate::hash::{self, Hash};
 use crate::object::{Object, ObjectType};
 use crate::store::{ObjectSource, ObjectStore, StoreError};
 
@@ -47,42 +47,100 @@ pub fn collect_ancestor_set<S: BuildHasher>(
     start: Hash,
     set: &mut HashSet<Hash, S>,
 ) -> Result<(), StoreError> {
-    collect_ancestor_set_with_cap(
-        store,
-        start,
-        set,
-        MAX_ANCESTORS,
-        ANCESTOR_LIMIT,
-        Missing::EndsPath,
-    )
+    collect_ancestor_set_with_cap(store, start, set, MAX_ANCESTORS, ANCESTOR_LIMIT)
 }
 
-/// What an ancestor walk does at an object that is not in the store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Missing {
-    /// Keep the hash in the set and follow no parents from it.
-    EndsPath,
-    /// Fail with [`StoreError::ObjectNotFound`]. A missing commit may have
-    /// ancestors the walk then never sees, so a caller that leaves the set
-    /// out needs this.
-    Fails,
+/// Why a strict ancestor walk failed. A strict walk reads every commit of
+/// the history: a walk that ended at a commit it could not read would miss
+/// every ancestor behind it.
+#[derive(Debug, thiserror::Error)]
+pub enum AncestorError {
+    /// A commit of the history cannot be read.
+    #[error("commit {} cannot be read: {source}", hash::to_hex(.hash))]
+    Unreadable {
+        /// The commit that cannot be read.
+        hash: Hash,
+        /// Why the read failed.
+        source: StoreError,
+    },
+    /// A commit names a parent that is not a commit.
+    #[error("object {} in the history is not a commit", hash::to_hex(.0))]
+    NotACommit(Hash),
+    /// The walk reached its cap.
+    #[error(transparent)]
+    Limit(StoreError),
 }
 
-/// [`collect_ancestor_set`] with a caller-supplied cap, the limit name its
-/// error reports, and what a missing object does.
+/// Read the commit `hash` of a history.
+///
+/// # Errors
+/// [`AncestorError::Unreadable`] when the object cannot be read, and
+/// [`AncestorError::NotACommit`] when it is another kind of object.
+pub(crate) fn read_history_commit(
+    store: &(impl ObjectSource + ?Sized),
+    hash: Hash,
+) -> Result<crate::object::Commit, AncestorError> {
+    match store.read_object(&hash) {
+        Ok(Object::Commit(commit)) => Ok(commit),
+        Ok(_) => Err(AncestorError::NotACommit(hash)),
+        Err(source) => Err(AncestorError::Unreadable { hash, source }),
+    }
+}
+
+/// [`collect_ancestor_set`] with a caller-supplied cap and the limit name
+/// its error reports.
 ///
 /// # Errors
 ///
 /// As [`collect_ancestor_set`], with `cap` in place of [`MAX_ANCESTORS`].
-/// With [`Missing::Fails`], [`StoreError::ObjectNotFound`] propagates too.
 pub(crate) fn collect_ancestor_set_with_cap<S: BuildHasher>(
     store: &(impl ObjectSource + ?Sized),
     start: Hash,
     set: &mut HashSet<Hash, S>,
     cap: usize,
     limit: &'static str,
-    missing: Missing,
 ) -> Result<(), StoreError> {
+    walk_ancestors(start, set, cap, limit, |current| {
+        match store.read_object(&current) {
+            Ok(Object::Commit(c)) => Ok(c.parents),
+            // A non-commit or a missing object ends the path.
+            Ok(_) | Err(StoreError::ObjectNotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    })
+}
+
+/// Collect `start` and all of its ancestors into `set`, reading every one
+/// of them. A root commit ends a path.
+///
+/// # Errors
+///
+/// [`AncestorError::Unreadable`] or [`AncestorError::NotACommit`] when a
+/// commit of the history cannot be read or is another kind of object, and
+/// [`AncestorError::Limit`] naming `limit` when the walk would insert more
+/// than `cap` commits. `set` may then hold part of the ancestors; do not
+/// use it.
+pub(crate) fn collect_history_with_cap<S: BuildHasher>(
+    store: &(impl ObjectSource + ?Sized),
+    start: Hash,
+    set: &mut HashSet<Hash, S>,
+    cap: usize,
+    limit: &'static str,
+) -> Result<(), AncestorError> {
+    walk_ancestors(start, set, cap, limit, |current| {
+        read_history_commit(store, current).map(|c| c.parents)
+    })
+}
+
+/// A depth-first walk from `start` that inserts each hash into `set` and
+/// follows the parents that `parents` returns for it.
+fn walk_ancestors<S: BuildHasher, E: From<LimitReached>>(
+    start: Hash,
+    set: &mut HashSet<Hash, S>,
+    cap: usize,
+    limit: &'static str,
+    mut parents: impl FnMut(Hash) -> Result<Vec<Hash>, E>,
+) -> Result<(), E> {
     let mut stack: Vec<Hash> = vec![start];
     let mut count: usize = 0;
     while let Some(current) = stack.pop() {
@@ -90,25 +148,28 @@ pub(crate) fn collect_ancestor_set_with_cap<S: BuildHasher>(
             continue;
         }
         if count >= cap {
-            return Err(StoreError::OperationLimitExceeded(limit));
+            return Err(LimitReached(limit).into());
         }
         set.insert(current);
         count += 1;
-
-        match store.read_object(&current) {
-            Ok(Object::Commit(c)) => {
-                for &parent in &c.parents {
-                    stack.push(parent);
-                }
-            }
-            // A non-commit has no parents, so no ancestor lies behind it.
-            // A missing object may: see [`Missing`].
-            Ok(_) => {}
-            Err(StoreError::ObjectNotFound(_)) if missing == Missing::EndsPath => {}
-            Err(e) => return Err(e),
-        }
+        stack.extend(parents(current)?);
     }
     Ok(())
+}
+
+/// An ancestor walk reached its cap, named by the limit it reports.
+struct LimitReached(&'static str);
+
+impl From<LimitReached> for StoreError {
+    fn from(LimitReached(limit): LimitReached) -> Self {
+        Self::OperationLimitExceeded(limit)
+    }
+}
+
+impl From<LimitReached> for AncestorError {
+    fn from(LimitReached(limit): LimitReached) -> Self {
+        Self::Limit(StoreError::OperationLimitExceeded(limit))
+    }
 }
 
 /// Hard cap on the total number of objects [`reachable_objects`] will
@@ -424,16 +485,13 @@ mod tests {
         let c2 = make_commit(&s, tree, &[c1], "c2--");
         let c3 = make_commit(&s, tree, &[c2], "c3----");
         let mut set = HashSet::new();
-        let err =
-            collect_ancestor_set_with_cap(&s, c3, &mut set, 2, ANCESTOR_LIMIT, Missing::EndsPath)
-                .unwrap_err();
+        let err = collect_ancestor_set_with_cap(&s, c3, &mut set, 2, ANCESTOR_LIMIT).unwrap_err();
         assert!(matches!(
             err,
             StoreError::OperationLimitExceeded(ANCESTOR_LIMIT)
         ));
         let mut set = HashSet::new();
-        collect_ancestor_set_with_cap(&s, c3, &mut set, 3, ANCESTOR_LIMIT, Missing::EndsPath)
-            .unwrap();
+        collect_ancestor_set_with_cap(&s, c3, &mut set, 3, ANCESTOR_LIMIT).unwrap();
         assert_eq!(set.len(), 3);
         // The error names the cap.
         assert!(ANCESTOR_LIMIT.starts_with("10,000-"));

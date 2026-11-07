@@ -849,9 +849,8 @@ Branches / refs:
   Restore steps refuse to overwrite staged changes, dirty tracked files,
   or untracked path collisions. On conflict the rebase pauses with
   resumable state; `--skip` drops the current commit. See "Resolving
-  conflicts" below. A commit to replay that is missing, corrupt or not a
-  commit, or a missing ancestor of the base, fails the rebase before any
-  change.
+  conflicts" below. A commit to replay or an ancestor of the base that is
+  missing, corrupt or not a commit fails the rebase before any change.
   `-i`/`--interactive` opens the todo list in `$EDITOR` before any
   mutation. Each line is `<command> <commit> <subject>`, oldest-first
   (top is applied first). Reorder lines to reorder commits; delete a line
@@ -886,6 +885,9 @@ Branches / refs:
   sparse-checkout repo `run` materializes the **full** tree for each
   candidate (the transient checkout doesn't re-apply a persisted sparse
   cone).
+  Bisect reads every commit of the range and every ancestor of each good
+  commit. One that is missing, corrupt or not a commit fails the step with
+  an error that names it, and bisect offers no candidate.
 - `kit gc [-n|--dry-run] [--grace-secs <secs>]` &mdash; reclaim unreachable
   objects (mark-and-sweep). Under the repo lock it expires stale recovery
   entries, computes the live set reachable from the retention roots (refs,
