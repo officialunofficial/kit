@@ -7,6 +7,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Batched object writes, such as `kit add`, start each object's write
+  barrier on a background pool as soon as the object is staged. Before, every
+  barrier waited for commit. The device wait now overlaps chunking and
+  hashing. Objects still become visible only after the batch's full flush.
+- FastCDC cuts chunks on up to 8 threads. The boundaries are byte-identical
+  to the single-threaded chunker, so the object format does not change.
+
 ### Fixed
 
 - Blame caps its LCS comparison table at 64 MiB after trimming the common
