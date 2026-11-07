@@ -42,11 +42,13 @@ const MAX_HEAD_NAME_BYTES: u64 = 4096;
 const MAX_HASH_FILE_BYTES: u64 = 128;
 const MAX_HASH_LIST_BYTES: u64 = 1024 * 1024;
 
-/// Maximum commits walked by [`collect_commits_to_replay`] before bail-out.
+/// Maximum commits [`collect_commits_to_replay`] replays. A longer branch
+/// fails with [`RebaseError::TooManyCommits`].
 const MAX_REPLAY_DEPTH: usize = 10_000;
 
-/// Maximum commits visited by the inlined ancestor walk.
-const MAX_ANCESTORS: usize = 10_000;
+/// The limit a rebase reports when the ancestors of its base exceed
+/// [`crate::ops::graph::MAX_ANCESTORS`].
+const ONTO_ANCESTOR_LIMIT: &str = "10,000-commit ancestor walk of the rebase base";
 
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +68,10 @@ pub enum RebaseError {
     /// Object-store failure during the walk.
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
+    /// The branch has more commits to replay than one rebase replays.
+    /// Replaying only the newest of them would drop the rest.
+    #[error("the branch has more than {0} commits to replay; nothing was rebased")]
+    TooManyCommits(usize),
 }
 
 /// Result alias.
@@ -233,29 +239,57 @@ pub fn cleanup_rebase(layout: &RepoLayout) -> RebaseResult<()> {
 
 /// Walk first-parent chain from `head_hash` back, stopping when we reach
 /// `onto_hash` or any ancestor of it. Returns commits in oldest-first
-/// order (ready for replay). Caps the walk at `MAX_REPLAY_DEPTH`.
+/// order (ready for replay). More than `MAX_REPLAY_DEPTH` commits to replay
+/// is an error, and so is a base with more ancestors than one walk visits:
+/// a partial ancestor set would replay commits the base already holds.
 ///
 /// # Errors
-/// - [`RebaseError::Store`] / [`RebaseError::Object`] for store failures.
+/// - [`RebaseError::Store`] / [`RebaseError::Object`] for store failures,
+///   and [`RebaseError::Store`] when the base has too many ancestors.
+/// - [`RebaseError::TooManyCommits`] when the branch is too long to replay.
 pub fn collect_commits_to_replay(
     store: &ObjectStore,
     head_hash: Hash,
     onto_hash: Hash,
+) -> RebaseResult<Vec<Hash>> {
+    collect_commits_with_caps(
+        store,
+        head_hash,
+        onto_hash,
+        MAX_REPLAY_DEPTH,
+        crate::ops::graph::MAX_ANCESTORS,
+    )
+}
+
+/// [`collect_commits_to_replay`] with caller-supplied caps.
+fn collect_commits_with_caps(
+    store: &ObjectStore,
+    head_hash: Hash,
+    onto_hash: Hash,
+    max_replay: usize,
+    max_ancestors: usize,
 ) -> RebaseResult<Vec<Hash>> {
     if head_hash == onto_hash {
         return Ok(Vec::new());
     }
 
     let mut onto_ancestors: HashSet<Hash> = HashSet::new();
-    collect_ancestor_set(store, onto_hash, &mut onto_ancestors);
+    crate::ops::graph::collect_ancestor_set_with_cap(
+        store,
+        onto_hash,
+        &mut onto_ancestors,
+        max_ancestors,
+        ONTO_ANCESTOR_LIMIT,
+    )?;
 
     let mut commits: Vec<Hash> = Vec::new();
     let mut current = head_hash;
-    let mut depth = 0usize;
-
-    while depth < MAX_REPLAY_DEPTH {
+    loop {
         if current == onto_hash || onto_ancestors.contains(&current) {
             break;
+        }
+        if commits.len() >= max_replay {
+            return Err(RebaseError::TooManyCommits(max_replay));
         }
         commits.push(current);
 
@@ -263,11 +297,10 @@ pub fn collect_commits_to_replay(
             break;
         };
         let Object::Commit(commit) = obj else { break };
-        if commit.parents.is_empty() {
+        let Some(&parent) = commit.parents.first() else {
             break;
-        }
-        current = commit.parents[0];
-        depth += 1;
+        };
+        current = parent;
     }
 
     commits.reverse();
@@ -275,30 +308,6 @@ pub fn collect_commits_to_replay(
 }
 
 // -- Internal helpers --------------------------------------------------------
-
-/// Private ancestor-set walk. Kept private so `ops::graph` owns the
-/// public surface.
-fn collect_ancestor_set(store: &ObjectStore, start: Hash, set: &mut HashSet<Hash>) {
-    let mut stack: Vec<Hash> = vec![start];
-    let mut count = 0usize;
-    while let Some(current) = stack.pop() {
-        if count >= MAX_ANCESTORS {
-            break;
-        }
-        if !set.insert(current) {
-            continue;
-        }
-        count += 1;
-        let Ok(obj) = store.read_object(&current) else {
-            continue;
-        };
-        if let Object::Commit(commit) = obj {
-            for p in commit.parents {
-                stack.push(p);
-            }
-        }
-    }
-}
 
 fn read_hex_hash(path: &Path) -> RebaseResult<Hash> {
     let raw =
@@ -453,6 +462,32 @@ mod tests {
         ));
         let bytes = serialize::serialize(&commit).unwrap();
         store.write(&bytes).unwrap()
+    }
+
+    #[test]
+    fn a_rebase_over_its_caps_fails_and_never_replays_a_part() {
+        let (_d, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let tree = put_tree(&store, "f.txt", blob);
+        // base - o1 - o2 (onto), and base - h1 - h2 - h3 (head).
+        let base = put_commit(&store, tree, vec![], 1);
+        let o1 = put_commit(&store, tree, vec![base], 2);
+        let o2 = put_commit(&store, tree, vec![o1], 3);
+        let h1 = put_commit(&store, tree, vec![base], 4);
+        let h2 = put_commit(&store, tree, vec![h1], 5);
+        let h3 = put_commit(&store, tree, vec![h2], 6);
+        let all = collect_commits_with_caps(&store, h3, o2, 3, 3).unwrap();
+        assert_eq!(all, [h1, h2, h3]);
+        let long = collect_commits_with_caps(&store, h3, o2, 2, 3).unwrap_err();
+        assert!(matches!(long, RebaseError::TooManyCommits(2)), "{long:?}");
+        assert!(long.to_string().contains("more than 2 commits"));
+        let deep = collect_commits_with_caps(&store, h3, o2, 3, 2).unwrap_err();
+        assert!(matches!(
+            deep,
+            RebaseError::Store(crate::store::StoreError::OperationLimitExceeded(
+                ONTO_ANCESTOR_LIMIT
+            ))
+        ));
     }
 
     #[test]

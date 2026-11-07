@@ -41,8 +41,9 @@ pub const BISECT_FILE: &str = "bisect";
 
 const MAX_BISECT_FILE_BYTES: u64 = 1024 * 1024;
 
-/// Maximum commits visited by the inlined ancestor walk.
-const MAX_ANCESTORS: usize = 10_000;
+/// The limit bisect reports when the ancestors of a good commit exceed
+/// [`crate::ops::graph::MAX_ANCESTORS`].
+const GOOD_ANCESTOR_LIMIT: &str = "10,000-commit ancestor walk of a good commit";
 
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
@@ -241,15 +242,35 @@ pub fn bisect_file_path(layout: &RepoLayout) -> PathBuf {
 /// ancestor of `good`. Returns the candidate set in BFS order from `bad`.
 ///
 /// # Errors
-/// - [`BisectError::Store`] / [`BisectError::Object`] for store failures.
+/// - [`BisectError::Store`] / [`BisectError::Object`] for store failures,
+///   and [`BisectError::Store`] when a good commit has more ancestors than
+///   one walk visits.
 pub fn enumerate_range(
     store: &ObjectStore,
     bad: Hash,
     good_hashes: &[Hash],
 ) -> BisectResult<Vec<Hash>> {
+    enumerate_range_with_cap(store, bad, good_hashes, crate::ops::graph::MAX_ANCESTORS)
+}
+
+/// [`enumerate_range`] with a caller-supplied cap on the ancestors of each
+/// good commit.
+fn enumerate_range_with_cap(
+    store: &ObjectStore,
+    bad: Hash,
+    good_hashes: &[Hash],
+    max_ancestors: usize,
+) -> BisectResult<Vec<Hash>> {
+    // A partial good set would offer commits that are already known good.
     let mut good_set: HashSet<Hash> = HashSet::new();
     for g in good_hashes {
-        collect_ancestor_set(store, *g, &mut good_set);
+        crate::ops::graph::collect_ancestor_set_with_cap(
+            store,
+            *g,
+            &mut good_set,
+            max_ancestors,
+            GOOD_ANCESTOR_LIMIT,
+        )?;
     }
 
     let mut visited: HashSet<Hash> = HashSet::new();
@@ -389,30 +410,6 @@ pub fn next_step(store: &ObjectStore, state: &BisectState) -> BisectResult<Bisec
         hash: mid,
         remaining: candidates.len(),
     })
-}
-
-// -- Internal helpers --------------------------------------------------------
-
-fn collect_ancestor_set(store: &ObjectStore, start: Hash, set: &mut HashSet<Hash>) {
-    let mut stack: Vec<Hash> = vec![start];
-    let mut count = 0usize;
-    while let Some(current) = stack.pop() {
-        if count >= MAX_ANCESTORS {
-            break;
-        }
-        if !set.insert(current) {
-            continue;
-        }
-        count += 1;
-        let Ok(obj) = store.read_object(&current) else {
-            continue;
-        };
-        if let Object::Commit(commit) = obj {
-            for p in commit.parents {
-                stack.push(p);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -651,6 +648,28 @@ mod tests {
     #[test]
     fn pick_midpoint_empty_returns_zero() {
         assert_eq!(pick_midpoint(&[]), ZERO);
+    }
+
+    #[test]
+    fn a_good_commit_with_ancestors_over_the_cap_fails() {
+        let (_d, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let tree = put_tree(&store, "f.txt", blob);
+        let c1 = put_commit(&store, tree, vec![], 1);
+        let c2 = put_commit(&store, tree, vec![c1], 2);
+        let c3 = put_commit(&store, tree, vec![c2], 3);
+        let c4 = put_commit(&store, tree, vec![c3], 4);
+        let err = enumerate_range_with_cap(&store, c4, &[c3], 2).unwrap_err();
+        assert!(matches!(
+            err,
+            BisectError::Store(crate::store::StoreError::OperationLimitExceeded(
+                GOOD_ANCESTOR_LIMIT
+            ))
+        ));
+        assert_eq!(
+            enumerate_range_with_cap(&store, c4, &[c3], 3).unwrap(),
+            [c4]
+        );
     }
 
     #[test]
