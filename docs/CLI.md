@@ -304,6 +304,9 @@ History / commits:
   commit's first parent, so a merged side branch never enters the walk at
   all. All of these filters apply **before** `-n <limit>`, so `-n` caps
   the filtered result, matching git.
+  One walk reads at most 1,000,000 commits, counting the excluded side of
+  a range. A walk that would read more fails with an error that names the
+  limit; `kit log` never prints part of a history as if it were all of it.
 - `kit reflog [<ref>] [--format=json] [-n N]` &mdash; **read-only** view of a
   branch's first-parent ancestry. Defaults to the branch `HEAD` points at;
   detached `HEAD` needs an explicit `<ref>`. Walks newest-first, addressing each

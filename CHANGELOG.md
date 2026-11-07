@@ -9,6 +9,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `kit log` and `kit rev-list` fail with an error that names the limit when
+  a walk reaches more than 1,000,000 commits. They used to stop there and
+  print the newest commits as if they were the whole history. The excluded
+  side of a range (`A..B`, `A...B`) shares that limit; it used to stop
+  silently at 10,000 commits, which let excluded commits through.
 - Blame caps its LCS comparison table at 64 MiB after trimming the common
   prefix. Larger comparisons use the bounded line diff search. Reassembly,
   line buffers, and attribution memory still grow with file size.
