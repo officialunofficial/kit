@@ -5,7 +5,7 @@ SPEC-CONCURRENCY with a layout server. A layout server is a server that embeds t
 
 | File | What it models |
 |------|----------------|
-| `refs.qnt` | SPEC-REFS §5 CAS (Any / Missing / Match, deletes), §5.1 atomicity per lock domain (local `refs-<ref>.lock`, file-transport `RefLock`, memory `Mutex`), SPEC-CONCURRENCY §4 lock order and deadlock freedom, §3.2 recovery-log record/expire, §3.1 cross-domain gap |
+| `refs.qnt` | SPEC-REFS §5 CAS (Any / Missing / Match, deletes), §5.1 atomicity per lock domain (local `refs-<ref>.lock`, the file transport's repo and stripe locks, memory `Mutex`), SPEC-REFS §5.1.1 stripe locks, SPEC-CONCURRENCY §4 lock order and deadlock freedom, §3.2 recovery-log record/expire, §3.1 cross-domain gap |
 | `refs_test.qnt` | Pinned interleavings for `refs.qnt`, mutants and witnesses included |
 | `serve.qnt` | `serveLocks`: `serve.lock` (shared by `kit serve` and a layout server), `server.lock` (exclusive, a layout server), the startup sweep of crashed uploads under an exclusive `serve.lock`, the worktree probe (SPEC-CONCURRENCY §2, §3.1). `servedNames`: SPEC-REFS v3 §2 served names and the §3 512-byte bound, as far as they affect safety |
 | `serve_test.qnt` | Pinned interleavings for `serve.qnt` (`serve_test`, `served_test`) |
@@ -24,11 +24,24 @@ SPEC-CONCURRENCY with a layout server. A layout server is a server that embeds t
   and takes the shared lock; busy means skip. Modelled against concurrent
   uploads of other servers, including a stalled streaming upload whose temp
   file is older than the age bound (`SweepAlone`, `NoLiveUploadSwept`).
+- **File transport stripe locks** (SPEC-REFS §5.1.1): a single-ref write
+  (`file`) takes the repo lock `<root>/.kit/refs/.lock` shared, then the
+  exclusive lock of its ref's stripe. A multi-file step (`fileTx`,
+  `FileTransport::with_ref_lock`) takes the repo lock exclusive and no
+  stripe. `sharers` tracks the shared holders. `OneFileWriterPerRef` (two
+  writes to one ref never overlap), `FileStepAlone` (an exclusive step
+  excludes every file write) and the repo lock's read-write rule in
+  `LockOwnership` are Safety conjuncts; `WitnessStripesOverlap` shows that
+  writes to refs in different stripes do overlap, and the `refs2_collide`
+  instance (both refs in one stripe) shows that it is then unreachable.
+  `WRITER_PREF` selects a repo lock that makes a new shared hold wait
+  behind a waiting exclusive request, as an in-process read-write lock
+  may; `false` is an OS flock, which grants it.
 - **Cross-domain gap covers layout server** (§3.1): a layout server
   fs-layout deployment writes refs through `FileTransport` under the same
-  `<root>/.kit/refs/.lock` (`FsLayoutStore::apply` ->
-  `FileTransport::with_ref_lock`), so in `refs.qnt` a `file` op is a CAS
-  from `kit serve`, a layout server or a `kit+file://` push alike. The
+  locks (`FsLayoutStore::apply` -> `FileTransport::with_ref_lock`), so in
+  `refs.qnt` a `file` or `fileTx` op is a CAS from `kit serve`, a layout
+  server or a `kit+file://` push alike. The
   `WitnessCrossDomainGap` witness is still reachable, as documented.
 - **Served names, SPEC-REFS v3 §2**, and the **512-byte bound, §3**:
   `servedNames` checks that a server refuses a name outside `refs/`, or
@@ -81,15 +94,19 @@ refs or values.
 
 | Checker | Instance | Bound | Result |
 |---------|----------|-------|--------|
-| `quint test` | `refs_test` (23 runs), `serve_test` (13), `served_test` (7) | pinned traces | all pass |
-| `quint run` | `refs3`, `refs2` Safety | 20000 samples x 40 steps, seed 0x1 | ok |
+| `quint test` | `refs_test` (29 runs), `refs_wpref_test` (2), `refs_collide_test` (1), `serve_test` (13), `served_test` (7) | pinned traces | all pass |
+| `quint run` | `refs3`, `refs2` Safety | 20000 samples x 40 steps, seed 0x1 (the stripe-lock model was last run at 2000 samples: one 20000-sample run takes about 20 minutes on a 4-CPU machine) | ok |
 | `quint run` | `serve2`, `serve3`, `served` Safety | same | ok |
 | TLC | `serve2` Safety | exhaustive: 2 server slots (each may start as either binary), 1 local command, 3 uploaders | ok, 18,812 states |
 | TLC | `serve3` Safety | exhaustive: 3 server slots | ok, 152,012 states |
 | TLC | `served` Safety | exhaustive (one request at a time, 5 name classes, stray files present or not) | ok, 66,064 states |
-| TLC | `refs2` Safety, slice `domains` | exhaustive for 2 processes whose ops are local `updateRef`, `file` or `mem` on one ref (TLC `CONSTANT KINDS <- ...`, `REFS <- {0}`), CONSTRAINT `nextEntry <= 2`; VIEW drops only `lastAction` | ok, 3,418,713 states |
+| TLC | `refs2` Safety, slice `domains` | exhaustive for 2 processes whose ops are local `updateRef`, `file` or `mem` on one ref (TLC `CONSTANT KINDS <- ...`, `REFS <- {0}`), CONSTRAINT `nextEntry <= 2`; VIEW drops only `lastAction` | ok, 3,770,793 states |
 | TLC | `refs2` Safety, slice `chain` | same, ops `commit`, `amend`, `branch`, `checkout`, `gc` on one ref | ok, 3,538,512 states |
-| Apalache 0.62.2 | `refs2` Safety (full op space) | length `REFS_DEPTH` = 8 (~22 min under load) | ok |
+| TLC | `refs2` Safety, slice `file` | same, ops `file` and `fileTx` on both refs | ok, 308,475 states |
+| TLC | `refs2_collide` Safety and `WitnessStripesOverlap`, slice `file` | same, both refs in one stripe | ok, 277,371 states (the witness is unreachable) |
+| TLC | `refs3_wpref` Safety, slice `file3` | 3 processes, ops `file` and `fileTx` on one ref, writer-preferring repo lock | ok, 2,198,691 states |
+| TLC | `refs3_stripeFirstFlock` `NoDeadlock`, slice `file3` | same, flock repo lock, single-ref writes may take the stripe first | ok, 7,902,603 states: with a flock repo lock the opposite order does not deadlock |
+| Apalache 0.62.2 | `refs2` Safety (full op space) | length `REFS_DEPTH` = 8 (~22 min under load) | ok for the model before the stripe locks; not rerun since |
 | Apalache 0.62.2 | `serve2` Safety, `served` Safety | length 12 / 8 | ok |
 
 Every mutant and witness in the table below was reached by TLC and/or
@@ -107,6 +124,10 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 | `refs2_gcSkipTrees` | `ExpireHoldsSuperset`, `NoRecordExpireInterleave` | §3.2 superset rule |
 | `refs2_racyAcquire` | `LockOwnership` | broken flock |
 | `refs2_memNoMutex` | `NoLostUpdateMem` | the v1 "NOT atomic" memory row |
+| `refs2_noStripeLock` | `OneFileWriterPerRef`, `NoLostUpdateFile` | a single-ref write needs its stripe lock; the shared repo lock excludes nothing |
+| `refs2_txShared` | `FileStepAlone` | a multi-file step needs the repo lock exclusive |
+| `refs3_stripeFirst` | `NoDeadlock` (writer-preferring repo lock), `LockOrderRespected` | the order repo lock, then stripe lock, prevents a deadlock between a write in order, a write out of order and a waiting multi-file step |
+| `refs2` | `WitnessStripesOverlap` | writes to refs in different stripes overlap; `refs2_collide` shows it unreachable with one stripe |
 | `refs3` | `WitnessCrossDomainGap` | documented §3.1 gap (local vs `kit serve` or a layout server, when the served root is the common dir) |
 | `serve2_sweepUnlocked` | `SweepAlone`, `NoLiveUploadSwept` | the sweep needs the exclusive hold |
 | `serve2_sweepUnderShared` | `SweepAlone`, `NoLiveUploadSwept` | a shared hold does not exclude other servers' uploads |
@@ -141,13 +162,15 @@ cover the whole space to their bounds.
   effects (a starting `kit serve` skips its sweep, a starting server waits)
   are liveness only. Lock waits never time out (the 5 s timeout is
   abstracted, as in `refs.qnt`). Stop and crash are one action.
-- The file domain is one lock (id 7 in `refs.qnt`), the `.lock` file. The
-  code takes that lock shared and the exclusive lock of one of 256 stripes
-  for a write to one ref (SPEC-REFS §5.1.1), so single-ref writes to refs in
-  different stripes run in parallel. The model serializes them. A step that
-  holds the repo lock exclusive (`FileTransport::with_ref_lock`) still
-  excludes every file write, as lock 7 does. The `NoLostUpdateFile` result
-  therefore describes one lock, not the stripe locks.
+- The 256 stripes are two: ref 0 and ref 1 each have one (ids 10 and
+  11), or share id 10 under `COLLIDE`. The stripe mapping itself (the first
+  byte of the BLAKE3 digest of the ref name) is pure arithmetic, left to the
+  `kit-transport-file` unit tests. So is the clash between a ref and a ref
+  below it (`refs/heads/a`, `refs/heads/a/b`) under different stripe locks:
+  the model's refs are not nested.
+- Each file-transport instance's in-process locks mirror its OS locks and
+  are not modelled apart from them; `WRITER_PREF` covers the in-process
+  read-write lock's possible writer preference.
 - A SQLite-metadata layout server deployment keeps refs in SQLite (the root marker makes
   `FileTransport` refuse ref writes on that root) and is not modelled;
   neither is a layout server's S3 spool sweep (under `server.lock`, used
@@ -187,7 +210,7 @@ the `history-mmr` ancestry path) are in that file's header.
 | `quint run refs_mbt3 --step stepLin` `LinSafety` | 2000 samples x 60 steps, seed 0x1 | ok |
 | `quint run refs_mbt3 --step stepLin` `LinSafety` (one-off, not in the script) | 20000 samples x 40 steps, seed 0x1, 9 min | ok |
 | `quint run refs_mbt3 --step stepAll` `NoCrossDomainGap` | 20000 samples x 60 steps, seed 0x1 | violation (as it must) |
-| Replay of 5 fixtures (`refs_mbt2` seeds 0xa, 0xf, 0x24; `refs_mbt3` seeds 0x1b, 0x21) | 300 steps, 41 commits | every step agrees |
+| Replay of 5 fixtures (`refs_mbt2` seeds 0x1, 0x9, 0xc, 0x18, 0x1a) | 300 steps, 43 commits, the multi-file step `fileTx` included | every step agrees |
 | `harness_detects_adapter_faults` | 5 deliberate adapter bugs (one per domain, plus conditional delete and dropped record) | each caught |
 | `harness_detects_a_tampered_trace` | flipped outcome, altered ref value | each caught at that state |
 

@@ -338,7 +338,11 @@ transport root takes two OS locks under `<root>/.kit/refs/`:
   full ref name. For example `refs/heads/main` maps to `refs-ec.lock`.
 
 A writer takes the repo lock first, then the stripe lock. A step that holds
-the repo lock exclusive takes no stripe lock. Every write condition takes
+the repo lock exclusive takes no stripe lock. The order matters where a new
+shared hold of the repo lock waits behind a waiting exclusive request, as an
+in-process read-write lock may: a writer that took its stripe first would wait
+behind that request, which waits for a shared holder, which waits for the
+stripe. Every write condition takes
 these locks, `.any` included. A write holds them from its read of the
 current value until its rename and directory fsync complete.
 

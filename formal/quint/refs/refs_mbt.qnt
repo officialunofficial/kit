@@ -31,7 +31,8 @@
 module refsLin {
   const LIN_PROCS: Set[str]
   import refs(PROCS = LIN_PROCS,
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).* from "./refs"
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).* from "./refs"
 
   // Another process of a different disk domain holds an uncommitted read
   // of the same on-disk ref.

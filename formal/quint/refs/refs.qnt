@@ -6,7 +6,12 @@
 //     (unconditional `delete_ref`, conditional `delete_ref_if_matches`).
 //   - SPEC-REFS §5.1 atomicity matrix for the three in-repo lock domains:
 //       local : direct on-disk mutation under `refs-<ref>.lock` (refs.rs RefMutation)
-//       file  : file transport under `<root>/.kit/refs/.lock` (RefLock). This
+//       file  : file transport (SPEC-REFS §5.1.1). A single-ref write
+//               holds the repo lock `<root>/.kit/refs/.lock` shared, then
+//               the exclusive lock of its ref's stripe
+//               `<root>/.kit/refs/refs-<hh>.lock`. A step that reads and
+//               writes several files as one (`with_ref_lock`, kind
+//               `fileTx`) holds the repo lock exclusive and no stripe. This
 //               is also the domain of every SERVER of a `.kit` root: `kit
 //               serve` (ssh-frame) and a layout server
 //               write refs through `FileTransport` (`FsLayoutStore::apply` ->
@@ -79,9 +84,14 @@ module refs {
   //   1 worktree.lock(main)      2 worktree.lock(linked id 1)
   //   3 refs-history-<a>.lock    4 refs-history-<b>.lock
   //   5 refs-<refs/heads/a>.lock 6 refs-<refs/heads/b>.lock
-  //   7 <root>/.kit/refs/.lock  (file-transport RefLock; separate domain,
-  //     never composed with 0..6 — §3.1, §4 "not composed")
+  //   7 <root>/.kit/refs/.lock held exclusive (file transport; separate
+  //     domain, never composed with 0..6 — §3.1, §4 "not composed")
   //   8 MemoryTransport's in-process Mutex (its own domain)
+  //   9 <root>/.kit/refs/.lock held shared. Not a second lock: the same
+  //     file as 7 in shared mode, tracked in `sharers`, not in `owner`.
+  //  10, 11 the stripe locks <root>/.kit/refs/refs-<hh>.lock of ref 0 and
+  //     ref 1, or both 10 when COLLIDE maps both refs to one stripe.
+  //  The file domain's order is 9 or 7, then a stripe (SPEC-REFS §5.1.1).
   type Lock = int
 
   // An operation request. `kind` selects the lock plan / command path.
@@ -93,8 +103,9 @@ module refs {
   //               (checkout -b/-B: checkout.rs takes the registry lock, then
   //               its tree's lock, then write_ref_recording_history)
   //   gc        : worktrees.lock ≺ worktree.lock(0) ≺ worktree.lock(1), then recovery::expire
-  //   file      : file-transport RefLock only (kit serve, a layout server
-  //               fs-layout, kit+file:// push)
+  //   file      : repo lock shared ≺ stripe(ref) (a single-ref write from
+  //               kit serve, a layout server or a kit+file:// push)
+  //   fileTx    : repo lock exclusive (a multi-file step, `with_ref_lock`)
   //   mem       : memory transport, its in-process Mutex only
   // `del` = delete instead of write (branch only): Any = delete_ref,
   // Match(e) = delete_ref_if_matches(e).
@@ -116,10 +127,13 @@ module refs {
   type Faults = {
     misorder: bool,     // a process may take its plan in reverse (violates §4)
     noRefLock: bool,    // local writers skip refs-<ref>.lock (pre-fix behaviour)
-    noFileLock: bool,   // file transport skips RefLock
+    noFileLock: bool,   // file transport takes none of its locks
     gcSkipTrees: bool,  // gc expires holding only worktrees.lock (violates §3.2)
     racyAcquire: bool,  // acquire ignores exclusivity (a broken flock; violates §2)
     memNoMutex: bool,   // memory transport without its Mutex (the old §5.1 "NOT atomic" row)
+    noStripeLock: bool, // a single-ref file write takes the repo lock shared and no stripe lock
+    stripeFirst: bool,  // a single-ref file write may take its stripe lock before the repo lock
+    txShared: bool,     // a multi-file step takes the repo lock shared instead of exclusive
   }
 
   type Violation = { writer: str, by: str }
@@ -130,18 +144,26 @@ module refs {
   // --------------------------------------------------------------- bounds
   const PROCS: Set[Proc]  // instantiated below: 3 procs (refs3*) or 2 procs (refs2*)
   const FAULTS: Faults    // NO_FAULTS for the real model; mutants only for non-vacuity
+  // Both refs map to one stripe (a stripe collision).
+  const COLLIDE: bool
+  // A new shared hold of the repo lock waits while an exclusive request
+  // waits (writer preference, as an in-process read-write lock may). An OS
+  // flock grants it, which is the `false` setting.
+  const WRITER_PREF: bool
   pure val TREES: Set[int] = Set(0, 1)
   pure val REFS: Set[int] = Set(0, 1)
   pure val VALUES: Set[int] = Set(1, 2)
   pure val ABSENT: int = 0
-  pure val KINDS: Set[str] = Set("commit", "amend", "updateRef", "branch", "checkout", "gc", "file", "mem")
-  pure val LOCKS: Set[Lock] = 0.to(8)
+  pure val KINDS: Set[str] = Set("commit", "amend", "updateRef", "branch", "checkout", "gc", "file", "fileTx", "mem")
+  pure val LOCKS: Set[Lock] = 0.to(11)
   pure val FREE: Proc = ""
   pure val PLAN_IDX: Set[int] = 0.to(3)  // every lock plan has at most 4 locks
 
   pure val WTS: Lock = 0
   pure val FILE_LOCK: Lock = 7
   pure val MEM_LOCK: Lock = 8
+  pure val FILE_SHARED: Lock = 9
+  def stripeLock(r: int): Lock = if (COLLIDE) 10 else 10 + r
   pure def wtLock(t: int): Lock = 1 + t
   pure def histLock(r: int): Lock = 3 + r
   pure def refLock(r: int): Lock = 5 + r
@@ -153,21 +175,21 @@ module refs {
   }
   pure val NO_FAULTS: Faults = {
     misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false,
-    memNoMutex: false,
+    memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false,
   }
 
   // ------------------------------------------------------------- helpers
   pure def rev(l: List[Lock]): List[Lock] = l.foldl([], (acc, x) => [x].concat(acc))
 
   pure def domainOf(kind: str): str =
-    if (kind == "file") "file" else if (kind == "mem") "mem" else "local"
+    if (kind == "file" or kind == "fileTx") "file" else if (kind == "mem") "mem" else "local"
 
   // Which ref store the op touches: the file transport serves the SAME
   // on-disk refs the local chain mutates (§3.1); memory is separate.
   pure def storeOf(kind: str): str = if (kind == "mem") "mem" else "disk"
 
   // Canonical §4 lock plan per command path (SPEC-CONCURRENCY §4 table).
-  pure def canonicalPlan(op: Op, f: Faults): List[Lock] =
+  def canonicalPlan(op: Op, f: Faults): List[Lock] =
     if (op.kind == "commit" or op.kind == "amend")
       (if (f.noRefLock) [wtLock(op.tree), histLock(op.ref)]
        else [wtLock(op.tree), histLock(op.ref), refLock(op.ref)])
@@ -179,7 +201,11 @@ module refs {
       (if (f.noRefLock) [WTS, wtLock(op.tree), histLock(op.ref)]
        else [WTS, wtLock(op.tree), histLock(op.ref), refLock(op.ref)])
     else if (op.kind == "gc") (if (f.gcSkipTrees) [WTS] else [WTS, wtLock(0), wtLock(1)])
-    else if (op.kind == "file") (if (f.noFileLock) [] else [FILE_LOCK])
+    else if (op.kind == "file")
+      (if (f.noFileLock) [] else if (f.noStripeLock) [FILE_SHARED]
+       else [FILE_SHARED, stripeLock(op.ref)])
+    else if (op.kind == "fileTx")
+      (if (f.noFileLock) [] else if (f.txShared) [FILE_SHARED] else [FILE_LOCK])
     else if (op.kind == "mem") (if (f.memNoMutex) [] else [MEM_LOCK])
     else []
 
@@ -203,7 +229,7 @@ module refs {
     // deletes only through branch -d / rename's delete_ref_if_matches
     op.del implies (op.kind == "branch" and op.cond != Missing),
     // gc and transports ignore tree; gc ignores ref/cond/val (canonicalise for replay)
-    (op.kind == "gc" or op.kind == "file" or op.kind == "mem" or op.kind == "branch") implies op.tree == 0,
+    (op.kind == "gc" or op.kind == "file" or op.kind == "fileTx" or op.kind == "mem" or op.kind == "branch") implies op.tree == 0,
     TREES.contains(op.tree), REFS.contains(op.ref),
     op.kind == "gc" implies (op.ref == 0 and op.cond == Any and op.value == 1),
   }
@@ -214,6 +240,7 @@ module refs {
   var disk: int -> int          // on-disk refs (local chain AND file transport)
   var mem: int -> int           // memory-transport refs
   var owner: Lock -> Proc       // kernel lock holder, FREE if unheld
+  var sharers: Set[Proc]        // shared holders of the file transport's repo lock
   var procs: Proc -> PState
   var recLog: Set[int]          // .kit/recovery-log entry ids
   var nextEntry: int
@@ -230,6 +257,7 @@ module refs {
     disk' = Map(0 -> d0, 1 -> d1),
     mem' = Map(0 -> m0, 1 -> ABSENT),
     owner' = LOCKS.mapBy(_ => FREE),
+    sharers' = Set(),
     procs' = PROCS.mapBy(_ => IDLE),
     recLog' = Set(),
     nextEntry' = 1,
@@ -264,24 +292,46 @@ module refs {
     all {
       procs.get(p).pc == "idle",
       validOp(op),
-      reversed implies faults.misorder,
+      reversed implies (faults.misorder or (faults.stripeFirst and op.kind == "file")),
       procs' = procs.set(p, { ...IDLE, op: op, plan: plan,
                               pc: if (plan.length() == 0) bodyStart(op.kind) else "acquire" }),
       owner' = owner,
+      sharers' = sharers,
       unchangedData,
       lastAction' = { name: "begin", proc: p, op: op, rev: reversed, lock: -1, outcome: "" },
     }
   }
 
-  // acquire(p): blocking exclusive kernel lock (repo_lock / RefLock); enabled
-  // only when free (unless the racyAcquire mutant breaks exclusivity).
+  // Some process waits for the file transport's repo lock exclusive.
+  def exclusiveWaiter(q: Proc): bool = {
+    val s = procs.get(q)
+    s.pc == "acquire" and nextLock(s) == FILE_LOCK
+  }
+
+  // Lock `l` can be taken now. The repo lock exclusive needs no holder in
+  // either mode; shared needs no exclusive holder and, under WRITER_PREF,
+  // no exclusive waiter.
+  def lockFree(l: Lock): bool =
+    if (l == FILE_LOCK) owner.get(FILE_LOCK) == FREE and sharers == Set()
+    else if (l == FILE_SHARED)
+      owner.get(FILE_LOCK) == FREE and not(WRITER_PREF and PROCS.exists(q => exclusiveWaiter(q)))
+    else owner.get(l) == FREE
+
+  // p holds lock `l` of its plan.
+  def holds(p: Proc, l: Lock): bool =
+    if (l == FILE_SHARED) sharers.contains(p) else owner.get(l) == p
+
+  // acquire(p): blocking kernel lock (repo_lock, the file transport's repo
+  // lock in either mode, a stripe lock); enabled only when free (unless the
+  // racyAcquire mutant breaks exclusivity).
   action acquire(p: Proc): bool = {
     val st = procs.get(p)
     val l = nextLock(st)
     all {
       st.pc == "acquire",
-      faults.racyAcquire or owner.get(l) == FREE,
-      owner' = owner.set(l, p),
+      faults.racyAcquire or lockFree(l),
+      owner' = if (l == FILE_SHARED) owner else owner.set(l, p),
+      sharers' = if (l == FILE_SHARED) sharers.union(Set(p)) else sharers,
       procs' = procs.set(p, { ...st, nHeld: st.nHeld + 1, pc: afterAcquire(st, l, st.nHeld + 1) }),
       unchangedData,
       lastAction' = { name: "acquire", proc: p, op: st.op, rev: false, lock: l, outcome: "" },
@@ -300,6 +350,7 @@ module refs {
       procs' = procs.set(p, { ...st, recorded: true,
                               pc: if (st.nHeld == st.plan.length()) "read" else "acquire" }),
       owner' = owner,
+      sharers' = sharers,
       disk' = disk, mem' = mem, faults' = faults, violations' = violations, lostRecords' = lostRecords,
       lastAction' = { name: "record", proc: p, op: st.op, rev: false, lock: -1, outcome: "" },
     }
@@ -313,6 +364,7 @@ module refs {
       st.pc == "read",
       procs' = procs.set(p, { ...st, pc: "commit", observed: cur, pending: Set() }),
       owner' = owner,
+      sharers' = sharers,
       unchangedData,
       lastAction' = { name: "readRef", proc: p, op: st.op, rev: false, lock: -1, outcome: "" },
     }
@@ -349,6 +401,7 @@ module refs {
           else s
         }),
       owner' = owner,
+      sharers' = sharers,
       recLog' = recLog, nextEntry' = nextEntry, faults' = faults,
       lostRecords' = lostRecords, recordDuringExpire' = recordDuringExpire,
       lastAction' = { name: "commitRef", proc: p, op: op, rev: false, lock: -1, outcome: outcome },
@@ -364,6 +417,7 @@ module refs {
       st.pc == "expireRead",
       procs' = procs.set(p, { ...st, pc: "expireWrite", snapshot: recLog }),
       owner' = owner,
+      sharers' = sharers,
       unchangedData,
       lastAction' = { name: "expireRead", proc: p, op: st.op, rev: false, lock: -1, outcome: "" },
     }
@@ -377,6 +431,7 @@ module refs {
       lostRecords' = lostRecords.union(recLog.exclude(st.snapshot)),
       procs' = procs.set(p, { ...st, pc: "release", outcome: "ok" }),
       owner' = owner,
+      sharers' = sharers,
       disk' = disk, mem' = mem, nextEntry' = nextEntry, faults' = faults,
       violations' = violations, recordDuringExpire' = recordDuringExpire,
       lastAction' = { name: "expireWrite", proc: p, op: st.op, rev: false, lock: -1, outcome: "ok" },
@@ -390,6 +445,7 @@ module refs {
       st.pc == "release",
       procs' = procs.set(p, IDLE),
       owner' = LOCKS.mapBy(l => if (owner.get(l) == p) FREE else owner.get(l)),
+      sharers' = sharers.exclude(Set(p)),
       unchangedData,
       lastAction' = { name: "release", proc: p, op: st.op, rev: false, lock: -1, outcome: st.outcome },
     }
@@ -409,7 +465,7 @@ module refs {
   // p has an enabled step (only a blocked acquire is disabled).
   def canMove(p: Proc): bool = {
     val st = procs.get(p)
-    st.pc != "acquire" or faults.racyAcquire or owner.get(nextLock(st)) == FREE
+    st.pc != "acquire" or faults.racyAcquire or lockFree(nextLock(st))
   }
 
   // begin with every op parameter chosen nondeterministically. Bound here,
@@ -422,7 +478,7 @@ module refs {
     nondet v = VALUES.oneOf()
     nondet d = Set(false, true).oneOf()
     nondet rv = Set(false, true).oneOf()
-    begin(p, mkOp(kind, t, r, c, v, d), rv and faults.misorder)
+    begin(p, mkOp(kind, t, r, c, v, d), rv and (faults.misorder or (faults.stripeFirst and kind == "file")))
   }
 
   action step = {
@@ -447,10 +503,16 @@ module refs {
       val st = procs.get(owner.get(l))
       PLAN_IDX.exists(i => i < st.nHeld and st.plan[i] == l)
     }) and
+    sharers.forall(q => {
+      val st = procs.get(q)
+      PLAN_IDX.exists(i => i < st.nHeld and st.plan[i] == FILE_SHARED)
+    }) and
     PROCS.forall(p => {
       val st = procs.get(p)
-      PLAN_IDX.forall(i => i < st.nHeld implies owner.get(st.plan[i]) == p)
-    })
+      PLAN_IDX.forall(i => i < st.nHeld implies holds(p, st.plan[i]))
+    }) and
+    // SPEC-REFS §5.1.1: the repo lock is held exclusive or shared, not both.
+    (owner.get(FILE_LOCK) != FREE implies sharers == Set())
 
   // SPEC-CONCURRENCY §4: every process's held locks were taken in strictly
   // increasing global order.
@@ -462,7 +524,11 @@ module refs {
 
   def waitsFor(p: Proc, q: Proc): bool = {
     val st = procs.get(p)
-    p != q and st.pc == "acquire" and owner.get(nextLock(st)) == q
+    val l = nextLock(st)
+    p != q and st.pc == "acquire" and (
+      if (l == FILE_LOCK) owner.get(l) == q or sharers.contains(q)
+      else if (l == FILE_SHARED) owner.get(FILE_LOCK) == q or (WRITER_PREF and exclusiveWaiter(q))
+      else owner.get(l) == q)
   }
 
   // No wait-for cycle (exhaustive for |PROCS| = 3: 2- and 3-cycles).
@@ -474,8 +540,26 @@ module refs {
   // refs-<ref>.lock domain, no successful conditional write is based on a
   // value another local writer changed underneath it.
   val NoLostUpdateLocal: bool = not(violations.contains({ writer: "local", by: "local" }))
-  // Same for the file transport's RefLock domain.
+  // Same for the file transport's domain: its repo and stripe locks.
   val NoLostUpdateFile: bool = not(violations.contains({ writer: "file", by: "file" }))
+
+  // p is inside a file-transport critical section: past its locks, before
+  // its commit.
+  def inFileSection(p: Proc): bool = {
+    val st = procs.get(p)
+    domainOf(st.op.kind) == "file" and (st.pc == "read" or st.pc == "commit")
+  }
+
+  // SPEC-REFS §5.1.1: two writes to one ref never overlap.
+  val OneFileWriterPerRef: bool =
+    not(PROCS.exists(p => PROCS.exists(q =>
+      p != q and inFileSection(p) and inFileSection(q) and procs.get(p).op.ref == procs.get(q).op.ref)))
+
+  // SPEC-REFS §5.1.1: a step that holds the repo lock exclusive excludes
+  // every file-transport write.
+  val FileStepAlone: bool =
+    not(PROCS.exists(p => PROCS.exists(q =>
+      p != q and inFileSection(p) and procs.get(p).op.kind == "fileTx" and inFileSection(q))))
   // Memory transport: its Mutex makes read-check-write atomic (SPEC-REFS
   // §5.1 memory row, "atomic*", in-process only).
   val NoLostUpdateMem: bool = not(violations.contains({ writer: "mem", by: "mem" }))
@@ -490,7 +574,7 @@ module refs {
 
   val Safety: bool = and {
     LockOwnership, LockOrderRespected, NoDeadlock, NoLostUpdateWithinDomain,
-    ExpireHoldsSuperset, NoRecordExpireInterleave,
+    ExpireHoldsSuperset, NoRecordExpireInterleave, OneFileWriterPerRef, FileStepAlone,
   }
 
   // ---------------------------------------------- witnesses (expected FALSE)
@@ -507,49 +591,98 @@ module refs {
   val WitnessConditionalDelete: bool =
     not(lastAction.name == "commitRef" and lastAction.outcome == "ok" and lastAction.op.del and lastAction.op.cond != Any)
   val WitnessGcExpires: bool = not(lastAction.name == "expireWrite" and recLog != Set())
+  // SPEC-REFS §5.1.1: writes to refs in different stripes run in parallel.
+  // Reachable with two stripes; unreachable when COLLIDE maps both refs to
+  // one stripe.
+  val WitnessStripesOverlap: bool =
+    not(PROCS.exists(p => PROCS.exists(q =>
+      p != q and inFileSection(p) and inFileSection(q)
+        and procs.get(p).op.kind == "file" and procs.get(q).op.kind == "file"
+        and procs.get(p).op.ref != procs.get(q).op.ref)))
   val WitnessTwoLocksContended: bool =
     not(PROCS.exists(p => PROCS.exists(q => waitsFor(p, q) and procs.get(q).nHeld >= 2)))
 }
 
 // ------------------------------------------------------------ instances
-// FAULTS literal: { misorder, noRefLock, noFileLock, gcSkipTrees, racyAcquire, memNoMutex }.
+// FAULTS literal: { misorder, noRefLock, noFileLock, gcSkipTrees, racyAcquire, memNoMutex,
+// noStripeLock, stripeFirst, txShared }. COLLIDE and WRITER_PREF: see the consts.
 // 3 processes: every wait-for cycle shape (2- and 3-cycles). quint run.
 module refs3 {
   import refs(PROCS = Set("p1", "p2", "p3"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).*
 }
 // 2 processes: Apalache instance (lost update, cross-domain gap, 2-cycle
 // deadlock and record/expire interleaving all need only 2 processes).
 module refs2 {
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).*
 }
 // Mutants (non-vacuity): each must violate the named invariant.
 module refs3_misorder {    // NoDeadlock, LockOrderRespected
   import refs(PROCS = Set("p1", "p2", "p3"),
-              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
+              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).*
 }
 module refs2_misorder {    // NoDeadlock, LockOrderRespected
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
+              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).*
 }
 module refs2_noRefLock {   // NoLostUpdateLocal
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: true, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
+              FAULTS = { misorder: false, noRefLock: true, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).*
 }
 module refs2_noFileLock {  // NoLostUpdateFile
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: true, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: true, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).*
 }
 module refs2_gcSkipTrees { // NoRecordExpireInterleave, ExpireHoldsSuperset
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: true, racyAcquire: false, memNoMutex: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: true, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).*
 }
 module refs2_racyAcquire { // LockOwnership
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: true, memNoMutex: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: true, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).*
 }
 module refs2_memNoMutex {  // NoLostUpdateMem (the old SPEC-REFS §5.1 memory row)
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: true }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: true, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).*
+}
+// File transport stripe locks (SPEC-REFS §5.1.1).
+module refs2_collide {  // WitnessStripesOverlap holds: one stripe serializes both refs
+  import refs(PROCS = Set("p1", "p2"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = true, WRITER_PREF = false).*
+}
+module refs3_wpref {  // Safety under a writer-preferring repo lock
+  import refs(PROCS = Set("p1", "p2", "p3"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = true).*
+}
+module refs2_noStripeLock {  // OneFileWriterPerRef, NoLostUpdateFile
+  import refs(PROCS = Set("p1", "p2"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: true, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).*
+}
+module refs2_txShared {  // FileStepAlone, NoLostUpdateFile
+  import refs(PROCS = Set("p1", "p2"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: true },
+              COLLIDE = false, WRITER_PREF = false).*
+}
+module refs3_stripeFirst {  // NoDeadlock (writer-preferring repo lock), LockOrderRespected
+  import refs(PROCS = Set("p1", "p2", "p3"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: true, txShared: false },
+              COLLIDE = false, WRITER_PREF = true).*
+}
+module refs3_stripeFirstFlock {  // LockOrderRespected; NoDeadlock holds (flock grants the shared hold)
+  import refs(PROCS = Set("p1", "p2", "p3"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: true, txShared: false },
+              COLLIDE = false, WRITER_PREF = false).*
 }
