@@ -24,7 +24,8 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use kit_core::hash::{self, Hash};
 use kit_core::object::{Commit, Object};
-use kit_core::ops::merge::find_merge_base;
+use kit_core::ops::graph::AncestorError;
+use kit_core::ops::merge::find_merge_base_strict;
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
 
@@ -49,7 +50,7 @@ pub enum Error {
         source: revspec::Error,
     },
     /// The merge base of the two sides of a symmetric range could not be
-    /// found.
+    /// found: its walk reached its limit.
     #[error("merge base: {0}")]
     MergeBase(StoreError),
     /// An object in the walk is not a commit.
@@ -305,7 +306,7 @@ fn resolve_selection(
             // Leave out the common ancestors, which are the ancestors of the
             // merge base.
             if let (Some(a), Some(b)) = (a, b)
-                && let Some(base) = find_merge_base(repo.store(), a, b).map_err(Error::MergeBase)?
+                && let Some(base) = merge_base(repo.store(), a, b)?
             {
                 collect_excluded(repo.store(), base, &mut excluded, max_commits)?;
             }
@@ -317,6 +318,20 @@ fn resolve_selection(
         }
     };
     Ok(Some((tips, excluded)))
+}
+
+/// The merge base of `a` and `b`, read from every commit of both histories.
+///
+/// # Errors
+/// [`Error::ReadCommit`] or [`Error::NotACommit`] when a commit of either
+/// history cannot be read or is another kind of object, and
+/// [`Error::MergeBase`] when the walk reaches its limit.
+fn merge_base(store: &ObjectStore, a: Hash, b: Hash) -> Result<Option<Hash>, Error> {
+    find_merge_base_strict(store, a, b).map_err(|e| match e {
+        AncestorError::Unreadable { hash, source } => Error::ReadCommit { hash, source },
+        AncestorError::NotACommit(hash) => Error::NotACommit(hash),
+        AncestorError::Limit(limit) => Error::MergeBase(limit),
+    })
 }
 
 /// Resolve one end of a selection. `None` or `HEAD` reads `HEAD`, which can

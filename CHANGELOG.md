@@ -58,6 +58,19 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   commit, is missing, corrupt or not a commit. The range walk used to end
   at such a commit and the good walk used to skip it, so bisect could miss
   candidates or offer commits that are known good.
+- `kit merge-base`, `kit merge-base --is-ancestor`, `kit merge`,
+  `kit diff A...B`, `kit diff --merge-base`, the ancestry filters of
+  `kit branch`, the fast-forward check of `kit pull` and of the git bridge
+  pull, and the copy tie-break of `kit blame` read every commit of their
+  merge base or ancestry walk. A commit that is missing, corrupt or not a
+  commit used to end the walk there: `kit merge-base` printed no base or a
+  wrong one, `--is-ancestor` answered "no" with exit 1, and `kit merge`
+  and `kit diff` could use a wrong base. They now fail with an error that
+  names the commit: `kit merge-base`, `kit merge`, `kit diff` and
+  `kit branch` exit 65, print nothing on stdout, and change nothing.
+  `libkit::merge::Error::History`, `libkit::diff::Error::History` and
+  `libkit::branch::Error::History` carry the error. Push keeps the lenient
+  walks.
 - The two sides of a `kit log` range share one budget of 1,000,000
   commits, as the documentation says. Each side used to have its own, so
   a range could read up to twice the limit.

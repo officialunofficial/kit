@@ -133,7 +133,9 @@ Working-tree commands:
   is the flag spelling of that symmetric range: with two revisions it
   diffs `merge-base(a, b)` against `b`, and with one revision it diffs
   `merge-base(<rev>, HEAD)` against the worktree (like `git diff
-  --merge-base`). Revisions may be refs, commit hashes, short
+  --merge-base`). The merge base walk reads every commit of both
+  histories; one that is missing, corrupt or not a commit fails the diff
+  with exit `65`, an error that names it and nothing on stdout. Revisions may be refs, commit hashes, short
   hashes, or `HEAD~n` (a raw 64-hex tree hash also works, since it
   resolves to itself). Any remaining positional arguments are pathspecs
   that limit the output to entries at or below them. The default output is a
@@ -307,7 +309,8 @@ History / commits:
   One walk reads at most 1,000,000 commits, counting the excluded side of
   a range: both sides of a range share that budget. A walk that would read
   more fails with an error that names the limit; `kit log` never prints
-  part of a history as if it were all of it.
+  part of a history as if it were all of it. The merge base of `A...B`
+  comes from a separate walk with the same limit on each side.
   A commit of the walk, or of the excluded side of a range, that is
   missing, corrupt or not a commit fails the walk with an error that names
   it; it never drops out of the history.
@@ -560,6 +563,11 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   ancestor of two commits (64-hex; exit 1 with no output when there is
   none). `--is-ancestor` tests whether `<a>` is an ancestor of `<b>`,
   exiting 0 (yes) or 1 (no) with no output. Reuses the merge engine.
+  Both forms read every commit they walk. A commit that is missing,
+  corrupt or not a commit (a remix included) exits `65` with an error that
+  names it and nothing on stdout, so a script can tell "cannot tell" (`65`)
+  from "no" (`1`). A walk that would read more than 1,000,000 commits on
+  either side also exits `65`, with an error that names the limit.
 - `kit show-ref [--heads] [--tags]` &mdash; list refs as `<hash> <refname>`,
   sorted by ref name. Default shows `refs/heads/*`, `refs/tags/*`, and
   any `refs/remotes/*` tracking refs; `--heads`/`--tags` filter to one
@@ -741,6 +749,8 @@ Branches / refs:
   it. `--merged [<c>]` keeps only branches already merged into `<c>` (that is,
   whose tip is an ancestor of it); `--no-merged [<c>]` inverts it. All four
   ancestry commit args **default to `HEAD`** when omitted (like git).
+  An ancestry walk that meets a commit that is missing, corrupt or not a
+  commit exits `65` with an error that names it and lists no branch.
   Patterns and ancestry filters combine (a branch must satisfy all of
   them). `--list` is an explicit list selector &mdash; listing is already the
   default when no create/delete/rename flag is given, but `--list` also
@@ -809,7 +819,10 @@ Branches / refs:
   committing**: it stages the merged tree and records `MERGE_HEAD`, then
   leaves you to finish with `kit commit` (which records a two-parent
   merge commit) or `kit merge --continue`. A fast-forward creates no
-  commit, so `--no-commit` does not affect it.
+  commit, so `--no-commit` does not affect it. The merge base walk reads
+  every commit of both histories. One that is missing, corrupt or not a
+  commit fails the merge with exit `65` and an error that names it, before
+  it touches the files, the index or a ref.
   `--format=json` emits one JSON object to stdout for every outcome:
   `{"ok":true,"kind":"up-to-date"|"fast-forward"|"no-commit"|"merge-commit"|"aborted",...}`
   on success, or `{"ok":false,"kind":"conflict","conflicts":[<path>,...],
