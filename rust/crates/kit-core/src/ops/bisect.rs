@@ -44,6 +44,10 @@ const MAX_BISECT_FILE_BYTES: u64 = 1024 * 1024;
 /// [`crate::ops::graph::MAX_ANCESTORS`].
 const GOOD_ANCESTOR_LIMIT: &str = "10,000-commit ancestor walk of a good commit";
 
+/// The limit bisect reports when the candidates of a range exceed
+/// [`crate::ops::graph::MAX_ANCESTORS`].
+const CANDIDATE_LIMIT: &str = "10,000-commit candidate walk of a bisect range";
+
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
 pub enum BisectError {
@@ -249,8 +253,9 @@ pub fn bisect_file_path(layout: &RepoLayout) -> PathBuf {
 ///
 /// # Errors
 /// [`BisectError::History`] when a commit of either walk cannot be read or
-/// is another kind of object, or when a good commit has more ancestors than
-/// one walk visits.
+/// is another kind of object, or when a good commit has more ancestors, or
+/// the range more candidates, than one walk visits. It never returns part of
+/// the range.
 pub fn enumerate_range(
     store: &ObjectStore,
     bad: Hash,
@@ -260,7 +265,7 @@ pub fn enumerate_range(
 }
 
 /// [`enumerate_range`] with a caller-supplied cap on the ancestors of each
-/// good commit.
+/// good commit and on the candidates of the range.
 fn enumerate_range_with_cap(
     store: &ObjectStore,
     bad: Hash,
@@ -291,6 +296,13 @@ fn enumerate_range_with_cap(
         }
         if good_set.contains(&current) {
             continue;
+        }
+        if candidates.len() >= max_ancestors {
+            return Err(BisectError::History(
+                crate::ops::graph::AncestorError::Limit(
+                    crate::store::StoreError::OperationLimitExceeded(CANDIDATE_LIMIT),
+                ),
+            ));
         }
         let commit = crate::ops::graph::read_history_commit(store, current)?;
         candidates.push(current);
@@ -671,6 +683,33 @@ mod tests {
         assert_eq!(
             enumerate_range_with_cap(&store, c4, &[c3], 3).unwrap(),
             [c4]
+        );
+    }
+
+    #[test]
+    fn a_range_with_candidates_over_the_cap_fails() {
+        let (_d, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let tree = put_tree(&store, "f.txt", blob);
+        let c1 = put_commit(&store, tree, vec![], 1);
+        let c2 = put_commit(&store, tree, vec![c1], 2);
+        let c3 = put_commit(&store, tree, vec![c2], 3);
+        let c4 = put_commit(&store, tree, vec![c3], 4);
+        // Three candidates above c1: c4, c3 and c2.
+        let err = enumerate_range_with_cap(&store, c4, &[c1], 2).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BisectError::History(crate::ops::graph::AncestorError::Limit(
+                    crate::store::StoreError::OperationLimitExceeded(CANDIDATE_LIMIT)
+                ))
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains(CANDIDATE_LIMIT), "{err}");
+        assert_eq!(
+            enumerate_range_with_cap(&store, c4, &[c1], 3).unwrap(),
+            [c4, c3, c2]
         );
     }
 

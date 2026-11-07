@@ -50,6 +50,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The two sides of a `kit log` range share one budget of 1,000,000
   commits, as the documentation says. Each side used to have its own, so
   a range could read up to twice the limit.
+- `kit bisect` fails with an error that names the limit when a range has
+  more than 10,000 candidates. Its candidate walk used to have no limit.
 - `kit blame --reverse` fails with an error that names the limit when the
   first-parent walk from the end of its range holds more than 1,000,000
   commits. It used to collect the whole chain with no limit.

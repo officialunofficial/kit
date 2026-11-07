@@ -891,7 +891,9 @@ Branches / refs:
   cone).
   Bisect reads every commit of the range and every ancestor of each good
   commit. One that is missing, corrupt or not a commit fails the step with
-  an error that names it, and bisect offers no candidate.
+  an error that names it, and bisect offers no candidate. A range with more
+  than 10,000 candidates, or a good commit with more than 10,000
+  ancestors, fails the step with an error that names the limit.
 - `kit gc [-n|--dry-run] [--grace-secs <secs>]` &mdash; reclaim unreachable
   objects (mark-and-sweep). Under the repo lock it expires stale recovery
   entries, computes the live set reachable from the retention roots (refs,
