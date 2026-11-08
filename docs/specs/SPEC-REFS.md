@@ -373,7 +373,12 @@ the head and then the packmap never sees a packmap older than that head,
 but between the two writes, and after a crash between them, it sees the new
 packmap with the old head. That state is consistent only when the new
 packmap also reconstructs the old head's closure, so the file transport
-does not offer an atomic advance.
+does not offer an atomic advance. It offers a serialized advance
+(`supports_serialized_advance`, SPEC-TRANSPORT §7.2): an append always
+keeps the old head's closure, and a client MUST request a packmap reset
+of it only for a push whose head condition is `Match(h)` with `h` an
+ancestor of the new head in the client's own store. The reset then holds
+the new head's full closure, which contains `h`'s.
 
 *Coordination with local worktree operations:* the file transport's locks
 by themselves only serialize it against concurrent instances

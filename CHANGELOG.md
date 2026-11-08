@@ -7,6 +7,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `Transport::supports_serialized_advance` and
+  `RemoteSource::supports_serialized_advance`: whether a two-ref advance is
+  serialized for writers. Both default to the atomic-advance capability.
+
 ### Changed
 
 - The file transport and `kit serve` lock each ref instead of the whole root.
@@ -26,6 +32,19 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lock exclusive, so a clash with a ref created at the same time is reported
   as `InvalidRef` and leaves nothing behind. The file transport still offers
   no atomic advance: a reader can see the new packmap with the old head.
+- Pushes over `kit+file://` now re-baseline the packmap chain. The file
+  transport reports `Transport::supports_serialized_advance`: its advance is
+  serialized for writers, but a reader, or a crash, can see the new packmap
+  with the old head. The push driver resets a chain on such an advance only
+  for a push that fast-forwards the head it leases, as the local store shows,
+  and appends otherwise (SPEC-TRANSPORT §7.2). Force pushes over
+  `kit+file://` take the guarded force driver, which plans again when a reset
+  drops the chain its plan read. With the `fetch-grow` row of the
+  multi-writer benchmark (default depth 64), a clone after 1,001 pushes to
+  one branch went from 1,001 packs and 2,004 requests to 41 packs and 84
+  requests (about 16 s to under 1 s on one 4-CPU VM, under load from other
+  builds). Bytes downloaded and push cost were not measured: each reset
+  uploads the full closure of the tip.
 
 ### Fixed
 
