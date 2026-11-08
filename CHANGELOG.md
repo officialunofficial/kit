@@ -7,12 +7,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-08
+
 ### Fixed
 
+- An interrupted pull resumes its worktree restore on the next pull. Recovery
+  refuses to overwrite local work and reports when it completes the pull.
 - Blame caps its LCS comparison table at 64 MiB after trimming the common
   prefix. Larger comparisons use the bounded line diff search. Reassembly,
   line buffers, and attribution memory still grow with file size.
 - Mutation testing of changed lines uses paths relative to the Rust workspace.
+- Apple release archives build on macos-26.
 
 ## [0.7.2] - 2026-11-06
 
