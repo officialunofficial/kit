@@ -91,6 +91,12 @@ pub trait RemoteSource {
     fn supports_atomic_advance(&self) -> bool {
         false
     }
+    /// Both conditioned refs advance serialized against other writers, as
+    /// `Transport::supports_serialized_advance` defines it. Every atomic
+    /// advance is serialized.
+    fn supports_serialized_advance(&self) -> bool {
+        self.supports_atomic_advance()
+    }
     /// Known atomic-advance capability; `None` means discovery was unavailable
     /// or invalid, so a force push must refuse before uploading or publishing.
     fn atomic_advance_status(&self) -> Option<bool> {
@@ -230,6 +236,10 @@ impl RemoteSource for TransportSource<'_> {
     }
     fn supports_atomic_advance(&self) -> bool {
         self.transport.supports_atomic_advance()
+    }
+
+    fn supports_serialized_advance(&self) -> bool {
+        self.transport.supports_serialized_advance()
     }
 
     fn atomic_advance_status(&self) -> Option<bool> {
