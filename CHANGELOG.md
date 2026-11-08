@@ -9,6 +9,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The file transport and `kit serve` report a ref absent when a ref file
+  sits above its name (`refs/heads/a` for `refs/heads/a/b`) or a directory
+  of other refs sits at it. Before, the read failed with a `Not a
+  directory` or `Is a directory` I/O error. A listing under a prefix that
+  names a ref file is empty instead of an error. Other read failures are
+  still errors.
 - Blame caps its LCS comparison table at 64 MiB after trimming the common
   prefix. Larger comparisons use the bounded line diff search. Reassembly,
   line buffers, and attribution memory still grow with file size.

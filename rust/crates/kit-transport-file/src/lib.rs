@@ -495,7 +495,8 @@ impl FileTransport {
 
     /// The ref's id, strictly: like [`Transport::read_ref`], but a ref file
     /// that does not hold a ref wire is [`RefFileError::Corrupt`] rather
-    /// than absent. A directory where the ref file would be is no ref.
+    /// than absent. A directory where the ref file would be is no ref, and
+    /// no ref lies below a ref file.
     ///
     /// # Errors
     /// [`RefFileError::InvalidName`], [`RefFileError::Escape`] for the
@@ -515,7 +516,7 @@ impl FileTransport {
             Ok(bytes) => decode_ref_wire(&bytes)
                 .map(Some)
                 .ok_or_else(|| RefFileError::Corrupt(name.to_owned())),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) if no_ref_file(&e) => Ok(None),
             Err(e) if e.kind() == ErrorKind::InvalidData => {
                 Err(RefFileError::Corrupt(name.to_owned()))
             }
@@ -547,7 +548,7 @@ impl FileTransport {
         while let Some(dir) = dirs.pop() {
             let entries = match fs::read_dir(&dir) {
                 Ok(entries) => entries,
-                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) if no_ref_file(&e) => continue,
                 Err(e) => return Err(RefFileError::Io(e)),
             };
             for entry in entries {
@@ -952,16 +953,32 @@ impl Transport for FileTransport {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Read and decode the hash from a ref file. Returns `None` if the
-/// file does not exist; propagates other I/O errors.
+/// Read and decode the hash from a ref file. Returns `None` if no ref
+/// file is there ([`no_ref_file`]); propagates other I/O errors.
 fn read_ref_raw(path: &Path) -> io::Result<Option<Hash>> {
-    match bounded_read::read_capped(path, REF_FILE_MAX_BYTES) {
+    ref_from_read(bounded_read::read_capped(path, REF_FILE_MAX_BYTES))
+}
+
+/// The ref a capped read of a ref file yields.
+fn ref_from_read(read: io::Result<Vec<u8>>) -> io::Result<Option<Hash>> {
+    match read {
         Ok(bytes) => Ok(decode_ref_wire(&bytes)),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) if no_ref_file(&e) => Ok(None),
         // An oversized file is malformed content, like a bad hash.
         Err(e) if e.kind() == ErrorKind::InvalidData => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// Whether a failed open or read of a ref path means no ref file is there:
+/// the path is missing, a component above it is a ref file (`Not a
+/// directory`), or it is a directory of other refs (`Is a directory`).
+/// Every other failure is a real I/O error.
+fn no_ref_file(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        ErrorKind::NotFound | ErrorKind::NotADirectory | ErrorKind::IsADirectory
+    )
 }
 
 /// Recursively walk `dir`, collecting all ref files whose full logical
@@ -975,7 +992,7 @@ fn read_ref_raw(path: &Path) -> io::Result<Option<Hash>> {
 fn collect_refs(root_dir: &Path, current_dir: &Path, out: &mut Vec<Ref>) -> TransportResult<()> {
     let entries = match fs::read_dir(current_dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) if no_ref_file(&e) => return Ok(()),
         Err(e) => {
             return Err(TransportError::RemoteError(format!(
                 "list_refs I/O error: {e}"
@@ -1276,6 +1293,106 @@ mod tests {
         let t = FileTransport::new(dir.path());
         let err = t.read_ref("/bad").unwrap_err();
         assert!(matches!(err, TransportError::InvalidRef(_)));
+    }
+
+    /// A ref file `a` is no directory, so no ref `a/b` lies below it: the
+    /// read reports `a/b` absent rather than `Not a directory`.
+    #[test]
+    fn read_ref_below_a_ref_file_is_absent() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        t.write_ref("refs/heads/a", &blake3_hash(b"a")).unwrap();
+        assert_eq!(t.read_ref("refs/heads/a/b").unwrap(), None);
+        assert_eq!(t.read_ref("refs/heads/a/b/c").unwrap(), None);
+        assert_eq!(t.read_ref_strict("refs/heads/a/b").unwrap(), None);
+        t.with_ref_lock(|refs| assert_eq!(refs.read_ref("refs/heads/a/b").unwrap(), None))
+            .unwrap();
+        assert_eq!(t.read_ref("refs/heads/a").unwrap(), Some(blake3_hash(b"a")));
+    }
+
+    /// The directory that holds ref `a/b` is no ref file: the read of `a`
+    /// reports it absent rather than `Is a directory`.
+    #[test]
+    fn read_ref_of_a_directory_of_refs_is_absent() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        t.write_ref("refs/heads/a/b", &blake3_hash(b"b")).unwrap();
+        assert_eq!(t.read_ref("refs/heads/a").unwrap(), None);
+        assert_eq!(t.read_ref_strict("refs/heads/a").unwrap(), None);
+        assert_eq!(
+            t.read_ref("refs/heads/a/b").unwrap(),
+            Some(blake3_hash(b"b"))
+        );
+    }
+
+    /// A prefix that names a ref file lists nothing: no ref lies below a
+    /// file, and a ref named exactly the prefix is not listed (SPEC-REFS
+    /// §4).
+    #[test]
+    fn list_refs_below_a_ref_file_is_empty() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        t.write_ref("refs/heads/a", &blake3_hash(b"a")).unwrap();
+        assert!(t.list_refs("refs/heads/a").unwrap().is_empty());
+        assert!(t.list_refs("refs/heads/a/b/").unwrap().is_empty());
+        assert!(t.list_ref_files("refs/heads/a").unwrap().is_empty());
+        assert_eq!(t.list_refs("refs/heads").unwrap().len(), 1);
+    }
+
+    /// Only a missing file, a ref file above the name and a directory at
+    /// the name read as absent. Any other read failure, here an injected
+    /// permission error, stays an error.
+    #[test]
+    fn ref_read_failure_other_than_absence_is_an_error() {
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::NotADirectory,
+            ErrorKind::IsADirectory,
+        ] {
+            assert_eq!(ref_from_read(Err(kind.into())).unwrap(), None, "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidInput,
+            ErrorKind::Other,
+        ] {
+            let err = ref_from_read(Err(kind.into())).unwrap_err();
+            assert_eq!(err.kind(), kind);
+        }
+        let h = blake3_hash(b"h");
+        assert_eq!(
+            ref_from_read(Ok(encode_ref_wire(&h).to_vec())).unwrap(),
+            Some(h)
+        );
+        assert_eq!(ref_from_read(Ok(b"junk".to_vec())).unwrap(), None);
+    }
+
+    /// A read that fails for another reason than absence surfaces through
+    /// every reader: a ref path that is a symlink loop.
+    #[cfg(unix)]
+    #[test]
+    fn read_ref_of_a_symlink_loop_is_an_error() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let heads = dir.path().join("refs/heads");
+        fs::create_dir_all(&heads).unwrap();
+        std::os::unix::fs::symlink("loop", heads.join("loop")).unwrap();
+        assert!(matches!(
+            t.read_ref("refs/heads/loop"),
+            Err(TransportError::RemoteError(_))
+        ));
+        assert!(matches!(
+            t.read_ref_strict("refs/heads/loop"),
+            Err(RefFileError::Io(_))
+        ));
+        assert!(matches!(
+            t.list_refs("refs/heads/loop"),
+            Err(TransportError::RemoteError(_))
+        ));
+        assert!(matches!(
+            t.list_ref_files("refs/heads/loop"),
+            Err(RefFileError::Io(_))
+        ));
     }
 
     // ------------------------------------------------------------------
