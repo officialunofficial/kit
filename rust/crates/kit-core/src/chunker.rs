@@ -151,26 +151,67 @@ impl FastCdc {
             return data.len();
         }
         let table = gear_table();
-        let mut hash: u64 = 0;
         let avg_end = self.avg_size.min(data.len());
-        let mut i = self.min_size;
-        while i < avg_end {
-            hash = (hash << 1).wrapping_add(table[data[i] as usize]);
-            if (hash & self.mask_s) == 0 {
-                return i;
-            }
-            i += 1;
+        let (cut, hash) = scan(table, data, self.min_size, avg_end, 0, self.mask_s);
+        if let Some(i) = cut {
+            return i;
         }
         let max_end = self.max_size.min(data.len());
-        while i < max_end {
+        scan(table, data, avg_end, max_end, hash, self.mask_l)
+            .0
+            .unwrap_or(max_end)
+    }
+}
+
+/// Bytes [`scan`] rolls between two checks for a run of one byte value.
+const RUN_CHECK: usize = 64;
+
+/// Roll the gear hash over `data[i..end]` from `hash`. Returns the first
+/// position whose hash has no bit of `mask` set, or `None` and the hash
+/// after `end - 1`.
+///
+/// A run of one byte value `c` drives the hash to the fixed point
+/// `-gear[c]`, because `(-g << 1) + g == -g` in wrapping arithmetic. Once
+/// the hash after a byte `c` equals that fixed point, every following `c`
+/// leaves it, and so the mask test, unchanged. The test has just failed,
+/// so the scan jumps to the end of the run. The cut points are exactly
+/// those of the byte-by-byte loop. A run is noticed at the next check,
+/// at most [`RUN_CHECK`] bytes after the hash reaches the fixed point.
+fn scan(
+    table: &[u64; 256],
+    data: &[u8],
+    mut i: usize,
+    end: usize,
+    mut hash: u64,
+    mask: u64,
+) -> (Option<usize>, u64) {
+    while i < end {
+        let block_end = (i + RUN_CHECK).min(end);
+        while i < block_end {
             hash = (hash << 1).wrapping_add(table[data[i] as usize]);
-            if (hash & self.mask_l) == 0 {
-                return i;
+            if hash & mask == 0 {
+                return (Some(i), hash);
             }
             i += 1;
         }
-        max_end
+        let c = data[i - 1];
+        if hash == table[c as usize].wrapping_neg() {
+            i += run_len(&data[i..end], c);
+        }
     }
+    (None, hash)
+}
+
+/// Length of the prefix of `s` that is all `c`.
+fn run_len(s: &[u8], c: u8) -> usize {
+    let mut n = 0;
+    for block in s.chunks_exact(32) {
+        if !block.iter().all(|&b| b == c) {
+            break;
+        }
+        n += 32;
+    }
+    n + s[n..].iter().position(|&b| b != c).unwrap_or(s.len() - n)
 }
 
 /// Iterator over chunk boundaries in a contiguous byte slice.
@@ -900,6 +941,90 @@ mod tests {
         }
     }
 
+    /// The cut loop of SPEC-FASTCDC §5, byte by byte, with no run skip.
+    fn cut_reference(cdc: &FastCdc, data: &[u8]) -> usize {
+        if data.len() <= cdc.min_size {
+            return data.len();
+        }
+        let table = gear_table();
+        let mut hash: u64 = 0;
+        let avg_end = cdc.avg_size.min(data.len());
+        let max_end = cdc.max_size.min(data.len());
+        for (i, &b) in data.iter().enumerate().take(max_end).skip(cdc.min_size) {
+            hash = (hash << 1).wrapping_add(table[b as usize]);
+            let mask = if i < avg_end { cdc.mask_s } else { cdc.mask_l };
+            if hash & mask == 0 {
+                return i;
+            }
+        }
+        max_end
+    }
+
+    fn reference_ends(cdc: &FastCdc, data: &[u8]) -> Vec<usize> {
+        let mut ends = Vec::new();
+        let mut pos = 0;
+        while pos < data.len() {
+            pos += cut_reference(cdc, &data[pos..]);
+            ends.push(pos);
+        }
+        ends
+    }
+
+    /// Runs of one byte value, alternating with pseudo-random stretches.
+    /// `scale` bounds each piece's length.
+    fn runs(seed: u64, len: usize, scale: u64, zeros: bool) -> Vec<u8> {
+        let mut rng = Prng::new(seed);
+        let mut data = Vec::with_capacity(len);
+        while data.len() < len {
+            let z = rng.next_u64();
+            let piece = usize::try_from((z >> 8) % scale).unwrap() + 1;
+            if z & 1 == 0 {
+                let byte = if zeros { 0 } else { z.to_le_bytes()[5] };
+                data.resize(data.len() + piece, byte);
+            } else {
+                let start = data.len();
+                data.resize(start + piece, 0);
+                rng.fill(&mut data[start..]);
+            }
+        }
+        data.truncate(len);
+        data
+    }
+
+    #[test]
+    fn run_skip_matches_byte_by_byte_cut() {
+        // Runs short and long, of zero and other bytes, crossing the
+        // strict/loose switch and the forced cut, for the v1 sizes and a
+        // tiny chunker whose sizes are near `RUN_CHECK`.
+        let tiny = FastCdc::custom(16, 64, 256);
+        for (case, scale) in [10u64, 100, 1000, 70_000, 300_000].into_iter().enumerate() {
+            for zeros in [true, false] {
+                let data = runs(0x5EED + case as u64, 3 * 1024 * 1024 + case, scale, zeros);
+                for cdc in [FastCdc::v1(), tiny, FastCdc::custom(64, 256, 1024)] {
+                    assert_eq!(
+                        sequential_ends(&cdc, &data),
+                        reference_ends(&cdc, &data),
+                        "scale {scale}, zeros {zeros}, max {}",
+                        cdc.max_size()
+                    );
+                }
+            }
+        }
+        // A run that covers the whole strict region and ends inside the
+        // loose one, and a run that covers everything.
+        let mut data = vec![0u8; MAX_SIZE * 3];
+        Prng::new(3).fill(&mut data[AVG_SIZE + 77..]);
+        assert_eq!(
+            sequential_ends(&FastCdc::v1(), &data),
+            reference_ends(&FastCdc::v1(), &data)
+        );
+        let data = vec![0xA5u8; MAX_SIZE * 3 + 5];
+        assert_eq!(
+            sequential_ends(&FastCdc::v1(), &data),
+            reference_ends(&FastCdc::v1(), &data)
+        );
+    }
+
     /// Pinned v1 gear-table digest, harvested once from the splitmix64
     /// derivation seeded with "KITFCDC". Drift = a v2 break.
     const EXPECTED_GEAR_DIGEST_HEX: &str =
@@ -971,6 +1096,27 @@ mod tests {
                 streamed.push(chunk);
             }
             proptest::prop_assert_eq!(in_memory, streamed);
+        }
+
+        /// The run skip never moves a cut: arbitrary runs and random
+        /// stretches cut the same as the byte-by-byte loop.
+        #[test]
+        fn proptest_run_skip_matches_reference(
+            pieces in proptest::collection::vec((proptest::num::u8::ANY, 1usize..4096, proptest::bool::ANY), 1..64),
+            seed in proptest::num::u64::ANY,
+        ) {
+            let mut data = Vec::new();
+            let mut rng = Prng::new(seed);
+            for (byte, len, run) in pieces {
+                let start = data.len();
+                data.resize(start + len, byte);
+                if !run {
+                    rng.fill(&mut data[start..]);
+                }
+            }
+            for cdc in [FastCdc::custom(16, 64, 256), FastCdc::custom(1024, 4096, 16384)] {
+                proptest::prop_assert_eq!(sequential_ends(&cdc, &data), reference_ends(&cdc, &data));
+            }
         }
     }
 }

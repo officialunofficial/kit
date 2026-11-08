@@ -195,6 +195,14 @@ The result `length` is the number of bytes in the first chunk. The
 caller consumes those bytes, then calls `cut` again on the remainder.
 The iteration continues until all bytes are consumed.
 
+Implementation note (informative): a run of one byte value `c` drives
+`hash` to the fixed point `-gear_table[c]` (wrapping), because
+`(-g << 1) +% g == -g`. Once `hash` equals that value after a byte `c`,
+each further `c` leaves `hash` and the mask test unchanged, so an
+implementation MAY jump to the end of the run, stopping at the
+strict/loose switch and at `max_size`. The cut points do not change.
+kit-core does this, so runs of zero bytes cut at memory speed.
+
 ---
 
 ## 6. Chunked_blob composition
