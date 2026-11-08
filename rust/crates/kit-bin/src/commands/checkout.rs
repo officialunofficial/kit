@@ -14,7 +14,7 @@ use kit_core::hash::Hash;
 use kit_core::index::EntryStatus;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
-use kit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_with};
+use kit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_observed};
 use kit_core::refs;
 use kit_core::store::ObjectStore;
 
@@ -304,13 +304,19 @@ pub fn run(args: &[String]) -> u8 {
     // directories that became empty — git removes those on a branch
     // switch; `fs::remove_dir` only succeeds on EMPTY dirs, so a dir
     // still holding untracked files survives.
-    let report = match restore_tree_to_worktree_with(
+    // The restore records a stat observation for each file it writes, so
+    // the index can carry a stat cache for it and the next command does
+    // not re-hash it. Observation paths are relative to the restore root,
+    // so they are used only when that root is the worktree root.
+    let mut observed = Vec::new();
+    let report = match restore_tree_to_worktree_observed(
         &store,
         &tree_hash,
         base_tree,
         &cwd,
         &sparse_opts,
         &crate::restore_fanout::read_chunks_fanout,
+        (cwd == layout.worktree_root()).then_some(&mut observed),
     ) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("restore: {e}"), exit::CANTCREAT),
@@ -318,7 +324,7 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(code) = remove_dropped(&cwd, &dropped) {
         return code;
     }
-    if let Err(e) = super::sync_index_to_tree(&layout, &store, tree_hash) {
+    if let Err(e) = super::sync_index_to_tree_observed(&layout, &store, tree_hash, &observed) {
         return emit_err(&e, exit::CANTCREAT);
     }
 

@@ -15,6 +15,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hashing. Objects still become visible only after the batch's full flush.
 - FastCDC cuts chunks on up to 8 threads. The boundaries are byte-identical
   to the single-threaded chunker, so the object format does not change.
+- `kit checkout`, `pull`, `rebase`, `revert` and `cherry-pick` record the
+  stat cache of each file they write in the index. The next command no longer
+  re-hashes those files, so the safety check of a second checkout and the first
+  `status` after a checkout skip reading them.
 
 ### Fixed
 

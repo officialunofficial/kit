@@ -400,3 +400,58 @@ fn checkout_resets_index_to_checked_out_tree() {
         "stale feature index leaked into main commit: {body}"
     );
 }
+
+/// A checkout records the stat cache of each file it writes. An edit
+/// after the checkout that keeps the size must still be seen, and an
+/// untouched checkout must report a clean status.
+#[test]
+fn checkout_with_recorded_stat_cache_still_sees_edits() {
+    let td = tempfile::tempdir().unwrap();
+    assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
+    // Above the chunking threshold, so the chunked restore path is covered.
+    let big: Vec<u8> = (0..1_500_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    fs::write(td.path().join("big.bin"), &big).unwrap();
+    fs::write(td.path().join("a.txt"), b"main\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "main"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(td.path(), &["checkout", "-b", "feature"])
+            .status
+            .success()
+    );
+    let mut big2 = big.clone();
+    big2[1000] ^= 0xFF;
+    fs::write(td.path().join("big.bin"), &big2).unwrap();
+    fs::write(td.path().join("a.txt"), b"feat\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "feature"])
+            .status
+            .success()
+    );
+
+    let out = run_in(td.path(), &["checkout", "main"]);
+    assert!(out.status.success(), "checkout failed: {out:?}");
+    assert_eq!(fs::read(td.path().join("big.bin")).unwrap(), big);
+    let out = run_in(td.path(), &["status", "--porcelain"]);
+    assert!(out.status.success(), "status failed: {out:?}");
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "");
+
+    // Same size, new content, in a later timestamp tick.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let mut edited = big;
+    edited[2000] ^= 0xFF;
+    fs::write(td.path().join("big.bin"), &edited).unwrap();
+    let out = run_in(td.path(), &["checkout", "feature"]);
+    assert!(!out.status.success(), "dirty checkout should fail: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("restore would overwrite local changes"),
+        "{stderr}"
+    );
+}
