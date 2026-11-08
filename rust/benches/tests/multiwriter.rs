@@ -38,6 +38,14 @@ fn every_row_runs_at_tiny_sizes() {
     let run =
         multiwriter::push_shared(&file(base.join("remote")), &base.join("local"), 3, 2).unwrap();
     assert_eq!((run.pushes, run.latencies.len()), (6, 6));
+    // Every landed push is split, and its parts fit inside its time.
+    assert_eq!(run.parts.len(), 6);
+    for (latency, parts) in run.latencies.iter().zip(&run.parts) {
+        assert!(parts.attempts >= 1);
+        assert!(parts.commit + parts.rejected + parts.fetch + parts.landed <= *latency);
+    }
+    let (slow, count) = run.parts_above(0.99);
+    assert!(count >= 1 && slow.attempts >= 1);
 
     let base = case("fetch-noop");
     let connect = file(base.join("remote"));

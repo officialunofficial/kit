@@ -164,6 +164,7 @@ fn run(args: &Args) -> Result<(), String> {
         let mut e = Vec::with_capacity(args.runs);
         let mut f = Vec::with_capacity(args.runs);
         let mut g = Vec::with_capacity(args.runs);
+        let mut h = Vec::with_capacity(args.runs);
         for r in 0..args.runs {
             let dirs = RunDirs::new(&args.dir, &format!("{row}-{n}-{r}"))?;
             let connect = connector(args.target, &dirs.root);
@@ -184,6 +185,13 @@ fn run(args: &Args) -> Result<(), String> {
                     b.push(ms(run.quantile(0.5)));
                     c.push(ms(run.quantile(0.99)));
                     d.push(run.retries_per_success());
+                    if row == "push-shared" {
+                        let (slow, _) = run.parts_above(0.99);
+                        e.push(slow.attempts as f64);
+                        f.push(ms(slow.rejected));
+                        g.push(ms(slow.fetch));
+                        h.push(ms(slow.commit + slow.landed));
+                    }
                 }
                 "fetch-noop" => {
                     let reader = multiwriter::fetch_noop_setup(connect, &dirs.local, n)?;
@@ -208,7 +216,7 @@ fn run(args: &Args) -> Result<(), String> {
         }
         match row {
             "ref-write" => report(row, args.target, n, args.runs, &[("writes/s", &a)]),
-            "push-distinct" | "push-shared" => report(
+            "push-distinct" => report(
                 row,
                 args.target,
                 n,
@@ -218,6 +226,25 @@ fn run(args: &Args) -> Result<(), String> {
                     ("p50_ms", &b),
                     ("p99_ms", &c),
                     ("retries/success", &d),
+                ],
+            ),
+            // The slowest 1% of landed pushes, split: attempts, time in
+            // rejected attempts, in fetches after them, and in local
+            // commits plus the attempt that landed.
+            "push-shared" => report(
+                row,
+                args.target,
+                n,
+                args.runs,
+                &[
+                    ("pushes/s", &a),
+                    ("p50_ms", &b),
+                    ("p99_ms", &c),
+                    ("retries/success", &d),
+                    ("slow_attempts", &e),
+                    ("slow_rejected_ms", &f),
+                    ("slow_fetch_ms", &g),
+                    ("slow_other_ms", &h),
                 ],
             ),
             "fetch-noop" => report(
