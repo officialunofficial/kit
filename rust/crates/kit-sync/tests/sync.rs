@@ -2049,3 +2049,113 @@ fn recovery_keeps_untracked_files_that_the_ignore_rules_preserve() {
     assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"two\n");
     assert!(!layout.pull_head_file().exists());
 }
+
+fn publish_nested_a(remote: &Remote, parent: Option<Hash>) -> Hash {
+    let (mut objects, _) = remote.build(parent, &[("b.txt", b"nested\n")], true);
+    let Object::Commit(mut commit) = objects.pop().unwrap() else {
+        panic!("commit");
+    };
+    let root = Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"a".to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: commit.tree_hash,
+        }],
+    });
+    commit.tree_hash = root.id().unwrap();
+    commit.signature = sign::sign_commit(&commit, &remote.key).unwrap().0;
+    let commit = Object::Commit(commit);
+    let tip = commit.id().unwrap();
+    objects.extend([root, commit]);
+    remote.publish_objects(&objects, tip, false);
+    tip
+}
+
+fn pending_file_directory_restore(
+    to_directory: bool,
+) -> (Remote, tempfile::TempDir, RepoLayout, Hash) {
+    let remote = Remote::new();
+    let first = if to_directory {
+        remote.publish(None, &[("a", b"plain\n")], true)
+    } else {
+        publish_nested_a(&remote, None)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    let second = if to_directory {
+        publish_nested_a(&remote, Some(first))
+    } else {
+        remote.publish(Some(first), &[("a", b"plain\n")], true)
+    };
+    let layout = RepoLayout::single(dir.path());
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &StopAfterHead {
+            layout: layout.clone(),
+            tip: second,
+        },
+    );
+    assert!(matches!(result, Err(SyncError::Interrupted)));
+    if to_directory {
+        // One target descendant landed, but the index still tracks file a.
+        std::fs::remove_file(dir.path().join("a")).unwrap();
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        std::fs::write(dir.path().join("a/b.txt"), b"nested\n").unwrap();
+    }
+    (remote, dir, layout, second)
+}
+
+#[test]
+fn recovery_preserves_edits_during_file_directory_transitions() {
+    for to_directory in [true, false] {
+        let (remote, dir, layout, second) = pending_file_directory_restore(to_directory);
+        std::fs::write(dir.path().join("a/b.txt"), b"local edit\n").unwrap();
+        let index = std::fs::read(layout.index_file()).unwrap();
+        let marker = std::fs::read(layout.pull_head_file()).unwrap();
+        let result = pull(
+            dir.path(),
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        );
+        assert!(
+            matches!(result, Err(SyncError::RestoreSafety(_))),
+            "to_directory={to_directory}: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("a/b.txt")).unwrap(),
+            b"local edit\n"
+        );
+        assert_eq!(std::fs::read(layout.index_file()).unwrap(), index);
+        assert_eq!(std::fs::read(layout.pull_head_file()).unwrap(), marker);
+        assert_eq!(refs::resolve_head(&layout).unwrap(), Some(second));
+    }
+}
+
+#[test]
+fn recovery_finishes_unedited_file_directory_transitions() {
+    for to_directory in [true, false] {
+        let (remote, dir, layout, _) = pending_file_directory_restore(to_directory);
+        pull(
+            dir.path(),
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        if to_directory {
+            assert_eq!(
+                std::fs::read(dir.path().join("a/b.txt")).unwrap(),
+                b"nested\n"
+            );
+        } else {
+            assert_eq!(std::fs::read(dir.path().join("a")).unwrap(), b"plain\n");
+        }
+        assert!(!layout.pull_head_file().exists());
+    }
+}

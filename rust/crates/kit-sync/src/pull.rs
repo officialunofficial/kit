@@ -338,6 +338,17 @@ fn ensure_pull_restore_safe(
             "pull recovery would remove untracked path '{path}'"
         ));
     }
+    // The union can contain a former file and a target descendant. Keeping
+    // that file in the snapshot index would hide the whole directory.
+    let directories: std::collections::HashSet<_> = old
+        .entries
+        .iter()
+        .chain(&target.entries)
+        .flat_map(|entry| Path::new(&entry.path).ancestors().skip(1))
+        .filter_map(|parent| parent.to_str())
+        .filter(|parent| !parent.is_empty())
+        .collect();
+    tracked.retain_entries(|entry| !directories.contains(entry.path.as_str()));
     let snapshot = kit_core::store::EphemeralSink::new(store);
     let old_tree = worktree::build_tree_from_index_with(store, &snapshot, &old, false)
         .map_err(|e| format!("index tree: {e}"))?;
