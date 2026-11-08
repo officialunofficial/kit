@@ -108,6 +108,7 @@ pub(crate) enum ChainAction {
 /// writes the head. Atomic force pushes use the separate guarded driver,
 /// including this idempotent case. Lost-response conflicts are disambiguated
 /// by reading the head.
+#[allow(clippy::too_many_lines)] // One CAS attempt reads best as one loop body.
 pub(crate) fn advance_packmap(
     tx: &PushContext<'_>,
     branch: &str,
@@ -130,6 +131,11 @@ pub(crate) fn advance_packmap(
     for _ in 0..PACKMAP_CAS_ATTEMPTS {
         if tx.observer.cancelled() {
             return Err(PushError::Sync(SyncError::Interrupted));
+        }
+        if !tx.supports_atomic_advance()
+            && let Some(done) = stale_head(tx, &head_name, head_condition, &tip, branch)?
+        {
+            return done;
         }
         let prior = tx.read_ref(&packmap_name)?;
         // Decide the new node's `prev`. A re-baseline always resets
@@ -233,6 +239,39 @@ pub(crate) fn advance_packmap(
     }
     Err(PushError::PackmapContended {
         branch: branch.to_owned(),
+    })
+}
+
+/// The ordered advance writes the packmap before the head, so a push whose
+/// head condition already fails would chain its packs onto the packmap and
+/// then lose the head CAS. Every later fetch downloads those packs. Read
+/// the head first: `Some` ends the push, as [`head_conflict`] would after
+/// the advance, and `None` lets it go on. The head CAS stays
+/// authoritative; this read only skips a packmap write that no head move
+/// could follow.
+fn stale_head(
+    tx: &PushContext<'_>,
+    head_name: &str,
+    condition: refs::RefWriteCondition,
+    tip: &Hash,
+    branch: &str,
+) -> Result<Option<Result<(), PushError>>, PushError> {
+    let current = tx
+        .read_ref(head_name)
+        .map_err(|error| super::repository_operation_error(tx, error))?;
+    let holds = match condition {
+        refs::RefWriteCondition::Any => true,
+        refs::RefWriteCondition::Missing => current.is_none(),
+        refs::RefWriteCondition::Match(expected) => current == Some(expected),
+    };
+    Ok(if holds {
+        None
+    } else if current == Some(*tip) {
+        Some(Ok(()))
+    } else {
+        Some(Err(PushError::NonFastForwardPush {
+            branch: branch.to_owned(),
+        }))
     })
 }
 

@@ -9,6 +9,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A push to a transport that writes the packmap before the head (the file
+  transport, `kit serve` over ssh, s3) reads the head before each packmap
+  write and stops with a non-fast-forward error when the head has already
+  moved. Before, the rejected push appended its packs to the branch's
+  chain and only then lost the head write, so every later fetch
+  downloaded the packs of every lost push. The head write still decides
+  the push.
 - Blame caps its LCS comparison table at 64 MiB after trimming the common
   prefix. Larger comparisons use the bounded line diff search. Reassembly,
   line buffers, and attribution memory still grow with file size.

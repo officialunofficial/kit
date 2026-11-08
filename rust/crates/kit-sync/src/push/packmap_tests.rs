@@ -312,6 +312,7 @@ struct LostResponseTransport {
     reissue: Reissue,
     capture: std::sync::Mutex<Vec<(refs::RefWriteCondition, Hash, refs::RefWriteCondition, Hash)>>,
     race: Option<Hash>,
+    head_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl LostResponseTransport {
@@ -321,6 +322,7 @@ impl LostResponseTransport {
             reissue,
             capture: std::sync::Mutex::new(Vec::new()),
             race: None,
+            head_reads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -377,6 +379,10 @@ impl Transport for LostResponseTransport {
         self.inner.update_ref(name, condition, hash)
     }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, TransportError> {
+        if name.starts_with("refs/heads/") {
+            self.head_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         self.inner.read_ref(name)
     }
     fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, TransportError> {
@@ -658,4 +664,132 @@ fn commit_head_genuine_conflict_stays_non_fast_forward() {
         "{err:?}"
     );
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(theirs));
+}
+
+#[test]
+fn advance_packmap_ordered_leaves_the_packmap_when_the_head_moved() {
+    // The ordered advance writes the packmap before the head. A push whose
+    // head condition already fails would chain its packs and then lose the
+    // head CAS anyway, so it stops before it writes anything.
+    for condition in [
+        refs::RefWriteCondition::Match(h("lease")),
+        refs::RefWriteCondition::Missing,
+    ] {
+        let tx = LostResponseTransport::new(Reissue::None);
+        let prior = put_node(&tx.inner, None, &[h("base")]);
+        tx.inner
+            .update_ref(
+                &packmap_ref("main"),
+                refs::RefWriteCondition::Missing,
+                &prior,
+            )
+            .unwrap();
+        let theirs = h("their-tip");
+        tx.inner
+            .update_ref("refs/heads/main", refs::RefWriteCondition::Missing, &theirs)
+            .unwrap();
+        let err = advance_packmap(
+            &tx,
+            "main",
+            &[h("k1")],
+            ChainAction::Append {
+                self_contained: false,
+            },
+            None,
+            condition,
+            h("tip"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, PushError::NonFastForwardPush { ref branch } if branch == "main"),
+            "{err:?}"
+        );
+        assert!(
+            tx.capture.lock().unwrap().is_empty(),
+            "no advance attempted"
+        );
+        assert_eq!(tx.read_ref(&packmap_ref("main")).unwrap(), Some(prior));
+        assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(theirs));
+    }
+}
+
+#[test]
+fn advance_packmap_ordered_head_already_at_tip_is_success() {
+    // A re-issued push whose first attempt landed finds its own tip: it
+    // landed, and the packmap that reconstructs it is already written.
+    let tx = LostResponseTransport::new(Reissue::None);
+    let tip = h("tip");
+    let prior = put_node(&tx.inner, None, &[h("k1")]);
+    tx.inner
+        .update_ref(
+            &packmap_ref("main"),
+            refs::RefWriteCondition::Missing,
+            &prior,
+        )
+        .unwrap();
+    tx.inner
+        .update_ref("refs/heads/main", refs::RefWriteCondition::Missing, &tip)
+        .unwrap();
+    advance_packmap(
+        &tx,
+        "main",
+        &[h("k2")],
+        ChainAction::Append {
+            self_contained: false,
+        },
+        None,
+        refs::RefWriteCondition::Match(h("lease")),
+        tip,
+    )
+    .unwrap();
+    assert!(
+        tx.capture.lock().unwrap().is_empty(),
+        "no advance attempted"
+    );
+    assert_eq!(tx.read_ref(&packmap_ref("main")).unwrap(), Some(prior));
+}
+
+#[test]
+fn advance_packmap_atomic_does_not_read_the_head_first() {
+    // An atomic advance writes neither ref when the head condition fails,
+    // so the head is read only to resolve a conflict.
+    let tx = LostResponseTransport::new(Reissue::Atomic);
+    let tip = h("tip");
+    advance_first_push(&tx, &[h("k1")], tip).unwrap();
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip));
+    assert_eq!(
+        tx.head_reads.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "only the read in this assertion"
+    );
+}
+
+#[test]
+fn advance_packmap_ordered_any_overwrites_a_moved_head() {
+    // An unconditional head write has no condition to fail, so a moved head
+    // does not stop it.
+    let tx = LostResponseTransport::new(Reissue::None);
+    tx.inner
+        .update_ref(
+            "refs/heads/main",
+            refs::RefWriteCondition::Missing,
+            &h("their-tip"),
+        )
+        .unwrap();
+    let tip = h("tip");
+    advance_packmap(
+        &tx,
+        "main",
+        &[h("k1")],
+        ChainAction::Append {
+            self_contained: true,
+        },
+        None,
+        refs::RefWriteCondition::Any,
+        tip,
+    )
+    .unwrap();
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip));
+    let pm = tx.read_ref(&packmap_ref("main")).unwrap().unwrap();
+    assert_eq!(decode_node_at(&tx.inner, pm).packs, vec![h("k1")]);
 }
