@@ -456,17 +456,13 @@ pub(crate) fn pull_all_with_source(
     target_branch: Option<&str>,
     require_signed: bool,
     terminal: &Terminal,
-) -> Result<usize, Error> {
+) -> Result<kit_sync::PullReport, Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    transfer::pull_with_source(
-        cwd,
-        source,
-        remote,
-        target_branch,
-        require_signed,
-        sync_policy(&layout),
-        terminal,
-    )
+    let options = kit_sync::SyncOptions::default()
+        .with_target_branch(target_branch.map(str::to_owned))
+        .with_verify_signatures(require_signed)
+        .with_sync_policy(sync_policy(&layout));
+    Ok(kit_sync::pull(cwd, source, remote, &options, terminal)?)
 }
 
 /// Fetch the remote; see [`transfer::fetch_with_source`].

@@ -325,9 +325,10 @@ branch-write primitives a fast-forward is built on (`ensure_restore_safe`,
 command line's `checkout`, `reset` and `restore` use the same functions.
 
 A pull writes the per-worktree `PULL_HEAD` sidecar before moving the branch
-and HEAD, then removes it after restoring the files and index. A retry
-finishes that restore before returning `UpToDate`, including when only some
-files were restored. See SPEC-WORKTREE for its layout and recovery rules.
+and HEAD, then removes it after restoring the files and index. A retry checks
+for local work before finishing a partial restore. It reports completion even
+when the branch tip stays the same. This covers a killed process, not power
+loss. See SPEC-WORKTREE for its layout and recovery rules.
 
 ## Features
 

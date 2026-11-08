@@ -129,16 +129,6 @@ fn pull_one(
         );
     };
     let endpoint = resolved.endpoint.as_str();
-    // Snapshot the current branch tip so we can report a git-style
-    // `Updating <old>..<new>` / `Fast-forward` block (or `Already up to
-    // date.`) once the fast-forward completes.
-    let branch = match kit_core::refs::read_head(layout) {
-        Ok(kit_core::refs::Head::Branch(b)) => Some(b),
-        _ => None,
-    };
-    let old_tip = branch
-        .as_deref()
-        .and_then(|b| kit_core::refs::read_ref(layout, b).ok().flatten());
     let progress = crate::progress::start(
         "Unpacking objects",
         None,
@@ -174,11 +164,25 @@ fn pull_one(
                 outcome
             };
             match pull_outcome {
-                Ok(_) => {
-                    let new_tip = branch
-                        .as_deref()
-                        .and_then(|b| kit_core::refs::read_ref(layout, b).ok().flatten());
-                    report_pull(layout, endpoint, old_tip, new_tip);
+                Ok(report) => {
+                    let (branch, old_tip, new_tip, up_to_date) = match report.outcome {
+                        kit_sync::PullOutcome::UpToDate { branch } => {
+                            let tip = kit_core::refs::read_ref(layout, &branch).ok().flatten();
+                            (Some(branch), tip, tip, true)
+                        }
+                        kit_sync::PullOutcome::FastForwarded { branch, old, new } => {
+                            (Some(branch), old, Some(new), false)
+                        }
+                        kit_sync::PullOutcome::NoRemoteBranches => (None, None, None, true),
+                        _ => {
+                            return emit_err_json(
+                                "unsupported pull outcome",
+                                exit::GENERAL_ERROR,
+                                json,
+                            );
+                        }
+                    };
+                    report_pull(layout, endpoint, old_tip, new_tip, up_to_date);
                     if json {
                         let mut obj = JsonObject::new();
                         obj.field_bool("ok", true)
@@ -187,7 +191,7 @@ fn pull_one(
                             .field_opt_str("branch", branch.as_deref())
                             .field_opt_hash("old", old_tip.as_ref())
                             .field_opt_hash("new", new_tip.as_ref())
-                            .field_bool("up_to_date", old_tip == new_tip);
+                            .field_bool("up_to_date", up_to_date);
                         let mut stdout = std::io::stdout().lock();
                         let _ = writeln!(stdout, "{}", obj.finish());
                     }
@@ -225,11 +229,20 @@ fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
 /// no-op, else `From <url>` + `Updating <old>..<new>` + `Fast-forward` +
 /// the diffstat. The diffstat is best-effort — a failure to compute it
 /// still leaves the headline lines intact.
-fn report_pull(layout: &RepoLayout, endpoint: &str, old: Option<Hash>, new: Option<Hash>) {
+fn report_pull(
+    layout: &RepoLayout,
+    endpoint: &str,
+    old: Option<Hash>,
+    new: Option<Hash>,
+    up_to_date: bool,
+) {
     let mut stderr = std::io::stderr().lock();
     match (old, new) {
-        (o, n) if o == n => {
+        _ if up_to_date => {
             let _ = writeln!(stderr, "Already up to date.");
+        }
+        (o, n) if o == n => {
+            let _ = writeln!(stderr, "Completed interrupted pull.");
         }
         (Some(o), Some(n)) => {
             let _ = writeln!(stderr, "From {endpoint}");

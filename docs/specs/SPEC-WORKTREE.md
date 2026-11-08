@@ -32,17 +32,28 @@ of two classes:
 
 `PULL_HEAD` records an unfinished pull's target commit using the existing
 65-byte ref encoding (lowercase hex and LF). The writer atomically persists
-and syncs it before moving the branch or HEAD. A following pull restores
-that commit and the index when HEAD still resolves to it, before testing
-whether the remote tip matches. Recovery also works when the remote has
-advanced again. The marker is removed and its directory synced after the
-restore and index write succeed, or after an error rolls the branch and HEAD
-back successfully. Recovery completes the previously approved restore; edits made
-after interruption to files in that restore can be overwritten. An unrelated
-HEAD does not authorize recovery over local changes: the ordinary restore
-safety checks still apply, and a mismatched marker prevents an up-to-date
-result. The marker uses the ref bytes covered by the `ref_detached` golden
-vector; it adds no ref encoding.
+and syncs it before moving the branch or HEAD. A following pull rejects
+detached HEAD before touching files. It discards a well-formed marker when
+neither HEAD nor the selected branch tip names it, because restore cannot
+have started in that state. Corrupt markers fail closed.
+
+Before recovery, each tracked or target path must match the old index entry
+or the target tree entry, including its mode or absence. A path that matches
+neither causes refusal before any file, HEAD or index write; the marker stays.
+Untracked paths outside the target must stay on disk. The current clean
+restore cannot preserve arbitrary untracked paths, so recovery refuses when
+it would remove one; it preserves the ignore files and ignored paths under
+the ordinary restore rules. Recovery accepts a mixture of old and already
+restored target entries and aligns the index after the restore succeeds.
+It finishes a branch write already at the marker, even if HEAD still names
+an unborn branch absent on the remote. A later remote advance can then land
+through the ordinary fast-forward and restore checks.
+
+The marker is removed and its directory synced after the restore and index
+write succeed, or after an error rolls the branch and HEAD back successfully.
+This recovers a killed process, not power loss: worktree file writes are not
+flushed before marker removal. The marker uses the ref bytes covered by the
+`ref_detached` golden vector; it adds no ref encoding.
 
 In the classic single-worktree layout both directories are the same
 `<root>/.kit/`; the two-directory model is byte-identical there.

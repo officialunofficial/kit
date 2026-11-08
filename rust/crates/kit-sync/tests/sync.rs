@@ -501,7 +501,7 @@ fn pull_retries_a_marker_written_before_the_branch_moves() {
 }
 
 #[test]
-fn pull_refuses_malformed_or_unrelated_markers_before_a_no_op() {
+fn pull_refuses_malformed_markers_before_a_no_op() {
     let remote = Remote::new();
     let tip = remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
@@ -514,7 +514,6 @@ fn pull_refuses_malformed_or_unrelated_markers_before_a_no_op() {
         vec![b'a'; 66],
         vec![b'G'; 65],
         hash::to_hex(&tip).into_bytes(),
-        refs::encode_ref_wire(&hash::hash(b"another commit")).to_vec(),
     ] {
         std::fs::write(layout.pull_head_file(), &bytes).unwrap();
         assert!(
@@ -1749,4 +1748,304 @@ fn checkpoint_directory_does_not_collide_with_a_remote_named_heads() {
             .iter()
             .any(|event| matches!(event, SyncEvent::AppliedPacksPersistFailed { .. }))
     );
+}
+
+fn pending_restore() -> (Remote, tempfile::TempDir, RepoLayout, Hash, Hash) {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n"), ("c.txt", b"same\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    let second = remote.publish(
+        Some(first),
+        &[("a.txt", b"two\n"), ("c.txt", b"same\n")],
+        true,
+    );
+    let layout = RepoLayout::single(dir.path());
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &StopAfterHead {
+            layout: layout.clone(),
+            tip: second,
+        },
+    );
+    assert!(matches!(result, Err(SyncError::Interrupted)));
+    (remote, dir, layout, first, second)
+}
+
+#[test]
+fn recovery_preserves_new_untracked_files() {
+    let (remote, dir, layout, _, _) = pending_restore();
+    std::fs::write(dir.path().join("notes.txt"), b"notes\n").unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    // A clean sweep cannot preserve this file, so recovery must refuse it.
+    assert!(matches!(result, Err(SyncError::RestoreSafety(_))));
+    assert_eq!(
+        std::fs::read(dir.path().join("notes.txt")).unwrap(),
+        b"notes\n"
+    );
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
+    assert!(layout.pull_head_file().exists());
+}
+
+#[test]
+fn recovery_refuses_edits_to_files_the_pull_did_not_change() {
+    let (remote, dir, layout, _, _) = pending_restore();
+    std::fs::write(dir.path().join("c.txt"), b"local edit\n").unwrap();
+    let index = std::fs::read(layout.index_file()).unwrap();
+    let marker = std::fs::read(layout.pull_head_file()).unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    assert!(matches!(result, Err(SyncError::RestoreSafety(_))));
+    assert_eq!(
+        std::fs::read(dir.path().join("c.txt")).unwrap(),
+        b"local edit\n"
+    );
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
+    assert_eq!(std::fs::read(layout.index_file()).unwrap(), index);
+    assert_eq!(std::fs::read(layout.pull_head_file()).unwrap(), marker);
+}
+
+#[test]
+fn recovery_refuses_later_edits_after_the_target_lands_another_way() {
+    let (remote, dir, layout, _, second) = pending_restore();
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    let Object::Commit(commit) = store.read_object(&second).unwrap() else {
+        panic!("commit");
+    };
+    kit_sync::worktree::restore_worktree_and_index(&layout, &store, commit.tree_hash).unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"later edit\n").unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    assert!(matches!(result, Err(SyncError::RestoreSafety(_))));
+    assert_eq!(
+        std::fs::read(dir.path().join("a.txt")).unwrap(),
+        b"later edit\n"
+    );
+    assert!(layout.pull_head_file().exists());
+}
+
+#[test]
+fn detached_head_refuses_recovery_before_changing_files() {
+    let (remote, dir, layout, _, second) = pending_restore();
+    refs::write_head_detached(&layout, &second).unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"later edit\n").unwrap();
+    remote.publish(Some(second), &[("a.txt", b"three\n")], true);
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    assert!(matches!(result, Err(SyncError::DetachedHead)));
+    assert_eq!(
+        std::fs::read(dir.path().join("a.txt")).unwrap(),
+        b"later edit\n"
+    );
+    assert!(layout.pull_head_file().exists());
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(second)
+    );
+}
+
+#[test]
+fn pull_discards_markers_that_neither_head_nor_the_selected_branch_names() {
+    let (remote, dir, layout, first, second) = pending_restore();
+    let third = remote.publish(
+        Some(second),
+        &[("a.txt", b"three\n"), ("c.txt", b"same\n")],
+        true,
+    );
+    fetch(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    let Object::Commit(commit) = store.read_object(&third).unwrap() else {
+        panic!("commit");
+    };
+    kit_sync::worktree::restore_worktree_and_index(&layout, &store, commit.tree_hash).unwrap();
+    refs::write_ref(&layout, "main", &third).unwrap();
+    // Manual recovery followed by a newer commit leaves the old marker behind.
+    let report = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(matches!(report.outcome, PullOutcome::UpToDate { .. }));
+    assert!(!layout.pull_head_file().exists());
+    // A remote rewind before the branch move leaves no restore to finish.
+    refs::write_ref(&layout, "main", &first).unwrap();
+    remote
+        .tx
+        .update_ref("refs/heads/main", RefWriteCondition::Any, &first)
+        .unwrap();
+    std::fs::write(layout.pull_head_file(), refs::encode_ref_wire(&second)).unwrap();
+    let report = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(matches!(report.outcome, PullOutcome::UpToDate { .. }));
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"three\n");
+    assert!(!layout.pull_head_file().exists());
+    // A well-formed marker from another branch is equally stale.
+    std::fs::write(
+        layout.pull_head_file(),
+        refs::encode_ref_wire(&hash::hash(b"other branch")),
+    )
+    .unwrap();
+    pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(!layout.pull_head_file().exists());
+}
+
+#[test]
+fn pull_finishes_an_unborn_branch_after_its_selected_branch_already_moved() {
+    let remote = Remote::new();
+    let tip = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let layout = init_clone_dir(dir.path(), &default_remote("kit+memory://x")).unwrap();
+    refs::write_head_branch(&layout, "unborn").unwrap();
+    fetch(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    // Stop between the selected branch write and the HEAD write.
+    std::fs::write(layout.pull_head_file(), refs::encode_ref_wire(&tip)).unwrap();
+    refs::write_ref(&layout, "main", &tip).unwrap();
+    let report = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(matches!(report.outcome, PullOutcome::FastForwarded { new, .. } if new == tip));
+    assert_eq!(
+        refs::read_head(&layout).unwrap(),
+        refs::Head::Branch("main".to_owned())
+    );
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
+    assert!(!layout.pull_head_file().exists());
+}
+
+#[test]
+fn marker_write_failure_cannot_move_the_branch_or_head() {
+    struct BlockMarker {
+        layout: RepoLayout,
+        tip: Hash,
+    }
+    impl Observer<SyncEvent> for BlockMarker {
+        fn cancelled(&self) -> bool {
+            if refs::read_remote_ref(&self.layout, "default", "main").unwrap() == Some(self.tip) {
+                std::fs::create_dir_all(self.layout.pull_head_file()).unwrap();
+            }
+            false
+        }
+    }
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let layout = RepoLayout::single(dir.path());
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &BlockMarker {
+            layout: layout.clone(),
+            tip: second,
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(first));
+    assert_eq!(refs::resolve_head(&layout).unwrap(), Some(first));
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
+}
+
+#[test]
+fn recovery_preserves_ignored_files_under_a_target_file_path() {
+    let (remote, dir, layout, _, _) = pending_restore();
+    std::fs::remove_file(dir.path().join("a.txt")).unwrap();
+    std::fs::create_dir(dir.path().join("a.txt")).unwrap();
+    std::fs::write(dir.path().join(".kitignore"), b"a.txt/notes.txt\n").unwrap();
+    std::fs::write(dir.path().join("a.txt/notes.txt"), b"notes\n").unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    assert!(matches!(result, Err(SyncError::RestoreSafety(_))));
+    assert_eq!(
+        std::fs::read(dir.path().join("a.txt/notes.txt")).unwrap(),
+        b"notes\n"
+    );
+    assert!(layout.pull_head_file().exists());
+}
+
+#[test]
+fn recovery_keeps_untracked_files_that_the_ignore_rules_preserve() {
+    let (remote, dir, layout, _, _) = pending_restore();
+    std::fs::write(dir.path().join(".kitignore"), b"cache.bin\n").unwrap();
+    std::fs::write(dir.path().join("cache.bin"), b"cache\n").unwrap();
+    pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("cache.bin")).unwrap(),
+        b"cache\n"
+    );
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"two\n");
+    assert!(!layout.pull_head_file().exists());
 }
