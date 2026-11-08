@@ -102,6 +102,76 @@ fn fastcdc_boundaries_256k_match_golden() {
     );
 }
 
+/// SPEC-FASTCDC §8 vector 11: runs of one byte value between splitmix64
+/// stretches, 1 MiB in all.
+fn runs_stream() -> Vec<u8> {
+    let mut data = vec![0u8; 393_216];
+    data.extend(splitmix_bytes(0x0052_554E_5300_0001, 262_144));
+    data.resize(data.len() + 131_072, 0xA5);
+    data.extend(splitmix_bytes(0x0052_554E_5300_0002, 262_144));
+    assert_eq!(data.len(), 1024 * 1024);
+    data
+}
+
+fn ends(cdc: FastCdc, data: &[u8]) -> Vec<usize> {
+    ChunkIterator::new(cdc, data)
+        .map(|b| b.offset + b.length)
+        .collect()
+}
+
+/// SPEC-FASTCDC §8 vectors 11 to 13: the runs stream under v1, and the
+/// pinned streams under v2. The independent check is
+/// `scripts/golden/objects_ref.py`.
+#[test]
+fn fastcdc_runs_and_v2_boundaries_match_golden() {
+    let mib = splitmix_bytes(0xA5A5_F00D_DEAD_BEEF, 1024 * 1024);
+    let k256 = splitmix_bytes(0xCAFE_BABE_1234_5678, 256 * 1024);
+    let runs = runs_stream();
+    for (name, cdc, data) in [
+        ("fastcdc_boundaries_runs", FastCdc::v1(), &runs),
+        ("fastcdc_v2_boundaries_1mib", FastCdc::v2(), &mib),
+        ("fastcdc_v2_boundaries_256k", FastCdc::v2(), &k256),
+        ("fastcdc_v2_boundaries_runs", FastCdc::v2(), &runs),
+    ] {
+        let raw = fs::read_to_string(fastcdc_dir().join(format!("{name}.bin"))).unwrap();
+        assert_eq!(ends(cdc, data), parse_boundaries_json(&raw), "{name}");
+        assert_eq!(cdc.chunk_ends(data), parse_boundaries_json(&raw), "{name}");
+    }
+}
+
+/// SPEC-FASTCDC §8 vector 14: the v2 manifest bytes of a 2 MiB stream and
+/// its object id, pinned in `MANIFEST.txt`.
+#[test]
+fn fastcdc_v2_manifest_matches_golden() {
+    use kit_core::chunker::{CHUNK_SIZE_FASTCDC_V2, Chunker};
+    use kit_core::object::Object;
+    use kit_core::{merkle, serialize, worktree};
+
+    let data = splitmix_bytes(0x4B49_5446_4344_4332, 2 * 1024 * 1024);
+    let manifest = worktree::chunked_blob_from_bytes_with(&data, Chunker::FastCdcV2).unwrap();
+    assert_eq!(manifest.chunk_size, CHUNK_SIZE_FASTCDC_V2);
+    let bytes = serialize::serialize(&Object::ChunkedBlob(manifest.clone())).unwrap();
+    let golden = fs::read(fastcdc_dir().join("fastcdc_v2_manifest_2mib.bin")).unwrap();
+    assert_eq!(bytes, golden);
+    assert_eq!(
+        serialize::deserialize(&golden).unwrap(),
+        Object::ChunkedBlob(manifest.clone())
+    );
+    let pinned = fs::read_to_string(fastcdc_dir().join("MANIFEST.txt"))
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("fastcdc_v2_manifest_2mib_object_id "))
+        .unwrap()
+        .to_string();
+    assert_eq!(hash::to_hex(&merkle::compute_chunked_id(&manifest)), pinned);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+    let id = worktree::store_file_object_with(&store, &data, Chunker::FastCdcV2).unwrap();
+    assert_eq!(hash::to_hex(&id), pinned);
+    assert_eq!(worktree::read_blob(&store, &id).unwrap(), data);
+}
+
 #[test]
 fn fastcdc_iterator_total_equals_input_length() {
     // Sanity, plus exercises the Iterator API in tests/.

@@ -18,6 +18,11 @@
 //! All chunk boundaries are fully determined by the input bytes plus the
 //! constants above. Any change breaks `chunked_blob` reproducibility
 //! (see `SPEC-FASTCDC.md` §2 determinism contract).
+//!
+//! `FastCDC` v2 (SPEC-FASTCDC §11) keeps the gear table and the sizes and
+//! swaps in [`MASK_S_V2`] and [`MASK_L_V2`]. A manifest names it with
+//! [`CHUNK_SIZE_FASTCDC_V2`]. No writer uses it by default; see
+//! [`Chunker`].
 
 /// Frozen splitmix64 seed for v1 — ASCII `"KITFCDC"` as big-endian u64.
 ///
@@ -40,6 +45,60 @@ pub const MASK_S: u64 = 0x0001_FFFF;
 /// Loose mask (used while `AVG_SIZE <= i < MAX_SIZE`). More cuts → avoid
 /// running into the `MAX_SIZE` forced boundary.
 pub const MASK_L: u64 = 0x0000_7FFF;
+
+/// `FastCDC` v2 strict mask: 18 one-bits spread over bits 16 to 47
+/// (SPEC-FASTCDC §11.1).
+pub const MASK_S_V2: u64 = 0x0000_AB55_AB55_0000;
+/// `FastCDC` v2 loose mask: 14 one-bits spread over bits 16 to 47
+/// (SPEC-FASTCDC §11.1).
+pub const MASK_L_V2: u64 = 0x0000_552A_552A_0000;
+
+/// The `chunk_size` value of a `ChunkedBlob` manifest cut by `FastCDC` v2
+/// (SPEC-OBJECTS §7). `FastCDC` v1 manifests carry `0`.
+pub const CHUNK_SIZE_FASTCDC_V2: u32 = 0x8000_0002;
+
+/// A content-defined chunker that a `ChunkedBlob` manifest can name in its
+/// `chunk_size` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Chunker {
+    /// `FastCDC` v1, `chunk_size = 0`. Every writer uses it by default.
+    FastCdcV1,
+    /// `FastCDC` v2, `chunk_size = CHUNK_SIZE_FASTCDC_V2`. A writer uses it
+    /// only when its caller asks for it.
+    FastCdcV2,
+}
+
+impl Chunker {
+    /// The chunker's parameters.
+    #[must_use]
+    pub const fn cdc(self) -> FastCdc {
+        match self {
+            Self::FastCdcV1 => FastCdc::v1(),
+            Self::FastCdcV2 => FastCdc::v2(),
+        }
+    }
+
+    /// The `chunk_size` value that names this chunker in a manifest.
+    #[must_use]
+    pub const fn chunk_size(self) -> u32 {
+        match self {
+            Self::FastCdcV1 => 0,
+            Self::FastCdcV2 => CHUNK_SIZE_FASTCDC_V2,
+        }
+    }
+
+    /// The chunker a manifest's `chunk_size` names, or `None` for a
+    /// fixed-size manifest.
+    #[must_use]
+    pub const fn from_chunk_size(chunk_size: u32) -> Option<Self> {
+        match chunk_size {
+            0 => Some(Self::FastCdcV1),
+            CHUNK_SIZE_FASTCDC_V2 => Some(Self::FastCdcV2),
+            _ => None,
+        }
+    }
+}
 
 /// 256-entry gear table, derived once at first use from [`SEED`] via
 /// splitmix64. Wrapping arithmetic throughout — see SPEC-FASTCDC §3 for
@@ -95,6 +154,17 @@ impl FastCdc {
             max_size: MAX_SIZE,
             mask_s: MASK_S,
             mask_l: MASK_L,
+        }
+    }
+
+    /// Construct the v2 chunker: the v1 sizes and gear table with the
+    /// spread masks [`MASK_S_V2`] and [`MASK_L_V2`].
+    #[must_use]
+    pub const fn v2() -> Self {
+        Self {
+            mask_s: MASK_S_V2,
+            mask_l: MASK_L_V2,
+            ..Self::v1()
         }
     }
 
@@ -896,7 +966,7 @@ mod tests {
         let mut data = vec![0u8; 9 * 1024 * 1024 + 777];
         Prng::new(0x009A_11E1).fill(&mut data);
         data[3 * 1024 * 1024..4 * 1024 * 1024 + 99].fill(0);
-        for cdc in [FastCdc::v1(), FastCdc::custom(64, 256, 1024)] {
+        for cdc in [FastCdc::v1(), FastCdc::v2(), FastCdc::custom(64, 256, 1024)] {
             let expected = sequential_ends(&cdc, &data);
             for threads in 1..=MAX_CUT_THREADS + 1 {
                 assert_eq!(
@@ -1000,7 +1070,12 @@ mod tests {
         for (case, scale) in [10u64, 100, 1000, 70_000, 300_000].into_iter().enumerate() {
             for zeros in [true, false] {
                 let data = runs(0x5EED + case as u64, 3 * 1024 * 1024 + case, scale, zeros);
-                for cdc in [FastCdc::v1(), tiny, FastCdc::custom(64, 256, 1024)] {
+                for cdc in [
+                    FastCdc::v1(),
+                    FastCdc::v2(),
+                    tiny,
+                    FastCdc::custom(64, 256, 1024),
+                ] {
                     assert_eq!(
                         sequential_ends(&cdc, &data),
                         reference_ends(&cdc, &data),
@@ -1022,6 +1097,49 @@ mod tests {
         assert_eq!(
             sequential_ends(&FastCdc::v1(), &data),
             reference_ends(&FastCdc::v1(), &data)
+        );
+    }
+
+    /// SPEC-FASTCDC §11.1: `n` one-bits at bit positions
+    /// `16 + floor((2k + 1) * 32 / (2n))` for `k` in `0..n`.
+    fn spread_mask(n: u64) -> u64 {
+        (0..n).fold(0, |m, k| m | 1 << (16 + (2 * k + 1) * 32 / (2 * n)))
+    }
+
+    #[test]
+    fn v2_masks_follow_the_spread_derivation() {
+        let bits = u64::from(AVG_SIZE.trailing_zeros());
+        assert_eq!(MASK_S_V2, spread_mask(bits + 2));
+        assert_eq!(MASK_L_V2, spread_mask(bits - 2));
+        assert_eq!(MASK_S_V2.count_ones(), 18);
+        assert_eq!(MASK_L_V2.count_ones(), 14);
+        let v2 = FastCdc::v2();
+        assert_eq!(
+            (v2.min_size(), v2.avg_size(), v2.max_size()),
+            (MIN_SIZE, AVG_SIZE, MAX_SIZE)
+        );
+    }
+
+    #[test]
+    fn chunker_ids_round_trip_and_v1_keeps_zero() {
+        for chunker in [Chunker::FastCdcV1, Chunker::FastCdcV2] {
+            assert_eq!(
+                Chunker::from_chunk_size(chunker.chunk_size()),
+                Some(chunker)
+            );
+        }
+        assert_eq!(Chunker::FastCdcV1.chunk_size(), 0);
+        assert_eq!(Chunker::FastCdcV2.chunk_size(), CHUNK_SIZE_FASTCDC_V2);
+        assert_eq!(Chunker::from_chunk_size(65_536), None);
+        let mut data = vec![0u8; 2 * 1024 * 1024];
+        Prng::new(0x0002_C0DE).fill(&mut data);
+        assert_ne!(
+            sequential_ends(&FastCdc::v1(), &data),
+            sequential_ends(&FastCdc::v2(), &data)
+        );
+        assert_eq!(
+            sequential_ends(&Chunker::FastCdcV2.cdc(), &data),
+            sequential_ends(&FastCdc::v2(), &data)
         );
     }
 

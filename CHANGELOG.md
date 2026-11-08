@@ -7,6 +7,16 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- FastCDC v2 (SPEC-FASTCDC §11, draft): spread masks at normalization
+  level 2 over the v1 gear table and sizes. A v2 manifest carries
+  `chunk_size = 0x8000_0002`. kit-core exposes it through
+  `Chunker::FastCdcV2`, `store_file_object_with` and
+  `chunked_blob_from_bytes_with`. No writer uses it by default, so
+  existing repositories read and write byte-identically. The git bridge
+  refuses v2 manifests.
+
 ### Changed
 
 - Batched object writes, such as `kit add`, start each object's write

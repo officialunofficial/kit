@@ -1,0 +1,7 @@
+{
+  "bin": "fastcdc_v2_boundaries_1mib.bin",
+  "blake3": "55db32d460205585a7eefc0ceeefa235d19cecef73a30c5d9ba837f8559c4a1a",
+  "description": "FastCDC v2 over the 1 MiB splitmix64 stream (seed 0xA5A5_F00D_DEAD_BEEF); chunk-end offsets as JSON",
+  "name": "fastcdc_v2_boundaries_1mib",
+  "size": 122
+}

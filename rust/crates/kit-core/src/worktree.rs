@@ -20,7 +20,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use crate::chunker::{ChunkReader, FastCdc};
+use crate::chunker::{ChunkReader, Chunker, FastCdc};
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
 use crate::index::{self, Index};
@@ -1371,6 +1371,22 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
 /// # Errors
 /// See [`WorktreeError`].
 pub fn store_file_object<S: ObjectSink + ?Sized>(sink: &S, data: &[u8]) -> WorktreeResult<Hash> {
+    store_file_object_with(sink, data, Chunker::FastCdcV1)
+}
+
+/// [`store_file_object`] with an explicit `chunker` for files above
+/// [`CHUNK_THRESHOLD`]. The manifest names the chunker in its
+/// `chunk_size` field. With [`Chunker::FastCdcV1`] this is exactly
+/// [`store_file_object`]; another chunker gives the same bytes a
+/// different object id.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn store_file_object_with<S: ObjectSink + ?Sized>(
+    sink: &S,
+    data: &[u8],
+    chunker: Chunker,
+) -> WorktreeResult<Hash> {
     if u64::try_from(data.len()).unwrap_or(u64::MAX) <= CHUNK_THRESHOLD {
         // Zero-copy: the canonical Blob bytes are `prologue ‖ data`
         // (pinned to serialize() by proptest), so the sink can hash and
@@ -1379,12 +1395,12 @@ pub fn store_file_object<S: ObjectSink + ?Sized>(sink: &S, data: &[u8]) -> Workt
         return Ok(sink.put_parts(&[&prologue, data])?);
     }
 
-    // Large file: split with FastCDC v1, store each chunk as a Blob, and
+    // Large file: split with the chunker, store each chunk as a Blob, and
     // assemble a ChunkedBlob manifest. Per-manifest chunk count is
     // bounded by serialize::MAX_CHUNKS (1_000_000); MAX_FILE_BYTES
     // (1 GiB) ÷ FastCDC MIN_SIZE (16 KiB) = ~65k, well under the cap.
     let total_size = data.len() as u64;
-    let chunks: Vec<Hash> = chunk_slices(data)
+    let chunks: Vec<Hash> = chunk_slices(data, chunker)
         .map(|chunk| {
             let prologue = serialize::blob_prologue(chunk.len())?;
             Ok::<_, WorktreeError>(sink.put_parts(&[&prologue, chunk])?)
@@ -1393,19 +1409,20 @@ pub fn store_file_object<S: ObjectSink + ?Sized>(sink: &S, data: &[u8]) -> Workt
 
     let manifest = Object::ChunkedBlob(ChunkedBlob {
         total_size,
-        chunk_size: 0, // 0 = content-defined (FastCDC) per SPEC-OBJECTS §7
+        // Names the content-defined chunker per SPEC-OBJECTS §7: 0 for v1.
+        chunk_size: chunker.chunk_size(),
         chunks,
     });
     let manifest_bytes = serialize::serialize(&manifest)?;
     Ok(sink.put(&manifest_bytes)?)
 }
 
-/// `data` split into its [`FastCdc::v1`] chunks, in order. The cut points
+/// `data` split into its `chunker` chunks, in order. The cut points
 /// come from [`FastCdc::chunk_ends`], which cuts on several threads and
 /// matches [`crate::chunker::ChunkIterator`] exactly.
-fn chunk_slices(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+fn chunk_slices(data: &[u8], chunker: Chunker) -> impl Iterator<Item = &[u8]> {
     let mut start = 0;
-    FastCdc::v1().chunk_ends(data).into_iter().map(move |end| {
+    chunker.cdc().chunk_ends(data).into_iter().map(move |end| {
         let chunk = &data[start..end];
         start = end;
         chunk
@@ -1425,7 +1442,16 @@ fn chunk_slices(data: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// # Errors
 /// [`WorktreeError::Object`] if a chunk length exceeds the wire-format cap.
 pub fn chunked_blob_from_bytes(data: &[u8]) -> WorktreeResult<ChunkedBlob> {
-    let chunks: Vec<Hash> = chunk_slices(data)
+    chunked_blob_from_bytes_with(data, Chunker::FastCdcV1)
+}
+
+/// [`chunked_blob_from_bytes`] with an explicit `chunker`, matching
+/// [`store_file_object_with`].
+///
+/// # Errors
+/// [`WorktreeError::Object`] if a chunk length exceeds the wire-format cap.
+pub fn chunked_blob_from_bytes_with(data: &[u8], chunker: Chunker) -> WorktreeResult<ChunkedBlob> {
+    let chunks: Vec<Hash> = chunk_slices(data, chunker)
         .map(|chunk| {
             // Blob object id = BLAKE3(blob_prologue ‖ chunk) — the id
             // store_file_object writes this chunk Blob under (the prologue ‖
@@ -1439,7 +1465,7 @@ pub fn chunked_blob_from_bytes(data: &[u8]) -> WorktreeResult<ChunkedBlob> {
         .collect::<Result<_, _>>()?;
     Ok(ChunkedBlob {
         total_size: data.len() as u64,
-        chunk_size: 0,
+        chunk_size: chunker.chunk_size(),
         chunks,
     })
 }
@@ -2701,6 +2727,44 @@ mod tests {
         let h2 = store_file_object(&batch2, small).unwrap();
         batch2.commit().unwrap();
         assert_eq!(h1, h2);
+    }
+
+    /// The default store path is the v1 path, byte for byte. A v2 store
+    /// names its chunker in the manifest, gets another id for the same
+    /// bytes, reads back the same bytes, and matches the read-only
+    /// manifest builder.
+    #[test]
+    fn store_file_object_with_chunker_v1_is_default_and_v2_is_distinct() {
+        let mut data = vec![0u8; 3 * 1024 * 1024];
+        let mut state = 0x0BAD_5EEDu64;
+        for byte in &mut data {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *byte = state.to_le_bytes()[7];
+        }
+        let (_d, store) = fresh_store();
+        let v1 = store_file_object(&store, &data).unwrap();
+        assert_eq!(
+            store_file_object_with(&store, &data, Chunker::FastCdcV1).unwrap(),
+            v1
+        );
+        assert_eq!(hash_file_object(&data).unwrap(), v1);
+        let v2 = store_file_object_with(&store, &data, Chunker::FastCdcV2).unwrap();
+        assert_ne!(v1, v2);
+        assert_eq!(read_blob(&store, &v2).unwrap(), data);
+        let Object::ChunkedBlob(manifest) = store.read_object(&v2).unwrap() else {
+            panic!("v2 store must write a chunked blob");
+        };
+        assert_eq!(manifest.chunk_size, crate::chunker::CHUNK_SIZE_FASTCDC_V2);
+        let built = chunked_blob_from_bytes_with(&data, Chunker::FastCdcV2).unwrap();
+        assert_eq!(manifest, built);
+        assert_eq!(crate::merkle::compute_chunked_id(&built), v2);
+        let Object::ChunkedBlob(old) = store.read_object(&v1).unwrap() else {
+            panic!("v1 store must write a chunked blob");
+        };
+        assert_eq!(old.chunk_size, 0);
+        assert_ne!(old.chunks, manifest.chunks);
     }
 
     /// Committing a staged index must cost exactly one full flush no
