@@ -2,7 +2,7 @@
 //!
 //! Each row drives real code paths. `ref-write` calls
 //! [`Transport::update_ref`] directly. The push rows run
-//! [`kit_sync::push`] from one local repository per pusher, and the fetch
+//! [`kit_sync::push()`] from one local repository per pusher, and the fetch
 //! rows run [`kit_sync::fetch`] through a counting [`RemoteSource`]. Every
 //! row checks its result before it reports a number: a write that a writer
 //! believes landed but the remote does not hold fails the run.
