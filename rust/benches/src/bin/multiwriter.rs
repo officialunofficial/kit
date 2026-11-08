@@ -165,6 +165,7 @@ fn run(args: &Args) -> Result<(), String> {
         let mut f = Vec::with_capacity(args.runs);
         let mut g = Vec::with_capacity(args.runs);
         let mut h = Vec::with_capacity(args.runs);
+        let (mut p90, mut max, mut nodes) = (Vec::new(), Vec::new(), Vec::new());
         for r in 0..args.runs {
             let dirs = RunDirs::new(&args.dir, &format!("{row}-{n}-{r}"))?;
             let connect = connector(args.target, &dirs.root);
@@ -186,6 +187,9 @@ fn run(args: &Args) -> Result<(), String> {
                     c.push(ms(run.quantile(0.99)));
                     d.push(run.retries_per_success());
                     if row == "push-shared" {
+                        p90.push(ms(run.quantile(0.9)));
+                        max.push(ms(run.quantile(1.0)));
+                        nodes.push(run.chain_nodes as f64);
                         let (slow, _) = run.parts_above(0.99);
                         e.push(slow.attempts as f64);
                         f.push(ms(slow.rejected));
@@ -239,8 +243,11 @@ fn run(args: &Args) -> Result<(), String> {
                 &[
                     ("pushes/s", &a),
                     ("p50_ms", &b),
+                    ("p90_ms", &p90),
                     ("p99_ms", &c),
+                    ("max_ms", &max),
                     ("retries/success", &d),
+                    ("chain_nodes", &nodes),
                     ("slow_attempts", &e),
                     ("slow_rejected_ms", &f),
                     ("slow_fetch_ms", &g),

@@ -46,6 +46,8 @@ fn every_row_runs_at_tiny_sizes() {
     }
     let (slow, count) = run.parts_above(0.99);
     assert!(count >= 1 && slow.attempts >= 1);
+    // Each landed push chains one node; a rejected attempt can add one.
+    assert!((6..=6 + run.conflicts).contains(&run.chain_nodes));
 
     let base = case("fetch-noop");
     let connect = file(base.join("remote"));
