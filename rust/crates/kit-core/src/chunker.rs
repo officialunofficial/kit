@@ -260,7 +260,7 @@ impl FastCdc {
     /// that position. The pass computes the rest itself.
     ///
     /// Without `eof`, only final cuts are returned (see
-    /// [`FastCdc::cut_is_final`]): the bytes after the last returned end
+    /// `FastCdc::cut_is_final`): the bytes after the last returned end
     /// belong to a chunk that may still grow.
     #[must_use]
     pub fn cut_ends(&self, data: &[u8], eof: bool, threads: usize) -> Vec<usize> {
@@ -316,7 +316,7 @@ impl FastCdc {
         (ends, side)
     }
 
-    /// Chunk end offsets of all of `data`, cut on [`cut_threads`] threads.
+    /// Chunk end offsets of all of `data`, cut on `cut_threads` threads.
     /// Identical to [`chunk_boundaries`] for the v1 chunker.
     #[must_use]
     pub fn chunk_ends(&self, data: &[u8]) -> Vec<usize> {
@@ -383,7 +383,7 @@ fn read_full(reader: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result
 }
 
 impl<R: std::io::Read> ChunkReader<R> {
-    /// Reader that cuts on [`cut_threads`] threads.
+    /// Reader that cuts on `cut_threads` threads.
     #[must_use]
     pub fn new(cdc: FastCdc, reader: R) -> Self {
         Self::with_threads(cdc, reader, cut_threads())
