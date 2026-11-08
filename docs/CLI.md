@@ -903,10 +903,8 @@ Branches / refs:
   candidate (the transient checkout doesn't re-apply a persisted sparse
   cone).
   Bisect reads every commit of the range and every ancestor of each good
-  commit. One that is missing, corrupt or not a commit fails the step, and
-  bisect offers no candidate. The error names the commit, except for an
-  object whose bytes match its id but do not decode, which fails with the
-  decode error. A range with more
+  commit. One that is missing, corrupt or not a commit fails the step with
+  an error that names it, and bisect offers no candidate. A range with more
   than 10,000 candidates, or a good commit with more than 10,000
   ancestors, fails the step with an error that names the limit.
 - `kit gc [-n|--dry-run] [--grace-secs <secs>]` &mdash; reclaim unreachable
