@@ -53,7 +53,11 @@ pub fn collect_ancestor_set<S: BuildHasher>(
 /// Why a strict ancestor walk failed. A strict walk reads every commit of
 /// the history: a walk that ended at a commit it could not read would miss
 /// every ancestor behind it.
+///
+/// New failure kinds can be added without a breaking change, so match with
+/// a wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AncestorError {
     /// A commit of the history cannot be read.
     #[error("commit {} cannot be read: {source}", hash::to_hex(.hash))]
