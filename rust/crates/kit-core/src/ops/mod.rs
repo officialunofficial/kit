@@ -16,6 +16,7 @@ pub mod revert;
 // OPS2 — rebase / bisect / blame / stash / restore.
 pub mod bisect;
 pub mod blame;
+pub mod pull_state;
 pub mod rebase;
 pub mod recovery;
 pub mod restore;
