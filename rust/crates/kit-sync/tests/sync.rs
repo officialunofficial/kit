@@ -356,6 +356,245 @@ fn pull_fast_forwards_and_a_second_pull_is_a_no_op() {
     assert_eq!(again.fetch.packs_already_applied, 2);
 }
 
+struct StopAfterHead {
+    layout: RepoLayout,
+    tip: Hash,
+}
+
+impl Observer<SyncEvent> for StopAfterHead {
+    fn cancelled(&self) -> bool {
+        refs::resolve_head(&self.layout).unwrap() == Some(self.tip)
+    }
+}
+
+#[test]
+fn pull_resumes_the_restore_after_head_was_written() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let second = remote.publish(
+        Some(first),
+        &[("a.txt", b"two\n"), ("b.txt", b"new\n")],
+        true,
+    );
+    let layout = RepoLayout::single(&target);
+    let result = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &StopAfterHead {
+            layout: layout.clone(),
+            tip: second,
+        },
+    );
+    assert!(matches!(result, Err(SyncError::Interrupted)), "{result:?}");
+    assert_eq!(refs::resolve_head(&layout).unwrap(), Some(second));
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"one\n");
+    assert!(!target.join("b.txt").exists());
+    assert_eq!(
+        std::fs::read(layout.pull_head_file()).unwrap(),
+        refs::encode_ref_wire(&second)
+    );
+
+    let resumed = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"two\n");
+    assert_eq!(std::fs::read(target.join("b.txt")).unwrap(), b"new\n");
+    let index = kit_core::index::read_index(&layout).unwrap();
+    assert_eq!(index.entries.len(), 2);
+    assert!(matches!(resumed.outcome, PullOutcome::FastForwarded { new, .. } if new == second));
+    assert!(!layout.pull_head_file().exists());
+    // Once complete, a no-op pull must preserve subsequent local edits.
+    std::fs::write(target.join("a.txt"), b"local edit\n").unwrap();
+    let again = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(matches!(again.outcome, PullOutcome::UpToDate { .. }));
+    assert_eq!(
+        std::fs::read(target.join("a.txt")).unwrap(),
+        b"local edit\n"
+    );
+}
+
+#[test]
+fn pull_resumes_a_partial_restore_before_landing_a_newer_tip() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n"), ("b.txt", b"old\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let second = remote.publish(
+        Some(first),
+        &[("a.txt", b"two\n"), ("b.txt", b"new\n")],
+        true,
+    );
+    let layout = RepoLayout::single(&target);
+    let result = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &StopAfterHead {
+            layout: layout.clone(),
+            tip: second,
+        },
+    );
+    assert!(matches!(result, Err(SyncError::Interrupted)));
+    // One file landed before interruption; the index still describes first.
+    std::fs::write(target.join("a.txt"), b"two\n").unwrap();
+    let third = remote.publish(
+        Some(second),
+        &[("a.txt", b"three\n"), ("b.txt", b"newest\n")],
+        true,
+    );
+    let report = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(
+        matches!(report.outcome, PullOutcome::FastForwarded { old: Some(old), new, .. } if old == second && new == third)
+    );
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"three\n");
+    assert_eq!(std::fs::read(target.join("b.txt")).unwrap(), b"newest\n");
+    assert!(!layout.pull_head_file().exists());
+}
+
+#[test]
+fn pull_retries_a_marker_written_before_the_branch_moves() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let layout = RepoLayout::single(&target);
+    std::fs::write(layout.pull_head_file(), refs::encode_ref_wire(&second)).unwrap();
+    pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(refs::resolve_head(&layout).unwrap(), Some(second));
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"two\n");
+    assert!(!layout.pull_head_file().exists());
+}
+
+#[test]
+fn pull_refuses_malformed_or_unrelated_markers_before_a_no_op() {
+    let remote = Remote::new();
+    let tip = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    std::fs::write(target.join("a.txt"), b"local edit\n").unwrap();
+    for bytes in [
+        vec![],
+        vec![b'a'; 66],
+        vec![b'G'; 65],
+        hash::to_hex(&tip).into_bytes(),
+        refs::encode_ref_wire(&hash::hash(b"another commit")).to_vec(),
+    ] {
+        std::fs::write(layout.pull_head_file(), &bytes).unwrap();
+        assert!(
+            pull(
+                &target,
+                &remote.source(),
+                "default",
+                &SyncOptions::default(),
+                &NoopObserver
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(target.join("a.txt")).unwrap(),
+            b"local edit\n"
+        );
+        assert_eq!(std::fs::read(layout.pull_head_file()).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn pull_preserves_local_changes_when_the_pending_target_is_not_head() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let layout = RepoLayout::single(&target);
+    fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    // The branch moved, but HEAD still names a different commit.
+    refs::write_ref(&layout, "main", &second).unwrap();
+    refs::write_ref(&layout, "dev", &first).unwrap();
+    refs::write_head_branch(&layout, "dev").unwrap();
+    std::fs::write(layout.pull_head_file(), refs::encode_ref_wire(&second)).unwrap();
+    std::fs::write(target.join("a.txt"), b"local edit\n").unwrap();
+    let options = SyncOptions::default().with_target_branch(Some("main".to_owned()));
+    let result = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &options,
+        &NoopObserver,
+    );
+    assert!(matches!(result, Err(SyncError::RestoreSafety(_))));
+    assert_eq!(
+        refs::read_head(&layout).unwrap(),
+        refs::Head::Branch("dev".to_owned())
+    );
+    assert_eq!(
+        std::fs::read(target.join("a.txt")).unwrap(),
+        b"local edit\n"
+    );
+    assert!(layout.pull_head_file().exists());
+    // With a clean worktree the same pending branch can finish safely.
+    std::fs::write(target.join("a.txt"), b"one\n").unwrap();
+    let report = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &options,
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(matches!(report.outcome, PullOutcome::FastForwarded { new, .. } if new == second));
+    assert_eq!(
+        refs::read_head(&layout).unwrap(),
+        refs::Head::Branch("main".to_owned())
+    );
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"two\n");
+    assert!(!layout.pull_head_file().exists());
+}
+
 #[test]
 fn fetch_moves_only_the_tracking_ref() {
     let remote = Remote::new();
@@ -739,6 +978,21 @@ fn a_failed_worktree_restore_rolls_the_branch_and_head_back() {
         refs::read_head(&layout).unwrap(),
         refs::Head::Branch("dev".to_owned())
     );
+    assert!(!layout.pull_head_file().exists());
+    // A remote at the rolled-back tip must not see an abandoned marker.
+    remote
+        .tx
+        .update_ref("refs/heads/main", RefWriteCondition::Any, &first)
+        .unwrap();
+    let report = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &options,
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(matches!(report.outcome, PullOutcome::UpToDate { .. }));
 }
 
 #[test]

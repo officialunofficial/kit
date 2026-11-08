@@ -1,5 +1,7 @@
 //! Pulling: fetch, then fast-forward the local branch, HEAD and worktree.
 
+use std::fs;
+use std::io;
 use std::path::Path;
 
 use kit_core::hash::Hash;
@@ -90,6 +92,17 @@ pub fn pull(
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
         .collect::<Vec<_>>();
+    let _lock = acquire_worktree_lock(&layout, observer)?;
+    let pending = read_pull_head(&layout)?;
+    let mut restored = false;
+    if let Some(tip) = pending
+        && refs::resolve_head(&layout)? == Some(tip)
+    {
+        // The preflight ran before PULL_HEAD was written. A partial restore
+        // is expected to differ from the index, so do not preflight it again.
+        finish_restore(&layout, &store, tip)?;
+        restored = true;
+    }
     if remote_refs.is_empty() {
         return Ok(PullReport {
             fetch,
@@ -97,7 +110,6 @@ pub fn pull(
         });
     }
 
-    let _lock = acquire_worktree_lock(&layout, observer)?;
     let target_branch = options.target_branch.as_deref();
     let original_head = refs::read_head(&layout).ok();
     let (branch, local_tip, remote_tip) = match &original_head {
@@ -128,7 +140,9 @@ pub fn pull(
         if local_tip == remote_tip {
             return Ok(PullReport {
                 fetch,
-                outcome: PullOutcome::UpToDate { branch },
+                outcome: finish_unchanged_pull(
+                    &layout, &store, branch, local_tip, pending, restored,
+                )?,
             });
         }
         if !is_ancestor(&store, local_tip, remote_tip)? {
@@ -141,10 +155,18 @@ pub fn pull(
 
     let tree = load_tree_hash(&store, remote_tip)?;
     ensure_restore_safe(&layout, &store, tree).map_err(SyncError::RestoreSafety)?;
+    crate::applied_packs::write_atomic(
+        &layout.pull_head_file(),
+        &refs::encode_ref_wire(&remote_tip),
+    )?;
     write_ref_recording_history(&layout, &branch, ref_condition, &remote_tip)?;
     if let Err(e) = refs::write_head_branch(&layout, &branch) {
         rollback_pull_ref(&layout, &branch, local_tip, remote_tip)?;
+        clear_pull_head(&layout)?;
         return Err(e.into());
+    }
+    if observer.cancelled() {
+        return Err(SyncError::Interrupted);
     }
     if let Err(e) = restore_worktree_and_index(&layout, &store, tree) {
         if let Err(rollback) =
@@ -154,8 +176,10 @@ pub fn pull(
                 "{e}; additionally failed to roll back ref: {rollback}"
             )));
         }
+        clear_pull_head(&layout)?;
         return Err(SyncError::RestoreSafety(e));
     }
+    clear_pull_head(&layout)?;
     Ok(PullReport {
         fetch,
         outcome: PullOutcome::FastForwarded {
@@ -224,4 +248,60 @@ fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, SyncEr
         Object::Remix(r) => Ok(r.tree_hash),
         _ => Err(SyncError::NotCommit),
     }
+}
+
+fn finish_unchanged_pull(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    branch: String,
+    tip: Hash,
+    pending: Option<Hash>,
+    mut restored: bool,
+) -> Result<PullOutcome, SyncError> {
+    if !restored && let Some(pending) = pending {
+        if pending != tip {
+            return Err(SyncError::RestoreSafety(
+                "unfinished pull targets another commit; restore that pull first".to_owned(),
+            ));
+        }
+        let tree = load_tree_hash(store, pending)?;
+        ensure_restore_safe(layout, store, tree).map_err(SyncError::RestoreSafety)?;
+        refs::write_head_branch(layout, &branch)?;
+        finish_restore(layout, store, pending)?;
+        restored = true;
+    }
+    Ok(if restored {
+        PullOutcome::FastForwarded {
+            branch,
+            old: Some(tip),
+            new: tip,
+        }
+    } else {
+        PullOutcome::UpToDate { branch }
+    })
+}
+
+// PULL_HEAD uses the existing ref encoding, with an exact size and canonical bytes.
+fn read_pull_head(layout: &RepoLayout) -> Result<Option<Hash>, SyncError> {
+    let bytes = match kit_core::bounded_read::read_capped(&layout.pull_head_file(), 65) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let tip = refs::decode_ref_wire(&bytes)
+        .filter(|tip| bytes == refs::encode_ref_wire(tip))
+        .ok_or_else(|| SyncError::RestoreSafety("malformed PULL_HEAD".to_owned()))?;
+    Ok(Some(tip))
+}
+
+fn finish_restore(layout: &RepoLayout, store: &ObjectStore, tip: Hash) -> Result<(), SyncError> {
+    let tree = load_tree_hash(store, tip)?;
+    restore_worktree_and_index(layout, store, tree).map_err(SyncError::RestoreSafety)?;
+    clear_pull_head(layout)
+}
+
+fn clear_pull_head(layout: &RepoLayout) -> Result<(), SyncError> {
+    fs::remove_file(layout.pull_head_file())?;
+    crate::applied_packs::sync_parent_dir(layout.worktree_state_dir())?;
+    Ok(())
 }

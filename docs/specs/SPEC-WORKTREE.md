@@ -28,7 +28,21 @@ of two classes:
 | Class | Contents |
 |---|---|
 | **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `history-v1/`, `recovery-log`, `attestations/`, `applied-packs/`, `upload-parts/`, `git/`, `sparse/`, `worktrees/`, `refs-history-<branch>.lock`, `refs-<ref>.lock`, `worktrees.lock`, `serve.lock` (SPEC-CONCURRENCY §2) |
-| **worktree state dir** (private to one tree) | `HEAD`, `index`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock` |
+| **worktree state dir** (private to one tree) | `HEAD`, `index`, `PULL_HEAD`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock` |
+
+`PULL_HEAD` records an unfinished pull's target commit using the existing
+65-byte ref encoding (lowercase hex and LF). The writer atomically persists
+and syncs it before moving the branch or HEAD. A following pull restores
+that commit and the index when HEAD still resolves to it, before testing
+whether the remote tip matches. Recovery also works when the remote has
+advanced again. The marker is removed and its directory synced after the
+restore and index write succeed, or after an error rolls the branch and HEAD
+back successfully. Recovery completes the previously approved restore; edits made
+after interruption to files in that restore can be overwritten. An unrelated
+HEAD does not authorize recovery over local changes: the ordinary restore
+safety checks still apply, and a mismatched marker prevents an up-to-date
+result. The marker uses the ref bytes covered by the `ref_detached` golden
+vector; it adds no ref encoding.
 
 In the classic single-worktree layout both directories are the same
 `<root>/.kit/`; the two-directory model is byte-identical there.
