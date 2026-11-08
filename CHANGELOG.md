@@ -30,6 +30,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking:** `BisectError`, `RebaseError` and `BlameError` in kit-core
+  are `#[non_exhaustive]`, and each has a `History` variant that carries
+  the `AncestorError` of a history walk. A commit that cannot be read
+  gives `AncestorError::Unreadable` with its id, a parent that is not a
+  commit gives `AncestorError::NotACommit` with its id, and a walk over
+  its cap gives `AncestorError::Limit` naming the limit. This covers the
+  range and good walks of bisect, the replay and base walks of rebase, the
+  first-parent chain of `kit blame --reverse` and the ancestry walk of the
+  copy tie-break of blame. An object whose bytes match its id but do not
+  decode now fails with an error that names it. Code that matches these
+  enums needs a wildcard arm.
 - `kit log -n N` from one revision streams the history while each commit
   has at most one followed parent, and stops after N commits. On one ext4
   disk with 1,000,000 linear commits, `kit log -n 20` went from about 8 s
