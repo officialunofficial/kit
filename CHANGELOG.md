@@ -31,6 +31,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   copy tie-break of blame. An object whose bytes match its id but do not
   decode now fails with an error that names it. Code that matches these
   enums needs a wildcard arm.
+- **Breaking:** `libkit::log::Error` no longer has the `WalkRangeBase` and
+  `WalkMergeBase` variants. No walk returned them: a commit that cannot be
+  read gives `ReadCommit`, and an object that is not a commit gives
+  `NotACommit`.
 - `kit log -n N` from one revision streams the history while each commit
   has at most one followed parent, and stops after N commits. On one ext4
   disk with 1,000,000 linear commits, `kit log -n 20` went from about 8 s
@@ -61,8 +65,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of its commits is missing, corrupt or not a commit. It used to skip such
   a commit, so the range printed ancestors of `A` that it leaves out. The
   error is `libkit::log::Error::ReadCommit` or `NotACommit`, as on the
-  included side. `WalkRangeBase` and `WalkMergeBase` are no longer
-  returned and are deprecated.
+  included side.
 - `kit git format-patch A..B` fails before it writes a patch when an
   ancestor of `A` is missing, corrupt or not a commit. It used to skip such
   a commit, so the series held patches for ancestors of `A`.
