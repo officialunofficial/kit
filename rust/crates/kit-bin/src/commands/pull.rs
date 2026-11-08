@@ -173,7 +173,16 @@ fn pull_one(
                         kit_sync::PullOutcome::FastForwarded { branch, old, new } => {
                             (Some(branch), old, Some(new), false)
                         }
-                        kit_sync::PullOutcome::NoRemoteBranches => (None, None, None, true),
+                        kit_sync::PullOutcome::NoRemoteBranches => {
+                            let branch = match kit_core::refs::read_head(layout) {
+                                Ok(kit_core::refs::Head::Branch(branch)) => Some(branch),
+                                _ => None,
+                            };
+                            let tip = branch.as_deref().and_then(|branch| {
+                                kit_core::refs::read_ref(layout, branch).ok().flatten()
+                            });
+                            (branch, tip, tip, true)
+                        }
                         _ => {
                             return emit_err_json(
                                 "unsupported pull outcome",

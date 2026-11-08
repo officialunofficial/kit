@@ -10,6 +10,7 @@ use std::path::Path;
 use kit_core::hash::{self, Hash};
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+use kit_core::ops::pull_state::PullState;
 use kit_core::pack::{self, PackWriter};
 use kit_core::protocol::{PackKey, Transport};
 use kit_core::refs::{self, RefWriteCondition};
@@ -396,7 +397,18 @@ fn pull_resumes_the_restore_after_head_was_written() {
     assert!(!target.join("b.txt").exists());
     assert_eq!(
         std::fs::read(layout.pull_head_file()).unwrap(),
-        refs::encode_ref_wire(&second)
+        PullState {
+            target: second,
+            before_tree: match kit_core::store::ObjectStore::open(&layout)
+                .unwrap()
+                .read_object(&first)
+                .unwrap()
+            {
+                Object::Commit(c) => c.tree_hash,
+                _ => panic!("commit"),
+            }
+        }
+        .encode()
     );
 
     let resumed = pull(
@@ -486,7 +498,7 @@ fn pull_retries_a_marker_written_before_the_branch_moves() {
     clone_into(&remote, &target);
     let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
     let layout = RepoLayout::single(&target);
-    std::fs::write(layout.pull_head_file(), refs::encode_ref_wire(&second)).unwrap();
+    write_pull_marker(&layout, second);
     pull(
         &target,
         &remote.source(),
@@ -555,7 +567,7 @@ fn pull_preserves_local_changes_when_the_pending_target_is_not_head() {
     refs::write_ref(&layout, "main", &second).unwrap();
     refs::write_ref(&layout, "dev", &first).unwrap();
     refs::write_head_branch(&layout, "dev").unwrap();
-    std::fs::write(layout.pull_head_file(), refs::encode_ref_wire(&second)).unwrap();
+    write_pull_marker(&layout, second);
     std::fs::write(target.join("a.txt"), b"local edit\n").unwrap();
     let options = SyncOptions::default().with_target_branch(Some("main".to_owned()));
     let result = pull(
@@ -1907,7 +1919,7 @@ fn pull_discards_markers_that_neither_head_nor_the_selected_branch_names() {
         .tx
         .update_ref("refs/heads/main", RefWriteCondition::Any, &first)
         .unwrap();
-    std::fs::write(layout.pull_head_file(), refs::encode_ref_wire(&second)).unwrap();
+    write_pull_marker(&layout, second);
     let report = pull(
         dir.path(),
         &remote.source(),
@@ -1920,11 +1932,7 @@ fn pull_discards_markers_that_neither_head_nor_the_selected_branch_names() {
     assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"three\n");
     assert!(!layout.pull_head_file().exists());
     // A well-formed marker from another branch is equally stale.
-    std::fs::write(
-        layout.pull_head_file(),
-        refs::encode_ref_wire(&hash::hash(b"other branch")),
-    )
-    .unwrap();
+    write_pull_marker(&layout, hash::hash(b"other branch"));
     pull(
         dir.path(),
         &remote.source(),
@@ -1952,7 +1960,7 @@ fn pull_finishes_an_unborn_branch_after_its_selected_branch_already_moved() {
     )
     .unwrap();
     // Stop between the selected branch write and the HEAD write.
-    std::fs::write(layout.pull_head_file(), refs::encode_ref_wire(&tip)).unwrap();
+    write_pull_marker(&layout, tip);
     refs::write_ref(&layout, "main", &tip).unwrap();
     let report = pull(
         dir.path(),
@@ -2158,4 +2166,20 @@ fn recovery_finishes_unedited_file_directory_transitions() {
         }
         assert!(!layout.pull_head_file().exists());
     }
+}
+
+fn write_pull_marker(layout: &RepoLayout, target: Hash) {
+    let store = kit_core::store::ObjectStore::open(layout).unwrap();
+    let index = kit_core::index::read_index(layout).unwrap();
+    let before_tree =
+        kit_core::worktree::build_tree_from_index_with(&store, &store, &index, false).unwrap();
+    std::fs::write(
+        layout.pull_head_file(),
+        PullState {
+            target,
+            before_tree,
+        }
+        .encode(),
+    )
+    .unwrap();
 }

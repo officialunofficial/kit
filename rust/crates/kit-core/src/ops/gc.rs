@@ -193,6 +193,12 @@ fn collect_tree_roots(
         add(entry.object_hash, roots);
     }
 
+    // An unfinished pull keeps its immutable baseline even if the index changes.
+    if let Some(state) = super::pull_state::PullState::read(tree)? {
+        add(state.target, roots);
+        add(state.before_tree, roots);
+    }
+
     // ORIG_HEAD (written by reset and by the in-progress ops below).
     if let Some(h) = read_optional_hash(&tree.orig_head_file())? {
         add(h, roots);
@@ -546,6 +552,24 @@ mod tests {
             )
             .unwrap();
         (commit, blob)
+    }
+
+    #[test]
+    fn unfinished_pull_roots_and_malformed_state_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let _store = ObjectStore::init(&layout).unwrap();
+        refs::init(&layout).unwrap();
+        let state = super::super::pull_state::PullState {
+            target: hash::hash(b"pull-target"),
+            before_tree: hash::hash(b"pull-before-tree"),
+        };
+        fs::write(layout.pull_head_file(), state.encode()).unwrap();
+        let roots = collect_roots(&layout).unwrap();
+        assert!(roots.contains(&state.target));
+        assert!(roots.contains(&state.before_tree));
+        fs::write(layout.pull_head_file(), b"invalid").unwrap();
+        assert!(collect_roots(&layout).is_err());
     }
 
     #[test]

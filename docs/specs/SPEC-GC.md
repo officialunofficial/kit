@@ -53,6 +53,7 @@ all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 | Staging index | `.kit/index` | each entry's `object_hash` (staged-but-uncommitted content) |
 | Stash | `.kit/stash` | each entry's `commit_hash` + `parent_hash` |
 | Reset/op backup | `.kit/ORIG_HEAD` | the saved pre-op HEAD |
+| Pull restore in progress | `.kit/PULL_HEAD` | target commit and pre-pull tree |
 | Merge in progress | `.kit/MERGE_HEAD` (+`ORIG_HEAD`) | `merge_head`, `orig_head` |
 | Cherry-pick in progress | `.kit/CHERRY_PICK_HEAD` (+`ORIG_HEAD`) | `cherry_pick_head`, `orig_head` |
 | Revert in progress | `.kit/REVERT_HEAD` (+`ORIG_HEAD`) | `revert_head`, `orig_head` |

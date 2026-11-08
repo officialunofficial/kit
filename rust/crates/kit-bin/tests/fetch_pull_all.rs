@@ -258,7 +258,20 @@ fn pull_reports_completion_when_it_restores_an_equal_tip() {
     assert!(run_in(sink.path(), &["fetch"]).status.success());
     let tip = local_main(upstream.path());
     // The pull reached HEAD, but did not reach the worktree restore.
-    fs::write(sink.path().join(".kit/PULL_HEAD"), format!("{tip}\n")).unwrap();
+    let layout = kit_core::layout::RepoLayout::single(sink.path());
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    let before_tree = kit_core::worktree::build_tree_from_index_with(
+        &store,
+        &store,
+        &kit_core::index::read_index(&layout).unwrap(),
+        false,
+    )
+    .unwrap();
+    let marker = kit_core::ops::pull_state::PullState {
+        target: kit_core::hash::from_hex(&tip).unwrap(),
+        before_tree,
+    };
+    fs::write(layout.pull_head_file(), marker.encode()).unwrap();
     fs::write(sink.path().join(".kit/refs/heads/main"), format!("{tip}\n")).unwrap();
     let out = run_in(sink.path(), &["pull", "--format", "json"]);
     assert!(out.status.success(), "{out:?}");
