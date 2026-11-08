@@ -555,6 +555,43 @@ mod tests {
     }
 
     #[test]
+    fn linked_worktree_pull_keeps_its_baseline_and_target() {
+        let (d, store) = repo();
+        let main = layout(&d);
+        let linked = tempfile::tempdir().unwrap();
+        let state_dir = main.worktree_state_dir_for("linked");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(state_dir.join("commondir"), b"../..\n").unwrap();
+        fs::write(
+            state_dir.join("kitdir"),
+            format!("{}\n", linked.path().join(".kit").display()),
+        )
+        .unwrap();
+        crate::layout::write_pointer_file(linked.path(), &state_dir).unwrap();
+        let linked_layout = crate::layout::discover(linked.path()).unwrap();
+        refs::write_head_branch(&linked_layout, "unborn").unwrap();
+        let (before_commit, before_blob) = commit_one(&store, b"before", b"before", vec![]);
+        let Object::Commit(before) = store.read_object(&before_commit).unwrap() else {
+            panic!("commit");
+        };
+        let (target, target_blob) = commit_one(&store, b"target", b"target", vec![]);
+        let state = super::super::pull_state::PullState {
+            target,
+            before_tree: before.tree_hash,
+        };
+        fs::write(linked_layout.pull_head_file(), state.encode()).unwrap();
+        run_gc(&store, &main, u64::MAX, 0, false).unwrap();
+        for hash in [target, target_blob, before.tree_hash, before_blob] {
+            assert!(store.contains(&hash), "linked pull root must survive");
+        }
+        assert!(!store.contains(&before_commit));
+        let orphan = write_blob(&store, b"cannot prune through corrupt state");
+        fs::write(linked_layout.pull_head_file(), b"invalid").unwrap();
+        assert!(run_gc(&store, &main, u64::MAX, 0, false).is_err());
+        assert!(store.contains(&orphan));
+    }
+
+    #[test]
     fn unfinished_pull_roots_and_malformed_state_fail_closed() {
         let dir = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(dir.path());

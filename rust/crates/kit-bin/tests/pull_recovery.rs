@@ -63,6 +63,7 @@ impl Pending {
         ok(upstream.path(), &["keygen"]);
         fs::write(upstream.path().join("a.txt"), b"one\n").unwrap();
         fs::write(upstream.path().join("b.txt"), b"same\n").unwrap();
+        fs::write(upstream.path().join(".a.txt.tmp.1.2"), b"tracked value\n").unwrap();
         ok(upstream.path(), &["add", "."]);
         ok(upstream.path(), &["commit", "-m", "base"]);
         let url = format!("kit+file://{}", bare.path().display());
@@ -255,4 +256,25 @@ fn no_remote_branches_refuse_an_unfinished_pull() {
     assert!(!out.status.success());
     assert_eq!(fs::read(layout.pull_head_file()).unwrap(), marker);
     assert_eq!(fs::read(dir.join("a.txt")).unwrap(), b"one\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_refuses_symlinks_with_temporary_names() {
+    let pending = Pending::new();
+    let dir = pending.local.path();
+    let temporary = dir.join(".a.txt.tmp.987654.0");
+    std::os::unix::fs::symlink("b.txt", &temporary).unwrap();
+    pending.refuses_without_changes();
+    assert_eq!(fs::read_link(&temporary).unwrap(), Path::new("b.txt"));
+    assert_eq!(fs::read(dir.join("b.txt")).unwrap(), b"same\n");
+}
+
+#[test]
+fn recovery_protects_tracked_files_with_temporary_names() {
+    let pending = Pending::new();
+    let path = pending.local.path().join(".a.txt.tmp.1.2");
+    fs::write(&path, b"local edit\n").unwrap();
+    pending.refuses_without_changes();
+    assert_eq!(fs::read(path).unwrap(), b"local edit\n");
 }
