@@ -530,6 +530,35 @@ mod tests {
         }
     }
 
+    /// A source that only states whether its advance is atomic.
+    struct Advance(bool);
+    impl RemoteSource for Advance {
+        fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
+            Ok(Vec::new())
+        }
+        fn read_ref(&self, _: &str) -> Result<Option<Hash>, SourceError> {
+            Ok(None)
+        }
+        fn download_blob_via_ref(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+            Err(SourceError::ProtocolError)
+        }
+        fn download_pack_via_ref(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+            Err(SourceError::ProtocolError)
+        }
+        fn supports_atomic_advance(&self) -> bool {
+            self.0
+        }
+    }
+
+    /// Every atomic advance is serialized; a source that claims neither
+    /// gets neither.
+    #[test]
+    fn serialized_advance_defaults_to_atomic_advance() {
+        for atomic in [false, true] {
+            assert_eq!(Advance(atomic).supports_serialized_advance(), atomic);
+        }
+    }
+
     #[test]
     fn contextual_sync_errors_keep_remote_evidence() {
         let source = Absent(crate::RemoteFailure {
