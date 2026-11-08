@@ -281,6 +281,10 @@ pub struct PushRun {
     /// Where the time of each landed push went, in the order of
     /// `latencies`. Empty for rows that do not split it.
     pub parts: Vec<PushParts>,
+    /// Pack list nodes on the shared branch's chain afterwards. A rejected
+    /// attempt can leave one, so more nodes than landed pushes means
+    /// rejected attempts wrote to the chain. Zero for `push-distinct`.
+    pub chain_nodes: usize,
 }
 
 /// A landed push's time and its parts.
@@ -434,6 +438,7 @@ pub fn push_distinct(
         elapsed,
         latencies,
         parts: Vec::new(),
+        chain_nodes: 0,
     })
 }
 
@@ -522,12 +527,16 @@ pub fn push_shared(
             expected.len()
         ));
     }
+    let conflicts = conflicts.load(Ordering::Relaxed);
+    let bound = pushers * steps + conflicts;
+    let chain_nodes = chain_nodes(&*connect()?, SHARED_BRANCH, bound)?;
     Ok(PushRun {
         pushes: pushers * steps,
-        conflicts: conflicts.load(Ordering::Relaxed),
+        conflicts,
         elapsed,
         latencies,
         parts,
+        chain_nodes,
     })
 }
 
