@@ -28,7 +28,8 @@
 use kit_core::hash::Hash;
 use kit_core::index;
 use kit_core::object::Object;
-use kit_core::ops::merge::find_merge_base;
+use kit_core::ops::graph::AncestorError;
+use kit_core::ops::merge::find_merge_base_strict;
 use kit_core::ops::{
     BINARY_SNIFF_LEN, DiffEntry, DiffKind, WhitespaceMode, detect_content_renames,
     diff_line_counts, diff_trees, is_binary, unified_hunks_opts,
@@ -77,9 +78,13 @@ pub enum Error {
     /// The revisions of a merge-base diff share no ancestor.
     #[error("no merge base between the given revisions")]
     NoMergeBase,
-    /// The merge base could not be computed.
+    /// The merge base could not be computed: the walk reached its limit.
     #[error("merge base: {0}")]
     MergeBase(StoreError),
+    /// A commit of the history is missing or corrupt, or a parent is not a
+    /// commit. The error names it.
+    #[error("merge base: {0}")]
+    History(AncestorError),
     /// `HEAD` could not be read.
     #[error("resolve HEAD: {0}")]
     ResolveHead(RefError),
@@ -387,8 +392,8 @@ fn resolve_endpoints(
     {
         let commit_a = peeled(repo, a)?;
         let commit_b = peeled(repo, b)?;
-        let base = find_merge_base(repo.store(), commit_a, commit_b)
-            .map_err(Error::MergeBase)?
+        let base = find_merge_base_strict(repo.store(), commit_a, commit_b)
+            .map_err(merge_base_error)?
             .ok_or_else(|| Error::NoMergeBaseBetween {
                 a: a.to_owned(),
                 b: b.to_owned(),
@@ -477,9 +482,18 @@ fn merge_base_endpoints(
 }
 
 fn merge_base_of(repo: &Repo, a: Hash, b: Hash) -> Result<Hash, Error> {
-    find_merge_base(repo.store(), a, b)
-        .map_err(Error::MergeBase)?
+    find_merge_base_strict(repo.store(), a, b)
+        .map_err(merge_base_error)?
         .ok_or(Error::NoMergeBase)
+}
+
+/// The error of a strict merge base walk. A base found in part of the
+/// history would diff the wrong changes, so the diff fails instead.
+fn merge_base_error(err: AncestorError) -> Error {
+    match err {
+        AncestorError::Limit(limit) => Error::MergeBase(limit),
+        other => Error::History(other),
+    }
 }
 
 /// Resolve `spec` and follow tags to the commit.

@@ -6,7 +6,8 @@ use std::path::Path;
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
-use kit_core::ops::merge::is_ancestor;
+use kit_core::ops::graph::AncestorError;
+use kit_core::ops::merge::is_ancestor_strict;
 use kit_core::ops::pull_state::PullState;
 use kit_core::refs::{self, Head};
 use kit_core::store::ObjectStore;
@@ -135,7 +136,16 @@ pub fn pull(
                 },
             });
         }
-        if !is_ancestor(&store, local_tip, remote_tip)? {
+        // A missing commit would read as "not a fast-forward", so the walk
+        // reads every commit and names the one it cannot read.
+        let fast_forward =
+            is_ancestor_strict(&store, local_tip, remote_tip).map_err(|e| match e {
+                AncestorError::Unreadable { source, .. } | AncestorError::Limit(source) => {
+                    SyncError::Store(source)
+                }
+                AncestorError::NotACommit(_) => SyncError::NotCommit,
+            })?;
+        if !fast_forward {
             return Err(SyncError::NonFastForwardPull { branch });
         }
         refs::RefWriteCondition::Match(local_tip)

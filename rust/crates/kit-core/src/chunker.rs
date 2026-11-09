@@ -361,7 +361,7 @@ impl FastCdc {
     }
 
     /// Chunk end offsets of `data`, with the chain starting at offset `0`,
-    /// split across `threads` threads. The result is identical to calling
+    /// split across `threads` threads (`0` is treated as `1`). The result is identical to calling
     /// [`FastCdc::cut`] repeatedly from offset `0`.
     ///
     /// Each thread follows the chain from the start of its own segment.
@@ -914,6 +914,60 @@ mod tests {
     }
 
     #[test]
+    fn reader_window_size_follows_threads_and_max_size() {
+        // One thread reads `WINDOW_MULTIPLE * max_size` new bytes per
+        // window. More threads read 2 MiB per thread, capped at 16 MiB,
+        // but never less than the one-thread window.
+        const MIB: usize = 1024 * 1024;
+        let large = FastCdc::custom(MIB, 2 * MIB, 4 * MIB);
+        for (cdc, threads, fresh) in [
+            (FastCdc::v1(), 0, MIB),
+            (FastCdc::v1(), 1, MIB),
+            (FastCdc::v1(), 4, 8 * MIB),
+            (FastCdc::v1(), 64, 16 * MIB),
+            (large, 1, 16 * MIB),
+            (large, 2, 16 * MIB),
+        ] {
+            let reader = ChunkReader::with_threads(cdc, std::io::empty(), threads);
+            let want = cdc.max_size() + fresh;
+            assert_eq!(reader.cur.len(), want, "threads {threads}");
+            assert_eq!(reader.next.len(), want, "threads {threads}");
+        }
+    }
+
+    #[test]
+    fn new_reader_cuts_on_available_parallelism() {
+        let want = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(MAX_CUT_THREADS);
+        let reader = ChunkReader::new(FastCdc::v1(), std::io::empty());
+        assert_eq!(reader.threads, want);
+    }
+
+    #[test]
+    fn streaming_matches_in_memory_when_input_fills_whole_windows() {
+        // The read that follows the last full window returns no bytes.
+        // The uncut tail of that window must still come out as chunks.
+        const MIB: usize = 1024 * 1024;
+        for (threads, fresh) in [(1, MIB), (2, 4 * MIB)] {
+            for windows in [1, 2] {
+                let mut data = vec![0u8; windows * fresh];
+                Prng::new(0x00E0_F111).fill(&mut data);
+                let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+                    .map(|b| data[b.offset..b.offset + b.length].to_vec())
+                    .collect();
+                let reader =
+                    ChunkReader::with_threads(FastCdc::v1(), std::io::Cursor::new(&data), threads);
+                assert_eq!(
+                    in_memory,
+                    drain(reader, false),
+                    "threads {threads}, windows {windows}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn streaming_matches_in_memory_iterator_under_short_reads() {
         let mut data = vec![0u8; 300 * 1024];
         Prng::new(0x5713_EA32).fill(&mut data);
@@ -968,7 +1022,7 @@ mod tests {
         data[3 * 1024 * 1024..4 * 1024 * 1024 + 99].fill(0);
         for cdc in [FastCdc::v1(), FastCdc::v2(), FastCdc::custom(64, 256, 1024)] {
             let expected = sequential_ends(&cdc, &data);
-            for threads in 1..=MAX_CUT_THREADS + 1 {
+            for threads in 0..=MAX_CUT_THREADS + 1 {
                 assert_eq!(
                     cdc.cut_ends(&data, true, threads),
                     expected,
