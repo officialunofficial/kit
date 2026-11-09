@@ -196,6 +196,7 @@ pub use protocol::{
 pub use ops::{
     CherryPickError, CherryPickResult, ClosureMode, Conflict, ConflictKind, DiffEntry, DiffError,
     DiffKind, DiffResult, MergeResult, StatusEntry, StatusStaging, cherry_pick, children,
-    collect_ancestor_set, diff_trees, find_merge_base, is_ancestor, merge_trees, reachable_closure,
-    reachable_objects, reachable_snapshot, status_diff,
+    collect_ancestor_set, diff_trees, find_merge_base, find_merge_base_strict, is_ancestor,
+    is_ancestor_strict, merge_trees, reachable_closure, reachable_objects, reachable_snapshot,
+    status_diff,
 };

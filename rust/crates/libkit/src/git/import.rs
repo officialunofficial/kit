@@ -376,8 +376,10 @@ fn fast_forward_current(
     if current == target {
         return Ok(None);
     }
-    let ancestor = kit_core::ops::merge::is_ancestor(&store, current, target)
-        .map_err(|e| step(Class::General, "ancestry", e))?;
+    // A missing commit would read as "not a fast-forward", so the walk reads
+    // every commit and names the one it cannot read.
+    let ancestor = kit_core::ops::merge::is_ancestor_strict(&store, current, target)
+        .map_err(|e| step(Class::Data, "ancestry", e))?;
     if !ancestor {
         return Err(Error::PullNotFastForward {
             branch,
