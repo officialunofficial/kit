@@ -193,6 +193,12 @@ fn collect_tree_roots(
         add(entry.object_hash, roots);
     }
 
+    // An unfinished pull keeps its immutable baseline even if the index changes.
+    if let Some(state) = super::pull_state::PullState::read(tree)? {
+        add(state.target, roots);
+        add(state.before_tree, roots);
+    }
+
     // ORIG_HEAD (written by reset and by the in-progress ops below).
     if let Some(h) = read_optional_hash(&tree.orig_head_file())? {
         add(h, roots);
@@ -546,6 +552,61 @@ mod tests {
             )
             .unwrap();
         (commit, blob)
+    }
+
+    #[test]
+    fn linked_worktree_pull_keeps_its_baseline_and_target() {
+        let (d, store) = repo();
+        let main = layout(&d);
+        let linked = tempfile::tempdir().unwrap();
+        let state_dir = main.worktree_state_dir_for("linked");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(state_dir.join("commondir"), b"../..\n").unwrap();
+        fs::write(
+            state_dir.join("kitdir"),
+            format!("{}\n", linked.path().join(".kit").display()),
+        )
+        .unwrap();
+        crate::layout::write_pointer_file(linked.path(), &state_dir).unwrap();
+        let linked_layout = crate::layout::discover(linked.path()).unwrap();
+        refs::write_head_branch(&linked_layout, "unborn").unwrap();
+        let (before_commit, before_blob) = commit_one(&store, b"before", b"before", vec![]);
+        let Object::Commit(before) = store.read_object(&before_commit).unwrap() else {
+            panic!("commit");
+        };
+        let (target, target_blob) = commit_one(&store, b"target", b"target", vec![]);
+        let state = super::super::pull_state::PullState {
+            target,
+            before_tree: before.tree_hash,
+        };
+        fs::write(linked_layout.pull_head_file(), state.encode()).unwrap();
+        run_gc(&store, &main, u64::MAX, 0, false).unwrap();
+        for hash in [target, target_blob, before.tree_hash, before_blob] {
+            assert!(store.contains(&hash), "linked pull root must survive");
+        }
+        assert!(!store.contains(&before_commit));
+        let orphan = write_blob(&store, b"cannot prune through corrupt state");
+        fs::write(linked_layout.pull_head_file(), b"invalid").unwrap();
+        assert!(run_gc(&store, &main, u64::MAX, 0, false).is_err());
+        assert!(store.contains(&orphan));
+    }
+
+    #[test]
+    fn unfinished_pull_roots_and_malformed_state_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let _store = ObjectStore::init(&layout).unwrap();
+        refs::init(&layout).unwrap();
+        let state = super::super::pull_state::PullState {
+            target: hash::hash(b"pull-target"),
+            before_tree: hash::hash(b"pull-before-tree"),
+        };
+        fs::write(layout.pull_head_file(), state.encode()).unwrap();
+        let roots = collect_roots(&layout).unwrap();
+        assert!(roots.contains(&state.target));
+        assert!(roots.contains(&state.before_tree));
+        fs::write(layout.pull_head_file(), b"invalid").unwrap();
+        assert!(collect_roots(&layout).is_err());
     }
 
     #[test]

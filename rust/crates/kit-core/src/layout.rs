@@ -58,6 +58,7 @@
 //! | `git/`                   | common   | `kit-git-bridge`       |
 //! | `sparse/`                | common   | CLI sparse witness cache |
 //! | `HEAD`                   | worktree | [`crate::refs`]         |
+//! | `PULL_HEAD`              | worktree | `kit-sync`              |
 //! | `index`                  | worktree | [`crate::index`]        |
 //! | `ORIG_HEAD`              | worktree | [`crate::ops::conflict_state`] |
 //! | `MERGE_HEAD`/`MERGE_MSG` | worktree | [`crate::ops::conflict_state`] |
@@ -105,6 +106,8 @@ pub const CONFIG_FILE_NAME: &str = "config";
 pub const KEYS_DIR_NAME: &str = "keys";
 /// Staging-index file name under the worktree state dir.
 pub const INDEX_FILE_NAME: &str = "index";
+/// Unfinished pull target under the worktree state dir.
+pub const PULL_HEAD_FILE_NAME: &str = "PULL_HEAD";
 /// Stash manifest file name under the worktree state dir.
 pub const STASH_FILE_NAME: &str = "stash";
 /// Sparse-checkout filter file name under the worktree state dir.
@@ -342,6 +345,12 @@ impl RepoLayout {
     #[must_use]
     pub fn head_file(&self) -> PathBuf {
         self.worktree_state_dir.join(HEAD_FILE)
+    }
+
+    /// `PULL_HEAD` — commit whose pull restore has not finished.
+    #[must_use]
+    pub fn pull_head_file(&self) -> PathBuf {
+        self.worktree_state_dir.join(PULL_HEAD_FILE_NAME)
     }
 
     /// `index` — this worktree's staging index.
@@ -799,6 +808,7 @@ mod tests {
             ("git_state_dir", l.git_state_dir(), "git", Common),
             ("sparse_cache_dir", l.sparse_cache_dir(), "sparse", Common),
             ("head_file", l.head_file(), "HEAD", Worktree),
+            ("pull_head_file", l.pull_head_file(), "PULL_HEAD", Worktree),
             ("index_file", l.index_file(), "index", Worktree),
             ("orig_head_file", l.orig_head_file(), "ORIG_HEAD", Worktree),
             (
