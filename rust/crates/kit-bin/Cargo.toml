@@ -96,7 +96,7 @@ tokio = { version = "1.54.1", default-features = false, features = [
 # is `kit mcp --http <addr>` (SEP-2567 dropped sessions for 2026-07-28
 # traffic). Off by default so the default `kit-bin` build
 # compiles no MCP HTTP server. See `commands/mcp_v2.rs`.
-rmcp = { version = "3.8.0", default-features = false, features = [
+rmcp = { version = "3.9.0", default-features = false, features = [
     "server",
     "transport-io",
     "transport-streamable-http-server",
@@ -181,7 +181,7 @@ zeroize = "1.9.1"
 # `#![deny(unsafe_code)]` — see signal.rs.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"
-signal-hook = { version = "0.4.5", default-features = false }
+signal-hook = { version = "0.4.6", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 kit-keystore = { version = "=0.7.3", path = "../kit-keystore", features = ["backend-macos-keychain"] }

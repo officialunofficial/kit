@@ -399,6 +399,20 @@ The S3 transport ([`kit-transport-s3`](../../rust/crates/kit-transport-s3/))
 talks SigV4 against any S3-compatible store that honors conditional
 writes (see §6.3).
 
+*Informative.* `list_refs` on this transport issues one `ListObjectsV2` per
+page and then one `GET` per listed ref, because a ref's id lives only in its
+object body. A fetch adds a packmap read and a node download per branch. The
+transport suits repositories with few concurrent writers and few refs.
+Deployments with many concurrent writers use the Connect service.
+
+**Protocol requirement.** A listing returns every listed ref that its `GET`
+finds, or fails. A `GET` that fails, after the retries of §6.5, with an error
+status fails the whole listing with that error. Only a `404` skips the ref,
+because the ref was deleted after the page was listed; the result is then an
+older listing (SPEC-TRANSPORT-CONNECT §7.9 allows one). A `200` whose body is
+not a canonical 65-byte ref wire (SPEC-REFS §1) fails the whole listing, as it
+fails `read_ref`.
+
 ### 6.1 Object layout
 
 The table below lists canonical repository-relative keys. For a URL of
