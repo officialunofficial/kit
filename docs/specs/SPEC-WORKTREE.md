@@ -28,7 +28,44 @@ of two classes:
 | Class | Contents |
 |---|---|
 | **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `history-v1/`, `recovery-log`, `attestations/`, `applied-packs/`, `upload-parts/`, `git/`, `sparse/`, `worktrees/`, `refs-history-<branch>.lock`, `refs-<ref>.lock`, `worktrees.lock`, `serve.lock` (SPEC-CONCURRENCY §2) |
-| **worktree state dir** (private to one tree) | `HEAD`, `index`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock` |
+| **worktree state dir** (private to one tree) | `HEAD`, `index`, `PULL_HEAD`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock` |
+
+`PULL_HEAD` is exactly 130 bytes: the target commit in canonical ref encoding
+(64 lowercase hex digits and LF), then the pre-pull tree in the same encoding.
+The tree matches the clean index proven by the restore safety check. The writer
+stores that tree and atomically persists and syncs the marker before moving
+the branch or HEAD. Every other marker shape, including a single ref, fails
+closed. The `pull_state` golden vector pins both fields and their order.
+The target and pre-pull tree are GC roots while the marker exists. A following pull rejects
+detached HEAD before touching files. It discards a well-formed marker when
+neither HEAD nor the selected branch tip names it, because restore cannot
+have started in that state. Corrupt markers fail closed.
+
+Before recovery, the current index tree must equal the recorded pre-pull tree
+or the target tree. Otherwise recovery refuses before changing files, HEAD,
+the index or the marker. Staging files after an interruption cannot redefine
+the baseline. Each tracked or target path must then match the recorded pre-pull
+tree or the target tree, including its mode or absence. A path that matches
+neither causes refusal before any file, HEAD or index write; the marker stays.
+Untracked paths outside the target must stay on disk. The current clean
+restore cannot preserve arbitrary untracked paths, so recovery refuses when
+it would remove one; it preserves the ignore files and ignored paths under
+the ordinary restore rules. An untracked regular file named exactly
+`.{tracked sibling}.tmp.<digits>.<digits>` is an interrupted restore temporary
+file and may be swept. Both numeric fields are nonempty ASCII digits. The
+sibling must be a tracked leaf in the pre-pull or target tree in the same
+directory. Directories, symlinks, unknown siblings and other suffixes do not
+qualify. A tracked path is never exempted as a temporary file. Recovery accepts a mixture of old and already
+restored target entries and aligns the index after the restore succeeds.
+It finishes a branch write already at the marker, even if HEAD still names
+an unborn branch absent on the remote. A later remote advance can then land
+through the ordinary fast-forward and restore checks. With no remote branches,
+a pending marker causes refusal instead of an up-to-date result.
+
+The marker is removed and its directory synced after the restore and index
+write succeed, or after an error rolls the branch and HEAD back successfully.
+This recovers a killed process, not power loss: worktree file writes are not
+flushed before marker removal. The marker composes two existing ref encodings; it changes no object bytes.
 
 In the classic single-worktree layout both directories are the same
 `<root>/.kit/`; the two-directory model is byte-identical there.

@@ -27,8 +27,8 @@ workspace = true
 # `pack.rs` (see `src/`), so opting out costs nothing here and keeps
 # this crate's wasm32 build zstd-sys-free.
 [dependencies]
-kit-core = { version = "=0.7.2", path = "../kit-core", default-features = false }
-kit-attest = { version = "=0.7.2", path = "../kit-attest" }
+kit-core = { version = "=0.7.3", path = "../kit-core", default-features = false }
+kit-attest = { version = "=0.7.3", path = "../kit-attest" }
 wasm-bindgen = "0.2.129"
 hex = "0.4.3"
 # Parses the optional ceremony-policy blob handed to

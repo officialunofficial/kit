@@ -227,3 +227,61 @@ fn all_with_no_remotes_configured_is_actionable() {
         );
     }
 }
+
+#[test]
+fn pull_reports_completion_when_it_restores_an_equal_tip() {
+    let upstream = repo_with_commit(b"one\n");
+    let bare = tempfile::tempdir().unwrap();
+    let url = file_url(bare.path());
+    assert!(
+        run_in(upstream.path(), &["remote", "add", &url])
+            .status
+            .success()
+    );
+    assert!(run_in(upstream.path(), &["push"]).status.success());
+    let sink = tempfile::tempdir().unwrap();
+    assert!(run_in(sink.path(), &["init"]).status.success());
+    assert!(
+        run_in(sink.path(), &["remote", "add", &url])
+            .status
+            .success()
+    );
+    assert!(run_in(sink.path(), &["pull"]).status.success());
+    fs::write(upstream.path().join("a.txt"), b"two\n").unwrap();
+    assert!(run_in(upstream.path(), &["add", "a.txt"]).status.success());
+    assert!(
+        run_in(upstream.path(), &["commit", "-m", "update"])
+            .status
+            .success()
+    );
+    assert!(run_in(upstream.path(), &["push"]).status.success());
+    assert!(run_in(sink.path(), &["fetch"]).status.success());
+    let tip = local_main(upstream.path());
+    // The pull reached HEAD, but did not reach the worktree restore.
+    let layout = kit_core::layout::RepoLayout::single(sink.path());
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    let before_tree = kit_core::worktree::build_tree_from_index_with(
+        &store,
+        &store,
+        &kit_core::index::read_index(&layout).unwrap(),
+        false,
+    )
+    .unwrap();
+    let marker = kit_core::ops::pull_state::PullState {
+        target: kit_core::hash::from_hex(&tip).unwrap(),
+        before_tree,
+    };
+    fs::write(layout.pull_head_file(), marker.encode()).unwrap();
+    fs::write(sink.path().join(".kit/refs/heads/main"), format!("{tip}\n")).unwrap();
+    let out = run_in(sink.path(), &["pull", "--format", "json"]);
+    assert!(out.status.success(), "{out:?}");
+    let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["up_to_date"], false);
+    assert_eq!(result["old"], tip);
+    assert_eq!(result["new"], tip);
+    assert!(stderr_str(&out).contains("Completed interrupted pull."));
+    assert_eq!(fs::read(sink.path().join("a.txt")).unwrap(), b"two\n");
+    let again = run_in(sink.path(), &["pull", "--format", "json"]);
+    let result: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(result["up_to_date"], true);
+}
