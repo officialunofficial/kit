@@ -1181,6 +1181,159 @@ mod tests {
         assert_eq!(any_file_count(&store), 0, "temp files are cleaned up");
     }
 
+    /// Syncer whose barriers block while its gate is closed, so tests can
+    /// hold barrier workers busy. Counts barriers started and finished.
+    #[derive(Debug, Default)]
+    struct GatedSyncer {
+        closed: Mutex<bool>,
+        opened: Condvar,
+        started: std::sync::atomic::AtomicUsize,
+        finished: std::sync::atomic::AtomicUsize,
+    }
+
+    impl GatedSyncer {
+        fn set_closed(&self, closed: bool) {
+            *self.closed.lock().unwrap() = closed;
+            self.opened.notify_all();
+        }
+
+        fn started(&self) -> usize {
+            self.started.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn finished(&self) -> usize {
+            self.finished.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Syncer for GatedSyncer {
+        fn barrier(&self, _file: &File, _path: &Path) -> io::Result<()> {
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut closed = self.closed.lock().unwrap();
+            while *closed {
+                closed = self.opened.wait(closed).unwrap();
+            }
+            self.finished
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn full(&self, _file: &File, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn rename(&self, tmp: TempPath, final_path: &Path) -> io::Result<()> {
+            tmp.persist(final_path).map_err(|e| e.error)?;
+            Ok(())
+        }
+
+        fn dir_sync(&self, _dir: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn dir_barrier(&self, _dir: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn device_flush(&self, _objects_root: &Path) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Poll `done` for up to ten seconds. Returns whether it became true.
+    fn wait_for(done: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        true
+    }
+
+    /// `count` empty files in `dir`, for barriers to open.
+    fn staged_files(dir: &Path, count: usize) -> Vec<PathBuf> {
+        (0..count)
+            .map(|i| {
+                let path = dir.join(format!("staged-{i}"));
+                File::create(&path).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn barrier_pool_never_exceeds_worker_cap() {
+        // With every barrier blocked, each queued file finds no idle
+        // worker and asks for a new one. The pool stops at the cap.
+        let dir = TempDir::new().unwrap();
+        let syncer = Arc::new(GatedSyncer::default());
+        syncer.set_closed(true);
+        let early = EarlyBarriers::new(syncer.clone());
+        let count = MAX_SYNC_WORKERS + 16;
+        for path in staged_files(dir.path(), count) {
+            early.submit(path);
+        }
+        let spawned = early.workers.lock().unwrap().len();
+        let all_busy = wait_for(|| syncer.started() >= spawned);
+        syncer.set_closed(false);
+        assert_eq!(spawned, MAX_SYNC_WORKERS);
+        assert!(all_busy, "every worker took a file");
+        assert!(early.finish().unwrap().is_empty());
+        assert_eq!(syncer.finished(), count, "every file got its barrier");
+    }
+
+    #[test]
+    fn woken_worker_is_no_longer_counted_idle() {
+        // A worker that wakes for a file and blocks on its barrier is
+        // busy. The next file must get a new worker instead of waiting
+        // behind the busy one.
+        let dir = TempDir::new().unwrap();
+        let files = staged_files(dir.path(), 3);
+        let syncer = Arc::new(GatedSyncer::default());
+        let early = EarlyBarriers::new(syncer.clone());
+        early.submit(files[0].clone());
+        assert!(wait_for(|| early.shared.state.lock().unwrap().idle == 1));
+        syncer.set_closed(true);
+        early.submit(files[1].clone());
+        assert!(wait_for(|| syncer.started() == 2));
+        early.submit(files[2].clone());
+        let workers = early.workers.lock().unwrap().len();
+        let overlapped = wait_for(|| syncer.started() == 3);
+        syncer.set_closed(false);
+        assert_eq!(workers, 2, "a second worker is spawned");
+        assert!(overlapped, "the third barrier runs beside the blocked one");
+        assert!(early.finish().unwrap().is_empty());
+        assert_eq!(syncer.finished(), 3);
+    }
+
+    #[test]
+    fn dropped_batch_waits_for_in_flight_barriers() {
+        // An aborted batch joins its barrier workers before it returns,
+        // so no worker still holds a temp file once it is unlinked.
+        let (_dir, mut store) = fresh_store();
+        let syncer = Arc::new(GatedSyncer::default());
+        store.set_syncer(syncer.clone());
+        syncer.set_closed(true);
+        let batch = store.batch();
+        batch.write(b"in flight at drop").unwrap();
+        assert!(wait_for(|| syncer.started() == 1));
+        let opener = {
+            let syncer = syncer.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                syncer.set_closed(false);
+            })
+        };
+        drop(batch);
+        let finished = syncer.finished();
+        opener.join().unwrap();
+        assert_eq!(finished, 1, "drop returned before the barrier finished");
+        assert_eq!(any_file_count(&store), 0, "temp files are cleaned up");
+    }
+
     // ---- Cycle 3: equivalence & limits ---------------------------------
 
     #[test]
