@@ -167,7 +167,7 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };
     let n = match pull_outcome {
-        Ok(n) => n,
+        Ok(report) => report.fetch.branches_fetched,
         Err(libkit::transfer::Error::Interrupted) => {
             return emit_err("clone: interrupted", exit::TEMPFAIL);
         }
