@@ -191,12 +191,15 @@ qrun serve.qnt served_listNoSkip ListingServedOnly violation
 # ---- advance.qnt: random simulation -----------------------------------------
 qrun advance.qnt advance3 Safety ok
 qrun advance.qnt advance3_atomic Safety ok
-for c in CanaryNoReset CanaryNoCrashAfterReset CanaryNoForceReplan; do
+for c in CanaryNoReset CanaryNoCrashAfterReset CanaryNoForceReplan CanaryNoLeaseRefusal; do
   qrun advance.qnt advance3 "$c" violation
 done
 qrun advance.qnt advance3_noAncestry Consistent violation
 qrun advance.qnt advance3_forceOrdered Consistent violation
 qrun advance.qnt advance3_atomicForceOrdered Consistent violation
+qrun advance.qnt advance3_atomicLeaseUnchecked Consistent violation
+# advance3_leaseUnchecked needs a long interleaving of all three pushers
+# that random simulation rarely hits: TLC finds it below.
 
 # ---- TLC: exhaustive (serve.qnt, advance.qnt) / constrained (refs.qnt) -------
 if [[ ${TLC:-1} == 1 ]]; then
@@ -216,12 +219,14 @@ if [[ ${TLC:-1} == 1 ]]; then
   # advance.qnt is finite (one push per process): exhaustive.
   tlc advance.qnt advance3 Safety ok "" ""
   tlc advance.qnt advance3_atomic Safety ok "" ""
-  for c in CanaryNoReset CanaryNoCrashAfterReset CanaryNoForceReplan; do
+  for c in CanaryNoReset CanaryNoCrashAfterReset CanaryNoForceReplan CanaryNoLeaseRefusal; do
     tlc advance.qnt advance3 "$c" violation "" ""
   done
   tlc advance.qnt advance3_noAncestry Consistent violation "" ""
   tlc advance.qnt advance3_forceOrdered Consistent violation "" ""
   tlc advance.qnt advance3_atomicForceOrdered Consistent violation "" ""
+  tlc advance.qnt advance3_leaseUnchecked Consistent violation "" ""
+  tlc advance.qnt advance3_atomicLeaseUnchecked Consistent violation "" ""
   # refs.qnt: recLog / nextEntry grow without bound and the full op space
   # (8 kinds x trees x refs x conditions x values) of two processes exceeds a
   # 30-minute / 4 GB budget (measured: > 1.5 M distinct states at depth 4).
