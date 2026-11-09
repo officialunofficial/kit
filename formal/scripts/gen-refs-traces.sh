@@ -14,7 +14,7 @@
 #
 # Each fixture is the ITF trace `quint run --mbt --out-itf` wrote for one
 # (instance, seed), post-processed with jq: variables the harness does not
-# read (owner, procs, faults, lostRecords, recordDuringExpire and the
+# read (owner, sharers, procs, faults, lostRecords, recordDuringExpire and the
 # mbt::* metadata) are dropped, the remaining ones lose their
 # `refsLin::refs::` qualifier, `#meta` is replaced by a deterministic one
 # (quint's carries a wall-clock timestamp), and each state is one line.
@@ -35,10 +35,10 @@ STEPS=${STEPS:-60}
 SAMPLES=${SAMPLES:-2000}
 # instance:seed. Seeds were picked (greedy set cover over seeds 0x1..0x28 of
 # both instances, quint 0.32.0, STEPS=60) so that together the traces reach
-# every op kind's commit, every CAS outcome (ok / conflict / notfound) in
+# every op kind's commit (the multi-file step `fileTx` included), every CAS outcome (ok / conflict / notfound) in
 # every lock domain that has it, a conditional delete, a recovery record
 # and a gc expire (the Rust test asserts that coverage).
-TRACES=${TRACES:-"refs_mbt2:0xa refs_mbt2:0xf refs_mbt2:0x24 refs_mbt3:0x1b refs_mbt3:0x21"}
+TRACES=${TRACES:-"refs_mbt2:0x1 refs_mbt2:0x9 refs_mbt2:0xc refs_mbt2:0x18 refs_mbt2:0x1a"}
 
 command -v quint >/dev/null || { echo "gen-refs-traces.sh: quint not on PATH" >&2; exit 2; }
 command -v jq >/dev/null || { echo "gen-refs-traces.sh: jq not on PATH" >&2; exit 2; }
