@@ -9,6 +9,8 @@
 #   QUINT=0 skips `quint run`; ONLY=<regex> restricts TLC/Apalache to
 #   matching "<module>::<invariant>" checks.
 #
+# advance.qnt (the two-ref advance and the re-baseline gate) runs too.
+#
 # Pins: quint 0.32.0, Apalache 0.62.2 run directly on the
 # compiled TLA+ (not `quint verify`), TLC = tlc2.TLC from the Apalache 0.62.2
 # jar, Java 21. Tool locations (override any of them):
@@ -120,7 +122,7 @@ tlc() {
 }
 
 # ---- typecheck + deterministic scenarios ------------------------------------
-quint typecheck refs.qnt && quint typecheck serve.qnt
+quint typecheck refs.qnt && quint typecheck serve.qnt && quint typecheck advance.qnt
 quint typecheck refs_test.qnt && quint typecheck serve_test.qnt
 quint test refs_test.qnt --main refs_test >/dev/null && note "test refs_test" ok || bad "test refs_test" failed
 for m in refs_wpref_test refs_collide_test refs_nested_test refs_nested_unchecked_test; do
@@ -186,7 +188,17 @@ qrun serve.qnt served_listNoSkip ListingServedOnly violation
 # NoLiveUploadSwept's mutants need a 5-step pinned interleaving that random
 # simulation rarely hits: serve_test.qnt pins them, and TLC finds them below.
 
-# ---- TLC: exhaustive (serve.qnt) / constrained (refs.qnt) --------------------
+# ---- advance.qnt: random simulation -----------------------------------------
+qrun advance.qnt advance3 Safety ok
+qrun advance.qnt advance3_atomic Safety ok
+for c in CanaryNoReset CanaryNoCrashAfterReset CanaryNoForceReplan; do
+  qrun advance.qnt advance3 "$c" violation
+done
+qrun advance.qnt advance3_noAncestry Consistent violation
+qrun advance.qnt advance3_forceOrdered Consistent violation
+qrun advance.qnt advance3_atomicForceOrdered Consistent violation
+
+# ---- TLC: exhaustive (serve.qnt, advance.qnt) / constrained (refs.qnt) -------
 if [[ ${TLC:-1} == 1 ]]; then
   # serve.qnt is finite: exhaustive, no VIEW, no CONSTRAINT.
   tlc serve.qnt serve2 Safety ok "" ""
@@ -201,6 +213,15 @@ if [[ ${TLC:-1} == 1 ]]; then
   tlc serve.qnt served_checkAfterRead RefuseBeforeStorage violation "" ""
   tlc serve.qnt served_headCheckedLate RefusedWritesNothing violation "" ""
   tlc serve.qnt served_listNoSkip ListingServedOnly violation "" ""
+  # advance.qnt is finite (one push per process): exhaustive.
+  tlc advance.qnt advance3 Safety ok "" ""
+  tlc advance.qnt advance3_atomic Safety ok "" ""
+  for c in CanaryNoReset CanaryNoCrashAfterReset CanaryNoForceReplan; do
+    tlc advance.qnt advance3 "$c" violation "" ""
+  done
+  tlc advance.qnt advance3_noAncestry Consistent violation "" ""
+  tlc advance.qnt advance3_forceOrdered Consistent violation "" ""
+  tlc advance.qnt advance3_atomicForceOrdered Consistent violation "" ""
   # refs.qnt: recLog / nextEntry grow without bound and the full op space
   # (8 kinds x trees x refs x conditions x values) of two processes exceeds a
   # 30-minute / 4 GB budget (measured: > 1.5 M distinct states at depth 4).

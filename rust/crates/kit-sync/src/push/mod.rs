@@ -26,6 +26,15 @@ struct PushContext<'a> {
     source: &'a dyn RemoteSource,
     observer: &'a dyn Observer<SyncEvent>,
 }
+impl PushContext<'_> {
+    /// Whether force pushes take the guarded force driver. It needs only a
+    /// serialized advance: it appends, and it re-plans when a concurrent
+    /// reset drops the chain its plan depends on, which an ordered force
+    /// append could not see.
+    fn guards_force(&self) -> bool {
+        self.supports_atomic_advance() || self.supports_serialized_advance()
+    }
+}
 impl<'a> std::ops::Deref for PushContext<'a> {
     type Target = dyn RemoteSource + 'a;
     fn deref(&self) -> &Self::Target {
@@ -69,7 +78,9 @@ pub struct PushOptions<'a> {
     pub remote_name: &'a str,
     /// Object-store durability schedule.
     pub sync_policy: kit_core::store::SyncPolicy,
-    /// Atomic pushes reset healthy chains past this depth; zero disables it.
+    /// Pushes reset healthy chains past this depth on an atomic advance, and
+    /// on a serialized one when they fast-forward the leased head; zero
+    /// disables it.
     pub rebaseline_threshold: usize,
     /// Per-pack payload bound, further limited by the remote and format.
     pub pack_payload_cap: u64,
@@ -437,7 +448,7 @@ fn push_step_recovering(
     pack_payload_cap: u64,
     plan: Option<PreparedPlan>,
 ) -> Result<(), PushError> {
-    if matches!(condition, refs::RefWriteCondition::Any) && tx.supports_atomic_advance() {
+    if matches!(condition, refs::RefWriteCondition::Any) && tx.guards_force() {
         refs::check_pushable_branch(branch)?;
         return force::push_step(
             tx,
@@ -470,6 +481,36 @@ fn push_step_recovering(
         Err(PushError::DeltaBaseUnavailable) => once(Some(RetryReason::LostDeltaBase), None),
         result => result,
     }
+}
+
+/// Whether a push of `tip` conditioned on `condition` may reset the chain.
+///
+/// A reset drops the prior chain, so it must commit with the head. An
+/// atomic advance does that for any conditioned head: a conflict changes
+/// nothing, and no reader sees one ref without the other. A serialized
+/// advance writes the packmap before the head, so a reader between the two
+/// writes, or a crash between them, sees the reset with the head it
+/// replaced. That head is rebuildable only when it is an ancestor of
+/// `tip`, whose full closure the reset holds, so a serialized advance
+/// resets only for a `Match` head that the local store shows is an
+/// ancestor of `tip`. An `Any` head is never reset: it conditions on no
+/// head at all.
+fn may_rebaseline(
+    tx: &PushContext<'_>,
+    store: &ObjectStore,
+    condition: refs::RefWriteCondition,
+    tip: Hash,
+) -> Result<bool, PushError> {
+    if matches!(condition, refs::RefWriteCondition::Any) {
+        return Ok(false);
+    }
+    if tx.supports_atomic_advance() {
+        return Ok(true);
+    }
+    let refs::RefWriteCondition::Match(head) = condition else {
+        return Ok(false);
+    };
+    Ok(tx.supports_serialized_advance() && kit_core::ops::merge::is_ancestor(store, head, tip)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -519,16 +560,9 @@ fn push_branch_once(
     // (`resolved_chain`) so `advance_packmap`'s append path can reuse it
     // instead of re-walking.
     //
-    // A reset is committed together with the head; the ordered (non-atomic)
-    // `advance_refs` fallback (packmap PUT then head PUT) would strand the
-    // head at the old tip on a torn write, and a reset — unlike an append —
-    // is not a superset of the prior chain, so it can't rebuild that stranded
-    // closure. We therefore re-baseline ONLY when BOTH hold:
-    //   * the transport advances both refs transactionally
-    //     (`supports_atomic_advance`), AND
-    //   * the head write is CAS-conditioned (not `Any`). Atomic force pushes
-    //     use the guarded force driver before reaching this path. The `Any`
-    //     calls left here belong to non-atomic sources and cannot reset.
+    // A reset is not a superset of the prior chain, so it may only land
+    // where no reader or crash can pair it with a head it cannot rebuild
+    // (`may_rebaseline`).
     let mut rebaseline = false;
     let mut resolved_chain = None;
     if !force_self_contained
@@ -538,8 +572,7 @@ fn push_branch_once(
         match probe_chain(tx, branch, pm) {
             Ok(chain)
                 if chain.depth + 1 > rebaseline_threshold
-                    && tx.supports_atomic_advance()
-                    && !matches!(condition, refs::RefWriteCondition::Any) =>
+                    && may_rebaseline(tx, store, condition, tip)? =>
             {
                 rebaseline = true;
             }
@@ -1163,6 +1196,8 @@ fn seal_pack(
 
 #[cfg(test)]
 mod packmap_tests;
+#[cfg(test)]
+mod rebaseline_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

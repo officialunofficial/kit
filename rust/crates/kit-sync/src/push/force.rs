@@ -40,7 +40,7 @@ pub(super) fn snapshot(
     head: Option<Hash>,
     condition: RefWriteCondition,
 ) -> Result<Option<Snapshot>, PushError> {
-    if matches!(condition, RefWriteCondition::Any) && tx.supports_atomic_advance() {
+    if matches!(condition, RefWriteCondition::Any) && tx.guards_force() {
         Ok(Some(Snapshot {
             packmap: tx.read_ref(&packmap_ref(branch))?,
             head,

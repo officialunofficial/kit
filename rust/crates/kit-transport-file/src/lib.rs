@@ -1191,6 +1191,9 @@ fn read_previous(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+#[cfg(test)]
+mod push_tests;
+
 /// Fault injection for the two-ref advance, in tests only.
 #[cfg(test)]
 mod advance_fault {
@@ -1302,9 +1305,10 @@ impl Transport for FileTransport {
     /// that state on disk. That state is consistent only when the new
     /// packmap also reconstructs the old head's closure: an append always
     /// does, a re-baseline does only for a fast-forward. So
-    /// [`Transport::supports_atomic_advance`] stays `false`: a client
-    /// asks for a re-baseline only of a transport whose advance is one
-    /// indivisible step.
+    /// [`Transport::supports_atomic_advance`] stays `false`, and the
+    /// transport offers [`Transport::supports_serialized_advance`]
+    /// instead: a client asks it for a re-baseline only of a push that is
+    /// a verified fast-forward of the head it conditions on.
     fn advance_refs(
         &self,
         head_ref: &str,
@@ -1322,6 +1326,13 @@ impl Transport for FileTransport {
             packmap_condition,
             packmap_value,
         )?)
+    }
+
+    /// [`Self::advance_refs`] holds both refs' locks across its checks and
+    /// writes, so no other writer interleaves and a conflict changes
+    /// nothing. Readers still see its two renames one at a time.
+    fn supports_serialized_advance(&self) -> bool {
+        true
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {

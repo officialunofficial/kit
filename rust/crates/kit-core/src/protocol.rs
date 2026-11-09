@@ -875,8 +875,10 @@ pub trait Transport: Send + Sync {
     /// closure the reset packmap can no longer reconstruct (kit).
     ///
     /// Callers MUST treat `false` (the default) as "never request a
-    /// packmap reset against this transport" — see
-    /// `remote_dispatch::push_branch`'s re-baseline gate. Override to
+    /// packmap reset against this transport", unless
+    /// [`Self::supports_serialized_advance`] is `true` and the push is a
+    /// verified fast-forward of the head it conditions on — see the
+    /// re-baseline gate of the push driver. Override to
     /// `true` ONLY when [`Self::advance_refs`] is overridden with a
     /// genuinely transactional implementation (e.g. the HTTP transport's
     /// single-request `/refs/advance` endpoint). If that endpoint
@@ -884,6 +886,25 @@ pub trait Transport: Send + Sync {
     /// [`Self::atomic_force_head_condition`] so force pushes stay atomic.
     fn supports_atomic_advance(&self) -> bool {
         false
+    }
+
+    /// Whether [`Self::advance_refs`] is serialized for writers: it checks
+    /// both conditions before it writes either ref, a conflict changes
+    /// nothing, and no other write to either ref interleaves with it.
+    /// Readers may still see the packmap written before the head, and a
+    /// crash between the two writes may leave the new packmap with the old
+    /// head.
+    ///
+    /// Every atomic advance is serialized, so the default returns
+    /// [`Self::supports_atomic_advance`]. A transport that overrides this
+    /// to `true` without an atomic advance gets a packmap reset only for a
+    /// push that is a verified fast-forward of the head it conditions on:
+    /// the reset then also rebuilds that head's closure, so the state a
+    /// reader or a crash can expose stays consistent. Force pushes against
+    /// it use the guarded force driver, which never appends a pack whose
+    /// planned bases a concurrent reset dropped.
+    fn supports_serialized_advance(&self) -> bool {
+        self.supports_atomic_advance()
     }
 
     /// Known atomic-advance capability. Discovery-based transports return
@@ -1029,6 +1050,7 @@ mod tests {
     struct RecordingTransport {
         uploaded: std::sync::Mutex<Option<(Vec<u8>, PackKey)>>,
         stored: std::sync::Mutex<std::collections::HashMap<[u8; 32], Vec<u8>>>,
+        atomic: bool,
     }
 
     impl Transport for RecordingTransport {
@@ -1069,6 +1091,22 @@ mod tests {
 
         fn list_refs(&self, _prefix: &str) -> TransportResult<Vec<Ref>> {
             unimplemented!("not exercised by these tests")
+        }
+
+        fn supports_atomic_advance(&self) -> bool {
+            self.atomic
+        }
+    }
+
+    /// Every atomic advance is serialized; an ordered one is neither.
+    #[test]
+    fn serialized_advance_defaults_to_atomic_advance() {
+        for atomic in [false, true] {
+            let transport = RecordingTransport {
+                atomic,
+                ..RecordingTransport::default()
+            };
+            assert_eq!(transport.supports_serialized_advance(), atomic);
         }
     }
 

@@ -91,6 +91,12 @@ pub trait RemoteSource {
     fn supports_atomic_advance(&self) -> bool {
         false
     }
+    /// Both conditioned refs advance serialized against other writers, as
+    /// `Transport::supports_serialized_advance` defines it. Every atomic
+    /// advance is serialized.
+    fn supports_serialized_advance(&self) -> bool {
+        self.supports_atomic_advance()
+    }
     /// Known atomic-advance capability; `None` means discovery was unavailable
     /// or invalid, so a force push must refuse before uploading or publishing.
     fn atomic_advance_status(&self) -> Option<bool> {
@@ -230,6 +236,10 @@ impl RemoteSource for TransportSource<'_> {
     }
     fn supports_atomic_advance(&self) -> bool {
         self.transport.supports_atomic_advance()
+    }
+
+    fn supports_serialized_advance(&self) -> bool {
+        self.transport.supports_serialized_advance()
     }
 
     fn atomic_advance_status(&self) -> Option<bool> {
@@ -517,6 +527,35 @@ mod tests {
         }
         fn repository_address(&self) -> Option<(String, String)> {
             Some(("default".into(), "https://vcs.example.org".into()))
+        }
+    }
+
+    /// A source that only states whether its advance is atomic.
+    struct Advance(bool);
+    impl RemoteSource for Advance {
+        fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
+            Ok(Vec::new())
+        }
+        fn read_ref(&self, _: &str) -> Result<Option<Hash>, SourceError> {
+            Ok(None)
+        }
+        fn download_blob_via_ref(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+            Err(SourceError::ProtocolError)
+        }
+        fn download_pack_via_ref(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+            Err(SourceError::ProtocolError)
+        }
+        fn supports_atomic_advance(&self) -> bool {
+            self.0
+        }
+    }
+
+    /// Every atomic advance is serialized; a source that claims neither
+    /// gets neither.
+    #[test]
+    fn serialized_advance_defaults_to_atomic_advance() {
+        for atomic in [false, true] {
+            assert_eq!(Advance(atomic).supports_serialized_advance(), atomic);
         }
     }
 

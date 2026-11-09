@@ -212,7 +212,11 @@ object-store lock.
 
 The file transport's locks serialize every write condition to one ref within
 that transport. A process takes the repo lock before the stripe lock, and a
-holder of the exclusive repo lock takes no stripe lock (SPEC-REFS §5.1.1). They
+holder of the exclusive repo lock takes no stripe lock (SPEC-REFS §5.1.1). A
+two-ref advance takes both refs' stripe locks in ascending stripe order under
+the shared repo lock. Readers take none of these locks, so they see an
+advance's packmap write before its head write; the push driver's re-baseline
+rule for that case is in SPEC-TRANSPORT §7.2. The file transport's locks
 are not composed with the local chain above; the served-root/local-worktree
 deployment restriction in §3.1 still applies.
 
