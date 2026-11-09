@@ -27,6 +27,16 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   1.2 GB to about 5.2 s and 415 MB. With `--first-parent` the whole walk
   streams. A history with a merge near the tip still reads every reachable
   commit before it prints. The output is unchanged.
+- The file transport and `kit serve` lock each ref instead of the whole root.
+  A ref write holds the repo lock shared and the lock of the one of 256
+  stripes that the ref maps to, so writes to refs in different stripes no
+  longer wait for one another (SPEC-REFS §5.1.1). Measured with single-ref
+  compare-and-swap writes on one 4-CPU VM with an ext4 disk, 32 writers to 32
+  refs in one root went from about 1,100 to about 2,500 writes per second; 32
+  writers in separate roots on the same disk reached about 7,000, so the limit
+  is inside one root. Writes to one ref still serialize, and `FileTransport::with_ref_lock` still excludes
+  every ref write. `FileTransport::with_ref_lock_for` is the single-ref
+  entry point.
 
 ### Fixed
 

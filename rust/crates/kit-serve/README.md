@@ -13,7 +13,8 @@ commands already use:
 <root>/
   packs/<64-hex>      pack bytes, published only after the hash verifies
   refs/...            one file per ref
-  .kit/refs/.lock    the lock that every ref write takes
+  .kit/refs/.lock           the repo lock: every ref write holds it shared
+  .kit/refs/refs-<hh>.lock  the lock of the stripe that a ref maps to
 ```
 
 ## Authority

@@ -896,8 +896,10 @@ fn session_writes_only_packs_and_refs() {
     assert_eq!(
         fx.files(),
         [
-            // The ref lock.
+            // The repo lock and the lock of the stripe that holds
+            // `refs/heads/main`.
             std::path::PathBuf::from(".kit/refs/.lock"),
+            std::path::PathBuf::from(".kit/refs/refs-ec.lock"),
             std::path::PathBuf::from("packs").join(hex),
             std::path::PathBuf::from("refs/heads/main"),
         ],

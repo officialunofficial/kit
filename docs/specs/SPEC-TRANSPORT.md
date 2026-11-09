@@ -636,7 +636,7 @@ concerns.
 | Transport | `Missing` | `Match(h)` | Cross-process safe |
 |---|---|---|---|
 | Memory | `Mutex`-protected read-then-write | `Mutex`-protected | N/A (test only) |
-| File   | `link(2)` after `write_atomic` (atomic per POSIX) | OS exclusive file lock on `<root>/.kit/refs/.lock` (via `std::fs::File::lock`) wraps a read-then-`write_atomic`; an in-process `Mutex` keeps multi-threaded callers within one process from contending on the OS lock | Yes |
+| File   | `link(2)` after `write_atomic` (atomic per POSIX) | OS exclusive lock on the ref's stripe, `<root>/.kit/refs/refs-<hh>.lock` (via `std::fs::File::lock`), with the repo lock `<root>/.kit/refs/.lock` held shared, wraps a read-then-`write_atomic` (SPEC-REFS §5.1.1); in-process locks keep multi-threaded callers within one process from contending on the OS locks | Yes |
 | S3     | `If-None-Match: *` enforced by the store | `If-Match: "<md5-of-wire>"` enforced by the store | Yes (S3 multipart breaks `Match` &mdash; see §6.3) |
 | SSH    | Server-enforced via `expectation = REF_EXPECTATION_MISSING` | Server-enforced via `expectation = REF_EXPECTATION_MATCH` plus 32-byte `expected_id` | Depends on server-side ref-store atomicity |
 
