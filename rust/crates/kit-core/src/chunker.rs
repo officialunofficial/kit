@@ -603,6 +603,10 @@ impl<R: std::io::Read> ChunkReader<R> {
 /// first chunk and ends with `data.len()`. An empty input yields an
 /// empty vector. Used by goldens to pin boundaries deterministically
 /// without exposing the `ChunkBoundary` struct in serialised form.
+///
+/// # Panics
+///
+/// Panics if a cut makes no progress, which the chunker never does.
 #[must_use]
 pub fn chunk_boundaries(data: &[u8]) -> Vec<usize> {
     let cdc = FastCdc::v1();
