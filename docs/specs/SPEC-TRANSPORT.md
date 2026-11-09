@@ -681,6 +681,16 @@ driver MUST request a reset only when one of these holds:
   closure of `h`, so the old head stays reconstructable between the two
   writes and after a crash between them.
 
+A push plans its packs against the head it reads, and leaves out what that
+head holds. A push conditioned on `Missing` or `Match` MUST plan only
+against a head its condition holds for. When the head it reads fails the
+condition, the push is refused as a non-fast-forward before it plans,
+unless that head is already the new head, in which case an earlier
+attempt landed and the push writes nothing. A condition that differs from
+the planned head could hold again after the head moves away and back while
+a reset drops what the plan left out, and the advance would then publish a
+head its chain cannot reconstruct, on every kind of advance.
+
 A force push (`Any`) never requests a reset. On a serialized or an atomic
 advance it uses the guarded force driver: it conditions the packmap write
 on the chain its plan read, and plans again when that chain no longer
