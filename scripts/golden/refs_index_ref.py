@@ -143,6 +143,12 @@ def main():
         re.fullmatch(rb"ref: refs/heads/[0-9A-Za-z._-]+\n", files["head_symbolic"]) is not None,
         "head_symbolic does not match the HEAD grammar",
     )
+    pull = files["pull_state"]
+    expect(re.fullmatch(rb"[0-9a-f]{64}\n[0-9a-f]{64}\n", pull) is not None,
+           "pull_state must contain exactly two canonical ref records")
+    expect(pull == blake3(b"refs-index-pull-target").hex().encode() + b"\n"
+           + blake3(b"refs-index-pull-before-tree").hex().encode() + b"\n",
+           "pull_state differs from the pinned target and pre-pull tree")
     if o.FAILURES:
         sys.exit(1)
     print("OK")

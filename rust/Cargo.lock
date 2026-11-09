@@ -2266,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "kit-attest"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -2289,7 +2289,7 @@ dependencies = [
 
 [[package]]
 name = "kit-benches"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "blake2",
  "criterion",
@@ -2308,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "kit-bin"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "assert_cmd",
  "assert_fs",
@@ -2365,7 +2365,7 @@ dependencies = [
 
 [[package]]
 name = "kit-client"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "base64 0.23.1",
  "buffa",
@@ -2381,7 +2381,7 @@ dependencies = [
 
 [[package]]
 name = "kit-core"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "bao",
  "blake3",
@@ -2407,7 +2407,7 @@ dependencies = [
 
 [[package]]
 name = "kit-formal-conformance"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "kit-core",
  "kit-transport-file",
@@ -2440,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "kit-git-bridge"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "flate2",
  "kit-core",
@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "kit-keystore"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -2471,7 +2471,7 @@ dependencies = [
 
 [[package]]
 name = "kit-rpc"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "arbitrary",
  "buffa",
@@ -2485,7 +2485,7 @@ dependencies = [
 
 [[package]]
 name = "kit-serve"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "kit-core",
  "kit-rpc",
@@ -2495,7 +2495,7 @@ dependencies = [
 
 [[package]]
 name = "kit-sign-file"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "buffa",
  "kit-attest",
@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "kit-sync"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "base64 0.23.1",
  "buffa",
@@ -2538,11 +2538,11 @@ dependencies = [
 
 [[package]]
 name = "kit-test-util"
-version = "0.7.2"
+version = "0.7.3"
 
 [[package]]
 name = "kit-transport-connect"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "base64 0.23.1",
  "buffa",
@@ -2576,7 +2576,7 @@ dependencies = [
 
 [[package]]
 name = "kit-transport-file"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "kit-core",
  "libc",
@@ -2585,14 +2585,14 @@ dependencies = [
 
 [[package]]
 name = "kit-transport-memory"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "kit-core",
 ]
 
 [[package]]
 name = "kit-transport-s3"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "hex",
  "hmac",
@@ -2606,7 +2606,7 @@ dependencies = [
 
 [[package]]
 name = "kit-transport-ssh"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "buffa",
  "kit-core",
@@ -2616,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "kit-wasm"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "bao",
  "base64 0.23.1",
@@ -2662,7 +2662,7 @@ dependencies = [
 
 [[package]]
 name = "libkit"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
@@ -3520,9 +3520,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.8.0"
+version = "3.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8be15815186873ea063bf005011d16c356804973489e40c39116ae3a2878d1f"
+checksum = "d24a7e92f4bcaa36b97fa93c4fa7ca8f3e669eced949345b3462dba333c7f909"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3540,6 +3540,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "sse-stream",
  "thiserror",
  "tokio",
@@ -3944,9 +3945,9 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-hook"
-version = "0.4.5"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b29ffa27d3d59a049bb328258de100f8012848d1b08d444e08bbc02ac468435e"
+checksum = "49f7447afd772ca79ad17ae0a3972a6b0df0cb4b80990fd82707593e9e012a74"
 dependencies = [
  "libc",
  "signal-hook-registry",

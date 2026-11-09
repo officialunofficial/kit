@@ -1,11 +1,14 @@
 //! Pulling: fetch, then fast-forward the local branch, HEAD and worktree.
 
+use std::fs;
 use std::path::Path;
 
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
-use kit_core::ops::merge::is_ancestor;
+use kit_core::ops::graph::AncestorError;
+use kit_core::ops::merge::is_ancestor_strict;
+use kit_core::ops::pull_state::PullState;
 use kit_core::refs::{self, Head};
 use kit_core::store::ObjectStore;
 
@@ -84,54 +87,65 @@ pub fn pull(
     observer: &dyn Observer<SyncEvent>,
 ) -> Result<PullReport, SyncError> {
     let layout = kit_core::layout::discover(dir)?;
+    if matches!(refs::read_head(&layout), Ok(Head::Detached(_))) {
+        return Err(SyncError::DetachedHead);
+    }
     let store = open_store(&layout, options)?;
     let fetch = fetch_objects(&store, &layout, source, observer, remote, options)?;
     let remote_refs = list_remote_refs_parallel(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
         .collect::<Vec<_>>();
+    let _lock = acquire_worktree_lock(&layout, observer)?;
+    let pending = PullState::read(&layout)?;
+    let original_head = refs::read_head(&layout).ok();
+    if matches!(original_head, Some(Head::Detached(_))) {
+        return Err(SyncError::DetachedHead);
+    }
     if remote_refs.is_empty() {
+        if pending.is_some() {
+            return Err(SyncError::RestoreSafety("unfinished pull cannot recover without a remote branch; restore the remote branch, then pull again".to_owned()));
+        }
         return Ok(PullReport {
             fetch,
             outcome: PullOutcome::NoRemoteBranches,
         });
     }
 
-    let _lock = acquire_worktree_lock(&layout, observer)?;
-    let target_branch = options.target_branch.as_deref();
-    let original_head = refs::read_head(&layout).ok();
-    let (branch, local_tip, remote_tip) = match &original_head {
-        Some(Head::Branch(head_branch)) => {
-            let want_branch = target_branch.unwrap_or(head_branch.as_str());
-            let local_tip = refs::read_ref(&layout, want_branch)?;
-            let selected = if local_tip.is_some() || target_branch.is_some() {
-                // An explicit target (or an already-committed local branch of
-                // that name) must match exactly: no silent fallback to a
-                // different branch.
-                remote_refs
-                    .iter()
-                    .find(|(name, _)| name == want_branch)
-                    .ok_or_else(|| SyncError::RemoteBranchMissing(want_branch.to_owned()))?
-            } else {
-                remote_refs
-                    .iter()
-                    .find(|(name, _)| name == want_branch)
-                    .unwrap_or(&remote_refs[0])
-            };
-            (selected.0.clone(), local_tip, selected.1)
-        }
-        Some(Head::Detached(_)) => return Err(SyncError::DetachedHead),
-        None => (remote_refs[0].0.clone(), None, remote_refs[0].1),
-    };
+    let (branch, local_tip, remote_tip) = select_branch(
+        &layout,
+        original_head.as_ref(),
+        options.target_branch.as_deref(),
+        &remote_refs,
+    )?;
 
+    let restored = resume_pull(&layout, &store, &branch, pending, local_tip)?;
+    let original_head = refs::read_head(&layout).ok();
     let ref_condition = if let Some(local_tip) = local_tip {
         if local_tip == remote_tip {
             return Ok(PullReport {
                 fetch,
-                outcome: PullOutcome::UpToDate { branch },
+                outcome: if restored {
+                    PullOutcome::FastForwarded {
+                        branch,
+                        old: Some(local_tip),
+                        new: remote_tip,
+                    }
+                } else {
+                    PullOutcome::UpToDate { branch }
+                },
             });
         }
-        if !is_ancestor(&store, local_tip, remote_tip)? {
+        // A missing commit would read as "not a fast-forward", so the walk
+        // reads every commit and names the one it cannot read.
+        let fast_forward =
+            is_ancestor_strict(&store, local_tip, remote_tip).map_err(|e| match e {
+                AncestorError::Unreadable { source, .. } | AncestorError::Limit(source) => {
+                    SyncError::Store(source)
+                }
+                AncestorError::NotACommit(_) => SyncError::NotCommit,
+            })?;
+        if !fast_forward {
             return Err(SyncError::NonFastForwardPull { branch });
         }
         refs::RefWriteCondition::Match(local_tip)
@@ -141,10 +155,18 @@ pub fn pull(
 
     let tree = load_tree_hash(&store, remote_tip)?;
     ensure_restore_safe(&layout, &store, tree).map_err(SyncError::RestoreSafety)?;
+    if observer.cancelled() {
+        return Err(SyncError::Interrupted);
+    }
+    write_pull_head(&layout, &store, remote_tip)?;
     write_ref_recording_history(&layout, &branch, ref_condition, &remote_tip)?;
     if let Err(e) = refs::write_head_branch(&layout, &branch) {
         rollback_pull_ref(&layout, &branch, local_tip, remote_tip)?;
+        clear_pull_head(&layout)?;
         return Err(e.into());
+    }
+    if observer.cancelled() {
+        return Err(SyncError::Interrupted);
     }
     if let Err(e) = restore_worktree_and_index(&layout, &store, tree) {
         if let Err(rollback) =
@@ -154,8 +176,10 @@ pub fn pull(
                 "{e}; additionally failed to roll back ref: {rollback}"
             )));
         }
+        clear_pull_head(&layout)?;
         return Err(SyncError::RestoreSafety(e));
     }
+    clear_pull_head(&layout)?;
     Ok(PullReport {
         fetch,
         outcome: PullOutcome::FastForwarded {
@@ -224,4 +248,206 @@ fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, SyncEr
         Object::Remix(r) => Ok(r.tree_hash),
         _ => Err(SyncError::NotCommit),
     }
+}
+
+fn select_branch(
+    layout: &RepoLayout,
+    head: Option<&Head>,
+    target_branch: Option<&str>,
+    remote_refs: &[(String, Hash)],
+) -> Result<(String, Option<Hash>, Hash), SyncError> {
+    let selected = match head {
+        Some(Head::Branch(head_branch)) => {
+            let want = target_branch.unwrap_or(head_branch);
+            let local = refs::read_ref(layout, want)?;
+            let selected = remote_refs.iter().find(|(name, _)| name == want);
+            if local.is_some() || target_branch.is_some() {
+                selected.ok_or_else(|| SyncError::RemoteBranchMissing(want.to_owned()))?
+            } else {
+                selected.unwrap_or(&remote_refs[0])
+            }
+        }
+        Some(Head::Detached(_)) => return Err(SyncError::DetachedHead),
+        None => &remote_refs[0],
+    };
+    // The selected branch may differ from the unborn branch named by HEAD.
+    Ok((
+        selected.0.clone(),
+        refs::read_ref(layout, &selected.0)?,
+        selected.1,
+    ))
+}
+
+fn resume_pull(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    branch: &str,
+    pending: Option<PullState>,
+    local_tip: Option<Hash>,
+) -> Result<bool, SyncError> {
+    let Some(state) = pending else {
+        return Ok(false);
+    };
+    let tip = state.target;
+    let head_tip = refs::resolve_head(layout)?;
+    if head_tip != Some(tip) && local_tip != Some(tip) {
+        clear_pull_head(layout)?;
+        return Ok(false);
+    }
+    let tree = load_tree_hash(store, tip)?;
+    ensure_pull_restore_safe(layout, store, tree, state.before_tree)
+        .map_err(SyncError::RestoreSafety)?;
+    if head_tip != Some(tip) {
+        refs::write_head_branch(layout, branch)?;
+    }
+    restore_worktree_and_index(layout, store, tree).map_err(SyncError::RestoreSafety)?;
+    clear_pull_head(layout)?;
+    Ok(true)
+}
+
+// Each path may still contain the old index entry or an already-restored target
+// entry. Anything else is local work. The clean restore also requires that no
+// untracked, unignored path would be swept away.
+fn ensure_pull_restore_safe(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree: Hash,
+    before_tree: Hash,
+) -> Result<(), String> {
+    use crate::worktree::{collect_worktree_paths, is_ignored_worktree_path};
+    use kit_core::ops::diff::diff_trees;
+    use kit_core::worktree;
+
+    let index = kit_core::index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
+    let snapshot = kit_core::store::EphemeralSink::new(store);
+    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &index, false)
+        .map_err(|e| format!("index tree: {e}"))?;
+    if index_tree != before_tree && index_tree != tree {
+        return Err("pull recovery would overwrite staged changes; copy staged work elsewhere before discarding it with `kit checkout -f <branch>`, then pull again".to_owned());
+    }
+    let old = kit_core::index::from_tree(store, before_tree)
+        .map_err(|e| format!("pre-pull index: {e}"))?;
+    let target =
+        kit_core::index::from_tree(store, tree).map_err(|e| format!("target index: {e}"))?;
+    let mut tracked = old.clone();
+    for entry in &target.entries {
+        tracked.upsert_entry(entry.clone());
+    }
+    for entry in &mut tracked.entries {
+        entry.mtime_ns = 0;
+    }
+    let root = layout.worktree_root();
+    let ignore = kit_core::ignore::load(root).map_err(|e| format!("read ignore file: {e}"))?;
+    let mut paths = Vec::new();
+    collect_worktree_paths(root, root, "", &mut paths).map_err(|e| format!("check paths: {e}"))?;
+    let temporary_paths: std::collections::HashSet<_> = paths
+        .iter()
+        .filter(|path| is_restore_temp(root, &tracked, path))
+        .cloned()
+        .collect();
+    if let Some(path) = paths.iter().find(|path| {
+        !tracked.tracks_path_or_descendant(path)
+            && !temporary_paths.contains(*path)
+            && Path::new(path)
+                .ancestors()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .any(|parent| {
+                    let name = parent.to_str().expect("collected UTF-8 path");
+                    target.has_tracked_file_at(name)
+                        || (!target.tracks_path_or_descendant(name)
+                            && parent
+                                .file_name()
+                                .is_none_or(|name| name != ".kitignore" && name != ".gitignore")
+                            && !is_ignored_worktree_path(root, &ignore, name))
+                })
+    }) {
+        return Err(format!(
+            "pull recovery would remove untracked path '{path}'; move or remove it, then pull again"
+        ));
+    }
+    // The union can contain a former file and a target descendant. Keeping
+    // that file in the snapshot index would hide the whole directory.
+    let directories: std::collections::HashSet<_> = old
+        .entries
+        .iter()
+        .chain(&target.entries)
+        .flat_map(|entry| Path::new(&entry.path).ancestors().skip(1))
+        .filter_map(|parent| parent.to_str())
+        .filter(|parent| !parent.is_empty())
+        .collect();
+    tracked.retain_entries(|entry| !directories.contains(entry.path.as_str()));
+    let current = worktree::build_tree_filtered_observed_with_source(
+        &snapshot,
+        &snapshot,
+        root,
+        Some(&tracked),
+        &mut Vec::new(),
+    )
+    .map_err(|e| format!("working tree: {e}"))?;
+    let from_old =
+        diff_trees(&snapshot, Some(before_tree), Some(current)).map_err(|e| e.to_string())?;
+    let from_target =
+        diff_trees(&snapshot, Some(tree), Some(current)).map_err(|e| e.to_string())?;
+    let changed: std::collections::HashSet<_> = from_target
+        .entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    if let Some(entry) = from_old.entries.iter().find(|entry| {
+        changed.contains(entry.path.as_str())
+            && !temporary_paths.contains(&entry.path)
+            && !(entry.kind == kit_core::ops::diff::DiffKind::Added
+                && (entry.path == ".kitignore" || entry.path == ".gitignore")
+                && !target.has_tracked_file_at(&entry.path))
+    }) {
+        return Err(format!(
+            "pull recovery would overwrite local changes at '{}'; copy it elsewhere or run `kit restore -f <path>`, then pull again",
+            entry.path
+        ));
+    }
+    Ok(())
+}
+
+fn write_pull_head(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    target: Hash,
+) -> Result<(), SyncError> {
+    let index = crate::worktree::read_or_seed_index_from_head(layout, store)
+        .map_err(SyncError::RestoreSafety)?;
+    let before_tree = kit_core::worktree::build_tree_from_index_with(store, store, &index, false)
+        .map_err(|e| SyncError::RestoreSafety(e.to_string()))?;
+    crate::applied_packs::write_atomic(
+        &layout.pull_head_file(),
+        &PullState {
+            target,
+            before_tree,
+        }
+        .encode(),
+    )?;
+    Ok(())
+}
+
+fn is_restore_temp(root: &Path, tracked: &kit_core::index::Index, path: &str) -> bool {
+    if tracked.tracks_path_or_descendant(path) {
+        return false;
+    }
+    let path = Path::new(path);
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(sibling) = kit_core::ops::restore::restore_temp_sibling(name) else {
+        return false;
+    };
+    let sibling = path.with_file_name(sibling);
+    sibling
+        .to_str()
+        .is_some_and(|sibling| tracked.has_tracked_file_at(sibling))
+        && fs::symlink_metadata(root.join(path)).is_ok_and(|meta| meta.is_file())
+}
+
+fn clear_pull_head(layout: &RepoLayout) -> Result<(), SyncError> {
+    fs::remove_file(layout.pull_head_file())?;
+    crate::applied_packs::sync_parent_dir(layout.worktree_state_dir())?;
+    Ok(())
 }

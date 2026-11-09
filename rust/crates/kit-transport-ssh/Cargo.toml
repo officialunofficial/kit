@@ -21,8 +21,8 @@ workspace = true
 [dependencies]
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it.
-kit-core = { version = "=0.7.2", path = "../kit-core" }
-kit-rpc = { version = "=0.7.2", path = "../kit-rpc" }
+kit-core = { version = "=0.7.3", path = "../kit-core" }
+kit-rpc = { version = "=0.7.3", path = "../kit-rpc" }
 buffa = "0.9.2"
 thiserror = "2.0.21"
 

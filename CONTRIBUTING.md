@@ -94,7 +94,7 @@ is a full version and equals the version in `Cargo.lock`. Do not write `=`,
 `*`, `~` or a short version such as `"1.2"`.
 
 All kit crates share one version. Each kit-* requirement is exact, such as
-`"=0.7.2"`, and has a `path`. A dependency with a `path` and no version is valid
+`"=0.7.3"`, and has a `path`. A dependency with a `path` and no version is valid
 only in `dev-dependencies` or in a crate with `publish = false`.
 
 The rules cover every manifest, including binary, fuzz and bench crates.

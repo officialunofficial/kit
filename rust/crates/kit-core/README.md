@@ -34,6 +34,9 @@ each pulls in.
 
 `ops::{merge_trees, revert, cherry_pick}` accept any `ObjectSource + ObjectSink`.
 `find_merge_base`, `is_ancestor` and `collect_ancestor_set` only need reads.
+They end a path at a missing object, for push and its shallow boundaries;
+`find_merge_base_strict` and `is_ancestor_strict` fail with an error that names
+the commit instead.
 Successful sink writes must be immediately readable by that source. Existing
 `ObjectStore` calls work unchanged. The caller owns signing, refs, locks,
 conflict handling and publication; rebase workflow remains separate.

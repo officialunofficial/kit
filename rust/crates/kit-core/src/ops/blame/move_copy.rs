@@ -75,7 +75,8 @@ use super::{
 use crate::hash::Hash;
 use crate::object::{EntryMode, Object};
 use crate::ops::diff::diff_trees;
-use crate::ops::is_ancestor;
+use crate::ops::graph::AncestorError;
+use crate::ops::is_ancestor_strict;
 use crate::store::ObjectStore;
 
 /// Past this many unmatched lines in one run, only the whole run is tried
@@ -131,7 +132,7 @@ pub(super) struct Detector<'a> {
     /// (expensive; built only once a candidate actually matches a block).
     attrs_cache: HashMap<(Hash, String), Vec<Attribution>>,
     /// (ancestor, descendant) → ancestry result, memoizing the copy
-    /// tie-break's `is_ancestor` DAG walks so a duplicated block that ties
+    /// tie-break's `is_ancestor_strict` DAG walks so a duplicated block that ties
     /// at many start positions doesn't re-walk history each time.
     ancestry_cache: HashMap<(Hash, Hash), bool>,
 }
@@ -179,14 +180,21 @@ impl<'a> Detector<'a> {
         }
     }
 
-    /// Memoized [`is_ancestor`] for the copy tie-break. An incomparable pair
-    /// (parallel branches) walks the whole reachable DAG to return `false`,
-    /// so caching matters when a duplicated block ties repeatedly.
+    /// Memoized [`is_ancestor_strict`] for the copy tie-break. An
+    /// incomparable pair (parallel branches) walks the whole reachable DAG to
+    /// return `false`, so caching matters when a duplicated block ties
+    /// repeatedly. A missing commit would turn "ancestor" into "not an
+    /// ancestor" and pick the wrong origin, so the walk reads every commit.
     fn is_ancestor_cached(&mut self, ancestor: Hash, descendant: Hash) -> BlameOutcome<bool> {
         if let Some(&v) = self.ancestry_cache.get(&(ancestor, descendant)) {
             return Ok(v);
         }
-        let v = is_ancestor(self.store, ancestor, descendant)?;
+        let v = is_ancestor_strict(self.store, ancestor, descendant).map_err(|e| match e {
+            AncestorError::Unreadable { source, .. } | AncestorError::Limit(source) => {
+                BlameError::Store(source)
+            }
+            AncestorError::NotACommit(_) => BlameError::NotACommit,
+        })?;
         self.ancestry_cache.insert((ancestor, descendant), v);
         Ok(v)
     }
@@ -690,4 +698,53 @@ fn commit_tree(store: &ObjectStore, commit: Hash) -> BlameOutcome<Hash> {
         return Err(BlameError::NotACommit);
     };
     Ok(c.tree_hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::layout::RepoLayout;
+    use crate::object::{Commit, Identity};
+
+    /// The copy tie-break reads every commit of its ancestry walk. Without
+    /// `mid` a lenient walk answers "not an ancestor" and the tie-break would
+    /// pick the wrong origin.
+    #[test]
+    fn the_tie_break_fails_on_a_missing_commit() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let mut chain: Vec<Hash> = Vec::new();
+        for ts in 0..3u64 {
+            let commit = Commit::new_unannotated(
+                [0; 32],
+                chain.last().copied().into_iter().collect(),
+                Identity::ed25519([0; 32]),
+                [0; 32],
+                b"msg".to_vec(),
+                ts,
+                [0; 64],
+            );
+            let bytes = crate::serialize::serialize(&Object::Commit(commit)).unwrap();
+            chain.push(store.write(&bytes).unwrap());
+        }
+        let [root, mid, tip] = [chain[0], chain[1], chain[2]];
+        let opts = BlameOptions::default();
+        assert!(
+            Detector::new(&store, &opts)
+                .is_ancestor_cached(root, tip)
+                .unwrap()
+        );
+
+        let hex = crate::hash::to_hex(&mid);
+        fs::remove_file(layout.objects_dir().join(&hex[..2]).join(&hex[2..])).unwrap();
+        let err = Detector::new(&store, &opts)
+            .is_ancestor_cached(root, tip)
+            .unwrap_err();
+        assert!(err.to_string().contains(&hex), "{err}");
+    }
 }
