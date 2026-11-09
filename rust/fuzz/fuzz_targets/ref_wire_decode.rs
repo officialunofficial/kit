@@ -1,5 +1,5 @@
 //! cargo-fuzz target — ref file wire decoder (`ref_wire_decode`). See sibling `delta.rs` for guardrail
-//! rationale. Invariant: no panic, and an accepted hash survives an encode and decode round trip.
+//! rationale. Includes pull records and restore temporary sibling names. Invariant: no panic, and an accepted hash survives an encode and decode round trip.
 
 #![no_main]
 #![cfg(feature = "libfuzzer")]

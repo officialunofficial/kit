@@ -1451,7 +1451,8 @@ pub fn envelope_decode_one_iteration(input: &[u8]) {
 
 /// Ref file wire decoder (`ref_wire_decode`): `decode_ref_wire` and
 /// `parse_lowercase_hash` never panic, and an accepted hash survives an
-/// encode and decode round trip.
+/// encode and decode round trip. Also covers the pull record and the restore
+/// temporary sibling parser; canonical records round-trip byte for byte.
 pub fn ref_wire_decode_one_iteration(input: &[u8]) {
     use kit_core::refs::{decode_ref_wire, encode_ref_wire, parse_lowercase_hash};
     let input = &input[..input.len().min(MAX_INPUT)];
@@ -1463,6 +1464,38 @@ pub fn ref_wire_decode_one_iteration(input: &[u8]) {
             parse_lowercase_hash(kit_core::to_hex(&h).as_bytes()),
             Some(h)
         );
+    }
+    let state = kit_core::ops::pull_state::PullState {
+        target: kit_core::hash::hash(input),
+        before_tree: kit_core::hash::hash(&input[..input.len() / 2]),
+    };
+    assert_eq!(
+        kit_core::ops::pull_state::PullState::decode(&state.encode()),
+        Some(state)
+    );
+    let temporary = format!(
+        ".a.tmp.{}.{}",
+        input.len(),
+        input.first().copied().unwrap_or(0)
+    );
+    assert_eq!(
+        kit_core::ops::restore::restore_temp_sibling(&temporary),
+        Some("a")
+    );
+    if let Some(state) = kit_core::ops::pull_state::PullState::decode(input) {
+        assert_eq!(state.encode().as_slice(), input);
+        assert_eq!(
+            kit_core::ops::pull_state::PullState::decode(&state.encode()),
+            Some(state)
+        );
+    }
+    if let Ok(name) = std::str::from_utf8(input)
+        && let Some(sibling) = kit_core::ops::restore::restore_temp_sibling(name)
+    {
+        assert!(kit_core::object::TreeEntry::validate_name(
+            sibling.as_bytes()
+        ));
+        assert!(name.starts_with(&format!(".{sibling}.tmp.")));
     }
 }
 
