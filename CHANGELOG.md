@@ -37,6 +37,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is inside one root. Writes to one ref still serialize, and `FileTransport::with_ref_lock` still excludes
   every ref write. `FileTransport::with_ref_lock_for` is the single-ref
   entry point.
+- Batched object writes, such as `kit add`, start each object's write
+  barrier on a background pool as soon as the object is staged. Before, every
+  barrier waited for commit. The device wait now overlaps chunking and
+  hashing. Objects still become visible only after the batch's full flush.
+- FastCDC cuts chunks on up to 8 threads. The boundaries are byte-identical
+  to the single-threaded chunker, so the object format does not change.
 - The file transport advances a branch head and its packmap under the locks
   of both refs (SPEC-REFS §5.1.1). It checks both conditions before it
   writes either, so a conflict changes nothing, and it puts the packmap back
