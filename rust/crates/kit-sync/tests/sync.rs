@@ -1221,6 +1221,75 @@ fn checkpoint_file(target: &Path) -> std::path::PathBuf {
     .path()
 }
 
+/// A source that names no repository, such as the ssh transport, keeps no
+/// checkpoint, so an unchanged fetch lists once, then reads each branch's
+/// packmap and downloads every node of its pack list again. SPEC-TRANSPORT
+/// §4.4 derives what fits in one `kit serve` session from this count.
+#[test]
+fn an_unchanged_fetch_from_an_unnamed_source_walks_each_pack_list() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"1")], true);
+    let source = remote.source();
+    let counted = CountingSource::new(&source);
+    assert!(counted.address.is_none());
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone(
+        &target,
+        &counted,
+        &default_remote("kit+memory://x"),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    counted.take();
+    let node = |h: Hash| format!("Node {}", hash::to_hex(&h));
+
+    let head = remote.packmap_head.borrow().unwrap();
+    fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        counted.take(),
+        [
+            "ListRefs".to_owned(),
+            "ReadRef refs/kit/packmap/main".to_owned(),
+            node(head)
+        ]
+    );
+
+    remote.publish(Some(first), &[("a", b"2")], true);
+    fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    counted.take();
+    fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let calls = counted.take();
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert_eq!(calls[..2], ["ListRefs", "ReadRef refs/kit/packmap/main"]);
+    assert!(
+        calls[2..].iter().all(|c| c.starts_with("Node ")),
+        "{calls:?}"
+    );
+}
+
 #[test]
 fn incremental_pull_counts_and_rebaseline_fallback() {
     let remote = Remote::new();

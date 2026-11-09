@@ -63,5 +63,19 @@ fn bench_ignore_match(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_ignore_match);
+fn bench_ignore_ancestors(c: &mut Criterion) {
+    let list = parse(PATTERNS);
+    let paths = paths();
+    c.bench_function("ignore_match/with_ancestors", |b| {
+        b.iter(|| {
+            let mut hits = 0usize;
+            for p in &paths {
+                hits += usize::from(list.is_ignored_with_ancestors(black_box(p), false));
+            }
+            hits
+        });
+    });
+}
+
+criterion_group!(benches, bench_ignore_match, bench_ignore_ancestors);
 criterion_main!(benches);

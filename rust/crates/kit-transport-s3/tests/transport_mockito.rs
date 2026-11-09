@@ -568,55 +568,41 @@ fn list_refs_200_parses_xml_and_sorts() {
     assert_eq!(refs[1].hash.unwrap(), h_zebra);
 }
 
-/// SPEC-REFS §1: `list_refs` resolves each key with the same
-/// strict parser as `read_ref`. A malformed body (uppercase hex, CRLF)
-/// is skipped — mirroring the file transport, which drops undecodable
-/// ref files from listings — while valid entries are still returned.
+/// SPEC-REFS §1: `list_refs` resolves each key with the same strict
+/// parser as `read_ref`. A listed ref whose read returns 200 with a body
+/// that is not a canonical 65-byte ref wire fails the whole listing, as
+/// an error status does: dropping the ref would hand a fetch a listing
+/// without that branch.
 #[test]
-fn list_refs_skips_non_canonical_ref_bodies() {
-    let mut server = mockito::Server::new();
-
-    let xml = br#"<ListBucketResult>
-        <Contents><Key>refs/heads/crlf</Key></Contents>
-        <Contents><Key>refs/heads/good</Key></Contents>
-        <Contents><Key>refs/heads/upper</Key></Contents>
-    </ListBucketResult>"#;
-    let _m_list = server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(r"/bucket\?list-type=2".into()),
-        )
-        .with_status(200)
-        .with_body(xml)
-        .create();
-
-    let h_good = [0x01u8; 32];
-    let mut body_good = to_hex(&h_good).into_bytes();
-    body_good.push(b'\n');
-    let body_upper = format!("{}\n", to_hex(&[0xABu8; 32]).to_uppercase()).into_bytes();
-    let body_crlf = format!("{}\r\n", to_hex(&[0x03u8; 32])).into_bytes();
-
-    let _m_good = server
-        .mock("GET", "/bucket/refs/heads/good")
-        .with_status(200)
-        .with_body(body_good)
-        .create();
-    let _m_upper = server
-        .mock("GET", "/bucket/refs/heads/upper")
-        .with_status(200)
-        .with_body(body_upper)
-        .create();
-    let _m_crlf = server
-        .mock("GET", "/bucket/refs/heads/crlf")
-        .with_status(200)
-        .with_body(body_crlf)
-        .create();
-
-    let t = build_transport(&server.url());
-    let refs = t.list_refs("refs/heads/").unwrap();
-    assert_eq!(refs.len(), 1);
-    assert_eq!(refs[0].name, "good");
-    assert_eq!(refs[0].hash.unwrap(), h_good);
+fn list_refs_fails_on_a_non_canonical_ref_body() {
+    let malformed: [Vec<u8>; 4] = [
+        format!("{}\n", to_hex(&[0xABu8; 32]).to_uppercase()).into_bytes(),
+        format!("{}\r\n", to_hex(&[0x03u8; 32])).into_bytes(),
+        to_hex(&[0x04u8; 32]).into_bytes(),
+        b"deadbeef\n".to_vec(),
+    ];
+    for body in malformed {
+        let mut server = mockito::Server::new();
+        let names = vec!["bad".to_owned(), "good".to_owned()];
+        let _list = mock_listing(&mut server, &names);
+        let _good = server
+            .mock("GET", "/bucket/refs/heads/good")
+            .with_status(200)
+            .with_body(ref_body(&[0x01u8; 32]))
+            .create();
+        let _bad = server
+            .mock("GET", "/bucket/refs/heads/bad")
+            .with_status(200)
+            .with_body(body.clone())
+            .create();
+        let t = build_transport(&server.url());
+        let got = t.list_refs("refs/heads/");
+        assert!(
+            matches!(got, Err(TransportError::InvalidResponse)),
+            "body {:?} must fail the listing, got {got:?}",
+            String::from_utf8_lossy(&body)
+        );
+    }
 }
 
 #[test]
@@ -979,4 +965,139 @@ fn redirects_are_not_followed() {
         Err(TransportError::ServerError { status: 307 })
     ));
     evil.assert();
+}
+
+// -- list_refs: one ref read per listed key ------------------------------------
+
+/// A ListObjectsV2 body naming `names` under `refs/heads/`.
+fn listing_xml(names: &[String]) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let mut xml = String::from("<ListBucketResult>");
+    for n in names {
+        let _ = write!(xml, "<Contents><Key>refs/heads/{n}</Key></Contents>");
+    }
+    xml.push_str("</ListBucketResult>");
+    xml.into_bytes()
+}
+
+fn ref_body(h: &Hash) -> Vec<u8> {
+    let mut body = to_hex(h).into_bytes();
+    body.push(b'\n');
+    body
+}
+
+fn mock_listing(server: &mut mockito::Server, names: &[String]) -> mockito::Mock {
+    server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"/bucket\?list-type=2".into()),
+        )
+        .with_status(200)
+        .with_body(listing_xml(names))
+        .expect(1)
+        .create()
+}
+
+#[test]
+fn list_refs_reads_each_listed_ref_once_and_keeps_the_order() {
+    let mut server = mockito::Server::new();
+    let names: Vec<String> = (0..40).map(|i| format!("b{i:02}")).collect();
+    let list = mock_listing(&mut server, &names);
+    let reads: Vec<_> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            server
+                .mock("GET", format!("/bucket/refs/heads/{n}").as_str())
+                .with_status(200)
+                .with_body(ref_body(&[u8::try_from(i).unwrap() + 1; 32]))
+                .expect(1)
+                .create()
+        })
+        .collect();
+    let t = build_transport(&server.url());
+    let refs = t.list_refs("refs/heads/").unwrap();
+    let got: Vec<(String, Hash)> = refs
+        .into_iter()
+        .map(|r| (r.name, r.hash.unwrap()))
+        .collect();
+    let want: Vec<(String, Hash)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), [u8::try_from(i).unwrap() + 1; 32]))
+        .collect();
+    assert_eq!(got, want);
+    list.assert();
+    for m in reads {
+        m.assert();
+    }
+}
+
+#[test]
+fn list_refs_fails_when_a_listed_ref_read_fails() {
+    let mut server = mockito::Server::new();
+    let names: Vec<String> = ["a", "b", "c"].iter().map(|s| (*s).to_owned()).collect();
+    let _list = mock_listing(&mut server, &names);
+    for n in ["a", "c"] {
+        server
+            .mock("GET", format!("/bucket/refs/heads/{n}").as_str())
+            .with_status(200)
+            .with_body(ref_body(&sample_hash()))
+            .create();
+    }
+    let _broken = server
+        .mock("GET", "/bucket/refs/heads/b")
+        .with_status(500)
+        .create();
+    let t = build_transport(&server.url());
+    assert!(
+        matches!(
+            t.list_refs("refs/heads/"),
+            Err(TransportError::ServerError { status: 500 })
+        ),
+        "a failed ref read must fail the listing, not drop the ref"
+    );
+}
+
+#[test]
+fn list_refs_fails_when_a_listed_ref_read_is_denied() {
+    let mut server = mockito::Server::new();
+    let names = vec!["a".to_owned(), "b".to_owned()];
+    let _list = mock_listing(&mut server, &names);
+    let _a = server
+        .mock("GET", "/bucket/refs/heads/a")
+        .with_status(200)
+        .with_body(ref_body(&sample_hash()))
+        .create();
+    let _b = server
+        .mock("GET", "/bucket/refs/heads/b")
+        .with_status(403)
+        .create();
+    let t = build_transport(&server.url());
+    assert!(matches!(
+        t.list_refs("refs/heads/"),
+        Err(TransportError::AccessDenied)
+    ));
+}
+
+/// A ref deleted between the listing and its read is absent, as in an
+/// older listing (SPEC-TRANSPORT-CONNECT §7.9 allows a stale listing).
+#[test]
+fn list_refs_skips_a_ref_deleted_after_the_listing() {
+    let mut server = mockito::Server::new();
+    let names = vec!["a".to_owned(), "gone".to_owned()];
+    let _list = mock_listing(&mut server, &names);
+    let _a = server
+        .mock("GET", "/bucket/refs/heads/a")
+        .with_status(200)
+        .with_body(ref_body(&sample_hash()))
+        .create();
+    let _gone = server
+        .mock("GET", "/bucket/refs/heads/gone")
+        .with_status(404)
+        .create();
+    let t = build_transport(&server.url());
+    let refs = t.list_refs("refs/heads/").unwrap();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, "a");
 }
