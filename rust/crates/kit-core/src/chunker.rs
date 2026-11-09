@@ -354,7 +354,9 @@ impl FastCdc {
         let mut ends = vec![from];
         let mut pos = from;
         while pos < stop && self.cut_is_final(data.len(), pos, eof) {
-            pos += self.cut(&data[pos..]);
+            let length = self.cut(&data[pos..]);
+            assert!(length > 0, "a cut must make progress");
+            pos += length;
             ends.push(pos);
         }
         ends
@@ -421,7 +423,9 @@ impl FastCdc {
                 pos = spec[spec.len() - 1];
                 continue;
             }
-            pos += self.cut(&data[pos..]);
+            let length = self.cut(&data[pos..]);
+            assert!(length > 0, "a cut must make progress");
+            pos += length;
             ends.push(pos);
         }
         (ends, side)
@@ -606,6 +610,7 @@ pub fn chunk_boundaries(data: &[u8]) -> Vec<usize> {
     let mut offset = 0usize;
     while offset < data.len() {
         let len = cdc.cut(&data[offset..]);
+        assert!(len > 0, "a cut must make progress");
         offset += len;
         out.push(offset);
     }
