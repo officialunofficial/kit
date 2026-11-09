@@ -72,15 +72,17 @@ SPEC-CONCURRENCY with a layout server. A layout server is a server that embeds t
   advance checks the head condition and writes the packmap in one step and
   the head in a later one; a crash can stop it between them. `Consistent`
   (the head's closure lies in the chain) holds in every state, so for every
-  reader. A lease push resets only when it fast-forwards the head it
-  conditions on; a force push re-plans when its anchor was reset away. The
-  `advance3_noAncestry` mutant resets any lease push, `advance3_forceOrdered`
-  appends force pushes without the anchor check, and
+  reader. A lease push conditions on its lease, any commit, and plans only
+  when the head it reads equals the lease; it resets only when it
+  fast-forwards that head. A force push re-plans when its anchor was reset
+  away. The `advance3_noAncestry` mutant resets any lease push,
+  `advance3_forceOrdered` appends force pushes without the anchor check,
   `advance3_atomicForceOrdered` shows an atomic advance needs that check
-  too. Abstractions: objects are commits, a pack holds `closure(tip)` minus
-  `closure(planned head)`, the chain depth is free (a push may reset
-  whenever the gate allows), a lease push conditions on the head its plan
-  read, and each pusher makes one push, which may re-plan.
+  too, and `advance3_leaseUnchecked` and `advance3_atomicLeaseUnchecked`
+  plan a lease push against a head that differs from its lease. Abstractions:
+  objects are commits, a pack holds `closure(tip)` minus `closure(planned
+  head)`, the chain depth is free (a push may reset whenever the gate
+  allows), and each pusher makes one push, which may re-plan.
 - **Memory transport**: `kit-transport-memory`'s `update_ref` holds its
   `Mutex` across read-check-write, and SPEC-REFS §5.1 says `atomic*`
   (in-process only). The Safety conjunct `NoLostUpdateMem` covers the race; the race survives as the
@@ -133,8 +135,8 @@ refs or values.
 | TLC | `refs2_collide` Safety and `WitnessStripesOverlap`, slice `file` | same, both refs in one stripe | ok, 277,371 states (the witness is unreachable) |
 | TLC | `refs2_nested` Safety, slice `file` | same, ref 1 named below ref 0, two stripes | ok, 178,671 states |
 | TLC | `refs2_nestedCollide` Safety and `WitnessNestedCreatesOverlap`, slice `file` | same, both names in one stripe | ok, 154,095 states (the witness is unreachable) |
-| TLC | `advance3` Safety | exhaustive: 3 pushers, serialized advance, crashes between the writes | ok, 2,275,988 states |
-| TLC | `advance3_atomic` Safety | exhaustive: 3 pushers, atomic advance | ok, 682,475 states |
+| TLC | `advance3` Safety | exhaustive: 3 pushers, each with any lease, serialized advance, crashes between the writes | ok, 5,011,016 states |
+| TLC | `advance3_atomic` Safety | exhaustive: 3 pushers, atomic advance | ok, 2,307,335 states |
 | TLC | `refs3_wpref` Safety, slice `file3` | 3 processes, ops `file` and `fileTx` on one ref, writer-preferring repo lock | ok, 2,198,691 states |
 | TLC | `refs3_stripeFirstFlock` `NoDeadlock`, slice `file3` | same, flock repo lock, single-ref writes may take the stripe first | ok, 7,902,603 states: with a flock repo lock the opposite order does not deadlock |
 | Apalache 0.62.2 | `refs2` Safety (full op space) | length `REFS_DEPTH` = 8 (~22 min under load) | ok for the model before the stripe locks; not rerun since |
@@ -171,10 +173,12 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 | `served_checkAfterRead` | `RefuseBeforeStorage`, `ExplicitRefusal` | pre-v3 behaviour (answering `main` from storage / as absent) |
 | `served_headCheckedLate` | `RefuseBeforeStorage`, `RefusedWritesNothing` | both AdvanceRefs names must be checked before the first write |
 | `served_listNoSkip` | `ListingServedOnly` | stray refs must be skipped in listings |
-| `advance3_noAncestry` | `Consistent` | a serialized advance must not reset a push that does not fast-forward its lease (TLC: 549 states) |
-| `advance3_forceOrdered` | `Consistent` | a force push appended without the anchor check publishes a head whose objects a reset dropped (TLC: 1,664,415 states) |
-| `advance3_atomicForceOrdered` | `Consistent` | the same on an atomic advance (TLC: 39,903 states) |
-| `advance3` | `CanaryNoReset`, `CanaryNoCrashAfterReset`, `CanaryNoForceReplan` | resets, a crash after a reset, and a force push re-planning are all reached |
+| `advance3_noAncestry` | `Consistent` | a serialized advance must not reset a push that does not fast-forward its lease (TLC: 13,616 states) |
+| `advance3_forceOrdered` | `Consistent` | a force push appended without the anchor check publishes a head whose objects a reset dropped (TLC: 3,974,222 states) |
+| `advance3_atomicForceOrdered` | `Consistent` | the same on an atomic advance (TLC: 783,217 states) |
+| `advance3_leaseUnchecked` | `Consistent` | a lease push planned against a head that differs from its lease lands after the head returns to the lease and a reset drops what the plan left out (TLC: 16,305,652 states) |
+| `advance3_atomicLeaseUnchecked` | `Consistent` | the same on an atomic advance (TLC: 2,005,882 states) |
+| `advance3` | `CanaryNoReset`, `CanaryNoCrashAfterReset`, `CanaryNoForceReplan`, `CanaryNoLeaseRefusal` | resets, a crash after a reset, a force push re-planning and a lease push refused for a differing lease are all reached |
 
 Canaries (`Canary*`, `Witness*` reachability) confirm the interesting
 states are visited: a sweep removes a crashed upload's file, a start skips

@@ -864,8 +864,8 @@ kind, a crash between the two writes, a force push racing a reset, a lease
 that differs from the head the push reads),
 `kit-transport-file` `push_tests` (the advance's crash hook under the push
 driver), CLI `tests/pack_rebaseline.rs`, and the `advance3` models in
-`formal/quint/refs/advance.qnt` (TLC, with mutants `advance3_noAncestry`
-and `advance3_forceOrdered`).
+`formal/quint/refs/advance.qnt` (TLC, with mutants `advance3_noAncestry`,
+`advance3_forceOrdered` and `advance3_leaseUnchecked`).
 
 ## Pack unpack bounds owned payload residency
 

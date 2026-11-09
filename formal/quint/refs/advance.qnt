@@ -12,10 +12,13 @@
 //     advance interleaves, but every state between the writes is visible to
 //     a lock-free reader, and a crash there leaves it for good;
 //   - an atomic advance (`atomic`): both refs in one step;
-//   - the push driver: a lease push plans its pack against the head it
-//     reads and conditions the head write on that head; it re-baselines
-//     (resets the chain to its tip's full closure) only when the gate
-//     allows it. A force push plans against the head it reads and takes the
+//   - the push driver: a lease push conditions the head write on its lease,
+//     a value it tracked earlier, which may differ from the remote head. It
+//     plans its pack only when the head it reads equals the lease, and is
+//     refused otherwise (a head already at its tip landed earlier, and is
+//     refused too: the push writes nothing). It re-baselines (resets the
+//     chain to its tip's full closure) only when the gate allows it. A force
+//     push plans against the head it reads and takes the
 //     guarded force driver: it re-plans when the head moved or a reset
 //     since its plan dropped the chain its plan relied on (the anchor).
 //
@@ -30,8 +33,8 @@
 //     plan's anchor survives while no reset came after it.
 //   - The chain depth is not modelled: whenever the gate allows a reset,
 //     the push may or may not take it.
-//   - A lease push conditions on the head its plan read (the driver reads
-//     the remote head to plan; a stale lease fails the head check).
+//   - A lease is any commit: a stale lease, one from another clone and one
+//     the head returns to later are all covered.
 //   - Each process makes one push, which may re-plan; a failed lease push
 //     stops. Crashing is only modelled between the two writes, the one
 //     place it leaves a state no step would; a crash elsewhere changes
@@ -49,6 +52,7 @@ module twoRefAdvance {
     atomic: bool,       // the transport's advance is atomic, not serialized
     noAncestry: bool,   // MUTANT: a serialized advance resets any lease push
     forceOrdered: bool, // MUTANT: force pushes append on the ordered path, no anchor check
+    leaseUnchecked: bool, // MUTANT: a lease push plans against a head that differs from its lease
   }
 
   const PROCS: Set[Proc]
@@ -72,8 +76,9 @@ module twoRefAdvance {
   var pmv: int                // packmap version (writes so far)
   var lastReset: int          // version of the last reset, 0 if none
   var holder: Proc            // the writer between its two writes, NONE if none
-  var pc: Proc -> str         // fresh | idle | planned | wrote | done | crashed
+  var pc: Proc -> str         // fresh | idle | planned | wrote | done | refused | crashed
   var tip: Proc -> str
+  var lease: Proc -> str      // the head a lease push conditions on
   var force: Proc -> bool
   var planHead: Proc -> str
   var planPm: Proc -> int
@@ -92,6 +97,7 @@ module twoRefAdvance {
     holder' = NONE,
     pc' = PROCS.mapBy(_ => "fresh"),
     tip' = PROCS.mapBy(_ => NONE),
+    lease' = PROCS.mapBy(_ => NONE),
     force' = PROCS.mapBy(_ => false),
     planHead' = PROCS.mapBy(_ => NONE),
     planPm' = PROCS.mapBy(_ => 0),
@@ -102,28 +108,37 @@ module twoRefAdvance {
   action choose(p: Proc): bool = {
     nondet t = COMMITS.oneOf()
     nondet f = Set(false, true).oneOf()
+    nondet l = COMMITS.oneOf()
     all {
       pc.get(p) == "fresh",
       pc' = pc.set(p, "idle"),
       tip' = tip.set(p, t),
+      lease' = lease.set(p, if (f) NONE else l),
       force' = force.set(p, f),
       brHead' = brHead, objs' = objs, pmv' = pmv, lastReset' = lastReset, holder' = holder,
       planHead' = planHead, planPm' = planPm, reset' = reset, replans' = replans,
     }
   }
 
-  // Read the head and the packmap, plan the pack, decide on a reset.
+  // Read the head and the packmap, plan the pack, decide on a reset. A
+  // lease push whose lease differs from the head it reads is refused.
   action plan(p: Proc): bool = {
     nondet r = Set(false, true).oneOf()
-    all {
+    val leased = not(force.get(p))
+    if (leased and not(FAULTS.leaseUnchecked) and brHead != lease.get(p)) all {
       pc.get(p) == "idle",
-      not(r) or (not(force.get(p)) and gate(tip.get(p), brHead)),
+      moveTo(p, "refused"),
+      holder' = holder,
+      replans' = replans,
+    } else all {
+      pc.get(p) == "idle",
+      not(r) or (leased and gate(tip.get(p), lease.get(p))),
       pc' = pc.set(p, "planned"),
       planHead' = planHead.set(p, brHead),
       planPm' = planPm.set(p, pmv),
       reset' = reset.set(p, r),
       brHead' = brHead, objs' = objs, pmv' = pmv, lastReset' = lastReset, holder' = holder,
-      tip' = tip, force' = force, replans' = replans,
+      tip' = tip, lease' = lease, force' = force, replans' = replans,
     }
   }
 
@@ -142,7 +157,7 @@ module twoRefAdvance {
       } else all {
         brHead' = brHead, holder' = p, pc' = pc.set(p, "wrote"),
       },
-      tip' = tip, force' = force, planHead' = planHead, planPm' = planPm,
+      tip' = tip, lease' = lease, force' = force, planHead' = planHead, planPm' = planPm,
       reset' = reset, replans' = replans,
     }
   }
@@ -151,7 +166,8 @@ module twoRefAdvance {
   action moveTo(p: Proc, state: str): bool = all {
     pc' = pc.set(p, state),
     brHead' = brHead, objs' = objs, pmv' = pmv, lastReset' = lastReset,
-    tip' = tip, force' = force, planHead' = planHead, planPm' = planPm, reset' = reset,
+    tip' = tip, lease' = lease, force' = force, planHead' = planHead, planPm' = planPm,
+    reset' = reset,
   }
 
   // Take the locks and check the conditions.
@@ -159,8 +175,8 @@ module twoRefAdvance {
     pc.get(p) == "planned",
     holder == NONE,
     if (not(force.get(p))) {
-      // A lease push: the head condition is the head its plan read.
-      if (brHead == planHead.get(p)) write(p)
+      // A lease push: the head condition is its lease.
+      if (brHead == lease.get(p)) write(p)
       else all { moveTo(p, "done"), holder' = holder, replans' = replans }
     } else if (FAULTS.forceOrdered) {
       // An unconditional head write appended to whatever chain is there.
@@ -178,7 +194,7 @@ module twoRefAdvance {
     holder' = NONE,
     pc' = pc.set(p, "done"),
     objs' = objs, pmv' = pmv, lastReset' = lastReset,
-    tip' = tip, force' = force, planHead' = planHead, planPm' = planPm,
+    tip' = tip, lease' = lease, force' = force, planHead' = planHead, planPm' = planPm,
     reset' = reset, replans' = replans,
   }
 
@@ -204,27 +220,36 @@ module twoRefAdvance {
   val CanaryNoCrashAfterReset: bool =
     not(lastReset > 0 and PROCS.exists(p => pc.get(p) == "crashed"))
   val CanaryNoForceReplan: bool = replans == Set()
+  val CanaryNoLeaseRefusal: bool = PROCS.forall(p => pc.get(p) != "refused")
 }
 
 // ------------------------------------------------------------ instances
-// Faults literal: { atomic, noAncestry, forceOrdered }.
+// Faults literal: { atomic, noAncestry, forceOrdered, leaseUnchecked }.
 module advance3 {               // the file transport: serialized advance
   import twoRefAdvance(PROCS = Set("p1", "p2", "p3"),
-    FAULTS = { atomic: false, noAncestry: false, forceOrdered: false }).*
+    FAULTS = { atomic: false, noAncestry: false, forceOrdered: false, leaseUnchecked: false }).*
 }
 module advance3_atomic {        // an atomic advance resets any lease push
   import twoRefAdvance(PROCS = Set("p1", "p2", "p3"),
-    FAULTS = { atomic: true, noAncestry: false, forceOrdered: false }).*
+    FAULTS = { atomic: true, noAncestry: false, forceOrdered: false, leaseUnchecked: false }).*
 }
 module advance3_noAncestry {    // Consistent
   import twoRefAdvance(PROCS = Set("p1", "p2", "p3"),
-    FAULTS = { atomic: false, noAncestry: true, forceOrdered: false }).*
+    FAULTS = { atomic: false, noAncestry: true, forceOrdered: false, leaseUnchecked: false }).*
 }
 module advance3_forceOrdered {  // Consistent
   import twoRefAdvance(PROCS = Set("p1", "p2", "p3"),
-    FAULTS = { atomic: false, noAncestry: false, forceOrdered: true }).*
+    FAULTS = { atomic: false, noAncestry: false, forceOrdered: true, leaseUnchecked: false }).*
 }
 module advance3_atomicForceOrdered {  // Consistent: an atomic advance needs the driver too
   import twoRefAdvance(PROCS = Set("p1", "p2", "p3"),
-    FAULTS = { atomic: true, noAncestry: false, forceOrdered: true }).*
+    FAULTS = { atomic: true, noAncestry: false, forceOrdered: true, leaseUnchecked: false }).*
+}
+module advance3_leaseUnchecked {  // Consistent: a lease that differs from the planned head
+  import twoRefAdvance(PROCS = Set("p1", "p2", "p3"),
+    FAULTS = { atomic: false, noAncestry: false, forceOrdered: false, leaseUnchecked: true }).*
+}
+module advance3_atomicLeaseUnchecked {  // Consistent: the same on an atomic advance
+  import twoRefAdvance(PROCS = Set("p1", "p2", "p3"),
+    FAULTS = { atomic: true, noAncestry: false, forceOrdered: false, leaseUnchecked: true }).*
 }
