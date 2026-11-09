@@ -1547,6 +1547,30 @@ mod tests {
         assert_eq!(fs::read(target.path().join("same")).unwrap(), b"same");
     }
 
+    /// Without `observe`, a restored file reports no stat fields, chunked
+    /// or not. With it, the same restore proves them.
+    #[test]
+    fn an_unobserved_restore_reports_no_stat_fields() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 8,
+            chunk_size: 0,
+            chunks: vec![put_blob(&store, b"big-"), put_blob(&store, b"file")],
+        });
+        let big = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
+        let plain = put_blob(&store, b"plain");
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        for (name, hash) in [("big", big), ("plain", plain)] {
+            let off =
+                restore_blob_with(&store, target.path(), name, hash, false, 1, &rd, false).unwrap();
+            assert_eq!(off, None, "{name} without observe");
+            let on =
+                restore_blob_with(&store, target.path(), name, hash, false, 1, &rd, true).unwrap();
+            assert!(on.is_some(), "{name} with observe");
+        }
+    }
+
     /// Every file an observed restore writes gets an observation that
     /// stat-matches the file on disk, chunked and executable files
     /// included. Entries an incremental restore skips get none.

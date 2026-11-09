@@ -1022,6 +1022,26 @@ mod tests {
             .collect()
     }
 
+    /// `run_len` counts the leading bytes equal to `c`, whatever the run
+    /// length relative to its 32-byte blocks.
+    #[test]
+    fn run_len_counts_the_leading_run() {
+        assert_eq!(run_len(&[], 7), 0);
+        assert_eq!(run_len(&[8, 7, 7], 7), 0);
+        for len in [1, 31, 32, 33, 63, 64, 65, 100] {
+            let all = vec![7u8; len];
+            assert_eq!(run_len(&all, 7), len, "all {len}");
+            for stop in [0, 1, len / 2, len.saturating_sub(1)] {
+                if stop >= len {
+                    continue;
+                }
+                let mut broken = all.clone();
+                broken[stop] = 9;
+                assert_eq!(run_len(&broken, 7), stop, "len {len} broken at {stop}");
+            }
+        }
+    }
+
     #[test]
     fn cut_ends_matches_sequential_for_every_thread_count() {
         // Pseudo-random bytes, a long zero run (forced max-size cuts that
