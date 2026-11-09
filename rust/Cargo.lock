@@ -2579,6 +2579,7 @@ name = "kit-transport-file"
 version = "0.7.3"
 dependencies = [
  "kit-core",
+ "kit-sync",
  "libc",
  "tempfile",
 ]

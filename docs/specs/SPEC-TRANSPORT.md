@@ -654,6 +654,40 @@ is not the body MD5. This is an accepted downgrade specific to large
 S3 packs; content-addressing (§8) makes it safe (see §6.7's
 idempotency note).
 
+### 7.2 Two-ref advance and the packmap reset
+
+`advance_refs` moves a branch head and its packmap together. The push
+driver keeps one invariant for every state a reader without locks, or a
+crash, can expose: when the head resolves to `T`, the packmap chain
+reconstructs the closure of `T`. A transport reports how strongly its
+advance commits:
+
+| Capability | Writers | Readers and crashes | Transports |
+|---|---|---|---|
+| none (ordered) | the packmap write, then the head write, each conditioned alone; another writer can run between them | may see the new packmap with the old head | default `advance_refs` (memory, S3, SSH) |
+| `supports_serialized_advance` | both conditions are checked before either write; a conflict changes nothing; no other write to either ref interleaves | may see the new packmap with the old head | file (SPEC-REFS §5.1.1) |
+| `supports_atomic_advance` | one indivisible step | see both refs move together | Connect servers that advertise `atomic_advance` |
+
+An atomic advance is also serialized. An append to the packmap chain is a
+superset of the prior chain, so the new packmap with the old head is
+consistent on every transport. A reset (the re-baseline that replaces a
+deep chain with one self-contained node) is not a superset. The push
+driver MUST request a reset only when one of these holds:
+
+- the advance is atomic and the head condition is `Missing` or `Match`;
+- the advance is serialized, not atomic, and the head condition is
+  `Match(h)` with `h` an ancestor of the new head in the client's own
+  store. The reset holds the new head's full closure, which contains the
+  closure of `h`, so the old head stays reconstructable between the two
+  writes and after a crash between them.
+
+A force push (`Any`) never requests a reset. On a serialized or an atomic
+advance it uses the guarded force driver: it conditions the packmap write
+on the chain its plan read, and plans again when that chain no longer
+contains the node the plan depended on, so it never appends packs whose
+bases a concurrent reset dropped. On an ordered advance no reset happens
+except over a broken chain, and a force push appends on the ordered path.
+
 ---
 
 ## 8. Pack format

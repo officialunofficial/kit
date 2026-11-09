@@ -143,8 +143,9 @@ options.control.observer = &my_observer;
 let report = push(&dir, &source, &options)?;
 ```
 
-On atomic-capable sources, force pushes publish the head and packmap together,
-including a head-only change. The uncontended success path adds at most one
+On sources whose advance is atomic or serialized (the file transport checks
+both refs under their locks), force pushes publish the head and packmap
+together, including a head-only change. The uncontended success path adds at most one
 strong packmap read; other pushes keep their existing requests. A replaced chain causes
 a re-plan within the same eight-attempt budget as publication. Sustained
 contention returns `PushError::PackmapContended`. A dependent plan compares both
@@ -155,6 +156,12 @@ Connect sources whose capability discovery failed or was invalid refuse force
 pushes with `PushError::ForceCapabilityUnknown` before uploading. Reconnect and
 retry discovery. Explicitly non-atomic transports retain their existing push
 behavior; failed discovery is not evidence that a server is non-atomic.
+
+A push that would grow a packmap chain past `rebaseline_threshold` resets it
+to one self-contained node on an atomic source. On a serialized source it
+resets only when the push fast-forwards the head it leases, as the local
+store shows: a reader there can see the new packmap before the new head, and
+only then does the reset still rebuild the old head. Other pushes append.
 
 `PushReport` contains the completed ref count, advance count, and optional
 single-branch tip. `PushError` preserves push-specific refusals and carries

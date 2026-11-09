@@ -98,8 +98,9 @@ pub(crate) enum ChainAction {
 /// Append validates the entire prior chain. A broken chain permits a reset only
 /// for self-contained packs; deltas need its bases and fail with the original
 /// error. Transient failures propagate. Proactive resets skip validation and
-/// require atomic advance plus a conditioned head lease because a reset is not
-/// a superset of the old chain. The caller chooses rollover before pack planning
+/// require an atomic advance plus a conditioned head lease, or a serialized
+/// advance plus a lease on an ancestor of the tip, because a reset is not a
+/// superset of the old chain. The caller chooses rollover before pack planning
 /// and freezes that choice across retries; concurrent appends can temporarily
 /// exceed the depth threshold until the next push resets it.
 ///
@@ -140,8 +141,8 @@ pub(crate) fn advance_packmap(
                 // A reset can discard old closure: both conditioned refs must
                 // commit atomically. Keep these guards for direct callers.
                 debug_assert!(
-                    tx.supports_atomic_advance(),
-                    "re-baseline reset requires a transactional advance_refs (kit)"
+                    tx.supports_atomic_advance() || tx.supports_serialized_advance(),
+                    "re-baseline reset requires an atomic or serialized advance_refs"
                 );
                 debug_assert!(
                     !matches!(head_condition, refs::RefWriteCondition::Any),

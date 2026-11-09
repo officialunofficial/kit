@@ -9,6 +9,7 @@ SPEC-CONCURRENCY with a layout server. A layout server is a server that embeds t
 | `refs_test.qnt` | Pinned interleavings for `refs.qnt`, mutants and witnesses included |
 | `serve.qnt` | `serveLocks`: `serve.lock` (shared by `kit serve` and a layout server), `server.lock` (exclusive, a layout server), the startup sweep of crashed uploads under an exclusive `serve.lock`, the worktree probe (SPEC-CONCURRENCY §2, §3.1). `servedNames`: SPEC-REFS v3 §2 served names and the §3 512-byte bound, as far as they affect safety |
 | `serve_test.qnt` | Pinned interleavings for `serve.qnt` (`serve_test`, `served_test`) |
+| `advance.qnt` | `twoRefAdvance`: the two-ref advance of a head and its packmap (serialized or atomic), crashes between its writes, and the push driver's packmap reset gate and force driver (SPEC-TRANSPORT §7.2, SPEC-REFS §5.1.1) |
 | `check.sh` | Runs every check below and compares each result with the expected one |
 
 ## Server rules covered
@@ -65,6 +66,21 @@ SPEC-CONCURRENCY with a layout server. A layout server is a server that embeds t
   class is pure grammar, left to unit tests and conformance vectors**
   (`kit_core::refs` tests; the `kit-serve` ssh tests), as are the derived local bounds (495 / 502 bytes) and
   prefix normalization (§4.2).
+- **Two-ref advance and the packmap reset** (SPEC-TRANSPORT §7.2,
+  SPEC-REFS §5.1.1): `advance.qnt` has pushers on one branch over a fixed
+  commit graph (`c0 <- c1 <- c2 <- c3`, `c0 <- d <- e`). A serialized
+  advance checks the head condition and writes the packmap in one step and
+  the head in a later one; a crash can stop it between them. `Consistent`
+  (the head's closure lies in the chain) holds in every state, so for every
+  reader. A lease push resets only when it fast-forwards the head it
+  conditions on; a force push re-plans when its anchor was reset away. The
+  `advance3_noAncestry` mutant resets any lease push, `advance3_forceOrdered`
+  appends force pushes without the anchor check, and
+  `advance3_atomicForceOrdered` shows an atomic advance needs that check
+  too. Abstractions: objects are commits, a pack holds `closure(tip)` minus
+  `closure(planned head)`, the chain depth is free (a push may reset
+  whenever the gate allows), a lease push conditions on the head its plan
+  read, and each pusher makes one push, which may re-plan.
 - **Memory transport**: `kit-transport-memory`'s `update_ref` holds its
   `Mutex` across read-check-write, and SPEC-REFS §5.1 says `atomic*`
   (in-process only). The Safety conjunct `NoLostUpdateMem` covers the race; the race survives as the
@@ -107,6 +123,7 @@ refs or values.
 | `quint test` | `refs_test` (29 runs), `refs_wpref_test` (2), `refs_collide_test` (1), `refs_nested_test` (1), `refs_nested_unchecked_test` (1), `serve_test` (13), `served_test` (7) | pinned traces | all pass |
 | `quint run` | `refs3`, `refs2` Safety | 20000 samples x 40 steps, seed 0x1 (the stripe-lock model was last run at 2000 samples: one 20000-sample run takes about 20 minutes on a 4-CPU machine) | ok |
 | `quint run` | `serve2`, `serve3`, `served` Safety | same | ok |
+| `quint run` | `advance3`, `advance3_atomic` Safety | same | ok |
 | TLC | `serve2` Safety | exhaustive: 2 server slots (each may start as either binary), 1 local command, 3 uploaders | ok, 18,812 states |
 | TLC | `serve3` Safety | exhaustive: 3 server slots | ok, 152,012 states |
 | TLC | `served` Safety | exhaustive (one request at a time, 5 name classes, stray files present or not) | ok, 66,064 states |
@@ -116,6 +133,8 @@ refs or values.
 | TLC | `refs2_collide` Safety and `WitnessStripesOverlap`, slice `file` | same, both refs in one stripe | ok, 277,371 states (the witness is unreachable) |
 | TLC | `refs2_nested` Safety, slice `file` | same, ref 1 named below ref 0, two stripes | ok, 178,671 states |
 | TLC | `refs2_nestedCollide` Safety and `WitnessNestedCreatesOverlap`, slice `file` | same, both names in one stripe | ok, 154,095 states (the witness is unreachable) |
+| TLC | `advance3` Safety | exhaustive: 3 pushers, serialized advance, crashes between the writes | ok, 2,275,988 states |
+| TLC | `advance3_atomic` Safety | exhaustive: 3 pushers, atomic advance | ok, 682,475 states |
 | TLC | `refs3_wpref` Safety, slice `file3` | 3 processes, ops `file` and `fileTx` on one ref, writer-preferring repo lock | ok, 2,198,691 states |
 | TLC | `refs3_stripeFirstFlock` `NoDeadlock`, slice `file3` | same, flock repo lock, single-ref writes may take the stripe first | ok, 7,902,603 states: with a flock repo lock the opposite order does not deadlock |
 | Apalache 0.62.2 | `refs2` Safety (full op space) | length `REFS_DEPTH` = 8 (~22 min under load) | ok for the model before the stripe locks; not rerun since |
@@ -152,6 +171,10 @@ Mutants and witnesses (each must be reached; `check.sh` lists every one):
 | `served_checkAfterRead` | `RefuseBeforeStorage`, `ExplicitRefusal` | pre-v3 behaviour (answering `main` from storage / as absent) |
 | `served_headCheckedLate` | `RefuseBeforeStorage`, `RefusedWritesNothing` | both AdvanceRefs names must be checked before the first write |
 | `served_listNoSkip` | `ListingServedOnly` | stray refs must be skipped in listings |
+| `advance3_noAncestry` | `Consistent` | a serialized advance must not reset a push that does not fast-forward its lease (TLC: 549 states) |
+| `advance3_forceOrdered` | `Consistent` | a force push appended without the anchor check publishes a head whose objects a reset dropped (TLC: 1,664,415 states) |
+| `advance3_atomicForceOrdered` | `Consistent` | the same on an atomic advance (TLC: 39,903 states) |
+| `advance3` | `CanaryNoReset`, `CanaryNoCrashAfterReset`, `CanaryNoForceReplan` | resets, a crash after a reset, and a force push re-planning are all reached |
 
 Canaries (`Canary*`, `Witness*` reachability) confirm the interesting
 states are visited: a sweep removes a crashed upload's file, a start skips
