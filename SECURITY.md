@@ -29,8 +29,8 @@ Only the latest minor line receives security fixes.
 
 | Version | Supported                            |
 | ------- | ------------------------------------ |
-| 0.5.x   | Yes (current)                        |
-| < 0.5   | No                                   |
+| 0.7.x   | Yes (current)                        |
+| < 0.7   | No                                   |
 
 Pre-1.0 releases may ship breaking format changes alongside security
 fixes. Read the CHANGELOG before upgrading.

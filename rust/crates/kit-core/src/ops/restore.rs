@@ -1166,6 +1166,25 @@ fn make_tmp_sibling_name(name: &str) -> String {
     format!(".{name}.tmp.{pid}.{counter}")
 }
 
+/// Read the exact temporary sibling name written by the restore path.
+/// The caller must also verify that the sibling is tracked and the entry is
+/// an untracked regular file before treating it as an interrupted write.
+#[must_use]
+pub fn restore_temp_sibling(name: &str) -> Option<&str> {
+    let (prefix, counter) = name.strip_prefix('.')?.rsplit_once('.')?;
+    let (prefix, pid) = prefix.rsplit_once('.')?;
+    let sibling = prefix.strip_suffix(".tmp")?;
+    if !TreeEntry::validate_name(sibling.as_bytes())
+        || pid.is_empty()
+        || counter.is_empty()
+        || !pid.bytes().all(|b| b.is_ascii_digit())
+        || !counter.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(sibling)
+}
+
 /// Sweep `target_dir` of untracked entries before re-materialising a
 /// tree. Entries present in `tree_entries`, the repo-metadata dirs
 /// (`.kit`/`.git`, ASCII case-insensitive so case-insensitive
@@ -1285,6 +1304,24 @@ mod tests {
     fn put_tree_with(store: &ObjectStore, entries: Vec<TreeEntry>) -> Hash {
         let bytes = serialize::serialize(&Object::Tree(Tree { entries })).unwrap();
         store.write(&bytes).unwrap()
+    }
+
+    #[test]
+    fn restore_temporary_names_are_exact() {
+        for name in [".a.tmp.1.2", ".a.tmp.00.0", "..hidden.txt.tmp.123.456"] {
+            assert!(restore_temp_sibling(name).is_some());
+        }
+        for name in [
+            "a.tmp.1.2",
+            ".a.tmp..2",
+            ".a.tmp.1.",
+            ".a.tmp.-1.2",
+            ".a.tmp.１.2",
+            ".a.tmp.1.2.extra",
+            "../a.tmp.1.2",
+        ] {
+            assert!(restore_temp_sibling(name).is_none(), "{name}");
+        }
     }
 
     #[test]
