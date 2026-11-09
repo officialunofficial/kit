@@ -15,13 +15,15 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
 use kit_core::ops::graph::reachable_objects;
 use kit_core::pack::{self, PackReader};
-use kit_core::protocol::{AdvanceOutcome, PackKey, Transport, TransportError, TransportResult};
+use kit_core::protocol::{
+    AdvanceOutcome, PackKey, Transport, TransportError, TransportResult, UploadLimits,
+};
 use kit_core::refs::{Ref, RefWriteCondition};
 use kit_core::store::ObjectStore;
 use kit_core::{serialize, transfer};
 use kit_transport_memory::MemoryTransport;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tempfile::TempDir;
 
 const HEAD: &str = "refs/heads/main";
@@ -32,12 +34,16 @@ type Hook<'a> = Box<dyn FnOnce(&Remote<'a>) + Send + 'a>;
 /// A remote whose two-ref advance checks both conditions under one lock,
 /// then writes the packmap, then the head: serialized for writers, ordered
 /// for readers. `atomic` makes it claim an atomic advance instead, and
-/// `serialized = false` makes it claim neither.
+/// `serialized = false` makes it claim neither. `tickets` makes it limit the
+/// tickets of an advance, which sends a push through the split planner.
 struct Remote<'a> {
     inner: MemoryTransport,
     lock: Mutex<()>,
     atomic: bool,
     serialized: bool,
+    tickets: bool,
+    /// The packs uploaded so far.
+    uploads: AtomicUsize,
     /// Stop the next advance after its packmap write, as a crash would.
     crash: AtomicBool,
     /// Run once at the start of the next advance, before its checks.
@@ -53,6 +59,8 @@ impl<'a> Remote<'a> {
             lock: Mutex::new(()),
             atomic: false,
             serialized: true,
+            tickets: false,
+            uploads: AtomicUsize::new(0),
             crash: AtomicBool::new(false),
             before_advance: Mutex::new(None),
             head_conditions: Mutex::new(Vec::new()),
@@ -74,6 +82,7 @@ fn holds(condition: RefWriteCondition, current: Option<Hash>) -> bool {
 
 impl Transport for Remote<'_> {
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        self.uploads.fetch_add(1, Ordering::SeqCst);
         self.inner.upload_pack(bytes, key)
     }
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
@@ -129,6 +138,12 @@ impl Transport for Remote<'_> {
     fn supports_atomic_advance(&self) -> bool {
         self.atomic
     }
+    fn upload_limits(&self) -> UploadLimits {
+        UploadLimits {
+            tickets_per_advance: self.tickets.then_some(7),
+            ..UploadLimits::default()
+        }
+    }
     fn supports_serialized_advance(&self) -> bool {
         self.atomic || self.serialized
     }
@@ -181,13 +196,24 @@ fn push(
     tip: Hash,
     condition: RefWriteCondition,
 ) -> Result<usize, PushError> {
+    push_at(remote, store, tip, condition, DEPTH)
+}
+
+/// A push with its own re-baseline threshold; zero never resets.
+fn push_at(
+    remote: &Remote<'_>,
+    store: &ObjectStore,
+    tip: Hash,
+    condition: RefWriteCondition,
+    threshold: usize,
+) -> Result<usize, PushError> {
     push_branch_steps(
         &TransportSource::new(remote),
         store,
         "main",
         tip,
         condition,
-        DEPTH,
+        threshold,
         pack::MAX_TOTAL_PAYLOAD,
         &PushControl::default(),
         &mut |_| Ok(()),
@@ -373,4 +399,97 @@ fn a_force_push_on_an_ordered_advance_writes_the_head_unconditionally() {
         [RefWriteCondition::Any]
     );
     assert!(rebuilds(&remote, s.ahead));
+}
+
+/// A lease push whose lease differs from the head it reads. The head is
+/// `c2`, the lease; another push moves it to `aside`, and the push plans
+/// `beyond`, a child of `aside`, against `aside`, leaving `aside` out as
+/// already held. Before its advance, two pushes move the head back to `c2`
+/// through `c1`, and the second resets the chain to the closure of `c2`,
+/// dropping `aside`. The lease now holds again, so a push that conditions on
+/// it would publish `beyond` with a chain that lacks its parent. The driver
+/// refuses the push before it plans, on an atomic and on a serialized
+/// advance, and through the split planner.
+#[test]
+fn a_lease_push_refuses_a_head_that_differs_from_its_lease() {
+    for (atomic, tickets) in [(true, false), (false, false), (true, true), (false, true)] {
+        let case = format!("atomic: {atomic}, tickets: {tickets}");
+        let (_dir, store) = store();
+        let remote = Remote {
+            atomic,
+            tickets,
+            ..Remote::new()
+        };
+        let s = setup(&store, &remote);
+        let (c1, c2, aside) = (s.c[1], s.c[2], s.aside);
+        let beyond = commit(&store, &[("a", "aside"), ("b", "beyond")], &[aside], 5);
+        push_at(&remote, &store, aside, RefWriteCondition::Match(c2), 0).unwrap();
+        let store_ref = &store;
+        remote.before_advance(move |remote| {
+            push_at(remote, store_ref, c1, RefWriteCondition::Match(aside), 0).unwrap();
+            push_at(remote, store_ref, c2, RefWriteCondition::Match(c1), 1).unwrap();
+            assert_eq!(chain(remote).len(), 1, "the push back to the lease reset");
+        });
+        let uploads = remote.uploads.load(Ordering::SeqCst);
+        let result = push_at(&remote, &store, beyond, RefWriteCondition::Match(c2), 0);
+        let head = remote.read_ref(HEAD).unwrap().unwrap();
+        assert!(rebuilds(&remote, head), "{case}: {result:?}");
+        assert!(
+            matches!(result, Err(PushError::NonFastForwardPush { .. })),
+            "{case}: {result:?}"
+        );
+        assert_eq!(head, aside, "{case}");
+        assert_eq!(remote.uploads.load(Ordering::SeqCst), uploads, "{case}");
+    }
+}
+
+/// A push that leases a missing head is refused before it plans when the
+/// head exists: a plan against that head could rely on objects a reset
+/// drops before the head goes away again.
+#[test]
+fn a_push_leasing_a_missing_head_refuses_an_existing_head() {
+    for tickets in [false, true] {
+        let (_dir, store) = store();
+        let remote = Remote {
+            atomic: true,
+            tickets,
+            ..Remote::new()
+        };
+        let s = setup(&store, &remote);
+        let uploads = remote.uploads.load(Ordering::SeqCst);
+        let result = push(&remote, &store, s.ahead, RefWriteCondition::Missing);
+        assert!(
+            matches!(result, Err(PushError::NonFastForwardPush { .. })),
+            "tickets: {tickets}: {result:?}"
+        );
+        assert_eq!(remote.read_ref(HEAD).unwrap(), Some(s.c[2]));
+        assert_eq!(remote.uploads.load(Ordering::SeqCst), uploads);
+    }
+}
+
+/// A push whose earlier attempt landed finds the head at its tip and its
+/// lease stale. It succeeds and writes nothing, so a later return of the
+/// head to the lease cannot pair the tip with a chain that dropped it.
+#[test]
+fn a_push_that_already_landed_writes_nothing() {
+    for tickets in [false, true] {
+        let (_dir, store) = store();
+        let remote = Remote {
+            atomic: true,
+            tickets,
+            ..Remote::new()
+        };
+        let s = setup(&store, &remote);
+        push(&remote, &store, s.ahead, RefWriteCondition::Match(s.c[2])).unwrap();
+        let packmap = remote.read_ref(&packmap_ref("main")).unwrap();
+        let uploads = remote.uploads.load(Ordering::SeqCst);
+        remote.head_conditions.lock().unwrap().clear();
+        remote.before_advance(|_| panic!("a landed push advances nothing"));
+        let steps = push(&remote, &store, s.ahead, RefWriteCondition::Match(s.c[2])).unwrap();
+        assert_eq!(steps, 1, "tickets: {tickets}");
+        assert_eq!(remote.read_ref(HEAD).unwrap(), Some(s.ahead));
+        assert_eq!(remote.read_ref(&packmap_ref("main")).unwrap(), packmap);
+        assert_eq!(remote.uploads.load(Ordering::SeqCst), uploads);
+        assert!(remote.head_conditions.lock().unwrap().is_empty());
+    }
 }

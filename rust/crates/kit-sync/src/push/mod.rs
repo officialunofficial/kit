@@ -347,7 +347,9 @@ fn run_steps(
         return single(None);
     }
     refs::check_pushable_branch(branch)?;
-    let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
+    let LeaseHead::Holds(remote_tip) = lease_head(tx, branch, condition, tip)? else {
+        return single(None);
+    };
     let plan = transfer::plan_pack_with(store, tip, remote_tip, encode_delta_candidates_batch)?;
     let cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
     if estimate_pack_sizes(store, &plan, cap, limits.max_pack_bytes)?.len()
@@ -364,9 +366,7 @@ fn run_steps(
     }
     match build_and_upload_packs(PackSink::Count, store, plan, cap, limits, tx.observer) {
         Err(PushError::PushTooLarge { .. }) => {}
-        Err(PushError::Sync(SyncError::Interrupted)) => {
-            return Err(PushError::Sync(SyncError::Interrupted));
-        }
+        Err(error @ PushError::Sync(SyncError::Interrupted)) => return Err(error),
         _ => return single(None),
     }
     let steps = plan_push_steps(
@@ -483,6 +483,47 @@ fn push_step_recovering(
     }
 }
 
+/// The remote head a push plans against, read before it plans.
+enum LeaseHead {
+    /// The head, which the push's head condition holds for.
+    Holds(Option<Hash>),
+    /// The head is already the tip: an earlier attempt landed.
+    Landed,
+}
+
+/// Read the head a push of `tip` plans against, and refuse a lease that
+/// does not hold for it.
+///
+/// A plan leaves out what the head it reads holds, so the head write must
+/// condition on that head. A lease that differs could hold again later,
+/// after the head moved away and back and a reset dropped what the plan
+/// left out; the head write would then publish a tip the packmap cannot
+/// rebuild. Such a push would fail its head condition at once, so it is
+/// refused before it plans. A head that is already `tip` means an earlier
+/// attempt landed, and the push writes nothing more.
+fn lease_head(
+    tx: &PushContext<'_>,
+    branch: &str,
+    condition: refs::RefWriteCondition,
+    tip: Hash,
+) -> Result<LeaseHead, PushError> {
+    let head = tx.read_ref(&format!("refs/heads/{branch}"))?;
+    let holds = match condition {
+        refs::RefWriteCondition::Any => true,
+        refs::RefWriteCondition::Missing => head.is_none(),
+        refs::RefWriteCondition::Match(lease) => head == Some(lease),
+    };
+    if holds {
+        Ok(LeaseHead::Holds(head))
+    } else if head == Some(tip) {
+        Ok(LeaseHead::Landed)
+    } else {
+        Err(PushError::NonFastForwardPush {
+            branch: branch.to_owned(),
+        })
+    }
+}
+
 /// Whether a push of `tip` conditioned on `condition` may reset the chain.
 ///
 /// A reset drops the prior chain, so it must commit with the head. An
@@ -535,7 +576,18 @@ fn push_branch_once(
     // optimization; the head CAS below remains authoritative.
     // A caller that already planned against the remote's current tip (the
     // split decision does) passes its plan, so it is diffed once.
-    let mut plan = plan_branch(tx, store, branch, tip, force_self_contained, preplanned)?;
+    let Some(mut plan) = plan_branch(
+        tx,
+        store,
+        branch,
+        tip,
+        condition,
+        force_self_contained,
+        preplanned,
+    )?
+    else {
+        return Ok(());
+    };
 
     let limits = tx.upload_limits();
     // Payload and serialized-byte limits are checked separately. Framing
@@ -679,33 +731,38 @@ fn push_branch_once(
     )
 }
 
+/// The plan for `tip`, or `None` when an earlier attempt already landed it.
 fn plan_branch(
     tx: &PushContext<'_>,
     store: &ObjectStore,
     branch: &str,
     tip: Hash,
+    condition: refs::RefWriteCondition,
     force_self_contained: bool,
     preplanned: Option<transfer::PackPlan>,
-) -> Result<transfer::PackPlan, PushError> {
-    Ok(if let Some(plan) = preplanned {
-        plan
+) -> Result<Option<transfer::PackPlan>, PushError> {
+    if let Some(plan) = preplanned {
+        return Ok(Some(plan));
+    }
+    // A full closure depends on no remote head, so it reads none.
+    let remote_tip = if force_self_contained {
+        None
     } else {
-        let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
-        // Plan FIRST, against the remote's current tip (for speed): a no-op push
-        // (the remote already holds this closure) yields an empty plan and takes
-        // the cheap head-only path below WITHOUT walking the packmap chain. Only
-        // a push that actually has objects to send pays the O(depth) chain probe.
-        transfer::plan_pack_with(
-            store,
-            tip,
-            if force_self_contained {
-                None
-            } else {
-                remote_tip
-            },
-            encode_delta_candidates_batch,
-        )?
-    })
+        match lease_head(tx, branch, condition, tip)? {
+            LeaseHead::Holds(head) => head,
+            LeaseHead::Landed => return Ok(None),
+        }
+    };
+    // Plan FIRST, against the remote's current tip (for speed): a no-op push
+    // (the remote already holds this closure) yields an empty plan and takes
+    // the cheap head-only path below WITHOUT walking the packmap chain. Only
+    // a push that actually has objects to send pays the O(depth) chain probe.
+    Ok(Some(transfer::plan_pack_with(
+        store,
+        tip,
+        remote_tip,
+        encode_delta_candidates_batch,
+    )?))
 }
 
 /// Build `plan`'s entries into one or more packs, each staying under
