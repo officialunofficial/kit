@@ -56,7 +56,7 @@ from recurring.
 | `fuzz_targets/stash_list.rs` | `ops::stash::deserialize_list` (an accepted list re-encodes to exactly itself) |
 | `fuzz_targets/bridge_map.rs` | The `kit-git-bridge` map and ref-state loaders (never panic on any file content) |
 | `fuzz_targets/pack_cursor_decode.rs` | `pack::window::WindowCursor::from_bytes` (an accepted cursor re-encodes to exactly itself) |
-| `fuzz_targets/chunked_blob_build.rs` | `worktree::chunked_blob_from_bytes` (the manifest records the input length) |
+| `fuzz_targets/chunked_blob_build.rs` | `worktree::chunked_blob_from_bytes` (the manifest records the input length); `chunker` cut bounds, coverage, and parallel and streaming cuts matching the sequential iterator |
 | `fuzz_targets/trust_roots_parse.rs` | `trust_roots::parse` / `kit_core::hash::from_hex_bytes` (an accepted file serializes to text that parses back to the same entries; every accepted key has a length that fits its kind) |
 | `fuzz_targets/ssh_url_parse.rs` | `kit_transport_ssh::parse_kit_ssh_url` / `validate_ssh_path` (an accepted target has a user, a host and a valid path, and no control byte) |
 | `fuzz_targets/grant_fields_parse.rs` | The `kit_attest::grant::text` field parsers, `Capabilities::parse`, `RefFlags::parse`, `RefPattern::parse`, `RefScopes::parse`, `AcceptedSchemes::from_tokens`, `is_loopback_origin` and `Grant::parse_with_id` (an accepted value re-encodes to exactly the input; an accepted grant id is the hash of the input) |

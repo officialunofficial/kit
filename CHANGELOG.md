@@ -9,12 +9,27 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `find_merge_base_strict` and `is_ancestor_strict` in kit-core read every
+  commit they walk. On a healthy store they give the answers of
+  `find_merge_base` and `is_ancestor`; where a commit is missing, corrupt
+  or not a commit they fail with an `AncestorError` that names it, and a
+  walk that would read more than 1,000,000 commits on either side fails
+  with an error that names the limit. `find_merge_base` and `is_ancestor`
+  keep ending a path at a missing object, for push and its shallow
+  boundaries.
 - `Transport::supports_serialized_advance` and
   `RemoteSource::supports_serialized_advance`: whether a two-ref advance is
   serialized for writers. Both default to the atomic-advance capability.
 
 ### Changed
 
+- `kit log -n N` from one revision streams the history while each commit
+  has at most one followed parent, and stops after N commits. On one ext4
+  disk with 1,000,000 linear commits, `kit log -n 20` went from about 8 s
+  and 1.2 GB to about 4 ms and 8 MB, and the full log from about 8.2 s and
+  1.2 GB to about 5.2 s and 415 MB. With `--first-parent` the whole walk
+  streams. A history with a merge near the tip still reads every reachable
+  commit before it prints. The output is unchanged.
 - The file transport and `kit serve` lock each ref instead of the whole root.
   A ref write holds the repo lock shared and the lock of the one of 256
   stripes that the ref maps to, so writes to refs in different stripes no
@@ -25,6 +40,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is inside one root. Writes to one ref still serialize, and `FileTransport::with_ref_lock` still excludes
   every ref write. `FileTransport::with_ref_lock_for` is the single-ref
   entry point.
+- Batched object writes, such as `kit add`, start each object's write
+  barrier on a background pool as soon as the object is staged. Before, every
+  barrier waited for commit. The device wait now overlaps chunking and
+  hashing. Objects still become visible only after the batch's full flush.
+- FastCDC cuts chunks on up to 8 threads. The boundaries are byte-identical
+  to the single-threaded chunker, so the object format does not change.
 - The file transport advances a branch head and its packmap under the locks
   of both refs (SPEC-REFS §5.1.1). It checks both conditions before it
   writes either, so a conflict changes nothing, and it puts the packmap back
@@ -48,10 +69,90 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `kit log` and `kit rev-list` fail with an error that names the limit when
+  a walk reaches more than 1,000,000 commits. They used to stop there and
+  print the newest commits as if they were the whole history. The excluded
+  side of a range (`A..B`, `A...B`) shares that limit; it used to stop
+  silently at 10,000 commits, which let excluded commits through.
+- `collect_ancestor_set`, `kit rebase` and `kit bisect` fail with an error
+  that names the limit when an ancestor walk reaches 10,000 commits, and
+  a rebase fails when the branch has more than 10,000 commits to replay.
+  They used to stop there silently: a rebase could replay only the newest
+  commits of a long branch, or replay commits its base already holds, and
+  bisect could offer commits that are known good.
+- `kit rebase` fails before it changes anything when a commit to replay
+  or an ancestor of the base is missing, corrupt or not a commit. It used
+  to end the walk there. It then dropped a missing commit of the branch
+  and every commit below it, and after a missing commit in the base's
+  history it replayed commits the base already holds.
+- The excluded side of a `kit log` range (`A..B`, `A...B`) fails when one
+  of its commits is missing, corrupt or not a commit. It used to skip such
+  a commit, so the range printed ancestors of `A` that it leaves out. The
+  error is `libkit::log::Error::ReadCommit` or `NotACommit`, as on the
+  included side. `WalkRangeBase` and `WalkMergeBase` are no longer
+  returned and are deprecated.
+- `kit git format-patch A..B` fails before it writes a patch when an
+  ancestor of `A` is missing, corrupt or not a commit. It used to skip such
+  a commit, so the series held patches for ancestors of `A`.
+- `kit bisect` fails when a commit of the range, or an ancestor of a good
+  commit, is missing, corrupt or not a commit. The range walk used to end
+  at such a commit and the good walk used to skip it, so bisect could miss
+  candidates or offer commits that are known good.
+- `kit merge-base`, `kit merge-base --is-ancestor`, `kit merge`,
+  `kit diff A...B`, `kit diff --merge-base`, the ancestry filters of
+  `kit branch`, the fast-forward check of `kit pull` and of the git bridge
+  pull, and the copy tie-break of `kit blame` read every commit of their
+  merge base or ancestry walk. A commit that is missing, corrupt or not a
+  commit used to end the walk there: `kit merge-base` printed no base or a
+  wrong one, `--is-ancestor` answered "no" with exit 1, and `kit merge`
+  and `kit diff` could use a wrong base. They now fail with an error that
+  names the commit: `kit merge-base`, `kit merge`, `kit diff` and
+  `kit branch` exit 65, print nothing on stdout, and change nothing.
+  `libkit::merge::Error::History`, `libkit::diff::Error::History` and
+  `libkit::branch::Error::History` carry the error. Push keeps the lenient
+  walks.
+- The two sides of a `kit log` range share one budget of 1,000,000
+  commits, as the documentation says. Each side used to have its own, so
+  a range could read up to twice the limit.
+- `kit bisect` fails with an error that names the limit when a range has
+  more than 10,000 candidates. Its candidate walk used to have no limit.
+- `kit git format-patch` fails before it writes a patch when the two sides
+  of its range would read more than 1,000,000 commits together, with an
+  error that names the limit. Both walks used to have no limit.
+- `kit blame --reverse` fails with an error that names the limit when the
+  first-parent walk from the end of its range holds more than 1,000,000
+  commits. It used to collect the whole chain with no limit.
+- The file transport and `kit serve` report a ref absent when a ref file
+  sits above its name (`refs/heads/a` for `refs/heads/a/b`) or a directory
+  of other refs sits at it. Before, the read failed with a `Not a
+  directory` or `Is a directory` I/O error. A listing under a prefix that
+  names a ref file is empty instead of an error. Other read failures are
+  still errors.
+- `kit serve` names its limit when a session sends more than 10,000 frames,
+  and SPEC-TRANSPORT §4.4 states what fits: over ssh an unchanged fetch costs
+  one frame plus at least two per branch, so one session fetches at most
+  4,999 branches.
+- An S3 `list_refs` fails when it cannot read a listed ref. Before, a ref
+  whose read returned an error status such as 403 or 500, or a body that is
+  not a canonical ref wire, was left out of the listing, so a fetch treated
+  the branch as absent. A ref that returns 404 is still left out: it was
+  deleted after the page was listed.
 - Blame caps its LCS comparison table at 64 MiB after trimming the common
   prefix. Larger comparisons use the bounded line diff search. Reassembly,
   line buffers, and attribution memory still grow with file size.
 - Mutation testing of changed lines uses paths relative to the Rust workspace.
+
+## [0.7.3] - 2026-11-08
+
+### Fixed
+
+- An interrupted pull resumes its worktree restore on the next pull. Recovery
+  refuses to overwrite local work and reports when it completes the pull.
+- Blame caps its LCS comparison table at 64 MiB after trimming the common
+  prefix. Larger comparisons use the bounded line diff search. Reassembly,
+  line buffers, and attribution memory still grow with file size.
+- Mutation testing of changed lines uses paths relative to the Rust workspace.
+- Apple release archives build on macos-26.
 
 ## [0.7.2] - 2026-11-06
 

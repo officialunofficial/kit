@@ -286,6 +286,14 @@ exists → `RefConflict`.
 `.match(H)` &mdash; write only if the ref currently contains `H`. If it does
 not exist or contains a different hash → `RefConflict`.
 
+The file transport, and `kit serve` on top of it, keep each ref as a
+file, so they cannot hold a ref and a ref below it (`refs/heads/a` and
+`refs/heads/a/b`): one needs a file where the other needs a directory.
+A write that would create the second fails. A read of either name
+while the other exists reports it absent, and a `listRefs` prefix that
+names a ref lists nothing (§4). Any other failure to read a ref file is
+an error, never absent.
+
 ### 5.1 Per-transport atomicity matrix
 
 (Normative &mdash; this is what conformance tests verify.)

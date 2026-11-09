@@ -51,6 +51,12 @@ fn main() -> std::io::Result<()> {
     let head_sym = b"ref: refs/heads/main\n";
     write_vector(&out_dir, "head_symbolic", head_sym)?;
 
+    let pull = kit_core::ops::pull_state::PullState {
+        target: hash::hash(b"refs-index-pull-target"),
+        before_tree: hash::hash(b"refs-index-pull-before-tree"),
+    };
+    write_vector(&out_dir, "pull_state", &pull.encode())?;
+
     // Manifest for the integration tests.
     let mut manifest = String::new();
     manifest.push_str("# Refs/index golden vectors (deterministic)\n");
@@ -61,6 +67,7 @@ fn main() -> std::io::Result<()> {
         "index_3entries",
         "ref_detached",
         "head_symbolic",
+        "pull_state",
     ] {
         let bytes = fs::read(out_dir.join(format!("{name}.bin")))?;
         let h = hash::hash(&bytes);

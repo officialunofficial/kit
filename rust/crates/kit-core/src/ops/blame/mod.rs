@@ -36,6 +36,15 @@ use walk::{WalkCtx, attribute_commit, build_file_dag, topo_order};
 /// Reassembly and splitting precede the check and use memory linear in file size.
 pub const BLAME_MAX_LINES: usize = 100_000;
 
+/// Hard cap on the commits of a reverse blame's first-parent chain, the same
+/// as the cap on a history walk. A longer chain fails before any line is
+/// blamed.
+pub const BLAME_MAX_REVERSE_COMMITS: usize = 1_000_000;
+
+/// The limit a reverse blame reports when its first-parent chain exceeds
+/// [`BLAME_MAX_REVERSE_COMMITS`].
+const REVERSE_LIMIT: &str = "1,000,000-commit first-parent chain of a reverse blame";
+
 /// The LCS table may hold at most 64 MiB. Check before allocating, independent
 /// of the memory available on the machine. Larger comparisons use the bounded
 /// line diff search. Prefix trimming keeps small trailing edits on the LCS path.
@@ -425,17 +434,43 @@ impl From<&ReverseEntry> for Attribution {
 ///
 /// # Errors
 /// [`BlameError::ReverseRange`] if `start` is not reached on `end`'s
-/// first-parent chain.
+/// first-parent chain. [`BlameError::Store`] with
+/// [`crate::store::StoreError::OperationLimitExceeded`] naming
+/// [`REVERSE_LIMIT`] if the walk would hold more than
+/// [`BLAME_MAX_REVERSE_COMMITS`] commits; it never returns part of the
+/// chain.
 fn collect_reverse_chain(
     store: &ObjectStore,
     start_hash: Hash,
     end_hash: Hash,
     file_path: &str,
 ) -> BlameOutcome<Vec<ReverseEntry>> {
+    collect_reverse_chain_with_cap(
+        store,
+        start_hash,
+        end_hash,
+        file_path,
+        BLAME_MAX_REVERSE_COMMITS,
+    )
+}
+
+/// [`collect_reverse_chain`] with a caller-supplied cap on the chain.
+fn collect_reverse_chain_with_cap(
+    store: &ObjectStore,
+    start_hash: Hash,
+    end_hash: Hash,
+    file_path: &str,
+    cap: usize,
+) -> BlameOutcome<Vec<ReverseEntry>> {
     let mut chain: Vec<ReverseEntry> = Vec::new();
     let mut current = Some(end_hash);
     let mut reached_start = false;
     while let Some(commit_hash) = current {
+        if chain.len() >= cap {
+            return Err(BlameError::Store(
+                crate::store::StoreError::OperationLimitExceeded(REVERSE_LIMIT),
+            ));
+        }
         let Object::Commit(commit) = store.read_object(&commit_hash)? else {
             return Err(BlameError::NotACommit);
         };
@@ -495,6 +530,8 @@ fn collect_reverse_chain(
 /// - [`BlameError::NotACommit`] if either endpoint is not a commit.
 /// - [`BlameError::FileTooLarge`] if any blob on the chain exceeds
 ///   [`BLAME_MAX_LINES`].
+/// - [`BlameError::Store`] naming the limit if the first-parent walk from
+///   `<end>` holds more than [`BLAME_MAX_REVERSE_COMMITS`] commits.
 pub fn blame_file_reverse(
     store: &ObjectStore,
     start_hash: Hash,
@@ -2451,6 +2488,45 @@ mod tests {
             matches!(err, BlameError::ReverseRange { .. }),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn a_reverse_chain_over_its_cap_fails_and_never_returns_a_prefix() {
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"a\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"a\nb\n", vec![c1], 2, 200);
+        let c3 = put_file_commit(&store, "f.txt", b"a\nb\nc\n", vec![c2], 3, 300);
+        let chain = super::collect_reverse_chain_with_cap(&store, c1, c3, "f.txt", 3).unwrap();
+        let hashes: Vec<Hash> = chain.iter().map(|e| e.commit_hash).collect();
+        assert_eq!(hashes, [c1, c2, c3]);
+        let err = super::collect_reverse_chain_with_cap(&store, c1, c3, "f.txt", 2)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BlameError::Store(crate::store::StoreError::OperationLimitExceeded(
+                    REVERSE_LIMIT
+                ))
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains(REVERSE_LIMIT), "{err}");
+        // A start off the chain walks to the root under the same cap.
+        let other = put_file_commit(&store, "f.txt", b"z\n", vec![], 9, 900);
+        let err = super::collect_reverse_chain_with_cap(&store, other, c3, "f.txt", 2)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BlameError::Store(crate::store::StoreError::OperationLimitExceeded(
+                    REVERSE_LIMIT
+                ))
+            ),
+            "{err:?}"
+        );
+        assert_eq!(BLAME_MAX_REVERSE_COMMITS, 1_000_000);
     }
 
     #[test]

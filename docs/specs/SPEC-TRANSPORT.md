@@ -316,7 +316,22 @@ misbehaving or malicious client (see
 - `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on cumulative request payload bytes.
 
 Each cap trips emits an `Error{ ERROR_CODE_INVALID_REQUEST }` and
-closes the connection with `exit::PROTOCOL_ERROR`.
+closes the connection with `exit::PROTOCOL_ERROR`. The frame cap's reply
+names it: `per-connection frame budget exceeded: at most 10000 frames per
+session (SPEC-TRANSPORT 4.4)`.
+
+**Reference-server behavior.** What fits in one session follows from the
+frame cap. A fetch costs one `ListRefs` frame, then per branch a `ReadRef` of
+the packmap and a `DownloadPack` of each node of its pack list, even when no
+branch changed: the SSH transport names no repository, so a fetch keeps no
+per-branch checkpoint for it and walks each pack list again. With one node
+per pack list that is one frame plus two per branch, so one session fetches
+at most 4,999 branches; a fetch of more fails closed with the reply above.
+`kit fetch`, `kit pull` and `kit clone` open one session each. A push walks
+the branch's whole pack list over its session, and an SSH push never
+re-baselines the pack list, so a push's frames grow with the number of
+pushes the branch has had. The cap is not raised: it is what bounds
+a client that sends requests without end.
 
 Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
 the declared upload length and additionally cap the number of chunk
@@ -383,6 +398,20 @@ transport carries it (§6.6).
 The S3 transport ([`kit-transport-s3`](../../rust/crates/kit-transport-s3/))
 talks SigV4 against any S3-compatible store that honors conditional
 writes (see §6.3).
+
+*Informative.* `list_refs` on this transport issues one `ListObjectsV2` per
+page and then one `GET` per listed ref, because a ref's id lives only in its
+object body. A fetch adds a packmap read and a node download per branch. The
+transport suits repositories with few concurrent writers and few refs.
+Deployments with many concurrent writers use the Connect service.
+
+**Protocol requirement.** A listing returns every listed ref that its `GET`
+finds, or fails. A `GET` that fails, after the retries of §6.5, with an error
+status fails the whole listing with that error. Only a `404` skips the ref,
+because the ref was deleted after the page was listed; the result is then an
+older listing (SPEC-TRANSPORT-CONNECT §7.9 allows one). A `200` whose body is
+not a canonical 65-byte ref wire (SPEC-REFS §1) fails the whole listing, as it
+fails `read_ref`.
 
 ### 6.1 Object layout
 
