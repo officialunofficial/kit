@@ -227,3 +227,464 @@ fn tampered_tag_signature_is_rejected_by_verify() {
     let hex = to_hex(&new);
     assert_rejected(&repo, &["verify", &hex], "tampered tag signature");
 }
+
+// ---------------------------------------------------------------------------
+// Rebase over an unreadable commit
+// ---------------------------------------------------------------------------
+
+/// main = base - O1 - O2; feature = base - A - B - C, checked out. Returns the
+/// hex ids of O1 and B.
+fn rebase_fixture(repo: &Repo) -> (String, String) {
+    repo.commit_file("base.txt", b"base\n", "base");
+    repo.ok(&["branch", "feature"]);
+    repo.commit_file("o1.txt", b"o1\n", "O1");
+    let o1 = String::from_utf8(repo.ok(&["rev-parse", "HEAD"]).stdout).unwrap();
+    repo.commit_file("o2.txt", b"o2\n", "O2");
+    repo.ok(&["checkout", "feature"]);
+    repo.commit_file("a.txt", b"a\n", "A");
+    repo.commit_file("b.txt", b"b\n", "B");
+    let b = String::from_utf8(repo.ok(&["rev-parse", "HEAD"]).stdout).unwrap();
+    repo.commit_file("c.txt", b"c\n", "C");
+    (o1.trim().to_owned(), b.trim().to_owned())
+}
+
+/// `kit rebase main` fails and leaves the branch, `HEAD`, the files and the
+/// rebase state as they were.
+fn assert_rebase_changes_nothing(repo: &Repo, case: &str) {
+    let layout = RepoLayout::single(repo.path());
+    let tip = refs::read_ref(&layout, "feature").unwrap();
+    assert_rejected(repo, &["rebase", "main"], case);
+    assert_eq!(
+        fs::read_to_string(repo.kit_dir().join("HEAD")).unwrap(),
+        "ref: refs/heads/feature\n",
+        "{case}: HEAD moved"
+    );
+    assert_eq!(refs::read_ref(&layout, "feature").unwrap(), tip, "{case}");
+    assert!(
+        common::operation_residue(&repo.kit_dir(), "rebase").is_none(),
+        "{case}: rebase state left behind"
+    );
+    for (file, present) in [("a.txt", true), ("c.txt", true), ("o2.txt", false)] {
+        assert_eq!(repo.path().join(file).exists(), present, "{case}: {file}");
+    }
+}
+
+#[test]
+fn rebase_over_an_unreadable_commit_fails_and_changes_nothing() {
+    let repo = Repo::new();
+    let (_, b) = rebase_fixture(&repo);
+    fs::remove_file(object_file(&repo, &b)).unwrap();
+    assert_rebase_changes_nothing(&repo, "missing commit in the branch");
+
+    let repo = Repo::new();
+    let (_, b) = rebase_fixture(&repo);
+    let path = object_file(&repo, &b);
+    let mut bytes = fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(&path, &bytes).unwrap();
+    assert_rebase_changes_nothing(&repo, "corrupt commit in the branch");
+
+    // Without O1 the ancestors of main would lack `base`, and the rebase
+    // would replay `base` again.
+    let repo = Repo::new();
+    let (o1, _) = rebase_fixture(&repo);
+    fs::remove_file(object_file(&repo, &o1)).unwrap();
+    assert_rebase_changes_nothing(&repo, "missing commit in the base");
+}
+
+// ---------------------------------------------------------------------------
+// History walks over an unreadable commit
+// ---------------------------------------------------------------------------
+
+/// main = r - p - m - g; side = r - p - x - merge(x, g), checked out. Returns
+/// the hex ids of m and g.
+fn range_fixture(repo: &Repo) -> (String, String) {
+    let head = |repo: &Repo| {
+        let out = repo.ok(&["rev-parse", "HEAD"]).stdout;
+        String::from_utf8(out).unwrap().trim().to_owned()
+    };
+    repo.commit_file("r.txt", b"r\n", "r");
+    repo.commit_file("p.txt", b"p\n", "p");
+    repo.ok(&["branch", "side"]);
+    repo.commit_file("m.txt", b"m\n", "m");
+    let m = head(repo);
+    repo.commit_file("g.txt", b"g\n", "g");
+    let g = head(repo);
+    repo.ok(&["checkout", "side"]);
+    repo.commit_file("x.txt", b"x\n", "x");
+    repo.ok(&["merge", "main"]);
+    (m, g)
+}
+
+/// Flip the last byte of the loose object `hex`.
+fn corrupt_object(repo: &Repo, hex: &str) {
+    let path = object_file(repo, hex);
+    let mut bytes = fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(&path, &bytes).unwrap();
+}
+
+/// Run `kit <args>` and assert it fails and prints nothing to stdout.
+fn assert_rejected_silently(repo: &Repo, args: &[&str], case: &str) {
+    assert_rejected(repo, args, case);
+    let out = repo.run(args);
+    assert!(out.stdout.is_empty(), "{case}: printed a partial answer");
+}
+
+#[test]
+fn a_log_range_over_an_unreadable_commit_fails_and_prints_nothing() {
+    let repo = Repo::new();
+    range_fixture(&repo);
+    let healthy = repo.ok(&["log", "--oneline", "main..side"]).stdout;
+    let subjects: Vec<String> = String::from_utf8(healthy)
+        .unwrap()
+        .lines()
+        .map(|line| line.split_once(' ').unwrap().1.to_owned())
+        .collect();
+    assert_eq!(subjects, ["Merge branch 'main'", "x"]);
+
+    // Without m the excluded side would lack p and r, and the range would
+    // print them.
+    let repo = Repo::new();
+    let (m, _) = range_fixture(&repo);
+    fs::remove_file(object_file(&repo, &m)).unwrap();
+    for range in ["main..side", "side...main"] {
+        assert_rejected_silently(
+            &repo,
+            &["log", range],
+            "missing commit on the excluded side",
+        );
+    }
+
+    let repo = Repo::new();
+    let (m, _) = range_fixture(&repo);
+    corrupt_object(&repo, &m);
+    assert_rejected_silently(
+        &repo,
+        &["log", "main..side"],
+        "corrupt commit on the excluded side",
+    );
+}
+
+#[test]
+fn bisect_over_an_unreadable_commit_fails_and_offers_nothing() {
+    let bisect = |repo: &Repo, good: &str| {
+        repo.ok(&["bisect", "start"]);
+        repo.ok(&["bisect", "bad"]);
+        repo.run(&["bisect", "good", good])
+    };
+    let repo = Repo::new();
+    let (_, g) = range_fixture(&repo);
+    let out = bisect(&repo, &g);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("(2 candidates remaining)"));
+
+    // Without m the good set would lack p and r, and bisect would offer them
+    // although they are known good.
+    let repo = Repo::new();
+    let (m, g) = range_fixture(&repo);
+    fs::remove_file(object_file(&repo, &m)).unwrap();
+    let out = bisect(&repo, &g);
+    check_exit(&out, "missing commit in the good set").unwrap();
+    assert!(!out.status.success(), "missing commit in the good set");
+    assert!(out.stdout.is_empty(), "offered a candidate");
+
+    let repo = Repo::new();
+    let (m, g) = range_fixture(&repo);
+    corrupt_object(&repo, &m);
+    let out = bisect(&repo, &g);
+    check_exit(&out, "corrupt commit in the good set").unwrap();
+    assert!(!out.status.success(), "corrupt commit in the good set");
+    assert!(out.stdout.is_empty(), "offered a candidate");
+}
+
+#[test]
+fn a_patch_series_over_an_unreadable_commit_fails_and_writes_nothing() {
+    let repo = Repo::new();
+    range_fixture(&repo);
+    let healthy = repo
+        .ok(&["git", "format-patch", "--stdout", "main..side"])
+        .stdout;
+    let healthy = String::from_utf8(healthy).unwrap();
+    assert_eq!(healthy.matches("\nSubject: ").count(), 1, "{healthy}");
+    assert!(healthy.contains("\nSubject: [PATCH] x\n"), "{healthy}");
+
+    // Without m the excluded side would lack p and r, and the series would
+    // hold patches for them.
+    let repo = Repo::new();
+    let (m, _) = range_fixture(&repo);
+    fs::remove_file(object_file(&repo, &m)).unwrap();
+    let args = ["git", "format-patch", "--stdout", "main..side"];
+    assert_rejected_silently(&repo, &args, "missing commit on the excluded side");
+
+    let repo = Repo::new();
+    let (m, _) = range_fixture(&repo);
+    corrupt_object(&repo, &m);
+    assert_rejected_silently(&repo, &args, "corrupt commit on the excluded side");
+}
+
+/// Write a commit on top of main whose second parent is main's tree, and
+/// return its hex id.
+fn commit_above_a_tree(repo: &Repo) -> String {
+    let layout = RepoLayout::single(repo.path());
+    let store = ObjectStore::open(&layout).unwrap();
+    let main = refs::read_ref(&layout, "main").unwrap().unwrap();
+    let Object::Commit(c) = store.read_object(&main).unwrap() else {
+        panic!("main is not a commit");
+    };
+    let odd = kit_core::object::Commit::new_unannotated(
+        c.tree_hash,
+        vec![main, c.tree_hash],
+        c.author.clone(),
+        c.signer,
+        b"odd".to_vec(),
+        c.timestamp + 1,
+        [0; 64],
+    );
+    to_hex(
+        &store
+            .write(&serialize(&Object::Commit(odd)).unwrap())
+            .unwrap(),
+    )
+}
+
+#[test]
+fn a_range_over_a_parent_that_is_not_a_commit_fails() {
+    let repo = Repo::new();
+    range_fixture(&repo);
+    let range = format!("{}..side", commit_above_a_tree(&repo));
+    let case = "a parent on the excluded side that is not a commit";
+    assert_rejected_silently(&repo, &["log", &range], case);
+    let args = ["git", "format-patch", "--stdout", &range];
+    assert_rejected_silently(&repo, &args, case);
+}
+
+// ---------------------------------------------------------------------------
+// Merge bases over an unreadable commit
+// ---------------------------------------------------------------------------
+
+/// The hex id that `rev` names.
+fn rev(repo: &Repo, rev: &str) -> String {
+    let out = repo.ok(&["rev-parse", rev]).stdout;
+    String::from_utf8(out).unwrap().trim().to_owned()
+}
+
+/// [`range_fixture`] plus n, a commit on top of m with the tree of g that no
+/// ref names. Returns the hex ids of p, m, g, n and the side tip s.
+///
+/// The merge base of s and n is m, reached from s through g. Without g a
+/// lenient walk reaches m from n only, so it settles for p instead.
+#[allow(clippy::many_single_char_names)] // the commit names follow the fixture diagram
+fn base_fixture(repo: &Repo) -> [String; 5] {
+    let (m, g) = range_fixture(repo);
+    let p = rev(repo, "main~2");
+    let s = rev(repo, "side");
+    let layout = RepoLayout::single(repo.path());
+    let store = ObjectStore::open(&layout).unwrap();
+    let Object::Commit(gc) = store.read_object(&hash::from_hex(&g).unwrap()).unwrap() else {
+        panic!("g is not a commit");
+    };
+    let n = kit_core::object::Commit::new_unannotated(
+        gc.tree_hash,
+        vec![hash::from_hex(&m).unwrap()],
+        gc.author.clone(),
+        gc.signer,
+        b"n".to_vec(),
+        gc.timestamp + 1,
+        [0; 64],
+    );
+    let n = to_hex(
+        &store
+            .write(&serialize(&Object::Commit(n)).unwrap())
+            .unwrap(),
+    );
+    [p, m, g, n, s]
+}
+
+/// Run `kit <args>`, and assert that it exits 65 (`DATAERR`), prints nothing
+/// to stdout and names `culprit` on stderr.
+fn assert_unreadable_history(repo: &Repo, args: &[&str], culprit: &str, case: &str) {
+    let out = repo.run(args);
+    check_exit(&out, case).unwrap_or_else(|e| panic!("{case}: {e}"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(65), "{case}: {stderr}");
+    assert!(out.stdout.is_empty(), "{case}: printed a partial answer");
+    assert!(stderr.contains(culprit), "{case}: {stderr}");
+}
+
+#[test]
+#[allow(clippy::many_single_char_names)] // the commit names follow the fixture diagram
+fn merge_base_over_an_unreadable_commit_fails_and_prints_nothing() {
+    let repo = Repo::new();
+    let [p, m, g, n, s] = base_fixture(&repo);
+    let stdout = |args: &[&str]| String::from_utf8(repo.ok(args).stdout).unwrap();
+    assert_eq!(stdout(&["merge-base", &g, &p]).trim(), p);
+    assert_eq!(stdout(&["merge-base", &s, &n]).trim(), m);
+    repo.ok(&["merge-base", "--is-ancestor", &p, &g]);
+    repo.ok(&["merge-base", "--is-ancestor", &m, &s]);
+    let out = repo.run(&["merge-base", "--is-ancestor", &n, &s]);
+    assert_eq!(out.status.code(), Some(1), "not an ancestor");
+
+    // Without m the history of g ends there: no common ancestor of g and
+    // p, and p not an ancestor of g. Exit 1 would say exactly that.
+    let repo = Repo::new();
+    let [p, m, g, ..] = base_fixture(&repo);
+    fs::remove_file(object_file(&repo, &m)).unwrap();
+    for args in [
+        ["merge-base", g.as_str(), p.as_str()].as_slice(),
+        &["merge-base", &p, &g],
+        &["merge-base", "--is-ancestor", &p, &g],
+    ] {
+        assert_unreadable_history(&repo, args, &m, "missing commit");
+    }
+
+    // Without g a lenient walk prints p for s and n; the base is m.
+    let repo = Repo::new();
+    let [_, m, g, n, s] = base_fixture(&repo);
+    fs::remove_file(object_file(&repo, &g)).unwrap();
+    assert_unreadable_history(&repo, &["merge-base", &s, &n], &g, "missing g");
+    assert_unreadable_history(
+        &repo,
+        &["merge-base", "--is-ancestor", &m, &s],
+        &g,
+        "missing g",
+    );
+
+    let repo = Repo::new();
+    let [p, m, g, ..] = base_fixture(&repo);
+    corrupt_object(&repo, &m);
+    assert_unreadable_history(&repo, &["merge-base", &g, &p], &m, "corrupt commit");
+    assert_unreadable_history(
+        &repo,
+        &["merge-base", "--is-ancestor", &p, &g],
+        &m,
+        "corrupt commit",
+    );
+
+    let repo = Repo::new();
+    let [p, ..] = base_fixture(&repo);
+    let odd = commit_above_a_tree(&repo);
+    let layout = RepoLayout::single(repo.path());
+    let store = ObjectStore::open(&layout).unwrap();
+    let Object::Commit(c) = store.read_object(&hash::from_hex(&odd).unwrap()).unwrap() else {
+        panic!("not a commit");
+    };
+    let tree = to_hex(&c.parents[1]);
+    let case = "a parent that is not a commit";
+    assert_unreadable_history(&repo, &["merge-base", &odd, &p], &tree, case);
+    assert_unreadable_history(
+        &repo,
+        &["merge-base", "--is-ancestor", &p, &odd],
+        &tree,
+        case,
+    );
+}
+
+#[test]
+#[allow(clippy::many_single_char_names)] // the commit names follow the fixture diagram
+fn a_diff_over_an_unreadable_commit_fails_and_prints_nothing() {
+    let repo = Repo::new();
+    let [_, _, _, n, s] = base_fixture(&repo);
+    let symmetric = format!("{s}...{n}");
+    let healthy = repo.ok(&["diff", "--name-only", &symmetric]).stdout;
+    assert_eq!(String::from_utf8(healthy).unwrap(), "g.txt\n");
+
+    // Without g a lenient walk diffs from p and also lists m.txt.
+    let repo = Repo::new();
+    let [_, _, g, n, s] = base_fixture(&repo);
+    fs::remove_file(object_file(&repo, &g)).unwrap();
+    let symmetric = format!("{s}...{n}");
+    for args in [
+        ["diff", "--name-only", symmetric.as_str()].as_slice(),
+        &["diff", &symmetric],
+        &["diff", "--merge-base", &s, &n],
+    ] {
+        assert_unreadable_history(&repo, args, &g, "missing commit");
+    }
+
+    let repo = Repo::new();
+    let [_, _, g, n, s] = base_fixture(&repo);
+    corrupt_object(&repo, &g);
+    let symmetric = format!("{s}...{n}");
+    assert_unreadable_history(&repo, &["diff", &symmetric], &g, "corrupt commit");
+}
+
+/// Everything a merge could change: `HEAD`, the refs, the index, the files
+/// and the state of a merge.
+fn snapshot(repo: &Repo) -> Vec<(PathBuf, Vec<u8>)> {
+    fn walk(dir: &std::path::Path, skip_kit: bool, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if skip_kit && path.file_name().is_some_and(|n| n == ".kit") {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, false, out);
+            } else {
+                out.push((path.clone(), fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(repo.path(), true, &mut out);
+    walk(&repo.kit_dir().join("refs"), false, &mut out);
+    for file in ["HEAD", "index"] {
+        let path = repo.kit_dir().join(file);
+        out.push((path.clone(), fs::read(&path).unwrap_or_default()));
+    }
+    out.sort();
+    out
+}
+
+#[test]
+#[allow(clippy::many_single_char_names)] // the commit names follow the fixture diagram
+fn a_merge_over_an_unreadable_commit_fails_and_changes_nothing() {
+    // Healthy: the side merges n on base m.
+    let repo = Repo::new();
+    let [_, _, _, n, _] = base_fixture(&repo);
+    repo.ok(&["merge", &n, "-m", "merge n"]);
+
+    // Without g a lenient walk merges on base p.
+    let repo = Repo::new();
+    let [_, _, g, n, _] = base_fixture(&repo);
+    fs::remove_file(object_file(&repo, &g)).unwrap();
+    let before = snapshot(&repo);
+    assert_unreadable_history(&repo, &["merge", &n, "-m", "merge n"], &g, "missing commit");
+    assert!(
+        before == snapshot(&repo),
+        "the merge changed the repository"
+    );
+    assert!(common::operation_residue(&repo.kit_dir(), "merge").is_none());
+
+    let repo = Repo::new();
+    let [_, _, g, n, _] = base_fixture(&repo);
+    corrupt_object(&repo, &g);
+    let before = snapshot(&repo);
+    assert_unreadable_history(&repo, &["merge", &n, "-m", "merge n"], &g, "corrupt commit");
+    assert!(
+        before == snapshot(&repo),
+        "the merge changed the repository"
+    );
+    assert!(common::operation_residue(&repo.kit_dir(), "merge").is_none());
+}
+
+#[test]
+fn a_branch_filter_over_an_unreadable_commit_fails_and_prints_nothing() {
+    let repo = Repo::new();
+    let [_, m, ..] = base_fixture(&repo);
+    let listed = String::from_utf8(repo.ok(&["branch", "--contains", &m]).stdout).unwrap();
+    assert!(
+        listed.contains("main") && listed.contains("side"),
+        "{listed}"
+    );
+
+    // Without g a lenient walk finds m in neither branch and lists none.
+    let repo = Repo::new();
+    let [_, m, g, ..] = base_fixture(&repo);
+    fs::remove_file(object_file(&repo, &g)).unwrap();
+    for filter in ["--contains", "--no-contains"] {
+        assert_unreadable_history(&repo, &["branch", filter, &m], &g, "missing commit");
+    }
+}

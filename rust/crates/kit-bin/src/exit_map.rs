@@ -70,8 +70,11 @@ fn merge_exit_code(error: &merge::Error) -> u8 {
         merge::Error::Signing(inner) => signing_exit_code(inner),
         // `HEAD` has its own table when it goes back.
         merge::Error::RestoreHead(inner) => head_exit_code(inner),
-        // An object of the wrong kind, or a commit that cannot be encoded.
-        merge::Error::NotACommit | merge::Error::Serialize(_) => exit::DATAERR,
+        // An object of the wrong kind, a commit that cannot be encoded, or a
+        // history that cannot be read.
+        merge::Error::NotACommit | merge::Error::Serialize(_) | merge::Error::History(_) => {
+            exit::DATAERR
+        }
         // The state of the merge, the commit or `HEAD` cannot be written.
         merge::Error::AdvanceHead(_)
         | merge::Error::WriteState(_)
@@ -165,9 +168,10 @@ fn diff_exit_code(error: &diff::Error) -> u8 {
     match error {
         // The arguments contradict each other.
         diff::Error::MergeBaseNeedsRevision | diff::Error::StagedWithRevision => exit::USAGE,
-        // The caller named a revision that does not exist, or two revisions
-        // without a common ancestor.
+        // The caller named a revision that does not exist, two revisions
+        // without a common ancestor, or a history that cannot be read.
         diff::Error::BadRevision { .. }
+        | diff::Error::History(_)
         | diff::Error::UnknownRevision(_)
         | diff::Error::NoMergeBaseBetween { .. }
         | diff::Error::NoMergeBase => exit::DATAERR,
@@ -226,7 +230,8 @@ fn branch_exit_code(error: &branch::Error) -> u8 {
         | branch::Error::Worktrees(_)
         | branch::Error::BadRevision { .. }
         | branch::Error::NotACommit(_)
-        | branch::Error::ReadRevision { .. } => exit::DATAERR,
+        | branch::Error::ReadRevision { .. }
+        | branch::Error::History(_) => exit::DATAERR,
         branch::Error::NoHeadCommit
         | branch::Error::NotFound(_)
         | branch::Error::Read { .. }

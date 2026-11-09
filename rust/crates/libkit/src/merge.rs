@@ -24,7 +24,8 @@ use kit_core::observer::Observer;
 use kit_core::ops::conflict_state::{
     self, ConflictRecord, ConflictStateError, MergeState, in_progress_op_name, is_merge_in_progress,
 };
-use kit_core::ops::merge::{find_merge_base, merge_trees};
+use kit_core::ops::graph::AncestorError;
+use kit_core::ops::merge::{find_merge_base_strict, merge_trees};
 use kit_core::refs::{self, RefError, RefWriteCondition};
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::worktree::{self, WorktreeError};
@@ -52,9 +53,13 @@ pub enum Error {
     /// The target does not resolve.
     #[error("merge target: {0}")]
     Target(revspec::Error),
-    /// The merge base cannot be found.
+    /// The merge base cannot be found: the walk reached its limit.
     #[error("find merge base: {0}")]
     MergeBase(StoreError),
+    /// A commit of the history is missing or corrupt, or a parent is not a
+    /// commit. The error names it. Nothing was changed.
+    #[error("find merge base: {0}")]
+    History(AncestorError),
     /// An object that must be a commit is another kind of object.
     #[error("object is not a commit")]
     NotACommit,
@@ -211,7 +216,12 @@ pub fn start(
         return Ok(Outcome::UpToDate { head: ours });
     }
 
-    let base = find_merge_base(store, ours, theirs).map_err(Error::MergeBase)?;
+    // A base found in part of the history would merge the wrong changes, so
+    // the walk reads every commit and fails before anything changes.
+    let base = find_merge_base_strict(store, ours, theirs).map_err(|e| match e {
+        AncestorError::Limit(limit) => Error::MergeBase(limit),
+        other => Error::History(other),
+    })?;
 
     if base == Some(ours) {
         let theirs_tree = commit_tree(store, theirs)?;
