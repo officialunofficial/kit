@@ -1,7 +1,9 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-06: main CI green on d1f1030; PR 38 clean and green; nothing to fix.",
+  "last_findings": "2026-11-09: main CI green on 9c857ac; nightly formal run failed once on a 504 downloading Apalache (transient). Merged PR 38. PR 45 rebased locally (conflict in ignore_match bench, resolved, tests pass) but force-push was denied; its semver-checks and cargo-mutants checks failed on the old base and need a re-run. PRs 44, 46-52 skipped: touched within 24h. Commonware releases not checked: commonwarexyz/monorepo is outside the session's repository scope.",
   "lessons": [
-    "The state branch did not exist on first run; create it from main."
+    "The state branch did not exist on first run; create it from main.",
+    "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
+    "commonwarexyz/monorepo is not readable through the GitHub tools; fetch its releases page with WebFetch instead."
   ]
 }
