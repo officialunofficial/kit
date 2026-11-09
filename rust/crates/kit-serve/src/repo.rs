@@ -315,6 +315,36 @@ mod tests {
     }
 
     #[test]
+    fn a_ref_and_a_ref_below_it_read_each_other_absent() {
+        let td = tempfile::tempdir().unwrap();
+        let r = repo(&td);
+        let (file, below) = ("refs/heads/a", "refs/heads/a/b");
+        r.update_ref(file, RefWriteCondition::Any, &[1; 32])
+            .unwrap();
+        assert_eq!(r.read_ref(below).unwrap(), None);
+        assert_eq!(
+            r.update_ref(below, RefWriteCondition::Match([1; 32]), &[2; 32])
+                .unwrap(),
+            RefUpdate::Conflict { current: None }
+        );
+        assert!(matches!(
+            r.update_ref(below, RefWriteCondition::Missing, &[2; 32]),
+            Err(RefFileError::InvalidName(_))
+        ));
+
+        let td = tempfile::tempdir().unwrap();
+        let r = repo(&td);
+        r.update_ref(below, RefWriteCondition::Any, &[1; 32])
+            .unwrap();
+        assert_eq!(r.read_ref(file).unwrap(), None);
+        assert_eq!(
+            r.update_ref(file, RefWriteCondition::Match([1; 32]), &[2; 32])
+                .unwrap(),
+            RefUpdate::Conflict { current: None }
+        );
+    }
+
+    #[test]
     fn listing_cuts_at_component_boundaries() {
         let td = tempfile::tempdir().unwrap();
         let r = repo(&td);

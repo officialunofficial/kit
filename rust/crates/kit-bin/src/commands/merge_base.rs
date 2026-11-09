@@ -1,13 +1,16 @@
 //! `kit merge-base [--is-ancestor] <a> <b>` — print the best common
-//! ancestor of two commits, or test ancestry. Reuses the merge engine's
-//! `find_merge_base` / `is_ancestor` (the algorithms already power
-//! `merge`/`rebase`). Object ids are full 64-hex BLAKE3 (the documented
-//! hash-length divergence); everything else matches git.
+//! ancestor of two commits, or test ancestry. Uses the strict walks of the
+//! merge engine, `find_merge_base_strict` / `is_ancestor_strict`, which read
+//! every commit they walk. A commit that is missing, corrupt or not a commit
+//! exits 65 with an error that names it, so it never reads as "no common
+//! ancestor" or "not an ancestor" (exit 1). Object ids are full 64-hex
+//! BLAKE3 (the documented hash-length divergence); everything else matches
+//! git.
 
 use std::io::Write;
 
 use clap::Parser;
-use kit_core::ops::merge::{find_merge_base, is_ancestor};
+use kit_core::ops::merge::{find_merge_base_strict, is_ancestor_strict};
 use kit_core::store::ObjectStore;
 
 use crate::clap_args;
@@ -21,7 +24,8 @@ use crate::format;
 )]
 struct MergeBaseOpts {
     /// Test whether <a> is an ancestor of <b>: exit 0 if yes, 1 if no
-    /// (no output), like `git merge-base --is-ancestor`.
+    /// (no output), like `git merge-base --is-ancestor`. A history that
+    /// cannot be read exits 65.
     #[arg(long = "is-ancestor")]
     is_ancestor: bool,
     a: String,
@@ -68,14 +72,16 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if opts.is_ancestor {
-        return match is_ancestor(&store, a, b) {
+        return match is_ancestor_strict(&store, a, b) {
             Ok(true) => exit::OK,
             Ok(false) => exit::GENERAL_ERROR,
-            Err(e) => emit_err(&format!("merge-base: {e}"), exit::GENERAL_ERROR),
+            // Exit 1 means "not an ancestor"; an unreadable history is not
+            // an answer.
+            Err(e) => emit_err(&format!("merge-base: {e}"), exit::DATAERR),
         };
     }
 
-    match find_merge_base(&store, a, b) {
+    match find_merge_base_strict(&store, a, b) {
         Ok(Some(base)) => {
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "{}", format::hex_hash(&base));
@@ -83,7 +89,7 @@ pub fn run(args: &[String]) -> u8 {
         }
         // No common ancestor — git exits 1 with no output.
         Ok(None) => exit::GENERAL_ERROR,
-        Err(e) => emit_err(&format!("merge-base: {e}"), exit::GENERAL_ERROR),
+        Err(e) => emit_err(&format!("merge-base: {e}"), exit::DATAERR),
     }
 }
 
