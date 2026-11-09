@@ -14,9 +14,9 @@ use kit_rpc::kit::common::v1::RefExpectation;
 use kit_rpc::kit::rpc::v1::ErrorCode;
 use kit_rpc::kit::rpc::v1::ssh::DownloadPackHeader;
 use kit_serve::{
-    DOWNLOAD_CHUNK_MAX, FrameIoError, MAX_BYTES_PER_CONN, MAX_FRAMES_PER_CONN, MAX_REF_NAME_BYTES,
-    REF_NAME_OUTSIDE_REFS, ReadFrames, SessionConfig, SessionEnd, UploadLimits,
-    frame_byte_estimate, serve_session, upload_limits,
+    DOWNLOAD_CHUNK_MAX, FRAME_BUDGET_EXCEEDED, FrameIoError, MAX_BYTES_PER_CONN,
+    MAX_FRAMES_PER_CONN, MAX_REF_NAME_BYTES, REF_NAME_OUTSIDE_REFS, ReadFrames, SessionConfig,
+    SessionEnd, UploadLimits, frame_byte_estimate, serve_session, upload_limits,
 };
 use kit_transport_file::FileTransport;
 
@@ -172,11 +172,49 @@ fn frame_budget_exceeded_ends_protocol_error() {
     assert_eq!(end, SessionEnd::ProtocolError);
     assert_eq!(frames.len(), n + 1);
     assert_error(&frames[n - 1], ErrorCode::InvalidRequest, "empty frame");
-    assert_error(
-        &frames[n],
-        ErrorCode::InvalidRequest,
-        "per-connection frame budget exceeded",
+    assert_error(&frames[n], ErrorCode::InvalidRequest, FRAME_BUDGET_EXCEEDED);
+}
+
+/// The requests of a fetch that finds `branches` branches unchanged: one
+/// listing, then a packmap read and a pack list node download per branch.
+fn unchanged_fetch(branches: usize, node: &[u8]) -> Vec<Option<Body>> {
+    let mut bodies = vec![list_refs(Some("refs/heads/"))];
+    for _ in 0..branches {
+        bodies.push(read_ref("refs/kit/packmap/b"));
+        bodies.push(download(Some(node)));
+    }
+    bodies
+}
+
+/// SPEC-TRANSPORT §4.4: an unchanged fetch of 4,999 branches fits one
+/// session (9,999 frames); one of 5,000 branches (10,001 frames) is refused
+/// with the budget reply, and the session ends.
+#[test]
+fn the_largest_unchanged_fetch_fits_one_session_and_one_more_branch_does_not() {
+    let largest = (MAX_FRAMES_PER_CONN as usize - 1) / 2;
+    assert_eq!(largest, 4_999);
+    let fx = Fixture::new();
+    let (pack, id) = valid_pack();
+    fx.seed(&[("refs/kit/packmap/b", id)], &[&pack]);
+
+    let (end, frames) = fx.run(unchanged_fetch(largest, &id));
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(
+        frames
+            .iter()
+            .all(|f| !matches!(&f.body, Some(Body::Error(_)))),
+        "no request of the fetch was refused"
     );
+
+    let (end, frames) = fx.run(unchanged_fetch(largest + 1, &id));
+    assert_eq!(end, SessionEnd::ProtocolError);
+    let last = frames.last().unwrap();
+    assert_error(last, ErrorCode::InvalidRequest, FRAME_BUDGET_EXCEEDED);
+    let refused = frames
+        .iter()
+        .filter(|f| matches!(&f.body, Some(Body::Error(_))))
+        .count();
+    assert_eq!(refused, 1, "only the frame over the budget is refused");
 }
 
 #[test]

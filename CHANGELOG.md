@@ -83,6 +83,21 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit blame --reverse` fails with an error that names the limit when the
   first-parent walk from the end of its range holds more than 1,000,000
   commits. It used to collect the whole chain with no limit.
+- The file transport and `kit serve` report a ref absent when a ref file
+  sits above its name (`refs/heads/a` for `refs/heads/a/b`) or a directory
+  of other refs sits at it. Before, the read failed with a `Not a
+  directory` or `Is a directory` I/O error. A listing under a prefix that
+  names a ref file is empty instead of an error. Other read failures are
+  still errors.
+- `kit serve` names its limit when a session sends more than 10,000 frames,
+  and SPEC-TRANSPORT §4.4 states what fits: over ssh an unchanged fetch costs
+  one frame plus at least two per branch, so one session fetches at most
+  4,999 branches.
+- An S3 `list_refs` fails when it cannot read a listed ref. Before, a ref
+  whose read returned an error status such as 403 or 500, or a body that is
+  not a canonical ref wire, was left out of the listing, so a fetch treated
+  the branch as absent. A ref that returns 404 is still left out: it was
+  deleted after the page was listed.
 
 ## [0.7.3] - 2026-11-08
 
