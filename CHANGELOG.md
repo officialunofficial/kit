@@ -7,6 +7,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- An S3 `list_refs` fails when it cannot read a listed ref. Before, a ref
+  whose read returned an error status such as 403 or 500, or a body that is
+  not a canonical ref wire, was left out of the listing, so a fetch treated
+  the branch as absent. A ref that returns 404 is still left out: it was
+  deleted after the page was listed.
+
 ## [0.7.3] - 2026-11-08
 
 ### Fixed
