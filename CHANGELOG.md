@@ -9,6 +9,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The file transport and `kit serve` report a ref absent when a ref file
+  sits above its name (`refs/heads/a` for `refs/heads/a/b`) or a directory
+  of other refs sits at it. Before, the read failed with a `Not a
+  directory` or `Is a directory` I/O error. A listing under a prefix that
+  names a ref file is empty instead of an error. Other read failures are
+  still errors.
 - `kit serve` names its limit when a session sends more than 10,000 frames,
   and SPEC-TRANSPORT §4.4 states what fits: over ssh an unchanged fetch costs
   one frame plus at least two per branch, so one session fetches at most
