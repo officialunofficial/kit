@@ -115,6 +115,7 @@ fn runs_stream() -> Vec<u8> {
 
 fn ends(cdc: FastCdc, data: &[u8]) -> Vec<usize> {
     ChunkIterator::new(cdc, data)
+        .take(data.len() + 1)
         .map(|b| b.offset + b.length)
         .collect()
 }
@@ -177,6 +178,7 @@ fn fastcdc_iterator_total_equals_input_length() {
     // Sanity, plus exercises the Iterator API in tests/.
     let data = splitmix_bytes(0xDEAD_BEEF, 200 * 1024);
     let total: usize = ChunkIterator::new(FastCdc::v1(), &data)
+        .take(data.len() + 1)
         .map(|b| b.length)
         .sum();
     assert_eq!(total, data.len());

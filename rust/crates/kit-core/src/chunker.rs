@@ -311,6 +311,7 @@ impl Iterator for ChunkIterator<'_> {
         }
         let remaining = &self.data[self.offset..];
         let length = self.cdc.cut(remaining);
+        assert!(length > 0, "a cut must make progress");
         let boundary = ChunkBoundary {
             offset: self.offset,
             length,
@@ -687,7 +688,7 @@ mod tests {
 
         let mut total = 0usize;
         let mut count = 0usize;
-        for b in ChunkIterator::new(cdc, &data) {
+        for b in ChunkIterator::new(cdc, &data).take(data.len() + 1) {
             assert!(b.length <= MAX_SIZE);
             // Only the final chunk is allowed to be smaller than min.
             if b.offset + b.length < data.len() {
@@ -705,7 +706,9 @@ mod tests {
         let cdc = FastCdc::v1();
         let small = b"hello, this is a tiny file";
         assert_eq!(cdc.cut(small), small.len());
-        let boundaries: Vec<_> = ChunkIterator::new(cdc, small).collect();
+        let boundaries: Vec<_> = ChunkIterator::new(cdc, small)
+            .take(small.len() + 1)
+            .collect();
         assert_eq!(boundaries.len(), 1);
         assert_eq!(boundaries[0].offset, 0);
         assert_eq!(boundaries[0].length, small.len());
@@ -715,7 +718,7 @@ mod tests {
     fn empty_input_iterator_is_empty() {
         let cdc = FastCdc::v1();
         assert_eq!(cdc.cut(b""), 0);
-        let none: Vec<_> = ChunkIterator::new(cdc, b"").collect();
+        let none: Vec<_> = ChunkIterator::new(cdc, b"").take((b"").len() + 1).collect();
         assert!(none.is_empty());
     }
 
@@ -749,8 +752,12 @@ mod tests {
         modified.push(0xFF);
         modified.extend_from_slice(&original[insert_point..]);
 
-        let orig_chunks: Vec<_> = ChunkIterator::new(cdc, &original).collect();
-        let mod_chunks: Vec<_> = ChunkIterator::new(cdc, &modified).collect();
+        let orig_chunks: Vec<_> = ChunkIterator::new(cdc, &original)
+            .take(original.len() + 1)
+            .collect();
+        let mod_chunks: Vec<_> = ChunkIterator::new(cdc, &modified)
+            .take(modified.len() + 1)
+            .collect();
 
         let max_chunks = orig_chunks.len().max(mod_chunks.len());
         let mut differing = 0usize;
@@ -780,9 +787,11 @@ mod tests {
         let large = FastCdc::v1();
 
         let s: Vec<_> = ChunkIterator::new(small, &data)
+            .take(data.len() + 1)
             .map(|b| b.offset + b.length)
             .collect();
         let l: Vec<_> = ChunkIterator::new(large, &data)
+            .take(data.len() + 1)
             .map(|b| b.offset + b.length)
             .collect();
         assert!(
@@ -797,6 +806,7 @@ mod tests {
         Prng::new(0xFEED_FACE).fill(&mut data);
         let from_helper = chunk_boundaries(&data);
         let from_iter: Vec<usize> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| b.offset + b.length)
             .collect();
         assert_eq!(from_helper, from_iter);
@@ -808,6 +818,7 @@ mod tests {
         Prng::new(0x5713_EA31).fill(&mut data);
 
         let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| data[b.offset..b.offset + b.length].to_vec())
             .collect();
 
@@ -845,6 +856,7 @@ mod tests {
         Prng::new(0xC0FF_EE01).fill(&mut data);
 
         let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| data[b.offset..b.offset + b.length].to_vec())
             .collect();
         assert!(in_memory.len() > 100, "got {} chunks", in_memory.len());
@@ -963,6 +975,7 @@ mod tests {
                 let mut data = vec![0u8; windows * fresh];
                 Prng::new(0x00E0_F111).fill(&mut data);
                 let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+                    .take(data.len() + 1)
                     .map(|b| data[b.offset..b.offset + b.length].to_vec())
                     .collect();
                 let reader =
@@ -982,6 +995,7 @@ mod tests {
         Prng::new(0x5713_EA32).fill(&mut data);
 
         let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| data[b.offset..b.offset + b.length].to_vec())
             .collect();
 
@@ -1002,6 +1016,7 @@ mod tests {
         let mut data = vec![0u8; 5 * 1024 * 1024];
         Prng::new(0x5713_EA33).fill(&mut data);
         let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| data[b.offset..b.offset + b.length].to_vec())
             .collect();
         let reader = ChunkReader::with_threads(
@@ -1018,6 +1033,7 @@ mod tests {
     /// Sequential chunk ends of `data` from offset `0`.
     fn sequential_ends(cdc: &FastCdc, data: &[u8]) -> Vec<usize> {
         ChunkIterator::new(*cdc, data)
+            .take(data.len() + 1)
             .map(|b| b.offset + b.length)
             .collect()
     }
@@ -1256,8 +1272,8 @@ mod tests {
         #[test]
         fn proptest_determinism(data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024)) {
             let cdc = FastCdc::v1();
-            let pass1: Vec<_> = ChunkIterator::new(cdc, &data).collect();
-            let pass2: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            let pass1: Vec<_> = ChunkIterator::new(cdc, &data).take(data.len() + 1).collect();
+            let pass2: Vec<_> = ChunkIterator::new(cdc, &data).take(data.len() + 1).collect();
             proptest::prop_assert_eq!(pass1, pass2);
         }
 
@@ -1268,7 +1284,7 @@ mod tests {
             data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024),
         ) {
             let cdc = FastCdc::v1();
-            let boundaries: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            let boundaries: Vec<_> = ChunkIterator::new(cdc, &data).take(data.len() + 1).collect();
             let mut expected_offset = 0usize;
             for b in &boundaries {
                 proptest::prop_assert_eq!(b.offset, expected_offset);
@@ -1287,7 +1303,7 @@ mod tests {
             data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024),
         ) {
             let cdc = FastCdc::v1();
-            let in_memory: Vec<Vec<u8>> = ChunkIterator::new(cdc, &data)
+            let in_memory: Vec<Vec<u8>> = ChunkIterator::new(cdc, &data).take(data.len() + 1)
                 .map(|b| data[b.offset..b.offset + b.length].to_vec())
                 .collect();
 
