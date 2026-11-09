@@ -20,7 +20,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use crate::chunker::{ChunkIterator, ChunkReader, FastCdc};
+use crate::chunker::{ChunkReader, FastCdc};
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
 use crate::index::{self, Index};
@@ -1147,7 +1147,7 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// [`ChunkedBlob`] manifest, streaming chunks directly from `reader`
 /// instead of requiring the whole file resident in memory first.
 /// Bounds ingest memory to one fixed `ChunkReader` window
-/// (1 MiB), an owned batch of at most 64 chunks (16 MiB), and the
+/// (1 MiB to 16 MiB, by cutter thread count), an owned batch of at most 64 chunks (16 MiB), and the
 /// growing chunk-hash list (32 bytes/chunk). The reader and batch stay
 /// bounded independently of total file size.
 ///
@@ -1160,8 +1160,7 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// targets, which have no OS threads — so the fan-out decision lives
 /// with the caller instead of living in this function, the same shape
 /// as [`crate::transfer::plan_pack_with`]'s `encode_deltas` callback.
-/// Cutting chunk boundaries from `reader` is inherently sequential (each
-/// cut's start is the previous cut's end), but once a batch of up to
+/// `ChunkReader` cuts each window on several threads; once a batch of up to
 /// `STREAM_HASH_BATCH` chunks is in hand, hashing and storing each one
 /// is independent of every other chunk in the batch — `kit-bin`'s
 /// native, rayon-backed `add` path passes a parallel `hash_chunks`
@@ -1174,8 +1173,7 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// manifest's chunk list, and therefore the file's content address,
 /// depends on that order.
 ///
-/// Cutting chunk boundaries is otherwise strictly sequential (each cut's
-/// start is the previous cut's end), but cutting *batch N+1* has no data
+/// Cutting *batch N+1* has no data
 /// dependency on *hashing batch N* — only on the reader position, which
 /// the cutter alone advances. Native builds (see
 /// `store_large_file_streaming_pipelined`) overlap the two phases
@@ -1381,15 +1379,13 @@ pub fn store_file_object<S: ObjectSink + ?Sized>(sink: &S, data: &[u8]) -> Workt
         return Ok(sink.put_parts(&[&prologue, data])?);
     }
 
-    // Large file: split with FastCDC v1 via the public ChunkIterator,
-    // store each chunk as a Blob, and assemble a ChunkedBlob manifest.
-    // Per-manifest chunk count is bounded by serialize::MAX_CHUNKS
-    // (1_000_000); MAX_FILE_BYTES (1 GiB) ÷ FastCDC MIN_SIZE (16 KiB)
-    // = ~65k, well under the cap.
+    // Large file: split with FastCDC v1, store each chunk as a Blob, and
+    // assemble a ChunkedBlob manifest. Per-manifest chunk count is
+    // bounded by serialize::MAX_CHUNKS (1_000_000); MAX_FILE_BYTES
+    // (1 GiB) ÷ FastCDC MIN_SIZE (16 KiB) = ~65k, well under the cap.
     let total_size = data.len() as u64;
-    let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), data)
-        .map(|b| {
-            let chunk = &data[b.offset..b.offset + b.length];
+    let chunks: Vec<Hash> = chunk_slices(data)
+        .map(|chunk| {
             let prologue = serialize::blob_prologue(chunk.len())?;
             Ok::<_, WorktreeError>(sink.put_parts(&[&prologue, chunk])?)
         })
@@ -1402,6 +1398,18 @@ pub fn store_file_object<S: ObjectSink + ?Sized>(sink: &S, data: &[u8]) -> Workt
     });
     let manifest_bytes = serialize::serialize(&manifest)?;
     Ok(sink.put(&manifest_bytes)?)
+}
+
+/// `data` split into its [`FastCdc::v1`] chunks, in order. The cut points
+/// come from [`FastCdc::chunk_ends`], which cuts on several threads and
+/// matches [`crate::chunker::ChunkIterator`] exactly.
+fn chunk_slices(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut start = 0;
+    FastCdc::v1().chunk_ends(data).into_iter().map(move |end| {
+        let chunk = &data[start..end];
+        start = end;
+        chunk
+    })
 }
 
 /// Build the canonical [`ChunkedBlob`] manifest for `data`: split with
@@ -1417,9 +1425,8 @@ pub fn store_file_object<S: ObjectSink + ?Sized>(sink: &S, data: &[u8]) -> Workt
 /// # Errors
 /// [`WorktreeError::Object`] if a chunk length exceeds the wire-format cap.
 pub fn chunked_blob_from_bytes(data: &[u8]) -> WorktreeResult<ChunkedBlob> {
-    let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), data)
-        .map(|b| {
-            let chunk = &data[b.offset..b.offset + b.length];
+    let chunks: Vec<Hash> = chunk_slices(data)
+        .map(|chunk| {
             // Blob object id = BLAKE3(blob_prologue ‖ chunk) — the id
             // store_file_object writes this chunk Blob under (the prologue ‖
             // payload split is pinned to serialize(Blob) by proptest).
