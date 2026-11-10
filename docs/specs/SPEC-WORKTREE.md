@@ -51,10 +51,10 @@ Untracked paths outside the target must stay on disk. The current clean
 restore cannot preserve arbitrary untracked paths, so recovery refuses when
 it would remove one; it preserves the ignore files and ignored paths under
 the ordinary restore rules. An untracked regular file named exactly
-`.{tracked sibling}.tmp.<digits>.<digits>` is an interrupted restore temporary
-file and may be swept. Both numeric fields are nonempty ASCII digits. The
-sibling must be a tracked leaf in the pre-pull or target tree in the same
-directory. Directories, symlinks, unknown siblings and other suffixes do not
+`.kit-restore-tmp.<digits>.<digits>` is an interrupted restore temporary file
+and may be swept. Both numeric fields are nonempty ASCII digits. The name does
+not contain the name of the file being restored, so it fits any directory
+that holds the restored file. Directories, symlinks and other names do not
 qualify. A tracked path is never exempted as a temporary file. Recovery accepts a mixture of old and already
 restored target entries and aligns the index after the restore succeeds.
 It finishes a branch write already at the marker, even if HEAD still names

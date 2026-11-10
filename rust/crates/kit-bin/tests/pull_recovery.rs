@@ -63,7 +63,11 @@ impl Pending {
         ok(upstream.path(), &["keygen"]);
         fs::write(upstream.path().join("a.txt"), b"one\n").unwrap();
         fs::write(upstream.path().join("b.txt"), b"same\n").unwrap();
-        fs::write(upstream.path().join(".a.txt.tmp.1.2"), b"tracked value\n").unwrap();
+        fs::write(
+            upstream.path().join(".kit-restore-tmp.1.2"),
+            b"tracked value\n",
+        )
+        .unwrap();
         ok(upstream.path(), &["add", "."]);
         ok(upstream.path(), &["commit", "-m", "base"]);
         let url = format!("kit+file://{}", bare.path().display());
@@ -155,7 +159,7 @@ fn recovery_refuses_soft_reset_work_with_a_stale_marker() {
 fn recovery_cleans_a_regular_restore_temporary_file() {
     let pending = Pending::new();
     let dir = pending.local.path();
-    let temporary = dir.join(".a.txt.tmp.123456.7");
+    let temporary = dir.join(".kit-restore-tmp.123456.7");
     fs::write(&temporary, b"incomplete contents").unwrap();
     ok(dir, &["pull"]);
     assert!(!temporary.exists());
@@ -167,13 +171,13 @@ fn recovery_refuses_other_temporary_file_shapes() {
     let pending = Pending::new();
     let dir = pending.local.path();
     for name in [
-        ".a.txt.tmp.1.x",
-        ".a.txt.tmp..3",
-        ".a.txt.tmp.+1.2",
-        ".a.txt.tmp.１.2",
-        ".a.txt.tmp.1.2.extra",
-        ".unknown.tmp.12.3",
-        ".a.txt.tmp.1",
+        ".kit-restore-tmp.1.x",
+        ".kit-restore-tmp..3",
+        ".kit-restore-tmp.+1.2",
+        ".kit-restore-tmp.１.2",
+        ".kit-restore-tmp.1.2.extra",
+        ".a.txt.tmp.12.3",
+        ".kit-restore-tmp.1",
     ] {
         let path = dir.join(name);
         fs::write(&path, b"local work").unwrap();
@@ -185,7 +189,7 @@ fn recovery_refuses_other_temporary_file_shapes() {
         assert_eq!(fs::read(&path).unwrap(), b"local work");
         fs::remove_file(path).unwrap();
     }
-    let path = dir.join(".a.txt.tmp.12.3");
+    let path = dir.join(".kit-restore-tmp.12.3");
     fs::create_dir(&path).unwrap();
     pending.refuses_without_changes();
     assert!(path.is_dir());
@@ -263,7 +267,7 @@ fn no_remote_branches_refuse_an_unfinished_pull() {
 fn recovery_refuses_symlinks_with_temporary_names() {
     let pending = Pending::new();
     let dir = pending.local.path();
-    let temporary = dir.join(".a.txt.tmp.987654.0");
+    let temporary = dir.join(".kit-restore-tmp.987654.0");
     std::os::unix::fs::symlink("b.txt", &temporary).unwrap();
     pending.refuses_without_changes();
     assert_eq!(fs::read_link(&temporary).unwrap(), Path::new("b.txt"));
@@ -273,8 +277,29 @@ fn recovery_refuses_symlinks_with_temporary_names() {
 #[test]
 fn recovery_protects_tracked_files_with_temporary_names() {
     let pending = Pending::new();
-    let path = pending.local.path().join(".a.txt.tmp.1.2");
+    let path = pending.local.path().join(".kit-restore-tmp.1.2");
     fs::write(&path, b"local edit\n").unwrap();
     pending.refuses_without_changes();
     assert_eq!(fs::read(path).unwrap(), b"local edit\n");
+}
+
+#[test]
+fn pull_restores_a_file_with_a_maximum_length_name() {
+    let upstream = tempfile::tempdir().unwrap();
+    let bare = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let name = "n".repeat(255);
+    ok(upstream.path(), &["init"]);
+    ok(upstream.path(), &["keygen"]);
+    fs::write(upstream.path().join(&name), b"long name\n").unwrap();
+    ok(upstream.path(), &["add", "."]);
+    ok(upstream.path(), &["commit", "-m", "base"]);
+    let url = format!("kit+file://{}", bare.path().display());
+    ok(upstream.path(), &["remote", "add", &url]);
+    ok(upstream.path(), &["push"]);
+    ok(local.path(), &["init"]);
+    ok(local.path(), &["keygen"]);
+    ok(local.path(), &["remote", "add", &url]);
+    ok(local.path(), &["pull"]);
+    assert_eq!(fs::read(local.path().join(&name)).unwrap(), b"long name\n");
 }

@@ -32,6 +32,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking:** `RestoreError` in kit-core is `#[non_exhaustive]` and has a
+  new `File` variant that carries the path of the file that failed. The
+  function `restore_temp_sibling` is gone. `is_restore_temp_name` replaces
+  it and takes a name only, because a restore temporary name no longer
+  contains the name of the file it replaces. Code that matches
+  `RestoreError` needs a wildcard arm.
 - **Breaking:** `BisectError`, `RebaseError` and `BlameError` in kit-core
   are `#[non_exhaustive]`, and each has a `History` variant that carries
   the `AncestorError` of a history walk. A commit that cannot be read
@@ -100,6 +106,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Restore writes a file through a temporary name of fixed length,
+  `.kit-restore-tmp.<pid>.<counter>`, so a file name of up to 255 bytes
+  checks out, clones and pulls. Before, a name of 240 bytes or more failed
+  because its temporary name passed the file system limit. A restore never
+  opens, follows or removes a file that already has a temporary name; it
+  takes the next counter value. Pull recovery sweeps an untracked regular
+  file with that name shape, and the rule no longer needs a tracked sibling.
+- A restore I/O error names the file, as a path relative to the restore root.
 - `kit log` and `kit rev-list` fail with an error that names the limit when
   a walk reaches more than 1,000,000 commits. They used to stop there and
   print the newest commits as if they were the whole history. The excluded
