@@ -45,7 +45,7 @@ To pin a version, pass `--version`:
 curl -sSfL https://kit.storage/install.sh | sh -s -- --version v0.8.0
 ```
 
-To build from source, use Rust 1.99 or newer:
+To build from source, use Rust 1.99.1 or newer:
 
 ```sh
 cargo install --git https://github.com/officialunofficial/kit kit-bin
