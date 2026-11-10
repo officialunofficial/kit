@@ -3,9 +3,11 @@
 //! Each row drives real code paths. `ref-write` calls
 //! [`Transport::update_ref`] directly. The push rows run
 //! [`kit_sync::push()`] from one local repository per pusher, and the fetch
-//! rows run [`kit_sync::fetch`] through a counting [`RemoteSource`]. Every
-//! row checks its result before it reports a number: a write that a writer
-//! believes landed but the remote does not hold fails the run.
+//! rows run [`kit_sync::fetch`] through a counting [`RemoteSource`]. The
+//! pushes of `fetch-grow` run through a [`RemoteSource`] that counts the
+//! bytes they upload. Every row checks its result before it reports a
+//! number: a write that a writer believes landed but the remote does not
+//! hold fails the run.
 //!
 //! The workload is deterministic. Ref values, file contents, commit
 //! timestamps and the signing key derive from the writer and step numbers
@@ -19,20 +21,20 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Barrier, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
-use kit_core::protocol::{PackKey, RefWriteCondition, Transport};
+use kit_core::protocol::{CommitOutcome, PackKey, RefWriteCondition, Transport, UploadLimits};
 use kit_core::refs::{self, Ref};
 use kit_core::sign::{self, KeyPair};
 use kit_core::store::ObjectStore;
 use kit_sync::{
     CloneRemote, DEFAULT_REMOTE_NAME, FetchReport, NoopObserver, PushError, PushLease, PushOptions,
-    PushTarget, RemoteSource, SourceError, SyncOptions, TransportSource,
+    PushTarget, RemoteSource, SourceError, SyncError, SyncOptions, TransportSource,
 };
 
 use crate::Xorshift;
@@ -635,6 +637,126 @@ impl RemoteSource for Counting<'_> {
     }
 }
 
+/// A [`RemoteSource`] that forwards every call and counts the bytes of the
+/// packs and pack list nodes it uploads.
+struct Uploads<'a> {
+    inner: TransportSource<'a>,
+    bytes: AtomicU64,
+}
+
+impl<'a> Uploads<'a> {
+    fn new(tx: &'a dyn Transport) -> Self {
+        Self {
+            inner: TransportSource::new(tx),
+            bytes: AtomicU64::new(0),
+        }
+    }
+
+    fn count(&self, bytes: &[u8]) {
+        self.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    }
+}
+
+impl RemoteSource for Uploads<'_> {
+    fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
+        self.inner.list_branches()
+    }
+
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
+        self.inner.read_ref(name)
+    }
+
+    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_blob_via_ref(key, ref_name)
+    }
+
+    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_pack_via_ref(key, ref_name)
+    }
+
+    fn supports_push(&self) -> bool {
+        self.inner.supports_push()
+    }
+
+    fn upload_pack_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), SourceError> {
+        self.count(bytes);
+        self.inner.upload_pack_via_ref(bytes, key, name)
+    }
+
+    fn upload_blob_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        name: &str,
+    ) -> Result<(), SourceError> {
+        self.count(bytes);
+        self.inner.upload_blob_via_ref(bytes, key, name)
+    }
+
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        tip: &Hash,
+    ) -> Result<(), SourceError> {
+        self.inner.update_ref(name, condition, tip)
+    }
+
+    fn advance_refs_committing(
+        &self,
+        head: &str,
+        head_condition: RefWriteCondition,
+        tip: &Hash,
+        packmap: &str,
+        packmap_condition: RefWriteCondition,
+        node: &Hash,
+        keys: &[PackKey],
+    ) -> Result<CommitOutcome, SourceError> {
+        self.inner.advance_refs_committing(
+            head,
+            head_condition,
+            tip,
+            packmap,
+            packmap_condition,
+            node,
+            keys,
+        )
+    }
+
+    fn upload_limits(&self) -> UploadLimits {
+        self.inner.upload_limits()
+    }
+
+    fn supports_atomic_advance(&self) -> bool {
+        self.inner.supports_atomic_advance()
+    }
+
+    fn supports_serialized_advance(&self) -> bool {
+        self.inner.supports_serialized_advance()
+    }
+
+    fn atomic_advance_status(&self) -> Option<bool> {
+        self.inner.atomic_advance_status()
+    }
+
+    fn atomic_force_head_condition(&self, observed_head: Option<Hash>) -> RefWriteCondition {
+        self.inner.atomic_force_head_condition(observed_head)
+    }
+
+    fn repository_address(&self) -> Option<(String, String)> {
+        self.inner.repository_address()
+    }
+
+    fn repository_error(&self, error: SourceError) -> SyncError {
+        self.inner.repository_error(error)
+    }
+}
+
 /// Result of one fetch measurement.
 #[derive(Debug, Clone, Copy)]
 pub struct FetchRun {
@@ -719,8 +841,35 @@ pub fn fetch_noop(connect: &Connect, reader: &Path) -> Result<FetchRun, String> 
     })
 }
 
-/// Result of one `fetch-grow` run.
+/// One push of `fetch-grow` after the clone.
 #[derive(Debug, Clone, Copy)]
+pub struct GrowPush {
+    /// Time of the push, opening its connection included.
+    pub elapsed: Duration,
+    /// Bytes of the packs and the pack list node the push uploaded.
+    pub uploaded: u64,
+    /// Whether the push reset the pack list chain to one node that holds
+    /// the full closure of its tip.
+    pub reset: bool,
+}
+
+/// The cost of the `fetch-grow` pushes of one kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PushCost {
+    /// Pushes of this kind.
+    pub pushes: usize,
+    /// Mean bytes uploaded by one push.
+    pub mean_bytes: f64,
+    /// Most bytes uploaded by one push.
+    pub max_bytes: u64,
+    /// Median time of one push, nearest rank.
+    pub median: Duration,
+    /// Longest time of one push.
+    pub max: Duration,
+}
+
+/// Result of one `fetch-grow` run.
+#[derive(Debug, Clone)]
 pub struct GrowRun {
     /// A fetch into a clone taken before the pushes.
     pub incremental: FetchRun,
@@ -728,6 +877,30 @@ pub struct GrowRun {
     pub cold: FetchRun,
     /// Pack list nodes on the branch's chain after the pushes.
     pub chain_nodes: usize,
+    /// The pushes after the clone, in order.
+    pub pushes: Vec<GrowPush>,
+}
+
+impl GrowRun {
+    /// The cost of the pushes that reset the chain (`reset` is true) or of
+    /// the pushes that appended to it. All zero when there is no such push.
+    #[must_use]
+    pub fn cost(&self, reset: bool) -> PushCost {
+        let of_kind: Vec<&GrowPush> = self.pushes.iter().filter(|p| p.reset == reset).collect();
+        if of_kind.is_empty() {
+            return PushCost::default();
+        }
+        let mut times: Vec<Duration> = of_kind.iter().map(|p| p.elapsed).collect();
+        times.sort_unstable();
+        let total: u64 = of_kind.iter().map(|p| p.uploaded).sum();
+        PushCost {
+            pushes: of_kind.len(),
+            mean_bytes: total as f64 / of_kind.len() as f64,
+            max_bytes: of_kind.iter().map(|p| p.uploaded).max().unwrap_or(0),
+            median: quantile(&times, 0.5),
+            max: quantile(&times, 1.0),
+        }
+    }
 }
 
 /// Ref writes `fetch-noop` setup makes over one connection, two per branch.
@@ -738,24 +911,36 @@ pub const GROW_BRANCH: &str = "grow";
 
 /// `fetch-grow`: one push, a clone, `pushes` more pushes to the branch,
 /// then a fetch into that clone and a fetch into an empty repository.
-/// Both must end at the last pushed commit.
+/// Both must end at the last pushed commit. Each push after the clone
+/// reports its time, the bytes it uploaded and whether it reset the chain.
 pub fn fetch_grow(connect: &Connect, scratch: &Path, pushes: usize) -> Result<GrowRun, String> {
     check_bounds(1, pushes)?;
     let key = bench_key();
     let pusher = Pusher::create(&scratch.join("pusher"), &key)?;
     let mut tip = pusher.commit(GROW_BRANCH, None, 0)?;
-    let push = |step: usize| -> Result<(), String> {
+    let push = |step: usize| -> Result<GrowPush, String> {
+        let t0 = Instant::now();
         let tx = connect()?;
+        let source = Uploads::new(&*tx);
         pusher
-            .push(&TransportSource::new(&*tx), GROW_BRANCH)
-            .map_err(|e| format!("push {step}: {e}"))
+            .push(&source, GROW_BRANCH)
+            .map_err(|e| format!("push {step}: {e}"))?;
+        let elapsed = t0.elapsed();
+        Ok(GrowPush {
+            elapsed,
+            uploaded: source.bytes.load(Ordering::Relaxed),
+            // Every push after the first finds a chain. Its node has no
+            // predecessor only when the push reset that chain.
+            reset: step > 0 && chain_prev(&*tx, GROW_BRANCH)?.is_none(),
+        })
     };
     push(0)?;
     let reader = Pusher::create(&scratch.join("reader"), &key)?;
     reader.fetch(&TransportSource::new(&*connect()?))?;
+    let mut grow = Vec::with_capacity(pushes);
     for step in 1..=pushes {
         tip = pusher.commit(GROW_BRANCH, Some(tip), seed(0, step))?;
-        push(step)?;
+        grow.push(push(step)?);
     }
     let measure = |repo: &Pusher<'_>| -> Result<FetchRun, String> {
         let tx = connect()?;
@@ -779,7 +964,23 @@ pub fn fetch_grow(connect: &Connect, scratch: &Path, pushes: usize) -> Result<Gr
         incremental,
         cold,
         chain_nodes,
+        pushes: grow,
     })
+}
+
+/// The predecessor of the newest pack list node of `branch`. The branch
+/// must have a chain.
+fn chain_prev(tx: &dyn Transport, branch: &str) -> Result<Option<Hash>, String> {
+    let head = tx
+        .read_ref(&kit_sync::packmap::packmap_ref(branch))
+        .map_err(|e| e.to_string())?
+        .ok_or("the push left no packmap")?;
+    let bytes = tx
+        .download_blob(&PackKey::from_hash(head))
+        .map_err(|e| e.to_string())?;
+    Ok(kit_core::transfer::decode_packlist(&bytes)
+        .map_err(|e| e.to_string())?
+        .prev)
 }
 
 /// Walk the pack list chain of `branch` and count its nodes, at most

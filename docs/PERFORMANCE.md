@@ -98,7 +98,7 @@ Each value is the mean and the sample standard deviation over the runs.
 | `push-distinct` | N pushers, N in 1, 8, 64, 512. Each pushes 4 commits to its own branch. | Pushes per second, p50 and p99 latency, rejected attempts per landed push. |
 | `push-shared` | N pushers, N in 1, 8, 32, each landing 4 commits on one branch. A rejected push fetches, commits again on the new tip and retries. | Pushes per second, p50, p90, p99 and maximum latency including retries, rejected attempts per landed push, pack list nodes on the branch's chain afterwards (more than the landed pushes means rejected attempts wrote to it), and for the slowest 1% of landed pushes: attempts, time in rejected attempts, time in fetches after them, and the rest (local commits and the attempt that landed). Pushers retry at once, without a wait. Each landed push can cost up to N - 1 rejected attempts, so large N takes a long time. |
 | `fetch-noop` | M branches, M in 10, 100, 1,000, 10,000, and a clone that already holds them. Five fetches per run. | Fetch time and remote requests. |
-| `fetch-grow` | One push, a clone, then K pushes to the branch, K in 10, 100, 1,000. A fetch into the clone, and a fetch into an empty repository. | Time, packs downloaded and remote requests of each fetch, and pack list nodes on the chain. |
+| `fetch-grow` | One push, a clone, then K pushes to the branch, K in 10, 100, 1,000. A fetch into the clone, and a fetch into an empty repository. | Time, packs downloaded and remote requests of each fetch, and pack list nodes on the chain. For the K pushes: the mean bytes uploaded, the median and the longest time of the pushes that append to the chain, the count of pushes that reset the chain, and their mean and largest upload and median and longest time. |
 
 Every `ref-write` writer opens its own transport, as a separate process
 would. Every pusher has its own local repository, and every push and fetch
@@ -120,3 +120,49 @@ row at tiny sizes and checks that a transport that drops a write fails it.
 Each file transport instance has its own in-process locks, so writers in one
 process meet only at the OS locks, as separate processes do. Starting the benchmark process is outside the timed part. The rows do not
 cover a network: `kit serve` runs on the same machine.
+
+### The push cost of a pack chain reset
+
+A push appends one pack list node to the chain of its branch. A push that
+would grow the chain past 64 nodes resets it: the push uploads one pack with
+the full closure of its tip, and the chain restarts at one node. The first
+push makes node 1, so every 64th push after it is a reset. `fetch-grow` counts
+the bytes of the packs and pack list nodes that each push uploads, and times
+the push with its connection.
+
+Each commit of the workload replaces one 1 KiB file. A push that appends
+uploads about 876 bytes. A reset uploads about 770 bytes for each commit in
+the history, so its upload grows with the branch. The byte counts are the same
+on every run.
+
+| K pushes | Resets | Bytes, append | Bytes, mean reset | Bytes, last reset | Last reset / append |
+|---:|---:|---:|---:|---:|---:|
+| 64 | 1 | 875 | 50,571 | 50,571 | 58 |
+| 100 | 1 | 878 | 50,571 | 50,571 | 58 |
+| 128 | 2 | 876 | 75,194 | 99,816 | 114 |
+| 256 | 4 | 876 | 124,465 | 198,376 | 226 |
+| 512 | 8 | 876 | 223,020 | 395,493 | 451 |
+| 1,000 | 15 | 877 | 395,495 | 740,447 | 845 |
+
+Over the 1,000 pushes, the 15 resets upload 5.9 MB and the 985 appends upload
+0.86 MB. The resets carry 87% of the uploaded bytes.
+
+The times are from three runs of each size over the file transport, on one
+30-CPU arm64 machine under heavy load from other builds. Each cell is the
+range over the three runs.
+
+| K pushes | Append, median ms | Reset, median ms | Reset, longest ms |
+|---:|---:|---:|---:|
+| 64 | 54 to 212 | 102 to 147 | 102 to 147 |
+| 100 | 74 to 113 | 100 to 147 | 100 to 147 |
+| 128 | 74 to 111 | 91 to 274 | 122 to 725 |
+| 256 | 96 to 301 | 129 to 243 | 193 to 714 |
+| 512 | 87 to 219 | 131 to 254 | 203 to 1,151 |
+| 1,000 | 115 to 250 | 204 to 474 | 578 to 1,893 |
+
+The ranges overlap for every size. Within one run of 1,000 pushes the median
+reset took 1.6 to 2.4 times the median append. The longest append in a run
+took 0.1 to 12 s, longer than the longest reset in 17 of the 18 runs, so the
+load on the machine hides most of the difference. At these sizes a reset
+costs bytes more than time. The rows do not cover a network, where the upload
+of a reset takes time in proportion to its bytes.
