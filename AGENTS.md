@@ -34,6 +34,12 @@ kit is a content-addressed, signed version-control system. Security comes first.
 - Run `cargo fmt`, `cargo clippy -- -D warnings` and `cargo test` before you commit.
 - Run `scripts/check-writing.sh` and `scripts/check-unsafe-safety.sh` before you commit. CI runs both.
 
+## Linux on an Apple machine
+
+- Some code and tests build only on Linux. On an Apple machine, run them in a Linux container before you commit a change that they cover.
+- Use Apple's `container` command for that. Do not use another container or virtual machine tool when `container` is installed.
+- `CONTRIBUTING.md` has the command.
+
 ## Writing
 
 - Code, docs, commits and issues must not mention phases, stages, parts, work packages, ticket numbers, PR numbers, trackers, tools or models.

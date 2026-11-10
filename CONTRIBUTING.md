@@ -64,6 +64,29 @@ python3 -I -B scripts/check-dependency-versions.py
 bash scripts/test-check-dependency-versions.sh
 ```
 
+## Linux tests on a Mac
+
+Some code and tests carry a `target_os = "linux"` condition and do not build
+on macOS. On an Apple machine, run them in a Linux container with Apple's
+`container` command. Prefer it to other container and virtual machine tools.
+
+Start the service once. The first start installs a Linux kernel.
+
+```sh
+container system start --enable-kernel-install
+```
+
+Then run the tests in the `rust` image of the toolchain version. The Linux
+build goes to `rust/target/linux`, apart from the macOS build.
+
+```sh
+toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust/rust-toolchain.toml)"
+container run --rm --cpus 6 --memory 12g \
+  -v "$PWD":/src -w /src/rust \
+  -e CARGO_TARGET_DIR=/src/rust/target/linux \
+  "rust:${toolchain}" cargo test --locked -p kit-transport-file
+```
+
 ## Rules for code
 
 These rules come from [`AGENTS.md`](AGENTS.md). Read that file first.
