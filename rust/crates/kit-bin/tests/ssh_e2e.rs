@@ -631,26 +631,32 @@ fn ssh_root_mode_without_principal_reads_but_cannot_write() {
         "a keyless principal may read: {}",
         String::from_utf8_lossy(&clone.stderr)
     );
-    let second = root.join("source2");
-    fs::create_dir_all(&second).unwrap();
-    assert!(run_in(&second, xdg.path(), &["init"], &[]).status.success());
+    // A fast-forward of the branch the clone fetched, so that the refusal
+    // can only come from the missing write permission.
+    assert!(run_in(&dest, xdg.path(), &["keygen"], &[]).status.success());
+    fs::write(dest.join("f.txt"), b"nope\n").unwrap();
     assert!(
-        run_in(&second, xdg.path(), &["keygen"], &[])
-            .status
-            .success()
-    );
-    fs::write(second.join("f.txt"), b"nope\n").unwrap();
-    assert!(
-        run_in(&second, xdg.path(), &["add", "."], &[])
+        run_in(&dest, xdg.path(), &["add", "."], &[])
             .status
             .success()
     );
     assert!(
-        run_in(&second, xdg.path(), &["commit", "-m", "x"], &[])
+        run_in(&dest, xdg.path(), &["commit", "-m", "x"], &[])
             .status
             .success()
     );
-    let push = push_over_ssh(&second, xdg.path(), &url, &anon_env);
+    for args in [
+        &["remote", "add", "origin", url.as_str()][..],
+        &["fetch", "origin"][..],
+    ] {
+        let out = run_in(&dest, xdg.path(), args, &anon);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let push = run_in(&dest, xdg.path(), &["push", "origin"], &anon);
     assert!(!push.status.success(), "a keyless push must fail: {push:?}");
     assert!(
         String::from_utf8_lossy(&push.stderr).contains("write not permitted"),
