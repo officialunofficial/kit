@@ -67,3 +67,55 @@ The size rows cover 100 small files, one 100 MiB file, and the growth after a
   Do not use it to pick a winner.
 - Compare the standard deviation with the difference between the means. When the
   ranges overlap, the data does not show a winner.
+
+## Concurrent writers
+
+`scripts/bench-multiwriter.sh` measures many writers against one remote root.
+It runs the `multiwriter` binary of the `kit-benches` crate against the file
+transport (`kit+file://`) and against `kit serve` (`kit+ssh://`, through a
+local stand-in for `ssh` that starts `kit serve <path>` for each connection).
+
+```sh
+scripts/bench-multiwriter.sh /path/on/the/disk/to/measure
+```
+
+Give it a directory on the disk you want to measure. The script refuses tmpfs,
+because tmpfs makes every fsync free and hides the cost of the ref locks. It
+builds the release binaries, prints the provenance (commit, dirty flag,
+machine, file system, compiler, run count) and one line for each row and size.
+Each value is the mean and the sample standard deviation over the runs.
+
+| Variable | Effect |
+|---|---|
+| `KIT_BENCH_TARGETS` | `file`, `serve`, or both (the default). |
+| `KIT_BENCH_RUNS` | Runs per size. The default is 5. |
+| `KIT_BENCH_ARGS` | Extra arguments for every row: `--sizes 1,8` overrides the sizes, `--steps N` the operations per writer. |
+
+| Row | Workload | Reports |
+|---|---|---|
+| `ref-write` | N threads, N in 1, 2, 4, 8, 16, 32. Each makes 150 compare-and-swap writes to its own ref: `Missing`, then `Match` of the previous value. | Writes per second. |
+| `push-distinct` | N pushers, N in 1, 8, 64, 512. Each pushes 4 commits to its own branch. | Pushes per second, p50 and p99 latency. |
+| `push-shared` | N pushers, N in 1, 8, 32, each landing 4 commits on one branch. A rejected push fetches, commits again on the new tip and retries. | Pushes per second, p50, p90, p99 and maximum latency including retries, rejected attempts per landed push, pack list nodes on the branch's chain afterwards (more than the landed pushes means rejected attempts wrote to it), and for the slowest 1% of landed pushes: attempts, time in rejected attempts, time in fetches after them, and the rest (local commits and the attempt that landed). Pushers retry at once, without a wait. Each landed push can cost up to N - 1 rejected attempts, so large N takes a long time. |
+| `fetch-noop` | M branches, M in 10, 100, 1,000, 10,000, and a clone that already holds them. Five fetches per run. | Fetch time and remote requests. |
+| `fetch-grow` | One push, a clone, then K pushes to the branch, K in 10, 100, 1,000. A fetch into the clone, and a fetch into an empty repository. | Time, packs downloaded and remote requests of each fetch, and pack list nodes on the chain. |
+
+Every `ref-write` writer opens its own transport, as a separate process
+would. Every pusher has its own local repository, and every push and fetch
+opens a fresh transport, as one `kit push` or `kit fetch` does. For `kit
+serve` that is one server process per push or fetch, and the timed part
+includes starting it. Pushes and fetches run the library
+code behind `kit push` and `kit fetch`. The workload is deterministic: ref
+values, file contents, commit times and the signing key derive from the
+writer and step numbers, so every run writes the same bytes.
+
+Each row checks its result before it reports a number. After `ref-write`, each
+ref must hold its writer's last value. After `push-distinct`, each branch must
+hold its pusher's last commit. After `push-shared`, the first-parent history of
+the branch must hold exactly the commits the pushers landed. The fetch rows
+must end at the pushed tip, and `fetch-noop` must download nothing. A lost
+write fails the run. `cargo test -p kit-benches --test multiwriter` runs every
+row at tiny sizes and checks that a transport that drops a write fails it.
+
+Each file transport instance has its own in-process locks, so writers in one
+process meet only at the OS locks, as separate processes do. Starting the benchmark process is outside the timed part. The rows do not
+cover a network: `kit serve` runs on the same machine.

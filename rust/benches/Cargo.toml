@@ -1,6 +1,6 @@
 [package]
 name = "kit-benches"
-description = "Criterion benchmarks for hashing, signing, object commit, pack creation and object store writes."
+description = "Criterion benchmarks for hashing, signing, object commit, pack creation and object store writes, and concurrent-writer rows."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -65,14 +65,24 @@ harness = false
 name = "chunker_dedup"
 harness = false
 
+# Concurrent writers against one remote root. Not a criterion suite: each
+# row times many threads at once and checks the result.
+[[bin]]
+name = "multiwriter"
+path = "src/bin/multiwriter.rs"
+
 # The library carries the sample types and the timing helpers.
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# The concurrent-writer rows drive these crates directly.
+kit-core = { path = "../crates/kit-core" }
+kit-sync = { path = "../crates/kit-sync" }
+kit-transport-file = { path = "../crates/kit-transport-file" }
+kit-transport-ssh = { path = "../crates/kit-transport-ssh" }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["plotters", "cargo_bench_support", "html_reports"] }
-kit-core = { path = "../crates/kit-core" }
 sha1 = "0.11.0"
 sha2 = "0.11.1"
 blake2 = "0.11.0"
