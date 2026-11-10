@@ -505,12 +505,10 @@ fn barrier_path(syncer: &dyn Syncer, path: &Path) -> io::Result<()> {
 /// as the file is written, instead of all of them at [`WriteBatch::commit`].
 ///
 /// A barrier spends almost all its time blocked on the device. Issued
-/// early, that wait overlaps the caller's chunking and hashing; a large
-/// `kit add` used to spend close to half its wall clock in the barrier
-/// burst at commit. The durability contract is unchanged: `commit`
-/// joins every worker (so every barrier has completed) before the full
-/// flush, the renames still come after the flush, and a barrier error
-/// fails the commit.
+/// early, that wait overlaps the caller's chunking and hashing. The
+/// durability contract holds: `commit` joins every worker (so every
+/// barrier has completed) before the full flush, the renames come after
+/// the flush, and a barrier error fails the commit.
 ///
 /// Workers are spawned lazily, one more whenever a path is queued and
 /// none is idle, up to [`MAX_SYNC_WORKERS`], so a small batch costs one
@@ -644,7 +642,7 @@ fn barrier_worker(shared: &EarlyShared) {
     }
 }
 
-/// Worker-pool cap for [`parallel_io`]. Deliberately NOT
+/// Worker-pool cap for [`parallel_io`] and [`EarlyBarriers`]. Deliberately NOT
 /// `std::thread::available_parallelism()`: a worker here spends nearly
 /// all its time blocked in the kernel on a barrier/fsync-class syscall,
 /// not consuming CPU, so CPU core count is the wrong resource to size

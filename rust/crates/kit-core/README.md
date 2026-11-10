@@ -5,8 +5,8 @@ refs, packs, and the transport trait every backend implements.
 
 The byte layout this crate produces is defined, normatively, in
 `docs/specs/SPEC-OBJECTS.md` (version `0x01`, magic `"KOB1"`) &mdash; any change here
-must update the spec in the same PR. The crate depends only on `std`: no
-`serde`, no `anyhow`, no panics on unchecked input.
+must update the spec in the same commit. The crate uses no `serde` and no
+`anyhow`, and it does not panic on unchecked input.
 
 ## What's in here
 
@@ -19,8 +19,9 @@ must update the spec in the same PR. The crate depends only on `std`: no
 - `sign` &mdash; Ed25519 signing/verification for commits and remixes (see
   `docs/specs/SPEC-SIGNING.md`).
 - `protocol` &mdash; the `Transport` trait (`list_refs`, `read_ref`, `write_ref`,
-  `pack_exists`, `download_pack`, `upload_pack`) every `kit-transport-*`
-  crate implements.
+  `update_ref`, `advance_refs`, `pack_exists`, `download_pack`, `upload_pack`,
+  and the advance capabilities `supports_atomic_advance` and
+  `supports_serialized_advance`) every `kit-transport-*` crate implements.
 - `chunker` / `delta` &mdash; `FastCDC` content-defined chunking and delta encoding
   for large blobs.
 - `ops` &mdash; the higher-level repository operations (`commit`, `merge`,
@@ -70,8 +71,9 @@ only emitted objects. Limits last for the overlay's lifetime, including later
 operations; create a fresh overlay for a fresh budget.
 
 Exhaustion returns `StoreError::OperationLimitExceeded`, never a successful
-partial merge/ancestry answer. The existing ancestor-set walk still truncates
-at 10,000 inserts; this pre-existing behavior is separate from budget errors.
+partial merge/ancestry answer. The ancestor-set walk has its own cap: it fails
+with `StoreError::OperationLimitExceeded` when it would insert more than 10,000
+commits.
 Tree recursion returns `TreeTooDeep` beyond 128 levels. Generic algorithms do
 not impose new aggregate limits on arbitrary custom sources/sinks; wrap them
 or enforce equivalent budgets in their implementations. A source read can
