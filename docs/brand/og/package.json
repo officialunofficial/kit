@@ -8,8 +8,8 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@officialunofficial/og": "^0.3.1",
-    "workers-og": "^0.0.27"
+    "@officialunofficial/og": "^0.7.0",
+    "@takumi-rs/wasm": "^2.20.0"
   },
   "devDependencies": {
     "wrangler": "^4.154.0"
