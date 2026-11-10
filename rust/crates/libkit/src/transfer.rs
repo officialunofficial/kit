@@ -35,9 +35,10 @@ pub use kit_sync::push::{PushControl, RetryReason, StepAuthority};
 pub use open::{Remote, Scheme, is_connect_url, open, scheme, validate_connect_repository};
 pub use trust::check_endpoint;
 
-/// The chain depth at which a push starts a new pack chain. A push appends one
-/// node to the chain of the branch. A fresh clone downloads every node, so
-/// the cost of a clone grows with the depth. Zero turns the reset off.
+/// The chain depth at which a push re-baselines the pack chain of the branch
+/// into one node that lists every pack of the chain. A push appends one node
+/// otherwise. A push and a fresh clone read every node, so their cost grows
+/// with the depth. Zero turns the re-baseline off.
 pub const DEFAULT_REBASELINE_DEPTH: usize = 64;
 
 /// What a successful push published.
@@ -55,8 +56,8 @@ pub struct Pushed {
 pub struct PushSettings<'a> {
     /// The durability schedule of the object store.
     pub sync_policy: SyncPolicy,
-    /// The chain depth at which the push starts a new pack chain. Zero turns
-    /// the reset off.
+    /// The chain depth at which the push re-baselines the pack chain. Zero
+    /// turns the re-baseline off.
     pub rebaseline_threshold: usize,
     /// The check that the stored grants cover every advance of a split push.
     pub authority: Option<&'a dyn StepAuthority>,

@@ -2,10 +2,10 @@
 //!
 //! `push_branch` bounds a branch's packlist chain depth: once a push would
 //! grow the chain past the re-baseline threshold (default 64, see
-//! `remote_dispatch::packmap::rebaseline_depth`), it resets the chain to a
-//! single self-contained node instead of appending to it. This is a
-//! storage/transfer-encoding change only — every commit keeps its hash and
-//! stays checkout-able (re-baselining does NOT squash history).
+//! `remote_dispatch::packmap::configured_depth`), it replaces the chain with
+//! one node that lists every pack of the chain and then its own. It uploads
+//! no pack again. This changes the transfer index only: every commit keeps
+//! its hash and stays checkout-able (re-baselining does NOT squash history).
 //!
 //! ## Injecting a small threshold
 //!
@@ -34,7 +34,6 @@ use common::Repo;
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
-use kit_core::pack::delta_base_hashes;
 use kit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportResult};
 use kit_core::refs::{self, Ref};
 use kit_core::store::ObjectStore;
@@ -76,13 +75,13 @@ fn packmap_chain(tx: &dyn Transport, branch: &str) -> Vec<PackListNode> {
     nodes
 }
 
-/// `true` if every pack referenced anywhere in `chain` carries zero delta
-/// entries (i.e. every pack in the chain is self-contained / all-raw).
-fn chain_is_all_raw(tx: &dyn Transport, chain: &[PackListNode]) -> bool {
-    chain.iter().flat_map(|n| &n.packs).all(|pack_key| {
-        let bytes = tx.download_pack(&PackKey::from_hash(*pack_key)).unwrap();
-        delta_base_hashes(&bytes).unwrap().is_empty()
-    })
+/// The pack keys of `chain`, oldest first.
+fn chain_packs(chain: &[PackListNode]) -> Vec<Hash> {
+    chain
+        .iter()
+        .rev()
+        .flat_map(|node| node.packs.iter().copied())
+        .collect()
 }
 
 fn all_ancestor_commit_hashes(store: &ObjectStore, tip: Hash) -> HashSet<Hash> {
@@ -104,26 +103,19 @@ fn all_ancestor_commit_hashes(store: &ObjectStore, tip: Hash) -> HashSet<Hash> {
 // `kit+file://` remote (env-var injection via subprocess, see module docs).
 // ---------------------------------------------------------------------------
 
-/// `kit+file://` (`FileTransport`) advances a head and its packmap under
-/// both refs' locks: serialized for writers, but a lock-free reader, or a
-/// crash, can see the new packmap with the old head. A re-baseline reset
-/// is not a superset of the prior chain, so the push driver resets on it
-/// only for a push that is a verified fast-forward of the head it
-/// conditions on: the reset holds the new tip's closure, which contains
-/// the old head's. `kit push` leases each branch on its tracked tip, and
-/// each push here fast-forwards it, so the fourth push, which would grow
-/// the chain past depth 3, resets it to one self-contained node. The
-/// remote stays fully clonable throughout.
-///
-/// A push that is not a fast-forward appends instead; the push driver's
-/// own tests and the file transport's crash tests cover that case.
+/// The fourth push would grow the chain past depth 3, so it replaces the
+/// chain with one node. The node lists the three packs the chain held, in
+/// their order, and then the pack of the fourth push: nothing is uploaded
+/// again, and a clone that holds the first three packs fetches only the
+/// fourth. The remote stays fully clonable throughout.
 #[test]
-fn a_fast_forward_push_past_depth_3_over_the_file_transport_resets_the_chain() {
+fn a_push_past_depth_3_over_the_file_transport_re_baselines_the_chain() {
     let alice = Repo::new();
     let remote = tempfile::tempdir().unwrap();
     let url = file_url(remote.path());
     alice.ok(&["remote", "add", &url]);
 
+    let mut held = Vec::new();
     let mut tips = Vec::new();
     for i in 0..4u32 {
         alice.commit_file("f.txt", i.to_string().as_bytes(), &format!("c{i}"));
@@ -136,13 +128,25 @@ fn a_fast_forward_push_past_depth_3_over_the_file_transport_resets_the_chain() {
             1
         };
         assert_eq!(chain.len(), want, "after push {i}");
+        if i < 3 {
+            held = chain_packs(&chain);
+        }
     }
     let final_tip = *tips.last().unwrap();
 
     let tx = FileTransport::new(remote.path());
     let chain = packmap_chain(&tx, "main");
-    assert_eq!(chain[0].prev, None, "the fourth push reset the chain");
-    assert!(chain_is_all_raw(&tx, &chain));
+    assert_eq!(
+        chain[0].prev, None,
+        "the fourth push re-baselined the chain"
+    );
+    assert_eq!(held.len(), 3);
+    assert_eq!(chain[0].packs.len(), 4);
+    assert_eq!(
+        chain[0].packs[..3],
+        held,
+        "the packs of the chain it replaced"
+    );
     assert_eq!(
         tx.read_ref("refs/heads/main").unwrap(),
         Some(final_tip),
@@ -186,7 +190,7 @@ fn two_pushes_below_depth_3_threshold_keep_two_nodes() {
     assert_eq!(
         chain.len(),
         2,
-        "no premature reset while the chain is still below the threshold"
+        "no re-baseline while the chain is still below the threshold"
     );
 }
 
@@ -223,13 +227,9 @@ fn depth_zero_disables_rebaseline() {
 ///
 /// The plain default `advance_refs` (used by [`MemoryTransport`] and
 /// exercised by `push_delta.rs`) commits packmap-then-head sequentially,
-/// and so, for readers, does [`FileTransport`]'s locked advance; that is
-/// documented as safe when a losing head race still leaves an *appended*
-/// (superset) packmap. The re-baseline reset (`prev = None`) breaks
-/// that assumption for a torn write — which is exactly the production
-/// hazard that the atomic advance exists to close — so this specific test
-/// needs the real atomic contract to be meaningful rather than incidental
-/// to the non-transactional fallback's commit order.
+/// and so, for readers, does [`FileTransport`]'s locked advance. The tests
+/// below check that a losing push leaves the remote untouched, which only
+/// an atomic advance promises.
 struct AtomicTransport {
     inner: MemoryTransport,
     lock: Mutex<()>,
@@ -300,13 +300,9 @@ impl Transport for AtomicTransport {
         Ok(AdvanceOutcome::Committed)
     }
 
-    // This transport's `advance_refs` above genuinely commits the head +
-    // packmap write as one indivisible transaction (both preconditions
-    // checked under one lock before either write lands), which is exactly
-    // the contract `Transport::supports_atomic_advance` gates the
-    // pack-chain re-baseline reset on (kit): declaring it here is
-    // what lets `divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable`
-    // below still exercise the re-baseline path at all.
+    // This transport's `advance_refs` above commits the head and packmap
+    // write as one indivisible transaction: both preconditions are checked
+    // under one lock before either write lands.
     fn supports_atomic_advance(&self) -> bool {
         true
     }
@@ -372,8 +368,8 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
         "expected NonFastForwardPush, got {err:?}"
     );
 
-    // The remote must be untouched: the atomic advance never let bob's
-    // would-be re-baseline reset land without also winning the head CAS.
+    // The remote must be untouched: bob's push is refused before it writes
+    // a re-baseline node.
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(alice_tip));
     assert_eq!(packmap_chain(&tx, "main").len(), TEST_DEPTH);
     let carol = Repo::new();
@@ -387,8 +383,8 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     // The loser retries: fast-forward onto alice's tip, recommit, push
     // again. The chain is still at TEST_DEPTH, so this retry ALSO decides
     // to re-baseline — and this time it wins the head CAS outright (nothing
-    // else moved the head), collapsing the chain to one self-contained
-    // node covering the full merged history.
+    // else moved the head), collapsing the chain to one node that lists
+    // every pack of the merged history.
     fetch_all(bob.path(), &tx, "default").expect("bob's retry fetch");
     let alice_hex = kit_core::to_hex(&alice_tip);
     bob.ok(&["reset", "--hard", "-f", &alice_hex]);
@@ -408,7 +404,7 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(bob_retry_tip));
     let chain = packmap_chain(&tx, "main");
     assert_eq!(chain.len(), 1, "retry re-baseline collapses the chain");
-    assert!(chain_is_all_raw(&tx, &chain));
+    assert_eq!(chain[0].packs.len(), TEST_DEPTH + 1);
 
     // Still clonable, with the full merged history (alice's base +
     // TEST_DEPTH - 1 appending commits, plus bob's retried commit) present
@@ -440,20 +436,9 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     }
 }
 
-/// Force-push safety: a force push (`RefWriteCondition::Any`)
-/// that reaches the re-baseline threshold on an ATOMIC transport must still
-/// NOT reset the chain — it must append.
-///
-/// A force push's `Any` head condition makes even an atomic `advance_refs`
-/// fall back to the ordered two-PUT path (packmap PUT then head PUT), on
-/// which a committed reset (`prev = None`, not a superset of the prior chain)
-/// followed by a lost/crashed head PUT would strand the head at a closure the
-/// reset can no longer reconstruct → `RemoteMissingObject` for every fetcher.
-/// So `push_branch`'s depth gate excludes `Any` and takes the safe append
-/// path here, even though the transport reports `supports_atomic_advance()`.
-/// The CAS/`Match`-conditioned re-baseline (exercised by
-/// `divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable`)
-/// is deliberately left untouched and stays green.
+/// A force push (`RefWriteCondition::Any`) that reaches the re-baseline
+/// threshold on an atomic transport takes the guarded force driver, which
+/// appends. The next conditioned push re-baselines the chain.
 #[test]
 fn force_push_at_threshold_appends_and_never_resets() {
     let alice = Repo::new();
@@ -464,8 +449,7 @@ fn force_push_at_threshold_appends_and_never_resets() {
 
     // A FORCE push (unconditional `Any` head condition) of a new
     // fast-forward commit. The chain sits at TEST_DEPTH, so a
-    // CAS-conditioned push would re-baseline here — but `Any` forces the
-    // ordered advance path, so this must append instead.
+    // CAS-conditioned push would re-baseline here.
     alice.commit_file("f.txt", b"forced", "forced");
     let forced_tip = head_hash(alice.path());
     let store = ObjectStore::open(&RepoLayout::single(alice.path())).unwrap();

@@ -61,7 +61,7 @@ fn every_row_runs_at_tiny_sizes() {
     assert_eq!(run.chain_nodes, 4);
     assert_eq!(run.incremental.packs_downloaded, 3);
     assert_eq!(run.cold.packs_downloaded, 4);
-    // A chain this short is never reset. Every push uploads one commit.
+    // A chain this short is never re-baselined. Every push uploads one commit.
     assert_eq!(run.pushes.len(), 3);
     assert_eq!(run.cost(true), multiwriter::PushCost::default());
     let append = run.cost(false);
@@ -75,11 +75,11 @@ fn every_row_runs_at_tiny_sizes() {
 const FILE_BYTES: u64 = 1024;
 
 #[test]
-fn fetch_grow_reports_the_upload_of_a_chain_reset() {
-    // A push resets a chain that it would grow past 64 nodes. The first
-    // push makes node 1, so push 64 after the clone is the reset.
+fn fetch_grow_reports_the_upload_of_a_chain_re_baseline() {
+    // A push re-baselines a chain that it would grow past 64 nodes. The
+    // first push makes node 1, so push 64 after the clone re-baselines.
     const PUSHES: usize = 66;
-    const RESET: usize = 64;
+    const REBASELINE: usize = 64;
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("remote")).unwrap();
     let run = multiwriter::fetch_grow(
@@ -88,26 +88,29 @@ fn fetch_grow_reports_the_upload_of_a_chain_reset() {
         PUSHES,
     )
     .unwrap();
-    let resets: Vec<usize> = (1..=PUSHES).filter(|i| run.pushes[i - 1].reset).collect();
-    assert_eq!(resets, [RESET]);
-    // The reset left one node, and two pushes appended to it.
+    let rebaselines: Vec<usize> = (1..=PUSHES)
+        .filter(|i| run.pushes[i - 1].rebaseline)
+        .collect();
+    assert_eq!(rebaselines, [REBASELINE]);
+    // The re-baseline left one node, and two pushes appended to it. The
+    // node lists every pack, so a clone downloads one pack for each push.
     assert_eq!(run.chain_nodes, 3);
-    assert_eq!(run.cold.packs_downloaded, 3);
+    assert_eq!(run.cold.packs_downloaded, PUSHES + 1);
+    assert_eq!(run.incremental.packs_downloaded, PUSHES);
 
-    // A push that appends uploads one commit, before and after the reset.
+    // A push that appends uploads one commit, before and after the
+    // re-baseline.
     let append = run.cost(false);
     assert_eq!(append.pushes, PUSHES - 1);
     assert!(append.mean_bytes > 0.0 && append.max_bytes < 2 * FILE_BYTES);
 
-    // The reset uploads the closure of its tip: the first commit and the
-    // 64 after it. That is far more than one commit, and at least half of
-    // what the 64 pushes before it uploaded, pack list nodes included.
-    let reset = run.cost(true);
-    assert_eq!(reset.pushes, 1);
-    assert_eq!(reset.max_bytes, run.pushes[RESET - 1].uploaded);
-    assert!(reset.max_bytes > 32 * append.max_bytes);
-    let before: u64 = run.pushes[..RESET - 1].iter().map(|p| p.uploaded).sum();
-    assert!(reset.max_bytes > before / 2);
+    // The re-baseline uploads one commit and a node that lists 65 packs
+    // with 32 bytes each. It uploads no earlier commit again.
+    let rebaseline = run.cost(true);
+    assert_eq!(rebaseline.pushes, 1);
+    assert_eq!(rebaseline.max_bytes, run.pushes[REBASELINE - 1].uploaded);
+    assert!(rebaseline.max_bytes > 65 * 32);
+    assert!(rebaseline.max_bytes < 65 * 32 + 2 * FILE_BYTES);
 }
 
 #[test]

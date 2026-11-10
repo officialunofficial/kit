@@ -848,9 +848,9 @@ pub struct GrowPush {
     pub elapsed: Duration,
     /// Bytes of the packs and the pack list node the push uploaded.
     pub uploaded: u64,
-    /// Whether the push reset the pack list chain to one node that holds
-    /// the full closure of its tip.
-    pub reset: bool,
+    /// Whether the push re-baselined the pack list chain: its node has no
+    /// predecessor and lists every pack of the chain before its own.
+    pub rebaseline: bool,
 }
 
 /// The cost of the `fetch-grow` pushes of one kind.
@@ -882,11 +882,15 @@ pub struct GrowRun {
 }
 
 impl GrowRun {
-    /// The cost of the pushes that reset the chain (`reset` is true) or of
+    /// The cost of the pushes that re-baselined the chain (`rebaseline` is true) or of
     /// the pushes that appended to it. All zero when there is no such push.
     #[must_use]
-    pub fn cost(&self, reset: bool) -> PushCost {
-        let of_kind: Vec<&GrowPush> = self.pushes.iter().filter(|p| p.reset == reset).collect();
+    pub fn cost(&self, rebaseline: bool) -> PushCost {
+        let of_kind: Vec<&GrowPush> = self
+            .pushes
+            .iter()
+            .filter(|p| p.rebaseline == rebaseline)
+            .collect();
         if of_kind.is_empty() {
             return PushCost::default();
         }
@@ -912,7 +916,7 @@ pub const GROW_BRANCH: &str = "grow";
 /// `fetch-grow`: one push, a clone, `pushes` more pushes to the branch,
 /// then a fetch into that clone and a fetch into an empty repository.
 /// Both must end at the last pushed commit. Each push after the clone
-/// reports its time, the bytes it uploaded and whether it reset the chain.
+/// reports its time, the bytes it uploaded and whether it re-baselined the chain.
 pub fn fetch_grow(connect: &Connect, scratch: &Path, pushes: usize) -> Result<GrowRun, String> {
     check_bounds(1, pushes)?;
     let key = bench_key();
@@ -930,8 +934,8 @@ pub fn fetch_grow(connect: &Connect, scratch: &Path, pushes: usize) -> Result<Gr
             elapsed,
             uploaded: source.bytes.load(Ordering::Relaxed),
             // Every push after the first finds a chain. Its node has no
-            // predecessor only when the push reset that chain.
-            reset: step > 0 && chain_prev(&*tx, GROW_BRANCH)?.is_none(),
+            // predecessor only when the push re-baselined that chain.
+            rebaseline: step > 0 && chain_prev(&*tx, GROW_BRANCH)?.is_none(),
         })
     };
     push(0)?;

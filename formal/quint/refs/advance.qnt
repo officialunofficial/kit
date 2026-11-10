@@ -1,6 +1,6 @@
 // -*- mode: Bluespec; -*-
 // The two-ref advance of a branch head and its packmap, and the push
-// driver's re-baseline gate (SPEC-REFS §5.1.1, SPEC-TRANSPORT §7).
+// driver's reset gate (SPEC-REFS §5.1.1, SPEC-TRANSPORT §7).
 // Companion of refs.qnt, which models the locks themselves; here the locks
 // are one step that checks both conditions, as the file transport's
 // `advance_refs` does under both refs' stripe locks.
@@ -16,8 +16,8 @@
 //     a value it tracked earlier, which may differ from the remote head. It
 //     plans its pack only when the head it reads equals the lease, and is
 //     refused otherwise (a head already at its tip landed earlier, and is
-//     refused too: the push writes nothing). It re-baselines (resets the
-//     chain to its tip's full closure) only when the gate allows it. A force
+//     refused too: the push writes nothing). It resets the chain to its
+//     tip's full closure only when the gate allows it. A force
 //     push plans against the head it reads and takes the
 //     guarded force driver: it re-plans when the head moved or a reset
 //     since its plan dropped the chain its plan relied on (the anchor).
@@ -33,6 +33,9 @@
 //     plan's anchor survives while no reset came after it.
 //   - The chain depth is not modelled: whenever the gate allows a reset,
 //     the push may or may not take it.
+//   - A re-baseline, the node that lists every pack of the chain it
+//     replaces, is an append here: it holds the same objects. A force push
+//     plans again after one, which repeats a step the model already has.
 //   - A lease is any commit: a stale lease, one from another clone and one
 //     the head returns to later are all covered.
 //   - Each process makes one push, which may re-plan; a failed lease push
@@ -85,7 +88,7 @@ module twoRefAdvance {
   var reset: Proc -> bool
   var replans: Set[Proc]      // force pushes that re-planned
 
-  // The re-baseline gate for a lease push of `t` conditioned on head `h`.
+  // The reset gate for a lease push of `t` conditioned on head `h`.
   def gate(t: str, h: str): bool =
     FAULTS.atomic or FAULTS.noAncestry or ancestor(h, t)
 

@@ -4,8 +4,8 @@
 //! A reader takes no lock, and a crash can stop the advance after its first
 //! rename, so either can see the new packmap with the old head. These tests
 //! check that the old head stays rebuildable from that packmap: the driver
-//! re-baselines only a fast-forward of the head the push conditions on,
-//! whose reset holds that head's closure, and appends otherwise.
+//! appends to the chain or re-baselines it, and both keep every pack the
+//! chain listed.
 
 use crate::FileTransport;
 use crate::advance_fault::{self, Fault};
@@ -116,10 +116,9 @@ fn rebuilds(remote: &FileTransport, head: Hash) -> bool {
 }
 
 /// A crash after the packmap rename of the push that crosses the
-/// re-baseline threshold. A fast-forward of the remote head re-baselines,
-/// and the reset rebuilds the head it did not replace. A push that is not
-/// a fast-forward of that head appends, so the head stays rebuildable too;
-/// a reset there would hold only the new tip's closure.
+/// re-baseline threshold. The push re-baselines, a fast-forward or not:
+/// its node lists every pack of the chain it replaces, so it rebuilds the
+/// head the crash left in place.
 #[test]
 fn a_crash_between_the_renames_of_a_push_leaves_the_old_head_rebuildable() {
     for fast_forward in [true, false] {
@@ -145,11 +144,8 @@ fn a_crash_between_the_renames_of_a_push_leaves_the_old_head_rebuildable() {
         let after = FileTransport::new(root);
         assert_eq!(after.read_ref("refs/heads/main").unwrap(), Some(c2));
         let nodes = chain(&after);
-        if fast_forward {
-            assert_eq!(nodes.len(), 1, "the fast-forward re-baselines");
-        } else {
-            assert_eq!(nodes.len(), DEPTH + 1, "the other push appends");
-        }
+        assert_eq!(nodes.len(), 1, "fast-forward: {fast_forward}");
+        assert_eq!(nodes[0].packs.len(), DEPTH + 1);
         assert!(rebuilds(&after, c2), "fast-forward: {fast_forward}");
 
         push(root, &store, tip, RefWriteCondition::Match(c2)).unwrap();

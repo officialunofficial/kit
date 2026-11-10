@@ -162,13 +162,13 @@ pushes with `PushError::ForceCapabilityUnknown` before uploading. Reconnect and
 retry discovery. Explicitly non-atomic transports retain their existing push
 behavior; failed discovery is not evidence that a server is non-atomic.
 
-An advance that leases the head and would grow a packmap chain past
-`rebaseline_threshold` resets it to one self-contained node on an atomic
-source. On a serialized source it resets only when the push fast-forwards the
-head it leases, as the local store shows: a reader there can see the new
-packmap before the new head, and only then does the reset still rebuild the
-old head. Other pushes append, and so does an advance with no head lease,
-such as the first advance of a force push.
+An advance that would grow a packmap chain past `rebaseline_threshold`
+re-baselines it: one node with no predecessor lists every pack of the chain
+and then the new packs. The advance uploads no pack again, and a fetcher
+that holds the old packs downloads only the new ones. The node holds
+everything the chain held, so every source and every head condition allows
+it. A chain that holds more than 1,024 packs with the new ones keeps
+appending. A force push on an atomic or serialized source appends.
 
 `PushReport` contains the completed ref count, advance count, and optional
 single-branch tip. `PushError` preserves push-specific refusals and carries

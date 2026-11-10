@@ -761,9 +761,9 @@ A branch's packmap ref travels with its head. For a grantee:
   head's flags. It consumes no ticket and needs no packmap scope.
 
 Why the packmap is not checked as its own ref: a push normally appends
-one node to the packmap chain, but a re-baseline writes a fresh,
-self-contained chain that is not an append of the old one (informative:
-the client's packmap re-baseline). A packmap ref therefore has no
+one node to the packmap chain, but a re-baseline and a reset write a
+node with no predecessor, which is not an append of the old chain
+(informative: SPEC-TRANSPORT §7.2). A packmap ref therefore has no
 fast-forward relation of its own that a flag could express. Binding it
 to its head, in the head's atomic advance, keeps the head and the
 packmap consistent and lets the head's flags stand for both.

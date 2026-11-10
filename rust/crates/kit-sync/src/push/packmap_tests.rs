@@ -1,6 +1,6 @@
 //! Existing push packmap regression fixtures, run through the source boundary.
 
-use super::packmap::{self, ChainAction, ResolvedChain};
+use super::packmap;
 use super::{PushContext, PushError};
 use crate::packmap::packmap_ref;
 use crate::{NoopObserver, SyncError, TransportSource};
@@ -8,7 +8,11 @@ use kit_core::hash::Hash;
 use kit_core::protocol::{AdvanceOutcome, PackKey, Transport, TransportError};
 use kit_core::{refs, transfer};
 
-fn probe_chain(tx: &dyn Transport, branch: &str, head: Hash) -> Result<ResolvedChain, PushError> {
+fn probe_chain(
+    tx: &dyn Transport,
+    branch: &str,
+    head: Hash,
+) -> Result<(usize, Vec<Hash>), PushError> {
     let source = TransportSource::new(tx);
     let context = PushContext {
         source: &source,
@@ -22,12 +26,7 @@ fn resolve_pack_chain(
     branch: &str,
     head: Hash,
 ) -> Result<Vec<Hash>, PushError> {
-    let source = TransportSource::new(tx);
-    let context = PushContext {
-        source: &source,
-        observer: &NoopObserver,
-    };
-    packmap::resolve_pack_chain(&context, branch, head)
+    Ok(probe_chain(tx, branch, head)?.1)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -35,8 +34,8 @@ fn advance_packmap(
     tx: &dyn Transport,
     branch: &str,
     keys: &[Hash],
-    action: ChainAction,
-    resolved: Option<ResolvedChain>,
+    self_contained: bool,
+    rollover_threshold: usize,
     condition: refs::RefWriteCondition,
     tip: Hash,
 ) -> Result<(), PushError> {
@@ -45,7 +44,15 @@ fn advance_packmap(
         source: &source,
         observer: &NoopObserver,
     };
-    packmap::advance_packmap(&context, branch, keys, action, resolved, condition, tip)
+    packmap::advance_packmap(
+        &context,
+        branch,
+        keys,
+        self_contained,
+        rollover_threshold,
+        condition,
+        tip,
+    )
 }
 
 fn commit_head(
@@ -80,34 +87,26 @@ fn put_node(tx: &MemoryTransport, prev: Option<Hash>, packs: &[Hash]) -> Hash {
 }
 
 #[test]
-fn probe_chain_depth_counts_nodes_and_matches_resolve_pack_chain() {
+fn probe_chain_counts_nodes_and_lists_packs_oldest_first() {
     let tx = MemoryTransport::new();
     let n1 = put_node(&tx, None, &[h("pack1")]);
     let n2 = put_node(&tx, Some(n1), &[h("pack2")]);
     let n3 = put_node(&tx, Some(n2), &[h("pack3")]);
 
-    let probed = probe_chain(&tx, "main", n3).unwrap();
-    assert_eq!(probed.depth, 3);
-
-    // Same node count as the packs resolve_pack_chain flattens, and the
-    // packs themselves come back oldest-first — matching `probe_chain`'s
-    // own `packs` field too.
-    let packs = resolve_pack_chain(&tx, "main", n3).unwrap();
+    let (depth, packs) = probe_chain(&tx, "main", n3).unwrap();
+    assert_eq!(depth, 3);
     assert_eq!(packs, vec![h("pack1"), h("pack2"), h("pack3")]);
-    assert_eq!(probed.depth, packs.len());
-    assert_eq!(probed.packs, packs);
-    assert_eq!(probed.head, n3);
 }
 
 #[test]
 fn probe_chain_depth_of_a_single_node_chain_is_one() {
     let tx = MemoryTransport::new();
     let solo = put_node(&tx, None, &[h("pack-solo")]);
-    assert_eq!(probe_chain(&tx, "main", solo).unwrap().depth, 1);
+    assert_eq!(probe_chain(&tx, "main", solo).unwrap().0, 1);
 }
 
 #[test]
-fn probe_chain_errors_on_a_cycle_exactly_like_resolve_pack_chain() {
+fn probe_chain_errors_on_a_cycle() {
     let tx = MemoryTransport::new();
     let a = h("cycle-a");
     let b = h("cycle-b");
@@ -122,22 +121,14 @@ fn probe_chain_errors_on_a_cycle_exactly_like_resolve_pack_chain() {
         probe_chain(&tx, "main", a).unwrap_err(),
         PushError::Sync(SyncError::PackChainInvalid { .. })
     ));
-    assert!(matches!(
-        resolve_pack_chain(&tx, "main", a).unwrap_err(),
-        PushError::Sync(SyncError::PackChainInvalid { .. })
-    ));
 }
 
 #[test]
-fn probe_chain_errors_on_an_undownloadable_node_like_resolve_pack_chain() {
+fn probe_chain_errors_on_an_undownloadable_node() {
     let tx = MemoryTransport::new();
     let ghost = h("never-uploaded");
     assert!(matches!(
         probe_chain(&tx, "main", ghost).unwrap_err(),
-        PushError::Sync(SyncError::PackChainInvalid { .. })
-    ));
-    assert!(matches!(
-        resolve_pack_chain(&tx, "main", ghost).unwrap_err(),
         PushError::Sync(SyncError::PackChainInvalid { .. })
     ));
 }
@@ -159,10 +150,8 @@ fn advance_packmap_multi_key_first_push_writes_one_node_in_order() {
         &tx,
         "main",
         &[k1, k2, k3],
-        ChainAction::Append {
-            self_contained: true,
-        },
-        None,
+        true,
+        0,
         refs::RefWriteCondition::Missing,
         tip,
     )
@@ -191,10 +180,8 @@ fn advance_packmap_single_key_matches_pre_831_shape() {
         &tx,
         "main",
         &[k1],
-        ChainAction::Append {
-            self_contained: true,
-        },
-        None,
+        true,
+        0,
         refs::RefWriteCondition::Missing,
         tip,
     )
@@ -225,10 +212,8 @@ fn advance_packmap_is_idempotent_when_every_key_already_chained() {
         &tx,
         "main",
         &[k1, k2, k3],
-        ChainAction::Append {
-            self_contained: true,
-        },
-        None,
+        true,
+        0,
         refs::RefWriteCondition::Missing,
         tip,
     )
@@ -262,10 +247,8 @@ fn advance_packmap_appends_when_only_some_keys_already_chained() {
         &tx,
         "main",
         &[k1, k2, k3],
-        ChainAction::Append {
-            self_contained: true,
-        },
-        None,
+        true,
+        0,
         refs::RefWriteCondition::Missing,
         tip,
     )
@@ -454,13 +437,16 @@ fn packmap_driver_capture_matrix() {
             kit_core::pack::pack_key(&writer.finish().unwrap())
         })
         .collect();
-    for (label, held, reset, conflict) in [
+    for (label, held, rollover, conflict) in [
         ("first", None, false, false),
         ("append", Some(vec![[9; 32]]), false, false),
         ("partial", Some(vec![keys[0]]), false, false),
         ("full", Some(keys.clone()), false, false),
-        ("rollover", Some(keys.clone()), true, false),
+        ("rollover", Some(vec![[9; 32]]), true, false),
+        ("rollover-partial", Some(vec![keys[0]]), true, false),
+        ("rollover-full", Some(keys.clone()), true, false),
         ("changed-prior", Some(vec![[9; 32]]), false, true),
+        ("rollover-changed-prior", Some(vec![[9; 32]]), true, true),
     ] {
         let mut tx = LostResponseTransport::new(Reissue::Atomic);
         let prior = held.as_ref().map(|packs| put_node(&tx.inner, None, packs));
@@ -488,21 +474,15 @@ fn packmap_driver_capture_matrix() {
             &tx,
             "main",
             &keys,
-            if reset {
-                ChainAction::ResetSelfContained
-            } else {
-                ChainAction::Append {
-                    self_contained: true,
-                }
-            },
-            None,
+            true,
+            usize::from(rollover),
             refs::RefWriteCondition::Match([6; 32]),
             [4; 32],
         )
         .unwrap();
         assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some([4; 32]));
         let moves = tx.capture.lock().unwrap();
-        if label == "full" {
+        if label.ends_with("full") {
             assert!(moves.is_empty());
             assert_eq!(tx.read_ref(&packmap_ref("main")).unwrap(), prior);
             continue;
@@ -511,8 +491,21 @@ fn packmap_driver_capture_matrix() {
         for (attempt, (head_condition, head, condition, key)) in moves.iter().enumerate() {
             let current = if attempt == 0 { prior } else { retry };
             let bytes = tx.download_blob(&PackKey::from_hash(*key)).unwrap();
-            let expected =
-                transfer::encode_packlist(if reset { None } else { current }, &keys).unwrap();
+            let expected = if rollover {
+                // The chain's packs, oldest first, then each new pack it lacks.
+                let mut listed = held.clone().unwrap();
+                if attempt == 1 {
+                    listed.push([8; 32]);
+                }
+                for key in &keys {
+                    if !listed.contains(key) {
+                        listed.push(*key);
+                    }
+                }
+                transfer::encode_packlist(None, &listed).unwrap()
+            } else {
+                transfer::encode_packlist(current, &keys).unwrap()
+            };
             assert_eq!(bytes, expected, "{label}: bytes");
             assert_eq!(*key, kit_core::pack::pack_key(&expected));
             assert_eq!(*head_condition, refs::RefWriteCondition::Match([6; 32]));
@@ -533,10 +526,8 @@ fn advance_first_push(tx: &dyn Transport, keys: &[Hash], tip: Hash) -> Result<()
         tx,
         "main",
         keys,
-        ChainAction::Append {
-            self_contained: true,
-        },
-        None,
+        true,
+        0,
         refs::RefWriteCondition::Missing,
         tip,
     )
@@ -573,10 +564,10 @@ fn advance_packmap_reissued_atomic_advance_is_success() {
 }
 
 #[test]
-fn advance_packmap_reissued_rebaseline_reset_is_success() {
-    // A re-baseline reset re-issued after it landed: the retry loop
-    // re-reads the packmap (now our node) and CASes off it, and the
-    // head precondition then fails against our own landed tip.
+fn advance_packmap_reissued_rollover_is_success() {
+    // A rollover re-issued after it landed: the retry loop re-reads the
+    // packmap (now our node), finds every key listed, and the head
+    // precondition then fails against our own landed tip.
     let tx = LostResponseTransport::new(Reissue::Advance);
     let old = h("old-tip");
     let prior = put_node(&tx.inner, None, &[h("old-pack")]);
@@ -594,14 +585,110 @@ fn advance_packmap_reissued_rebaseline_reset_is_success() {
     advance_packmap(
         &tx,
         "main",
-        &[h("full")],
-        ChainAction::ResetSelfContained,
-        None,
+        &[h("new")],
+        false,
+        1,
         refs::RefWriteCondition::Match(old),
         tip,
     )
     .unwrap();
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip));
+    let pm = tx.read_ref(&packmap_ref("main")).unwrap().unwrap();
+    let node = decode_node_at(&tx.inner, pm);
+    assert_eq!(node.prev, None);
+    assert_eq!(node.packs, vec![h("old-pack"), h("new")]);
+}
+
+/// A chain of three one-pack nodes under `main`, and its head.
+fn three_node_chain(tx: &MemoryTransport) -> Hash {
+    let n1 = put_node(tx, None, &[h("pack1")]);
+    let n2 = put_node(tx, Some(n1), &[h("pack2")]);
+    let n3 = put_node(tx, Some(n2), &[h("pack3")]);
+    tx.update_ref(&packmap_ref("main"), refs::RefWriteCondition::Missing, &n3)
+        .unwrap();
+    n3
+}
+
+/// The rollover needs no atomic advance and no head lease: the node lists a
+/// superset of the chain, so an ordered advance and an `Any` head are safe.
+#[test]
+fn a_chain_at_the_threshold_rolls_over_into_one_node() {
+    for condition in [
+        refs::RefWriteCondition::Missing,
+        refs::RefWriteCondition::Any,
+    ] {
+        let tx = MemoryTransport::new();
+        three_node_chain(&tx);
+        advance_packmap(&tx, "main", &[h("new")], false, 3, condition, h("tip")).unwrap();
+        let head = tx.read_ref(&packmap_ref("main")).unwrap().unwrap();
+        let node = decode_node_at(&tx, head);
+        assert_eq!(node.prev, None);
+        assert_eq!(
+            node.packs,
+            vec![h("pack1"), h("pack2"), h("pack3"), h("new")],
+            "every pack of the chain, oldest first, then the new pack"
+        );
+        assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(h("tip")));
+    }
+}
+
+#[test]
+fn a_chain_below_the_threshold_or_with_no_threshold_appends() {
+    for threshold in [0, 4] {
+        let tx = MemoryTransport::new();
+        let prior = three_node_chain(&tx);
+        advance_packmap(
+            &tx,
+            "main",
+            &[h("new")],
+            false,
+            threshold,
+            refs::RefWriteCondition::Missing,
+            h("tip"),
+        )
+        .unwrap();
+        let head = tx.read_ref(&packmap_ref("main")).unwrap().unwrap();
+        let node = decode_node_at(&tx, head);
+        assert_eq!(node.prev, Some(prior), "threshold {threshold}");
+        assert_eq!(node.packs, vec![h("new")]);
+    }
+}
+
+/// One node lists at most `ROLLOVER_MAX_PACKS` packs. A chain that holds
+/// more with the new pack keeps appending.
+#[test]
+fn a_chain_with_too_many_packs_for_one_node_appends() {
+    use transfer::packmap::ROLLOVER_MAX_PACKS;
+    for (held, rolls) in [(ROLLOVER_MAX_PACKS - 1, true), (ROLLOVER_MAX_PACKS, false)] {
+        let tx = MemoryTransport::new();
+        let packs: Vec<Hash> = (0..held).map(|i| h(&format!("pack{i}"))).collect();
+        let prior = put_node(&tx, None, &packs);
+        tx.update_ref(
+            &packmap_ref("main"),
+            refs::RefWriteCondition::Missing,
+            &prior,
+        )
+        .unwrap();
+        advance_packmap(
+            &tx,
+            "main",
+            &[h("new")],
+            false,
+            1,
+            refs::RefWriteCondition::Missing,
+            h("tip"),
+        )
+        .unwrap();
+        let head = tx.read_ref(&packmap_ref("main")).unwrap().unwrap();
+        let node = decode_node_at(&tx, head);
+        if rolls {
+            assert_eq!(node.prev, None);
+            assert_eq!(node.packs.len(), ROLLOVER_MAX_PACKS);
+        } else {
+            assert_eq!(node.prev, Some(prior));
+            assert_eq!(node.packs, vec![h("new")]);
+        }
+    }
 }
 
 #[test]

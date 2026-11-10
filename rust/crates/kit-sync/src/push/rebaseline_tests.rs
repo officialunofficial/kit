@@ -1,5 +1,5 @@
-//! The re-baseline gate on a serialized advance, and a force push racing a
-//! reset.
+//! The re-baseline of a chain through whole pushes, and a push racing a
+//! chain that another client reset.
 //!
 //! Every test checks the invariant a reader relies on: whenever the head
 //! resolves to `T`, the packmap chain rebuilds the closure of `T`. A
@@ -199,7 +199,7 @@ fn push(
     push_at(remote, store, tip, condition, DEPTH)
 }
 
-/// A push with its own re-baseline threshold; zero never resets.
+/// A push with its own re-baseline threshold; zero never re-baselines.
 fn push_at(
     remote: &Remote<'_>,
     store: &ObjectStore,
@@ -279,68 +279,91 @@ fn setup(store: &ObjectStore, remote: &Remote<'_>) -> Setup {
     }
 }
 
-#[test]
-fn a_fast_forward_resets_the_chain_on_a_serialized_advance() {
-    let (_dir, store) = store();
-    let remote = Remote::new();
-    let s = setup(&store, &remote);
-    push(&remote, &store, s.ahead, RefWriteCondition::Match(s.c[2])).unwrap();
-    assert_eq!(remote.read_ref(HEAD).unwrap(), Some(s.ahead));
-    let nodes = chain(&remote);
-    assert_eq!(nodes.len(), 1, "the fast-forward re-baselines");
-    assert_eq!(nodes[0].prev, None);
-    assert!(rebuilds(&remote, s.ahead));
+/// Replace the chain with one node that holds only the closure of `tip`,
+/// and move the head to `tip`, as a client that resets the chain does.
+fn reset_to(remote: &Remote<'_>, store: &ObjectStore, tip: Hash) {
+    let scratch = Remote::new();
+    push_at(&scratch, store, tip, RefWriteCondition::Missing, 0).unwrap();
+    let node_key = scratch.read_ref(&packmap_ref("main")).unwrap().unwrap();
+    let node = scratch
+        .download_blob(&PackKey::from_hash(node_key))
+        .unwrap();
+    for key in transfer::decode_packlist(&node).unwrap().packs {
+        let key = PackKey::from_hash(key);
+        remote
+            .inner
+            .upload_pack(&scratch.download_pack(&key).unwrap(), &key)
+            .unwrap();
+    }
+    remote
+        .inner
+        .upload_blob(&node, &PackKey::from_hash(node_key))
+        .unwrap();
+    for (name, value) in [(packmap_ref("main"), node_key), (HEAD.to_owned(), tip)] {
+        remote
+            .inner
+            .update_ref(&name, RefWriteCondition::Any, &value)
+            .unwrap();
+    }
 }
 
-/// A lease push that is not a fast-forward of the head it conditions on
-/// appends: a reset would leave that head unrebuildable between the writes.
-#[test]
-fn a_push_that_is_not_a_fast_forward_appends_on_a_serialized_advance() {
-    let (_dir, store) = store();
-    let remote = Remote::new();
-    let s = setup(&store, &remote);
-    push(&remote, &store, s.aside, RefWriteCondition::Match(s.c[2])).unwrap();
-    assert_eq!(remote.read_ref(HEAD).unwrap(), Some(s.aside));
-    assert_eq!(chain(&remote).len(), DEPTH + 1, "no reset");
-    assert!(rebuilds(&remote, s.aside));
-}
-
-/// A remote that offers neither advance never resets, even for a
-/// fast-forward.
-#[test]
-fn a_fast_forward_appends_on_an_ordered_advance() {
-    let (_dir, store) = store();
-    let remote = Remote {
-        serialized: false,
+/// A remote that offers the advance `kind` names.
+fn remote_of<'a>(kind: &str) -> Remote<'a> {
+    Remote {
+        atomic: kind == "atomic",
+        serialized: kind != "ordered",
         ..Remote::new()
-    };
-    let s = setup(&store, &remote);
-    push(&remote, &store, s.ahead, RefWriteCondition::Match(s.c[2])).unwrap();
-    assert_eq!(chain(&remote).len(), DEPTH + 1);
-    assert!(rebuilds(&remote, s.ahead));
+    }
 }
 
-/// An atomic advance commits both refs as one step, so it resets any
-/// conditioned push, a fast-forward or not.
+/// A push that crosses the threshold replaces the chain with one node that
+/// lists every pack of the chain and then its own. It uploads what an
+/// append uploads. Every advance does this, for a fast-forward and for a push that
+/// is not one, because the node drops nothing.
 #[test]
-fn an_atomic_advance_resets_a_push_that_is_not_a_fast_forward() {
-    let (_dir, store) = store();
-    let remote = Remote {
-        atomic: true,
-        ..Remote::new()
-    };
-    let s = setup(&store, &remote);
-    push(&remote, &store, s.aside, RefWriteCondition::Match(s.c[2])).unwrap();
-    assert_eq!(chain(&remote).len(), 1);
-    assert!(rebuilds(&remote, s.aside));
+fn a_push_at_the_threshold_re_baselines_and_uploads_what_an_append_does() {
+    for kind in ["serialized", "ordered", "atomic"] {
+        for fast_forward in [true, false] {
+            let case = format!("{kind}, fast-forward: {fast_forward}");
+            let (_dir, store) = store();
+            let (remote, twin) = (remote_of(kind), remote_of(kind));
+            let s = setup(&store, &remote);
+            setup(&store, &twin);
+            let tip = if fast_forward { s.ahead } else { s.aside };
+            let held: Vec<Hash> = chain(&remote)
+                .into_iter()
+                .rev()
+                .flat_map(|node| node.packs)
+                .collect();
+            let uploads = remote.uploads.load(Ordering::SeqCst);
+            push(&remote, &store, tip, RefWriteCondition::Match(s.c[2])).unwrap();
+            let uploaded = remote.uploads.load(Ordering::SeqCst) - uploads;
+            // The same push with no threshold appends.
+            let uploads = twin.uploads.load(Ordering::SeqCst);
+            push_at(&twin, &store, tip, RefWriteCondition::Match(s.c[2]), 0).unwrap();
+            let appended = chain(&twin).remove(0).packs;
+
+            assert_eq!(remote.read_ref(HEAD).unwrap(), Some(tip), "{case}");
+            let nodes = chain(&remote);
+            assert_eq!(nodes.len(), 1, "{case}");
+            assert_eq!(nodes[0].prev, None, "{case}");
+            assert_eq!(nodes[0].packs, [held, appended.clone()].concat(), "{case}");
+            assert_eq!(
+                uploaded,
+                twin.uploads.load(Ordering::SeqCst) - uploads,
+                "{case}: the uploads of an append, its packs and one node"
+            );
+            assert!(rebuilds(&remote, tip), "{case}");
+        }
+    }
 }
 
 /// A crash between the packmap write and the head write leaves the old
-/// head with the new packmap, and that packmap rebuilds the old head: the
-/// fast-forward's reset holds its closure, and the other push appended.
+/// head with the new packmap. That packmap lists every pack of the chain it
+/// replaced, so it rebuilds the old head.
 #[test]
 fn a_crash_between_the_writes_leaves_the_old_head_rebuildable() {
-    for (fast_forward, nodes_after) in [(true, 1), (false, DEPTH + 1)] {
+    for fast_forward in [true, false] {
         let (_dir, store) = store();
         let remote = Remote::new();
         let s = setup(&store, &remote);
@@ -348,7 +371,7 @@ fn a_crash_between_the_writes_leaves_the_old_head_rebuildable() {
         remote.crash.store(true, Ordering::SeqCst);
         assert!(push(&remote, &store, tip, RefWriteCondition::Match(s.c[2])).is_err());
         assert_eq!(remote.read_ref(HEAD).unwrap(), Some(s.c[2]));
-        assert_eq!(chain(&remote).len(), nodes_after, "{fast_forward}");
+        assert_eq!(chain(&remote).len(), 1, "{fast_forward}");
         assert!(rebuilds(&remote, s.c[2]), "{fast_forward}");
         // The next push from that state lands.
         push(&remote, &store, tip, RefWriteCondition::Match(s.c[2])).unwrap();
@@ -357,12 +380,12 @@ fn a_crash_between_the_writes_leaves_the_old_head_rebuildable() {
 }
 
 /// A force push plans its packs against the head it reads, then appends
-/// them. Here, between its plan and its advance, a lease push moves the
-/// head aside and a fast-forward of that resets the chain, dropping the
-/// objects the force push left out as already held (`keep`). An ordered
-/// force append would then publish a head the chain cannot rebuild. On a
-/// serialized advance the force push takes the guarded driver, sees the
-/// reset drop the chain its plan relied on, and plans again.
+/// them. Here, between its plan and its advance, another client resets the
+/// chain to the closure of a head that lacks `keep`, which the force push
+/// left out as already held. An ordered force append would then publish a
+/// head the chain cannot rebuild. On a serialized advance the force push
+/// takes the guarded driver, sees the reset drop the chain its plan relied
+/// on, and plans again.
 #[test]
 fn a_force_push_racing_a_reset_plans_again() {
     let (_dir, store) = store();
@@ -370,16 +393,29 @@ fn a_force_push_racing_a_reset_plans_again() {
     let s = setup(&store, &remote);
     let forced = s.ahead;
     let beyond = commit(&store, &[("a", "beyond")], &[s.aside], 5);
+    let store_ref = &store;
+    remote.before_advance(move |remote| reset_to(remote, store_ref, beyond));
+    push(&remote, &store, forced, RefWriteCondition::Any).unwrap();
+    assert_eq!(remote.read_ref(HEAD).unwrap(), Some(forced));
+    assert!(rebuilds(&remote, forced));
+}
+
+/// A force push whose chain another push re-baselines before its advance
+/// still lands, and the chain rebuilds its head.
+#[test]
+fn a_force_push_racing_a_re_baseline_lands() {
+    let (_dir, store) = store();
+    let remote = Remote::new();
+    let s = setup(&store, &remote);
     let (aside, c2) = (s.aside, s.c[2]);
     let store_ref = &store;
     remote.before_advance(move |remote| {
         push(remote, store_ref, aside, RefWriteCondition::Match(c2)).unwrap();
-        push(remote, store_ref, beyond, RefWriteCondition::Match(aside)).unwrap();
-        assert_eq!(chain(remote).len(), 1, "the fast-forward re-baselined");
+        assert_eq!(chain(remote).len(), 1, "the push re-baselined");
     });
-    push(&remote, &store, forced, RefWriteCondition::Any).unwrap();
-    assert_eq!(remote.read_ref(HEAD).unwrap(), Some(forced));
-    assert!(rebuilds(&remote, forced));
+    push(&remote, &store, s.ahead, RefWriteCondition::Any).unwrap();
+    assert_eq!(remote.read_ref(HEAD).unwrap(), Some(s.ahead));
+    assert!(rebuilds(&remote, s.ahead));
 }
 
 /// Force pushes keep the ordered path on a remote that offers neither
@@ -404,9 +440,8 @@ fn a_force_push_on_an_ordered_advance_writes_the_head_unconditionally() {
 /// A lease push whose lease differs from the head it reads. The head is
 /// `c2`, the lease; another push moves it to `aside`, and the push plans
 /// `beyond`, a child of `aside`, against `aside`, leaving `aside` out as
-/// already held. Before its advance, two pushes move the head back to `c2`
-/// through `c1`, and the second resets the chain to the closure of `c2`,
-/// dropping `aside`. The lease now holds again, so a push that conditions on
+/// already held. Before its advance, another client resets the chain to the
+/// closure of `c2`, dropping `aside`. The lease now holds again, so a push that conditions on
 /// it would publish `beyond` with a chain that lacks its parent. The driver
 /// refuses the push before it plans, on an atomic and on a serialized
 /// advance, and through the split planner.
@@ -421,15 +456,11 @@ fn a_lease_push_refuses_a_head_that_differs_from_its_lease() {
             ..Remote::new()
         };
         let s = setup(&store, &remote);
-        let (c1, c2, aside) = (s.c[1], s.c[2], s.aside);
+        let (c2, aside) = (s.c[2], s.aside);
         let beyond = commit(&store, &[("a", "aside"), ("b", "beyond")], &[aside], 5);
         push_at(&remote, &store, aside, RefWriteCondition::Match(c2), 0).unwrap();
         let store_ref = &store;
-        remote.before_advance(move |remote| {
-            push_at(remote, store_ref, c1, RefWriteCondition::Match(aside), 0).unwrap();
-            push_at(remote, store_ref, c2, RefWriteCondition::Match(c1), 1).unwrap();
-            assert_eq!(chain(remote).len(), 1, "the push back to the lease reset");
-        });
+        remote.before_advance(move |remote| reset_to(remote, store_ref, c2));
         let uploads = remote.uploads.load(Ordering::SeqCst);
         let result = push_at(&remote, &store, beyond, RefWriteCondition::Match(c2), 0);
         let head = remote.read_ref(HEAD).unwrap().unwrap();

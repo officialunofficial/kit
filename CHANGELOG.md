@@ -88,19 +88,25 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lock exclusive, so a clash with a ref created at the same time is reported
   as `InvalidRef` and leaves nothing behind. The file transport still offers
   no atomic advance: a reader can see the new packmap with the old head.
-- Pushes over `kit+file://` now re-baseline the packmap chain. The file
-  transport reports `Transport::supports_serialized_advance`: its advance is
-  serialized for writers, but a reader, or a crash, can see the new packmap
-  with the old head. The push driver resets a chain on such an advance only
-  for a push that fast-forwards the head it leases, as the local store shows,
-  and appends otherwise (SPEC-TRANSPORT §7.2). Force pushes over
-  `kit+file://` take the guarded force driver, which plans again when a reset
-  drops the chain its plan read. With the `fetch-grow` row of the
-  multi-writer benchmark (default depth 64), a clone after 1,001 pushes to
-  one branch went from 1,001 packs and 2,004 requests to 41 packs and 84
-  requests (about 16 s to under 1 s on one 4-CPU VM, under load from other
-  builds). Bytes downloaded and push cost were not measured: each reset
-  uploads the full closure of the tip.
+- A push that would grow a packmap chain past the re-baseline depth (64 by
+  default, `KIT_PACK_REBASELINE_DEPTH`) replaces the chain with one node
+  that lists every pack of the chain and then its own (SPEC-TRANSPORT §7.2).
+  It uploads only its own packs, and a fetch into an existing clone downloads
+  only the new ones. Before, such a push to a Connect server uploaded the
+  full closure of the tip again and every clone downloaded it again, and a
+  chain on any other transport grew by one node with each push. The node
+  holds everything the chain held, so every transport and every head
+  condition allows it. A node lists at most 1,024 packs: a chain that holds
+  more keeps appending. A fresh clone downloads every pack of the branch.
+  With the `fetch-grow` row of the multi-writer benchmark, the largest
+  upload of one push among 1,000 pushes of a 1 KiB change went from 740,447
+  bytes to 32,120 bytes, and a clone after them from 41 packs and 84 requests
+  to 1,001 packs and 1,044 requests (docs/PERFORMANCE.md).
+- The file transport reports `Transport::supports_serialized_advance`: its
+  advance is serialized for writers, but a reader, or a crash, can see the
+  new packmap with the old head. Force pushes over `kit+file://` take the
+  guarded force driver, which plans again when another writer replaces the
+  chain its plan read.
 - The FastCDC cutter jumps over runs of one byte value, such as the zero
   blocks of a sparse image, once the rolling hash reaches its fixed point.
   The cut points do not change.

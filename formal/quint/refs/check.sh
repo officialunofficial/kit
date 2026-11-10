@@ -9,7 +9,7 @@
 #   QUINT=0 skips `quint run`; ONLY=<regex> restricts TLC/Apalache to
 #   matching "<module>::<invariant>" checks.
 #
-# advance.qnt (the two-ref advance and the re-baseline gate) runs too.
+# advance.qnt (the two-ref advance and the reset gate) runs too.
 #
 # Pins: quint 0.32.0, Apalache 0.62.2 run directly on the
 # compiled TLA+ (not `quint verify`), TLC = tlc2.TLC from the Apalache 0.62.2
