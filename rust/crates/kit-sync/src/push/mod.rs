@@ -712,8 +712,9 @@ fn push_branch_once(
     // `self_contained` lets a full-closure push reset a broken chain
     // (unconditionally, on any transport); `ResetSelfContained`
     // proactively resets a healthy chain that has grown too deep, and
-    // is only ever chosen above when the transport is atomic-capable
-    // AND the head write is CAS-conditioned. A failed advance leaves
+    // is only ever chosen above when `may_rebaseline` allows it: an
+    // atomic advance with a CAS-conditioned head, or a serialized one
+    // whose leased head the tip fast-forwards. A failed advance leaves
     // the head untouched.
     let action = if rebaseline {
         ChainAction::ResetSelfContained
@@ -765,39 +766,8 @@ fn plan_branch(
     )?))
 }
 
-/// Build `plan`'s entries into one or more packs, each staying under
-/// `payload_cap` bytes of wire payload, uploading each pack to `tx` as
-/// soon as it's sealed. Returns the ordered pack keys — build order is
-/// apply order, threaded straight into [`advance_packmap`].
-///
-/// A single linear left-to-right pass over the plan's already-ordered
-/// `raw ++ deltas` sequence is enough: [`transfer::plan_pack`] never
-/// deltas an entry against a base introduced earlier in THIS push
-/// (every delta's base is already on the remote from a prior push), so
-/// packs can be sealed independently the instant one would exceed the
-/// cap — no intra-push base-ordering hazard to preserve across the
-/// split.
-///
-/// Sizing uses a conservative *uncompressed* upper bound per entry
-/// (`bytes.len()` for a raw, `HASH_LEN + stream.len()` for a delta)
-/// checked against [`PackWriter::total_payload`]'s real (compressed)
-/// running total, so a sealed pack never exceeds `payload_cap` — it may
-/// under-fill when compression bites, yielding more packs than the
-/// theoretical minimum, never fewer. Peak memory is one pack buffer
-/// PLUS one prepared batch, not every pack (or the whole plan) held at
-/// once: [`size_capped_batch_lens`] caps each batch at `payload_cap`
-/// conservative bytes (the same budget the writer itself is bounded
-/// by) as well as [`pack_fanout_threshold`]-many entries, so a plan
-/// containing very large objects can't balloon a batch past what one
-/// sealed pack would have held anyway — see that function's doc
-/// comment for why both caps are needed.
-///
-/// Takes `plan` BY VALUE (not `&PackPlan`): the delta compression
-/// fan-out needs owned `Vec<u8>` streams to hand to rayon, and
-/// `plan.deltas` already owns them — draining them out here is zero
-/// extra bytes copied, where borrowing would force a clone per entry
-/// just to satisfy ownership. The caller reads whatever it needs off
-/// `plan` (just `self_contained`) before making this call.
+/// The per-pack payload cap: `requested`, bounded by the pack format and
+/// by the limit the remote advertises. A cap of zero is an error.
 fn effective_payload_cap(requested: u64, advertised: Option<u64>) -> Result<u64, PushError> {
     // The serialized limit's overhead margin is exact and dynamic: header,
     // trailer and one frame per entry. `should_seal` applies it on each add.
@@ -877,6 +847,39 @@ enum PackSink<'a> {
     Count,
 }
 
+/// Build `plan`'s entries into one or more packs, each staying under
+/// `payload_cap` bytes of wire payload, uploading each pack to `tx` as
+/// soon as it's sealed. Returns the ordered pack keys — build order is
+/// apply order, threaded straight into [`advance_packmap`].
+///
+/// A single linear left-to-right pass over the plan's already-ordered
+/// `raw ++ deltas` sequence is enough: [`transfer::plan_pack`] never
+/// deltas an entry against a base introduced earlier in THIS push
+/// (every delta's base is already on the remote from a prior push), so
+/// packs can be sealed independently the instant one would exceed the
+/// cap — no intra-push base-ordering hazard to preserve across the
+/// split.
+///
+/// Sizing uses a conservative *uncompressed* upper bound per entry
+/// (`bytes.len()` for a raw, `HASH_LEN + stream.len()` for a delta)
+/// checked against [`PackWriter::total_payload`]'s real (compressed)
+/// running total, so a sealed pack never exceeds `payload_cap` — it may
+/// under-fill when compression bites, yielding more packs than the
+/// theoretical minimum, never fewer. Peak memory is one pack buffer
+/// PLUS one prepared batch, not every pack (or the whole plan) held at
+/// once: [`size_capped_batch_lens`] caps each batch at `payload_cap`
+/// conservative bytes (the same budget the writer itself is bounded
+/// by) as well as [`pack_fanout_threshold`]-many entries, so a plan
+/// containing very large objects can't balloon a batch past what one
+/// sealed pack would have held anyway — see that function's doc
+/// comment for why both caps are needed.
+///
+/// Takes `plan` BY VALUE (not `&PackPlan`): the delta compression
+/// fan-out needs owned `Vec<u8>` streams to hand to rayon, and
+/// `plan.deltas` already owns them — draining them out here is zero
+/// extra bytes copied, where borrowing would force a clone per entry
+/// just to satisfy ownership. The caller reads whatever it needs off
+/// `plan` (just `self_contained`) before making this call.
 fn build_and_upload_packs(
     sink: PackSink<'_>,
     store: &ObjectStore,

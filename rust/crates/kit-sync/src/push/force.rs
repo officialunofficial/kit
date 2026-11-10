@@ -1,4 +1,5 @@
-//! Force publication keeps the planning dependencies in the atomic ref write.
+//! Force publication keeps the planning dependencies in the two-ref advance,
+//! on an atomic or a serialized advance.
 use super::{
     PackSink, PreparedPlan, PushContext, PushError, RetryReason, build_and_upload_packs,
     effective_payload_cap, encode_delta_candidates_batch, estimate_pack_sizes,

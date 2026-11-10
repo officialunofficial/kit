@@ -99,10 +99,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The FastCDC cutter jumps over runs of one byte value, such as the zero
   blocks of a sparse image, once the rolling hash reaches its fixed point.
   The cut points do not change.
-- `kit checkout`, `pull`, `rebase`, `revert` and `cherry-pick` record the
-  stat cache of each file they write in the index. The next command no longer
-  re-hashes those files, so the safety check of a second checkout and the first
-  `status` after a checkout skip reading them.
+- `kit checkout`, `pull`, `merge`, `rebase`, `revert`, `cherry-pick` and
+  `worktree add` record the stat cache of each file they write in the index.
+  The next command no longer re-hashes those files, so the safety check of a
+  second checkout and the first `status` after a checkout skip reading them.
+  kit-core exposes this as `restore_tree_to_worktree_observed`.
+- An ignore check of one path, such as `kit add <path>` and the restore
+  safety check, slices each ancestor directory out of the path instead of
+  building a new string for it.
 
 ### Fixed
 
@@ -186,10 +190,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not a canonical ref wire, was left out of the listing, so a fetch treated
   the branch as absent. A ref that returns 404 is still left out: it was
   deleted after the page was listed.
-- Blame caps its LCS comparison table at 64 MiB after trimming the common
-  prefix. Larger comparisons use the bounded line diff search. Reassembly,
-  line buffers, and attribution memory still grow with file size.
-- Mutation testing of changed lines uses paths relative to the Rust workspace.
 - `kit push` and `kit push --force-with-lease` fail as a non-fast-forward,
   before they upload anything, when the remote head they read differs from
   their lease. They used to plan against that head and condition the head
@@ -198,6 +198,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   objects it needs, and fetches and clones of the branch then failed with a
   missing object. This affected every remote. A push whose earlier attempt
   already landed still succeeds and writes nothing (SPEC-TRANSPORT §7).
+  Because push reads the head before its first upload, a push without write
+  permission whose history does not fast-forward the branch now fails as a
+  non-fast-forward.
 
 ## [0.7.3] - 2026-11-08
 

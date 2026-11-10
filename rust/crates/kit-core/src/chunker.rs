@@ -132,7 +132,8 @@ pub struct ChunkBoundary {
 }
 
 /// `FastCDC` chunker parameters. Construct with [`FastCdc::v1`] for the
-/// frozen v1 constants; other constructors exist mainly for tests that
+/// frozen v1 constants or [`FastCdc::v2`] for the v2 masks;
+/// [`FastCdc::custom`] exists mainly for tests and fuzz targets that
 /// exercise the algorithm at smaller sizes.
 #[derive(Debug, Clone, Copy)]
 pub struct FastCdc {
@@ -171,10 +172,8 @@ impl FastCdc {
     /// Construct a chunker with custom parameters. `avg_size` MUST be a
     /// power of two; the strict/loose masks are derived as
     /// `mask = (1 << log2(avg)) - 1; mask_s = mask | (mask << 1); mask_l = mask >> 1`.
-    /// Returns [`crate::object::KitError::InvalidIdentity`] re-purposed as a generic
-    /// "bad parameter" error if the constraints are violated — but in
-    /// practice this constructor is only used by tests, where the inputs
-    /// are constants, so we panic instead for a clearer failure mode.
+    /// Tests and fuzz targets call it with constant inputs, so it panics on
+    /// bad parameters rather than returning an error.
     ///
     /// # Panics
     ///
@@ -1243,7 +1242,8 @@ mod tests {
     }
 
     /// Pinned v1 gear-table digest, harvested once from the splitmix64
-    /// derivation seeded with "KITFCDC". Drift = a v2 break.
+    /// derivation seeded with "KITFCDC". v1 and v2 share the table, so drift
+    /// moves the chunk boundaries of both.
     const EXPECTED_GEAR_DIGEST_HEX: &str =
         "2c8b776fb264316106cef8f45ebd30bf6c2cb7a704c095ce9adc4b4b84ab75ff";
 

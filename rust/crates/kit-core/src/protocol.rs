@@ -789,8 +789,10 @@ pub trait Transport: Send + Sync {
     /// (durable before the head moves) then the head. A crash in between
     /// leaves the head at its prior value and the packmap a superset — still
     /// consistent for fetch while concurrent writes also preserve the chain.
-    /// This ordering cannot protect against a concurrent atomic re-baseline;
-    /// force pushes on atomic transports must use the atomic implementation.
+    /// This ordering cannot protect against a concurrent re-baseline. A
+    /// transport that offers an atomic or serialized advance provides its
+    /// own two-ref advance, and force pushes against it use the guarded
+    /// force driver.
     /// The [`AdvanceOutcome`] distinguishes a packmap
     /// precondition failure (caller re-reads and retries the chain) from a
     /// head precondition failure (caller treats it as non-fast-forward),
@@ -846,14 +848,16 @@ pub trait Transport: Send + Sync {
         UploadLimits::default()
     }
 
-    /// Head precondition for a force push using an atomic advance.
+    /// Head precondition for a force push using an atomic or serialized
+    /// advance.
     ///
     /// The default keeps the unconditional force-write intent. Transports
     /// whose atomic endpoint cannot encode [`RefWriteCondition::Any`] must
     /// override this to match `observed_head` (or require a missing head).
     /// Push pairs this condition with a packmap precondition and retries a
     /// concurrent head change, so force pushes never use an ordered fallback.
-    /// Only used when [`Self::supports_atomic_advance`] returns `true`.
+    /// Only used when [`Self::supports_atomic_advance`] or
+    /// [`Self::supports_serialized_advance`] returns `true`.
     fn atomic_force_head_condition(&self, _observed_head: Option<Hash>) -> RefWriteCondition {
         RefWriteCondition::Any
     }
@@ -868,11 +872,11 @@ pub trait Transport: Send + Sync {
     /// head-CAS race between the two writes leaves the packmap a strict
     /// superset of what the (unmoved) head needs — still reconstructable.
     /// That safety argument does NOT extend to a packmap **reset** (a fresh
-    /// node with `prev = None`, produced by the pack-chain re-baseline,
-    /// kit): a reset is not a superset of the prior chain, so a
+    /// node with `prev = None`, produced by the pack-chain re-baseline):
+    /// a reset is not a superset of the prior chain, so a
     /// packmap write that commits while the paired head write loses its CAS
     /// would strand the (still-unmoved) head pointing at a commit whose
-    /// closure the reset packmap can no longer reconstruct (kit).
+    /// closure the reset packmap can no longer reconstruct.
     ///
     /// Callers MUST treat `false` (the default) as "never request a
     /// packmap reset against this transport", unless

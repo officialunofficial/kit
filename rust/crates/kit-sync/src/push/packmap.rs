@@ -29,15 +29,12 @@ pub(crate) fn resolve_pack_chain(
 /// value it was walked from.
 ///
 /// Produced by [`probe_chain`] (the push-side pre-plan re-baseline probe in
-/// `push_branch`) and consumed by [`advance_packmap`]'s first CAS attempt —
-/// so a healthy chain is walked once per push, not twice (kit perf
-/// fix; previously the pre-plan depth probe and `advance_packmap`'s own
-/// [`resolve_pack_chain`] call each walked the whole chain independently).
+/// `push_branch_once`) and consumed by [`advance_packmap`]'s first CAS
+/// attempt, so a healthy chain is walked once per push, not twice.
 /// `advance_packmap` only reuses this when the packmap's live value still
 /// equals `head`; a mismatch (the packmap moved between the probe and the
 /// CAS attempt, or a prior CAS attempt already lost the race) falls back to
-/// a fresh [`resolve_pack_chain`] call, preserving the existing retry
-/// semantics.
+/// a fresh [`resolve_pack_chain`] call.
 #[derive(Debug)]
 pub(crate) struct ResolvedChain {
     /// The packmap value this chain was walked from.
@@ -51,9 +48,9 @@ pub(crate) struct ResolvedChain {
 
 /// Walk a branch's packlist chain from `head_key` ONCE, returning both its
 /// depth and its flattened oldest-first pack keys as a single
-/// [`ResolvedChain`]. Sole caller is `push_branch`'s pre-plan re-baseline
-/// probe; see [`ResolvedChain`] for why threading its result into
-/// [`advance_packmap`] matters.
+/// [`ResolvedChain`]. `push_branch_once`'s pre-plan re-baseline probe calls
+/// it, and [`resolve_pack_chain`] is built on it; see [`ResolvedChain`] for
+/// why threading the probe's result into [`advance_packmap`] matters.
 pub(crate) fn probe_chain(
     tx: &PushContext<'_>,
     branch: &str,
@@ -82,9 +79,11 @@ pub(crate) enum ChainAction {
         /// broken-chain escape-hatch reset described above.
         self_contained: bool,
     },
-    /// Reset to a full-closure node. Requires atomic advance and a conditioned
-    /// head lease. Existing fetchers download the full closure again, and old
-    /// pack digests remain in their applied-pack records until pruned.
+    /// Reset to a full-closure node. Requires an atomic advance and a
+    /// conditioned head lease, or a serialized advance and a lease on an
+    /// ancestor of the tip. Existing fetchers download the full closure
+    /// again, and old pack digests remain in their applied-pack records
+    /// until pruned.
     ResetSelfContained,
 }
 
@@ -106,8 +105,8 @@ pub(crate) enum ChainAction {
 ///
 /// `resolved` reuses the pre-plan walk only while its head matches the live ref.
 /// A stale probe or lost CAS race requires a fresh walk. An idempotent retry only
-/// writes the head. Atomic force pushes use the separate guarded driver,
-/// including this idempotent case. Lost-response conflicts are disambiguated
+/// writes the head. Force pushes on an atomic or serialized advance use the
+/// separate guarded driver, including this idempotent case. Lost-response conflicts are disambiguated
 /// by reading the head.
 pub(crate) fn advance_packmap(
     tx: &PushContext<'_>,
