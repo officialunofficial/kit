@@ -201,6 +201,18 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Because push reads the head before its first upload, a push without write
   permission whose history does not fast-forward the branch now fails as a
   non-fast-forward.
+- A failed save no longer wedges a paused rebase. Each state file is staged
+  in a synced temporary file and replaced whole, and the files are staged
+  before any is replaced, so a full disk leaves the previous state intact.
+  Before, a save could leave `head-name`, `orig-head`, `todo` or `actions`
+  empty, and `kit rebase --continue`, `--abort` and a new rebase all failed
+  until `.kit/rebase-apply` was removed by hand. A rebase whose first save
+  fails removes the empty state directory it created. `read_state` also
+  rejects an empty `head-name` as invalid state.
+- `kit trust add` and `kit trust remove` no longer empty the trust catalog
+  when a write fails. They write a synced temporary file and replace the
+  catalog whole. The catalog keeps its permissions, and a catalog that is a
+  symlink, dangling or not, stays a symlink.
 
 ## [0.7.3] - 2026-11-08
 

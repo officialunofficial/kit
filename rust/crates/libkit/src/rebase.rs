@@ -383,7 +383,12 @@ pub fn start(
     let signer = signing.open(layout)?;
     let onto_tree = commit_tree(store, onto)?;
     ensure_restore_safe(layout, store, onto_tree).map_err(Error::Worktree)?;
-    write_state(layout, &state).map_err(Error::WriteState)?;
+    if let Err(e) = write_state(layout, &state) {
+        // A failed save can leave the directory it created. Without state
+        // files, it would block `--abort` and every new rebase.
+        let _ = cleanup_rebase(layout);
+        return Err(Error::WriteState(e));
+    }
     restore_worktree_and_index(layout, store, onto_tree).map_err(Error::Worktree)?;
     refs::write_head_detached(layout, &onto).map_err(Error::DetachHead)?;
     replay(layout, store, Some(signer), signing, editor, observer)
