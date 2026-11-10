@@ -1,9 +1,11 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-09: main CI green on 9c857ac; nightly formal run failed once on a 504 downloading Apalache (transient). Merged PR 38. PR 45 rebased locally (conflict in ignore_match bench, resolved, tests pass) but force-push was denied; its semver-checks and cargo-mutants checks failed on the old base and need a re-run. PRs 44, 46-52 skipped: touched within 24h. Commonware releases not checked: commonwarexyz/monorepo is outside the session's repository scope.",
+  "last_findings": "2026-11-10: main CI green on f1105d6 (cancelled runs superseded). Scheduled mutation sweep (kit-attest, kit-keystore) failed on df60da0; likely surviving mutants, not investigated (report artifact only). PR 45 conflicted; rebased onto main, tests pass, opened PR 71 (new branch), closed 45. PRs 65, 66 skipped: touched within 24h. Commonware not checked (Monday only).",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
-    "commonwarexyz/monorepo is not readable through the GitHub tools; fetch its releases page with WebFetch instead."
+    "commonwarexyz/monorepo is not readable through the GitHub tools; fetch its releases page with WebFetch instead.",
+    "Replacing a conflicted PR: rebase locally, push a new branch, open a new PR, comment and close the old one. Do not cite PR numbers in the new PR body (AGENTS.md).",
+    "get_job_logs needs return_content=true and tail_lines; the mutation job log tail shows only cleanup, so read the uploaded mutants report artifact instead."
   ]
 }
