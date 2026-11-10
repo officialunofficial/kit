@@ -353,8 +353,9 @@ fn pull_fast_forwards_and_a_second_pull_is_a_no_op() {
             branch: "main".to_owned()
         }
     );
+    // The remote's cursor is unchanged, so the fetch skips every branch.
+    assert!(again.fetch.remote_unchanged);
     assert_eq!(again.fetch.packs_downloaded, 0);
-    assert_eq!(again.fetch.packs_already_applied, 2);
 }
 
 struct StopAfterHead {
@@ -2251,4 +2252,148 @@ fn write_pull_marker(layout: &RepoLayout, target: Hash) {
         .encode(),
     )
     .unwrap();
+}
+
+/// Counts the requests a fetch makes and forwards the repository cursor.
+struct CountingCursor<'a> {
+    inner: TransportSource<'a>,
+    calls: Cell<usize>,
+}
+
+impl RemoteSource for CountingCursor<'_> {
+    fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
+        self.calls.set(self.calls.get() + 1);
+        self.inner.list_branches()
+    }
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
+        self.calls.set(self.calls.get() + 1);
+        self.inner.read_ref(name)
+    }
+    fn download_blob_via_ref(
+        &self,
+        key: &PackKey,
+        name: &str,
+    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        self.calls.set(self.calls.get() + 1);
+        self.inner.download_blob_via_ref(key, name)
+    }
+    fn download_pack_via_ref(
+        &self,
+        key: &PackKey,
+        name: &str,
+    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        self.calls.set(self.calls.get() + 1);
+        self.inner.download_pack_via_ref(key, name)
+    }
+    fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, kit_sync::SourceError> {
+        self.inner.repo_cursor()
+    }
+}
+
+fn counted_fetch(
+    remote: &Remote,
+    dir: &Path,
+    options: &SyncOptions,
+) -> (kit_sync::FetchReport, usize) {
+    let source = CountingCursor {
+        inner: remote.source(),
+        calls: Cell::new(0),
+    };
+    let report = fetch(dir, &source, "default", options, &NoopObserver).unwrap();
+    (report, source.calls.get())
+}
+
+#[test]
+fn an_unchanged_remote_costs_no_request_beyond_its_cursor() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let options = SyncOptions::default();
+
+    // The clone saw the cursor: nothing changed, so no listing, no ref read.
+    let (report, calls) = counted_fetch(&remote, &target, &options);
+    assert!(report.remote_unchanged);
+    assert_eq!((calls, report.branches_fetched), (0, 0));
+
+    // A write changes the cursor, and the fetch does its full work.
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let (report, calls) = counted_fetch(&remote, &target, &options);
+    assert!(!report.remote_unchanged);
+    assert!(calls > 0);
+    let layout = RepoLayout::single(&target);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(second)
+    );
+    let (report, calls) = counted_fetch(&remote, &target, &options);
+    assert!(report.remote_unchanged && calls == 0);
+
+    // A changed tracking ref, or a fetch that wants signatures checked after
+    // one that did not, is not trusted.
+    refs::write_remote_ref(&layout, "default", "main", &first).unwrap();
+    let (report, _) = counted_fetch(&remote, &target, &options);
+    assert!(!report.remote_unchanged);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(second)
+    );
+    let unsigned = SyncOptions::default().with_verify_signatures(false);
+    let (report, _) = counted_fetch(&remote, &target, &unsigned);
+    assert!(report.remote_unchanged);
+    std::fs::remove_dir_all(layout.applied_packs_dir().join(".cursors")).unwrap();
+    let (report, _) = counted_fetch(&remote, &target, &unsigned);
+    assert!(!report.remote_unchanged);
+    let (report, _) = counted_fetch(&remote, &target, &options);
+    assert!(
+        !report.remote_unchanged,
+        "an unsigned fetch's record does not satisfy a signed one"
+    );
+}
+
+#[test]
+fn a_recreated_remote_never_matches_an_old_cursor() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let again = Remote::new();
+    again.publish(None, &[("a.txt", b"one\n")], true);
+    let (report, _) = counted_fetch(&again, &target, &SyncOptions::default());
+    assert!(!report.remote_unchanged);
+}
+
+/// An unchanged cursor checks that the object of each tracked tip is in the
+/// store, not the closure below it. An object below a tip that the store
+/// lost stays missing through such a fetch. The next fetch that does its
+/// full work, because the cursor changed or no record matches, checks the
+/// closure and fetches the chain again.
+#[test]
+fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    let blob = Object::Blob(Blob {
+        data: b"one\n".to_vec(),
+    })
+    .id()
+    .unwrap();
+    assert!(store.contains(&blob));
+    store.remove_object(&blob).unwrap();
+
+    let options = SyncOptions::default();
+    let (report, calls) = counted_fetch(&remote, &target, &options);
+    assert!(report.remote_unchanged && calls == 0);
+    assert!(!store.contains(&blob), "the skip does not walk the closure");
+
+    std::fs::remove_dir_all(layout.applied_packs_dir().join(".cursors")).unwrap();
+    let (report, _) = counted_fetch(&remote, &target, &options);
+    assert!(!report.remote_unchanged);
+    assert!(store.contains(&blob), "a full fetch heals the closure");
 }

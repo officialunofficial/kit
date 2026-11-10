@@ -1,4 +1,5 @@
-# Ref lock stripes for SPEC-REFS section 5.1.1 (BLAKE3 hash of file bytes)
+# Ref lock stripes and stripe versions for SPEC-REFS sections 5.1.1 and 5.1.2 (BLAKE3 hash of file bytes)
 # Update the digests with `python3 scripts/golden/write_manifest.py rust/tests/golden/ref-locks`
 # Cross-checked by `python3 scripts/golden/ref_locks_ref.py rust/tests/golden`
 vectors.txt 0231f5493b9a937c1a52f6c6957cdcf488c4a2c4fc4529f1eb339bf3a557bf6d
+versions.txt b8ebd49cf6cd667acdb97900dee9136d5fb9c53dbb8d3a2914d425db456c090e

@@ -1493,6 +1493,22 @@ pub fn ref_wire_decode_one_iteration(input: &[u8]) {
     }
 }
 
+/// Fetch cursor record parser (`fetch_cursor_record`): `kit_sync::cursor::parse`
+/// never panics, and an accepted record survives a write and a parse.
+pub fn fetch_cursor_record_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Some(record) = kit_sync::cursor::parse(input) else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("record");
+    record.persist(&path).expect("persist");
+    assert_eq!(
+        kit_sync::cursor::parse(&std::fs::read(&path).expect("read")),
+        Some(record)
+    );
+}
+
 /// Index file decoder (`index_decode`): `index::deserialize` never panics,
 /// and an accepted index survives a serialize and deserialize round trip.
 pub fn index_decode_one_iteration(input: &[u8]) {
@@ -2950,6 +2966,24 @@ mod tests {
         ] {
             run_one(case, git_commit_parse_one_iteration).unwrap();
         }
+    }
+
+    #[test]
+    fn unit_fetch_cursor_record() {
+        run_iterated_unit(fetch_cursor_record_one_iteration).unwrap();
+        // A valid record, so the round trip runs.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record");
+        kit_sync::cursor::CursorRecord {
+            cursor: kit_core::protocol::RepoCursor::new(&[7u8; 16]).unwrap(),
+            tracking: [3u8; 32],
+            signed: false,
+        }
+        .persist(&path)
+        .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(kit_sync::cursor::parse(&bytes).is_some());
+        run_one(&bytes, fetch_cursor_record_one_iteration).unwrap();
     }
 
     #[test]

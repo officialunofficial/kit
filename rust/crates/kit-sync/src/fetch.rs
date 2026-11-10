@@ -45,6 +45,10 @@ pub struct FetchReport {
     pub packs_already_applied: usize,
     /// Objects written to the object store.
     pub objects_unpacked: usize,
+    /// The remote's cursor equalled the one the last complete fetch saw,
+    /// and the remote-tracking refs were as that fetch left them, so the
+    /// fetch made no other request (SPEC-TRANSPORT §1.2).
+    pub remote_unchanged: bool,
 }
 
 /// One branch's pack chain, resolved and downloaded over the network with
@@ -330,6 +334,26 @@ fn fetch_objects_inner(
     let target_branch = options.target_branch.as_deref();
     let require_signed = options.verify_signatures;
     let stage_parent = options.staging_dir.as_deref();
+    // The cursor is read before the listing, so a write the listing misses
+    // changes a later cursor.
+    let cursor = source
+        .repo_cursor()
+        .map_err(|error| source.repository_error(error))?;
+    let cursor_path = crate::cursor::path(layout, source, remote);
+    if let Some(cursor) = &cursor
+        && remote_unchanged(
+            store,
+            layout,
+            &cursor_path,
+            cursor,
+            remote,
+            require_signed,
+            target_branch,
+        )?
+    {
+        report.remote_unchanged = true;
+        return Ok(());
+    }
     let mut remote_refs = source
         .list_branches()
         .map_err(|error| source.repository_error(error))?;
@@ -495,5 +519,50 @@ fn fetch_objects_inner(
     })();
     // Persist the successful batched prefix even if a later branch failed.
     tracking.commit()?;
-    result
+    result?;
+    if let Some(cursor) = cursor {
+        // A disposable cache: failing to write it costs the next fetch a
+        // full walk, never this fetch.
+        let record = crate::cursor::CursorRecord {
+            cursor,
+            tracking: crate::cursor::tracking_digest(layout, remote)?,
+            signed: require_signed,
+        };
+        let _ = record.persist(&cursor_path);
+    }
+    Ok(())
+}
+
+/// Whether the last complete fetch saw `cursor`, the remote-tracking refs
+/// are as it left them, and the object of every tracked tip is in the store
+/// (a wiped store still heals). A fetch that verifies signatures does not
+/// trust a fetch that did not, and a fetch of a named branch needs its
+/// tracking ref.
+fn remote_unchanged(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    path: &std::path::Path,
+    cursor: &kit_core::protocol::RepoCursor,
+    remote: &str,
+    require_signed: bool,
+    target_branch: Option<&str>,
+) -> Result<bool, SyncError> {
+    let Some(record) = crate::cursor::CursorRecord::load(path) else {
+        return Ok(false);
+    };
+    if record.cursor != *cursor || (require_signed && !record.signed) {
+        return Ok(false);
+    }
+    if let Some(branch) = target_branch
+        && refs::read_remote_ref(layout, remote, branch)?.is_none()
+    {
+        return Ok(false);
+    }
+    let mut tracked = refs::list_remote_refs(layout, remote)?;
+    if record.tracking != crate::cursor::digest_of(&mut tracked) {
+        return Ok(false);
+    }
+    Ok(tracked
+        .iter()
+        .all(|r| r.hash.is_some_and(|tip| store.contains(&tip))))
 }

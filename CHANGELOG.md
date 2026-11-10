@@ -22,6 +22,20 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Transport::supports_serialized_advance` and
   `RemoteSource::supports_serialized_advance`: whether a two-ref advance is
   serialized for writers. Both default to the atomic-advance capability.
+- Transports can offer a repository cursor, an opaque value that changes
+  whenever a ref changes (SPEC-TRANSPORT §1.2). A fetch whose remote cursor
+  equals the one its last complete fetch saw, with its remote-tracking refs
+  and their tip objects as that fetch left them, makes no other request.
+  `FetchReport::remote_unchanged` reports it. The memory transport offers a
+  cursor. The file transport offers one on Linux: it keeps a write count in
+  each stripe lock file and also reads the times of the ref directories, so
+  that a write by kit 0.7.3 or earlier, which keeps no count, changes the
+  cursor too (SPEC-REFS §5.1.2). It offers none while a ref directory was
+  modified in the last 2 s. On one ext4 disk, a fetch of an unchanged
+  `kit+file://` remote with 10,000 branches takes one request and about
+  23 ms; it took 20,001 requests before. The SSH, S3 and Connect transports
+  offer no cursor, and neither does the file transport on other systems: a
+  fetch there works as before.
 - FastCDC v2 (SPEC-FASTCDC §11, draft): spread masks at normalization
   level 2 over the v1 gear table and sizes. A v2 manifest carries
   `chunk_size = 0x8000_0002`. kit-core exposes it through

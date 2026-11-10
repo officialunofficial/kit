@@ -1,0 +1,26 @@
+# Stripe versions (SPEC-REFS 5.1.2): <lock file bytes> <version> <bytes after one more write>,
+# or <lock file bytes> corrupt. Bytes are lowercase hex, and `-` is the empty
+# file. The version is the count of writes to refs in the stripe, 8 bytes
+# little-endian at the start of the stripe's lock file. An empty file holds
+# version 0, and any other length is corrupt. A write adds one, and the
+# version after 18446744073709551615 is 0.
+# Checked by scripts/golden/ref_locks_ref.py.
+# A lock file that no write has counted in.
+- 0 0100000000000000
+# Zero, written out.
+0000000000000000 0 0100000000000000
+# The first write.
+0100000000000000 1 0200000000000000
+# A carry into the second byte.
+ff00000000000000 255 0001000000000000
+# Every byte differs, so the byte order shows.
+0807060504030201 72623859790382856 0907060504030201
+# The highest byte alone.
+0000000000000080 9223372036854775808 0100000000000080
+# The largest version wraps to zero.
+ffffffffffffffff 18446744073709551615 0000000000000000
+# Any length but 0 and 8 is corrupt.
+00 corrupt
+01000000000000 corrupt
+010000000000000000 corrupt
+01000000000000000100000000000000 corrupt

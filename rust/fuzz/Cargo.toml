@@ -53,6 +53,7 @@ kit-git-bridge = { path = "../crates/kit-git-bridge" }
 kit-keystore = { path = "../crates/kit-keystore", features = ["fuzzing"] }
 kit-rpc = { path = "../crates/kit-rpc", features = ["arbitrary"] }
 kit-serve = { path = "../crates/kit-serve" }
+kit-sync = { path = "../crates/kit-sync" }
 kit-bin = { path = "../crates/kit-bin", features = ["fuzzing"] }
 libkit = { path = "../crates/libkit", features = ["git-bridge", "transport-connect"] }
 kit-transport-ssh = { path = "../crates/kit-transport-ssh" }
@@ -276,6 +277,14 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "envelope_decode"
 path = "fuzz_targets/envelope_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "fetch_cursor_record"
+path = "fuzz_targets/fetch_cursor_record.rs"
 test = false
 doc = false
 bench = false

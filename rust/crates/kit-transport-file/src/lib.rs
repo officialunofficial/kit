@@ -51,7 +51,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError, RwLock};
 
@@ -88,8 +88,8 @@ fn open_pack_file(path: &Path) -> io::Result<fs::File> {
 use kit_core::bounded_read;
 use kit_core::hash::Hash;
 use kit_core::protocol::{
-    AdvanceOutcome, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, Transport,
-    TransportError, TransportResult,
+    AdvanceOutcome, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, RepoCursor,
+    Transport, TransportError, TransportResult,
 };
 use kit_core::refs::{
     REF_FILE_MAX_BYTES, Ref, decode_ref_wire, encode_ref_wire, validate_ref_name,
@@ -305,6 +305,75 @@ pub fn create_dir_all_durably(dir: &Path) -> io::Result<()> {
 /// every process on a root agrees on the mapping and the number of lock
 /// files stays fixed however many refs the root holds.
 const REF_LOCK_STRIPES: usize = 256;
+
+/// Bytes of a stripe version: the count of writes to refs in the stripe,
+/// little-endian, at the start of the stripe's lock file (SPEC-REFS
+/// §5.1.2). An empty lock file counts zero.
+const STRIPE_VERSION_LEN: usize = 8;
+
+/// The file under `<root>/.kit/refs/` that holds the root's random id.
+const REPO_ID_FILE: &str = ".repo-id";
+
+/// Bytes of the root's random id.
+const REPO_ID_LEN: usize = 16;
+
+/// Domain separator of the file transport's repository cursor digest.
+const REPO_CURSOR_DOMAIN: &[u8] = b"kit.file-repo-cursor\0";
+
+/// How old the modification time of every ref directory must be before
+/// the file transport offers a cursor. A file system stamps times at a
+/// coarse granularity (a clock tick on Linux, up to 2 s on FAT), so two
+/// writes close together can leave one time. A time older than this window
+/// changes on any later write.
+const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The most ref directories a cursor covers. A root with more offers none.
+const MAX_CURSOR_DIRS: usize = 1 << 16;
+
+/// The stripe version at the start of `file`. Zero for an empty file; any
+/// length but zero and [`STRIPE_VERSION_LEN`] is `InvalidData`.
+fn read_stripe_version(mut file: &fs::File) -> io::Result<u64> {
+    let mut buf = [0u8; STRIPE_VERSION_LEN + 1];
+    file.seek(io::SeekFrom::Start(0))?;
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    match filled {
+        0 => Ok(0),
+        STRIPE_VERSION_LEN => {
+            let mut le = [0u8; STRIPE_VERSION_LEN];
+            le.copy_from_slice(&buf[..STRIPE_VERSION_LEN]);
+            Ok(u64::from_le_bytes(le))
+        }
+        _ => Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "stripe lock file holds no version",
+        )),
+    }
+}
+
+/// Add one to the stripe version in `file`.
+fn bump_version_in(mut file: &fs::File) -> io::Result<()> {
+    let next = read_stripe_version(file)?.wrapping_add(1);
+    file.seek(io::SeekFrom::Start(0))?;
+    file.write_all(&next.to_le_bytes())
+}
+
+/// The kernel's boot id, which changes on every boot. `None` where the
+/// system offers none.
+fn boot_id() -> Option<Vec<u8>> {
+    const BOOT_ID_MAX: u64 = 64;
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    bounded_read::read_capped(Path::new("/proc/sys/kernel/random/boot_id"), BOOT_ID_MAX)
+        .ok()
+        .filter(|id| !id.is_empty())
+}
 
 /// The lock stripe of the ref `name`: the first byte of the BLAKE3 digest
 /// of its UTF-8 bytes.
@@ -614,8 +683,12 @@ impl FileTransport {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let _repo_lock = RefLock::acquire_shared(&self.root).map_err(RefFileError::Io)?;
-        let _stripe_lock = RefLock::acquire_stripe(&self.root, stripe).map_err(RefFileError::Io)?;
-        Ok(f(&LockedRef { tx: self, name }))
+        let stripe_lock = RefLock::acquire_stripe(&self.root, stripe).map_err(RefFileError::Io)?;
+        Ok(f(&LockedRef {
+            tx: self,
+            name,
+            stripe: &stripe_lock.file,
+        }))
     }
 
     /// Run `f` holding the locks of two refs: the repo lock shared and the
@@ -760,7 +833,8 @@ impl FileTransport {
 
     /// Put back a ref file's previous bytes, or remove it if it had none;
     /// best-effort. The caller holds the ref's lock, and the exclusive
-    /// repo lock when the file was absent.
+    /// repo lock when the file was absent. It changes the ref file again,
+    /// so it counts one more write on the ref's stripe (SPEC-REFS §5.1.2).
     fn restore(&self, name: &str, path: &Path, previous: Option<&[u8]>) {
         match previous {
             Some(bytes) => {
@@ -772,6 +846,7 @@ impl FileTransport {
                 }
             }
         }
+        let _ = self.bump_stripe_version(name);
     }
 
     /// The ref's id, strictly: like [`Transport::read_ref`], but a ref file
@@ -925,7 +1000,257 @@ impl FileTransport {
     /// The other fails, and a failure that leaves a clash on disk is
     /// [`RefFileError::InvalidName`], as the check before the write reports
     /// it, never a bare I/O error or a false conflict.
+    /// The CAS write of one ref file, then one more count on its stripe
+    /// version (SPEC-REFS §5.1.2) whenever the write may have changed the
+    /// file. The caller holds the ref's stripe lock or the repo lock
+    /// exclusive.
     fn write_ref_file(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+    ) -> Result<(), RefFileError> {
+        self.write_ref_file_in(name, condition, hash, None)
+    }
+
+    /// [`Self::write_ref_file`], counting through `stripe`, the open lock
+    /// file of the ref's stripe, when the caller holds it.
+    fn write_ref_file_in(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+        stripe: Option<&fs::File>,
+    ) -> Result<(), RefFileError> {
+        let written = self.write_ref_file_uncounted(name, condition, hash);
+        #[cfg(test)]
+        tests::BETWEEN_WRITE_AND_COUNT.with(|hook| {
+            if let Some(f) = hook.borrow_mut().as_mut() {
+                f();
+            }
+        });
+        if matches!(written, Ok(()) | Err(RefFileError::Io(_))) {
+            match stripe {
+                Some(file) => bump_version_in(file),
+                None => self.bump_stripe_version(name),
+            }
+            .map_err(RefFileError::Io)?;
+        }
+        written
+    }
+
+    /// Count one more write to the stripe of `name`, after the write's
+    /// rename. Only a holder of that stripe's lock, or of the repo lock
+    /// exclusive, calls this, so the read and the write of the count are
+    /// one step.
+    fn bump_stripe_version(&self, name: &str) -> io::Result<()> {
+        let path = self.lock_dir().join(stripe_lock_file(ref_stripe(name)));
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        bump_version_in(&file)
+    }
+
+    /// `<root>/.kit/refs/`, which holds the lock files.
+    fn lock_dir(&self) -> PathBuf {
+        kit_core::layout::RepoLayout::single(&self.root).refs_dir()
+    }
+
+    /// The repository cursor (SPEC-TRANSPORT §1.2): the BLAKE3 digest of
+    /// [`REPO_CURSOR_DOMAIN`], the root's random id, the kernel's boot id
+    /// and the 256 stripe versions, then the times of every directory under
+    /// `<root>/refs` ([`Self::stamp_ref_dirs`]). Each stripe version is read
+    /// under that stripe's lock held shared, after the repo lock held
+    /// shared, so no write is half counted. The directories are read under
+    /// the same shared repo lock, which excludes a writer that holds it
+    /// exclusive and keeps no count. No ref file is read.
+    ///
+    /// The directory times cover writers that keep no count. While any of
+    /// them is less than [`RACY_WINDOW`] old, the transport offers no
+    /// cursor, so a client fetches in full. The times are read first, so
+    /// such a read reads no count and takes no stripe lock.
+    ///
+    /// A count is written without fsync. A process crash keeps it, because
+    /// the page cache survives the process. An operating system crash can
+    /// lose it, and then the boot id changes, so no cursor read before the
+    /// crash equals one read after it. Where the boot id cannot be read, the
+    /// transport offers no cursor.
+    ///
+    /// # Errors
+    /// [`RefFileError::Corrupt`] for a lock file or id file that holds
+    /// neither nothing nor a valid value, or I/O.
+    fn repo_cursor_digest(&self) -> Result<Option<Hash>, RefFileError> {
+        self.repo_cursor_digest_at(std::time::SystemTime::now())
+    }
+
+    /// [`Self::repo_cursor_digest`] read at `now`.
+    fn repo_cursor_digest_at(
+        &self,
+        now: std::time::SystemTime,
+    ) -> Result<Option<Hash>, RefFileError> {
+        let Some(boot) = boot_id() else {
+            return Ok(None);
+        };
+        let id = self.repo_id()?;
+        let mut input = Vec::with_capacity(
+            REPO_CURSOR_DOMAIN.len()
+                + id.len()
+                + boot.len()
+                + REF_LOCK_STRIPES * STRIPE_VERSION_LEN,
+        );
+        input.extend_from_slice(REPO_CURSOR_DOMAIN);
+        input.extend_from_slice(&id);
+        input.extend_from_slice(&boot);
+        let _repo_guard = self
+            .repo_gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _repo_lock = RefLock::acquire_shared(&self.root).map_err(RefFileError::Io)?;
+        // The times come first: a fresh one withholds the cursor whatever
+        // the counts hold, so such a read takes no stripe lock and never
+        // waits behind a write. They are digested after the counts, as
+        // before, and both parts are read under one hold of the repo lock.
+        let mut stamps = Vec::new();
+        if !self.stamp_ref_dirs(now, &mut stamps)? {
+            return Ok(None);
+        }
+        for stripe in 0..REF_LOCK_STRIPES {
+            let _stripe_guard = self.stripe_gates[stripe]
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let lock = RefLock::open(&self.root, &stripe_lock_file(stripe), LockMode::Shared)
+                .map_err(RefFileError::Io)?;
+            let version = read_stripe_version(&lock.file).map_err(|e| {
+                if e.kind() == ErrorKind::InvalidData {
+                    RefFileError::Corrupt(stripe_lock_file(stripe))
+                } else {
+                    RefFileError::Io(e)
+                }
+            })?;
+            input.extend_from_slice(&version.to_le_bytes());
+        }
+        input.extend_from_slice(&stamps);
+        Ok(Some(kit_core::hash::hash(&input)))
+    }
+
+    /// Append to `out` the path, inode number, modification time and change
+    /// time of every directory under `<root>/refs`, sorted by path, or a
+    /// marker when there is none. A rename or unlink in a directory changes
+    /// its times, so a writer that keeps no stripe count still changes them.
+    /// No directory entry is read beyond its type, and no ref file is read.
+    ///
+    /// `false` when no cursor can be trusted: a directory was modified less
+    /// than [`RACY_WINDOW`] before `now` or after it, one vanished during
+    /// the walk (a write is in progress), `<root>/refs` is not a directory,
+    /// or there are more than [`MAX_CURSOR_DIRS`].
+    #[cfg(unix)]
+    fn stamp_ref_dirs(
+        &self,
+        now: std::time::SystemTime,
+        out: &mut Vec<u8>,
+    ) -> Result<bool, RefFileError> {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+        let top = self.root.join("refs");
+        match fs::symlink_metadata(&top) {
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                out.push(0);
+                return Ok(true);
+            }
+            Err(e) => return Err(RefFileError::Io(e)),
+            Ok(meta) if !meta.is_dir() => return Ok(false),
+            Ok(_) => {}
+        }
+        let Some(trusted_before) = now.checked_sub(RACY_WINDOW) else {
+            return Ok(false);
+        };
+        let mut stamps: Vec<(Vec<u8>, [i64; 5])> = Vec::new();
+        let mut pending = vec![(Vec::new(), top)];
+        while let Some((rel, dir)) = pending.pop() {
+            if stamps.len() == MAX_CURSOR_DIRS {
+                return Ok(false);
+            }
+            let meta = match fs::symlink_metadata(&dir) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(RefFileError::Io(e)),
+            };
+            if !meta.is_dir() || meta.modified().map_err(RefFileError::Io)? >= trusted_before {
+                return Ok(false);
+            }
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(RefFileError::Io(e)),
+            };
+            for entry in entries {
+                let entry = entry.map_err(RefFileError::Io)?;
+                if entry.file_type().map_err(RefFileError::Io)?.is_dir() {
+                    let mut sub = rel.clone();
+                    sub.push(b'/');
+                    sub.extend_from_slice(entry.file_name().as_bytes());
+                    pending.push((sub, entry.path()));
+                }
+            }
+            // The inode number fits in an i64 bit for bit; only equality
+            // matters.
+            #[allow(clippy::cast_possible_wrap)]
+            let ino = meta.ino() as i64;
+            stamps.push((
+                rel,
+                [
+                    ino,
+                    meta.mtime(),
+                    meta.mtime_nsec(),
+                    meta.ctime(),
+                    meta.ctime_nsec(),
+                ],
+            ));
+        }
+        stamps.sort();
+        out.push(1);
+        for (rel, fields) in &stamps {
+            out.extend_from_slice(&(rel.len() as u64).to_le_bytes());
+            out.extend_from_slice(rel);
+            for field in fields {
+                out.extend_from_slice(&field.to_le_bytes());
+            }
+        }
+        Ok(true)
+    }
+
+    /// No directory times to cover where the platform offers none, so no
+    /// cursor.
+    #[cfg(not(unix))]
+    fn stamp_ref_dirs(
+        &self,
+        _now: std::time::SystemTime,
+        _out: &mut Vec<u8>,
+    ) -> Result<bool, RefFileError> {
+        Ok(false)
+    }
+
+    /// The root's random id, created by the first caller that needs it.
+    /// A root that is deleted and created again gets a new one.
+    fn repo_id(&self) -> Result<[u8; REPO_ID_LEN], RefFileError> {
+        let path = self.lock_dir().join(REPO_ID_FILE);
+        let mut fresh = [0u8; REPO_ID_LEN];
+        getrandom::fill(&mut fresh)
+            .map_err(|e| RefFileError::Io(io::Error::other(e.to_string())))?;
+        // Exactly one creator wins the exclusive create; every caller then
+        // reads the winner's id.
+        write_create_new(&path, &fresh, true).map_err(RefFileError::Io)?;
+        let bytes =
+            bounded_read::read_capped(&path, REPO_ID_LEN as u64).map_err(RefFileError::Io)?;
+        bytes
+            .try_into()
+            .map_err(|_| RefFileError::Corrupt(REPO_ID_FILE.to_owned()))
+    }
+
+    fn write_ref_file_uncounted(
         &self,
         name: &str,
         condition: RefWriteCondition,
@@ -1113,7 +1438,14 @@ impl LockedRefs<'_> {
         if path.is_dir() {
             return Ok(false);
         }
-        let removed = remove_durably(&path).map_err(RefFileError::Io)?;
+        let removed = remove_durably(&path);
+        // Count the stripe whenever the file may be gone (SPEC-REFS §5.1.2).
+        if !matches!(removed, Ok(false)) {
+            self.tx
+                .bump_stripe_version(name)
+                .map_err(RefFileError::Io)?;
+        }
+        let removed = removed.map_err(RefFileError::Io)?;
         if removed {
             self.tx.prune_empty_parents(&path, name);
         }
@@ -1153,6 +1485,9 @@ impl LockedRefs<'_> {
 pub struct LockedRef<'a> {
     tx: &'a FileTransport,
     name: &'a str,
+    /// The stripe's lock file, held exclusive, which also holds the
+    /// stripe version.
+    stripe: &'a fs::File,
 }
 
 impl LockedRef<'_> {
@@ -1171,7 +1506,8 @@ impl LockedRef<'_> {
     /// [`RefFileError::InvalidName`], [`RefFileError::Escape`],
     /// [`RefFileError::Conflict`], or I/O.
     pub fn update(&self, condition: RefWriteCondition, hash: &Hash) -> Result<(), RefFileError> {
-        self.tx.write_ref_file(self.name, condition, hash)
+        self.tx
+            .write_ref_file_in(self.name, condition, hash, Some(self.stripe))
     }
 }
 
@@ -1359,6 +1695,13 @@ impl Transport for FileTransport {
     /// nothing. Readers still see its two renames one at a time.
     fn supports_serialized_advance(&self) -> bool {
         true
+    }
+
+    fn repo_cursor(&self) -> TransportResult<Option<RepoCursor>> {
+        match self.repo_cursor_digest()? {
+            Some(digest) => RepoCursor::new(&digest).map(Some),
+            None => Ok(None),
+        }
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
@@ -2584,6 +2927,69 @@ mod tests {
         assert_eq!(count, 57);
     }
 
+    /// The golden vectors of SPEC-REFS section 5.1.2:
+    /// `rust/tests/golden/ref-locks/versions.txt` lists lock file bytes with
+    /// the stripe version they hold and the bytes one more write leaves, or
+    /// marks them corrupt. `scripts/golden/ref_locks_ref.py` checks the same
+    /// file independently.
+    #[test]
+    fn every_golden_lock_file_holds_its_stripe_version() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/ref-locks");
+        let raw = fs::read(dir.join("versions.txt")).unwrap();
+        let manifest = fs::read_to_string(dir.join("MANIFEST.txt")).unwrap();
+        let pinned = manifest
+            .lines()
+            .find_map(|l| l.strip_prefix("versions.txt "))
+            .unwrap();
+        assert_eq!(
+            kit_core::hash::to_hex(&blake3_hash(&raw)),
+            pinned,
+            "versions.txt does not match MANIFEST.txt"
+        );
+        let unhex = |field: &str| -> Vec<u8> {
+            if field == "-" {
+                return Vec::new();
+            }
+            (0..field.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&field[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let scratch = tmp();
+        let path = scratch.path().join("lock");
+        let open = || {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap()
+        };
+        let text = std::str::from_utf8(&raw).unwrap();
+        let (mut valid, mut corrupt) = (0, 0);
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let fields: Vec<&str> = line.split(' ').collect();
+            fs::write(&path, unhex(fields[0])).unwrap();
+            match fields[1..] {
+                ["corrupt"] => {
+                    let read = read_stripe_version(&open());
+                    assert_eq!(read.unwrap_err().kind(), ErrorKind::InvalidData, "{line}");
+                    assert!(bump_version_in(&open()).is_err(), "{line}");
+                    assert_eq!(fs::read(&path).unwrap(), unhex(fields[0]), "{line}");
+                    corrupt += 1;
+                }
+                [version, after] => {
+                    let version: u64 = version.parse().unwrap();
+                    assert_eq!(read_stripe_version(&open()).unwrap(), version, "{line}");
+                    bump_version_in(&open()).unwrap();
+                    assert_eq!(fs::read(&path).unwrap(), unhex(after), "{line}");
+                    valid += 1;
+                }
+                _ => panic!("malformed vector {line:?}"),
+            }
+        }
+        assert_eq!((valid, corrupt), (7, 4));
+    }
+
     #[test]
     fn the_stripe_of_a_ref_is_pinned() {
         // First bytes of the BLAKE3 digests, computed with an independent
@@ -2999,8 +3405,13 @@ mod tests {
         assert!(!dir.path().join("refs/kit/packmap/n").exists());
 
         advance(&t, 0, 1).unwrap();
+        // The packmap was written and put back: its stripe counts both.
+        let stripe = t.lock_dir().join(stripe_lock_file(ref_stripe(PACKMAP)));
+        let count = || read_stripe_version(&fs::File::open(&stripe).unwrap()).unwrap();
+        let before = count();
         advance_fault::set(advance_fault::Fault::FailHead);
         assert!(advance(&t, 1, 2).is_err());
+        assert_eq!(count(), before + 2);
         assert_eq!(t.read_ref(PACKMAP).unwrap(), Some(id(1)));
         assert_eq!(t.read_ref(HEAD).unwrap(), Some(id(1)));
         assert!(temp_files_under(&dir.path().join("refs")).is_empty());
@@ -3452,5 +3863,357 @@ mod tests {
         let name = a.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with(".kit.tmp."), "{name}");
         assert!(temp_path(Path::new("/")).is_err());
+    }
+
+    type Hook = Option<Box<dyn FnMut()>>;
+
+    thread_local! {
+        /// Runs inside a ref write, after the rename and before the count.
+        pub(super) static BETWEEN_WRITE_AND_COUNT: std::cell::RefCell<Hook> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The count comes after the rename: between them the ref already holds
+    /// the new value and its stripe still holds the old count. A count
+    /// before the rename would let a reader pair the new cursor with the
+    /// old ref.
+    #[test]
+    fn a_write_counts_after_its_rename() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        let name = "refs/heads/main";
+        tx.update_ref(name, RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        let stripe = tx.lock_dir().join(stripe_lock_file(ref_stripe(name)));
+        let count = |path: &Path| read_stripe_version(&fs::File::open(path).unwrap()).unwrap();
+        let before = count(&stripe);
+        let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+        let (seen_in, ref_path, stripe_in) = (seen.clone(), tx.ref_path(name), stripe.clone());
+        BETWEEN_WRITE_AND_COUNT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let current = read_ref_raw(&ref_path).unwrap();
+                seen_in.set(Some((current, count(&stripe_in))));
+            }));
+        });
+        tx.update_ref(name, RefWriteCondition::Match(value(0, 0)), &value(0, 1))
+            .unwrap();
+        BETWEEN_WRITE_AND_COUNT.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(seen.get(), Some((Some(value(0, 1)), before)));
+        assert_eq!(count(&stripe), before + 1);
+    }
+
+    /// A clock past the window in which a fresh directory time is not
+    /// trusted, as if every write so far had settled.
+    fn settled_now() -> std::time::SystemTime {
+        std::time::SystemTime::now() + RACY_WINDOW + std::time::Duration::from_secs(1)
+    }
+
+    /// The cursor once every write so far has settled.
+    #[cfg(target_os = "linux")]
+    fn cursor(tx: &FileTransport) -> Hash {
+        tx.repo_cursor_digest_at(settled_now())
+            .unwrap()
+            .expect("a cursor on Linux")
+    }
+
+    fn value(writer: usize, step: usize) -> Hash {
+        let mut h = [0u8; 32];
+        h[0] = 1;
+        h[1] = u8::try_from(writer).unwrap();
+        h[2..10].copy_from_slice(&(step as u64).to_le_bytes());
+        h
+    }
+
+    /// The step of `writer` that `h` names.
+    #[cfg(target_os = "linux")]
+    fn step_of(h: &Hash) -> u64 {
+        u64::from_le_bytes(h[2..10].try_into().unwrap())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn every_committed_write_changes_the_cursor() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        let mut seen = std::collections::HashSet::new();
+        assert!(seen.insert(cursor(&tx)));
+        let name = "refs/heads/main";
+        tx.update_ref(name, RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        assert!(seen.insert(cursor(&tx)), "a Missing write");
+        tx.update_ref(name, RefWriteCondition::Match(value(0, 0)), &value(0, 1))
+            .unwrap();
+        assert!(seen.insert(cursor(&tx)), "a Match write");
+        tx.update_ref(name, RefWriteCondition::Any, &value(0, 1))
+            .unwrap();
+        assert!(seen.insert(cursor(&tx)), "an Any write of the same value");
+        tx.with_ref_lock(|refs| {
+            refs.update_ref("refs/heads/b", RefWriteCondition::Any, &value(1, 0))
+        })
+        .unwrap()
+        .unwrap();
+        assert!(
+            seen.insert(cursor(&tx)),
+            "a write under the exclusive repo lock"
+        );
+        assert!(
+            tx.with_ref_lock(|refs| refs.delete_ref(name))
+                .unwrap()
+                .unwrap()
+        );
+        assert!(seen.insert(cursor(&tx)), "a delete");
+        // A failed CAS changes no ref. Its temporary file may still move a
+        // directory time, and with it the cursor, which only costs a fetch.
+        let failed = tx.update_ref("refs/heads/b", RefWriteCondition::Missing, &value(1, 1));
+        assert!(matches!(failed, Err(TransportError::RefConflict)));
+        // Reading the cursor writes no ref.
+        assert_eq!(tx.list_refs("refs/").unwrap().len(), 1);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_recreated_root_never_reuses_a_cursor() {
+        let dir = tmp();
+        let root = dir.path().join("root");
+        let first = {
+            let tx = FileTransport::new(&root);
+            tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+                .unwrap();
+            cursor(&tx)
+        };
+        fs::remove_dir_all(&root).unwrap();
+        let tx = FileTransport::new(&root);
+        tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        assert_ne!(cursor(&tx), first);
+    }
+
+    #[test]
+    fn a_lock_file_without_a_version_is_corrupt() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        let stripe = tx
+            .lock_dir()
+            .join(stripe_lock_file(ref_stripe("refs/heads/main")));
+        fs::write(&stripe, b"abc").unwrap();
+        let err = tx.update_ref("refs/heads/main", RefWriteCondition::Any, &value(0, 1));
+        assert!(err.is_err(), "a garbled count fails the write");
+        if cfg!(target_os = "linux") {
+            assert!(matches!(
+                tx.repo_cursor_digest_at(settled_now()),
+                Err(RefFileError::Corrupt(_))
+            ));
+        }
+    }
+
+    /// Writers advance their own refs while a reader takes (cursor, listing)
+    /// pairs. Whenever a later cursor equals an earlier one, the earlier
+    /// listing already holds every write that completed before the later
+    /// cursor was read.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_equal_cursor_misses_no_completed_write() {
+        // The race this checks is narrow, so the scenario runs many times.
+        for _ in 0..20 {
+            equal_cursor_round();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn equal_cursor_round() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        const WRITERS: usize = 2;
+        const STEPS: usize = 40;
+        let dir = tmp();
+        let done: Vec<AtomicU64> = (0..WRITERS).map(|_| AtomicU64::new(0)).collect();
+        let finished = AtomicU64::new(0);
+        std::thread::scope(|s| {
+            for w in 0..WRITERS {
+                let (done, finished, root) = (&done, &finished, dir.path());
+                s.spawn(move || {
+                    let tx = FileTransport::new(root);
+                    let name = format!("refs/heads/w{w}");
+                    for step in 1..=STEPS {
+                        tx.update_ref(&name, RefWriteCondition::Any, &value(w, step))
+                            .unwrap();
+                        done[w].store(step as u64, Ordering::SeqCst);
+                        // Quiet gaps let the reader see equal cursors.
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    finished.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+            let tx = FileTransport::new(dir.path());
+            let mut history: Vec<(Hash, Vec<u64>)> = Vec::new();
+            let mut equal = 0usize;
+            let mut after_last_write = 0;
+            loop {
+                let all_done = finished.load(Ordering::SeqCst) == WRITERS as u64;
+                // Writes completed before the cursor read.
+                let completed: Vec<u64> = done.iter().map(|d| d.load(Ordering::SeqCst)).collect();
+                let c = cursor(&tx);
+                let listing = tx.list_refs("refs/heads/").unwrap();
+                let mut steps = vec![0u64; WRITERS];
+                for r in &listing {
+                    let w: usize = r.name.trim_start_matches('w').parse().unwrap();
+                    steps[w] = step_of(&r.hash.unwrap());
+                }
+                for (earlier, earlier_steps) in &history {
+                    if *earlier == c {
+                        equal += 1;
+                        for w in 0..WRITERS {
+                            assert!(
+                                earlier_steps[w] >= completed[w],
+                                "writer {w}: listing at step {}, a write of step {} completed before an equal cursor",
+                                earlier_steps[w],
+                                completed[w]
+                            );
+                        }
+                    }
+                }
+                history.push((c, steps));
+                if all_done {
+                    after_last_write += 1;
+                    if after_last_write == 2 {
+                        break;
+                    }
+                }
+            }
+            // The last two observations follow the last write, so their
+            // cursors are equal and the check above ran.
+            assert!(equal > 0);
+        });
+    }
+
+    /// A write as kit 0.7.3 makes it: the repo lock exclusive, the ref file
+    /// by a temporary file and a rename, no stripe count. `None` deletes.
+    #[cfg(target_os = "linux")]
+    fn old_writer(root: &Path, name: &str, value: Option<&Hash>) {
+        let _lock = RefLock::acquire(root).unwrap();
+        let dest = root.join(name);
+        match value {
+            Some(hash) => {
+                fs::create_dir_all(dest.parent().unwrap()).unwrap();
+                let tmp = temp_path(&dest).unwrap();
+                fs::write(&tmp, encode_ref_wire(hash)).unwrap();
+                fs::rename(&tmp, &dest).unwrap();
+            }
+            None => fs::remove_file(&dest).unwrap(),
+        }
+    }
+
+    /// Set the modification time of every directory under `<root>/refs`
+    /// `age` into the past, as if the last write were that old.
+    #[cfg(target_os = "linux")]
+    fn age_ref_dirs(root: &Path, age: std::time::Duration) {
+        let when = std::time::SystemTime::now() - age;
+        let mut dirs = vec![root.join("refs")];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    dirs.push(entry.path());
+                }
+            }
+            fs::File::open(&dir).unwrap().set_modified(when).unwrap();
+        }
+    }
+
+    /// A writer that takes the repo lock exclusive and writes no count, as
+    /// kit 0.7.3 does, still changes the cursor: a create, an overwrite, a
+    /// create in a new directory, an overwrite there and a delete each leave a cursor that
+    /// differs from the one before, or no cursor.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_writer_that_does_not_count_still_changes_the_cursor() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        let steps: [(&str, Option<Hash>); 5] = [
+            ("refs/heads/main", Some(value(0, 1))),
+            ("refs/heads/other", Some(value(1, 0))),
+            ("refs/heads/topic/x", Some(value(2, 0))),
+            ("refs/heads/topic/x", Some(value(2, 1))),
+            ("refs/heads/other", None),
+        ];
+        for (name, write) in steps {
+            age_ref_dirs(dir.path(), std::time::Duration::from_secs(60));
+            let before = tx.repo_cursor_digest().unwrap();
+            assert!(before.is_some(), "a settled root offers a cursor");
+            old_writer(dir.path(), name, write.as_ref());
+            assert_ne!(
+                tx.repo_cursor_digest().unwrap(),
+                before,
+                "{name}: an uncounted write left the cursor equal"
+            );
+            // Once the write is old enough to trust, the cursor is offered
+            // again and still differs.
+            let settled = tx.repo_cursor_digest_at(settled_now()).unwrap();
+            assert!(settled.is_some() && settled != before, "{name}");
+        }
+    }
+
+    /// Right after a write the directory's time is too fresh to tell a
+    /// later write in the same clock tick apart, so no cursor is offered.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_cursor_is_withheld_while_a_ref_directory_is_fresh() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        assert_eq!(tx.repo_cursor_digest().unwrap(), None);
+        assert!(tx.repo_cursor_digest_at(settled_now()).unwrap().is_some());
+        // A directory time ahead of the clock is no more trusted.
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3_600);
+        fs::File::open(dir.path().join("refs/heads"))
+            .unwrap()
+            .set_modified(ahead)
+            .unwrap();
+        assert_eq!(tx.repo_cursor_digest_at(settled_now()).unwrap(), None);
+    }
+
+    /// A read that finds a fresh ref directory offers no cursor whatever the
+    /// counts hold, so it reads no count and never waits behind a write that
+    /// holds a stripe lock. A read past the window still waits for it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_withheld_cursor_does_not_wait_for_a_held_stripe() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &value(0, 0))
+            .unwrap();
+        let fresh = std::time::SystemTime::now();
+        let lock = RefLock::acquire_stripe(dir.path(), ref_stripe("refs/heads/main")).unwrap();
+        let (send, recv) = mpsc::channel();
+        let reader = |now: std::time::SystemTime| {
+            let (root, send) = (dir.path().to_path_buf(), send.clone());
+            std::thread::spawn(move || {
+                let t = FileTransport::new(root);
+                send.send(t.repo_cursor_digest_at(now).map_err(|e| e.to_string()))
+                    .unwrap();
+            })
+        };
+        let withheld = reader(fresh);
+        let got = recv.recv_timeout(Duration::from_secs(5));
+        let settled = reader(settled_now());
+        let premature = recv.recv_timeout(Duration::from_millis(100));
+        drop(lock);
+        withheld.join().unwrap();
+        settled.join().unwrap();
+        assert_eq!(got, Ok(Ok(None)), "a withheld cursor waited for a stripe");
+        assert!(
+            matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)),
+            "a cursor read bypassed a held stripe lock: {premature:?}"
+        );
+        assert!(matches!(
+            recv.recv_timeout(Duration::from_secs(5)),
+            Ok(Ok(Some(_)))
+        ));
     }
 }

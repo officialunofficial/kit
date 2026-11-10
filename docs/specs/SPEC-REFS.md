@@ -392,6 +392,50 @@ of it only for a push whose head condition is `Match(h)` with `h` an
 ancestor of the new head in the client's own store. The reset then holds
 the new head's full closure, which contains `h`'s.
 
+#### 5.1.2 File transport stripe versions
+
+**Protocol requirement.** A stripe lock file holds the stripe version: the
+count of writes to refs in that stripe, as 8 bytes little-endian at the start
+of the file. An empty file holds version 0. Any other length is corrupt, and a
+writer or reader that finds it MUST fail rather than guess. The version after
+2^64 - 1 is 0.
+
+Every write that may have changed a ref file, a delete included, MUST add one
+to the version of the ref's stripe after its rename or unlink and before it
+reports, while it still holds the stripe lock or the repo lock exclusive. A
+write that fails its condition changes no file and need not count. The count
+need not be durable, as long as a cursor derived from the counts changes
+across an operating system crash, the one event that can lose a count that a
+write already made. Every process that writes refs under a root MUST count, or the root's
+repository cursor can report an unchanged state that has changed.
+
+**Reference-server behavior.** The file transport derives its repository
+cursor (SPEC-TRANSPORT §1.2) from a random 16-byte id of the root, created once
+in `<root>/.kit/refs/.repo-id`, the kernel's boot id, and the 256 stripe
+versions. It reads each version holding the repo lock shared, then that
+stripe's lock shared, so it never sees half a count. It reads no ref file.
+The boot id changes on every boot, so a count lost in a crash never makes a
+cursor repeat. Where the system offers no boot id, the transport offers no
+cursor.
+
+The cursor also covers the path, inode number, modification time and change
+time of every directory under `<root>/refs`, read under the same shared repo
+lock, without reading any ref file. A rename or unlink in a directory changes
+its times, so a writer that keeps no count still changes the cursor when it
+writes a ref under `refs/`. kit 0.7.3 and earlier are such writers: they hold
+the repo lock exclusive and count nothing. File systems stamp times at a
+coarse granularity, so two writes close together can leave one time. While
+any of these directories was modified less than 2 s before the read, or
+after it, the transport offers no cursor for that read, and a client fetches
+in full. It reads the directory times before any version, under the same
+hold of the repo lock, so a read that offers no cursor takes no stripe lock
+and never waits behind a write. The order is safe: a writer that keeps no
+count holds the repo lock exclusive and cannot write during the read, and
+the versions alone cover every writer that counts. It offers none either while a directory vanishes during the read,
+when `<root>/refs` is not a directory, or when there are more than 65,536
+directories. Reading the cursor lists each directory, so its cost grows with
+the number of directory entries; it reads no ref file.
+
 *Coordination with local worktree operations:* the file transport's locks
 by themselves only serialize it against concurrent instances
 of itself &mdash; it does not, on its own, coordinate against a `commit`,
@@ -559,6 +603,13 @@ base/ours/theirs material lives only in this sidecar.
    grammar's edge characters, a name of 32 segments, names of 512 bytes, two
    names that share a stripe, and every stripe in `00`..`0f` and `f0`..`ff`.
    Fixtures: `rust/tests/golden/ref-locks/`.
+9. **File transport stripe versions** (§5.1.2): for the bytes of a stripe
+   lock file, the version they hold and the bytes that one more write
+   leaves, or that they are corrupt. The vectors cover the empty file,
+   version 0 written out, a carry into the second byte, a version whose
+   bytes all differ, the largest version, which wraps to 0, and corrupt
+   files of 1, 7, 9 and 16 bytes. Fixtures:
+   `rust/tests/golden/ref-locks/versions.txt`.
 
 ---
 
