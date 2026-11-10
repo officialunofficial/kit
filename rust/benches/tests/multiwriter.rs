@@ -61,6 +61,53 @@ fn every_row_runs_at_tiny_sizes() {
     assert_eq!(run.chain_nodes, 4);
     assert_eq!(run.incremental.packs_downloaded, 3);
     assert_eq!(run.cold.packs_downloaded, 4);
+    // A chain this short is never reset. Every push uploads one commit.
+    assert_eq!(run.pushes.len(), 3);
+    assert_eq!(run.cost(true), multiwriter::PushCost::default());
+    let append = run.cost(false);
+    assert_eq!(append.pushes, 3);
+    assert!(append.mean_bytes > 0.0 && append.max_bytes < 2 * FILE_BYTES);
+    assert!(append.median <= append.max);
+}
+
+/// Bytes of the one file in each benchmark commit. A pack compresses it,
+/// so a push of one commit uploads less than twice this.
+const FILE_BYTES: u64 = 1024;
+
+#[test]
+fn fetch_grow_reports_the_upload_of_a_chain_reset() {
+    // A push resets a chain that it would grow past 64 nodes. The first
+    // push makes node 1, so push 64 after the clone is the reset.
+    const PUSHES: usize = 66;
+    const RESET: usize = 64;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("remote")).unwrap();
+    let run = multiwriter::fetch_grow(
+        &file(dir.path().join("remote")),
+        &dir.path().join("local"),
+        PUSHES,
+    )
+    .unwrap();
+    let resets: Vec<usize> = (1..=PUSHES).filter(|i| run.pushes[i - 1].reset).collect();
+    assert_eq!(resets, [RESET]);
+    // The reset left one node, and two pushes appended to it.
+    assert_eq!(run.chain_nodes, 3);
+    assert_eq!(run.cold.packs_downloaded, 3);
+
+    // A push that appends uploads one commit, before and after the reset.
+    let append = run.cost(false);
+    assert_eq!(append.pushes, PUSHES - 1);
+    assert!(append.mean_bytes > 0.0 && append.max_bytes < 2 * FILE_BYTES);
+
+    // The reset uploads the closure of its tip: the first commit and the
+    // 64 after it. That is far more than one commit, and at least half of
+    // what the 64 pushes before it uploaded, pack list nodes included.
+    let reset = run.cost(true);
+    assert_eq!(reset.pushes, 1);
+    assert_eq!(reset.max_bytes, run.pushes[RESET - 1].uploaded);
+    assert!(reset.max_bytes > 32 * append.max_bytes);
+    let before: u64 = run.pushes[..RESET - 1].iter().map(|p| p.uploaded).sum();
+    assert!(reset.max_bytes > before / 2);
 }
 
 #[test]

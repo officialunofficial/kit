@@ -166,6 +166,7 @@ fn run(args: &Args) -> Result<(), String> {
         let mut g = Vec::with_capacity(args.runs);
         let mut h = Vec::with_capacity(args.runs);
         let (mut p90, mut max, mut nodes) = (Vec::new(), Vec::new(), Vec::new());
+        let mut cost: [Vec<f64>; 8] = Default::default();
         for r in 0..args.runs {
             let dirs = RunDirs::new(&args.dir, &format!("{row}-{n}-{r}"))?;
             let connect = connector(args.target, &dirs.root);
@@ -215,6 +216,20 @@ fn run(args: &Args) -> Result<(), String> {
                     e.push(run.cold.packs_downloaded as f64);
                     f.push(run.cold.requests.total() as f64);
                     g.push(run.chain_nodes as f64);
+                    let (append, reset) = (run.cost(false), run.cost(true));
+                    let values = [
+                        append.mean_bytes,
+                        ms(append.median),
+                        ms(append.max),
+                        reset.pushes as f64,
+                        reset.mean_bytes,
+                        reset.max_bytes as f64,
+                        ms(reset.median),
+                        ms(reset.max),
+                    ];
+                    for (column, value) in cost.iter_mut().zip(values) {
+                        column.push(value);
+                    }
                 }
             }
         }
@@ -261,6 +276,9 @@ fn run(args: &Args) -> Result<(), String> {
                 args.runs,
                 &[("ms", &a), ("requests", &b)],
             ),
+            // The pushes after the clone, split: the ones that append to
+            // the chain, and the ones that reset it and upload the full
+            // closure of their tip.
             _ => report(
                 row,
                 args.target,
@@ -274,6 +292,14 @@ fn run(args: &Args) -> Result<(), String> {
                     ("clone_packs", &e),
                     ("clone_requests", &f),
                     ("chain_nodes", &g),
+                    ("push_bytes", &cost[0]),
+                    ("push_ms", &cost[1]),
+                    ("push_max_ms", &cost[2]),
+                    ("resets", &cost[3]),
+                    ("reset_bytes", &cost[4]),
+                    ("reset_max_bytes", &cost[5]),
+                    ("reset_ms", &cost[6]),
+                    ("reset_max_ms", &cost[7]),
                 ],
             ),
         }
