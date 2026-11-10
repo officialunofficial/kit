@@ -21,7 +21,7 @@ workspace = true
 [dependencies]
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it.
-kit-core = { version = "=0.7.3", path = "../kit-core" }
+kit-core = { version = "=0.8.0", path = "../kit-core" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"

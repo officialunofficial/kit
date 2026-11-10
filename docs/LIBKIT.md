@@ -62,14 +62,14 @@ stays in `kit-bin`.
 
 ```toml
 [dependencies]
-libkit = "0.7.3"
+libkit = "0.8.0"
 ```
 
 Turn on a transport with its feature.
 
 ```toml
 [dependencies]
-libkit = { version = "0.7.3", features = ["transport-ssh"] }
+libkit = { version = "0.8.0", features = ["transport-ssh"] }
 ```
 
 All kit crates share one version. Use the same version of `libkit` and of
