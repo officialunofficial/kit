@@ -143,6 +143,11 @@ options.control.observer = &my_observer;
 let report = push(&dir, &source, &options)?;
 ```
 
+A push reads the remote head before it plans. When that head differs from
+the push's lease, the push fails with `PushError::NonFastForwardPush` before
+it uploads anything. When the head already equals the tip, an earlier
+attempt landed, and the push writes nothing.
+
 On sources whose advance is atomic or serialized (the file transport checks
 both refs under their locks), force pushes publish the head and packmap
 together, including a head-only change. The uncontended success path adds at most one
@@ -157,11 +162,13 @@ pushes with `PushError::ForceCapabilityUnknown` before uploading. Reconnect and
 retry discovery. Explicitly non-atomic transports retain their existing push
 behavior; failed discovery is not evidence that a server is non-atomic.
 
-A push that would grow a packmap chain past `rebaseline_threshold` resets it
-to one self-contained node on an atomic source. On a serialized source it
-resets only when the push fast-forwards the head it leases, as the local
-store shows: a reader there can see the new packmap before the new head, and
-only then does the reset still rebuild the old head. Other pushes append.
+An advance that leases the head and would grow a packmap chain past
+`rebaseline_threshold` resets it to one self-contained node on an atomic
+source. On a serialized source it resets only when the push fast-forwards the
+head it leases, as the local store shows: a reader there can see the new
+packmap before the new head, and only then does the reset still rebuild the
+old head. Other pushes append, and so does an advance with no head lease,
+such as the first advance of a force push.
 
 `PushReport` contains the completed ref count, advance count, and optional
 single-branch tip. `PushError` preserves push-specific refusals and carries
