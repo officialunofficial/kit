@@ -16,7 +16,7 @@ def save(path, root):
 
 
 def icon(square=False):
-    root = E.Element(NS + 'svg', {'viewBox': '0 0 64 64', 'width': '64', 'height': '64', 'role': 'img', 'aria-label': 'KIT'})
+    root = E.Element(NS + 'svg', {'viewBox': '0 0 64 64', 'width': '64', 'height': '64', 'role': 'img', 'aria-label': 'kit'})
     E.SubElement(root, NS + 'rect', {'width': '64', 'height': '64', 'rx': '0' if square else '14', 'fill': '#0067ed'})
     # One uniform scale preserves the 66.51 by 19.79 unit wordmark.
     scale = 60 / 66.51

@@ -1,7 +1,7 @@
 # kit
 
 <p align="center">
-  <img src="docs/brand/kit-logo-grid.webp" alt="KIT logo with geometric solids and a fading blue perspective grid" width="240">
+  <img src="docs/brand/kit-logo-grid.webp" alt="kit logo with geometric solids and a fading blue perspective grid" width="240">
 </p>
 
 ![status: alpha](https://img.shields.io/badge/status-alpha-orange)

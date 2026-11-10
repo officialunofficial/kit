@@ -1,4 +1,4 @@
-# KIT brand assets
+# kit brand assets
 
 The logo and shape libraries provide alternate artwork for different sizes
 and backgrounds. These exported assets are committed for direct use in
@@ -45,7 +45,7 @@ hide edges behind them.
 
 ![Grouped symbol variations](shapes/symbol-library.png)
 
-The six grouped symbols preserve the original arrangement without the KIT
+The six grouped symbols preserve the original arrangement without the kit
 lettering or border. Files **composition-01** through **composition-06** use
 the same treatments as the individual shapes. Each has SVG and PNG exports
 in [shapes/](shapes/).
@@ -64,5 +64,5 @@ when replacing assets.
 
 ## Web assets
 
-[Favicons and social cards](WEB.md) includes a proportional KIT favicon, an Uno-blue
+[Favicons and social cards](WEB.md) includes a proportional kit favicon, an Uno-blue
 Open Graph example, source rendering code, and page metadata guidance.

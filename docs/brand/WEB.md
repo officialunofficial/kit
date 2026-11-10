@@ -2,7 +2,7 @@
 
 ## Favicon
 
-The favicon uses the complete outlined KIT wordmark in white on an Uno-blue
+The favicon uses the complete outlined kit wordmark in white on an Uno-blue
 rounded tile. A single uniform scale preserves its original 66.51 by 19.79
 unit proportions, letter spacing, and contours. The wordmark fills 60 units
 of the 64-unit canvas width and remains centered vertically.
@@ -48,10 +48,10 @@ Copy the files to the site's public root and include:
 
 ## Open Graph card
 
-![KIT Open Graph example](og/example.png)
+![kit Open Graph example](og/example.png)
 
 The example is 1200 by 630 pixels. It uses a solid Uno-blue background,
-white solids, blue construction edges, and the outlined white KIT wordmark.
+white solids, blue construction edges, and the outlined white kit wordmark.
 A 72 pixel layout inset keeps the composition away from the canvas edges.
 The layout omits the border and grid to keep the card clear at preview sizes.
 
@@ -106,21 +106,21 @@ that is not absolute HTTP or HTTPS. Adapt the title and description for the
 actual page.
 
 ```html
-<meta property="og:title" content="KIT — Signed version control" />
+<meta property="og:title" content="kit — Signed version control" />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://kit.storage/" />
 <meta property="og:description" content="Content-addressed version control with signed commits and attestations." />
-<meta property="og:site_name" content="KIT" />
+<meta property="og:site_name" content="kit" />
 <meta property="og:image" content="https://kit.storage/brand/og-kit-v1.png" />
 <meta property="og:image:type" content="image/png" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
-<meta property="og:image:alt" content="White geometric solids beside the KIT wordmark on an Uno-blue background." />
+<meta property="og:image:alt" content="White geometric solids beside the kit wordmark on an Uno-blue background." />
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="KIT — Signed version control">
+<meta name="twitter:title" content="kit — Signed version control">
 <meta name="twitter:description" content="Content-addressed version control with signed commits and attestations.">
 <meta name="twitter:image" content="https://kit.storage/brand/og-kit-v1.png">
-<meta name="twitter:image:alt" content="White geometric solids beside the KIT wordmark on an Uno-blue background.">
+<meta name="twitter:image:alt" content="White geometric solids beside the kit wordmark on an Uno-blue background.">
 ```
 
 Serve the page metadata in the initial HTML. The image URL must return the
