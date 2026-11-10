@@ -10,7 +10,9 @@ layout is in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## What libkit adds
 
-The crate adds two types that the other crates do not have.
+The crate holds the logic of most commands in its own modules, such as
+`libkit::log`, `libkit::merge` and `libkit::push`. The module reference lists
+them. The crate also adds two types that the other crates do not have.
 
 - `libkit::Environment` holds every input that the library would otherwise
   read from the process. These are the working directory, the home directory,

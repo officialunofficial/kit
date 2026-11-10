@@ -21,7 +21,7 @@ verify the result.
 | CLI on a dev machine (Linux/macOS)    | Release archive or `cargo install --git` | `curl kit.storage \| sh` *or* `cargo install --git https://github.com/officialunofficial/kit kit-bin` |
 | CLI on a dev machine (Windows)        | Not supported &mdash; use WSL         | run the above `install.sh` (or `cargo install`) inside WSL |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/kit-<VERSION>-<target>.tar.gz && tar -xzf kit-<VERSION>-<target>.tar.gz` |
-| Library inside another Rust crate     | crates.io (or git dependency)        | `kit-core = "0.5"`                                                                                  |
+| Library inside another Rust crate     | crates.io (or git dependency)        | `libkit = "0.8.0"` ([`LIBKIT.md`](LIBKIT.md))                                                      |
 
 Pick the leftmost channel that satisfies your constraints &mdash; release
 archives are the lowest-overhead path for end users, source builds the
@@ -33,7 +33,7 @@ Source builds are the right path for contributors and air-gapped CI. For
 everyday CLI use, `cargo install kit-bin` from crates.io (see
 [`README.md`](../README.md)) is the shortest route.
 
-**Toolchain.** Rust 1.99, edition 2024, pinned by
+**Toolchain.** Rust 1.99.1, edition 2024, pinned by
 [`rust/rust-toolchain.toml`](../rust/rust-toolchain.toml). `rustup` will
 auto-install on the first build.
 

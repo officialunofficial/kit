@@ -20,7 +20,8 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 | `kit-git-bridge`              | `rust/crates/kit-git-bridge/`        | Git import/export bridge incl. fork mode (`specs/SPEC-GIT-BRIDGE.md`)        |
 | `kit-rpc`                     | `rust/crates/kit-rpc/`               | Shared stdio framing for subprocess protocols (`specs/SPEC-RPC.md`)          |
 | `kit-transport-memory`        | `rust/crates/kit-transport-memory/`  | In-process transport, used by tests                                    |
-| `kit-transport-file`          | `rust/crates/kit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
+| `kit-transport-file`          | `rust/crates/kit-transport-file/`    | Local-filesystem transport; CAS under per-ref stripe locks, a create through `link(2)` |
+| `kit-client`                  | `rust/crates/kit-client/`            | Runtime-independent async protocol client for kit servers: reads, signed writes and ticketed push, native and wasm |
 | `kit-transport-connect`       | `rust/crates/kit-transport-connect/` | ConnectRPC client implementing `kit.transport.v1.TransportService` (`specs/SPEC-TRANSPORT-CONNECT.md`); the transport `kit-bin` actually constructs for `kit+https://` / `kit+http://` |
 | `kit-transport-s3`            | `rust/crates/kit-transport-s3/`      | Hand-rolled SigV4 transport (S3-compatible conditional writes)           |
 | `kit-transport-ssh`           | `rust/crates/kit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
@@ -50,8 +51,8 @@ so the modules stay.
 
 | Feature | Module | Lines | Kept code that needs it |
 |---|---|---|---|
-| `history-mmr` | `history.rs`, `history/ancestry.rs` | 2,478 | `refs.rs` and `refs/ancestry_state.rs` (ref-write journal), `kit-sync` `worktree.rs`, and in `kit-bin` the `branch`, `commit`, `reflog`, `reset` and `update-ref` commands. The `kit-formal-conformance` ref test and `docs/specs/SPEC-HISTORY-PROOF.md` also cite it. |
-| `sparse-checkout` | `sparse.rs` | 537 | In `kit-bin`: `sparse_cache.rs`, the `--sparse` option of `clone` and `checkout`, and the `sparse_checkout_local` test. Also the `sparse-checkout` feature of `kit-transport-s3`, the `sparse_verify` fuzz target and the `layout.rs` witness cache directory. `docs/specs/SPEC-SPARSE-CHECKOUT.md` specifies the wire format. |
+| `history-mmr` | `history.rs`, `history/ancestry.rs` | 2,641 | `refs.rs` and `refs/ancestry_state.rs` (ref-write journal), `kit-sync` `worktree.rs`, and in `kit-bin` the `branch`, `commit`, `reflog`, `reset` and `update-ref` commands. The `kit-formal-conformance` ref test and `docs/specs/SPEC-HISTORY-PROOF.md` also cite it. |
+| `sparse-checkout` | `sparse.rs` | 536 | In `kit-bin`: `sparse_cache.rs`, the `--sparse` option of `clone` and `checkout`, and the `sparse_checkout_local` test. Also the `sparse-checkout` feature of `kit-transport-s3`, the `sparse_verify` fuzz target and the `layout.rs` witness cache directory. `docs/specs/SPEC-SPARSE-CHECKOUT.md` specifies the wire format. |
 
 Removing one of these modules means removing every item in its row.
 The spec text goes in the same change as the code.
@@ -85,27 +86,28 @@ Each Total is Source plus Tests plus Generated.
 
 | Crate | Source | Tests | Generated | Total |
 |---|---:|---:|---:|---:|
-| `kit-bin` | 50,521 | 42,401 | 0 | 92,922 |
-| `kit-core` | 69,332 | 10,362 | 0 | 79,694 |
-| `kit-rpc` | 940 | 167 | 50,231 | 51,338 |
-| `kit-attest` | 12,715 | 6,416 | 0 | 19,131 |
-| `kit-sync` | 12,041 | 3,771 | 0 | 15,812 |
+| `kit-core` | 76,177 | 11,576 | 0 | 87,753 |
+| `kit-bin` | 32,401 | 43,436 | 0 | 75,837 |
+| `kit-rpc` | 985 | 175 | 50,438 | 51,598 |
+| `libkit` | 25,660 | 7,226 | 0 | 32,886 |
+| `kit-attest` | 12,899 | 6,409 | 0 | 19,308 |
+| `kit-sync` | 12,871 | 4,579 | 0 | 17,450 |
 | `kit-transport-connect` | 5,357 | 6,840 | 0 | 12,197 |
-| `kit-client` | 6,582 | 3,094 | 0 | 9,676 |
-| `kit-git-bridge` | 4,654 | 2,534 | 0 | 7,188 |
-| `kit-keystore` | 6,105 | 219 | 0 | 6,324 |
-| `kit-serve` | 2,026 | 1,652 | 0 | 3,678 |
-| `kit-transport-s3` | 2,136 | 1,505 | 0 | 3,641 |
-| `kit-fuzz` | 2,094 | 720 | 0 | 2,814 |
-| `kit-transport-ssh` | 2,127 | 0 | 0 | 2,127 |
-| `kit-transport-file` | 2,031 | 0 | 0 | 2,031 |
-| `kit-benches` | 232 | 846 | 0 | 1,078 |
+| `kit-client` | 6,582 | 3,105 | 0 | 9,687 |
+| `kit-git-bridge` | 4,944 | 2,873 | 0 | 7,817 |
+| `kit-keystore` | 6,210 | 219 | 0 | 6,429 |
+| `kit-fuzz` | 4,003 | 1,225 | 0 | 5,228 |
+| `kit-wasm` | 3,171 | 1,279 | 0 | 4,450 |
+| `kit-serve` | 2,077 | 1,692 | 0 | 3,769 |
+| `kit-transport-s3` | 2,153 | 1,513 | 0 | 3,666 |
+| `kit-transport-file` | 3,527 | 0 | 0 | 3,527 |
+| `kit-benches` | 1,347 | 1,725 | 0 | 3,072 |
+| `kit-transport-ssh` | 2,207 | 0 | 0 | 2,207 |
 | `kit-sign-file` | 445 | 421 | 0 | 866 |
-| `kit-formal-conformance` | 10 | 701 | 0 | 711 |
-| `kit-transport-memory` | 500 | 0 | 0 | 500 |
-| `libkit` | 63 | 95 | 0 | 158 |
+| `kit-formal-conformance` | 10 | 722 | 0 | 732 |
+| `kit-transport-memory` | 499 | 0 | 0 | 499 |
 | `kit-test-util` | 156 | 0 | 0 | 156 |
-| **All crates** | **180,067** | **81,744** | **50,231** | **312,042** |
+| **All crates** | **203,681** | **95,015** | **50,438** | **349,134** |
 
 Generated code is a documented exception to the rule against checked-in
 generated output. The code generator needs `protoc`, and many hosts ship a `protoc` too old

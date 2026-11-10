@@ -6,6 +6,8 @@ Two tools measure performance:
   They also guard against regressions. The script
   [`scripts/bench-vs-git.sh`](../scripts/bench-vs-git.sh) runs the suite that
   compares kit with Git.
+  [`scripts/bench-multiwriter.sh`](../scripts/bench-multiwriter.sh) runs the
+  concurrent-writer rows. [`PERFORMANCE.md`](PERFORMANCE.md) explains both.
 - **Sampling profiles** (this document) show where the time goes in a real
   run. They name the functions and source lines that use the CPU, with
   inline stacks.
@@ -82,8 +84,9 @@ Profiler in your browser with the profile loaded.
 ## Profile a benchmark
 
 To study one criterion suite, name it. The suites are `hashing`,
-`sign_verify`, `object_commit`, `pack_create` and `store_write`. The list is
-in `rust/benches/Cargo.toml`.
+`sign_verify`, `ed25519_batch`, `object_commit`, `pack_create`,
+`store_write`, `ignore_match`, `restore_chunk_fanout`, `delta_encode_scan`,
+`chunker` and `chunker_dedup`. The list is in `rust/benches/Cargo.toml`.
 
 ```sh
 scripts/profile.sh --bench pack_create

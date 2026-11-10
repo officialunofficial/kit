@@ -558,7 +558,10 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
 - `kit rev-list [--count] <rev>` &mdash; list the commit ids reachable from
   `<rev>` in reverse-chronological (topological) order, one 64-hex id per
   line; `--count` prints the number instead. Reuses `log`'s walk so the
-  order matches. (Range/filter forms are a follow-up.)
+  order matches. It takes one revision and no range. A walk that would
+  read more than 1,000,000 commits, or that meets a commit that is missing,
+  corrupt or not a commit, exits `65` with an error that names the limit
+  or the commit.
 - `kit merge-base [--is-ancestor] <a> <b>` &mdash; print the best common
   ancestor of two commits (64-hex; exit 1 with no output when there is
   none). `--is-ancestor` tests whether `<a>` is an ancestor of `<b>`,
@@ -867,7 +870,9 @@ Branches / refs:
   or untracked path collisions. On conflict the rebase pauses with
   resumable state; `--skip` drops the current commit. See "Resolving
   conflicts" below. A commit to replay or an ancestor of the base that is
-  missing, corrupt or not a commit fails the rebase before any change.
+  missing, corrupt or not a commit fails the rebase before any change. So
+  does a branch with more than 10,000 commits to replay, or a base with
+  more than 10,000 ancestors, with an error that names the limit.
   `-i`/`--interactive` opens the todo list in `$EDITOR` before any
   mutation. Each line is `<command> <commit> <subject>`, oldest-first
   (top is applied first). Reorder lines to reorder commits; delete a line
@@ -1060,7 +1065,9 @@ Remote / sync:
 - `kit pull [<remote>] [--all] [--no-verify-signatures] [--format=json]
   [-q|--quiet]` &mdash; fetch, then fast-forward the current branch from
   `refs/remotes/<remote>/<branch>`. Divergent histories are refused; use
-  explicit merge/rebase flows after resolving the divergence. Fresh repos
+  explicit merge/rebase flows after resolving the divergence. The
+  fast-forward check reads every commit it walks; a commit that is missing,
+  corrupt or not a commit fails the pull with an error that names it. Fresh repos
   with no local branch tip initialize the current branch/worktree from
   the remote default branch. `--all` pulls from every configured remote
   in turn (same enumeration and failure-tolerance as `fetch --all`),
@@ -1095,9 +1102,12 @@ Remote / sync:
   CAS-protected: a non-fast-forward is rejected using the remote-tracking
   ref as the lease. `--all` mirrors every `refs/heads/*` (also CAS-safe).
   `--force` overwrites the remote branch unconditionally (skips CAS);
-  `--force-with-lease` overwrites only if the remote hasn't moved past
+  `--force-with-lease` overwrites only if the remote head still equals
   the last-seen tip (the two are mutually exclusive); `-f` is an alias of
-  `--force`. `-u`/`--set-upstream` records the pushed remote as the
+  `--force`. When the remote head differs from the lease, a push without
+  `--force` fails as a non-fast-forward before it uploads anything. A
+  remote head that already equals the tip means an earlier attempt landed:
+  the push succeeds and writes nothing. `-u`/`--set-upstream` records the pushed remote as the
   branch's upstream even if one was already set. `--dry-run`
   resolves the push plan without contacting the remote. Every endpoint
   flows through the per-endpoint credential-trust gate, which is keyed on
@@ -1190,7 +1200,10 @@ Remote / sync:
   removes upload temp files (`packs/.<hex>.tmp.<pid>.<seq>`) that a crashed
   server left, once they are an hour old. It refuses a root marked
   `.kit/server-meta` (exit 78), because the refs of that root live in a
-  database.
+  database. A session may send at most 10,000 frames after `Hello`; the
+  server refuses the next one with an error that names the limit. An
+  unchanged fetch costs one frame plus at least two per branch, so one
+  session fetches at most 4,999 branches (SPEC-TRANSPORT §4.4).
 
   `--http` and `--listen-enc` do not exist. `KIT_API_TOKEN` is sent as a
   bearer token by `kit+https://` remotes.

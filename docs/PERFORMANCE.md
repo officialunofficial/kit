@@ -76,10 +76,11 @@ transport (`kit+file://`) and against `kit serve` (`kit+ssh://`, through a
 local stand-in for `ssh` that starts `kit serve <path>` for each connection).
 
 ```sh
-scripts/bench-multiwriter.sh /path/on/the/disk/to/measure
+scripts/bench-multiwriter.sh /path/on/the/disk/to/measure [row ...]
 ```
 
-Give it a directory on the disk you want to measure. The script refuses tmpfs,
+Give it a directory on the disk you want to measure. Name rows after the
+directory to run only those; with none it runs all five. The script refuses tmpfs,
 because tmpfs makes every fsync free and hides the cost of the ref locks. It
 builds the release binaries, prints the provenance (commit, dirty flag,
 machine, file system, compiler, run count) and one line for each row and size.
@@ -89,12 +90,12 @@ Each value is the mean and the sample standard deviation over the runs.
 |---|---|
 | `KIT_BENCH_TARGETS` | `file`, `serve`, or both (the default). |
 | `KIT_BENCH_RUNS` | Runs per size. The default is 5. |
-| `KIT_BENCH_ARGS` | Extra arguments for every row: `--sizes 1,8` overrides the sizes, `--steps N` the operations per writer. |
+| `KIT_BENCH_ARGS` | Extra arguments for every row: `--sizes 1,8` overrides the sizes, `--steps N` the operations per writer (the fetches per run for `fetch-noop`; `fetch-grow` ignores it). |
 
 | Row | Workload | Reports |
 |---|---|---|
 | `ref-write` | N threads, N in 1, 2, 4, 8, 16, 32. Each makes 150 compare-and-swap writes to its own ref: `Missing`, then `Match` of the previous value. | Writes per second. |
-| `push-distinct` | N pushers, N in 1, 8, 64, 512. Each pushes 4 commits to its own branch. | Pushes per second, p50 and p99 latency. |
+| `push-distinct` | N pushers, N in 1, 8, 64, 512. Each pushes 4 commits to its own branch. | Pushes per second, p50 and p99 latency, rejected attempts per landed push. |
 | `push-shared` | N pushers, N in 1, 8, 32, each landing 4 commits on one branch. A rejected push fetches, commits again on the new tip and retries. | Pushes per second, p50, p90, p99 and maximum latency including retries, rejected attempts per landed push, pack list nodes on the branch's chain afterwards (more than the landed pushes means rejected attempts wrote to it), and for the slowest 1% of landed pushes: attempts, time in rejected attempts, time in fetches after them, and the rest (local commits and the attempt that landed). Pushers retry at once, without a wait. Each landed push can cost up to N - 1 rejected attempts, so large N takes a long time. |
 | `fetch-noop` | M branches, M in 10, 100, 1,000, 10,000, and a clone that already holds them. Five fetches per run. | Fetch time and remote requests. |
 | `fetch-grow` | One push, a clone, then K pushes to the branch, K in 10, 100, 1,000. A fetch into the clone, and a fetch into an empty repository. | Time, packs downloaded and remote requests of each fetch, and pack list nodes on the chain. |
