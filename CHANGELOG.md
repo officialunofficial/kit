@@ -112,6 +112,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An ignore check of one path, such as `kit add <path>` and the restore
   safety check, slices each ancestor directory out of the path instead of
   building a new string for it.
+- The S3 transport reads the refs of a listing with at most 16 requests in
+  flight, not one after another. Against a local server that delays each
+  read by 5 ms, a listing of 1,000 refs went from about 6.4 s to about
+  0.4 s. The request count and the result do not change: refs come back in
+  name order, a 404 skips the ref, and any other failure fails the listing
+  (SPEC-TRANSPORT §6).
 
 ### Fixed
 

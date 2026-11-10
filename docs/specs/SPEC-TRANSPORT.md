@@ -414,6 +414,10 @@ older listing (SPEC-TRANSPORT-CONNECT §7.9 allows one). A `200` whose body is
 not a canonical 65-byte ref wire (SPEC-REFS §1) fails the whole listing, as it
 fails `read_ref`.
 
+**Reference-server behavior.** The client keeps at most 16 of those `GET`s in
+flight. It returns the first failure in key order, as one read after another
+would, and starts no new read after a failure.
+
 ### 6.1 Object layout
 
 The table below lists canonical repository-relative keys. For a URL of
