@@ -301,7 +301,7 @@ an error, never absent.
 | Transport | `.any`      | `.missing`                            | `.match`                                                       | Notes |
 |-----------|-------------|---------------------------------------|----------------------------------------------------------------|-------|
 | memory    | atomic*     | atomic*                               | atomic* &mdash; the read-check-write runs under the instance's one `Mutex` | *In-process only: every verb of one `MemoryTransport` instance holds its `Mutex` for the whole operation, so concurrent threads sharing the instance cannot interleave. Never shared across processes. |
-| file      | atomic      | atomic (via `O_EXCL` create)          | atomic &mdash; OS exclusive lock of the ref's stripe (`<root>/.kit/refs/refs-<hh>.lock`, §5.1.1) serializes the read-check-write for that ref across processes | Lock guards released on drop (including panic-unwind). Writes to refs in different stripes run in parallel. |
+| file      | atomic      | atomic (hard link of a temp file, which fails if the ref exists) | atomic &mdash; OS exclusive lock of the ref's stripe (`<root>/.kit/refs/refs-<hh>.lock`, §5.1.1) serializes the read-check-write for that ref across processes | Lock guards released on drop (including panic-unwind). Writes to refs in different stripes run in parallel. |
 | s3        | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<md5-of-wire>"`                         | Requires a store that supports conditional writes. |
 | http      | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<hex-hash>"`                            | Worker-flavored server. Generic S3 and nginx do NOT conform. |
 | ssh       | atomic      | atomic (`OP_WRITE_REF_IF_ABSENT` path via condition byte) | atomic (`CONDITION_MATCH` with 32-byte expected hash)          | Server enforces CAS; client trusts `STATUS_ERROR`. |
@@ -312,7 +312,7 @@ instance's single `Mutex`, so all three conditions are atomic for every
 thread sharing that instance. It provides no cross-process atomicity and
 needs none: the memory transport is an in-process test transport. The
 file transport's `.match` is atomic across processes via the OS lock
-above. As of, the local `kit-core`
+above. The local `kit-core`
 `refs::cas_write` helper used by commands that mutate refs directly on
 disk (without going through the file transport) is also atomic across
 processes: every write condition takes a dedicated `<common_dir>/refs-<ref>.lock`
@@ -576,7 +576,7 @@ base/ours/theirs material lives only in this sidecar.
 | Every ref name crossing a transport boundary satisfies the §3 grammar | validation at **every** boundary &mdash; write, read, list, client-supplied parse; no silent case-folding or canonicalization (§3) |
 | No ref shadows `HEAD` or a lock file | grammar rejections for final-segment `HEAD` and the `.lock` suffix (§3) |
 | `listRefs(prefix)` is byte-identical across transports | single normative stripping algorithm; lexicographic order, no duplicates; conformance-tested (§4, §4.1, test vector 3) |
-| A `.missing` write succeeds at most once per ref | `O_EXCL`/`If-None-Match: *` / condition byte, per the atomicity matrix (§5.1) |
+| A `.missing` write succeeds at most once per ref | hard link / `If-None-Match: *` / condition byte, per the atomicity matrix (§5.1) |
 | A `.match(H)` write on s3/http/ssh/file/memory cannot clobber a moved ref | conditional-write CAS per transport encoding, the OS exclusive lock for file, or the instance `Mutex` for memory (in-process only) (§5.1, §5.2) |
 | An `.any` conditional hint is never binding CAS | clients requiring CAS MUST use `.match` explicitly (§5.3) |
 | A default push cannot silently rewind a remote that advanced | `Match(tracked)`/`Missing` CAS lease on the remote-tracking ref (§2) |
@@ -591,4 +591,4 @@ across separate instances, which never share state (§5.1). The file
 transport's own `.match` is race-free across processes (OS exclusive
 lock), and the local `kit-core` `refs::cas_write` helper used by
 commands that write refs directly rather than through the file transport
-is, as of, likewise serialized under a per-ref lock (§5.1).
+is likewise serialized under a per-ref lock (§5.1).
