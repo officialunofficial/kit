@@ -56,7 +56,9 @@ A 72 pixel layout inset keeps the composition away from the canvas edges.
 The layout omits the border and grid to keep the card clear at preview sizes.
 
 The rendered PNG is committed as a ready-to-use example. The source under
-[og/](og/) uses `@officialunofficial/og` for the layout and response rendering.
+[og/](og/) uses `@officialunofficial/og` for the layout, the rendering, the
+response cache and the page metadata. The package renders with the
+`@takumi-rs/wasm` renderer, which the example bundles.
 Both images are embedded as SVG data URIs. Outlined lettering avoids a font
 request and preserves the custom wordmark.
 
@@ -81,8 +83,12 @@ The generator needs Python 3 and `rsvg-convert`. It derives favicon and white
 OG artwork from the existing brand SVGs. The development server runs locally.
 The build checks packaging without deploying anything. The example serves
 only GET and HEAD requests to **/og.png**, returning PNG content and a one-hour
-public cache header. Rendering is shared across concurrent requests and reused
-within each server instance. HEAD returns headers without rendering. Unknown
+public cache header. The package's `cachedResponse` keeps the rendered card in
+the Cache API: it serves the card without rendering for an hour, then serves
+the stored card for one more day while it renders a new one in the background.
+Concurrent requests share one render, and every query string shares one cache
+entry. The `X-Og-Cache` header reports `HIT`, `STALE` or `MISS`. HEAD returns
+headers without rendering. Unknown
 paths return 404; other methods return 405.
 
 The exported PNG can be served as a static file without running the example
@@ -93,20 +99,23 @@ with the current card source.
 ### Page metadata
 
 After hosting the image, use its absolute HTTPS URL. The paths below assume
-the site publishes this PNG at **/brand/og-kit-v1.png**. Adapt the canonical
-page URL, title, description, and image path for the actual page.
+the site publishes this PNG at **/brand/og-kit-v1.png**. `pageMetadata` in
+[og/metadata.ts](og/metadata.ts) builds the Open Graph tags from the page URL
+and the image URL with the package's `openGraphMetaTags`, which refuses a URL
+that is not absolute HTTP or HTTPS. Adapt the title and description for the
+actual page.
 
 ```html
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="KIT">
-<meta property="og:title" content="KIT — Signed version control">
-<meta property="og:description" content="Content-addressed version control with signed commits and attestations.">
-<meta property="og:url" content="https://kit.storage/">
-<meta property="og:image" content="https://kit.storage/brand/og-kit-v1.png">
-<meta property="og:image:type" content="image/png">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="White geometric solids beside the KIT wordmark on an Uno-blue background.">
+<meta property="og:title" content="KIT — Signed version control" />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://kit.storage/" />
+<meta property="og:description" content="Content-addressed version control with signed commits and attestations." />
+<meta property="og:site_name" content="KIT" />
+<meta property="og:image" content="https://kit.storage/brand/og-kit-v1.png" />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content="White geometric solids beside the KIT wordmark on an Uno-blue background." />
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="KIT — Signed version control">
 <meta name="twitter:description" content="Content-addressed version control with signed commits and attestations.">
@@ -130,7 +139,8 @@ The browser ICO and SVG files are local exports from that source.
 
 - [Open Graph protocol](https://ogp.me/) defines image and page metadata.
 - [Package API](https://www.npmjs.com/package/@officialunofficial/og)
-  documents the layout primitives, data URIs, and rendering response.
+  documents the layout primitives, data URIs, rendering response, response
+  cache and metadata builders.
 - [Wrangler configuration](https://developers.cloudflare.com/workers/wrangler/configuration/)
   describes local configuration and asset module rules.
 
