@@ -27,7 +27,7 @@ jobs:
   release-plz-pr:
     name: release-plz PR
     if: vars.KIT_RELEASE_PLZ_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     permissions:
       contents: write

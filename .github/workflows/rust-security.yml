@@ -19,7 +19,7 @@ env:
 jobs:
   audit:
     name: cargo audit and cargo deny
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - name: Checkout

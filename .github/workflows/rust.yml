@@ -34,7 +34,7 @@ env:
 jobs:
   fmt:
     name: fmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -53,7 +53,7 @@ jobs:
 
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -79,7 +79,7 @@ jobs:
 
   msrv:
     name: msrv
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -112,7 +112,7 @@ jobs:
 
   build-and-test:
     name: build and test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     env:
       KIT_TEST_STRICT: "1"
@@ -146,7 +146,7 @@ jobs:
 
   nextest:
     name: nextest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     env:
       KIT_TEST_STRICT: "1"
@@ -173,7 +173,7 @@ jobs:
     name: Rust CI gate
     if: always()
     needs: [fmt, clippy, msrv, build-and-test, nextest]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     steps:
       - name: Verify that every job succeeded
