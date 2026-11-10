@@ -164,8 +164,10 @@ v2 mutation/completeness tests and `rust/tests/golden/sparse/response_v2.bin`.
 
 **Always:** local Any, Missing, Match and deletion take the same full-ref guard.
 The order is registry, worktrees, history, then ref mutation locks; peers within
-a class use canonical order. File transport serializes all condition variants
-within its separate transport lock domain.
+a class use canonical order. The file transport and `kit serve` use their own
+lock domain: every condition variant holds the repo lock shared and the lock of
+the ref's stripe, one of 256, so writes to one ref serialize and writes to
+refs in different stripes run in parallel.
 Ref lock filenames use a fixed-length digest of the complete ref identity,
 including its namespace, so valid long ref names remain writable.
 
@@ -176,8 +178,10 @@ observation just as another CAS writer can.
 history publication states.
 
 **Enforced by:** core refs and file-transport contention regressions, CLI
-history lifecycle and publication retry tests, and core long-ref mutation and
-lock-identity regressions.
+history lifecycle and publication retry tests, core long-ref mutation and
+lock-identity regressions, and the `refs2` and `refs3` models in
+`formal/quint/refs/refs.qnt` (TLC, `NoLostUpdateFile`, `OneFileWriterPerRef`,
+`NoNestedPair`, `NoDeadlock` and `LockOrderRespected`).
 
 ## History evidence binds ancestry, generation and context
 
@@ -192,7 +196,9 @@ multiple durable files.
 proofs or let GC remove objects needed to recover.
 
 **Enforced by:** `history/ancestry.rs` chain/context/generation and six-boundary
-failure tests, and core GC intent-root tests. Current descriptors establish
+failure tests, core GC intent-root tests, and the `history` model in
+`formal/quint/history/history.qnt` (TLC, `NoProofWhileIntent` and
+`IntentRootsRetained`). Current descriptors establish
 local trust only; snapshots/reconstruction cost O(chain length), capped at one
 million leaves. Only canonical ancestry snapshots are supported.
 
@@ -865,7 +871,9 @@ that differs from the head the push reads),
 `kit-transport-file` `push_tests` (the advance's crash hook under the push
 driver), CLI `tests/pack_rebaseline.rs`, and the `advance3` models in
 `formal/quint/refs/advance.qnt` (TLC, with mutants `advance3_noAncestry`,
-`advance3_forceOrdered` and `advance3_leaseUnchecked`).
+`advance3_forceOrdered`, `advance3_atomicForceOrdered`,
+`advance3_leaseUnchecked` and `advance3_atomicLeaseUnchecked`, and the canary
+`CanaryNoLeaseRefusal`, which shows a lease push is refused).
 
 ## Pack unpack bounds owned payload residency
 
