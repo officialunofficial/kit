@@ -61,6 +61,10 @@ harness = false
 name = "chunker"
 harness = false
 
+[[bench]]
+name = "chunker_dedup"
+harness = false
+
 # The library carries the sample types and the timing helpers.
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

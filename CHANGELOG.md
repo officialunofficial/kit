@@ -20,6 +20,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Transport::supports_serialized_advance` and
   `RemoteSource::supports_serialized_advance`: whether a two-ref advance is
   serialized for writers. Both default to the atomic-advance capability.
+- FastCDC v2 (SPEC-FASTCDC §11, draft): spread masks at normalization
+  level 2 over the v1 gear table and sizes. A v2 manifest carries
+  `chunk_size = 0x8000_0002`. kit-core exposes it through
+  `Chunker::FastCdcV2`, `store_file_object_with` and
+  `chunked_blob_from_bytes_with`. No writer uses it by default, so
+  existing repositories read and write byte-identically. The git bridge
+  refuses v2 manifests.
 
 ### Changed
 
@@ -66,6 +73,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requests (about 16 s to under 1 s on one 4-CPU VM, under load from other
   builds). Bytes downloaded and push cost were not measured: each reset
   uploads the full closure of the tip.
+- The FastCDC cutter jumps over runs of one byte value, such as the zero
+  blocks of a sparse image, once the rolling hash reaches its fixed point.
+  The cut points do not change.
+- `kit checkout`, `pull`, `rebase`, `revert` and `cherry-pick` record the
+  stat cache of each file they write in the index. The next command no longer
+  re-hashes those files, so the safety check of a second checkout and the first
+  `status` after a checkout skip reading them.
 
 ### Fixed
 

@@ -227,6 +227,7 @@ fn build_fixture() -> ClosureFixture {
 
     let chunked_bytes = common::prng_bytes(3, CHUNKED_FILE_LEN);
     let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), &chunked_bytes)
+        .take(chunked_bytes.len() + 1)
         .map(|b| {
             let data = chunked_bytes[b.offset..b.offset + b.length].to_vec();
             write_object(&store, Object::Blob(Blob { data }))

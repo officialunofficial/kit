@@ -635,8 +635,9 @@ fn check_chunked_total_size(
         } else {
             // Each chunk holds at least one byte. With a fixed size, every
             // chunk but the last holds exactly `chunk_size` bytes and the
-            // last holds between one and `chunk_size` bytes.
-            if size == 0 {
+            // last holds between one and `chunk_size` bytes. A value that
+            // names a content-defined chunker is not a size.
+            if crate::chunker::Chunker::from_chunk_size(chunk_size).is_some() {
                 total_size >= count
             } else {
                 total_size > (count - 1) * size && total_size <= count * size

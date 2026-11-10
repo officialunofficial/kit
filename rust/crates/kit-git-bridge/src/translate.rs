@@ -80,12 +80,20 @@ pub fn translate_blob(data: &[u8]) -> GitObject {
 /// Refuses (per §4) anything a conformant kit writer cannot have
 /// produced — fixed-size chunking, at-or-below-threshold totals, or
 /// boundaries that differ from the pinned `FastCDC` output — because
-/// such manifests would not survive the §9 round trip.
+/// such manifests would not survive the §9 round trip. A `FastCDC` v2
+/// manifest is refused too: §9 re-chunks with `FastCDC` v1.
 pub fn translate_chunked<S: ObjectSource>(
     hash: &Hash,
     manifest: &ChunkedBlob,
     source: &S,
 ) -> Result<GitObject, BridgeError> {
+    if manifest.chunk_size == kit_core::chunker::CHUNK_SIZE_FASTCDC_V2 {
+        return Err(Refusal::NonCanonicalChunking {
+            object: *hash,
+            detail: "FastCDC v2 manifests do not translate; reconstruction re-chunks with FastCDC v1",
+        }
+        .into());
+    }
     if manifest.chunk_size != 0 {
         return Err(Refusal::FixedSizeChunking {
             object: *hash,

@@ -297,7 +297,16 @@ pub fn restore_tree_to_worktree(
     // regression `restore_blob` (the `restore_tree`/stash path) avoids
     // by not batching at all. `restore_tree_to_worktree_with` below is
     // the path real (parallel-capable) `read_chunks` callers want.
-    restore_tree_to_worktree_impl(store, tree, root, opts, 1, None, &sequential_read_chunks)
+    restore_tree_to_worktree_impl(
+        store,
+        tree,
+        root,
+        opts,
+        1,
+        None,
+        &sequential_read_chunks,
+        None,
+    )
 }
 
 /// [`restore_tree_to_worktree`], parameterised over how a
@@ -370,6 +379,37 @@ pub fn restore_tree_to_worktree_with<F>(
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
+    restore_tree_to_worktree_observed(store, tree, base_tree, root, opts, read_chunks, None)
+}
+
+/// [`restore_tree_to_worktree_with`] that also pushes one
+/// [`worktree::StatObservation`] per regular file it writes onto
+/// `observed`, when `observed` is `Some`. A caller that rebuilds the
+/// index from the tree records these as the stat cache, so the next
+/// command does not re-hash files the restore just wrote.
+///
+/// An observation is pushed only when the file at its final path is
+/// still the inode this restore wrote, with the same size and mtime as
+/// the open handle reported after the last write. Its fields are read
+/// from the final path after the rename, because a rename moves the
+/// ctime. A later edit that leaves size, mtime and ctime unchanged is
+/// invisible to it, as to every stat observation; the index's racy-clean
+/// rule bounds that window.
+///
+/// # Errors
+/// Same as [`restore_tree_to_worktree_with`].
+pub fn restore_tree_to_worktree_observed<F>(
+    store: &ObjectStore,
+    tree: &Hash,
+    base_tree: Option<Hash>,
+    root: &Path,
+    opts: &RestoreOptions,
+    read_chunks: &F,
+    observed: Option<&mut Vec<worktree::StatObservation>>,
+) -> RestoreResult<RestoreReport>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
     let base = if opts.clean || opts.sparse_patterns.is_some() {
         None
     } else {
@@ -383,6 +423,7 @@ where
         RESTORE_CHUNK_BATCH,
         base,
         read_chunks,
+        observed,
     )
 }
 
@@ -391,6 +432,7 @@ where
 /// public signature — it is 1 for the sequential default (see
 /// [`restore_tree_to_worktree`]'s doc) and [`RESTORE_CHUNK_BATCH`] for a
 /// caller-supplied `read_chunks`.
+#[allow(clippy::too_many_arguments)]
 fn restore_tree_to_worktree_impl<F>(
     store: &ObjectStore,
     tree: &Hash,
@@ -399,6 +441,7 @@ fn restore_tree_to_worktree_impl<F>(
     batch_size: usize,
     base_tree: Option<Hash>,
     read_chunks: &F,
+    observed: Option<&mut Vec<worktree::StatObservation>>,
 ) -> RestoreResult<RestoreReport>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
@@ -422,6 +465,7 @@ where
         batch_size,
         base_tree,
         read_chunks,
+        observed,
     )?;
     Ok(report)
 }
@@ -439,6 +483,7 @@ fn restore_tree_to_worktree_inner<F>(
     batch_size: usize,
     base_tree: Option<Hash>,
     read_chunks: &F,
+    mut observed: Option<&mut Vec<worktree::StatObservation>>,
 ) -> RestoreResult<()>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
@@ -497,7 +542,7 @@ where
                 {
                     continue;
                 }
-                restore_blob_with(
+                let stat = restore_blob_with(
                     store,
                     target_dir,
                     name,
@@ -505,8 +550,12 @@ where
                     entry.mode == EntryMode::Executable,
                     batch_size,
                     read_chunks,
+                    observed.is_some(),
                 )?;
                 report.files_written += 1;
+                if let (Some(out), Some(stat)) = (observed.as_deref_mut(), stat) {
+                    out.push(observation(full_path, entry.object_hash, stat));
+                }
             }
             EntryMode::Tree => {
                 if let Some(patterns) = options.sparse_patterns.as_deref()
@@ -535,6 +584,7 @@ where
                         .filter(|b| b.mode == EntryMode::Tree)
                         .map(|b| b.object_hash),
                     read_chunks,
+                    observed.as_deref_mut(),
                 )?;
             }
             EntryMode::Symlink => {
@@ -675,7 +725,9 @@ fn restore_blob(
 ) -> RestoreResult<()> {
     let obj = store.read_object(&blob_hash)?;
     match obj {
-        Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable)?,
+        Object::Blob(b) => {
+            write_file_atomic(dir, name, &b.data, executable, false)?;
+        }
         Object::ChunkedBlob(cb) => {
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
             let result = (|| -> RestoreResult<()> {
@@ -709,9 +761,14 @@ fn restore_blob(
 /// for a caller-supplied `read_chunks`, never part of either public
 /// entry point's own signature).
 ///
+/// With `observe`, returns the written file's stat fields when
+/// [`observe_written`] can prove them; see
+/// [`restore_tree_to_worktree_observed`].
+///
 /// # Panics
 /// If `batch_size` is 0 (`[T]::chunks` itself panics on that) — never
 /// true for either internal caller.
+#[allow(clippy::too_many_arguments)]
 fn restore_blob_with<F>(
     store: &ObjectStore,
     dir: &Path,
@@ -720,13 +777,14 @@ fn restore_blob_with<F>(
     executable: bool,
     batch_size: usize,
     read_chunks: &F,
-) -> RestoreResult<()>
+    observe: bool,
+) -> RestoreResult<Option<StatFields>>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
     let obj = store.read_object(&blob_hash)?;
     match obj {
-        Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable)?,
+        Object::Blob(b) => Ok(write_file_atomic(dir, name, &b.data, executable, observe)?),
         Object::ChunkedBlob(cb) => {
             // Stream each batch straight to the open tmp file instead of
             // concatenating the whole reassembled file into memory first.
@@ -749,13 +807,48 @@ where
                 cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))
                     .map_err(RestoreError::from)
             });
+            let written = if observe && result.is_ok() {
+                tmp.metadata().ok()
+            } else {
+                None
+            };
             #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(tmp);
             finish_or_discard_tmp(result, &tmp_path, &final_path, executable)?;
+            Ok(written.and_then(|meta| observe_written(&meta, &final_path)))
         }
-        _ => return Err(RestoreError::NotABlob),
+        _ => Err(RestoreError::NotABlob),
     }
-    Ok(())
+}
+
+/// Stat-cache fields in [`worktree::stat_cache_fields`] order:
+/// `(mtime_ns, size, ino, ctime_ns)`.
+type StatFields = (u64, u64, u64, u64);
+
+fn observation(path: String, object_hash: Hash, stat: StatFields) -> worktree::StatObservation {
+    let (mtime_ns, size, ino, ctime_ns) = stat;
+    worktree::StatObservation {
+        path,
+        object_hash,
+        mtime_ns,
+        size,
+        ino,
+        ctime_ns,
+    }
+}
+
+/// Stat-cache fields of `final_path`, if it is still the file a restore
+/// just wrote. `written` is the open handle's metadata after the last
+/// write. The final path must be a regular file with the same inode,
+/// size and mtime; any later write that moved the mtime fails the check.
+/// The fields come from the final path, because the rename moved the
+/// ctime.
+fn observe_written(written: &fs::Metadata, final_path: &Path) -> Option<StatFields> {
+    let now = fs::symlink_metadata(final_path).ok()?;
+    let (mtime, size, ino, _) = worktree::stat_cache_fields(written);
+    let fields = worktree::stat_cache_fields(&now);
+    (now.is_file() && mtime != 0 && fields.0 == mtime && fields.1 == size && fields.2 == ino)
+        .then_some(fields)
 }
 
 /// Rename the tmp file into place when `result` is `Ok`. Otherwise remove
@@ -972,12 +1065,23 @@ fn create_symlink(_target: &str, _link: &Path) -> io::Result<()> {
 /// crash. Flushing every restored file made checkout O(files) full
 /// flushes (`F_FULLFSYNC` each on macOS) for no recoverable state; git
 /// likewise does not flush checked-out files.
-fn write_file_atomic(dir: &Path, name: &str, data: &[u8], executable: bool) -> io::Result<()> {
+///
+/// With `observe`, returns the file's stat fields when
+/// [`observe_written`] can prove them.
+fn write_file_atomic(
+    dir: &Path,
+    name: &str,
+    data: &[u8],
+    executable: bool,
+    observe: bool,
+) -> io::Result<Option<StatFields>> {
     let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
     tmp.write_all(data)?;
+    let written = if observe { tmp.metadata().ok() } else { None };
     #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
     drop(tmp);
-    finish_atomic_write(&tmp_path, &final_path, executable)
+    finish_atomic_write(&tmp_path, &final_path, executable)?;
+    Ok(written.and_then(|meta| observe_written(&meta, &final_path)))
 }
 
 /// Open a fresh tmp file beside `name`, removing any stale tmp file a
@@ -1441,6 +1545,158 @@ mod tests {
         // No base => full restore.
         restore_tree_to_worktree_with(&store, &next, None, target.path(), &opts, &rd).unwrap();
         assert_eq!(fs::read(target.path().join("same")).unwrap(), b"same");
+    }
+
+    /// Without `observe`, a restored file reports no stat fields, chunked
+    /// or not. With it, the same restore proves them.
+    #[test]
+    fn an_unobserved_restore_reports_no_stat_fields() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 8,
+            chunk_size: 0,
+            chunks: vec![put_blob(&store, b"big-"), put_blob(&store, b"file")],
+        });
+        let big = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
+        let plain = put_blob(&store, b"plain");
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        for (name, hash) in [("big", big), ("plain", plain)] {
+            let off =
+                restore_blob_with(&store, target.path(), name, hash, false, 1, &rd, false).unwrap();
+            assert_eq!(off, None, "{name} without observe");
+            let on =
+                restore_blob_with(&store, target.path(), name, hash, false, 1, &rd, true).unwrap();
+            assert!(on.is_some(), "{name} with observe");
+        }
+    }
+
+    /// Every file an observed restore writes gets an observation that
+    /// stat-matches the file on disk, chunked and executable files
+    /// included. Entries an incremental restore skips get none.
+    #[test]
+    fn observed_restore_records_stat_matching_observations() {
+        use crate::index::{EntryStatus, IndexEntry};
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let entry = |n: &str, mode, h| TreeEntry {
+            name: n.as_bytes().to_vec(),
+            mode,
+            object_hash: h,
+        };
+        let (same, a1, a2, run) = (
+            put_blob(&store, b"same"),
+            put_blob(&store, b"a-old"),
+            put_blob(&store, b"a-new"),
+            put_blob(&store, b"#!/bin/sh\n"),
+        );
+        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 8,
+            chunk_size: 0,
+            chunks: vec![put_blob(&store, b"big-"), put_blob(&store, b"file")],
+        });
+        let big = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
+        let sub = put_tree_with(&store, vec![entry("big", EntryMode::Blob, big)]);
+        let mk = |a| {
+            put_tree_with(
+                &store,
+                vec![
+                    entry("a", EntryMode::Blob, a),
+                    entry("d", EntryMode::Tree, sub),
+                    entry("run", EntryMode::Executable, run),
+                    entry("same", EntryMode::Blob, same),
+                ],
+            )
+        };
+        let (base, next) = (mk(a1), mk(a2));
+        let opts = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        let check = |observed: &[worktree::StatObservation], want: &[(&str, Hash)]| {
+            let got: Vec<(&str, Hash)> = observed
+                .iter()
+                .map(|o| (o.path.as_str(), o.object_hash))
+                .collect();
+            assert_eq!(got, want);
+            for o in observed {
+                let status = if o.path == "run" {
+                    EntryStatus::Executable
+                } else {
+                    EntryStatus::Blob
+                };
+                let ie = IndexEntry {
+                    path: o.path.clone(),
+                    status,
+                    object_hash: o.object_hash,
+                    mtime_ns: o.mtime_ns,
+                    size: o.size,
+                    ino: o.ino,
+                    ctime_ns: o.ctime_ns,
+                };
+                let meta = fs::symlink_metadata(target.path().join(&o.path)).unwrap();
+                assert!(worktree::stat_matches(&ie, &meta), "{}", o.path);
+            }
+        };
+
+        let mut observed = Vec::new();
+        restore_tree_to_worktree_observed(
+            &store,
+            &base,
+            None,
+            target.path(),
+            &opts,
+            &rd,
+            Some(&mut observed),
+        )
+        .unwrap();
+        check(
+            &observed,
+            &[("a", a1), ("d/big", big), ("run", run), ("same", same)],
+        );
+        assert_eq!(fs::read(target.path().join("d/big")).unwrap(), b"big-file");
+
+        let mut observed = Vec::new();
+        restore_tree_to_worktree_observed(
+            &store,
+            &next,
+            Some(base),
+            target.path(),
+            &opts,
+            &rd,
+            Some(&mut observed),
+        )
+        .unwrap();
+        check(&observed, &[("a", a2)]);
+    }
+
+    /// An observation is refused when the final path no longer holds the
+    /// file the handle wrote: another inode renamed over it, or a write
+    /// that changed its size.
+    #[test]
+    fn observe_written_refuses_a_replaced_or_changed_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("f");
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(b"restored").unwrap();
+        let written = file.metadata().unwrap();
+        drop(file);
+        assert!(observe_written(&written, &path).is_some());
+
+        fs::write(dir.path().join("g"), b"restored").unwrap();
+        fs::rename(dir.path().join("g"), &path).unwrap();
+        #[cfg(unix)]
+        assert!(observe_written(&written, &path).is_none());
+
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(b"restored").unwrap();
+        let written = file.metadata().unwrap();
+        file.write_all(b" and edited").unwrap();
+        drop(file);
+        assert!(observe_written(&written, &path).is_none());
+        fs::remove_file(&path).unwrap();
+        assert!(observe_written(&written, &path).is_none());
     }
 
     #[test]

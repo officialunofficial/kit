@@ -1,6 +1,6 @@
 ---
 spec: SPEC-FASTCDC
-version: 1
+version: 2
 status: stable
 audience: implementers of compatible chunkers; anyone reproducing chunked_blob hashes across producers
 ---
@@ -8,7 +8,8 @@ audience: implementers of compatible chunkers; anyone reproducing chunked_blob h
 # SPEC-FASTCDC &mdash; kit v1 content-defined chunking
 
 Status: **Normative** for kit v1 (content-defined chunking of large
-files).
+files). §11 (FastCDC v2) is **draft**: it is specified and implemented,
+and no writer uses it by default.
 Scope: gear table derivation, chunking parameters, and the determinism
 contract that makes chunked_blob hashes stable across producers.
 
@@ -52,6 +53,11 @@ across the change boundary fails for every large file.
 
 This is why (2) through (4) are specified as normative constants in v1
 and can only be changed through a format-version bump.
+
+A manifest names the chunker that cut it in its `chunk_size` field
+(§6): `0` for FastCDC v1, `0x8000_0002` for FastCDC v2 (§11). The
+contract above holds per chunker. The same bytes cut by two chunkers
+give two different `chunked_blob` ids.
 
 ---
 
@@ -195,6 +201,14 @@ The result `length` is the number of bytes in the first chunk. The
 caller consumes those bytes, then calls `cut` again on the remainder.
 The iteration continues until all bytes are consumed.
 
+Implementation note (informative): a run of one byte value `c` drives
+`hash` to the fixed point `-gear_table[c]` (wrapping), because
+`(-g << 1) +% g == -g`. Once `hash` equals that value after a byte `c`,
+each further `c` leaves `hash` and the mask test unchanged, so an
+implementation MAY jump to the end of the run, stopping at the
+strict/loose switch and at `max_size`. The cut points do not change.
+kit-core does this, so runs of zero bytes cut at memory speed.
+
 ---
 
 ## 6. Chunked_blob composition
@@ -202,8 +216,9 @@ The iteration continues until all bytes are consumed.
 See SPEC-OBJECTS §7 for the container. Key points for chunking:
 
 - `total_size` = sum of all chunk byte lengths = file size.
-- `chunk_size` = **0** (not the file chunk size; 0 is the sentinel for
-  content-defined chunking).
+- `chunk_size` names the chunker, not a size: **0** for FastCDC v1,
+  **`0x8000_0002`** for FastCDC v2 (§11.2). Any other value is a
+  fixed-size manifest (SPEC-OBJECTS §7).
 - `chunks` = ordered list of chunk BLAKE3 hashes.
 - Each chunk is itself stored as a `blob` object (SPEC-OBJECTS §3)
   under its content hash.
@@ -271,6 +286,29 @@ The vectors below are exercised by
 10. **Seed misuse detector**: if an implementation is accidentally
     built with any seed other than `"KITFCDC"`, the gear-table-hash
     pin and the boundary goldens both fail loudly at test time.
+11. **Runs stream, v1**: 1 MiB made of 393 216 zero bytes, then 262 144
+    bytes of the splitmix64 stream from seed `0x0052_554E_5300_0001`,
+    then 131 072 bytes of `0xA5`, then 262 144 bytes of the splitmix64
+    stream from seed `0x0052_554E_5300_0002`. It covers forced cuts
+    inside a run and runs that end inside a chunk. Pinned in
+    `fastcdc_boundaries_runs.bin`.
+12. **FastCDC v2 boundaries** (§11) of the streams of vectors 4 and 5:
+    `fastcdc_v2_boundaries_1mib.bin` and
+    `fastcdc_v2_boundaries_256k.bin`.
+13. **FastCDC v2 boundaries** of the runs stream of vector 11:
+    `fastcdc_v2_boundaries_runs.bin`. They differ from vector 11.
+14. **FastCDC v2 manifest**: the `chunked_blob` (SPEC-OBJECTS §7) that
+    FastCDC v2 gives for 2 MiB of the splitmix64 stream from seed
+    `0x4B49_5446_4344_4332`, with `chunk_size = 0x8000_0002`, in
+    `fastcdc_v2_manifest_2mib.bin`. Its object id
+    (SPEC-MERKLE-OBJECTS §3.1) is the
+    `fastcdc_v2_manifest_2mib_object_id` line of `MANIFEST.txt`.
+
+Vectors 11 to 14 are checked by `fastcdc_runs_and_v2_boundaries_match_golden`
+and `fastcdc_v2_manifest_matches_golden`. `scripts/golden/objects_ref.py`
+checks vectors 1, 4, 5 and 11 to 14 independently: it derives the gear
+table, both mask sets, the boundaries, the chunk ids, the manifest bytes
+and the manifest id from this document and SPEC-OBJECTS alone.
 
 ---
 
@@ -296,3 +334,100 @@ The vectors below are exercised by
 | Content-defined manifests are distinguishable from fixed-size ones | `chunk_size = 0` sentinel (§6; SPEC-OBJECTS §7) |
 | Any two conformant chunkers agree on chunk count, byte offsets, chunk hashes, and manifest hash | cross-implementation contract (§7); boundary goldens (§8 vectors 4–5) |
 | A build with the wrong seed or parameters cannot ship silently | gear-table-hash pin and boundary goldens fail loudly at test time (§8 vectors 9–10) |
+| A manifest says which chunker cut it | `chunk_size` is `0` for v1 and `0x8000_0002` for v2 (§6, §11.2) |
+| No writer produces v2 manifests unless its caller asks | §11.3; the default store path is v1 |
+
+---
+
+## 11. FastCDC v2 (draft)
+
+FastCDC v2 is a second content-defined chunker. It keeps the gear table
+(§3), the sizes (§4: 16, 64 and 256 KiB) and the cut loop (§5), and
+replaces the two masks. Its manifests are a format change: the same
+bytes get a different `chunked_blob` id. Readers need no change to
+reassemble them (§11.4).
+
+### 11.1 Spread masks
+
+The v1 masks test the low 15 to 17 bits of the hash. Bit `p` of the
+hash depends only on the last `p + 1` bytes, so v1 cut decisions see
+only the last 15 to 17 bytes. On text with a repeating structure, such
+as logs, source code and tar headers, that window repeats, few positions
+cut, and many chunks run to the forced cut at `max_size`.
+
+v2 spreads the mask bits over bits 16 to 47, so each decision depends
+on the last 48 bytes, and it uses normalization level 2: the strict
+mask has two more bits than `log2(avg_size)` and the loose mask two
+fewer (v1 uses one).
+
+```
+spread(n) = OR over k in 0 .. n-1 of  1 << (16 + floor((2k + 1) * 32 / (2n)))
+bits      = log2(avg_size)                    # 16
+mask_s    = spread(bits + 2)                  # 18 one-bits
+mask_l    = spread(bits - 2)                  # 14 one-bits
+```
+
+For the v2 sizes:
+
+```
+mask_s = 0x0000_AB55_AB55_0000
+mask_l = 0x0000_552A_552A_0000
+```
+
+The cut loop is §5 with these masks. The implementation note of §5
+about runs of one byte value applies unchanged.
+
+### 11.2 Chunker id
+
+A v2 manifest is a `chunked_blob` (SPEC-OBJECTS §7) with
+`chunk_size = 0x8000_0002`. The value is far above the 1 GiB file
+limit, so before this revision it was valid only for a manifest of at
+most one chunk. Every such manifest still decodes, and its bytes and id
+do not change. A reader of an earlier revision refuses a v2 manifest of
+two or more chunks at decode time, as it refuses any fixed-size layout
+it cannot hold.
+
+### 11.3 Selecting a chunker
+
+A writer MUST cut with FastCDC v1 and write `chunk_size = 0` unless its
+caller asks for v2. Repositories written before this revision therefore
+read and write byte-identically. kit-core exposes v2 only through
+explicit calls (`Chunker::FastCdcV2`, `store_file_object_with`,
+`chunked_blob_from_bytes_with`). No command line flag or configuration
+key selects it yet. Making v2 a default is a separate format decision.
+
+### 11.4 Reading
+
+Readers reassemble a v2 manifest exactly as a v1 manifest: concatenate
+the chunks and check `total_size`. File-content equality does not depend
+on the chunker: SPEC-OBJECTS §7 requires a full byte comparison when two
+ids differ, so a v1 and a v2 object of the same bytes are equal content.
+
+### 11.5 Git bridge
+
+The git bridge reconstructs chunked blobs by re-chunking with FastCDC
+v1 (SPEC-GIT-BRIDGE §4, §9). It refuses a v2 manifest as non-canonical,
+so a v2 object is never exported in a form that would not round-trip.
+
+### 11.6 Measured comparison (informative)
+
+`cargo bench -p kit-benches --bench chunker_dedup` cuts six generated
+workloads, each a pair of versions A and B built from fixed splitmix64
+seeds. "New bytes" are the bytes of B in chunks that A does not have.
+
+| Workload | v1 new bytes | v2 new bytes | v1 dedup | v2 dedup | v1 / v2 chunks of A | v1 / v2 forced cuts |
+|---|---:|---:|---:|---:|---:|---:|
+| 32 MiB random, 50 one-byte inserts | 5 217 900 | 3 720 253 | 84.45% | 88.91% | 393 / 451 | 0.3% / 0.0% |
+| 32 MiB random, 4 000 8-byte overwrites | 8 543 555 | 8 415 903 | 74.54% | 74.92% | 409 / 450 | 0.0% / 0.0% |
+| 32 MiB log, 200 lines edited, 2 MiB appended | 16 536 317 | 13 050 635 | 53.62% | 63.39% | 288 / 445 | 3.8% / 0.0% |
+| 32 MiB source, 300 lines inserted | 26 000 415 | 16 549 715 | 22.54% | 50.69% | 238 / 450 | 12.2% / 0.0% |
+| 48 MiB tar of text files, 40 files edited | 6 605 792 | 3 991 429 | 87.00% | 92.15% | 388 / 674 | 8.0% / 0.0% |
+| 64 MiB sparse image, 1% of 4 KiB blocks rewritten | 27 812 140 | 21 887 031 | 58.56% | 67.39% | 438 / 579 | 17.1% / 3.6% |
+
+v2 stores fewer new bytes on all six. Its mean chunk is close to the
+64 KiB target on every workload; v1 chunks of text average 116 to
+141 KiB because so many run to `max_size`. The cost is more chunk
+objects: 15% more on random bytes and up to 89% more on text. Cutting
+speed is the same on random bytes and about 10% lower on the sparse
+image.
+

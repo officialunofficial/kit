@@ -1754,6 +1754,28 @@ pub fn chunked_blob_build_one_iteration(input: &[u8]) {
     assert_eq!(manifest.chunk_size, 0);
     assert_eq!(manifest.chunks.is_empty(), input.is_empty());
 
+    // The FastCDC v2 manifest names its chunker, decodes back to itself,
+    // and its cuts cover the input.
+    let v2 = kit_core::chunker::Chunker::FastCdcV2;
+    let manifest = kit_core::worktree::chunked_blob_from_bytes_with(input, v2)
+        .expect("a bounded input always chunks");
+    assert_eq!(manifest.total_size, input.len() as u64);
+    assert_eq!(manifest.chunk_size, v2.chunk_size());
+    let object = kit_core::object::Object::ChunkedBlob(manifest);
+    let bytes = kit_core::serialize::serialize(&object).expect("a bounded manifest serializes");
+    assert_eq!(
+        kit_core::serialize::deserialize(&bytes).expect("a written manifest decodes"),
+        object
+    );
+    assert_eq!(
+        v2.cdc()
+            .cut_ends(input, true, 4)
+            .last()
+            .copied()
+            .unwrap_or(0),
+        input.len()
+    );
+
     // The chunker itself, at a small size so a bounded input yields many
     // cuts: every chunk is non-empty and at most `max_size`, the chunks
     // cover the input, and the parallel and streaming cutters agree with

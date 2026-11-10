@@ -28,7 +28,8 @@
 #   * the tag signing hash and the signed tag signature from seed [0x07; 32];
 #   * the ids of the empty tree, the single-file tree and the three-chunk
 #     chunked blob, which pin the "kit.tree" and "kit.chunked" domains;
-#   * the FastCDC gear table and the chunk boundaries of both pinned streams.
+#   * the FastCDC gear table, the v1 and v2 masks, the v1 and v2 chunk
+#     boundaries of the pinned streams, and the v2 manifest bytes and id.
 #
 # Usage:
 #   python3 scripts/golden/objects_ref.py rust/tests/golden
@@ -333,6 +334,10 @@ ACCEPTED_CHUNKED = [
     (1, 65_536, 1),
     (65_536, 65_536, 1),
     (1 << 30, 0, 2),
+    (0, 0x8000_0002, 0),
+    (3, 0x8000_0002, 3),
+    (1 << 30, 0x8000_0002, 2),
+    (1, 0x8000_0001, 1),
 ]
 REFUSED_CHUNKED = [
     (1, 0, 0),
@@ -343,7 +348,16 @@ REFUSED_CHUNKED = [
     (65_536, 65_536, 2),
     (1, 65_536, 2),
     (0, 65_536, 1),
+    (1, 0x8000_0002, 0),
+    (2, 0x8000_0002, 3),
+    ((1 << 30) + 1, 0x8000_0002, 2),
+    (3, 0x8000_0001, 3),
 ]
+
+
+# SPEC-OBJECTS section 7: chunk_size values that name a content-defined
+# chunker rather than a fixed size. 0 is FastCDC v1, 0x8000_0002 FastCDC v2.
+CONTENT_DEFINED = (0, 0x8000_0002)
 
 
 def check_chunked_layout(total, size, count):
@@ -352,7 +366,7 @@ def check_chunked_layout(total, size, count):
     if count == 0:
         if total != 0:
             raise ValueError("total_size without chunks")
-    elif size == 0:
+    elif size in CONTENT_DEFINED:
         if total < count:
             raise ValueError("total_size below chunk_count")
     elif not ((count - 1) * size < total <= count * size):
@@ -499,14 +513,32 @@ def splitmix_bytes(seed, total):
     return bytes(out[:total])
 
 
-def fastcdc_cut(data, gear, min_size=16 * 1024, avg_size=64 * 1024, max_size=256 * 1024):
+def v1_masks(avg_size=64 * 1024):
     """SPEC-FASTCDC section 5."""
-    if len(data) <= min_size:
-        return len(data)
     bits = avg_size.bit_length() - 1
     mask = (1 << bits) - 1
-    mask_s = mask | (mask << 1)
-    mask_l = mask >> 1
+    return mask | (mask << 1), mask >> 1
+
+
+def spread_mask(n):
+    """SPEC-FASTCDC section 11.1: n one-bits spread over bits 16 to 47."""
+    m = 0
+    for k in range(n):
+        m |= 1 << (16 + (2 * k + 1) * 32 // (2 * n))
+    return m
+
+
+def v2_masks(avg_size=64 * 1024):
+    """SPEC-FASTCDC section 11.1."""
+    bits = avg_size.bit_length() - 1
+    return spread_mask(bits + 2), spread_mask(bits - 2)
+
+
+def fastcdc_cut(data, gear, masks, min_size=16 * 1024, avg_size=64 * 1024, max_size=256 * 1024):
+    """SPEC-FASTCDC section 5, with the masks of section 5 or 11.1."""
+    if len(data) <= min_size:
+        return len(data)
+    mask_s, mask_l = masks
     h = 0
     for i in range(min_size, min(avg_size, len(data))):
         h = ((h << 1) + gear[data[i]]) & MASK64
@@ -519,12 +551,33 @@ def fastcdc_cut(data, gear, min_size=16 * 1024, avg_size=64 * 1024, max_size=256
     return min(max_size, len(data))
 
 
-def boundaries(data, gear):
+def boundaries(data, gear, masks=None):
+    """Chunk-end offsets; FastCDC v1 unless masks are given."""
+    masks = masks or v1_masks()
     ends, pos = [], 0
     while pos < len(data):
-        pos += fastcdc_cut(data[pos:], gear)
+        pos += fastcdc_cut(data[pos:], gear, masks)
         ends.append(pos)
     return ends
+
+
+def runs_stream():
+    """SPEC-FASTCDC section 8, vector 11: runs of one byte value between
+    splitmix64 stretches, 1 MiB in all."""
+    return (
+        bytes(393_216)
+        + splitmix_bytes(0x0052_554E_5300_0001, 262_144)
+        + b"\xa5" * 131_072
+        + splitmix_bytes(0x0052_554E_5300_0002, 262_144)
+    )
+
+
+def blob_id(data):
+    """SPEC-OBJECTS sections 2 and 3: BLAKE3 of the canonical blob bytes."""
+    return blake3(bytes([BLOB]) + PROLOGUE_MAGIC + bytes([SCHEMA_VERSION]) + struct.pack("<I", len(data)) + data)
+
+
+FASTCDC_V2_CHUNK_SIZE = 0x8000_0002  # SPEC-OBJECTS section 7
 
 
 # ---------------------------------------------------------------- checks
@@ -671,17 +724,65 @@ def check_tags(root):
             )
 
 
+def fastcdc_vectors():
+    """The boundary vectors of SPEC-FASTCDC section 8: (name, masks, input)."""
+    v1, v2 = v1_masks(), v2_masks()
+    mib = splitmix_bytes(0xA5A5_F00D_DEAD_BEEF, 1024 * 1024)
+    k256 = splitmix_bytes(0xCAFE_BABE_1234_5678, 256 * 1024)
+    runs = runs_stream()
+    return [
+        ("fastcdc_boundaries_1mib", v1, mib),
+        ("fastcdc_boundaries_256k", v1, k256),
+        ("fastcdc_boundaries_runs", v1, runs),
+        ("fastcdc_v2_boundaries_1mib", v2, mib),
+        ("fastcdc_v2_boundaries_256k", v2, k256),
+        ("fastcdc_v2_boundaries_runs", v2, runs),
+    ]
+
+
+def fastcdc_v2_manifest(gear):
+    """SPEC-FASTCDC section 8, vector 14: the v2 manifest of a 2 MiB
+    splitmix64 stream, and its object id."""
+    data = splitmix_bytes(0x4B49_5446_4344_4332, 2 * 1024 * 1024)
+    chunks, start = [], 0
+    for end in boundaries(data, gear, v2_masks()):
+        chunks.append(blob_id(data[start:end]))
+        start = end
+    body = (
+        bytes([CHUNKED])
+        + PROLOGUE_MAGIC
+        + bytes([SCHEMA_VERSION])
+        + struct.pack("<QII", len(data), FASTCDC_V2_CHUNK_SIZE, len(chunks))
+        + b"".join(chunks)
+    )
+    return body, chunked_id(len(data), FASTCDC_V2_CHUNK_SIZE, chunks)
+
+
 def check_fastcdc(root):
-    files, _ = check_files(root, "fastcdc")
+    files, man = check_files(root, "fastcdc")
     gear = gear_table()
     expect(len(set(gear)) == 256 and 0 not in gear, "gear table is not unique and non-zero")
-    for name, seed, size in (
-        ("fastcdc_boundaries_1mib", 0xA5A5_F00D_DEAD_BEEF, 1024 * 1024),
-        ("fastcdc_boundaries_256k", 0xCAFE_BABE_1234_5678, 256 * 1024),
-    ):
+    expect(
+        blake3(b"".join(g.to_bytes(8, "little") for g in gear)).hex()
+        == "2c8b776fb264316106cef8f45ebd30bf6c2cb7a704c095ce9adc4b4b84ab75ff",
+        "gear table digest (SPEC-FASTCDC section 8, vector 1)",
+    )
+    expect(v2_masks() == (0x0000_AB55_AB55_0000, 0x0000_552A_552A_0000), "v2 masks")
+    for name, masks, data in fastcdc_vectors():
         want = json.loads(files[name])
-        got = boundaries(splitmix_bytes(seed, size), gear)
+        got = boundaries(data, gear, masks)
         expect(got == want, f"{name}: boundaries {got} != {want}")
+    expect(
+        boundaries(runs_stream(), gear, v1_masks()) != boundaries(runs_stream(), gear, v2_masks()),
+        "v1 and v2 must cut the runs stream differently",
+    )
+    body, oid = fastcdc_v2_manifest(gear)
+    expect(files["fastcdc_v2_manifest_2mib"] == body, "fastcdc_v2_manifest_2mib bytes differ")
+    expect(parse_chunked(body)["chunk_size"] == FASTCDC_V2_CHUNK_SIZE, "v2 manifest chunk_size")
+    expect(
+        man.get("fastcdc_v2_manifest_2mib_object_id") == oid.hex(),
+        "fastcdc_v2_manifest_2mib object id differs from MANIFEST.txt",
+    )
 
 
 def main():

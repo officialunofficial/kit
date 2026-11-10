@@ -46,7 +46,7 @@ pub use merge::{
 pub use recovery::{RecoveryEntry, RecoveryError, RetentionPolicy};
 pub use restore::{
     RESTORE_CHUNK_BATCH, RestoreOptions, RestoreReport, restore_tree_to_worktree,
-    restore_tree_to_worktree_with,
+    restore_tree_to_worktree_observed, restore_tree_to_worktree_with,
 };
 pub use revert::{RevertError, RevertResult, revert};
 

@@ -18,6 +18,11 @@
 //! All chunk boundaries are fully determined by the input bytes plus the
 //! constants above. Any change breaks `chunked_blob` reproducibility
 //! (see `SPEC-FASTCDC.md` §2 determinism contract).
+//!
+//! `FastCDC` v2 (SPEC-FASTCDC §11) keeps the gear table and the sizes and
+//! swaps in [`MASK_S_V2`] and [`MASK_L_V2`]. A manifest names it with
+//! [`CHUNK_SIZE_FASTCDC_V2`]. No writer uses it by default; see
+//! [`Chunker`].
 
 /// Frozen splitmix64 seed for v1 — ASCII `"KITFCDC"` as big-endian u64.
 ///
@@ -40,6 +45,60 @@ pub const MASK_S: u64 = 0x0001_FFFF;
 /// Loose mask (used while `AVG_SIZE <= i < MAX_SIZE`). More cuts → avoid
 /// running into the `MAX_SIZE` forced boundary.
 pub const MASK_L: u64 = 0x0000_7FFF;
+
+/// `FastCDC` v2 strict mask: 18 one-bits spread over bits 16 to 47
+/// (SPEC-FASTCDC §11.1).
+pub const MASK_S_V2: u64 = 0x0000_AB55_AB55_0000;
+/// `FastCDC` v2 loose mask: 14 one-bits spread over bits 16 to 47
+/// (SPEC-FASTCDC §11.1).
+pub const MASK_L_V2: u64 = 0x0000_552A_552A_0000;
+
+/// The `chunk_size` value of a `ChunkedBlob` manifest cut by `FastCDC` v2
+/// (SPEC-OBJECTS §7). `FastCDC` v1 manifests carry `0`.
+pub const CHUNK_SIZE_FASTCDC_V2: u32 = 0x8000_0002;
+
+/// A content-defined chunker that a `ChunkedBlob` manifest can name in its
+/// `chunk_size` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Chunker {
+    /// `FastCDC` v1, `chunk_size = 0`. Every writer uses it by default.
+    FastCdcV1,
+    /// `FastCDC` v2, `chunk_size = CHUNK_SIZE_FASTCDC_V2`. A writer uses it
+    /// only when its caller asks for it.
+    FastCdcV2,
+}
+
+impl Chunker {
+    /// The chunker's parameters.
+    #[must_use]
+    pub const fn cdc(self) -> FastCdc {
+        match self {
+            Self::FastCdcV1 => FastCdc::v1(),
+            Self::FastCdcV2 => FastCdc::v2(),
+        }
+    }
+
+    /// The `chunk_size` value that names this chunker in a manifest.
+    #[must_use]
+    pub const fn chunk_size(self) -> u32 {
+        match self {
+            Self::FastCdcV1 => 0,
+            Self::FastCdcV2 => CHUNK_SIZE_FASTCDC_V2,
+        }
+    }
+
+    /// The chunker a manifest's `chunk_size` names, or `None` for a
+    /// fixed-size manifest.
+    #[must_use]
+    pub const fn from_chunk_size(chunk_size: u32) -> Option<Self> {
+        match chunk_size {
+            0 => Some(Self::FastCdcV1),
+            CHUNK_SIZE_FASTCDC_V2 => Some(Self::FastCdcV2),
+            _ => None,
+        }
+    }
+}
 
 /// 256-entry gear table, derived once at first use from [`SEED`] via
 /// splitmix64. Wrapping arithmetic throughout — see SPEC-FASTCDC §3 for
@@ -98,6 +157,17 @@ impl FastCdc {
         }
     }
 
+    /// Construct the v2 chunker: the v1 sizes and gear table with the
+    /// spread masks [`MASK_S_V2`] and [`MASK_L_V2`].
+    #[must_use]
+    pub const fn v2() -> Self {
+        Self {
+            mask_s: MASK_S_V2,
+            mask_l: MASK_L_V2,
+            ..Self::v1()
+        }
+    }
+
     /// Construct a chunker with custom parameters. `avg_size` MUST be a
     /// power of two; the strict/loose masks are derived as
     /// `mask = (1 << log2(avg)) - 1; mask_s = mask | (mask << 1); mask_l = mask >> 1`.
@@ -151,26 +221,67 @@ impl FastCdc {
             return data.len();
         }
         let table = gear_table();
-        let mut hash: u64 = 0;
         let avg_end = self.avg_size.min(data.len());
-        let mut i = self.min_size;
-        while i < avg_end {
-            hash = (hash << 1).wrapping_add(table[data[i] as usize]);
-            if (hash & self.mask_s) == 0 {
-                return i;
-            }
-            i += 1;
+        let (cut, hash) = scan(table, data, self.min_size, avg_end, 0, self.mask_s);
+        if let Some(i) = cut {
+            return i;
         }
         let max_end = self.max_size.min(data.len());
-        while i < max_end {
+        scan(table, data, avg_end, max_end, hash, self.mask_l)
+            .0
+            .unwrap_or(max_end)
+    }
+}
+
+/// Bytes [`scan`] rolls between two checks for a run of one byte value.
+const RUN_CHECK: usize = 64;
+
+/// Roll the gear hash over `data[i..end]` from `hash`. Returns the first
+/// position whose hash has no bit of `mask` set, or `None` and the hash
+/// after `end - 1`.
+///
+/// A run of one byte value `c` drives the hash to the fixed point
+/// `-gear[c]`, because `(-g << 1) + g == -g` in wrapping arithmetic. Once
+/// the hash after a byte `c` equals that fixed point, every following `c`
+/// leaves it, and so the mask test, unchanged. The test has just failed,
+/// so the scan jumps to the end of the run. The cut points are exactly
+/// those of the byte-by-byte loop. A run is noticed at the next check,
+/// at most [`RUN_CHECK`] bytes after the hash reaches the fixed point.
+fn scan(
+    table: &[u64; 256],
+    data: &[u8],
+    mut i: usize,
+    end: usize,
+    mut hash: u64,
+    mask: u64,
+) -> (Option<usize>, u64) {
+    while i < end {
+        let block_end = (i + RUN_CHECK).min(end);
+        while i < block_end {
             hash = (hash << 1).wrapping_add(table[data[i] as usize]);
-            if (hash & self.mask_l) == 0 {
-                return i;
+            if hash & mask == 0 {
+                return (Some(i), hash);
             }
             i += 1;
         }
-        max_end
+        let c = data[i - 1];
+        if hash == table[c as usize].wrapping_neg() {
+            i += run_len(&data[i..end], c);
+        }
     }
+    (None, hash)
+}
+
+/// Length of the prefix of `s` that is all `c`.
+fn run_len(s: &[u8], c: u8) -> usize {
+    let mut n = 0;
+    for block in s.chunks_exact(32) {
+        if !block.iter().all(|&b| b == c) {
+            break;
+        }
+        n += 32;
+    }
+    n + s[n..].iter().position(|&b| b != c).unwrap_or(s.len() - n)
 }
 
 /// Iterator over chunk boundaries in a contiguous byte slice.
@@ -200,6 +311,7 @@ impl Iterator for ChunkIterator<'_> {
         }
         let remaining = &self.data[self.offset..];
         let length = self.cdc.cut(remaining);
+        assert!(length > 0, "a cut must make progress");
         let boundary = ChunkBoundary {
             offset: self.offset,
             length,
@@ -243,7 +355,9 @@ impl FastCdc {
         let mut ends = vec![from];
         let mut pos = from;
         while pos < stop && self.cut_is_final(data.len(), pos, eof) {
-            pos += self.cut(&data[pos..]);
+            let length = self.cut(&data[pos..]);
+            assert!(length > 0, "a cut must make progress");
+            pos += length;
             ends.push(pos);
         }
         ends
@@ -310,7 +424,9 @@ impl FastCdc {
                 pos = spec[spec.len() - 1];
                 continue;
             }
-            pos += self.cut(&data[pos..]);
+            let length = self.cut(&data[pos..]);
+            assert!(length > 0, "a cut must make progress");
+            pos += length;
             ends.push(pos);
         }
         (ends, side)
@@ -488,6 +604,10 @@ impl<R: std::io::Read> ChunkReader<R> {
 /// first chunk and ends with `data.len()`. An empty input yields an
 /// empty vector. Used by goldens to pin boundaries deterministically
 /// without exposing the `ChunkBoundary` struct in serialised form.
+///
+/// # Panics
+///
+/// Panics if a cut makes no progress, which the chunker never does.
 #[must_use]
 pub fn chunk_boundaries(data: &[u8]) -> Vec<usize> {
     let cdc = FastCdc::v1();
@@ -495,6 +615,7 @@ pub fn chunk_boundaries(data: &[u8]) -> Vec<usize> {
     let mut offset = 0usize;
     while offset < data.len() {
         let len = cdc.cut(&data[offset..]);
+        assert!(len > 0, "a cut must make progress");
         offset += len;
         out.push(offset);
     }
@@ -567,7 +688,7 @@ mod tests {
 
         let mut total = 0usize;
         let mut count = 0usize;
-        for b in ChunkIterator::new(cdc, &data) {
+        for b in ChunkIterator::new(cdc, &data).take(data.len() + 1) {
             assert!(b.length <= MAX_SIZE);
             // Only the final chunk is allowed to be smaller than min.
             if b.offset + b.length < data.len() {
@@ -585,7 +706,9 @@ mod tests {
         let cdc = FastCdc::v1();
         let small = b"hello, this is a tiny file";
         assert_eq!(cdc.cut(small), small.len());
-        let boundaries: Vec<_> = ChunkIterator::new(cdc, small).collect();
+        let boundaries: Vec<_> = ChunkIterator::new(cdc, small)
+            .take(small.len() + 1)
+            .collect();
         assert_eq!(boundaries.len(), 1);
         assert_eq!(boundaries[0].offset, 0);
         assert_eq!(boundaries[0].length, small.len());
@@ -595,7 +718,7 @@ mod tests {
     fn empty_input_iterator_is_empty() {
         let cdc = FastCdc::v1();
         assert_eq!(cdc.cut(b""), 0);
-        let none: Vec<_> = ChunkIterator::new(cdc, b"").collect();
+        let none: Vec<_> = ChunkIterator::new(cdc, b"").take((b"").len() + 1).collect();
         assert!(none.is_empty());
     }
 
@@ -629,8 +752,12 @@ mod tests {
         modified.push(0xFF);
         modified.extend_from_slice(&original[insert_point..]);
 
-        let orig_chunks: Vec<_> = ChunkIterator::new(cdc, &original).collect();
-        let mod_chunks: Vec<_> = ChunkIterator::new(cdc, &modified).collect();
+        let orig_chunks: Vec<_> = ChunkIterator::new(cdc, &original)
+            .take(original.len() + 1)
+            .collect();
+        let mod_chunks: Vec<_> = ChunkIterator::new(cdc, &modified)
+            .take(modified.len() + 1)
+            .collect();
 
         let max_chunks = orig_chunks.len().max(mod_chunks.len());
         let mut differing = 0usize;
@@ -660,9 +787,11 @@ mod tests {
         let large = FastCdc::v1();
 
         let s: Vec<_> = ChunkIterator::new(small, &data)
+            .take(data.len() + 1)
             .map(|b| b.offset + b.length)
             .collect();
         let l: Vec<_> = ChunkIterator::new(large, &data)
+            .take(data.len() + 1)
             .map(|b| b.offset + b.length)
             .collect();
         assert!(
@@ -677,6 +806,7 @@ mod tests {
         Prng::new(0xFEED_FACE).fill(&mut data);
         let from_helper = chunk_boundaries(&data);
         let from_iter: Vec<usize> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| b.offset + b.length)
             .collect();
         assert_eq!(from_helper, from_iter);
@@ -688,6 +818,7 @@ mod tests {
         Prng::new(0x5713_EA31).fill(&mut data);
 
         let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| data[b.offset..b.offset + b.length].to_vec())
             .collect();
 
@@ -725,6 +856,7 @@ mod tests {
         Prng::new(0xC0FF_EE01).fill(&mut data);
 
         let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| data[b.offset..b.offset + b.length].to_vec())
             .collect();
         assert!(in_memory.len() > 100, "got {} chunks", in_memory.len());
@@ -843,6 +975,7 @@ mod tests {
                 let mut data = vec![0u8; windows * fresh];
                 Prng::new(0x00E0_F111).fill(&mut data);
                 let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+                    .take(data.len() + 1)
                     .map(|b| data[b.offset..b.offset + b.length].to_vec())
                     .collect();
                 let reader =
@@ -862,6 +995,7 @@ mod tests {
         Prng::new(0x5713_EA32).fill(&mut data);
 
         let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| data[b.offset..b.offset + b.length].to_vec())
             .collect();
 
@@ -882,6 +1016,7 @@ mod tests {
         let mut data = vec![0u8; 5 * 1024 * 1024];
         Prng::new(0x5713_EA33).fill(&mut data);
         let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| data[b.offset..b.offset + b.length].to_vec())
             .collect();
         let reader = ChunkReader::with_threads(
@@ -898,8 +1033,29 @@ mod tests {
     /// Sequential chunk ends of `data` from offset `0`.
     fn sequential_ends(cdc: &FastCdc, data: &[u8]) -> Vec<usize> {
         ChunkIterator::new(*cdc, data)
+            .take(data.len() + 1)
             .map(|b| b.offset + b.length)
             .collect()
+    }
+
+    /// `run_len` counts the leading bytes equal to `c`, whatever the run
+    /// length relative to its 32-byte blocks.
+    #[test]
+    fn run_len_counts_the_leading_run() {
+        assert_eq!(run_len(&[], 7), 0);
+        assert_eq!(run_len(&[8, 7, 7], 7), 0);
+        for len in [1, 31, 32, 33, 63, 64, 65, 100] {
+            let all = vec![7u8; len];
+            assert_eq!(run_len(&all, 7), len, "all {len}");
+            for stop in [0, 1, len / 2, len.saturating_sub(1)] {
+                if stop >= len {
+                    continue;
+                }
+                let mut broken = all.clone();
+                broken[stop] = 9;
+                assert_eq!(run_len(&broken, 7), stop, "len {len} broken at {stop}");
+            }
+        }
     }
 
     #[test]
@@ -909,7 +1065,7 @@ mod tests {
         let mut data = vec![0u8; 9 * 1024 * 1024 + 777];
         Prng::new(0x009A_11E1).fill(&mut data);
         data[3 * 1024 * 1024..4 * 1024 * 1024 + 99].fill(0);
-        for cdc in [FastCdc::v1(), FastCdc::custom(64, 256, 1024)] {
+        for cdc in [FastCdc::v1(), FastCdc::v2(), FastCdc::custom(64, 256, 1024)] {
             let expected = sequential_ends(&cdc, &data);
             for threads in 0..=MAX_CUT_THREADS + 1 {
                 assert_eq!(
@@ -954,6 +1110,138 @@ mod tests {
         }
     }
 
+    /// The cut loop of SPEC-FASTCDC §5, byte by byte, with no run skip.
+    fn cut_reference(cdc: &FastCdc, data: &[u8]) -> usize {
+        if data.len() <= cdc.min_size {
+            return data.len();
+        }
+        let table = gear_table();
+        let mut hash: u64 = 0;
+        let avg_end = cdc.avg_size.min(data.len());
+        let max_end = cdc.max_size.min(data.len());
+        for (i, &b) in data.iter().enumerate().take(max_end).skip(cdc.min_size) {
+            hash = (hash << 1).wrapping_add(table[b as usize]);
+            let mask = if i < avg_end { cdc.mask_s } else { cdc.mask_l };
+            if hash & mask == 0 {
+                return i;
+            }
+        }
+        max_end
+    }
+
+    fn reference_ends(cdc: &FastCdc, data: &[u8]) -> Vec<usize> {
+        let mut ends = Vec::new();
+        let mut pos = 0;
+        while pos < data.len() {
+            pos += cut_reference(cdc, &data[pos..]);
+            ends.push(pos);
+        }
+        ends
+    }
+
+    /// Runs of one byte value, alternating with pseudo-random stretches.
+    /// `scale` bounds each piece's length.
+    fn runs(seed: u64, len: usize, scale: u64, zeros: bool) -> Vec<u8> {
+        let mut rng = Prng::new(seed);
+        let mut data = Vec::with_capacity(len);
+        while data.len() < len {
+            let z = rng.next_u64();
+            let piece = usize::try_from((z >> 8) % scale).unwrap() + 1;
+            if z & 1 == 0 {
+                let byte = if zeros { 0 } else { z.to_le_bytes()[5] };
+                data.resize(data.len() + piece, byte);
+            } else {
+                let start = data.len();
+                data.resize(start + piece, 0);
+                rng.fill(&mut data[start..]);
+            }
+        }
+        data.truncate(len);
+        data
+    }
+
+    #[test]
+    fn run_skip_matches_byte_by_byte_cut() {
+        // Runs short and long, of zero and other bytes, crossing the
+        // strict/loose switch and the forced cut, for the v1 sizes and a
+        // tiny chunker whose sizes are near `RUN_CHECK`.
+        let tiny = FastCdc::custom(16, 64, 256);
+        for (case, scale) in [10u64, 100, 1000, 70_000, 300_000].into_iter().enumerate() {
+            for zeros in [true, false] {
+                let data = runs(0x5EED + case as u64, 3 * 1024 * 1024 + case, scale, zeros);
+                for cdc in [
+                    FastCdc::v1(),
+                    FastCdc::v2(),
+                    tiny,
+                    FastCdc::custom(64, 256, 1024),
+                ] {
+                    assert_eq!(
+                        sequential_ends(&cdc, &data),
+                        reference_ends(&cdc, &data),
+                        "scale {scale}, zeros {zeros}, max {}",
+                        cdc.max_size()
+                    );
+                }
+            }
+        }
+        // A run that covers the whole strict region and ends inside the
+        // loose one, and a run that covers everything.
+        let mut data = vec![0u8; MAX_SIZE * 3];
+        Prng::new(3).fill(&mut data[AVG_SIZE + 77..]);
+        assert_eq!(
+            sequential_ends(&FastCdc::v1(), &data),
+            reference_ends(&FastCdc::v1(), &data)
+        );
+        let data = vec![0xA5u8; MAX_SIZE * 3 + 5];
+        assert_eq!(
+            sequential_ends(&FastCdc::v1(), &data),
+            reference_ends(&FastCdc::v1(), &data)
+        );
+    }
+
+    /// SPEC-FASTCDC §11.1: `n` one-bits at bit positions
+    /// `16 + floor((2k + 1) * 32 / (2n))` for `k` in `0..n`.
+    fn spread_mask(n: u64) -> u64 {
+        (0..n).fold(0, |m, k| m | 1 << (16 + (2 * k + 1) * 32 / (2 * n)))
+    }
+
+    #[test]
+    fn v2_masks_follow_the_spread_derivation() {
+        let bits = u64::from(AVG_SIZE.trailing_zeros());
+        assert_eq!(MASK_S_V2, spread_mask(bits + 2));
+        assert_eq!(MASK_L_V2, spread_mask(bits - 2));
+        assert_eq!(MASK_S_V2.count_ones(), 18);
+        assert_eq!(MASK_L_V2.count_ones(), 14);
+        let v2 = FastCdc::v2();
+        assert_eq!(
+            (v2.min_size(), v2.avg_size(), v2.max_size()),
+            (MIN_SIZE, AVG_SIZE, MAX_SIZE)
+        );
+    }
+
+    #[test]
+    fn chunker_ids_round_trip_and_v1_keeps_zero() {
+        for chunker in [Chunker::FastCdcV1, Chunker::FastCdcV2] {
+            assert_eq!(
+                Chunker::from_chunk_size(chunker.chunk_size()),
+                Some(chunker)
+            );
+        }
+        assert_eq!(Chunker::FastCdcV1.chunk_size(), 0);
+        assert_eq!(Chunker::FastCdcV2.chunk_size(), CHUNK_SIZE_FASTCDC_V2);
+        assert_eq!(Chunker::from_chunk_size(65_536), None);
+        let mut data = vec![0u8; 2 * 1024 * 1024];
+        Prng::new(0x0002_C0DE).fill(&mut data);
+        assert_ne!(
+            sequential_ends(&FastCdc::v1(), &data),
+            sequential_ends(&FastCdc::v2(), &data)
+        );
+        assert_eq!(
+            sequential_ends(&Chunker::FastCdcV2.cdc(), &data),
+            sequential_ends(&FastCdc::v2(), &data)
+        );
+    }
+
     /// Pinned v1 gear-table digest, harvested once from the splitmix64
     /// derivation seeded with "KITFCDC". Drift = a v2 break.
     const EXPECTED_GEAR_DIGEST_HEX: &str =
@@ -984,8 +1272,8 @@ mod tests {
         #[test]
         fn proptest_determinism(data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024)) {
             let cdc = FastCdc::v1();
-            let pass1: Vec<_> = ChunkIterator::new(cdc, &data).collect();
-            let pass2: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            let pass1: Vec<_> = ChunkIterator::new(cdc, &data).take(data.len() + 1).collect();
+            let pass2: Vec<_> = ChunkIterator::new(cdc, &data).take(data.len() + 1).collect();
             proptest::prop_assert_eq!(pass1, pass2);
         }
 
@@ -996,7 +1284,7 @@ mod tests {
             data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024),
         ) {
             let cdc = FastCdc::v1();
-            let boundaries: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            let boundaries: Vec<_> = ChunkIterator::new(cdc, &data).take(data.len() + 1).collect();
             let mut expected_offset = 0usize;
             for b in &boundaries {
                 proptest::prop_assert_eq!(b.offset, expected_offset);
@@ -1015,7 +1303,7 @@ mod tests {
             data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024),
         ) {
             let cdc = FastCdc::v1();
-            let in_memory: Vec<Vec<u8>> = ChunkIterator::new(cdc, &data)
+            let in_memory: Vec<Vec<u8>> = ChunkIterator::new(cdc, &data).take(data.len() + 1)
                 .map(|b| data[b.offset..b.offset + b.length].to_vec())
                 .collect();
 
@@ -1025,6 +1313,27 @@ mod tests {
                 streamed.push(chunk);
             }
             proptest::prop_assert_eq!(in_memory, streamed);
+        }
+
+        /// The run skip never moves a cut: arbitrary runs and random
+        /// stretches cut the same as the byte-by-byte loop.
+        #[test]
+        fn proptest_run_skip_matches_reference(
+            pieces in proptest::collection::vec((proptest::num::u8::ANY, 1usize..4096, proptest::bool::ANY), 1..64),
+            seed in proptest::num::u64::ANY,
+        ) {
+            let mut data = Vec::new();
+            let mut rng = Prng::new(seed);
+            for (byte, len, run) in pieces {
+                let start = data.len();
+                data.resize(start + len, byte);
+                if !run {
+                    rng.fill(&mut data[start..]);
+                }
+            }
+            for cdc in [FastCdc::custom(16, 64, 256), FastCdc::custom(1024, 4096, 16384)] {
+                proptest::prop_assert_eq!(sequential_ends(&cdc, &data), reference_ends(&cdc, &data));
+            }
         }
     }
 }
