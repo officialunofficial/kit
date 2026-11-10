@@ -21,8 +21,10 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use tempfile::NamedTempFile;
 
 use crate::hash::{self, HEX_LEN, Hash};
 use crate::layout::RepoLayout;
@@ -190,6 +192,9 @@ pub fn read_state(layout: &RepoLayout) -> RebaseResult<RebaseState> {
     let head_name = read_text_capped(&dir.join(HEAD_NAME_FILE), MAX_HEAD_NAME_BYTES)
         .map_err(|_| RebaseError::InvalidRebaseState)?;
     let head_name = trim_trailing(&head_name).to_string();
+    if head_name.is_empty() {
+        return Err(RebaseError::InvalidRebaseState);
+    }
 
     let orig_head = read_hex_hash(&dir.join(ORIG_HEAD_FILE))?;
     let onto = read_hex_hash(&dir.join(ONTO_FILE))?;
@@ -212,21 +217,48 @@ pub fn read_state(layout: &RepoLayout) -> RebaseResult<RebaseState> {
 
 /// Persist `state` to `<kit_dir>/rebase-apply/`.
 ///
+/// Every file that changed is staged in a synced temporary file first. Only
+/// when all are staged does the function rename them into place and sync the
+/// directory once. A failure while staging leaves the previous state whole.
+/// Each file is replaced whole, but the renames are not atomic as a group: a
+/// crash between them can leave `todo` and `actions` out of step, and
+/// [`read_state`] then reports malformed state. A file whose content did not
+/// change is not rewritten.
+///
 /// # Errors
 /// - [`RebaseError::Io`] for filesystem failures.
 pub fn write_state(layout: &RepoLayout, state: &RebaseState) -> RebaseResult<()> {
     let dir = layout.rebase_dir();
     fs::create_dir_all(&dir)?;
 
-    write_with_newline(&dir.join(HEAD_NAME_FILE), state.head_name.as_bytes())?;
-    write_with_newline(
-        &dir.join(ORIG_HEAD_FILE),
-        hash::to_hex(&state.orig_head).as_bytes(),
-    )?;
-    write_with_newline(&dir.join(ONTO_FILE), hash::to_hex(&state.onto).as_bytes())?;
-    write_hash_list(&dir.join(TODO_FILE), &state.todo)?;
-    write_actions(&dir.join(ACTIONS_FILE), &state.actions)?;
-    write_hash_list(&dir.join(DONE_FILE), &state.done)?;
+    let files = [
+        (HEAD_NAME_FILE, with_newline(state.head_name.as_bytes())),
+        (
+            ORIG_HEAD_FILE,
+            with_newline(hash::to_hex(&state.orig_head).as_bytes()),
+        ),
+        (
+            ONTO_FILE,
+            with_newline(hash::to_hex(&state.onto).as_bytes()),
+        ),
+        (TODO_FILE, hash_list_bytes(&state.todo)),
+        (ACTIONS_FILE, actions_bytes(&state.actions)),
+        (DONE_FILE, hash_list_bytes(&state.done)),
+    ];
+    let mut staged = Vec::with_capacity(files.len());
+    for (name, bytes) in &files {
+        if holds(&dir.join(name), bytes) {
+            continue;
+        }
+        let mut tmp = NamedTempFile::with_prefix_in(".rebase-state-", &dir)?;
+        tmp.as_file_mut().write_all(bytes)?;
+        tmp.as_file_mut().sync_all()?;
+        staged.push((name, tmp));
+    }
+    for (name, tmp) in staged {
+        tmp.persist(dir.join(name)).map_err(|e| e.error)?;
+    }
+    crate::atomic::sync_dir(&dir)?;
     Ok(())
 }
 
@@ -378,41 +410,44 @@ fn read_actions(path: &Path, todo_len: usize) -> RebaseResult<Vec<RebaseAction>>
     Ok(out)
 }
 
-fn write_actions(path: &Path, actions: &[RebaseAction]) -> RebaseResult<()> {
+fn actions_bytes(actions: &[RebaseAction]) -> Vec<u8> {
     if actions.is_empty() {
-        write_with_newline(path, b"")?;
-        return Ok(());
+        return b"\n".to_vec();
     }
     let mut buf = String::with_capacity(actions.len() * 8);
     for a in actions {
         buf.push_str(a.keyword());
         buf.push('\n');
     }
-    fs::write(path, buf.as_bytes())?;
-    Ok(())
+    buf.into_bytes()
 }
 
-fn write_hash_list(path: &Path, hashes: &[Hash]) -> RebaseResult<()> {
+fn hash_list_bytes(hashes: &[Hash]) -> Vec<u8> {
     if hashes.is_empty() {
-        write_with_newline(path, b"")?;
-        return Ok(());
+        return b"\n".to_vec();
     }
     let mut buf = String::with_capacity(hashes.len() * (HEX_LEN + 1));
     for h in hashes {
         buf.push_str(&hash::to_hex(h));
         buf.push('\n');
     }
-    fs::write(path, buf.as_bytes())?;
-    Ok(())
+    buf.into_bytes()
 }
 
-fn write_with_newline(path: &Path, content: &[u8]) -> io::Result<()> {
+fn with_newline(content: &[u8]) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::with_capacity(content.len() + 1);
     buf.extend_from_slice(content);
     if buf.last().copied() != Some(b'\n') {
         buf.push(b'\n');
     }
-    fs::write(path, buf)
+    buf
+}
+
+/// Whether the file at `path` already holds exactly `bytes`. A file of
+/// another length is not read.
+fn holds(path: &Path, bytes: &[u8]) -> bool {
+    let same_len = fs::metadata(path).is_ok_and(|m| m.len() == bytes.len() as u64);
+    same_len && fs::read(path).is_ok_and(|on_disk| on_disk == bytes)
 }
 
 fn read_text_capped(path: &Path, cap: u64) -> io::Result<String> {
@@ -630,6 +665,116 @@ mod tests {
             read_state(&kit),
             Err(RebaseError::InvalidRebaseState)
         ));
+    }
+
+    fn sample_state(todo: &[&[u8]]) -> RebaseState {
+        RebaseState {
+            head_name: "main".to_string(),
+            orig_head: hash::hash(b"head"),
+            onto: hash::hash(b"onto"),
+            todo: todo.iter().map(|t| hash::hash(t)).collect(),
+            actions: vec![RebaseAction::Pick; todo.len()],
+            done: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_empty_head_name_is_invalid_state() {
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(kit.worktree_state_dir()).unwrap();
+        write_state(&kit, &sample_state(&[b"t1"])).unwrap();
+        let head_name = kit.rebase_dir().join("head-name");
+
+        for content in [&b""[..], b"\n"] {
+            fs::write(&head_name, content).unwrap();
+            assert!(matches!(
+                read_state(&kit),
+                Err(RebaseError::InvalidRebaseState)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_save_leaves_only_the_state_files() {
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(kit.worktree_state_dir()).unwrap();
+        write_state(&kit, &sample_state(&[b"t1", b"t2"])).unwrap();
+        write_state(&kit, &sample_state(&[b"t2"])).unwrap();
+
+        let mut names: Vec<String> = fs::read_dir(kit.rebase_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["actions", "done", "head-name", "onto", "orig-head", "todo"]
+        );
+    }
+
+    #[test]
+    fn a_save_repairs_a_damaged_state_file() {
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(kit.worktree_state_dir()).unwrap();
+        let state = sample_state(&[b"t1"]);
+        write_state(&kit, &state).unwrap();
+        let dir = kit.rebase_dir();
+        // One file loses its content. Another keeps its length but not its bytes.
+        fs::write(dir.join("head-name"), b"").unwrap();
+        let mut todo = fs::read(dir.join("todo")).unwrap();
+        todo[0] = b'z';
+        fs::write(dir.join("todo"), todo).unwrap();
+
+        write_state(&kit, &state).unwrap();
+
+        assert_eq!(read_state(&kit).unwrap(), state);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_save_rewrites_only_the_files_that_changed() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(kit.worktree_state_dir()).unwrap();
+        let dir = kit.rebase_dir();
+        write_state(&kit, &sample_state(&[b"t1", b"t2"])).unwrap();
+        let ino = |name: &str| fs::metadata(dir.join(name)).unwrap().ino();
+        let (head_name, todo) = (ino("head-name"), ino("todo"));
+
+        write_state(&kit, &sample_state(&[b"t2"])).unwrap();
+
+        assert_eq!(ino("head-name"), head_name);
+        assert_ne!(ino("todo"), todo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_save_that_cannot_stage_keeps_the_previous_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(kit.worktree_state_dir()).unwrap();
+        let first = sample_state(&[b"t1", b"t2"]);
+        write_state(&kit, &first).unwrap();
+        let dir = kit.rebase_dir();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        // A privileged user can create files in a read-only directory.
+        let privileged = fs::File::create(dir.join("probe")).is_ok();
+
+        let result = write_state(&kit, &sample_state(&[b"t2"]));
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        if privileged {
+            return;
+        }
+        assert!(matches!(result, Err(RebaseError::Io(_))));
+        assert_eq!(read_state(&kit).unwrap(), first);
     }
 
     #[test]

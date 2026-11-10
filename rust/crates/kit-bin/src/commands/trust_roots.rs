@@ -330,15 +330,68 @@ pub fn serialize(entries: &[TrustEntry]) -> String {
 }
 
 /// Write `entries` to `path`, creating parent directories as needed.
+///
+/// The write goes through a synced temporary file in the same directory, so a
+/// failed write leaves the existing file as it was. When `path` is a symlink,
+/// the write replaces the file it points to, or creates it when the link
+/// dangles, and keeps the link. A catalog that exists keeps its permissions, and a read-only one is refused.
+/// A new catalog gets the mode of any new file under the process umask.
 pub fn save(path: &Path, entries: &[TrustEntry]) -> Result<(), (String, u8)> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
+    let fail = |e: std::io::Error| (format!("write {}: {e}", path.display()), exit::CANTCREAT);
+    let target = link_target(path).map_err(fail)?;
+    let parent = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(parent)
+        .map_err(|e| (format!("create {}: {e}", parent.display()), exit::CANTCREAT))?;
+    let existing = match std::fs::metadata(&target) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(fail(e)),
+    };
+    // The rename needs only write access to the directory, so refuse a
+    // read-only catalog here, as a write to the file itself would.
+    if existing
+        .as_ref()
+        .is_some_and(|m| m.permissions().readonly())
     {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| (format!("create {}: {e}", parent.display()), exit::CANTCREAT))?;
+        return Err(fail(std::io::ErrorKind::PermissionDenied.into()));
     }
-    std::fs::write(path, serialize(entries))
-        .map_err(|e| (format!("write {}: {e}", path.display()), exit::CANTCREAT))
+    let mut tmp = tempfile::Builder::new();
+    tmp.prefix(".trust-roots-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        tmp.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    let mut tmp = tmp.tempfile_in(parent).map_err(fail)?;
+    if let Some(meta) = existing {
+        tmp.as_file()
+            .set_permissions(meta.permissions())
+            .map_err(fail)?;
+    }
+    tmp.write_all(serialize(entries).as_bytes()).map_err(fail)?;
+    tmp.as_file().sync_all().map_err(fail)?;
+    tmp.persist(&target).map_err(|e| fail(e.error))?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(fail)?;
+    Ok(())
+}
+
+/// The file a write to `path` must replace. For a symlink it is the file the
+/// link resolves to, or the place a dangling link points at.
+fn link_target(path: &Path) -> std::io::Result<PathBuf> {
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => Ok(resolved),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match std::fs::read_link(path) {
+            Ok(link) => Ok(path.parent().unwrap_or(Path::new("")).join(link)),
+            Err(_) => Ok(path.to_path_buf()),
+        },
+        Err(e) => Err(e),
+    }
 }
 
 /// Cross-check that `keyid` is consistent with the declared
