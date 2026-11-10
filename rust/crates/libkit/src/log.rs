@@ -153,8 +153,12 @@ pub struct Entry {
 /// counts as no commit.
 ///
 /// # Errors
-/// [`Error::BadRevision`] when a named revision does not resolve. The other
-/// variants report an object that is missing or is not a commit.
+/// [`Error::BadRevision`] when a named revision does not resolve.
+/// [`Error::ReadCommit`] or [`Error::NotACommit`] when a commit of the walk
+/// cannot be read or is another kind of object. [`Error::TooManyCommits`]
+/// when the walk, both sides of a range together, would read more than
+/// 1,000,000 commits, and [`Error::MergeBase`] when the merge base walk of
+/// `A...B` reaches its limit.
 pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> {
     let store = repo.store();
     let selection = parse_selection(query.start.as_deref());
