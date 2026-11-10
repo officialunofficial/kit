@@ -155,6 +155,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prefix. Larger comparisons use the bounded line diff search. Reassembly,
   line buffers, and attribution memory still grow with file size.
 - Mutation testing of changed lines uses paths relative to the Rust workspace.
+- `kit push` and `kit push --force-with-lease` fail as a non-fast-forward,
+  before they upload anything, when the remote head they read differs from
+  their lease. They used to plan against that head and condition the head
+  write on the lease. If the head then moved back to the lease while another
+  push reset the packmap chain, the push could land a head whose chain lacks
+  objects it needs, and fetches and clones of the branch then failed with a
+  missing object. This affected every remote. A push whose earlier attempt
+  already landed still succeeds and writes nothing (SPEC-TRANSPORT §7).
 
 ## [0.7.3] - 2026-11-08
 
