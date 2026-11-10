@@ -35,7 +35,7 @@ jobs:
   mutants-diff:
     name: cargo-mutants (changed lines)
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -99,7 +99,7 @@ jobs:
   mutants-full:
     name: cargo-mutants (full sweep, ${{ matrix.crate }})
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 350
     strategy:
       fail-fast: false
