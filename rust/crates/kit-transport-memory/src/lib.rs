@@ -29,9 +29,12 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use kit_core::hash::Hash;
-use kit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, TransportResult};
+use kit_core::protocol::{
+    PackKey, RefWriteCondition, RepoCursor, Transport, TransportError, TransportResult,
+};
 use kit_core::refs::{
     Ref, decode_ref_wire, encode_ref_wire, validate_ref_name, validate_ref_prefix,
 };
@@ -42,9 +45,24 @@ use kit_core::refs::{
 /// Packs are keyed by [`PackKey`] (the BLAKE3 digest of the pack
 /// bytes). Refs are keyed by their full ref name (e.g.
 /// `"refs/heads/main"`) and stored in the 65-byte wire form.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MemoryTransport {
     inner: Mutex<Inner>,
+    /// Distinct for every instance in the process, so a cursor of one
+    /// instance never equals a cursor of another (SPEC-TRANSPORT §1.2).
+    instance: u64,
+}
+
+/// The next [`MemoryTransport::instance`].
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
+
+impl Default for MemoryTransport {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(Inner::default()),
+            instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -53,6 +71,9 @@ struct Inner {
     packs: HashMap<PackKey, Vec<u8>>,
     /// Ref store: full ref name → 65-byte wire (`[64-hex]\n`).
     refs: HashMap<String, [u8; 65]>,
+    /// Committed ref writes so far. Every write that changes the ref store
+    /// bumps it under the `Mutex` the write already holds.
+    generation: u64,
 }
 
 impl MemoryTransport {
@@ -153,7 +174,18 @@ impl Transport for MemoryTransport {
         }
 
         g.refs.insert(name.to_owned(), encode_ref_wire(hash));
+        g.generation = g.generation.wrapping_add(1);
         Ok(())
+    }
+
+    /// The instance number and the count of committed ref writes. Both are
+    /// read under the `Mutex`, so the pair names one state of the refs.
+    fn repo_cursor(&self) -> TransportResult<Option<RepoCursor>> {
+        let g = self.inner.lock().expect("MemoryTransport mutex poisoned");
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&self.instance.to_le_bytes());
+        bytes[8..].copy_from_slice(&g.generation.to_le_bytes());
+        RepoCursor::new(&bytes).map(Some)
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
@@ -495,5 +527,37 @@ mod tests {
 
         t.write_ref("refs/heads/main", &blake3_hash(b"h")).unwrap();
         assert_eq!(t.ref_count(), 1);
+    }
+
+    #[test]
+    fn every_committed_write_changes_the_cursor() {
+        let t = MemoryTransport::new();
+        let cursor = |t: &MemoryTransport| t.repo_cursor().unwrap().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        assert!(seen.insert(cursor(&t).as_bytes().to_vec()));
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        t.update_ref("refs/heads/main", RefWriteCondition::Missing, &a)
+            .unwrap();
+        assert!(seen.insert(cursor(&t).as_bytes().to_vec()));
+        t.update_ref("refs/heads/main", RefWriteCondition::Any, &a)
+            .unwrap();
+        assert!(
+            seen.insert(cursor(&t).as_bytes().to_vec()),
+            "the same value again"
+        );
+        let before = cursor(&t);
+        assert!(
+            t.update_ref("refs/heads/main", RefWriteCondition::Match(b), &b)
+                .is_err()
+        );
+        assert_eq!(cursor(&t), before, "a failed CAS changes nothing");
+    }
+
+    #[test]
+    fn a_new_instance_never_reuses_a_cursor() {
+        let a = MemoryTransport::new();
+        let b = MemoryTransport::new();
+        assert_ne!(a.repo_cursor().unwrap(), b.repo_cursor().unwrap());
     }
 }

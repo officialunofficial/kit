@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Reproduce every quint-refs check: refs.qnt (ref CAS and
-# lock order) and serve.qnt (serve.lock / server.lock, the startup upload
-# sweep, the served-name rule).
+# lock order), serve.qnt (serve.lock / server.lock, the startup upload
+# sweep, the served-name rule) and cursor.qnt (the file transport's
+# repository cursor with writers that do not count).
 #
 #   ./check.sh               quint typecheck + test + run, then TLC
 #   TLC=0 ./check.sh         skip TLC
@@ -124,6 +125,7 @@ tlc() {
 # ---- typecheck + deterministic scenarios ------------------------------------
 quint typecheck refs.qnt && quint typecheck serve.qnt && quint typecheck advance.qnt
 quint typecheck refs_test.qnt && quint typecheck serve_test.qnt
+quint typecheck cursor.qnt
 quint test refs_test.qnt --main refs_test >/dev/null && note "test refs_test" ok || bad "test refs_test" failed
 for m in refs_wpref_test refs_collide_test refs_nested_test refs_nested_unchecked_test; do
   quint test refs_test.qnt --main "$m" >/dev/null && note "test $m" ok || bad "test $m" failed
@@ -201,8 +203,20 @@ qrun advance.qnt advance3_atomicLeaseUnchecked Consistent violation
 # advance3_leaseUnchecked needs a long interleaving of all three pushers
 # that random simulation rarely hits: TLC finds it below.
 
-# ---- TLC: exhaustive (serve.qnt, advance.qnt) / constrained (refs.qnt) -------
+# ---- cursor.qnt: random simulation ------------------------------------------
+# Random simulation rarely keeps a cursor, waits out the window and writes in
+# one grain; TLC below covers the mutants exhaustively.
+qrun cursor.qnt cursor2 Safety ok
+qrun cursor.qnt cursor2 CanaryNoCursorOffered violation
+
+# ---- TLC: exhaustive (serve, advance, cursor) / constrained (refs.qnt) -------
 if [[ ${TLC:-1} == 1 ]]; then
+  # cursor.qnt is finite (clock and writes bounded): exhaustive.
+  tlc cursor.qnt cursor2 Safety ok "" ""
+  tlc cursor.qnt cursor2 CanaryNoEqualCursor violation "" ""
+  tlc cursor.qnt cursor2_noGuard NoStaleSkip violation "" ""
+  tlc cursor.qnt cursor2_noStamps NoStaleSkip violation "" ""
+  tlc cursor.qnt cursor2_shortWindow NoStaleSkip violation "" ""
   # serve.qnt is finite: exhaustive, no VIEW, no CONSTRAINT.
   tlc serve.qnt serve2 Safety ok "" ""
   tlc serve.qnt serve3 Safety ok "" ""

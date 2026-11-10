@@ -566,11 +566,50 @@ impl<'a> RepositoryAddress<'a> {
     }
 }
 
+/// The most bytes a [`RepoCursor`] holds (SPEC-TRANSPORT §1.2).
+pub const REPO_CURSOR_MAX_LEN: usize = 64;
+
+/// An opaque token for the state of a repository's refs (SPEC-TRANSPORT
+/// §1.2). Two cursors of one repository compare equal only when its refs are
+/// unchanged between them. A cursor carries no order: compare it for
+/// equality and nothing else.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RepoCursor(Vec<u8>);
+
+impl RepoCursor {
+    /// Wrap `bytes`. An empty cursor or one over [`REPO_CURSOR_MAX_LEN`]
+    /// bytes is [`TransportError::InvalidResponse`].
+    pub fn new(bytes: &[u8]) -> TransportResult<Self> {
+        if bytes.is_empty() || bytes.len() > REPO_CURSOR_MAX_LEN {
+            return Err(TransportError::InvalidResponse);
+        }
+        Ok(Self(bytes.to_vec()))
+    }
+
+    /// The cursor bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RepoCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RepoCursor({} bytes)", self.0.len())
+    }
+}
+
 pub trait Transport: Send + Sync {
     /// Repository identity and origin used for remote error context, if available.
     /// Existing transports carry no addressing context by default.
     fn repository_address(&self) -> Option<RepositoryAddress<'_>> {
         None
+    }
+
+    /// The repository cursor (SPEC-TRANSPORT §1.2), or `None` when the
+    /// transport does not offer one. Reading it reads no ref.
+    fn repo_cursor(&self) -> TransportResult<Option<RepoCursor>> {
+        Ok(None)
     }
 
     /// Upload a pack. The digest is computed by the caller (BLAKE3 of
@@ -969,6 +1008,28 @@ pub struct UploadLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repo_cursor_holds_its_bytes_within_the_bound_and_hides_them_in_debug() {
+        for bytes in [&[][..], &[7; REPO_CURSOR_MAX_LEN + 1]] {
+            assert!(matches!(
+                RepoCursor::new(bytes),
+                Err(TransportError::InvalidResponse)
+            ));
+        }
+        for bytes in [vec![0], vec![1], vec![7; REPO_CURSOR_MAX_LEN]] {
+            let cursor = RepoCursor::new(&bytes).unwrap();
+            assert_eq!(cursor.as_bytes(), bytes);
+            assert_eq!(
+                format!("{cursor:?}"),
+                format!("RepoCursor({} bytes)", bytes.len())
+            );
+        }
+        assert_ne!(
+            RepoCursor::new(&[0]).unwrap(),
+            RepoCursor::new(&[1]).unwrap()
+        );
+    }
 
     #[test]
     fn remote_text_is_escaped_when_displayed() {
