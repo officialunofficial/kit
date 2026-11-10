@@ -140,12 +140,8 @@ pub fn pull(
         // reads every commit and names the one it cannot read.
         let fast_forward =
             is_ancestor_strict(&store, local_tip, remote_tip).map_err(|e| match e {
-                AncestorError::Unreadable { source, .. } | AncestorError::Limit(source) => {
-                    SyncError::Store(source)
-                }
-                AncestorError::NotACommit(_) => SyncError::NotCommit,
-                // A failure kind added later still fails the pull and keeps
-                // its message.
+                AncestorError::Limit(source) => SyncError::Store(source),
+                // The error keeps the id of the commit it names.
                 other => SyncError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, other)),
             })?;
         if !fast_forward {
