@@ -306,7 +306,7 @@ fn lock_and_sweep(target: &ServeTarget) -> Result<RepoLock, LockError> {
     )
 }
 
-/// Remove the temp files (`packs/.<hex>.tmp.<pid>.<seq>`) that uploads
+/// Remove the temp files (`packs/.kit.tmp.<pid>.<seq>`) that uploads
 /// left when their process crashed, once they are [`STALE_UPLOAD_AGE`]
 /// old. Best effort: a failure is ignored, and the next start retries.
 fn sweep_crashed_uploads(target: &ServeTarget) {

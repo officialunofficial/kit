@@ -9,8 +9,9 @@
 //!     <2-hex>/<62-hex>   # raw canonical object bytes, BLAKE3-named
 //! ```
 //!
-//! Writes are atomic: bytes are first written to a sibling temp file
-//! (`<name>.tmp.<pid>.<rand>`), made durable, then renamed into place.
+//! Writes are atomic: bytes are first written to a sibling temp file, made
+//! durable, then renamed into place. A single or batched write names the temp
+//! file `.<name>.tmp.<pid>.<seq>`; a bulk write names it `.kit.tmp.<pid>.<seq>`.
 //! A crash mid-write leaves only the temp file behind and never
 //! produces a visible object that fails the read-time hash check.
 //!
@@ -835,7 +836,8 @@ fn check_hash(expected: &Hash, actual: &Hash) -> StoreResult<()> {
 }
 
 /// Create a uniquely-named sibling temp file in `parent` for the object
-/// file `file_name`. The `.{name}.tmp.{pid}.{seq}` shape is what
+/// file `file_name`. A bulk write ([`BulkWriter`]) names its temp files
+/// `.kit.tmp.*` instead. The `.{name}.tmp.{pid}.{seq}` shape is what
 /// [`ObjectStore::iter_object_hashes`] and the stale-temp tests rely on
 /// to skip non-objects.
 pub(crate) fn temp_file_in(parent: &Path, file_name: &str) -> io::Result<NamedTempFile> {

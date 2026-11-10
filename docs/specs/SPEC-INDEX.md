@@ -144,8 +144,10 @@ entries whose path, status, and `object_hash` are unchanged.
 ## 5. Atomicity and versioning
 
 Writes use atomic-rename: write to a sibling tempfile (named
-`.<file>.tmp.<pid>.<seq>`), `fsync` the tempfile, `rename(2)` into
-place, then `fsync` the parent directory so the rename itself is
+`.kit.tmp.<pid>.<seq>`, which does not contain the file's name, so a
+file name of any length the file system allows works; the writer
+creates it exclusively and never follows a link), `fsync` the tempfile,
+`rename(2)` into place, then `fsync` the parent directory so the rename itself is
 durable across power loss. The `.kit/` directory is created if absent.
 (The index write is deliberately NOT part of the object store's batched
 durability schedule &mdash; it is one of the durable pointers that schedule

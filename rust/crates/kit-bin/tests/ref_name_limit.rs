@@ -167,3 +167,53 @@ fn existing_branch_over_the_bound_is_usable_but_not_pushable() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!branches(root, x).contains(&over));
 }
+
+/// A remote that holds one branch with a 240-byte name: `fetch` and
+/// `clone` of it work, and leave no temp file in the tracking directory.
+#[test]
+fn fetch_and_clone_read_a_remote_with_a_240_byte_branch() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let bare = tempfile::tempdir().unwrap();
+    let url = format!("kit+file://{}", bare.path().display());
+    assert!(
+        run_in(root, x, &["remote", "add", "origin", &url])
+            .status
+            .success()
+    );
+    let out = run_in(root, x, &["push", "origin", "--all"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let long = "l".repeat(240);
+    let heads = bare.path().join("refs/heads");
+    let main = fs::read_dir(&heads)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.is_file())
+        .unwrap();
+    fs::copy(&main, heads.join(&long)).unwrap();
+    let packmap = bare.path().join("refs/kit/packmap");
+    fs::copy(packmap.join(main.file_name().unwrap()), packmap.join(&long)).unwrap();
+
+    let fetcher = tempfile::tempdir().unwrap();
+    assert!(run_in(fetcher.path(), x, &["init"]).status.success());
+    assert!(
+        run_in(fetcher.path(), x, &["remote", "add", "origin", &url])
+            .status
+            .success()
+    );
+    let out = run_in(fetcher.path(), x, &["fetch", "origin"]);
+    assert!(out.status.success(), "fetch: {}", stderr(&out));
+    let tracked = fetcher.path().join(".kit/refs/remotes/origin");
+    assert!(tracked.join(&long).is_file(), "the long branch is tracked");
+
+    let parent = tempfile::tempdir().unwrap();
+    let out = run_in(parent.path(), x, &["clone", "-o", "origin", &url, "copy"]);
+    assert!(out.status.success(), "clone: {}", stderr(&out));
+    assert!(
+        parent
+            .path()
+            .join("copy/.kit/refs/remotes/origin")
+            .join(&long)
+            .is_file()
+    );
+}

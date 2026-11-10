@@ -608,7 +608,7 @@ fn startup_sweeps_crashed_uploads_only_when_no_server_holds_the_lock() {
     let td = repo_root();
     let packs = td.path().join("packs");
     fs::create_dir_all(&packs).unwrap();
-    let stale = packs.join(format!(".{}.tmp.4242.0", "ab".repeat(32)));
+    let stale = packs.join(".kit.tmp.4242.0");
     fs::write(&stale, b"partial").unwrap();
     let old = std::time::SystemTime::now() - Duration::from_hours(2);
     fs::File::options()

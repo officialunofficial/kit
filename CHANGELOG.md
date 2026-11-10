@@ -32,6 +32,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking:** `kit_transport_file::temp_path` is private. `create_temp`
+  replaces it: it creates the temporary file next to a destination with
+  `create_new`, takes the next name when one is taken, and returns the path
+  and the open file. A caller of `temp_path` that created the file itself
+  calls `create_temp`.
 - **Breaking:** `RestoreError` in kit-core is `#[non_exhaustive]` and has a
   new `File` variant that carries the path of the file that failed. The
   function `restore_temp_sibling` is gone. `is_restore_temp_name` replaces
@@ -106,6 +111,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Branch and remote names up to the file system limit work for create, fetch
+  and clone. Ref, index and file-transport writes name their temporary file
+  `.kit.tmp.<pid>.<seq>`, which does not contain the name of the file it
+  replaces. Before, a ref name segment of 236 bytes or more failed with
+  `ENAMETOOLONG`, so one such branch on a remote made every `kit fetch` and
+  `kit clone` of it fail. `kit serve` sweeps crashed uploads by the new name.
+- File-transport writes never follow or truncate an existing temporary file,
+  and do not leave one behind. A write creates its temporary file exclusively
+  and takes the next name when one is taken, so a link planted at a temporary
+  name can no longer redirect a push to another file. A write that fails
+  after it created the temporary file removes it.
 - Restore writes a file through a temporary name of fixed length,
   `.kit-restore-tmp.<pid>.<counter>`, so a file name of up to 255 bytes
   checks out, clones and pulls. Before, a name of 240 bytes or more failed

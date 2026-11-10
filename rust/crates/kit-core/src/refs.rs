@@ -3060,4 +3060,27 @@ mod tests {
             );
         }
     }
+
+    // --- long names -------------------------------------------------------
+
+    #[test]
+    fn a_branch_with_a_250_byte_segment_is_written_and_read() {
+        let (_dir, layout) = fresh_repo();
+        let branch = "b".repeat(250);
+        write_ref(&layout, &branch, &h("long")).unwrap();
+        assert_eq!(read_ref(&layout, &branch).unwrap(), Some(h("long")));
+    }
+
+    #[test]
+    fn a_remote_batch_writes_a_255_byte_segment() {
+        let (_dir, layout) = fresh_repo();
+        let branch = "r".repeat(255);
+        let mut batch = RemoteRefBatch::new(&layout, "origin").unwrap();
+        batch.write(&branch, &h("long")).unwrap();
+        batch.commit().unwrap();
+        assert_eq!(
+            read_remote_ref(&layout, "origin", &branch).unwrap(),
+            Some(h("long"))
+        );
+    }
 }

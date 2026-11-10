@@ -34,6 +34,18 @@ use tempfile::NamedTempFile;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// The prefix of a temp file name: `.kit.tmp.<pid>.<seq>`. `tempfile` adds a
+/// random suffix and creates the file with `O_EXCL`, so a link at that name is
+/// never followed. The name does not contain the destination name: a ref
+/// segment can be as long as the file system allows, and a temp name that
+/// held it would be too long. The leading dot keeps the temp file out of any
+/// ref listing, because a ref segment never starts with a dot.
+fn temp_prefix() -> String {
+    let pid = process::id();
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!(".kit.tmp.{pid}.{seq}")
+}
+
 /// Atomically write `bytes` to `final_path`, fsyncing the file CONTENTS
 /// before the rename but deferring the directory fsync to the caller.
 /// This is the durable-before-visible primitive for [`store::BulkWriter`]:
@@ -47,13 +59,7 @@ pub(crate) fn write_content_synced(final_path: &Path, bytes: &[u8]) -> io::Resul
     let parent = final_path
         .parent()
         .expect("atomic::write_content_synced: path has parent");
-    let file_name = final_path
-        .file_name()
-        .expect("atomic::write_content_synced: path has file name")
-        .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
+    let tmp_name = temp_prefix();
     let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
     tmp.as_file_mut().write_all(bytes)?;
     tmp.as_file_mut().sync_all()?;
@@ -73,13 +79,7 @@ pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8], make_parents: bool) 
     if make_parents {
         fs::create_dir_all(parent)?;
     }
-    let file_name = final_path
-        .file_name()
-        .expect("atomic::write_atomic: path has file name")
-        .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
+    let tmp_name = temp_prefix();
 
     let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
     tmp.as_file_mut().write_all(bytes)?;
@@ -115,13 +115,7 @@ pub(crate) fn write_create_new(
     // never a half-written `final_path` that later readers would see as
     // a corrupt ref. Writing straight into `final_path` with `O_EXCL`
     // (the previous approach) poisons the slot on partial-write failure.
-    let file_name = final_path
-        .file_name()
-        .expect("atomic::write_create_new: path has file name")
-        .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
+    let tmp_name = temp_prefix();
 
     let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
     tmp.as_file_mut().write_all(bytes)?;
@@ -198,5 +192,22 @@ pub(crate) mod testing {
     #[must_use]
     pub(crate) fn dir_sync_calls() -> u64 {
         DIR_SYNC_CALLS.with(Cell::get)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temp_prefixes_are_short_hidden_and_unique() {
+        let (a, b) = (temp_prefix(), temp_prefix());
+        assert_ne!(a, b);
+        for name in [&a, &b] {
+            let rest = name.strip_prefix(".kit.tmp.").expect("fixed hidden prefix");
+            let (pid, seq) = rest.split_once('.').expect("pid and sequence");
+            assert_eq!(pid, process::id().to_string());
+            assert!(seq.bytes().all(|c| c.is_ascii_digit()) && !seq.is_empty());
+        }
     }
 }
