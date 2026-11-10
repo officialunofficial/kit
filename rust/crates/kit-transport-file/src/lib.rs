@@ -1329,11 +1329,11 @@ impl Transport for FileTransport {
     /// Lock-free readers are not excluded: between the two renames they
     /// see the new packmap with the old head, and a crash there leaves
     /// that state on disk. That state is consistent only when the new
-    /// packmap also reconstructs the old head's closure: an append always
-    /// does, a re-baseline does only for a fast-forward. So
+    /// packmap also reconstructs the old head's closure: an append and a
+    /// re-baseline always do, a reset does only for a fast-forward. So
     /// [`Transport::supports_atomic_advance`] stays `false`, and the
     /// transport offers [`Transport::supports_serialized_advance`]
-    /// instead: a client asks it for a re-baseline only of a push that is
+    /// instead: a client asks it for a reset only of a push that is
     /// a verified fast-forward of the head it conditions on.
     fn advance_refs(
         &self,

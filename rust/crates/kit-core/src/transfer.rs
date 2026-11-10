@@ -64,11 +64,12 @@ const PACKLIST_HEADER_LEN: usize = 4 + 1;
 /// Chaining keeps each push O(1) on the wire (read a 32-byte pointer, write
 /// a ~64-byte node) instead of re-uploading the whole history's list.
 ///
-/// A node's `prev` is reset to `None` (rather than linked to the prior head)
-/// when a push re-baselines — proactively bounding chain depth, or
-/// reactively escaping a broken chain. Either way the packs the superseded
-/// chain referenced become unreachable from the new head node: they are not
-/// deleted here (this module only ever writes new nodes/packs, never
+/// A node's `prev` is `None` (rather than linked to the prior head) when a
+/// push re-baselines a deep chain or resets a broken one. A re-baseline
+/// lists every pack of the chain it replaces, so only the old nodes become
+/// unreachable. A reset lists only its own packs, so the packs the
+/// superseded chain referenced become unreachable from the new head node
+/// too. Neither is deleted here (this module only ever writes new nodes/packs, never
 /// deletes), so they linger as orphaned storage on the remote until a
 /// server-side sweep reclaims them. A stale
 /// pack lingering harmlessly is safe; nothing on the fetch side ever
@@ -77,7 +78,8 @@ const PACKLIST_HEADER_LEN: usize = 4 + 1;
 pub struct PackListNode {
     /// Previous node's key, or `None` for the first node of a branch.
     pub prev: Option<Hash>,
-    /// Pack keys added by this node, in apply order.
+    /// Pack keys this node lists, in apply order: the packs its push added,
+    /// after every pack of the chain it replaced when it re-baselines one.
     pub packs: Vec<Hash>,
 }
 
@@ -490,17 +492,9 @@ pub struct PackPlan {
     /// a full-closure push (no usable `old_tip`), so the pack reconstructs
     /// the ref's whole closure on its own. The push path normally **appends**
     /// this pack to the branch's packlist chain; it uses `self_contained`
-    /// to decide whether a push may **reset** to a fresh chain, in two
-    /// cases:
-    ///
-    /// * Reactively, when the prior chain is unreadable — a self-contained
-    ///   pack is the one kind that can safely escape a broken chain.
-    /// * Proactively: when a *healthy* chain has simply grown past
-    ///   the re-baseline depth threshold, the push side calls [`plan_pack`]
-    ///   with `old_tip: None` specifically to force `self_contained: true`,
-    ///   then resets the chain to bound its depth. This reuses the atomic
-    ///   head+packmap advance the reactive reset already depends on
-    ///   — no separate mechanism was needed once that landed.
+    /// to decide whether a push may **reset** to a fresh chain when the
+    /// prior chain is unreadable. A self-contained pack is the one kind
+    /// that can safely escape a broken chain.
     pub self_contained: bool,
 }
 

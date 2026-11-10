@@ -8,83 +8,16 @@ use kit_core::{
     transfer::packmap::{ChainState, PlanError, plan_advance},
 };
 pub(super) const PACKMAP_CAS_ATTEMPTS: u32 = 8;
-/// Walk a branch's packlist chain from `head_key` and return the flat
-/// **oldest-first** list of pack keys it references. See
-/// [`crate::packmap::walk_pack_chain`] for the walk / integrity-check
-/// semantics.
-pub(crate) fn resolve_pack_chain(
-    tx: &PushContext<'_>,
-    branch: &str,
-    head_key: Hash,
-) -> Result<Vec<Hash>, PushError> {
-    // Defined in terms of `probe_chain` so the flattened pack list is
-    // identical BY CONSTRUCTION to `probe_chain(..).packs` (the equivalence
-    // the `probe_chain_*_matches_resolve_pack_chain` test asserts) — the two
-    // can't drift. `probe_chain` can't delegate the other way: it also needs
-    // the node count for `depth`.
-    Ok(probe_chain(tx, branch, head_key)?.packs)
-}
-
-/// A branch's packmap chain, walked exactly once, paired with the packmap
-/// value it was walked from.
-///
-/// Produced by [`probe_chain`] (the push-side pre-plan re-baseline probe in
-/// `push_branch_once`) and consumed by [`advance_packmap`]'s first CAS
-/// attempt, so a healthy chain is walked once per push, not twice.
-/// `advance_packmap` only reuses this when the packmap's live value still
-/// equals `head`; a mismatch (the packmap moved between the probe and the
-/// CAS attempt, or a prior CAS attempt already lost the race) falls back to
-/// a fresh [`resolve_pack_chain`] call.
-#[derive(Debug)]
-pub(crate) struct ResolvedChain {
-    /// The packmap value this chain was walked from.
-    pub(crate) head: Hash,
-    /// Chain depth (node count) at `head`.
-    pub(crate) depth: usize,
-    /// Flattened oldest-first pack keys — identical to what
-    /// [`resolve_pack_chain`] would return for `head`.
-    pub(crate) packs: Vec<Hash>,
-}
-
-/// Walk a branch's packlist chain from `head_key` ONCE, returning both its
-/// depth and its flattened oldest-first pack keys as a single
-/// [`ResolvedChain`]. `push_branch_once`'s pre-plan re-baseline probe calls
-/// it, and [`resolve_pack_chain`] is built on it; see [`ResolvedChain`] for
-/// why threading the probe's result into [`advance_packmap`] matters.
+/// Walk a branch's packlist chain from `head_key` once. Return its depth in
+/// nodes and its pack keys, oldest first. See
+/// [`crate::packmap::walk_pack_chain`] for the walk and its integrity checks.
 pub(crate) fn probe_chain(
     tx: &PushContext<'_>,
     branch: &str,
     head_key: Hash,
-) -> Result<ResolvedChain, PushError> {
+) -> Result<(usize, Vec<Hash>), PushError> {
     let nodes = walk_pack_chain(tx.source, tx.observer, branch, head_key)?;
-    let depth = nodes.len();
-    let packs = flatten_oldest_first(nodes);
-    Ok(ResolvedChain {
-        head: head_key,
-        depth,
-        packs,
-    })
-}
-
-/// The push-side action, frozen before pack construction and CAS retries.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ChainAction {
-    /// Validate the prior chain (if any) and append onto it. If the prior
-    /// chain is broken, a self-contained pack (`self_contained == true`)
-    /// resets to escape it; otherwise the push blocks
-    /// ([`SyncError::PackChainInvalid`]).
-    Append {
-        /// Whether the pack being chained on reconstructs the whole
-        /// closure with no external base — the precondition for the
-        /// broken-chain escape-hatch reset described above.
-        self_contained: bool,
-    },
-    /// Reset to a full-closure node. Requires an atomic advance and a
-    /// conditioned head lease, or a serialized advance and a lease on an
-    /// ancestor of the tip. Existing fetchers download the full closure
-    /// again, and old pack digests remain in their applied-pack records
-    /// until pruned.
-    ResetSelfContained,
+    Ok((nodes.len(), flatten_oldest_first(nodes)))
 }
 
 /// Advertise new packs in apply order and then move the branch head.
@@ -94,26 +27,27 @@ pub(crate) enum ChainAction {
 /// A transactional transport commits both refs together; the ordered default
 /// commits packmap first, so the head never precedes its reconstructing packs.
 ///
-/// Append validates the entire prior chain. A broken chain permits a reset only
-/// for self-contained packs; deltas need its bases and fail with the original
-/// error. Transient failures propagate. Proactive resets skip validation and
-/// require an atomic advance plus a conditioned head lease, or a serialized
-/// advance plus a lease on an ancestor of the tip, because a reset is not a
-/// superset of the old chain. The caller chooses rollover before pack planning
-/// and freezes that choice across retries; concurrent appends can temporarily
-/// exceed the depth threshold until the next push resets it.
+/// Every attempt validates the entire prior chain. A broken chain permits a
+/// reset only for self-contained packs; deltas need its bases and fail with the
+/// original error. Transient failures propagate.
 ///
-/// `resolved` reuses the pre-plan walk only while its head matches the live ref.
-/// A stale probe or lost CAS race requires a fresh walk. An idempotent retry only
-/// writes the head. Force pushes on an atomic or serialized advance use the
-/// separate guarded driver, including this idempotent case. Lost-response conflicts are disambiguated
-/// by reading the head.
+/// A chain that the new node would make deeper than `rollover_threshold` rolls
+/// over: one node with no predecessor lists every pack of the chain and then
+/// the new packs. The node advertises a superset of the chain it replaces, so
+/// it is as safe as an append on every transport and under every head
+/// condition. No pack is uploaded again, and a fetcher that holds the old
+/// packs downloads only the new ones. Each attempt decides again from the
+/// chain it read. A threshold of zero never rolls over.
+///
+/// An idempotent retry only writes the head. Force pushes on an atomic or
+/// serialized advance use the separate guarded driver, including this
+/// idempotent case. Lost-response conflicts are disambiguated by reading the head.
 pub(crate) fn advance_packmap(
     tx: &PushContext<'_>,
     branch: &str,
     pack_keys: &[Hash],
-    action: ChainAction,
-    resolved: Option<ResolvedChain>,
+    self_contained: bool,
+    rollover_threshold: usize,
     head_condition: refs::RefWriteCondition,
     tip: Hash,
 ) -> Result<(), PushError> {
@@ -124,56 +58,24 @@ pub(crate) fn advance_packmap(
     );
     let packmap_name = packmap_ref(branch);
     let head_name = format!("refs/heads/{branch}");
-    // A cached walk is consumed once; retries resolve the live chain again.
-    // The caller's append/reset decision stays frozen across attempts.
-    let mut cached = resolved;
     for _ in 0..PACKMAP_CAS_ATTEMPTS {
         if tx.observer.cancelled() {
             return Err(PushError::Sync(SyncError::Interrupted));
         }
         let prior = tx.read_ref(&packmap_name)?;
-        // Decide the new node's `prev`. A re-baseline always resets
-        // (skipping prior-chain validation); otherwise validate the WHOLE
-        // prior chain before deciding to append vs. reset.
-        let state = match action {
-            ChainAction::ResetSelfContained => {
-                // A reset can discard old closure: both conditioned refs must
-                // commit atomically. Keep these guards for direct callers.
-                debug_assert!(
-                    tx.supports_atomic_advance() || tx.supports_serialized_advance(),
-                    "re-baseline reset requires an atomic or serialized advance_refs"
-                );
-                debug_assert!(
-                    !matches!(head_condition, refs::RefWriteCondition::Any),
-                    "re-baseline reset must not run with an `Any` head condition — the \
-                     ordered advance_refs fallback would strand the head (kit)"
-                );
-                ChainState::Reset { prior }
-            }
-            ChainAction::Append { self_contained } => match prior {
-                None => ChainState::Missing,
-                Some(p) => {
-                    // Reuse only a walk matching the ref read by this attempt.
-                    let packs = match cached.take() {
-                        Some(c) if c.head == p => Ok(c.packs),
-                        _ => resolve_pack_chain(tx, branch, p),
-                    };
-                    match packs {
-                        Ok(packs) => ChainState::Append {
-                            head: p,
-                            packs: packs.into_iter().collect(),
-                        },
-                        // Broken chain: a self-contained pack can reset to escape it;
-                        // a delta push must block (its bases live in the broken tail).
-                        // Transient transport errors propagate (don't reset on a blip).
-                        Err(PushError::Sync(SyncError::PackChainInvalid { .. }))
-                            if self_contained =>
-                        {
-                            ChainState::Reset { prior }
-                        }
-                        Err(e) => return Err(e),
-                    }
+        let state = match prior {
+            None => ChainState::Missing,
+            Some(head) => match probe_chain(tx, branch, head) {
+                Ok((depth, packs)) => {
+                    ChainState::validated(head, depth, packs, pack_keys.len(), rollover_threshold)
                 }
+                // Broken chain: a self-contained pack can reset to escape it;
+                // a delta push must block (its bases live in the broken tail).
+                // Transient transport errors propagate (don't reset on a blip).
+                Err(PushError::Sync(SyncError::PackChainInvalid { .. })) if self_contained => {
+                    ChainState::Reset { prior }
+                }
+                Err(e) => return Err(e),
             },
         };
         let node = plan_advance(state, pack_keys, None).map_err(|error| match error {

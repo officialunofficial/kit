@@ -1779,7 +1779,7 @@ fn cli_https_latency_comparison() {
 const PACKMAP: &str = "refs/kit/packmap/main";
 
 /// Runs a competing push, once, just before the wrapped transport writes
-/// refs. The competing push resets the pack chain under the force push.
+/// refs. The competing push replaces the pack chain under the force push.
 struct ResetBeforeAdvance<'a> {
     inner: &'a dyn Transport,
     competing: &'a dyn Transport,
@@ -1910,7 +1910,7 @@ fn signed_transport(url: &str) -> Box<dyn Transport> {
     )
 }
 
-/// A force push that loses a race with a pack chain reset replans and
+/// A force push that loses a race with a pack chain re-baseline replans and
 /// publishes. The head-only case resets the branch to a past commit. The
 /// appending case adds a commit on top of it.
 fn run_rebaseline_race(appending: bool) {
@@ -1985,7 +1985,7 @@ fn run_rebaseline_race(appending: bool) {
     assert_eq!(
         advances(&calls) - before,
         3,
-        "reset, rejected stale force, replanned force"
+        "re-baseline, rejected stale force, replanned force"
     );
     assert!(
         calls

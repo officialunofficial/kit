@@ -216,16 +216,16 @@ fn run(args: &Args) -> Result<(), String> {
                     e.push(run.cold.packs_downloaded as f64);
                     f.push(run.cold.requests.total() as f64);
                     g.push(run.chain_nodes as f64);
-                    let (append, reset) = (run.cost(false), run.cost(true));
+                    let (append, rebaseline) = (run.cost(false), run.cost(true));
                     let values = [
                         append.mean_bytes,
                         ms(append.median),
                         ms(append.max),
-                        reset.pushes as f64,
-                        reset.mean_bytes,
-                        reset.max_bytes as f64,
-                        ms(reset.median),
-                        ms(reset.max),
+                        rebaseline.pushes as f64,
+                        rebaseline.mean_bytes,
+                        rebaseline.max_bytes as f64,
+                        ms(rebaseline.median),
+                        ms(rebaseline.max),
                     ];
                     for (column, value) in cost.iter_mut().zip(values) {
                         column.push(value);
@@ -277,8 +277,8 @@ fn run(args: &Args) -> Result<(), String> {
                 &[("ms", &a), ("requests", &b)],
             ),
             // The pushes after the clone, split: the ones that append to
-            // the chain, and the ones that reset it and upload the full
-            // closure of their tip.
+            // the chain, and the ones that re-baseline it and upload a
+            // node that lists every pack of the chain.
             _ => report(
                 row,
                 args.target,
@@ -295,11 +295,11 @@ fn run(args: &Args) -> Result<(), String> {
                     ("push_bytes", &cost[0]),
                     ("push_ms", &cost[1]),
                     ("push_max_ms", &cost[2]),
-                    ("resets", &cost[3]),
-                    ("reset_bytes", &cost[4]),
-                    ("reset_max_bytes", &cost[5]),
-                    ("reset_ms", &cost[6]),
-                    ("reset_max_ms", &cost[7]),
+                    ("rebaselines", &cost[3]),
+                    ("rebaseline_bytes", &cost[4]),
+                    ("rebaseline_max_bytes", &cost[5]),
+                    ("rebaseline_ms", &cost[6]),
+                    ("rebaseline_max_ms", &cost[7]),
                 ],
             ),
         }

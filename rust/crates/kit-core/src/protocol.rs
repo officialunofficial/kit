@@ -789,7 +789,7 @@ pub trait Transport: Send + Sync {
     /// (durable before the head moves) then the head. A crash in between
     /// leaves the head at its prior value and the packmap a superset — still
     /// consistent for fetch while concurrent writes also preserve the chain.
-    /// This ordering cannot protect against a concurrent re-baseline. A
+    /// This ordering cannot protect against a concurrent reset. A
     /// transport that offers an atomic or serialized advance provides its
     /// own two-ref advance, and force pushes against it use the guarded
     /// force driver.
@@ -871,9 +871,11 @@ pub trait Transport: Send + Sync {
     /// per its doc comment, a crash or lost
     /// head-CAS race between the two writes leaves the packmap a strict
     /// superset of what the (unmoved) head needs — still reconstructable.
-    /// That safety argument does NOT extend to a packmap **reset** (a fresh
-    /// node with `prev = None`, produced by the pack-chain re-baseline):
-    /// a reset is not a superset of the prior chain, so a
+    /// A re-baseline, the node with `prev = None` that lists every pack of
+    /// the chain it replaces, is a superset too. That safety argument does
+    /// NOT extend to a packmap **reset**, a node with `prev = None` that
+    /// drops packs of the chain it replaces: a reset is not a superset of
+    /// the prior chain, so a
     /// packmap write that commits while the paired head write loses its CAS
     /// would strand the (still-unmoved) head pointing at a commit whose
     /// closure the reset packmap can no longer reconstruct.
@@ -881,8 +883,8 @@ pub trait Transport: Send + Sync {
     /// Callers MUST treat `false` (the default) as "never request a
     /// packmap reset against this transport", unless
     /// [`Self::supports_serialized_advance`] is `true` and the push is a
-    /// verified fast-forward of the head it conditions on — see the
-    /// re-baseline gate of the push driver. Override to
+    /// verified fast-forward of the head it conditions on
+    /// (SPEC-TRANSPORT §7.2). Override to
     /// `true` ONLY when [`Self::advance_refs`] is overridden with a
     /// genuinely transactional implementation (e.g. the HTTP transport's
     /// single-request `/refs/advance` endpoint). If that endpoint

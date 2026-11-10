@@ -333,9 +333,17 @@ fn compressible_push_is_not_refused_by_an_uncompressed_estimate() {
     assert!(tx.uploads.load(Ordering::SeqCst) <= 6);
 }
 
+/// A re-baseline lists the packs the remote holds and uploads only the
+/// packs of its own push, so the ticket budget of an advance does not limit
+/// the size of the chain it replaces.
 #[test]
-fn rebaseline_over_six_packs_keeps_the_append_plan() {
-    for (threshold, should_append) in [(0, true), (u64::MAX, false)] {
+fn a_re_baseline_over_many_packs_uploads_only_its_own_pack() {
+    let node_at = |tx: &TicketTransport| {
+        let newest = tx.read_ref("refs/kit/packmap/main").unwrap().unwrap();
+        kit_core::transfer::decode_packlist(&tx.download_blob(&PackKey::new(newest)).unwrap())
+            .unwrap()
+    };
+    for threshold in [0, u64::MAX] {
         let repo = Repo::new();
         for i in 0_u64..16 {
             repo.write(&format!("f{i}.bin"), &filler(i * 2 + 1, 2048));
@@ -356,6 +364,8 @@ fn rebaseline_over_six_packs_keeps_the_append_plan() {
             4096,
         )
         .unwrap();
+        let held = node_at(&tx).packs;
+        assert!(held.len() > 6, "{}", held.len());
 
         tx.ticket_threshold_bytes = Some(threshold);
         repo.commit_file("next", b"small update", "next");
@@ -371,11 +381,10 @@ fn rebaseline_over_six_packs_keeps_the_append_plan() {
         )
         .unwrap();
         assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip(&repo)));
-        let newest = tx.read_ref("refs/kit/packmap/main").unwrap().unwrap();
-        let node =
-            kit_core::transfer::decode_packlist(&tx.download_blob(&PackKey::new(newest)).unwrap())
-                .unwrap();
-        assert_eq!(node.prev.is_some(), should_append);
+        let node = node_at(&tx);
+        assert_eq!(node.prev, None);
+        assert_eq!(node.packs.len(), held.len() + 1);
+        assert_eq!(node.packs[..held.len()], held);
     }
 }
 

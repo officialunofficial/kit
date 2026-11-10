@@ -846,17 +846,20 @@ and CLI `tests/remote_dispatch_connect.rs` header capture.
 
 **Always:** in every state a reader without locks, or a crash, can expose, a
 branch head that resolves to `T` has a packmap chain that reconstructs the
-closure of `T`. The push driver resets the chain only on an atomic advance
-with a conditioned head, or on a serialized advance (the file transport) for
-a push whose head condition is `Match(h)` with `h` an ancestor of the new tip
-in the local store. A conditioned push plans only against a head its
+closure of `T`. The push driver replaces a deep chain only with a node that
+lists every pack of that chain. A client resets a chain it can read only on
+an atomic advance with a conditioned head, or on a serialized advance (the
+file transport) for a push whose head condition is `Match(h)` with `h` an
+ancestor of the new tip in the local store. A conditioned push plans only
+against a head its
 condition holds for, and is refused when the head it reads differs. Force
 pushes never reset, and on a serialized or atomic advance they re-plan when
 a concurrent reset dropped the chain node their plan depended on.
 
 **Because:** a serialized advance writes the packmap before the head, so the
 new packmap and the old head are visible together, and stay together after a
-crash. A reset holds only the new tip's closure: it contains the old head's
+crash. A node that lists every pack of the chain it replaces rebuilds every
+head that chain rebuilt. A reset holds only the new tip's closure: it contains the old head's
 closure exactly when the push fast-forwards that head. An ordered force
 append after a reset would publish packs whose bases the reset dropped. A
 lease that differs from the planned head can hold again after the head moves
@@ -865,9 +868,9 @@ away and back while a reset drops what the plan left out.
 **If violated:** every fetch and clone of the branch fails with a missing
 object until another push repairs the chain.
 
-**Enforced by:** `kit-sync` `push::rebaseline_tests` (reset gate per advance
-kind, a crash between the two writes, a force push racing a reset, a lease
-that differs from the head the push reads),
+**Enforced by:** `kit-sync` `push::rebaseline_tests` (the re-baseline per
+advance kind, a crash between the two writes, a force push racing a reset
+and a re-baseline, a lease that differs from the head the push reads),
 `kit-transport-file` `push_tests` (the advance's crash hook under the push
 driver), CLI `tests/pack_rebaseline.rs`, and the `advance3` models in
 `formal/quint/refs/advance.qnt` (TLC, with mutants `advance3_noAncestry`,

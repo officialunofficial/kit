@@ -1,5 +1,4 @@
 //! Native repository push: bounded packs and conditioned ref publication.
-use crate::packmap::packmap_ref;
 use crate::{Observer, RemoteSource, SourceError, SyncError, SyncEvent};
 use kit_core::hash::{HASH_LEN, Hash};
 use kit_core::pack::{self, PackWriter, PreparedDelta, PreparedRaw};
@@ -14,7 +13,7 @@ mod force;
 mod packmap;
 mod split;
 pub use error::PushError;
-use packmap::{ChainAction, advance_packmap, commit_head, probe_chain};
+use packmap::{advance_packmap, commit_head};
 pub use split::{MAX_CHAIN_COMMITS, MAX_SPLIT_STEPS, PushControl, StepAuthority, plan_push_steps};
 
 struct PreparedPlan {
@@ -78,9 +77,8 @@ pub struct PushOptions<'a> {
     pub remote_name: &'a str,
     /// Object-store durability schedule.
     pub sync_policy: kit_core::store::SyncPolicy,
-    /// Pushes reset healthy chains past this depth on an atomic advance, and
-    /// on a serialized one when they fast-forward the leased head; zero
-    /// disables it.
+    /// Pushes re-baseline a chain past this depth into one node that lists
+    /// every pack of the chain; zero disables it.
     pub rebaseline_threshold: usize,
     /// Per-pack payload bound, further limited by the remote and format.
     pub pack_payload_cap: u64,
@@ -524,36 +522,6 @@ fn lease_head(
     }
 }
 
-/// Whether a push of `tip` conditioned on `condition` may reset the chain.
-///
-/// A reset drops the prior chain, so it must commit with the head. An
-/// atomic advance does that for any conditioned head: a conflict changes
-/// nothing, and no reader sees one ref without the other. A serialized
-/// advance writes the packmap before the head, so a reader between the two
-/// writes, or a crash between them, sees the reset with the head it
-/// replaced. That head is rebuildable only when it is an ancestor of
-/// `tip`, whose full closure the reset holds, so a serialized advance
-/// resets only for a `Match` head that the local store shows is an
-/// ancestor of `tip`. An `Any` head is never reset: it conditions on no
-/// head at all.
-fn may_rebaseline(
-    tx: &PushContext<'_>,
-    store: &ObjectStore,
-    condition: refs::RefWriteCondition,
-    tip: Hash,
-) -> Result<bool, PushError> {
-    if matches!(condition, refs::RefWriteCondition::Any) {
-        return Ok(false);
-    }
-    if tx.supports_atomic_advance() {
-        return Ok(true);
-    }
-    let refs::RefWriteCondition::Match(head) = condition else {
-        return Ok(false);
-    };
-    Ok(tx.supports_serialized_advance() && kit_core::ops::merge::is_ancestor(store, head, tip)?)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn push_branch_once(
     tx: &PushContext<'_>,
@@ -576,7 +544,7 @@ fn push_branch_once(
     // optimization; the head CAS below remains authoritative.
     // A caller that already planned against the remote's current tip (the
     // split decision does) passes its plan, so it is diffed once.
-    let Some(mut plan) = plan_branch(
+    let Some(plan) = plan_branch(
         tx,
         store,
         branch,
@@ -605,51 +573,6 @@ fn push_branch_once(
         return Err(PushError::Sync(SyncError::Interrupted));
     }
 
-    // Re-baseline decision, made only now that we know there IS
-    // something to send: walk the current chain exactly once and decide
-    // whether this push should reset the chain to a single self-contained
-    // node instead of appending. When NOT re-baselining, the walk is cached
-    // (`resolved_chain`) so `advance_packmap`'s append path can reuse it
-    // instead of re-walking.
-    //
-    // A reset is not a superset of the prior chain, so it may only land
-    // where no reader or crash can pair it with a head it cannot rebuild
-    // (`may_rebaseline`).
-    let mut rebaseline = false;
-    let mut resolved_chain = None;
-    if !force_self_contained
-        && rebaseline_threshold > 0
-        && let Some(pm) = tx.read_ref(&packmap_ref(branch))?
-    {
-        match probe_chain(tx, branch, pm) {
-            Ok(chain)
-                if chain.depth + 1 > rebaseline_threshold
-                    && may_rebaseline(tx, store, condition, tip)? =>
-            {
-                rebaseline = true;
-            }
-            Ok(chain) => resolved_chain = Some(chain),
-            Err(PushError::Sync(SyncError::PackChainInvalid { .. })) => {}
-            Err(e) => return Err(e),
-        }
-    }
-
-    if rebaseline {
-        // Force a full-closure plan: no external bases, so the pack is
-        // self-contained and safe to reset the chain onto.
-        let full = transfer::plan_pack_with(store, tip, None, encode_delta_candidates_batch)?;
-        let full_cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
-        if estimated_ticketed_count(
-            &estimate_pack_sizes(store, &full, full_cap, limits.max_pack_bytes)?,
-            limits,
-        ) > split::data_pack_budget(limits)
-        {
-            rebaseline = false;
-        } else {
-            plan = full;
-        }
-    }
-
     // A retry re-planned the push: make sure the new plan still fits before
     // uploading any of it, so the failure leaves no half-uploaded advance.
     if let Some(reason) = retry
@@ -676,8 +599,6 @@ fn push_branch_once(
     // No pre-flight PushTooLarge: the estimate uses uncompressed sizes, so it
     // would refuse pushes that compress into six packs. The seal-time gate is
     // exact and still stops before the seventh ticketed pack's BeginUpload.
-    // (The re-baseline check above may use the conservative estimate: a false
-    // "too many" only keeps the append plan.)
 
     // Build the plan into one or more payload-bounded packs (splitting
     // when the plan exceeds `pack_payload_cap`) and upload
@@ -705,28 +626,18 @@ fn push_branch_once(
         tx.observer,
     )?;
 
-    // Chain the pack(s) onto the packmap AND move the head together
-    // A transactional transport applies both atomically, the
-    // default does packmap-then-head. Either way the head never lands
-    // past a packmap that can't reconstruct it. `Append`'s
-    // `self_contained` lets a full-closure push reset a broken chain
-    // (unconditionally, on any transport); `ResetSelfContained`
-    // proactively resets a healthy chain that has grown too deep, and
-    // is only ever chosen above when `may_rebaseline` allows it: an
-    // atomic advance with a CAS-conditioned head, or a serialized one
-    // whose leased head the tip fast-forwards. A failed advance leaves
-    // the head untouched.
-    let action = if rebaseline {
-        ChainAction::ResetSelfContained
-    } else {
-        ChainAction::Append { self_contained }
-    };
+    // Chain the packs onto the packmap and move the head together. A
+    // transactional transport applies both atomically; the default writes
+    // the packmap, then the head. Either way the head never lands past a
+    // packmap that cannot reconstruct it. `self_contained` lets a
+    // full-closure push reset a broken chain. A failed advance leaves the
+    // head untouched.
     advance_packmap(
         tx,
         branch,
         &pack_keys,
-        action,
-        resolved_chain,
+        self_contained,
+        rebaseline_threshold,
         condition,
         tip,
     )

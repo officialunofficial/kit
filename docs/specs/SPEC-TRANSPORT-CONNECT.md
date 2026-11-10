@@ -1148,9 +1148,9 @@ lifetime. It reports `true` only when a validated v2 advertisement explicitly
 sets `atomic_advance = true`. Servers that return `unimplemented`, failed
 discovery after the retry ladder, and invalid advertisements retain the
 conservative `false` default. There is no local opt-in. Servers with a
-transactional ref store can therefore enable the existing packmap
-re-baseline gate automatically; the gate still requires advertised atomicity
-before resetting a chain.
+transactional ref store therefore need no client setting. A client still
+requires advertised atomicity before it resets a chain it can read
+(SPEC-TRANSPORT §7.2).
 
 Every `Transport` method `ConnectTransport` implements is driven through
 the same `kit_core::protocol::retrying`/`BackoffIterator` ladder

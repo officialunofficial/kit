@@ -329,9 +329,10 @@ per-branch checkpoint for it and walks each packmap chain again. With one node
 per packmap chain that is one frame plus two per branch, so one session fetches
 at most 4,999 branches; a fetch of more fails closed with the reply above.
 `kit fetch`, `kit pull` and `kit clone` open one session each. A push walks
-the branch's whole packmap chain over its session, and an SSH push never
-resets the packmap chain, so a push's frames grow with the number of
-pushes the branch has had. The cap is not raised: it is what bounds
+the branch's whole packmap chain over its session. A push re-baselines the
+chain (§7.2), so the walk stays within the re-baseline depth while one node
+can list the chain's packs. Past that, a push's frames grow with the number
+of pushes the branch has had. The cap is not raised: it is what bounds
 a client that sends requests without end.
 
 Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
@@ -674,9 +675,26 @@ advance commits:
 
 An atomic advance is also serialized. An append to the packmap chain is a
 superset of the prior chain, so the new packmap with the old head is
-consistent on every transport. A reset (the re-baseline that replaces a
-deep chain with one self-contained node) is not a superset. The push
-driver MUST request a reset only when one of these holds:
+consistent on every transport.
+
+A push re-baselines a chain that its node would make deeper than the
+re-baseline depth. The depth is 64 by default, and a depth of zero never
+re-baselines. The re-baseline is one node with no `prev`. It lists every pack
+of the chain, oldest first, and then each new pack the chain does not list.
+The push uploads no pack again, and a fetcher that holds the chain's packs
+downloads only the new ones. The node is a superset of the chain it
+replaces, so it is consistent on every transport and under every head
+condition, as an append is. Its packmap write is conditioned on the chain
+head the push read, and a push that loses that write reads the chain and
+decides again. A re-baseline lists at most 1,024 packs
+([SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md)). A chain that
+holds more with the new packs keeps appending.
+
+A reset replaces a chain with a node that does not list every pack of that
+chain, so it is not a superset. The reference push driver resets only a
+chain it cannot read, and only with packs that hold the full closure of the
+new head. A client that resets a chain it can read MUST request the reset
+only when one of these holds:
 
 - the advance is atomic and the head condition is `Missing` or `Match`;
 - the advance is serialized, not atomic, and the head condition is
@@ -700,7 +718,8 @@ A force push (`Any`) never requests a reset. On a serialized or an atomic
 advance it uses the guarded force driver: it conditions the packmap write
 on the chain its plan read, and plans again when that chain no longer
 contains the node the plan depended on, so it never appends packs whose
-bases a concurrent reset dropped. On an ordered advance no reset happens
+bases a concurrent reset dropped. A re-baseline replaces that node too, so
+a force push plans again after one. On an ordered advance no reset happens
 except over a broken chain, and a force push appends on the ordered path.
 
 ---
