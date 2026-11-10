@@ -94,8 +94,12 @@ Named remotes (`kit remote add <name> <url>`) store their tracking refs
 under `refs/remotes/<name>/<branch>`. `kit push` uses the local
 remote-tracking ref as its **CAS lease**: a default (current-branch)
 push writes the remote `refs/heads/<branch>` with a `Match(tracked)`
-condition (or `Missing` for a first push), so a remote that has moved
-past the last-seen tip rejects the update as non-fast-forward. On a
+condition (or `Missing` for a first push). The push reads the remote
+head before it plans. When that head fails the lease, the push
+fails as non-fast-forward before it uploads anything, unless the head
+is already the pushed tip: an earlier attempt landed, and the push
+writes nothing (SPEC-TRANSPORT §7.2). A head that moves after that read
+fails the head write's condition. On a
 successful push, kit advances the local `refs/remotes/<remote>/<branch>`
 to the pushed tip. `--force-with-lease` keeps this lease; `--force`
 drops to an unconditional write.
