@@ -77,5 +77,41 @@ fn bench_ignore_ancestors(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_ignore_match, bench_ignore_ancestors);
+/// A list the size of a large real `.gitignore`: mostly literal names, with
+/// suffix, anchored and negated patterns mixed in.
+fn large_patterns() -> String {
+    let mut out = String::new();
+    for i in 0..300 {
+        match i % 10 {
+            0..=5 => out.push_str(&format!("generated_{i}\n")),
+            6 => out.push_str(&format!("*.ext{i}\n")),
+            7 => out.push_str(&format!("/out_{i}/\n")),
+            8 => out.push_str(&format!("cache_{i}/\n")),
+            _ => out.push_str(&format!("!generated_{i}\n")),
+        }
+    }
+    out.push_str("*.log\nnode_modules/\n");
+    out
+}
+
+fn bench_ignore_match_large(c: &mut Criterion) {
+    let list = parse(&large_patterns());
+    let paths = paths();
+    c.bench_function("ignore_match/large_list", |b| {
+        b.iter(|| {
+            let mut hits = 0usize;
+            for p in &paths {
+                hits += usize::from(list.is_ignored(black_box(p), false));
+            }
+            hits
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_ignore_match,
+    bench_ignore_ancestors,
+    bench_ignore_match_large
+);
 criterion_main!(benches);

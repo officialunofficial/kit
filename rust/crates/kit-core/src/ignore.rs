@@ -35,6 +35,7 @@
 //! ignore files (only the root is read), global excludes
 //! (`core.excludesFile`), and escaped trailing spaces.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read as _};
 use std::path::Path;
@@ -176,10 +177,57 @@ impl Pattern {
     }
 }
 
+impl LiteralIndex {
+    /// The answer of a reverse scan of `patterns` for `path`. The
+    /// highest-index literal match comes from the map. The scan then walks
+    /// the other patterns in reverse and stops once it passes that match.
+    fn is_ignored(&self, patterns: &[Pattern], path: &[&str], is_dir: bool) -> bool {
+        let literal = path
+            .last()
+            .and_then(|name| self.literals.get(*name))
+            .and_then(|idx| {
+                idx.iter()
+                    .rev()
+                    .copied()
+                    .find(|&i| is_dir || !patterns[i].dir_only)
+            });
+        for &i in self.scanned.iter().rev() {
+            if literal.is_some_and(|l| i < l) {
+                break;
+            }
+            let p = &patterns[i];
+            if p.dir_only && !is_dir {
+                continue;
+            }
+            if p.matches(path) {
+                return !p.negated;
+            }
+        }
+        literal.is_some_and(|l| !patterns[l].negated)
+    }
+}
+
+/// Literal-basename patterns needed before [`IgnoreList`] indexes them. Below
+/// this, hashing the basename costs more than comparing it to each pattern.
+const MIN_INDEXED_LITERALS: usize = 32;
+
 /// Parsed ignore-list (the merged `.gitignore` + `.kitignore` patterns).
 #[derive(Debug, Default, Clone)]
 pub struct IgnoreList {
     patterns: Vec<Pattern>,
+    /// `None` when the list has too few literal-basename patterns to index.
+    index: Option<LiteralIndex>,
+}
+
+/// Splits the patterns of an [`IgnoreList`] into literal basenames, found by
+/// name, and the rest, found by a scan.
+#[derive(Debug, Default, Clone)]
+struct LiteralIndex {
+    /// Literal-basename patterns by name. Each value holds the indices into
+    /// `patterns`, ascending.
+    literals: HashMap<String, Vec<usize>>,
+    /// Indices into `patterns` of every other pattern, ascending.
+    scanned: Vec<usize>,
 }
 
 impl IgnoreList {
@@ -189,7 +237,28 @@ impl IgnoreList {
     pub const fn new() -> Self {
         Self {
             patterns: Vec::new(),
+            index: None,
         }
+    }
+
+    /// Build a list and index its literal-basename patterns.
+    fn from_patterns(patterns: Vec<Pattern>) -> Self {
+        let count = patterns
+            .iter()
+            .filter(|p| matches!(p.basename_kind.as_deref(), Some(BasenameKind::Literal(_))))
+            .count();
+        let index = (count >= MIN_INDEXED_LITERALS).then(|| {
+            let mut index = LiteralIndex::default();
+            for (i, p) in patterns.iter().enumerate() {
+                if let Some(BasenameKind::Literal(name)) = p.basename_kind.as_deref() {
+                    index.literals.entry(name.clone()).or_default().push(i);
+                } else {
+                    index.scanned.push(i);
+                }
+            }
+            index
+        });
+        Self { patterns, index }
     }
 
     /// Borrow the parsed patterns.
@@ -218,11 +287,11 @@ impl IgnoreList {
             if path.is_empty() {
                 return false;
             }
+            if let Some(index) = &self.index {
+                return index.is_ignored(&self.patterns, path, is_dir);
+            }
             // Last match wins, so walk in reverse and return the first
-            // (highest-index) match — equivalent to scanning forward and
-            // keeping the last, but skips every earlier pattern once a
-            // deciding match is found instead of always paying for the full
-            // list.
+            // match.
             for p in self.patterns.iter().rev() {
                 if p.dir_only && !is_dir {
                     continue;
@@ -303,7 +372,7 @@ pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
             return Err(IgnoreError::TooManyPatterns);
         }
     }
-    Ok(IgnoreList { patterns })
+    Ok(IgnoreList::from_patterns(patterns))
 }
 
 /// Read and parse a single ignore file, or `None` if it is absent.
@@ -348,7 +417,7 @@ pub fn parse(content: &str) -> IgnoreList {
             patterns.push(p);
         }
     }
-    IgnoreList { patterns }
+    IgnoreList::from_patterns(patterns)
 }
 
 /// Parse untrusted ignore-file content, refusing what [`parse`] would accept
@@ -373,7 +442,7 @@ pub fn parse_checked(content: &str) -> Result<IgnoreList, IgnoreError> {
             patterns.push(p);
         }
     }
-    Ok(IgnoreList { patterns })
+    Ok(IgnoreList::from_patterns(patterns))
 }
 
 /// Parse one cleaned line into a [`Pattern`], or `None` for blanks/comments.
@@ -605,6 +674,64 @@ pub fn glob_match(pattern: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
+
+    /// Reference matcher: scan every pattern, last match wins.
+    fn linear_is_ignored(list: &IgnoreList, rel: &str, is_dir: bool) -> bool {
+        let trimmed = rel.trim_matches('/');
+        let segs: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+        if segs.is_empty() {
+            return false;
+        }
+        let mut ignored = false;
+        for p in list.patterns() {
+            if p.dir_only && !is_dir {
+                continue;
+            }
+            if p.matches(&segs) {
+                ignored = !p.negated;
+            }
+        }
+        ignored
+    }
+
+    #[test]
+    fn literal_index_matches_a_linear_scan() {
+        let mut text = String::new();
+        for i in 0..MIN_INDEXED_LITERALS {
+            let _ = writeln!(text, "pad{i}");
+        }
+        text.push_str(
+            "foo\n!foo\nfoo\nbar/\n*.o\n!bar\nbaz\n/anchored\n!baz/\nbaz/\nqux\n!*.x\nqux.x\n*x\n",
+        );
+        let list = parse(&text);
+        assert!(list.index.is_some());
+        assert!(parse("foo\n").index.is_none());
+        for path in [
+            "foo",
+            "a/foo",
+            "bar",
+            "a/bar",
+            "baz",
+            "x/baz",
+            "qux",
+            "qux.x",
+            "m.o",
+            "anchored",
+            "d/anchored",
+            "other",
+            "a/b/foo/",
+            "q.x",
+        ] {
+            for is_dir in [false, true] {
+                assert_eq!(
+                    list.is_ignored(path, is_dir),
+                    linear_is_ignored(&list, path, is_dir),
+                    "{path} dir={is_dir}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn deep_paths_match_at_and_beyond_the_stack_buffer() {
