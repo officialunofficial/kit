@@ -33,7 +33,6 @@ use std::path::PathBuf;
 
 use crate::hash::{self, HEX_LEN, Hash, ZERO};
 use crate::layout::RepoLayout;
-use crate::object::Object;
 use crate::store::ObjectStore;
 
 /// Single-file state path under `<kit_dir>`.
@@ -41,8 +40,13 @@ pub const BISECT_FILE: &str = "bisect";
 
 const MAX_BISECT_FILE_BYTES: u64 = 1024 * 1024;
 
-/// Maximum commits visited by the inlined ancestor walk.
-const MAX_ANCESTORS: usize = 10_000;
+/// The limit bisect reports when the ancestors of a good commit exceed
+/// [`crate::ops::graph::MAX_ANCESTORS`].
+const GOOD_ANCESTOR_LIMIT: &str = "10,000-commit ancestor walk of a good commit";
+
+/// The limit bisect reports when the candidates of a range exceed
+/// [`crate::ops::graph::MAX_ANCESTORS`].
+const CANDIDATE_LIMIT: &str = "10,000-commit candidate walk of a bisect range";
 
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +61,22 @@ pub enum BisectError {
     Object(#[from] crate::object::KitError),
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
+}
+
+/// A commit of the range or of the history of a good commit that cannot be
+/// read gives [`BisectError::Store`] with the store error that names it, and
+/// a walk over its cap gives [`BisectError::Store`] with
+/// [`crate::store::StoreError::OperationLimitExceeded`] naming the limit. A
+/// parent that is not a commit gives [`BisectError::Io`] of kind
+/// [`io::ErrorKind::InvalidData`] that carries the
+/// [`crate::ops::graph::AncestorError`] naming it.
+impl From<crate::ops::graph::AncestorError> for BisectError {
+    fn from(err: crate::ops::graph::AncestorError) -> Self {
+        match err.into_store_or_invalid_data() {
+            Ok(store) => Self::Store(store),
+            Err(io) => Self::Io(io),
+        }
+    }
 }
 
 /// Result alias.
@@ -239,17 +259,43 @@ pub fn bisect_file_path(layout: &RepoLayout) -> PathBuf {
 
 /// Walk ancestors of `bad`, stopping at any commit that is `good` or an
 /// ancestor of `good`. Returns the candidate set in BFS order from `bad`.
+/// Every commit of both walks is read: a walk that ended at a commit it
+/// could not read would miss candidates, or offer commits that are known
+/// good.
 ///
 /// # Errors
-/// - [`BisectError::Store`] / [`BisectError::Object`] for store failures.
+/// [`BisectError::Store`] with the store error that names a commit of either
+/// walk that cannot be read, or naming the limit when a good commit has more
+/// ancestors, or the range more candidates, than one walk visits.
+/// [`BisectError::Io`] of kind [`io::ErrorKind::InvalidData`], carrying the
+/// [`crate::ops::graph::AncestorError`] that names it, for a parent that is
+/// not a commit. It never returns part of the range.
 pub fn enumerate_range(
     store: &ObjectStore,
     bad: Hash,
     good_hashes: &[Hash],
 ) -> BisectResult<Vec<Hash>> {
+    enumerate_range_with_cap(store, bad, good_hashes, crate::ops::graph::MAX_ANCESTORS)
+}
+
+/// [`enumerate_range`] with a caller-supplied cap on the ancestors of each
+/// good commit and on the candidates of the range.
+fn enumerate_range_with_cap(
+    store: &ObjectStore,
+    bad: Hash,
+    good_hashes: &[Hash],
+    max_ancestors: usize,
+) -> BisectResult<Vec<Hash>> {
+    // A partial good set would offer commits that are already known good.
     let mut good_set: HashSet<Hash> = HashSet::new();
     for g in good_hashes {
-        collect_ancestor_set(store, *g, &mut good_set);
+        crate::ops::graph::collect_history_with_cap(
+            store,
+            *g,
+            &mut good_set,
+            max_ancestors,
+            GOOD_ANCESTOR_LIMIT,
+        )?;
     }
 
     let mut visited: HashSet<Hash> = HashSet::new();
@@ -265,15 +311,14 @@ pub fn enumerate_range(
         if good_set.contains(&current) {
             continue;
         }
-        candidates.push(current);
-        let Ok(obj) = store.read_object(&current) else {
-            continue;
-        };
-        if let Object::Commit(commit) = obj {
-            for p in commit.parents {
-                queue.push(p);
-            }
+        if candidates.len() >= max_ancestors {
+            return Err(BisectError::Store(
+                crate::store::StoreError::OperationLimitExceeded(CANDIDATE_LIMIT),
+            ));
         }
+        let commit = crate::ops::graph::read_history_commit(store, current)?;
+        candidates.push(current);
+        queue.extend(commit.parents);
     }
     Ok(candidates)
 }
@@ -335,7 +380,8 @@ pub fn pick_midpoint_skip(candidates: &[Hash], skipped: &BTreeSet<Hash>) -> Hash
 /// - Otherwise return [`BisectStep::NeedMore`].
 ///
 /// # Errors
-/// - [`BisectError::Store`] / [`BisectError::Object`] for store failures.
+/// - [`BisectError::Store`] or [`BisectError::Io`] when a commit of the
+///   range cannot be read; see [`enumerate_range`].
 pub fn next_step(store: &ObjectStore, state: &BisectState) -> BisectResult<BisectStep> {
     let Some(bad) = state.bad_hash else {
         return Ok(BisectStep::NeedMore);
@@ -391,34 +437,10 @@ pub fn next_step(store: &ObjectStore, state: &BisectState) -> BisectResult<Bisec
     })
 }
 
-// -- Internal helpers --------------------------------------------------------
-
-fn collect_ancestor_set(store: &ObjectStore, start: Hash, set: &mut HashSet<Hash>) {
-    let mut stack: Vec<Hash> = vec![start];
-    let mut count = 0usize;
-    while let Some(current) = stack.pop() {
-        if count >= MAX_ANCESTORS {
-            break;
-        }
-        if !set.insert(current) {
-            continue;
-        }
-        count += 1;
-        let Ok(obj) = store.read_object(&current) else {
-            continue;
-        };
-        if let Object::Commit(commit) = obj {
-            for p in commit.parents {
-                stack.push(p);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object::{Commit, Identity, Tree, TreeEntry};
+    use crate::object::{Commit, Identity, Object, Tree, TreeEntry};
     use crate::serialize;
     use tempfile::TempDir;
 
@@ -651,6 +673,201 @@ mod tests {
     #[test]
     fn pick_midpoint_empty_returns_zero() {
         assert_eq!(pick_midpoint(&[]), ZERO);
+    }
+
+    #[test]
+    fn a_good_commit_with_ancestors_over_the_cap_fails() {
+        let (_d, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let tree = put_tree(&store, "f.txt", blob);
+        let c1 = put_commit(&store, tree, vec![], 1);
+        let c2 = put_commit(&store, tree, vec![c1], 2);
+        let c3 = put_commit(&store, tree, vec![c2], 3);
+        let c4 = put_commit(&store, tree, vec![c3], 4);
+        let err = enumerate_range_with_cap(&store, c4, &[c3], 2).unwrap_err();
+        assert!(matches!(
+            err,
+            BisectError::Store(crate::store::StoreError::OperationLimitExceeded(
+                GOOD_ANCESTOR_LIMIT
+            ))
+        ));
+        assert_eq!(
+            enumerate_range_with_cap(&store, c4, &[c3], 3).unwrap(),
+            [c4]
+        );
+    }
+
+    #[test]
+    fn a_range_with_candidates_over_the_cap_fails() {
+        let (_d, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let tree = put_tree(&store, "f.txt", blob);
+        let c1 = put_commit(&store, tree, vec![], 1);
+        let c2 = put_commit(&store, tree, vec![c1], 2);
+        let c3 = put_commit(&store, tree, vec![c2], 3);
+        let c4 = put_commit(&store, tree, vec![c3], 4);
+        // Three candidates above c1: c4, c3 and c2.
+        let err = enumerate_range_with_cap(&store, c4, &[c1], 2).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BisectError::Store(crate::store::StoreError::OperationLimitExceeded(
+                    CANDIDATE_LIMIT
+                ))
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains(CANDIDATE_LIMIT), "{err}");
+        assert_eq!(
+            enumerate_range_with_cap(&store, c4, &[c1], 3).unwrap(),
+            [c4, c3, c2]
+        );
+    }
+
+    /// The loose object file of `h`.
+    fn object_path(dir: &TempDir, h: &Hash) -> PathBuf {
+        let hex = hash::to_hex(h);
+        RepoLayout::single(dir.path())
+            .objects_dir()
+            .join(&hex[..2])
+            .join(&hex[2..])
+    }
+
+    /// root - fork - mid - good, and fork - side; bad = merge(side, good).
+    /// Returns the store and [root, fork, mid, good, side, bad].
+    fn range_fixture() -> (TempDir, ObjectStore, [Hash; 6]) {
+        let (dir, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let tree = put_tree(&store, "f.txt", blob);
+        let root = put_commit(&store, tree, vec![], 1);
+        let fork = put_commit(&store, tree, vec![root], 2);
+        let mid = put_commit(&store, tree, vec![fork], 3);
+        let good = put_commit(&store, tree, vec![mid], 4);
+        let side = put_commit(&store, tree, vec![fork], 5);
+        let bad = put_commit(&store, tree, vec![side, good], 6);
+        (dir, store, [root, fork, mid, good, side, bad])
+    }
+
+    /// Assert that the range fails and names `culprit`.
+    fn assert_fails_naming(store: &ObjectStore, bad: Hash, good: Hash, culprit: &Hash) {
+        let err = enumerate_range(store, bad, &[good]).unwrap_err();
+        let named = match &err {
+            BisectError::Store(e) => crate::ops::graph::store_error_names(e, culprit),
+            BisectError::Io(e) => crate::ops::graph::invalid_data_names(e, culprit),
+            _ => false,
+        };
+        assert!(named, "{err:?}");
+        assert!(err.to_string().contains(&hash::to_hex(culprit)), "{err}");
+    }
+
+    #[test]
+    fn an_unreadable_commit_fails_the_range_and_never_returns_a_part() {
+        let (_d, store, [_, _, _, good, side, bad]) = range_fixture();
+        assert_eq!(enumerate_range(&store, bad, &[good]).unwrap(), [bad, side]);
+
+        // A missing commit of the good side: the good set would lack fork
+        // and root, and the range would offer them although they are known
+        // good.
+        let (dir, store, [_, _, mid, good, _, bad]) = range_fixture();
+        fs::remove_file(object_path(&dir, &mid)).unwrap();
+        assert_fails_naming(&store, bad, good, &mid);
+
+        // A missing commit of the bad side: the range would end there and
+        // miss every candidate below it.
+        let (dir, store, [root, _, _, _, side, bad]) = range_fixture();
+        fs::remove_file(object_path(&dir, &side)).unwrap();
+        assert_fails_naming(&store, bad, root, &side);
+
+        // A corrupt commit on either side: flip one byte of it.
+        let corrupt = |dir: &TempDir, h: &Hash| {
+            let path = object_path(dir, h);
+            let mut bytes = fs::read(&path).unwrap();
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0xff;
+            fs::write(&path, &bytes).unwrap();
+        };
+        let (dir, store, [root, _, _, _, side, bad]) = range_fixture();
+        corrupt(&dir, &side);
+        assert_fails_naming(&store, bad, root, &side);
+        let (dir, store, [_, _, mid, good, _, bad]) = range_fixture();
+        corrupt(&dir, &mid);
+        assert_fails_naming(&store, bad, good, &mid);
+
+        // A parent that is not a commit, on either side.
+        let (_d, store, [root, ..]) = range_fixture();
+        let blob = put_blob(&store, b"data");
+        let tree = put_tree(&store, "f.txt", blob);
+        let above_tree = put_commit(&store, tree, vec![tree], 7);
+        let top = put_commit(&store, tree, vec![above_tree], 8);
+        assert_fails_naming(&store, top, root, &tree);
+        assert_fails_naming(&store, top, above_tree, &tree);
+    }
+
+    /// The range as a lenient walk enumerates it: a commit it cannot read
+    /// ends its path on either side. On a healthy history the strict walk
+    /// has to return the same list in the same order.
+    fn lenient_range(store: &ObjectStore, bad: Hash, good_hashes: &[Hash]) -> Vec<Hash> {
+        let mut good_set: HashSet<Hash> = HashSet::new();
+        for g in good_hashes {
+            crate::ops::graph::collect_ancestor_set(store, *g, &mut good_set).unwrap();
+        }
+        let mut visited: HashSet<Hash> = HashSet::new();
+        let mut candidates: Vec<Hash> = Vec::new();
+        let mut queue: Vec<Hash> = vec![bad];
+        let mut head = 0usize;
+        while head < queue.len() {
+            let current = queue[head];
+            head += 1;
+            if !visited.insert(current) || good_set.contains(&current) {
+                continue;
+            }
+            candidates.push(current);
+            if let Ok(Object::Commit(commit)) = store.read_object(&current) {
+                queue.extend(commit.parents);
+            }
+        }
+        candidates
+    }
+
+    #[test]
+    fn the_range_of_a_healthy_history_matches_a_lenient_walk() {
+        for seed in 1..=60u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut below = |n: usize| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                usize::try_from(state >> 33).unwrap() % n
+            };
+            let (_d, store) = fresh_store();
+            let blob = put_blob(&store, b"data");
+            let tree = put_tree(&store, "f.txt", blob);
+            // Chains, merges of two or three parents, jumps back and roots.
+            let n = 1 + below(40);
+            let mut hashes: Vec<Hash> = Vec::new();
+            for i in 0..n {
+                let mut parents = Vec::new();
+                if i > 0 && below(20) != 0 {
+                    match below(10) {
+                        0 => {
+                            for _ in 0..2 + below(2) {
+                                parents.push(hashes[below(i)]);
+                            }
+                        }
+                        1 => parents.push(hashes[below(i)]),
+                        _ => parents.push(hashes[i - 1]),
+                    }
+                }
+                hashes.push(put_commit(&store, tree, parents, i as u64));
+            }
+            let bad = hashes[below(n)];
+            let goods: Vec<Hash> = (0..=below(2)).map(|_| hashes[below(n)]).collect();
+            assert_eq!(
+                enumerate_range(&store, bad, &goods).unwrap(),
+                lenient_range(&store, bad, &goods),
+                "seed {seed}"
+            );
+        }
     }
 
     #[test]

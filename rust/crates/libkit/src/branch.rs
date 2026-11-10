@@ -18,7 +18,8 @@ use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
 use kit_core::observer::Observer;
-use kit_core::ops::merge::is_ancestor;
+use kit_core::ops::graph::AncestorError;
+use kit_core::ops::merge::is_ancestor_strict;
 use kit_core::refs::{self, Head, Ref, RefError, RefWriteCondition};
 use kit_core::store::{ObjectStore, StoreError};
 
@@ -121,9 +122,14 @@ pub enum Error {
         /// Why the object cannot be read.
         source: StoreError,
     },
-    /// The ancestry of two commits cannot be found.
+    /// The ancestry of two commits cannot be found: the walk reached its
+    /// limit.
     #[error("ancestry: {0}")]
     Ancestry(StoreError),
+    /// A commit of the history is missing or corrupt, or a parent is not a
+    /// commit. The error names it.
+    #[error("ancestry: {0}")]
+    History(AncestorError),
     /// The trees of the repository cannot be read.
     #[error(transparent)]
     Worktrees(#[from] worktrees::Error),
@@ -326,7 +332,9 @@ pub struct Branch {
 /// [`Error::ListRefs`] when the refs cannot be read. [`Error::OpenStore`]
 /// when the query needs the store and it cannot be opened. A filter that does
 /// not resolve gives [`Error::BadRevision`], [`Error::ReadRevision`] or
-/// [`Error::NotACommit`]. [`Error::Ancestry`] when the walk fails.
+/// [`Error::NotACommit`]. [`Error::History`] when a commit of an ancestry
+/// walk cannot be read, and [`Error::Ancestry`] when the walk reaches its
+/// limit.
 pub fn list(layout: &RepoLayout, query: &Query<'_>) -> Result<Vec<Branch>, Error> {
     let mut branches = list_refs(layout).map_err(Error::ListRefs)?;
 
@@ -396,7 +404,14 @@ impl Filter {
     /// that have C as an ancestor. `merged M` keeps tips that are ancestors
     /// of M. The `no_*` forms are the complements.
     fn keeps(&self, store: &ObjectStore, tip: &Hash) -> Result<bool, Error> {
-        let ancestor = |a: Hash, d: Hash| is_ancestor(store, a, d).map_err(Error::Ancestry);
+        // A missing commit would turn "ancestor" into "not an ancestor" and
+        // keep or drop a branch wrongly, so the walk reads every commit.
+        let ancestor = |a: Hash, d: Hash| {
+            is_ancestor_strict(store, a, d).map_err(|e| match e {
+                AncestorError::Limit(limit) => Error::Ancestry(limit),
+                other => Error::History(other),
+            })
+        };
         if let Some(c) = self.contains
             && !ancestor(c, *tip)?
         {

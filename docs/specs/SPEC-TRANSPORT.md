@@ -316,7 +316,22 @@ misbehaving or malicious client (see
 - `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on cumulative request payload bytes.
 
 Each cap trips emits an `Error{ ERROR_CODE_INVALID_REQUEST }` and
-closes the connection with `exit::PROTOCOL_ERROR`.
+closes the connection with `exit::PROTOCOL_ERROR`. The frame cap's reply
+names it: `per-connection frame budget exceeded: at most 10000 frames per
+session (SPEC-TRANSPORT 4.4)`.
+
+**Reference-server behavior.** What fits in one session follows from the
+frame cap. A fetch costs one `ListRefs` frame, then per branch a `ReadRef` of
+the packmap and a `DownloadPack` of each node of its pack list, even when no
+branch changed: the SSH transport names no repository, so a fetch keeps no
+per-branch checkpoint for it and walks each pack list again. With one node
+per pack list that is one frame plus two per branch, so one session fetches
+at most 4,999 branches; a fetch of more fails closed with the reply above.
+`kit fetch`, `kit pull` and `kit clone` open one session each. A push walks
+the branch's whole pack list over its session, and an SSH push never
+re-baselines the pack list, so a push's frames grow with the number of
+pushes the branch has had. The cap is not raised: it is what bounds
+a client that sends requests without end.
 
 Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
 the declared upload length and additionally cap the number of chunk
@@ -383,6 +398,20 @@ transport carries it (§6.6).
 The S3 transport ([`kit-transport-s3`](../../rust/crates/kit-transport-s3/))
 talks SigV4 against any S3-compatible store that honors conditional
 writes (see §6.3).
+
+*Informative.* `list_refs` on this transport issues one `ListObjectsV2` per
+page and then one `GET` per listed ref, because a ref's id lives only in its
+object body. A fetch adds a packmap read and a node download per branch. The
+transport suits repositories with few concurrent writers and few refs.
+Deployments with many concurrent writers use the Connect service.
+
+**Protocol requirement.** A listing returns every listed ref that its `GET`
+finds, or fails. A `GET` that fails, after the retries of §6.5, with an error
+status fails the whole listing with that error. Only a `404` skips the ref,
+because the ref was deleted after the page was listed; the result is then an
+older listing (SPEC-TRANSPORT-CONNECT §7.9 allows one). A `200` whose body is
+not a canonical 65-byte ref wire (SPEC-REFS §1) fails the whole listing, as it
+fails `read_ref`.
 
 ### 6.1 Object layout
 
@@ -607,7 +636,7 @@ concerns.
 | Transport | `Missing` | `Match(h)` | Cross-process safe |
 |---|---|---|---|
 | Memory | `Mutex`-protected read-then-write | `Mutex`-protected | N/A (test only) |
-| File   | `link(2)` after `write_atomic` (atomic per POSIX) | OS exclusive file lock on `<root>/.kit/refs/.lock` (via `std::fs::File::lock`) wraps a read-then-`write_atomic`; an in-process `Mutex` keeps multi-threaded callers within one process from contending on the OS lock | Yes |
+| File   | `link(2)` after `write_atomic` (atomic per POSIX) | OS exclusive lock on the ref's stripe, `<root>/.kit/refs/refs-<hh>.lock` (via `std::fs::File::lock`), with the repo lock `<root>/.kit/refs/.lock` held shared, wraps a read-then-`write_atomic` (SPEC-REFS §5.1.1); in-process locks keep multi-threaded callers within one process from contending on the OS locks | Yes |
 | S3     | `If-None-Match: *` enforced by the store | `If-Match: "<md5-of-wire>"` enforced by the store | Yes (S3 multipart breaks `Match` &mdash; see §6.3) |
 | SSH    | Server-enforced via `expectation = REF_EXPECTATION_MISSING` | Server-enforced via `expectation = REF_EXPECTATION_MATCH` plus 32-byte `expected_id` | Depends on server-side ref-store atomicity |
 
@@ -624,6 +653,50 @@ bytes or doesn't exist at all), while a multipart upload's
 is not the body MD5. This is an accepted downgrade specific to large
 S3 packs; content-addressing (§8) makes it safe (see §6.7's
 idempotency note).
+
+### 7.2 Two-ref advance and the packmap reset
+
+`advance_refs` moves a branch head and its packmap together. The push
+driver keeps one invariant for every state a reader without locks, or a
+crash, can expose: when the head resolves to `T`, the packmap chain
+reconstructs the closure of `T`. A transport reports how strongly its
+advance commits:
+
+| Capability | Writers | Readers and crashes | Transports |
+|---|---|---|---|
+| none (ordered) | the packmap write, then the head write, each conditioned alone; another writer can run between them | may see the new packmap with the old head | default `advance_refs` (memory, S3, SSH) |
+| `supports_serialized_advance` | both conditions are checked before either write; a conflict changes nothing; no other write to either ref interleaves | may see the new packmap with the old head | file (SPEC-REFS §5.1.1) |
+| `supports_atomic_advance` | one indivisible step | see both refs move together | Connect servers that advertise `atomic_advance` |
+
+An atomic advance is also serialized. An append to the packmap chain is a
+superset of the prior chain, so the new packmap with the old head is
+consistent on every transport. A reset (the re-baseline that replaces a
+deep chain with one self-contained node) is not a superset. The push
+driver MUST request a reset only when one of these holds:
+
+- the advance is atomic and the head condition is `Missing` or `Match`;
+- the advance is serialized, not atomic, and the head condition is
+  `Match(h)` with `h` an ancestor of the new head in the client's own
+  store. The reset holds the new head's full closure, which contains the
+  closure of `h`, so the old head stays reconstructable between the two
+  writes and after a crash between them.
+
+A push plans its packs against the head it reads, and leaves out what that
+head holds. A push conditioned on `Missing` or `Match` MUST plan only
+against a head its condition holds for. When the head it reads fails the
+condition, the push is refused as a non-fast-forward before it plans,
+unless that head is already the new head, in which case an earlier
+attempt landed and the push writes nothing. A condition that differs from
+the planned head could hold again after the head moves away and back while
+a reset drops what the plan left out, and the advance would then publish a
+head its chain cannot reconstruct, on every kind of advance.
+
+A force push (`Any`) never requests a reset. On a serialized or an atomic
+advance it uses the guarded force driver: it conditions the packmap write
+on the chain its plan read, and plans again when that chain no longer
+contains the node the plan depended on, so it never appends packs whose
+bases a concurrent reset dropped. On an ordered advance no reset happens
+except over a broken chain, and a force push appends on the ordered path.
 
 ---
 

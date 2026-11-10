@@ -5,7 +5,8 @@
 // a documented gap is reachable.
 module refs_test {
   import refs(PROCS = Set("p1", "p2", "p3"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).* from "./refs"
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).* from "./refs"
 
   pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
     { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
@@ -73,12 +74,14 @@ module refs_test {
       .then(commitRef("p1")).then(commitRef("p2"))
       .expect(and { not(NoLostUpdateLocal), lastAction.outcome == "ok" })
 
-  // File transport: RefLock serialises two Match CAS on the same root.
+  // File transport: the stripe lock serialises two Match CAS on one ref of
+  // the same root. Both hold the repo lock shared.
   run fileMatchSerialisedTest =
     initFixed(SAFE_INIT, 1, 1, ABSENT)
       .then(beginOp("p1", op("file", 0, 0, Match(1), 2, false)))
       .then(beginOp("p2", op("file", 0, 0, Match(1), 1, false)))
-      .then(acquire("p1"))
+      .then(acquire("p1")).then(acquire("p1"))
+      .then(acquire("p2"))
       .expect(not(canMove("p2")))
       .then(readRef("p1")).then(commitRef("p1")).then(release("p1"))
       .then(acquire("p2")).then(readRef("p2")).then(commitRef("p2"))
@@ -124,8 +127,85 @@ module refs_test {
       .then(commitRef("p1")).then(commitRef("p2"))
       .expect(and { not(NoLostUpdateMem), mem.get(0) == 1 })
 
+  // File transport stripe locks (SPEC-REFS §5.1.1). A single-ref write
+  // holds the repo lock shared, then its stripe lock: two writes to refs in
+  // different stripes overlap.
+  run fileStripesOverlapTest =
+    initFixed(SAFE_INIT, 1, 1, ABSENT)
+      .then(beginOp("p1", op("file", 0, 0, Match(1), 2, false)))
+      .then(beginOp("p2", op("file", 0, 1, Match(1), 2, false)))
+      .then(acquire("p1")).then(acquire("p1"))
+      .then(acquire("p2")).then(acquire("p2"))
+      .then(readRef("p1")).then(readRef("p2"))
+      .expect(and { Safety, not(WitnessStripesOverlap) })
+      .then(commitRef("p1")).then(commitRef("p2"))
+      .expect(and { Safety, disk.get(0) == 2, disk.get(1) == 2 })
+
+  // A step that holds the repo lock exclusive (`with_ref_lock`) waits for
+  // a single-ref write that holds it shared, and excludes later ones.
+  run fileStepExcludesWritesTest =
+    initFixed(SAFE_INIT, 1, 1, ABSENT)
+      .then(beginOp("p1", op("file", 0, 0, Match(1), 2, false)))
+      .then(acquire("p1"))
+      .then(beginOp("p2", op("fileTx", 0, 1, Match(1), 2, false)))
+      .expect(not(canMove("p2")))            // p1 holds the repo lock shared
+      .then(acquire("p1")).then(readRef("p1")).then(commitRef("p1")).then(release("p1"))
+      .then(acquire("p2"))
+      .then(beginOp("p3", op("file", 0, 0, Match(2), 1, false)))
+      .expect(not(canMove("p3")))            // p2 holds it exclusive
+      .then(readRef("p2")).then(commitRef("p2")).then(release("p2"))
+      .then(acquire("p3")).then(acquire("p3")).then(readRef("p3")).then(commitRef("p3"))
+      .expect(and { Safety, disk.get(0) == 1, disk.get(1) == 2 })
+
+  // Two writes to one ref serialize on its stripe lock.
+  run fileSameRefSerialisesTest =
+    initFixed(SAFE_INIT, 1, 1, ABSENT)
+      .then(beginOp("p1", op("file", 0, 0, Match(1), 2, false)))
+      .then(beginOp("p2", op("file", 0, 0, Match(1), 1, false)))
+      .then(acquire("p1")).then(acquire("p1"))
+      .then(acquire("p2"))
+      .expect(not(canMove("p2")))            // the stripe of ref 0
+      .then(readRef("p1")).then(commitRef("p1")).then(release("p1"))
+      .then(acquire("p2")).then(readRef("p2")).then(commitRef("p2"))
+      .expect(and { Safety, disk.get(0) == 2, lastAction.outcome == "conflict" })
+
+  // MUTANT: a single-ref write without its stripe lock. The shared repo
+  // lock excludes nothing, so two writes to one ref race.
+  run mutantNoStripeLockTest =
+    initFixed({ ...NO_FAULTS, noStripeLock: true }, 1, 1, ABSENT)
+      .then(beginOp("p1", op("file", 0, 0, Match(1), 2, false)))
+      .then(beginOp("p2", op("file", 0, 0, Match(1), 1, false)))
+      .then(acquire("p1")).then(acquire("p2"))
+      .then(readRef("p1")).then(readRef("p2"))
+      .expect(not(OneFileWriterPerRef))
+      .then(commitRef("p1")).then(commitRef("p2"))
+      .expect(not(NoLostUpdateFile))
+
+  // MUTANT: a multi-file step that takes the repo lock shared. A write to
+  // another ref slips inside the step.
+  run mutantStepTakesSharedTest =
+    initFixed({ ...NO_FAULTS, txShared: true }, 1, 1, ABSENT)
+      .then(beginOp("p1", op("fileTx", 0, 0, Match(1), 2, false)))
+      .then(acquire("p1")).then(readRef("p1"))
+      .then(beginOp("p2", op("file", 0, 1, Match(1), 2, false)))
+      .then(acquire("p2")).then(acquire("p2")).then(readRef("p2"))
+      .expect(not(FileStepAlone))
+
+  // A writer that takes its stripe lock before the repo lock does not
+  // deadlock against a flock-style repo lock, which grants a shared hold
+  // while an exclusive request waits. See refs_wpref_test for a repo lock
+  // that does not.
+  run stripeFirstFlockNoDeadlockTest =
+    initFixed({ ...NO_FAULTS, stripeFirst: true }, 1, 1, ABSENT)
+      .then(beginOp("p2", op("file", 0, 0, Match(1), 2, false)))
+      .then(acquire("p2"))                   // p2: repo lock shared
+      .then(begin("p1", op("file", 0, 0, Match(1), 1, false), true))
+      .then(acquire("p1"))                   // p1: stripe of ref 0 first
+      .then(beginOp("p3", op("fileTx", 0, 1, Match(1), 2, false)))
+      .expect(and { not(canMove("p3")), not(canMove("p2")), canMove("p1"), NoDeadlock })
+
   // WITNESS — DOCUMENTED GAP (SPEC-CONCURRENCY §3.1): a local Match write
-  // under refs-<ref>.lock and a file-transport write under RefLock (from
+  // under refs-<ref>.lock and a file-transport write under its stripe lock (from
   // `kit serve`, a layout server or a kit+file:// push) hit the
   // same file with no common lock. Safety (per-domain) still holds.
   run crossDomainGapWitnessTest =
@@ -134,7 +214,7 @@ module refs_test {
       .then(acquire("p1")).then(acquire("p1")).then(acquire("p1"))
       .then(readRef("p1"))
       .then(beginOp("p2", op("file", 0, 0, Match(1), 2, false)))
-      .then(acquire("p2")).then(readRef("p2")).then(commitRef("p2"))
+      .then(acquire("p2")).then(acquire("p2")).then(readRef("p2")).then(commitRef("p2"))
       .then(commitRef("p1"))
       .expect(and { Safety, not(WitnessCrossDomainGap), lastAction.outcome == "ok" })
 
@@ -273,4 +353,112 @@ module refs_test {
       .then(acquire("p1"))                        // p1: wt(main)
       .then(acquire("p2")).then(acquire("p2"))    // p2: refs-a, history-a
       .expect(and { not(NoDeadlock), not(LockOrderRespected) })
+}
+
+// Stripe scenarios that need another lock configuration.
+module refs_wpref_test {
+  // A repo lock that makes a new shared holder wait behind a waiting
+  // exclusive request, as an in-process read-write lock may.
+  import refs(PROCS = Set("p1", "p2", "p3"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = true, NESTED = false, CLASH_UNCHECKED = false).* from "./refs"
+
+  pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
+    { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
+
+  // MUTANT: p1 takes its stripe lock before the repo lock. p2 holds the
+  // repo lock shared and waits for the stripe, p3 waits for the repo lock
+  // exclusive behind p2, and p1 waits for its shared hold behind p3.
+  run mutantStripeFirstDeadlockTest =
+    initFixed({ ...NO_FAULTS, stripeFirst: true }, 1, 1, ABSENT)
+      .then(begin("p2", op("file", 0, 0, Match(1), 2, false), false))
+      .then(acquire("p2"))                   // p2: repo lock shared
+      .then(begin("p1", op("file", 0, 0, Match(1), 1, false), true))
+      .then(acquire("p1"))                   // p1: stripe of ref 0
+      .then(begin("p3", op("fileTx", 0, 1, Match(1), 2, false), false))
+      .expect(and { not(canMove("p1")), not(canMove("p2")), not(canMove("p3")), not(NoDeadlock) })
+
+  // In the documented order the same three writers finish.
+  run writerPreferenceInOrderTest =
+    initFixed(NO_FAULTS, 1, 1, ABSENT)
+      .then(begin("p2", op("file", 0, 0, Match(1), 2, false), false))
+      .then(acquire("p2"))
+      .then(begin("p1", op("file", 0, 0, Match(1), 1, false), false))
+      .then(begin("p3", op("fileTx", 0, 1, Match(1), 2, false), false))
+      .expect(and { not(canMove("p1")), not(canMove("p3")), canMove("p2"), NoDeadlock })
+      .then(acquire("p2")).then(readRef("p2")).then(commitRef("p2")).then(release("p2"))
+      .then(acquire("p3")).then(readRef("p3")).then(commitRef("p3")).then(release("p3"))
+      .then(acquire("p1")).then(acquire("p1")).then(readRef("p1")).then(commitRef("p1"))
+      .expect(and { Safety, disk.get(0) == 2, disk.get(1) == 2, lastAction.outcome == "conflict" })
+}
+
+module refs_collide_test {
+  // Both refs map to one stripe.
+  import refs(PROCS = Set("p1", "p2", "p3"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = true, WRITER_PREF = false, NESTED = false, CLASH_UNCHECKED = false).* from "./refs"
+
+  pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
+    { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
+
+  run fileStripeCollisionSerialisesTest =
+    initFixed(NO_FAULTS, 1, 1, ABSENT)
+      .then(begin("p1", op("file", 0, 0, Match(1), 2, false), false))
+      .then(begin("p2", op("file", 0, 1, Match(1), 2, false), false))
+      .then(acquire("p1")).then(acquire("p1"))
+      .then(acquire("p2"))
+      .expect(not(canMove("p2")))            // ref 1 shares ref 0's stripe
+      .then(readRef("p1")).then(commitRef("p1")).then(release("p1"))
+      .then(acquire("p2")).then(readRef("p2")).then(commitRef("p2"))
+      .expect(and { Safety, disk.get(0) == 2, disk.get(1) == 2 })
+}
+
+module refs_nested_test {
+  // Ref 1 is named below ref 0 (`refs/heads/a/b` below `refs/heads/a`),
+  // in another stripe.
+  import refs(PROCS = Set("p1", "p2", "p3"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false, NESTED = true, CLASH_UNCHECKED = false).* from "./refs"
+
+  pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
+    { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
+
+  // Both creates read an absent name under their own stripe, so both are
+  // in their critical sections at once. The first commit wins; the second
+  // reports the clash and writes nothing, and every lock is released.
+  run nestedCreatesRaceTest =
+    initFixed(NO_FAULTS, ABSENT, ABSENT, ABSENT)
+      .then(begin("p1", op("file", 0, 0, Missing, 1, false), false))
+      .then(begin("p2", op("file", 0, 1, Any, 2, false), false))
+      .then(acquire("p1")).then(acquire("p1")).then(readRef("p1"))
+      .then(acquire("p2")).then(acquire("p2")).then(readRef("p2"))
+      .expect(not(WitnessNestedCreatesOverlap))
+      .then(commitRef("p2")).then(release("p2"))
+      .then(commitRef("p1"))
+      .expect(and { Safety, lastAction.outcome == "clash", disk.get(0) == ABSENT, disk.get(1) == 2 })
+      .then(release("p1"))
+      // The root stays writable: a multi-file step and a write to the
+      // winner both commit.
+      .then(begin("p3", op("fileTx", 0, 1, Match(2), 1, false), false))
+      .then(acquire("p3")).then(readRef("p3")).then(commitRef("p3")).then(release("p3"))
+      .expect(and { Safety, disk.get(1) == 1, owner.keys().forall(l => owner.get(l) == FREE), sharers == Set() })
+}
+
+module refs_nested_unchecked_test {
+  import refs(PROCS = Set("p1", "p2", "p3"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false, noStripeLock: false, stripeFirst: false, txShared: false },
+              COLLIDE = false, WRITER_PREF = false, NESTED = true, CLASH_UNCHECKED = true).* from "./refs"
+
+  pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
+    { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
+
+  // MUTANT: a create that ignores the clash leaves both names behind.
+  run mutantNestedPairTest =
+    initFixed(NO_FAULTS, ABSENT, ABSENT, ABSENT)
+      .then(begin("p1", op("file", 0, 0, Missing, 1, false), false))
+      .then(begin("p2", op("file", 0, 1, Missing, 2, false), false))
+      .then(acquire("p1")).then(acquire("p1")).then(readRef("p1"))
+      .then(acquire("p2")).then(acquire("p2")).then(readRef("p2"))
+      .then(commitRef("p2")).then(commitRef("p1"))
+      .expect(not(NoNestedPair))
 }

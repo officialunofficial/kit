@@ -25,26 +25,35 @@
 //! |-----------|--------------------------------------------------------|----------------|
 //! | `Any`     | `write_atomic`: tmp file → `fsync` → `rename` → parent | Last writer wins. Concurrent writers never expose a half-written file because `rename(2)` is atomic on POSIX. |
 //! | `Missing` | `write_create_new`: same tmp+fsync, then a hard-link    | Only the first writer succeeds. If two concurrent callers both see "absent" before writing, only one `link(2)` wins; the other gets `AlreadyExists` → `RefConflict`. |
-//! | `Match(H)`| OS file-lock + in-process `Mutex` around read-then-`write_atomic` | Atomic across processes on the same on-disk root. The OS exclusive lock on `<root>/.kit/refs/.lock` serialises every `Match` CAS critical section; the in-process `Mutex` keeps multi-threaded callers from racing each other before they hit the file lock. |
+//! | `Match(H)`| OS file-locks + in-process locks around read-then-`write_atomic` | Atomic across processes on the same on-disk root. The exclusive lock of the ref's stripe, `<root>/.kit/refs/refs-<hh>.lock`, serialises every CAS critical section on that ref; the in-process stripe mutex keeps multi-threaded callers from racing each other before they hit the file lock. |
 //!
 //! Cross-process atomicity for `Match` is achieved via
-//! [`std::fs::File::lock`] (stable as of Rust 1.89) on a sentinel file
-//! `<root>/.kit/refs/.lock`. The lock is held for the duration of the
-//! read-compare-write sequence and released on `Drop` (including on
-//! panic). The in-process `Mutex` is retained as a fast-path optimisation
-//! and to serialise lock acquisition fairly within one process.
+//! [`std::fs::File::lock`] (stable as of Rust 1.89) on two files under
+//! `<root>/.kit/refs/`. A ref write holds the repo lock `.lock` shared and
+//! the exclusive lock of the ref's stripe. The stripe is the first byte of
+//! the BLAKE3 digest of the ref name, so `<hh>` is one of 256 lowercase hex
+//! values and every process on the root maps a ref to the same file. The
+//! locks are held for the duration of the read-compare-write sequence and
+//! released on `Drop` (including on panic). The in-process locks are a
+//! fast-path optimisation and serialise lock acquisition fairly within one
+//! process.
 //!
-//! Every ref write takes both locks, whatever its condition.
-//! [`FileTransport::with_ref_lock`] hands the same lock to callers that
-//! read, decide and write several files as one step (a metadata store's
-//! check-and-write), through [`LockedRefs`].
+//! Writes to refs in different stripes run in parallel. A write to one
+//! ref, or to two refs in one stripe, waits for the earlier one.
+//!
+//! Every ref write takes these locks, whatever its condition.
+//! [`FileTransport::with_ref_lock_for`] hands them to callers that check
+//! and write one ref as a step, through [`LockedRef`].
+//! [`FileTransport::with_ref_lock`] takes the repo lock exclusive instead,
+//! which excludes every ref write, and hands it to callers that read,
+//! decide and write several files as one step, through [`LockedRefs`].
 
 #![forbid(unsafe_code)]
 
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, RwLock};
 
 /// Open the pack at `path` for reading, never through a link, and check
 /// on the open handle that it is a regular file.
@@ -79,8 +88,8 @@ fn open_pack_file(path: &Path) -> io::Result<fs::File> {
 use kit_core::bounded_read;
 use kit_core::hash::Hash;
 use kit_core::protocol::{
-    PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, Transport, TransportError,
-    TransportResult,
+    AdvanceOutcome, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, Transport,
+    TransportError, TransportResult,
 };
 use kit_core::refs::{
     REF_FILE_MAX_BYTES, Ref, decode_ref_wire, encode_ref_wire, validate_ref_name,
@@ -139,7 +148,10 @@ fn write_atomic(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result<()>
         f.sync_all()?;
     }
 
-    fs::rename(&tmp_path, dest)?;
+    if let Err(e) = fs::rename(&tmp_path, dest) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
     // Make the rename's dirent durable. Propagated (not best-effort
     // discarded): on power loss a swallowed parent-dir fsync could lose a
     // committed ref/pack write. Matches `kit_core::atomic::write_atomic`,
@@ -262,10 +274,31 @@ pub fn create_dir_all_durably(dir: &Path) -> io::Result<()> {
 // Cross-process ref lock
 // ---------------------------------------------------------------------------
 
-/// RAII guard around an OS-level exclusive file lock on the per-repo
-/// sentinel file `<root>/.kit/refs/.lock`. Used to serialise `Match`
-/// CAS critical sections across processes that share the same on-disk
-/// root.
+/// Number of per-ref lock files under `<root>/.kit/refs/`. A ref maps to
+/// one of them by the first byte of the BLAKE3 digest of its full name, so
+/// every process on a root agrees on the mapping and the number of lock
+/// files stays fixed however many refs the root holds.
+const REF_LOCK_STRIPES: usize = 256;
+
+/// The lock stripe of the ref `name`: the first byte of the BLAKE3 digest
+/// of its UTF-8 bytes.
+fn ref_stripe(name: &str) -> usize {
+    usize::from(kit_core::hash::hash(name.as_bytes())[0])
+}
+
+/// The lock file of stripe `stripe` under `<root>/.kit/refs/`:
+/// `refs-<hh>.lock`, `<hh>` the stripe as two lowercase hex digits.
+fn stripe_lock_file(stripe: usize) -> String {
+    format!("refs-{stripe:02x}.lock")
+}
+
+/// RAII guard around an OS-level file lock under `<root>/.kit/refs/`. The
+/// repo lock `.lock` is held exclusive by a step that reads and writes
+/// several files as one ([`FileTransport::with_ref_lock`]) and shared by a
+/// single-ref write ([`FileTransport::with_ref_lock_for`]). A stripe lock
+/// `refs-<hh>.lock` is held exclusive by a single-ref write, so writes to
+/// refs in different stripes run in parallel and writes to one ref never
+/// do. The order is the repo lock first, then the stripe lock.
 ///
 /// On `Drop` (including on panic-unwind) the kernel releases the lock
 /// when the underlying `File` handle is closed; we also call
@@ -278,20 +311,40 @@ pub fn create_dir_all_durably(dir: &Path) -> io::Result<()> {
 /// each time; a lock taken on the previous inode would migrate to an
 /// abandoned file and stop providing mutual exclusion.
 ///
-/// v1 uses blocking [`File::lock`](std::fs::File::lock); refs
-/// updates are user-driven and serialisation is the desired behaviour.
-/// A future v2 could expose `try_lock` for fail-fast contention
-/// handling.
+/// Locks block until they can be taken; ref updates are user-driven and
+/// waiting is the desired behaviour.
 #[must_use = "lock is released on drop; bind to a named guard"]
 struct RefLock {
     file: fs::File,
 }
 
+/// How a [`RefLock`] is held.
+#[derive(Clone, Copy)]
+enum LockMode {
+    Shared,
+    Exclusive,
+}
+
 impl RefLock {
-    /// Acquire the exclusive lock on `<root>/.kit/refs/.lock`,
+    /// Acquire the exclusive repo lock on `<root>/.kit/refs/.lock`,
     /// creating the lock file (and its parent directories) on first
     /// use. Blocks until the lock can be taken.
     fn acquire(root: &Path) -> io::Result<Self> {
+        Self::open(root, ".lock", LockMode::Exclusive)
+    }
+
+    /// Acquire the repo lock shared. It conflicts only with an exclusive
+    /// holder.
+    fn acquire_shared(root: &Path) -> io::Result<Self> {
+        Self::open(root, ".lock", LockMode::Shared)
+    }
+
+    /// Acquire the exclusive lock of one stripe.
+    fn acquire_stripe(root: &Path, stripe: usize) -> io::Result<Self> {
+        Self::open(root, &stripe_lock_file(stripe), LockMode::Exclusive)
+    }
+
+    fn open(root: &Path, file_name: &str, mode: LockMode) -> io::Result<Self> {
         let lock_dir = kit_core::layout::RepoLayout::single(root).refs_dir();
         fs::create_dir_all(&lock_dir)?;
         #[cfg(unix)]
@@ -303,7 +356,7 @@ impl RefLock {
             let _ = fs::set_permissions(&lock_dir, fs::Permissions::from_mode(0o700));
         }
 
-        let lock_path = lock_dir.join(".lock");
+        let lock_path = lock_dir.join(file_name);
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -317,8 +370,11 @@ impl RefLock {
             let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
         }
 
-        // Blocking exclusive lock. Stable since Rust 1.89.
-        file.lock()?;
+        // Blocking lock. Stable since Rust 1.89.
+        match mode {
+            LockMode::Shared => file.lock_shared()?,
+            LockMode::Exclusive => file.lock()?,
+        }
         Ok(Self { file })
     }
 }
@@ -337,20 +393,21 @@ impl Drop for RefLock {
 // ---------------------------------------------------------------------------
 
 /// Local-filesystem transport. Every instance holds a root `PathBuf`
-/// and a `Mutex` protecting the `Match` CAS read-then-write sequence
-/// within a process. Cross-process atomicity is supplied separately
-/// by `RefLock`, which takes an OS exclusive lock on
-/// `<root>/.kit/refs/.lock` for the duration of the CAS critical
-/// section.
+/// and the in-process mirrors of the ref locks. Cross-process atomicity
+/// is supplied separately by `RefLock`: a ref write holds the repo lock
+/// `<root>/.kit/refs/.lock` shared and the exclusive lock of the ref's
+/// stripe, and a multi-file step holds the repo lock exclusive.
 ///
-/// The `Mutex` is unit-typed (zero overhead for lock/unlock when
-/// uncontended); all other operations (`Any`, `Missing`, pack I/O) do
-/// **not** acquire it.
+/// The in-process locks are unit-typed (zero overhead when uncontended);
+/// pack I/O does **not** acquire them.
 #[derive(Debug)]
 pub struct FileTransport {
     root: PathBuf,
-    /// Serialises `Match` CAS within a single process.
-    cas_lock: Mutex<()>,
+    /// Mirrors the repo lock within a single process: read for a
+    /// single-ref write, write for a multi-file step.
+    repo_gate: RwLock<()>,
+    /// Mirrors the stripe locks within a single process.
+    stripe_gates: Box<[Mutex<()>]>,
 }
 
 /// Canonicalize `path`, or — if it does not exist yet — canonicalize its
@@ -389,7 +446,8 @@ impl FileTransport {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            cas_lock: Mutex::new(()),
+            repo_gate: RwLock::new(()),
+            stripe_gates: (0..REF_LOCK_STRIPES).map(|_| Mutex::new(())).collect(),
         }
     }
 
@@ -468,16 +526,19 @@ impl FileTransport {
         &self.root
     }
 
-    /// Run `f` holding the ref mutation lock: this transport's in-process
-    /// mutex, then the OS exclusive lock on `<root>/.kit/refs/.lock`
-    /// (created on first use). Every ref write takes it, including
-    /// [`Transport::update_ref`], so what `f` reads, decides and writes
-    /// through [`LockedRefs`] is one step that no other writer on the same
-    /// root, in this process or another, can interleave with. Blocks until
-    /// the lock is free. `f` is synchronous, so nothing holds the lock
-    /// across an `.await`.
+    /// Run `f` holding the exclusive ref lock: this transport's in-process
+    /// write gate, then the OS exclusive lock on `<root>/.kit/refs/.lock`
+    /// (created on first use). It excludes every ref write on the root,
+    /// including [`Transport::update_ref`] and [`Self::with_ref_lock_for`],
+    /// so what `f` reads, decides and writes through [`LockedRefs`] is one
+    /// step that no other writer on the same root, in this process or
+    /// another, can interleave with. Blocks until the lock is free. `f` is
+    /// synchronous, so nothing holds the lock across an `.await`.
     ///
-    /// A panic in `f` releases both locks. The in-process mutex guards no
+    /// Use [`Self::with_ref_lock_for`] when the step touches one ref. This
+    /// method makes every other writer wait.
+    ///
+    /// A panic in `f` releases both locks. The in-process gate guards no
     /// data (the state is the files, and every write is one atomic rename),
     /// so a panic never poisons the transport: the next caller recovers it.
     ///
@@ -488,14 +549,209 @@ impl FileTransport {
         &self,
         f: impl FnOnce(&LockedRefs<'_>) -> T,
     ) -> Result<T, RefFileError> {
-        let _process_guard = self.cas_lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _process_guard = self
+            .repo_gate
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
         let _xproc_guard = RefLock::acquire(&self.root).map_err(RefFileError::Io)?;
         Ok(f(&LockedRefs { tx: self }))
     }
 
+    /// Run `f` holding the lock of the ref `name` only: the repo lock
+    /// shared and the exclusive lock of the ref's stripe, each after its
+    /// in-process mirror. What `f` reads and writes through [`LockedRef`]
+    /// is one step that no other write to `name`, in this process or
+    /// another, can interleave with. Writes to refs in other stripes run
+    /// in parallel with it; a write to another ref in the same stripe
+    /// waits. A step under [`Self::with_ref_lock`] excludes it.
+    ///
+    /// A panic in `f` releases the locks and never poisons the transport.
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`] for a name that is not a valid ref
+    /// name. [`RefFileError::Io`] if a lock file cannot be created or
+    /// locked; `f` did not run.
+    pub fn with_ref_lock_for<T>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&LockedRef<'_>) -> T,
+    ) -> Result<T, RefFileError> {
+        if !validate_ref_name(name) {
+            return Err(RefFileError::InvalidName(name.to_owned()));
+        }
+        let stripe = ref_stripe(name);
+        let _repo_guard = self
+            .repo_gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _stripe_guard = self.stripe_gates[stripe]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _repo_lock = RefLock::acquire_shared(&self.root).map_err(RefFileError::Io)?;
+        let _stripe_lock = RefLock::acquire_stripe(&self.root, stripe).map_err(RefFileError::Io)?;
+        Ok(f(&LockedRef { tx: self, name }))
+    }
+
+    /// Run `f` holding the locks of two refs: the repo lock shared and the
+    /// exclusive lock of each ref's stripe, taken in ascending stripe
+    /// order and once for two refs in one stripe, each after its
+    /// in-process mirror. No write to either ref, in this process or
+    /// another, interleaves with `f`.
+    fn with_two_ref_locks<T>(
+        &self,
+        first: &str,
+        second: &str,
+        step: impl FnOnce() -> T,
+    ) -> io::Result<T> {
+        let (lo, hi) = {
+            let (one, two) = (ref_stripe(first), ref_stripe(second));
+            (one.min(two), one.max(two))
+        };
+        let stripes: &[usize] = if lo == hi { &[lo][..] } else { &[lo, hi][..] };
+        let _repo_guard = self
+            .repo_gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _stripe_guards: Vec<_> = stripes
+            .iter()
+            .map(|&s| {
+                self.stripe_gates[s]
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+            })
+            .collect();
+        let _repo_lock = RefLock::acquire_shared(&self.root)?;
+        let _stripe_locks = stripes
+            .iter()
+            .map(|&s| RefLock::acquire_stripe(&self.root, s))
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(step())
+    }
+
+    /// The two-ref advance of [`Transport::advance_refs`].
+    ///
+    /// When both ref files exist, it holds the two refs' locks
+    /// ([`Self::with_two_ref_locks`]). A write then replaces an existing
+    /// file, so no write to another ref can clash with it. When either
+    /// file is missing, the advance creates a ref, and a ref created under
+    /// another stripe could clash with it (`refs/heads/a` and
+    /// `refs/heads/a/b`). It then holds the repo lock exclusive, which
+    /// excludes every other ref write on the root, so the clash check
+    /// before the first write decides the outcome.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_two_refs(
+        &self,
+        head: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+    ) -> Result<AdvanceOutcome, RefFileError> {
+        for name in [head, packmap] {
+            if !validate_ref_name(name) {
+                return Err(RefFileError::InvalidName(name.to_owned()));
+            }
+        }
+        // One name, or one name below the other, can never both be refs.
+        if head == packmap || names_nest(head, packmap) {
+            return Err(RefFileError::InvalidName(packmap.to_owned()));
+        }
+        self.refuse_if_meta_elsewhere()?;
+        for name in [head, packmap] {
+            self.guard_ref_path(&self.ref_path(name))?;
+        }
+        let step = TwoRefStep {
+            head,
+            head_condition,
+            head_value,
+            packmap,
+            packmap_condition,
+            packmap_value,
+        };
+        let under_stripes = self
+            .with_two_ref_locks(head, packmap, || {
+                let both_exist = [head, packmap].iter().all(|n| {
+                    fs::symlink_metadata(self.ref_path(n)).is_ok_and(|m| m.file_type().is_file())
+                });
+                both_exist.then(|| self.advance_held(&step))
+            })
+            .map_err(RefFileError::Io)?;
+        match under_stripes {
+            Some(outcome) => outcome,
+            None => self.with_ref_lock(|_| self.advance_held(&step))?,
+        }
+    }
+
+    /// The checks and writes of a two-ref advance, under its locks: both
+    /// conditions first (the packmap's reported first), then the packmap,
+    /// then the head. A failed head write puts the packmap's previous
+    /// bytes back, so a failed advance changes nothing. A crash between
+    /// the writes leaves the new packmap with the old head.
+    fn advance_held(&self, step: &TwoRefStep<'_>) -> Result<AdvanceOutcome, RefFileError> {
+        let head_path = self.ref_path(step.head);
+        let packmap_path = self.ref_path(step.packmap);
+        for (name, path) in [(step.packmap, &packmap_path), (step.head, &head_path)] {
+            if self.ref_clash(path) {
+                return Err(RefFileError::InvalidName(name.to_owned()));
+            }
+        }
+        if !condition_holds(&packmap_path, step.packmap_condition).map_err(RefFileError::Io)? {
+            return Ok(AdvanceOutcome::PackmapConflict);
+        }
+        if !condition_holds(&head_path, step.head_condition).map_err(RefFileError::Io)? {
+            return Ok(AdvanceOutcome::HeadConflict);
+        }
+        let previous = read_previous(&packmap_path).map_err(RefFileError::Io)?;
+        match self.write_ref_file(step.packmap, step.packmap_condition, step.packmap_value) {
+            Ok(()) => {}
+            Err(RefFileError::Conflict) => return Ok(AdvanceOutcome::PackmapConflict),
+            Err(e) => return Err(e),
+        }
+        #[cfg(test)]
+        if let Some(fault) = advance_fault::take() {
+            match fault {
+                advance_fault::Fault::CrashAfterPackmap => {
+                    return Err(RefFileError::Io(io::Error::other("injected crash")));
+                }
+                advance_fault::Fault::FailHead => {
+                    self.restore(step.packmap, &packmap_path, previous.as_deref());
+                    return Err(RefFileError::Io(io::Error::other("injected head failure")));
+                }
+            }
+        }
+        match self.write_ref_file(step.head, step.head_condition, step.head_value) {
+            Ok(()) => Ok(AdvanceOutcome::Committed),
+            Err(e) => {
+                self.restore(step.packmap, &packmap_path, previous.as_deref());
+                match e {
+                    RefFileError::Conflict => Ok(AdvanceOutcome::HeadConflict),
+                    e => Err(e),
+                }
+            }
+        }
+    }
+
+    /// Put back a ref file's previous bytes, or remove it if it had none;
+    /// best-effort. The caller holds the ref's lock, and the exclusive
+    /// repo lock when the file was absent.
+    fn restore(&self, name: &str, path: &Path, previous: Option<&[u8]>) {
+        match previous {
+            Some(bytes) => {
+                let _ = write_atomic(path, bytes, false);
+            }
+            None => {
+                if remove_durably(path).unwrap_or(false) {
+                    self.prune_empty_parents(path, name);
+                }
+            }
+        }
+    }
+
     /// The ref's id, strictly: like [`Transport::read_ref`], but a ref file
     /// that does not hold a ref wire is [`RefFileError::Corrupt`] rather
-    /// than absent. A directory where the ref file would be is no ref.
+    /// than absent. A directory where the ref file would be is no ref, and
+    /// no ref lies below a ref file.
     ///
     /// # Errors
     /// [`RefFileError::InvalidName`], [`RefFileError::Escape`] for the
@@ -515,7 +771,7 @@ impl FileTransport {
             Ok(bytes) => decode_ref_wire(&bytes)
                 .map(Some)
                 .ok_or_else(|| RefFileError::Corrupt(name.to_owned())),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) if no_ref_file(&e) => Ok(None),
             Err(e) if e.kind() == ErrorKind::InvalidData => {
                 Err(RefFileError::Corrupt(name.to_owned()))
             }
@@ -547,7 +803,7 @@ impl FileTransport {
         while let Some(dir) = dirs.pop() {
             let entries = match fs::read_dir(&dir) {
                 Ok(entries) => entries,
-                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) if no_ref_file(&e) => continue,
                 Err(e) => return Err(RefFileError::Io(e)),
             };
             for entry in entries {
@@ -633,6 +889,62 @@ impl FileTransport {
                 .skip(1)
                 .take_while(|d| *d != self.root)
                 .any(Path::is_file)
+    }
+
+    /// The CAS write of one ref file. The caller holds the ref's lock: the
+    /// exclusive repo lock, or the shared repo lock and the ref's stripe.
+    ///
+    /// Two writers under different stripe locks can race to create a ref
+    /// and a ref below it (`refs/heads/a` and `refs/heads/a/b`). One wins.
+    /// The other fails, and a failure that leaves a clash on disk is
+    /// [`RefFileError::InvalidName`], as the check before the write reports
+    /// it, never a bare I/O error or a false conflict.
+    fn write_ref_file(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+    ) -> Result<(), RefFileError> {
+        if !validate_ref_name(name) {
+            return Err(RefFileError::InvalidName(name.to_owned()));
+        }
+        self.refuse_if_meta_elsewhere()?;
+        let dest = self.ref_path(name);
+        self.guard_ref_path(&dest)?;
+        if self.ref_clash(&dest) {
+            return Err(RefFileError::InvalidName(name.to_owned()));
+        }
+        let wire = encode_ref_wire(hash);
+        let clashed = |e: io::Error| {
+            if self.ref_clash(&dest) {
+                RefFileError::InvalidName(name.to_owned())
+            } else {
+                RefFileError::Io(e)
+            }
+        };
+
+        match condition {
+            // Unconditional atomic overwrite.
+            RefWriteCondition::Any => write_atomic(&dest, &wire, true).map_err(clashed),
+
+            RefWriteCondition::Missing => {
+                // Exclusive create: succeeds only when the file is absent.
+                match write_create_new(&dest, &wire, true) {
+                    Ok(true) => Ok(()),
+                    Ok(false) if dest.is_dir() => Err(RefFileError::InvalidName(name.to_owned())),
+                    Ok(false) => Err(RefFileError::Conflict),
+                    Err(e) => Err(clashed(e)),
+                }
+            }
+
+            RefWriteCondition::Match(expected) => {
+                match read_ref_raw(&dest).map_err(RefFileError::Io)? {
+                    Some(c) if c == expected => {}
+                    _ => return Err(RefFileError::Conflict),
+                }
+                write_atomic(&dest, &wire, true).map_err(clashed)
+            }
+        }
     }
 
     /// Remove the directories between `path` and `<root>/<first component
@@ -756,38 +1068,7 @@ impl LockedRefs<'_> {
         condition: RefWriteCondition,
         hash: &Hash,
     ) -> Result<(), RefFileError> {
-        if !validate_ref_name(name) {
-            return Err(RefFileError::InvalidName(name.to_owned()));
-        }
-        self.tx.refuse_if_meta_elsewhere()?;
-        let dest = self.tx.ref_path(name);
-        self.tx.guard_ref_path(&dest)?;
-        if self.tx.ref_clash(&dest) {
-            return Err(RefFileError::InvalidName(name.to_owned()));
-        }
-        let wire = encode_ref_wire(hash);
-
-        match condition {
-            // Unconditional atomic overwrite.
-            RefWriteCondition::Any => write_atomic(&dest, &wire, true).map_err(RefFileError::Io),
-
-            RefWriteCondition::Missing => {
-                // Exclusive create: succeeds only when the file is absent.
-                match write_create_new(&dest, &wire, true) {
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err(RefFileError::Conflict),
-                    Err(e) => Err(RefFileError::Io(e)),
-                }
-            }
-
-            RefWriteCondition::Match(expected) => {
-                match read_ref_raw(&dest).map_err(RefFileError::Io)? {
-                    Some(c) if c == expected => {}
-                    _ => return Err(RefFileError::Conflict),
-                }
-                write_atomic(&dest, &wire, true).map_err(RefFileError::Io)
-            }
-        }
+        self.tx.write_ref_file(name, condition, hash)
     }
 
     /// Remove the ref file, fsync its directory, then remove the
@@ -835,6 +1116,107 @@ impl LockedRefs<'_> {
         self.tx.refuse_if_meta_elsewhere()?;
         let path = self.tx.server_path(rel)?;
         remove_durably(&path).map_err(RefFileError::Io)
+    }
+}
+
+/// One ref of a [`FileTransport`] root while
+/// [`FileTransport::with_ref_lock_for`] holds that ref's lock. It reads and
+/// writes only that ref, so a step under it cannot disturb a write to
+/// another ref that runs in parallel.
+#[derive(Debug)]
+pub struct LockedRef<'a> {
+    tx: &'a FileTransport,
+    name: &'a str,
+}
+
+impl LockedRef<'_> {
+    /// The ref's id: [`FileTransport::read_ref_strict`].
+    ///
+    /// # Errors
+    /// As [`FileTransport::read_ref_strict`].
+    pub fn read(&self) -> Result<Option<Hash>, RefFileError> {
+        self.tx.read_ref_strict(self.name)
+    }
+
+    /// The CAS write of [`Transport::update_ref`], under the lock already
+    /// held.
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`], [`RefFileError::Escape`],
+    /// [`RefFileError::Conflict`], or I/O.
+    pub fn update(&self, condition: RefWriteCondition, hash: &Hash) -> Result<(), RefFileError> {
+        self.tx.write_ref_file(self.name, condition, hash)
+    }
+}
+
+/// The arguments of one two-ref advance.
+struct TwoRefStep<'a> {
+    head: &'a str,
+    head_condition: RefWriteCondition,
+    head_value: &'a Hash,
+    packmap: &'a str,
+    packmap_condition: RefWriteCondition,
+    packmap_value: &'a Hash,
+}
+
+/// Whether one ref name lies below the other (`refs/heads/a` and
+/// `refs/heads/a/b`): their files can never both exist.
+fn names_nest(a: &str, b: &str) -> bool {
+    let below = |x: &str, y: &str| x.strip_prefix(y).is_some_and(|rest| rest.starts_with('/'));
+    below(a, b) || below(b, a)
+}
+
+/// Whether the write condition holds on the ref file at `path`, as
+/// [`FileTransport::write_ref_file`] decides it: `Missing` needs no file
+/// at all, `Match` needs the file to hold that id.
+fn condition_holds(path: &Path, condition: RefWriteCondition) -> io::Result<bool> {
+    match condition {
+        RefWriteCondition::Any => Ok(true),
+        RefWriteCondition::Missing => match fs::symlink_metadata(path) {
+            Ok(_) => Ok(false),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(true),
+            Err(e) => Err(e),
+        },
+        RefWriteCondition::Match(expected) => Ok(read_ref_raw(path)? == Some(expected)),
+    }
+}
+
+/// The bytes of the ref file at `path`, bounded like every ref read, or
+/// `None` when there is no file.
+fn read_previous(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match bounded_read::read_capped(path, REF_FILE_MAX_BYTES) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod push_tests;
+
+/// Fault injection for the two-ref advance, in tests only.
+#[cfg(test)]
+mod advance_fault {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy)]
+    pub(super) enum Fault {
+        /// Stop after the packmap write, as a crashed process would.
+        CrashAfterPackmap,
+        /// Fail the head write.
+        FailHead,
+    }
+
+    thread_local! {
+        static NEXT: Cell<Option<Fault>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn set(fault: Fault) {
+        NEXT.with(|n| n.set(Some(fault)));
+    }
+
+    pub(super) fn take() -> Option<Fault> {
+        NEXT.with(Cell::take)
     }
 }
 
@@ -911,7 +1293,46 @@ impl Transport for FileTransport {
         }
         // Every condition participates: an unconditional write must not
         // interleave between a Match read and its publication.
-        Ok(self.with_ref_lock(|refs| refs.update_ref(name, condition, hash))??)
+        Ok(self.with_ref_lock_for(name, |lock| lock.update(condition, hash))??)
+    }
+
+    /// Both refs' conditions are checked under both refs' locks before
+    /// either is written, then the packmap is written, then the head. A
+    /// failed advance changes nothing, and no other writer interleaves.
+    ///
+    /// Lock-free readers are not excluded: between the two renames they
+    /// see the new packmap with the old head, and a crash there leaves
+    /// that state on disk. That state is consistent only when the new
+    /// packmap also reconstructs the old head's closure: an append always
+    /// does, a re-baseline does only for a fast-forward. So
+    /// [`Transport::supports_atomic_advance`] stays `false`, and the
+    /// transport offers [`Transport::supports_serialized_advance`]
+    /// instead: a client asks it for a re-baseline only of a push that is
+    /// a verified fast-forward of the head it conditions on.
+    fn advance_refs(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+    ) -> TransportResult<AdvanceOutcome> {
+        Ok(self.advance_two_refs(
+            head_ref,
+            head_condition,
+            head_value,
+            packmap_ref,
+            packmap_condition,
+            packmap_value,
+        )?)
+    }
+
+    /// [`Self::advance_refs`] holds both refs' locks across its checks and
+    /// writes, so no other writer interleaves and a conflict changes
+    /// nothing. Readers still see its two renames one at a time.
+    fn supports_serialized_advance(&self) -> bool {
+        true
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
@@ -952,16 +1373,32 @@ impl Transport for FileTransport {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Read and decode the hash from a ref file. Returns `None` if the
-/// file does not exist; propagates other I/O errors.
+/// Read and decode the hash from a ref file. Returns `None` if no ref
+/// file is there ([`no_ref_file`]); propagates other I/O errors.
 fn read_ref_raw(path: &Path) -> io::Result<Option<Hash>> {
-    match bounded_read::read_capped(path, REF_FILE_MAX_BYTES) {
+    ref_from_read(bounded_read::read_capped(path, REF_FILE_MAX_BYTES))
+}
+
+/// The ref a capped read of a ref file yields.
+fn ref_from_read(read: io::Result<Vec<u8>>) -> io::Result<Option<Hash>> {
+    match read {
         Ok(bytes) => Ok(decode_ref_wire(&bytes)),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) if no_ref_file(&e) => Ok(None),
         // An oversized file is malformed content, like a bad hash.
         Err(e) if e.kind() == ErrorKind::InvalidData => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// Whether a failed open or read of a ref path means no ref file is there:
+/// the path is missing, a component above it is a ref file (`Not a
+/// directory`), or it is a directory of other refs (`Is a directory`).
+/// Every other failure is a real I/O error.
+fn no_ref_file(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        ErrorKind::NotFound | ErrorKind::NotADirectory | ErrorKind::IsADirectory
+    )
 }
 
 /// Recursively walk `dir`, collecting all ref files whose full logical
@@ -975,7 +1412,7 @@ fn read_ref_raw(path: &Path) -> io::Result<Option<Hash>> {
 fn collect_refs(root_dir: &Path, current_dir: &Path, out: &mut Vec<Ref>) -> TransportResult<()> {
     let entries = match fs::read_dir(current_dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) if no_ref_file(&e) => return Ok(()),
         Err(e) => {
             return Err(TransportError::RemoteError(format!(
                 "list_refs I/O error: {e}"
@@ -1276,6 +1713,106 @@ mod tests {
         let t = FileTransport::new(dir.path());
         let err = t.read_ref("/bad").unwrap_err();
         assert!(matches!(err, TransportError::InvalidRef(_)));
+    }
+
+    /// A ref file `a` is no directory, so no ref `a/b` lies below it: the
+    /// read reports `a/b` absent rather than `Not a directory`.
+    #[test]
+    fn read_ref_below_a_ref_file_is_absent() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        t.write_ref("refs/heads/a", &blake3_hash(b"a")).unwrap();
+        assert_eq!(t.read_ref("refs/heads/a/b").unwrap(), None);
+        assert_eq!(t.read_ref("refs/heads/a/b/c").unwrap(), None);
+        assert_eq!(t.read_ref_strict("refs/heads/a/b").unwrap(), None);
+        t.with_ref_lock(|refs| assert_eq!(refs.read_ref("refs/heads/a/b").unwrap(), None))
+            .unwrap();
+        assert_eq!(t.read_ref("refs/heads/a").unwrap(), Some(blake3_hash(b"a")));
+    }
+
+    /// The directory that holds ref `a/b` is no ref file: the read of `a`
+    /// reports it absent rather than `Is a directory`.
+    #[test]
+    fn read_ref_of_a_directory_of_refs_is_absent() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        t.write_ref("refs/heads/a/b", &blake3_hash(b"b")).unwrap();
+        assert_eq!(t.read_ref("refs/heads/a").unwrap(), None);
+        assert_eq!(t.read_ref_strict("refs/heads/a").unwrap(), None);
+        assert_eq!(
+            t.read_ref("refs/heads/a/b").unwrap(),
+            Some(blake3_hash(b"b"))
+        );
+    }
+
+    /// A prefix that names a ref file lists nothing: no ref lies below a
+    /// file, and a ref named exactly the prefix is not listed (SPEC-REFS
+    /// §4).
+    #[test]
+    fn list_refs_below_a_ref_file_is_empty() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        t.write_ref("refs/heads/a", &blake3_hash(b"a")).unwrap();
+        assert!(t.list_refs("refs/heads/a").unwrap().is_empty());
+        assert!(t.list_refs("refs/heads/a/b/").unwrap().is_empty());
+        assert!(t.list_ref_files("refs/heads/a").unwrap().is_empty());
+        assert_eq!(t.list_refs("refs/heads").unwrap().len(), 1);
+    }
+
+    /// Only a missing file, a ref file above the name and a directory at
+    /// the name read as absent. Any other read failure, here an injected
+    /// permission error, stays an error.
+    #[test]
+    fn ref_read_failure_other_than_absence_is_an_error() {
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::NotADirectory,
+            ErrorKind::IsADirectory,
+        ] {
+            assert_eq!(ref_from_read(Err(kind.into())).unwrap(), None, "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidInput,
+            ErrorKind::Other,
+        ] {
+            let err = ref_from_read(Err(kind.into())).unwrap_err();
+            assert_eq!(err.kind(), kind);
+        }
+        let h = blake3_hash(b"h");
+        assert_eq!(
+            ref_from_read(Ok(encode_ref_wire(&h).to_vec())).unwrap(),
+            Some(h)
+        );
+        assert_eq!(ref_from_read(Ok(b"junk".to_vec())).unwrap(), None);
+    }
+
+    /// A read that fails for another reason than absence surfaces through
+    /// every reader: a ref path that is a symlink loop.
+    #[cfg(unix)]
+    #[test]
+    fn read_ref_of_a_symlink_loop_is_an_error() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let heads = dir.path().join("refs/heads");
+        fs::create_dir_all(&heads).unwrap();
+        std::os::unix::fs::symlink("loop", heads.join("loop")).unwrap();
+        assert!(matches!(
+            t.read_ref("refs/heads/loop"),
+            Err(TransportError::RemoteError(_))
+        ));
+        assert!(matches!(
+            t.read_ref_strict("refs/heads/loop"),
+            Err(RefFileError::Io(_))
+        ));
+        assert!(matches!(
+            t.list_refs("refs/heads/loop"),
+            Err(TransportError::RemoteError(_))
+        ));
+        assert!(matches!(
+            t.list_ref_files("refs/heads/loop"),
+            Err(RefFileError::Io(_))
+        ));
     }
 
     // ------------------------------------------------------------------
@@ -1883,11 +2420,704 @@ mod tests {
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             t.with_ref_lock(|_| panic!("panic under the ref lock"))
         }));
-        assert!(panicked.is_err() && t.cas_lock.is_poisoned());
+        assert!(panicked.is_err() && t.repo_gate.is_poisoned());
         let h = blake3_hash(b"after");
         t.update_ref("refs/heads/a", RefWriteCondition::Any, &h)
             .unwrap();
         assert_eq!(t.read_ref("refs/heads/a").unwrap(), Some(h));
+    }
+
+    #[test]
+    fn with_ref_lock_for_recovers_after_a_panic() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            t.with_ref_lock_for("refs/heads/a", |_| panic!("panic under the ref lock"))
+        }));
+        assert!(panicked.is_err() && t.stripe_gates[ref_stripe("refs/heads/a")].is_poisoned());
+        let h = blake3_hash(b"after");
+        t.update_ref("refs/heads/a", RefWriteCondition::Any, &h)
+            .unwrap();
+        assert_eq!(t.read_ref("refs/heads/a").unwrap(), Some(h));
+    }
+
+    #[test]
+    fn with_ref_lock_for_refuses_an_invalid_name() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let result = t.with_ref_lock_for("refs/heads/../x", |_| ());
+        assert!(matches!(result, Err(RefFileError::InvalidName(_))));
+    }
+
+    /// Two ref names, in different stripes, that start with `refs/heads/`.
+    fn refs_in_different_stripes() -> (String, String) {
+        let a = "refs/heads/a".to_owned();
+        let b = (0..1000)
+            .map(|i| format!("refs/heads/b{i}"))
+            .find(|n| ref_stripe(n) != ref_stripe(&a))
+            .unwrap();
+        (a, b)
+    }
+
+    /// The stripe is the first byte of the BLAKE3 digest of the name. Every
+    /// process on a root must agree on it, so the mapping is pinned.
+    /// The golden vectors of SPEC-REFS section 5.1.1:
+    /// `rust/tests/golden/ref-locks/vectors.txt` lists, for each ref name,
+    /// its stripe and lock file. `scripts/golden/ref_locks_ref.py` checks
+    /// the same file independently.
+    #[test]
+    fn every_golden_ref_maps_to_its_stripe_and_lock_file() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/ref-locks");
+        let raw = fs::read(dir.join("vectors.txt")).unwrap();
+        let manifest = fs::read_to_string(dir.join("MANIFEST.txt")).unwrap();
+        let pinned = manifest
+            .lines()
+            .find_map(|l| l.strip_prefix("vectors.txt "))
+            .unwrap();
+        assert_eq!(
+            kit_core::hash::to_hex(&blake3_hash(&raw)),
+            pinned,
+            "vectors.txt does not match MANIFEST.txt"
+        );
+        let text = std::str::from_utf8(&raw).unwrap();
+        let mut count = 0;
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let fields: Vec<&str> = line.split(' ').collect();
+            let [name, hh, lock] = fields[..] else {
+                panic!("malformed vector {line:?}");
+            };
+            assert!(validate_ref_name(name), "{name}");
+            let stripe = usize::from_str_radix(hh, 16).unwrap();
+            assert_eq!(ref_stripe(name), stripe, "{name}");
+            assert_eq!(stripe_lock_file(ref_stripe(name)), lock, "{name}");
+            count += 1;
+        }
+        assert_eq!(count, 57);
+    }
+
+    #[test]
+    fn the_stripe_of_a_ref_is_pinned() {
+        // First bytes of the BLAKE3 digests, computed with an independent
+        // implementation.
+        assert_eq!(ref_stripe("refs/heads/main"), 0xec);
+        assert_eq!(ref_stripe("refs/heads/a"), 0x1b);
+        assert_eq!(ref_stripe("refs/tags/v1"), 0xce);
+        assert_eq!(REF_LOCK_STRIPES, 256);
+
+        let dir = tmp();
+        FileTransport::new(dir.path())
+            .update_ref(
+                "refs/heads/main",
+                RefWriteCondition::Missing,
+                &blake3_hash(b"x"),
+            )
+            .unwrap();
+        let locks = dir.path().join(".kit").join("refs");
+        assert!(locks.join(".lock").exists());
+        assert!(locks.join("refs-ec.lock").exists());
+    }
+
+    #[test]
+    fn a_write_to_another_stripe_does_not_wait_for_a_held_stripe() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tmp();
+        let (held, other) = refs_in_different_stripes();
+        let lock = RefLock::acquire_stripe(dir.path(), ref_stripe(&held)).unwrap();
+        let root = dir.path().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        let name = other.clone();
+        let worker = std::thread::spawn(move || {
+            let t = FileTransport::new(root);
+            tx.send(t.update_ref(&name, RefWriteCondition::Missing, &blake3_hash(b"b")))
+                .unwrap();
+        });
+        let finished = rx.recv_timeout(Duration::from_secs(5));
+        drop(lock);
+        worker.join().unwrap();
+        assert!(
+            matches!(finished, Ok(Ok(()))),
+            "a write to another stripe waited on a held stripe: {finished:?}"
+        );
+    }
+
+    #[test]
+    fn a_write_to_a_held_stripe_waits_for_it() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        for condition in [
+            RefWriteCondition::Any,
+            RefWriteCondition::Missing,
+            RefWriteCondition::Match(blake3_hash(b"absent")),
+        ] {
+            let dir = tmp();
+            let lock = RefLock::acquire_stripe(dir.path(), ref_stripe("refs/heads/main")).unwrap();
+            let root = dir.path().to_path_buf();
+            let (tx, rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let t = FileTransport::new(root);
+                tx.send(t.update_ref("refs/heads/main", condition, &blake3_hash(b"next")))
+                    .unwrap();
+            });
+            let premature = rx.recv_timeout(Duration::from_millis(100));
+            drop(lock);
+            worker.join().unwrap();
+            assert!(
+                matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)),
+                "a write bypassed its held stripe lock: {premature:?}"
+            );
+            rx.recv_timeout(Duration::from_secs(2)).unwrap().ok();
+        }
+    }
+
+    #[test]
+    fn a_multi_file_step_excludes_single_ref_writes() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let root = dir.path().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        let inside = t
+            .with_ref_lock(|_| {
+                let worker = std::thread::spawn(move || {
+                    let other = FileTransport::new(root);
+                    tx.send(other.update_ref(
+                        "refs/heads/main",
+                        RefWriteCondition::Any,
+                        &blake3_hash(b"next"),
+                    ))
+                    .unwrap();
+                });
+                let premature = rx.recv_timeout(Duration::from_millis(100));
+                (worker, premature.is_err())
+            })
+            .unwrap();
+        let (worker, waited) = inside;
+        worker.join().unwrap();
+        assert!(waited, "a single-ref write ran inside a multi-file step");
+        rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_ref_write_does_not_wait_for_a_shared_repo_lock() {
+        let dir = tmp();
+        let shared = RefLock::acquire_shared(dir.path()).unwrap();
+        let t = FileTransport::new(dir.path());
+        t.update_ref(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &blake3_hash(b"x"),
+        )
+        .unwrap();
+        drop(shared);
+    }
+
+    /// Writers under different stripe locks race to create `refs/heads/c` and
+    /// `refs/heads/c/x`. At most one wins, and the other reports the clash.
+    #[test]
+    fn a_ref_and_a_ref_below_it_race_without_a_false_outcome() {
+        use std::sync::{Arc, Barrier};
+        let (parent, child) = (0..1000)
+            .map(|i| (format!("refs/heads/c{i}"), format!("refs/heads/c{i}/x")))
+            .find(|(p, c)| ref_stripe(p) != ref_stripe(c))
+            .unwrap();
+        for _ in 0..100 {
+            let dir = tmp();
+            let barrier = Arc::new(Barrier::new(2));
+            let run = |name: String| {
+                let root = dir.path().to_path_buf();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let t = FileTransport::new(root);
+                    barrier.wait();
+                    t.update_ref(&name, RefWriteCondition::Missing, &blake3_hash(b"v"))
+                })
+            };
+            let (a, b) = (run(parent.clone()), run(child.clone()));
+            let (ra, rb) = (a.join().unwrap(), b.join().unwrap());
+            let wins = usize::from(ra.is_ok()) + usize::from(rb.is_ok());
+            assert!(wins <= 1, "both a ref and a ref below it were created");
+            for r in [&ra, &rb] {
+                assert!(
+                    matches!(r, Ok(()) | Err(TransportError::InvalidRef(_))),
+                    "a clash must be InvalidRef, got {r:?}"
+                );
+            }
+            assert_eq!(wins, 1, "one of the two writers must win");
+            let leaked: Vec<_> = fs::read_dir(dir.path().join("refs/heads"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+                .collect();
+            assert!(leaked.is_empty(), "a failed write left a temp file");
+        }
+    }
+
+    /// Every temp file left under `dir`, at any depth.
+    fn temp_files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut todo = vec![dir.to_path_buf()];
+        while let Some(d) = todo.pop() {
+            for e in fs::read_dir(&d).unwrap().filter_map(Result::ok) {
+                let path = e.path();
+                if path.is_dir() {
+                    todo.push(path);
+                } else if e.file_name().to_string_lossy().contains(".tmp.") {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    /// A ref whose stripe is `stripe`, named so it clashes with nothing.
+    fn ref_in_stripe(stripe: usize) -> String {
+        (0..100_000)
+            .map(|k| format!("refs/tags/victim-{k}"))
+            .find(|n| ref_stripe(n) == stripe)
+            .unwrap()
+    }
+
+    /// Single-ref creates of `refs/heads/a` and `refs/heads/a/b`, in
+    /// different stripes, race on a fresh root each round, under every
+    /// write condition that can create. Whatever the interleaving, the root
+    /// stays usable: one name wins and reads back, the loser reports
+    /// `InvalidRef`, no temp file is left, refs in both stripes can still be
+    /// written, and the exclusive multi-file step still runs.
+    #[test]
+    fn a_ref_and_a_ref_below_it_race_and_leave_the_root_usable() {
+        use std::sync::{Arc, Barrier};
+        let (parent, child) = (0..1000)
+            .map(|i| (format!("refs/heads/a{i}"), format!("refs/heads/a{i}/b")))
+            .find(|(p, c)| ref_stripe(p) != ref_stripe(c))
+            .unwrap();
+        let victims = [
+            ref_in_stripe(ref_stripe(&parent)),
+            ref_in_stripe(ref_stripe(&child)),
+        ];
+        let conditions = [RefWriteCondition::Missing, RefWriteCondition::Any];
+        for round in 0..200usize {
+            let dir = tmp();
+            let barrier = Arc::new(Barrier::new(2));
+            let run = |name: String, condition: RefWriteCondition, v: &[u8]| {
+                let root = dir.path().to_path_buf();
+                let barrier = Arc::clone(&barrier);
+                let id = blake3_hash(v);
+                std::thread::spawn(move || {
+                    let t = FileTransport::new(root);
+                    barrier.wait();
+                    (t.update_ref(&name, condition, &id), id)
+                })
+            };
+            let a = run(parent.clone(), conditions[round % 2], b"parent");
+            let b = run(child.clone(), conditions[(round / 2) % 2], b"child");
+            let ((ra, ia), (rb, ib)) = (a.join().unwrap(), b.join().unwrap());
+            for r in [&ra, &rb] {
+                assert!(
+                    matches!(r, Ok(()) | Err(TransportError::InvalidRef(_))),
+                    "round {round}: a clash must be InvalidRef, got {r:?}"
+                );
+            }
+            assert_eq!(
+                usize::from(ra.is_ok()) + usize::from(rb.is_ok()),
+                1,
+                "round {round}: exactly one of the two names must win"
+            );
+            let t = FileTransport::new(dir.path());
+            let (winner, id, loser) = if ra.is_ok() {
+                (&parent, ia, &child)
+            } else {
+                (&child, ib, &parent)
+            };
+            assert_eq!(t.read_ref(winner).unwrap(), Some(id), "round {round}");
+            let leaked = temp_files_under(&dir.path().join("refs"));
+            assert!(leaked.is_empty(), "round {round}: temp files {leaked:?}");
+            for v in &victims {
+                t.update_ref(v, RefWriteCondition::Missing, &blake3_hash(v.as_bytes()))
+                    .unwrap();
+            }
+            let listed: Vec<String> = t
+                .list_refs("refs/heads/")
+                .unwrap()
+                .into_iter()
+                .map(|r| r.name)
+                .collect();
+            // The loser is absent. A read by its name can fail instead: its
+            // path runs through, or is, the winner's file system entry.
+            let want = winner.strip_prefix("refs/heads/").unwrap();
+            assert_eq!(listed, [want], "round {round}: loser {loser}");
+            t.with_ref_lock(|refs| {
+                refs.update_ref(winner, RefWriteCondition::Match(id), &blake3_hash(b"next"))
+            })
+            .unwrap()
+            .unwrap();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Two-ref advance
+    // ------------------------------------------------------------------
+
+    fn id(v: u64) -> Hash {
+        let mut x = [0u8; 32];
+        x[..8].copy_from_slice(&v.to_le_bytes());
+        x[31] = 1;
+        x
+    }
+
+    fn version(x: Option<Hash>) -> u64 {
+        x.map_or(0, |x| {
+            let mut v = [0u8; 8];
+            v.copy_from_slice(&x[..8]);
+            u64::from_le_bytes(v)
+        })
+    }
+
+    fn cond(v: u64) -> RefWriteCondition {
+        if v == 0 {
+            RefWriteCondition::Missing
+        } else {
+            RefWriteCondition::Match(id(v))
+        }
+    }
+
+    const HEAD: &str = "refs/heads/main";
+    const PACKMAP: &str = "refs/kit/packmap/main";
+
+    fn advance(t: &FileTransport, from: u64, to: u64) -> TransportResult<AdvanceOutcome> {
+        t.advance_refs(HEAD, cond(from), &id(to), PACKMAP, cond(from), &id(to))
+    }
+
+    /// The outcomes of `Transport::advance_refs`: both refs move, or
+    /// nothing changes and the packmap conflict is reported first.
+    #[test]
+    fn an_advance_moves_both_refs_or_changes_nothing() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        assert_eq!(advance(&t, 0, 1).unwrap(), AdvanceOutcome::Committed);
+        assert_eq!(advance(&t, 1, 2).unwrap(), AdvanceOutcome::Committed);
+        let state = |t: &FileTransport| (t.read_ref(HEAD).unwrap(), t.read_ref(PACKMAP).unwrap());
+        assert_eq!(state(&t), (Some(id(2)), Some(id(2))));
+
+        // Both conditions stale: the packmap conflict is reported.
+        assert_eq!(advance(&t, 1, 3).unwrap(), AdvanceOutcome::PackmapConflict);
+        // Only the head stale: nothing changes, the packmap included.
+        let r = t.advance_refs(HEAD, cond(1), &id(3), PACKMAP, cond(2), &id(3));
+        assert_eq!(r.unwrap(), AdvanceOutcome::HeadConflict);
+        assert_eq!(state(&t), (Some(id(2)), Some(id(2))));
+        // Only the packmap stale.
+        let r = t.advance_refs(HEAD, cond(2), &id(3), PACKMAP, cond(1), &id(3));
+        assert_eq!(r.unwrap(), AdvanceOutcome::PackmapConflict);
+        assert_eq!(state(&t), (Some(id(2)), Some(id(2))));
+        // A create of an existing ref is a conflict, not an overwrite.
+        let r = t.advance_refs(HEAD, cond(0), &id(3), PACKMAP, cond(2), &id(3));
+        assert_eq!(r.unwrap(), AdvanceOutcome::HeadConflict);
+        assert_eq!(state(&t), (Some(id(2)), Some(id(2))));
+        // Unconditional writes.
+        let any = RefWriteCondition::Any;
+        let r = t.advance_refs(HEAD, any, &id(4), PACKMAP, any, &id(4));
+        assert_eq!(r.unwrap(), AdvanceOutcome::Committed);
+        assert_eq!(state(&t), (Some(id(4)), Some(id(4))));
+        assert!(temp_files_under(&dir.path().join("refs")).is_empty());
+    }
+
+    #[test]
+    fn an_advance_refuses_names_that_cannot_both_be_refs() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let a = RefWriteCondition::Missing;
+        for (head, packmap) in [
+            ("refs/heads/x", "refs/heads/x"),
+            ("refs/heads/x", "refs/heads/x/y"),
+            ("refs/heads/x/y", "refs/heads/x"),
+            ("refs/heads/../x", "refs/kit/packmap/x"),
+        ] {
+            let r = t.advance_refs(head, a, &id(1), packmap, a, &id(1));
+            assert!(
+                matches!(r, Err(TransportError::InvalidRef(_))),
+                "{head} {packmap}: {r:?}"
+            );
+        }
+        assert!(t.list_refs("").unwrap().is_empty());
+    }
+
+    /// Two refs in one stripe take that stripe once.
+    #[test]
+    fn an_advance_of_two_refs_in_one_stripe_commits() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let s = ref_stripe("refs/heads/same");
+        let other = (0..100_000)
+            .map(|k| format!("refs/kit/packmap/same-{k}"))
+            .find(|n| ref_stripe(n) == s)
+            .unwrap();
+        for (from, to) in [(0, 1), (1, 2)] {
+            let r = t.advance_refs(
+                "refs/heads/same",
+                cond(from),
+                &id(to),
+                &other,
+                cond(from),
+                &id(to),
+            );
+            assert_eq!(r.unwrap(), AdvanceOutcome::Committed);
+        }
+        assert_eq!(t.read_ref(&other).unwrap(), Some(id(2)));
+    }
+
+    /// A crash between the two writes leaves the new packmap and the old
+    /// head, both readable; the next advance from that state commits.
+    #[test]
+    fn a_crash_between_the_writes_leaves_the_new_packmap_and_the_old_head() {
+        for from in [0, 1] {
+            let dir = tmp();
+            let t = FileTransport::new(dir.path());
+            if from == 1 {
+                advance(&t, 0, 1).unwrap();
+            }
+            advance_fault::set(advance_fault::Fault::CrashAfterPackmap);
+            assert!(advance(&t, from, 2).is_err());
+            let t = FileTransport::new(dir.path());
+            assert_eq!(t.read_ref(PACKMAP).unwrap(), Some(id(2)));
+            assert_eq!(version(t.read_ref(HEAD).unwrap()), from);
+            assert!(temp_files_under(&dir.path().join("refs")).is_empty());
+            let r = t.advance_refs(HEAD, cond(from), &id(3), PACKMAP, cond(2), &id(3));
+            assert_eq!(r.unwrap(), AdvanceOutcome::Committed);
+            t.with_ref_lock(|_| ()).unwrap();
+        }
+    }
+
+    /// A failed head write puts the packmap back: the advance changes
+    /// nothing, including a create, which leaves no file or directory.
+    #[test]
+    fn a_failed_head_write_restores_the_packmap() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        advance_fault::set(advance_fault::Fault::FailHead);
+        assert!(
+            t.advance_refs(
+                "refs/heads/n/m",
+                cond(0),
+                &id(1),
+                "refs/kit/packmap/n/m",
+                cond(0),
+                &id(1)
+            )
+            .is_err()
+        );
+        assert!(t.list_refs("").unwrap().is_empty());
+        assert!(!dir.path().join("refs/kit/packmap/n").exists());
+
+        advance(&t, 0, 1).unwrap();
+        advance_fault::set(advance_fault::Fault::FailHead);
+        assert!(advance(&t, 1, 2).is_err());
+        assert_eq!(t.read_ref(PACKMAP).unwrap(), Some(id(1)));
+        assert_eq!(t.read_ref(HEAD).unwrap(), Some(id(1)));
+        assert!(temp_files_under(&dir.path().join("refs")).is_empty());
+    }
+
+    /// One round of a race between creates of `refs/heads/<p>` and
+    /// `refs/heads/<p>/b` (each as an advance with its packmap, or as a
+    /// single-ref write). Whatever the interleaving, one name wins, the
+    /// other reports `InvalidRef`, nothing is left half-written, and the
+    /// root stays usable.
+    fn nested_create_round(parent: &str, parent_advances: bool, child_advances: bool) {
+        use std::sync::{Arc, Barrier};
+        let child = format!("{parent}/b");
+        let dir = tmp();
+        let barrier = Arc::new(Barrier::new(2));
+        let run = |branch: String, advances: bool, v: u64| {
+            let root = dir.path().to_path_buf();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let t = FileTransport::new(root);
+                let head = format!("refs/heads/{branch}");
+                barrier.wait();
+                if advances {
+                    let packmap = format!("refs/kit/packmap/{branch}");
+                    t.advance_refs(&head, cond(0), &id(v), &packmap, cond(0), &id(v))
+                        .map(|o| assert_eq!(o, AdvanceOutcome::Committed))
+                } else {
+                    t.update_ref(&head, cond(0), &id(v))
+                }
+            })
+        };
+        let a = run(parent.to_owned(), parent_advances, 1);
+        let b = run(child.clone(), child_advances, 2);
+        let (ra, rb) = (a.join().unwrap(), b.join().unwrap());
+        for r in [&ra, &rb] {
+            assert!(
+                matches!(r, Ok(()) | Err(TransportError::InvalidRef(_))),
+                "{r:?}"
+            );
+        }
+        assert_eq!(usize::from(ra.is_ok()) + usize::from(rb.is_ok()), 1);
+        let t = FileTransport::new(dir.path());
+        let (winner, advanced) = if ra.is_ok() {
+            (parent.to_owned(), parent_advances)
+        } else {
+            (child, child_advances)
+        };
+        let mut want = vec![format!("heads/{winner}")];
+        if advanced {
+            want.push(format!("kit/packmap/{winner}"));
+        }
+        let listed: Vec<String> = t
+            .list_refs("refs/")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(listed, want);
+        assert!(temp_files_under(&dir.path().join("refs")).is_empty());
+        for name in [
+            format!("refs/heads/{parent}"),
+            format!("refs/heads/{parent}/b"),
+            format!("refs/kit/packmap/{parent}"),
+            format!("refs/kit/packmap/{parent}/b"),
+        ] {
+            let victim = ref_in_stripe(ref_stripe(&name));
+            t.update_ref(&victim, RefWriteCondition::Any, &id(9))
+                .unwrap();
+        }
+        FileTransport::new(dir.path())
+            .with_ref_lock(|_| ())
+            .unwrap();
+    }
+
+    #[test]
+    fn concurrent_advances_of_a_ref_and_a_ref_below_it_leave_the_root_usable() {
+        for _ in 0..200 {
+            nested_create_round("a", true, true);
+        }
+    }
+
+    #[test]
+    fn an_advance_racing_a_single_ref_create_below_or_above_it_leaves_the_root_usable() {
+        for round in 0..300 {
+            nested_create_round("a", round % 2 == 0, round % 2 == 1);
+        }
+    }
+
+    /// Readers take no lock. One that reads the head, then the packmap,
+    /// never sees a packmap older than the head it read: the packmap moves
+    /// first.
+    #[test]
+    fn a_reader_never_sees_a_head_newer_than_its_packmap() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        let dir = tmp();
+        let stop = Arc::new(AtomicBool::new(false));
+        let torn = Arc::new(AtomicU64::new(0));
+        let writer = {
+            let (root, stop) = (dir.path().to_path_buf(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let t = FileTransport::new(root);
+                let mut v = 0;
+                while !stop.load(Ordering::Relaxed) || v < 50 {
+                    assert_eq!(advance(&t, v, v + 1).unwrap(), AdvanceOutcome::Committed);
+                    v += 1;
+                }
+                v
+            })
+        };
+        let readers: Vec<_> = (0..8)
+            .map(|_| {
+                let (root, stop, torn) = (
+                    dir.path().to_path_buf(),
+                    Arc::clone(&stop),
+                    Arc::clone(&torn),
+                );
+                std::thread::spawn(move || {
+                    let t = FileTransport::new(root);
+                    let mut pairs = 0u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        let head = version(t.read_ref(HEAD).unwrap());
+                        let packmap = version(t.read_ref(PACKMAP).unwrap());
+                        if packmap < head {
+                            torn.fetch_add(1, Ordering::Relaxed);
+                        }
+                        pairs += 1;
+                    }
+                    pairs
+                })
+            })
+            .collect();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        stop.store(true, Ordering::Relaxed);
+        let advances = writer.join().unwrap();
+        let pairs: u64 = readers.into_iter().map(|r| r.join().unwrap()).sum();
+        assert!(advances >= 50 && pairs > 0);
+        assert_eq!(
+            torn.load(Ordering::Relaxed),
+            0,
+            "{advances} advances, {pairs} read pairs"
+        );
+    }
+
+    /// Advances on overlapping pairs of refs, single-ref writes and
+    /// exclusive steps, from many threads, all finish.
+    #[test]
+    fn mixed_advances_and_writes_do_not_deadlock() {
+        use std::sync::mpsc;
+        let dir = tmp();
+        let names: Vec<String> = (0..6).map(|i| format!("refs/heads/d{i}")).collect();
+        let (done_tx, done_rx) = mpsc::channel();
+        for th in 0..8u64 {
+            let (root, names, done_tx) = (dir.path().to_path_buf(), names.clone(), done_tx.clone());
+            std::thread::spawn(move || {
+                let t = FileTransport::new(root);
+                let any = RefWriteCondition::Any;
+                for i in 0..200u64 {
+                    let pick =
+                        |k: u64| names[usize::try_from((th * 7 + i * k) % 6).unwrap()].clone();
+                    let (a, b) = (pick(1), pick(5));
+                    match i % 4 {
+                        0 | 1 if a != b => {
+                            t.advance_refs(&a, any, &id(i), &b, any, &id(i)).unwrap();
+                        }
+                        2 => t.with_ref_lock(|_| ()).unwrap(),
+                        _ => t.update_ref(&a, any, &id(i)).unwrap(),
+                    }
+                }
+                done_tx.send(()).unwrap();
+            });
+        }
+        for _ in 0..8 {
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .expect("a writer did not finish: deadlock");
+        }
+    }
+
+    #[test]
+    fn writers_to_different_refs_all_commit() {
+        use std::sync::Arc;
+        let dir = tmp();
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let root = dir.path().to_path_buf();
+                std::thread::spawn(move || {
+                    let t = FileTransport::new(root);
+                    let name = format!("refs/heads/w{i}");
+                    let mut prev = None;
+                    for n in 0..20u8 {
+                        let next = blake3_hash(&[i, n]);
+                        let cond =
+                            prev.map_or(RefWriteCondition::Missing, RefWriteCondition::Match);
+                        t.update_ref(&name, cond, &next).unwrap();
+                        prev = Some(next);
+                    }
+                    (name, prev.unwrap())
+                })
+            })
+            .collect();
+        let t = Arc::new(FileTransport::new(dir.path()));
+        for h in handles {
+            let (name, last) = h.join().unwrap();
+            assert_eq!(t.read_ref(&name).unwrap(), Some(last));
+        }
     }
 
     #[test]

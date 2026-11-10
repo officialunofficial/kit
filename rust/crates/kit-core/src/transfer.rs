@@ -809,6 +809,7 @@ mod tests {
     /// the worktree large-file path. Returns the manifest hash.
     fn put_chunked(s: &ObjectStore, data: &[u8]) -> Hash {
         let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), data)
+            .take(data.len() + 1)
             .map(|b| {
                 put(
                     s,

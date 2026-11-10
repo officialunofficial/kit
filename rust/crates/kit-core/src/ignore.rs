@@ -249,10 +249,11 @@ impl IgnoreList {
         if trimmed.is_empty() {
             return false;
         }
-        let segs: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
         // Each strict ancestor is a directory; if one is ignored, so is this.
-        for i in 1..segs.len() {
-            if self.is_ignored(&segs[..i].join("/"), true) {
+        // An ancestor is the prefix before a `/`. Empty segments vanish in
+        // `is_ignored`, so a prefix that ends in `/` tests the same ancestor.
+        for (i, _) in trimmed.match_indices('/') {
+            if self.is_ignored(&trimmed[..i], true) {
                 return true;
             }
         }
@@ -920,6 +921,14 @@ mod tests {
     }
 
     // --- glob_match public helper --------------------------------------
+
+    #[test]
+    fn is_ignored_with_ancestors_skips_empty_segments() {
+        let il = parse("build/\n");
+        assert!(il.is_ignored_with_ancestors("build//out/x.o", false));
+        assert!(il.is_ignored_with_ancestors("/src//build/x.o", false));
+        assert!(!il.is_ignored_with_ancestors("src//lib/x.o", false));
+    }
 
     #[test]
     fn is_ignored_with_ancestors_catches_files_under_ignored_dir() {

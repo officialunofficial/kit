@@ -103,7 +103,8 @@ pub(crate) use kit_sync::worktree::{
 };
 pub use kit_sync::worktree::{
     ensure_restore_safe, ensure_restore_safe_with_options, read_or_seed_index_from_head,
-    restore_worktree_and_index, sync_index_to_tree, write_ref_recording_history,
+    restore_worktree_and_index, sync_index_to_tree, sync_index_to_tree_observed,
+    write_ref_recording_history,
 };
 
 /// [`refs::list_refs`], with the per-ref read-and-decode step fanned out

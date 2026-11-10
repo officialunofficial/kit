@@ -23,6 +23,7 @@
 //! | `branch`, `del`, condition `Any`              | `refs::delete_ref` |
 //! | `branch`, `del`, condition `Match(e)`         | `refs::delete_ref_if_matches` |
 //! | `file`                                        | `Transport::update_ref` on a `FileTransport` rooted at the repo's common dir |
+//! | `fileTx`                                      | `FileTransport::with_ref_lock`, then `LockedRefs::update_ref` on the same transport |
 //! | `mem`                                         | `Transport::update_ref` on a `MemoryTransport` |
 //! | `record` (amend)                              | `ops::recovery::record` |
 //! | `expireWrite` (gc)                            | `ops::recovery::expire` (default retention) |
@@ -57,7 +58,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::ops::recovery::{self, RecoveryEntry, RetentionPolicy};
 use kit_core::protocol::{Transport, TransportError};
 use kit_core::refs::{self, RefError, RefWriteCondition};
-use kit_transport_file::FileTransport;
+use kit_transport_file::{FileTransport, RefFileError};
 use kit_transport_memory::MemoryTransport;
 use serde_json::Value;
 
@@ -332,7 +333,7 @@ impl Sut {
             self.mem
                 .read_ref(&transport_name(op.reference))
                 .map_err(|e| e.to_string())?
-        } else if op.kind == "file" {
+        } else if op.kind == "file" || op.kind == "fileTx" {
             self.file
                 .read_ref(&transport_name(op.reference))
                 .map_err(|e| e.to_string())?
@@ -381,6 +382,22 @@ impl Sut {
                     self.file
                         .update_ref(&transport_name(op.reference), cond, &h),
                 )
+            }
+            "fileTx" => {
+                let cond = match op.cond {
+                    Cond::Match(_) if self.fault == Fault::FileMatchAsAny => RefWriteCondition::Any,
+                    _ => cond,
+                };
+                let name = transport_name(op.reference);
+                let written = self
+                    .file
+                    .with_ref_lock(|refs| refs.update_ref(&name, cond, &h))
+                    .and_then(|r| r);
+                match written {
+                    Ok(()) => Ok("ok"),
+                    Err(RefFileError::Conflict) => Ok("conflict"),
+                    Err(e) => Err(format!("unexpected locked ref error: {e}")),
+                }
             }
             "mem" => {
                 let cond = match op.cond {
@@ -604,6 +621,9 @@ fn refs_traces_replay_against_the_implementation() {
         "mem/match/ok",
         "mem/match/conflict",
         "mem/missing/conflict",
+        "fileTx/match/ok",
+        "fileTx/match/conflict",
+        "fileTx/missing/conflict",
     ];
     let missing: Vec<&str> = required.iter().copied().filter(|k| !total.has(k)).collect();
     assert!(
@@ -618,6 +638,7 @@ fn refs_traces_replay_against_the_implementation() {
         "branch",
         "checkout",
         "file",
+        "fileTx",
         "mem",
     ] {
         assert!(

@@ -11,6 +11,13 @@ use crate::upload::UploadLimits;
 /// of an upload do not count here. [`UploadLimits::max_chunks`] caps them.
 pub const MAX_FRAMES_PER_CONN: u32 = 10_000;
 
+/// The reply when a session sends more than [`MAX_FRAMES_PER_CONN`] frames.
+/// It names the limit, so a client that hits it can tell why: an unchanged
+/// fetch costs one frame per listing and two per branch, so one session
+/// fetches at most 4,999 branches (SPEC-TRANSPORT §4.4).
+pub const FRAME_BUDGET_EXCEEDED: &str =
+    "per-connection frame budget exceeded: at most 10000 frames per session (SPEC-TRANSPORT 4.4)";
+
 /// The most estimated request bytes per session (1 GiB). See
 /// [`frame_byte_estimate`]. It also caps the declared size of an upload.
 pub const MAX_BYTES_PER_CONN: u64 = 1024 * 1024 * 1024;
@@ -54,12 +61,22 @@ impl Budget {
     pub(crate) fn charge(&mut self, frame: &SshFrame) -> Result<(), &'static str> {
         self.frames = self.frames.saturating_add(1);
         if self.frames > MAX_FRAMES_PER_CONN {
-            return Err("per-connection frame budget exceeded");
+            return Err(FRAME_BUDGET_EXCEEDED);
         }
         self.bytes = self.bytes.saturating_add(frame_byte_estimate(frame));
         if self.bytes > MAX_BYTES_PER_CONN {
             return Err("per-connection byte budget exceeded");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_frame_budget_reply_names_the_limit() {
+        assert!(FRAME_BUDGET_EXCEEDED.contains(&MAX_FRAMES_PER_CONN.to_string()));
     }
 }

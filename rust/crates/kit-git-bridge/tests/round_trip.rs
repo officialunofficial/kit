@@ -390,6 +390,40 @@ fn fixed_size_chunking_is_refused() {
     );
 }
 
+/// §4 item 1: a `FastCDC` v2 manifest is refused as non-canonical, even
+/// when its chunks are the v2 output of its bytes.
+#[test]
+fn fastcdc_v2_chunking_is_refused() {
+    let (_d, store) = store();
+    let mut data = vec![0u8; 3 * 1024 * 1024];
+    let mut state = 0x6E1D_u64;
+    for byte in &mut data {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *byte = state.to_le_bytes()[7];
+    }
+    let manifest = kit_core::worktree::store_file_object_with(
+        &store,
+        &data,
+        kit_core::chunker::Chunker::FastCdcV2,
+    )
+    .unwrap();
+    let mut known = HashMap::new();
+    let err = translate_closure(&store, &manifest, &mut known, &mut |_, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::Refused(kit_git_bridge::Refusal::NonCanonicalChunking { .. })
+        ),
+        "got {err}"
+    );
+    // The same bytes stored by the default writer translate.
+    let v1 = kit_core::worktree::store_file_object(&store, &data).unwrap();
+    let mut known = HashMap::new();
+    translate_closure(&store, &v1, &mut known, &mut |_, _| Ok(())).unwrap();
+}
+
 /// Counts chunk reads so a test can see where the read loop stops.
 struct CountingSource<'a> {
     store: &'a ObjectStore,

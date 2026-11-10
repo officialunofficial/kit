@@ -15,7 +15,7 @@ use kit_core::index::Index;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
 use kit_core::ops::diff::{DiffKind, diff_trees};
-use kit_core::ops::restore::{RestoreOptions, matches_sparse, restore_tree_to_worktree_with};
+use kit_core::ops::restore::{RestoreOptions, matches_sparse, restore_tree_to_worktree_observed};
 use kit_core::refs::{self, RefError};
 use kit_core::store::ObjectStore;
 use kit_core::worktree as core_worktree;
@@ -29,6 +29,20 @@ pub fn sync_index_to_tree(
     layout: &RepoLayout,
     store: &ObjectStore,
     tree_hash: Hash,
+) -> Result<(), String> {
+    sync_index_to_tree_observed(layout, store, tree_hash, &[])
+}
+
+/// [`sync_index_to_tree`], recording `observed` as the stat cache of each
+/// entry whose path and object hash match an observation. A restore that
+/// just wrote those files produces them (see
+/// [`kit_core::ops::restore::restore_tree_to_worktree_observed`]), so the
+/// next command does not re-hash them.
+pub fn sync_index_to_tree_observed(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+    observed: &[core_worktree::StatObservation],
 ) -> Result<(), String> {
     let mut idx =
         kit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
@@ -53,6 +67,20 @@ pub fn sync_index_to_tree(
             }
         }
     }
+    if !observed.is_empty() {
+        let by_path: std::collections::HashMap<&str, &core_worktree::StatObservation> =
+            observed.iter().map(|o| (o.path.as_str(), o)).collect();
+        for e in &mut idx.entries {
+            if let Some(o) = by_path.get(e.path.as_str())
+                && o.object_hash == e.object_hash
+            {
+                e.mtime_ns = o.mtime_ns;
+                e.size = o.size;
+                e.ino = o.ino;
+                e.ctime_ns = o.ctime_ns;
+            }
+        }
+    }
     kit_core::index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))
 }
 
@@ -62,16 +90,18 @@ pub fn restore_worktree_and_index(
     store: &ObjectStore,
     tree_hash: Hash,
 ) -> Result<(), String> {
-    restore_tree_to_worktree_with(
+    let mut observed = Vec::new();
+    restore_tree_to_worktree_observed(
         store,
         &tree_hash,
         None,
         layout.worktree_root(),
         &RestoreOptions::default(),
         &crate::restore_fanout::read_chunks_fanout,
+        Some(&mut observed),
     )
     .map_err(|e| format!("restore worktree: {e}"))?;
-    sync_index_to_tree(layout, store, tree_hash)
+    sync_index_to_tree_observed(layout, store, tree_hash, &observed)
 }
 
 /// Refuse a destructive restore when the index/worktree contains user work.
@@ -295,4 +325,74 @@ pub fn fanout_read_batch(candidates: &[refs::RefCandidate]) -> Vec<refs::RefRead
         crate::fanout::threshold(LIST_REFS_FANOUT_ENTRIES_PER_THREAD),
         |c, _| refs::read_ref_candidate(c),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
+
+    use super::*;
+    use kit_core::object::{Blob, EntryMode, Tree, TreeEntry};
+    use kit_core::serialize;
+
+    fn put(store: &ObjectStore, obj: &Object) -> Hash {
+        store.write(&serialize::serialize(obj).unwrap()).unwrap()
+    }
+
+    /// An observation becomes the index entry's stat cache only when its
+    /// path and object hash both match the tree entry.
+    #[test]
+    fn sync_index_to_tree_observed_records_matching_observations() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let blob = |data: &[u8]| {
+            put(
+                &store,
+                &Object::Blob(Blob {
+                    data: data.to_vec(),
+                }),
+            )
+        };
+        let (a, b) = (blob(b"a"), blob(b"b"));
+        let tree = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![
+                    TreeEntry {
+                        name: b"a".to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: a,
+                    },
+                    TreeEntry {
+                        name: b"b".to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: b,
+                    },
+                ],
+            }),
+        );
+        // A whole-second mtime far in the past, so the racy-clean rule
+        // keeps it on read.
+        let seen = |path: &str, object_hash| core_worktree::StatObservation {
+            path: path.to_string(),
+            object_hash,
+            mtime_ns: 1_000_000_000_000_000_000,
+            size: 1,
+            ino: 7,
+            ctime_ns: 1_000_000_000_000_000_001,
+        };
+        // "b" is observed with the wrong hash, "c" is not in the tree.
+        let observed = [seen("a", a), seen("b", a), seen("c", b)];
+        sync_index_to_tree_observed(&layout, &store, tree, &observed).unwrap();
+        let idx = kit_core::index::read_index(&layout).unwrap();
+        assert_eq!(idx.entries.len(), 2);
+        let ea = &idx.entries[idx.find_entry("a").unwrap()];
+        assert_eq!(
+            (ea.mtime_ns, ea.size, ea.ino, ea.ctime_ns),
+            (1_000_000_000_000_000_000, 1, 7, 1_000_000_000_000_000_001)
+        );
+        let eb = &idx.entries[idx.find_entry("b").unwrap()];
+        assert_eq!((eb.mtime_ns, eb.size, eb.ino, eb.ctime_ns), (0, 0, 0, 0));
+    }
 }

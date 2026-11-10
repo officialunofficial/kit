@@ -23,4 +23,4 @@ backend for `kit+file://` remotes and for repositories served via
 | ---------- | ----------------------------------------------------------------- | --------------- |
 | `Any`      | `write_atomic`: tmp file → `fsync` → `rename` → parent           | Last writer wins; `rename(2)` is atomic on POSIX, so no half-written file is ever exposed. |
 | `Missing`  | `write_create_new`: same tmp+fsync, then a hard-link              | Only the first writer succeeds; the loser gets `AlreadyExists` → `RefConflict`. |
-| `Match(H)` | OS file-lock and in-process `Mutex` around read-then-`write_atomic` | Atomic across processes on the same root, via `std::fs::File::lock` on `<root>/.kit/refs/.lock`, held for the read-compare-write and released on `Drop` (including on panic). |
+| `Match(H)` | OS file-locks and in-process locks around read-then-`write_atomic` | Atomic across processes on the same root, via `std::fs::File::lock` on the ref's stripe `<root>/.kit/refs/refs-<hh>.lock` and on the repo lock `<root>/.kit/refs/.lock` (shared), held for the read-compare-write and released on `Drop` (including on panic). Writes to refs in different stripes run in parallel. |

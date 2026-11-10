@@ -18,6 +18,11 @@
 //! All chunk boundaries are fully determined by the input bytes plus the
 //! constants above. Any change breaks `chunked_blob` reproducibility
 //! (see `SPEC-FASTCDC.md` §2 determinism contract).
+//!
+//! `FastCDC` v2 (SPEC-FASTCDC §11) keeps the gear table and the sizes and
+//! swaps in [`MASK_S_V2`] and [`MASK_L_V2`]. A manifest names it with
+//! [`CHUNK_SIZE_FASTCDC_V2`]. No writer uses it by default; see
+//! [`Chunker`].
 
 /// Frozen splitmix64 seed for v1 — ASCII `"KITFCDC"` as big-endian u64.
 ///
@@ -40,6 +45,60 @@ pub const MASK_S: u64 = 0x0001_FFFF;
 /// Loose mask (used while `AVG_SIZE <= i < MAX_SIZE`). More cuts → avoid
 /// running into the `MAX_SIZE` forced boundary.
 pub const MASK_L: u64 = 0x0000_7FFF;
+
+/// `FastCDC` v2 strict mask: 18 one-bits spread over bits 16 to 47
+/// (SPEC-FASTCDC §11.1).
+pub const MASK_S_V2: u64 = 0x0000_AB55_AB55_0000;
+/// `FastCDC` v2 loose mask: 14 one-bits spread over bits 16 to 47
+/// (SPEC-FASTCDC §11.1).
+pub const MASK_L_V2: u64 = 0x0000_552A_552A_0000;
+
+/// The `chunk_size` value of a `ChunkedBlob` manifest cut by `FastCDC` v2
+/// (SPEC-OBJECTS §7). `FastCDC` v1 manifests carry `0`.
+pub const CHUNK_SIZE_FASTCDC_V2: u32 = 0x8000_0002;
+
+/// A content-defined chunker that a `ChunkedBlob` manifest can name in its
+/// `chunk_size` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Chunker {
+    /// `FastCDC` v1, `chunk_size = 0`. Every writer uses it by default.
+    FastCdcV1,
+    /// `FastCDC` v2, `chunk_size = CHUNK_SIZE_FASTCDC_V2`. A writer uses it
+    /// only when its caller asks for it.
+    FastCdcV2,
+}
+
+impl Chunker {
+    /// The chunker's parameters.
+    #[must_use]
+    pub const fn cdc(self) -> FastCdc {
+        match self {
+            Self::FastCdcV1 => FastCdc::v1(),
+            Self::FastCdcV2 => FastCdc::v2(),
+        }
+    }
+
+    /// The `chunk_size` value that names this chunker in a manifest.
+    #[must_use]
+    pub const fn chunk_size(self) -> u32 {
+        match self {
+            Self::FastCdcV1 => 0,
+            Self::FastCdcV2 => CHUNK_SIZE_FASTCDC_V2,
+        }
+    }
+
+    /// The chunker a manifest's `chunk_size` names, or `None` for a
+    /// fixed-size manifest.
+    #[must_use]
+    pub const fn from_chunk_size(chunk_size: u32) -> Option<Self> {
+        match chunk_size {
+            0 => Some(Self::FastCdcV1),
+            CHUNK_SIZE_FASTCDC_V2 => Some(Self::FastCdcV2),
+            _ => None,
+        }
+    }
+}
 
 /// 256-entry gear table, derived once at first use from [`SEED`] via
 /// splitmix64. Wrapping arithmetic throughout — see SPEC-FASTCDC §3 for
@@ -98,6 +157,17 @@ impl FastCdc {
         }
     }
 
+    /// Construct the v2 chunker: the v1 sizes and gear table with the
+    /// spread masks [`MASK_S_V2`] and [`MASK_L_V2`].
+    #[must_use]
+    pub const fn v2() -> Self {
+        Self {
+            mask_s: MASK_S_V2,
+            mask_l: MASK_L_V2,
+            ..Self::v1()
+        }
+    }
+
     /// Construct a chunker with custom parameters. `avg_size` MUST be a
     /// power of two; the strict/loose masks are derived as
     /// `mask = (1 << log2(avg)) - 1; mask_s = mask | (mask << 1); mask_l = mask >> 1`.
@@ -151,26 +221,67 @@ impl FastCdc {
             return data.len();
         }
         let table = gear_table();
-        let mut hash: u64 = 0;
         let avg_end = self.avg_size.min(data.len());
-        let mut i = self.min_size;
-        while i < avg_end {
-            hash = (hash << 1).wrapping_add(table[data[i] as usize]);
-            if (hash & self.mask_s) == 0 {
-                return i;
-            }
-            i += 1;
+        let (cut, hash) = scan(table, data, self.min_size, avg_end, 0, self.mask_s);
+        if let Some(i) = cut {
+            return i;
         }
         let max_end = self.max_size.min(data.len());
-        while i < max_end {
+        scan(table, data, avg_end, max_end, hash, self.mask_l)
+            .0
+            .unwrap_or(max_end)
+    }
+}
+
+/// Bytes [`scan`] rolls between two checks for a run of one byte value.
+const RUN_CHECK: usize = 64;
+
+/// Roll the gear hash over `data[i..end]` from `hash`. Returns the first
+/// position whose hash has no bit of `mask` set, or `None` and the hash
+/// after `end - 1`.
+///
+/// A run of one byte value `c` drives the hash to the fixed point
+/// `-gear[c]`, because `(-g << 1) + g == -g` in wrapping arithmetic. Once
+/// the hash after a byte `c` equals that fixed point, every following `c`
+/// leaves it, and so the mask test, unchanged. The test has just failed,
+/// so the scan jumps to the end of the run. The cut points are exactly
+/// those of the byte-by-byte loop. A run is noticed at the next check,
+/// at most [`RUN_CHECK`] bytes after the hash reaches the fixed point.
+fn scan(
+    table: &[u64; 256],
+    data: &[u8],
+    mut i: usize,
+    end: usize,
+    mut hash: u64,
+    mask: u64,
+) -> (Option<usize>, u64) {
+    while i < end {
+        let block_end = (i + RUN_CHECK).min(end);
+        while i < block_end {
             hash = (hash << 1).wrapping_add(table[data[i] as usize]);
-            if (hash & self.mask_l) == 0 {
-                return i;
+            if hash & mask == 0 {
+                return (Some(i), hash);
             }
             i += 1;
         }
-        max_end
+        let c = data[i - 1];
+        if hash == table[c as usize].wrapping_neg() {
+            i += run_len(&data[i..end], c);
+        }
     }
+    (None, hash)
+}
+
+/// Length of the prefix of `s` that is all `c`.
+fn run_len(s: &[u8], c: u8) -> usize {
+    let mut n = 0;
+    for block in s.chunks_exact(32) {
+        if !block.iter().all(|&b| b == c) {
+            break;
+        }
+        n += 32;
+    }
+    n + s[n..].iter().position(|&b| b != c).unwrap_or(s.len() - n)
 }
 
 /// Iterator over chunk boundaries in a contiguous byte slice.
@@ -200,6 +311,7 @@ impl Iterator for ChunkIterator<'_> {
         }
         let remaining = &self.data[self.offset..];
         let length = self.cdc.cut(remaining);
+        assert!(length > 0, "a cut must make progress");
         let boundary = ChunkBoundary {
             offset: self.offset,
             length,
@@ -209,95 +321,248 @@ impl Iterator for ChunkIterator<'_> {
     }
 }
 
+/// Bytes of input each worker thread cuts per round in [`FastCdc::cut_ends`].
+/// A worker starts at an arbitrary offset inside the chain, so its first
+/// cuts are usually wrong and are thrown away; the chain converges within
+/// a chunk or two. At 2 MiB per worker that waste is a few percent of the
+/// work. It also sets [`ChunkReader`]'s window: `threads * PARALLEL_SEGMENT`.
+const PARALLEL_SEGMENT: usize = 2 * 1024 * 1024;
+
+/// Upper bound on cutter threads. Caps [`ChunkReader`]'s window at
+/// `MAX_CUT_THREADS * PARALLEL_SEGMENT` (16 MiB).
+const MAX_CUT_THREADS: usize = 8;
+
+/// Number of threads [`ChunkReader::new`] and [`FastCdc::chunk_ends`] cut
+/// with: the available parallelism, capped at [`MAX_CUT_THREADS`]. Targets
+/// without threads (wasm32) report no parallelism and get `1`.
+fn cut_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_CUT_THREADS)
+}
+
+impl FastCdc {
+    /// Whether a cut started at `pos` in a `len`-byte buffer is final.
+    /// [`FastCdc::cut`] reads at most `max_size` bytes, so the cut is final
+    /// once `max_size` bytes are present or the input has ended.
+    const fn cut_is_final(&self, len: usize, pos: usize, eof: bool) -> bool {
+        pos < len && (eof || len - pos >= self.max_size)
+    }
+
+    /// Follow the cut chain from `from`, starting new cuts only below
+    /// `stop`. Returns `from` followed by every chunk end.
+    fn chain(&self, data: &[u8], from: usize, stop: usize, eof: bool) -> Vec<usize> {
+        let mut ends = vec![from];
+        let mut pos = from;
+        while pos < stop && self.cut_is_final(data.len(), pos, eof) {
+            let length = self.cut(&data[pos..]);
+            assert!(length > 0, "a cut must make progress");
+            pos += length;
+            ends.push(pos);
+        }
+        ends
+    }
+
+    /// Chunk end offsets of `data`, with the chain starting at offset `0`,
+    /// split across `threads` threads (`0` is treated as `1`). The result is identical to calling
+    /// [`FastCdc::cut`] repeatedly from offset `0`.
+    ///
+    /// Each thread follows the chain from the start of its own segment.
+    /// A single pass then walks the true chain. When a true cut lands on a
+    /// position some thread also cut from, that thread's later cuts are
+    /// the true cuts, because `cut` is a pure function of the bytes from
+    /// that position. The pass computes the rest itself.
+    ///
+    /// Without `eof`, only final cuts are returned (see
+    /// `FastCdc::cut_is_final`): the bytes after the last returned end
+    /// belong to a chunk that may still grow.
+    #[must_use]
+    pub fn cut_ends(&self, data: &[u8], eof: bool, threads: usize) -> Vec<usize> {
+        self.cut_ends_beside(data, eof, threads, || ()).0
+    }
+
+    /// [`FastCdc::cut_ends`], running `beside` on the calling thread while
+    /// the worker threads cut. Without workers, `beside` runs first.
+    fn cut_ends_beside<T>(
+        &self,
+        data: &[u8],
+        eof: bool,
+        threads: usize,
+        beside: impl FnOnce() -> T,
+    ) -> (Vec<usize>, T) {
+        let segment = PARALLEL_SEGMENT.max(self.max_size);
+        if threads <= 1 || data.len() < 2 * segment {
+            let side = beside();
+            let mut ends = self.chain(data, 0, data.len(), eof);
+            ends.remove(0);
+            return (ends, side);
+        }
+        let segment = data.len().div_ceil(threads).max(segment);
+        let (specs, side) = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..data.len().div_ceil(segment))
+                .map(|t| {
+                    let from = t * segment;
+                    let stop = (from + segment).min(data.len());
+                    scope.spawn(move || self.chain(data, from, stop, eof))
+                })
+                .collect();
+            let side = beside();
+            let specs: Vec<Vec<usize>> = workers
+                .into_iter()
+                .map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                .collect();
+            (specs, side)
+        });
+        let mut ends = Vec::new();
+        let mut pos = 0;
+        while self.cut_is_final(data.len(), pos, eof) {
+            let spec = &specs[pos / segment];
+            if let Ok(k) = spec.binary_search(&pos)
+                && k + 1 < spec.len()
+            {
+                ends.extend_from_slice(&spec[k + 1..]);
+                pos = spec[spec.len() - 1];
+                continue;
+            }
+            let length = self.cut(&data[pos..]);
+            assert!(length > 0, "a cut must make progress");
+            pos += length;
+            ends.push(pos);
+        }
+        (ends, side)
+    }
+
+    /// Chunk end offsets of all of `data`, cut on `cut_threads` threads.
+    /// Identical to [`chunk_boundaries`] for the v1 chunker.
+    #[must_use]
+    pub fn chunk_ends(&self, data: &[u8]) -> Vec<usize> {
+        self.cut_ends(data, true, cut_threads())
+    }
+}
+
 /// Streaming variant of [`ChunkIterator`] that pulls from a [`Read`]
 /// instead of requiring the whole input as an in-memory slice.
 ///
-/// [`FastCdc::cut`] only ever looks at most `max_size` bytes ahead of the
-/// current chunk's start (see its doc comment), so a *correct* reader
-/// only strictly needs one `max_size`-sized window resident — but memory
-/// use is bounded, independent of the total input length, either way.
-/// This reader keeps `WINDOW_MULTIPLE * max_size` resident instead of the
-/// bare minimum: buffering further ahead means `fill`'s `read` calls can
-/// pull in more than `max_size` bytes at once when the source allows it
-/// (a `File` or `Cursor` read is not obligated to stop at `max_size`),
-/// amortizing the compaction below across several `max_size` windows
-/// instead of paying it once per chunk. It produces byte-identical chunk
-/// boundaries and content to [`ChunkIterator`] run over the same bytes
-/// regardless of how far ahead it buffers, since [`FastCdc::cut`] itself
-/// clamps its scan to `max_size` no matter how much of the slice handed
-/// to it is valid (pinned by the `streaming_matches_in_memory_*` tests
-/// below).
+/// The reader holds two fixed buffers. While [`FastCdc::cut_ends`] cuts
+/// the current window on `threads` threads, the calling thread reads the
+/// next window's bytes from the source into the other buffer, so reading
+/// overlaps cutting. A window starts with the previous window's uncut
+/// tail, which is shorter than `max_size` because every cut that starts
+/// `max_size` or more bytes before the end is final. Each buffer
+/// reserves `max_size` bytes at the front for that tail. Memory is
+/// bounded by the two buffers, independent of the total input length.
 ///
-/// The window lives in one `WINDOW_MULTIPLE * max_size` buffer allocated
-/// once at construction. `[start, end)` marks the currently valid bytes;
-/// `next_chunk_ref` advances `start` past each cut chunk in place instead
-/// of `split_off`-ing a new `Vec` (an allocation plus a full memcpy of the
-/// remainder) every call, and `fill` reads straight into the buffer's
-/// unused tail instead of through a separate scratch buffer, so a chunk
-/// costs at most one compacting `copy_within` amortized over several
-/// `max_size` windows rather than two copies per chunk.
+/// The output is byte-identical to [`ChunkIterator`] over the same bytes,
+/// whatever the thread count and however the source splits its reads.
+/// The `streaming_matches_in_memory_*` tests pin this.
 ///
-/// `WINDOW_MULTIPLE`'s only correctness requirement is `>= 2` (`fill`'s
-/// compaction condition needs at least one full `max_size` of spare tail
-/// room to guarantee progress without compacting on every read); `4` was
-/// chosen so compaction amortizes over 3 windows' worth of consumption
-/// (`(WINDOW_MULTIPLE - 1) * max_size`) — see the `chunker_streaming`
-/// bench for the throughput this buys. For `FastCdc::v1()` this makes the
-/// buffer exactly 1 MiB, the same number as (but not derived from, and
-/// not required to track) `worktree::CHUNK_THRESHOLD` — that constant is
-/// an unrelated policy choice (which files stream through this reader at
-/// all), not a bound this reader depends on.
+/// Each buffer holds `max_size` plus `WINDOW_MULTIPLE * max_size` new
+/// bytes (1.25 MiB for `FastCdc::v1()`) with one thread, or `max_size`
+/// plus `threads * PARALLEL_SEGMENT` (at most 16.25 MiB) with more.
+///
+/// [`Read`]: std::io::Read
 const WINDOW_MULTIPLE: usize = 4;
 
 #[derive(Debug)]
 pub struct ChunkReader<R> {
     cdc: FastCdc,
     reader: R,
-    buf: Vec<u8>,
+    threads: usize,
+    /// The window being handed out: `cur[start..end]` is not yet consumed.
+    cur: Vec<u8>,
     start: usize,
     end: usize,
+    /// The next window's new bytes, at `next[max_size..max_size + next_len]`.
+    next: Vec<u8>,
+    next_len: usize,
+    /// The source has returned EOF.
     eof: bool,
+    /// The first window has been read.
+    primed: bool,
+    /// Chunk ends in `cur` not yet handed out, in order.
+    ends: std::collections::VecDeque<usize>,
+}
+
+/// Read from `reader` into `buf` until it is full or the reader reports
+/// EOF. `read` can return short of the requested length without
+/// signalling EOF, so this loops until one of the two. Returns the byte
+/// count and whether EOF was reached.
+fn read_full(reader: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result<(usize, bool)> {
+    let mut n = 0;
+    while n < buf.len() {
+        match reader.read(&mut buf[n..])? {
+            0 => return Ok((n, true)),
+            k => n += k,
+        }
+    }
+    Ok((n, false))
 }
 
 impl<R: std::io::Read> ChunkReader<R> {
+    /// Reader that cuts on `cut_threads` threads.
     #[must_use]
     pub fn new(cdc: FastCdc, reader: R) -> Self {
-        let window = cdc.max_size() * WINDOW_MULTIPLE;
+        Self::with_threads(cdc, reader, cut_threads())
+    }
+
+    /// Reader that cuts on exactly `threads` threads (`0` is treated as `1`).
+    #[must_use]
+    pub fn with_threads(cdc: FastCdc, reader: R, threads: usize) -> Self {
+        let threads = threads.clamp(1, MAX_CUT_THREADS);
+        let fresh = if threads == 1 {
+            cdc.max_size() * WINDOW_MULTIPLE
+        } else {
+            (threads * PARALLEL_SEGMENT).max(cdc.max_size() * WINDOW_MULTIPLE)
+        };
+        let len = cdc.max_size() + fresh;
         Self {
             cdc,
             reader,
-            buf: vec![0u8; window],
+            threads,
+            cur: vec![0u8; len],
             start: 0,
             end: 0,
+            next: vec![0u8; len],
+            next_len: 0,
             eof: false,
+            primed: false,
+            ends: std::collections::VecDeque::new(),
         }
     }
 
-    /// Top up `[start, end)` to at least `max_size` valid bytes (or EOF),
-    /// reading directly into the buffer's tail. Compacts the valid region
-    /// back to offset `0` first whenever the tail no longer has room for a
-    /// full `max_size` read — with a `WINDOW_MULTIPLE * max_size` buffer
-    /// this happens roughly once every `(WINDOW_MULTIPLE - 1) * max_size`
-    /// bytes consumed, not once per chunk. `read` can return short of the
-    /// requested length without signalling EOF, so this loops until either
-    /// the target is met or a `0`-byte read confirms EOF.
-    fn fill(&mut self) -> std::io::Result<()> {
-        debug_assert!(self.start <= self.end && self.end <= self.buf.len());
-        let target = self.cdc.max_size();
-        while !self.eof && self.end - self.start < target {
-            if self.buf.len() - self.end < target {
-                self.buf.copy_within(self.start..self.end, 0);
-                self.end -= self.start;
-                self.start = 0;
-            }
-            let n = self.reader.read(&mut self.buf[self.end..])?;
-            if n == 0 {
-                self.eof = true;
-            } else {
-                self.end += n;
-            }
+    /// Start a new window: the uncut tail of `cur` followed by the bytes
+    /// read ahead into `next`. Cut it while reading the window after it.
+    fn refill(&mut self) -> std::io::Result<()> {
+        debug_assert!(self.ends.is_empty());
+        let max = self.cdc.max_size();
+        if !self.primed {
+            let (n, eof) = read_full(&mut self.reader, &mut self.next[max..])?;
+            self.next_len = n;
+            self.eof = eof;
+            self.primed = true;
         }
-        debug_assert!(self.start <= self.end && self.end <= self.buf.len());
+        let tail = self.end - self.start;
+        debug_assert!(tail < max || (tail == 0 && max == 0));
+        self.next[max - tail..max].copy_from_slice(&self.cur[self.start..self.end]);
+        std::mem::swap(&mut self.cur, &mut self.next);
+        self.start = max - tail;
+        self.end = max + self.next_len;
+        self.next_len = 0;
+
+        let final_window = self.eof;
+        let (cdc, threads) = (self.cdc, self.threads);
+        let window = &self.cur[self.start..self.end];
+        let (ends, read) = if final_window {
+            (cdc.cut_ends(window, true, threads), Ok((0, true)))
+        } else {
+            let (reader, next) = (&mut self.reader, &mut self.next[max..]);
+            cdc.cut_ends_beside(window, false, threads, || read_full(reader, next))
+        };
+        let (n, eof) = read?;
+        self.next_len = n;
+        self.eof = eof;
+        let start = self.start;
+        self.ends.extend(ends.into_iter().map(|e| start + e));
         Ok(())
     }
 
@@ -309,15 +574,18 @@ impl<R: std::io::Read> ChunkReader<R> {
     /// # Errors
     /// Propagates the underlying reader's I/O errors.
     pub fn next_chunk_ref(&mut self) -> std::io::Result<Option<&[u8]>> {
-        self.fill()?;
-        if self.start == self.end {
-            return Ok(None);
+        while self.ends.is_empty() {
+            if self.start == self.end && self.eof && self.next_len == 0 && self.primed {
+                return Ok(None);
+            }
+            self.refill()?;
         }
-        let length = self.cdc.cut(&self.buf[self.start..self.end]);
-        debug_assert!(length <= self.end - self.start);
+        let Some(end) = self.ends.pop_front() else {
+            return Ok(None);
+        };
         let chunk_start = self.start;
-        self.start += length;
-        Ok(Some(&self.buf[chunk_start..chunk_start + length]))
+        self.start = end;
+        Ok(Some(&self.cur[chunk_start..end]))
     }
 
     /// Read and return the next chunk's owned bytes, or `None` at end of
@@ -336,6 +604,10 @@ impl<R: std::io::Read> ChunkReader<R> {
 /// first chunk and ends with `data.len()`. An empty input yields an
 /// empty vector. Used by goldens to pin boundaries deterministically
 /// without exposing the `ChunkBoundary` struct in serialised form.
+///
+/// # Panics
+///
+/// Panics if a cut makes no progress, which the chunker never does.
 #[must_use]
 pub fn chunk_boundaries(data: &[u8]) -> Vec<usize> {
     let cdc = FastCdc::v1();
@@ -343,6 +615,7 @@ pub fn chunk_boundaries(data: &[u8]) -> Vec<usize> {
     let mut offset = 0usize;
     while offset < data.len() {
         let len = cdc.cut(&data[offset..]);
+        assert!(len > 0, "a cut must make progress");
         offset += len;
         out.push(offset);
     }
@@ -415,7 +688,7 @@ mod tests {
 
         let mut total = 0usize;
         let mut count = 0usize;
-        for b in ChunkIterator::new(cdc, &data) {
+        for b in ChunkIterator::new(cdc, &data).take(data.len() + 1) {
             assert!(b.length <= MAX_SIZE);
             // Only the final chunk is allowed to be smaller than min.
             if b.offset + b.length < data.len() {
@@ -433,7 +706,9 @@ mod tests {
         let cdc = FastCdc::v1();
         let small = b"hello, this is a tiny file";
         assert_eq!(cdc.cut(small), small.len());
-        let boundaries: Vec<_> = ChunkIterator::new(cdc, small).collect();
+        let boundaries: Vec<_> = ChunkIterator::new(cdc, small)
+            .take(small.len() + 1)
+            .collect();
         assert_eq!(boundaries.len(), 1);
         assert_eq!(boundaries[0].offset, 0);
         assert_eq!(boundaries[0].length, small.len());
@@ -443,7 +718,7 @@ mod tests {
     fn empty_input_iterator_is_empty() {
         let cdc = FastCdc::v1();
         assert_eq!(cdc.cut(b""), 0);
-        let none: Vec<_> = ChunkIterator::new(cdc, b"").collect();
+        let none: Vec<_> = ChunkIterator::new(cdc, b"").take((b"").len() + 1).collect();
         assert!(none.is_empty());
     }
 
@@ -477,8 +752,12 @@ mod tests {
         modified.push(0xFF);
         modified.extend_from_slice(&original[insert_point..]);
 
-        let orig_chunks: Vec<_> = ChunkIterator::new(cdc, &original).collect();
-        let mod_chunks: Vec<_> = ChunkIterator::new(cdc, &modified).collect();
+        let orig_chunks: Vec<_> = ChunkIterator::new(cdc, &original)
+            .take(original.len() + 1)
+            .collect();
+        let mod_chunks: Vec<_> = ChunkIterator::new(cdc, &modified)
+            .take(modified.len() + 1)
+            .collect();
 
         let max_chunks = orig_chunks.len().max(mod_chunks.len());
         let mut differing = 0usize;
@@ -508,9 +787,11 @@ mod tests {
         let large = FastCdc::v1();
 
         let s: Vec<_> = ChunkIterator::new(small, &data)
+            .take(data.len() + 1)
             .map(|b| b.offset + b.length)
             .collect();
         let l: Vec<_> = ChunkIterator::new(large, &data)
+            .take(data.len() + 1)
             .map(|b| b.offset + b.length)
             .collect();
         assert!(
@@ -525,6 +806,7 @@ mod tests {
         Prng::new(0xFEED_FACE).fill(&mut data);
         let from_helper = chunk_boundaries(&data);
         let from_iter: Vec<usize> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| b.offset + b.length)
             .collect();
         assert_eq!(from_helper, from_iter);
@@ -536,6 +818,7 @@ mod tests {
         Prng::new(0x5713_EA31).fill(&mut data);
 
         let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| data[b.offset..b.offset + b.length].to_vec())
             .collect();
 
@@ -548,51 +831,47 @@ mod tests {
         assert_eq!(in_memory, streamed);
     }
 
+    /// Drain a reader through `next_chunk` (owned) or `next_chunk_ref`.
+    fn drain<R: std::io::Read>(mut reader: ChunkReader<R>, owned: bool) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        if owned {
+            while let Some(chunk) = reader.next_chunk().unwrap() {
+                out.push(chunk);
+            }
+        } else {
+            while let Some(chunk) = reader.next_chunk_ref().unwrap() {
+                out.push(chunk.to_vec());
+            }
+        }
+        out
+    }
+
     #[test]
-    fn streaming_matches_in_memory_iterator_across_multiple_compactions() {
-        // `streaming_matches_in_memory_iterator` above only pushes 500 KiB
-        // through the reader — under the `WINDOW_MULTIPLE * MAX_SIZE`
-        // (1 MiB) window, so `fill`'s `copy_within` compaction path never
-        // actually runs there. Push several MiB through instead, so `fill`
-        // is forced to compact more than once, and check *content*
-        // (both the owned `next_chunk` and the borrowed `next_chunk_ref`
-        // paths) against `ChunkIterator`, not just that the window stays
-        // bounded (`streaming_reader_buffer_stays_bounded_...` below only
-        // checks buffer size, not chunk correctness). `Cursor` — unlike
-        // `StingyReader` below — happily satisfies a `read` request in one
-        // large memcpy, so this also exercises `fill` buffering far past
-        // `max_size` in a single read before the next `cut`.
-        let mut data = vec![0u8; 6 * 1024 * 1024];
+    fn streaming_matches_in_memory_iterator_across_multiple_refills() {
+        // Push enough input through that every thread count refills its
+        // window several times, so the tail carried across refills is
+        // exercised, and check both the owned and the borrowed paths.
+        // `Cursor` fills a whole window in one `read`.
+        let mut data = vec![0u8; 13 * 1024 * 1024 + 12_345];
         Prng::new(0xC0FF_EE01).fill(&mut data);
 
         let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| data[b.offset..b.offset + b.length].to_vec())
             .collect();
-        assert!(
-            in_memory.len() > 50,
-            "fixture must be large enough to force several compactions, got {} chunks",
-            in_memory.len()
-        );
+        assert!(in_memory.len() > 100, "got {} chunks", in_memory.len());
 
-        let mut owned_reader = ChunkReader::new(FastCdc::v1(), std::io::Cursor::new(&data));
-        let mut owned = Vec::new();
-        while let Some(chunk) = owned_reader.next_chunk().unwrap() {
-            owned.push(chunk);
+        for threads in [1, 2, 3] {
+            for owned in [true, false] {
+                let reader =
+                    ChunkReader::with_threads(FastCdc::v1(), std::io::Cursor::new(&data), threads);
+                assert_eq!(
+                    in_memory,
+                    drain(reader, owned),
+                    "threads {threads}, owned {owned}: diverged from ChunkIterator"
+                );
+            }
         }
-        assert_eq!(
-            in_memory, owned,
-            "owned next_chunk() diverged from ChunkIterator"
-        );
-
-        let mut ref_reader = ChunkReader::new(FastCdc::v1(), std::io::Cursor::new(&data));
-        let mut borrowed = Vec::new();
-        while let Some(chunk) = ref_reader.next_chunk_ref().unwrap() {
-            borrowed.push(chunk.to_vec());
-        }
-        assert_eq!(
-            in_memory, borrowed,
-            "borrowed next_chunk_ref() diverged from ChunkIterator"
-        );
     }
 
     #[test]
@@ -628,35 +907,86 @@ mod tests {
 
     #[test]
     fn streaming_reader_buffer_stays_bounded_regardless_of_input_size() {
-        // The point of the reader: ingest memory must not scale
-        // with file size. Run several MiB through the reader and assert
-        // its internal window is a fixed `WINDOW_MULTIPLE * max_size`
-        // allocation that never grows or reallocates — bounded by the
-        // chunker's own parameters, not by how much input remains. (The
-        // valid region within it can transiently exceed `max_size`: a
-        // single `read` is allowed to fill the whole spare tail in one
-        // syscall, which is the point of buffering ahead — `cut` only
-        // ever consults the first `max_size` bytes of it.)
-        let mut data = vec![0u8; 8 * 1024 * 1024];
+        // Ingest memory must not scale with file size: the two buffers are
+        // fixed allocations, set by the chunker's parameters and the thread
+        // count, that never grow or reallocate.
+        let mut data = vec![0u8; 20 * 1024 * 1024];
         Prng::new(0x8000_0008).fill(&mut data);
-        let mut reader = ChunkReader::new(FastCdc::v1(), std::io::Cursor::new(&data));
-        let window = WINDOW_MULTIPLE * MAX_SIZE;
-        let mut chunk_count = 0usize;
-        while let Some(_chunk) = reader.next_chunk().unwrap() {
-            assert_eq!(
-                reader.buf.len(),
-                window,
-                "internal window buffer must not grow past its fixed allocation"
-            );
+        for (threads, fresh) in [
+            (1, WINDOW_MULTIPLE * MAX_SIZE),
+            (4, 4 * PARALLEL_SEGMENT),
+            (64, MAX_CUT_THREADS * PARALLEL_SEGMENT),
+        ] {
+            let window = MAX_SIZE + fresh;
+            let mut reader =
+                ChunkReader::with_threads(FastCdc::v1(), std::io::Cursor::new(&data), threads);
+            let mut chunk_count = 0usize;
+            while let Some(_chunk) = reader.next_chunk().unwrap() {
+                assert_eq!(reader.cur.len(), window, "threads {threads}");
+                assert_eq!(reader.next.len(), window, "threads {threads}");
+                assert!(reader.end - reader.start <= window, "threads {threads}");
+                chunk_count += 1;
+            }
             assert!(
-                reader.end - reader.start <= window,
-                "valid region grew to {} bytes, expected <= {}",
-                reader.end - reader.start,
-                window
+                chunk_count > 1,
+                "threads {threads}: expected multiple chunks"
             );
-            chunk_count += 1;
         }
-        assert!(chunk_count > 1, "expected multiple chunks from 8 MiB input");
+    }
+
+    #[test]
+    fn reader_window_size_follows_threads_and_max_size() {
+        // One thread reads `WINDOW_MULTIPLE * max_size` new bytes per
+        // window. More threads read 2 MiB per thread, capped at 16 MiB,
+        // but never less than the one-thread window.
+        const MIB: usize = 1024 * 1024;
+        let large = FastCdc::custom(MIB, 2 * MIB, 4 * MIB);
+        for (cdc, threads, fresh) in [
+            (FastCdc::v1(), 0, MIB),
+            (FastCdc::v1(), 1, MIB),
+            (FastCdc::v1(), 4, 8 * MIB),
+            (FastCdc::v1(), 64, 16 * MIB),
+            (large, 1, 16 * MIB),
+            (large, 2, 16 * MIB),
+        ] {
+            let reader = ChunkReader::with_threads(cdc, std::io::empty(), threads);
+            let want = cdc.max_size() + fresh;
+            assert_eq!(reader.cur.len(), want, "threads {threads}");
+            assert_eq!(reader.next.len(), want, "threads {threads}");
+        }
+    }
+
+    #[test]
+    fn new_reader_cuts_on_available_parallelism() {
+        let want = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(MAX_CUT_THREADS);
+        let reader = ChunkReader::new(FastCdc::v1(), std::io::empty());
+        assert_eq!(reader.threads, want);
+    }
+
+    #[test]
+    fn streaming_matches_in_memory_when_input_fills_whole_windows() {
+        // The read that follows the last full window returns no bytes.
+        // The uncut tail of that window must still come out as chunks.
+        const MIB: usize = 1024 * 1024;
+        for (threads, fresh) in [(1, MIB), (2, 4 * MIB)] {
+            for windows in [1, 2] {
+                let mut data = vec![0u8; windows * fresh];
+                Prng::new(0x00E0_F111).fill(&mut data);
+                let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+                    .take(data.len() + 1)
+                    .map(|b| data[b.offset..b.offset + b.length].to_vec())
+                    .collect();
+                let reader =
+                    ChunkReader::with_threads(FastCdc::v1(), std::io::Cursor::new(&data), threads);
+                assert_eq!(
+                    in_memory,
+                    drain(reader, false),
+                    "threads {threads}, windows {windows}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -665,22 +995,251 @@ mod tests {
         Prng::new(0x5713_EA32).fill(&mut data);
 
         let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
             .map(|b| data[b.offset..b.offset + b.length].to_vec())
             .collect();
 
-        let mut reader = ChunkReader::new(
+        let reader = ChunkReader::with_threads(
             FastCdc::v1(),
             StingyReader {
                 data: &data,
                 pos: 0,
             },
+            1,
         );
-        let mut streamed = Vec::new();
-        while let Some(chunk) = reader.next_chunk().unwrap() {
-            streamed.push(chunk);
-        }
+        assert_eq!(in_memory, drain(reader, true));
+    }
 
-        assert_eq!(in_memory, streamed);
+    #[test]
+    fn parallel_streaming_matches_in_memory_iterator_under_short_reads() {
+        // Large enough that two threads take the parallel path.
+        let mut data = vec![0u8; 5 * 1024 * 1024];
+        Prng::new(0x5713_EA33).fill(&mut data);
+        let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .take(data.len() + 1)
+            .map(|b| data[b.offset..b.offset + b.length].to_vec())
+            .collect();
+        let reader = ChunkReader::with_threads(
+            FastCdc::v1(),
+            StingyReader {
+                data: &data,
+                pos: 0,
+            },
+            2,
+        );
+        assert_eq!(in_memory, drain(reader, false));
+    }
+
+    /// Sequential chunk ends of `data` from offset `0`.
+    fn sequential_ends(cdc: &FastCdc, data: &[u8]) -> Vec<usize> {
+        ChunkIterator::new(*cdc, data)
+            .take(data.len() + 1)
+            .map(|b| b.offset + b.length)
+            .collect()
+    }
+
+    /// `run_len` counts the leading bytes equal to `c`, whatever the run
+    /// length relative to its 32-byte blocks.
+    #[test]
+    fn run_len_counts_the_leading_run() {
+        assert_eq!(run_len(&[], 7), 0);
+        assert_eq!(run_len(&[8, 7, 7], 7), 0);
+        for len in [1, 31, 32, 33, 63, 64, 65, 100] {
+            let all = vec![7u8; len];
+            assert_eq!(run_len(&all, 7), len, "all {len}");
+            for stop in [0, 1, len / 2, len.saturating_sub(1)] {
+                if stop >= len {
+                    continue;
+                }
+                let mut broken = all.clone();
+                broken[stop] = 9;
+                assert_eq!(run_len(&broken, 7), stop, "len {len} broken at {stop}");
+            }
+        }
+    }
+
+    #[test]
+    fn cut_ends_matches_sequential_for_every_thread_count() {
+        // Pseudo-random bytes, a long zero run (forced max-size cuts that
+        // line up with segment starts), and an odd total length.
+        let mut data = vec![0u8; 9 * 1024 * 1024 + 777];
+        Prng::new(0x009A_11E1).fill(&mut data);
+        data[3 * 1024 * 1024..4 * 1024 * 1024 + 99].fill(0);
+        for cdc in [FastCdc::v1(), FastCdc::v2(), FastCdc::custom(64, 256, 1024)] {
+            let expected = sequential_ends(&cdc, &data);
+            for threads in 0..=MAX_CUT_THREADS + 1 {
+                assert_eq!(
+                    cdc.cut_ends(&data, true, threads),
+                    expected,
+                    "threads {threads}, max {}",
+                    cdc.max_size()
+                );
+            }
+        }
+        assert_eq!(
+            FastCdc::v1().chunk_ends(&data),
+            sequential_ends(&FastCdc::v1(), &data)
+        );
+    }
+
+    #[test]
+    fn cut_ends_without_eof_returns_only_final_cuts() {
+        // Without EOF, `cut_ends` returns a prefix of the full chain, and
+        // every chunk it returns started at least `max_size` bytes before
+        // the end of the buffer.
+        let mut data = vec![0u8; 7 * 1024 * 1024];
+        Prng::new(0x000F_1AA1).fill(&mut data);
+        let cdc = FastCdc::v1();
+        let full = sequential_ends(&cdc, &data);
+        for len in [
+            0,
+            1000,
+            MAX_SIZE,
+            MAX_SIZE + 1,
+            5 * 1024 * 1024 + 3,
+            data.len(),
+        ] {
+            for threads in [1, 2, 4] {
+                let ends = cdc.cut_ends(&data[..len], false, threads);
+                assert_eq!(ends[..], full[..ends.len()], "len {len}, threads {threads}");
+                let last_start = ends.len().checked_sub(2).map_or(0, |i| ends[i]);
+                if !ends.is_empty() {
+                    assert!(len - last_start >= MAX_SIZE, "len {len}, threads {threads}");
+                }
+            }
+        }
+    }
+
+    /// The cut loop of SPEC-FASTCDC §5, byte by byte, with no run skip.
+    fn cut_reference(cdc: &FastCdc, data: &[u8]) -> usize {
+        if data.len() <= cdc.min_size {
+            return data.len();
+        }
+        let table = gear_table();
+        let mut hash: u64 = 0;
+        let avg_end = cdc.avg_size.min(data.len());
+        let max_end = cdc.max_size.min(data.len());
+        for (i, &b) in data.iter().enumerate().take(max_end).skip(cdc.min_size) {
+            hash = (hash << 1).wrapping_add(table[b as usize]);
+            let mask = if i < avg_end { cdc.mask_s } else { cdc.mask_l };
+            if hash & mask == 0 {
+                return i;
+            }
+        }
+        max_end
+    }
+
+    fn reference_ends(cdc: &FastCdc, data: &[u8]) -> Vec<usize> {
+        let mut ends = Vec::new();
+        let mut pos = 0;
+        while pos < data.len() {
+            pos += cut_reference(cdc, &data[pos..]);
+            ends.push(pos);
+        }
+        ends
+    }
+
+    /// Runs of one byte value, alternating with pseudo-random stretches.
+    /// `scale` bounds each piece's length.
+    fn runs(seed: u64, len: usize, scale: u64, zeros: bool) -> Vec<u8> {
+        let mut rng = Prng::new(seed);
+        let mut data = Vec::with_capacity(len);
+        while data.len() < len {
+            let z = rng.next_u64();
+            let piece = usize::try_from((z >> 8) % scale).unwrap() + 1;
+            if z & 1 == 0 {
+                let byte = if zeros { 0 } else { z.to_le_bytes()[5] };
+                data.resize(data.len() + piece, byte);
+            } else {
+                let start = data.len();
+                data.resize(start + piece, 0);
+                rng.fill(&mut data[start..]);
+            }
+        }
+        data.truncate(len);
+        data
+    }
+
+    #[test]
+    fn run_skip_matches_byte_by_byte_cut() {
+        // Runs short and long, of zero and other bytes, crossing the
+        // strict/loose switch and the forced cut, for the v1 sizes and a
+        // tiny chunker whose sizes are near `RUN_CHECK`.
+        let tiny = FastCdc::custom(16, 64, 256);
+        for (case, scale) in [10u64, 100, 1000, 70_000, 300_000].into_iter().enumerate() {
+            for zeros in [true, false] {
+                let data = runs(0x5EED + case as u64, 3 * 1024 * 1024 + case, scale, zeros);
+                for cdc in [
+                    FastCdc::v1(),
+                    FastCdc::v2(),
+                    tiny,
+                    FastCdc::custom(64, 256, 1024),
+                ] {
+                    assert_eq!(
+                        sequential_ends(&cdc, &data),
+                        reference_ends(&cdc, &data),
+                        "scale {scale}, zeros {zeros}, max {}",
+                        cdc.max_size()
+                    );
+                }
+            }
+        }
+        // A run that covers the whole strict region and ends inside the
+        // loose one, and a run that covers everything.
+        let mut data = vec![0u8; MAX_SIZE * 3];
+        Prng::new(3).fill(&mut data[AVG_SIZE + 77..]);
+        assert_eq!(
+            sequential_ends(&FastCdc::v1(), &data),
+            reference_ends(&FastCdc::v1(), &data)
+        );
+        let data = vec![0xA5u8; MAX_SIZE * 3 + 5];
+        assert_eq!(
+            sequential_ends(&FastCdc::v1(), &data),
+            reference_ends(&FastCdc::v1(), &data)
+        );
+    }
+
+    /// SPEC-FASTCDC §11.1: `n` one-bits at bit positions
+    /// `16 + floor((2k + 1) * 32 / (2n))` for `k` in `0..n`.
+    fn spread_mask(n: u64) -> u64 {
+        (0..n).fold(0, |m, k| m | 1 << (16 + (2 * k + 1) * 32 / (2 * n)))
+    }
+
+    #[test]
+    fn v2_masks_follow_the_spread_derivation() {
+        let bits = u64::from(AVG_SIZE.trailing_zeros());
+        assert_eq!(MASK_S_V2, spread_mask(bits + 2));
+        assert_eq!(MASK_L_V2, spread_mask(bits - 2));
+        assert_eq!(MASK_S_V2.count_ones(), 18);
+        assert_eq!(MASK_L_V2.count_ones(), 14);
+        let v2 = FastCdc::v2();
+        assert_eq!(
+            (v2.min_size(), v2.avg_size(), v2.max_size()),
+            (MIN_SIZE, AVG_SIZE, MAX_SIZE)
+        );
+    }
+
+    #[test]
+    fn chunker_ids_round_trip_and_v1_keeps_zero() {
+        for chunker in [Chunker::FastCdcV1, Chunker::FastCdcV2] {
+            assert_eq!(
+                Chunker::from_chunk_size(chunker.chunk_size()),
+                Some(chunker)
+            );
+        }
+        assert_eq!(Chunker::FastCdcV1.chunk_size(), 0);
+        assert_eq!(Chunker::FastCdcV2.chunk_size(), CHUNK_SIZE_FASTCDC_V2);
+        assert_eq!(Chunker::from_chunk_size(65_536), None);
+        let mut data = vec![0u8; 2 * 1024 * 1024];
+        Prng::new(0x0002_C0DE).fill(&mut data);
+        assert_ne!(
+            sequential_ends(&FastCdc::v1(), &data),
+            sequential_ends(&FastCdc::v2(), &data)
+        );
+        assert_eq!(
+            sequential_ends(&Chunker::FastCdcV2.cdc(), &data),
+            sequential_ends(&FastCdc::v2(), &data)
+        );
     }
 
     /// Pinned v1 gear-table digest, harvested once from the splitmix64
@@ -713,8 +1272,8 @@ mod tests {
         #[test]
         fn proptest_determinism(data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024)) {
             let cdc = FastCdc::v1();
-            let pass1: Vec<_> = ChunkIterator::new(cdc, &data).collect();
-            let pass2: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            let pass1: Vec<_> = ChunkIterator::new(cdc, &data).take(data.len() + 1).collect();
+            let pass2: Vec<_> = ChunkIterator::new(cdc, &data).take(data.len() + 1).collect();
             proptest::prop_assert_eq!(pass1, pass2);
         }
 
@@ -725,7 +1284,7 @@ mod tests {
             data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024),
         ) {
             let cdc = FastCdc::v1();
-            let boundaries: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            let boundaries: Vec<_> = ChunkIterator::new(cdc, &data).take(data.len() + 1).collect();
             let mut expected_offset = 0usize;
             for b in &boundaries {
                 proptest::prop_assert_eq!(b.offset, expected_offset);
@@ -744,7 +1303,7 @@ mod tests {
             data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024),
         ) {
             let cdc = FastCdc::v1();
-            let in_memory: Vec<Vec<u8>> = ChunkIterator::new(cdc, &data)
+            let in_memory: Vec<Vec<u8>> = ChunkIterator::new(cdc, &data).take(data.len() + 1)
                 .map(|b| data[b.offset..b.offset + b.length].to_vec())
                 .collect();
 
@@ -754,6 +1313,27 @@ mod tests {
                 streamed.push(chunk);
             }
             proptest::prop_assert_eq!(in_memory, streamed);
+        }
+
+        /// The run skip never moves a cut: arbitrary runs and random
+        /// stretches cut the same as the byte-by-byte loop.
+        #[test]
+        fn proptest_run_skip_matches_reference(
+            pieces in proptest::collection::vec((proptest::num::u8::ANY, 1usize..4096, proptest::bool::ANY), 1..64),
+            seed in proptest::num::u64::ANY,
+        ) {
+            let mut data = Vec::new();
+            let mut rng = Prng::new(seed);
+            for (byte, len, run) in pieces {
+                let start = data.len();
+                data.resize(start + len, byte);
+                if !run {
+                    rng.fill(&mut data[start..]);
+                }
+            }
+            for cdc in [FastCdc::custom(16, 64, 256), FastCdc::custom(1024, 4096, 16384)] {
+                proptest::prop_assert_eq!(sequential_ends(&cdc, &data), reference_ends(&cdc, &data));
+            }
         }
     }
 }

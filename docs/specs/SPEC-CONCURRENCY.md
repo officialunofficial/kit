@@ -39,7 +39,8 @@ document points here.
 | `worktrees.lock` | common dir | per-repo | linked-worktree registry mutations, branch-checked-out-elsewhere guard + HEAD write | SPEC-WORKTREE §4.3 |
 | `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ancestry intent + ref + descriptor publication for one branch (`kit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
 | `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`kit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
-| `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`kit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
+| `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | held shared by a single-ref write and exclusive by a multi-file step; the exclusive hold excludes every file-transport write (`kit-transport-file`'s `RefLock`) | SPEC-REFS §5.1.1, §3.1 (this document) |
+| `<root>/.kit/refs/refs-<hh>.lock` | transport root, keyed on the first byte of the BLAKE3 digest of the full ref name | per-stripe (256), **local to the file transport only** | a single-ref write's Any, Missing and Match critical section | SPEC-REFS §5.1.1 |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-bin`'s `git_import::import_into`, `git::export`) | §4 (this document) |
 | shared/exclusive `format` handle | existing immutable common-dir `format` file | per-repo, short object-store critical section | shared during a bulk write or cached reuse and during format validation; exclusive during gc's final age check and unlink | SPEC-GC, §3.4 (this document) |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
@@ -60,8 +61,10 @@ only the current lock naming contract is supported.
 
 ### 3.1 File-transport CAS vs. local worktree operations (detected, not coordinated)
 
-`<root>/.kit/refs/.lock` serializes all file-transport Any, Missing and
-Match writes against other file-transport instances pointed at the same root.
+The file transport's locks (`<root>/.kit/refs/.lock` and
+`<root>/.kit/refs/refs-<hh>.lock`, SPEC-REFS §5.1.1) serialize file-transport
+Any, Missing and Match writes to one ref against other file-transport
+instances pointed at the same root.
 Direct local ref mutations instead share the full-ref
 `<common_dir>/refs-<ref>.lock`, including unconditional writes and deletes.
 Each domain therefore prevents its own unconditional writer from bypassing a
@@ -207,13 +210,19 @@ both chains. Holders acquire no further repository locks; gc never waits
 for its exclusive acquisition. Per-command sets below omit this implicit
 object-store lock.
 
-The file transport's `<root>/.kit/refs/.lock` serializes every write condition
-within that transport. It is not composed with the local chain above; the
-served-root/local-worktree deployment restriction in §3.1 still applies.
+The file transport's locks serialize every write condition to one ref within
+that transport. A process takes the repo lock before the stripe lock, and a
+holder of the exclusive repo lock takes no stripe lock (SPEC-REFS §5.1.1). A
+two-ref advance takes both refs' stripe locks in ascending stripe order under
+the shared repo lock. Readers take none of these locks, so they see an
+advance's packmap write before its head write; the push driver's re-baseline
+rule for that case is in SPEC-TRANSPORT §7.2. The file transport's locks
+are not composed with the local chain above; the served-root/local-worktree
+deployment restriction in §3.1 still applies.
 
 `serve.lock` is a lifetime detection guard, excluded from this acquisition
 chain. A server holds it shared while handling requests, including requests
-that acquire the file transport's `refs/.lock`. A local command only probes
+that take the file transport's ref locks. A local command only probes
 it non-blocking from inside its `worktree.lock`/`worktrees.lock` critical
 section and immediately releases a successful probe. Neither path waits for
 exclusive ownership of `serve.lock`, so detection introduces no blocking

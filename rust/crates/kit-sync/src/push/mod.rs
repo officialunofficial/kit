@@ -26,6 +26,15 @@ struct PushContext<'a> {
     source: &'a dyn RemoteSource,
     observer: &'a dyn Observer<SyncEvent>,
 }
+impl PushContext<'_> {
+    /// Whether force pushes take the guarded force driver. It needs only a
+    /// serialized advance: it appends, and it re-plans when a concurrent
+    /// reset drops the chain its plan depends on, which an ordered force
+    /// append could not see.
+    fn guards_force(&self) -> bool {
+        self.supports_atomic_advance() || self.supports_serialized_advance()
+    }
+}
 impl<'a> std::ops::Deref for PushContext<'a> {
     type Target = dyn RemoteSource + 'a;
     fn deref(&self) -> &Self::Target {
@@ -69,7 +78,9 @@ pub struct PushOptions<'a> {
     pub remote_name: &'a str,
     /// Object-store durability schedule.
     pub sync_policy: kit_core::store::SyncPolicy,
-    /// Atomic pushes reset healthy chains past this depth; zero disables it.
+    /// Pushes reset healthy chains past this depth on an atomic advance, and
+    /// on a serialized one when they fast-forward the leased head; zero
+    /// disables it.
     pub rebaseline_threshold: usize,
     /// Per-pack payload bound, further limited by the remote and format.
     pub pack_payload_cap: u64,
@@ -336,7 +347,9 @@ fn run_steps(
         return single(None);
     }
     refs::check_pushable_branch(branch)?;
-    let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
+    let LeaseHead::Holds(remote_tip) = lease_head(tx, branch, condition, tip)? else {
+        return single(None);
+    };
     let plan = transfer::plan_pack_with(store, tip, remote_tip, encode_delta_candidates_batch)?;
     let cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
     if estimate_pack_sizes(store, &plan, cap, limits.max_pack_bytes)?.len()
@@ -353,9 +366,7 @@ fn run_steps(
     }
     match build_and_upload_packs(PackSink::Count, store, plan, cap, limits, tx.observer) {
         Err(PushError::PushTooLarge { .. }) => {}
-        Err(PushError::Sync(SyncError::Interrupted)) => {
-            return Err(PushError::Sync(SyncError::Interrupted));
-        }
+        Err(error @ PushError::Sync(SyncError::Interrupted)) => return Err(error),
         _ => return single(None),
     }
     let steps = plan_push_steps(
@@ -437,7 +448,7 @@ fn push_step_recovering(
     pack_payload_cap: u64,
     plan: Option<PreparedPlan>,
 ) -> Result<(), PushError> {
-    if matches!(condition, refs::RefWriteCondition::Any) && tx.supports_atomic_advance() {
+    if matches!(condition, refs::RefWriteCondition::Any) && tx.guards_force() {
         refs::check_pushable_branch(branch)?;
         return force::push_step(
             tx,
@@ -472,6 +483,77 @@ fn push_step_recovering(
     }
 }
 
+/// The remote head a push plans against, read before it plans.
+enum LeaseHead {
+    /// The head, which the push's head condition holds for.
+    Holds(Option<Hash>),
+    /// The head is already the tip: an earlier attempt landed.
+    Landed,
+}
+
+/// Read the head a push of `tip` plans against, and refuse a lease that
+/// does not hold for it.
+///
+/// A plan leaves out what the head it reads holds, so the head write must
+/// condition on that head. A lease that differs could hold again later,
+/// after the head moved away and back and a reset dropped what the plan
+/// left out; the head write would then publish a tip the packmap cannot
+/// rebuild. Such a push would fail its head condition at once, so it is
+/// refused before it plans. A head that is already `tip` means an earlier
+/// attempt landed, and the push writes nothing more.
+fn lease_head(
+    tx: &PushContext<'_>,
+    branch: &str,
+    condition: refs::RefWriteCondition,
+    tip: Hash,
+) -> Result<LeaseHead, PushError> {
+    let head = tx.read_ref(&format!("refs/heads/{branch}"))?;
+    let holds = match condition {
+        refs::RefWriteCondition::Any => true,
+        refs::RefWriteCondition::Missing => head.is_none(),
+        refs::RefWriteCondition::Match(lease) => head == Some(lease),
+    };
+    if holds {
+        Ok(LeaseHead::Holds(head))
+    } else if head == Some(tip) {
+        Ok(LeaseHead::Landed)
+    } else {
+        Err(PushError::NonFastForwardPush {
+            branch: branch.to_owned(),
+        })
+    }
+}
+
+/// Whether a push of `tip` conditioned on `condition` may reset the chain.
+///
+/// A reset drops the prior chain, so it must commit with the head. An
+/// atomic advance does that for any conditioned head: a conflict changes
+/// nothing, and no reader sees one ref without the other. A serialized
+/// advance writes the packmap before the head, so a reader between the two
+/// writes, or a crash between them, sees the reset with the head it
+/// replaced. That head is rebuildable only when it is an ancestor of
+/// `tip`, whose full closure the reset holds, so a serialized advance
+/// resets only for a `Match` head that the local store shows is an
+/// ancestor of `tip`. An `Any` head is never reset: it conditions on no
+/// head at all.
+fn may_rebaseline(
+    tx: &PushContext<'_>,
+    store: &ObjectStore,
+    condition: refs::RefWriteCondition,
+    tip: Hash,
+) -> Result<bool, PushError> {
+    if matches!(condition, refs::RefWriteCondition::Any) {
+        return Ok(false);
+    }
+    if tx.supports_atomic_advance() {
+        return Ok(true);
+    }
+    let refs::RefWriteCondition::Match(head) = condition else {
+        return Ok(false);
+    };
+    Ok(tx.supports_serialized_advance() && kit_core::ops::merge::is_ancestor(store, head, tip)?)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_branch_once(
     tx: &PushContext<'_>,
@@ -494,7 +576,18 @@ fn push_branch_once(
     // optimization; the head CAS below remains authoritative.
     // A caller that already planned against the remote's current tip (the
     // split decision does) passes its plan, so it is diffed once.
-    let mut plan = plan_branch(tx, store, branch, tip, force_self_contained, preplanned)?;
+    let Some(mut plan) = plan_branch(
+        tx,
+        store,
+        branch,
+        tip,
+        condition,
+        force_self_contained,
+        preplanned,
+    )?
+    else {
+        return Ok(());
+    };
 
     let limits = tx.upload_limits();
     // Payload and serialized-byte limits are checked separately. Framing
@@ -519,16 +612,9 @@ fn push_branch_once(
     // (`resolved_chain`) so `advance_packmap`'s append path can reuse it
     // instead of re-walking.
     //
-    // A reset is committed together with the head; the ordered (non-atomic)
-    // `advance_refs` fallback (packmap PUT then head PUT) would strand the
-    // head at the old tip on a torn write, and a reset — unlike an append —
-    // is not a superset of the prior chain, so it can't rebuild that stranded
-    // closure. We therefore re-baseline ONLY when BOTH hold:
-    //   * the transport advances both refs transactionally
-    //     (`supports_atomic_advance`), AND
-    //   * the head write is CAS-conditioned (not `Any`). Atomic force pushes
-    //     use the guarded force driver before reaching this path. The `Any`
-    //     calls left here belong to non-atomic sources and cannot reset.
+    // A reset is not a superset of the prior chain, so it may only land
+    // where no reader or crash can pair it with a head it cannot rebuild
+    // (`may_rebaseline`).
     let mut rebaseline = false;
     let mut resolved_chain = None;
     if !force_self_contained
@@ -538,8 +624,7 @@ fn push_branch_once(
         match probe_chain(tx, branch, pm) {
             Ok(chain)
                 if chain.depth + 1 > rebaseline_threshold
-                    && tx.supports_atomic_advance()
-                    && !matches!(condition, refs::RefWriteCondition::Any) =>
+                    && may_rebaseline(tx, store, condition, tip)? =>
             {
                 rebaseline = true;
             }
@@ -646,33 +731,38 @@ fn push_branch_once(
     )
 }
 
+/// The plan for `tip`, or `None` when an earlier attempt already landed it.
 fn plan_branch(
     tx: &PushContext<'_>,
     store: &ObjectStore,
     branch: &str,
     tip: Hash,
+    condition: refs::RefWriteCondition,
     force_self_contained: bool,
     preplanned: Option<transfer::PackPlan>,
-) -> Result<transfer::PackPlan, PushError> {
-    Ok(if let Some(plan) = preplanned {
-        plan
+) -> Result<Option<transfer::PackPlan>, PushError> {
+    if let Some(plan) = preplanned {
+        return Ok(Some(plan));
+    }
+    // A full closure depends on no remote head, so it reads none.
+    let remote_tip = if force_self_contained {
+        None
     } else {
-        let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
-        // Plan FIRST, against the remote's current tip (for speed): a no-op push
-        // (the remote already holds this closure) yields an empty plan and takes
-        // the cheap head-only path below WITHOUT walking the packmap chain. Only
-        // a push that actually has objects to send pays the O(depth) chain probe.
-        transfer::plan_pack_with(
-            store,
-            tip,
-            if force_self_contained {
-                None
-            } else {
-                remote_tip
-            },
-            encode_delta_candidates_batch,
-        )?
-    })
+        match lease_head(tx, branch, condition, tip)? {
+            LeaseHead::Holds(head) => head,
+            LeaseHead::Landed => return Ok(None),
+        }
+    };
+    // Plan FIRST, against the remote's current tip (for speed): a no-op push
+    // (the remote already holds this closure) yields an empty plan and takes
+    // the cheap head-only path below WITHOUT walking the packmap chain. Only
+    // a push that actually has objects to send pays the O(depth) chain probe.
+    Ok(Some(transfer::plan_pack_with(
+        store,
+        tip,
+        remote_tip,
+        encode_delta_candidates_batch,
+    )?))
 }
 
 /// Build `plan`'s entries into one or more packs, each staying under
@@ -1163,6 +1253,8 @@ fn seal_pack(
 
 #[cfg(test)]
 mod packmap_tests;
+#[cfg(test)]
+mod rebaseline_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

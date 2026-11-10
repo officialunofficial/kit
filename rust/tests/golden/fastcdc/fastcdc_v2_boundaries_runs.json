@@ -1,0 +1,7 @@
+{
+  "bin": "fastcdc_v2_boundaries_runs.bin",
+  "blake3": "da976807c5dec0b424023300903f0946533ad16138fd8b733c2774f55ce1ea2f",
+  "description": "FastCDC v2 over the 1 MiB runs stream (SPEC-FASTCDC section 8 vector 11); chunk-end offsets as JSON",
+  "name": "fastcdc_v2_boundaries_runs",
+  "size": 74
+}

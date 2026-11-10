@@ -9,6 +9,8 @@
 #   QUINT=0 skips `quint run`; ONLY=<regex> restricts TLC/Apalache to
 #   matching "<module>::<invariant>" checks.
 #
+# advance.qnt (the two-ref advance and the re-baseline gate) runs too.
+#
 # Pins: quint 0.32.0, Apalache 0.62.2 run directly on the
 # compiled TLA+ (not `quint verify`), TLC = tlc2.TLC from the Apalache 0.62.2
 # jar, Java 21. Tool locations (override any of them):
@@ -120,9 +122,12 @@ tlc() {
 }
 
 # ---- typecheck + deterministic scenarios ------------------------------------
-quint typecheck refs.qnt && quint typecheck serve.qnt
+quint typecheck refs.qnt && quint typecheck serve.qnt && quint typecheck advance.qnt
 quint typecheck refs_test.qnt && quint typecheck serve_test.qnt
 quint test refs_test.qnt --main refs_test >/dev/null && note "test refs_test" ok || bad "test refs_test" failed
+for m in refs_wpref_test refs_collide_test refs_nested_test refs_nested_unchecked_test; do
+  quint test refs_test.qnt --main "$m" >/dev/null && note "test $m" ok || bad "test $m" failed
+done
 quint test serve_test.qnt --main serve_test >/dev/null && note "test serve_test" ok || bad "test serve_test" failed
 quint test serve_test.qnt --main served_test >/dev/null && note "test served_test" ok || bad "test served_test" failed
 
@@ -130,7 +135,7 @@ quint test serve_test.qnt --main served_test >/dev/null && note "test served_tes
 qrun refs.qnt refs3 Safety ok
 qrun refs.qnt refs2 Safety ok
 for w in WitnessCrossDomainGap WitnessMatchConflict WitnessConditionalDelete \
-  WitnessGcExpires WitnessTwoLocksContended; do
+  WitnessGcExpires WitnessTwoLocksContended WitnessStripesOverlap; do
   qrun refs.qnt refs3 "$w" violation
 done
 qrun refs.qnt refs3_misorder NoDeadlock violation
@@ -140,6 +145,25 @@ qrun refs.qnt refs2_noFileLock NoLostUpdateFile violation
 qrun refs.qnt refs2_gcSkipTrees ExpireHoldsSuperset violation
 qrun refs.qnt refs2_racyAcquire LockOwnership violation
 qrun refs.qnt refs2_memNoMutex NoLostUpdateMem violation
+# File transport stripe locks (SPEC-REFS §5.1.1).
+qrun refs.qnt refs3_wpref Safety ok
+qrun refs.qnt refs2_collide Safety ok
+qrun refs.qnt refs2_collide WitnessStripesOverlap ok
+qrun refs.qnt refs2_noStripeLock OneFileWriterPerRef violation
+qrun refs.qnt refs2_txShared FileStepAlone violation
+qrun refs.qnt refs2_txShared NoLostUpdateFile violation
+qrun refs.qnt refs3_stripeFirst LockOrderRespected violation
+# Nested names (`refs/heads/a` and `refs/heads/a/b`), single-ref writes.
+qrun refs.qnt refs2_nested Safety ok
+qrun refs.qnt refs2_nested WitnessNestedClash violation
+qrun refs.qnt refs2_nestedCollide Safety ok
+qrun refs.qnt refs2_nestedUnchecked NoNestedPair violation
+# The no-stripe-lock lost update needs two Match writes to one ref that both
+# read before either commits, and random simulation rarely builds it:
+# refs_test.qnt pins it, and TLC finds it in the `file` slice below.
+# The stripe-first deadlock needs a 3-cycle through a waiting exclusive
+# request that random simulation rarely builds: refs_test.qnt pins it, and
+# TLC finds it in the `file` slice below.
 
 # ---- serve.qnt: random simulation -------------------------------------------
 qrun serve.qnt serve2 Safety ok
@@ -164,7 +188,20 @@ qrun serve.qnt served_listNoSkip ListingServedOnly violation
 # NoLiveUploadSwept's mutants need a 5-step pinned interleaving that random
 # simulation rarely hits: serve_test.qnt pins them, and TLC finds them below.
 
-# ---- TLC: exhaustive (serve.qnt) / constrained (refs.qnt) --------------------
+# ---- advance.qnt: random simulation -----------------------------------------
+qrun advance.qnt advance3 Safety ok
+qrun advance.qnt advance3_atomic Safety ok
+for c in CanaryNoReset CanaryNoCrashAfterReset CanaryNoForceReplan CanaryNoLeaseRefusal; do
+  qrun advance.qnt advance3 "$c" violation
+done
+qrun advance.qnt advance3_noAncestry Consistent violation
+qrun advance.qnt advance3_forceOrdered Consistent violation
+qrun advance.qnt advance3_atomicForceOrdered Consistent violation
+qrun advance.qnt advance3_atomicLeaseUnchecked Consistent violation
+# advance3_leaseUnchecked needs a long interleaving of all three pushers
+# that random simulation rarely hits: TLC finds it below.
+
+# ---- TLC: exhaustive (serve.qnt, advance.qnt) / constrained (refs.qnt) -------
 if [[ ${TLC:-1} == 1 ]]; then
   # serve.qnt is finite: exhaustive, no VIEW, no CONSTRAINT.
   tlc serve.qnt serve2 Safety ok "" ""
@@ -179,6 +216,17 @@ if [[ ${TLC:-1} == 1 ]]; then
   tlc serve.qnt served_checkAfterRead RefuseBeforeStorage violation "" ""
   tlc serve.qnt served_headCheckedLate RefusedWritesNothing violation "" ""
   tlc serve.qnt served_listNoSkip ListingServedOnly violation "" ""
+  # advance.qnt is finite (one push per process): exhaustive.
+  tlc advance.qnt advance3 Safety ok "" ""
+  tlc advance.qnt advance3_atomic Safety ok "" ""
+  for c in CanaryNoReset CanaryNoCrashAfterReset CanaryNoForceReplan CanaryNoLeaseRefusal; do
+    tlc advance.qnt advance3 "$c" violation "" ""
+  done
+  tlc advance.qnt advance3_noAncestry Consistent violation "" ""
+  tlc advance.qnt advance3_forceOrdered Consistent violation "" ""
+  tlc advance.qnt advance3_atomicForceOrdered Consistent violation "" ""
+  tlc advance.qnt advance3_leaseUnchecked Consistent violation "" ""
+  tlc advance.qnt advance3_atomicLeaseUnchecked Consistent violation "" ""
   # refs.qnt: recLog / nextEntry grow without bound and the full op space
   # (8 kinds x trees x refs x conditions x values) of two processes exceeds a
   # 30-minute / 4 GB budget (measured: > 1.5 M distinct states at depth 4).
@@ -187,7 +235,7 @@ if [[ ${TLC:-1} == 1 ]]; then
   # both processes, every interleaving, CONSTRAINT nextEntry <= 2 (at most
   # one recovery record). The VIEW drops only lastAction, which no guard or
   # Safety conjunct reads (sound for Safety, not for lastAction canaries).
-  RV='<< @disk, @mem, @owner, @procs, @recLog, @nextEntry, @faults, @violations, @lostRecords, @recordDuringExpire >>'
+  RV='<< @disk, @mem, @owner, @sharers, @procs, @recLog, @nextEntry, @faults, @violations, @lostRecords, @recordDuringExpire >>'
   RC='@nextEntry <= 2'
   # Slice "domains": the three §5.1 lock domains on one ref: local updateRef
   # (refs-<ref>.lock), file (RefLock: kit serve / a layout server / kit+file://)
@@ -204,6 +252,30 @@ if [[ ${TLC:-1} == 1 ]]; then
   tlc refs.qnt refs2 Safety ok "$RV" "$RC" "$CHD" "$DOMC" chain
   tlc refs.qnt refs2_misorder NoDeadlock violation "$RV" "$RC" "$CHD" "$DOMC" chain
   tlc refs.qnt refs2_gcSkipTrees NoRecordExpireInterleave violation "$RV" "$RC" "$CHD" "$DOMC" chain
+  # Slice "file": the file transport's own locks (SPEC-REFS §5.1.1). Single-
+  # ref writes and multi-file steps on both refs.
+  FD=$'SliceKinds == {"file", "fileTx"}\nSliceRefs == {0, 1}'
+  tlc refs.qnt refs2 Safety ok "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2 WitnessStripesOverlap violation "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_collide Safety ok "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_collide WitnessStripesOverlap ok "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_noStripeLock NoLostUpdateFile violation "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_txShared FileStepAlone violation "$RV" "$RC" "$FD" "$DOMC" file
+  # The same slice with ref 1 named below ref 0: two creates race in
+  # different stripes, and one stripe serializes them.
+  tlc refs.qnt refs2_nested Safety ok "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_nested WitnessNestedCreatesOverlap violation "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_nestedCollide Safety ok "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_nestedCollide WitnessNestedCreatesOverlap ok "$RV" "$RC" "$FD" "$DOMC" file
+  tlc refs.qnt refs2_nestedUnchecked NoNestedPair violation "$RV" "$RC" "$FD" "$DOMC" file
+  # Slice "file3": three processes on one ref, enough for a wait-for cycle
+  # through two writes to the ref and one multi-file step. Three processes
+  # on both refs exceed the 30-minute / 4 GB budget (over 4 M distinct
+  # states at depth 6, queue still growing).
+  FD3=$'SliceKinds == {"file", "fileTx"}\nSliceRefs == {0}'
+  tlc refs.qnt refs3_wpref Safety ok "$RV" "$RC" "$FD3" "$DOMC" file3
+  tlc refs.qnt refs3_stripeFirst NoDeadlock violation "$RV" "$RC" "$FD3" "$DOMC" file3
+  tlc refs.qnt refs3_stripeFirstFlock NoDeadlock ok "$RV" "$RC" "$FD3" "$DOMC" file3
 fi
 
 # ---- Apalache: bounded symbolic ----------------------------------------------
