@@ -8,16 +8,16 @@
 //! existing pack.
 //!
 //! A process that crashes mid-upload leaves its temp file behind, named
-//! `.<64-hex>.tmp.<pid>.<seq>`. [`sweep_stale_uploads`] removes the old ones.
+//! `.kit.tmp.<pid>.<seq>`. [`sweep_stale_uploads`] removes the old ones.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use kit_core::hash::Hasher;
 use kit_core::protocol::PackKey;
-use kit_transport_file::{create_dir_all_durably, sync_dir, temp_path};
+use kit_transport_file::{create_dir_all_durably, create_temp, sync_dir};
 
 /// The directory under the root that holds the packs.
 const PACK_DIR: &str = "packs";
@@ -63,8 +63,7 @@ impl PackWriter {
             .parent()
             .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "pack path has no directory"))?;
         create_dir_all_durably(dir)?;
-        let tmp = temp_path(&dest)?;
-        let file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let (tmp, file) = create_temp(&dest)?;
         Ok(Self {
             file: Some(file),
             tmp: Some(tmp),
@@ -193,24 +192,19 @@ impl PackReader {
     }
 }
 
-/// Whether `name` is an upload's temp file name: `.<64 lowercase
-/// hex>.tmp.<pid>.<seq>` with a decimal `u32` pid and `u64` sequence.
+/// Whether `name` is an upload's temp file name: `.kit.tmp.<pid>.<seq>`
+/// with a decimal `u32` pid and `u64` sequence.
 fn is_upload_temp_name(name: &str) -> bool {
     let decimal = |s: &str, max: usize| {
         !s.is_empty() && s.len() <= max && s.bytes().all(|b| b.is_ascii_digit())
     };
-    let Some(rest) = name.strip_prefix('.') else {
+    let Some((pid, seq)) = name
+        .strip_prefix(".kit.tmp.")
+        .and_then(|r| r.split_once('.'))
+    else {
         return false;
     };
-    let Some((hex, rest)) = rest.split_at_checked(64) else {
-        return false;
-    };
-    let Some((pid, seq)) = rest.strip_prefix(".tmp.").and_then(|r| r.split_once('.')) else {
-        return false;
-    };
-    hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        && decimal(pid, 10)
-        && decimal(seq, 20)
+    decimal(pid, 10) && decimal(seq, 20)
 }
 
 /// Remove the temp files that crashed uploads left in the pack directory.
@@ -391,15 +385,13 @@ mod tests {
     #[test]
     fn temp_names_are_exact() {
         let hex = "a".repeat(64);
-        assert!(is_upload_temp_name(&format!(".{hex}.tmp.1.2")));
-        assert!(!is_upload_temp_name(&format!("{hex}.tmp.1.2")));
-        assert!(!is_upload_temp_name(&format!(".{hex}.tmp.1")));
-        assert!(!is_upload_temp_name(&format!(".{hex}.tmp.x.2")));
-        assert!(!is_upload_temp_name(&format!(
-            ".{}.tmp.1.2",
-            "A".repeat(64)
-        )));
-        assert!(!is_upload_temp_name(&format!(".{hex}.tmp.12345678901.2")));
+        assert!(is_upload_temp_name(".kit.tmp.1.2"));
+        assert!(!is_upload_temp_name("kit.tmp.1.2"));
+        assert!(!is_upload_temp_name(".kit.tmp.1"));
+        assert!(!is_upload_temp_name(".kit.tmp.x.2"));
+        assert!(!is_upload_temp_name(".kit.tmp.1.2x"));
+        assert!(!is_upload_temp_name(".kit.tmp.12345678901.2"));
+        assert!(!is_upload_temp_name(&format!(".{hex}.tmp.1.2")));
         assert!(!is_upload_temp_name(&hex));
     }
 
@@ -409,7 +401,7 @@ mod tests {
         let dir = td.path().join("packs");
         fs::create_dir_all(&dir).unwrap();
         let hex = "b".repeat(64);
-        let temp = dir.join(format!(".{hex}.tmp.1.2"));
+        let temp = dir.join(".kit.tmp.1.2");
         let pack = dir.join(&hex);
         let other = dir.join(".other.tmp.1.2");
         for p in [&temp, &pack, &other] {
@@ -424,6 +416,34 @@ mod tests {
         // Old enough: only the upload temp file goes.
         assert_eq!(sweep_stale_uploads(td.path(), Duration::ZERO).unwrap(), 1);
         assert!(!temp.exists() && pack.exists() && other.exists());
+    }
+
+    #[test]
+    fn begin_skips_a_temp_name_that_is_taken() {
+        let td = tempfile::tempdir().unwrap();
+        let key = key_of(b"taken");
+        let dir = td.path().join(PACK_DIR);
+        fs::create_dir_all(&dir).unwrap();
+        // Take a fresh name, then plant files at the names that follow it.
+        let (probe, _file) = create_temp(&pack_path(td.path(), &key)).unwrap();
+        let name = probe.file_name().unwrap().to_string_lossy().into_owned();
+        let (stem, seq) = name.rsplit_once('.').unwrap();
+        let seq: u64 = seq.parse().unwrap();
+        let planted: Vec<PathBuf> = (seq + 1..seq + 9)
+            .map(|n| {
+                let path = dir.join(format!("{stem}.{n}"));
+                fs::write(&path, b"planted").unwrap();
+                path
+            })
+            .collect();
+
+        let mut writer = PackWriter::begin(td.path(), key).unwrap();
+        writer.write(b"pack bytes").unwrap();
+        drop(writer);
+
+        for path in &planted {
+            assert_eq!(fs::read(path).unwrap(), b"planted");
+        }
     }
 
     #[test]

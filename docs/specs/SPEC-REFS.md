@@ -448,8 +448,11 @@ the shallow file at 1 MiB. Reads exceeding these bounds yield
 `RefError::InvalidHead`/`RefError::InvalidRef` respectively.
 
 Writers MUST use atomic write-then-rename on local disk to avoid torn
-reads. The temp-name pattern is `.<file>.tmp.<pid>.<seq>`, identical
-to SPEC-INDEX §5.
+reads. The temp-name pattern is `.kit.tmp.<pid>.<seq>`, identical to
+SPEC-INDEX §5. The name does not contain the ref's name, so a ref
+segment of any length the file system allows can be written. It starts
+with a dot, and no ref segment does, so a temp file is never listed as
+a ref.
 
 `HEAD` reads tolerate trailing `\r`, space, and tab so a Windows-
 edited file does not brick a repo; ref-file reads tolerate the same

@@ -105,27 +105,67 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A fresh temp-file path next to `dest`: `.<file name>.tmp.<pid>.<seq>`
-/// in `dest`'s directory. Every temp file this crate writes is named here,
-/// from one process-wide counter, so two writers in one process never pick
-/// the same name, and writers in different processes differ by pid. A
-/// streaming writer that publishes into the same layout (a blob store
-/// writing `packs/`) names its temp files here too, so it can never
-/// collide with this crate's own writes.
+/// The next temp-file path beside `dest`: `.kit.tmp.<pid>.<seq>` in `dest`'s
+/// directory. The name does not hold `dest`'s name, so it stays short when
+/// `dest` has a long name. The sequence comes from one process-wide counter,
+/// so two writers in one process never pick the same name, and writers in
+/// different processes differ by pid.
 ///
 /// # Errors
 /// `InvalidInput` if `dest` has no parent directory or no file name.
-pub fn temp_path(dest: &Path) -> io::Result<PathBuf> {
+fn temp_path(dest: &Path) -> io::Result<PathBuf> {
     let parent = dest
         .parent()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination path has no parent"))?;
-    let file_name = dest
-        .file_name()
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination has no file name"))?
-        .to_string_lossy();
+    if dest.file_name().is_none() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "destination has no file name",
+        ));
+    }
     let pid = process::id();
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    Ok(parent.join(format!(".{file_name}.tmp.{pid}.{seq}")))
+    Ok(parent.join(format!(".kit.tmp.{pid}.{seq}")))
+}
+
+/// Create a new, empty temp file beside `dest`, named `.kit.tmp.<pid>.<seq>`.
+/// The file is created with `create_new`, which never follows a link and
+/// never truncates: a name that is taken, by a file or a link, is skipped and
+/// the next one is tried. Every temp file this crate writes is created here.
+/// A streaming writer that publishes into the same layout (a blob store
+/// writing `packs/`) creates its temp files here too, so it can never
+/// collide with this crate's own writes. The caller removes the file when it
+/// fails to publish it.
+///
+/// # Errors
+/// `InvalidInput` if `dest` has no parent directory or no file name. Any
+/// other error is the one from creating the file.
+pub fn create_temp(dest: &Path) -> io::Result<(PathBuf, fs::File)> {
+    loop {
+        let path = temp_path(dest)?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Write `bytes` to a new temp file beside `dest` and fsync it. A failure
+/// removes the temp file and returns the original error.
+fn write_temp(dest: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    use std::io::Write;
+    let (path, mut file) = create_temp(dest)?;
+    if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(&path);
+        return Err(e);
+    }
+    Ok(path)
 }
 
 /// Atomically write `bytes` to `dest` using a temp-file + fsync +
@@ -139,14 +179,7 @@ fn write_atomic(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result<()>
         create_dir_all_durably(parent)?;
     }
 
-    let tmp_path = temp_path(dest)?;
-
-    {
-        use std::io::Write;
-        let mut f = fs::File::create(&tmp_path)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
+    let tmp_path = write_temp(dest, bytes)?;
 
     if let Err(e) = fs::rename(&tmp_path, dest) {
         let _ = fs::remove_file(&tmp_path);
@@ -172,14 +205,7 @@ fn write_create_new(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result
         create_dir_all_durably(parent)?;
     }
 
-    let tmp_path = temp_path(dest)?;
-
-    {
-        use std::io::Write;
-        let mut f = fs::File::create(&tmp_path)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
+    let tmp_path = write_temp(dest, bytes)?;
 
     // Hard-link tmp → dest (atomic, fails with AlreadyExists if dest exists).
     match fs::hard_link(&tmp_path, dest) {
@@ -239,7 +265,7 @@ fn sync_parent(_dir: &Path) -> io::Result<()> {
 /// done in it durable: what every write of this crate does after its
 /// rename. A missing `dir` counts as success; on non-Unix targets this is a
 /// no-op (see `sync_parent`). For writers that publish into the same
-/// layout with their own temp file (see [`temp_path`]).
+/// layout with their own temp file (see [`create_temp`]).
 ///
 /// # Errors
 /// The directory could not be opened or synced.
@@ -1623,6 +1649,69 @@ mod tests {
             t.read_ref("refs/heads/feature/deep/branch").unwrap(),
             Some(h)
         );
+    }
+
+    #[test]
+    fn write_ref_accepts_a_name_of_250_bytes() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let name = format!("refs/heads/{}", "n".repeat(250));
+        let h = blake3_hash(b"long-name");
+        t.write_ref(&name, &h).unwrap();
+        assert_eq!(t.read_ref(&name).unwrap(), Some(h));
+    }
+
+    /// Plant links to `target` at the next 64 temp names beside `dest`,
+    /// counted from a name taken now. Returns the links.
+    #[cfg(unix)]
+    fn plant_links_ahead(dest: &Path, target: &Path) -> Vec<PathBuf> {
+        let next = temp_path(dest).unwrap();
+        let name = next.file_name().unwrap().to_string_lossy().into_owned();
+        let (stem, seq) = name.rsplit_once('.').unwrap();
+        let seq: u64 = seq.parse().unwrap();
+        (seq + 1..seq + 65)
+            .map(|n| {
+                let link = next.with_file_name(format!("{stem}.{n}"));
+                std::os::unix::fs::symlink(target, &link).unwrap();
+                link
+            })
+            .collect()
+    }
+
+    /// A link planted at the temp names a write is about to use is neither
+    /// followed nor truncated: the target keeps its bytes, the link stays
+    /// and the write lands under a name that is free. The links are planted
+    /// from a fresh name right before each write.
+    #[cfg(unix)]
+    #[test]
+    fn writes_never_follow_a_link_at_a_temp_name() {
+        let dir = tmp();
+        let outside = tmp();
+        let target = outside.path().join("target");
+        fs::write(&target, b"old").unwrap();
+        let heads = dir.path().join("refs/heads");
+        fs::create_dir_all(&heads).unwrap();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"after-link");
+
+        let mut planted = plant_links_ahead(&heads.join("main"), &target);
+        t.write_ref("refs/heads/main", &h).unwrap();
+        planted.extend(plant_links_ahead(&heads.join("fresh"), &target));
+        assert!(write_create_new(&heads.join("fresh"), b"x", false).unwrap());
+
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        for link in &planted {
+            assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        }
+        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h));
+        assert_eq!(fs::read(heads.join("fresh")).unwrap(), b"x");
+        let leftovers = fs::read_dir(&heads)
+            .unwrap()
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .filter(|e| !e.file_type().unwrap().is_symlink())
+            .count();
+        assert_eq!(leftovers, 0);
     }
 
     #[test]
@@ -3361,7 +3450,7 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.parent(), dest.parent());
         let name = a.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with(".abc.tmp."), "{name}");
+        assert!(name.starts_with(".kit.tmp."), "{name}");
         assert!(temp_path(Path::new("/")).is_err());
     }
 }
