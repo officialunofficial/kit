@@ -802,7 +802,7 @@ where
 {
     let obj = store.read_object(&blob_hash)?;
     match obj {
-        Object::Blob(b) => Ok(write_file_atomic(dir, name, &b.data, executable, observe)?),
+        Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable, observe),
         Object::ChunkedBlob(cb) => {
             // Stream each batch straight to the open tmp file instead of
             // concatenating the whole reassembled file into memory first.
@@ -869,22 +869,22 @@ fn observe_written(written: &fs::Metadata, final_path: &Path) -> Option<StatFiel
         .then_some(fields)
 }
 
-/// Rename the tmp file into place when `result` is `Ok`. Otherwise remove
-/// the tmp file and return the error, so a failed restore leaves no
-/// partial file behind.
+/// Rename the tmp file into place when `result` is `Ok`. When the write,
+/// the mode change or the rename fails, remove the tmp file this call was
+/// given, and only that file, and return the error. A failed restore then
+/// leaves no partial file behind. A failure to remove the tmp file never
+/// replaces the error.
 fn finish_or_discard_tmp(
     result: RestoreResult<()>,
     tmp_path: &Path,
     final_path: &Path,
     executable: bool,
 ) -> RestoreResult<()> {
-    match result {
-        Ok(()) => Ok(finish_atomic_write(tmp_path, final_path, executable)?),
-        Err(e) => {
-            let _ = fs::remove_file(tmp_path);
-            Err(e)
-        }
+    let result = result.and_then(|()| Ok(finish_atomic_write(tmp_path, final_path, executable)?));
+    if result.is_err() {
+        let _ = fs::remove_file(tmp_path);
     }
+    result
 }
 
 /// Read `chunks` in batches of `batch_size` via `read_chunks` and append
@@ -1049,9 +1049,12 @@ fn restore_symlink(
             Err(e) => return Err(e.into()),
         }
     };
-    prepare_path_for_rename(&final_path)?;
-    fs::rename(&tmp_path, &final_path)?;
-    Ok(())
+    let result =
+        prepare_path_for_rename(&final_path).and_then(|()| fs::rename(&tmp_path, &final_path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    Ok(result?)
 }
 
 #[cfg(unix)]
@@ -1096,13 +1099,13 @@ fn write_file_atomic(
     data: &[u8],
     executable: bool,
     observe: bool,
-) -> io::Result<Option<StatFields>> {
+) -> RestoreResult<Option<StatFields>> {
     let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
-    tmp.write_all(data)?;
+    let result = tmp.write_all(data).map_err(RestoreError::from);
     let written = if observe { tmp.metadata().ok() } else { None };
     #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
     drop(tmp);
-    finish_atomic_write(&tmp_path, &final_path, executable)?;
+    finish_or_discard_tmp(result, &tmp_path, &final_path, executable)?;
     Ok(written.and_then(|meta| observe_written(&meta, &final_path)))
 }
 
@@ -1111,8 +1114,9 @@ fn write_file_atomic(
 /// next counter value and never opened or removed. Returns the tmp path,
 /// final path, and the open handle so a caller can write incrementally
 /// (see [`restore_blob`]'s `ChunkedBlob` arm) instead of buffering the
-/// whole file first — pair with [`finish_atomic_write`] to apply the
-/// executable bit and atomically rename into place.
+/// whole file first — pair with [`finish_or_discard_tmp`] to apply the
+/// executable bit and atomically rename into place, or to remove the tmp
+/// file when a step fails.
 fn create_tmp_for_write(dir: &Path, name: &str) -> io::Result<(PathBuf, PathBuf, fs::File)> {
     loop {
         let tmp_path = dir.join(make_tmp_name());
@@ -1601,6 +1605,215 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A target directory in which a restore of the entry `x` fails after
+    /// it wrote its temporary file: `x` is a directory that holds a file in
+    /// a read-only subdirectory, so the restore cannot remove it to make
+    /// room. Also holds `victim`, a sibling file the restore must not touch.
+    #[cfg(unix)]
+    struct LockedTarget {
+        root: TempDir,
+    }
+
+    #[cfg(unix)]
+    impl LockedTarget {
+        /// `None` when permissions do not apply, for example when running as root.
+        fn new() -> Option<Self> {
+            use std::os::unix::fs::PermissionsExt;
+            let root = TempDir::new().unwrap();
+            let sub = root.path().join("x/sub");
+            fs::create_dir_all(&sub).unwrap();
+            fs::write(sub.join("f"), b"keep").unwrap();
+            fs::write(root.path().join("victim"), b"untouched").unwrap();
+            fs::set_permissions(&sub, fs::Permissions::from_mode(0o555)).unwrap();
+            let locked = Self { root };
+            fs::File::create(sub.join("probe"))
+                .is_err()
+                .then_some(locked)
+        }
+
+        fn path(&self) -> &Path {
+            self.root.path()
+        }
+
+        fn assert_untouched(&self) {
+            assert_eq!(fs::read(self.path().join("x/sub/f")).unwrap(), b"keep");
+            assert_eq!(fs::read(self.path().join("victim")).unwrap(), b"untouched");
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for LockedTarget {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(
+                self.root.path().join("x/sub"),
+                fs::Permissions::from_mode(0o755),
+            );
+        }
+    }
+
+    /// Entries a restore writes through a temporary file: the mode and the
+    /// object of each, named for the failure message.
+    #[cfg(unix)]
+    fn temporary_file_entries(store: &ObjectStore) -> Vec<(&'static str, EntryMode, Hash)> {
+        let plain = put_blob(store, b"data");
+        let chunks = vec![put_blob(store, b"da"), put_blob(store, b"ta")];
+        let chunked = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 4,
+            chunk_size: 2,
+            chunks,
+        });
+        let chunked = store
+            .write(&serialize::serialize(&chunked).unwrap())
+            .unwrap();
+        vec![
+            ("plain", EntryMode::Blob, plain),
+            ("executable", EntryMode::Executable, plain),
+            ("chunked", EntryMode::Blob, chunked),
+            ("chunked executable", EntryMode::Executable, chunked),
+            ("symlink", EntryMode::Symlink, put_blob(store, b"victim")),
+        ]
+    }
+
+    /// Restore the one entry `x` into `target` and return the error.
+    #[cfg(unix)]
+    fn failed_restore_of_x(
+        store: &ObjectStore,
+        mode: EntryMode,
+        object_hash: Hash,
+        target: &Path,
+        worktree: bool,
+    ) -> RestoreError {
+        let tree = put_tree_with(
+            store,
+            vec![TreeEntry {
+                name: b"x".to_vec(),
+                mode,
+                object_hash,
+            }],
+        );
+        let keep_untracked = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        if worktree {
+            restore_tree_to_worktree(store, &tree, target, &keep_untracked).unwrap_err()
+        } else {
+            restore_tree(store, tree, target, &keep_untracked).unwrap_err()
+        }
+    }
+
+    /// Names in `dir` with the shape of a restore temporary name.
+    #[cfg(unix)]
+    fn temp_shaped_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| is_restore_temp_name(name))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_restore_removes_its_temporary_file() {
+        let (_d, store) = fresh_store();
+        for (label, mode, object_hash) in temporary_file_entries(&store) {
+            for worktree in [false, true] {
+                let Some(target) = LockedTarget::new() else {
+                    return;
+                };
+                let err = failed_restore_of_x(&store, mode, object_hash, target.path(), worktree);
+                assert!(
+                    matches!(&err, RestoreError::File { path, .. } if path == "x"),
+                    "{label}: {err:?}"
+                );
+                assert!(err.to_string().starts_with("x: "), "{label}: {err}");
+                assert_eq!(
+                    temp_shaped_names(target.path()),
+                    Vec::<String>::new(),
+                    "{label}, worktree {worktree}"
+                );
+                target.assert_untouched();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_restore_keeps_temporary_names_it_did_not_create() {
+        let (_d, store) = fresh_store();
+        let entries = temporary_file_entries(&store);
+        let outside = TempDir::new().unwrap();
+        let outside_victim = outside.path().join("victim");
+        fs::write(&outside_victim, b"untouched").unwrap();
+        for label in ["plain", "symlink"] {
+            let (_, mode, object_hash) = *entries.iter().find(|e| e.0 == label).unwrap();
+            for planted_symlinks in [false, true] {
+                let Some(target) = LockedTarget::new() else {
+                    return;
+                };
+                let planted = plant_temp_names(target.path(), |path| {
+                    if planted_symlinks {
+                        std::os::unix::fs::symlink(&outside_victim, path).unwrap();
+                    } else {
+                        fs::write(path, b"keep").unwrap();
+                    }
+                });
+                let err = failed_restore_of_x(&store, mode, object_hash, target.path(), false);
+                assert!(
+                    matches!(&err, RestoreError::File { path, .. } if path == "x"),
+                    "{label}: {err:?}"
+                );
+                let mut expected: Vec<String> = planted
+                    .iter()
+                    .map(|path| path.file_name().unwrap().to_str().unwrap().to_string())
+                    .collect();
+                expected.sort();
+                assert_eq!(
+                    temp_shaped_names(target.path()),
+                    expected,
+                    "{label}, planted symlinks {planted_symlinks}"
+                );
+                for path in planted {
+                    if planted_symlinks {
+                        assert_eq!(fs::read_link(&path).unwrap(), outside_victim);
+                    } else {
+                        assert_eq!(fs::read(&path).unwrap(), b"keep");
+                    }
+                }
+                assert_eq!(fs::read(&outside_victim).unwrap(), b"untouched");
+                target.assert_untouched();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_removal_does_not_replace_the_restore_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let tmp_path = dir.path().join(".kit-restore-tmp.1.2");
+        fs::write(&tmp_path, b"partial").unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let can_remove = fs::File::create(dir.path().join("probe")).is_ok();
+        let err = finish_or_discard_tmp(
+            Err(RestoreError::NotABlob),
+            &tmp_path,
+            &dir.path().join("final"),
+            false,
+        )
+        .unwrap_err();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        if can_remove {
+            // Permissions do not apply, for example when running as root.
+            return;
+        }
+        assert!(matches!(err, RestoreError::NotABlob), "{err:?}");
+        assert!(tmp_path.exists());
     }
 
     #[test]
