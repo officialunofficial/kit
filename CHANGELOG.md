@@ -114,6 +114,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   takes the next counter value. Pull recovery sweeps an untracked regular
   file with that name shape, and the rule no longer needs a tracked sibling.
 - A restore I/O error names the file, as a path relative to the restore root.
+- A restore that fails while it writes a file, sets its mode or renames it
+  into place removes the temporary file it created. Before, a failed
+  checkout, pull or stash left a `.kit-restore-tmp.<pid>.<counter>` file or
+  symlink in the worktree, which `kit status` listed and `kit add` staged.
+  A killed restore still leaves one for pull recovery to sweep.
 - `kit log` and `kit rev-list` fail with an error that names the limit when
   a walk reaches more than 1,000,000 commits. They used to stop there and
   print the newest commits as if they were the whole history. The excluded
