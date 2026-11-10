@@ -9,9 +9,9 @@ audience: implementers of compatible ref stores and transports
 
 Status: **Normative** and **Stable** for kit v1 &mdash; the wire format,
 namespace layout, and CAS semantics below are settled and backed by
-shipped, tested transports (memory, file, s3, http, ssh). Every
+shipped, tested transports (memory, file, s3, ssh, Connect). Every
 transport's `.missing` and `.match` CAS is atomic among the callers that
-share it, given the server support §5.1 requires for s3 and http; the
+share it, given the server support §5.1 requires for s3; the
 in-process memory transport's atomicity is in-process only, because it
 is never shared across processes. The local
 `kit-core` `refs::cas_write` helper used by commands that write refs
@@ -303,8 +303,8 @@ an error, never absent.
 | memory    | atomic*     | atomic*                               | atomic* &mdash; the read-check-write runs under the instance's one `Mutex` | *In-process only: every verb of one `MemoryTransport` instance holds its `Mutex` for the whole operation, so concurrent threads sharing the instance cannot interleave. Never shared across processes. |
 | file      | atomic      | atomic (hard link of a temp file, which fails if the ref exists) | atomic &mdash; OS exclusive lock of the ref's stripe (`<root>/.kit/refs/refs-<hh>.lock`, §5.1.1) serializes the read-check-write for that ref across processes | Lock guards released on drop (including panic-unwind). Writes to refs in different stripes run in parallel. |
 | s3        | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<md5-of-wire>"`                         | Requires a store that supports conditional writes. |
-| http      | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<hex-hash>"`                            | Worker-flavored server. Generic S3 and nginx do NOT conform. |
-| ssh       | atomic      | atomic (`OP_WRITE_REF_IF_ABSENT` path via condition byte) | atomic (`CONDITION_MATCH` with 32-byte expected hash)          | Server enforces CAS; client trusts `STATUS_ERROR`. |
+| ssh       | atomic      | atomic via `REF_EXPECTATION_MISSING`  | atomic via `REF_EXPECTATION_MATCH` and the 32-byte `expected_id` | Server enforces CAS; a conflict is an `Error` with non-empty `details` (SPEC-TRANSPORT §4.2.1). |
+| connect   | atomic      | atomic via `REF_EXPECTATION_MISSING`  | atomic via `REF_EXPECTATION_MATCH` and the 32-byte `expected_id` | `kit+https` remotes. Server enforces CAS; a conflict is `failed_precondition` (SPEC-TRANSPORT-CONNECT §3). |
 
 *memory CAS:* `kit-transport-memory`'s `update_ref` reads the current
 value, checks the condition and writes the new value while holding the
@@ -410,18 +410,15 @@ invalidates it, so an ABA rewrite or delete/recreate cannot reuse a generation.
 A pending history intent blocks raw mutation until recovered. Neither this
 metadata nor the guard changes the 65-byte ref wire format.
 
-### 5.2 ETag encoding divergence
+### 5.2 `.match` encoding divergence
 
 The `.match(H)` condition is serialized differently by transport:
 
 - **S3**: ETag value is `"\"<md5_hex>\""` where `md5_hex` is the MD5
   hash of the 65-byte ref wire bytes for `H`. Enclosing double-quotes
   are part of the header value.
-- **HTTP** (Worker flavour): ETag value is `"\"<hash_hex>\""` where
-  `hash_hex` is the 64-char hex of `H` directly. Enclosing double-quotes
-  again.
-- **SSH**: no ETag; the 32 raw bytes of `H` are sent in the
-  `CONDITION_MATCH` payload.
+- **SSH and Connect**: no ETag; `UpdateRef` carries
+  `REF_EXPECTATION_MATCH` and the 32 raw bytes of `H` in `expected_id`.
 - **file / memory**: read-then-compare against `H`'s raw bytes
   in-process, under the file transport's OS lock or the memory
   transport's `Mutex` (§5.1).
@@ -430,14 +427,6 @@ Kit v1 **does not** unify these encodings. The transport spec
 explicitly states which encoding to produce. Clients and servers for a
 single transport MUST agree on the transport's encoding; cross-transport
 compatibility is not in scope.
-
-### 5.3 `.any` with conditional hint
-
-The HTTP transport's `buildRefWriteHeaders(.any, Some(current))` emits
-`If-Match: "<hex>"` opportunistically when the caller knows the prior
-value. This is an optimization and MUST NOT be treated as binding CAS
-&mdash; a server that ignores the header is still conforming for `.any`.
-Clients requiring CAS MUST use `.match` explicitly.
 
 ---
 
@@ -537,12 +526,12 @@ base/ours/theirs material lives only in this sidecar.
 1. **Wire encode/decode**: hash = BLAKE3("test-ref") → 64 hex + `\n`.
    Record the 65-byte wire.
 2. **Reject uppercase wire** on read.
-3. **listRefs prefix cross-transport parity**: memory, file, s3, http,
-   ssh all asked `listRefs("refs/heads")` and `listRefs("refs/heads/")`
+3. **listRefs prefix cross-transport parity**: memory, file, s3, ssh
+   and Connect all asked `listRefs("refs/heads")` and `listRefs("refs/heads/")`
    on an identical seeded state &mdash; results MUST be byte-identical.
 4. **`.missing` race**: two concurrent `.missing` writers to the same
    ref &mdash; exactly one succeeds, the other returns `RefConflict`. Run on
-   s3, http, ssh.
+   s3, ssh and Connect.
 5. **`.match` on file transport, exactly-one-winner**: two concurrent
    `.match` writers to the same ref &mdash; exactly one succeeds, the other
    returns `RefConflict` and the ref is left at the winner's value.
@@ -556,9 +545,7 @@ base/ours/theirs material lives only in this sidecar.
 7. **S3 MD5-of-wire ETag**: compute MD5 of the 65-byte wire for a
    known hash; compare against an S3 PUT's Content-MD5 on the same
    wire.
-8. **HTTP hex-hash ETag**: compute `If-Match: "<64-hex>"` for a known
-   hash; server echoes back matching state.
-9. **File transport lock stripes** (§5.1.1): for each full ref name, its
+8. **File transport lock stripes** (§5.1.1): for each full ref name, its
    stripe (the first byte of the BLAKE3 digest of the name, two lowercase
    hex digits) and its lock file `refs-<hh>.lock`. The vectors cover
    `refs/heads/main` (stripe `ec`), a tag, a ref and a ref below it, the
@@ -576,9 +563,8 @@ base/ours/theirs material lives only in this sidecar.
 | Every ref name crossing a transport boundary satisfies the §3 grammar | validation at **every** boundary &mdash; write, read, list, client-supplied parse; no silent case-folding or canonicalization (§3) |
 | No ref shadows `HEAD` or a lock file | grammar rejections for final-segment `HEAD` and the `.lock` suffix (§3) |
 | `listRefs(prefix)` is byte-identical across transports | single normative stripping algorithm; lexicographic order, no duplicates; conformance-tested (§4, §4.1, test vector 3) |
-| A `.missing` write succeeds at most once per ref | hard link / `If-None-Match: *` / condition byte, per the atomicity matrix (§5.1) |
-| A `.match(H)` write on s3/http/ssh/file/memory cannot clobber a moved ref | conditional-write CAS per transport encoding, the OS exclusive lock for file, or the instance `Mutex` for memory (in-process only) (§5.1, §5.2) |
-| An `.any` conditional hint is never binding CAS | clients requiring CAS MUST use `.match` explicitly (§5.3) |
+| A `.missing` write succeeds at most once per ref | hard link / `If-None-Match: *` / `REF_EXPECTATION_MISSING`, per the atomicity matrix (§5.1) |
+| A `.match(H)` write on s3/ssh/Connect/file/memory cannot clobber a moved ref | conditional-write CAS per transport encoding, the OS exclusive lock for file, or the instance `Mutex` for memory (in-process only) (§5.1, §5.2) |
 | A default push cannot silently rewind a remote that advanced | `Match(tracked)`/`Missing` CAS lease on the remote-tracking ref (§2) |
 | Fetched tips never overwrite local branches | fetch writes only `refs/remotes/<remote>/<name>`; `pull` fast-forwards from it (§2) |
 | Local ref reads never observe a torn write | atomic write-then-rename with the SPEC-INDEX §5 temp-name pattern (§6) |
