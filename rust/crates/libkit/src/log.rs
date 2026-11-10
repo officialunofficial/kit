@@ -49,22 +49,14 @@ pub enum Error {
         /// Why it did not resolve.
         source: revspec::Error,
     },
-    /// No walk returns this error any more: a commit of the excluded side
-    /// that cannot be read gives [`Error::ReadCommit`] or
-    /// [`Error::NotACommit`].
-    #[deprecated(note = "no longer returned; see `ReadCommit` and `NotACommit`")]
-    #[error("walk range base: {0}")]
-    WalkRangeBase(StoreError),
     /// The merge base of the two sides of a symmetric range could not be
     /// found: its walk reached its limit.
     #[error("merge base: {0}")]
     MergeBase(StoreError),
-    /// No walk returns this error any more: a commit of the history of the
-    /// merge base that cannot be read gives [`Error::ReadCommit`] or
-    /// [`Error::NotACommit`].
-    #[deprecated(note = "no longer returned; see `ReadCommit` and `NotACommit`")]
-    #[error("walk merge base: {0}")]
-    WalkMergeBase(StoreError),
+    /// A history walk failed in a way that has no variant of its own. The
+    /// error names the commit or the limit. Nothing is returned.
+    #[error("merge base: {0}")]
+    History(AncestorError),
     /// An object in the walk is not a commit.
     #[error("not a commit: {}", hash::to_hex(.0))]
     NotACommit(Hash),
@@ -343,6 +335,7 @@ fn merge_base(store: &ObjectStore, a: Hash, b: Hash) -> Result<Option<Hash>, Err
         AncestorError::Unreadable { hash, source } => Error::ReadCommit { hash, source },
         AncestorError::NotACommit(hash) => Error::NotACommit(hash),
         AncestorError::Limit(limit) => Error::MergeBase(limit),
+        other => Error::History(other),
     })
 }
 

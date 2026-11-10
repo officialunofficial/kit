@@ -53,7 +53,11 @@ pub fn collect_ancestor_set<S: BuildHasher>(
 /// Why a strict ancestor walk failed. A strict walk reads every commit of
 /// the history: a walk that ended at a commit it could not read would miss
 /// every ancestor behind it.
+///
+/// New failure kinds can be added without a breaking change, so match with
+/// a wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AncestorError {
     /// A commit of the history cannot be read.
     #[error("commit {} cannot be read: {source}", hash::to_hex(.hash))]
@@ -71,42 +75,20 @@ pub enum AncestorError {
     Limit(StoreError),
 }
 
-impl AncestorError {
-    /// This error as the variants of an operation error that has no variant
-    /// for it: [`StoreError`] for a commit that cannot be read and for a
-    /// walk that reached its cap, which keeps the store error that names the
-    /// object or the limit, and an [`std::io::Error`] of kind
-    /// [`std::io::ErrorKind::InvalidData`] that carries this error for a
-    /// parent that is not a commit.
-    pub(crate) fn into_store_or_invalid_data(self) -> Result<StoreError, std::io::Error> {
-        match self {
-            Self::Unreadable { source, .. } | Self::Limit(source) => Ok(source),
-            Self::NotACommit(_) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, self)),
-        }
-    }
+/// Whether `err` names `culprit` as a commit that cannot be read or is not
+/// a commit.
+#[cfg(test)]
+pub(crate) fn names_commit(err: &AncestorError, culprit: &Hash) -> bool {
+    matches!(
+        err,
+        AncestorError::Unreadable { hash, .. } | AncestorError::NotACommit(hash) if hash == culprit
+    )
 }
 
-/// Whether `err` is the store error that names `culprit`: the object is
-/// missing, or its bytes do not hash to its id.
+/// Whether `err` is a walk that reached the cap named `limit`.
 #[cfg(test)]
-pub(crate) fn store_error_names(err: &StoreError, culprit: &Hash) -> bool {
-    let hex = hash::to_hex(culprit);
-    match err {
-        StoreError::ObjectNotFound(id) => *id == hex,
-        StoreError::HashMismatch { expected, .. } => *expected == hex,
-        _ => false,
-    }
-}
-
-/// Whether `err` carries the [`AncestorError::NotACommit`] that names
-/// `culprit`.
-#[cfg(test)]
-pub(crate) fn invalid_data_names(err: &std::io::Error, culprit: &Hash) -> bool {
-    err.kind() == std::io::ErrorKind::InvalidData
-        && matches!(
-            err.get_ref().and_then(|e| e.downcast_ref::<AncestorError>()),
-            Some(AncestorError::NotACommit(hash)) if hash == culprit
-        )
+pub(crate) fn names_limit(err: &AncestorError, limit: &str) -> bool {
+    matches!(err, AncestorError::Limit(StoreError::OperationLimitExceeded(l)) if *l == limit)
 }
 
 /// Read the commit `hash` of a history.

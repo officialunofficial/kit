@@ -30,12 +30,12 @@ todo = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [dependencies]
-kit-sync = { version = "=0.7.3", path = "../kit-sync", default-features = false, features = ["connect-native"] }
-kit-client = { version = "=0.7.3", path = "../kit-client", default-features = false }
-kit-rpc = { version = "=0.7.3", path = "../kit-rpc", features = ["transport"] }
+kit-sync = { version = "=0.8.0", path = "../kit-sync", default-features = false, features = ["connect-native"] }
+kit-client = { version = "=0.8.0", path = "../kit-client", default-features = false }
+kit-rpc = { version = "=0.8.0", path = "../kit-rpc", features = ["transport"] }
 # Inter-workspace deps need explicit version + path so `cargo publish`
 # accepts them.
-kit-core = { version = "=0.7.3", path = "../kit-core" }
+kit-core = { version = "=0.8.0", path = "../kit-core" }
 
 # ConnectRPC native client: hyper/hyper-util transport + rustls TLS.
 # `UploadPack`/`DownloadPack`'s client-streaming/server-streaming RPCs work
@@ -96,7 +96,7 @@ rustls = { version = "0.23.46", features = ["ring"] }
 [dev-dependencies]
 kit-test-util = { path = "../kit-test-util" }
 serde_json = "1.0.154"
-kit-transport-memory = { version = "=0.7.3", path = "../kit-transport-memory" }
+kit-transport-memory = { version = "=0.8.0", path = "../kit-transport-memory" }
 # Test-only: `envelope::tests::parity` independently re-verifies the write
 # envelope headers `EnvelopeTransport` produces against a from-scratch
 # implementation of the server-side envelope verification contract, so

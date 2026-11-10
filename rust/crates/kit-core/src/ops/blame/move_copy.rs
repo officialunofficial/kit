@@ -75,7 +75,6 @@ use super::{
 use crate::hash::Hash;
 use crate::object::{EntryMode, Object};
 use crate::ops::diff::diff_trees;
-use crate::ops::graph::AncestorError;
 use crate::ops::is_ancestor_strict;
 use crate::store::ObjectStore;
 
@@ -189,12 +188,7 @@ impl<'a> Detector<'a> {
         if let Some(&v) = self.ancestry_cache.get(&(ancestor, descendant)) {
             return Ok(v);
         }
-        let v = is_ancestor_strict(self.store, ancestor, descendant).map_err(|e| match e {
-            AncestorError::Unreadable { source, .. } | AncestorError::Limit(source) => {
-                BlameError::Store(source)
-            }
-            AncestorError::NotACommit(_) => BlameError::NotACommit,
-        })?;
+        let v = is_ancestor_strict(self.store, ancestor, descendant)?;
         self.ancestry_cache.insert((ancestor, descendant), v);
         Ok(v)
     }
@@ -745,6 +739,10 @@ mod tests {
         let err = Detector::new(&store, &opts)
             .is_ancestor_cached(root, tip)
             .unwrap_err();
+        assert!(
+            matches!(&err, BlameError::History(e) if crate::ops::graph::names_commit(e, &mid)),
+            "{err:?}"
+        );
         assert!(err.to_string().contains(&hex), "{err}");
     }
 }

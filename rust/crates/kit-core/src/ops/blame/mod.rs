@@ -274,6 +274,7 @@ impl From<BlameLine> for Attribution {
 
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BlameError {
     #[error("requested object is not a commit")]
     NotACommit,
@@ -293,6 +294,11 @@ pub enum BlameError {
     Object(#[from] crate::object::KitError),
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
+    /// A commit of the ancestry walk of the copy tie-break cannot be read or
+    /// is not a commit, or that walk or the first-parent chain of a reverse
+    /// blame reached its cap. The error names the commit or the limit.
+    #[error(transparent)]
+    History(#[from] crate::ops::graph::AncestorError),
 }
 
 /// Fallible-result alias for this module's operations.
@@ -434,11 +440,9 @@ impl From<&ReverseEntry> for Attribution {
 ///
 /// # Errors
 /// [`BlameError::ReverseRange`] if `start` is not reached on `end`'s
-/// first-parent chain. [`BlameError::Store`] with
-/// [`crate::store::StoreError::OperationLimitExceeded`] naming
-/// [`REVERSE_LIMIT`] if the walk would hold more than
-/// [`BLAME_MAX_REVERSE_COMMITS`] commits; it never returns part of the
-/// chain.
+/// first-parent chain. [`BlameError::History`] naming [`REVERSE_LIMIT`] if
+/// the walk would hold more than [`BLAME_MAX_REVERSE_COMMITS`] commits; it
+/// never returns part of the chain.
 fn collect_reverse_chain(
     store: &ObjectStore,
     start_hash: Hash,
@@ -467,8 +471,10 @@ fn collect_reverse_chain_with_cap(
     let mut reached_start = false;
     while let Some(commit_hash) = current {
         if chain.len() >= cap {
-            return Err(BlameError::Store(
-                crate::store::StoreError::OperationLimitExceeded(REVERSE_LIMIT),
+            return Err(BlameError::History(
+                crate::ops::graph::AncestorError::Limit(
+                    crate::store::StoreError::OperationLimitExceeded(REVERSE_LIMIT),
+                ),
             ));
         }
         let Object::Commit(commit) = store.read_object(&commit_hash)? else {
@@ -530,7 +536,7 @@ fn collect_reverse_chain_with_cap(
 /// - [`BlameError::NotACommit`] if either endpoint is not a commit.
 /// - [`BlameError::FileTooLarge`] if any blob on the chain exceeds
 ///   [`BLAME_MAX_LINES`].
-/// - [`BlameError::Store`] naming the limit if the first-parent walk from
+/// - [`BlameError::History`] naming the limit if the first-parent walk from
 ///   `<end>` holds more than [`BLAME_MAX_REVERSE_COMMITS`] commits.
 pub fn blame_file_reverse(
     store: &ObjectStore,
@@ -2492,6 +2498,7 @@ mod tests {
 
     #[test]
     fn a_reverse_chain_over_its_cap_fails_and_never_returns_a_prefix() {
+        use crate::ops::graph::names_limit;
         let (_d, store) = fresh_store();
         let c1 = put_file_commit(&store, "f.txt", b"a\n", vec![], 1, 100);
         let c2 = put_file_commit(&store, "f.txt", b"a\nb\n", vec![c1], 2, 200);
@@ -2503,12 +2510,7 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert!(
-            matches!(
-                err,
-                BlameError::Store(crate::store::StoreError::OperationLimitExceeded(
-                    REVERSE_LIMIT
-                ))
-            ),
+            matches!(&err, BlameError::History(e) if names_limit(e, REVERSE_LIMIT)),
             "{err:?}"
         );
         assert!(err.to_string().contains(REVERSE_LIMIT), "{err}");
@@ -2518,14 +2520,10 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert!(
-            matches!(
-                err,
-                BlameError::Store(crate::store::StoreError::OperationLimitExceeded(
-                    REVERSE_LIMIT
-                ))
-            ),
+            matches!(&err, BlameError::History(e) if names_limit(e, REVERSE_LIMIT)),
             "{err:?}"
         );
+        assert!(err.to_string().contains(REVERSE_LIMIT), "{err}");
         assert_eq!(BLAME_MAX_REVERSE_COMMITS, 1_000_000);
     }
 

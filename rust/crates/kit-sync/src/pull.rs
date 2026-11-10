@@ -144,6 +144,9 @@ pub fn pull(
                     SyncError::Store(source)
                 }
                 AncestorError::NotACommit(_) => SyncError::NotCommit,
+                // A failure kind added later still fails the pull and keeps
+                // its message.
+                other => SyncError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, other)),
             })?;
         if !fast_forward {
             return Err(SyncError::NonFastForwardPull { branch });
