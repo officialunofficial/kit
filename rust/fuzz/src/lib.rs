@@ -1474,14 +1474,11 @@ pub fn ref_wire_decode_one_iteration(input: &[u8]) {
         Some(state)
     );
     let temporary = format!(
-        ".a.tmp.{}.{}",
+        ".kit-restore-tmp.{}.{}",
         input.len(),
         input.first().copied().unwrap_or(0)
     );
-    assert_eq!(
-        kit_core::ops::restore::restore_temp_sibling(&temporary),
-        Some("a")
-    );
+    assert!(kit_core::ops::restore::is_restore_temp_name(&temporary));
     if let Some(state) = kit_core::ops::pull_state::PullState::decode(input) {
         assert_eq!(state.encode().as_slice(), input);
         assert_eq!(
@@ -1490,12 +1487,9 @@ pub fn ref_wire_decode_one_iteration(input: &[u8]) {
         );
     }
     if let Ok(name) = std::str::from_utf8(input)
-        && let Some(sibling) = kit_core::ops::restore::restore_temp_sibling(name)
+        && kit_core::ops::restore::is_restore_temp_name(name)
     {
-        assert!(kit_core::object::TreeEntry::validate_name(
-            sibling.as_bytes()
-        ));
-        assert!(name.starts_with(&format!(".{sibling}.tmp.")));
+        assert!(name.starts_with(".kit-restore-tmp."));
     }
 }
 

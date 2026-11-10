@@ -439,13 +439,7 @@ fn is_restore_temp(root: &Path, tracked: &kit_core::index::Index, path: &str) ->
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    let Some(sibling) = kit_core::ops::restore::restore_temp_sibling(name) else {
-        return false;
-    };
-    let sibling = path.with_file_name(sibling);
-    sibling
-        .to_str()
-        .is_some_and(|sibling| tracked.has_tracked_file_at(sibling))
+    kit_core::ops::restore::is_restore_temp_name(name)
         && fs::symlink_metadata(root.join(path)).is_ok_and(|meta| meta.is_file())
 }
 

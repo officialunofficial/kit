@@ -57,6 +57,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RestoreError {
     #[error("requested object is not a tree")]
     NotATree,
@@ -76,6 +77,13 @@ pub enum RestoreError {
     Store(#[from] crate::store::StoreError),
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// An I/O error while restoring `path`, relative to the restore root.
+    #[error("{path}: {source}")]
+    File {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
     /// A `read_chunks` callback passed to
     /// [`restore_tree_to_worktree_with`] returned a different number of
     /// chunk buffers than the batch it was given — a contract violation
@@ -470,7 +478,7 @@ where
     Ok(report)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one arm per entry mode
 fn restore_tree_to_worktree_inner<F>(
     store: &ObjectStore,
     tree_hash: Hash,
@@ -542,15 +550,18 @@ where
                 {
                     continue;
                 }
-                let stat = restore_blob_with(
-                    store,
-                    target_dir,
-                    name,
-                    entry.object_hash,
-                    entry.mode == EntryMode::Executable,
-                    batch_size,
-                    read_chunks,
-                    observed.is_some(),
+                let stat = at_path(
+                    restore_blob_with(
+                        store,
+                        target_dir,
+                        name,
+                        entry.object_hash,
+                        entry.mode == EntryMode::Executable,
+                        batch_size,
+                        read_chunks,
+                        observed.is_some(),
+                    ),
+                    &full_path,
                 )?;
                 report.files_written += 1;
                 if let (Some(out), Some(stat)) = (observed.as_deref_mut(), stat) {
@@ -563,10 +574,9 @@ where
                 {
                     continue;
                 }
-                ensure_directory(target_dir, name)?;
-                report.directories_created += 1;
                 let dir_path = target_dir.join(name);
-                let dir_meta = fs::symlink_metadata(&dir_path)?;
+                let dir_meta = ensure_directory_at(target_dir, name, &full_path)?;
+                report.directories_created += 1;
                 if !dir_meta.is_dir() {
                     return Err(RestoreError::NotADirectory(dir_path));
                 }
@@ -593,7 +603,10 @@ where
                 {
                     continue;
                 }
-                restore_symlink(store, target_dir, name, entry.object_hash)?;
+                at_path(
+                    restore_symlink(store, target_dir, name, entry.object_hash),
+                    &full_path,
+                )?;
                 report.symlinks_written += 1;
             }
         }
@@ -668,12 +681,15 @@ fn restore_tree_inner(
                 {
                     continue;
                 }
-                restore_blob(
-                    store,
-                    target_dir,
-                    name,
-                    entry.object_hash,
-                    entry.mode == EntryMode::Executable,
+                at_path(
+                    restore_blob(
+                        store,
+                        target_dir,
+                        name,
+                        entry.object_hash,
+                        entry.mode == EntryMode::Executable,
+                    ),
+                    &full_path,
                 )?;
             }
             EntryMode::Tree => {
@@ -682,10 +698,9 @@ fn restore_tree_inner(
                 {
                     continue;
                 }
-                ensure_directory(target_dir, name)?;
                 let dir_path = target_dir.join(name);
                 // Refuse to follow a symlink that took the place of the dir.
-                let dir_meta = fs::symlink_metadata(&dir_path)?;
+                let dir_meta = ensure_directory_at(target_dir, name, &full_path)?;
                 if !dir_meta.is_dir() {
                     return Err(RestoreError::NotADirectory(dir_path));
                 }
@@ -697,7 +712,10 @@ fn restore_tree_inner(
                 {
                     continue;
                 }
-                restore_symlink(store, target_dir, name, entry.object_hash)?;
+                at_path(
+                    restore_symlink(store, target_dir, name, entry.object_hash),
+                    &full_path,
+                )?;
             }
         }
     }
@@ -1022,11 +1040,15 @@ fn restore_symlink(
     if !worktree::validate_symlink_target(target) {
         return Err(RestoreError::InvalidSymlinkTarget(target.to_string()));
     }
-    let tmp_name = make_tmp_sibling_name(name);
-    let tmp_path = dir.join(&tmp_name);
     let final_path = dir.join(name);
-    let _ = fs::remove_file(&tmp_path);
-    create_symlink(target, &tmp_path)?;
+    let tmp_path = loop {
+        let tmp_path = dir.join(make_tmp_name());
+        match create_symlink(target, &tmp_path) {
+            Ok(()) => break tmp_path,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+    };
     prepare_path_for_rename(&final_path)?;
     fs::rename(&tmp_path, &final_path)?;
     Ok(())
@@ -1084,19 +1106,26 @@ fn write_file_atomic(
     Ok(written.and_then(|meta| observe_written(&meta, &final_path)))
 }
 
-/// Open a fresh tmp file beside `name`, removing any stale tmp file a
-/// prior aborted attempt at the same name left behind. Returns the tmp
-/// path, final path, and the open handle so a caller can write
-/// incrementally (see [`restore_blob`]'s `ChunkedBlob` arm) instead of
-/// buffering the whole file first — pair with [`finish_atomic_write`]
-/// to apply the executable bit and atomically rename into place.
+/// Create a fresh tmp file in `dir`. The tmp name is new: a name that is
+/// already taken, by a file, a directory or a symlink, is skipped for the
+/// next counter value and never opened or removed. Returns the tmp path,
+/// final path, and the open handle so a caller can write incrementally
+/// (see [`restore_blob`]'s `ChunkedBlob` arm) instead of buffering the
+/// whole file first — pair with [`finish_atomic_write`] to apply the
+/// executable bit and atomically rename into place.
 fn create_tmp_for_write(dir: &Path, name: &str) -> io::Result<(PathBuf, PathBuf, fs::File)> {
-    let tmp_name = make_tmp_sibling_name(name);
-    let tmp_path = dir.join(&tmp_name);
-    let final_path = dir.join(name);
-    let _ = fs::remove_file(&tmp_path);
-    let tmp = fs::File::create(&tmp_path)?;
-    Ok((tmp_path, final_path, tmp))
+    loop {
+        let tmp_path = dir.join(make_tmp_name());
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(tmp) => return Ok((tmp_path, dir.join(name), tmp)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Apply the executable bit (if requested) and atomically rename the
@@ -1124,6 +1153,17 @@ fn apply_executable_bit(path: &Path) -> io::Result<()> {
 #[allow(clippy::unnecessary_wraps)]
 fn apply_executable_bit(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+/// Create directory `name` under `parent` and return its metadata, read
+/// without following a symlink. An I/O error names `full_path`.
+fn ensure_directory_at(parent: &Path, name: &str, full_path: &str) -> RestoreResult<fs::Metadata> {
+    at_path(
+        ensure_directory(parent, name)
+            .and_then(|()| fs::symlink_metadata(parent.join(name)))
+            .map_err(RestoreError::from),
+        full_path,
+    )
 }
 
 fn ensure_directory(parent: &Path, name: &str) -> io::Result<()> {
@@ -1160,29 +1200,48 @@ fn prepare_path_for_rename(final_path: &Path) -> io::Result<()> {
     }
 }
 
-fn make_tmp_sibling_name(name: &str) -> String {
+/// Prefix of every restore temporary name, `<prefix>.<pid>.<counter>`.
+const TMP_PREFIX: &str = ".kit-restore-tmp";
+
+/// A short temporary name for a restore write. It does not contain the
+/// file name, so it stays within the file system's name limit for any
+/// name the file system accepts. The process id and a process-wide
+/// counter make it unique per process and call.
+fn make_tmp_name() -> String {
     let pid = process::id();
     let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(".{name}.tmp.{pid}.{counter}")
+    format!("{TMP_PREFIX}.{pid}.{counter}")
 }
 
-/// Read the exact temporary sibling name written by the restore path.
-/// The caller must also verify that the sibling is tracked and the entry is
-/// an untracked regular file before treating it as an interrupted write.
+/// Whether `name` is exactly a restore temporary name: the prefix, then
+/// a process id and a counter, both nonempty ASCII digits. The caller
+/// must also verify that the entry is an untracked regular file before
+/// treating it as an interrupted write.
 #[must_use]
-pub fn restore_temp_sibling(name: &str) -> Option<&str> {
-    let (prefix, counter) = name.strip_prefix('.')?.rsplit_once('.')?;
-    let (prefix, pid) = prefix.rsplit_once('.')?;
-    let sibling = prefix.strip_suffix(".tmp")?;
-    if !TreeEntry::validate_name(sibling.as_bytes())
-        || pid.is_empty()
-        || counter.is_empty()
-        || !pid.bytes().all(|b| b.is_ascii_digit())
-        || !counter.bytes().all(|b| b.is_ascii_digit())
-    {
-        return None;
-    }
-    Some(sibling)
+pub fn is_restore_temp_name(name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix(TMP_PREFIX)
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return false;
+    };
+    let Some((pid, counter)) = rest.split_once('.') else {
+        return false;
+    };
+    [pid, counter]
+        .iter()
+        .all(|field| !field.is_empty() && field.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Attach `path` to an I/O error from `result`.
+fn at_path<T>(result: RestoreResult<T>, path: &str) -> RestoreResult<T> {
+    result.map_err(|e| match e {
+        RestoreError::Io(source) => RestoreError::File {
+            path: path.to_string(),
+            source,
+        },
+        other => other,
+    })
 }
 
 /// Sweep `target_dir` of untracked entries before re-materialising a
@@ -1308,19 +1367,239 @@ mod tests {
 
     #[test]
     fn restore_temporary_names_are_exact() {
-        for name in [".a.tmp.1.2", ".a.tmp.00.0", "..hidden.txt.tmp.123.456"] {
-            assert!(restore_temp_sibling(name).is_some());
+        for name in [
+            ".kit-restore-tmp.1.2",
+            ".kit-restore-tmp.00.0",
+            ".kit-restore-tmp.123.456",
+        ] {
+            assert!(is_restore_temp_name(name), "{name}");
         }
         for name in [
-            "a.tmp.1.2",
-            ".a.tmp..2",
-            ".a.tmp.1.",
-            ".a.tmp.-1.2",
-            ".a.tmp.１.2",
-            ".a.tmp.1.2.extra",
-            "../a.tmp.1.2",
+            "kit-restore-tmp.1.2",
+            ".kit-restore-tmp..2",
+            ".kit-restore-tmp.1.",
+            ".kit-restore-tmp.1",
+            ".kit-restore-tmp.-1.2",
+            ".kit-restore-tmp.+1.2",
+            ".kit-restore-tmp.１.2",
+            ".kit-restore-tmp.1.2.extra",
+            ".kit-restore-tmp.1.x",
+            "../.kit-restore-tmp.1.2",
+            ".a.tmp.1.2",
         ] {
-            assert!(restore_temp_sibling(name).is_none(), "{name}");
+            assert!(!is_restore_temp_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn restore_temporary_names_are_short_and_unique() {
+        let first = make_tmp_name();
+        let second = make_tmp_name();
+        assert_ne!(first, second);
+        assert!(is_restore_temp_name(&first));
+        assert!(first.len() < 64);
+    }
+
+    fn tree_of_one_file(store: &ObjectStore, name: &[u8], data: &[u8]) -> Hash {
+        let blob = put_blob(store, data);
+        put_tree_with(
+            store,
+            vec![TreeEntry {
+                name: name.to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }],
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_sets_the_executable_bit_only_for_executable_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let tree = put_tree_with(
+            &store,
+            vec![
+                TreeEntry {
+                    name: b"plain".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob,
+                },
+                TreeEntry {
+                    name: b"run".to_vec(),
+                    mode: EntryMode::Executable,
+                    object_hash: blob,
+                },
+            ],
+        );
+        let sequential = TempDir::new().unwrap();
+        restore_tree(&store, tree, sequential.path(), &RestoreOptions::default()).unwrap();
+        let worktree = TempDir::new().unwrap();
+        restore_tree_to_worktree(&store, &tree, worktree.path(), &RestoreOptions::default())
+            .unwrap();
+        for target in [&sequential, &worktree] {
+            let mode = |name: &str| {
+                fs::metadata(target.path().join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777
+            };
+            assert_eq!(mode("run"), 0o755);
+            assert_eq!(mode("plain") & 0o111, 0);
+        }
+    }
+
+    /// Names a restore could pick for its next temporary files, planted
+    /// before the restore runs. `make` creates one.
+    fn plant_temp_names(dir: &Path, make: impl Fn(&Path)) -> Vec<PathBuf> {
+        let start = TMP_COUNTER.load(Ordering::Relaxed);
+        (start..start + 1000)
+            .map(|n| {
+                let path = dir.join(format!("{TMP_PREFIX}.{}.{n}", process::id()));
+                make(&path);
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn restore_never_removes_a_file_at_a_temporary_name() {
+        let (_d, store) = fresh_store();
+        let keep_untracked = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        let mut trees = vec![tree_of_one_file(&store, b"a", b"restored")];
+        #[cfg(unix)]
+        trees.push(put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"a".to_vec(),
+                mode: EntryMode::Symlink,
+                object_hash: put_blob(&store, b"restored"),
+            }],
+        ));
+        // Each restore step meets every planted name before it finds a free one.
+        for tree in trees {
+            for worktree in [false, true] {
+                let target = TempDir::new().unwrap();
+                let planted = plant_temp_names(target.path(), |path| {
+                    fs::write(path, b"keep").unwrap();
+                });
+                if worktree {
+                    restore_tree_to_worktree(&store, &tree, target.path(), &keep_untracked)
+                        .unwrap();
+                } else {
+                    restore_tree(&store, tree, target.path(), &keep_untracked).unwrap();
+                }
+                assert!(fs::symlink_metadata(target.path().join("a")).is_ok());
+                for path in planted {
+                    assert_eq!(fs::read(&path).unwrap(), b"keep", "{}", path.display());
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_never_writes_through_a_symlink_at_a_temporary_name() {
+        let (_d, store) = fresh_store();
+        let keep_untracked = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        let tree = tree_of_one_file(&store, b"a", b"restored");
+        let target = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, b"untouched").unwrap();
+        let planted = plant_temp_names(target.path(), |path| {
+            std::os::unix::fs::symlink(&victim, path).unwrap();
+        });
+        restore_tree(&store, tree, target.path(), &keep_untracked).unwrap();
+        assert_eq!(fs::read(target.path().join("a")).unwrap(), b"restored");
+        assert_eq!(fs::read(&victim).unwrap(), b"untouched");
+        for path in planted {
+            assert_eq!(fs::read_link(&path).unwrap(), victim);
+        }
+    }
+
+    #[test]
+    fn restore_writes_a_file_with_a_maximum_length_name() {
+        let (_d, store) = fresh_store();
+        let name = "n".repeat(255);
+        let tree = tree_of_one_file(&store, name.as_bytes(), b"data");
+        let sequential = TempDir::new().unwrap();
+        restore_tree(&store, tree, sequential.path(), &RestoreOptions::default()).unwrap();
+        let worktree = TempDir::new().unwrap();
+        restore_tree_to_worktree(&store, &tree, worktree.path(), &RestoreOptions::default())
+            .unwrap();
+        for target in [&sequential, &worktree] {
+            assert_eq!(fs::read(target.path().join(&name)).unwrap(), b"data");
+            assert_eq!(fs::read_dir(target.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_io_error_names_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, store) = fresh_store();
+        let link = put_blob(&store, b"target");
+        let inners = [
+            (
+                "dir/file.txt",
+                tree_of_one_file(&store, b"file.txt", b"data"),
+            ),
+            (
+                "dir/link",
+                put_tree_with(
+                    &store,
+                    vec![TreeEntry {
+                        name: b"link".to_vec(),
+                        mode: EntryMode::Symlink,
+                        object_hash: link,
+                    }],
+                ),
+            ),
+        ];
+        for (expected, inner) in inners {
+            let outer = put_tree_with(
+                &store,
+                vec![TreeEntry {
+                    name: b"dir".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: inner,
+                }],
+            );
+            for worktree in [false, true] {
+                let target = TempDir::new().unwrap();
+                let dir = target.path().join("dir");
+                fs::create_dir(&dir).unwrap();
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+                if fs::File::create(dir.join("probe")).is_ok() {
+                    // Permissions do not apply, for example when running as root.
+                    return;
+                }
+                let err = if worktree {
+                    let options = RestoreOptions::default();
+                    restore_tree_to_worktree(&store, &outer, target.path(), &options).unwrap_err()
+                } else {
+                    let options = RestoreOptions::default();
+                    restore_tree(&store, outer, target.path(), &options).unwrap_err()
+                };
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+                assert!(
+                    matches!(&err, RestoreError::File { path, .. } if path == expected),
+                    "{err:?}"
+                );
+                assert!(
+                    err.to_string().starts_with(&format!("{expected}: ")),
+                    "{err}"
+                );
+            }
         }
     }
 
