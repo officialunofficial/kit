@@ -127,18 +127,18 @@ is chunked**, the parameters above MUST be used.
 Implementation status: end-to-end wiring is in place across the
 hashing, staging, commit, and read-back paths.
 
-A single helper, `worktree::store_file_object`, is the one place that
-decides a regular file's object representation: at or below
-`CHUNK_THRESHOLD` it writes a single `Blob`; above it, it splits with
-`FastCdc::v1`, stores each chunk as its own `Blob`, and writes a
-`ChunkedBlob` manifest (with `chunk_size = 0` to denote content-defined
-chunking) whose hash lands in the parent tree. Every caller routes
-through it, so a given file produces the same object/hash regardless of
-the path that computes it:
+`worktree::store_file_object` decides the object representation of a
+file held in memory: at or below `CHUNK_THRESHOLD` it writes a single
+`Blob`; above it, it splits with `FastCdc::v1`, stores each chunk as its
+own `Blob`, and writes a `ChunkedBlob` manifest (with `chunk_size = 0`,
+FastCDC v1) whose hash lands in the parent tree. `worktree::hash_file`
+applies the same rule to a file on disk and streams a file above the
+threshold through the same chunker, so a given file produces the same
+object/hash regardless of the path that computes it:
 
 - `worktree::{hash_file, build_tree}` &mdash; diff, status, tree, and the
   `rm`/`checkout` dirty-checks;
-- `kit add` (`add_one` / `stage_tracked_changes`) &mdash; staging into the
+- `kit add` (`add_one` / `stage_tracked`) &mdash; staging into the
   index;
 - `worktree::build_tree_from_index` &mdash; the commit/index tree build now
   accepts a `ChunkedBlob` under a regular-file (Blob/Executable) entry,
@@ -326,12 +326,12 @@ and the manifest id from this document and SPEC-OBJECTS alone.
 | Invariant | Enforced by |
 |---|---|
 | Chunk boundaries &mdash; and therefore `chunked_blob` hashes &mdash; are a pure function of the input bytes | frozen seed (§3), parameters (§4), and mask derivation (§5); any change requires a format-version bump (§2) |
-| Every implementation derives the identical gear table | the `"KITFCDC"` + splitmix64 procedure (§3); gear-table digest pin and uniqueness/non-zero checks (§8.1) |
+| Every implementation derives the identical gear table | the `"KITFCDC"` + splitmix64 procedure (§3); gear-table digest pin and uniqueness/non-zero checks (§8 vector 1) |
 | `avg_size` is a power of two; `min_size < avg_size < max_size` holds strictly | normative parameter constraint (§4) |
 | Input of ≤ `min_size` bytes is a single chunk, never a `chunked_blob` | `cut` returns the full input length (§4, §5) |
 | No chunk exceeds `max_size` | forced cut at `max_size` (§5) |
 | Chunk lengths sum to the input length; `total_size` equals the file size | iterative consumption until all bytes are cut (§5); reassembly length check against `total_size` (§6); pinned by §8 vector 8 |
-| Content-defined manifests are distinguishable from fixed-size ones | `chunk_size = 0` sentinel (§6; SPEC-OBJECTS §7) |
+| Content-defined manifests are distinguishable from fixed-size ones | `chunk_size` is `0` or `0x8000_0002` (§6; SPEC-OBJECTS §7) |
 | Any two conformant chunkers agree on chunk count, byte offsets, chunk hashes, and manifest hash | cross-implementation contract (§7); boundary goldens (§8 vectors 4–5) |
 | A build with the wrong seed or parameters cannot ship silently | gear-table-hash pin and boundary goldens fail loudly at test time (§8 vectors 9–10) |
 | A manifest says which chunker cut it | `chunk_size` is `0` for v1 and `0x8000_0002` for v2 (§6, §11.2) |

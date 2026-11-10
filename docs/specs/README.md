@@ -31,7 +31,7 @@ proofs that check them, with each result's bounds.
 - [SPEC-RPC](SPEC-RPC.md) &mdash; shared stdio protobuf framing for subprocess protocols.
 - [SPEC-SIGNING](SPEC-SIGNING.md) &mdash; commit / remix / tag signing hashes and verification.
 - [SPEC-SPARSE-CHECKOUT](SPEC-SPARSE-CHECKOUT.md) &mdash; verifiable server-side sparse checkout over HTTP/S3.
-- [SPEC-TRANSPORT](SPEC-TRANSPORT.md) &mdash; seven-verb transport wire protocol (file, SSH, HTTP via SPEC-TRANSPORT-CONNECT, S3, memory).
+- [SPEC-TRANSPORT](SPEC-TRANSPORT.md) &mdash; transport verbs and wire protocols (file, SSH, HTTP via SPEC-TRANSPORT-CONNECT, S3, memory).
 - [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) &mdash; draft `kit.transport.v1` Connect service, the canonical remote protocol for `kit+https` remotes.
 - [SPEC-WORKTREE](SPEC-WORKTREE.md) &mdash; linked working trees: common-dir/per-tree state split, discovery, and cross-worktree locking.
 - [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md) &mdash; draft owner-signed grants that let Ed25519 keys write to, or read from, a namespace's repositories.

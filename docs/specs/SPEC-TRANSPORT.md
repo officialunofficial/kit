@@ -44,6 +44,7 @@ internal `Mutex` so the trait object remains object-safe.
 | `upload_blob(bytes, key)` | Store an auxiliary content-addressed blob &mdash; transfer metadata that is NOT a packfile (for example a packlist chain node). Shares the digest-keyed store with packs; a default trait impl delegates to `upload_pack`, so the verb only marks the *kind* explicit at the call site. |
 | `download_blob(key)` | Fetch an auxiliary blob by digest. Default impl delegates to `download_pack`. |
 | `update_ref(name, condition, hash)` | CAS ref write. |
+| `advance_refs(head, head_condition, head_value, packmap, packmap_condition, packmap_value)` | Move a branch head and its packmap together (§7.2). The default writes the packmap, then the head, each under its own condition. |
 | `read_ref(name)` | Read a ref's current hash, or `None` if absent. |
 | `list_refs(prefix)` | List refs whose full name starts with `prefix`. Returned names have `prefix` stripped per SPEC-REFS §4. |
 | `write_ref(name, hash)` | Convenience: `update_ref(name, RefWriteCondition::Any, hash)`. A default trait impl delegates here, so transports only need to implement `update_ref`. |
@@ -322,14 +323,14 @@ session (SPEC-TRANSPORT 4.4)`.
 
 **Reference-server behavior.** What fits in one session follows from the
 frame cap. A fetch costs one `ListRefs` frame, then per branch a `ReadRef` of
-the packmap and a `DownloadPack` of each node of its pack list, even when no
+the packmap and a `DownloadPack` of each node of its packmap chain, even when no
 branch changed: the SSH transport names no repository, so a fetch keeps no
-per-branch checkpoint for it and walks each pack list again. With one node
-per pack list that is one frame plus two per branch, so one session fetches
+per-branch checkpoint for it and walks each packmap chain again. With one node
+per packmap chain that is one frame plus two per branch, so one session fetches
 at most 4,999 branches; a fetch of more fails closed with the reply above.
 `kit fetch`, `kit pull` and `kit clone` open one session each. A push walks
-the branch's whole pack list over its session, and an SSH push never
-re-baselines the pack list, so a push's frames grow with the number of
+the branch's whole packmap chain over its session, and an SSH push never
+resets the packmap chain, so a push's frames grow with the number of
 pushes the branch has had. The cap is not raised: it is what bounds
 a client that sends requests without end.
 
@@ -489,9 +490,8 @@ note on large packs.
   `PACK_BODY_LIMIT` widens to `usize::MAX` and `S3_SINGLE_PUT_MAX`
   becomes the real gate). Raising `PACK_BODY_LIMIT` itself is the
   streaming/constant-memory `Transport` redesign, which is out of scope here.
-- `REF_BODY_LIMIT = 256` bytes (a ref is 64 hex + newline; the
-  256-byte ceiling accommodates trailing whitespace and trivial
-  S3 metadata).
+- `REF_BODY_LIMIT = 256` bytes for a ref `GET`. It bounds the read; a
+  body other than the 65-byte ref wire is rejected after it.
 - `REF_LIST_BODY_LIMIT = 16 MiB` for the `ListObjectsV2` XML
   response.
 - HTTP timeout: 60 s per request.
@@ -686,7 +686,8 @@ head holds. A push conditioned on `Missing` or `Match` MUST plan only
 against a head its condition holds for. When the head it reads fails the
 condition, the push is refused as a non-fast-forward before it plans,
 unless that head is already the new head, in which case an earlier
-attempt landed and the push writes nothing. A condition that differs from
+attempt landed and the push writes nothing. A retry that plans the full
+closure of the new head depends on no head and reads none. A condition that differs from
 the planned head could hold again after the head moves away and back while
 a reset drops what the plan left out, and the advance would then publish a
 head its chain cannot reconstruct, on every kind of advance.

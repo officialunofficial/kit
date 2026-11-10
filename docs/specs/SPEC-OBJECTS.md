@@ -312,7 +312,7 @@ The tag object is content-addressed like every other object; its hash is
 ```
 [prologue 6]
 [u64 LE total_size]
-[u32 LE chunk_size]                       0 == content-defined (FastCDC)
+[u32 LE chunk_size]                       0 or 0x8000_0002 == content-defined (FastCDC)
 [u32 LE chunk_count]                      0..=1_000_000
 repeat chunk_count:
     [32 bytes chunk_hash]                 each chunk stored as its own blob

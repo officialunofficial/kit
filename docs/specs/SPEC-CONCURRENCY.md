@@ -14,7 +14,7 @@ does not resolve. See SPEC-CONVENTIONS §2 for what draft/normative mean.
 Scope: this document is the single owner of the total lock order across
 *every* lock any kit process takes &mdash; repo-local locks defined in
 SPEC-WORKTREE §4.3, the ref-history locks defined in `kit-core::refs`,
-and the file-transport's own CAS lock defined in SPEC-TRANSPORT. Any
+and the file transport's ref locks defined in SPEC-REFS §5.1.1. Any
 other `SPEC-*.md` document that mentions a lock cross-references this
 one rather than restating the order; this document does not restate
 those other documents' non-locking content.
@@ -39,8 +39,8 @@ document points here.
 | `worktrees.lock` | common dir | per-repo | linked-worktree registry mutations, branch-checked-out-elsewhere guard + HEAD write | SPEC-WORKTREE §4.3 |
 | `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ancestry intent + ref + descriptor publication for one branch (`kit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
 | `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`kit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
-| `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | held shared by a single-ref write and exclusive by a multi-file step; the exclusive hold excludes every file-transport write (`kit-transport-file`'s `RefLock`) | SPEC-REFS §5.1.1, §3.1 (this document) |
-| `<root>/.kit/refs/refs-<hh>.lock` | transport root, keyed on the first byte of the BLAKE3 digest of the full ref name | per-stripe (256), **local to the file transport only** | a single-ref write's Any, Missing and Match critical section | SPEC-REFS §5.1.1 |
+| `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | held shared by a single-ref write and by a two-ref advance of existing refs, and exclusive by a multi-file step and by a two-ref advance that creates a ref; the exclusive hold excludes every file-transport write (`kit-transport-file`'s `RefLock`) | SPEC-REFS §5.1.1, §3.1 (this document) |
+| `<root>/.kit/refs/refs-<hh>.lock` | transport root, keyed on the first byte of the BLAKE3 digest of the full ref name | per-stripe (256), **local to the file transport only** | a single-ref write's Any, Missing and Match critical section, and the checks and writes of a two-ref advance of existing refs | SPEC-REFS §5.1.1 |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-bin`'s `git_import::import_into`, `git::export`) | §4 (this document) |
 | shared/exclusive `format` handle | existing immutable common-dir `format` file | per-repo, short object-store critical section | shared during a bulk write or cached reuse and during format validation; exclusive during gc's final age check and unlink | SPEC-GC, §3.4 (this document) |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
@@ -213,10 +213,11 @@ object-store lock.
 The file transport's locks serialize every write condition to one ref within
 that transport. A process takes the repo lock before the stripe lock, and a
 holder of the exclusive repo lock takes no stripe lock (SPEC-REFS §5.1.1). A
-two-ref advance takes both refs' stripe locks in ascending stripe order under
-the shared repo lock. Readers take none of these locks, so they see an
-advance's packmap write before its head write; the push driver's re-baseline
-rule for that case is in SPEC-TRANSPORT §7.2. The file transport's locks
+two-ref advance of two existing refs takes both refs' stripe locks in
+ascending stripe order under the shared repo lock; one that creates a ref
+holds the repo lock exclusive instead. Readers take none of these locks, so
+a reader can see an advance's new packmap with the old head; the push
+driver's reset rule for that case is in SPEC-TRANSPORT §7.2. The file transport's locks
 are not composed with the local chain above; the served-root/local-worktree
 deployment restriction in §3.1 still applies.
 
