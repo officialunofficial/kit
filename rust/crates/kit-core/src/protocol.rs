@@ -1010,6 +1010,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_repo_cursor_holds_its_bytes_within_the_bound_and_hides_them_in_debug() {
+        for bytes in [&[][..], &[7; REPO_CURSOR_MAX_LEN + 1]] {
+            assert!(matches!(
+                RepoCursor::new(bytes),
+                Err(TransportError::InvalidResponse)
+            ));
+        }
+        for bytes in [vec![0], vec![1], vec![7; REPO_CURSOR_MAX_LEN]] {
+            let cursor = RepoCursor::new(&bytes).unwrap();
+            assert_eq!(cursor.as_bytes(), bytes);
+            assert_eq!(
+                format!("{cursor:?}"),
+                format!("RepoCursor({} bytes)", bytes.len())
+            );
+        }
+        assert_ne!(
+            RepoCursor::new(&[0]).unwrap(),
+            RepoCursor::new(&[1]).unwrap()
+        );
+    }
+
+    #[test]
     fn remote_text_is_escaped_when_displayed() {
         let e = TransportError::RemoteError("\x1b[2Jx\u{202e}".into());
         assert_eq!(e.to_string(), "remote error: \\u{1b}[2Jx\\u{202e}");
