@@ -177,6 +177,16 @@ impl Pattern {
     }
 }
 
+/// One literal-basename pattern of a [`LiteralIndex`].
+#[derive(Debug, Clone, Copy)]
+struct LiteralHit {
+    /// Index into `patterns`.
+    pattern: usize,
+    /// Number of entries of `scanned` that come before this pattern. The
+    /// scan for a path that this pattern decides skips them.
+    scanned_below: usize,
+}
+
 impl LiteralIndex {
     /// The answer of a reverse scan of `patterns` for `path`. The
     /// highest-index literal match comes from the map. The scan then walks
@@ -185,16 +195,13 @@ impl LiteralIndex {
         let literal = path
             .last()
             .and_then(|name| self.literals.get(*name))
-            .and_then(|idx| {
-                idx.iter()
+            .and_then(|hits| {
+                hits.iter()
                     .rev()
-                    .copied()
-                    .find(|&i| is_dir || !patterns[i].dir_only)
+                    .find(|hit| is_dir || !patterns[hit.pattern].dir_only)
             });
-        for &i in self.scanned.iter().rev() {
-            if literal.is_some_and(|l| i < l) {
-                break;
-            }
+        let below = literal.map_or(0, |hit| hit.scanned_below);
+        for &i in self.scanned[below..].iter().rev() {
             let p = &patterns[i];
             if p.dir_only && !is_dir {
                 continue;
@@ -203,7 +210,7 @@ impl LiteralIndex {
                 return !p.negated;
             }
         }
-        literal.is_some_and(|l| !patterns[l].negated)
+        literal.is_some_and(|hit| !patterns[hit.pattern].negated)
     }
 }
 
@@ -223,9 +230,8 @@ pub struct IgnoreList {
 /// name, and the rest, found by a scan.
 #[derive(Debug, Default, Clone)]
 struct LiteralIndex {
-    /// Literal-basename patterns by name. Each value holds the indices into
-    /// `patterns`, ascending.
-    literals: HashMap<String, Vec<usize>>,
+    /// Literal-basename patterns by name, each list ascending by pattern.
+    literals: HashMap<String, Vec<LiteralHit>>,
     /// Indices into `patterns` of every other pattern, ascending.
     scanned: Vec<usize>,
 }
@@ -251,7 +257,14 @@ impl IgnoreList {
             let mut index = LiteralIndex::default();
             for (i, p) in patterns.iter().enumerate() {
                 if let Some(BasenameKind::Literal(name)) = p.basename_kind.as_deref() {
-                    index.literals.entry(name.clone()).or_default().push(i);
+                    index
+                        .literals
+                        .entry(name.clone())
+                        .or_default()
+                        .push(LiteralHit {
+                            pattern: i,
+                            scanned_below: index.scanned.len(),
+                        });
                 } else {
                     index.scanned.push(i);
                 }
@@ -702,7 +715,8 @@ mod tests {
             let _ = writeln!(text, "pad{i}");
         }
         text.push_str(
-            "foo\n!foo\nfoo\nbar/\n*.o\n!bar\nbaz\n/anchored\n!baz/\nbaz/\nqux\n!*.x\nqux.x\n*x\n",
+            "foo\n!foo\nfoo\nbar/\n*.o\n!bar\nbaz\n/anchored\n!baz/\nbaz/\nqux\n!*.x\nqux.x\n*x\n\
+             !*.y\nlit.y\ntop.z\n!*.z\n*.d/\n",
         );
         let list = parse(&text);
         assert!(list.index.is_some());
@@ -722,6 +736,9 @@ mod tests {
             "other",
             "a/b/foo/",
             "q.x",
+            "lit.y",
+            "top.z",
+            "a.d",
         ] {
             for is_dir in [false, true] {
                 assert_eq!(
