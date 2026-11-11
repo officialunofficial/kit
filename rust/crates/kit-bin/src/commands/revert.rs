@@ -61,6 +61,10 @@ struct RevertOpts {
     /// pause (`"conflicts":[<path>,...]`), or an error.
     #[arg(long, value_enum, default_value = "default")]
     format: RevertFormat,
+    /// Revert a merge commit relative to this parent (1-based), like
+    /// `git revert -m`. Required for a merge; rejected for a non-merge.
+    #[arg(short = 'm', long = "mainline", value_name = "PARENT-NUMBER", conflicts_with_all = ["cont", "abort"])]
+    mainline: Option<usize>,
     /// Commit to revert: a ref, full/short hash, or `HEAD~n` revspec.
     commit: Option<String>,
 }
@@ -106,14 +110,21 @@ pub fn run(args: &[String]) -> u8 {
     } else if opts.cont {
         cont(&layout, &store, json)
     } else if let Some(hex) = opts.commit.as_deref() {
-        start(&layout, &store, hex, opts.no_commit, json)
+        start(&layout, &store, hex, opts.no_commit, opts.mainline, json)
     } else {
         super::usage_error("usage: kit revert <commit> | --continue | --abort")
     }
 }
 
 #[allow(clippy::too_many_lines)] // linear flow: apply + commit + report
-fn start(layout: &RepoLayout, store: &ObjectStore, hex: &str, no_commit: bool, json: bool) -> u8 {
+fn start(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    hex: &str,
+    no_commit: bool,
+    mainline: Option<usize>,
+    json: bool,
+) -> u8 {
     let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     if let Some(op) = in_progress_op_name(layout) {
         return emit_err(
@@ -140,7 +151,7 @@ fn start(layout: &RepoLayout, store: &ObjectStore, hex: &str, no_commit: bool, j
         Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::GENERAL_ERROR),
     };
 
-    let result = match revert_tree(store, target, ours_tree) {
+    let result = match revert_tree(store, target, ours_tree, mainline) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("revert: {e}"), exit::GENERAL_ERROR),
     };

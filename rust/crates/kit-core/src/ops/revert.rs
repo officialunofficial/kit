@@ -24,11 +24,16 @@ pub enum RevertError {
     NotACommit,
     #[error("target commit's first parent does not refer to a commit object")]
     ParentNotACommit,
-    /// Reverting a merge commit is ambiguous — different parents yield
-    /// different inverse patches — and mainline selection (`-m`) is not
-    /// yet supported, so we refuse rather than silently pick parent 0.
-    #[error("cannot revert a merge commit ({0} parents); mainline selection is not yet supported")]
+    /// Reverting a merge commit is ambiguous, because each parent yields a
+    /// different inverse patch. The caller must choose one with `-m`.
+    #[error("cannot revert a merge commit ({0} parents) without -m <parent-number>")]
     IsMergeCommit(usize),
+    /// A mainline parent was given for a commit that is not a merge.
+    #[error("mainline (-m) was specified but the commit is not a merge")]
+    MainlineForNonMerge,
+    /// The mainline parent number is out of range for this merge commit.
+    #[error("invalid mainline parent {given}: commit has {parents} parents")]
+    BadMainline { given: usize, parents: usize },
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -53,8 +58,9 @@ impl RevertResult {
 /// Revert `target_hash` against `ours_tree`.
 ///
 /// 1. Load the target commit. (Error if not a commit.)
-/// 2. Load the target's first parent's tree as the merge `theirs`. A
-///    root commit (no parents) reverts against the empty tree, removing
+/// 2. Load the mainline parent's tree as the merge `theirs`. A non-merge
+///    commit uses its only parent and rejects `mainline`; a merge needs
+///    `mainline`, the 1-based parent number. A root commit (no parents) reverts against the empty tree, removing
 ///    everything it introduced.
 /// 3. 3-way merge `(base = target.tree, ours = ours_tree, theirs =
 ///    parent.tree)` — the inverse of cherry-pick.
@@ -66,30 +72,45 @@ impl RevertResult {
 /// # Errors
 /// * [`RevertError::NotACommit`] / [`RevertError::ParentNotACommit`] for
 ///   bad input objects.
+/// * [`RevertError::IsMergeCommit`], [`RevertError::MainlineForNonMerge`]
+///   and [`RevertError::BadMainline`] for a bad `mainline`.
 /// * [`RevertError::Store`] for wrapped store/serialize errors.
 pub fn revert<S: ObjectSource + ObjectSink + ?Sized>(
     store: &S,
     target_hash: Hash,
     ours_tree: Hash,
+    mainline: Option<usize>,
 ) -> Result<RevertResult, RevertError> {
     let Object::Commit(target_commit) = store.read_object(&target_hash)? else {
         return Err(RevertError::NotACommit);
     };
 
-    // A merge commit has no single "the change it introduced": the
-    // inverse depends on which parent is the mainline. Refuse (fail
-    // closed) until `-m` is supported, rather than silently pick parent 0.
-    if target_commit.parents.len() > 1 {
-        return Err(RevertError::IsMergeCommit(target_commit.parents.len()));
-    }
+    // A merge commit has no single "the change it introduced": the inverse
+    // depends on which parent is the mainline, so a merge requires `-m
+    // <parent-number>` (1-based) and a non-merge rejects it, like git.
+    let n_parents = target_commit.parents.len();
+    let base_parent: Option<Hash> = match (n_parents, mainline) {
+        (0, None) => None,
+        (0 | 1, Some(_)) => return Err(RevertError::MainlineForNonMerge),
+        (1, None) => Some(target_commit.parents[0]),
+        (_, None) => return Err(RevertError::IsMergeCommit(n_parents)),
+        (_, Some(m)) if m >= 1 && m <= n_parents => Some(target_commit.parents[m - 1]),
+        (_, Some(m)) => {
+            return Err(RevertError::BadMainline {
+                given: m,
+                parents: n_parents,
+            });
+        }
+    };
 
-    let parent_tree: Option<Hash> = if target_commit.parents.is_empty() {
-        None
-    } else {
-        let Object::Commit(parent_commit) = store.read_object(&target_commit.parents[0])? else {
-            return Err(RevertError::ParentNotACommit);
-        };
-        Some(parent_commit.tree_hash)
+    let parent_tree: Option<Hash> = match base_parent {
+        None => None,
+        Some(parent_hash) => {
+            let Object::Commit(parent_commit) = store.read_object(&parent_hash)? else {
+                return Err(RevertError::ParentNotACommit);
+            };
+            Some(parent_commit.tree_hash)
+        }
     };
 
     // Inverse of cherry-pick: base = target's tree, theirs = parent's tree.
@@ -133,8 +154,13 @@ mod tests {
     use crate::serialize;
     use tempfile::TempDir;
 
-    fn revert(s: &CorpusStore, target: Hash, ours: Hash) -> Result<RevertResult, RevertError> {
-        s.compare(|backend| super::revert(backend, target, ours))
+    fn revert(
+        s: &CorpusStore,
+        target: Hash,
+        ours: Hash,
+        mainline: Option<usize>,
+    ) -> Result<RevertResult, RevertError> {
+        s.compare(|backend| super::revert(backend, target, ours, mainline))
     }
 
     fn store() -> (TempDir, CorpusStore) {
@@ -194,7 +220,7 @@ mod tests {
         let target = make_commit(&s, target_tree, &[parent], "target");
         let ours = make_tree(&s, vec![entry(b"f", put_blob(&s, &blob(b"c\n")))]);
 
-        let r = revert(&s, target, ours).unwrap();
+        let r = revert(&s, target, ours, None).unwrap();
         assert_eq!(r.conflicts.len(), 1);
         assert_eq!(r.conflicts[0].kind, ConflictKind::ModifyModify);
     }
@@ -210,7 +236,7 @@ mod tests {
         let target = make_commit(&s, target_tree, &[base], "add b.txt");
 
         // Revert "add b.txt" against its own resulting tree → b.txt gone.
-        let r = revert(&s, target, target_tree).unwrap();
+        let r = revert(&s, target, target_tree, None).unwrap();
         assert!(!r.has_conflicts());
         assert_eq!(tree_names(&s, r.tree_hash), vec![b"a.txt".to_vec()]);
         let msg = String::from_utf8(r.message).unwrap();
@@ -227,7 +253,7 @@ mod tests {
         let target_tree = make_tree(&s, vec![]); // a.txt removed
         let target = make_commit(&s, target_tree, &[base], "remove a.txt");
 
-        let r = revert(&s, target, target_tree).unwrap();
+        let r = revert(&s, target, target_tree, None).unwrap();
         assert!(!r.has_conflicts());
         assert_eq!(tree_names(&s, r.tree_hash), vec![b"a.txt".to_vec()]);
     }
@@ -245,7 +271,7 @@ mod tests {
         let blob_ours = put_blob(&s, b"ours-change");
         let ours_tree = make_tree(&s, vec![entry(b"a.txt", blob_ours)]);
 
-        let r = revert(&s, target, ours_tree).unwrap();
+        let r = revert(&s, target, ours_tree, None).unwrap();
         assert!(r.has_conflicts());
         assert_eq!(r.conflicts[0].kind, ConflictKind::ModifyModify);
         assert_eq!(r.conflicts[0].path, "a.txt");
@@ -257,22 +283,64 @@ mod tests {
         let blob = put_blob(&s, b"x");
         let empty = make_tree(&s, vec![]);
         assert!(matches!(
-            revert(&s, blob, empty),
+            revert(&s, blob, empty, None),
             Err(RevertError::NotACommit)
         ));
     }
 
+    /// A merge of `a.txt` (parent 1) and `b.txt` (parent 2) that holds both.
+    fn merge_fixture(s: &CorpusStore) -> (Hash, Hash) {
+        let a = put_blob(s, b"a");
+        let b = put_blob(s, b"b");
+        let t1 = make_tree(s, vec![entry(b"a.txt", a)]);
+        let t2 = make_tree(s, vec![entry(b"b.txt", b)]);
+        let tm = make_tree(s, vec![entry(b"a.txt", a), entry(b"b.txt", b)]);
+        let p1 = make_commit(s, t1, &[], "p1");
+        let p2 = make_commit(s, t2, &[], "p2");
+        (make_commit(s, tm, &[p1, p2], "merge"), tm)
+    }
+
     #[test]
-    fn reverting_a_merge_commit_is_refused() {
+    fn reverting_a_merge_without_mainline_is_refused() {
         let (_d, s) = store();
-        let blob = put_blob(&s, b"x");
-        let t = make_tree(&s, vec![entry(b"a.txt", blob)]);
-        let p1 = make_commit(&s, t, &[], "p1");
-        let p2 = make_commit(&s, t, &[], "p2");
-        let merge = make_commit(&s, t, &[p1, p2], "merge");
+        let (merge, tm) = merge_fixture(&s);
         assert!(matches!(
-            revert(&s, merge, t),
+            revert(&s, merge, tm, None),
             Err(RevertError::IsMergeCommit(2))
         ));
+    }
+
+    #[test]
+    fn mainline_on_a_non_merge_is_refused() {
+        let (_d, s) = store();
+        let t = make_tree(&s, vec![]);
+        let root = make_commit(&s, t, &[], "root");
+        assert!(matches!(
+            revert(&s, root, t, Some(1)),
+            Err(RevertError::MainlineForNonMerge)
+        ));
+    }
+
+    #[test]
+    fn out_of_range_mainline_is_refused() {
+        let (_d, s) = store();
+        let (merge, tm) = merge_fixture(&s);
+        for m in [0, 3] {
+            assert!(matches!(
+                revert(&s, merge, tm, Some(m)),
+                Err(RevertError::BadMainline { given, parents: 2 }) if given == m
+            ));
+        }
+    }
+
+    #[test]
+    fn mainline_selects_the_parent_the_revert_returns_to() {
+        let (_d, s) = store();
+        let (merge, tm) = merge_fixture(&s);
+        // `-m 1` returns to parent 1 (drops b.txt); `-m 2` to parent 2.
+        let r1 = revert(&s, merge, tm, Some(1)).unwrap();
+        assert_eq!(tree_names(&s, r1.tree_hash), vec![b"a.txt".to_vec()]);
+        let r2 = revert(&s, merge, tm, Some(2)).unwrap();
+        assert_eq!(tree_names(&s, r2.tree_hash), vec![b"b.txt".to_vec()]);
     }
 }

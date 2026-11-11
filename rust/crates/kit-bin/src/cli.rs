@@ -243,9 +243,10 @@ commands:
                     without committing; -m/--mainline selects the mainline
                     parent when replaying a merge commit, like git;
                     --format=json emits a JSON outcome object)
-  revert [-n] [--format=json] <commit> | --continue | --abort
+  revert [-n] [-m <parent-number>] [--format=json] <commit> | --continue | --abort
                     Create a new commit undoing <commit> (forward commit;
                     conflict-aware; -n stages the revert without committing;
+                    -m picks the mainline parent (1-based) to revert a merge;
                     --format=json emits a JSON outcome object)
   rebase <branch>    Replay commits onto a different base
   rebase -i <branch> Interactive: reorder/drop/reword/squash/fixup the todo
