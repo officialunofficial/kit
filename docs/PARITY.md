@@ -367,6 +367,13 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   with no output when nothing matches, as Git does and as `rev-parse
   --verify` does. kit rejects an empty pattern as a usage error. kit has no
   `--verify`, `--hash`, `--dereference` or `-q` on `show-ref`.
+- **`init <dir>` / `init -q`.** `init <dir>` creates `<dir>`, nested levels
+  included, and initialises it. An existing empty directory works. kit refuses
+  a `<dir>` that is a symlink, a dangling one included, with or without a
+  trailing slash, and a `<dir>` that is a file. Git follows a symlink. kit
+  prints its success line on stderr. `-q` drops that line and never an error.
+  `init` in an existing repository stays an error, and `-q` does not change
+  that. kit has no `--bare`, `--initial-branch` or `--template`.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -408,6 +415,4 @@ kit does not implement these flags. A command with a missing flag is
   kit rejects each form. `stash` always saves the whole working tree.
 - `checkout -- <path>` &mdash; `checkout` takes a branch or a revision. Use
   `restore` for files.
-- `init <dir>` / `init -q` &mdash; `init` takes no argument, and it is an error
-  in an existing repository.
 - `worktree move` / `lock` / `repair` &mdash; kit has no such subcommand.

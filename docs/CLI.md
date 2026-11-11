@@ -42,7 +42,11 @@ the `.kit/` marker and has no split work-tree / exec-path model.
 
 Working-tree commands:
 
-- `kit init` &mdash; create a new repository in `.kit/`.
+- `kit init [-q] [<dir>]` &mdash; create a new repository in `.kit/`, in the
+  current directory or in `<dir>`. kit creates a missing `<dir>`, nested
+  levels included. It refuses a `<dir>` that is a symlink or a file (exit
+  `73`) and a directory that holds a repository already (exit `1`).
+  `-q`/`--quiet` drops the success line and never an error.
 - `kit add [-A|-u] [-f] [-n] [-p] <path>...` / `kit add .` &mdash; stage files for the
   next commit. Multiple pathspecs may be given. `.` stages every non-ignored
   file under the current directory. `-A`/`--all` stages every change in

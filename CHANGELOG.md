@@ -33,6 +33,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remote-tracking ref and every tag. A commit shows once. The flag is a usage
   error together with a revision or a range. `libkit::log::Query::all` selects
   it, and `libkit::log::ref_tips` lists the refs.
+- `init <dir>` creates `<dir>`, nested levels included, and initialises it. It
+  refuses a `<dir>` that is a symlink, a dangling one included, or a file.
+  `init -q` (`--quiet`) drops the success line and never an error. `init` in
+  an existing repository stays an error.
 - `show-ref <pattern>...` keeps the refs that a pattern names: the full ref
   name, or its trailing path components. `main` keeps `refs/heads/main` and
   not `refs/heads/domain`. Several patterns give the union, and an empty

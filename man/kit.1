@@ -62,10 +62,18 @@ The full list of subcommands is printed by
 .Nm kit Fl Fl help .
 The highlights:
 .Bl -tag -width "cherry-pick"
-.It Cm init
+.It Cm init Oo Fl q | Fl Fl quiet Oc Op Ar dir
 Create a new
 .Nm
-repository in the current directory.
+repository in the current directory, or in
+.Ar dir .
+A missing
+.Ar dir
+is created, nested levels included. A
+.Ar dir
+that is a symlink or a file is an error.
+.Fl q
+drops the success line and never an error.
 .It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Oo Fl f Oc Oo Fl n | Fl Fl dry-run Oc Oo Fl p Oc Ar path ...
 Stage files for the next commit. Respects
 .Pa .gitignore
