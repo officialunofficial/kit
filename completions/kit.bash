@@ -140,7 +140,7 @@ _kit_complete() {
             return
             ;;
         stash)
-            COMPREPLY=( $(compgen -W "save list pop apply drop clear show" -- "$cur") )
+            COMPREPLY=( $(compgen -W "save push list pop apply drop clear show" -- "$cur") )
             ;;
         remote)
             COMPREPLY=( $(compgen -W "add set remove rename get-url set-url -v --verbose --help" -- "$cur") )
