@@ -267,7 +267,7 @@ History / commits:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
   "is_merge":<bool>,"is_root":<bool>}`.
-- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [-n N] [--all | <rev> | <A>..<B> | <A>...<B>]` &mdash; show
+- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [--graph] [-n N] [--all | <rev> | <A>..<B> | <A>...<B>]` &mdash; show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -309,6 +309,15 @@ History / commits:
   parentheses. kit reads the refs once. Each name prints with control
   characters escaped. `--decorate` with `--format=json` is a usage error
   (exit `64`), because the JSON record has a fixed set of keys.
+  `--graph` draws the commit graph in the left margin: `*` for a commit, `|`
+  for an open branch, `\` where a merge opens a branch and `/` where
+  branches join. It works with the default and the `--oneline` format, and
+  with `--all` and `--decorate`. A merge shows as `|\` on its own line below
+  the commit, and each extra parent of an octopus merge adds a `\`. kit
+  draws an edge only to a parent that the output shows, so a limit, a range
+  or a filter leaves no open line. A history with more than 1024 open
+  branches is an error (exit `65`). `--graph` with `-p`, `--stat` or
+  `--format=json` is a usage error (exit `64`).
   `--author <pattern>` and `--grep <pattern>` filter the walk by a plain
   **substring** match &mdash; `--author` against both the short display form
   (the `Author:` line) and the full `kind:hex`/`mid:N` form

@@ -20,6 +20,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after a conflict. The replayed commits are signed as in any rebase.
   `libkit::rebase::Request` has `upstream` and `branch` fields, and
   `libkit::rebase::Error::NoSuchBranch` reports a missing branch.
+- `log --graph` draws the commit graph in the left margin with `*`, `|`, `/`
+  and `\`, for the default and the `--oneline` format. It draws an edge only
+  to a parent that the output shows. It is a usage error together with `-p`,
+  `--stat` or `--format=json`, and an error for a history with more than 1024
+  open branches.
 - `log --decorate` prints the refs that name a commit after its id, as
   `(HEAD -> main, tag: v1, origin/main)`. It reads the refs once and prints
   each name with control characters escaped. It is a usage error together

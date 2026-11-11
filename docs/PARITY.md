@@ -297,6 +297,18 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   differently. The flag does not combine with `--format=json`, so the JSON
   record keeps its fixed keys. kit prints each name with control characters
   escaped.
+- **`log --graph`.** kit draws the graph with `*`, `|`, `/` and `\` for
+  `--oneline` and the default format. The layout differs from Git. The line
+  `|\` of a merge follows the text of the merge commit, where Git widens the
+  commit line. An octopus merge opens one column per extra parent, with no
+  `*-.` line. A column that ends shifts the columns on its right one line at a
+  time. kit draws an edge only to a parent that the output shows, so a
+  filter such as `--grep` or `--no-merges`, a limit or a range leaves no open
+  line, and it does not join the commits on each side of a hidden one.
+  `--first-parent` draws one column. The text lines of a commit that has no
+  parent in the output have a blank margin. A history with more than 1024
+  open branches is an error. `-p`, `--stat` and `--format=json` do not
+  combine with `--graph`.
 - **`rev-list`.** `rev-list` takes one revision or range, with `-n` or
   `--max-count`. It does not take several revisions, `^<rev>` or `--not`.
   It does not read the `-<n>` form. A negative count is an error. Git
@@ -364,7 +376,6 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
-- `log --graph` &mdash; kit rejects the flag as an unknown argument.
 - `branch -u` / `--unset-upstream` &mdash; kit has no upstream setting
   on `branch`. `push -u` sets one.
 - `add -n` / `--dry-run` &mdash; kit rejects the flag.

@@ -39,6 +39,11 @@
 //! print through [`format::safe_text`]. The flag excludes `--format=json`,
 //! because the JSON record has a fixed set of keys.
 //!
+//! `--graph` draws the commit graph in the left margin, for the default and
+//! the `--oneline` format. See the `graph` module. It draws an edge only to a parent
+//! that the output shows, so a filter or a limit leaves no open line. It
+//! excludes `-p`, `--stat` and `--format=json`.
+//!
 //! History filters — `--author`/`--grep` (substring matches),
 //! `--since`/`--until` (a small explicit date grammar, see
 //! `libkit::log::date`), and `--no-merges`/`--first-parent` — are
@@ -53,7 +58,7 @@
 //! errors and the parser maps them to kit sysexits (`USAGE` for
 //! unknown flags, `DATAERR` for malformed `-n` values, etc.).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 use clap::{Parser, ValueEnum};
@@ -67,6 +72,8 @@ use crate::exit;
 use crate::exit_map;
 use crate::format;
 use crate::signal;
+
+mod graph;
 
 /// Default abbreviated-hash length, matching git's nominal `core.abbrev`
 /// starting point. Overridable with `--abbrev[=N]`.
@@ -173,6 +180,11 @@ struct LogOpts {
     #[arg(long)]
     decorate: bool,
 
+    /// Draw the commit graph in the left margin with `*`, `|`, `/` and `\`.
+    /// It cannot combine with `-p`, `--stat` or `--format=json`.
+    #[arg(long, conflicts_with_all = ["patch", "stat"])]
+    graph: bool,
+
     /// Optional starting revision (`<rev>`), range (`A..B`, `A..`, `..B`), or
     /// symmetric range (`A...B`). Defaults to `HEAD`; an empty range side
     /// means `HEAD`.
@@ -218,6 +230,9 @@ pub fn run(args: &[String]) -> u8 {
             "-p and --stat do not combine with --format=json",
             exit::USAGE,
         );
+    }
+    if fmt == Format::Json && opts.graph {
+        return emit_err("--graph does not combine with --format=json", exit::USAGE);
     }
     if fmt == Format::Json && opts.decorate {
         return emit_err(
@@ -301,6 +316,13 @@ fn print_entries(
 ) -> u8 {
     let (fmt, abbrev) = (opts.render_format(), opts.abbrev_len());
     let mut stdout = std::io::stdout().lock();
+    let mut graph = opts.graph.then(graph::Graph::default);
+    // The graph draws an edge only to a parent that is in the output.
+    let shown: HashSet<Hash> = if opts.graph {
+        entries.iter().map(|entry| entry.hash).collect()
+    } else {
+        HashSet::new()
+    };
     for entry in entries {
         if signal::is_shutdown() {
             return exit::TEMPFAIL;
@@ -308,6 +330,18 @@ fn print_entries(
         let decoration = decorations
             .get(&entry.hash)
             .map(|names| format!("({})", names.join(", ")));
+        if let Some(graph) = graph.as_mut() {
+            if let Err(code) = print_graph_commit(
+                &mut stdout,
+                (graph, &shown),
+                opts,
+                entry,
+                decoration.as_deref(),
+            ) {
+                return code;
+            }
+            continue;
+        }
         render_commit(
             &mut stdout,
             fmt,
@@ -334,6 +368,58 @@ fn print_entries(
         }
     }
     exit::OK
+}
+
+/// Print one commit with the graph in the left margin. The error is the exit
+/// code, after the message.
+fn print_graph_commit(
+    out: &mut impl Write,
+    (graph, shown): (&mut graph::Graph, &HashSet<Hash>),
+    opts: &LogOpts,
+    entry: &log::Entry,
+    decoration: Option<&str>,
+) -> Result<(), u8> {
+    let walked = if opts.first_parent { 1 } else { usize::MAX };
+    let parents: Vec<Hash> = entry
+        .commit
+        .parents
+        .iter()
+        .take(walked)
+        .filter(|parent| shown.contains(*parent))
+        .copied()
+        .collect();
+    let row = graph
+        .push(&entry.hash, &parents)
+        .map_err(|graph::TooWide| {
+            let msg = format!("--graph: more than {} open branches", graph::MAX_COLUMNS);
+            emit_err(&msg, exit::DATAERR)
+        })?;
+    let mut text = Vec::new();
+    render_commit(
+        &mut text,
+        opts.render_format(),
+        opts.abbrev_len(),
+        (&entry.hash, &entry.commit),
+        decoration,
+    );
+    for line in &row.before {
+        let _ = writeln!(out, "{line}");
+    }
+    for (n, line) in text.split_inclusive(|b| *b == b'\n').enumerate() {
+        let margin = if n == 0 { &row.first } else { &row.rest };
+        // A blank line keeps no trailing space after its margin.
+        let margin = if line == b"\n" {
+            margin.trim_end()
+        } else {
+            margin
+        };
+        let _ = out.write_all(margin.as_bytes());
+        let _ = out.write_all(line);
+    }
+    for line in &row.after {
+        let _ = writeln!(out, "{line}");
+    }
+    Ok(())
 }
 
 /// Parse the value of `--since` or `--until`. A bad date is a usage error,
@@ -503,6 +589,7 @@ mod tests {
             stat: false,
             all: false,
             decorate: false,
+            graph: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -526,6 +613,7 @@ mod tests {
             stat: false,
             all: false,
             decorate: false,
+            graph: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Oneline);
@@ -549,6 +637,7 @@ mod tests {
             stat: false,
             all: false,
             decorate: false,
+            graph: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -572,6 +661,7 @@ mod tests {
             stat: false,
             all: false,
             decorate: false,
+            graph: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Json);
@@ -594,6 +684,7 @@ mod tests {
             stat: false,
             all: false,
             decorate: false,
+            graph: false,
             start: None,
         }
     }
