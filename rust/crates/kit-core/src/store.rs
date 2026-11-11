@@ -70,7 +70,7 @@ pub const OBJECTS_DIR: &str = "objects";
 pub const FORMAT_FILE: &str = "format";
 /// The only supported object-addressing format value (see
 /// `docs/specs/SPEC-MERKLE-OBJECTS.md`): Tree/ChunkedBlob keyed by BMT root.
-pub const FORMAT_VALUE: &str = "bmt-v1";
+pub const FORMAT_VALUE: &str = "bmt-v2";
 
 /// Longest format marker that kit reads. The real value is a few bytes.
 const FORMAT_MAX_BYTES: u64 = 64;

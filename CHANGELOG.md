@@ -7,6 +7,35 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- A tree id now commits to the sort order of its entry names. Each
+  two-child parent of a `Tree` BMT hashes the name of the first entry under
+  its right child, and a tree entry proof carries these separators. The
+  verifier checks the proven name against each one, so a name has at most
+  one verifiable entry in a tree. Before, a signer could build an unsorted
+  tree that held one name twice with different contents, and two
+  disclosure bundles for the same path under the same signed commit both
+  verified with different bytes (SPEC-MERKLE-OBJECTS §3.2 and §5.8).
+
+### Changed
+
+- Breaking: the id of every tree with two or more entries changes. The
+  repository format marker is `bmt-v2`, and kit refuses to open a store
+  that declares `bmt-v1`.
+- Breaking: disclosure bundles are KDPB version 3. A tree step carries a
+  keyed `TreeProof` and no inner root. Versions 1 and 2 are rejected. KDSP
+  keeps version 1 and wraps KDPB v3 bundles.
+- Breaking: `verify-proof --format=json`, the WASM `verify_disclosure`
+  result and `Disclosed` no longer report `step_inner_roots`.
+- Breaking: `merkle::build_tree_entry_proof` returns a `TreeProof`, and
+  `merkle::verify_tree_entry` and the WASM `verify_tree_entry` take one.
+  Tree range and multi-leaf proofs are removed. Chunk proofs are unchanged
+  and stay byte-identical to `commonware_storage::bmt`.
+- SPEC-DISCLOSURE states that disclosure provides integrity only: a length
+  proof also carries the chunk's first content bytes, and a range carries
+  every whole 1 KiB block it touches.
+
 ## [0.8.0] - 2026-11-10
 
 ### Added

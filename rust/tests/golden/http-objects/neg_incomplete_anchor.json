@@ -1,6 +1,6 @@
 {
-  "blake3": "166902eea67f05225ea5266300ab5e45b019f1e455c5b362e9ceea3a8bc5eab2",
-  "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "c92cbe08146f9287ce2eeabc3321f78bd462b2c237e66e9cfadd4b74de2ba0a9",
+  "commit": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
   "expect": {
     "accept": false,
     "expand_to": null,
@@ -10,13 +10,13 @@
   "recipe": {
     "segments": [
       {
-        "length": 573,
+        "length": 563,
         "offset": 0,
         "source": "span_two_chunks.bin"
       },
       {
         "length": 33,
-        "offset": 23447,
+        "offset": 23417,
         "source": "span_two_chunks.bin"
       },
       {
@@ -24,7 +24,7 @@
       },
       {
         "length": 133,
-        "offset": 23480,
+        "offset": 23450,
         "source": "span_two_chunks.bin"
       },
       {
@@ -32,7 +32,7 @@
       },
       {
         "length": 1024,
-        "offset": 23616,
+        "offset": 23586,
         "source": "span_two_chunks.bin"
       },
       {
@@ -40,12 +40,12 @@
       },
       {
         "length": 37,
-        "offset": 606,
+        "offset": 596,
         "source": "span_two_chunks.bin"
       },
       {
         "length": 32,
-        "offset": 675,
+        "offset": 665,
         "source": "span_two_chunks.bin"
       },
       {
@@ -53,21 +53,21 @@
       },
       {
         "length": 66,
-        "offset": 2247,
+        "offset": 2237,
         "source": "span_two_chunks.bin"
       },
       {
         "length": 1352,
-        "offset": 789,
+        "offset": 779,
         "source": "span_two_chunks.bin"
       },
       {
-        "length": 37910,
-        "offset": 3665,
+        "length": 37890,
+        "offset": 3655,
         "source": "span_two_chunks.bin"
       }
     ]
   },
   "schema_version": 1,
-  "size": 41575
+  "size": 41545
 }

@@ -1,10 +1,11 @@
-//! Native-only acceptance test for SPEC-DISCLOSURE v2 inner roots
-//! Every accept golden is verified using **only** bundle
-//! fields, `commonware_storage::bmt::Proof`, `commonware_cryptography::blake3`,
-//! and `kit_core::hash::domain_digest` with the hardcoded domain byte
-//! strings from the spec. Never calls `kit_core::merkle` or
-//! `kit_core::verify` verifiers. Leaf digests are recomputed from
-//! SPEC-MERKLE-OBJECTS §3.
+//! Native-only acceptance test for SPEC-DISCLOSURE v3 bundles.
+//! Every accept golden is verified using **only** bundle fields,
+//! `commonware_storage::bmt::Proof` for chunk headers, a keyed tree fold
+//! written here from SPEC-MERKLE-OBJECTS §5.8 for tree steps,
+//! `commonware_cryptography::blake3`, and `kit_core::hash::domain_digest`
+//! with the hardcoded domain byte strings from the spec. Never calls
+//! `kit_core::merkle` or `kit_core::verify` verifiers. Leaf digests are
+//! recomputed from SPEC-MERKLE-OBJECTS §3.
 #![allow(clippy::unwrap_used)]
 
 use std::fs;
@@ -73,24 +74,70 @@ fn wrap_ok(domain: &[u8], inner_root: &Hash, expected_id: &Hash) -> bool {
     domain_digest(domain, inner_root) == *expected_id
 }
 
-fn upstream_element(proof_bytes: &[u8], leaf: Hash, position: u32, inner_root: Hash) -> bool {
-    let mut r = Copying(proof_bytes);
-    let Ok(proof) = UpstreamProof::<Digest>::read_cfg(&mut r, &1usize) else {
+/// SPEC-MERKLE-OBJECTS §5.8, written from the spec: fold a keyed tree
+/// proof and check the name against every separator.
+fn keyed_tree_entry(step: &Step, expected_id: &Hash) -> bool {
+    let leaf = tree_entry_leaf(&step.name, step.mode, &step.child_id);
+    let leaf_count = step.proof.leaf_count;
+    let mut position = step.position;
+    if position >= leaf_count {
         return false;
-    };
-    proof
-        .verify_element_inclusion::<Blake3>(&Digest(leaf), position, &Digest(inner_root))
-        .is_ok()
+    }
+    let mut c = blake3::Hasher::new()
+        .update(&position.to_be_bytes())
+        .update(&leaf)
+        .finalize();
+    let mut size = leaf_count;
+    let mut steps = step.proof.steps.iter();
+    while size > 1 {
+        if position.is_multiple_of(2) && position + 1 >= size {
+            c = blake3::Hasher::new()
+                .update(c.as_bytes())
+                .update(c.as_bytes())
+                .finalize();
+        } else {
+            let Some(s) = steps.next() else { return false };
+            let separator = s.separator.as_slice();
+            let left_side = position.is_multiple_of(2);
+            if (left_side && step.name.as_slice() >= separator)
+                || (!left_side && step.name.as_slice() < separator)
+            {
+                return false;
+            }
+            let (l, r) = if left_side {
+                (*c.as_bytes(), s.sibling)
+            } else {
+                (s.sibling, *c.as_bytes())
+            };
+            c = blake3::Hasher::new()
+                .update(&l)
+                .update(&r)
+                .update(&[u8::try_from(separator.len()).unwrap()])
+                .update(separator)
+                .finalize();
+        }
+        position /= 2;
+        size = size.div_ceil(2);
+    }
+    if steps.next().is_some() {
+        return false;
+    }
+    let root = blake3::Hasher::new()
+        .update(&leaf_count.to_be_bytes())
+        .update(c.as_bytes())
+        .finalize();
+    wrap_ok(TREE_DOMAIN, root.as_bytes(), expected_id)
 }
 
-/// Decode a v2 bundle far enough to check every step and chunk header
-/// with upstream BMT, without calling kit verifiers.
+/// Decode a v3 bundle far enough to check every step with the keyed fold
+/// and every chunk header with upstream BMT, without calling kit
+/// verifiers.
 fn native_check(bundle: &[u8]) -> Result<(), NativeFail> {
     if bundle.len() < 5 || &bundle[..4] != b"KDPB" {
         return Err(NativeFail::Other("bad magic"));
     }
     let version = bundle[4];
-    if version != 2 {
+    if version != 3 {
         return Err(NativeFail::Version(version));
     }
     let mut r = Copying(&bundle[5..]);
@@ -112,12 +159,8 @@ fn native_check(bundle: &[u8]) -> Result<(), NativeFail> {
 
     let mut expected = tree_hash;
     for step in &steps {
-        if !wrap_ok(TREE_DOMAIN, &step.inner_root, &expected) {
+        if !keyed_tree_entry(step, &expected) {
             return Err(NativeFail::Wrap);
-        }
-        let leaf = tree_entry_leaf(&step.name, step.mode, &step.child_id);
-        if !upstream_element(&step.proof.encode(), leaf, step.position, step.inner_root) {
-            return Err(NativeFail::Upstream);
         }
         expected = step.child_id;
     }
@@ -232,6 +275,9 @@ fn new_negatives_fail_at_wrap_or_upstream() {
         ("neg_inner_root_forged", "wrap"),
         ("neg_inner_root_fold_mismatch", "upstream"),
         ("neg_bundle_version_1", "version"),
+        ("neg_bundle_version_2", "version"),
+        ("neg_separator_violated", "wrap"),
+        ("neg_duplicate_name", "wrap"),
     ];
     for (name, want) in cases {
         let bin = fs::read(dir.join(format!("{name}.bin"))).unwrap_or_else(|_| {
@@ -244,7 +290,7 @@ fn new_negatives_fail_at_wrap_or_upstream() {
             (want, &err),
             ("wrap", NativeFail::Wrap)
                 | ("upstream", NativeFail::Upstream)
-                | ("version", NativeFail::Version(1))
+                | ("version", NativeFail::Version(1 | 2))
         );
         assert!(ok, "{name}: expected {want}, got {err}");
     }

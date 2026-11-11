@@ -233,7 +233,7 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, SpanError> {
     })
 }
 
-/// Encode a KDSP v1 container from already encoded KDPB v2 bundles.
+/// Encode a KDSP v1 container from already encoded KDPB v3 bundles.
 ///
 /// Encoding does not authenticate or validate the supplied bundles. Callers
 /// must verify the result against a trusted commit id before using it.
@@ -445,7 +445,7 @@ pub fn verify_disclosure_span(trusted: &Hash, bytes: &[u8]) -> Result<DisclosedS
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RangeProof {
-    /// One KDPB v2 Range bundle.
+    /// One KDPB v3 Range bundle.
     Kdpb(Vec<u8>),
     /// One KDSP v1 container.
     Kdsp(Vec<u8>),
@@ -455,7 +455,7 @@ pub enum RangeProof {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RangeProofKind {
-    /// The range lies within one chunk (or a plain Blob): one KDPB v2 bundle.
+    /// The range lies within one chunk (or a plain Blob): one KDPB v3 bundle.
     Kdpb,
     /// The range crosses a chunk boundary: one KDSP v1 container.
     Kdsp,
@@ -1422,6 +1422,12 @@ mod tests {
                     name_len: step.name.len(),
                     position: step.position,
                     leaf_count: step.proof.leaf_count,
+                    separator_bytes: step
+                        .proof
+                        .steps
+                        .iter()
+                        .map(|s| s.separator.len() as u64)
+                        .sum(),
                 })
                 .collect();
             let plan = chunked_range_proof_size(

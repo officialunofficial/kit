@@ -1,6 +1,6 @@
 {
-  "blake3": "729960be0f2647e301cb978b1e52598cf3151cbf3acab011397c2d347416255d",
-  "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "03e9dddd84866041ee7f62b89aa3d678580fb186d7f02d241a777ec3fb9cd8bd",
+  "commit": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
   "expect": {
     "accept": false,
     "expand_to": null,
@@ -10,20 +10,15 @@
   "recipe": {
     "segments": [
       {
-        "hex": "4b445350"
+        "hex": "4b44535002"
       },
       {
-        "length": 33,
-        "offset": 59,
-        "source": "span_two_chunks.bin"
-      },
-      {
-        "length": 41538,
-        "offset": 37,
+        "length": 41540,
+        "offset": 5,
         "source": "span_two_chunks.bin"
       }
     ]
   },
   "schema_version": 1,
-  "size": 41575
+  "size": 41545
 }

@@ -1,6 +1,6 @@
 {
   "bin": "neg_id_vs_inner_root.bin",
-  "blake3": "9f72ee5921818724864dceaf4ca42270f47b51431d447beb273249545aae0a6e",
+  "blake3": "2d16c26cbdcac16fc1e42bc8dd5fc7a6532bf4595d40650a7a663cea1b296485",
   "description": "A valid tree_7entry proof, but `object_id_hex` here is deliberately the bare (pre-wrap) inner root rather than the real object id — the mistake SPEC-MERKLE-OBJECTS §5 and §Security call out. A verifier MUST apply the type-domain wrap before comparing.",
   "entries": [
     {
@@ -13,9 +13,9 @@
   "kind": "tree_entry",
   "max_items": 1,
   "name": "neg_id_vs_inner_root",
-  "object_id_hex": "7e4c9d671d50a42ee4184276c9b01205159a82fe8e9f0cb5e727d692822bc5e4",
+  "object_id_hex": "33ea2c36919d6867cfdaab2a7c7e5d9c0fc3c9686d2329eaa8b23bea1a062f5b",
   "position": 6,
   "proof_kind": "single",
   "reject_reason": "verified against the bare inner root instead of the wrapped object id",
-  "size": 69
+  "size": 73
 }

@@ -1,6 +1,6 @@
 {
-  "blake3": "2252690d65b6195dd5e4f530e6d1cc3ef95b41ea60ba5d9e34c1669b35ab6bb6",
-  "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "bca875be52ea2af92330290bd6e74b57c98076f5bfd8b28d912636ad93dca50a",
+  "commit": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
   "expect": {
     "accept": false,
     "expand_to": null,
@@ -15,17 +15,17 @@
         "source": "span_two_chunks.bin"
       },
       {
-        "length": 19261,
-        "offset": 3666,
+        "length": 19251,
+        "offset": 3656,
         "source": "span_two_chunks.bin"
       },
       {
-        "length": 37910,
-        "offset": 3665,
+        "length": 37890,
+        "offset": 3655,
         "source": "span_two_chunks.bin"
       }
     ]
   },
   "schema_version": 1,
-  "size": 57224
+  "size": 57194
 }

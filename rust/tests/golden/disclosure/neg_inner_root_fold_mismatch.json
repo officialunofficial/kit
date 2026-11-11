@@ -1,14 +1,14 @@
 {
   "bin": "neg_inner_root_fold_mismatch.bin",
-  "blake3": "6d77b863b5a80b8ab1c49045444dd817e39d6f9d3dbe85afea731a8ed5ad3510",
-  "commit_id_hex": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
-  "description": "The declared inner_root wraps to the parent id, but the proof was built for a different tree so the fold disagrees.",
+  "blake3": "e92598c578d9b29d632104ea38c4b29d3ae710b828028daf49035f7491b937a5",
+  "commit_id_hex": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
+  "description": "The chunk payload's declared inner_root wraps to the ChunkedBlob id, but one sibling of its proof is changed so the fold disagrees.",
   "expect": "reject",
   "name": "neg_inner_root_fold_mismatch",
   "path_hex": [
-    "7368616c6c6f772e747874"
+    "6368756e6b65642e62696e"
   ],
   "reject_reason": "proof fold does not equal the declared inner root",
-  "selector": "object",
-  "size": 437
+  "selector": "chunk(1)",
+  "size": 19248
 }

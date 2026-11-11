@@ -1,35 +1,23 @@
 {
   "bin": "neg_multi_positions_unsorted.bin",
-  "blake3": "3e84381949af227800c6274588a355e7dc5ef93e9fe3f433c829a7744cfcaf16",
-  "description": "The tree_9entry_multi_0_4_8 proof checked with positions {8, 4, 0}, which are not strictly ascending.",
-  "entries": [
-    {
-      "mode": 1,
-      "name_hex": "69",
-      "object_hash_hex": "0909090909090909090909090909090909090909090909090909090909090909"
-    },
-    {
-      "mode": 1,
-      "name_hex": "65",
-      "object_hash_hex": "0505050505050505050505050505050505050505050505050505050505050505"
-    },
-    {
-      "mode": 1,
-      "name_hex": "61",
-      "object_hash_hex": "0101010101010101010101010101010101010101010101010101010101010101"
-    }
+  "blake3": "325e579391ee2d599fd37dd933a8c63e5469bebd84e4b8b7ff3b7937b620fde3",
+  "chunk_hashes_hex": [
+    "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+    "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
   ],
+  "chunk_size": 0,
+  "description": "The chunked_blob_cs0_3chunks_multi_1_3 proof checked with positions {3, 1}, which are not strictly ascending.",
   "expect": "reject",
-  "kind": "tree_entry",
-  "max_items": 3,
+  "kind": "chunk",
+  "max_items": 2,
   "name": "neg_multi_positions_unsorted",
-  "object_id_hex": "39433535dfc3a02579762e91e718bfebe10da0f9a85b16894a62bf77935a0882",
+  "object_id_hex": "afbb936cbd2702c2628f188e38cd91284aa0d1d90197587935e5c04787d3674c",
   "positions": [
-    8,
-    4,
-    0
+    3,
+    1
   ],
   "proof_kind": "multi",
   "reject_reason": "multi-leaf positions are not strictly ascending",
-  "size": 133
+  "size": 69,
+  "total_size": 1000000
 }

@@ -15,6 +15,9 @@ pub struct PrefixStep {
     pub position: u32,
     /// Number of entries in that tree.
     pub leaf_count: u32,
+    /// Total bytes of the separator names in the entry's keyed tree
+    /// proof (SPEC-MERKLE-OBJECTS §5.8).
+    pub separator_bytes: u64,
 }
 
 /// Exact format, chunk bounds and wire length selected by a chunked range.
@@ -57,6 +60,12 @@ fn proof_size(count: u32, positions: &[u32]) -> Result<u128, RangeProofError> {
         .map_err(|error| VerifyError::from(error).into())
 }
 
+fn tree_proof_size(step: &PrefixStep) -> Result<u128, RangeProofError> {
+    let steps = merkle::tree_proof_step_count(step.leaf_count, step.position)
+        .map_err(|error| -> RangeProofError { VerifyError::from(error).into() })?;
+    Ok(4 + varint_size(steps as u64) + steps as u128 * 33 + u128::from(step.separator_bytes))
+}
+
 fn prefix_size(commit_bytes: u64, steps: &[PrefixStep]) -> Result<u128, RangeProofError> {
     if commit_bytes > MAX_COMMIT_BYTES as u64 {
         return Err(RangeProofError::ProofTooLarge);
@@ -69,8 +78,7 @@ fn prefix_size(commit_bytes: u64, steps: &[PrefixStep]) -> Result<u128, RangePro
         if step.name_len == 0 || step.name_len > 255 {
             return Err(VerifyError::Malformed.into());
         }
-        size +=
-            vector_size(step.name_len as u64) + 69 + proof_size(step.leaf_count, &[step.position])?;
+        size += vector_size(step.name_len as u64) + 37 + tree_proof_size(step)?;
     }
     capped(size)?;
     Ok(size)
@@ -386,6 +394,12 @@ mod tests {
                 name_len: step.name.len(),
                 position: step.position,
                 leaf_count: step.proof.leaf_count,
+                separator_bytes: step
+                    .proof
+                    .steps
+                    .iter()
+                    .map(|s| s.separator.len() as u64)
+                    .sum(),
             })
             .collect()
     }
@@ -581,10 +595,13 @@ mod tests {
             commit.signature = sign_commit(&commit, &key).unwrap().0;
             let canonical = serialize(&Object::Commit(commit)).unwrap();
             let id = store.write(&canonical).unwrap();
+            // The keyed proof of `name` at position 1 of [a, name, z]
+            // carries two separators: `name` itself and `z`.
             let steps = [PrefixStep {
                 name_len,
                 position: 1,
                 leaf_count: 3,
+                separator_bytes: name_len as u64 + 1,
             }];
             let total = lengths.iter().sum::<u64>();
             for (offset, len) in [(0, total), (total - 1, 1), (1, total - 2)] {

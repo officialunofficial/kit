@@ -6,22 +6,15 @@
 //! code cannot drift apart.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
-// The second sample runs after the first, in the same scope of imports.
-use commonware_codec::{Copying, Read as _};
-use commonware_cryptography::blake3::{Blake3, Digest};
-use commonware_storage::bmt::Proof as UpstreamProof;
-use kit_core::hash::{Hash, domain_digest, hash};
-use kit_core::merkle::{
-    build_tree_entry_proof, compute_tree_id, tree_entry_position, tree_inner_root,
-};
-use kit_core::object::{EntryMode, Tree, TreeEntry};
-use kit_core::verify::Step;
+use kit_core::hash::{Hash, hash};
+use kit_core::merkle::{build_chunk_proof, chunked_inner_root, compute_chunked_id};
+use kit_core::object::ChunkedBlob;
 
 type Outcome = Result<(), Box<dyn std::error::Error>>;
 
 // sample:begin prover-supplies-the-root
 fn prover_supplies_the_root(
-    trusted_tree_id: Hash,
+    trusted_chunked_id: Hash,
     prover_inner_root: Hash,
     leaf: Hash,
     position: u32,
@@ -33,8 +26,8 @@ fn prover_supplies_the_root(
     use kit_core::hash::domain_digest;
 
     assert_eq!(
-        domain_digest(b"kit.tree\x00", &prover_inner_root), // or b"kit.chunked\x00"
-        trusted_tree_id,
+        domain_digest(b"kit.chunked\x00", &prover_inner_root),
+        trusted_chunked_id,
     );
 
     let mut r = Copying(proof_bytes);
@@ -48,82 +41,55 @@ fn prover_supplies_the_root(
 }
 // sample:end prover-supplies-the-root
 
-// sample:begin v2-step
-fn v2_step(step: &Step, trusted_tree_id: Hash, leaf: Hash) -> Outcome {
-    assert_eq!(
-        domain_digest(b"kit.tree\x00", &step.inner_root),
-        trusted_tree_id,
-    );
-    let proof_bytes = step.proof.encode();
-    let mut r = Copying(&proof_bytes[..]);
-    let proof = UpstreamProof::<Digest>::read_cfg(&mut r, &1usize)?;
-    proof.verify_element_inclusion::<Blake3>(
-        &Digest(leaf),
-        step.position,
-        &Digest(step.inner_root),
-    )?;
-    Ok(())
-}
-// sample:end v2-step
-
 struct Fixture {
-    tree_id: Hash,
+    chunked_id: Hash,
     inner_root: Hash,
     leaf: Hash,
     position: u32,
-    step: Step,
+    proof_bytes: Vec<u8>,
 }
 
 fn fixture() -> Fixture {
-    let entry = |name: &[u8]| TreeEntry {
-        name: name.to_vec(),
-        mode: EntryMode::Blob,
-        object_hash: hash(name),
+    let chunks: Vec<Hash> = [b"a", b"b", b"c", b"d", b"e"]
+        .iter()
+        .map(|c| hash(*c))
+        .collect();
+    let cb = ChunkedBlob {
+        total_size: 5 * 65_536,
+        chunk_size: 0,
+        chunks,
     };
-    let tree = Tree {
-        entries: vec![
-            entry(b"a"),
-            entry(b"b"),
-            entry(b"c"),
-            entry(b"d"),
-            entry(b"e"),
-        ],
-    };
-    let position = tree_entry_position(&tree, b"c").unwrap();
-    let chosen = &tree.entries[position as usize];
-    // SPEC-MERKLE-OBJECTS section 3: the leaf of one tree entry.
-    let mut body = Vec::new();
-    body.extend_from_slice(&u32::try_from(chosen.name.len()).unwrap().to_le_bytes());
-    body.extend_from_slice(&chosen.name);
-    body.push(chosen.mode as u8);
-    body.extend_from_slice(&chosen.object_hash);
-    let leaf = domain_digest(b"kit-tree-entry-v1", &body);
-    let inner_root = tree_inner_root(&tree);
-    let proof = build_tree_entry_proof(&tree, position).unwrap();
+    // SPEC-MERKLE-OBJECTS section 3.1: chunk 2 is at position 3.
+    let position = 3;
     Fixture {
-        tree_id: compute_tree_id(&tree),
-        inner_root,
-        leaf,
+        chunked_id: compute_chunked_id(&cb),
+        inner_root: chunked_inner_root(&cb),
+        leaf: cb.chunks[2],
         position,
-        step: Step {
-            name: chosen.name.clone(),
-            mode: chosen.mode,
-            child_id: chosen.object_hash,
-            inner_root,
-            position,
-            proof,
-        },
+        proof_bytes: build_chunk_proof(&cb, position).unwrap().encode(),
     }
 }
 
 #[test]
 fn the_prover_supplied_root_sample_accepts_a_real_proof_and_rejects_a_wrong_leaf() {
     let f = fixture();
-    let bytes = f.step.proof.encode();
-    prover_supplies_the_root(f.tree_id, f.inner_root, f.leaf, f.position, &bytes).unwrap();
+    prover_supplies_the_root(
+        f.chunked_id,
+        f.inner_root,
+        f.leaf,
+        f.position,
+        &f.proof_bytes,
+    )
+    .unwrap();
     assert!(
-        prover_supplies_the_root(f.tree_id, f.inner_root, hash(b"other"), f.position, &bytes)
-            .is_err()
+        prover_supplies_the_root(
+            f.chunked_id,
+            f.inner_root,
+            hash(b"other"),
+            f.position,
+            &f.proof_bytes
+        )
+        .is_err()
     );
 }
 
@@ -131,16 +97,8 @@ fn the_prover_supplied_root_sample_accepts_a_real_proof_and_rejects_a_wrong_leaf
 #[should_panic(expected = "assertion `left == right` failed")]
 fn the_prover_supplied_root_sample_rejects_a_forged_root_before_the_proof_runs() {
     let f = fixture();
-    let bytes = f.step.proof.encode();
     let forged = hash(b"forged inner root");
-    let _ = prover_supplies_the_root(f.tree_id, forged, f.leaf, f.position, &bytes);
-}
-
-#[test]
-fn the_v2_step_sample_accepts_a_real_proof_and_rejects_a_wrong_leaf() {
-    let f = fixture();
-    v2_step(&f.step, f.tree_id, f.leaf).unwrap();
-    assert!(v2_step(&f.step, f.tree_id, hash(b"other")).is_err());
+    let _ = prover_supplies_the_root(f.chunked_id, forged, f.leaf, f.position, &f.proof_bytes);
 }
 
 /// Code lines only: no blank lines, no comment lines, no indentation.
@@ -170,12 +128,10 @@ fn sample(name: &str) -> String {
 #[test]
 fn the_document_prints_the_compiled_samples() {
     let doc = code_lines(include_str!("../../../../docs/VERIFY.md"));
-    for name in ["prover-supplies-the-root", "v2-step"] {
-        let text = sample(name);
-        assert!(text.lines().count() >= 8, "sample {name} is empty:\n{text}");
-        assert!(
-            doc.contains(&text),
-            "docs/VERIFY.md no longer prints the compiled sample {name}:\n{text}"
-        );
-    }
+    let text = sample("prover-supplies-the-root");
+    assert!(text.lines().count() >= 8, "the sample is empty:\n{text}");
+    assert!(
+        doc.contains(&text),
+        "docs/VERIFY.md no longer prints the compiled sample:\n{text}"
+    );
 }

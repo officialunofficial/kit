@@ -1,0 +1,21 @@
+{
+  "bin": "neg_duplicate_name.bin",
+  "blake3": "e6f1dd3f90990a3f39a891607be7a471b90d7222704e0d04d738d25ecbc55352",
+  "description": "A two-entry tree that holds the name lib.rs twice, proven at position 0. The keyed fold admits at most one entry per name, so this proof is rejected (SPEC-MERKLE-OBJECTS §5.8).",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "6c69622e7273",
+      "object_hash_hex": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "expect": "reject",
+  "kind": "tree_entry",
+  "max_items": 1,
+  "name": "neg_duplicate_name",
+  "object_id_hex": "a330eb64ec1fa837e762f810666b7507c48756619665b536573b1050798680fc",
+  "position": 0,
+  "proof_kind": "single",
+  "reject_reason": "the left copy of a repeated name is not below the separator",
+  "size": 44
+}

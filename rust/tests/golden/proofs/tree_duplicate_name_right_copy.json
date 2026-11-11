@@ -1,0 +1,20 @@
+{
+  "bin": "tree_duplicate_name_right_copy.bin",
+  "blake3": "1bed0df6dbf15a2bae753cfa95afe85fc7b2c9280982d89902bfae8ecc295a87",
+  "description": "The same hostile tree proven at position 1: the one copy of lib.rs that verifies.",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "6c69622e7273",
+      "object_hash_hex": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "expect": "accept",
+  "kind": "tree_entry",
+  "max_items": 1,
+  "name": "tree_duplicate_name_right_copy",
+  "object_id_hex": "a330eb64ec1fa837e762f810666b7507c48756619665b536573b1050798680fc",
+  "position": 1,
+  "proof_kind": "single",
+  "size": 44
+}

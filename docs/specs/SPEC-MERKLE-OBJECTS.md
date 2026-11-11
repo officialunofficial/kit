@@ -1,6 +1,6 @@
 ---
 spec: SPEC-MERKLE-OBJECTS
-version: 2
+version: 3
 status: stable-normative
 audience: implementers of compatible kit object stores
 ---
@@ -23,17 +23,23 @@ object's read-time id check into a free completeness proof for its whole
 child set: if the root matches, every child is present and correctly
 ordered.
 
+A `Tree` id also commits to the sort order of its entry names (§3.2). A
+verifier can then prove that a name occurs at most once in a tree from one
+entry proof, even when the tree's author is hostile (§5.8).
+
 A repository stores objects under this scheme only. A store that does not
 declare it is rejected. See §7.
 
 ## 1. Primitive
 
 The Merkle primitive is a **stateless Binary Merkle Tree** built with the
-canonical `BLAKE3` hasher, identical in construction to
-`commonware_storage::bmt` (the Commonware house primitive; kit vendors
-the identical construction over the `blake3` crate so object identity has
-no `std`/`zstd` dependency and compiles to `wasm32` &mdash; a native test
-cross-verifies the two roots byte-for-byte).
+canonical `BLAKE3` hasher. For `ChunkedBlob` it is identical in
+construction to `commonware_storage::bmt` (the Commonware house primitive;
+kit implements the same construction over the `blake3` crate so object
+identity has no `std`/`zstd` dependency and compiles to `wasm32` &mdash; a
+native test cross-verifies the two roots byte-for-byte). `Tree` uses the
+same construction with one change: each two-child parent also commits to
+a separator name (§3.2).
 
 BMT is chosen over the MMR family because an object's child set is **fixed
 and known up front**, so the append-only / range-proof properties of an
@@ -47,7 +53,8 @@ Given an ordered list of **leaf digests** `L[0..N]`:
    An empty list (`N = 0`) starts from a single node `BLAKE3("")`.
 2. **Fold** level by level: each parent is `BLAKE3(left ‖ right)`; if a
    level has an odd node count, the last node is duplicated
-   (`BLAKE3(left ‖ left)`).
+   (`BLAKE3(left ‖ left)`). A `Tree` replaces the two-child parent with
+   the keyed parent of §3.2; the duplicated last node is unchanged.
 3. **Finalize**: `tree_root = BLAKE3(be32(N) ‖ level0_or_folded_root)`.
    Binding `N` defeats the odd-node-duplication malleability (a length-`N`
    tree can never collide with a length-`N+1` tree whose last leaf was
@@ -71,12 +78,17 @@ where `domain_digest(d, b) = BLAKE3(le16(len(d)) ‖ d ‖ b)` (SPEC-OBJECTS
 | ChunkedBlob | `b"kit.chunked\x00"` |
 | Tree        | `b"kit.tree\x00"`    |
 
-The outer domain wrap makes the id **type-distinct**. A bare BMT root over
-identical leaf streams would collide across types (the prologue type byte
-is not part of the root), so an empty `Tree` and an empty `ChunkedBlob`,
-or a 1-entry `Tree` and a 1-chunk `ChunkedBlob` carrying the same child
-hash, would otherwise share an id. The wrap costs one `BLAKE3` over 32
-bytes.
+The outer domain wrap makes the id **type-distinct**. The BMT has no
+leaf/node tag of the kind RFC 6962 uses: the position hash of §1.1 step 1
+and the finalization of step 3 both hash a 4-byte big-endian integer
+followed by a 32-byte digest, and `ChunkedBlob` leaves are author-chosen
+32-byte values. An interior node of one BMT can therefore equal the bare
+root of another. For example, a chunk id chosen as `BLAKE3(be32(0) ‖ L)`
+at position 1 makes a level-0 node equal to the bare root of the 1-leaf
+BMT over `[L]`. The leaf count bound at finalization fixes the shape of
+the tree a proof folds through, and the wrap ensures that a verifier
+never compares a folded value with an id of the wrong type or with a bare
+root (§5.4). The wrap costs one `BLAKE3` over 32 bytes.
 
 ## 3. Leaf schemes
 
@@ -112,6 +124,28 @@ L[i] = domain_digest(b"kit-tree-entry-v1", le32(len(name)) ‖ name ‖ u8(mode)
   inclusion proof attests the entire entry, not just "this child hash
   appears at position `i`".
 
+**Keyed fold.** A `Tree` folds its position-hashed leaves (§1.1 step 1)
+with a keyed parent in place of `BLAKE3(left ‖ right)`:
+
+```
+parent = BLAKE3(left ‖ right ‖ u8(len(sep)) ‖ sep)
+```
+
+where `sep` is the name of the first entry under `right`: for the parent
+at level `k` (level 0 = the position-hashed leaves) and index `j`, `sep`
+is `entries[(2j + 1) · 2^(k-1)].name`. A level with an odd node count
+duplicates its last node as `BLAKE3(left ‖ left)`, with no separator.
+Finalization (§1.1 step 3) and the wrap (§2) are unchanged. `len(sep)` is
+`1..=255` (SPEC-OBJECTS §4.1), so the keyed parent hashes at least 66
+bytes and never has the 64-byte input of a duplicated node.
+
+Because the entries are sorted (SPEC-OBJECTS §4), every entry name in the
+left subtree of a parent is below `sep`, and every name in the right
+subtree is at or above it. A tree entry proof (§5.8) carries the
+separator of each parent on its path, and the verifier checks the proven
+name against each one. This is what lets one proof show that a name
+occurs at most once.
+
 ## 4. Empty objects
 
 The empty `Tree` (`entries = []`, common) has the fixed id
@@ -124,6 +158,10 @@ never transcribed by hand. The empty `ChunkedBlob` (`N = 0`, a meta-only
 
 Status: **stable**. Wire bytes and sibling selection are pinned to
 §5.7's upstream train and to the golden vectors in §5.6.
+
+§5.1 to §5.7 define the proofs of `ChunkedBlob` chunks. A `Tree` entry is
+proven with the keyed proof of §5.8. Range and multi-leaf proofs exist
+only for `ChunkedBlob`.
 
 ### 5.1 Proof struct
 
@@ -266,7 +304,7 @@ for exactly this mistake.
 ### 5.5 Position semantics
 
 - **Tree**: position = the entry's index in the canonical order of §3.2,
-  `0..M`.
+  `0..M` (§5.8).
 - **ChunkedBlob**: position = chunk index **+ 1** (§3.1's offset);
   position 0 is the metadata leaf. It has a structurally valid BMT proof
   like any other leaf, but chunk-proof verification MUST reject position
@@ -282,20 +320,22 @@ with a `<name>.json` sidecar recording the object id to verify against,
 the proven position(s)/leaf data, the `max_items` decode bound, and the
 expected accept/reject outcome (with a reason for every reject).
 `MANIFEST.txt` pins every vector's BLAKE3 digest. The set covers: tree
-entry proofs (single-leaf, including the odd-trailing-node case at
-several tree sizes; a range proof; a multi-leaf proof; and the real
-`tree_single_file` object from `rust/tests/golden/objects/`), chunk
-proofs (single-leaf, a range proof, and the metadata-leaf rejection of
-§5.5, all against the real `chunked_blob_cs0_3chunks` object), and
-negative vectors for a wrong position, a swapped sibling, a truncated
-proof, an off-by-one `leaf_count`, an inner-root-vs-id confusion (§5.4),
-a trailing byte after the encoded proof, and a multi-leaf proof whose
-positions are not ascending.
+entry proofs (§5.8, including the odd-trailing-node case at several tree
+sizes and the real `tree_single_file` object from
+`rust/tests/golden/objects/`), chunk proofs (single-leaf, a range proof, a
+multi-leaf proof, and the metadata-leaf rejection of §5.5, all against
+the real `chunked_blob_cs0_3chunks` object), and negative vectors for a
+wrong position, a swapped sibling, a truncated proof, an off-by-one
+`leaf_count`, an inner-root-vs-id confusion (§5.4), a trailing byte after
+the encoded proof, a multi-leaf proof whose positions are not ascending,
+a tree separator that the proven name violates, and a tree that holds one
+name twice, where only one of the two entries verifies.
 
 ### 5.7 Compatibility with commonware
 
-This wire format and sibling-selection algorithm are, deliberately,
-byte-identical to the upstream Binary Merkle Tree proof construction that
+This applies to `ChunkedBlob` proofs only; the keyed `Tree` proof of §5.8
+has no upstream counterpart. This wire format and sibling-selection
+algorithm are, deliberately, byte-identical to the upstream Binary Merkle Tree proof construction that
 kit's BMT primitive already mirrors for root computation (§1), at the
 release train kit currently cross-verifies against (pinned in
 `rust/Cargo.toml`'s workspace dependencies). A verifier already built
@@ -311,6 +351,63 @@ cross-acceptance claim across many tree sizes and proof shapes
 both sides and that both sides reject a multi-leaf position list that is
 repeated or not ascending (§5.4).
 
+### 5.8 Tree entry proofs
+
+A `TreeProof` proves one entry of a `Tree`:
+
+```
+TreeProof {
+  leaf_count: u32,
+  steps:      [(sibling: Hash, sep: name)],   // bottom-up, one per two-child parent on the path
+}
+
+tree_proof_bytes = be32(leaf_count) ‖ varint(len(steps))
+                   ‖ for each step: sibling ‖ u8(len(sep)) ‖ sep
+```
+
+A decoder MUST reject a step count above `MAX_LEVELS` (32) before it
+reads any step, a separator of length 0, and trailing bytes. A verifier
+MUST reject a separator that is not a valid entry name (SPEC-OBJECTS
+§4.1).
+
+The steps follow the single-leaf sibling selection of §5.3: one step per
+level at which the proven node has a real sibling, and none at a level
+where it is the odd trailing node. `sep` is the separator of the parent
+that the step's sibling and the proven node share (§3.2), so it is the
+name of the first entry under the right child of that parent.
+
+**Verification.** Given a trusted tree id, an entry `e = (name, mode,
+object_hash)`, a position `p` and a `TreeProof`, a verifier MUST reject
+`p >= leaf_count`, position-hash the entry leaf (§3.2, §1.1 step 1), and
+fold bottom-up. At each level with `level_size > 1`:
+
+- `p` even and `p + 1 >= level_size`: the parent is `BLAKE3(c ‖ c)`, and
+  no step is consumed.
+- `p` even otherwise: consume the next step `(s, sep)`. Reject unless
+  `name < sep`. The parent is `BLAKE3(c ‖ s ‖ u8(len(sep)) ‖ sep)`.
+- `p` odd: consume the next step `(s, sep)`. Reject unless `sep <= name`.
+  The parent is `BLAKE3(s ‖ c ‖ u8(len(sep)) ‖ sep)`.
+
+Then halve `p` and `level_size`. Names compare as byte strings, the order
+of SPEC-OBJECTS §4. Every step MUST be consumed exactly once. Finalize as
+`BLAKE3(be32(leaf_count) ‖ c)`, wrap with `b"kit.tree\x00"` (§2) and
+compare with the trusted id.
+
+**At most one entry per name.** Suppose two proofs verify against the
+same tree id for the same name `n` at positions `p ≠ q`. Without a
+`BLAKE3` collision, both proofs fold through the same nodes, so they
+share the lowest common ancestor of `p` and `q` and its separator `sep`.
+One position lies in the left subtree of that ancestor, so its proof
+checked `n < sep`. The other lies in the right subtree, so its proof
+checked `sep <= n`. Both cannot hold. So a name has at most one
+verifiable position, and the entry at that position is fixed. This holds
+for any tree id, including one whose author built an unsorted tree with
+a repeated name: such a tree can hide an entry, but it cannot give one
+name two verifiable entries.
+
+A builder takes the separators from the sorted entries, so every entry of
+a canonical tree verifies. A `Tree` has no range or multi-leaf proof.
+
 ## 6. Invariants
 
 | Mutation | Detected because |
@@ -321,6 +418,8 @@ repeated or not ascending (§5.4).
 | ChunkedBlob `total_size`/`chunk_size` forged | the position-0 meta leaf changes |
 | Tree name/mode/hash boundary ambiguity | the `name_len` prefix in the entry leaf |
 | cross-type collision | the `TYPE_DOMAIN` wrap |
+| two entries of one Tree with the same name both proven | the keyed fold of §3.2 and the separator checks of §5.8 |
+| a Tree separator changed | the keyed parent changes, so the folded value no longer matches |
 | inclusion-proof sibling/position/leaf tampered | the folded value no longer matches (§5.4) |
 | inclusion-proof `leaf_count` tampered | the finalize step binds it, same as §1.1 step 3 |
 | inclusion proof checked against the wrong object id (bare root, or another type's id) | the `domain_digest(TYPE_DOMAIN, …)` wrap in the comparison (§5.4) |
@@ -338,3 +437,6 @@ The serialized **byte layout** of `Tree` and `ChunkedBlob` is given in
 SPEC-OBJECTS §4/§7. `schema_version` is `0x01`. A conformant store MUST
 refuse to open a repository whose on-disk format marker does not declare
 merkle addressing rather than silently mis-reading it (SPEC-OBJECTS §10).
+The marker value is `bmt-v2`: the keyed `Tree` fold of §3.2 gives a tree
+of two or more entries a different id from the unkeyed fold, so a store
+written under any other value is refused.

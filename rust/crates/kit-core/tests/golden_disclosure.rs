@@ -69,7 +69,7 @@ mod wire {
     ) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(b"KDPB");
-        out.push(2u8);
+        out.push(3u8);
         commit_id.write(&mut out);
         commit_bytes.write(&mut out);
         steps.write(&mut out);
@@ -175,7 +175,6 @@ fn walk_path(store: &ObjectStore, tree_hash: Hash, path: &[&[u8]]) -> (Vec<Step>
             name: name.to_vec(),
             mode: entry.mode,
             child_id: entry.object_hash,
-            inner_root: merkle::tree_inner_root(&tree),
             position,
             proof,
         });
@@ -288,7 +287,6 @@ fn disclosed_summary(d: &Disclosed) -> Value {
         "payload": payload,
         "signer_hex": to_hex(&d.signer),
         "signature_valid": d.signature_valid,
-        "step_inner_roots_hex": d.step_inner_roots.iter().map(to_hex).collect::<Vec<_>>(),
         "chunk_inner_root_hex": d.chunk_inner_root.as_ref().map(to_hex),
     })
 }
@@ -800,7 +798,7 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
-    // 10. version = 3 (unknown; v2 is the only supported value).
+    // 10. version = 4 (unknown; v3 is the only supported value).
     {
         let (steps, leaf) = walk_path(&f.store, f.tree_hash, &["shallow.txt".as_bytes()]);
         let bytes = canonical_bytes(&f.store, &leaf);
@@ -811,10 +809,10 @@ fn build_vectors() -> Vec<Vector> {
             &steps,
             &wire::object_payload(&bytes),
         );
-        bin[4] = 3;
+        bin[4] = 4;
         v.push(Vector {
             name: "neg_unsupported_version",
-            description: "The version byte is 3 instead of the only supported value, 2.",
+            description: "The version byte is 4 instead of the only supported value, 3.",
             bin,
             json: base_json(
                 &f.commit_id,
@@ -940,10 +938,76 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
-    // 14. Declared inner_root does not wrap to the parent id.
+    // 14. A chunk header's declared inner_root does not wrap to the leaf id.
+    // 15. It wraps correctly, but the proof folds to a different root.
+    {
+        let (steps, leaf) = walk_path(&f.store, f.tree_hash, &["chunked.bin".as_bytes()]);
+        let Object::ChunkedBlob(cb) = f.store.read_object(&leaf).unwrap() else {
+            panic!("expected ChunkedBlob");
+        };
+        let position = merkle::chunk_position(&cb, &cb.chunks[1]).unwrap();
+        let proof = merkle::build_chunks_multi_proof(&cb, [0, position]).unwrap();
+        let chunk_bytes = canonical_bytes(&f.store, &cb.chunks[1]);
+        let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
+        let mut forged_root = merkle::chunked_inner_root(&cb);
+        forged_root[0] ^= 0xFF;
+        let mut bad_proof = proof.clone();
+        bad_proof.siblings[0][0] ^= 0xFF;
+        for (name, description, inner_root, proof, reason) in [
+            (
+                "neg_inner_root_forged",
+                "The chunk payload's declared inner_root does not wrap to the ChunkedBlob id.",
+                forged_root,
+                &proof,
+                "declared inner root does not wrap to the leaf id",
+            ),
+            (
+                "neg_inner_root_fold_mismatch",
+                "The chunk payload's declared inner_root wraps to the ChunkedBlob id, but one \
+                 sibling of its proof is changed so the fold disagrees.",
+                merkle::chunked_inner_root(&cb),
+                &bad_proof,
+                "proof fold does not equal the declared inner root",
+            ),
+        ] {
+            let bin = wire::bundle(
+                &f.commit_id,
+                &commit_bytes,
+                &steps,
+                &wire::chunk_payload(
+                    cb.total_size,
+                    cb.chunk_size,
+                    1,
+                    &inner_root,
+                    proof,
+                    &chunk_bytes,
+                ),
+            );
+            v.push(Vector {
+                name,
+                description,
+                bin,
+                json: base_json(&f.commit_id, &chunked_path, "chunk(1)", false, Some(reason)),
+            });
+        }
+    }
+
+    // A tree step whose separator the proven name violates.
     {
         let (mut steps, leaf) = walk_path(&f.store, f.tree_hash, &[b"shallow.txt"]);
-        steps[0].inner_root[0] ^= 0xFF;
+        // `shallow.txt` is below the separator of a left turn and at or
+        // above that of a right turn. Swap the first separator for one on
+        // the wrong side: `zzz` on a right turn, `aaa` on a left turn.
+        let first = steps[0]
+            .proof
+            .steps
+            .first_mut()
+            .expect("the root tree has several entries");
+        first.separator = if first.separator.as_slice() <= b"shallow.txt".as_slice() {
+            b"zzz".to_vec()
+        } else {
+            b"aaa".to_vec()
+        };
         let bytes = canonical_bytes(&f.store, &leaf);
         let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
         let bin = wire::bundle(
@@ -953,52 +1017,93 @@ fn build_vectors() -> Vec<Vector> {
             &wire::object_payload(&bytes),
         );
         v.push(Vector {
-            name: "neg_inner_root_forged",
-            description: "The step's declared inner_root does not wrap to the parent Tree id.",
+            name: "neg_separator_violated",
+            description: "A step's keyed tree proof carries a separator that the step's name \
+                          violates (SPEC-MERKLE-OBJECTS §5.8).",
             bin,
             json: base_json(
                 &f.commit_id,
                 &[b"shallow.txt"],
                 "object",
                 false,
-                Some("declared inner root does not wrap to the parent id"),
+                Some("the step name is on the wrong side of a separator"),
             ),
         });
     }
 
-    // 15. Declared inner_root wraps correctly, but the proof was built
-    //     for a different tree, so the fold disagrees.
+    // A signed commit whose root tree holds `lib.rs` twice, with different
+    // contents. The left copy fails its separator check, so no bundle can
+    // disclose it.
     {
-        let (mut steps, leaf) = walk_path(&f.store, f.tree_hash, &[b"shallow.txt"]);
-        let (nested, _) = walk_path(
-            &f.store,
-            f.tree_hash,
-            &[
-                b"sub".as_slice(),
-                b"deep".as_slice(),
-                b"deep.txt".as_slice(),
-            ],
-        );
-        steps[0].proof = nested[1].proof.clone();
-        steps[0].position = nested[1].position;
-        let bytes = canonical_bytes(&f.store, &leaf);
-        let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
+        let honest = f
+            .store
+            .write(
+                &kit_core::serialize::serialize(&Object::Blob(kit_core::object::Blob {
+                    data: b"fn main() { honest(); }\n".to_vec(),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let backdoor = f
+            .store
+            .write(
+                &kit_core::serialize::serialize(&Object::Blob(kit_core::object::Blob {
+                    data: b"fn main() { backdoor(); }\n".to_vec(),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let hostile = kit_core::object::Tree {
+            entries: [backdoor, honest]
+                .into_iter()
+                .map(|object_hash| kit_core::object::TreeEntry {
+                    name: b"lib.rs".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash,
+                })
+                .collect(),
+        };
+        let tree_hash = merkle::compute_tree_id(&hostile);
+        let kp = kit_core::sign::KeyPair::from_seed([0x07; 32]);
+        let mut commit = kit_core::object::Commit {
+            tree_hash,
+            parents: vec![],
+            author: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"hostile tree with a repeated name".to_vec(),
+            timestamp: 1_726_300_000,
+            message_hash: kit_core::hash::ZERO,
+            content_digest: kit_core::hash::ZERO,
+            signature: [0u8; 64],
+        };
+        commit.signature = kit_core::sign::sign_commit(&commit, &kp).unwrap().0;
+        let commit_bytes = kit_core::serialize::serialize(&Object::Commit(commit)).unwrap();
+        let commit_id = hash(&commit_bytes);
+        let steps = vec![Step {
+            name: b"lib.rs".to_vec(),
+            mode: EntryMode::Blob,
+            child_id: backdoor,
+            position: 0,
+            proof: merkle::build_tree_entry_proof(&hostile, 0).unwrap(),
+        }];
         let bin = wire::bundle(
-            &f.commit_id,
+            &commit_id,
             &commit_bytes,
             &steps,
-            &wire::object_payload(&bytes),
+            &wire::object_payload(&canonical_bytes(&f.store, &backdoor)),
         );
         v.push(Vector {
-            name: "neg_inner_root_fold_mismatch",
-            description: "The declared inner_root wraps to the parent id, but the proof was built for a different tree so the fold disagrees.",
+            name: "neg_duplicate_name",
+            description: "A signed commit whose root tree holds lib.rs twice with different \
+                          contents, disclosed at the first copy. The keyed tree proof admits at \
+                          most one entry per name, so this bundle is rejected.",
             bin,
             json: base_json(
-                &f.commit_id,
-                &[b"shallow.txt"],
+                &commit_id,
+                &[b"lib.rs"],
                 "object",
                 false,
-                Some("proof fold does not equal the declared inner root"),
+                Some("the first copy of a repeated name is not below the separator"),
             ),
         });
     }
@@ -1015,9 +1120,24 @@ fn build_vectors() -> Vec<Vector> {
             &wire::object_payload(&bytes),
         );
         bin[4] = 1;
+        let mut v2 = bin.clone();
+        v2[4] = 2;
+        v.push(Vector {
+            name: "neg_bundle_version_2",
+            description: "The version byte is 2, whose tree steps carry an unkeyed proof; v3 is \
+                          the only supported value.",
+            bin: v2,
+            json: base_json(
+                &f.commit_id,
+                &[b"shallow.txt"],
+                "object",
+                false,
+                Some("unsupported bundle version 2"),
+            ),
+        });
         v.push(Vector {
             name: "neg_bundle_version_1",
-            description: "The version byte is 1; v2 is the only supported value.",
+            description: "The version byte is 1; v3 is the only supported value.",
             bin,
             json: base_json(
                 &f.commit_id,
@@ -1267,21 +1387,6 @@ fn verify_vector(name: &str, want_digest: &str) {
                     absolute_offset.map(i128::from),
                     want_abs.map(i128::from),
                     "{name}: absolute_offset mismatch"
-                );
-            }
-            let want_roots = want["step_inner_roots_hex"]
-                .as_array()
-                .unwrap_or_else(|| panic!("{name}: step_inner_roots_hex missing"));
-            assert_eq!(
-                want_roots.len(),
-                d.step_inner_roots.len(),
-                "{name}: step_inner_roots length"
-            );
-            for (got, want_hex) in d.step_inner_roots.iter().zip(want_roots) {
-                assert_eq!(
-                    to_hex(got),
-                    want_hex.as_str().unwrap(),
-                    "{name}: step_inner_roots mismatch"
                 );
             }
             match (

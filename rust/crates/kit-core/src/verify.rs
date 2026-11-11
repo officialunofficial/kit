@@ -54,12 +54,12 @@
 //!
 //! ```text
 //! magic   = "KDPB"            (4 raw bytes)
-//! version: u8 = 2
+//! version: u8 = 3
 //! commit_id: [u8; 32]
 //! commit_bytes: Vec<u8>        <= 4 MiB
 //! steps: Vec<Step>             <= MAX_TREE_DEPTH (128), root first
 //!   Step { name: Vec<u8> (1..=255), mode: u8, child_id: [u8; 32],
-//!          inner_root: [u8; 32], position: u32, proof: Proof (max_items = 1) }
+//!          position: u32, proof: TreeProof }
 //! payload_kind: u8
 //!   0 Object { bytes: Vec<u8> <= MAX_RAW_OBJECT_SIZE }
 //!   1 Chunk  { total_size: u64, chunk_size: u32, index: u32,
@@ -99,7 +99,7 @@ use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRange
 
 use crate::hash::{HASH_LEN, Hash, hash};
 use crate::list_decode::read_list;
-use crate::merkle::{self, MerkleError, ObjectKind, Proof};
+use crate::merkle::{self, MerkleError, ObjectKind, Proof, TreeProof};
 use crate::object::{EntryMode, KitError, MAGIC, Object, ObjectType, SCHEMA_VERSION, TreeEntry};
 use crate::sign::{verify_commit, verify_remix};
 use crate::store::MAX_TREE_DEPTH;
@@ -111,9 +111,10 @@ pub const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Fixed 4-byte magic at the start of every disclosure bundle.
 const BUNDLE_MAGIC: &[u8; 4] = b"KDPB";
-/// Current (and only) bundle version byte. v1 is rejected with
-/// [`VerifyError::UnsupportedBundleVersion`] (SPEC-DISCLOSURE v2).
-const BUNDLE_VERSION: u8 = 2;
+/// Current (and only) bundle version byte. v1 and v2 are rejected with
+/// [`VerifyError::UnsupportedBundleVersion`]: their tree steps carry an
+/// unkeyed proof that cannot show a name occurs once in its tree.
+const BUNDLE_VERSION: u8 = 3;
 /// Cap on `commit_bytes` — comfortably above any real commit (~250 B) or
 /// remix (larger, due to `sources`), far below `MAX_RAW_OBJECT_SIZE`.
 const MAX_COMMIT_BYTES: usize = 4 * 1024 * 1024;
@@ -137,16 +138,15 @@ pub enum VerifyError {
     /// magic bytes are not `"KDPB"`.
     #[error("disclosure bundle magic is not \"KDPB\"")]
     BadMagic,
-    /// The bundle's version byte is not `2`. A version byte of `1` is
-    /// this error with payload `1`.
-    #[error("disclosure bundle version {0} is not supported (v2 only)")]
+    /// The bundle's version byte is not `3`. A version byte of `1` or `2`
+    /// is this error with that payload.
+    #[error("disclosure bundle version {0} is not supported (v3 only)")]
     UnsupportedBundleVersion(u8),
-    /// A step's or chunk header's declared `inner_root` does not wrap to
-    /// the expected object id (`Tree` domain for steps, `ChunkedBlob` domain
-    /// for chunk headers). Checked before the field is used for anything.
+    /// A chunk header's declared `inner_root` does not wrap to the expected
+    /// `ChunkedBlob` id. Checked before the field is used for anything.
     #[error("declared inner root does not wrap to the expected object id")]
     InnerRootMismatch {
-        /// The parent `Tree` id (steps) or `ChunkedBlob` leaf id (chunk headers).
+        /// The `ChunkedBlob` leaf id.
         expected: Hash,
         /// The prover-supplied inner root that failed the wrap check.
         inner_root: Hash,
@@ -359,7 +359,7 @@ pub mod span;
 
 /// One authenticated hop of a path: the entry `name`/`mode` proven at
 /// `position` under its parent (a commit's `tree_hash`, or the previous
-/// step's `child_id`), via a single-leaf [`Proof`].
+/// step's `child_id`), via a keyed [`TreeProof`].
 ///
 /// This is both the in-memory type [`verify_path`] takes and the wire
 /// representation inside a disclosure bundle (§ module docs) — there is
@@ -372,16 +372,12 @@ pub struct Step {
     pub mode: EntryMode,
     /// The entry's child object id.
     pub child_id: Hash,
-    /// Bare BMT root of the **parent** Tree this step's proof is verified
-    /// against (the tree whose id is the commit's `tree_hash` for step 0,
-    /// or the previous step's `child_id`). Wrap-checked against that id
-    /// before use; never a second trust anchor.
-    pub inner_root: Hash,
     /// The entry's BMT position (= index) within its parent `Tree`.
     pub position: u32,
-    /// Single-leaf inclusion proof (`max_items = 1`) that `(name, mode,
-    /// child_id)` is the entry at `position` in the parent tree.
-    pub proof: Proof,
+    /// Keyed proof that `(name, mode, child_id)` is the entry at
+    /// `position` in the parent tree, and the only verifiable entry with
+    /// this name (SPEC-MERKLE-OBJECTS §5.8).
+    pub proof: TreeProof,
 }
 
 /// The result of walking and verifying a path from a commit's
@@ -425,11 +421,6 @@ pub struct Disclosed {
     /// Whether the commit/remix's embedded signature verifies. See
     /// [`PathVerified::signature_valid`].
     pub signature_valid: bool,
-    /// Authenticated bare BMT inner root of each step's parent Tree,
-    /// root first. Empty when `steps` is empty (root-tree disclosure).
-    /// Each value has been wrap-checked against the parent id and
-    /// cross-checked against the proof fold.
-    pub step_inner_roots: Vec<Hash>,
     /// Authenticated bare BMT inner root of the leaf `ChunkedBlob`, when
     /// the payload is `Chunk` or a `Range` over a chunk. `None` for an
     /// `Object` payload or a `Range` over a plain `Blob`.
@@ -661,11 +652,7 @@ fn verify_path_with_context(
             mode: step.mode,
             object_hash: step.child_id,
         };
-        check_inner_root_wrap(ObjectKind::Tree, &expected_parent, &step.inner_root)?;
-        let folded = step
-            .proof
-            .reconstruct_element_root(&merkle::tree_entry_leaf(&entry), step.position)?;
-        check_inner_root_fold(folded, &step.inner_root, &expected_parent, ObjectKind::Tree)?;
+        merkle::verify_tree_entry(&expected_parent, &entry, step.position, &step.proof)?;
         path.push((step.name.clone(), step.mode));
         expected_parent = step.child_id;
         leaf_id = step.child_id;
@@ -960,7 +947,6 @@ impl Write for Step {
         self.name.as_slice().write(writer);
         (self.mode as u8).write(writer);
         self.child_id.write(writer);
-        self.inner_root.write(writer);
         self.position.write(writer);
         self.proof.write(writer);
     }
@@ -971,7 +957,6 @@ impl EncodeSize for Step {
         self.name.as_slice().encode_size()
             + 1
             + self.child_id.encode_size()
-            + self.inner_root.encode_size()
             + self.position.encode_size()
             + self.proof.encode_size()
     }
@@ -985,14 +970,12 @@ impl Read for Step {
         let mode_byte = u8::read(reader)?;
         let mode = EntryMode::from_u8(mode_byte).map_err(|_| CodecError::InvalidEnum(mode_byte))?;
         let child_id = Hash::read(reader)?;
-        let inner_root = Hash::read(reader)?;
         let position = u32::read(reader)?;
-        let proof = Proof::read_cfg(reader, &1usize)?;
+        let proof = TreeProof::read(reader)?;
         Ok(Self {
             name,
             mode,
             child_id,
-            inner_root,
             position,
             proof,
         })
@@ -1292,7 +1275,6 @@ pub fn verify_disclosure(commit_id: &Hash, bundle: &[u8]) -> Result<Disclosed, V
         return Err(VerifyError::CommitIdMismatch);
     }
     let verified = verify_path(commit_id, &commit_bytes, &steps)?;
-    let step_inner_roots: Vec<Hash> = steps.iter().map(|s| s.inner_root).collect();
     let chunk_inner_root = match &payload {
         PayloadWire::Chunk { inner_root, .. } => Some(*inner_root),
         PayloadWire::Range {
@@ -1309,7 +1291,6 @@ pub fn verify_disclosure(commit_id: &Hash, bundle: &[u8]) -> Result<Disclosed, V
         payload,
         signer: verified.signer,
         signature_valid: verified.signature_valid,
-        step_inner_roots,
         chunk_inner_root,
     })
 }
@@ -1326,7 +1307,6 @@ pub(crate) fn verify_disclosure_reusing_context(
         return Err(VerifyError::CommitIdMismatch);
     }
     let verified = verify_path_reusing_context(commit_id, &commit_bytes, &steps, context)?;
-    let step_inner_roots = steps.iter().map(|s| s.inner_root).collect();
     let chunk_inner_root = match &payload {
         PayloadWire::Chunk { inner_root, .. } => Some(*inner_root),
         PayloadWire::Range {
@@ -1343,7 +1323,6 @@ pub(crate) fn verify_disclosure_reusing_context(
         payload,
         signer: verified.signer,
         signature_valid: verified.signature_valid,
-        step_inner_roots,
         chunk_inner_root,
     })
 }
@@ -1468,7 +1447,6 @@ fn build_prefix<S: crate::store::ObjectSource + ?Sized>(
             name: name.to_vec(),
             mode: entry.mode,
             child_id: entry.object_hash,
-            inner_root: merkle::tree_inner_root(&tree),
             position,
             proof,
         });
@@ -2396,13 +2374,33 @@ mod tests {
         ));
     }
 
+    fn steps_of(bundle: &[u8]) -> Vec<Step> {
+        decode_disclosure(bundle).unwrap().2
+    }
+
+    fn commit_bytes_of(bundle: &[u8]) -> Vec<u8> {
+        decode_disclosure(bundle).unwrap().1
+    }
+
+    fn chunk_bundle(f: &Fixture) -> (Hash, Vec<u8>, Vec<Step>, PayloadWire) {
+        let bundle = build_disclosure(
+            &f.store,
+            &f.commit_id,
+            &[b"chunked.bin"],
+            Selector::Chunk(1),
+        )
+        .unwrap();
+        decode_disclosure(&bundle).unwrap()
+    }
+
     #[test]
     fn inner_root_forged_is_rejected() {
         let f = build_fixture();
-        let bundle =
-            build_disclosure(&f.store, &f.commit_id, &[b"shallow.txt"], Selector::Object).unwrap();
-        let (commit_id, commit_bytes, mut steps, payload) = decode_disclosure(&bundle).unwrap();
-        steps[0].inner_root[0] ^= 0xFF;
+        let (commit_id, commit_bytes, steps, mut payload) = chunk_bundle(&f);
+        let PayloadWire::Chunk { inner_root, .. } = &mut payload else {
+            panic!("expected Chunk payload");
+        };
+        inner_root[0] ^= 0xFF;
         let tampered = encode_disclosure(&commit_id, &commit_bytes, &steps, &payload);
         assert!(matches!(
             verify_disclosure(&f.commit_id, &tampered),
@@ -2413,25 +2411,41 @@ mod tests {
     #[test]
     fn inner_root_fold_mismatch_is_rejected() {
         let f = build_fixture();
-        let nested = build_disclosure(
-            &f.store,
-            &f.commit_id,
-            &[b"sub", b"deep", b"deep.txt"],
-            Selector::Object,
-        )
-        .unwrap();
-        let shallow =
-            build_disclosure(&f.store, &f.commit_id, &[b"shallow.txt"], Selector::Object).unwrap();
-        let (commit_id, commit_bytes, mut steps, payload) = decode_disclosure(&shallow).unwrap();
-        let (_, _, nested_steps, _) = decode_disclosure(&nested).unwrap();
-        // Keep the wrap-correct inner_root of the root tree, but swap in
-        // a proof built against a different tree so the fold disagrees.
-        steps[0].proof = nested_steps[1].proof.clone();
-        steps[0].position = nested_steps[1].position;
+        let (commit_id, commit_bytes, steps, mut payload) = chunk_bundle(&f);
+        let PayloadWire::Chunk { proof, .. } = &mut payload else {
+            panic!("expected Chunk payload");
+        };
+        // Keep the wrap-correct inner root, but change one sibling so the
+        // proof folds to a different root.
+        proof.siblings[0][0] ^= 0xFF;
         let tampered = encode_disclosure(&commit_id, &commit_bytes, &steps, &payload);
         assert!(matches!(
             verify_disclosure(&f.commit_id, &tampered),
             Err(VerifyError::InnerRootFoldMismatch)
+        ));
+    }
+
+    #[test]
+    fn tree_step_separator_tamper_is_rejected() {
+        let f = build_fixture();
+        let bundle =
+            build_disclosure(&f.store, &f.commit_id, &[b"shallow.txt"], Selector::Object).unwrap();
+        let (commit_id, commit_bytes, mut steps, payload) = decode_disclosure(&bundle).unwrap();
+        assert!(
+            !steps[0].proof.steps.is_empty(),
+            "the root tree has several entries"
+        );
+        // A valid name that the step's name still respects, so only the
+        // keyed fold can catch it.
+        for step in &mut steps[0].proof.steps {
+            step.separator.push(b'x');
+        }
+        let tampered = encode_disclosure(&commit_id, &commit_bytes, &steps, &payload);
+        assert!(matches!(
+            verify_disclosure(&f.commit_id, &tampered),
+            Err(VerifyError::Merkle(
+                MerkleError::VerificationFailed | MerkleError::SeparatorOrder
+            ))
         ));
     }
 
@@ -2727,13 +2741,19 @@ mod tests {
         };
         let path: [&[u8]; 3] = [b"sub", b"deep", b"deep.txt"];
         let bundle = build_disclosure_from(&liar, &f.commit_id, &path, Selector::Object).unwrap();
-        // Step 0 (root → sub) is honest; step 1 carries the forged tree's
-        // inner root, which does not wrap to `sub`'s real id.
-        let err = verify_disclosure(&f.commit_id, &bundle).unwrap_err();
-        let VerifyError::InnerRootMismatch { expected, .. } = err else {
-            panic!("expected InnerRootMismatch at the `sub` step, got {err:?}");
-        };
-        assert_eq!(expected, sub_id);
+        // Step 0 (root → sub) is honest; step 1's proof was built over
+        // the forged tree, so it does not fold to `sub`'s real id.
+        let path_err =
+            verify_path(&f.commit_id, &commit_bytes_of(&bundle), &steps_of(&bundle)).unwrap_err();
+        assert!(
+            matches!(
+                path_err,
+                VerifyError::Merkle(MerkleError::VerificationFailed)
+            ),
+            "expected a failed fold at the `sub` step, got {path_err:?}"
+        );
+        let honest_prefix = steps_of(&bundle)[..1].to_vec();
+        verify_path(&f.commit_id, &commit_bytes_of(&bundle), &honest_prefix).unwrap();
     }
 
     #[test]

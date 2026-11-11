@@ -1,0 +1,14 @@
+{
+  "bin": "neg_separator_violated.bin",
+  "blake3": "2c8f202ce897256e4515b1a6d8527f2638a59dfbd20fc89c6534abfb3ee877b1",
+  "commit_id_hex": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
+  "description": "A step's keyed tree proof carries a separator that the step's name violates (SPEC-MERKLE-OBJECTS §5.8).",
+  "expect": "reject",
+  "name": "neg_separator_violated",
+  "path_hex": [
+    "7368616c6c6f772e747874"
+  ],
+  "reject_reason": "the step name is on the wrong side of a separator",
+  "selector": "object",
+  "size": 519
+}

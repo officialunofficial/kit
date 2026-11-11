@@ -12,10 +12,13 @@
 #   * compares the proof file with the size and BLAKE3 in its sidecar and in
 #     MANIFEST.txt;
 #   * decodes the proof strictly: big-endian leaf count, minimal varint
-#     sibling count, the max_items * 32 bound and no trailing byte;
-#   * rebuilds the leaves from the sidecar, folds the proof level by level
-#     with the sibling selection of section 5.3, and compares the wrapped
-#     result with the object id;
+#     sibling or step count, the bound on that count and no trailing byte;
+#   * for a chunk proof, rebuilds the leaves from the sidecar, folds the
+#     proof level by level with the sibling selection of section 5.3, and
+#     compares the wrapped result with the object id;
+#   * for a tree entry proof, folds the keyed proof of section 5.8, checks
+#     the entry name against every separator, and compares the wrapped
+#     result with the tree id;
 #   * checks that the outcome (accept or reject) matches the sidecar.
 #
 # Usage:
@@ -100,6 +103,82 @@ def fold(leaf_count, siblings, leaves):
     return blake3(struct.pack(">I", leaf_count) + nodes[0])
 
 
+def read_varint(r):
+    count, shift = 0, 0
+    while True:
+        b = r.u8()
+        count |= (b & 0x7F) << shift
+        if not b & 0x80:
+            if b == 0 and shift > 0:
+                raise Reject("non-minimal varint")
+            return count
+        shift += 7
+        if shift > 28:
+            raise Reject("varint too long")
+
+
+def read_tree_proof(r):
+    """SPEC-MERKLE-OBJECTS section 5.8, from an open reader."""
+    leaf_count = struct.unpack(">I", r.take(4))[0]
+    count = read_varint(r)
+    if count > MAX_LEVELS:
+        raise Reject("tree proof step count over the bound")
+    steps = []
+    for _ in range(count):
+        sibling = r.take(32)
+        n = r.u8()
+        if n == 0:
+            raise Reject("empty separator")
+        steps.append((sibling, r.take(n)))
+    return leaf_count, steps
+
+
+def decode_tree_proof(data):
+    try:
+        r = o.Reader(data)
+        proof = read_tree_proof(r)
+        r.end()
+    except ValueError as e:
+        raise Reject(f"decode: {e}")
+    return proof
+
+
+def verify_tree_entry(proof, name, mode, object_hash, position, tree_id):
+    """SPEC-MERKLE-OBJECTS section 5.8."""
+    leaf_count, steps = proof
+    if position >= leaf_count:
+        raise Reject("position out of range")
+    c = blake3(struct.pack(">I", position) + o.tree_entry_leaf(name, mode, object_hash))
+    size, used = leaf_count, 0
+    while size > 1:
+        if position % 2 == 0 and position + 1 >= size:
+            c = blake3(c + c)
+        else:
+            if used >= len(steps):
+                raise Reject("too few steps")
+            sibling, sep = steps[used]
+            used += 1
+            try:
+                o.check_entry_name(sep)
+            except ValueError as e:
+                raise Reject(f"separator: {e}")
+            if position % 2 == 0:
+                if not name < sep:
+                    raise Reject("name is not below the separator")
+                c = o.tree_parent(c, sibling, sep)
+            else:
+                if not sep <= name:
+                    raise Reject("name is below the separator")
+                c = o.tree_parent(sibling, c, sep)
+        position //= 2
+        size = (size + 1) // 2
+    if used != len(steps):
+        raise Reject("unused steps")
+    root = blake3(struct.pack(">I", leaf_count) + c)
+    if domain_digest(o.TREE_DOMAIN, root) != tree_id:
+        raise Reject("folded value differs from the tree id")
+
+
 def verify(leaf_count, siblings, leaves, domain, object_id):
     """Fold the leaves, wrap the result and compare it with the object id."""
     folded = fold(leaf_count, siblings, leaves)
@@ -108,20 +187,9 @@ def verify(leaf_count, siblings, leaves, domain, object_id):
 
 
 def leaves_for(meta):
-    """Return (domain, {position: leaf}) built from the sidecar."""
-    if meta["kind"] == "tree_entry":
-        entries = [
-            (bytes.fromhex(e["name_hex"]), e["mode"], bytes.fromhex(e["object_hash_hex"]))
-            for e in meta["entries"]
-        ]
-        leaves = [
-            domain_digest(b"kit-tree-entry-v1", struct.pack("<I", len(n)) + n + bytes([m]) + h)
-            for n, m, h in entries
-        ]
-        domain, base = o.TREE_DOMAIN, 0
-    else:
-        leaves = [bytes.fromhex(h) for h in meta["chunk_hashes_hex"]]
-        domain, base = o.CHUNKED_DOMAIN, 1
+    """Return (domain, {position: leaf}) built from a chunk sidecar."""
+    leaves = [bytes.fromhex(h) for h in meta["chunk_hashes_hex"]]
+    domain = o.CHUNKED_DOMAIN
     kind = meta["proof_kind"]
     if kind == "single":
         positions = [meta["position"]]
@@ -142,9 +210,20 @@ def check_vector(root, name):
     meta = json.loads(o.read(root, "proofs", name + ".json"))
     data = o.read(root, "proofs", meta["bin"])
     try:
-        leaf_count, siblings = decode_proof(data, meta["max_items"])
-        domain, leaves = leaves_for(meta)
-        verify(leaf_count, siblings, leaves, domain, bytes.fromhex(meta["object_id_hex"]))
+        if meta["kind"] == "tree_entry":
+            e = meta["entries"][0]
+            verify_tree_entry(
+                decode_tree_proof(data),
+                bytes.fromhex(e["name_hex"]),
+                e["mode"],
+                bytes.fromhex(e["object_hash_hex"]),
+                meta["position"],
+                bytes.fromhex(meta["object_id_hex"]),
+            )
+        else:
+            leaf_count, siblings = decode_proof(data, meta["max_items"])
+            domain, leaves = leaves_for(meta)
+            verify(leaf_count, siblings, leaves, domain, bytes.fromhex(meta["object_id_hex"]))
         outcome = "accept"
     except Reject as e:
         outcome = "reject"

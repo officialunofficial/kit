@@ -1,7 +1,7 @@
 {
   "bin": "chunked_range_with_offsets.bin",
-  "blake3": "3f6ece5d7cfc04db23c7d52ed95fc4df262a7b32b46ba62b0f4279c5e2f41321",
-  "commit_id_hex": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "c23c70d6d57fbffbe3ad85b83a9b3a60899d13590ec1fe2e9f5e98667e2d535d",
+  "commit_id_hex": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
   "description": "The same range, with a complete chunk_len_proofs set proving the absolute file offset.",
   "disclosed": {
     "chunk_inner_root_hex": "6f6490590242634f410607739fc5ee7015acec7b2e1963fcf4ef6709f6e42e91",
@@ -27,10 +27,7 @@
     },
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
-    "step_inner_roots_hex": [
-      "0554f091edd7efe582ee9e5dec12a091734f8a002dd9387d01299b675ce157d2"
-    ],
-    "tree_hash_hex": "a7e483c901dfea906d9ff88336269ddd64fa6e04aa872b2228e9e79d14588b3b"
+    "tree_hash_hex": "76f3877b22ac07ae2de60f93a2983c49a86a03c69b66a3b02108512492d9291f"
   },
   "expect": "accept",
   "name": "chunked_range_with_offsets",
@@ -38,5 +35,5 @@
     "6368756e6b65642e62696e"
   ],
   "selector": "range(offset=29531,len=64,with_offsets=true)",
-  "size": 3610
+  "size": 3600
 }

@@ -1,12 +1,12 @@
 {
   "bin": "neg_too_many_steps.bin",
-  "blake3": "93325028e77d17e64e5bdf4e9aa1c2540e424a38bd68057b030455d6a4d71508",
-  "commit_id_hex": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "45be7f8c7cc032d0f3c2e9ea151241322e752dd9d3e31cc75c758020c9669df2",
+  "commit_id_hex": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
   "description": "129 steps, one over MAX_TREE_DEPTH (128).",
   "expect": "reject",
   "name": "neg_too_many_steps",
   "path_hex": [],
   "reject_reason": "steps.len() > MAX_TREE_DEPTH",
   "selector": "object",
-  "size": 23830
+  "size": 23056
 }

@@ -497,9 +497,9 @@ independent check `scripts/golden/proofs_ref.py`.
 
 **Always:** every check `kit_core::verify` performs — a path step, a
 chunk, a byte range — is stated against an authenticated object id
-(a commit id, a step's `child_id`, a `ChunkedBlob`/chunk id). A v2
-bundle carries a bare inner root on each step and chunk header; that
-field is wrap-checked against the trusted id (`domain_digest(TYPE_DOMAIN,
+(a commit id, a step's `child_id`, a `ChunkedBlob`/chunk id). A
+bundle carries a bare inner root on each chunk header; that field is
+wrap-checked against the trusted id (`domain_digest(TYPE_DOMAIN,
 inner_root) == expected_id`) **before** it is used for anything, then
 cross-checked against the proof fold. No verification step ever treats
 a bare inner root, a caller-claimed path string, or an unauthenticated
@@ -524,30 +524,57 @@ the claimed location.
 wrong-position proof, a forged `ChunkedBlob` meta pair) — SPEC-DISCLOSURE
 §4 states this as a numbered MUST at every dispatch point.
 
-## Declared disclosure inner roots wrap and match the proof fold
+## One path has one disclosed content per commit
 
-**Always:** for every v2 disclosure `Step` and chunk header,
-`domain_digest(TYPE_DOMAIN, inner_root)` equals the parent Tree id or
-ChunkedBlob leaf id, and the proof folds to exactly that declared
-`inner_root`. Version byte `1` is rejected.
+**Always:** a tree entry proof verifies only if the entry's name is below
+the separator of every parent where its path goes left and at or above
+it where its path goes right (SPEC-MERKLE-OBJECTS §5.8). So a name has at
+most one verifiable entry in a tree, and two accepted disclosure bundles
+for one commit id and one path return the same leaf id, even when the
+commit's author built an unsorted tree that repeats the name.
+
+**Because:** a single-entry proof cannot show that the rest of a tree is
+sorted. Without separators committed in the tree id, a hostile signer
+could put one name in a tree twice with different contents, and give two
+parties two different files at the same path under one signed commit.
+
+**If violated:** disclosure would bind a position, not a path. Two
+verifiers who asked for the same path under the same trusted commit id
+could accept different bytes.
+
+**Enforced by:** `merkle::tests::a_repeated_name_has_at_most_one_verifiable_entry`,
+the property test `merkle::tests::no_name_has_two_verifiable_entries`,
+the vectors `rust/tests/golden/proofs/neg_duplicate_name.*`,
+`neg_separator_violated.*` and `rust/tests/golden/disclosure/neg_duplicate_name.*`,
+`neg_separator_violated.*`, and the independent checks
+`scripts/golden/proofs_ref.py` and `scripts/golden/disclosure_ref.py`.
+
+## Declared chunk inner roots wrap and match the proof fold
+
+**Always:** for every disclosure chunk header,
+`domain_digest(b"kit.chunked\x00", inner_root)` equals the ChunkedBlob
+leaf id, and the proof folds to exactly that declared `inner_root`.
+Bundle versions `1` and `2` are rejected.
 
 **Because:** a commonware-native verifier runs upstream
 `verify_element_inclusion` / `verify_multi_inclusion` against the
 declared root. Without wrap-check-first, a prover could substitute any
-tree whose proof verifies against a forged root. Without the fold
-cross-check, a bundle could declare a wrap-correct root while attaching
-a proof built for a different tree.
+chunked file whose proof verifies against a forged root. Without the
+fold cross-check, a bundle could declare a wrap-correct root while
+attaching a proof built for a different chunked file.
 
 **If violated:** an external verifier that trusted the field would
-accept content from the wrong tree, or kit and a commonware-native
-verifier would disagree on the same bundle.
+accept content from the wrong chunked file, or kit and a
+commonware-native verifier would disagree on the same bundle.
 
 **Enforced by:** `rust/crates/kit-core/tests/native_commonware_disclosure.rs`
 (every accept golden verified with only bundle fields, upstream
-`commonware_storage::bmt::Proof`, and `hash::domain_digest`; the three
-v2 negatives fail at wrap or upstream verify) and
+`commonware_storage::bmt::Proof` for chunk headers, a keyed tree fold
+written from the spec, and `hash::domain_digest`; the negatives fail at
+wrap, upstream verify or version) and
 `rust/tests/golden/disclosure/neg_inner_root_forged.*`,
-`neg_inner_root_fold_mismatch.*`, `neg_bundle_version_1.*`.
+`neg_inner_root_fold_mismatch.*`, `neg_bundle_version_1.*`,
+`neg_bundle_version_2.*`.
 
 ## Disclosed absolute offsets require a complete length-proof set
 

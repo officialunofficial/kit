@@ -1,14 +1,14 @@
 {
   "bin": "neg_inner_root_forged.bin",
-  "blake3": "dbe133709fda027922405856cb43c6f70eb50e0761d72392265760b34b8c3c30",
-  "commit_id_hex": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
-  "description": "The step's declared inner_root does not wrap to the parent Tree id.",
+  "blake3": "2b412f3ee3638fec9bdb887e0f4734eefdf88d68c70b8e405469f38c4db492ff",
+  "commit_id_hex": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
+  "description": "The chunk payload's declared inner_root does not wrap to the ChunkedBlob id.",
   "expect": "reject",
   "name": "neg_inner_root_forged",
   "path_hex": [
-    "7368616c6c6f772e747874"
+    "6368756e6b65642e62696e"
   ],
-  "reject_reason": "declared inner root does not wrap to the parent id",
-  "selector": "object",
-  "size": 533
+  "reject_reason": "declared inner root does not wrap to the leaf id",
+  "selector": "chunk(1)",
+  "size": 19248
 }

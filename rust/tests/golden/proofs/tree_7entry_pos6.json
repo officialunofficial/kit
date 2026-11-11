@@ -1,6 +1,6 @@
 {
   "bin": "tree_7entry_pos6.bin",
-  "blake3": "9f72ee5921818724864dceaf4ca42270f47b51431d447beb273249545aae0a6e",
+  "blake3": "2d16c26cbdcac16fc1e42bc8dd5fc7a6532bf4595d40650a7a663cea1b296485",
   "description": "7-entry tree, single-leaf proof at the last (odd trailing) position.",
   "entries": [
     {
@@ -13,8 +13,8 @@
   "kind": "tree_entry",
   "max_items": 1,
   "name": "tree_7entry_pos6",
-  "object_id_hex": "2094127e00f529c2b1eeaf253b88380425536c72d49de3c6e081bbe4b6f1db37",
+  "object_id_hex": "c8f6929cde7c4aee1482bee9e51f3915a0e9f2d9e8ef5ff2c3c4436b05ee7bfc",
   "position": 6,
   "proof_kind": "single",
-  "size": 69
+  "size": 73
 }

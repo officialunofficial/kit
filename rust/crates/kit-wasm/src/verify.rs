@@ -12,7 +12,7 @@ use wasm_bindgen::prelude::*;
 
 use kit_core::ClosureMode;
 use kit_core::hash::{hash, to_hex};
-use kit_core::merkle::{self, MerkleError, ObjectKind, Proof};
+use kit_core::merkle::{self, MerkleError, ObjectKind, Proof, TreeProof};
 use kit_core::object::{Blob, ChunkedBlob, EntryMode, Object, TreeEntry};
 use kit_core::serialize::serialize;
 use kit_core::verify::{
@@ -167,7 +167,6 @@ fn disclosed_to_json(d: &Disclosed) -> Result<String, String> {
         "signer": to_hex(&d.signer),
         "signature_valid": d.signature_valid,
         "payload": payload_json(&d.payload),
-        "step_inner_roots": d.step_inner_roots.iter().map(to_hex).collect::<Vec<_>>(),
         "chunk_inner_root": d.chunk_inner_root.as_ref().map(to_hex),
     }))
     .map_err(|e| format!("disclosed JSON: {e}"))
@@ -360,7 +359,7 @@ fn parse_tree_entry(entry_json: &str) -> Result<TreeEntry, String> {
 fn merkle_bool(r: Result<(), MerkleError>) -> Result<bool, String> {
     match r {
         Ok(()) => Ok(true),
-        Err(MerkleError::VerificationFailed) => Ok(false),
+        Err(MerkleError::VerificationFailed | MerkleError::SeparatorOrder) => Ok(false),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -383,7 +382,7 @@ fn verify_disclosure_inner(commit_id_hex: &str, bundle: &[u8]) -> Result<Disclos
 /// Verify a disclosure bundle against a trusted commit id.
 ///
 /// Returns JSON `{ commit_id, tree_hash, path, leaf_id, signer,
-/// signature_valid, payload, step_inner_roots, chunk_inner_root }`
+/// signature_valid, payload, chunk_inner_root }`
 /// **without** payload bytes. Call
 /// [`disclosure_payload_bytes`] for the verified bytes. Both functions
 /// re-verify; a caller that wants both should call this first and treat a
@@ -474,14 +473,16 @@ pub fn verify_closure_manifest(
 ///
 /// `entry_json` is `{ "name" | "name_hex", "mode", "object_hash" }`.
 /// `mode` matches [`crate::tree_encode`]: `blob` / `tree` / `symlink` /
-/// `exec`. `object_hash` is 64-char lowercase hex. Returns `Ok(false)`
-/// when the proof does not fold to `tree_id_hex`
-/// ([`MerkleError::VerificationFailed`]); `Err` on malformed input.
+/// `exec`. `object_hash` is 64-char lowercase hex. `proof` is a keyed
+/// tree proof (SPEC-MERKLE-OBJECTS §5.8). Returns `Ok(false)` when the
+/// proof does not fold to `tree_id_hex` or the entry's name is out of
+/// order with a separator ([`MerkleError::VerificationFailed`],
+/// [`MerkleError::SeparatorOrder`]); `Err` on malformed input.
 ///
 /// # Errors
 ///
 /// Malformed hex, JSON, or proof bytes, or any merkle error other than
-/// [`MerkleError::VerificationFailed`].
+/// those two.
 #[wasm_bindgen]
 pub fn verify_tree_entry(
     tree_id_hex: &str,
@@ -491,7 +492,7 @@ pub fn verify_tree_entry(
 ) -> Result<bool, String> {
     let tree_id = hash_hex(tree_id_hex)?;
     let entry = parse_tree_entry(entry_json)?;
-    let proof = Proof::decode(proof, 1).map_err(|e| e.to_string())?;
+    let proof = TreeProof::decode(proof).map_err(|e| e.to_string())?;
     merkle_bool(merkle::verify_tree_entry(
         &tree_id, &entry, position, &proof,
     ))

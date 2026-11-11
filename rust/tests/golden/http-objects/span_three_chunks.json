@@ -1,6 +1,6 @@
 {
-  "blake3": "38c67471327e0f6e66cb7d878b6e4db176d5a49edd2bacd69286b4d84d047038",
-  "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "ca0549c6f349e2de1aee16c0c04a8afbde2687c9852386e25a33a639e3f348f4",
+  "commit": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
   "expect": {
     "accept": true,
     "bytes_blake3": "6b5fcc642c4381e8de9c12108b3c853944f5ecdb1eda6cc5b489acb63c1545cf",
@@ -14,5 +14,5 @@
   },
   "name": "span_three_chunks",
   "schema_version": 1,
-  "size": 70186
+  "size": 70146
 }

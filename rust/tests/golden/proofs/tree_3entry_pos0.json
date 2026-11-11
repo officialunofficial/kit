@@ -1,6 +1,6 @@
 {
   "bin": "tree_3entry_pos0.bin",
-  "blake3": "7dbda0e785bb816c8ec53484cff4b73c35f93028dc1b024afec908c43b74f79f",
+  "blake3": "834715e6c12ac3fa0f045902c5ede528586310cf06fd47155158814fedc261c1",
   "description": "3-entry tree, single-leaf proof — exercises the odd trailing node.",
   "entries": [
     {
@@ -13,8 +13,8 @@
   "kind": "tree_entry",
   "max_items": 1,
   "name": "tree_3entry_pos0",
-  "object_id_hex": "923029f2eeb825da1a6059226d2a9c3b8f9a63729300fda91456407a3b5f631b",
+  "object_id_hex": "9bc27f7a168d068571c1fb7462951594705094e7c8597b175b7aa2ac969f1db2",
   "position": 0,
   "proof_kind": "single",
-  "size": 69
+  "size": 73
 }

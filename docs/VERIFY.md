@@ -82,14 +82,14 @@ for why that ordering is load-bearing, not cosmetic.
 | Component | Size |
 |---|---|
 | Commit (or Remix) object | ~250 B (a few hundred more for a Remix, which carries `sources`) |
-| One tree-entry step | one entry (`name` + mode + 32-byte child id) plus `32 * ceil(log2(M))` sibling bytes, `M` = that directory's entry count |
+| One tree-entry step | one entry (`name` + mode + 32-byte child id) plus at most `ceil(log2(M))` keyed proof steps of `32 + 1 + len(separator)` bytes each, `M` = that directory's entry count |
 | One chunk step | at most `32 * 2 * ceil(log2(N + 1))` sibling bytes, `N` = the file's chunk count (`+1` for the metadata leaf); the step is one multi-proof over positions `{0, index + 1}` |
 | A Bao slice of `len` content bytes | roughly one 1 KiB Bao leaf block per 1 KiB of `len`, plus `~64 * log2(blocks)` bytes of Bao tree-hash overhead |
 
-A concrete example, captured from a real v2-bundle run against a small
-demo repo (commit `64ccb22…`, a two-level path `src/lib.rs`, a 40-byte
+A concrete example, captured from a real bundle run against a small
+demo repo (commit `3606184…`, a two-level path `src/lib.rs`, a 40-byte
 range at offset 100): the whole disclosure bundle &mdash; commit bytes, two
-tree-entry steps, and a Bao-slice range payload &mdash; was **684 bytes**. A single file
+tree-entry steps, and a Bao-slice range payload &mdash; was **625 bytes**. A single file
 directly under the root instead of two levels deep would be smaller still;
 a 1 GiB chunked file has about 16,384 chunks at the 64 KiB average, so its
 chunk step carries at most 28 sibling digests (under 1 KiB),
@@ -281,11 +281,11 @@ client sampling one byte range, wants.
 
 ```
 magic   = "KDPB"              (4 raw bytes)
-version: u8 = 2
+version: u8 = 3
 commit_id: [u8; 32]
 commit_bytes: Vec<u8>          <= 4 MiB; verifier: BLAKE3(commit_bytes) == commit_id
 steps: Vec<Step>               <= MAX_TREE_DEPTH (128), root first
-  Step { name, mode, child_id, inner_root, position, proof: Proof (max_items = 1) }
+  Step { name, mode, child_id, position, proof: TreeProof }
 payload_kind: u8
   0  Object { bytes }                       full canonical object bytes
   1  Chunk  { total_size, chunk_size, index, inner_root,
@@ -358,11 +358,11 @@ against a trusted commit id, and recover exactly the disclosed bytes:
 
 ```console
 $ kit prove HEAD src/lib.rs --range 100:40 -o p.bin
-proof: 684 B for src/lib.rs @ 64ccb22 (range)
+proof: 625 B for src/lib.rs @ 3606184 (range)
 
-$ kit verify-proof 64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93 \
+$ kit verify-proof 3606184244e8055bb3c32654c887cc338f92886c24353d9443939e57fd150815 \
     p.bin --expect-path src/lib.rs --payload-out slice.bin
-ok: range src/lib.rs @ 64ccb22, 40 B, signer 0a486e59affe8fb5… (valid signature)
+ok: range src/lib.rs @ 3606184, 40 B, signer 25640d0082f21a44… (valid signature)
 
 $ cat slice.bin
 tuvwxyz
@@ -378,9 +378,9 @@ mismatch &mdash; it is not merely an informational filter.
 **JSON output**, from the same bundle:
 
 ```console
-$ kit verify-proof 64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93 \
+$ kit verify-proof 3606184244e8055bb3c32654c887cc338f92886c24353d9443939e57fd150815 \
     p.bin --expect-path src/lib.rs --format=json
-{"commit_id":"64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93","tree_hash":"15fa3e247b96d89c9504a8125be55b3de930ccc9e3a2f750fff0a25098cd7cf8","path":[{"name":"src","name_hex":"737263","mode":"tree"},{"name":"lib.rs","name_hex":"6c69622e7273","mode":"blob"}],"leaf_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","signer":"0a486e59affe8fb54af5fa3e31b3b49663970da1cba4140d538a72ffb12e2077","signature_valid":true,"payload":{"kind":"range","bytes_len":40,"bytes_blake3":"0b9523ef4483e7a5a1651f25553c85294f0bf872b689c840df3c9f4a494c5cf1","blob_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","chunk":null,"offset_in_blob":100,"absolute_offset":100},"step_inner_roots":["36b9b63b57ac62c1b0afee72d739e0d8aece1b17d0229b7a3d580b9e2c4cf955","7e837a5798b77529da077b0475cd370a2114c7c5dc99a654eecdc3559ac89ff4"],"chunk_inner_root":null,"signer_trusted":null}
+{"commit_id":"3606184244e8055bb3c32654c887cc338f92886c24353d9443939e57fd150815","tree_hash":"b095d98fd3636909b2ed44c9cd3da2904e87f3f8d7bd112c29903d596effb64d","path":[{"name":"src","name_hex":"737263","mode":"tree"},{"name":"lib.rs","name_hex":"6c69622e7273","mode":"blob"}],"leaf_id":"d0cd470f86ebc03deaa5b28e537d2f58f715bd0537e3fb8f4074e96ad8fc5388","signer":"25640d0082f21a4483eb16f53c2a3ebe9fe050ce160a99796525f7a4ae83ec53","signature_valid":true,"payload":{"kind":"range","bytes_len":40,"bytes_blake3":"0b9523ef4483e7a5a1651f25553c85294f0bf872b689c840df3c9f4a494c5cf1","blob_id":"d0cd470f86ebc03deaa5b28e537d2f58f715bd0537e3fb8f4074e96ad8fc5388","chunk":null,"offset_in_blob":100,"absolute_offset":100},"chunk_inner_root":null,"signer_trusted":null}
 ```
 
 `signer_trusted` is the CLI's own trust-roots addition on top of the
@@ -392,7 +392,7 @@ disclosure verifier's result.
 use kit_core::hash::from_hex;
 use kit_core::verify::verify_disclosure;
 
-let commit_id = from_hex("64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93")?;
+let commit_id = from_hex("3606184244e8055bb3c32654c887cc338f92886c24353d9443939e57fd150815")?;
 let bundle = std::fs::read("p.bin")?;
 
 let disclosed = verify_disclosure(&commit_id, &bundle)?;
@@ -405,40 +405,41 @@ assert!(disclosed.signature_valid);
 
 ## 5. Interop for commonware-based verifiers
 
-kit's Binary Merkle Tree proofs (`kit_core::merkle::Proof`) are,
-deliberately, **byte-identical** to `commonware_storage::bmt::Proof` at the
-release train kit pins (`2026.10.0`, `rust/Cargo.toml`): same wire framing
+kit's `ChunkedBlob` proofs (`kit_core::merkle::Proof`) are, deliberately,
+**byte-identical** to `commonware_storage::bmt::Proof` at the release
+train kit pins (`2026.10.0`, `rust/Cargo.toml`): same wire framing
 (`be32(leaf_count) || varint(n) || n * 32-byte digest`), same sibling
-selection algorithm, for single, range, and multi-leaf proofs alike. A verifier already built against the upstream
-`commonware-storage` crate can decode a kit
-proof directly with the upstream type and run upstream's own
-`verify_*_inclusion` **unchanged** &mdash; no kit-specific decoder, and no
-kit dependency, needed for the proof-checking step itself. One thing sits
-outside that byte-identity, though: `Proof::verify_element_inclusion(leaf,
-position, root)` checks against an already-known *bare* inner root, not a
-kit id (it doesn't recover or return the folded value, only accept/reject
-against a `root` the caller supplies), and a kit repository never
-publishes a bare inner root anywhere &mdash; only the domain-wrapped id. A
-commonware-native verifier therefore needs exactly one extra step around
-upstream's unmodified check: verify the wrap.
+selection algorithm, for single, range, and multi-leaf proofs alike. A
+verifier already built against the upstream `commonware-storage` crate
+can decode a kit chunk proof directly with the upstream type and run
+upstream's own `verify_*_inclusion` **unchanged**. One thing sits outside
+that byte-identity: `Proof::verify_element_inclusion(leaf, position,
+root)` checks against an already-known *bare* inner root, not a kit id,
+and a kit repository never publishes a bare inner root anywhere &mdash; only
+the domain-wrapped id. A commonware-native verifier therefore needs
+exactly one extra step around upstream's unmodified check: verify the
+wrap.
+
+`Tree` entries are proven with the keyed `TreeProof` of
+[SPEC-MERKLE-OBJECTS](specs/SPEC-MERKLE-OBJECTS.md) §5.8, which has no
+upstream counterpart: each step carries a separator name that the
+verifier checks against the proven name, so that a name has at most one
+verifiable entry in a tree. Use `kit_core::merkle::verify_tree_entry`, or
+implement §5.8 directly.
 
 ### Primary case: the prover supplies the inner root alongside the proof
 
-The most direct shape, and the one this section leads with because it
-needs no kit code at all on the verifier's side: the prover hands the
-verifier the proof **and** the bare inner root it was built against. The
-verifier, in order:
+The most direct shape needs no kit code at all on the verifier's side:
+the prover hands the verifier the chunk proof **and** the bare inner root
+it was built against. A disclosure bundle's `Chunk` payload and `Range`
+chunk header carry that root as `inner_root`. The verifier, in order:
 
 1. **Checks the wrap first, before trusting `inner_root` for anything else:**
-   `domain_digest(TYPE_DOMAIN, inner_root) == trusted_id`, where
-   `TYPE_DOMAIN` is `"kit.tree\x00"` for a `Tree` or `"kit.chunked\x00"`
-   for a `ChunkedBlob`, and `domain_digest(d, b) = BLAKE3(le16(len(d)) ||
-   d || b)` &mdash; both normative, public spec constants (SPEC-MERKLE-OBJECTS
-   §2, SPEC-OBJECTS §9), not merely a detail of `kit_core`'s own Rust
-   types. Because `domain_digest` is collision-resistant, a match proves
-   `inner_root` is *exactly* the root `trusted_id` commits to &mdash; the
-   prover cannot substitute a different tree/chunk set and still pass this
-   check, even though it supplied `inner_root` itself.
+   `domain_digest("kit.chunked\x00", inner_root) == trusted_id`, where
+   `domain_digest(d, b) = BLAKE3(le16(len(d)) || d || b)` &mdash; both
+   normative, public spec constants (SPEC-MERKLE-OBJECTS §2, SPEC-OBJECTS
+   §9). Because `domain_digest` is collision-resistant, a match proves
+   `inner_root` is *exactly* the root `trusted_id` commits to.
 2. **Only then** runs upstream's `Proof::verify_element_inclusion`
    (or `verify_range_inclusion` / `verify_multi_inclusion`) **unmodified**,
    against that now-trusted `inner_root`.
@@ -449,19 +450,18 @@ use commonware_cryptography::blake3::{Blake3, Digest};
 use commonware_storage::bmt::Proof as UpstreamProof;
 use kit_core::hash::domain_digest;
 
-// `trusted_tree_id` is the id the caller already trusts (a commit's
-// `tree_hash`, or the previous step's `child_id`). `prover_inner_root`,
-// `leaf`, `position`, and `proof_bytes` all came from the prover — none
-// of them are trusted yet.
+// `trusted_chunked_id` is the id the caller already trusts (a disclosed
+// leaf id). `prover_inner_root`, `leaf`, `position`, and `proof_bytes`
+// all came from the prover — none of them are trusted yet.
 
 // Step 1: the wrap check. Reject before step 2 even runs on a mismatch.
 assert_eq!(
-    domain_digest(b"kit.tree\x00", &prover_inner_root), // or b"kit.chunked\x00"
-    trusted_tree_id,
+    domain_digest(b"kit.chunked\x00", &prover_inner_root),
+    trusted_chunked_id,
 );
 // A verifier with no kit dependency at all computes the same check by
-// hand: BLAKE3(le16(9) || b"kit.tree\x00" || prover_inner_root) — 9 is
-// len(b"kit.tree\x00"); le16/le32 are 2/4-byte little-endian integers.
+// hand: BLAKE3(le16(12) || b"kit.chunked\x00" || prover_inner_root) — 12
+// is len(b"kit.chunked\x00"); le16 is a 2-byte little-endian integer.
 
 // Step 2: upstream's own check, unmodified, against the now-trusted root.
 let mut r = Copying(proof_bytes);
@@ -476,59 +476,35 @@ proof.verify_element_inclusion::<Blake3>(
 `commonware_codec` reads from its own `Buf` trait, which a plain `&[u8]` does
 not implement. `Copying` wraps the slice so that it does. The test
 `rust/crates/kit-core/tests/verify_doc_samples.rs` compiles and runs the code
-lines of this sample and of the next one against a real `Tree`, and fails if
-this document stops printing them.
+lines of this sample against a real `ChunkedBlob`, and fails if this
+document stops printing them.
 
-A v2 disclosure bundle carries that inner root on every `Step` and
-chunk header, so a commonware-native verifier reads it from the decoded
-bundle and runs the two-step sequence above with no out-of-band channel:
-
-```rust
-// After decoding a v2 `Step` (SPEC-DISCLOSURE §3):
-let trusted_tree_id = /* commit.tree_hash, or the previous step's child_id */;
-assert_eq!(
-    domain_digest(b"kit.tree\x00", &step.inner_root),
-    trusted_tree_id,
-);
-let proof_bytes = step.proof.encode();
-let mut r = Copying(&proof_bytes[..]);
-let proof = UpstreamProof::<Digest>::read_cfg(&mut r, &1usize)?;
-proof.verify_element_inclusion::<Blake3>(
-    &Digest(leaf),
-    step.position,
-    &Digest(step.inner_root),
-)?;
-```
-
-The field is mandatory (bundle version 2; a version byte of 1 is
-rejected). It is wrap-checked against the
-trusted id before use and cross-checked against the proof fold, so it
-adds no trust surface.
+The bundle's `inner_root` is wrap-checked against the trusted id before
+use and cross-checked against the proof fold, so it adds no trust
+surface.
 
 ### Secondary case: the verifier already holds the full object
 
-When the caller instead holds the full `Tree`/`ChunkedBlob` object &mdash; an
+When the caller instead holds the full `ChunkedBlob` object &mdash; an
 `Object`-kind disclosure payload, or an object re-derived while walking a
 closure &mdash; it can compute the bare inner root itself, from that object's
-leaves, with `kit_core::merkle::tree_inner_root` / `chunked_inner_root`.
-These are byte-identical to building the same tree with
-`commonware_storage::bmt::Builder`
+leaves, with `kit_core::merkle::chunked_inner_root`. It is byte-identical
+to building the same tree with `commonware_storage::bmt::Builder`
 (`merkle::tests::proofs_match_commonware` pins this cross-check), so the
 same two-step pattern above applies with `prover_inner_root` replaced by
-this self-computed value &mdash; trivially "step 1" here, since the caller
-derived the root itself rather than received it as a claim.
+this self-computed value.
 
 ### Neither: only a proof, no inner root, no full object
 
 A caller that has *only* `(leaf, position, proof)` against a trusted id,
 with no inner root available from anywhere, needs the same fold-up
-upstream's `verify_element_inclusion` performs internally before it can
-even begin &mdash; precisely the algorithm SPEC-MERKLE-OBJECTS §5.4 specifies
-in prose. `kit_core::merkle`'s own id-based verifiers (`verify_tree_entry`,
-`verify_chunk`, and their range/multi counterparts) already do exactly
-that fold-then-wrap-then-compare, tested and golden-vector-pinned; reach
-for those directly (`merkle::wrap_id` applies the
-same wrap step) rather than hand-rolling the fold loop.
+upstream's `verify_element_inclusion` performs internally &mdash; precisely
+the algorithm SPEC-MERKLE-OBJECTS §5.4 specifies in prose.
+`kit_core::merkle`'s own id-based verifiers (`verify_chunk` and the chunk
+range/multi verifiers) already do exactly that fold-then-wrap-then-compare,
+tested and golden-vector-pinned; reach for those directly
+(`merkle::wrap_id` applies the same wrap step) rather than hand-rolling
+the fold loop.
 
 ### Multi-leaf proofs: ascending positions
 
@@ -603,12 +579,12 @@ shape, common to both:
    closure, `children(obj, mode)` from the root).
 6. Only then interpret the payload/leaf content, and always **against the
    authenticated id**, never a caller-supplied path/offset/length that
-    wasn't itself part of what got verified. A v2 disclosure bundle
-    carries a bare inner root on each `Step` and chunk header, but that
-    field is wrap-checked against the trusted id **before** it is used
-    for anything (§5); the comparison against a trusted value remains
-    the wrapped id (SPEC-MERKLE-OBJECTS §5.4). The closure profile does
-    not carry inner roots.
+    wasn't itself part of what got verified. A disclosure bundle
+    carries a bare inner root on each chunk header, but that field is
+    wrap-checked against the trusted id **before** it is used for
+    anything (§5); the comparison against a trusted value remains the
+    wrapped id (SPEC-MERKLE-OBJECTS §5.4). The closure profile does not
+    carry inner roots.
 
 ### Bounds to enforce before allocation
 
@@ -621,7 +597,8 @@ itself checked against a fixed cap:
 | whole disclosure bundle | `MAX_BUNDLE_BYTES` = 64 MiB |
 | `commit_bytes` inside a bundle | 4 MiB |
 | `steps` (tree depth) | `MAX_TREE_DEPTH` = 128 |
-| a proof's sibling count | `max_items * MAX_LEVELS` (32), checked *before* reading any sibling digest |
+| a chunk proof's sibling count | `max_items * MAX_LEVELS` (32), checked *before* reading any sibling digest |
+| a tree proof's step count | `MAX_LEVELS` (32), checked *before* reading any step |
 | `Object`/`Chunk` payload bytes | `MAX_RAW_OBJECT_SIZE` = 1 GiB |
 | `chunk_len_proofs` count | `MAX_CHUNKS` = 1,000,000 |
 | one length-proof's Bao slice | 8 KiB |
@@ -722,8 +699,9 @@ own test harness should take.
 | `verify_closure_packs(root, mode, packs) -> ClosureReport` | closure check over raw-only packs | SPEC-DISCLOSURE §7.2/§7.4 |
 | `verify_closure_manifest(expected_root, manifest, packs) -> ClosureReport` | closure check + manifest-root binding | SPEC-DISCLOSURE §7.3/§7.4 |
 | `export_closure(store, root, mode) -> ClosureExport` (native) | producer side of a closure | SPEC-DISCLOSURE §7.2/§7.3 |
-| `merkle::wrap_id(kind, inner_root) -> Hash` | apply the outer type-domain wrap (§5's step 1); a v2 `Step.inner_root` is wrap-checked with this before upstream BMT verify | SPEC-MERKLE-OBJECTS §2 |
-| `merkle::verify_tree_entry` / `verify_chunk` (+ `*_range` / `*_multi`) | single/range/multi-leaf BMT inclusion proofs, against the object id | SPEC-MERKLE-OBJECTS §5.4 |
+| `merkle::wrap_id(kind, inner_root) -> Hash` | apply the outer type-domain wrap (§5's step 1); a chunk header's `inner_root` is wrap-checked with this before upstream BMT verify | SPEC-MERKLE-OBJECTS §2 |
+| `merkle::verify_tree_entry` | keyed tree entry proof, against the tree id | SPEC-MERKLE-OBJECTS §5.8 |
+| `merkle::verify_chunk` (+ `verify_chunks_range` / `verify_chunks_multi`) | single/range/multi-leaf chunk proofs, against the object id | SPEC-MERKLE-OBJECTS §5.4 |
 | **MCP tools** (`kit mcp`) | | |
 | `kit_prove` / `kit_verify_proof` / `kit_closure_verify` | agent-facing equivalents of the CLI commands above | &mdash; |
 

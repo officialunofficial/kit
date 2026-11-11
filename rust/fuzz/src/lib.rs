@@ -606,28 +606,29 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
         }
     }
 
-    // A Tree from the same bytes (one entry, name derived from input).
+    // A sorted three-entry Tree, so every proof crosses a separator.
+    let object_hash = chunks.first().copied().unwrap_or([0u8; 32]);
     let tree = Tree {
-        entries: vec![TreeEntry {
-            name: if input.is_empty() {
-                b"x".to_vec()
-            } else {
-                vec![input[0].max(1)]
-            },
-            mode: EntryMode::Blob,
-            object_hash: chunks.first().copied().unwrap_or([0u8; 32]),
-        }],
+        entries: [b"a".as_slice(), b"m", b"z"]
+            .iter()
+            .map(|name| TreeEntry {
+                name: name.to_vec(),
+                mode: EntryMode::Blob,
+                object_hash,
+            })
+            .collect(),
     };
     let tid = merkle::compute_tree_id(&tree);
-    assert_eq!(tid.len(), 32);
-    if let Ok(p) = merkle::build_tree_entry_proof(&tree, 0) {
-        merkle::verify_tree_entry(&tid, &tree.entries[0], 0, &p)
+    for position in 0..3u32 {
+        let p = merkle::build_tree_entry_proof(&tree, position)
+            .expect("a position of a three-entry tree is provable");
+        merkle::verify_tree_entry(&tid, &tree.entries[position as usize], position, &p)
             .expect("freshly built tree proof must verify");
     }
     // Adversarial proof bytes must reject without panicking (see the
     // chunk-proof comment above for why we decode first).
-    if let Ok(p) = merkle::Proof::decode(input, 1) {
-        let _ = merkle::verify_tree_entry(&tid, &tree.entries[0], 0, &p);
+    if let Ok(p) = merkle::TreeProof::decode(input) {
+        let _ = merkle::verify_tree_entry(&tid, &tree.entries[1], 1, &p);
     }
 }
 
@@ -958,18 +959,11 @@ pub fn verify_disclosure_one_iteration_with(input: &[u8], fixture: &DisclosureFi
 
     let disclosed = verify::verify_disclosure(&fixture.commit_id, &fixture.good_bundle)
         .expect("freshly built disclosure must verify");
-    // Builder fills `inner_root` from the parent tree; verify wrap-checks
-    // it then requires the proof fold to equal the declared field. Re-check
-    // the wrap of every authenticated root here so a builder/verifier
+    // Builder fills a chunk header's `inner_root` from the chunked blob;
+    // verify wrap-checks it then requires the proof fold to equal the
+    // declared field. Re-check the wrap here so a builder/verifier
     // disagreement cannot slip through a successful round-trip.
     use kit_core::merkle::{self, ObjectKind};
-    if let Some(root) = disclosed.step_inner_roots.first() {
-        assert_eq!(
-            merkle::wrap_id(ObjectKind::Tree, root),
-            disclosed.tree_hash,
-            "step 0 inner_root must wrap to tree_hash"
-        );
-    }
     if let Some(root) = disclosed.chunk_inner_root {
         assert_eq!(
             merkle::wrap_id(ObjectKind::ChunkedBlob, &root),

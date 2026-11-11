@@ -1,6 +1,6 @@
 {
-  "blake3": "67e9695b187a316240247d16a5a813116a545329a40f32e38e40068f324fc843",
-  "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "ab399177f09a64dfb4ff2c952860e3c4e0a1245ff03ff10d75be911c4e70bf42",
+  "commit": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
   "expect": {
     "accept": true,
     "bytes_blake3": "b3bfe673b905c25deb21be14be687940cbc1c3e72d0e66e555f7a0f9ef4aa665",
@@ -14,5 +14,5 @@
   },
   "name": "span_first_zero",
   "schema_version": 1,
-  "size": 51538
+  "size": 51508
 }

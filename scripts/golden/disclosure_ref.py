@@ -192,6 +192,12 @@ class Bundle(o.Reader):
             raise Reject("bad bool")
         return bool(b)
 
+    def tree_proof(self):
+        try:
+            return p.read_tree_proof(self)
+        except p.Reject as e:
+            raise Reject(str(e))
+
     def proof(self, max_items):
         leaf_count = self.be32()
         n = self.varint()
@@ -208,7 +214,7 @@ def decode_bundle(data):
         if b.take(4) != b"KDPB":
             raise Reject("bad magic")
         version = b.u8()
-        if version != 2:
+        if version != 3:
             raise Reject(f"unsupported bundle version {version}")
         out = {"commit_id": b.take(32), "commit_bytes": b.vec(MAX_COMMIT_BYTES)}
         steps = []
@@ -222,9 +228,8 @@ def decode_bundle(data):
                     "name": name,
                     "mode": b.u8(),
                     "child_id": b.take(32),
-                    "inner_root": b.take(32),
                     "position": b.be32(),
-                    "proof": b.proof(1),
+                    "proof": b.tree_proof(),
                 }
             )
         out["steps"] = steps
@@ -322,7 +327,7 @@ def verify_bundle(data, trusted_commit_id):
     sig_ok = ed25519_verify(signer, domain_digest(parsed["domain"], parsed["signing"]), parsed["signature"])
 
     expected = tree_hash
-    path, step_roots = [], []
+    path = []
     for i, step in enumerate(b["steps"]):
         try:
             o.check_entry_name(step["name"])
@@ -333,21 +338,13 @@ def verify_bundle(data, trusted_commit_id):
         # The mode test is cheap, so it runs before the proof. The outcome is the same.
         if i != len(b["steps"]) - 1 and step["mode"] != TREE_MODE:
             raise Reject("a non-final step is not a tree")
-        if domain_digest(o.TREE_DOMAIN, step["inner_root"]) != expected:
-            raise Reject(f"step {i}: inner root does not wrap to the parent id")
-        entry_leaf = domain_digest(
-            b"kit-tree-entry-v1",
-            struct.pack("<I", len(step["name"])) + step["name"] + bytes([step["mode"]]) + step["child_id"],
-        )
-        leaf_count, siblings = step["proof"]
         try:
-            folded = p.fold(leaf_count, siblings, {step["position"]: entry_leaf})
+            p.verify_tree_entry(
+                step["proof"], step["name"], step["mode"], step["child_id"], step["position"], expected
+            )
         except p.Reject as e:
             raise Reject(f"step {i}: {e}")
-        if folded != step["inner_root"]:
-            raise Reject(f"step {i}: proof does not fold to the declared inner root")
         path.append({"mode": step["mode"], "name_hex": step["name"].hex()})
-        step_roots.append(step["inner_root"].hex())
         expected = step["child_id"]
     leaf_id = expected
 
@@ -355,7 +352,6 @@ def verify_bundle(data, trusted_commit_id):
         "path": path,
         "leaf_id_hex": leaf_id.hex(),
         "tree_hash_hex": tree_hash.hex(),
-        "step_inner_roots_hex": step_roots,
         "chunk_inner_root_hex": None,
         "signer_hex": signer.hex(),
         "signature_valid": sig_ok,

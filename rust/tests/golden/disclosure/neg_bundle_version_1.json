@@ -1,8 +1,8 @@
 {
   "bin": "neg_bundle_version_1.bin",
-  "blake3": "bfc79ff223416c2ce58628f2c0ea11b61897c8b48eac74017633897c6851ada5",
-  "commit_id_hex": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
-  "description": "The version byte is 1; v2 is the only supported value.",
+  "blake3": "93a704df3e763a9832f90d293225053167bdc23ed8f1a2401458d2ae3e942415",
+  "commit_id_hex": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
+  "description": "The version byte is 1; v3 is the only supported value.",
   "expect": "reject",
   "name": "neg_bundle_version_1",
   "path_hex": [
@@ -10,5 +10,5 @@
   ],
   "reject_reason": "unsupported bundle version 1",
   "selector": "object",
-  "size": 533
+  "size": 527
 }

@@ -29,9 +29,9 @@ include a byte-range disclosure proof:
 a proof range is selected by `?proof=1&range=a-b`, never by `Range`.
 The proof is a separate representation with its own validator and media type.
 This lets a verifier request the complete proof without HTTP slicing it.
-The proof uses the KDSP container of existing KDPB v2 bundles
+The proof uses the KDSP container of KDPB v3 bundles
 ([SPEC-DISCLOSURE](SPEC-DISCLOSURE.md), multi-chunk span section).
-KDPB payload kind 3 remains reserved; KDPB v2 bytes are unchanged.
+KDPB payload kind 3 remains reserved.
 
 ## 2. Routes and URL syntax
 
@@ -490,6 +490,7 @@ separate work.
 
 | Version | Status | Changes |
 |---|---|---|
+| 1 | draft | Proofs carry KDPB v3 bundles, whose tree steps use the keyed tree proof of SPEC-MERKLE-OBJECTS. Routes, headers and the KDSP container are unchanged. |
 | 1 | draft | Extend §5.1 with inline MP4/WebM video, MP3/Ogg/WAV audio, HEIC images, Markdown and CSV. Dangerous extensions remain binary attachments; filename encoding, security headers and ordinary byte ranges are unchanged. |
 | 1 | draft | Adds an extension allowlist and encoded filenames to successful ordinary ref-path Blob/ChunkedBlob responses, including HEAD and 206; object-id, proof, non-file, 304 and error responses are unchanged. |
 | 1 | draft | Clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it. |

@@ -1,0 +1,14 @@
+{
+  "bin": "neg_duplicate_name.bin",
+  "blake3": "1263f1d1964b7122754e272d8de8c2aa5bc8401077e0a80f29e7142ada5f2d77",
+  "commit_id_hex": "acf8c22c0e2e6828f6d52817706dd75930dfa3df0396698705ae3dd411f2ebf3",
+  "description": "A signed commit whose root tree holds lib.rs twice with different contents, disclosed at the first copy. The keyed tree proof admits at most one entry per name, so this bundle is rejected.",
+  "expect": "reject",
+  "name": "neg_duplicate_name",
+  "path_hex": [
+    "6c69622e7273"
+  ],
+  "reject_reason": "the first copy of a repeated name is not below the separator",
+  "selector": "object",
+  "size": 448
+}

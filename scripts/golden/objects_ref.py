@@ -417,14 +417,43 @@ def bmt_root(leaves):
     return blake3(struct.pack(">I", len(leaves)) + level[0])
 
 
+def tree_entry_leaf(name, mode, object_hash):
+    """SPEC-MERKLE-OBJECTS section 3.2."""
+    return domain_digest(
+        b"kit-tree-entry-v1", struct.pack("<I", len(name)) + name + bytes([mode]) + object_hash
+    )
+
+
+def tree_parent(left, right, sep):
+    """The keyed parent of SPEC-MERKLE-OBJECTS section 3.2."""
+    return blake3(left + right + bytes([len(sep)]) + sep)
+
+
+def tree_bmt_root(entries):
+    """SPEC-MERKLE-OBJECTS sections 1.1 and 3.2: the keyed tree fold.
+
+    Each node tracks the index of the first entry under it; a two-child
+    parent commits to the name of the first entry under its right child.
+    """
+    if entries:
+        level = [blake3(struct.pack(">I", i) + tree_entry_leaf(*e)) for i, e in enumerate(entries)]
+    else:
+        level = [blake3(b"")]
+    first = list(range(len(level)))
+    while len(level) > 1:
+        nodes, firsts = [], []
+        for i in range(0, len(level), 2):
+            if i + 1 < len(level):
+                nodes.append(tree_parent(level[i], level[i + 1], entries[first[i + 1]][0]))
+            else:
+                nodes.append(blake3(level[i] + level[i]))
+            firsts.append(first[i])
+        level, first = nodes, firsts
+    return blake3(struct.pack(">I", len(entries)) + level[0])
+
+
 def tree_id(entries):
-    leaves = [
-        domain_digest(
-            b"kit-tree-entry-v1", struct.pack("<I", len(n)) + n + bytes([m]) + h
-        )
-        for n, m, h in entries
-    ]
-    return domain_digest(TREE_DOMAIN, bmt_root(leaves))
+    return domain_digest(TREE_DOMAIN, tree_bmt_root(entries))
 
 
 def chunked_id(total, chunk_size, chunks):

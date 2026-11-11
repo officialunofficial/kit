@@ -1,6 +1,6 @@
 ---
 spec: SPEC-DISCLOSURE
-version: 4
+version: 5
 status: draft-normative
 audience: implementers of a kit disclosure-bundle or closure-profile verifier (any language)
 ---
@@ -82,7 +82,7 @@ followed by `T` when present):
 
 ```
 magic   = "KDPB"              (4 raw bytes)
-version: u8 = 2
+version: u8 = 3
 commit_id: [u8; 32]
 commit_bytes: Vec<u8>          <= 4 MiB
 steps: Vec<Step>               <= MAX_TREE_DEPTH (128), root first
@@ -90,9 +90,8 @@ steps: Vec<Step>               <= MAX_TREE_DEPTH (128), root first
     name: Vec<u8> (1..=255)     entry name, SPEC-OBJECTS §4.1 rules
     mode: u8                    EntryMode (SPEC-OBJECTS §4)
     child_id: [u8; 32]
-    inner_root: [u8; 32]        bare BMT root of the parent Tree
     position: u32                BMT position (= entry index) in the parent Tree
-    proof: Proof (max_items = 1) SPEC-MERKLE-OBJECTS §5.1/§5.2
+    proof: TreeProof             SPEC-MERKLE-OBJECTS §5.8
   }
 payload_kind: u8
   0  Object { bytes: Vec<u8> <= MAX_RAW_OBJECT_SIZE }
@@ -109,20 +108,22 @@ payload_kind: u8
                 proof: Proof (max_items = 1), slice: Vec<u8> }
 ```
 
-`Step.inner_root` is the bare BMT root of the **parent** Tree this
-step's proof is verified against (the tree whose id is the commit's
-`tree_hash` for step 0, or the previous step's `child_id`).
+A step's proof is verified against the id of its **parent** Tree: the
+commit's `tree_hash` for step 0, or the previous step's `child_id`.
 `Chunk`/`ChunkHdr.inner_root` is the bare BMT root of the ChunkedBlob
 whose id is the leaf id. `LenProof` entries reuse that same root (same
 object) and gain nothing.
 
 The whole bundle MUST be `<= MAX_BUNDLE_BYTES` (64 MiB), checked before
 any decode work. Trailing bytes after the declared body MUST be
-rejected. `version != 2`, an unrecognized `payload_kind`, and an
+rejected. `version != 3`, an unrecognized `payload_kind`, and an
 unrecognized `mode` byte are typed decode errors, never a bare "invalid".
-A version byte of `1` is a typed `UnsupportedBundleVersion(1)` error.
+A version byte of `1` or `2` is a typed `UnsupportedBundleVersion`
+error. Version 2 steps carried a bare inner root and an unkeyed tree
+proof, which cannot show that a name occurs once in its tree.
 
-`Step` and `ChunkHdr`/`LenProof`'s `proof` fields decode with
+`Step.proof` decodes as a `TreeProof` with at most `MAX_LEVELS` steps
+(SPEC-MERKLE-OBJECTS §5.8). `Chunk`, `ChunkHdr` and `LenProof`'s `proof` fields decode with
 [`merkle::Proof::decode`](../../rust/crates/kit-core/src/merkle.rs)'s
 `max_items` bound (SPEC-MERKLE-OBJECTS §5.2): 1 for a single-leaf proof,
 2 for a multi-proof over `{0, position}` (§4.3). Every `Vec` read is
@@ -175,19 +176,12 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
       rules ([`TreeEntry::validate_name`](../../rust/crates/kit-core/src/object.rs)) &mdash;
       an invalid name (trailing space, `.kit`, a reserved Windows device
       name, etc.) is rejected here, before its proof is even checked.
-    2. **MUST** check `domain_digest(b"kit.tree\x00", inner_root) == expected_id`
-       first, where `expected_id` is the previous step's `child_id` (step 0
-       against `tree_hash` itself). A mismatch is a typed `InnerRootMismatch`.
-       The field is never a second trust anchor (wrap-check-first,
-       `docs/VERIFY.md` §5). **MUST** then require that the proof folds to
-       exactly `inner_root`; a bundle whose proof folds to a different root
-       than it declares is rejected even if the wrap of the declared root
-       happens to match, and vice versa. **MUST** then wrap the folded
-       value and compare to `expected_id` (SPEC-MERKLE-OBJECTS §5.4).
-       A commonware-native verifier performs the wrap check itself and
-       then runs upstream `bmt::Proof::verify_element_inclusion` against
-       `inner_root` unmodified, needing no kit code beyond the public
-       domain constants.
+    2. **MUST** verify the step's entry `(name, mode, child_id)` at
+       `position` with its `TreeProof` against `expected_id`, where
+       `expected_id` is the previous step's `child_id` (step 0 against
+       `tree_hash` itself), as SPEC-MERKLE-OBJECTS §5.8 specifies: every
+       separator check passes, the fold finalizes and wraps to
+       `expected_id`, and every proof step is consumed.
    3. **MUST** reject the whole bundle if `i` is not the last step and
       `mode != Tree` &mdash; every step but the last MUST descend into a
       directory.
@@ -196,6 +190,10 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
    when `steps` is empty &mdash; disclosing the root tree). A verifier
    compares this authenticated path against whatever path string it
    asked for; **it MUST NOT trust a claimed path** carried any other way.
+   Each step proves that its name has one verifiable entry in its parent
+   (SPEC-MERKLE-OBJECTS §5.8), so two accepted bundles for the same
+   commit id and the same path return the same leaf id, even when the
+   commit's author is hostile.
 10. Dispatch on `payload_kind`:
     - **`Object`**: **MUST** deserialize `bytes` and check its
       content-address (BLAKE3, or the BMT root for a `Tree`/`ChunkedBlob`
@@ -248,8 +246,13 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
 
 ### 4.1 Length proofs
 
-A length proof authenticates one chunk's declared content length without
-disclosing its bytes: a Bao slice over canonical bytes `0..10` (the fixed
+A length proof authenticates one chunk's declared content length. It is
+not confidential: a Bao slice always carries whole 1 KiB Bao chunks, so
+the slice also discloses the chunk's first content bytes, up to 1,014 of
+them. More generally, disclosure provides integrity only. A `Range`
+slice carries every whole 1 KiB block it touches, and a tree step reveals
+its parent's entry count, the entry's position and the sibling digests.
+A length proof is a Bao slice over canonical bytes `0..10` (the fixed
 6-byte prologue plus the 4-byte `le32` length field, SPEC-OBJECTS §2/§3)
 against that chunk's own id, at Bao offset 0 (not `+10` &mdash; this slice
 covers the header itself, not post-header content). The authenticated
@@ -267,7 +270,8 @@ id, not a value Bao invents.
 | `steps` | `MAX_TREE_DEPTH` = 128 | SPEC-OBJECTS' existing tree-depth cap |
 | `Step.name` | 1..=255 bytes | SPEC-OBJECTS §4.1 |
 | `Object.bytes` / `Chunk.bytes` | `MAX_RAW_OBJECT_SIZE` = 1 GiB | the store's existing object-size cap |
-| `Step`/`Chunk`/`ChunkHdr` proof siblings | `max_items * MAX_LEVELS` (32) | SPEC-MERKLE-OBJECTS §5.2, before any sibling is read |
+| `Step` proof steps | `MAX_LEVELS` (32) | SPEC-MERKLE-OBJECTS §5.8, before any step is read |
+| `Chunk`/`ChunkHdr`/`LenProof` proof siblings | `max_items * MAX_LEVELS` (32) | SPEC-MERKLE-OBJECTS §5.2, before any sibling is read |
 | `chunk_len_proofs` | `MAX_CHUNKS` = 1,000,000 | the store's existing per-manifest chunk-count cap |
 | a single `LenProof.slice` | 8 KiB | proving 10 bytes needs one 1 KiB Bao leaf chunk plus at most `MAX_LEVELS` 64-byte parent hashes plus an 8-byte header &mdash; comfortably under 4 KiB; 8 KiB leaves headroom |
 
@@ -307,13 +311,18 @@ offset; a zero-length range on a plain-`Blob` leaf
 chunk header's wrap/fold checks, per §4); an incomplete
 `chunk_len_proofs` set; a `chunk_len_proofs` entry present on a
 chunk-index-0 range (`neg_len_proofs_on_chunk0`); `steps.len() = 129`;
-`version = 3`; `version = 1` (`neg_bundle_version_1`); a declared inner
-root that does not wrap to the parent id (`neg_inner_root_forged`); a
-declared inner root that wraps correctly but whose proof was built for
-a different tree (`neg_inner_root_fold_mismatch`); a trailing byte
-after the declared body; and `commit_bytes` that decode to a `Tag` (a
-valid, signed object &mdash; just not one with a `tree_hash`). Accept
-sidecars record `step_inner_roots_hex` and `chunk_inner_root_hex`.
+`version = 4`; `version = 2` (`neg_bundle_version_2`); `version = 1`
+(`neg_bundle_version_1`); a chunk header whose declared inner root does
+not wrap to the leaf id (`neg_inner_root_forged`); a chunk header whose
+declared inner root wraps correctly but whose proof was built for a
+different chunked file (`neg_inner_root_fold_mismatch`); a step whose
+proof carries a separator that its name violates
+(`neg_separator_violated`); a signed commit whose root tree holds the
+name `lib.rs` twice, disclosed at the first of the two positions, which
+fails the separator check (`neg_duplicate_name`); a trailing byte after
+the declared body; and `commit_bytes` that decode to a `Tag` (a valid,
+signed object &mdash; just not one with a `tree_hash`). Accept sidecars
+record `chunk_inner_root_hex`.
 
 `rust/crates/kit-core/tests/golden_disclosure.rs` reads only the
 committed files, runs `verify::verify_disclosure`, and compares the
@@ -458,7 +467,7 @@ result with each sidecar.
 ## 8. Multi-chunk span container (KDSP v1)
 
 KDSP proves a content range crossing chunk boundaries of one ChunkedBlob.
-It wraps unchanged KDPB v2 Range and Chunk bundles, rather than introducing
+It wraps unchanged KDPB v3 Range and Chunk bundles, rather than introducing
 a payload kind. External tools MUST be able to encode and verify KDSP from
 this section and §3–§5 alone. [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md)
 selects this representation by query.
@@ -475,8 +484,8 @@ version: u8 = 1
 commit_id: [32]
 offset: u64                 absolute content offset
 len: u64                    content length, not inclusive endpoint
-anchor: Vec<u8>             encoded KDPB v2 Range
-chunks: Vec<Vec<u8>>         encoded KDPB v2 Chunk bundles
+anchor: Vec<u8>             encoded KDPB v3 Range
+chunks: Vec<Vec<u8>>         encoded KDPB v3 Chunk bundles
 ```
 
 The anchor MUST disclose content offset 0, length 1 of chunk `first`,
@@ -566,15 +575,18 @@ vector is zero-filled to one empty vector per declared chunk, so a lenient
 reader fails for a different reason and only the 1,000,000 cap rejects it.
 Each reject sidecar names the exact reason in §8.2.
 
-Document version 4 adds KDSP wire version 1; KDPB wire version 2 and its
-existing vectors remain unchanged.
+Document version 4 adds KDSP wire version 1. Document version 5 moves
+KDPB to wire version 3, whose tree steps carry the keyed proof of
+SPEC-MERKLE-OBJECTS §5.8. KDSP keeps wire version 1 and wraps KDPB v3
+bundles; a KDSP container that wraps a KDPB v2 bundle fails on the inner
+version.
 
 ## 9. Later (out of scope for this document)
 
 - **Non-membership.** `payload_kind 3` is reserved for a future proof
-  that a name is *absent* from a `Tree` (a range proof over the two
-  lex-adjacent entries). Not
-  implemented here.
+  that a name is *absent* from a `Tree`: proofs of the two adjacent
+  entries whose names bracket it. The separators of SPEC-MERKLE-OBJECTS
+  §3.2 make such a proof sound. Not implemented here.
 
 ## 10. Invariants
 
@@ -584,8 +596,9 @@ existing vectors remain unchanged.
 | a span claims incorrect boundaries | an offset-proving anchor plus canonical chunk lengths (§8.2) |
 | any disclosed byte tampered | the Bao slice / BLAKE3 check against the authenticated id fails |
 | a step's `(name, mode, child_id)` tampered | that step's inclusion proof no longer folds to the expected parent id |
-| declared inner root does not wrap to the parent id | wrap-check-first (`domain_digest(TYPE_DOMAIN, inner_root) == expected_id`) fails with `InnerRootMismatch` |
-| proof fold does not equal the declared inner root | rejected even if the wrap of the declared root happens to match |
+| a chunk header's declared inner root does not wrap to the leaf id | wrap-check-first (`domain_digest(TYPE_DOMAIN, inner_root) == expected_id`) fails with `InnerRootMismatch` |
+| a chunk proof's fold does not equal the declared inner root | rejected even if the wrap of the declared root happens to match |
+| one path disclosed with two different contents under one commit id | each step's keyed proof admits one entry per name (SPEC-MERKLE-OBJECTS §5.8) |
 | step order/parent tampered (steps swapped) | each step verifies against the *previous* step's `child_id`, not an independent root |
 | a non-final step's mode misreported as non-`Tree` | rejected outright (§4 step 8.3), before its proof is even checked |
 | `ChunkedBlob` `total_size`/`chunk_size` forged | the multi-proof's metadata leaf (computed by the verifier, never accepted as input) no longer folds to the leaf id |

@@ -1,0 +1,21 @@
+{
+  "bin": "neg_separator_violated.bin",
+  "blake3": "47529d5e6332c2ec1786615a05c15ae1e4ac071f91a2f5a5dbaee242c09128f9",
+  "description": "A tree_7entry proof whose first separator is above the proven name, where the path goes right (SPEC-MERKLE-OBJECTS §5.8).",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "67",
+      "object_hash_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+    }
+  ],
+  "expect": "reject",
+  "kind": "tree_entry",
+  "max_items": 1,
+  "name": "neg_separator_violated",
+  "object_id_hex": "c8f6929cde7c4aee1482bee9e51f3915a0e9f2d9e8ef5ff2c3c4436b05ee7bfc",
+  "position": 6,
+  "proof_kind": "single",
+  "reject_reason": "the entry name is below a separator on a right turn",
+  "size": 73
+}

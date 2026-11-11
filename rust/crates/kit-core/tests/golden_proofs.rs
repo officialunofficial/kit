@@ -1,7 +1,8 @@
 //! Golden vectors for BMT inclusion proofs (`docs/specs/SPEC-MERKLE-OBJECTS.md`
 //! §5).
 //!
-//! Each vector is an encoded [`kit_core::merkle::Proof`] (`<name>.bin`) plus
+//! Each vector is an encoded [`kit_core::merkle::Proof`] (chunk proofs) or
+//! [`kit_core::merkle::TreeProof`] (tree entry proofs) (`<name>.bin`) plus
 //! a `.json` sidecar carrying everything an independent verifier — with no
 //! access to this crate's Rust source, per acceptance
 //! criteria — needs to check it: the object id to verify against, the
@@ -26,7 +27,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use kit_core::hash::{Hash, from_hex, hash, to_hex};
-use kit_core::merkle::{self, Proof};
+use kit_core::merkle::{self, Proof, TreeProof};
 use kit_core::object::{EntryMode, Object, Tree, TreeEntry};
 use serde_json::{Value, json};
 
@@ -215,52 +216,6 @@ fn build_vectors() -> Vec<Vector> {
         }),
     ));
 
-    // ---- tree: range + multi ----
-
-    let t8 = synth_tree(8);
-    let id8 = merkle::compute_tree_id(&t8);
-    v.push(vector(
-        "tree_8entry_range2to4",
-        "8-entry tree, range proof over positions 2..=4.",
-        merkle::build_tree_entries_range_proof(&t8, 2, 4)
-            .unwrap()
-            .encode(),
-        &id8,
-        3,
-        true,
-        None,
-        json!({
-            "kind": "tree_entry",
-            "proof_kind": "range",
-            "start": 2,
-            "entries": t8.entries[2..=4].iter().map(hex_entry).collect::<Vec<_>>(),
-        }),
-    ));
-
-    let t9 = synth_tree(9);
-    let id9 = merkle::compute_tree_id(&t9);
-    let multi_entries: Vec<Value> = [0usize, 4, 8]
-        .iter()
-        .map(|&p| hex_entry(&t9.entries[p]))
-        .collect();
-    v.push(vector(
-        "tree_9entry_multi_0_4_8",
-        "9-entry tree, multi-leaf proof over positions {0, 4, 8}.",
-        merkle::build_tree_entries_multi_proof(&t9, [0, 4, 8])
-            .unwrap()
-            .encode(),
-        &id9,
-        3,
-        true,
-        None,
-        json!({
-            "kind": "tree_entry",
-            "proof_kind": "multi",
-            "positions": [0, 4, 8],
-            "entries": multi_entries,
-        }),
-    ));
-
     // ---- tree: the real `tree_single_file` object from objects/ ----
 
     let Object::Tree(tree_single_file) = load_object("tree_single_file") else {
@@ -337,6 +292,27 @@ fn build_vectors() -> Vec<Vector> {
         }),
     ));
 
+    v.push(vector(
+        "chunked_blob_cs0_3chunks_multi_1_3",
+        "`chunked_blob_cs0_3chunks` from ../objects/, multi-leaf proof over chunks 0 and 2 \
+         (positions {1, 3}).",
+        merkle::build_chunks_multi_proof(&cb, [1, 3])
+            .unwrap()
+            .encode(),
+        &id_cb,
+        2,
+        true,
+        None,
+        json!({
+            "kind": "chunk",
+            "proof_kind": "multi",
+            "positions": [1, 3],
+            "total_size": cb.total_size,
+            "chunk_size": cb.chunk_size,
+            "chunk_hashes_hex": [to_hex(&cb.chunks[0]), to_hex(&cb.chunks[2])],
+        }),
+    ));
+
     // NEGATIVE: position 0 is a *valid* raw BMT proof of the metadata leaf,
     // but `verify_chunk` MUST reject it — position 0 is never a chunk.
     v.push(vector(
@@ -362,7 +338,7 @@ fn build_vectors() -> Vec<Vector> {
     ));
 
     // ---- negatives, derived from the tree_7entry_pos6 vector above ----
-    // (it has 3 siblings, enough to demonstrate a swap).
+    // (it has 2 steps, enough to demonstrate a swap).
 
     let base_proof = tree_7entry_pos6_proof.clone();
     let inner_root7 = merkle::tree_inner_root(&t7);
@@ -385,10 +361,12 @@ fn build_vectors() -> Vec<Vector> {
 
     let mut swapped = base_proof.clone();
     assert!(
-        swapped.siblings.len() >= 2,
-        "need >=2 siblings to demonstrate a swap"
+        swapped.steps.len() >= 2,
+        "need >=2 steps to demonstrate a swap"
     );
-    swapped.siblings.swap(0, 1);
+    let (first, second) = (swapped.steps[0].sibling, swapped.steps[1].sibling);
+    swapped.steps[0].sibling = second;
+    swapped.steps[1].sibling = first;
     v.push(vector(
         "neg_swapped_siblings",
         "A valid tree_7entry proof with its first two sibling digests swapped.",
@@ -406,35 +384,34 @@ fn build_vectors() -> Vec<Vector> {
     ));
 
     let full = base_proof.encode();
-    let truncated = full[..full.len() - kit_core::hash::HASH_LEN].to_vec();
-    // A valid multi-leaf proof checked with its positions in descending
-    // order. The proof bytes are those of `tree_9entry_multi_0_4_8`.
-    let descending_entries: Vec<Value> = [8usize, 4, 0]
-        .iter()
-        .map(|&p| hex_entry(&t9.entries[p]))
-        .collect();
+    let truncated = full[..full.len() - 1].to_vec();
+    // A valid multi-leaf chunk proof checked with its positions in
+    // descending order. The proof bytes are those of
+    // `chunked_blob_cs0_3chunks_multi_1_3`.
     v.push(vector(
         "neg_multi_positions_unsorted",
-        "The tree_9entry_multi_0_4_8 proof checked with positions {8, 4, 0}, \
+        "The chunked_blob_cs0_3chunks_multi_1_3 proof checked with positions {3, 1}, \
          which are not strictly ascending.",
-        merkle::build_tree_entries_multi_proof(&t9, [0, 4, 8])
+        merkle::build_chunks_multi_proof(&cb, [1, 3])
             .unwrap()
             .encode(),
-        &id9,
-        3,
+        &id_cb,
+        2,
         false,
         Some("multi-leaf positions are not strictly ascending"),
         json!({
-            "kind": "tree_entry",
+            "kind": "chunk",
             "proof_kind": "multi",
-            "positions": [8, 4, 0],
-            "entries": descending_entries,
+            "positions": [3, 1],
+            "total_size": cb.total_size,
+            "chunk_size": cb.chunk_size,
+            "chunk_hashes_hex": [to_hex(&cb.chunks[2]), to_hex(&cb.chunks[0])],
         }),
     ));
 
     v.push(vector(
         "neg_truncated",
-        "A valid tree_7entry proof with its last sibling digest chopped off. \
+        "A valid tree_7entry proof with its last byte chopped off. \
          Must fail to decode, not merely fail to verify.",
         truncated,
         &id7,
@@ -485,6 +462,77 @@ fn build_vectors() -> Vec<Vector> {
             "proof_kind": "single",
             "position": 6,
             "entries": [hex_entry(&t7.entries[6])],
+        }),
+    ));
+
+    // The entry `g` at position 6 goes right at its first step, so the
+    // proof checks `sep <= "g"`. A separator `h` violates it.
+    let mut violated = base_proof.clone();
+    violated.steps[0].separator = b"h".to_vec();
+    v.push(vector(
+        "neg_separator_violated",
+        "A tree_7entry proof whose first separator is above the proven name, \
+         where the path goes right (SPEC-MERKLE-OBJECTS §5.8).",
+        violated.encode(),
+        &id7,
+        1,
+        false,
+        Some("the entry name is below a separator on a right turn"),
+        json!({
+            "kind": "tree_entry",
+            "proof_kind": "single",
+            "position": 6,
+            "entries": [hex_entry(&t7.entries[6])],
+        }),
+    ));
+
+    // A hostile tree that holds `lib.rs` twice. Only the right copy can
+    // verify: the left one sits below a separator equal to its own name.
+    let dup = Tree {
+        entries: vec![
+            TreeEntry {
+                name: b"lib.rs".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: [0x11; 32],
+            },
+            TreeEntry {
+                name: b"lib.rs".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: [0x22; 32],
+            },
+        ],
+    };
+    let dup_id = merkle::compute_tree_id(&dup);
+    v.push(vector(
+        "neg_duplicate_name",
+        "A two-entry tree that holds the name lib.rs twice, proven at position 0. \
+         The keyed fold admits at most one entry per name, so this proof is rejected \
+         (SPEC-MERKLE-OBJECTS §5.8).",
+        merkle::build_tree_entry_proof(&dup, 0).unwrap().encode(),
+        &dup_id,
+        1,
+        false,
+        Some("the left copy of a repeated name is not below the separator"),
+        json!({
+            "kind": "tree_entry",
+            "proof_kind": "single",
+            "position": 0,
+            "entries": [hex_entry(&dup.entries[0])],
+        }),
+    ));
+    v.push(vector(
+        "tree_duplicate_name_right_copy",
+        "The same hostile tree proven at position 1: the one copy of lib.rs that verifies.",
+        merkle::build_tree_entry_proof(&dup, 1).unwrap().encode(),
+        &dup_id,
+        1,
+        true,
+        None,
+        json!({
+            "kind": "tree_entry",
+            "proof_kind": "single",
+            "position": 1,
+            "entries": [hex_entry(&dup.entries[1])],
         }),
     ));
 
@@ -620,56 +668,34 @@ fn verify_vector(name: &str, want_digest: &str) {
         other => panic!("{name}.json: unknown expect value {other:?}"),
     };
 
-    let proof = match Proof::decode(&bin, max_items) {
-        Ok(p) => p,
-        Err(e) => {
-            assert!(
-                !expect_accept,
-                "{name}: decode failed ({e:?}) but the vector expects accept"
-            );
-            // A reject-on-decode vector is fully checked: it never reaches
-            // a verify_* call.
-            return;
-        }
-    };
-
     let object_id: Hash = from_hex(sidecar["object_id_hex"].as_str().unwrap()).unwrap();
     let kind = sidecar["kind"].as_str().unwrap();
     let proof_kind = sidecar["proof_kind"].as_str().unwrap();
 
+    let decode_failed = |e: merkle::MerkleError| {
+        assert!(
+            !expect_accept,
+            "{name}: decode failed ({e:?}) but the vector expects accept"
+        );
+    };
+    if (kind, proof_kind) == ("tree_entry", "single") {
+        // A reject-on-decode vector is fully checked: it never reaches a
+        // verify_* call.
+        let proof = match TreeProof::decode(&bin) {
+            Ok(p) => p,
+            Err(e) => return decode_failed(e),
+        };
+        let position = u32::try_from(sidecar["position"].as_u64().unwrap()).unwrap();
+        let entry = entry_from_json(&sidecar["entries"][0]);
+        let result = merkle::verify_tree_entry(&object_id, &entry, position, &proof);
+        return check_outcome(name, &sidecar, expect_accept, result);
+    }
+    let proof = match Proof::decode(&bin, max_items) {
+        Ok(p) => p,
+        Err(e) => return decode_failed(e),
+    };
+
     let result: Result<(), merkle::MerkleError> = match (kind, proof_kind) {
-        ("tree_entry", "single") => {
-            let position = u32::try_from(sidecar["position"].as_u64().unwrap()).unwrap();
-            let entry = entry_from_json(&sidecar["entries"][0]);
-            merkle::verify_tree_entry(&object_id, &entry, position, &proof)
-        }
-        ("tree_entry", "range") => {
-            let start = u32::try_from(sidecar["start"].as_u64().unwrap()).unwrap();
-            let entries: Vec<TreeEntry> = sidecar["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(entry_from_json)
-                .collect();
-            merkle::verify_tree_entries_range(&object_id, start, &entries, &proof)
-        }
-        ("tree_entry", "multi") => {
-            let positions: Vec<u32> = sidecar["positions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|p| u32::try_from(p.as_u64().unwrap()).unwrap())
-                .collect();
-            let entries: Vec<TreeEntry> = sidecar["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(entry_from_json)
-                .collect();
-            let pairs: Vec<(TreeEntry, u32)> =
-                entries.into_iter().zip(positions.iter().copied()).collect();
-            merkle::verify_tree_entries_multi(&object_id, &pairs, &proof)
-        }
         ("chunk", "single") => {
             let position = u32::try_from(sidecar["position"].as_u64().unwrap()).unwrap();
             let hashes = sidecar["chunk_hashes_hex"].as_array().unwrap();
@@ -692,9 +718,33 @@ fn verify_vector(name: &str, want_digest: &str) {
                 .collect();
             merkle::verify_chunks_range(&object_id, start, &chunk_hashes, &proof)
         }
+        ("chunk", "multi") => {
+            let positions = sidecar["positions"].as_array().unwrap().iter();
+            let chunks: Vec<(Hash, u32)> = sidecar["chunk_hashes_hex"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(positions)
+                .map(|(h, p)| {
+                    (
+                        from_hex(h.as_str().unwrap()).unwrap(),
+                        u32::try_from(p.as_u64().unwrap()).unwrap(),
+                    )
+                })
+                .collect();
+            merkle::verify_chunks_multi(&object_id, &chunks, &proof)
+        }
         (k, p) => panic!("{name}: unknown (kind, proof_kind) = ({k}, {p})"),
     };
+    check_outcome(name, &sidecar, expect_accept, result);
+}
 
+fn check_outcome(
+    name: &str,
+    sidecar: &Value,
+    expect_accept: bool,
+    result: Result<(), merkle::MerkleError>,
+) {
     if expect_accept {
         result.unwrap_or_else(|e| panic!("{name}: expected accept, got {e:?}"));
     } else {

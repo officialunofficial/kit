@@ -1,0 +1,14 @@
+{
+  "bin": "neg_bundle_version_2.bin",
+  "blake3": "f5fefbadb50bcbf2d97627e25778017dea65db6e96e8ee362a788bcc351d17c5",
+  "commit_id_hex": "f9ceecb392b1598a464a86371f2f14bbf1a4196551128865c71babca9347bdfa",
+  "description": "The version byte is 2, whose tree steps carry an unkeyed proof; v3 is the only supported value.",
+  "expect": "reject",
+  "name": "neg_bundle_version_2",
+  "path_hex": [
+    "7368616c6c6f772e747874"
+  ],
+  "reject_reason": "unsupported bundle version 2",
+  "selector": "object",
+  "size": 527
+}

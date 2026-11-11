@@ -8,9 +8,11 @@
 //!
 //! ## Primitive: a BMT over `blake3`
 //!
-//! This module implements the construction of `commonware_storage::bmt`.
-//! Tests compare the root and the proof bytes with that crate for trees of
-//! one or more leaves.
+//! For `ChunkedBlob`, this module implements the construction of
+//! `commonware_storage::bmt`. Tests compare the root and the proof bytes
+//! with that crate for trees of one or more leaves. A `Tree` uses the same
+//! construction with a keyed parent that also commits to a separator name
+//! (see "Keyed tree fold" below).
 //!
 //! The module does not use the upstream crate, for two reasons:
 //!
@@ -51,31 +53,46 @@
 //!
 //! Tree          leaves = entries (existing lex order)
 //!   entry leaf  = domain_digest("kit-tree-entry-v1", name_len_le ‖ name ‖ mode ‖ object_hash)
+//!   parent      = H(left ‖ right ‖ u8(len(sep)) ‖ sep)   (keyed, see below)
 //! ```
 //!
-//! The outer `wrap_id` wrap makes the id type-distinct: a bare BMT root
-//! over identical leaf streams would collide across types (the prologue
-//! type byte is not in the root), so an empty `Tree` and an empty
-//! `ChunkedBlob`, or a 1-entry `Tree` and a 1-chunk `ChunkedBlob` with the
-//! same child hash, would otherwise share an id.
+//! The outer `wrap_id` wrap makes the id type-distinct. The BMT has no
+//! leaf/node tag: a position-hashed leaf and a finalized root both hash a
+//! `be32` integer and a digest, so an interior node of one BMT can equal
+//! the bare root of another. The bound leaf count fixes the shape of the
+//! tree a proof folds through, and the wrap keeps a verifier from
+//! comparing a folded value with a bare root or another type's id.
 //!
-//! ## Inclusion proofs — stable, commonware-aligned
+//! ## Keyed tree fold
+//!
+//! A two-child parent in a `Tree` BMT is `H(left ‖ right ‖ u8(len) ‖ sep)`,
+//! where `sep` is the name of the first entry under `right`. A
+//! [`TreeProof`] carries the separator of every parent on its path, and
+//! [`verify_tree_entry`] checks the proven name against each one: below
+//! the separator when the path goes left, at or above it when it goes
+//! right. Two proofs of one name at different positions would need
+//! contradictory checks at their lowest common ancestor, so a name has at
+//! most one verifiable entry in a tree, even in a tree whose author broke
+//! the sort order (SPEC-MERKLE-OBJECTS §5.8).
+//!
+//! ## Inclusion proofs
 //!
 //! Object identity (`compute_tree_id` / `compute_chunked_id`) and the
 //! inclusion-proof construction below are both stable
-//! (`docs/specs/SPEC-MERKLE-OBJECTS.md` §5). [`Proof`]'s bytes and sibling
-//! selection are byte-identical to `commonware_storage::bmt::Proof` at the
-//! pinned `2026.10.0` train: a commonware-based verifier can decode a
-//! kit-produced proof with the upstream type and run its own
-//! `verify_element_inclusion` / `verify_range_inclusion` /
-//! `verify_multi_inclusion` against the **inner root** (see
-//! [`chunked_inner_root`] / [`tree_inner_root`]), then apply [`wrap_id`] to
+//! (`docs/specs/SPEC-MERKLE-OBJECTS.md` §5). For `ChunkedBlob`,
+//! [`Proof`]'s bytes and sibling selection are byte-identical to
+//! `commonware_storage::bmt::Proof` at the pinned `2026.10.0` train: a
+//! commonware-based verifier can decode a kit-produced chunk proof with
+//! the upstream type and run its own `verify_element_inclusion` /
+//! `verify_range_inclusion` / `verify_multi_inclusion` against the
+//! **inner root** (see [`chunked_inner_root`]), then apply [`wrap_id`] to
 //! compare against the object id. `tests::proofs_match_commonware` pins
-//! this claim; `rust/tests/golden/proofs/` carries fixed vectors.
+//! this claim; `rust/tests/golden/proofs/` carries fixed vectors. A `Tree`
+//! entry has only the keyed single-entry [`TreeProof`].
 //!
 //! Verification in this crate is always stated against the **object id**
-//! (`verify_tree_entry`, `verify_chunk`, and their range/multi
-//! counterparts), never the bare inner root — passing a caller the inner
+//! (`verify_tree_entry`, `verify_chunk`, and the chunk range/multi
+//! verifiers), never the bare inner root — passing a caller the inner
 //! root invited skipping the type-domain wrap and accepting, say, a
 //! `Tree` proof against a `ChunkedBlob` id (SPEC-DISCLOSURE). The
 //! inner-root-comparing primitives (`Proof::verify_element_inclusion` and
@@ -90,6 +107,10 @@ use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRange
 
 use crate::hash::{HASH_LEN, Hash, Hasher, domain_digest, hash};
 use crate::object::{ChunkedBlob, Tree, TreeEntry};
+
+/// Largest number of steps in a [`TreeProof`]: one per level of a tree
+/// with up to `u32::MAX` leaves.
+const MAX_TREE_PROOF_STEPS: usize = MAX_LEVELS;
 
 /// Type domain for the outer identity wrap of a `ChunkedBlob`.
 const CHUNKED_TYPE_DOMAIN: &[u8] = b"kit.chunked\x00";
@@ -171,6 +192,13 @@ pub enum MerkleError {
     /// The proof did not verify against the given root/id.
     #[error("merkle proof verification failed")]
     VerificationFailed,
+    /// A tree proof separator is not a valid entry name.
+    #[error("tree proof separator is not a valid entry name")]
+    InvalidSeparator,
+    /// The proven entry name is on the wrong side of a tree proof
+    /// separator, so the entry is not where the proof places it.
+    #[error("tree entry name is out of order with a tree proof separator")]
+    SeparatorOrder,
 }
 
 impl From<CodecError> for MerkleError {
@@ -230,6 +258,40 @@ struct BmtTree {
 }
 
 fn build_bmt(leaves: &[Hash]) -> BmtTree {
+    build_bmt_with(leaves, |_, _, left, right| h2(left, right))
+}
+
+/// The keyed parent of a `Tree` BMT: `H(left ‖ right ‖ u8(len) ‖ sep)`.
+fn tree_parent(left: &Hash, right: &Hash, sep: &[u8]) -> Hash {
+    let len = u8::try_from(sep.len()).expect("entry names are at most 255 bytes");
+    let mut h = Hasher::new();
+    h.update(left).update(right).update(&[len]).update(sep);
+    h.finalize()
+}
+
+/// Index of the first leaf under the right child of the parent at index
+/// `parent` whose children are at `level`.
+fn first_leaf_of_right_child(level: usize, parent: usize) -> usize {
+    (2 * parent + 1) << level
+}
+
+/// The keyed `Tree` BMT: every two-child parent commits to the name of
+/// the first entry under its right child (SPEC-MERKLE-OBJECTS §3.2).
+fn build_tree_bmt(tree: &Tree) -> BmtTree {
+    let leaves = tree_leaves(tree);
+    build_bmt_with(&leaves, |level, parent, left, right| {
+        let sep = &tree.entries[first_leaf_of_right_child(level, parent)].name;
+        tree_parent(left, right, sep)
+    })
+}
+
+/// Build a BMT whose two-child parents are `combine(level, parent_index,
+/// left, right)`, where `level` is the children's level. A level with an
+/// odd node count duplicates its last node as `H(left ‖ left)`.
+fn build_bmt_with(
+    leaves: &[Hash],
+    combine: impl Fn(usize, usize, &Hash, &Hash) -> Hash,
+) -> BmtTree {
     let leaf_count = u32_of(leaves.len());
     let empty = leaves.is_empty();
     let position_hashed: Vec<Hash> = if empty {
@@ -244,10 +306,14 @@ fn build_bmt(leaves: &[Hash]) -> BmtTree {
     let mut levels = vec![position_hashed];
     while levels.last().expect("levels is never empty").len() > 1 {
         let cur = levels.last().expect("levels is never empty");
+        let level = levels.len() - 1;
         let mut next = Vec::with_capacity(cur.len().div_ceil(2));
-        for pair in cur.chunks(2) {
-            let right = if pair.len() == 2 { &pair[1] } else { &pair[0] };
-            next.push(h2(&pair[0], right));
+        for (parent, pair) in cur.chunks(2).enumerate() {
+            next.push(match pair {
+                [left, right] => combine(level, parent, left, right),
+                [only] => h2(only, only),
+                _ => unreachable!("chunks(2) yields one or two nodes"),
+            });
         }
         levels.push(next);
     }
@@ -721,6 +787,119 @@ impl Proof {
 }
 
 // ---------------------------------------------------------------------------
+// TreeProof: keyed tree entry proof
+// ---------------------------------------------------------------------------
+
+/// One level of a [`TreeProof`]: the sibling digest and the separator of
+/// the parent the sibling shares with the proven node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeProofStep {
+    /// The sibling node at this level.
+    pub sibling: Hash,
+    /// The name of the first entry under the parent's right child.
+    pub separator: Vec<u8>,
+}
+
+/// A keyed inclusion proof for one `Tree` entry (SPEC-MERKLE-OBJECTS
+/// §5.8): the tree's leaf count and one [`TreeProofStep`] per level at
+/// which the proven node has a real sibling, bottom-up.
+///
+/// Bytes are `be32(leaf_count) ‖ varint(n) ‖ n × (sibling ‖ u8(len) ‖
+/// separator)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TreeProof {
+    /// The number of entries in the tree.
+    pub leaf_count: u32,
+    /// The proof steps, bottom-up.
+    pub steps: Vec<TreeProofStep>,
+}
+
+impl Write for TreeProofStep {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.sibling.write(writer);
+        let len = u8::try_from(self.separator.len()).expect("entry names are at most 255 bytes");
+        len.write(writer);
+        writer.put_slice(&self.separator);
+    }
+}
+
+impl EncodeSize for TreeProofStep {
+    fn encode_size(&self) -> usize {
+        HASH_LEN + 1 + self.separator.len()
+    }
+}
+
+impl Read for TreeProofStep {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, (): &Self::Cfg) -> Result<Self, CodecError> {
+        let sibling = Hash::read(reader)?;
+        let len = usize::from(u8::read(reader)?);
+        if len == 0 {
+            return Err(CodecError::Invalid("TreeProofStep", "empty separator"));
+        }
+        if reader.remaining() < len {
+            return Err(CodecError::EndOfBuffer);
+        }
+        let mut separator = vec![0u8; len];
+        reader.copy_to_slice(&mut separator);
+        Ok(Self { sibling, separator })
+    }
+}
+
+impl Write for TreeProof {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.leaf_count.write(writer);
+        self.steps.write(writer);
+    }
+}
+
+impl EncodeSize for TreeProof {
+    fn encode_size(&self) -> usize {
+        self.leaf_count.encode_size() + self.steps.encode_size()
+    }
+}
+
+impl Read for TreeProof {
+    type Cfg = ();
+
+    /// Bounds the step count to `MAX_TREE_PROOF_STEPS` before reading any
+    /// step.
+    fn read_cfg(reader: &mut impl Buf, (): &Self::Cfg) -> Result<Self, CodecError> {
+        let leaf_count = u32::read(reader)?;
+        let steps =
+            Vec::<TreeProofStep>::read_cfg(reader, &((..=MAX_TREE_PROOF_STEPS).into(), ()))?;
+        Ok(Self { leaf_count, steps })
+    }
+}
+
+impl TreeProof {
+    /// Encode to wire bytes.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.encode_size());
+        self.write(&mut out);
+        out
+    }
+
+    /// Decode from wire bytes. Rejects more than `MAX_LEVELS` steps, an
+    /// empty separator and trailing bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`MerkleError::MalformedProof`] on any of those, or on a truncated
+    /// buffer.
+    pub fn decode(bytes: &[u8]) -> Result<Self, MerkleError> {
+        let mut buf = Copying(bytes);
+        let proof = Self::read(&mut buf)?;
+        if buf.has_remaining() {
+            return Err(MerkleError::MalformedProof);
+        }
+        Ok(proof)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Leaf digests
 // ---------------------------------------------------------------------------
 
@@ -779,12 +958,12 @@ pub fn chunked_inner_root(cb: &ChunkedBlob) -> Hash {
     build_bmt(&chunked_leaves(cb)).root
 }
 
-/// Bare (pre-wrap) BMT root over a `Tree`'s entry leaves. A
-/// commonware-based verifier's `verify_*_inclusion` checks against this;
-/// kit callers use the id-based [`verify_tree_entry`] instead.
+/// Bare (pre-wrap) keyed BMT root over a `Tree`'s entry leaves
+/// (SPEC-MERKLE-OBJECTS §3.2). Kit callers verify entries with the
+/// id-based [`verify_tree_entry`].
 #[must_use]
 pub fn tree_inner_root(tree: &Tree) -> Hash {
-    build_bmt(&tree_leaves(tree)).root
+    build_tree_bmt(tree).root
 }
 
 /// The content-address (object id) of a `ChunkedBlob`.
@@ -827,6 +1006,13 @@ pub fn chunk_position(cb: &ChunkedBlob, chunk_hash: &Hash) -> Option<u32> {
 #[must_use]
 pub fn tree_entry_position(tree: &Tree, name: &[u8]) -> Option<u32> {
     tree.entries.iter().position(|e| e.name == name).map(u32_of)
+}
+
+/// Number of steps in the keyed proof of the entry at `position` in a
+/// tree of `leaf_count` entries: one per level at which the entry's node
+/// has a real sibling.
+pub(crate) fn tree_proof_step_count(leaf_count: u32, position: u32) -> Result<usize, MerkleError> {
+    Ok(siblings_required_for_multi_proof(leaf_count, [position])?.len())
 }
 
 /// Wire size of a proof, calculated from tree shape without hashing leaves.
@@ -872,28 +1058,31 @@ pub fn build_chunks_multi_proof(
     build_bmt(&chunked_leaves(cb)).multi_proof(positions)
 }
 
-/// Build an inclusion proof that the entry at `position` (= entry index)
-/// belongs to `tree`.
-pub fn build_tree_entry_proof(tree: &Tree, position: u32) -> Result<Proof, MerkleError> {
-    build_bmt(&tree_leaves(tree)).proof(position)
-}
-
-/// Build a range proof that the entries at `start..=end` belong to `tree`.
-pub fn build_tree_entries_range_proof(
-    tree: &Tree,
-    start: u32,
-    end: u32,
-) -> Result<Proof, MerkleError> {
-    build_bmt(&tree_leaves(tree)).range_proof(start, end)
-}
-
-/// Build a multi-leaf proof that the entries at `positions` belong to
-/// `tree`. The positions must be strictly ascending.
-pub fn build_tree_entries_multi_proof(
-    tree: &Tree,
-    positions: impl IntoIterator<Item = u32>,
-) -> Result<Proof, MerkleError> {
-    build_bmt(&tree_leaves(tree)).multi_proof(positions)
+/// Build a keyed proof that the entry at `position` (= entry index)
+/// belongs to `tree` (SPEC-MERKLE-OBJECTS §5.8).
+pub fn build_tree_entry_proof(tree: &Tree, position: u32) -> Result<TreeProof, MerkleError> {
+    let leaf_count = u32_of(tree.entries.len());
+    if position >= leaf_count {
+        return Err(MerkleError::PositionOutOfRange(position));
+    }
+    let bmt = build_tree_bmt(tree);
+    let mut steps = Vec::new();
+    let mut index = position as usize;
+    for (level, nodes) in bmt.levels.iter().enumerate() {
+        if nodes.len() == 1 {
+            break;
+        }
+        let sibling = index ^ 1;
+        if sibling < nodes.len() {
+            let sep = &tree.entries[first_leaf_of_right_child(level, index / 2)].name;
+            steps.push(TreeProofStep {
+                sibling: nodes[sibling],
+                separator: sep.clone(),
+            });
+        }
+        index /= 2;
+    }
+    Ok(TreeProof { leaf_count, steps })
 }
 
 // ---------------------------------------------------------------------------
@@ -901,42 +1090,52 @@ pub fn build_tree_entries_multi_proof(
 // ---------------------------------------------------------------------------
 
 /// Verify that `entry` at `position` belongs to the `Tree` whose id is
-/// `tree_id`.
+/// `tree_id` (SPEC-MERKLE-OBJECTS §5.8). Besides folding to the id, every
+/// separator on the path must be a valid entry name, and the entry's name
+/// must lie below each separator where the path goes left and at or above
+/// it where the path goes right. So an accepted proof also shows that no
+/// other position of `tree_id` has a verifiable entry with this name.
 pub fn verify_tree_entry(
     tree_id: &Hash,
     entry: &TreeEntry,
-    position: u32,
-    proof: &Proof,
+    mut position: u32,
+    proof: &TreeProof,
 ) -> Result<(), MerkleError> {
-    let root = proof.reconstruct_element_root(&tree_entry_leaf(entry), position)?;
-    check_wrapped(ObjectKind::Tree, &root, tree_id)
-}
-
-/// Verify that `entries` (in tree order, starting at `start`) belong to
-/// the `Tree` whose id is `tree_id`.
-pub fn verify_tree_entries_range(
-    tree_id: &Hash,
-    start: u32,
-    entries: &[TreeEntry],
-    proof: &Proof,
-) -> Result<(), MerkleError> {
-    let leaves: Vec<Hash> = entries.iter().map(tree_entry_leaf).collect();
-    let root = proof.reconstruct_range_root(start, &leaves)?;
-    check_wrapped(ObjectKind::Tree, &root, tree_id)
-}
-
-/// Verify that `entries` (each with its own position) belong to the `Tree`
-/// whose id is `tree_id`. The positions must be strictly ascending.
-pub fn verify_tree_entries_multi(
-    tree_id: &Hash,
-    entries: &[(TreeEntry, u32)],
-    proof: &Proof,
-) -> Result<(), MerkleError> {
-    let elements: Vec<(Hash, u32)> = entries
-        .iter()
-        .map(|(e, pos)| (tree_entry_leaf(e), *pos))
-        .collect();
-    let root = proof.reconstruct_multi_root(&elements)?;
+    if position >= proof.leaf_count {
+        return Err(MerkleError::PositionOutOfRange(position));
+    }
+    let mut computed = position_leaf(position, &tree_entry_leaf(entry));
+    let mut level_size = proof.leaf_count as usize;
+    let mut steps = proof.steps.iter();
+    while level_size > 1 {
+        let goes_left = position.is_multiple_of(2);
+        if goes_left && position as usize + 1 >= level_size {
+            computed = h2(&computed, &computed);
+        } else {
+            let step = steps.next().ok_or(MerkleError::UnalignedProof)?;
+            if !TreeEntry::validate_name(&step.separator) {
+                return Err(MerkleError::InvalidSeparator);
+            }
+            let separator = step.separator.as_slice();
+            computed = if goes_left {
+                if entry.name.as_slice() >= separator {
+                    return Err(MerkleError::SeparatorOrder);
+                }
+                tree_parent(&computed, &step.sibling, separator)
+            } else {
+                if entry.name.as_slice() < separator {
+                    return Err(MerkleError::SeparatorOrder);
+                }
+                tree_parent(&step.sibling, &computed, separator)
+            };
+        }
+        position /= 2;
+        level_size = level_size.div_ceil(2);
+    }
+    if steps.next().is_some() {
+        return Err(MerkleError::UnalignedProof);
+    }
+    let root = h2(&proof.leaf_count.to_be_bytes(), &computed);
     check_wrapped(ObjectKind::Tree, &root, tree_id)
 }
 
@@ -1199,91 +1398,267 @@ mod tests {
         assert!(verify_tree_entry(&id, &wrong, pos, &proof).is_err());
     }
 
+    fn sorted_tree(n: usize) -> Tree {
+        tree(
+            (0..n)
+                .map(|i| {
+                    let name = format!("e{i:04}");
+                    entry(
+                        name.as_bytes(),
+                        EntryMode::Blob,
+                        u8::try_from(i % 256).unwrap(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn every_entry_of_a_sorted_tree_verifies() {
+        for n in [1usize, 2, 3, 4, 5, 7, 8, 9, 16, 17, 33] {
+            let t = sorted_tree(n);
+            let id = compute_tree_id(&t);
+            for p in 0..u32_of(n) {
+                let proof = build_tree_entry_proof(&t, p).unwrap();
+                verify_tree_entry(&id, &t.entries[p as usize], p, &proof)
+                    .unwrap_or_else(|e| panic!("n={n} p={p}: {e}"));
+                let decoded = TreeProof::decode(&proof.encode()).unwrap();
+                assert_eq!(decoded, proof);
+            }
+        }
+    }
+
+    #[test]
+    fn keyed_fold_changes_ids_of_trees_with_two_or_more_entries() {
+        // The keyed parent replaces every two-child parent, so only the
+        // empty and one-entry trees keep the unkeyed id.
+        for n in [0usize, 1] {
+            let t = sorted_tree(n);
+            assert_eq!(tree_inner_root(&t), build_bmt(&tree_leaves(&t)).root);
+        }
+        for n in [2usize, 3, 9] {
+            let t = sorted_tree(n);
+            assert_ne!(tree_inner_root(&t), build_bmt(&tree_leaves(&t)).root);
+        }
+    }
+
+    #[test]
+    fn a_repeated_name_has_at_most_one_verifiable_entry() {
+        // A hostile author's tree: `lib.rs` twice, the second far from the
+        // first, with the order broken in between.
+        let t = tree(vec![
+            entry(b"lib.rs", EntryMode::Blob, 1),
+            entry(b"z", EntryMode::Blob, 2),
+            entry(b"a", EntryMode::Blob, 3),
+            entry(b"lib.rs", EntryMode::Blob, 4),
+        ]);
+        let id = compute_tree_id(&t);
+        let verified: Vec<u32> = (0..4)
+            .filter(|&p| t.entries[p as usize].name == b"lib.rs")
+            .filter(|&p| {
+                let proof = build_tree_entry_proof(&t, p).unwrap();
+                verify_tree_entry(&id, &t.entries[p as usize], p, &proof).is_ok()
+            })
+            .collect();
+        assert!(verified.len() <= 1, "verified positions {verified:?}");
+
+        // Two adjacent copies: the left one fails its separator check.
+        let t = tree(vec![
+            entry(b"lib.rs", EntryMode::Blob, 1),
+            entry(b"lib.rs", EntryMode::Blob, 2),
+        ]);
+        let id = compute_tree_id(&t);
+        let left = build_tree_entry_proof(&t, 0).unwrap();
+        assert_eq!(
+            verify_tree_entry(&id, &t.entries[0], 0, &left),
+            Err(MerkleError::SeparatorOrder)
+        );
+        let right = build_tree_entry_proof(&t, 1).unwrap();
+        verify_tree_entry(&id, &t.entries[1], 1, &right).unwrap();
+    }
+
+    #[test]
+    fn a_name_on_the_wrong_side_of_a_separator_is_rejected() {
+        let t = sorted_tree(4);
+        let id = compute_tree_id(&t);
+        let proof = build_tree_entry_proof(&t, 1).unwrap();
+        // Same leaf digest inputs except the name: a name above every
+        // separator cannot sit at position 1.
+        let mut moved = t.entries[1].clone();
+        moved.name = b"zzz".to_vec();
+        assert_eq!(
+            verify_tree_entry(&id, &moved, 1, &proof),
+            Err(MerkleError::SeparatorOrder)
+        );
+    }
+
+    #[test]
+    fn tree_proof_rejects_invalid_separators_and_bad_shapes() {
+        let t = sorted_tree(4);
+        let id = compute_tree_id(&t);
+        let good = build_tree_entry_proof(&t, 0).unwrap();
+
+        let mut bad = good.clone();
+        bad.steps[0].separator = b"a/b".to_vec();
+        assert_eq!(
+            verify_tree_entry(&id, &t.entries[0], 0, &bad),
+            Err(MerkleError::InvalidSeparator)
+        );
+
+        let mut short = good.clone();
+        short.steps.pop();
+        assert_eq!(
+            verify_tree_entry(&id, &t.entries[0], 0, &short),
+            Err(MerkleError::UnalignedProof)
+        );
+
+        let mut long = good.clone();
+        long.steps.push(good.steps[0].clone());
+        assert_eq!(
+            verify_tree_entry(&id, &t.entries[0], 0, &long),
+            Err(MerkleError::UnalignedProof)
+        );
+
+        assert_eq!(
+            verify_tree_entry(&id, &t.entries[0], 4, &good),
+            Err(MerkleError::PositionOutOfRange(4))
+        );
+    }
+
+    #[test]
+    fn tree_proof_decode_enforces_bounds() {
+        let proof = build_tree_entry_proof(&sorted_tree(9), 4).unwrap();
+        let bytes = proof.encode();
+
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(
+            TreeProof::decode(&trailing),
+            Err(MerkleError::MalformedProof)
+        );
+        assert_eq!(
+            TreeProof::decode(&bytes[..bytes.len() - 1]),
+            Err(MerkleError::MalformedProof)
+        );
+
+        // An empty separator: leaf count, one step, sibling, length 0.
+        let mut empty_sep = 4u32.to_be_bytes().to_vec();
+        empty_sep.push(1);
+        empty_sep.extend_from_slice(&[0u8; 32]);
+        empty_sep.push(0);
+        assert_eq!(
+            TreeProof::decode(&empty_sep),
+            Err(MerkleError::MalformedProof)
+        );
+
+        // 33 steps: rejected from the count, before any step is read.
+        let mut too_many = 4u32.to_be_bytes().to_vec();
+        too_many.push(33);
+        assert_eq!(
+            TreeProof::decode(&too_many),
+            Err(MerkleError::MalformedProof)
+        );
+    }
+
+    proptest::proptest! {
+        /// In any tree, canonical or not, built with names from a small
+        /// alphabet so that names repeat, no name has two positions whose
+        /// proofs verify.
+        #[test]
+        fn no_name_has_two_verifiable_entries(
+            names in proptest::collection::vec(proptest::sample::select(vec!["a", "b", "c", "d"]), 1..24)
+        ) {
+            let t = tree(
+                names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| entry(n.as_bytes(), EntryMode::Blob, u8::try_from(i).unwrap()))
+                    .collect(),
+            );
+            let id = compute_tree_id(&t);
+            for name in ["a", "b", "c", "d"] {
+                let verified = (0..u32_of(t.entries.len()))
+                    .filter(|&p| t.entries[p as usize].name == name.as_bytes())
+                    .filter(|&p| {
+                        let proof = build_tree_entry_proof(&t, p).unwrap();
+                        verify_tree_entry(&id, &t.entries[p as usize], p, &proof).is_ok()
+                    })
+                    .count();
+                proptest::prop_assert!(verified <= 1, "{name} verified {verified} times in {names:?}");
+            }
+        }
+    }
+
     #[test]
     fn range_and_multi_proofs_round_trip() {
-        let t = tree(
-            (0..9)
-                .map(|i| entry(&[b'a' + i], EntryMode::Blob, i))
-                .collect(),
-        );
-        let id = compute_tree_id(&t);
+        let c = cb(900, 0, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let id = compute_chunked_id(&c);
 
-        let range_proof = build_tree_entries_range_proof(&t, 2, 4).unwrap();
-        verify_tree_entries_range(&id, 2, &t.entries[2..=4], &range_proof).unwrap();
-        assert!(verify_tree_entries_range(&id, 2, &t.entries[2..4], &range_proof).is_err());
+        let range_proof = build_chunks_range_proof(&c, 2, 4).unwrap();
+        verify_chunks_range(&id, 2, &c.chunks[1..=3], &range_proof).unwrap();
+        assert!(verify_chunks_range(&id, 2, &c.chunks[1..3], &range_proof).is_err());
 
-        let multi_proof = build_tree_entries_multi_proof(&t, [0, 4, 8]).unwrap();
-        let elements = [
-            (t.entries[0].clone(), 0),
-            (t.entries[4].clone(), 4),
-            (t.entries[8].clone(), 8),
-        ];
-        verify_tree_entries_multi(&id, &elements, &multi_proof).unwrap();
-        let wrong_elements = [
-            (t.entries[0].clone(), 0),
-            (t.entries[4].clone(), 5), // wrong position
-            (t.entries[8].clone(), 8),
-        ];
-        assert!(verify_tree_entries_multi(&id, &wrong_elements, &multi_proof).is_err());
+        let multi_proof = build_chunks_multi_proof(&c, [1, 4, 8]).unwrap();
+        let elements = [(c.chunks[0], 1), (c.chunks[3], 4), (c.chunks[7], 8)];
+        verify_chunks_multi(&id, &elements, &multi_proof).unwrap();
+        let wrong_elements = [(c.chunks[0], 1), (c.chunks[3], 5), (c.chunks[7], 8)];
+        assert!(verify_chunks_multi(&id, &wrong_elements, &multi_proof).is_err());
     }
 
     #[test]
     fn multi_proofs_require_strictly_ascending_positions() {
-        let t = tree(
-            (0..9)
-                .map(|i| entry(&[b'a' + i], EntryMode::Blob, i))
-                .collect(),
-        );
-        let id = compute_tree_id(&t);
-        let proof = build_tree_entries_multi_proof(&t, [0, 4, 8]).unwrap();
-        let pair = |p: u32| (t.entries[p as usize].clone(), p);
+        // Nine chunks: BMT positions 1..=9 (position 0 is the metadata leaf).
+        let nine = cb(900, 0, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let id = compute_chunked_id(&nine);
+        let proof = build_chunks_multi_proof(&nine, [1, 4, 8]).unwrap();
+        let pair = |p: u32| (nine.chunks[p as usize - 1], p);
 
         // The builder names the first position that is lower than its
         // predecessor, in input order.
         assert_eq!(
-            build_tree_entries_multi_proof(&t, [8, 4, 0]),
+            build_chunks_multi_proof(&nine, [8, 4, 1]),
             Err(MerkleError::UnsortedPosition(4))
         );
         assert_eq!(
-            build_tree_entries_multi_proof(&t, [0, 8, 4]),
+            build_chunks_multi_proof(&nine, [1, 8, 4]),
             Err(MerkleError::UnsortedPosition(4))
         );
         assert_eq!(
-            build_tree_entries_multi_proof(&t, [0, 4, 4]),
+            build_chunks_multi_proof(&nine, [1, 4, 4]),
             Err(MerkleError::DuplicatePosition(4))
         );
         assert_eq!(
-            build_tree_entries_multi_proof(&t, [0, 4, 9]),
-            Err(MerkleError::PositionOutOfRange(9))
+            build_chunks_multi_proof(&nine, [1, 4, 10]),
+            Err(MerkleError::PositionOutOfRange(10))
         );
         // A duplicate that is not adjacent is still a descent.
         assert_eq!(
-            build_tree_entries_multi_proof(&t, [0, 4, 8, 4]),
+            build_chunks_multi_proof(&nine, [1, 4, 8, 4]),
             Err(MerkleError::UnsortedPosition(4))
         );
 
         // The verifier rejects the same orders against a valid proof.
-        verify_tree_entries_multi(&id, &[pair(0), pair(4), pair(8)], &proof).unwrap();
+        verify_chunks_multi(&id, &[pair(1), pair(4), pair(8)], &proof).unwrap();
         assert_eq!(
-            verify_tree_entries_multi(&id, &[pair(8), pair(4), pair(0)], &proof),
+            verify_chunks_multi(&id, &[pair(8), pair(4), pair(1)], &proof),
             Err(MerkleError::UnsortedPosition(4))
         );
         assert_eq!(
-            verify_tree_entries_multi(&id, &[pair(0), pair(8), pair(4)], &proof),
+            verify_chunks_multi(&id, &[pair(1), pair(8), pair(4)], &proof),
             Err(MerkleError::UnsortedPosition(4))
         );
         assert_eq!(
-            verify_tree_entries_multi(&id, &[pair(0), pair(4), pair(4)], &proof),
+            verify_chunks_multi(&id, &[pair(1), pair(4), pair(4)], &proof),
             Err(MerkleError::DuplicatePosition(4))
         );
         // Range errors and order errors are reported in input order.
         assert_eq!(
-            verify_tree_entries_multi(&id, &[pair(4), pair(0), (t.entries[0].clone(), 9)], &proof),
-            Err(MerkleError::UnsortedPosition(0))
+            verify_chunks_multi(&id, &[pair(4), pair(1), (nine.chunks[0], 10)], &proof),
+            Err(MerkleError::UnsortedPosition(1))
         );
         assert_eq!(
-            verify_tree_entries_multi(&id, &[pair(4), (t.entries[0].clone(), 9), pair(0)], &proof),
-            Err(MerkleError::PositionOutOfRange(9))
+            verify_chunks_multi(&id, &[pair(4), (nine.chunks[0], 10), pair(1)], &proof),
+            Err(MerkleError::PositionOutOfRange(10))
         );
 
         let c = cb(100, 0, &[1, 2, 3, 4]);
@@ -1339,8 +1714,8 @@ mod tests {
         let id = compute_tree_id(&t);
         let proof = build_tree_entry_proof(&t, 0).unwrap();
         assert!(
-            proof.siblings.is_empty(),
-            "single-leaf tree proof must have zero siblings"
+            proof.steps.is_empty(),
+            "single-leaf tree proof must have zero steps"
         );
         verify_tree_entry(&id, &t.entries[0], 0, &proof).unwrap();
     }
@@ -1357,26 +1732,27 @@ mod tests {
         // because that id's inner root happens to fold the same way
         // (SPEC-MERKLE-OBJECTS §5.4).
         assert_eq!(
-            verify_tree_entries_range(&TREE_EMPTY_ID, 0, &[], &Proof::default()),
+            verify_chunks_multi(&TREE_EMPTY_ID, &[], &Proof::default()),
             Err(MerkleError::NoPositions)
         );
         assert_eq!(
-            verify_tree_entries_multi(&TREE_EMPTY_ID, &[], &Proof::default()),
-            Err(MerkleError::NoPositions)
+            verify_tree_entry(
+                &TREE_EMPTY_ID,
+                &entry(b"a", EntryMode::Blob, 1),
+                0,
+                &TreeProof::default()
+            ),
+            Err(MerkleError::PositionOutOfRange(0))
         );
 
-        // The rule holds regardless of `leaf_count`: an empty
-        // entries/positions slice is rejected even against a genuinely
-        // non-empty tree with an otherwise-valid proof.
-        let t = tree(vec![entry(b"a", EntryMode::Blob, 1)]);
-        let id = compute_tree_id(&t);
-        let real_proof = build_tree_entry_proof(&t, 0).unwrap();
+        // The rule holds regardless of `leaf_count`: an empty positions
+        // slice is rejected even against a genuinely non-empty chunked
+        // blob with an otherwise-valid proof.
+        let c = cb(100, 0, &[1]);
+        let id = compute_chunked_id(&c);
+        let real_proof = build_chunk_proof(&c, 1).unwrap();
         assert_eq!(
-            verify_tree_entries_range(&id, 0, &[], &real_proof),
-            Err(MerkleError::NoPositions)
-        );
-        assert_eq!(
-            verify_tree_entries_multi(&id, &[], &real_proof),
+            verify_chunks_multi(&id, &[], &real_proof),
             Err(MerkleError::NoPositions)
         );
     }
@@ -1388,15 +1764,7 @@ mod tests {
         // rather than answered with the all-default proof.
         let empty = tree(vec![]);
         assert_eq!(
-            build_tree_entries_range_proof(&empty, 0, 0),
-            Err(MerkleError::PositionOutOfRange(0))
-        );
-        assert_eq!(
             build_tree_entry_proof(&empty, 0),
-            Err(MerkleError::PositionOutOfRange(0))
-        );
-        assert_eq!(
-            build_tree_entries_multi_proof(&empty, [0]),
             Err(MerkleError::PositionOutOfRange(0))
         );
     }
@@ -1412,12 +1780,8 @@ mod tests {
 
     #[test]
     fn proof_round_trips_through_encode_decode() {
-        let t = tree(
-            (0..7)
-                .map(|i| entry(&[b'a' + i], EntryMode::Blob, i))
-                .collect(),
-        );
-        let proof = build_tree_entry_proof(&t, 6).unwrap();
+        let c = cb(700, 0, &[1, 2, 3, 4, 5, 6]);
+        let proof = build_chunk_proof(&c, 6).unwrap();
         let bytes = proof.encode();
         let decoded = Proof::decode(&bytes, 1).unwrap();
         assert_eq!(proof, decoded);
@@ -1831,18 +2195,12 @@ mod kani_proofs {
         if chunk.is_ok() {
             assert!(shape_ok);
         }
-        let entry = TreeEntry {
-            name: vec![b'a'],
-            mode: crate::object::EntryMode::Blob,
-            object_hash: leaf,
-        };
-        let _ = verify_tree_entry(&id, &entry, position, &proof);
         chunk.is_ok()
     }
 
     /// Adversarial single-leaf verification: any `leaf_count`, any
-    /// `position`, no sibling digests, any claimed id. `verify_chunk` /
-    /// `verify_tree_entry` never panic/overflow, and the fold succeeds
+    /// `position`, no sibling digests, any claimed id. `verify_chunk`
+    /// never panics or overflows, and the fold succeeds
     /// iff `position < leaf_count` and the proof carries exactly the §5.3
     /// sibling count (§5.4 "consumed exactly once"). Chunk position 0 is
     /// always rejected (§5.5). One harness per sibling count: 0..=2 in
@@ -2002,12 +2360,8 @@ mod kani_proofs {
     }
 
     /// SPEC-MERKLE-OBJECTS §5.4 builder rule: "A builder MUST refuse any
-    /// position `>= leaf_count` ... A builder asked for position 0 of an
-    /// empty `Tree`, including the range `0..=0`, MUST refuse rather than
-    /// return the all-default proof." For the empty `Tree` every
-    /// single-leaf, range and (one-position) multi-leaf request, over
-    /// every `u32` position, is refused. The `cover` shows the range
-    /// assertion is on a reachable path.
+    /// position `>= leaf_count`." For the empty `Tree` every entry proof
+    /// request, over every `u32` position, is refused.
     #[kani::proof]
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
@@ -2017,14 +2371,10 @@ mod kani_proofs {
         let empty = Tree {
             entries: Vec::new(),
         };
-        let (p, start, end): (u32, u32, u32) = (kani::any(), kani::any(), kani::any());
-        assert!(build_tree_entry_proof(&empty, p).is_err());
-        assert!(build_tree_entries_multi_proof(&empty, [p]).is_err());
-        let range = build_tree_entries_range_proof(&empty, start, end);
-        kani::cover!(range.is_err(), "range_refused");
+        let p: u32 = kani::any();
         assert!(
-            range.is_err(),
-            "empty-Tree range proof must be refused (SPEC-MERKLE-OBJECTS §5.4)"
+            build_tree_entry_proof(&empty, p).is_err(),
+            "empty-Tree entry proof must be refused (SPEC-MERKLE-OBJECTS §5.4)"
         );
     }
 
