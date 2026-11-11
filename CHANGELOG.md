@@ -33,6 +33,28 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remote-tracking ref and every tag. A commit shows once. The flag is a usage
   error together with a revision or a range. `libkit::log::Query::all` selects
   it, and `libkit::log::ref_tips` lists the refs.
+- `checkout -- <path>...` restores the paths from the index. It runs
+  `restore <path>...`, so it refuses a file with unstaged edits, and `-f`
+  (`--force`) overrides the refusal. `checkout <rev> -- <path>` is a usage
+  error.
+- `init <dir>` creates `<dir>`, nested levels included, and initialises it. It
+  refuses a `<dir>` that is a symlink, a dangling one included, or a file.
+  `init -q` (`--quiet`) drops the success line and never an error. `init` in
+  an existing repository stays an error.
+- `show-ref <pattern>...` keeps the refs that a pattern names: the full ref
+  name, or its trailing path components. `main` keeps `refs/heads/main` and
+  not `refs/heads/domain`. Several patterns give the union, and an empty
+  pattern is a usage error. `show-ref` exits `1` with no output when nothing
+  matches.
+- `rev-parse --verify <rev>` takes exactly one revision, or `<rev>:<path>`,
+  and prints its full ID. The object must exist in the store. Any other input
+  prints nothing on stdout and exits `1`, or `64` when the count of
+  revisions is not one. `-q` (`--quiet`) drops the message. It does not
+  combine with `--abbrev-ref` or `--show-toplevel`.
+- `add -n` (`--dry-run`) prints `add '<path>'` for each file that a real add
+  would stage or update, and `remove '<path>'` for each deletion that `-A`
+  would record. It writes no index and no object. It excludes `-p` and `-u`.
+  `libkit::add::Request` has a `dry_run` field.
 - `rev-list` takes `-n <n>` and `--max-count=<n>`, which keep the first `<n>`
   commits, and a range `A..B` or `A...B` in place of a revision. It reads the
   range as `log` does.

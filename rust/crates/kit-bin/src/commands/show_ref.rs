@@ -1,6 +1,8 @@
-//! `kit show-ref [--heads] [--tags]` — list refs as `<hash> <refname>`,
-//! like `git show-ref`. Output is sorted by full ref name; the hash is a
-//! 64-hex BLAKE3 id (vs git's 40-hex SHA-1).
+//! `kit show-ref [--heads] [--tags] [<pattern>...]` — list refs as
+//! `<hash> <refname>`, like `git show-ref`. Output is sorted by full ref name;
+//! the hash is a 64-hex BLAKE3 id (vs git's 40-hex SHA-1). A pattern keeps a
+//! ref when it equals the full ref name or equals its trailing path
+//! components, so `main` keeps `refs/heads/main` and not `refs/heads/domain`.
 
 use std::io::Write;
 
@@ -20,6 +22,9 @@ struct ShowRefOpts {
     /// Limit to `refs/tags/*`.
     #[arg(long)]
     tags: bool,
+    /// Keep the refs that a pattern names: the full ref name, or its trailing
+    /// path components (`main` for `refs/heads/main`).
+    patterns: Vec<String>,
 }
 
 #[must_use]
@@ -28,6 +33,9 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    if opts.patterns.iter().any(String::is_empty) {
+        return super::usage_error("a pattern must not be empty");
+    }
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -77,6 +85,7 @@ pub fn run(args: &[String]) -> u8 {
             Err(e) => return emit_err(&format!("list remotes: {e}"), exit::GENERAL_ERROR),
         }
     }
+    lines.retain(|(name, _)| matches_any(name, &opts.patterns));
     lines.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut stdout = std::io::stdout().lock();
@@ -90,6 +99,19 @@ pub fn run(args: &[String]) -> u8 {
     } else {
         exit::OK
     }
+}
+
+/// Whether `name` passes the patterns: no pattern keeps every ref, and a
+/// pattern keeps the ref it equals or the ref whose trailing path components
+/// it equals.
+fn matches_any(name: &str, patterns: &[String]) -> bool {
+    patterns.is_empty()
+        || patterns.iter().any(|p| {
+            name == p
+                || name
+                    .strip_suffix(p.as_str())
+                    .is_some_and(|head| head.ends_with('/'))
+        })
 }
 
 /// Push `(<prefix><name>, hex hash)` for every ref with a readable hash.

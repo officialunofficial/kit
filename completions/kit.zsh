@@ -97,6 +97,7 @@ _kit() {
                         '(-A --all)'{-A,--all}'[stage all changes incl. deletions]' \
                         '(-u --update)'{-u,--update}'[restage only tracked files]' \
                         '(-f --force)'{-f,--force}'[stage an ignored path]' \
+                        '(-n --dry-run)'{-n,--dry-run}'[show what would be staged]' \
                         '(-p --patch)'{-p,--patch}'[interactively choose hunks to stage]' \
                         '--help[show help]' \
                         '*:file:_files'
@@ -215,6 +216,8 @@ _kit() {
                         '--short=[abbreviate to N chars]:N:' \
                         '--abbrev-ref[print the short symbolic name]' \
                         '--show-toplevel[print the repository root]' \
+                        '--verify[require one revision that resolves]' \
+                        '(-q --quiet)'{-q,--quiet}'[with --verify, print no message]' \
                         '--help[show help]' \
                         '*:rev:'
                     ;;
@@ -222,7 +225,8 @@ _kit() {
                     _arguments \
                         '--heads[only refs/heads]' \
                         '--tags[only refs/tags]' \
-                        '--help[show help]'
+                        '--help[show help]' \
+                        '*:pattern:'
                     ;;
                 for-each-ref)
                     _arguments \

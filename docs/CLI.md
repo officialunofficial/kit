@@ -42,8 +42,12 @@ the `.kit/` marker and has no split work-tree / exec-path model.
 
 Working-tree commands:
 
-- `kit init` &mdash; create a new repository in `.kit/`.
-- `kit add [-A|-u] [-f] [-p] <path>...` / `kit add .` &mdash; stage files for the
+- `kit init [-q] [<dir>]` &mdash; create a new repository in `.kit/`, in the
+  current directory or in `<dir>`. kit creates a missing `<dir>`, nested
+  levels included. It refuses a `<dir>` that is a symlink or a file (exit
+  `73`) and a directory that holds a repository already (exit `1`).
+  `-q`/`--quiet` drops the success line and never an error.
+- `kit add [-A|-u] [-f] [-n] [-p] <path>...` / `kit add .` &mdash; stage files for the
   next commit. Multiple pathspecs may be given. `.` stages every non-ignored
   file under the current directory. `-A`/`--all` stages every change in
   the worktree including deletions of tracked files (takes no path
@@ -63,7 +67,10 @@ Working-tree commands:
   are **refused**. An explicitly-named ignored path is refused unless
   `-f`/`--force` (like plain `add`); a path that escapes the repo through
   a symlinked parent is refused. The hunk view and prompts go to stderr;
-  `s` (split) and `e` (manual edit) are follow-ups.
+  `s` (split) and `e` (manual edit) are follow-ups. `-n`/`--dry-run` prints
+  `add '<path>'` for each file that would be staged or updated and
+  `remove '<path>'` for each deletion that `-A` would record. It changes no
+  index and writes no object. It is incompatible with `-p` and `-u`.
 - `kit rm [--cached] [-r|--recursive] [-f|--force] <path>...` &mdash; remove
   paths and stage the deletion for the next commit. By default this
   **deletes the worktree file(s)** and stages the removal; now-empty
@@ -579,14 +586,18 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   outside an
   `-o`/`-c` selection). `-z` NUL-terminates records and emits raw paths
   (otherwise special-byte paths &mdash; including under `-s` &mdash; are C-style quoted).
-- `kit rev-parse [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
+- `kit rev-parse [--short[=N]] [--abbrev-ref] [--show-toplevel] [--verify [-q]] [<rev>...]`
   &mdash; resolve revisions to object ids. Bare `<rev>...` prints each resolved
   64-hex id; `--short[=N]` abbreviates (default 7, a BLAKE3 prefix);
   `--abbrev-ref HEAD` prints the current branch; kit always errors on an
   unresolvable revision; `<rev>:<path>` prints the id of the object at
   `<path>` in the tree of `<rev>`; `--show-toplevel` prints the
   repository root (the directory holding `.kit`, found by walking up from
-  cwd).
+  cwd). `--verify <rev>` takes exactly one revision, prints its full id and
+  needs the object in the store. On any other input it prints nothing on
+  stdout and exits `1` (`64` when the count of revisions is not one).
+  `-q`/`--quiet` also drops the message. `--verify` does not combine with
+  `--abbrev-ref` or `--show-toplevel`.
 - `kit rev-list [--count] [-n <n> | --max-count=<n>] <rev>` &mdash; list the
   commit ids reachable from `<rev>` in reverse-chronological (topological)
   order, one 64-hex id per line; `--count` prints the number instead.
@@ -610,10 +621,13 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   names it and nothing on stdout, so a script can tell "cannot tell" (`65`)
   from "no" (`1`). A walk that would read more than 1,000,000 commits on
   either side also exits `65`, with an error that names the limit.
-- `kit show-ref [--heads] [--tags]` &mdash; list refs as `<hash> <refname>`,
+- `kit show-ref [--heads] [--tags] [<pattern>...]` &mdash; list refs as `<hash> <refname>`,
   sorted by ref name. Default shows `refs/heads/*`, `refs/tags/*`, and
   any `refs/remotes/*` tracking refs; `--heads`/`--tags` filter to one
-  namespace.
+  namespace. A `<pattern>` keeps a ref that it equals, or whose trailing
+  path components it equals (`main` keeps `refs/heads/main`, not
+  `refs/heads/domain`); several patterns give the union. The command exits
+  `1` with no output when nothing matches.
 - `kit for-each-ref [--format=<fmt>] [<pattern>...]` &mdash; iterate refs
   (heads, tags, and remote-tracking refs), sorted by ref name (like
   `git for-each-ref`). The default line
@@ -810,6 +824,10 @@ Branches / refs:
   files the target tree drops are removed, with emptied directories
   pruned. Prints `Switched to branch '<n>'`, or `Already on '<n>'` for a
   no-op switch (which still runs the dirty-worktree guard).
+- `kit checkout [-f] -- <path>...` &mdash; restore the paths from the index. It
+  runs `kit restore [-f] <path>...`, so it refuses a file with unstaged edits
+  unless `-f` is given. Any other argument before the `--`, a revision
+  included, is a usage error.
 - `kit checkout -b|-B <new> [<start>]` &mdash; create a branch at the
   start-point (default HEAD) and switch to it; `-b` refuses to clobber an
   existing branch, `-B` create-or-resets. Prints `Switched to a new branch

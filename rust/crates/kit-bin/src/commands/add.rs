@@ -50,6 +50,11 @@ struct AddOpts {
     #[arg(short = 'p', long)]
     patch: bool,
 
+    /// Show what would be staged and change nothing: no index change and
+    /// no object written. Takes neither `-p` nor `-u`.
+    #[arg(short = 'n', long = "dry-run", conflicts_with_all = ["patch", "update"])]
+    dry_run: bool,
+
     /// Paths to stage. Pass `.` to stage every non-ignored file under
     /// the current directory. Multiple paths may be given.
     paths: Vec<String>,
@@ -66,10 +71,19 @@ impl HunkChooser for StdinChooser {
     }
 }
 
-/// Prints the notices of `-p` on stderr.
-struct PatchNotices;
+/// Prints the notices of `-p` on stderr and the lines of `-n` on stdout.
+struct AddNotices;
 
-impl Observer<Event> for PatchNotices {
+/// `<verb> '<path>'`, with the C-style quoting of `ls-files` for a path with
+/// special bytes.
+fn dry_run_line(verb: &str, path: &str) -> String {
+    match super::c_quote_path(path) {
+        Some(quoted) => format!("{verb} {quoted}"),
+        None => format!("{verb} '{path}'"),
+    }
+}
+
+impl Observer<Event> for AddNotices {
     fn event(&self, event: &Event) {
         match event {
             Event::BinarySkipped { path } => {
@@ -81,6 +95,8 @@ impl Observer<Event> for PatchNotices {
                 selected,
                 total,
             } => eprintln!("{path}: staged {selected} of {total} hunks"),
+            Event::WouldAdd { path } => println!("{}", dry_run_line("add", path)),
+            Event::WouldRemove { path } => println!("{}", dry_run_line("remove", path)),
             _ => {}
         }
     }
@@ -110,11 +126,12 @@ pub fn run(args: &[String]) -> u8 {
                 update: opts.update,
                 patch: opts.patch,
                 force: opts.force,
+                dry_run: opts.dry_run,
                 paths: &opts.paths,
             },
             &mut StdinChooser,
             &crate::progress::ServedWarning,
-            &PatchNotices,
+            &AddNotices,
         )
     }) {
         Ok(()) => exit::OK,

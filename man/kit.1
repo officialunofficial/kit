@@ -62,11 +62,19 @@ The full list of subcommands is printed by
 .Nm kit Fl Fl help .
 The highlights:
 .Bl -tag -width "cherry-pick"
-.It Cm init
+.It Cm init Oo Fl q | Fl Fl quiet Oc Op Ar dir
 Create a new
 .Nm
-repository in the current directory.
-.It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Oo Fl f Oc Oo Fl p Oc Ar path ...
+repository in the current directory, or in
+.Ar dir .
+A missing
+.Ar dir
+is created, nested levels included. A
+.Ar dir
+that is a symlink or a file is an error.
+.Fl q
+drops the success line and never an error.
+.It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Oo Fl f Oc Oo Fl n | Fl Fl dry-run Oc Oo Fl p Oc Ar path ...
 Stage files for the next commit. Respects
 .Pa .gitignore
 and
@@ -93,6 +101,20 @@ or
 .Fl Fl force
 stages an explicitly-named ignored path (git refuses these without it;
 already-tracked paths are never subject to ignore).
+.Fl n
+or
+.Fl Fl dry-run
+prints
+.Ql add '<path>'
+for each file that would be staged or updated, and
+.Ql remove '<path>'
+for each deletion that
+.Fl A
+would record. It changes no index and writes no object. It does not combine
+with
+.Fl p
+or
+.Fl u .
 .Fl p
 or
 .Fl Fl patch
@@ -345,7 +367,7 @@ shows only those
 .Pq Fl Fl ignored No requires Fl Fl others ;
 .Fl z
 NUL-terminates records with raw paths.
-.It Cm rev-parse Oo Fl Fl short Ns Op = Ns Ar N Oc Oo Fl Fl abbrev-ref Oc Oo Fl Fl show-toplevel Oc Op Ar rev ...
+.It Cm rev-parse Oo Fl Fl short Ns Op = Ns Ar N Oc Oo Fl Fl abbrev-ref Oc Oo Fl Fl show-toplevel Oc Oo Fl Fl verify Op Fl q Oc Op Ar rev ...
 Resolve revisions to object ids.
 .Ar rev Ns : Ns Ar path
 names the object at
@@ -358,6 +380,11 @@ abbreviates (default 7, a BLAKE3 prefix);
 prints the current branch;
 .Fl Fl show-toplevel
 prints the repository root.
+.Fl Fl verify
+takes exactly one revision, prints its full id and exits non-zero with nothing
+on stdout when the revision does not resolve to an object in the store.
+.Fl q
+also drops the message.
 .It Cm rev-list Oo Fl Fl count Oc Oo Fl n Ar N | Fl Fl max-count Ns = Ns Ar N Oc Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B
 List the commit ids reachable from
 .Ar rev
@@ -382,12 +409,15 @@ tests whether
 is an ancestor of
 .Ar b ,
 exiting 0 or 1 with no output.
-.It Cm show-ref Oo Fl Fl heads Oc Op Fl Fl tags
+.It Cm show-ref Oo Fl Fl heads Oc Oo Fl Fl tags Oc Op Ar pattern ...
 List refs as
 .Ql <hash> <refname> ,
 sorted by name.
 .Fl Fl heads Ns / Ns Fl Fl tags
-filter to that namespace.
+filter to that namespace. A
+.Ar pattern
+keeps a ref that it equals, or whose trailing path components it equals. The
+command exits 1 with no output when nothing matches.
 .It Cm for-each-ref Oo Fl Fl format Ns = Ns Ar fmt Oc Op Ar pattern ...
 Iterate refs (heads and tags), sorted by name (like
 .Xr git 1 Cm for-each-ref ) .
@@ -777,6 +807,14 @@ Prints
 or
 .Sy Already on Ar n
 for a no-op switch.
+.It Cm checkout Oo Fl f Oc Fl Fl Ar path ...
+Restore the paths from the index. This runs
+.Cm restore
+.Op Fl f
+.Ar path ... ,
+so it refuses a file with unstaged edits unless
+.Fl f
+is given.
 .It Cm checkout Oo Fl b | Fl B Oc Ar new Op Ar start
 Create
 .Pq Fl b , or create-or-reset Fl B
