@@ -31,6 +31,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fetch, re-reads each candidate from the remote, and never deletes a local
   branch or a tag. `SyncOptions::prune` and `FetchReport::branches_pruned`
   carry it; `libkit::transfer::fetch_with_source` takes a `prune` argument.
+- `kit branch -r` lists the remote-tracking branches as `<remote>/<branch>`,
+  and `kit branch -a` lists the local branches and then the tracking branches
+  as `remotes/<remote>/<branch>`. `libkit::branch::Query::scope` selects them,
+  and `libkit::branch::Branch` has a `remote` field.
 
 ## [0.8.0] - 2026-11-10
 

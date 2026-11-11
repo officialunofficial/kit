@@ -302,6 +302,13 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   fetch, and only when a fresh read of the remote branch finds nothing. It
   prints ` - [deleted]         (none) -> <remote>/<branch>`. Git also prunes
   tags that a refspec maps; kit has no tag transfer and prunes no tag.
+- **`branch -r` / `-a`.** `branch -r` lists the `refs/remotes/<remote>/*`
+  refs of every remote as `<remote>/<branch>`. `branch -a` lists the local
+  branches, then the tracking refs as `remotes/<remote>/<branch>`. The `*`
+  marks only a local branch. A pattern filters the displayed names, and
+  `--format=json` adds `"remote":true` to a tracking row. `-r` and `-a`
+  exclude each other and do not combine with `-d`, `-D` or `-m`. kit prints
+  no `<remote>/HEAD -> ...` line.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -333,6 +340,10 @@ kit does not implement these flags. A command with a missing flag is
   unknown argument.
 - `branch -r` / `-a` / `-u` / `--unset-upstream` &mdash; no remote-tracking
   listing and no upstream setting.
+- `log -p` / `--stat` / `--decorate` / `--all` / `--graph` &mdash; kit rejects
+  each flag as an unknown argument.
+- `branch -u` / `--unset-upstream` &mdash; kit has no upstream setting
+  on `branch`. `push -u` sets one.
 - `add -n` / `--dry-run` &mdash; kit rejects the flag.
 - `rev-parse --verify` &mdash; kit rejects the flag.
 - `show-ref <pattern>` &mdash; kit rejects the pattern.

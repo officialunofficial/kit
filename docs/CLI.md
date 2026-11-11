@@ -758,8 +758,13 @@ Branches / refs:
   `<new>`, and moves HEAD when the renamed branch is checked out.
 - `kit branch --show-current` &mdash; print the checked-out branch name (empty
   output on a detached HEAD), like `git branch --show-current`.
-- `kit branch [--list] [--contains [<c>]] [--no-contains [<c>]] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]`
-  &mdash; filter the listing (like `git branch`). `<pattern>` arguments are
+- `kit branch [-r|-a] [--list] [--contains [<c>]] [--no-contains [<c>]] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]`
+  &mdash; filter the listing (like `git branch`). `-r` lists the
+  remote-tracking branches of every remote as `<remote>/<branch>`. `-a`
+  lists the local branches, then the remote-tracking branches as
+  `remotes/<remote>/<branch>`. Both read local refs and contact no remote,
+  they list like `--list` does (positional patterns filter), and they cannot
+  combine with `-d`, `-D` or `-m`. `<pattern>` arguments are
   shell globs matched against branch names (`*`, `?`, `[…]`; `*` spans
   `/`, so `feature/*` works &mdash; git's non-pathname `wildmatch`); a branch is
   kept if it matches any pattern. Patterns are only treated as filters in
