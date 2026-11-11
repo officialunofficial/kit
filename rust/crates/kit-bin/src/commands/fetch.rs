@@ -27,6 +27,7 @@ enum FetchFormat {
     name = "kit fetch",
     about = "Download from the configured remote without merging."
 )]
+#[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct FetchOpts {
     /// Named remote to fetch from (default: the flat default remote).
     remote: Option<String>,
@@ -42,10 +43,16 @@ struct FetchOpts {
     /// exclusive with an explicit `<remote>` argument.
     #[arg(long, conflicts_with = "remote")]
     all: bool,
+    /// After the fetch, delete the remote-tracking refs whose branch is gone
+    /// from the remote. It deletes no local branch and no tag, and only after
+    /// every remote branch was fetched and verified.
+    #[arg(short = 'p', long)]
+    prune: bool,
     /// Emit a machine-readable JSON result object to stdout:
     /// `{"ok":true,"remote":"...","endpoint":"...","updated":[{"name":"...",
-    /// "old":"<hex>|null","new":"<hex>"}]}`. With `--all`, one JSON object
-    /// is printed per remote fetched.
+    /// "old":"<hex>|null","new":"<hex>"}]}`, plus `"pruned":["..."]` with
+    /// `--prune`. With `--all`, one JSON object is printed per remote
+    /// fetched.
     #[arg(long, value_enum, default_value = "default")]
     format: FetchFormat,
     /// Suppress transfer progress output on stderr.
@@ -89,7 +96,7 @@ pub fn run(args: &[String]) -> u8 {
         // worst exit code observed is returned at the end.
         let mut worst = exit::OK;
         for name in names {
-            let code = fetch_one(&cwd, &layout, &cfg, &name, require_signed, json, opts.quiet);
+            let code = fetch_one(&cwd, &layout, &cfg, &name, &opts, require_signed);
             if code != exit::OK {
                 worst = code;
             }
@@ -101,9 +108,8 @@ pub fn run(args: &[String]) -> u8 {
         &layout,
         &cfg,
         opts.remote.as_deref().unwrap_or(""),
+        &opts,
         require_signed,
-        json,
-        opts.quiet,
     )
 }
 
@@ -115,10 +121,11 @@ fn fetch_one(
     layout: &RepoLayout,
     cfg: &config::LayeredConfig,
     remote: &str,
+    opts: &FetchOpts,
     require_signed: bool,
-    json: bool,
-    quiet: bool,
 ) -> u8 {
+    let json = matches!(opts.format, FetchFormat::Json);
+    let quiet = opts.quiet;
     let Some(resolved) = config::resolve_remote(cfg, remote) else {
         return emit_err_json(
             &if remote.is_empty() {
@@ -157,6 +164,7 @@ fn fetch_one(
                             source,
                             &resolved.name,
                             require_signed,
+                            opts.prune,
                             progress.terminal(),
                         )
                     })
@@ -171,7 +179,7 @@ fn fetch_one(
                     let after = tracking_snapshot(layout, &resolved.name);
                     report_fetch(endpoint, &resolved.name, &before, &after);
                     if json {
-                        emit_fetch_json(&resolved.name, endpoint, &before, &after);
+                        emit_fetch_json(&resolved.name, endpoint, &before, &after, opts.prune);
                     }
                     exit::OK
                 }
@@ -198,6 +206,7 @@ fn emit_fetch_json(
     endpoint: &str,
     before: &HashMap<String, Hash>,
     after: &HashMap<String, Hash>,
+    prune: bool,
 ) {
     let mut changed: Vec<(&String, Option<Hash>, Hash)> = after
         .iter()
@@ -220,6 +229,13 @@ fn emit_fetch_json(
         .field_str("remote", remote)
         .field_str("endpoint", endpoint)
         .field_raw("updated", &format!("[{}]", entries.join(",")));
+    if prune {
+        let names: Vec<String> = pruned_names(before, after)
+            .iter()
+            .map(|name| format!("\"{}\"", format::json_escape(name)))
+            .collect();
+        top.field_raw("pruned", &format!("[{}]", names.join(",")));
+    }
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "{}", top.finish());
 }
@@ -259,12 +275,16 @@ fn report_fetch(
         .filter(|(name, new)| before.get(*name) != Some(*new))
         .map(|(name, new)| (name, before.get(name).copied(), *new))
         .collect();
-    if changed.is_empty() {
+    let pruned = pruned_names(before, after);
+    if changed.is_empty() && pruned.is_empty() {
         return;
     }
     changed.sort_by(|a, b| a.0.cmp(b.0));
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "From {endpoint}");
+    for name in pruned {
+        let _ = writeln!(stderr, " - [deleted]         (none) -> {remote}/{name}");
+    }
     for (name, old, new) in changed {
         // Tracking-ref updates are rendered as fast-forwards; detecting a
         // forced (`+ old...new`) tracking update would need per-ref
@@ -276,6 +296,16 @@ fn report_fetch(
             format::ref_update_line(old.as_ref(), &new, name, &dst, false)
         );
     }
+}
+
+/// The tracking refs that the fetch deleted: only a prune removes one.
+fn pruned_names<'a>(
+    before: &'a HashMap<String, Hash>,
+    after: &HashMap<String, Hash>,
+) -> Vec<&'a String> {
+    let mut names: Vec<&String> = before.keys().filter(|n| !after.contains_key(*n)).collect();
+    names.sort();
+    names
 }
 
 use super::error as emit_err;

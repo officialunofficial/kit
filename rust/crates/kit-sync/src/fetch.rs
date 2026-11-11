@@ -37,6 +37,9 @@ pub struct FetchReport {
     pub branches_fetched: usize,
     /// Branches skipped because the listing was stale (deleted since).
     pub branches_skipped: Vec<String>,
+    /// Remote-tracking refs deleted because the remote no longer has the
+    /// branch. Empty unless the fetch pruned.
+    pub branches_pruned: Vec<String>,
     /// Packs downloaded and applied. Like the other counters, this covers the
     /// attempt that published each branch (a branch retried after a concurrent
     /// re-baseline reports only its successful second attempt).
@@ -340,7 +343,11 @@ fn fetch_objects_inner(
         .repo_cursor()
         .map_err(|error| source.repository_error(error))?;
     let cursor_path = crate::cursor::path(layout, source, remote);
-    if let Some(cursor) = &cursor
+    // A pruning fetch lists the remote even when its cursor is unchanged: a
+    // tracking ref can outlive its branch from an earlier fetch that did not
+    // prune.
+    if !options.prune
+        && let Some(cursor) = &cursor
         && remote_unchanged(
             store,
             layout,
@@ -371,6 +378,8 @@ fn fetch_objects_inner(
             None => return Err(SyncError::RemoteBranchMissing(branch.to_owned())),
         }
     }
+    let listed: std::collections::HashSet<String> =
+        remote_refs.iter().map(|r| r.name.clone()).collect();
     // Unidentified sources retain batched tracking writes. Checkpoints need
     // each tracking rename durable before the checkpoint is published.
     let mut tracking = refs::RemoteRefBatch::new(layout, remote)?;
@@ -520,6 +529,9 @@ fn fetch_objects_inner(
     // Persist the successful batched prefix even if a later branch failed.
     tracking.commit()?;
     result?;
+    if options.prune {
+        prune_tracking(layout, source, observer, remote, &listed, report)?;
+    }
     if let Some(cursor) = cursor {
         // A disposable cache: failing to write it costs the next fetch a
         // full walk, never this fetch.
@@ -529,6 +541,42 @@ fn fetch_objects_inner(
             signed: require_signed,
         };
         let _ = record.persist(&cursor_path);
+    }
+    Ok(())
+}
+
+/// Delete the tracking refs of `remote` whose branch the listing lacks. It
+/// runs only after every listed branch was fetched and verified. The listing
+/// may be stale, so a strong read of each candidate decides: only an absent
+/// head is pruned, and a failed read fails the fetch and prunes nothing more.
+/// It touches no local branch and no tag.
+fn prune_tracking(
+    layout: &RepoLayout,
+    source: &dyn RemoteSource,
+    observer: &dyn Observer<SyncEvent>,
+    remote: &str,
+    listed: &std::collections::HashSet<String>,
+    report: &mut FetchReport,
+) -> Result<(), SyncError> {
+    let mut gone = Vec::new();
+    for tracked in refs::list_remote_refs(layout, remote)? {
+        if !listed.contains(&tracked.name)
+            && source
+                .read_ref(&format!("refs/heads/{}", tracked.name))?
+                .is_none()
+        {
+            gone.push(tracked.name);
+        }
+    }
+    if gone.is_empty() {
+        return Ok(());
+    }
+    let _lock = acquire_worktree_lock(layout, observer)?;
+    for name in gone {
+        match refs::delete_remote_ref(layout, remote, &name) {
+            Ok(()) | Err(refs::RefError::NotFound(_)) => report.branches_pruned.push(name),
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(())
 }

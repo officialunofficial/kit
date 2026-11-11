@@ -26,6 +26,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `refs/heads/<name>` ref. A refspec push records an upstream only with `-u`.
   kit rejects a wildcard, a leading `+`, an empty `<src>` and a ref outside
   `refs/heads/`. `libkit::push::parse_refspec` and `plan_refspec` back it.
+- `kit fetch --prune` (`-p`) deletes the remote-tracking refs of branches the
+  remote lost (SPEC-TRANSPORT §1.3). It runs only after a complete, verified
+  fetch, re-reads each candidate from the remote, and never deletes a local
+  branch or a tag. `SyncOptions::prune` and `FetchReport::branches_pruned`
+  carry it; `libkit::transfer::fetch_with_source` takes a `prune` argument.
 
 ## [0.8.0] - 2026-11-10
 

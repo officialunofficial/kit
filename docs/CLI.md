@@ -1064,8 +1064,14 @@ Remote / sync:
     (mirrors `kit remote add <name> <url>` at clone time). The name
     must be dot-free and ref-safe, like a named `remote add`. Tracking
     refs land under `refs/remotes/<name>/*` to match.
-- `kit fetch [<remote>] [--all] [--no-verify-signatures] [--format=json]
-  [-q|--quiet]` &mdash; download from remote without merging. Fetched branch tips
+- `kit fetch [<remote>] [--all] [-p|--prune] [--no-verify-signatures]
+  [--format=json] [-q|--quiet]` &mdash; download from remote without merging.
+  `--prune` then deletes the `refs/remotes/<remote>/<branch>` refs whose
+  branch the remote lost, and prints ` - [deleted]         (none) ->
+  <remote>/<branch>` for each. It runs only after every remote branch was
+  fetched and verified, and it re-reads each candidate from the remote
+  before it deletes it. It never deletes a local branch or a tag. With
+  `--format=json` the object also has `"pruned":["<branch>"]`. Fetched branch tips
   are stored
   under `refs/remotes/<remote>/<branch>` (`refs/remotes/default/<branch>`
   for the flat default remote) and do not move local branches. `--all`

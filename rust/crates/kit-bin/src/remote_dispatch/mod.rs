@@ -471,6 +471,7 @@ pub(crate) fn fetch_all_with_source(
     source: &dyn kit_sync::RemoteSource,
     remote: &str,
     require_signed: bool,
+    prune: bool,
     terminal: &Terminal,
 ) -> Result<usize, Error> {
     let layout = kit_core::layout::discover(cwd)?;
@@ -479,6 +480,7 @@ pub(crate) fn fetch_all_with_source(
         source,
         remote,
         require_signed,
+        prune,
         sync_policy(&layout),
         terminal,
     )

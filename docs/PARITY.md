@@ -297,6 +297,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   name or as `refs/heads/<name>`. A refspec push records no upstream unless
   `-u` is set. Git also takes a tag, a wildcard, a leading `+` and an empty
   `<src>`; kit rejects each of them.
+- **`fetch --prune`.** `fetch --prune` deletes the tracking refs of one
+  remote whose branch the remote lost. It deletes a ref only after a complete
+  fetch, and only when a fresh read of the remote branch finds nothing. It
+  prints ` - [deleted]         (none) -> <remote>/<branch>`. Git also prunes
+  tags that a refspec maps; kit has no tag transfer and prunes no tag.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -331,7 +336,8 @@ kit does not implement these flags. A command with a missing flag is
 - `add -n` / `--dry-run` &mdash; kit rejects the flag.
 - `rev-parse --verify` &mdash; kit rejects the flag.
 - `show-ref <pattern>` &mdash; kit rejects the pattern.
-- `fetch --prune` / `--tags` &mdash; kit rejects each flag.
+- `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
+  tags.
 - `pull --rebase` / `--no-ff` &mdash; kit rejects each flag.
 - `rebase --onto` &mdash; kit rejects the flag. The `edit` todo action is not
   available either.

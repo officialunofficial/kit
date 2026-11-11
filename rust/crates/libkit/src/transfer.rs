@@ -199,6 +199,9 @@ pub fn pull_with_source(
 /// that each remote ref reaches, and writes the ref to
 /// `refs/remotes/<remote>/<branch>`. Returns the number of branches fetched.
 ///
+/// With `prune`, the fetch then deletes the tracking refs whose branch the
+/// remote no longer has.
+///
 /// # Errors
 /// The fetch fails.
 pub fn fetch_with_source(
@@ -206,10 +209,11 @@ pub fn fetch_with_source(
     source: &dyn RemoteSource,
     remote: &str,
     require_signed: bool,
+    prune: bool,
     sync_policy: SyncPolicy,
     observer: &dyn Observer<SyncEvent>,
 ) -> Result<usize, Error> {
-    let options = sync_options(None, require_signed, sync_policy);
+    let options = sync_options(None, require_signed, sync_policy).with_prune(prune);
     let report = kit_sync::fetch(cwd, source, remote, &options, observer)?;
     Ok(report.branches_fetched)
 }
@@ -453,6 +457,7 @@ pub fn fetch_all(cwd: &Path, transport: &dyn Transport, remote: &str) -> Result<
         &source(transport),
         remote,
         true,
+        false,
         SyncPolicy::Batch,
         &NoopObserver,
     )
