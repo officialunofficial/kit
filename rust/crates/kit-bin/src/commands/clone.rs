@@ -7,8 +7,8 @@
 //! `remote_dispatch::open`. `--sparse` is implemented (behind the
 //! `sparse-checkout` feature): the patterns are persisted to
 //! `.kit/sparse-checkout` and a verifiable sparse checkout is performed
-//! after the pull. `--depth` (shallow clone) is still deferred and is
-//! rejected with a clear message rather than silently ignored.
+//! after the pull. `--depth` (shallow clone) is not supported and is
+//! rejected rather than silently ignored.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -27,7 +27,7 @@ use crate::remote_dispatch;
     about = "Initialise a new repo and pull from a remote URL."
 )]
 struct CloneOpts {
-    /// Shallow clone depth (not yet wired).
+    /// Not supported. A clone holds the full history.
     #[arg(long, value_name = "N")]
     depth: Option<u32>,
     /// One or more sparse-checkout patterns.
@@ -73,7 +73,10 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
     if opts.depth.is_some() {
-        return super::usage_error("kit clone: --depth is not yet wired");
+        return super::usage_error(
+            "kit clone: --depth is not supported; a clone holds the full history so that \
+             every commit verifies with its ancestors",
+        );
     }
     // `--sparse` no longer rejects — the patterns are persisted to
     // `.kit/sparse-checkout` after the pack pull lands, and the next

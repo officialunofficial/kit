@@ -91,6 +91,7 @@ from Git, read [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md).
 ## Non-goals
 
 - **No shallow clone.** `kit clone --depth N` is rejected with a usage error.
+  A clone holds the full history, so every commit verifies with its ancestors.
   kit never silently makes a full clone when you ask for a shallow one.
 - **No import of older repository layouts.** kit reads only repositories in
   its own `.kit/` layout. To bring history in, use `kit git import` on a Git

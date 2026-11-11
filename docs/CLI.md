@@ -1033,10 +1033,9 @@ Remote / sync:
   a build with `--features sparse-checkout`). Note this is an
   **enhancement over git**: kit's `--sparse` takes one or more PATTERN
   arguments, whereas git's `clone --sparse` is a boolean flag (it cones
-  to the top-level files and you add patterns afterward). **`--depth N` is parsed but
-  not yet wired**: passing it fails with a clear `--depth is not yet
-  wired` usage error rather than silently producing a full clone; see
-  "Divergences from Git".
+  to the top-level files and you add patterns afterward). **`--depth N` is not
+  supported**: passing it fails with a `--depth is not supported` usage error
+  rather than silently producing a full clone; see "Divergences from Git".
   - `-b`/`--branch <name>` &mdash; check out `<name>` instead of the remote's
     default branch. The branch MUST exist among the remote's advertised
     refs; unlike the default heuristic (current default branch, falling
@@ -1620,10 +1619,10 @@ These are documented behaviors, not bugs:
 - **`kit status --porcelain=v2`** matches git's format except that object
   ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1). Exact renames emit a
   `2` record (`R100`); `--branch` header lines are not emitted.
-- **`kit clone --depth N` is parsed but not yet wired.** The flag is
-  accepted by the parser but `clone` rejects it with a `--depth is not
-  yet wired` usage error rather than silently producing a full clone.
-  Shallow-clone history truncation is a follow-up.
+- **`kit clone --depth N` is not supported.** `clone` rejects it with a
+  `--depth is not supported` usage error rather than silently producing a
+  full clone. A clone holds the full history, so every commit verifies with its
+  ancestors.
 - **`kit blame --ignore-rev-precise` (opt-in) is a content-addressed
   refinement of `--ignore-rev` fall-through, not git's positional guess.**
   git's `--ignore-rev` pairs a changed hunk's k-th added line with its k-th

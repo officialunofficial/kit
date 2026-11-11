@@ -48,7 +48,8 @@ These divergences stay while kit uses BLAKE3.
   does not take `--tags` or `--delete`.
 - Git wire protocol v2 and smart-HTTP negotiation.
 - `git notes`.
-- Shallow clone. `clone --depth` is a usage error.
+- Shallow clone. `clone --depth` is a usage error. A clone holds the full
+  history, so every commit verifies with its ancestors.
 - `.git` on-disk interop and SHA-1 objects.
 - Shadowing the `git` binary on `PATH`.
 
