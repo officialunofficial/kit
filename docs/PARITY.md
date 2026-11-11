@@ -377,7 +377,9 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 - **`checkout -- <path>`.** `checkout [-f] -- <path>...` runs `restore
   [-f] <path>...`, with the same output, exit codes and refusals. It restores
   from the index. Git discards an edited file without `-f`, and kit refuses it
-  as `restore` does. Anything else before the `--` is a usage error.
+  as `restore` does. `checkout [-f] <rev> -- <path>...` runs `restore [-f]
+  --source <rev> --staged --worktree <path>...`, with the same refusal.
+  Anything else before the `--` is a usage error.
 - **`revert -m`.** `revert -m <parent-number> <merge>` undoes a merge
   relative to the chosen parent, counted from 1, as `cherry-pick -m` picks
   one. A merge without `-m`, a number out of range and `-m` on a commit that
@@ -435,6 +437,4 @@ kit does not implement these flags. A command with a missing flag is
   would change that state format.
 - `stash push -u` / `--include-untracked` and `stash push <pathspec>` &mdash;
   kit rejects each form. `stash` always saves the whole working tree.
-- `checkout <rev> -- <path>` &mdash; kit rejects it as a usage error. Use
-  `restore --source <rev> --staged --worktree <path>`.
 - `worktree move` / `lock` / `repair` &mdash; kit has no such subcommand.
