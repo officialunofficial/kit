@@ -429,6 +429,7 @@ _kit() {
                 stash)
                     _values 'stash subcommand' \
                         'save[stash working-dir changes]' \
+                        'push[stash working-dir changes (same as save)]' \
                         'list[list stash entries]' \
                         'pop[apply and remove stash entry]' \
                         'apply[apply stash entry without removing it]' \

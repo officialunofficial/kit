@@ -201,9 +201,9 @@ Working-tree commands:
   `.kit/worktrees/<id>/`. Interim limit: `kit gc` refuses to run while
   linked worktrees exist (cross-tree root collection is a tracked
   follow-up) &mdash; remove or prune them first.
-- `kit stash [save|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
+- `kit stash [save|push|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
   save/restore WIP
-  changes. `apply` restores an entry without removing it; `clear` drops
+  changes. `push` is another name for `save`. `apply` restores an entry without removing it; `clear` drops
   every entry. `pop`/`apply`/`drop`/`show` select an entry by index
   (default `0`), accepting either a bare `N` or the `stash@{N}` form
   printed by `stash list`. `pop`/`apply` accept `--index`, which also

@@ -1,4 +1,4 @@
-//! `kit stash save|list|pop|drop|show` — stash working-directory
+//! `kit stash save|push|list|pop|drop|show` — stash working-directory
 //! changes. Backing logic lives in `kit_core::ops::stash`.
 
 use std::io::Write;
@@ -40,6 +40,7 @@ struct SaveOpts {
 #[derive(Debug, Subcommand)]
 enum StashCmd {
     /// Save the current worktree changes as a new stash entry.
+    #[command(visible_alias = "push")]
     Save(SaveOpts),
     /// List all stash entries.
     List,
@@ -97,7 +98,16 @@ pub fn run(args: &[String]) -> u8 {
     let needs_default = args.first().is_none_or(|a| {
         !matches!(
             a.as_str(),
-            "save" | "list" | "pop" | "apply" | "drop" | "clear" | "show" | "-h" | "--help"
+            "save"
+                | "push"
+                | "list"
+                | "pop"
+                | "apply"
+                | "drop"
+                | "clear"
+                | "show"
+                | "-h"
+                | "--help"
         )
     });
     let rewritten: Vec<String> = if needs_default {

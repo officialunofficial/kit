@@ -312,6 +312,8 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
+  `stash` also saves and removes untracked files. Git leaves them in place
+  unless you pass `-u`.
 - **`bisect`.** `bisect` prints the next candidate and does not check it out.
   `HEAD` stays on your branch. Git checks out each candidate and leaves
   `HEAD` detached.
@@ -353,7 +355,8 @@ kit does not implement these flags. A command with a missing flag is
 - `rebase --onto` &mdash; kit rejects the flag. The `edit` todo action is not
   available either.
 - `revert -m` &mdash; kit does not revert a merge commit.
-- `stash push` / `--include-untracked` &mdash; kit rejects each form.
+- `stash push -u` / `--include-untracked` and `stash push <pathspec>` &mdash;
+  kit rejects each form. `stash` always saves the whole working tree.
 - `checkout -- <path>` &mdash; `checkout` takes a branch or a revision. Use
   `restore` for files.
 - `init <dir>` / `init -q` &mdash; `init` takes no argument, and it is an error
