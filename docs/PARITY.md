@@ -52,6 +52,84 @@ These divergences stay while kit uses BLAKE3.
 - `.git` on-disk interop and SHA-1 objects.
 - Shadowing the `git` binary on `PATH`.
 
+## Permanent non-goals
+
+Four non-goals follow from the BLAKE3 object model. They stay while kit object
+IDs are BLAKE3 hashes. The other non-goals are choices of scope.
+
+### Git wire protocol v2 and smart-HTTP
+
+- **Constraint.** A Git client names objects by SHA-1 ID. A kit object has a
+  64-hex BLAKE3 ID and its own byte format. A Git client cannot name, fetch or
+  verify a kit object.
+- **Supported alternative.** The URL scheme picks a kit transport:
+  `kit+file`, `kit+ssh`, `kit+s3` or `kit+https`. To move history to or from a
+  Git server, use `kit git`.
+- **Would reopen.** An object format whose IDs and bytes a Git client can also
+  read, for example a SHA-256 format that matches the Git SHA-256 format. No
+  spec plans one.
+
+### `.git` on-disk interop and SHA-1 objects
+
+- **Constraint.** A BLAKE3 object store cannot share bytes with a SHA-1 object
+  store. kit keeps its state in `.kit/` and does not detect a repository by
+  `.git/`.
+- **Supported alternative.** `kit git import` writes a signed downstream fork
+  of a Git remote. `kit git export` writes a deterministic Git mirror. Each
+  command translates every object, and each loses something.
+- **Import loses** ([`SPEC-GIT-IMPORT`](specs/SPEC-GIT-IMPORT.md)):
+  - Every commit and tag becomes a new kit object that the importer signs. The
+    kit ID depends on the importer key. Two importers of one upstream get
+    unrelated histories.
+  - The kit commit does not hold the committer line, the time zones, the author
+    timestamp, a Git GPG or SSH signature, `mergetag`, `encoding` or unknown
+    headers. kit keeps the original Git bytes under `.kit/git/<remote>/` as
+    audit evidence.
+  - A ref is refused when its history holds a submodule entry or a name kit
+    does not store. A SHA-256 repository is refused. Some historic file modes
+    are normalized.
+  - `refs/notes`, `refs/replace` and grafts are not imported. A shallow import
+    is impossible, because a kit parent ID needs the full closure.
+  - `kit git import` needs `git` on `PATH`.
+- **Export loses** ([`SPEC-GIT-BRIDGE`](specs/SPEC-GIT-BRIDGE.md)):
+  - The author and committer lines are synthesized from the kit identity, with
+    the address `bridge@kit.invalid`. The real identity and the signature ride
+    in `kit-*` headers, and the signature still verifies.
+  - A chunked file becomes one Git blob. A remix is refused. Attestations are
+    not translated. Export mints one new `git-bridge/v1` attestation.
+  - A rewrite on the Git side, such as a rebase or an amend, drops the `kit-*`
+    headers. The result is no longer a translated kit object.
+- **Would reopen.** The same change as the wire protocol: a shared object
+  format.
+
+### Two-way sync through `kit git`
+
+- **Constraint.** Import is not the inverse of export. Import signs each commit
+  with the importer key, so a commit that goes from kit to Git and back has a
+  new kit ID and loses its original signature. A commit that goes from Git to
+  kit and back gets a Git ID that differs from the original, because export
+  synthesizes the author line and adds the `kit-*` headers.
+- **Supported alternative.** Work in one direction at a time.
+  `kit git pull` fast-forwards from the Git upstream, and `kit merge` integrates
+  a diverged branch. `kit git format-patch` writes `git am` patches. `kit git
+  export --passthrough` keeps the original Git IDs of imported objects, so the
+  pushed branch shares history with the upstream. A passthrough push can only
+  fast-forward. Plain export toward an imported-from upstream is refused.
+- **Would reopen.** A shared object format. Without one, a round trip that
+  keeps IDs would need kit to accept Git commit bytes as its own and drop the
+  per-commit signature.
+
+### Shadowing the `git` binary on `PATH`
+
+- **Constraint.** kit differs from Git in the places that tools notice. IDs
+  have 64 hex characters, a Git hash never resolves, the repository directory
+  is `.kit/`, and remote URLs start with `kit+`. A binary named `git` would
+  break callers that expect Git behavior.
+- **Supported alternative.** A script calls `kit`. The machine-output contract
+  below keeps the shape of the Git output. kit and Git run side by side.
+- **Would reopen.** kit reads Git IDs and `.git/` directories, which needs the
+  shared object format.
+
 ## Safety divergences
 
 kit refuses some silent data loss that Git allows. These divergences stay

@@ -95,6 +95,10 @@ from Git, read [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md).
 - **No import of older repository layouts.** kit reads only repositories in
   its own `.kit/` layout. To bring history in, use `kit git import` on a Git
   upstream.
+- **No Git compatibility layer.** kit does not speak the Git wire protocol, read
+  `.git` or shadow the `git` binary. `kit git` translates history in one
+  direction at a time. [`docs/PARITY.md`](docs/PARITY.md#permanent-non-goals)
+  gives the reason for each and what would reopen it.
 - **No Windows build.** Use WSL.
 - **No transport fallback.** The URL scheme picks the transport. kit does not
   try another one when the first fails.
