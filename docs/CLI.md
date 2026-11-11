@@ -885,9 +885,14 @@ Branches / refs:
   parent is the mainline, and `-m`/mainline selection is not yet
   supported. `--format=json` emits the same outcome-object shape as
   `merge`/`cherry-pick`.
-- `kit rebase [-i|--interactive] [--format=json] <revspec> | --continue | --abort | --skip`
+- `kit rebase [-i|--interactive] [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
   &mdash; replay commits onto a different base. The target is resolved through
   the shared revspec resolver (branch, tag, `HEAD~n`, full/short hash).
+  `--onto <newbase> <upstream> [<branch>]` replays the commits of
+  `<upstream>..<branch>` onto `<newbase>`. `<branch>` is a local branch and
+  defaults to the current one. `<upstream>` is required with `--onto`, and
+  `--onto` does not combine with `--continue`, `--skip` or `--abort`. Those
+  three finish or undo an `--onto` rebase.
   Restore steps refuse to overwrite staged changes, dirty tracked files,
   or untracked path collisions. On conflict the rebase pauses with
   resumable state; `--skip` drops the current commit. See "Resolving
@@ -1089,10 +1094,18 @@ Remote / sync:
   per remote fetched to stdout: `{"ok":true,"remote":"...","endpoint":"...",
   "updated":[{"name":"...","old":"<hex>|null","new":"<hex>"}]}` on
   success, or `{"ok":false,"error":"..."}` on failure.
-- `kit pull [<remote>] [--all] [--no-verify-signatures] [--format=json]
-  [-q|--quiet]` &mdash; fetch, then fast-forward the current branch from
-  `refs/remotes/<remote>/<branch>`. Divergent histories are refused; use
-  explicit merge/rebase flows after resolving the divergence. The
+- `kit pull [<remote>] [--all] [--rebase] [--no-verify-signatures]
+  [--format=json] [-q|--quiet]` &mdash; fetch, then fast-forward the current
+  branch from `refs/remotes/<remote>/<branch>`. Divergent histories are
+  refused; use `--rebase` or an explicit merge after resolving the
+  divergence. `--rebase` fetches with the same signature checks, then replays
+  the commits of the current branch that the fetched branch lacks onto the
+  fetched branch, as `kit rebase` does. It prints nothing but `Current branch
+  <branch> is up to date.` when the branch holds the fetched tip. A conflict
+  pauses the rebase with the state and the instructions of `kit rebase`;
+  finish it with `kit rebase --continue`, `--skip` or `--abort`. `--rebase`
+  needs a branch `HEAD` with a commit and does not combine with `--all`.
+  With `--format=json` it prints the object of `kit rebase`. The
   fast-forward check reads every commit it walks; a commit that is missing,
   corrupt or not a commit fails the pull with an error that names it. Fresh repos
   with no local branch tip initialize the current branch/worktree from

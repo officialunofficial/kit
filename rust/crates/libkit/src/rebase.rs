@@ -97,7 +97,10 @@ pub enum Error {
     /// No rebase is in progress.
     #[error("no rebase in progress")]
     NoRebaseInProgress,
-    /// The new base does not resolve.
+    /// The branch to rebase does not exist.
+    #[error("no such branch: {0}")]
+    NoSuchBranch(String),
+    /// A revision does not resolve.
     #[error("no such commit: {spec} ({source})")]
     NoSuchCommit {
         /// The revision text.
@@ -242,11 +245,17 @@ pub trait Editor {
     fn edit(&mut self, seed: &str) -> io::Result<String>;
 }
 
-/// What to rebase onto.
+/// What to rebase, and onto what.
 #[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
     /// A branch, tag, `HEAD~n`, hash or other revision.
     pub onto: &'a str,
+    /// The revision whose history stays behind. The rebase replays the
+    /// commits of the branch that this revision does not reach. `None` means
+    /// `onto`.
+    pub upstream: Option<&'a str>,
+    /// The branch to rebase. `None` means the branch that `HEAD` names.
+    pub branch: Option<&'a str>,
     /// Edit the todo list before the replay.
     pub interactive: bool,
 }
@@ -332,26 +341,39 @@ pub fn start(
     if let Some(op) = in_progress_op_name(layout) {
         return Err(Error::InProgress(op));
     }
-    // The name of the branch to rebase comes from `HEAD`, and not from the
-    // target.
-    let onto = revspec::resolve_revision(store, layout, request.onto).map_err(|source| {
-        Error::NoSuchCommit {
-            spec: request.onto.to_owned(),
+    let resolve = |spec: &str| {
+        revspec::resolve_revision(store, layout, spec).map_err(|source| Error::NoSuchCommit {
+            spec: spec.to_owned(),
             source,
-        }
-    })?;
-    let orig_head = match refs::resolve_head(layout) {
-        Ok(Some(h)) => h,
-        Ok(None) => return Err(Error::NoHeadCommit),
-        Err(e) => return Err(Error::ResolveHead(e)),
+        })
     };
-    let head_name = match refs::read_head(layout) {
-        Ok(Head::Branch(name)) => name,
-        Ok(Head::Detached(_)) => return Err(Error::DetachedHead),
-        Err(e) => return Err(Error::ReadHead(e)),
+    let onto = resolve(request.onto)?;
+    let stop = match request.upstream {
+        Some(spec) => resolve(spec)?,
+        None => onto,
+    };
+    // The branch is the one that the request names, or else the one that
+    // `HEAD` names. It never comes from the base.
+    let (orig_head, head_name) = if let Some(name) = request.branch {
+        let tip = refs::read_ref(layout, name).map_err(Error::ReadHead)?;
+        (
+            tip.ok_or_else(|| Error::NoSuchBranch(name.to_owned()))?,
+            name.to_owned(),
+        )
+    } else {
+        let tip = match refs::resolve_head(layout) {
+            Ok(Some(h)) => h,
+            Ok(None) => return Err(Error::NoHeadCommit),
+            Err(e) => return Err(Error::ResolveHead(e)),
+        };
+        match refs::read_head(layout) {
+            Ok(Head::Branch(name)) => (tip, name),
+            Ok(Head::Detached(_)) => return Err(Error::DetachedHead),
+            Err(e) => return Err(Error::ReadHead(e)),
+        }
     };
     let candidates =
-        collect_commits_to_replay(store, orig_head, onto).map_err(Error::CollectCommits)?;
+        collect_commits_to_replay(store, orig_head, stop).map_err(Error::CollectCommits)?;
 
     // A branch at the base needs nothing, in both modes. A branch behind the
     // base falls through, and the finish moves it forward.
@@ -366,7 +388,7 @@ pub fn start(
         if candidates.is_empty() {
             (Vec::new(), Vec::new())
         } else {
-            edit_todo(store, &candidates, orig_head, onto, editor)?
+            edit_todo(store, &candidates, orig_head, stop, onto, editor)?
         }
     } else {
         let actions = vec![RebaseAction::Pick; candidates.len()];
@@ -852,6 +874,7 @@ fn edit_todo(
     store: &ObjectStore,
     candidates: &[Hash],
     orig_head: Hash,
+    stop: Hash,
     onto: Hash,
     editor: &mut dyn Editor,
 ) -> Result<(Vec<Hash>, Vec<RebaseAction>), Error> {
@@ -880,7 +903,7 @@ fn edit_todo(
          # Reorder lines to reorder commits. Deleting a line drops that commit.\n\
          # A squash/fixup cannot be the first line. 'edit' is not yet supported.\n\
          # Removing every line resets the branch to the base.\n",
-        abbreviate(&onto),
+        abbreviate(&stop),
         abbreviate(&orig_head),
         abbreviate(&onto),
     );

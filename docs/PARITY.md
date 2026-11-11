@@ -309,6 +309,22 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `--format=json` adds `"remote":true` to a tracking row. `-r` and `-a`
   exclude each other and do not combine with `-d`, `-D` or `-m`. kit prints
   no `<remote>/HEAD -> ...` line.
+- **`rebase --onto`.** `rebase --onto <newbase> <upstream> [<branch>]`
+  replays the commits of `<branch>` that `<upstream>` does not reach onto
+  `<newbase>`. Git takes the configured upstream when `<upstream>` is
+  missing. kit has no upstream for `rebase`, so a missing `<upstream>` is a
+  usage error. `--onto` does not combine with `--continue`, `--skip` or
+  `--abort`. The state that a paused rebase keeps is the same as for a rebase
+  without `--onto`, so the three flags work after a conflict. A `<branch>`
+  must be a local branch.
+- **`pull --rebase`.** `pull --rebase` fetches, then runs the replay of
+  `rebase` onto the tip of the fetched branch. A conflict leaves the state of
+  `rebase`, and `rebase --continue`, `--skip` and `--abort` finish it. A branch
+  that holds the fetched tip prints `Current branch <branch> is up to date.`
+  and does not change. kit does not look for a fork point in the reflog, so
+  it replays every commit that the fetched tip does not reach. `--rebase`
+  does not combine with `--all`, needs a branch `HEAD` with a commit, and
+  ignores `pull.rebase`. `--format=json` prints the object of `rebase`.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -347,9 +363,9 @@ kit does not implement these flags. A command with a missing flag is
 - `show-ref <pattern>` &mdash; kit rejects the pattern.
 - `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
   tags.
-- `pull --rebase` / `--no-ff` &mdash; kit rejects each flag.
-- `rebase --onto` &mdash; kit rejects the flag. The `edit` todo action is not
-  available either.
+- `pull --no-ff` &mdash; kit rejects the flag. `pull` never creates a merge
+  commit.
+- `rebase -i` `edit` &mdash; the todo action is not available.
 - `revert -m` &mdash; kit does not revert a merge commit.
 - `stash push -u` / `--include-untracked` and `stash push <pathspec>` &mdash;
   kit rejects each form. `stash` always saves the whole working tree.

@@ -1,5 +1,6 @@
-//! `kit pull [<remote>]` — fetch refs from the configured remote
-//! (named, or the flat default) and fast-forward the current branch.
+//! `kit pull [--rebase] [<remote>]` — fetch refs from the configured remote
+//! (named, or the flat default), then fast-forward the current branch or, with
+//! `--rebase`, replay it onto the fetched branch.
 
 use std::io::Write;
 use std::path::Path;
@@ -23,6 +24,8 @@ enum PullFormat {
 
 #[derive(Debug, Parser)]
 #[command(name = "kit pull", about = "Pull changes from the configured remote.")]
+// CLI flag struct: each bool is an independent clap switch.
+#[allow(clippy::struct_excessive_bools)]
 struct PullOpts {
     /// Named remote to pull from (default: the flat default remote).
     remote: Option<String>,
@@ -39,10 +42,17 @@ struct PullOpts {
     /// explicit `<remote>` argument.
     #[arg(long, conflicts_with = "remote")]
     all: bool,
+    /// Fetch, then replay the current branch onto the fetched branch as
+    /// `kit rebase` does, instead of fast-forwarding. A conflict pauses the
+    /// rebase; finish it with `kit rebase --continue`, `--skip` or `--abort`.
+    /// Does not combine with `--all`.
+    #[arg(long, conflicts_with = "all")]
+    rebase: bool,
     /// Emit a machine-readable JSON result object to stdout:
     /// `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
     /// "old":"<hex>|null","new":"<hex>|null","up_to_date":<bool>}`. With
-    /// `--all`, one JSON object is printed per remote pulled.
+    /// `--all`, one JSON object is printed per remote pulled. With
+    /// `--rebase`, the object is the one that `kit rebase` prints.
     #[arg(long, value_enum, default_value = "default")]
     format: PullFormat,
     /// Suppress transfer progress output on stderr.
@@ -86,7 +96,7 @@ pub fn run(args: &[String]) -> u8 {
         // worst exit code observed is returned at the end.
         let mut worst = exit::OK;
         for name in names {
-            let code = pull_one(&cwd, &layout, &cfg, &name, require_signed, json, opts.quiet);
+            let code = pull_one(&cwd, &layout, &cfg, &name, require_signed, json, &opts);
             if code != exit::OK {
                 worst = code;
             }
@@ -100,14 +110,14 @@ pub fn run(args: &[String]) -> u8 {
         opts.remote.as_deref().unwrap_or(""),
         require_signed,
         json,
-        opts.quiet,
+        &opts,
     )
 }
 
 /// Pull from a single named remote (or the flat default when `remote`
 /// is empty), fast-forwarding the current branch and reporting a
 /// git-style summary. Shared by the single-remote path and the `--all`
-/// loop.
+/// loop. With `--rebase` it fetches and then rebases.
 fn pull_one(
     cwd: &Path,
     layout: &RepoLayout,
@@ -115,8 +125,9 @@ fn pull_one(
     remote: &str,
     require_signed: bool,
     json: bool,
-    quiet: bool,
+    opts: &PullOpts,
 ) -> u8 {
+    let quiet = opts.quiet;
     let Some(resolved) = config::resolve_remote(cfg, remote) else {
         return emit_err_json(
             &if remote.is_empty() {
@@ -147,14 +158,27 @@ fn pull_one(
             let pull_outcome = {
                 let outcome = tx
                     .with_source(|source| {
-                        remote_dispatch::pull_all_with_source(
-                            cwd,
-                            source,
-                            &resolved.name,
-                            None,
-                            require_signed,
-                            progress.terminal(),
-                        )
+                        if opts.rebase {
+                            remote_dispatch::fetch_all_with_source(
+                                cwd,
+                                source,
+                                &resolved.name,
+                                require_signed,
+                                false,
+                                progress.terminal(),
+                            )
+                            .map(|_| None)
+                        } else {
+                            remote_dispatch::pull_all_with_source(
+                                cwd,
+                                source,
+                                &resolved.name,
+                                None,
+                                require_signed,
+                                progress.terminal(),
+                            )
+                            .map(Some)
+                        }
                     })
                     .and_then(|result| result);
                 // The progress guard's final line lands before the
@@ -164,47 +188,9 @@ fn pull_one(
                 outcome
             };
             match pull_outcome {
-                Ok(report) => {
-                    let (branch, old_tip, new_tip, up_to_date) = match report.outcome {
-                        kit_sync::PullOutcome::UpToDate { branch } => {
-                            let tip = kit_core::refs::read_ref(layout, &branch).ok().flatten();
-                            (Some(branch), tip, tip, true)
-                        }
-                        kit_sync::PullOutcome::FastForwarded { branch, old, new } => {
-                            (Some(branch), old, Some(new), false)
-                        }
-                        kit_sync::PullOutcome::NoRemoteBranches => {
-                            let branch = match kit_core::refs::read_head(layout) {
-                                Ok(kit_core::refs::Head::Branch(branch)) => Some(branch),
-                                _ => None,
-                            };
-                            let tip = branch.as_deref().and_then(|branch| {
-                                kit_core::refs::read_ref(layout, branch).ok().flatten()
-                            });
-                            (branch, tip, tip, true)
-                        }
-                        _ => {
-                            return emit_err_json(
-                                "unsupported pull outcome",
-                                exit::GENERAL_ERROR,
-                                json,
-                            );
-                        }
-                    };
-                    report_pull(layout, endpoint, old_tip, new_tip, up_to_date);
-                    if json {
-                        let mut obj = JsonObject::new();
-                        obj.field_bool("ok", true)
-                            .field_str("remote", &resolved.name)
-                            .field_str("endpoint", endpoint)
-                            .field_opt_str("branch", branch.as_deref())
-                            .field_opt_hash("old", old_tip.as_ref())
-                            .field_opt_hash("new", new_tip.as_ref())
-                            .field_bool("up_to_date", up_to_date);
-                        let mut stdout = std::io::stdout().lock();
-                        let _ = writeln!(stdout, "{}", obj.finish());
-                    }
-                    exit::OK
+                Ok(None) => rebase_onto_fetched(layout, &resolved.name, json),
+                Ok(Some(report)) => {
+                    report_fast_forward(layout, &resolved.name, endpoint, report.outcome, json)
                 }
                 Err(libkit::transfer::Error::Interrupted) => {
                     emit_err_json("pull: interrupted", exit::TEMPFAIL, json)
@@ -220,6 +206,109 @@ fn pull_one(
         }
         Err(e) => emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
     }
+}
+
+/// Print the summary of a fast-forward pull, and its JSON object when `json`
+/// is set.
+fn report_fast_forward(
+    layout: &RepoLayout,
+    remote: &str,
+    endpoint: &str,
+    outcome: kit_sync::PullOutcome,
+    json: bool,
+) -> u8 {
+    let (branch, old_tip, new_tip, up_to_date) = match outcome {
+        kit_sync::PullOutcome::UpToDate { branch } => {
+            let tip = kit_core::refs::read_ref(layout, &branch).ok().flatten();
+            (Some(branch), tip, tip, true)
+        }
+        kit_sync::PullOutcome::FastForwarded { branch, old, new } => {
+            (Some(branch), old, Some(new), false)
+        }
+        kit_sync::PullOutcome::NoRemoteBranches => {
+            let branch = match kit_core::refs::read_head(layout) {
+                Ok(kit_core::refs::Head::Branch(branch)) => Some(branch),
+                _ => None,
+            };
+            let tip = branch
+                .as_deref()
+                .and_then(|branch| kit_core::refs::read_ref(layout, branch).ok().flatten());
+            (branch, tip, tip, true)
+        }
+        _ => {
+            return emit_err_json("unsupported pull outcome", exit::GENERAL_ERROR, json);
+        }
+    };
+    report_pull(layout, endpoint, old_tip, new_tip, up_to_date);
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("remote", remote)
+            .field_str("endpoint", endpoint)
+            .field_opt_str("branch", branch.as_deref())
+            .field_opt_hash("old", old_tip.as_ref())
+            .field_opt_hash("new", new_tip.as_ref())
+            .field_bool("up_to_date", up_to_date);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
+    exit::OK
+}
+
+/// Rebase the current branch onto the branch that the fetch updated, unless
+/// the branch has that tip already.
+fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
+    let _lock = match super::acquire_worktree_lock(layout) {
+        Ok(lock) => lock,
+        Err(code) => return code,
+    };
+    let branch = match kit_core::refs::read_head(layout) {
+        Ok(kit_core::refs::Head::Branch(branch)) => branch,
+        Ok(kit_core::refs::Head::Detached(_)) => {
+            return emit_err_json("pull: cannot rebase a detached HEAD", exit::USAGE, json);
+        }
+        Err(e) => {
+            return emit_err_json(&format!("pull: read HEAD: {e}"), exit::GENERAL_ERROR, json);
+        }
+    };
+    let upstream = match kit_core::refs::read_remote_ref(layout, remote, &branch) {
+        Ok(Some(tip)) => tip,
+        Ok(None) => {
+            return emit_err_json(
+                &format!("pull: the remote has no branch '{branch}' to rebase onto"),
+                exit::GENERAL_ERROR,
+                json,
+            );
+        }
+        Err(e) => {
+            return emit_err_json(
+                &format!("pull: read tracking ref: {e}"),
+                exit::GENERAL_ERROR,
+                json,
+            );
+        }
+    };
+    let store = match crate::commands::open_store_configured(layout) {
+        Ok(store) => store,
+        Err(e) => {
+            return emit_err_json(&format!("pull: open store: {e}"), exit::GENERAL_ERROR, json);
+        }
+    };
+    // A branch that holds the fetched tip has nothing to replay. Replaying it
+    // would rewrite its commits for no change.
+    if let Ok(Some(head)) = kit_core::refs::resolve_head(layout) {
+        match kit_core::ops::merge::is_ancestor_strict(&store, upstream, head) {
+            Ok(true) => {
+                let outcome = libkit::rebase::Outcome::UpToDate { branch, head };
+                return super::rebase::report(&outcome, json);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                return emit_err_json(&format!("pull: {e}"), exit::GENERAL_ERROR, json);
+            }
+        }
+    }
+    super::rebase::rebase_onto(layout, &store, &kit_core::hash::to_hex(&upstream), json)
 }
 
 /// `error(msg, code)` plus, when `json` is set, a `{"ok":false,...}`

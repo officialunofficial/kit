@@ -245,6 +245,8 @@ complete -c kit -n "__fish_seen_subcommand_from tag" \
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l interactive -s i -d "Edit the todo list before replaying"
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l onto -d "Replay onto this revision" -r
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l continue -d "Continue an in-progress rebase"
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l skip -d "Skip the current commit"
