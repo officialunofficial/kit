@@ -20,12 +20,15 @@ The script writes these files to the output directory:
 - One `<name>.json` file for each timing row. These are the `hyperfine` exports.
   The mean and the standard deviation of each command are in the `summary`
   object of hyperfine 2 and in the `mean` and `stddev` keys of hyperfine 1.
+- `clone-10k.txt`. It holds the median, the range and the raw times of the
+  `clone-10k` row.
 - `sizes.txt`. It holds the repository sizes in KiB from `du -k`.
 - `provenance.txt`. It holds the kit commit, a dirty flag, the machine and the
   tool versions.
 
 The script prints a summary of the mean and standard deviation of each row.
-Set `KIT_BENCH_PROVENANCE_ONLY=1` to print the provenance and stop.
+Set `KIT_BENCH_PROVENANCE_ONLY=1` to print the provenance and stop. Set
+`KIT_BENCH_CLONE_ONLY=1` to run the `clone-10k` row alone.
 
 ## What the script measures
 
@@ -39,10 +42,39 @@ Set `KIT_BENCH_PROVENANCE_ONLY=1` to print the provenance and stop.
 | `rehash-unchanged` | Run `touch` on a committed 100 MiB file. Add it again. |
 | `status-unchanged` | Run `status` with a committed 100 MiB file and a warm stat cache. |
 | `checkout-100m` | Switch to a branch that appends 1 MiB to a 100 MiB file. |
+| `clone-10k` | Clone one commit of 10,000 files of 1 KiB in 100 directories. kit clones over `kit+file://` and git over `file://`. |
 
 The size rows cover 100 small files, one 100 MiB file, and the growth after a
 1 MiB append. Git growth shows both the loose store and the store after
 `git gc`.
+
+## Clone of 10,000 files
+
+A clone of many small files waits for the disk. `hyperfine` runs one command
+many times in a row, so each run pays for the cleanup of the run before it. The
+`clone-10k` row does not use `hyperfine`. It alternates kit and git. Before
+each run it removes the previous clone, runs `sync` and waits 4 s. One round
+that warms the page cache is not counted. The default is 8 runs per tool
+(`KIT_BENCH_CLONE_RUNS`). The idle wait is `KIT_BENCH_CLONE_IDLE`. The report
+gives the median and the range, and prints the file system of the work
+directory.
+
+Measured on a Linux 6.18 aarch64 virtual machine with 9 CPUs, started with
+Apple's `container` command on an Apple-silicon Mac Studio with 30 cores. The work
+directory is on ext4 on a virtio block device. Three runs of the script, 8
+clones of each tool per run, with kit 0.8.0:
+
+| Tool | Median of 24 clones | Range | Medians of the three runs |
+|---|---|---|---|
+| kit | 4.1 s | 0.9 s to 13.6 s | 3.4 s, 5.9 s, 4.3 s |
+| git | 0.41 s | 0.32 s to 1.05 s | 0.43 s, 0.35 s, 0.39 s |
+
+The git time is stable. The kit time is not: the range covers a factor of 14,
+and the medians of three runs of the script differ by a factor of 1.7. A kit
+clone writes about 10,100 object files and flushes each one. The time to flush
+depends on the state of the disk, which this method does not control. Do not
+quote a ratio from this row. Quote the range, and run the row on the disk you
+care about.
 
 ## Method
 
