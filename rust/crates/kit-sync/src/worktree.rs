@@ -179,11 +179,16 @@ pub fn ensure_restore_safe_with_options(
     let mut worktree_paths = Vec::new();
     collect_worktree_paths(root, root, "", &mut worktree_paths)
         .map_err(|e| format!("check untracked paths: {e}"))?;
+    // A real directory that only holds a target path is no conflict: the
+    // restore writes beside its contents. Its descendants are checked as
+    // paths of their own.
+    let is_real_dir = |path: &str| fs::symlink_metadata(root.join(path)).is_ok_and(|m| m.is_dir());
     if let Some(path) = worktree_paths.iter().find(|path| {
         !index_tracks_path_or_descendant(&idx, path)
-            && target_writes
-                .iter()
-                .any(|target| paths_overlap(path, target))
+            && target_writes.iter().any(|target| {
+                paths_overlap(path, target)
+                    && !(is_real_dir(path) && index_path_descends_from(target, path))
+            })
     }) {
         return Err(format!(
             "restore would overwrite untracked path '{path}'; move or remove it first"
@@ -196,6 +201,9 @@ pub fn ensure_restore_safe_with_options(
                 && restore_affects_path(options, path)
                 && *path != ".kitignore"
                 && *path != ".gitignore"
+                // A directory is judged by its descendants, which this list
+                // also holds; the sweep keeps one that holds ignored files.
+                && !is_real_dir(path)
                 && !is_ignored_worktree_path(root, &ignore, path)
         })
     {
