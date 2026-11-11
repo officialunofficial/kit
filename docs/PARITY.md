@@ -130,6 +130,65 @@ IDs are BLAKE3 hashes. The other non-goals are choices of scope.
 - **Would reopen.** kit reads Git IDs and `.git/` directories, which needs the
   shared object format.
 
+## Decisions on submodules, hooks and notes
+
+Each of these is a non-goal today. Each entry says what Git does, what kit does
+instead, what it costs, and what would reopen the decision.
+
+### Submodules and subtrees
+
+- **Git.** A submodule stores a pointer to another repository at one commit,
+  as a `gitlink` entry in a tree. A subtree merges another history into a
+  directory.
+- **kit.** A tree entry is a blob, a tree, a symlink or an executable
+  ([`SPEC-OBJECTS`](specs/SPEC-OBJECTS.md)). It has no entry for a pointer to
+  another repository, and kit has no subtree merge. A project vendors the
+  files of a dependency into its own tree, so one signed commit covers them.
+  `kit git import` refuses a ref whose tree holds a submodule entry and says to
+  vendor it or to exclude the ref.
+- **Cost.** kit does not check out, update or verify a pinned dependency for
+  you. A vendored copy does not share history with its upstream.
+- **Would reopen.** A request for a pin that kit verifies. It needs a new tree
+  entry kind or a new object, which changes the object format. The spec would
+  have to say how the pin names the remote and how a fetch verifies it.
+
+### Hooks, including `core.hooksPath`
+
+- **Git.** A hook is a script that Git runs at a step such as commit or push.
+  `core.hooksPath` picks the directory that holds the scripts.
+- **kit.** kit has no hooks. `commit` always signs. kit does not read
+  `core.hooksPath`: `core.*` is an unknown config key, and an unknown key is
+  an error.
+- **Why.** Repository config cannot choose a signing key, a signer, an
+  external signer program or an admission helper
+  ([`SPEC-CONFIG-SECURITY`](specs/SPEC-CONFIG-SECURITY.md)). A cloned
+  repository then cannot make kit run its code or redirect its keys. A hook
+  that the repository supplies would be that kind of code. There is no
+  user-scoped hook either, so no hook can come from a repository by mistake.
+- **Cost.** A check that Git runs in a hook runs in a script or in CI that
+  calls `kit`. kit cannot stop a commit or a push because of a failed check.
+- **Would reopen.** A user need that a wrapper script does not meet. The change
+  would be a hook key that only the user-scoped config can set, listed in
+  `REPO_FORBIDDEN_KEYS`, and never a hook from the repository.
+
+### `git notes`
+
+- **Git.** A note attaches text to a commit under `refs/notes/*` without
+  changing the commit ID. A note is not signed, and its author can rewrite it.
+- **kit.** `kit attest` attaches a signed statement to a commit without
+  changing its ID. The statement is an in-toto v1 Statement in a DSSE envelope
+  ([`SPEC-ATTESTATIONS`](specs/SPEC-ATTESTATIONS.md)). kit stores it in
+  `.kit/attestations/<commit>/`, and it is not an object of the commit graph.
+  An attestation takes the place of a note. `kit git import` does not bring in
+  `refs/notes`.
+- **Cost.** An attestation is signed, so it has a predicate type and it cannot
+  be edited. A correction is a new attestation. Attestations are local today.
+  `kit push`, `kit pull` and `kit fetch` move only the object graph, so a
+  teammate does not receive them. The spec plans transport for them.
+- **Would reopen.** A need for an annotation that is unsigned and editable. A
+  shared attestation store does not reopen it, because that answers the sharing
+  cost.
+
 ## Safety divergences
 
 kit refuses some silent data loss that Git allows. These divergences stay

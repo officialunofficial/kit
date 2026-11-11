@@ -99,6 +99,10 @@ from Git, read [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md).
   `.git` or shadow the `git` binary. `kit git` translates history in one
   direction at a time. [`docs/PARITY.md`](docs/PARITY.md#permanent-non-goals)
   gives the reason for each and what would reopen it.
+- **No submodules, hooks or `git notes`.** Vendor a dependency, call kit from a
+  script, and attach a signed attestation to a commit.
+  [`docs/PARITY.md`](docs/PARITY.md#decisions-on-submodules-hooks-and-notes)
+  gives the reason for each and what would reopen it.
 - **No Windows build.** Use WSL.
 - **No transport fallback.** The URL scheme picks the transport. kit does not
   try another one when the first fails.
