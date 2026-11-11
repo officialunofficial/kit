@@ -102,7 +102,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--sparse --help" -- "$cur") )
             ;;
         branch)
-            COMPREPLY=( $(compgen -W "-v --verbose -d -D -m --list --contains --no-contains --merged --no-merged --show-current --format --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-v --verbose -d -D -m -r --remotes -a --all --list --contains --no-contains --merged --no-merged --show-current --format --help" -- "$cur") )
             ;;
         show)
             COMPREPLY=( $(compgen -W "--stat --help" -- "$cur") )

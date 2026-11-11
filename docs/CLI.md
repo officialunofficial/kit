@@ -758,8 +758,13 @@ Branches / refs:
   `<new>`, and moves HEAD when the renamed branch is checked out.
 - `kit branch --show-current` &mdash; print the checked-out branch name (empty
   output on a detached HEAD), like `git branch --show-current`.
-- `kit branch [--list] [--contains [<c>]] [--no-contains [<c>]] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]`
-  &mdash; filter the listing (like `git branch`). `<pattern>` arguments are
+- `kit branch [-r|-a] [--list] [--contains [<c>]] [--no-contains [<c>]] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]`
+  &mdash; filter the listing (like `git branch`). `-r` lists the
+  remote-tracking branches of every remote as `<remote>/<branch>`. `-a`
+  lists the local branches, then the remote-tracking branches as
+  `remotes/<remote>/<branch>`. Both read local refs and contact no remote,
+  they list like `--list` does (positional patterns filter), and they cannot
+  combine with `-d`, `-D` or `-m`. `<pattern>` arguments are
   shell globs matched against branch names (`*`, `?`, `[…]`; `*` spans
   `/`, so `feature/*` works &mdash; git's non-pathname `wildmatch`); a branch is
   kept if it matches any pattern. Patterns are only treated as filters in
@@ -1064,8 +1069,14 @@ Remote / sync:
     (mirrors `kit remote add <name> <url>` at clone time). The name
     must be dot-free and ref-safe, like a named `remote add`. Tracking
     refs land under `refs/remotes/<name>/*` to match.
-- `kit fetch [<remote>] [--all] [--no-verify-signatures] [--format=json]
-  [-q|--quiet]` &mdash; download from remote without merging. Fetched branch tips
+- `kit fetch [<remote>] [--all] [-p|--prune] [--no-verify-signatures]
+  [--format=json] [-q|--quiet]` &mdash; download from remote without merging.
+  `--prune` then deletes the `refs/remotes/<remote>/<branch>` refs whose
+  branch the remote lost, and prints ` - [deleted]         (none) ->
+  <remote>/<branch>` for each. It runs only after every remote branch was
+  fetched and verified, and it re-reads each candidate from the remote
+  before it deletes it. It never deletes a local branch or a tag. With
+  `--format=json` the object also has `"pruned":["<branch>"]`. Fetched branch tips
   are stored
   under `refs/remotes/<remote>/<branch>` (`refs/remotes/default/<branch>`
   for the flat default remote) and do not move local branches. `--all`
@@ -1109,12 +1120,19 @@ Remote / sync:
   remote it iterates.
 - **Library.** `clone`, `fetch` and `pull` run on the `kit-sync` crate
   (`rust/crates/kit-sync/README.md`), which an embedder can call directly.
-- `kit push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]
-  [--format=json] [-q|--quiet]`
+- `kit push [<remote> [<src>:<dst>]] [--all] [--force|--force-with-lease]
+  [--dry-run] [--format=json] [-q|--quiet]`
   &mdash; push refs and packs to a remote. With no `<remote>`, pushes the
   **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
   tracking pair), falling back to the configured default remote; an
-  explicit `<remote>` name overrides that choice. The default push is
+  explicit `<remote>` name overrides that choice. `<src>:<dst>` pushes the
+  local branch `<src>` to the remote branch `<dst>`, and `<src>` need not be
+  the current branch. Each side is a branch name or a `refs/heads/<name>`
+  ref. A refspec push goes through the same path as a plain push, so the
+  lease and the non-fast-forward check apply, and it records an upstream only
+  with `-u`. kit rejects a wildcard, a leading `+` (use `--force`), an empty
+  `<src>` (a remote delete), a ref outside `refs/heads/` and a refspec with
+  `--all`. The default push is
   CAS-protected: a non-fast-forward is rejected using the remote-tracking
   ref as the lease. `--all` mirrors every `refs/heads/*` (also CAS-safe).
   `--force` overwrites the remote branch unconditionally (skips CAS);

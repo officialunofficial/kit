@@ -20,6 +20,21 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resolves it. The path is relative, has at most 4096 bytes and has no
   empty, `.` or `..` component. A missing path, a path through a file and a
   malformed path are errors.
+- `kit push <remote> <src>:<dst>` pushes the local branch `<src>` to the
+  remote branch `<dst>` on the path of a plain push, so the lease and the
+  non-fast-forward check apply. Each side is a branch name or a
+  `refs/heads/<name>` ref. A refspec push records an upstream only with `-u`.
+  kit rejects a wildcard, a leading `+`, an empty `<src>` and a ref outside
+  `refs/heads/`. `libkit::push::parse_refspec` and `plan_refspec` back it.
+- `kit fetch --prune` (`-p`) deletes the remote-tracking refs of branches the
+  remote lost (SPEC-TRANSPORT §1.3). It runs only after a complete, verified
+  fetch, re-reads each candidate from the remote, and never deletes a local
+  branch or a tag. `SyncOptions::prune` and `FetchReport::branches_pruned`
+  carry it; `libkit::transfer::fetch_with_source` takes a `prune` argument.
+- `kit branch -r` lists the remote-tracking branches as `<remote>/<branch>`,
+  and `kit branch -a` lists the local branches and then the tracking branches
+  as `remotes/<remote>/<branch>`. `libkit::branch::Query::scope` selects them,
+  and `libkit::branch::Branch` has a `remote` field.
 
 ## [0.8.0] - 2026-11-10
 

@@ -577,3 +577,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "push_refspec"
+path = "fuzz_targets/push_refspec.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

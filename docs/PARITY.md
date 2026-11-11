@@ -44,8 +44,10 @@ These divergences stay while kit uses BLAKE3.
 
 - Submodules and subtrees.
 - Hooks, including `core.hooksPath`.
-- The full refspec grammar. `push` takes a remote and no refspec. `push`
-  does not take `--tags` or `--delete`.
+- The full refspec grammar. `push` takes `<src>:<dst>` for branches and
+  nothing else: no wildcard, no leading `+` and no ref outside `refs/heads/`.
+  `push` does not take `--tags` or `--delete`. A remote delete and a tag
+  transfer need a transport verb that kit does not have.
 - Git wire protocol v2 and smart-HTTP negotiation.
 - `git notes`.
 - Shallow clone. `clone --depth` is a usage error. A clone holds the full
@@ -290,6 +292,23 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   It does not read the `-<n>` form. A negative count is an error. Git
   reads `--max-count=-1` as no limit. `rev-list HEAD` in a repository
   without a commit is an error, as in Git.
+- **`push` refspec.** `push <remote> <src>:<dst>` pushes the local branch
+  `<src>` to the remote branch `<dst>`. Both sides must be branches, as a
+  name or as `refs/heads/<name>`. A refspec push records no upstream unless
+  `-u` is set. Git also takes a tag, a wildcard, a leading `+` and an empty
+  `<src>`; kit rejects each of them.
+- **`fetch --prune`.** `fetch --prune` deletes the tracking refs of one
+  remote whose branch the remote lost. It deletes a ref only after a complete
+  fetch, and only when a fresh read of the remote branch finds nothing. It
+  prints ` - [deleted]         (none) -> <remote>/<branch>`. Git also prunes
+  tags that a refspec maps; kit has no tag transfer and prunes no tag.
+- **`branch -r` / `-a`.** `branch -r` lists the `refs/remotes/<remote>/*`
+  refs of every remote as `<remote>/<branch>`. `branch -a` lists the local
+  branches, then the tracking refs as `remotes/<remote>/<branch>`. The `*`
+  marks only a local branch. A pattern filters the displayed names, and
+  `--format=json` adds `"remote":true` to a tracking row. `-r` and `-a`
+  exclude each other and do not combine with `-d`, `-D` or `-m`. kit prints
+  no `<remote>/HEAD -> ...` line.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -321,10 +340,15 @@ kit does not implement these flags. A command with a missing flag is
   unknown argument.
 - `branch -r` / `-a` / `-u` / `--unset-upstream` &mdash; no remote-tracking
   listing and no upstream setting.
+- `log -p` / `--stat` / `--decorate` / `--all` / `--graph` &mdash; kit rejects
+  each flag as an unknown argument.
+- `branch -u` / `--unset-upstream` &mdash; kit has no upstream setting
+  on `branch`. `push -u` sets one.
 - `add -n` / `--dry-run` &mdash; kit rejects the flag.
 - `rev-parse --verify` &mdash; kit rejects the flag.
 - `show-ref <pattern>` &mdash; kit rejects the pattern.
-- `fetch --prune` / `--tags` &mdash; kit rejects each flag.
+- `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
+  tags.
 - `pull --rebase` / `--no-ff` &mdash; kit rejects each flag.
 - `rebase --onto` &mdash; kit rejects the flag. The `edit` todo action is not
   available either.

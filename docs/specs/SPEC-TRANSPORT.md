@@ -139,6 +139,27 @@ exactly when the file transport does and a server that knows the request
 answers. The S3 and Connect transports offer none: their wire carries no
 cursor yet.
 
+### 1.3 Pruning remote-tracking refs
+
+A fetch that prunes deletes the remote-tracking refs of a remote whose branch
+the remote no longer has. It deletes nothing else: no local branch, no tag and
+no ref of another remote.
+
+- It prunes only after every branch of the listing was fetched and verified.
+  A fetch that fails prunes nothing.
+- A pruning fetch lists the remote even when the repository cursor (§1.2) is
+  unchanged, because a tracking ref can outlive its branch from an earlier
+  fetch that did not prune.
+- A listing can be stale (SPEC-TRANSPORT-CONNECT §7.9). A tracking ref whose
+  branch the listing lacks is deleted only when `read_ref` of
+  `refs/heads/<name>` answers absent. A branch that the read finds is kept. A
+  failed read fails the fetch and prunes no further ref.
+- The deletes run under the worktree lock. A tracking ref that is gone already
+  counts as pruned.
+
+Pruning is local. It uses `list_refs` and `read_ref` and sends no write, so no
+transport verb or wire format changes.
+
 ## 2. Error taxonomy
 
 Implementations MAY wrap transport-specific errors internally but

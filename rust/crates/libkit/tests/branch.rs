@@ -198,11 +198,13 @@ fn list_gives_every_branch_with_its_tip() {
             Branch {
                 name: "main".to_owned(),
                 hash: Some(tip),
+                remote: false,
                 subject: None
             },
             Branch {
                 name: "old".to_owned(),
                 hash: Some(root),
+                remote: false,
                 subject: None
             },
         ]

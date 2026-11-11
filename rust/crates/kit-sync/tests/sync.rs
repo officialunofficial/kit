@@ -877,6 +877,109 @@ fn a_listed_branch_deleted_since_the_listing_is_skipped_not_fetched() {
     );
 }
 
+/// A clone of a one-branch remote with an extra tracking ref `gone`, a branch
+/// the remote does not have.
+fn clone_with_tracking_ghost(remote: &Remote) -> (tempfile::TempDir, std::path::PathBuf, Hash) {
+    let tip = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(remote, &target);
+    let layout = RepoLayout::single(&target);
+    refs::write_remote_ref(&layout, "default", "gone", &tip).unwrap();
+    (dir, target, tip)
+}
+
+#[test]
+fn prune_deletes_only_the_tracking_refs_of_branches_the_remote_lost() {
+    let remote = Remote::new();
+    let (_dir, target, tip) = clone_with_tracking_ghost(&remote);
+    let layout = RepoLayout::single(&target);
+    refs::write_tag(&layout, "v1", &tip).unwrap();
+
+    let kept = fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(kept.branches_pruned.is_empty());
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "gone").unwrap(),
+        Some(tip)
+    );
+
+    let report = fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default().with_prune(true),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(report.branches_pruned, vec!["gone".to_owned()]);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "gone").unwrap(),
+        None
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(tip)
+    );
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(tip));
+    assert_eq!(refs::read_tag(&layout, "v1").unwrap(), Some(tip));
+}
+
+#[test]
+fn prune_keeps_a_tracking_ref_whose_branch_a_stale_listing_omits() {
+    let remote = Remote::new();
+    let (_dir, target, tip) = clone_with_tracking_ghost(&remote);
+    let source = StaleListing {
+        inner: remote.source(),
+        listing: Vec::new(),
+    };
+
+    let report = fetch(
+        &target,
+        &source,
+        "default",
+        &SyncOptions::default().with_prune(true),
+        &NoopObserver,
+    )
+    .unwrap();
+
+    // The strong read still finds `main`, so only `gone` goes.
+    assert_eq!(report.branches_pruned, vec!["gone".to_owned()]);
+    let layout = RepoLayout::single(&target);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(tip)
+    );
+}
+
+#[test]
+fn a_failed_fetch_prunes_nothing() {
+    let remote = Remote::new();
+    let (_dir, target, tip) = clone_with_tracking_ghost(&remote);
+    let bad = remote.publish(Some(tip), &[("a.txt", b"two\n")], false);
+    assert_ne!(bad, tip);
+
+    let err = fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default().with_prune(true),
+        &NoopObserver,
+    );
+    assert!(err.is_err(), "an unsigned commit fails the fetch");
+    let layout = RepoLayout::single(&target);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "gone").unwrap(),
+        Some(tip)
+    );
+}
+
 #[test]
 fn a_concurrent_rebaseline_is_retried_once_with_the_fresh_tip() {
     let remote = Remote::new();
