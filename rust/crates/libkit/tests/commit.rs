@@ -108,6 +108,7 @@ impl Fixture {
                 author: Identity::ed25519(public),
                 signer_public: public,
                 all,
+                allow_empty: false,
             },
             &mut self.signer,
             gate,

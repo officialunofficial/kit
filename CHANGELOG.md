@@ -37,10 +37,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remote-tracking ref and every tag. A commit shows once. The flag is a usage
   error together with a revision or a range. `libkit::log::Query::all` selects
   it, and `libkit::log::ref_tips` lists the refs.
+- `commit --allow-empty` is accepted. It makes a first commit with an empty
+  tree when nothing is staged. A commit that has a parent never needed it.
 - `checkout -- <path>...` restores the paths from the index. It runs
   `restore <path>...`, so it refuses a file with unstaged edits, and `-f`
-  (`--force`) overrides the refusal. `checkout <rev> -- <path>` is a usage
-  error.
+  (`--force`) overrides the refusal.
+- `checkout <rev> -- <path>...` restores the paths from `<rev>` into the index
+  and the working tree. It refuses a file with unstaged edits, and `-f`
+  overrides the refusal.
 - `init <dir>` creates `<dir>`, nested levels included, and initialises it. It
   refuses a `<dir>` that is a symlink, a dangling one included, or a file.
   `init -q` (`--quiet`) drops the success line and never an error. `init` in

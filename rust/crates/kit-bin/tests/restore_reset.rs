@@ -323,3 +323,35 @@ fn reset_resolves_short_hash_branch_and_relative() {
         assert_eq!(repo.head_hash(), c1, "HEAD~1 target must resolve");
     }
 }
+
+/// `restore --staged --worktree` restores a clean file. The dirty guard
+/// compares the worktree with the index as it was before the restore.
+#[test]
+fn restore_staged_and_worktree_restores_a_clean_file() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"one\n", "base");
+    repo.commit_file("a.txt", b"two\n", "next");
+
+    ok(
+        repo.path(),
+        repo.xdg(),
+        &[
+            "restore",
+            "--source",
+            "HEAD~1",
+            "--staged",
+            "--worktree",
+            "a.txt",
+        ],
+    );
+    assert_eq!(repo.read("a.txt"), "one\n");
+
+    repo.write("a.txt", b"edited\n");
+    let out = fail(
+        repo.path(),
+        repo.xdg(),
+        &["restore", "--staged", "--worktree", "a.txt"],
+    );
+    assert!(!out.stderr.is_empty());
+    assert_eq!(repo.read("a.txt"), "edited\n");
+}

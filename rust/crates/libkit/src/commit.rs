@@ -224,6 +224,9 @@ pub struct Request<'a> {
     pub signer_public: [u8; 32],
     /// Stage the changes of tracked files first.
     pub all: bool,
+    /// Let the first commit of a branch have an empty index, and so an empty
+    /// tree. A commit that has a parent never needs this.
+    pub allow_empty: bool,
 }
 
 /// The commit that [`create`] made.
@@ -309,9 +312,10 @@ pub fn create(
     // An absent index and an empty one are the same error. An index with only
     // removed entries is a real change, a commit of deletions with an empty
     // tree. A merge may have an empty tree too, when both sides deleted
-    // everything.
+    // everything. A first commit may be empty on request.
     let idx = index::read_index(layout).map_err(Error::ReadIndex)?;
-    if idx.entries.is_empty() && pending.merge.is_none() {
+    let empty_root_allowed = request.allow_empty && pending.head.is_none();
+    if idx.entries.is_empty() && pending.merge.is_none() && !empty_root_allowed {
         return Err(Error::NothingStaged);
     }
     // One durability batch holds the trees and the commit. It commits before

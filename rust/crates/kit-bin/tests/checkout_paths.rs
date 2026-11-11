@@ -1,4 +1,4 @@
-//! `kit checkout -- <path>...`: restore paths through `kit restore`.
+//! `kit checkout [<rev>] -- <path>...`: restore paths through `kit restore`.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
@@ -98,7 +98,9 @@ fn other_forms_before_the_separator_are_usage_errors() {
     for args in [
         vec!["checkout", "--"],
         vec!["checkout", "-b", "new", "--", "f.txt"],
-        vec!["checkout", "main", "--", "f.txt"],
+        vec!["checkout", "-x", "--", "f.txt"],
+        vec!["checkout", "main", "other", "--", "f.txt"],
+        vec!["checkout", "main", "--"],
         vec!["checkout", "-f", "-f", "--", "f.txt"],
         vec!["checkout", "--sparse", "x", "--", "f.txt"],
     ] {
@@ -115,4 +117,96 @@ fn a_branch_checkout_still_works() {
     repo.ok(&["branch", "other"]);
     repo.ok(&["checkout", "other"]);
     assert_eq!(branch(&repo), "other\n");
+}
+
+/// Paths from an older revision: `f.txt` is `v1` in `HEAD~2` and `v2` now.
+fn first_rev(repo: &Repo) -> String {
+    text(&repo.ok(&["rev-parse", "HEAD~2"])).trim().to_owned()
+}
+
+#[test]
+fn a_revision_restores_the_worktree_and_the_index() {
+    let repo = two_commits();
+    let rev = first_rev(&repo);
+    repo.ok(&["checkout", &rev, "--", "f.txt"]);
+    assert_eq!(read(&repo, "f.txt"), "v1\n");
+    let staged = text(&repo.ok(&["diff", "--staged", "--name-only"]));
+    assert_eq!(staged, "f.txt\n");
+}
+
+#[test]
+fn a_revision_matches_restore_with_source() {
+    let a = two_commits();
+    let b = two_commits();
+    let (ra, rb) = (first_rev(&a), first_rev(&b));
+    a.ok(&["checkout", &ra, "--", "f.txt"]);
+    b.ok(&[
+        "restore",
+        "--source",
+        &rb,
+        "--staged",
+        "--worktree",
+        "f.txt",
+    ]);
+    assert_eq!(read(&a, "f.txt"), read(&b, "f.txt"));
+    assert_eq!(
+        text(&a.ok(&["status", "--porcelain"])),
+        text(&b.ok(&["status", "--porcelain"]))
+    );
+}
+
+#[test]
+fn a_revision_leaves_other_paths_alone() {
+    let repo = two_commits();
+    let rev = first_rev(&repo);
+    repo.ok(&["checkout", &rev, "--", "f.txt"]);
+    assert_eq!(read(&repo, "dir/g.txt"), "g1\n");
+}
+
+#[test]
+fn a_revision_refuses_an_edited_file_as_restore_refuses_it() {
+    let repo = two_commits();
+    let rev = first_rev(&repo);
+    repo.write("f.txt", b"edited\n");
+    let restore = repo.run(&[
+        "restore",
+        "--source",
+        &rev,
+        "--staged",
+        "--worktree",
+        "f.txt",
+    ]);
+    let checkout = repo.run(&["checkout", &rev, "--", "f.txt"]);
+    assert!(!checkout.status.success());
+    assert_eq!(checkout.status.code(), restore.status.code());
+    assert_eq!(checkout.stderr, restore.stderr);
+    assert_eq!(read(&repo, "f.txt"), "edited\n");
+}
+
+#[test]
+fn force_restores_an_edited_file_from_a_revision() {
+    let repo = two_commits();
+    let rev = first_rev(&repo);
+    repo.write("f.txt", b"edited\n");
+    repo.ok(&["checkout", "-f", &rev, "--", "f.txt"]);
+    assert_eq!(read(&repo, "f.txt"), "v1\n");
+}
+
+#[test]
+fn an_unknown_revision_is_an_error() {
+    let repo = two_commits();
+    let out = repo.run(&["checkout", "no-such-rev", "--", "f.txt"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(read(&repo, "f.txt"), "v2\n");
+}
+
+#[test]
+fn a_path_absent_from_the_revision_is_an_error() {
+    let repo = two_commits();
+    let rev = first_rev(&repo);
+    let out = repo.run(&["checkout", &rev, "--", "dir/g.txt"]);
+    assert!(!out.status.success());
+    assert_eq!(read(&repo, "dir/g.txt"), "g1\n");
+    let out = repo.run(&["checkout", &rev, "--", "missing.txt"]);
+    assert!(!out.status.success());
 }
