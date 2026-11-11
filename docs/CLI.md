@@ -1094,10 +1094,18 @@ Remote / sync:
   per remote fetched to stdout: `{"ok":true,"remote":"...","endpoint":"...",
   "updated":[{"name":"...","old":"<hex>|null","new":"<hex>"}]}` on
   success, or `{"ok":false,"error":"..."}` on failure.
-- `kit pull [<remote>] [--all] [--no-verify-signatures] [--format=json]
-  [-q|--quiet]` &mdash; fetch, then fast-forward the current branch from
-  `refs/remotes/<remote>/<branch>`. Divergent histories are refused; use
-  explicit merge/rebase flows after resolving the divergence. The
+- `kit pull [<remote>] [--all] [--rebase] [--no-verify-signatures]
+  [--format=json] [-q|--quiet]` &mdash; fetch, then fast-forward the current
+  branch from `refs/remotes/<remote>/<branch>`. Divergent histories are
+  refused; use `--rebase` or an explicit merge after resolving the
+  divergence. `--rebase` fetches with the same signature checks, then replays
+  the commits of the current branch that the fetched branch lacks onto the
+  fetched branch, as `kit rebase` does. It prints nothing but `Current branch
+  <branch> is up to date.` when the branch holds the fetched tip. A conflict
+  pauses the rebase with the state and the instructions of `kit rebase`;
+  finish it with `kit rebase --continue`, `--skip` or `--abort`. `--rebase`
+  needs a branch `HEAD` with a commit and does not combine with `--all`.
+  With `--format=json` it prints the object of `kit rebase`. The
   fast-forward check reads every commit it walks; a commit that is missing,
   corrupt or not a commit fails the pull with an error that names it. Fresh repos
   with no local branch tip initialize the current branch/worktree from

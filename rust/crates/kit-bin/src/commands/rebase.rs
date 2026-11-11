@@ -10,6 +10,7 @@
 use std::io::Write;
 
 use clap::{Parser, ValueEnum};
+use kit_core::layout::RepoLayout;
 use kit_core::store::ObjectStore;
 use libkit::Observer;
 use libkit::rebase::{self, Editor, Event, Outcome, Request};
@@ -164,7 +165,30 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
-fn report(outcome: &Outcome, json: bool) -> u8 {
+/// Rebases the current branch onto `onto` and reports the outcome as
+/// `kit rebase` does. The caller holds the worktree lock.
+pub(super) fn rebase_onto(layout: &RepoLayout, store: &ObjectStore, onto: &str, json: bool) -> u8 {
+    let request = Request {
+        onto,
+        upstream: None,
+        branch: None,
+        interactive: false,
+    };
+    let signing = super::signing::Configured;
+    match rebase::start(
+        layout,
+        store,
+        &request,
+        &signing,
+        &mut TerminalEditor,
+        &Notes,
+    ) {
+        Ok(outcome) => report(&outcome, json),
+        Err(failure) => fail(failure, json),
+    }
+}
+
+pub(super) fn report(outcome: &Outcome, json: bool) -> u8 {
     match outcome {
         Outcome::UpToDate { branch, head } => {
             let mut stderr = std::io::stderr().lock();

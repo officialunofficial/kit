@@ -10,6 +10,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `kit stash push [-m <message>]` is another name for `kit stash save`.
+- `kit pull --rebase` fetches with the usual signature checks, then replays
+  the current branch onto the fetched branch through the code of `rebase`. A
+  conflict leaves the state of `rebase`, and `--continue`, `--skip` and
+  `--abort` finish it. It does not combine with `--all`.
 - `kit rebase --onto <newbase> <upstream> [<branch>]` replays the commits of
   `<upstream>..<branch>` onto `<newbase>`. `<branch>` is a local branch and
   defaults to the current branch. `--continue`, `--skip` and `--abort` work
