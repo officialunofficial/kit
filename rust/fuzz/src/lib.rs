@@ -1873,6 +1873,29 @@ pub fn ssh_url_parse_one_iteration(input: &[u8]) {
     }
 }
 
+/// The reply to `ReadRepoCursor` (`ssh_cursor_reply`): `cursor_from_reply`
+/// never panics on a decoded frame. An accepted cursor is 1 to 64 bytes and
+/// the reply that carries it holds no unknown field.
+pub fn ssh_cursor_reply_one_iteration(input: &[u8]) {
+    use kit_core::protocol::REPO_CURSOR_MAX_LEN;
+    use kit_rpc::kit::rpc::v1::ssh::{SshFrame, ssh_frame};
+    use kit_transport_ssh::cursor_from_reply;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(frame) = kit_rpc::frame_decode_options().decode_from_slice::<SshFrame>(input) else {
+        return;
+    };
+    let reply = match &frame.body {
+        Some(ssh_frame::Body::ReadRepoCursorResponse(r)) => Some(r.clone()),
+        _ => None,
+    };
+    if let Ok(Some(cursor)) = cursor_from_reply(frame.body) {
+        let reply = reply.expect("only a cursor reply yields a cursor");
+        assert!((1..=REPO_CURSOR_MAX_LEN).contains(&cursor.as_bytes().len()));
+        assert!(reply.__buffa_unknown_fields.is_empty());
+        assert_eq!(reply.cursor.as_deref(), Some(cursor.as_bytes()));
+    }
+}
+
 /// The field-level grant parsers (`grant_fields_parse`): the `text` helpers,
 /// `Capabilities`, `RefFlags`, `RefPattern`, `RefScopes`,
 /// `AcceptedSchemes::from_tokens`, `is_loopback_origin` and
@@ -3243,6 +3266,22 @@ mod tests {
             &[0xFF; 64][..],
         ] {
             run_one(case, ssh_url_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_ssh_cursor_reply() {
+        run_iterated_unit(ssh_cursor_reply_one_iteration).unwrap();
+        // A cursor reply, an empty one, one over the bound and an error.
+        for case in [
+            &[0x8a, 0x01, 0x04, 0x0a, 0x02, 7, 7][..],
+            &[0x8a, 0x01, 0x02, 0x0a, 0x00],
+            &[0x8a, 0x01, 0x00],
+            &[0x1a, 0x04, 0x08, 0x01, 0x12, 0x00],
+            b"",
+            &[0xFF; 64][..],
+        ] {
+            run_one(case, ssh_cursor_reply_one_iteration).unwrap();
         }
     }
 
