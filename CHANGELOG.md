@@ -10,6 +10,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `kit stash push [-m <message>]` is another name for `kit stash save`.
+- `kit rebase --onto <newbase> <upstream> [<branch>]` replays the commits of
+  `<upstream>..<branch>` onto `<newbase>`. `<branch>` is a local branch and
+  defaults to the current branch. `--continue`, `--skip` and `--abort` work
+  after a conflict. The replayed commits are signed as in any rebase.
+  `libkit::rebase::Request` has `upstream` and `branch` fields, and
+  `libkit::rebase::Error::NoSuchBranch` reports a missing branch.
 - `rev-list` takes `-n <n>` and `--max-count=<n>`, which keep the first `<n>`
   commits, and a range `A..B` or `A...B` in place of a revision. It reads the
   range as `log` does.

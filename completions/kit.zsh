@@ -350,6 +350,7 @@ _kit() {
                 rebase)
                     _arguments \
                         '(-i --interactive)'{-i,--interactive}'[edit the todo list before replaying]' \
+                        '--onto[replay onto this revision instead of the upstream]:newbase:' \
                         '--continue[continue after conflict resolution]' \
                         '--skip[skip the current commit]' \
                         '--abort[abort rebase]' \

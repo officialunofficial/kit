@@ -885,9 +885,14 @@ Branches / refs:
   parent is the mainline, and `-m`/mainline selection is not yet
   supported. `--format=json` emits the same outcome-object shape as
   `merge`/`cherry-pick`.
-- `kit rebase [-i|--interactive] [--format=json] <revspec> | --continue | --abort | --skip`
+- `kit rebase [-i|--interactive] [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
   &mdash; replay commits onto a different base. The target is resolved through
   the shared revspec resolver (branch, tag, `HEAD~n`, full/short hash).
+  `--onto <newbase> <upstream> [<branch>]` replays the commits of
+  `<upstream>..<branch>` onto `<newbase>`. `<branch>` is a local branch and
+  defaults to the current one. `<upstream>` is required with `--onto`, and
+  `--onto` does not combine with `--continue`, `--skip` or `--abort`. Those
+  three finish or undo an `--onto` rebase.
   Restore steps refuse to overwrite staged changes, dirty tracked files,
   or untracked path collisions. On conflict the rebase pauses with
   resumable state; `--skip` drops the current commit. See "Resolving

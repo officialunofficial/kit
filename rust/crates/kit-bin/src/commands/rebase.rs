@@ -1,7 +1,7 @@
-//! `kit rebase [-i] <revspec> | --continue | --abort | --skip` — replay
-//! commits onto a different base. The target is resolved through the
-//! shared revspec resolver, so a branch, tag, `HEAD~n`, or full/short
-//! hash all work.
+//! `kit rebase [-i] [--onto <newbase>] <revspec> [<branch>] | --continue |
+//! --abort | --skip` — replay commits onto a different base. Each revision is
+//! resolved through the shared revspec resolver, so a branch, tag, `HEAD~n`,
+//! or full/short hash all work.
 //!
 //! The logic lives in [`libkit::rebase`]. This command parses the arguments,
 //! holds the worktree lock, runs the editor of an interactive rebase and
@@ -32,13 +32,13 @@ enum RebaseFormat {
 #[allow(clippy::struct_excessive_bools)]
 struct RebaseOpts {
     /// Continue an in-progress rebase after resolving conflicts.
-    #[arg(long = "continue", conflicts_with_all = ["abort", "skip", "branch"])]
+    #[arg(long = "continue", conflicts_with_all = ["abort", "skip", "revisions", "onto"])]
     cont: bool,
     /// Abort the in-progress rebase and restore the original HEAD.
-    #[arg(long, conflicts_with_all = ["cont", "skip", "branch"])]
+    #[arg(long, conflicts_with_all = ["cont", "skip", "revisions", "onto"])]
     abort: bool,
     /// Skip the current commit (drop it) and continue the rebase.
-    #[arg(long, conflicts_with_all = ["cont", "abort", "branch"])]
+    #[arg(long, conflicts_with_all = ["cont", "abort", "revisions", "onto"])]
     skip: bool,
     /// Edit the todo list in `$EDITOR` before replaying: reorder lines,
     /// `drop` (or delete) lines, `reword`, or fold with `squash`/`fixup`.
@@ -52,9 +52,16 @@ struct RebaseOpts {
     /// human-in-the-loop.
     #[arg(long, value_enum, default_value = "default")]
     format: RebaseFormat,
-    /// Branch, tag, or revision (e.g. `HEAD~2`, a full/short hash) to
-    /// replay commits onto. Resolved through the shared revspec resolver.
-    branch: Option<String>,
+    /// Replay the commits of `<upstream>..<branch>` onto this revision
+    /// instead of onto `<upstream>`. Needs `<upstream>`.
+    #[arg(long, value_name = "NEWBASE", conflicts_with_all = ["cont", "abort", "skip"])]
+    onto: Option<String>,
+    /// Without `--onto`: the revision (e.g. `HEAD~2`, a full/short hash) to
+    /// replay commits onto. With `--onto`: `<upstream> [<branch>]`, the
+    /// revision whose history stays behind and the branch to rebase (default:
+    /// the current branch).
+    #[arg(num_args = 0..=2, value_name = "REVISION")]
+    revisions: Vec<String>,
 }
 
 /// Runs `$EDITOR` for the todo list and for commit messages.
@@ -96,6 +103,26 @@ fn fail(failure: rebase::Error, json: bool) -> u8 {
     emit_err(&message, crate::exit_map::exit_code(&failure))
 }
 
+const USAGE: &str = "usage: kit rebase [-i] <revspec> | kit rebase [-i] --onto <newbase> \
+                     <upstream> [<branch>] | kit rebase --continue | --abort | --skip";
+
+/// The request that the arguments describe, or `None` when they do not fit
+/// one of the forms of [`USAGE`].
+fn request(opts: &RebaseOpts) -> Option<Request<'_>> {
+    let (onto, upstream, branch) = match (opts.onto.as_deref(), opts.revisions.as_slice()) {
+        (None, [onto]) => (onto.as_str(), None, None),
+        (Some(onto), [upstream]) => (onto, Some(upstream.as_str()), None),
+        (Some(onto), [upstream, branch]) => (onto, Some(upstream.as_str()), Some(branch.as_str())),
+        _ => return None,
+    };
+    Some(Request {
+        onto,
+        upstream,
+        branch,
+        interactive: opts.interactive,
+    })
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_args::parse::<RebaseOpts>("kit rebase", args) {
@@ -126,22 +153,10 @@ pub fn run(args: &[String]) -> u8 {
         return abort(&layout, &store, json);
     } else if opts.cont || opts.skip {
         rebase::resume(&layout, &store, opts.skip, &signing, &mut editor, &Notes)
-    } else if let Some(onto) = opts.branch.as_deref() {
-        rebase::start(
-            &layout,
-            &store,
-            &Request {
-                onto,
-                interactive: opts.interactive,
-            },
-            &signing,
-            &mut editor,
-            &Notes,
-        )
+    } else if let Some(request) = request(&opts) {
+        rebase::start(&layout, &store, &request, &signing, &mut editor, &Notes)
     } else {
-        return super::usage_error(
-            "usage: kit rebase [-i] <revspec> | --continue | --abort | --skip",
-        );
+        return super::usage_error(USAGE);
     };
     match result {
         Ok(outcome) => report(&outcome, json),

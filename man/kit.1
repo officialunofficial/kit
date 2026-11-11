@@ -821,9 +821,19 @@ the paths, then
 or
 .Fl Fl abort
 to restore HEAD.
-.It Cm rebase Oo Fl i Oc Ar branch
+.It Cm rebase Oo Fl i Oc Oo Fl Fl onto Ar newbase Oc Ar branch Op Ar branch
 Replay commits from HEAD onto
 .Ar branch .
+With
+.Fl Fl onto
+the arguments are
+.Ar upstream
+and an optional
+.Ar branch ,
+and the command replays the commits of
+.Ar upstream Ns .. Ns Ar branch
+onto
+.Ar newbase .
 With
 .Fl i
 .Pq Fl Fl interactive

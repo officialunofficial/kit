@@ -309,6 +309,14 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `--format=json` adds `"remote":true` to a tracking row. `-r` and `-a`
   exclude each other and do not combine with `-d`, `-D` or `-m`. kit prints
   no `<remote>/HEAD -> ...` line.
+- **`rebase --onto`.** `rebase --onto <newbase> <upstream> [<branch>]`
+  replays the commits of `<branch>` that `<upstream>` does not reach onto
+  `<newbase>`. Git takes the configured upstream when `<upstream>` is
+  missing. kit has no upstream for `rebase`, so a missing `<upstream>` is a
+  usage error. `--onto` does not combine with `--continue`, `--skip` or
+  `--abort`. The state that a paused rebase keeps is the same as for a rebase
+  without `--onto`, so the three flags work after a conflict. A `<branch>`
+  must be a local branch.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -348,8 +356,7 @@ kit does not implement these flags. A command with a missing flag is
 - `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
   tags.
 - `pull --rebase` / `--no-ff` &mdash; kit rejects each flag.
-- `rebase --onto` &mdash; kit rejects the flag. The `edit` todo action is not
-  available either.
+- `rebase -i` `edit` &mdash; the todo action is not available.
 - `revert -m` &mdash; kit does not revert a merge commit.
 - `stash push -u` / `--include-untracked` and `stash push <pathspec>` &mdash;
   kit rejects each form. `stash` always saves the whole working tree.
