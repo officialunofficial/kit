@@ -135,6 +135,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   was complete. Bytes that decode to no object are now `unreferenced`
   instead of `corrupt`, so an extra object that does not decode no longer
   makes a map-based or pack-based verdict incomplete.
+- Disclosure verification now checks that an `Object` payload has the type
+  that the mode of the final step names: a tree for mode `Tree`, a blob or a
+  chunked blob for every other mode. Before, a step of mode `Blob` could name
+  a tree and return that tree's bytes under a path that reports a blob.
+  `verify::VerifyError` has a `PayloadTypeMismatch` variant.
 - `kit stash` removed ignored files from the working tree and did not save
   them, so `stash pop` could not bring them back. A stash now removes only
   the paths it saved. It refuses, before it changes anything, when HEAD needs

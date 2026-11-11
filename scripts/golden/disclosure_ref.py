@@ -17,7 +17,8 @@
 #   * decodes the bundle strictly: magic, version 2, bounded vectors, minimal
 #     varints and no trailing byte;
 #   * verifies the commit id, the commit signature, every tree step, the
-#     payload and any length proofs, in the order of section 4;
+#     payload and any length proofs, in the order of section 4, including the
+#     check that an Object payload has the type that the leaf mode names;
 #   * compares the result with the `disclosed` summary in the sidecar, or
 #     checks that the bundle is rejected when the sidecar says so.
 #
@@ -371,6 +372,11 @@ def verify_bundle(data, trusted_commit_id):
             raise Reject(f"payload: {e}")
         if oid != leaf_id:
             raise Reject("payload id differs from the leaf id")
+        # A Tree mode names a tree; every other mode names a blob or a chunked blob.
+        leaf_mode = path[-1]["mode"] if path else TREE_MODE
+        allowed = (o.TREE,) if leaf_mode == TREE_MODE else (o.BLOB, o.CHUNKED)
+        if b["bytes"][0] not in allowed:
+            raise Reject("payload type does not match the leaf mode")
         result["_content"] = b["bytes"]
         result["payload"] = {"kind": "object", "len": len(b["bytes"]), "bytes_blake3": blake3(b["bytes"]).hex()}
     elif kind == 1:

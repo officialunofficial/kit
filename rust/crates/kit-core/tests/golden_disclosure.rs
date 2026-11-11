@@ -25,9 +25,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use commonware_codec::Write as CodecWrite;
-use kit_core::hash::{Hash, hash, to_hex};
+use kit_core::hash::{Hash, ZERO, hash, to_hex};
 use kit_core::merkle;
-use kit_core::object::{EntryMode, Identity, Object};
+use kit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+use kit_core::sign::{KeyPair, sign_commit};
 use kit_core::store::ObjectStore;
 use kit_core::verify::{self, Disclosed, DisclosedPayload, Selector, Step, VerifyError};
 use serde_json::{Value, json};
@@ -1121,6 +1122,70 @@ fn build_vectors() -> Vec<Vector> {
                 false,
                 Some("forged total_size no longer folds to the ChunkedBlob id"),
             ),
+        });
+    }
+
+    // 19, 20. The final step's mode disagrees with the type of the
+    //     Object payload. The commit is signed and its tree is valid; the
+    //     entry names an object of the wrong type for its mode.
+    for (name, description, mode, target, reason) in [
+        (
+            "neg_blob_mode_names_tree",
+            "The final step has mode Blob but its child id is a tree; the Object payload is that tree.",
+            EntryMode::Blob,
+            f.tree_hash,
+            "Object payload is a Tree under a Blob mode",
+        ),
+        (
+            "neg_tree_mode_names_blob",
+            "The final step has mode Tree but its child id is a blob; the Object payload is that blob.",
+            EntryMode::Tree,
+            kit_core::worktree::store_file_object(&f.store, b"shallow file content").unwrap(),
+            "Object payload is a Blob under a Tree mode",
+        ),
+    ] {
+        let tree = Tree {
+            entries: vec![TreeEntry {
+                name: b"x".to_vec(),
+                mode,
+                object_hash: target,
+            }],
+        };
+        let tree_hash = f
+            .store
+            .write(&kit_core::serialize::serialize(&Object::Tree(tree)).unwrap())
+            .unwrap();
+        let kp = KeyPair::from_seed([0x23; 32]);
+        let mut commit = Commit {
+            tree_hash,
+            parents: vec![],
+            author: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"SPEC-DISCLOSURE entry mode vector".to_vec(),
+            timestamp: 1_726_400_000,
+            message_hash: ZERO,
+            content_digest: ZERO,
+            signature: [0u8; 64],
+        };
+        commit.signature = sign_commit(&commit, &kp).unwrap().0;
+        let commit_id = f
+            .store
+            .write(&kit_core::serialize::serialize(&Object::Commit(commit)).unwrap())
+            .unwrap();
+        let (steps, leaf) = walk_path(&f.store, tree_hash, &[b"x"]);
+        let bytes = canonical_bytes(&f.store, &leaf);
+        let commit_bytes = canonical_bytes(&f.store, &commit_id);
+        let bin = wire::bundle(
+            &commit_id,
+            &commit_bytes,
+            &steps,
+            &wire::object_payload(&bytes),
+        );
+        v.push(Vector {
+            name,
+            description,
+            bin,
+            json: base_json(&commit_id, &[b"x"], "object", false, Some(reason)),
         });
     }
 

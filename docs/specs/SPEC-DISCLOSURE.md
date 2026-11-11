@@ -199,7 +199,12 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
 10. Dispatch on `payload_kind`:
     - **`Object`**: **MUST** deserialize `bytes` and check its
       content-address (BLAKE3, or the BMT root for a `Tree`/`ChunkedBlob`
-      &mdash; SPEC-MERKLE-OBJECTS §2) equals the leaf id.
+      &mdash; SPEC-MERKLE-OBJECTS §2) equals the leaf id. **MUST** then
+      require the decoded type to match the mode of the final step: a
+      `Tree` object for mode `Tree`, a `Blob` or `ChunkedBlob` object for
+      every other mode. The root tree, which has no step, counts as mode
+      `Tree`. Reject on a mismatch: without this check the authenticated
+      path would report a blob under bytes that are a tree.
     - **`Chunk`**: **MUST** first check
        `domain_digest(b"kit.chunked\x00", inner_root) == leaf_id`, else
        reject with `InnerRootMismatch`. **MUST** then require that the
@@ -317,8 +322,11 @@ chunk-index-0 range (`neg_len_proofs_on_chunk0`); `steps.len() = 129`;
 root that does not wrap to the parent id (`neg_inner_root_forged`); a
 declared inner root that wraps correctly but whose proof was built for
 a different tree (`neg_inner_root_fold_mismatch`); a trailing byte
-after the declared body; and `commit_bytes` that decode to a `Tag` (a
-valid, signed object &mdash; just not one with a `tree_hash`). Accept
+after the declared body; `commit_bytes` that decode to a `Tag` (a
+valid, signed object &mdash; just not one with a `tree_hash`); an `Object`
+payload that is a tree under a final step of mode `Blob`
+(`neg_blob_mode_names_tree`); and an `Object` payload that is a blob under
+a final step of mode `Tree` (`neg_tree_mode_names_blob`). Accept
 sidecars record `step_inner_roots_hex` and `chunk_inner_root_hex`.
 
 `rust/crates/kit-core/tests/golden_disclosure.rs` reads only the

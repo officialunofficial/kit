@@ -1,0 +1,14 @@
+{
+  "bin": "neg_tree_mode_names_blob.bin",
+  "blake3": "0da274245ea5ddc1d56e2f1f0583ef3e58026854629e3e56a0a8d099b6568dd6",
+  "commit_id_hex": "19849bdb2224b4b0d6cc91a692396a2313eb5cab444cd14a27b2e8114a493500",
+  "description": "The final step has mode Tree but its child id is a blob; the Object payload is that blob.",
+  "expect": "reject",
+  "name": "neg_tree_mode_names_blob",
+  "path_hex": [
+    "78"
+  ],
+  "reject_reason": "Object payload is a Blob under a Tree mode",
+  "selector": "object",
+  "size": 430
+}
