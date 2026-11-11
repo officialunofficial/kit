@@ -1,0 +1,18 @@
+{
+  "bin": "neg_chunk_length_sum.manifest.bin",
+  "blake3": "39b819f6a6f3c1e38d2330085649a384c332bbf91f14b65ab122765295d7b52f",
+  "description": "The chunk lengths of a ChunkedBlob add up to 12, but its total_size is 13.",
+  "expect": "incomplete",
+  "ids": [],
+  "mode": "snapshot",
+  "n_packs": 1,
+  "name": "neg_chunk_length_sum",
+  "pack_hashes": [
+    "ebf14c774da9243023482d0e0b86f29b71ab1ad604dedd886cb7e1102bea8722"
+  ],
+  "reason": "corrupt",
+  "root_hex": "45ed53b953595dfd6e8972a52d9f0feb622f9395c0ff7cdb368931c94eeb1978",
+  "size": 71,
+  "unreferenced": [],
+  "verified": 0
+}

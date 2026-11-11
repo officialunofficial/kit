@@ -127,6 +127,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ok: ... (INVALID signature)` and exit `0` unless trust roots were loaded.
   It now prints `bad:` instead of `ok:`, and writes no `--payload-out` file.
   The report still shows what the bundle disclosed.
+- The closure verifier now checks that the objects fit together as a
+  checkout. A tree entry of mode `Tree` must name a tree. An entry of mode
+  `Blob`, `Executable` or `Symlink` must name a blob or a chunked blob. A
+  chunk must name a blob. The chunk lengths of a chunked blob must add up to
+  its `total_size`. A mismatch is `corrupt`. Before, a set with such objects
+  was complete. Bytes that decode to no object are now `unreferenced`
+  instead of `corrupt`, so an extra object that does not decode no longer
+  makes a map-based or pack-based verdict incomplete.
 - `kit stash` removed ignored files from the working tree and did not save
   them, so `stash pop` could not bring them back. A stash now removes only
   the paths it saved. It refuses, before it changes anything, when HEAD needs

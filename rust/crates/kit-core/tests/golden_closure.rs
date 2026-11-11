@@ -295,6 +295,35 @@ fn build_fixture() -> ClosureFixture {
     }
 }
 
+const DAMAGED_BLOB: &str = "One blob's magic byte flipped so deserialize fails. The blob it replaces is missing and the damaged bytes are unreferenced.";
+
+const UNDECODABLE_EXTRA: &str =
+    "Bytes that decode to no object are supplied; unreferenced, still complete.";
+
+/// Canonical bytes of `object` and its id.
+fn object_bytes(object: Object) -> (Hash, Vec<u8>) {
+    let bytes = kit_core::serialize::serialize(&object).unwrap();
+    (kit_core::object::id_from_object(&object, &bytes), bytes)
+}
+
+/// A signed commit over `tree_hash` with no parent.
+fn signed_commit(tree_hash: Hash) -> (Hash, Vec<u8>) {
+    let kp = KeyPair::from_seed([0x07; 32]);
+    let mut commit = Commit {
+        tree_hash,
+        parents: vec![],
+        author: Identity::ed25519(kp.public.0),
+        signer: kp.public.0,
+        message: b"SPEC-DISCLOSURE closure entry mode vector".to_vec(),
+        timestamp: 1_726_300_003,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0u8; 64],
+    };
+    commit.signature = sign_commit(&commit, &kp).unwrap().0;
+    object_bytes(Object::Commit(commit))
+}
+
 fn build_vectors() -> Vec<Vector> {
     let f = build_fixture();
     let mut v = Vec::new();
@@ -448,10 +477,10 @@ fn build_vectors() -> Vec<Vector> {
         .encode();
         v.push(Vector {
             name: "neg_corrupt_blob",
-            description: "One blob's magic byte flipped so deserialize fails.".into(),
+            description: DAMAGED_BLOB.into(),
             json: accept_json(
                 "neg_corrupt_blob",
-                "One blob's magic byte flipped so deserialize fails.",
+                DAMAGED_BLOB,
                 &f.commit_id,
                 ClosureMode::Snapshot,
                 std::slice::from_ref(&pack),
@@ -459,7 +488,136 @@ fn build_vectors() -> Vec<Vector> {
                 &[],
                 &[],
                 "incomplete",
-                Some("corrupt"),
+                Some("missing"),
+            ),
+            manifest,
+            packs: vec![pack],
+        });
+    }
+
+    // entry modes and chunk lists that do not fit together
+    {
+        let (blob_id, blob_bytes) = object_bytes(Object::Blob(Blob {
+            data: b"mode vector blob".to_vec(),
+        }));
+        let (inner_id, inner_bytes) = object_bytes(Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"g".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob_id,
+            }],
+        }));
+        let (five_id, five_bytes) = object_bytes(Object::Blob(Blob {
+            data: b"12345".to_vec(),
+        }));
+        let (seven_id, seven_bytes) = object_bytes(Object::Blob(Blob {
+            data: b"1234567".to_vec(),
+        }));
+        let chunked = |chunks: &[Hash]| {
+            object_bytes(Object::ChunkedBlob(ChunkedBlob {
+                total_size: 13,
+                chunk_size: 0,
+                chunks: chunks.to_vec(),
+            }))
+        };
+        let (names_tree_id, names_tree_bytes) = chunked(&[inner_id]);
+        let (sum_id, sum_bytes) = chunked(&[five_id, seven_id]);
+        for (name, description, mode, target, objects) in [
+            (
+                "neg_tree_mode_names_blob",
+                "A tree entry of mode Tree names a blob.",
+                EntryMode::Tree,
+                blob_id,
+                vec![blob_bytes.clone()],
+            ),
+            (
+                "neg_blob_mode_names_tree",
+                "A tree entry of mode Blob names a tree.",
+                EntryMode::Blob,
+                inner_id,
+                vec![inner_bytes.clone(), blob_bytes.clone()],
+            ),
+            (
+                "neg_chunk_names_non_blob",
+                "A chunk id of a ChunkedBlob names a tree.",
+                EntryMode::Blob,
+                names_tree_id,
+                vec![names_tree_bytes, inner_bytes, blob_bytes],
+            ),
+            (
+                "neg_chunk_length_sum",
+                "The chunk lengths of a ChunkedBlob add up to 12, but its total_size is 13.",
+                EntryMode::Blob,
+                sum_id,
+                vec![sum_bytes, five_bytes, seven_bytes],
+            ),
+        ] {
+            let (tree_id, tree_bytes) = object_bytes(Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"f".to_vec(),
+                    mode,
+                    object_hash: target,
+                }],
+            }));
+            let (root, commit_bytes) = signed_commit(tree_id);
+            let mut objects = objects;
+            objects.extend([commit_bytes, tree_bytes]);
+            let pack = pack_objects(&objects);
+            let manifest = ClosureManifest {
+                root,
+                mode: ClosureMode::Snapshot,
+                packs: vec![pack_key(&pack)],
+            }
+            .encode();
+            v.push(Vector {
+                name,
+                description: description.into(),
+                json: accept_json(
+                    name,
+                    description,
+                    &root,
+                    ClosureMode::Snapshot,
+                    std::slice::from_ref(&pack),
+                    0,
+                    &[],
+                    &[],
+                    "incomplete",
+                    Some("corrupt"),
+                ),
+                manifest,
+                packs: vec![pack],
+            });
+        }
+    }
+
+    // undecodable extra: bytes that are no object are unreferenced
+    {
+        let junk = b"bytes that are not an object".to_vec();
+        let junk_id = hash(&junk);
+        let mut objects = snap_objects.clone();
+        objects.push(junk);
+        let pack = pack_objects_raw(&objects);
+        let ids = sorted_ids(&f.store, &f.commit_id, ClosureMode::Snapshot);
+        let manifest = ClosureManifest {
+            root: f.commit_id,
+            mode: ClosureMode::Snapshot,
+            packs: vec![pack_key(&pack)],
+        }
+        .encode();
+        v.push(Vector {
+            name: "unreferenced_undecodable_extra",
+            description: UNDECODABLE_EXTRA.into(),
+            json: accept_json(
+                "unreferenced_undecodable_extra",
+                UNDECODABLE_EXTRA,
+                &f.commit_id,
+                ClosureMode::Snapshot,
+                std::slice::from_ref(&pack),
+                ids.len(),
+                &ids,
+                &[junk_id],
+                "accept",
+                Some("unreferenced"),
             ),
             manifest,
             packs: vec![pack],
@@ -866,7 +1024,9 @@ fn verify_vector(name: &str, want_digest: &str) {
                 .unwrap_or_else(|e| panic!("{name}: map path failed: {e:?}"));
                 let mut source_objects = BTreeMap::new();
                 for bytes in &objects {
-                    let object = kit_core::serialize::deserialize(bytes).unwrap();
+                    let Ok(object) = kit_core::serialize::deserialize(bytes) else {
+                        continue;
+                    };
                     let id = kit_core::object::id_from_object(&object, bytes);
                     source_objects.insert(id, bytes.as_slice());
                 }
@@ -891,6 +1051,13 @@ fn verify_vector(name: &str, want_digest: &str) {
                     !report.is_complete(),
                     "{name}: expected incomplete, report was complete"
                 );
+                match sidecar["reason"].as_str().unwrap() {
+                    "corrupt" => assert!(!report.corrupt.is_empty(), "{name}: {report:?}"),
+                    "missing" | "missing root" => {
+                        assert!(!report.missing.is_empty(), "{name}: {report:?}");
+                    }
+                    other => panic!("{name}.json: unknown reason {other:?}"),
+                }
             }
         }
         other => panic!("{name}.json: unknown expect value {other:?}"),

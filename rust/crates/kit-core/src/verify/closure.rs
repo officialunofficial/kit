@@ -8,6 +8,7 @@
 //! verifier obligations are pinned in `docs/specs/SPEC-DISCLOSURE.md`.
 
 use std::borrow::Cow;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Range;
 
@@ -18,7 +19,7 @@ use commonware_codec::{EncodeSize, ReadExt, Write};
 use crate::hash::{HASH_LEN, Hash, hash};
 use crate::list_decode::read_list;
 use crate::object::{Object, ObjectType};
-use crate::ops::graph::{ClosureMode, children};
+use crate::ops::graph::{ChildKind, ClosureMode, type_bit, typed_children};
 use crate::pack::{self, PackEntries, PackEntry, PackWriter, pack_key};
 use crate::store::{ObjectStore, StoreError};
 use crate::verify::VerifyError;
@@ -75,15 +76,17 @@ pub struct ClosureReport {
     pub verified: usize,
     /// Referenced by a reachable object but not supplied, sorted.
     pub missing: Vec<Hash>,
-    /// Bytes that failed to deserialize or whose derived id did not match
-    /// the requested id, sorted by reported id. The map path keys decode
-    /// failures by BLAKE3 of the supplied bytes and preserves the
-    /// `missing` + `unreferenced` result for parsable bit flips; a streaming
-    /// fetch-by-id path reports either failure under the requested id.
+    /// Reachable objects that do not fit: an object of a type that the
+    /// reference to it forbids, a `ChunkedBlob` whose chunk lengths do not
+    /// add up to its `total_size`, and, for a streaming fetch-by-id path,
+    /// bytes that failed to deserialize or whose derived id did not match
+    /// the requested id. Sorted by reported id. The map and pack paths
+    /// preserve the `missing` + `unreferenced` result for parsable bit flips.
     pub corrupt: Vec<(Hash, String)>,
-    /// Supplied (and successfully identified) but not reachable from
-    /// `root`, sorted. A DA provider may legitimately serve a superset;
-    /// this field is reported, not an error.
+    /// Supplied but not reachable from `root`, sorted. Bytes that decode to
+    /// no object are listed under the BLAKE3 of those bytes. A DA provider
+    /// may legitimately serve a superset; this field is reported, not an
+    /// error.
     pub unreferenced: Vec<Hash>,
     /// Whether the verifier could enumerate every supplied object to compute
     /// [`Self::unreferenced`]. Streaming sources set this to `false` and
@@ -191,7 +194,6 @@ impl ObjectSource for MapObjectSource<'_> {
 struct PackObjectSource<'a> {
     packs: Vec<&'a [u8]>,
     index: BTreeMap<Hash, (usize, Range<usize>)>,
-    corrupt: Vec<(Hash, String)>,
 }
 
 impl ObjectSource for PackObjectSource<'_> {
@@ -227,6 +229,17 @@ pub(crate) enum RootRule {
     Record,
 }
 
+const TYPE_CONFLICT: &str = "referenced as object types that no single object can have";
+
+/// What the walk knows about one reached id.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Reach {
+    /// Object types that every edge into the id allows ([`ChildKind::mask`]).
+    allowed: u8,
+    /// Content length when the id decoded as a `Blob`.
+    blob_len: Option<u64>,
+}
+
 /// Outcome of the shared [`walk`].
 #[derive(Debug, Default)]
 pub(crate) struct Walk {
@@ -241,7 +254,7 @@ pub(crate) struct Walk {
     /// Roots that are not a commit/remix/tag ([`RootRule::Record`]), sorted.
     pub(crate) bad_roots: Vec<(Hash, ObjectType)>,
     /// Every id the walk reached, including frontier stops.
-    pub(crate) visited: BTreeSet<Hash>,
+    pub(crate) visited: BTreeMap<Hash, Reach>,
     /// Largest queue length seen, so tests can pin that an id is queued
     /// at most once.
     #[cfg(test)]
@@ -249,7 +262,7 @@ pub(crate) struct Walk {
 }
 
 /// The one closure BFS. Every closure and push verifier in this crate
-/// walks through here, taking its edges from [`children`]`(obj, mode)`.
+/// walks through here, taking its edges from [`children`](crate::ops::graph::children)`(obj, mode)`.
 ///
 /// Starting from every id in `roots`, each id is queued and visited at
 /// most once (an id is marked reached when it is queued, so a tree whose
@@ -284,25 +297,10 @@ pub(crate) fn walk(
     let root_set: BTreeSet<Hash> = roots.iter().copied().collect();
     let mut out = Walk::default();
     let mut queue: VecDeque<Hash> = VecDeque::new();
-    // `out.visited` is "reached": an id joins it when first queued, and is
-    // never queued again. Dequeue order is therefore exactly the order of
-    // first occurrence a queue with duplicates would have produced, so the
-    // fetch sequence is unchanged; only repeats are no longer stored.
-    let reach = |id: Hash, out: &mut Walk, queue: &mut VecDeque<Hash>| {
-        if out.visited.insert(id) {
-            if out.visited.len() > pack::MAX_ENTRIES as usize {
-                return Err(VerifyError::TooManyClosureObjects);
-            }
-            queue.push_back(id);
-            #[cfg(test)]
-            {
-                out.peak_queue = out.peak_queue.max(queue.len());
-            }
-        }
-        Ok(())
-    };
+    // Chunked blobs whose chunk lengths are summed once every chunk is read.
+    let mut manifests: Vec<(Hash, u64, Vec<Hash>)> = Vec::new();
     for root in roots {
-        reach(*root, &mut out, &mut queue)?;
+        reach(&mut out, &mut queue, *root, ChildKind::Any)?;
     }
 
     while let Some(id) = queue.pop_front() {
@@ -345,16 +343,44 @@ pub(crate) fn walk(
                 },
             }
         }
+        let bit = type_bit(object.object_type());
+        let Some(reach_entry) = out.visited.get_mut(&id) else {
+            continue;
+        };
+        if reach_entry.allowed & bit == 0 {
+            // A zero set was reported when the edges first disagreed.
+            if reach_entry.allowed != 0 {
+                out.corrupt.push((
+                    id,
+                    format!(
+                        "{:?} object where the referencing entry requires another type",
+                        object.object_type()
+                    ),
+                ));
+                reach_entry.allowed = 0;
+            }
+            continue;
+        }
+        reach_entry.allowed &= bit;
+        if let Object::Blob(blob) = &object {
+            reach_entry.blob_len = Some(blob.data.len() as u64);
+        }
         visit(&id, &object)?;
 
-        let child_ids = children(&object, mode);
+        let child_ids = typed_children(&object, mode);
+        if let Object::ChunkedBlob(manifest) = &object {
+            let chunks = child_ids.iter().map(|(chunk, _)| *chunk).collect();
+            manifests.push((id, manifest.total_size, chunks));
+        }
         out.verified += 1;
         drop(object);
         drop(bytes);
-        for child in child_ids {
-            reach(child, &mut out, &mut queue)?;
+        for (child, kind) in child_ids {
+            reach(&mut out, &mut queue, child, kind)?;
         }
     }
+
+    check_chunk_lengths(&mut out, manifests);
 
     out.missing.sort_unstable();
     out.missing.dedup();
@@ -363,13 +389,77 @@ pub(crate) fn walk(
     Ok(out)
 }
 
+/// Mark `id` reached through an edge that allows `kind`. An id joins
+/// `out.visited` when first queued and is never queued again. Dequeue order
+/// is therefore exactly the order of first occurrence a queue with
+/// duplicates would have produced, so the fetch sequence is unchanged; only
+/// repeats are no longer stored. A repeat still narrows the types the id may
+/// have, so an id reached through two edges that disagree is reported once.
+fn reach(
+    out: &mut Walk,
+    queue: &mut VecDeque<Hash>,
+    id: Hash,
+    kind: ChildKind,
+) -> Result<(), VerifyError> {
+    let full = out.visited.len() >= pack::MAX_ENTRIES as usize;
+    match out.visited.entry(id) {
+        Entry::Vacant(slot) => {
+            if full {
+                return Err(VerifyError::TooManyClosureObjects);
+            }
+            slot.insert(Reach {
+                allowed: kind.mask(),
+                blob_len: None,
+            });
+            queue.push_back(id);
+            #[cfg(test)]
+            {
+                out.peak_queue = out.peak_queue.max(queue.len());
+            }
+        }
+        Entry::Occupied(mut slot) => {
+            let reach = slot.get_mut();
+            let before = reach.allowed;
+            reach.allowed &= kind.mask();
+            if before != 0 && reach.allowed == 0 {
+                out.corrupt.push((id, TYPE_CONFLICT.to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Report each chunked blob whose chunk lengths do not add up to its
+/// `total_size`. A manifest with a chunk that was not read as a blob is
+/// skipped: that chunk is already missing, corrupt or a frontier stop.
+fn check_chunk_lengths(out: &mut Walk, manifests: Vec<(Hash, u64, Vec<Hash>)>) {
+    for (id, total_size, chunks) in manifests {
+        // At most 1,000,000 chunks of at most `u64::MAX` bytes fit a `u128`.
+        let mut sum = 0u128;
+        let mut known_lens = true;
+        for chunk in &chunks {
+            let Some(len) = out.visited.get(chunk).and_then(|r| r.blob_len) else {
+                known_lens = false;
+                break;
+            };
+            sum += u128::from(len);
+        }
+        if known_lens && sum != u128::from(total_size) {
+            out.corrupt.push((
+                id,
+                format!("chunk lengths do not add up to total_size {total_size}"),
+            ));
+        }
+    }
+}
+
 /// Single-root closure walk: [`walk`] with no frontier, no visitor and a
 /// hard root-type rule.
 fn walk_closure(
     root: &Hash,
     mode: ClosureMode,
     source: &mut impl ObjectSource,
-) -> Result<(ClosureReport, BTreeSet<Hash>), VerifyError> {
+) -> Result<(ClosureReport, BTreeMap<Hash, Reach>), VerifyError> {
     let walked = walk(
         std::slice::from_ref(root),
         mode,
@@ -392,31 +482,41 @@ fn walk_closure(
     ))
 }
 
-fn merge_corrupt(report: &mut ClosureReport, extra: Vec<(Hash, String)>) {
-    // Walker corrupt is empty on these paths: the index is keyed by
-    // derived id, so fetch never returns bytes that fail the id check.
-    report.corrupt.extend(extra);
-    report.corrupt.sort_by_key(|(id, _)| *id);
-    report.corrupt.dedup_by_key(|(id, _)| *id);
+/// Supplied ids the walk did not reach, plus each undecodable item under the
+/// BLAKE3 of its bytes, sorted. No id derives from bytes that do not decode,
+/// so such an item is never referenced.
+fn unreferenced_ids<'a>(
+    supplied: impl Iterator<Item = &'a Hash>,
+    undecodable: Vec<Hash>,
+    visited: &BTreeMap<Hash, Reach>,
+) -> Vec<Hash> {
+    let mut out: Vec<Hash> = supplied
+        .filter(|id| !visited.contains_key(*id))
+        .copied()
+        .chain(undecodable)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Result of indexing [`verify_closure`]'s supplied object set:
-/// derived-id → bytes, plus anything that failed to classify.
-type SuppliedIndex<'a> = (BTreeMap<Hash, &'a [u8]>, Vec<(Hash, String)>);
+/// derived-id → bytes, plus the BLAKE3 of each item that does not decode.
+type SuppliedIndex<'a> = (BTreeMap<Hash, &'a [u8]>, Vec<Hash>);
 
 /// Result of indexing [`verify_closure_packs`]'s recorded entries:
 /// derived-id → `(pack_index, payload_range)`, plus anything that
-/// failed to classify.
-type PackIndex = (BTreeMap<Hash, (usize, Range<usize>)>, Vec<(Hash, String)>);
+/// the BLAKE3 of each entry that does not decode.
+type PackIndex = (BTreeMap<Hash, (usize, Range<usize>)>, Vec<Hash>);
 
 /// Deserialize `bytes` as a canonical object and derive its id, or
-/// classify it as corrupt under the BLAKE3 of the raw bytes. Pure and
+/// return the BLAKE3 of the raw bytes when they do not decode. Pure and
 /// independent per call — the per-item step shared by every branch
 /// below, and by [`walk_closure`]'s own (deliberately separate)
 /// re-derivation.
-fn classify_object(bytes: &[u8]) -> Result<Hash, (Hash, String)> {
+fn classify_object(bytes: &[u8]) -> Result<Hash, Hash> {
     match crate::serialize::deserialize(bytes) {
-        Err(e) => Err((hash(bytes), e.to_string())),
+        Err(_) => Err(hash(bytes)),
         Ok(obj) => Ok(crate::object::id_from_object(&obj, bytes)),
     }
 }
@@ -440,16 +540,16 @@ fn index_supplied_objects<'a>(items: &[&'a [u8]]) -> SuppliedIndex<'a> {
 
 fn index_supplied_objects_sequential<'a>(items: &[&'a [u8]]) -> SuppliedIndex<'a> {
     let mut by_id = BTreeMap::new();
-    let mut corrupt = Vec::new();
+    let mut undecodable = Vec::new();
     for bytes in items {
         match classify_object(bytes) {
             Ok(id) => {
                 by_id.insert(id, *bytes);
             }
-            Err(e) => corrupt.push(e),
+            Err(id) => undecodable.push(id),
         }
     }
-    (by_id, corrupt)
+    (by_id, undecodable)
 }
 
 /// Parallel branch of [`index_supplied_objects`]: split `items` into
@@ -464,7 +564,7 @@ fn index_supplied_objects_sequential<'a>(items: &[&'a [u8]]) -> SuppliedIndex<'a
 fn index_supplied_objects_parallel<'a>(items: &[&'a [u8]], threads: usize) -> SuppliedIndex<'a> {
     let chunk_size = items.len().div_ceil(threads).max(1);
     let mut by_id = BTreeMap::new();
-    let mut corrupt = Vec::new();
+    let mut undecodable = Vec::new();
     std::thread::scope(|scope| {
         let handles: Vec<_> = items
             .chunks(chunk_size)
@@ -486,12 +586,12 @@ fn index_supplied_objects_parallel<'a>(items: &[&'a [u8]], threads: usize) -> Su
                     Ok((id, bytes)) => {
                         by_id.insert(id, bytes);
                     }
-                    Err(e) => corrupt.push(e),
+                    Err(id) => undecodable.push(id),
                 }
             }
         }
     });
-    (by_id, corrupt)
+    (by_id, undecodable)
 }
 
 /// Indexes `verify_closure_packs`'s recorded `(pack_index,
@@ -511,17 +611,17 @@ fn index_pack_entries(packs: &[&[u8]], refs: &[(usize, Range<usize>)]) -> PackIn
 
 fn index_pack_entries_sequential(packs: &[&[u8]], refs: &[(usize, Range<usize>)]) -> PackIndex {
     let mut index = BTreeMap::new();
-    let mut corrupt = Vec::new();
+    let mut undecodable = Vec::new();
     for (pack_index, range) in refs {
         let bytes = &packs[*pack_index][range.clone()];
         match classify_object(bytes) {
             Ok(id) => {
                 index.insert(id, (*pack_index, range.clone()));
             }
-            Err(e) => corrupt.push(e),
+            Err(id) => undecodable.push(id),
         }
     }
-    (index, corrupt)
+    (index, undecodable)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -532,7 +632,7 @@ fn index_pack_entries_parallel(
 ) -> PackIndex {
     let chunk_size = refs.len().div_ceil(threads).max(1);
     let mut index = BTreeMap::new();
-    let mut corrupt = Vec::new();
+    let mut undecodable = Vec::new();
     std::thread::scope(|scope| {
         let handles: Vec<_> = refs
             .chunks(chunk_size)
@@ -557,12 +657,12 @@ fn index_pack_entries_parallel(
                     Ok((id, pack_index, range)) => {
                         index.insert(id, (pack_index, range));
                     }
-                    Err(e) => corrupt.push(e),
+                    Err(id) => undecodable.push(id),
                 }
             }
         }
     });
-    (index, corrupt)
+    (index, undecodable)
 }
 
 /// Walks a closure by fetching each requested id only when the BFS reaches it.
@@ -616,16 +716,15 @@ pub fn verify_closure_store(
 }
 
 /// Re-hashes every supplied object and walks from `root` with
-/// [`children`]`(obj, mode)`. Store-less: the caller provides the
+/// [`children`](crate::ops::graph::children)`(obj, mode)`. Store-less: the caller provides the
 /// object bytes. The map path is implemented by the same
 /// pull-based walker as [`verify_closure_streaming`], with an in-memory
 /// source keyed by each successfully derived id, followed by the
 /// supplied-set `unreferenced` pass.
 ///
-/// A deserialize failure is recorded as `corrupt` under the BLAKE3 of
-/// those bytes. A parsable bit flip remains `missing` (the requested id)
-/// plus `unreferenced` (the derived id), preserving the map path's existing
-/// semantics. The root itself missing yields `missing = [root]`,
+/// Bytes that fail to deserialize are `unreferenced` under the BLAKE3 of
+/// those bytes. A parsable bit flip is `missing` (the requested id)
+/// plus `unreferenced` (the derived id). The root itself missing yields `missing = [root]`,
 /// `verified = 0`. The root, when present, MUST deserialize as a
 /// `Commit`, `Remix`, or `Tag`.
 ///
@@ -651,18 +750,11 @@ pub fn verify_closure<'a>(
         }
         items.push(bytes);
     }
-    let (by_id, mut corrupt) = index_supplied_objects(&items);
-    corrupt.sort_by_key(|a| a.0);
+    let (by_id, undecodable) = index_supplied_objects(&items);
 
     let mut source = MapObjectSource { objects: by_id };
     let (mut report, visited) = walk_closure(root, mode, &mut source)?;
-    merge_corrupt(&mut report, corrupt);
-    report.unreferenced = source
-        .objects
-        .keys()
-        .copied()
-        .filter(|id| !visited.contains(id))
-        .collect();
+    report.unreferenced = unreferenced_ids(source.objects.keys(), undecodable, &visited);
     report.unreferenced_checked = true;
     Ok(report)
 }
@@ -729,21 +821,13 @@ pub fn verify_closure_packs(
     // (canonical decode + a BLAKE3/BMT id derivation per object),
     // independent per entry since each only reads its own payload
     // range.
-    let (index, mut corrupt) = index_pack_entries(packs, &refs);
-    corrupt.sort_by_key(|a| a.0);
+    let (index, undecodable) = index_pack_entries(packs, &refs);
     let mut source = PackObjectSource {
         packs: packs.to_vec(),
         index,
-        corrupt,
     };
     let (mut report, visited) = walk_closure(root, mode, &mut source)?;
-    merge_corrupt(&mut report, source.corrupt);
-    report.unreferenced = source
-        .index
-        .keys()
-        .copied()
-        .filter(|id| !visited.contains(id))
-        .collect();
+    report.unreferenced = unreferenced_ids(source.index.keys(), undecodable, &visited);
     report.unreferenced_checked = true;
     Ok(report)
 }
@@ -871,7 +955,9 @@ mod tests {
 
     use crate::hash::ZERO;
     use crate::layout::RepoLayout;
-    use crate::object::{Blob, Commit, EntryMode, Identity, Object, ObjectType, Tree, TreeEntry};
+    use crate::object::{
+        Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, ObjectType, Tree, TreeEntry,
+    };
     use crate::sign::{KeyPair, sign_commit};
 
     #[test]
@@ -1052,7 +1138,7 @@ mod tests {
         assert!(walked.peak_queue <= 1, "peak queue {}", walked.peak_queue);
         assert!(source.fetches.values().all(|n| *n == 1));
         assert_eq!(
-            walked.visited,
+            walked.visited.keys().copied().collect::<BTreeSet<_>>(),
             BTreeSet::from([root, tree_id, blob]),
             "reached set must equal the visited set"
         );
@@ -1072,6 +1158,180 @@ mod tests {
             assert_eq!(report.mode, mode);
             assert!(report.verified >= 3);
         }
+    }
+
+    fn object(object: &Object) -> (Hash, Vec<u8>) {
+        let bytes = crate::serialize::serialize(object).unwrap();
+        (crate::object::id_from_object(object, &bytes), bytes)
+    }
+
+    fn blob(data: &[u8]) -> (Hash, Vec<u8>) {
+        object(&Object::Blob(Blob {
+            data: data.to_vec(),
+        }))
+    }
+
+    fn tree(entries: &[(&[u8], EntryMode, Hash)]) -> (Hash, Vec<u8>) {
+        object(&Object::Tree(Tree {
+            entries: entries
+                .iter()
+                .map(|(name, mode, object_hash)| TreeEntry {
+                    name: name.to_vec(),
+                    mode: *mode,
+                    object_hash: *object_hash,
+                })
+                .collect(),
+        }))
+    }
+
+    fn chunked(total_size: u64, chunks: &[Hash]) -> (Hash, Vec<u8>) {
+        object(&Object::ChunkedBlob(ChunkedBlob {
+            total_size,
+            chunk_size: 0,
+            chunks: chunks.to_vec(),
+        }))
+    }
+
+    fn commit_over(tree_hash: Hash, parents: Vec<Hash>) -> (Hash, Vec<u8>) {
+        let kp = KeyPair::from_seed([0x11; 32]);
+        let mut commit = Commit {
+            tree_hash,
+            parents,
+            author: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"modes".to_vec(),
+            timestamp: 1,
+            message_hash: ZERO,
+            content_digest: ZERO,
+            signature: [0u8; 64],
+        };
+        commit.signature = sign_commit(&commit, &kp).unwrap().0;
+        object(&Object::Commit(commit))
+    }
+
+    /// Snapshot closure of `root` over `objects` (the map path).
+    fn closure_of(root: Hash, objects: &[&(Hash, Vec<u8>)]) -> ClosureReport {
+        verify_closure(
+            &root,
+            ClosureMode::Snapshot,
+            objects.iter().map(|(_, bytes)| bytes.as_slice()),
+        )
+        .unwrap()
+    }
+
+    fn corrupt_ids(report: &ClosureReport) -> Vec<Hash> {
+        report.corrupt.iter().map(|(id, _)| *id).collect()
+    }
+
+    #[test]
+    fn matching_entry_modes_are_complete() {
+        let file = blob(b"file");
+        let part = blob(b"part");
+        let big = chunked(8, &[part.0, part.0]);
+        let sub = tree(&[(b"f", EntryMode::Blob, file.0)]);
+        let root_tree = tree(&[
+            (b"big", EntryMode::Blob, big.0),
+            (b"exec", EntryMode::Executable, file.0),
+            (b"link", EntryMode::Symlink, file.0),
+            (b"sub", EntryMode::Tree, sub.0),
+        ]);
+        let root = commit_over(root_tree.0, vec![]);
+        let report = closure_of(root.0, &[&root, &root_tree, &sub, &big, &part, &file]);
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(report.verified, 6);
+        assert!(report.unreferenced.is_empty());
+    }
+
+    #[test]
+    fn tree_mode_naming_a_blob_is_corrupt() {
+        let file = blob(b"file");
+        let root_tree = tree(&[(b"d", EntryMode::Tree, file.0)]);
+        let root = commit_over(root_tree.0, vec![]);
+        let report = closure_of(root.0, &[&root, &root_tree, &file]);
+        assert_eq!(corrupt_ids(&report), vec![file.0], "{report:?}");
+        assert!(!report.is_complete());
+        assert_eq!(report.verified, 2, "the mistyped object is not accepted");
+    }
+
+    #[test]
+    fn file_modes_naming_a_tree_or_a_commit_are_corrupt() {
+        let file = blob(b"file");
+        let sub = tree(&[(b"f", EntryMode::Blob, file.0)]);
+        let parent = commit_over(sub.0, vec![]);
+        for mode in [EntryMode::Blob, EntryMode::Executable, EntryMode::Symlink] {
+            for target in [&sub, &parent] {
+                let root_tree = tree(&[(b"x", mode, target.0)]);
+                let root = commit_over(root_tree.0, vec![]);
+                let report = closure_of(root.0, &[&root, &root_tree, &sub, &parent, &file]);
+                assert_eq!(corrupt_ids(&report), vec![target.0], "{mode:?} {report:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_naming_a_non_blob_is_corrupt() {
+        let part = blob(b"part");
+        let inner = chunked(4, &[part.0]);
+        let sub = tree(&[(b"f", EntryMode::Blob, part.0)]);
+        for target in [&inner, &sub] {
+            let outer = chunked(4, &[target.0]);
+            let root_tree = tree(&[(b"big", EntryMode::Blob, outer.0)]);
+            let root = commit_over(root_tree.0, vec![]);
+            let report = closure_of(root.0, &[&root, &root_tree, &outer, &inner, &sub, &part]);
+            assert_eq!(corrupt_ids(&report), vec![target.0], "{report:?}");
+        }
+    }
+
+    #[test]
+    fn chunk_lengths_must_add_up_to_total_size() {
+        let one = blob(b"12345");
+        let two = blob(b"1234567");
+        for (total, ok) in [(12, true), (13, false), (11, false)] {
+            let big = chunked(total, &[one.0, two.0]);
+            let root_tree = tree(&[(b"big", EntryMode::Blob, big.0)]);
+            let root = commit_over(root_tree.0, vec![]);
+            let report = closure_of(root.0, &[&root, &root_tree, &big, &one, &two]);
+            assert_eq!(report.is_complete(), ok, "total {total}: {report:?}");
+            if !ok {
+                assert_eq!(corrupt_ids(&report), vec![big.0]);
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_lengths_are_not_checked_against_an_absent_chunk() {
+        let one = blob(b"12345");
+        let two = blob(b"1234567");
+        let big = chunked(99, &[one.0, two.0]);
+        let root_tree = tree(&[(b"big", EntryMode::Blob, big.0)]);
+        let root = commit_over(root_tree.0, vec![]);
+        let report = closure_of(root.0, &[&root, &root_tree, &big, &one]);
+        assert_eq!(report.missing, vec![two.0]);
+        assert!(report.corrupt.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn one_id_named_with_two_incompatible_modes_is_corrupt_once() {
+        let file = blob(b"file");
+        // Both entries name the subtree: one as a file, one as a tree.
+        let sub = tree(&[(b"f", EntryMode::Blob, file.0)]);
+        let root_tree = tree(&[
+            (b"a", EntryMode::Tree, sub.0),
+            (b"b", EntryMode::Blob, sub.0),
+        ]);
+        let root = commit_over(root_tree.0, vec![]);
+        let report = closure_of(root.0, &[&root, &root_tree, &sub, &file]);
+        assert_eq!(corrupt_ids(&report), vec![sub.0], "{report:?}");
+
+        // The blob is decoded first as a file, then named as a tree entry.
+        let deeper = tree(&[(b"x", EntryMode::Tree, file.0)]);
+        let root_tree = tree(&[
+            (b"a", EntryMode::Blob, file.0),
+            (b"sub", EntryMode::Tree, deeper.0),
+        ]);
+        let root = commit_over(root_tree.0, vec![]);
+        let report = closure_of(root.0, &[&root, &root_tree, &deeper, &file]);
+        assert_eq!(corrupt_ids(&report), vec![file.0], "{report:?}");
     }
 
     #[test]
@@ -1182,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_keeps_walker_corrupt_when_source_bytes_hash_elsewhere() {
+    fn streaming_reports_mismatched_source_bytes_under_the_requested_id() {
         let (_d, store, root, blob) = fixture();
         let blob_bytes = store.read(&blob).unwrap();
         let derived = crate::object::id_from_object(
@@ -1211,24 +1471,10 @@ mod tests {
         );
         assert_ne!(other_id, blob);
 
-        let (mut report, _) = walk_closure(&root, ClosureMode::Snapshot, &mut source).unwrap();
+        let (report, _) = walk_closure(&root, ClosureMode::Snapshot, &mut source).unwrap();
         assert!(
             report.corrupt.iter().any(|(id, _)| *id == blob),
             "walker must classify the mismatch under the requested id: {report:?}"
-        );
-
-        let extra_id = hash(b"not an object");
-        merge_corrupt(
-            &mut report,
-            vec![(extra_id, "deserialize failed".to_string())],
-        );
-        assert!(
-            report.corrupt.iter().any(|(id, _)| *id == blob),
-            "walker entry must survive the merge: {report:?}"
-        );
-        assert!(
-            report.corrupt.iter().any(|(id, _)| *id == extra_id),
-            "index-time entry must survive the merge: {report:?}"
         );
     }
 
@@ -1297,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_bytes_are_reported() {
+    fn undecodable_object_is_unreferenced_not_corrupt() {
         let (_d, store, commit_id, _) = fixture();
         let export = export_closure(&store, &commit_id, ClosureMode::Snapshot).unwrap();
         let mut objects: Vec<Vec<u8>> = Vec::new();
@@ -1310,14 +1556,25 @@ mod tests {
             }
         }
         objects.push(b"not an object".to_vec());
+        let junk = hash(b"not an object");
         let report = verify_closure(
             &commit_id,
             ClosureMode::Snapshot,
             objects.iter().map(Vec::as_slice),
         )
         .unwrap();
-        assert!(!report.corrupt.is_empty());
-        assert!(!report.is_complete());
+        assert!(report.corrupt.is_empty(), "{report:?}");
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(report.unreferenced, vec![junk]);
+
+        let mut w = PackWriter::new_raw_only();
+        for bytes in &objects {
+            w.push_raw(hash(bytes), bytes).unwrap();
+        }
+        let pack = w.finish().unwrap();
+        let report = verify_closure_packs(&commit_id, ClosureMode::Snapshot, &[&pack]).unwrap();
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(report.unreferenced, vec![junk]);
     }
 
     #[test]
@@ -1565,8 +1822,8 @@ mod tests {
         let refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
         let (seq_by_id, mut seq_corrupt) = index_supplied_objects_sequential(&refs);
         let (par_by_id, mut par_corrupt) = index_supplied_objects_parallel(&refs, threads.max(2));
-        seq_corrupt.sort_by_key(|a| a.0);
-        par_corrupt.sort_by_key(|a| a.0);
+        seq_corrupt.sort_unstable();
+        par_corrupt.sort_unstable();
         assert_eq!(seq_by_id, par_by_id);
         assert_eq!(seq_corrupt, par_corrupt);
         assert!(seq_corrupt.is_empty());
@@ -1611,13 +1868,13 @@ mod tests {
         let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         let (seq_by_id, mut seq_corrupt) = index_supplied_objects_sequential(&refs);
         let (par_by_id, mut par_corrupt) = index_supplied_objects_parallel(&refs, threads.max(2));
-        seq_corrupt.sort_by_key(|a| a.0);
-        par_corrupt.sort_by_key(|a| a.0);
+        seq_corrupt.sort_unstable();
+        par_corrupt.sort_unstable();
 
         assert_eq!(par_by_id, seq_by_id);
         assert_eq!(par_corrupt, seq_corrupt);
         assert_eq!(seq_corrupt.len(), 1, "{seq_corrupt:?}");
-        assert_eq!(seq_corrupt[0].0, expected_corrupt_id);
+        assert_eq!(seq_corrupt[0], expected_corrupt_id);
         assert_eq!(
             seq_by_id.len(),
             total - 1,

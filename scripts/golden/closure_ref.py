@@ -14,8 +14,12 @@
 #     sidecar and in MANIFEST.txt;
 #   * decodes the manifest strictly (magic, version, mode, no trailing byte);
 #   * decodes each pack as a raw-only pack and checks its trailer;
-#   * derives every object id with the type-dependent rule;
-#   * walks the closure from the trusted root with the mode of the manifest;
+#   * derives every object id with the type-dependent rule; bytes that decode
+#     to no object are unreferenced, never corrupt;
+#   * walks the closure from the trusted root with the mode of the manifest,
+#     checks that every entry mode and chunk reference names an object of a
+#     fitting type, and that the chunk lengths of a chunked blob add up to its
+#     total_size;
 #   * compares the outcome (accept, incomplete or reject) with the sidecar,
 #     including the verified count, the sorted id list and the unreferenced
 #     ids.
@@ -127,8 +131,16 @@ def object_id(data):
     return blake3(data)
 
 
+ANY = (o.BLOB, o.TREE, o.COMMIT, o.REMIX, o.CHUNKED, o.DELTA, o.TAG)
+TREE_MODE = 2
+
+
 def children(data, mode):
-    """SPEC-DISCLOSURE section 7.1."""
+    """SPEC-DISCLOSURE section 7.1: (id, allowed object types) per reference.
+
+    A tree entry of mode Tree names a tree. Any other entry names a blob or a
+    chunked blob. A chunk names a blob.
+    """
     kind = data[0]
     if kind in (o.COMMIT, o.REMIX):
         r = o.Reader(data)
@@ -137,40 +149,72 @@ def children(data, mode):
         parents = [r.take(32) for _ in range(r.u32())]
         if mode == HISTORY:
             out += parents
-        return out
+        return [(h, ANY) for h in out]
     if kind == o.TREE:
-        return [h for _, _, h in o.parse_tree(data)["entries"]]
+        return [
+            (h, (o.TREE,) if m == TREE_MODE else (o.BLOB, o.CHUNKED))
+            for _, m, h in o.parse_tree(data)["entries"]
+        ]
     if kind == o.CHUNKED:
-        return o.parse_chunked(data)["chunks"]
+        return [(h, (o.BLOB,)) for h in o.parse_chunked(data)["chunks"]]
     if kind == o.TAG:
-        return [data[6:38]]
+        return [(data[6:38], ANY)]
     return []
 
 
 def walk(root, mode, payloads):
-    """Return (visited ids, missing ids, corrupt count, unreferenced ids)."""
+    """Return (verified ids, missing ids, corrupt ids, unreferenced ids)."""
     objects = {}
-    corrupt = 0
+    unreferenced_junk = set()
     for payload in payloads:
         try:
             objects[object_id(payload)] = payload
         except ValueError:
-            corrupt += 1
-    visited, missing, queue = set(), [], [root]
+            # No id derives from bytes that are not an object: never referenced.
+            unreferenced_junk.add(blake3(payload))
+    allowed = {root: set(ANY)}
+    visited, missing, corrupt, queue = [], [], set(), [root]
+    seen = {root}
     while queue:
         oid = queue.pop(0)
-        if oid in visited:
-            continue
-        visited.add(oid)
         data = objects.get(oid)
         if data is None:
             missing.append(oid)
             continue
         if oid == root and data[0] not in (o.COMMIT, o.REMIX, o.TAG):
             raise Reject("root is not a commit, remix or tag")
-        queue.extend(children(data, mode))
-    unreferenced = sorted(set(objects) - visited)
-    return sorted(visited - set(missing)), missing, corrupt, unreferenced
+        if data[0] not in allowed[oid]:
+            corrupt.add(oid)
+            continue
+        visited.append(oid)
+        for child, kinds in children(data, mode):
+            allowed[child] = allowed.get(child, set(ANY)) & set(kinds)
+            if child not in seen:
+                seen.add(child)
+                queue.append(child)
+    # An id named with types that disagree, or whose object has a type that
+    # an entry forbids, is corrupt.
+    for oid, kinds in allowed.items():
+        data = objects.get(oid)
+        if data is not None and data[0] not in kinds:
+            corrupt.add(oid)
+    # Chunk lengths add up to total_size once every chunk is a read blob.
+    for oid in visited:
+        data = objects[oid]
+        if data[0] != o.CHUNKED:
+            continue
+        manifest = o.parse_chunked(data)
+        lens = []
+        for chunk in manifest["chunks"]:
+            blob = objects.get(chunk)
+            if blob is None or blob[0] != o.BLOB:
+                break
+            lens.append(o.parse_blob(blob)["len"])
+        else:
+            if sum(lens) != manifest["total"]:
+                corrupt.add(oid)
+    unreferenced = sorted((set(objects) - set(seen)) | unreferenced_junk)
+    return sorted(set(visited) - corrupt), missing, sorted(corrupt), unreferenced
 
 
 def check_vector(root_dir, sidecar_name, man):
@@ -203,7 +247,7 @@ def check_vector(root_dir, sidecar_name, man):
     if missing or corrupt:
         o.expect(expect == "incomplete", f"{name}: incomplete but sidecar says {expect}")
         if meta.get("reason") == "corrupt":
-            o.expect(corrupt > 0, f"{name}: expected a corrupt object")
+            o.expect(len(corrupt) > 0, f"{name}: expected a corrupt object")
         if meta.get("reason") == "missing":
             o.expect(len(missing) > 0, f"{name}: expected a missing object")
         if meta.get("reason") == "missing root":

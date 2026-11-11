@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
 use crate::hash::{self, Hash};
-use crate::object::{Object, ObjectType};
+use crate::object::{EntryMode, Object, ObjectType};
 use crate::store::{ObjectSource, ObjectStore, StoreError};
 
 /// Hard cap on commits visited per call.
@@ -216,6 +216,37 @@ pub enum ClosureMode {
     History,
 }
 
+/// What an edge of the object graph allows its target to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChildKind {
+    /// Any object type.
+    Any,
+    /// A tree entry: `Tree` mode names a [`ObjectType::Tree`]; every other
+    /// mode names a file, a [`ObjectType::Blob`] or a
+    /// [`ObjectType::ChunkedBlob`].
+    Entry(EntryMode),
+    /// A chunk of a [`ObjectType::ChunkedBlob`]: a [`ObjectType::Blob`].
+    Chunk,
+}
+
+/// Bit `1 << ty` in a [`ChildKind::mask`].
+pub(crate) fn type_bit(ty: ObjectType) -> u8 {
+    1 << ty as u8
+}
+
+impl ChildKind {
+    /// Bit `1 << type` for each object type the edge allows.
+    #[must_use]
+    pub(crate) fn mask(self) -> u8 {
+        match self {
+            Self::Any => u8::MAX,
+            Self::Entry(EntryMode::Tree) => type_bit(ObjectType::Tree),
+            Self::Entry(_) => type_bit(ObjectType::Blob) | type_bit(ObjectType::ChunkedBlob),
+            Self::Chunk => type_bit(ObjectType::Blob),
+        }
+    }
+}
+
 /// The single source of truth for "what does this object reference".
 ///
 /// * [`Object::Commit`]: `tree_hash`, plus `parents` only in
@@ -229,26 +260,40 @@ pub enum ClosureMode {
 ///   not followed — deltas are pack-only leaves).
 #[must_use]
 pub fn children(obj: &Object, mode: ClosureMode) -> Vec<Hash> {
+    typed_children(obj, mode)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// [`children`], each with the [`ChildKind`] its edge allows.
+#[must_use]
+pub(crate) fn typed_children(obj: &Object, mode: ClosureMode) -> Vec<(Hash, ChildKind)> {
+    let any = |id: &Hash| (*id, ChildKind::Any);
     match obj {
         Object::Commit(c) => {
             let mut out = Vec::with_capacity(1 + c.parents.len());
-            out.push(c.tree_hash);
+            out.push(any(&c.tree_hash));
             if mode == ClosureMode::History {
-                out.extend(c.parents.iter().copied());
+                out.extend(c.parents.iter().map(any));
             }
             out
         }
         Object::Remix(r) => {
             let mut out = Vec::with_capacity(1 + r.parents.len());
-            out.push(r.tree_hash);
+            out.push(any(&r.tree_hash));
             if mode == ClosureMode::History {
-                out.extend(r.parents.iter().copied());
+                out.extend(r.parents.iter().map(any));
             }
             out
         }
-        Object::Tree(t) => t.entries.iter().map(|e| e.object_hash).collect(),
-        Object::ChunkedBlob(cb) => cb.chunks.clone(),
-        Object::Tag(t) => vec![t.target],
+        Object::Tree(t) => t
+            .entries
+            .iter()
+            .map(|e| (e.object_hash, ChildKind::Entry(e.mode)))
+            .collect(),
+        Object::ChunkedBlob(cb) => cb.chunks.iter().map(|c| (*c, ChildKind::Chunk)).collect(),
+        Object::Tag(t) => vec![any(&t.target)],
         Object::Blob(_) | Object::Delta(_) => Vec::new(),
     }
 }
