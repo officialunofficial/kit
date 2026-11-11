@@ -121,6 +121,10 @@ person or an organization is exactly what `kit verify --trust-roots` (and
 caller's responsibility to apply the same policy at the DA/verifier layer
 if identity matters there.
 
+`kit verify-proof` treats `signature_valid == false` as a failure with or
+without trust roots. It exits `65` (`DATAERR`), prints `bad:` and the
+report, and writes no payload file. A script can rely on the exit code alone.
+
 One structural detail worth internalizing: `Commit`'s `message_hash` and
 `content_digest` fields are **inside** the commit id (they're part of the
 canonical bytes BLAKE3'd to produce it) but **outside** the signature (the
