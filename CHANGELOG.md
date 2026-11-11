@@ -20,6 +20,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after a conflict. The replayed commits are signed as in any rebase.
   `libkit::rebase::Request` has `upstream` and `branch` fields, and
   `libkit::rebase::Error::NoSuchBranch` reports a missing branch.
+- `log --all` starts the walk at `HEAD`, every local branch, every
+  remote-tracking ref and every tag. A commit shows once. The flag is a usage
+  error together with a revision or a range. `libkit::log::Query::all` selects
+  it, and `libkit::log::ref_tips` lists the refs.
 - `rev-list` takes `-n <n>` and `--max-count=<n>`, which keep the first `<n>`
   commits, and a range `A..B` or `A...B` in place of a revision. It reads the
   range as `log` does.

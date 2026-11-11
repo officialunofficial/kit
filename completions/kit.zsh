@@ -297,6 +297,7 @@ _kit() {
                         '--first-parent[follow only first parents]' \
                         '(-p --patch --stat)'{-p,--patch}'[show the patch of each commit]' \
                         '(-p --patch --stat)--stat[show the diffstat of each commit]' \
+                        '--all[start from every ref and HEAD]' \
                         '-n[limit number of commits]:count:' \
                         '--help[show help]'
                     ;;

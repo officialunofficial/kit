@@ -28,6 +28,10 @@
 //! its diff against the first parent, as `kit show` does. The two flags
 //! exclude each other and `--format=json`.
 //!
+//! `--all` starts the walk at `HEAD`, every local branch, every
+//! remote-tracking ref and every tag. A commit shows once, in the order above.
+//! It is a usage error together with a revision or a range.
+//!
 //! History filters — `--author`/`--grep` (substring matches),
 //! `--since`/`--until` (a small explicit date grammar, see
 //! `libkit::log::date`), and `--no-merges`/`--first-parent` — are
@@ -148,6 +152,12 @@ struct LogOpts {
     #[arg(long)]
     stat: bool,
 
+    /// Start the walk at `HEAD`, every local branch, every remote-tracking
+    /// ref and every tag, not at `HEAD` alone. Each commit appears once. It
+    /// cannot combine with a revision or a range.
+    #[arg(long, conflicts_with = "start")]
+    all: bool,
+
     /// Optional starting revision (`<rev>`), range (`A..B`, `A..`, `..B`), or
     /// symmetric range (`A...B`). Defaults to `HEAD`; an empty range side
     /// means `HEAD`.
@@ -229,6 +239,7 @@ pub fn run(args: &[String]) -> u8 {
     // the way git's does.
     let query = Query {
         start: opts.start.clone(),
+        all: opts.all,
         first_parent: opts.first_parent,
         filter: Filter {
             author: opts.author.clone(),
@@ -398,6 +409,7 @@ mod tests {
             first_parent: false,
             patch: false,
             stat: false,
+            all: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -419,6 +431,7 @@ mod tests {
             first_parent: false,
             patch: false,
             stat: false,
+            all: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Oneline);
@@ -440,6 +453,7 @@ mod tests {
             first_parent: false,
             patch: false,
             stat: false,
+            all: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -461,6 +475,7 @@ mod tests {
             first_parent: false,
             patch: false,
             stat: false,
+            all: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Json);
@@ -481,6 +496,7 @@ mod tests {
             first_parent: false,
             patch: false,
             stat: false,
+            all: false,
             start: None,
         }
     }

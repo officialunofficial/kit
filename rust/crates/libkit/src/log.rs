@@ -18,6 +18,10 @@
 //!
 //! An empty side of a range means `HEAD`. A tag is followed to the commit
 //! that it names.
+//!
+//! A query with [`Query::all`] set walks from `HEAD`, every local branch,
+//! every remote-tracking ref and every tag instead. [`ref_tips`] lists those
+//! refs.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -67,6 +71,9 @@ pub enum Error {
         /// The most commits that one walk may read.
         limit: usize,
     },
+    /// The refs could not be listed.
+    #[error("list refs: {0}")]
+    ListRefs(refs::RefError),
     /// A commit in the walk could not be read.
     #[error("read {}: {source}", hash::to_hex(.hash))]
     ReadCommit {
@@ -126,8 +133,12 @@ impl Filter {
 /// What to walk and what to keep.
 #[derive(Debug, Clone, Default)]
 pub struct Query {
-    /// The revision selection. `None` walks `HEAD`.
+    /// The revision selection. `None` walks `HEAD`. [`Query::all`] ignores
+    /// it, so a caller that sets `all` leaves it `None`.
     pub start: Option<String>,
+    /// Walk from `HEAD`, every local branch, every remote-tracking ref and
+    /// every tag, each followed to its commit.
+    pub all: bool,
     /// Follow only the first parent of each commit. A side branch that a
     /// merge brought in never enters the walk.
     pub first_parent: bool,
@@ -161,11 +172,100 @@ pub struct Entry {
 /// `A...B` reaches its limit.
 pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> {
     let store = repo.store();
-    let selection = parse_selection(query.start.as_deref());
-    let Some((tips, excluded)) = resolve_selection(repo, &selection, MAX_LOG_COMMITS)? else {
+    let resolved = if query.all {
+        all_tips(repo)?
+    } else {
+        let selection = parse_selection(query.start.as_deref());
+        resolve_selection(repo, &selection, MAX_LOG_COMMITS)?
+    };
+    let Some((tips, excluded)) = resolved else {
         return Ok(None);
     };
     select(store, &tips, &excluded, query, MAX_LOG_COMMITS).map(Some)
+}
+
+/// The kind of a ref in a [`RefTip`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefKind {
+    /// A local branch.
+    Branch,
+    /// A remote-tracking ref, named `<remote>/<branch>`.
+    Remote,
+    /// A tag.
+    Tag,
+}
+
+/// A ref that ends at a commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefTip {
+    /// The kind of the ref.
+    pub kind: RefKind,
+    /// The name of the ref, without its `refs/...` namespace.
+    pub name: String,
+    /// The commit that the ref names, after the tag objects on the way are
+    /// followed.
+    pub commit: Hash,
+}
+
+/// Every local branch, remote-tracking ref and tag that ends at a commit:
+/// the branches first, then the remote-tracking refs, then the tags, each
+/// group in name order. A ref with unreadable content and a ref that ends at
+/// an object that is not a commit are left out.
+///
+/// # Errors
+/// [`Error::ListRefs`] when the refs cannot be listed. [`Error::ReadCommit`]
+/// when the object that a ref ends at cannot be read.
+pub fn ref_tips(repo: &Repo) -> Result<Vec<RefTip>, Error> {
+    let layout = repo.layout();
+    let store = repo.store();
+    let mut found = Vec::new();
+    let mut add = |kind: RefKind, name: String, hash: Option<Hash>| -> Result<(), Error> {
+        let Some(hash) = hash else {
+            return Ok(());
+        };
+        let commit = revspec::peel_tags(store, hash);
+        match store.read_object(&commit) {
+            Ok(Object::Commit(_)) => found.push(RefTip { kind, name, commit }),
+            Ok(_) => {}
+            Err(source) => {
+                return Err(Error::ReadCommit {
+                    hash: commit,
+                    source,
+                });
+            }
+        }
+        Ok(())
+    };
+    for r in refs::list_refs(layout).map_err(Error::ListRefs)? {
+        add(RefKind::Branch, r.name, r.hash)?;
+    }
+    for remote in refs::list_remote_names(layout).map_err(Error::ListRefs)? {
+        for r in refs::list_remote_refs(layout, &remote).map_err(Error::ListRefs)? {
+            add(RefKind::Remote, format!("{remote}/{}", r.name), r.hash)?;
+        }
+    }
+    for r in refs::list_tags(layout).map_err(Error::ListRefs)? {
+        add(RefKind::Tag, r.name, r.hash)?;
+    }
+    Ok(found)
+}
+
+/// The tips of a walk over everything: `HEAD`, then the commit of each ref
+/// of [`ref_tips`], each once. The result is `None` when there is no tip.
+fn all_tips(repo: &Repo) -> Result<Option<WalkSet>, Error> {
+    let mut tips: Vec<Hash> = Vec::new();
+    let mut seen: HashSet<Hash> = HashSet::new();
+    let head = resolve_tip(repo, None)?;
+    let heads = ref_tips(repo)?.into_iter().map(|tip| tip.commit);
+    for hash in head.into_iter().chain(heads) {
+        if seen.insert(hash) {
+            tips.push(hash);
+        }
+    }
+    if tips.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((tips, HashSet::new())))
 }
 
 /// Walk the history of `tips` in the order of [`history`], with no
@@ -1076,6 +1176,7 @@ mod tests {
                         for limit in limits {
                             let query = Query {
                                 start: None,
+                                all: false,
                                 first_parent,
                                 filter: filter.clone(),
                                 limit,

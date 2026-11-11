@@ -506,7 +506,7 @@ launched. The superseded commit is not deleted; it remains on disk as an
 unreachable object until
 .Cm gc
 reclaims it.
-.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl n Ar N Oc Oo Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
+.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl n Ar N Oc Oo Fl Fl all | Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
 Show commit history. With no argument the walk starts at
 .Cm HEAD ;
 an optional
@@ -557,6 +557,11 @@ commit against its first parent, as
 .Cm show
 does. The two options exclude each other and
 .Fl Fl format Ar json .
+.Fl Fl all
+starts the walk at
+.Cm HEAD ,
+every local branch, every remote-tracking ref and every tag, and shows each
+commit once. It is a usage error together with a revision or a range.
 .Fl Fl author Ar pattern
 and
 .Fl Fl grep Ar pattern

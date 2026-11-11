@@ -7,6 +7,7 @@ use kit_core::object::{Commit, Identity, Object};
 use kit_core::refs;
 use kit_core::serialize;
 use kit_core::store::ObjectStore;
+use libkit::log::RefKind::{Branch, Remote, Tag};
 use libkit::log::{self, Filter, Query};
 use libkit::{Environment, Error, Repo};
 
@@ -18,7 +19,7 @@ use libkit::{Environment, Error, Repo};
 ///         side(t3) -+
 /// ```
 struct Fixture {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     repo: Repo,
     root: Hash,
     a: Hash,
@@ -56,7 +57,7 @@ fn fixture() -> Fixture {
     refs::write_ref(&layout, "side", &side).unwrap();
     let repo = Repo::open(dir.path(), &Environment::new(dir.path())).unwrap();
     Fixture {
-        _dir: dir,
+        dir,
         repo,
         root,
         a,
@@ -197,4 +198,82 @@ fn the_subject_is_the_first_line_of_the_message() {
     let f = fixture();
     assert_eq!(log::subject(f.repo.store(), &f.merge), "merge side");
     assert_eq!(log::subject(f.repo.store(), &[0xee; 32]), "");
+}
+
+fn layout_of(f: &Fixture) -> RepoLayout {
+    RepoLayout::single(f.dir.path())
+}
+
+#[test]
+fn all_walks_from_every_branch_remote_ref_and_tag_once() {
+    let f = fixture();
+    let layout = layout_of(&f);
+    let store = ObjectStore::open(&layout).unwrap();
+    // Three commits on three refs of three kinds, none reachable from HEAD.
+    let on_branch = commit(&store, vec![f.root], 6, 7, "on branch");
+    let on_remote = commit(&store, vec![f.root], 7, 8, "on remote");
+    let on_tag = commit(&store, vec![f.root], 8, 9, "on tag");
+    refs::write_ref(&layout, "later", &on_branch).unwrap();
+    refs::write_remote_ref(&layout, "origin", "main", &on_remote).unwrap();
+    refs::write_tag(&layout, "v1", &on_tag).unwrap();
+    // A second ref at a commit that another ref reaches adds nothing.
+    refs::write_tag(&layout, "v0", &f.a).unwrap();
+
+    let head_only = hashes(log::history(&f.repo, &query(None)).unwrap());
+    assert!(!head_only.contains(&on_branch));
+
+    let q = Query {
+        all: true,
+        ..Query::default()
+    };
+    let walked = hashes(log::history(&f.repo, &q).unwrap());
+    assert_eq!(
+        walked,
+        [
+            on_tag, on_remote, on_branch, f.tip, f.merge, f.side, f.a, f.root
+        ]
+    );
+}
+
+#[test]
+fn ref_tips_list_branches_then_remote_refs_then_tags_and_skip_other_objects() {
+    let f = fixture();
+    let layout = layout_of(&f);
+    let store = ObjectStore::open(&layout).unwrap();
+    refs::write_remote_ref(&layout, "origin", "dev/x", &f.a).unwrap();
+    refs::write_tag(&layout, "v1", &f.root).unwrap();
+    let blob = Object::Blob(kit_core::object::Blob {
+        data: b"x".to_vec(),
+    });
+    let blob = store.write(&serialize::serialize(&blob).unwrap()).unwrap();
+    refs::write_tag(&layout, "blob-tag", &blob).unwrap();
+
+    let tips: Vec<_> = log::ref_tips(&f.repo)
+        .unwrap()
+        .into_iter()
+        .map(|t| (t.kind, t.name, t.commit))
+        .collect();
+    assert_eq!(
+        tips,
+        [
+            (Branch, "main".to_owned(), f.tip),
+            (Branch, "side".to_owned(), f.side),
+            (Remote, "origin/dev/x".to_owned(), f.a),
+            (Tag, "v1".to_owned(), f.root),
+        ]
+    );
+}
+
+#[test]
+fn all_without_any_commit_has_nothing_to_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = RepoLayout::single(dir.path());
+    ObjectStore::init(&layout).unwrap();
+    refs::init(&layout).unwrap();
+    let repo = Repo::open(dir.path(), &Environment::new(dir.path())).unwrap();
+    let q = Query {
+        all: true,
+        ..Query::default()
+    };
+    assert!(log::history(&repo, &q).unwrap().is_none());
 }
