@@ -17,7 +17,13 @@ for n in names:
     b = d.decode_bundle(data)
     sibs = [len(s["proof"][1]) for s in b["steps"]]
     leafs = [s["proof"][0] for s in b["steps"]]
-    step_bytes = sum(1 + len(s["name"]) + 1 + 32 + 32 + 4 + 4 + 1 + 32 * len(s["proof"][1]) for s in b["steps"])
+    # name vector, mode, child id, position, then the keyed tree proof:
+    # leaf count, step count and one (sibling, separator) per step.
+    step_bytes = sum(
+        1 + len(s["name"]) + 1 + 32 + 4 + 4 + 1
+        + sum(33 + len(sep) for _, sep in s["proof"][1])
+        for s in b["steps"]
+    )
     kind = {0: "object", 1: "chunk", 2: "range"}[b["kind"]]
     chunk_sibs = "-"
     lp = 0; lpb = 0

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Per-path proof cost in a real git repository, from the width of each tree on
+# Per-path proof cost in a real git repository, from the entries of each tree on
 # the path. For every file at HEAD it computes the kit disclosure steps
-# (75 + |name| + 32 * siblings per path component, with the exact sibling count
-# of the selection rule of SPEC-MERKLE-OBJECTS section 5.3 over entries sorted
-# by name bytes) and the git cost (the sum of the raw tree objects on the
-# path). Neither figure includes the commit, the header or the payload.
+# (43 + |name| per path component, plus 33 + |separator| for each step of its
+# keyed tree proof, SPEC-MERKLE-OBJECTS section 5.8, over entries sorted by
+# name bytes) and the git cost (the sum of the raw tree objects on the path).
+# Neither figure includes the commit, the header or the payload.
 # Usage: python3 -I -B path_cost.py <git-repo>   (a blobless clone suffices)
 import statistics, subprocess, sys
 
@@ -16,13 +16,15 @@ def git(*args):
                           capture_output=True).stdout
 
 
-def sibs(p, n):
-    k = 0
-    while n > 1:
-        s = (p + 1 if p + 1 < n else p) if p % 2 == 0 else p - 1
-        k += s != p
-        p, n = p // 2, (n + 1) // 2
-    return k
+def separators(p, names):
+    """Separators of the keyed proof of the entry at position p."""
+    out, level, size = [], 0, len(names)
+    while size > 1:
+        sibling = p ^ 1
+        if sibling < size:
+            out.append(names[(p | 1) << level])
+        p, size, level = p // 2, (size + 1) // 2, level + 1
+    return out
 
 
 root = git("rev-parse", "HEAD^{tree}").decode().strip()
@@ -50,7 +52,7 @@ pos = {}
 for parent, names in children.items():
     names.sort()
     for i, name in enumerate(names):
-        pos[(parent, name)] = (i, len(names))
+        pos[(parent, name)] = i
 
 kit, gitc, depth = [], [], []
 for path in files:
@@ -58,8 +60,8 @@ for path in files:
     k = g = 0
     for j, name in enumerate(parts):
         parent = b"/".join(parts[:j])
-        i, n = pos[(parent, name)]
-        k += 75 + len(name) + 32 * sibs(i, n)
+        i = pos[(parent, name)]
+        k += 43 + len(name) + sum(33 + len(sep) for sep in separators(i, children[parent]))
         g += sizes[tree_oid[parent]]
     kit.append(k); gitc.append(g); depth.append(len(parts))
 

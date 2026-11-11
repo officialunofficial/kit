@@ -88,6 +88,8 @@
 \newcommand{\Hb}{\mathsf{H}}
 \newcommand{\D}{\mathsf{D}}
 \newcommand{\BMT}{\mathsf{BMT}}
+
+\newcommand{\KBMT}{\mathsf{KBMT}}
 \newcommand{\cc}{\mathbin{\|}}
 \newcommand{\str}[1]{\texttt{"\romannumeral-`0#1"}}
 \newcommand{\bytes}[1]{\texttt{\romannumeral-`0#1}}
@@ -116,7 +118,7 @@
 {\renewcommand{\thefootnote}{}%
  \footnotetext{\textsuperscript{$*$}Corresponding author:
    \href{mailto:christopher@officialunofficial.com}{\texttt{christopher@officialunofficial.com}}.}%
- \footnotetext{Preprint. Version 0.1 (draft), 30 October 2026. This work is
+ \footnotetext{Preprint. Version 0.2 (draft), 11 November 2026. This work is
    licensed under the Creative Commons Attribution 4.0 International License
    (CC~BY~4.0).}}
 
@@ -127,19 +129,20 @@ it bytes. \kit{} is a content-addressed, signed version-control system that
 removes that trust for claims about content. It names every object with a hash
 shaped like the proof a verifier needs: trees and chunk lists by typed binary
 Merkle roots, blobs by their BLAKE3 hash, which is also their Bao root, and a
-commit by a hash that covers its mandatory Ed25519 signature. From one trusted
-commit id, a verifier can check offline that a path, a chunk or a byte range
-belongs to the commit, and that a served object set holds every object the
-commit reaches. Each verifier returns what it authenticated rather than what it
-was told. A disclosure bundle grows with path depth and with the logarithm of
-directory size and chunk count (linear in the chunk index when an absolute file
-offset is required), not with repository size: in our committed vectors a file
-at depth 3 (two directories below the root) costs 635 bytes, 318 of them the
-bundle header, commit id and signed commit, and each further directory of $M$
-entries adds about $75 + |\mathit{name}| + 32\lceil\log_2 M\rceil$ bytes. We
-give the construction, the two verifiers, and informal security arguments that
-reduce soundness to BLAKE3 collision resistance. \kit{} is alpha software
-(version 0.5.0), and the disclosure format is a draft specification.
+commit by a hash that covers its mandatory Ed25519 signature. A tree id also
+commits to the sort order of its entry names, so one entry proof shows that a
+name occurs once in its directory, even when the commit's signer is hostile.
+From one trusted commit id, a verifier can check offline that a path, a chunk
+or a byte range belongs to the commit, and that a served object set holds every
+object the commit reaches. Each verifier returns what it authenticated rather
+than what it was told. A disclosure bundle grows with path depth and with the
+logarithm of directory size and chunk count (linear in the chunk index when an
+absolute file offset is required), not with repository size: in our committed
+vectors a file at depth 3 (two directories below the root) costs 543 bytes, 318
+of them the bundle header, commit id and signed commit. We give the
+construction, the two verifiers, and informal security arguments that reduce
+soundness to BLAKE3 collision resistance. \kit{} is alpha software, and the
+disclosure format is a draft specification.
 \end{abstract}
 
 % ---------------------------------------------------------------------------
@@ -194,24 +197,31 @@ a sparse Merkle tree or a Merkle Patricia trie~\cite{smt,ethereum}, gives
 logarithmic proofs but makes a commit commit to one global structure, so
 unchanged subdirectories are no longer objects shared between commits. IPFS
 UnixFS~\cite{unixfs} shards large directories with a HAMT, so proof size
-depends on the sharding. What \kit{} adds is the combination: per-directory,
-typed binary Merkle ids that keep git's subtree sharing; blob ids that are Bao
-roots, so byte ranges need no extra commitment; a mandatory signature inside
-the commit id; and a completeness verdict that needs no repository.
+depends on the sharding. A proof of one entry of a git tree, a HAMT bucket or a
+positional Merkle tree also cannot show that the name occurs only once: that
+takes the whole listing, or a structure that commits to the key order, as
+Merkle B-trees and Merkle search trees do~\cite{mbtree,mst}. What \kit{} adds
+is the combination: per-directory, typed binary Merkle ids that keep git's
+subtree sharing and commit to the order of names; blob ids that are Bao roots,
+so byte ranges need no extra commitment; a mandatory signature inside the
+commit id; and a completeness verdict that needs no repository.
 
 \paragraph{Contributions.}
 \begin{itemize}
   \item \emph{Proof-shaped identifiers} (\cref{sec:objects}). The combination
         above: trees and chunked files are named by a binary Merkle root that
         binds the leaf count, wrapped in a type domain, and flat objects by
-        BLAKE3 over canonical bytes, so a blob id is its Bao root. One trusted
-        commit id then authenticates a path, a chunk or a byte range through
-        objects that commits already share.
+        BLAKE3 over canonical bytes, so a blob id is its Bao root. Each parent
+        in a tree also commits to a separator name, so one entry proof shows
+        that the name occurs once in the directory. One trusted commit id then
+        authenticates a path, a chunk or a byte range through objects that
+        commits already share.
   \item \emph{Disclosure as a hash chain from $c^\star$}
         (\cref{sec:disclosure}). Each step is checked against the id the step
-        above authenticated. Length proofs give absolute file offsets without
-        disclosing earlier chunks. The verifier returns the path, leaf id and
-        offsets it proved. Bundle size grows with path depth times the
+        above authenticated. Length proofs give absolute file offsets. The
+        verifier returns the path, leaf id and offsets it proved, and two
+        accepted bundles for one path under one commit id return the same
+        content. Bundle size grows with path depth times the
         logarithm of directory width, plus the logarithm of the chunk count
         (linear in the chunk index when an absolute offset is required), plus
         the payload. It does not grow with repository size.
@@ -273,15 +283,19 @@ Attestation about the commit & \checkmark & \checkmark & \checkmark \\
 
 \paragraph{Assumptions.}
 \begin{description}[leftmargin=1.5em]
-  \item[A1 (hash).] BLAKE3~\cite{blake3} is collision resistant. Range proofs
-        use Bao slices~\cite{bao}, which expose BLAKE3's internal chaining
-        values, so A1 also covers collisions of those values.
-  \item[A2 (signature).] Ed25519~\cite{ed25519,rfc8032} is EUF-CMA secure
+  \item[A1 (hash).] BLAKE3~\cite{blake3} is collision resistant.
+  \item[A1$'$ (chaining values).] No efficient adversary finds two distinct
+        inputs to BLAKE3's chunk or parent compression, with their counter and
+        flags, that give the same chaining value. Range proofs use Bao
+        slices~\cite{bao}, which expose these values. A1$'$ is the assumption
+        under which BLAKE3's tree mode is analyzed~\cite{blake3}; it does not
+        follow from A1 alone.
+  \item[A2 (signature).] Ed25519~\cite{ed25519,rfc8032} is SUF-CMA secure
         under the acceptance predicate of SPEC-SIGNING: canonical
         encodings of $A$ and $R$, neither of small order, $0 \le S < L$, and
-        the cofactored equation $[8]([S]B - R - [k]A) = 0$~\cite{taming}.
-        Single and batch checks use the same cofactored equation, so they
-        agree on every signature~\cite{taming}.
+        the cofactored equation $[8]([S]B - R - [k]A) = 0$~\cite{taming,
+        brendel}. Single and batch checks use the same cofactored equation, so
+        they agree on every signature~\cite{taming}.
   \item[A3 (implementation).] The verifier implements its specification.
         Byte-exact golden vectors pass both the Rust code and an independent
         reference written from the specifications, and every decoder and
@@ -311,9 +325,10 @@ state that $c^\star$ determines, unless the adversary found a BLAKE3 collision
 (\cref{sec:security}). The \emph{depth} $d$ of a path is its number of
 components, so \texttt{src/lib.rs} has depth 2 and a disclosure carries one
 step per component. We want \emph{succinctness}: a disclosure for depth $d$,
-directory widths $M_1, \dots, M_d$, $K$ chunks and a range of $\ell$ bytes
-costs $O(\sum_j \log M_j + \log K + \ell)$ hashes, independent of repository
-size. We want a \emph{bounded verifier}: no prover-supplied length sizes an
+directory widths $M_1, \dots, M_d$ and $K$ chunks carries
+$O(\sum_j \log M_j + \log K)$ digests and entry names, plus the commit bytes,
+the payload and, when an absolute offset is required, one length proof per
+preceding chunk. None of these grows with repository size. We want a \emph{bounded verifier}: no prover-supplied length sizes an
 allocation before it is checked against a fixed cap.
 
 % ---------------------------------------------------------------------------
@@ -365,9 +380,17 @@ $n^0_i = \Hb(\mathrm{be}_{32}(i) \cc L_i)$, or the single node
 $\Hb(\varepsilon)$ if $N = 0$. Each higher level pairs adjacent nodes as
 $\Hb(\mathit{left} \cc \mathit{right})$; an odd last node pairs with itself.
 Folding ends at one node $t$, and
-$\BMT(L_0, \dots, L_{N-1}) = \Hb(\mathrm{be}_{32}(N) \cc t)$.\footnote{This
-tree and its proof encoding match an existing open-source BMT
-implementation~\cite{commonware}.}
+$\BMT(L_0, \dots, L_{N-1}) = \Hb(\mathrm{be}_{32}(N) \cc t)$.\footnote{For
+chunked blobs, this tree and its proof encoding match an existing open-source
+BMT implementation~\cite{commonware}.}
+\end{definition}
+
+\begin{definition}[Keyed BMT]\label{def:kbmt}
+For entries with names $\mathit{name}_0, \dots, \mathit{name}_{N-1}$ and leaf
+digests $L_i$, $\KBMT$ is $\BMT$ with every two-child parent replaced by
+$\Hb(\mathit{left} \cc \mathit{right} \cc \mathrm{u}_8(|s|) \cc s)$, where
+the \emph{separator} $s$ is the name of the first entry under
+$\mathit{right}$. A node that pairs with itself stays $\Hb(x \cc x)$.
 \end{definition}
 
 \begin{definition}[Tree id]\label{def:tree}
@@ -375,7 +398,7 @@ A tree with entries $(\mathit{name}_i, \mathit{mode}_i, h_i)_{i<M}$ in
 canonical order has leaves
 $L_i = \D\bigl(\str{kit-tree-entry-v1},\, \mathrm{le}_{32}(|\mathit{name}_i|)
 \cc \mathit{name}_i \cc \mathit{mode}_i \cc h_i\bigr)$ and id
-$\mathrm{id}(T) = \D\bigl(\str{kit.tree\textbackslash 0},\, \BMT(L_0, \dots,
+$\mathrm{id}(T) = \D\bigl(\str{kit.tree\textbackslash 0},\, \KBMT(L_0, \dots,
 L_{M-1})\bigr)$.
 \end{definition}
 
@@ -393,11 +416,14 @@ The \emph{inner root} of a Merkle object is its $\BMT$ value before the outer
 wrap. (i) Binding $N$ rules out the classic odd-node duplication
 malleability, in which a sequence whose last node is repeated folds to the same
 top node as the shorter sequence; it is defense in depth alongside the position
-hashed into each level-0 node. (ii)
-Without the outer type wrap, an empty tree and an empty chunked blob, or a
-one-entry tree and a one-chunk blob over the same child, could share an id, so
-a verifier that compared a proof with a bare inner root could accept a tree as
-a chunked file. (iii) The metadata leaf binds the total size $s$ and the
+hashed into each level-0 node. (ii) The $\BMT$ has no leaf or node tag: a
+level-0 node and a finalized root both hash a 4-byte integer and a digest, and
+chunk leaves are author-chosen 32-byte values. An interior node of one tree can
+therefore equal the bare root of another; for example, a chunk id chosen as
+$\Hb(\mathrm{be}_{32}(0) \cc L)$ at position~1 gives a level-0 node equal to
+the bare root of the one-leaf tree over $L$. The bound $N$ fixes the shape that
+a proof folds through, and the outer type wrap keeps a verifier from comparing
+a folded value with a bare root or with an id of another type. (iii) The metadata leaf binds the total size $s$ and the
 chunk-size field $z$, which the chunk list does not determine. The length
 prefix in a tree leaf stops $(\str{ab}, m, h)$ and $(\str{a}, m, \str{b} \cc
 h')$ from aliasing. Every domain tag and magic is unique and never changes
@@ -434,36 +460,58 @@ h')$ from aliasing. Every domain tag and magic is unique and never changes
   \draw[ar] (r) -- (id);
   \foreach \y/\t in {1/{$\D(\str{kit-tree-entry-v1}, \ldots)$},
                      2/{$\Hb(\mathrm{be}_{32}(i) \cc L_i)$},
-                     3/{$\Hb(\mathit{left} \cc \mathit{right})$},
-                     4/{$\Hb(p_{01} \cc p_{23})$}}
+                     3/{$\Hb(\mathit{left} \cc \mathit{right} \cc \mathrm{u}_8(|s|) \cc s)$},
+                     4/{$s = \mathit{name}_2$ at $t$}}
     \node[anchor=west, font=\scriptsize] at (3*\dx+0.6,\y*\dy) {\t};
 \end{tikzpicture}
-\caption{A four-entry tree id. The proof that entry~2 belongs to
-$\mathrm{id}(T)$ carries the shaded siblings $n_3$ and $p_{01}$ in level-major
-order. The verifier recomputes the thick nodes, wraps $r$ and compares the
-result with the id it trusts, never with a bare $r$.}
+\caption{A four-entry tree id. Each two-child parent also hashes its
+separator $s$, the name of the first entry under its right child:
+$\mathit{name}_1$ for $p_{01}$, $\mathit{name}_3$ for $p_{23}$ and
+$\mathit{name}_2$ for $t$. The proof that entry~2 belongs to $\mathrm{id}(T)$
+carries the shaded siblings with their separators, $(n_3, \mathit{name}_3)$ and
+$(p_{01}, \mathit{name}_2)$. The verifier checks $\mathit{name}_2 <
+\mathit{name}_3$ where the path goes left and $\mathit{name}_2 \le
+\mathit{name}_2$ where it goes right, recomputes the thick nodes, wraps $r$ and
+compares the result with the id it trusts, never with a bare $r$.}
 \label{fig:tree}
 \end{figure}
 
 \paragraph{Inclusion proofs.}
-A proof is the leaf count $N$ and the sibling digests on the path from the
-leaf, bottom-up, omitting a sibling when a node pairs with itself. A
-\emph{multi-proof} for a set of positions takes the positions in sorted order
-and carries the siblings their paths need, level by level from the bottom, in
-ascending position order within a level; a sibling that another path in the
-set already computes is omitted, and each sibling is consumed once. The decoder
-bounds the sibling count before reading any. The verifier folds the leaves to
-an inner root, wraps it with the type domain, and compares the result with the
-trusted id, never with a bare inner root. It rejects a position $\ge N$, a
-repeated position, and a chunk proof at the metadata position. \Cref{fig:tree}
-shows one proof.
+A chunk proof is the leaf count $N$ and the sibling digests on the path from
+the leaf, bottom-up, omitting a sibling when a node pairs with itself. A
+\emph{multi-proof} for a set of positions requires them strictly ascending in
+input order and carries the siblings their paths need, level by level from the
+bottom, in ascending position order within a level; a sibling that another
+path in the set already computes is omitted, and each sibling is consumed
+once. A \emph{tree proof} proves one entry: the leaf count and, for each level
+at which the entry's node has a real sibling, that sibling and the separator of
+the parent they share. The decoder bounds the sibling or step count before
+reading any. The verifier folds the leaf to an inner root, wraps it with the
+type domain, and compares the result with the trusted id, never with a bare
+inner root. It rejects a position $\ge N$ and a chunk proof at the metadata
+position. \Cref{fig:tree} shows one tree proof.
+
+\paragraph{One entry per name.}
+A tree verifier also checks the proven name against each separator: the name
+must be below the separator where the path goes left and at or above it where
+the path goes right. In a sorted tree every entry passes. Suppose two proofs
+of one name $n$ at positions $p \neq q$ verify against the same tree id. They
+fold through their lowest common ancestor, which commits to one separator $s$;
+one proof went left there and checked $n < s$, the other went right and checked
+$s \le n$. So a name has at most one verifiable entry in a tree, even in a tree
+whose author broke the sort order and repeated the name (\cref{lem:unique}).
+A proof of one entry of an unsorted tree cannot show this. Without
+separators, a hostile signer could place one name in a tree twice with
+different contents and give two parties two different files at the same path
+under one signed commit.
 
 \paragraph{Chunked files.}
-Files over 1~MiB are split by FastCDC~\cite{fastcdc} (average chunk 64~KiB;
-SPEC-FASTCDC). Each chunk is a blob whose id is a leaf of
-\cref{def:chunked}, so a chunk proof is an inclusion proof and a range inside a
-chunk is a Bao slice against the chunk id. Conformant chunkers agree on
-boundaries, but readers also accept other valid layouts of the same bytes, so
+The writer splits files over 1~MiB with FastCDC~\cite{fastcdc} (target average
+chunk 64~KiB; SPEC-FASTCDC, where the threshold is an implementer choice). Each
+chunk is a blob whose id is a leaf of \cref{def:chunked}, so a chunk proof is
+an inclusion proof and a range inside a chunk is a Bao slice against the chunk
+id. Two chunkers of the same FastCDC version agree on boundaries, but readers
+accept other valid layouts of the same bytes, including the other version's, so
 the same file can have more than one id (\cref{sec:limits}).
 
 \paragraph{Design space.}
@@ -471,9 +519,9 @@ For a path through directories of widths $M_1, \dots, M_d$, a git path proof
 carries $\sum_j M_j$ entries. A global sparse Merkle tree or Merkle Patricia
 trie over $n$ paths carries $O(\log n)$ digests and also supports absence
 proofs, and an IPFS HAMT carries a number that depends on the sharding. \kit{}
-keeps one object per directory and puts a binary Merkle tree inside it, so a
-proof carries $\sum_j \lceil\log_2 M_j\rceil$ siblings (\cref{sec:eval}
-measures both on real repositories).
+keeps one object per directory and puts a keyed binary Merkle tree inside it,
+so a proof carries at most $\sum_j \lceil\log_2 M_j\rceil$ siblings and as many
+separator names (\cref{sec:eval} measures both on real repositories).
 
 % ---------------------------------------------------------------------------
 \section{Verifiable disclosure}\label{sec:disclosure}
@@ -482,14 +530,12 @@ A disclosure bundle proves that one path, chunk or byte range belongs to a
 commit. The verifier takes a trusted commit id and the bundle and nothing
 else. It proves inclusion only: not that nothing else exists under a
 directory, and not who holds the signing key. This section and the next follow
-SPEC-DISCLOSURE, which is a draft specification of alpha software (\kit{}
-0.5.0).
+SPEC-DISCLOSURE, which is a draft specification of alpha software.
 
 \paragraph{Bundle.}
 A bundle holds the commit id, the commit bytes, one \emph{step} per path
 component (root first), and a payload. A step carries the
-entry's name, mode and child id, the parent tree's inner root, the entry's
-position, and a single-leaf proof. The payload is the leaf object's canonical
+entry's name, mode and child id, the entry's position, and a tree proof. The payload is the leaf object's canonical
 bytes (\emph{Object}), one chunk with a proof over the metadata leaf and the
 chunk's position (\emph{Chunk}), or a Bao slice against the blob or chunk id
 (\emph{Range}). A range inside a chunk may add \emph{length proofs} for the
@@ -529,13 +575,14 @@ is the authenticated path $[(\texttt{src}, \text{tree}), (\texttt{lib.rs},
 \paragraph{Verification algorithm.}
 \Cref{alg:disclosure} restates the verification requirements of the
 specification, and \cref{fig:chain} shows the chain it checks. Size is checked
-before decoding, and the hash that binds everything to the caller's input,
-$\Hb(\text{commit bytes}) = c^\star$, before any structure is interpreted. At
-each step the verifier recomputes the entry leaf, folds it with the proof,
-wraps the result in the tree domain, and compares it with the id the step above
-authenticated, never with an independently supplied root. The bundle carries
-the parent's inner root only as a hint, which the verifier checks against the
-same expected id.
+before decoding. The verifier decodes the whole bundle with every length
+bounded, then checks the hash that binds everything to the caller's input,
+$\Hb(\text{commit bytes}) = c^\star$, before it uses any decoded value. At
+each step it recomputes the entry leaf, checks the name against each separator,
+folds the leaf with the proof, wraps the result in the tree domain, and
+compares it with the id the step above authenticated, never with an
+independently supplied root. A chunk payload carries the chunked blob's inner
+root only as a hint, which the verifier checks against the leaf id.
 
 \begin{algorithm}[!htb]
 \caption{Disclosure verification. $B_{\max}$ and $d_{\max}$ are the bundle and
@@ -550,7 +597,8 @@ VerifyDisclosure(c*, B):
   for i, s in enumerate(B.steps):
     validate_name(s.name)
     leaf := D("kit-tree-entry-v1", le32(|s.name|) || s.name || s.mode || s.child_id)
-    if D("kit.tree\0", fold(leaf, s.position, s.proof)) != expected: reject
+    root := keyed_fold(leaf, s.name, s.position, s.proof)  # rejects a separator s.name violates
+    if D("kit.tree\0", root) != expected: reject
     if i is not last and s.mode != Tree: reject
     expected := s.child_id
   path := [(s.name, s.mode) for s in B.steps]; leaf_id := expected
@@ -585,14 +633,18 @@ the bundle, which leaves signer policy to the caller.
 \paragraph{Absolute offsets and their cost.}
 A Bao slice proves bytes at an offset inside one blob. To place a range inside
 the file, the bundle adds, for each preceding chunk, a Bao slice over that
-chunk's first 10 canonical bytes, against the chunk id. This proves the chunk's
-length without its content, and the verifier requires the proofs to cover
-exactly chunks $0..i-1$. The cost is linear in the chunk index: one length
-proof costs 1,523 bytes in \cref{tab:sizes}, so a chunk near the end of a
-1~GiB file ($K \approx 16{,}384$) needs about 25~MB of length proofs, still
-under the bundle cap. Binding running offsets into the chunk leaves, a
-prefix-sum Merkle tree, would make this logarithmic; we leave it as future
-work.
+chunk's first 10 canonical bytes, against the chunk id. This proves the
+chunk's length, and the verifier requires the proofs to cover exactly chunks
+$0..i-1$. It is not confidential: a Bao slice carries whole 1~KiB blocks, so a
+length proof also discloses up to 1,014 content bytes of each preceding chunk.
+The cost is linear in the chunk index. At $K \approx 16{,}384$ chunks a length
+proof carries about 15 siblings and a 1,480-byte slice, about 2,000 bytes, so a
+chunk near the end of a 1~GiB file needs about 33~MB of length proofs. The
+64~MiB bundle cap is reached at about 33,000 preceding chunks, so for a valid
+file with more chunks, which FastCDC allows for a 1~GiB file, an absolute
+offset near the end cannot be proved in one bundle. Binding running offsets
+into the chunk leaves, a prefix-sum Merkle tree, would make this logarithmic;
+we leave it as future work.
 
 \paragraph{Ranges across chunks.}
 A range across chunk boundaries is proved by a container that pairs one anchor
@@ -702,31 +754,33 @@ commit, not that the claim is true.
 
 The arguments below are informal and not machine-checked. They reduce a failure
 to a BLAKE3 collision or an Ed25519 forgery. The author may be adversarial, so
-the property is binding, not honesty. Under A1 and \cref{lem:inj}, $c^\star$
-determines a unique commit object $C$ with $\Hb(\beta(C)) = c^\star$, and
-through its tree id a unique state $S$. Soundness is the following experiment:
-the adversary outputs $c^\star$ and a bundle (or object set), and wins if the
-verifier accepts and its returned values differ from what $S$ determines. The
+the property is binding, not honesty: the adversary chooses $c^\star$ and may
+build trees that no honest writer produces, such as unsorted ones, or ids whose
+preimages it never reveals. We therefore state disclosure as a binding
+experiment. The adversary outputs $c^\star$ and two bundles, and wins if the
+verifier accepts both, both return the same path, and they return different
+leaf ids or, for the same selector, different bytes. Closure is stated against
+the objects that the ids name, and these are unique when they exist. The
 propositions bound the adversary's winning probability by the probability that
-it finds a BLAKE3 collision.
+it finds a BLAKE3 collision (A1, and A1$'$ for ranges).
 
 \begin{lemma}[Encoding injectivity]\label{lem:inj}
-Every hash input in \cref{eq:dd} and \cref{def:flat,def:bmt,def:tree,def:chunked}
-is a fixed layout of fixed-width and length-prefixed fields, so distinct field
-tuples give distinct inputs; and strict parsing gives each accepted object
-exactly one encoding.
+Every hash input in \cref{eq:dd} and
+\cref{def:flat,def:bmt,def:kbmt,def:tree,def:chunked} is a fixed layout of
+fixed-width and length-prefixed fields, so distinct field tuples give distinct
+inputs; and strict parsing gives each accepted object exactly one encoding.
 \end{lemma}
 \begin{proof}[Sketch]
 A length precedes each variable-length field and every other field has a fixed
 width, so the bytes determine the fields. In \cref{eq:dd},
-$\mathrm{le}_{16}(|d|) \cc d$ is self-delimiting. Rejecting trailing bytes,
-unsorted or repeated entries and non-minimal varints leaves one encoding per
-object.
+$\mathrm{le}_{16}(|d|) \cc d$ is self-delimiting, and a keyed parent ends with
+$\mathrm{u}_8(|s|) \cc s$. Rejecting trailing bytes and unsorted or repeated
+entries leaves one encoding per object.
 \end{proof}
 
 \begin{lemma}[BMT binding]\label{lem:bmt}
 Under A1, no efficient adversary finds distinct leaf sequences with equal
-$\BMT$ values. If a proof for position $p$ folds leaf $L$ to
+$\BMT$ values, or distinct entry sequences with equal $\KBMT$ values. If a proof for position $p$ folds leaf $L$ to
 $\BMT(L_0, \dots, L_{N-1})$, then $L = L_p$ unless a collision was found. If a
 multi-proof for a position set $P$ folds leaves $(L'_p)_{p \in P}$ to that
 value, then $L'_p = L_p$ for every $p \in P$ unless a collision was found.
@@ -741,43 +795,60 @@ from $(N, p)$, rejects $p \ge N$ and consumes each sibling once; the same
 descent along the path gives $L = L_p$ or a collision. For a multi-proof, the
 verifier derives every path from $(N, P)$ and each recomputed node lies on the
 path of some $p \in P$; the descent along each path gives $L'_p = L_p$ or a
-collision.
+collision. A keyed parent binds its separator as well as its children, so the
+same descent applies to $\KBMT$.
 \end{proof}
 
-\begin{proposition}[Disclosure binds bytes to the commit]\label{prop:disclosure}
-Assume A1 and A3. If \cref{alg:disclosure} accepts $B$ against $c^\star$ and
-returns path $\pi = [(n_1, m_1), \ldots, (n_k, m_k)]$, leaf id $\ell$ and bytes
-$x$, then, unless a BLAKE3 collision was found, $S$ has a path
-$n_1/\cdots/n_k$ with modes $m_1, \ldots, m_k$ ending at $\ell$, and $x$ is the
-canonical bytes of $\ell$ (\emph{Object}); chunk $i$ of $\ell$, with the
-returned total size and chunk-size field (\emph{Chunk}); or the content at the
-returned offset and length of the blob $\ell$ or of its chunk $i$
-(\emph{Range}). A returned absolute offset is the offset of $x$ in the file.
+\begin{lemma}[One entry per name]\label{lem:unique}
+Under A1, no efficient adversary outputs a tree id $t$ and two tree proofs that
+verify against $t$ for entries with the same name at different positions.
+\end{lemma}
+\begin{proof}[Sketch]
+Both proofs fold to the same inner root, so by the descent of \cref{lem:bmt}
+they agree, without a collision, on the leaf count and on every node, sibling
+and separator they share. Let $a$ be the lowest common ancestor of the two
+positions. Both proofs fold through $a$ with the same separator $s$, one from
+its left child and one from its right. The first checked $n < s$ and the second
+$s \le n$ for the same name $n$, a contradiction.
+\end{proof}
+
+\begin{proposition}[Disclosure binds one content to each path]\label{prop:disclosure}
+Assume A1, A1$'$ and A3. If \cref{alg:disclosure} accepts bundles $B$ and $B'$
+against the same $c^\star$ and both return the path
+$\pi = [(n_1, m_1), \ldots, (n_k, m_k)]$, then, unless a BLAKE3 collision was
+found, they return the same leaf id $\ell$; for \emph{Object}, the same bytes;
+for \emph{Chunk} with the same index, the same total size, chunk-size field
+and bytes; and for \emph{Range} with the same offset, length and chunk index,
+the same bytes. Each returned entry $(n_j, m_j, \mathit{child}_j)$ is an entry
+of the tree whose id the step above authenticated, and a returned absolute
+offset is the sum of the lengths of the preceding chunks of $\ell$.
 \end{proposition}
 \begin{proof}[Sketch]
-Line~4 gives $\Hb(\text{commit bytes}) = \Hb(\beta(C))$, so the commit bytes
-are $\beta(C)$, and the tree id, signer and signature are those of $C$. Induct
-over steps with the invariant ``\emph{expected} is the id of the tree at
-$n_1/\cdots/n_j$ in $S$''. The wrapped fold equals that id, so by
-\cref{lem:inj} the fold equals the inner root of that tree in $S$, and by
-\cref{lem:bmt} the recomputed leaf is the leaf of $S$ at $p_j$; \cref{lem:inj} on the leaf domain
-makes $(n_j, m_j, \mathit{child}_j)$ the entry of $S$; the mode check keeps
-every non-final child a tree. For \emph{Object}, $\mathrm{id}(x) = \ell$ pins
+Line~4 gives $\Hb(\text{commit bytes}) = c^\star$ for both bundles, so
+without a collision they carry the same commit and the same tree id. Induct
+over steps with the invariant that both bundles hold the same expected id
+before step $j$. Both steps prove an entry named $n_j$ against that id, so by
+\cref{lem:unique} they prove the same position and, by \cref{lem:bmt} and
+\cref{lem:inj} on the leaf domain, the same entry and child id. The wrap is a
+domain digest, so a fold that wraps to the expected id equals its inner root
+unless a collision was found. For \emph{Object}, $\mathrm{id}(x) = \ell$ pins
 the flat bytes, or the Merkle leaves and so, by canonical encoding, the bytes.
-For \emph{Chunk}, the wrapped multi-proof, whose metadata leaf the
-verifier computes itself, makes, by \cref{lem:bmt}, the total size, the
-chunk-size field and $\Hb(x)$, the chunk id, those of $S$. For \emph{Range},
-the Bao root is $\Hb$ of the canonical bytes, and a slice that decodes to other
-bytes gives a collision of BLAKE3 or its chaining values (A1). Each length
-proof pins the \texttt{le32} length of a chunk whose id is bound to its
-position, and the set must cover exactly $0..i-1$, so the absolute offset is
-the sum in $S$.
+For \emph{Chunk}, the wrapped multi-proof, whose metadata leaf the verifier
+computes itself, pins the total size, the chunk-size field and the chunk id
+$\Hb(x)$ (\cref{lem:bmt}). For \emph{Range}, the Bao root is $\Hb$ of the
+canonical bytes, and two slices that decode to different bytes give a
+collision of BLAKE3 or of its chaining values (A1, A1$'$). Each length proof
+pins the \texttt{le32} length of a chunk whose id is bound to its position, and
+the set must cover exactly $0..i-1$, so the absolute offset is their sum.
 \end{proof}
 
 \begin{remark}
 \Cref{prop:disclosure} concerns the authenticated path, not the requested one.
 It says nothing about absence, and its signature output states only validity
-under the key in $C$. This is the formal form of ``return what was proved''.
+under the embedded key. This is the formal form of ``return what was proved''.
+Without \cref{lem:unique} the proposition fails: a single-entry proof of an
+unsorted tree that holds one name twice verifies at either position, and two
+bundles for one path return different bytes.
 \end{remark}
 
 \begin{proposition}[A complete closure contains every reachable object]\label{prop:closure}
@@ -801,9 +872,12 @@ means every $x \in R_m(r^\star)$ was found.
 
 The proposition covers what $\mathrm{children}$ follows: parents only in
 history mode, never remix sources. It says nothing about the
-signer or about whether the history is the latest.
+signer or about whether the history is the latest. The walk also does not
+check that an entry's mode matches its child's type, that chunk ids name blobs,
+or that chunk lengths sum to the total size, so a complete set need not check
+out; adding these checks is future work (\cref{sec:limits}).
 
-\begin{proposition}[Signature non-replay across domains]\label{prop:replay}
+\begin{proposition}[Signature non-replay across object and attestation domains]\label{prop:replay}
 Assume A1 and A2. An adversary that obtains signatures under an honest key
 $\mathit{pk}$ on commits, remixes, tags and DSSE envelopes of its choice cannot
 output an object or envelope that verifies under $\mathit{pk}$ in its own
@@ -821,22 +895,28 @@ a BLAKE3 collision. A DSSE message is a PAE string; the verifier requires the
 has at least $7 + 2 + 1 + 28 + 1 + 1 + 1 = 41$ bytes, while every object-domain
 message has 32. These message sets are disjoint with no hash assumption. A
 signature on a message $\mathit{pk}$ never signed is an Ed25519 forgery (A2).
-The predicate rejects second encodings of $A$, $R$ and $S$, so a third party
-cannot change the signature bytes of a signed commit and keep it
-valid~\cite{taming}. It can change the annotation slots (\cref{sec:signing}),
-which changes the id but not the signed message.
+A third party also cannot produce a second valid signature on a message
+$\mathit{pk}$ did sign: that is a strong forgery, which A2 excludes, and the
+predicate rejects second encodings of $A$, $R$ and $S$~\cite{taming,brendel}.
+It can change the annotation slots (\cref{sec:signing}), which changes the id
+but not the signed message.
 \end{proof}
 
-The proposition does not cover a key also used for SSH or for other protocols,
-whose messages \kit{} does not control.
+The proposition covers object signatures and attestations only. The same key
+also signs write grants, URL tokens and authenticated write requests; a write
+request signs a 32-byte BLAKE3 digest of a message with its own prefix, the
+same length as an object digest, so its separation from object signatures rests
+on the distinct prefixes and A1 rather than on message length. SPEC-SIGNING
+does not yet analyze these roles together, and the proposition does not cover
+a key also used for SSH, whose messages \kit{} does not control.
 
 % ---------------------------------------------------------------------------
 \section{Evaluation}\label{sec:eval}
 
 \paragraph{Proof size.}
-A tree step costs the entry plus at most $32\lceil \log_2 M \rceil$ sibling
-bytes for $M$ entries, a chunk step at most $32 \cdot 2\lceil \log_2 (K+1)
-\rceil$ for $K$ chunks, and a Bao slice of $\ell$ content bytes about one
+A tree step costs the entry plus at most $\lceil \log_2 M \rceil$ proof steps
+for $M$ entries, each a 32-byte sibling and a separator name, a chunk step at most $32 \cdot 2\lceil \log_2 (K+1)
+\rceil$ for $K$ chunks, and a Bao slice of $\lambda$ content bytes about one
 1~KiB block per KiB plus $64 \log_2(\text{blocks})$ bytes. For a 1~GiB file at
 the 64~KiB average, $K \approx 16{,}384$, and the formula bounds a chunk step
 at 30 siblings. Applying the sibling-selection rule of multi-proofs to
@@ -855,7 +935,8 @@ tree and a 1,048,577-byte file that FastCDC splits into 15 chunks.
 \begin{table}[!htb]
 \centering\footnotesize\setlength{\tabcolsep}{3pt}
 \caption{Selected accepting disclosure vectors, in bytes (all ten are in
-\cref{tab:sizes-all}). ``Sibl.'' lists sibling digests per step. ``Payload''
+\cref{tab:sizes-all}). ``Sibl.'' lists sibling digests per step; each tree
+proof step also carries a separator name. ``Payload''
 is canonical object or chunk bytes, or a Bao slice; for the absolute-offset
 row the second figure is its one length proof. Every bundle also holds a
 5-byte header, the 32-byte commit id and the 279-byte commit with a 2-byte
@@ -865,21 +946,21 @@ length.}
 \toprule
 Disclosure & Total & Steps & Sibl. & Payload & Kind (chunk proof) \\
 \midrule
-file at root                &    533 & 182 & 3       &     30 & object \\
-file at depth 3 (two dirs)  &    635 & 272 & 1, 0, 0 &     42 & object \\
-whole small blob as range   &  2,138 & 180 & 3       &  1,618 & range, 1,536 B \\
-64 B in chunk 1             &  2,087 & 182 & 3       &  1,352 & range, 64 B (4 sibl.) \\
-same, absolute offset       &  3,610 & 182 & 3       & 1,352 + 1,523 & range, 64 B (4 sibl.) \\
-whole chunk 1               & 19,258 & 182 & 3       & 18,572 & chunk (4 sibl.) \\
+file at root                &    527 & 176 & 3       &     30 & object \\
+file at depth 3 (two dirs)  &    543 & 180 & 1, 0, 0 &     42 & object \\
+whole small blob as range   &  2,132 & 174 & 3       &  1,618 & range, 1,536 B \\
+64 B in chunk 1             &  2,077 & 172 & 3       &  1,352 & range, 64 B (4 sibl.) \\
+same, absolute offset       &  3,600 & 172 & 3       & 1,352 + 1,523 & range, 64 B (4 sibl.) \\
+whole chunk 1               & 19,248 & 172 & 3       & 18,572 & chunk (4 sibl.) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \paragraph{Results.}
-\Cref{tab:sizes} shows that a whole small file costs 533 to 635 bytes (527 for
+\Cref{tab:sizes} shows that a whole small file costs 527 to 543 bytes (517 for
 the smallest vector, \cref{tab:sizes-all}), of which 318 are the header,
-commit id and commit. A step costs $75 + |\mathit{name}| + 32n$ bytes for $n$
-siblings and short names. The proof for \texttt{sub}, the last entry of the
+commit id and commit. A step costs $43 + |\mathit{name}| + \sum_k (33 +
+|s_k|)$ bytes for proof steps with separators $s_k$ and short names. The proof for \texttt{sub}, the last entry of the
 5-entry root, needs one sibling instead of three because the odd trailing node
 pairs with itself, and the two one-entry subdirectories need none. A range is
 dominated by its Bao slice, which carries each 1~KiB block it touches plus
@@ -891,16 +972,20 @@ chunk's size.
 \paragraph{Real repositories.}
 To test the claim on real directory widths, we computed, for every file at the
 head of two large public repositories, the disclosure steps that \kit{} would
-need (the measured step cost $75 + |\mathit{name}| + 32n$, with the exact
-sibling count $n$ for the entry's position among the directory's entries
-sorted by name) and the git tree objects that a git path proof carries. Only
-the width and names of each directory on the path enter either figure.
-\Cref{tab:real} gives the result. Neither column includes the commit or the
-payload, which add 318 bytes and the content to a \kit{} bundle. The git
-figures use 20-byte SHA-1 ids; SHA-256 trees would be larger. The \kit{} cost
-is at most 2.6~KB on every path in both repositories, while the git cost
-is 9 to 19 times larger at the median and up to 69 times larger at the
-maximum, because a path through one wide directory carries its whole listing.
+need (the step cost above, with the exact proof steps and separators for the
+entry's position among the directory's entries sorted by name) and the git
+tree objects that a git path proof carries. Only the names of each directory on
+the path enter either figure. \Cref{tab:real} gives the result. Neither column
+includes the commit or the payload, which add 318 bytes and the content to a
+\kit{} bundle. The \kit{} cost is at most 3.1~KB on every path in both
+repositories. The git cost is 9 and 15 times larger at the median and its
+maximum is 25 and 51 times the \kit{} maximum, because a path through one wide
+directory carries its whole listing. Three caveats apply. The figures are
+computed from directory listings, not from built bundles. The git figures
+count raw, uncompressed tree objects with 20-byte SHA-1 ids; compression would
+shrink them, and SHA-256 trees would grow them. And git is the weakest
+baseline: we did not measure a global sparse Merkle tree or a HAMT over the
+same paths.
 
 \begin{table}[!htb]
 \centering\footnotesize\setlength{\tabcolsep}{4pt}
@@ -915,8 +1000,8 @@ objects on the path. Commit and payload excluded.}
 \cmidrule(lr){5-6}\cmidrule(l){7-8}
 Repository & Files & Widest dir & Depth (med./max) & median & max & median & max \\
 \midrule
-Linux        & 97,313 & 1,614 & 5 / 11 & 1,207 & 2,640 & 11,195 & 72,154 \\
-rust-lang/rust & 64,065 & 2,601 & 4 / 14 & 1,251 & 2,235 & 23,754 & 153,785 \\
+Linux        & 97,313 & 1,614 & 5 / 11 & 1,291 & 2,890 & 11,195 & 72,154 \\
+rust-lang/rust & 64,065 & 2,601 & 4 / 14 & 1,593 & 3,039 & 23,754 & 153,785 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -956,17 +1041,28 @@ provides roles, thresholds, key rotation and freshness for update metadata;
 intrinsic identifiers compatible with git. \kit{} ids are also intrinsic and
 add a mandatory signature and per-entry and per-chunk proofs.
 
-\paragraph{Untrusted storage.} SUNDR~\cite{sundr} gives fork consistency for a
-file system on an untrusted server; \kit{} gives no consistency or freshness
-guarantee across clients and relies on a trusted $c^\star$ instead.
+\paragraph{Untrusted storage.} SFSRO~\cite{sfsro} serves a read-only file
+system from untrusted mirrors under a signed root and a hash tree of
+directories, the closest ancestor of \kit{}'s disclosure path. SUNDR~\cite{sundr}
+gives fork consistency for a file system on an untrusted server; \kit{} gives
+no consistency or freshness guarantee across clients and relies on a trusted
+$c^\star$ instead. Torres-Arias et al.~\cite{torresarias} show how a git server
+can omit or roll back commits and refs, which is why \kit{} leaves freshness to
+the channel that delivers $c^\star$.
 
 \paragraph{Merkle-DAG stores and authenticated dictionaries.}
 Venti~\cite{venti} and IPFS~\cite{unixfs} name blocks by hash, and IPFS shards
 large directories with a HAMT. Sparse Merkle trees and Merkle Patricia
 tries~\cite{smt,ethereum} give inclusion and absence proofs over a key space.
-fs-verity~\cite{fsverity} authenticates file contents with a Merkle tree.
-\kit{} combines per-directory and per-chunk Merkle ids with Bao ranges under
-one signed commit id (\cref{sec:objects}).
+Authenticated data structures in general are surveyed by
+Tamassia~\cite{tamassia}, and Miller et al.~\cite{miller} derive them from
+ordinary data structures. Merkle B-trees~\cite{mbtree} and Merkle search
+trees~\cite{mst} commit to key order inside the tree, as \kit{}'s separators do;
+\kit{} keeps a positional, fixed-shape binary tree per directory and adds one
+separator per parent, which is enough for one-entry-per-name and adjacent
+absence proofs. fs-verity~\cite{fsverity} authenticates file contents with a
+Merkle tree. \kit{} combines per-directory and per-chunk Merkle ids with Bao
+ranges under one signed commit id (\cref{sec:objects}).
 
 \paragraph{Certificate Transparency and Merkle structures.} CT~\cite{rfc6962}
 made Merkle inclusion and consistency proofs over public logs practical, on a
@@ -994,10 +1090,16 @@ root is the id, and a range needs no extra commitment (\cref{sec:objects}).
         Transport key exchange is also elliptic-curve based, so recorded
         traffic to private repositories could later be decrypted; hybrid
         ML-KEM key exchange is not offered today.
-  \item \textbf{Absence.} Disclosure proves inclusion only. Sorted entries and
-        position-bound leaves make an adjacent-leaf non-membership proof
-        possible in principle; the format reserves a payload kind for it but
-        does not specify it.
+  \item \textbf{Absence and hidden entries.} Disclosure proves inclusion only.
+        The separators make a proof of the two entries adjacent to a missing
+        name a sound absence proof; the format reserves a payload kind for it
+        but does not specify it. A hostile signer can still build an unsorted
+        tree whose out-of-order entries fail their separator checks: those
+        entries cannot be disclosed, but no path gets two contents.
+  \item \textbf{Checkout validity.} Neither verifier checks that an entry's
+        mode matches its child's type, and closure does not check that chunk
+        lengths sum to the total size, so a complete closure need not check
+        out.
   \item \textbf{Non-unique layouts and annotations.} The same file can have
         more than one id, because readers accept other valid chunk layouts, so
         ``file $F$ is in the commit'' cannot be checked from $F$'s bytes alone
@@ -1013,8 +1115,9 @@ root is the id, and a range needs no extra commitment (\cref{sec:objects}).
         covers the verifiers. Measured bundle sizes come from a small fixture;
         the real-repository figures are computed from directory widths, not
         from built bundles. We have not measured disclosure verification time
-        against depth and range length, closure throughput, or closure against
-        a git fetch with a connectivity check.
+        against depth and range length, prover cost, storage cost against git,
+        closure throughput, or closure against a git fetch with a connectivity
+        check.
 \end{itemize}
 
 % ---------------------------------------------------------------------------
@@ -1024,9 +1127,10 @@ root is the id, and a range needs no extra commitment (\cref{sec:objects}).
 Typed Merkle ids for trees and chunk lists, blob ids that are Bao roots, and a
 signature inside the commit id let one trusted id authenticate a path, a chunk
 or a byte range in hundreds of bytes to a few KiB plus the content, and let a
-verifier decide offline whether a served set is complete. Both verifiers check
-the binding hash first, bound sizes before allocation and return what they
-proved. \kit{} is alpha software and its disclosure format is a draft
+verifier decide offline whether a served set is complete. Tree ids commit to
+the order of names, so a path has one content under a commit even when its
+signer is hostile. Both verifiers bind every decoded value to the trusted id
+before using it, bound sizes before allocation and return what they proved. \kit{} is alpha software and its disclosure format is a draft
 specification. Absence proofs, logarithmic absolute offsets, signer identity
 and freshness remain open.
 
@@ -1044,7 +1148,11 @@ derived from the batch contents, so a key holder could craft a signature whose
 8-torsion component single checks rejected and the batch accepted, and make
 two verifiers disagree; it did not allow forgery. The fix uses the cofactored
 equation of A2 in both checks with fresh random weights~\cite{taming}, and was
-made in the open; releases after 0.5.0 carry it.
+made in the open; releases after 0.5.0 carry it. A review of an earlier draft of
+this paper found that tree ids did not commit to the order of names, so a
+hostile signer could give two parties different contents at one path under one
+signed commit. The keyed tree of \cref{def:kbmt} fixes this; releases after
+0.8.0 carry it, and the fix was also made in the open.
 
 \section*{Acknowledgments}
 
@@ -1066,8 +1174,11 @@ Paths are relative to the repository root at the commit that
 
 \subsection{Specifications}\label{app:specs}
 
-\kit{} is alpha software (version 0.5.0); its object formats may change before
-1.0. \Cref{tab:specs} lists the specifications this paper cites.
+\kit{} is alpha software; its object formats may change before 1.0. The paper
+describes the code at the commit pinned in \cref{app:open}, which follows
+release 0.8.0 and carries the keyed tree format (repository marker
+\texttt{bmt-v2}, bundle version~3). \Cref{tab:specs} lists the specifications
+this paper cites.
 
 \begin{table}[!htb]
 \centering\footnotesize
@@ -1082,6 +1193,7 @@ SPEC-MERKLE-OBJECTS & stable & \repo{docs/specs/SPEC-MERKLE-OBJECTS.md} \\
 SPEC-SIGNING & stable & \repo{docs/specs/SPEC-SIGNING.md} \\
 SPEC-CONVENTIONS & stable & \repo{docs/specs/SPEC-CONVENTIONS.md} \\
 SPEC-DISCLOSURE & draft & \repo{docs/specs/SPEC-DISCLOSURE.md} \\
+SPEC-ATTESTATIONS & draft & \repo{docs/specs/SPEC-ATTESTATIONS.md} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1127,13 +1239,14 @@ bundle $B_{\max}$ (checked first) & 64~MiB & entries or chunks per object & $10^
 commit bytes in a bundle & 4~MiB & object or chunk payload & 1~GiB \\
 steps $d_{\max}$ & 128 & length proofs & $10^6$ \\
 entry name & 1--255 bytes & length-proof slice & 8~KiB \\
-proof siblings & $\mathit{max\_items} \times 32$ & objects per closure $n_{\max}$ & $10^7$ \\
+chunk proof siblings & $32\,\mathit{max\_items}$ & objects per closure $n_{\max}$ & $10^7$ \\
+tree proof steps & 32 & & \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The sibling cap is checked before any sibling is read, where
-$\mathit{max\_items}$ is the number of positions to verify.
+The sibling and step caps are counts, checked before any sibling or step is
+read; $\mathit{max\_items}$ is the number of positions to verify.
 
 \subsection{Assurance evidence}\label{app:assurance}
 
@@ -1145,14 +1258,16 @@ each vector's BLAKE3. Each set passes a Rust test and a Python check in
 the specification; the Python checks use a pure-Python BLAKE3 and implement
 Ed25519 from RFC~8032, and \texttt{scripts/check-golden.sh} runs them all.
 
-For the verifiers of this paper the corpus holds 10 accepting and 18 rejecting
-disclosure vectors, 12 accepting and 7 rejecting proof vectors, and 13 closure
+For the verifiers of this paper the corpus holds 10 accepting and 21 rejecting
+disclosure vectors, 12 accepting and 10 rejecting proof vectors, and 13 closure
 vectors: 4 complete (one with an unreferenced extra), 3 incomplete (missing
 chunk, corrupt blob, wrong root) and 6 rejected (delta entry, compressed entry,
 pack-hash mismatch, manifest root mismatch, manifest version~2, manifest
-trailing byte). Disclosure rejections include a forged inner root, swapped
-steps, a forged total size, a Bao slice at the wrong offset, 129 steps and
-commit bytes that decode to a tag.
+trailing byte). Disclosure rejections include a forged chunk inner root,
+swapped steps, a violated separator, a signed commit whose tree repeats a name,
+a forged total size, a Bao slice at the wrong offset, 129 steps and commit
+bytes that decode to a tag. A property test checks that no name has two
+verifiable entries in trees with repeated names and broken order.
 
 The Ed25519 vector set pins the verdict on torsion, small-order and
 non-canonical inputs and passes an independent Python check, and the
@@ -1173,23 +1288,24 @@ decoding it with \texttt{decode\_bundle} from
 \caption{Accepting disclosure vectors, in bytes. ``Sibl.'' lists sibling
 digests per step. ``Payload'' is canonical object or chunk bytes, or a Bao
 slice; for \texttt{with\_offsets} the second figure is its one length proof.
-Every bundle also holds a 5-byte header, the 32-byte commit id and the 279-byte
-commit with a 2-byte length.}
+Every bundle also holds a 5-byte header, the 32-byte commit id, the 279-byte
+commit with a 2-byte length, and one or two bytes of kind and length framing
+per field, so the columns do not sum to the total.}
 \label{tab:sizes-all}
 \begin{tabular}{@{}lrrlrl@{}}
 \toprule
 Vector & Total & Steps & Sibl. & Payload & Kind (chunk proof) \\
 \midrule
 \texttt{root\_tree}                 &    558 &   0 & --      &    236 & object \\
-\texttt{executable\_file}           &    527 & 178 & 3       &     28 & object \\
-\texttt{shallow\_file}              &    533 & 182 & 3       &     30 & object \\
-\texttt{nested\_file\_3levels}      &    635 & 272 & 1, 0, 0 &     42 & object \\
-\texttt{small\_blob\_range\_last\_partial\_block} & 1,114 & 180 & 3 & 594 & range, 512 B \\
-\texttt{small\_blob\_range\_first\_block}  & 2,138 & 180 & 3 & 1,618 & range, 1,024 B \\
-\texttt{small\_blob\_range\_whole}  &  2,138 & 180 & 3       &  1,618 & range, 1,536 B \\
-\texttt{chunked\_range\_no\_offsets}   & 2,087 & 182 & 3   &  1,352 & range, 64 B (4 sibl.) \\
-\texttt{chunked\_range\_with\_offsets} & 3,610 & 182 & 3   & 1,352 + 1,523 & range, 64 B (4 sibl.) \\
-\texttt{chunked\_file\_chunk1}      & 19,258 & 182 & 3       & 18,572 & chunk (4 sibl.) \\
+\texttt{executable\_file}           &    517 & 168 & 3       &     28 & object \\
+\texttt{shallow\_file}              &    527 & 176 & 3       &     30 & object \\
+\texttt{nested\_file\_3levels}      &    543 & 180 & 1, 0, 0 &     42 & object \\
+\texttt{small\_blob\_range\_last\_partial\_block} & 1,108 & 174 & 3 & 594 & range, 512 B \\
+\texttt{small\_blob\_range\_first\_block}  & 2,132 & 174 & 3 & 1,618 & range, 1,024 B \\
+\texttt{small\_blob\_range\_whole}  &  2,132 & 174 & 3       &  1,618 & range, 1,536 B \\
+\texttt{chunked\_range\_no\_offsets}   & 2,077 & 172 & 3   &  1,352 & range, 64 B (4 sibl.) \\
+\texttt{chunked\_range\_with\_offsets} & 3,600 & 172 & 3   & 1,352 + 1,523 & range, 64 B (4 sibl.) \\
+\texttt{chunked\_file\_chunk1}      & 19,248 & 172 & 3       & 18,572 & chunk (4 sibl.) \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1231,12 +1347,14 @@ $n$ & \texttt{verify\_strict} & single & batch & single, parallel & batch, paral
 \end{tabular}
 \end{table}
 
-The single check runs 1--15\% faster than \texttt{ed25519-dalek}'s
-\texttt{verify\_strict}, because it checks canonical encodings on the bytes.
-From $n = 256$ up, the batch check verifies 2.1--2.4 times as many signatures
-per second as the single check on one thread. With four signers at
-$n = 1024$, it verifies about 102{,}000 signatures per second on one thread and
-255{,}000 on four. For $n \le 8$ the batch does not pay.
+The single check runs about 10\% faster than \texttt{ed25519-dalek}'s
+\texttt{verify\_strict} (1--15\% across the rows), because it checks
+canonical encodings on the bytes. From $n = 256$ up, the batch check verifies
+2.1--2.4 times as many signatures per second as the single check on one thread
+with distinct signers, and 4.1--4.6 times with four signers. With four signers
+at $n = 1024$, it verifies about 102{,}000 signatures per second on one thread
+and 255{,}000 on four. At $n = 1$ a batch is slower than a single check, and at
+$n = 8$ the parallel batch trails parallel single checks.
 
 \subsection{Commands}\label{app:commands}
 
