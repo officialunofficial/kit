@@ -1211,4 +1211,245 @@ mod tests {
         );
         assert!(read_list(&layout).unwrap().entries.is_empty());
     }
+
+    /// Write `files` as a tree, commit it and point HEAD at the commit.
+    fn commit_head(store: &ObjectStore, layout: &RepoLayout, files: &[(&str, &[u8])]) {
+        fn tree_of(store: &ObjectStore, files: &[(&str, &[u8])]) -> Hash {
+            let mut names: Vec<&str> = Vec::new();
+            for (path, _) in files {
+                let top = path.split('/').next().unwrap();
+                if !names.contains(&top) {
+                    names.push(top);
+                }
+            }
+            names.sort_unstable();
+            let entries = names
+                .into_iter()
+                .map(|top| {
+                    let prefix = format!("{top}/");
+                    let sub: Vec<(&str, &[u8])> = files
+                        .iter()
+                        .filter_map(|(p, d)| p.strip_prefix(&prefix).map(|r| (r, *d)))
+                        .collect();
+                    if sub.is_empty() {
+                        let data = files.iter().find(|(p, _)| *p == top).unwrap().1;
+                        TreeEntry {
+                            name: top.as_bytes().to_vec(),
+                            mode: EntryMode::Blob,
+                            object_hash: put_blob_data(store, data),
+                        }
+                    } else {
+                        TreeEntry {
+                            name: top.as_bytes().to_vec(),
+                            mode: EntryMode::Tree,
+                            object_hash: tree_of(store, &sub),
+                        }
+                    }
+                })
+                .collect();
+            put_tree_entries(store, entries)
+        }
+        let commit = put_commit_obj(store, tree_of(store, files), vec![], 1_000_000);
+        refs::init(layout).unwrap();
+        refs::update_head(layout, &commit).unwrap();
+    }
+
+    fn put(root: &std::path::Path, rel: &str, data: &[u8]) {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, data).unwrap();
+    }
+
+    fn repo_with_head(files: &[(&str, &[u8])]) -> (TempDir, RepoLayout, ObjectStore) {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        commit_head(&store, &layout, files);
+        for (p, d) in files {
+            put(dir.path(), p, d);
+        }
+        (dir, layout, store)
+    }
+
+    #[test]
+    fn save_removes_snapshot_only_files_and_restores_tracked_ones() {
+        let (dir, layout, store) = repo_with_head(&[("a.txt", b"one"), ("d/b.txt", b"b")]);
+        let r = dir.path();
+        put(r, "a.txt", b"two");
+        put(r, "new.txt", b"untracked");
+        put(r, "d/extra.txt", b"extra");
+        put(r, "deep/er/f.txt", b"deep");
+        save(&store, &layout, "wip").unwrap();
+        assert_eq!(fs::read(r.join("a.txt")).unwrap(), b"one");
+        assert_eq!(fs::read(r.join("d/b.txt")).unwrap(), b"b");
+        assert!(!r.join("new.txt").exists());
+        assert!(!r.join("d/extra.txt").exists());
+        assert!(!r.join("deep").exists(), "empty parents are removed");
+        assert!(r.join("d").is_dir(), "a parent HEAD tracks stays");
+        pop(&store, &layout, 0).unwrap();
+        assert_eq!(fs::read(r.join("a.txt")).unwrap(), b"two");
+        assert_eq!(fs::read(r.join("new.txt")).unwrap(), b"untracked");
+        assert_eq!(fs::read(r.join("deep/er/f.txt")).unwrap(), b"deep");
+    }
+
+    #[test]
+    fn save_keeps_ignored_files_at_top_level_and_in_snapshot_only_directories() {
+        let (dir, layout, store) = repo_with_head(&[("a.txt", b"one"), (".kitignore", b"*.log\n")]);
+        let r = dir.path();
+        put(r, "top.log", b"ignored");
+        put(r, "new/u.txt", b"untracked");
+        put(r, "new/i.log", b"ignored deep");
+        save(&store, &layout, "wip").unwrap();
+        assert_eq!(fs::read(r.join("top.log")).unwrap(), b"ignored");
+        assert_eq!(fs::read(r.join("new/i.log")).unwrap(), b"ignored deep");
+        assert!(!r.join("new/u.txt").exists());
+        pop(&store, &layout, 0).unwrap();
+        assert_eq!(fs::read(r.join("new/u.txt")).unwrap(), b"untracked");
+        assert_eq!(fs::read(r.join("top.log")).unwrap(), b"ignored");
+    }
+
+    #[test]
+    fn save_refuses_an_ignored_file_at_a_head_path() {
+        let (dir, layout, store) =
+            repo_with_head(&[(".kitignore", b"*.log\n"), ("t.log", b"head")]);
+        let r = dir.path();
+        put(r, "t.log", b"local");
+        let err = save(&store, &layout, "wip").unwrap_err();
+        assert!(matches!(&err, StashError::IgnoredPathInTheWay(p) if p == "t.log"));
+        assert_eq!(fs::read(r.join("t.log")).unwrap(), b"local");
+        assert!(read_list(&layout).unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn save_refuses_when_an_ignored_file_is_a_parent_of_a_head_path() {
+        let (dir, layout, store) = repo_with_head(&[(".kitignore", b"d\n"), ("d/x.txt", b"head")]);
+        let r = dir.path();
+        fs::remove_dir_all(r.join("d")).unwrap();
+        put(r, "d", b"a file where HEAD has a directory");
+        let err = save(&store, &layout, "wip").unwrap_err();
+        assert!(matches!(&err, StashError::IgnoredPathInTheWay(p) if p == "d/x.txt"));
+        assert!(r.join("d").is_file());
+        assert!(read_list(&layout).unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn save_refuses_when_an_ignored_directory_is_at_a_head_file_path() {
+        let (dir, layout, store) = repo_with_head(&[(".kitignore", b"d\n"), ("d", b"head")]);
+        let r = dir.path();
+        fs::remove_file(r.join("d")).unwrap();
+        put(r, "d/inner.txt", b"ignored");
+        let err = save(&store, &layout, "wip").unwrap_err();
+        assert!(matches!(&err, StashError::IgnoredPathInTheWay(p) if p == "d"));
+        assert!(r.join("d/inner.txt").is_file());
+    }
+
+    #[test]
+    fn save_restores_head_paths_that_are_missing_or_have_a_directory_parent() {
+        let (dir, layout, store) = repo_with_head(&[("gone.txt", b"g"), ("d/x.txt", b"x")]);
+        let r = dir.path();
+        fs::remove_file(r.join("gone.txt")).unwrap();
+        fs::remove_file(r.join("d/x.txt")).unwrap();
+        put(r, "d/other.txt", b"o");
+        save(&store, &layout, "wip").unwrap();
+        assert_eq!(fs::read(r.join("gone.txt")).unwrap(), b"g");
+        assert_eq!(fs::read(r.join("d/x.txt")).unwrap(), b"x");
+        assert!(!r.join("d/other.txt").exists());
+    }
+
+    #[test]
+    fn remove_snapshot_path_removes_the_file_and_empty_parents_up_to_the_root() {
+        let dir = TempDir::new().unwrap();
+        let r = dir.path();
+        put(r, "a/b/c.txt", b"c");
+        put(r, "a/keep.txt", b"k");
+        remove_snapshot_path(r, "a/b/c.txt").unwrap();
+        assert!(!r.join("a/b").exists());
+        assert!(r.join("a/keep.txt").is_file());
+        remove_snapshot_path(r, "a/keep.txt").unwrap();
+        assert!(!r.join("a").exists());
+        assert!(r.is_dir(), "the root is never removed");
+        put(r, "top.txt", b"t");
+        remove_snapshot_path(r, "top.txt").unwrap();
+        assert!(r.is_dir());
+        assert!(!r.join("top.txt").exists());
+    }
+
+    #[test]
+    fn remove_snapshot_path_leaves_a_non_empty_parent() {
+        let dir = TempDir::new().unwrap();
+        let r = dir.path();
+        put(r, "a/b/c.txt", b"c");
+        put(r, "a/b/other.txt", b"o");
+        remove_snapshot_path(r, "a/b/c.txt").unwrap();
+        assert!(!r.join("a/b/c.txt").exists());
+        assert!(r.join("a/b/other.txt").is_file());
+    }
+
+    #[test]
+    fn remove_snapshot_path_leaves_a_directory_alone() {
+        let dir = TempDir::new().unwrap();
+        let r = dir.path();
+        put(r, "d/inner.txt", b"i");
+        remove_snapshot_path(r, "d").unwrap();
+        assert!(r.join("d/inner.txt").is_file());
+    }
+
+    #[test]
+    fn remove_snapshot_path_ignores_a_missing_path() {
+        let dir = TempDir::new().unwrap();
+        let r = dir.path();
+        put(r, "d/other.txt", b"o");
+        remove_snapshot_path(r, "d/missing.txt").unwrap();
+        remove_snapshot_path(r, "nodir/missing.txt").unwrap();
+        remove_snapshot_path(r, "missing.txt").unwrap();
+        assert!(r.join("d/other.txt").is_file());
+    }
+
+    #[test]
+    fn remove_snapshot_path_leaves_a_path_under_a_file_parent() {
+        let dir = TempDir::new().unwrap();
+        let r = dir.path();
+        put(r, "f", b"file");
+        remove_snapshot_path(r, "f/x.txt").unwrap();
+        assert_eq!(fs::read(r.join("f")).unwrap(), b"file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_snapshot_path_never_follows_a_symlink() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let r = dir.path();
+        put(outside.path(), "x.txt", b"outside");
+        std::os::unix::fs::symlink(outside.path(), r.join("link")).unwrap();
+        remove_snapshot_path(r, "link/x.txt").unwrap();
+        assert_eq!(fs::read(outside.path().join("x.txt")).unwrap(), b"outside");
+        remove_snapshot_path(r, "link").unwrap();
+        assert!(fs::symlink_metadata(r.join("link")).is_err());
+        assert!(outside.path().join("x.txt").is_file());
+    }
+
+    #[test]
+    fn remove_snapshot_path_propagates_other_io_errors() {
+        let dir = TempDir::new().unwrap();
+        let long = "x".repeat(300);
+        let err = remove_snapshot_path(dir.path(), &long).unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn path_blocked_reports_existing_paths_and_non_directory_ancestors() {
+        let dir = TempDir::new().unwrap();
+        let r = dir.path();
+        put(r, "f", b"file");
+        put(r, "d/g", b"g");
+        assert!(path_blocked(r, "f"));
+        assert!(path_blocked(r, "f/x"));
+        assert!(path_blocked(r, "d"));
+        assert!(path_blocked(r, "d/g"));
+        assert!(path_blocked(r, "d/g/h"));
+        assert!(!path_blocked(r, "d/new"));
+        assert!(!path_blocked(r, "missing"));
+        assert!(!path_blocked(r, "missing/deeper"));
+    }
 }
