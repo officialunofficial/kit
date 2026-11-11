@@ -267,7 +267,7 @@ History / commits:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
   "is_merge":<bool>,"is_root":<bool>}`.
-- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]` &mdash; show
+- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p] [-n N] [<rev> | <A>..<B> | <A>...<B>]` &mdash; show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -289,6 +289,13 @@ History / commits:
   object per commit, newest first) with keys `hash`, `parents`, `tree`,
   `author`, `timestamp`, `title`, `message`; the `timestamp` stays a raw
   Unix-seconds integer for machine consumption.
+  `-p` (`--patch`) follows each commit with its unified diff against its
+  first parent. A root commit is diffed against an empty tree. The text is
+  the text of `kit show`, and a merge commit shows its diff against the
+  first parent, as `show` does. With `--oneline` the diff follows the
+  one-line header directly. `-p` does not combine with `--format=json`; it
+  is a usage error (exit `64`). A blob that cannot be read ends the output
+  with an error.
   `--author <pattern>` and `--grep <pattern>` filter the walk by a plain
   **substring** match &mdash; `--author` against both the short display form
   (the `Author:` line) and the full `kind:hex`/`mid:N` form

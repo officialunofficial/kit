@@ -141,6 +141,10 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   is at most 4096 bytes. The index form `:<path>` and `:<n>:<path>` is an
   error. `show <rev>:<dir>` prints the `ls-tree` listing, not the Git
   header and the names.
+- **`log -p`.** A merge commit shows its diff against its first parent,
+  as `show` does. Git `log -p` shows no diff for a merge. `-p` does not
+  combine with `--format=json`. A blank line ends each commit, also the
+  last one. The diff text is the text of `diff` and `show`.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -168,8 +172,8 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
-- `log -p` / `--stat` / `--decorate` / `--all` / `--graph` &mdash; kit rejects
-  each flag as an unknown argument.
+- `log --stat` / `--decorate` / `--all` / `--graph` &mdash; kit rejects each
+  flag as an unknown argument.
 - `branch -r` / `-a` / `-u` / `--unset-upstream` &mdash; no remote-tracking
   listing and no upstream setting.
 - `add -n` / `--dry-run` &mdash; kit rejects the flag.
