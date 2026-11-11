@@ -48,6 +48,12 @@ struct PullOpts {
     /// Does not combine with `--all`.
     #[arg(long, conflicts_with = "all")]
     rebase: bool,
+    /// Fetch, then merge the fetched branch into the current branch and
+    /// always write a merge commit, even when a fast-forward is possible. A
+    /// conflict pauses the merge; finish it with `kit merge --continue` or
+    /// `--abort`. Does not combine with `--all` or `--rebase`.
+    #[arg(long = "no-ff", conflicts_with_all = ["all", "rebase"])]
+    no_ff: bool,
     /// Emit a machine-readable JSON result object to stdout:
     /// `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
     /// "old":"<hex>|null","new":"<hex>|null","up_to_date":<bool>}`. With
@@ -158,7 +164,7 @@ fn pull_one(
             let pull_outcome = {
                 let outcome = tx
                     .with_source(|source| {
-                        if opts.rebase {
+                        if opts.rebase || opts.no_ff {
                             remote_dispatch::fetch_all_with_source(
                                 cwd,
                                 source,
@@ -188,6 +194,7 @@ fn pull_one(
                 outcome
             };
             match pull_outcome {
+                Ok(None) if opts.no_ff => merge_fetched(layout, &resolved.name, json),
                 Ok(None) => rebase_onto_fetched(layout, &resolved.name, json),
                 Ok(Some(report)) => {
                     report_fast_forward(layout, &resolved.name, endpoint, report.outcome, json)
@@ -309,6 +316,76 @@ fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
         }
     }
     super::rebase::rebase_onto(layout, &store, &kit_core::hash::to_hex(&upstream), json)
+}
+
+/// Merge the branch that the fetch updated into the current branch, and write
+/// a merge commit even when a fast-forward is possible. A branch that holds
+/// the fetched tip is up to date and gets no commit.
+fn merge_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
+    let _lock = match super::acquire_worktree_lock(layout) {
+        Ok(lock) => lock,
+        Err(code) => return code,
+    };
+    let branch = match kit_core::refs::read_head(layout) {
+        Ok(kit_core::refs::Head::Branch(branch)) => branch,
+        Ok(kit_core::refs::Head::Detached(_)) => {
+            return emit_err_json("pull: cannot merge into a detached HEAD", exit::USAGE, json);
+        }
+        Err(e) => {
+            return emit_err_json(&format!("pull: read HEAD: {e}"), exit::GENERAL_ERROR, json);
+        }
+    };
+    let upstream = match kit_core::refs::read_remote_ref(layout, remote, &branch) {
+        Ok(Some(tip)) => tip,
+        Ok(None) => {
+            return emit_err_json(
+                &format!("pull: the remote has no branch '{branch}' to merge"),
+                exit::GENERAL_ERROR,
+                json,
+            );
+        }
+        Err(e) => {
+            return emit_err_json(
+                &format!("pull: read tracking ref: {e}"),
+                exit::GENERAL_ERROR,
+                json,
+            );
+        }
+    };
+    let store = match crate::commands::open_store_configured(layout) {
+        Ok(store) => store,
+        Err(e) => {
+            return emit_err_json(&format!("pull: open store: {e}"), exit::GENERAL_ERROR, json);
+        }
+    };
+    // The merge treats a fetched tip that `HEAD` already holds as a base, and
+    // would write an empty merge commit for it.
+    if let Ok(Some(head)) = kit_core::refs::resolve_head(layout) {
+        match kit_core::ops::merge::is_ancestor_strict(&store, upstream, head) {
+            Ok(true) => {
+                let _ = writeln!(std::io::stderr().lock(), "Already up to date.");
+                return exit::OK;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                return emit_err_json(&format!("pull: {e}"), exit::GENERAL_ERROR, json);
+            }
+        }
+    }
+    // The tracking ref names the target, so the message reads `Merge
+    // remote-tracking branch '<remote>/<branch>'`.
+    let target = format!("refs/remotes/{remote}/{branch}");
+    super::merge::start(
+        layout,
+        &store,
+        &libkit::merge::Request {
+            target: &target,
+            no_commit: false,
+            no_ff: true,
+            message: None,
+        },
+        json,
+    )
 }
 
 /// `error(msg, code)` plus, when `json` is set, a `{"ok":false,...}`
