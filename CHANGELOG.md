@@ -33,6 +33,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remote-tracking ref and every tag. A commit shows once. The flag is a usage
   error together with a revision or a range. `libkit::log::Query::all` selects
   it, and `libkit::log::ref_tips` lists the refs.
+- `show-ref <pattern>...` keeps the refs that a pattern names: the full ref
+  name, or its trailing path components. `main` keeps `refs/heads/main` and
+  not `refs/heads/domain`. Several patterns give the union, and an empty
+  pattern is a usage error. `show-ref` exits `1` with no output when nothing
+  matches.
 - `rev-parse --verify <rev>` takes exactly one revision, or `<rev>:<path>`,
   and prints its full ID. The object must exist in the store. Any other input
   prints nothing on stdout and exits `1`, or `64` when the count of

@@ -225,7 +225,8 @@ _kit() {
                     _arguments \
                         '--heads[only refs/heads]' \
                         '--tags[only refs/tags]' \
-                        '--help[show help]'
+                        '--help[show help]' \
+                        '*:pattern:'
                     ;;
                 for-each-ref)
                     _arguments \

@@ -617,10 +617,13 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   names it and nothing on stdout, so a script can tell "cannot tell" (`65`)
   from "no" (`1`). A walk that would read more than 1,000,000 commits on
   either side also exits `65`, with an error that names the limit.
-- `kit show-ref [--heads] [--tags]` &mdash; list refs as `<hash> <refname>`,
+- `kit show-ref [--heads] [--tags] [<pattern>...]` &mdash; list refs as `<hash> <refname>`,
   sorted by ref name. Default shows `refs/heads/*`, `refs/tags/*`, and
   any `refs/remotes/*` tracking refs; `--heads`/`--tags` filter to one
-  namespace.
+  namespace. A `<pattern>` keeps a ref that it equals, or whose trailing
+  path components it equals (`main` keeps `refs/heads/main`, not
+  `refs/heads/domain`); several patterns give the union. The command exits
+  `1` with no output when nothing matches.
 - `kit for-each-ref [--format=<fmt>] [<pattern>...]` &mdash; iterate refs
   (heads, tags, and remote-tracking refs), sorted by ref name (like
   `git for-each-ref`). The default line

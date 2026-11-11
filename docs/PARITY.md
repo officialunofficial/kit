@@ -360,6 +360,13 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   count of revisions is not one. Git exits `128`. `-q` / `--quiet` drops the
   message and keeps the exit code, and it needs `--verify`. `--short` works
   with `--verify`. `--abbrev-ref` and `--show-toplevel` do not.
+- **`show-ref <pattern>`.** A pattern keeps a ref when it equals the full ref
+  name or equals its trailing path components, so `main` keeps
+  `refs/heads/main` and `refs/heads/feature/main`, and drops
+  `refs/heads/domain`. Several patterns give the union. `show-ref` exits `1`
+  with no output when nothing matches, as Git does and as `rev-parse
+  --verify` does. kit rejects an empty pattern as a usage error. kit has no
+  `--verify`, `--hash`, `--dereference` or `-q` on `show-ref`.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -391,7 +398,6 @@ kit does not implement these flags. A command with a missing flag is
 
 - `branch -u` / `--unset-upstream` &mdash; kit has no upstream setting
   on `branch`. `push -u` sets one.
-- `show-ref <pattern>` &mdash; kit rejects the pattern.
 - `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
   tags.
 - `pull --no-ff` &mdash; kit rejects the flag. `pull` never creates a merge

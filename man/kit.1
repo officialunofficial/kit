@@ -401,12 +401,15 @@ tests whether
 is an ancestor of
 .Ar b ,
 exiting 0 or 1 with no output.
-.It Cm show-ref Oo Fl Fl heads Oc Op Fl Fl tags
+.It Cm show-ref Oo Fl Fl heads Oc Oo Fl Fl tags Oc Op Ar pattern ...
 List refs as
 .Ql <hash> <refname> ,
 sorted by name.
 .Fl Fl heads Ns / Ns Fl Fl tags
-filter to that namespace.
+filter to that namespace. A
+.Ar pattern
+keeps a ref that it equals, or whose trailing path components it equals. The
+command exits 1 with no output when nothing matches.
 .It Cm for-each-ref Oo Fl Fl format Ns = Ns Ar fmt Oc Op Ar pattern ...
 Iterate refs (heads and tags), sorted by name (like
 .Xr git 1 Cm for-each-ref ) .
