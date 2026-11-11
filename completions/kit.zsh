@@ -182,6 +182,7 @@ _kit() {
                 rev-list)
                     _arguments \
                         '--count[print the number of commits]' \
+                        '(-n --max-count)'{-n,--max-count=}'[limit number of commits]:count:' \
                         '--help[show help]'
                     ;;
                 cat-file)

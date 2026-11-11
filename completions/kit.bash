@@ -202,7 +202,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--is-ancestor --help" -- "$cur") )
             ;;
         rev-list)
-            COMPREPLY=( $(compgen -W "--count --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--count -n --max-count --help" -- "$cur") )
             ;;
         *)
             COMPREPLY=( $(compgen -W "--help" -- "$cur") )

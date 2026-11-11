@@ -565,10 +565,17 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   `<path>` in the tree of `<rev>`; `--show-toplevel` prints the
   repository root (the directory holding `.kit`, found by walking up from
   cwd).
-- `kit rev-list [--count] <rev>` &mdash; list the commit ids reachable from
-  `<rev>` in reverse-chronological (topological) order, one 64-hex id per
-  line; `--count` prints the number instead. Reuses `log`'s walk so the
-  order matches. It takes one revision and no range. A walk that would
+- `kit rev-list [--count] [-n <n> | --max-count=<n>] <rev>` &mdash; list the
+  commit ids reachable from `<rev>` in reverse-chronological (topological)
+  order, one 64-hex id per line; `--count` prints the number instead.
+  `<rev>` is a revision, a range `A..B` or a symmetric range `A...B`, read
+  as `kit log` reads them, and the walk is the walk of `log`, so the order
+  matches. `-n` and `--max-count` keep the first `<n>` commits of that
+  order, and `--count` counts what is left. `<n>` is a non-negative
+  integer; `0` lists nothing, and a value above the history lists all of
+  it. Any other value, a negative one included, is an error (exit `65`,
+  or `64` when it starts with `-`). It takes one revision or range. A walk
+  that would
   read more than 1,000,000 commits, or that meets a commit that is missing,
   corrupt or not a commit, exits `65` with an error that names the limit
   or the commit.

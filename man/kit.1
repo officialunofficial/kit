@@ -358,12 +358,21 @@ abbreviates (default 7, a BLAKE3 prefix);
 prints the current branch;
 .Fl Fl show-toplevel
 prints the repository root.
-.It Cm rev-list Oo Fl Fl count Oc Ar rev
+.It Cm rev-list Oo Fl Fl count Oc Oo Fl n Ar N | Fl Fl max-count Ns = Ns Ar N Oc Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B
 List the commit ids reachable from
 .Ar rev
-in reverse-chronological order, one per line;
+in reverse-chronological order, one per line. A range is read as in
+.Cm log .
+.Fl n
+and
+.Fl Fl max-count
+keep the first
+.Ar N
+commits, and
 .Fl Fl count
-prints the number instead.
+prints the number of commits left instead.
+.Ar N
+is a non-negative integer.
 .It Cm merge-base Oo Fl Fl is-ancestor Oc Ar a Ar b
 Print the best common ancestor of two commits
 .Pq exit 1, no output, when none .

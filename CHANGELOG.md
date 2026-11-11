@@ -9,6 +9,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rev-list` takes `-n <n>` and `--max-count=<n>`, which keep the first `<n>`
+  commits, and a range `A..B` or `A...B` in place of a revision. It reads the
+  range as `log` does.
 - `log -p` (`--patch`) and `log --stat` follow each commit with its diff against
   its first parent, in the text of `show`. A root commit is diffed against
   an empty tree. The flags exclude each other and `--format=json`.
