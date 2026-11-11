@@ -54,6 +54,8 @@ keep a range of lines, skip commits, and detect moved or copied lines.
 `rename` take the registry lock for their whole run, and they refuse a branch
 that a sibling tree has checked out. `list` can keep the branches that match
 a name pattern, or that contain, or are merged into, a commit.
+`set_upstream` and `unset_upstream` change the upstream of a branch in the repo
+config.
 
 `libkit::identity` writes an identity in its short and full text forms. It
 also reads the `--author` flag and the `user.identity` setting, and it picks

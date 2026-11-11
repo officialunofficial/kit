@@ -49,6 +49,15 @@ struct BranchOpts {
     /// renamed branch is the checked-out one.
     #[arg(short = 'm', long)]
     rename: bool,
+    /// Set the upstream of a branch to the remote-tracking branch
+    /// `<remote>/<branch>` (like `git branch -u`). The branch is the one
+    /// named, or the current one.
+    #[arg(short = 'u', long = "set-upstream-to", value_name = "UPSTREAM")]
+    set_upstream_to: Option<String>,
+    /// Remove the upstream of a branch (like `git branch --unset-upstream`).
+    /// The branch is the one named, or the current one.
+    #[arg(long = "unset-upstream")]
+    unset_upstream: bool,
     /// Verbose list: also show each branch tip's abbreviated id and
     /// commit subject (like `git branch -v`).
     #[arg(short = 'v', long)]
@@ -125,6 +134,24 @@ pub fn run(args: &[String]) -> u8 {
         return super::usage_error("usage: kit branch [-d|-D|-m] ...  (modes are exclusive)");
     }
 
+    if opts.set_upstream_to.is_some() || opts.unset_upstream {
+        if mode_flags > 0
+            || opts.list
+            || opts.remotes
+            || opts.all
+            || opts.contains.is_some()
+            || opts.no_contains.is_some()
+            || opts.merged.is_some()
+            || opts.no_merged.is_some()
+            || (opts.set_upstream_to.is_some() && opts.unset_upstream)
+        {
+            return super::usage_error(
+                "usage: kit branch -u <upstream> [<branch>] | --unset-upstream [<branch>]",
+            );
+        }
+        return upstream(&layout, opts.set_upstream_to.as_deref(), &opts.names);
+    }
+
     let has_ancestry_filter = opts.contains.is_some()
         || opts.no_contains.is_some()
         || opts.merged.is_some()
@@ -170,6 +197,38 @@ pub fn run(args: &[String]) -> u8 {
         [] => list(&layout, json, opts.verbose, &query(&[])),
         [name] => create(&layout, name),
         _ => super::usage_error("usage: kit branch <name>  (create takes one name)"),
+    }
+}
+
+/// `kit branch -u <upstream> [<branch>]` and `kit branch --unset-upstream
+/// [<branch>]` — change where a branch tracks.
+fn upstream(layout: &RepoLayout, set: Option<&str>, names: &[String]) -> u8 {
+    let branch = match names {
+        [] => None,
+        [name] => Some(name.as_str()),
+        _ => {
+            return super::usage_error(
+                "usage: kit branch -u <upstream> [<branch>] | --unset-upstream [<branch>]",
+            );
+        }
+    };
+    let mut stderr = std::io::stderr().lock();
+    match set {
+        Some(up) => match crate::config::set_upstream(layout, branch, up) {
+            Ok((name, up)) => {
+                let _ = writeln!(
+                    stderr,
+                    "branch '{name}' set up to track '{}/{}'.",
+                    up.remote, up.branch
+                );
+                exit::OK
+            }
+            Err(e) => super::fail(e),
+        },
+        None => match crate::config::unset_upstream(layout, branch) {
+            Ok(_) => exit::OK,
+            Err(e) => super::fail(e),
+        },
     }
 }
 

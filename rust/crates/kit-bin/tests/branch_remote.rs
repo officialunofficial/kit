@@ -108,3 +108,57 @@ fn dash_r_and_dash_a_conflict_and_do_not_mix_with_delete() {
     }
     assert_eq!(ok(repo.path(), &["branch"]), "* main\n  topic\n");
 }
+
+fn fail(cwd: &Path, args: &[&str]) -> String {
+    let out = run_in(cwd, args);
+    assert!(!out.status.success(), "{args:?} must fail: {out:?}");
+    String::from_utf8(out.stderr).unwrap()
+}
+
+fn config_text(repo: &Path) -> String {
+    fs::read_to_string(repo.join(".kit/config")).unwrap_or_default()
+}
+
+#[test]
+fn dash_u_records_the_upstream_in_the_repo_config() {
+    let (repo, _remotes) = repo();
+    let p = repo.path();
+    ok(p, &["branch", "-u", "origin/topic", "topic"]);
+    let cfg = config_text(p);
+    assert!(cfg.contains("branch.topic.remote = origin"), "{cfg}");
+    assert!(cfg.contains("branch.topic.merge = topic"), "{cfg}");
+
+    // The long form defaults to the current branch and replaces a value.
+    ok(p, &["branch", "--set-upstream-to=upstream/main"]);
+    let cfg = config_text(p);
+    assert!(cfg.contains("branch.main.remote = upstream"), "{cfg}");
+    ok(p, &["branch", "-u", "origin/main"]);
+    assert!(config_text(p).contains("branch.main.remote = origin"));
+}
+
+#[test]
+fn dash_u_refuses_an_unknown_upstream_or_branch() {
+    let (repo, _remotes) = repo();
+    let p = repo.path();
+    assert!(fail(p, &["branch", "-u", "origin/nope"]).contains("does not exist"));
+    assert!(fail(p, &["branch", "-u", "main"]).contains("does not exist"));
+    assert!(fail(p, &["branch", "-u", "origin/main", "ghost"]).contains("not found"));
+    assert!(fail(p, &["branch", "-u", "origin/main", "a", "b"]).contains("usage"));
+    assert!(fail(p, &["branch", "-u", "origin/main", "--unset-upstream"]).contains("usage"));
+    assert!(fail(p, &["branch", "-u", "origin/main", "-d", "topic"]).contains("usage"));
+    assert!(!config_text(p).contains("branch.main"));
+}
+
+#[test]
+fn unset_upstream_removes_the_entry() {
+    let (repo, _remotes) = repo();
+    let p = repo.path();
+    ok(p, &["branch", "-u", "origin/topic", "topic"]);
+    ok(p, &["branch", "--unset-upstream", "topic"]);
+    assert!(
+        !config_text(p).contains("branch.topic"),
+        "{}",
+        config_text(p)
+    );
+    assert!(fail(p, &["branch", "--unset-upstream", "topic"]).contains("no upstream"));
+}

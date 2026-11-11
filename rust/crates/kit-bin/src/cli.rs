@@ -145,6 +145,9 @@ commands:
   branch -D <name>  Force-delete a branch (errors on an absent branch,
                     like git; still refuses the current branch)
   branch -m [<old>] <new>  Rename a branch (current branch if <old> omitted)
+  branch -u <upstream> [<branch>]  Track a remote branch: <upstream> is an
+                    existing <remote>/<branch> (--set-upstream-to=<upstream>)
+  branch --unset-upstream [<branch>]  Stop tracking (the repo config only)
   branch --show-current  Print the current branch name
   branch [--list] [--contains [<c>]] [--no-contains [<c>]] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]
                     Filter the listing (like git): <pattern> are shell globs on
