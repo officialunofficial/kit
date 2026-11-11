@@ -582,14 +582,18 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   outside an
   `-o`/`-c` selection). `-z` NUL-terminates records and emits raw paths
   (otherwise special-byte paths &mdash; including under `-s` &mdash; are C-style quoted).
-- `kit rev-parse [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
+- `kit rev-parse [--short[=N]] [--abbrev-ref] [--show-toplevel] [--verify [-q]] [<rev>...]`
   &mdash; resolve revisions to object ids. Bare `<rev>...` prints each resolved
   64-hex id; `--short[=N]` abbreviates (default 7, a BLAKE3 prefix);
   `--abbrev-ref HEAD` prints the current branch; kit always errors on an
   unresolvable revision; `<rev>:<path>` prints the id of the object at
   `<path>` in the tree of `<rev>`; `--show-toplevel` prints the
   repository root (the directory holding `.kit`, found by walking up from
-  cwd).
+  cwd). `--verify <rev>` takes exactly one revision, prints its full id and
+  needs the object in the store. On any other input it prints nothing on
+  stdout and exits `1` (`64` when the count of revisions is not one).
+  `-q`/`--quiet` also drops the message. `--verify` does not combine with
+  `--abbrev-ref` or `--show-toplevel`.
 - `kit rev-list [--count] [-n <n> | --max-count=<n>] <rev>` &mdash; list the
   commit ids reachable from `<rev>` in reverse-chronological (topological)
   order, one 64-hex id per line; `--count` prints the number instead.

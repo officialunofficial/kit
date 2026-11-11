@@ -216,6 +216,8 @@ _kit() {
                         '--short=[abbreviate to N chars]:N:' \
                         '--abbrev-ref[print the short symbolic name]' \
                         '--show-toplevel[print the repository root]' \
+                        '--verify[require one revision that resolves]' \
+                        '(-q --quiet)'{-q,--quiet}'[with --verify, print no message]' \
                         '--help[show help]' \
                         '*:rev:'
                     ;;

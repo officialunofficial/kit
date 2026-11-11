@@ -33,6 +33,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remote-tracking ref and every tag. A commit shows once. The flag is a usage
   error together with a revision or a range. `libkit::log::Query::all` selects
   it, and `libkit::log::ref_tips` lists the refs.
+- `rev-parse --verify <rev>` takes exactly one revision, or `<rev>:<path>`,
+  and prints its full ID. The object must exist in the store. Any other input
+  prints nothing on stdout and exits `1`, or `64` when the count of
+  revisions is not one. `-q` (`--quiet`) drops the message. It does not
+  combine with `--abbrev-ref` or `--show-toplevel`.
 - `add -n` (`--dry-run`) prints `add '<path>'` for each file that a real add
   would stage or update, and `remove '<path>'` for each deletion that `-A`
   would record. It writes no index and no object. It excludes `-p` and `-u`.

@@ -118,7 +118,9 @@ complete -c kit -n "__fish_seen_subcommand_from ls-files" \
 complete -c kit -n "__fish_seen_subcommand_from ls-files" \
     -l exclude-standard -d "Drop .kitignore-ignored files"
 complete -c kit -n "__fish_seen_subcommand_from rev-parse" \
-    -l verify -d "Error on an unresolvable revision"
+    -l verify -d "Require one revision that resolves"
+complete -c kit -n "__fish_seen_subcommand_from rev-parse" \
+    -l quiet -s q -d "With --verify, print no message"
 complete -c kit -n "__fish_seen_subcommand_from rev-parse" \
     -l short -d "Abbreviate the id (default 7)"
 complete -c kit -n "__fish_seen_subcommand_from rev-parse" \

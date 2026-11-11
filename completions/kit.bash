@@ -63,7 +63,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-s --stage -z --others --ignored --exclude-standard --help" -- "$cur") )
             ;;
         rev-parse)
-            COMPREPLY=( $(compgen -W "--short --abbrev-ref --show-toplevel --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--short --abbrev-ref --show-toplevel --verify -q --quiet --help" -- "$cur") )
             ;;
         show-ref)
             COMPREPLY=( $(compgen -W "--heads --tags --help" -- "$cur") )

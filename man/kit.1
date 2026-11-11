@@ -359,7 +359,7 @@ shows only those
 .Pq Fl Fl ignored No requires Fl Fl others ;
 .Fl z
 NUL-terminates records with raw paths.
-.It Cm rev-parse Oo Fl Fl short Ns Op = Ns Ar N Oc Oo Fl Fl abbrev-ref Oc Oo Fl Fl show-toplevel Oc Op Ar rev ...
+.It Cm rev-parse Oo Fl Fl short Ns Op = Ns Ar N Oc Oo Fl Fl abbrev-ref Oc Oo Fl Fl show-toplevel Oc Oo Fl Fl verify Op Fl q Oc Op Ar rev ...
 Resolve revisions to object ids.
 .Ar rev Ns : Ns Ar path
 names the object at
@@ -372,6 +372,11 @@ abbreviates (default 7, a BLAKE3 prefix);
 prints the current branch;
 .Fl Fl show-toplevel
 prints the repository root.
+.Fl Fl verify
+takes exactly one revision, prints its full id and exits non-zero with nothing
+on stdout when the revision does not resolve to an object in the store.
+.Fl q
+also drops the message.
 .It Cm rev-list Oo Fl Fl count Oc Oo Fl n Ar N | Fl Fl max-count Ns = Ns Ar N Oc Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B
 List the commit ids reachable from
 .Ar rev

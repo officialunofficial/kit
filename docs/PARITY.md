@@ -354,6 +354,12 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   the errors of a real add. It does not combine with `-p` or `-u`, which is a
   usage error. A file whose bytes equal the staged bytes but whose chunking
   differs shows as `add`.
+- **`rev-parse --verify`.** `--verify` takes exactly one revision, or
+  `<rev>:<path>`, and prints its full ID. The object must exist in the store.
+  Any other input prints nothing on stdout and exits `1`, or `64` when the
+  count of revisions is not one. Git exits `128`. `-q` / `--quiet` drops the
+  message and keeps the exit code, and it needs `--verify`. `--short` works
+  with `--verify`. `--abbrev-ref` and `--show-toplevel` do not.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -385,7 +391,6 @@ kit does not implement these flags. A command with a missing flag is
 
 - `branch -u` / `--unset-upstream` &mdash; kit has no upstream setting
   on `branch`. `push -u` sets one.
-- `rev-parse --verify` &mdash; kit rejects the flag.
 - `show-ref <pattern>` &mdash; kit rejects the pattern.
 - `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
   tags.
