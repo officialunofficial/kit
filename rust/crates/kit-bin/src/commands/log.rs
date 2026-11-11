@@ -32,6 +32,13 @@
 //! remote-tracking ref and every tag. A commit shows once, in the order above.
 //! It is a usage error together with a revision or a range.
 //!
+//! `--decorate` prints the refs that name a commit after its id, in
+//! parentheses, as `(HEAD -> main, v1, origin/main)` with a `tag: ` prefix on
+//! a tag. The order is `HEAD`, the local branches, the tags, then the
+//! remote-tracking refs. kit reads the refs once for the whole run. Ref names
+//! print through [`format::safe_text`]. The flag excludes `--format=json`,
+//! because the JSON record has a fixed set of keys.
+//!
 //! History filters — `--author`/`--grep` (substring matches),
 //! `--since`/`--until` (a small explicit date grammar, see
 //! `libkit::log::date`), and `--no-merges`/`--first-parent` — are
@@ -46,12 +53,14 @@
 //! errors and the parser maps them to kit sysexits (`USAGE` for
 //! unknown flags, `DATAERR` for malformed `-n` values, etc.).
 
+use std::collections::HashMap;
 use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 use kit_core::Hash;
 use kit_core::object::Commit;
-use libkit::log::{self, Filter, Query};
+use kit_core::refs::{self, Head};
+use libkit::log::{self, Filter, Query, RefKind};
 
 use crate::clap_args;
 use crate::exit;
@@ -158,6 +167,12 @@ struct LogOpts {
     #[arg(long, conflicts_with = "start")]
     all: bool,
 
+    /// Print the refs that name each commit after its id: `HEAD`, the local
+    /// branches, the tags (as `tag: <name>`) and the remote-tracking refs.
+    /// It cannot combine with `--format=json`.
+    #[arg(long)]
+    decorate: bool,
+
     /// Optional starting revision (`<rev>`), range (`A..B`, `A..`, `..B`), or
     /// symmetric range (`A...B`). Defaults to `HEAD`; an empty range side
     /// means `HEAD`.
@@ -198,10 +213,15 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
     let fmt = opts.render_format();
-    let abbrev = opts.abbrev_len();
     if fmt == Format::Json && (opts.patch || opts.stat) {
         return emit_err(
             "-p and --stat do not combine with --format=json",
+            exit::USAGE,
+        );
+    }
+    if fmt == Format::Json && opts.decorate {
+        return emit_err(
+            "--decorate does not combine with --format=json",
             exit::USAGE,
         );
     }
@@ -211,19 +231,13 @@ pub fn run(args: &[String]) -> u8 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let since = match opts.since.as_deref() {
-        Some(s) => match log::date::parse(s, now) {
-            Ok(t) => Some(t),
-            Err(e) => return emit_err(&format!("--since: {e}"), exit::USAGE),
-        },
-        None => None,
+    let since = match parse_date("--since", opts.since.as_deref(), now) {
+        Ok(t) => t,
+        Err(code) => return code,
     };
-    let until = match opts.until.as_deref() {
-        Some(s) => match log::date::parse(s, now) {
-            Ok(t) => Some(t),
-            Err(e) => return emit_err(&format!("--until: {e}"), exit::USAGE),
-        },
-        None => None,
+    let until = match parse_date("--until", opts.until.as_deref(), now) {
+        Ok(t) => t,
+        Err(code) => return code,
     };
 
     let cwd = match std::env::current_dir() {
@@ -266,17 +280,46 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
 
+    let decorations = if opts.decorate {
+        match decorations(&repo) {
+            Ok(map) => map,
+            Err(code) => return code,
+        }
+    } else {
+        HashMap::new()
+    };
+
+    print_entries(&opts, &repo, &entries, &decorations)
+}
+
+/// Print the commits, each with its decoration and its diff when asked.
+fn print_entries(
+    opts: &LogOpts,
+    repo: &libkit::Repo,
+    entries: &[log::Entry],
+    decorations: &HashMap<Hash, Vec<String>>,
+) -> u8 {
+    let (fmt, abbrev) = (opts.render_format(), opts.abbrev_len());
     let mut stdout = std::io::stdout().lock();
-    for entry in &entries {
+    for entry in entries {
         if signal::is_shutdown() {
             return exit::TEMPFAIL;
         }
-        render_commit(&mut stdout, fmt, abbrev, &entry.hash, &entry.commit);
+        let decoration = decorations
+            .get(&entry.hash)
+            .map(|names| format!("({})", names.join(", ")));
+        render_commit(
+            &mut stdout,
+            fmt,
+            abbrev,
+            (&entry.hash, &entry.commit),
+            decoration.as_deref(),
+        );
         if opts.patch || opts.stat {
             let c = &entry.commit;
             match super::show::write_commit_diff(
                 &mut stdout,
-                &repo,
+                repo,
                 c.parents.first().copied(),
                 c.tree_hash,
                 opts.stat,
@@ -293,27 +336,76 @@ pub fn run(args: &[String]) -> u8 {
     exit::OK
 }
 
-/// Render one commit in the selected format.
+/// Parse the value of `--since` or `--until`. A bad date is a usage error,
+/// and the error is the exit code, after the message.
+fn parse_date(flag: &str, text: Option<&str>, now: u64) -> Result<Option<u64>, u8> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    log::date::parse(text, now)
+        .map(Some)
+        .map_err(|e| emit_err(&format!("{flag}: {e}"), exit::USAGE))
+}
+
+/// The decoration names of each commit that a ref names, read once. Each
+/// name is safe to print. The error is the exit code, after the message.
+fn decorations(repo: &libkit::Repo) -> Result<HashMap<Hash, Vec<String>>, u8> {
+    let tips = log::ref_tips(repo).map_err(|e| {
+        let e = libkit::Error::from(e);
+        emit_err(&exit_map::message(&e), exit_map::exit_code(&e))
+    })?;
+    let mut names: HashMap<Hash, Vec<String>> = HashMap::new();
+    for kind in [RefKind::Branch, RefKind::Tag, RefKind::Remote] {
+        for tip in tips.iter().filter(|tip| tip.kind == kind) {
+            let name = format::safe_text(&tip.name);
+            let name = if kind == RefKind::Tag {
+                format!("tag: {name}")
+            } else {
+                name
+            };
+            names.entry(tip.commit).or_default().push(name);
+        }
+    }
+    // `HEAD` leads the names of its commit. On a branch it replaces the
+    // name of that branch.
+    let layout = repo.layout();
+    if let Some(head) = refs::resolve_head(layout).ok().flatten() {
+        let list = names.entry(head).or_default();
+        match refs::read_head(layout) {
+            Ok(Head::Branch(branch)) => {
+                let branch = format::safe_text(&branch);
+                list.retain(|name| *name != branch);
+                list.insert(0, format!("HEAD -> {branch}"));
+            }
+            _ => list.insert(0, "HEAD".to_owned()),
+        }
+    }
+    Ok(names)
+}
+
+/// Render one commit in the selected format. `decoration` is the text that
+/// follows the commit id.
 fn render_commit(
     out: &mut impl Write,
     fmt: Format,
     abbrev: Option<usize>,
-    hash: &Hash,
-    c: &Commit,
+    (hash, c): (&Hash, &Commit),
+    decoration: Option<&str>,
 ) {
+    let decoration = decoration.map_or_else(String::new, |d| format!(" {d}"));
     let full_message: String = String::from_utf8_lossy(&c.message).into_owned();
     let title = full_message.lines().next().unwrap_or("");
     match fmt {
         Format::Oneline => {
             let id = format::short_hash(hash, abbrev.unwrap_or(DEFAULT_ABBREV));
-            let _ = writeln!(out, "{id} {}", format::safe_text(title));
+            let _ = writeln!(out, "{id}{decoration} {}", format::safe_text(title));
         }
         Format::Default => {
             let id = match abbrev {
                 Some(n) => format::short_hash(hash, n),
                 None => format::hex_hash(hash),
             };
-            let _ = writeln!(out, "commit {id}");
+            let _ = writeln!(out, "commit {id}{decoration}");
             let _ = writeln!(
                 out,
                 "Author: {}",
@@ -410,6 +502,7 @@ mod tests {
             patch: false,
             stat: false,
             all: false,
+            decorate: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -432,6 +525,7 @@ mod tests {
             patch: false,
             stat: false,
             all: false,
+            decorate: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Oneline);
@@ -454,6 +548,7 @@ mod tests {
             patch: false,
             stat: false,
             all: false,
+            decorate: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -476,6 +571,7 @@ mod tests {
             patch: false,
             stat: false,
             all: false,
+            decorate: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Json);
@@ -497,6 +593,7 @@ mod tests {
             patch: false,
             stat: false,
             all: false,
+            decorate: false,
             start: None,
         }
     }

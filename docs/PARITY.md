@@ -292,6 +292,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   other refs. kit leaves out a ref with unreadable content and a ref that ends
   at an object that is not a commit. A revision or a range together with
   `--all` is a usage error. Git accepts both.
+- **`log --decorate`.** The names follow the order `HEAD`, the local
+  branches, the tags, then the remote-tracking refs. Git can order them
+  differently. The flag does not combine with `--format=json`, so the JSON
+  record keeps its fixed keys. kit prints each name with control characters
+  escaped.
 - **`rev-list`.** `rev-list` takes one revision or range, with `-n` or
   `--max-count`. It does not take several revisions, `^<rev>` or `--not`.
   It does not read the `-<n>` form. A negative count is an error. Git
@@ -359,8 +364,7 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
-- `log --decorate` / `--graph` &mdash; kit rejects each flag as an unknown
-  argument.
+- `log --graph` &mdash; kit rejects the flag as an unknown argument.
 - `branch -u` / `--unset-upstream` &mdash; kit has no upstream setting
   on `branch`. `push -u` sets one.
 - `add -n` / `--dry-run` &mdash; kit rejects the flag.
