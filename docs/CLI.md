@@ -267,7 +267,7 @@ History / commits:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
   "is_merge":<bool>,"is_root":<bool>}`.
-- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]` &mdash; show
+- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [-n N] [<rev> | <A>..<B> | <A>...<B>]` &mdash; show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -289,6 +289,13 @@ History / commits:
   object per commit, newest first) with keys `hash`, `parents`, `tree`,
   `author`, `timestamp`, `title`, `message`; the `timestamp` stays a raw
   Unix-seconds integer for machine consumption.
+  `-p` (`--patch`) follows each commit with its unified diff against its
+  first parent, and `--stat` with its diffstat. A root commit is diffed
+  against an empty tree. The text is the text of `kit show`, and a merge
+  commit shows its diff against the first parent, as `show` does. With
+  `--oneline` the diff follows the one-line header directly. `-p` and
+  `--stat` exclude each other and `--format=json`; each is a usage error
+  (exit `64`). A blob that cannot be read ends the output with an error.
   `--author <pattern>` and `--grep <pattern>` filter the walk by a plain
   **substring** match &mdash; `--author` against both the short display form
   (the `Author:` line) and the full `kind:hex`/`mid:N` form
@@ -513,7 +520,8 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   missing` for unknown objects); `<size>` is the byte length of the content
   that follows, so blobs are byte-exact with git while commit/tree content
   (and its size) is kit-shaped, as with `-p`. `<object>` resolves through
-  the shared revspec grammar (hash, ref, `HEAD`, `HEAD~n`/`^`).
+  the shared revspec grammar (hash, ref, `HEAD`, `HEAD~n`/`^`), or as
+  `<rev>:<path>`, the object at `<path>` in the tree of `<rev>`.
 - `kit show [--stat] [<object>...]` &mdash; display objects (like `git show`),
   defaulting
   to `HEAD`. A **commit**/**remix** prints a header (`commit <hash>`,
@@ -529,7 +537,8 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   header carries kit's signed `Identity` and 64-hex BLAKE3 ids, so those
   header lines diverge from git's `Author: Name <email>` / 40-hex form (the
   same documented divergence as `log`); the diff body, tree listing, and blob
-  output match git. `<object>` resolves through the revspec grammar.
+  output match git. `<object>` resolves through the revspec grammar, or as
+  `<rev>:<path>`: the blob or tree at `<path>` in the tree of `<rev>`.
 - `kit ls-tree [-r] [-z] <tree-ish> [<path>...]` &mdash; list a tree's entries
   as `<mode> <type> <hash>\t<name>` (git octal modes
   `100644`/`100755`/`120000`/`040000`; the hash is 64-hex BLAKE3). `-r`
@@ -552,13 +561,21 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   &mdash; resolve revisions to object ids. Bare `<rev>...` prints each resolved
   64-hex id; `--short[=N]` abbreviates (default 7, a BLAKE3 prefix);
   `--abbrev-ref HEAD` prints the current branch; kit always errors on an
-  unresolvable revision; `--show-toplevel` prints the
+  unresolvable revision; `<rev>:<path>` prints the id of the object at
+  `<path>` in the tree of `<rev>`; `--show-toplevel` prints the
   repository root (the directory holding `.kit`, found by walking up from
   cwd).
-- `kit rev-list [--count] <rev>` &mdash; list the commit ids reachable from
-  `<rev>` in reverse-chronological (topological) order, one 64-hex id per
-  line; `--count` prints the number instead. Reuses `log`'s walk so the
-  order matches. It takes one revision and no range. A walk that would
+- `kit rev-list [--count] [-n <n> | --max-count=<n>] <rev>` &mdash; list the
+  commit ids reachable from `<rev>` in reverse-chronological (topological)
+  order, one 64-hex id per line; `--count` prints the number instead.
+  `<rev>` is a revision, a range `A..B` or a symmetric range `A...B`, read
+  as `kit log` reads them, and the walk is the walk of `log`, so the order
+  matches. `-n` and `--max-count` keep the first `<n>` commits of that
+  order, and `--count` counts what is left. `<n>` is a non-negative
+  integer; `0` lists nothing, and a value above the history lists all of
+  it. Any other value, a negative one included, is an error (exit `65`,
+  or `64` when it starts with `-`). It takes one revision or range. A walk
+  that would
   read more than 1,000,000 commits, or that meets a commit that is missing,
   corrupt or not a commit, exits `65` with an error that names the limit
   or the commit.

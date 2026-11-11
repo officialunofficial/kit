@@ -182,6 +182,7 @@ _kit() {
                 rev-list)
                     _arguments \
                         '--count[print the number of commits]' \
+                        '(-n --max-count)'{-n,--max-count=}'[limit number of commits]:count:' \
                         '--help[show help]'
                     ;;
                 cat-file)
@@ -294,6 +295,8 @@ _kit() {
                         '--until[only commits at or before this date]:date:' \
                         '--no-merges[hide merge commits from the output]' \
                         '--first-parent[follow only first parents]' \
+                        '(-p --patch --stat)'{-p,--patch}'[show the patch of each commit]' \
+                        '(-p --patch --stat)--stat[show the diffstat of each commit]' \
                         '-n[limit number of commits]:count:' \
                         '--help[show help]'
                     ;;

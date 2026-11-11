@@ -14,7 +14,8 @@
 //!   `<name> missing` for unknown objects).
 //!
 //! `<object>` is resolved through the shared revspec grammar (full/short
-//! hash, ref, `HEAD`, `HEAD~n`/`^`).
+//! hash, ref, `HEAD`, `HEAD~n`/`^`, and `<rev>:<path>` for the object at a
+//! path in the tree of a revision).
 
 use std::io::Write;
 
@@ -82,7 +83,7 @@ pub fn run(args: &[String]) -> u8 {
         return super::usage_error("usage: kit cat-file (-t | -s | -p) <object>");
     };
 
-    let h = match revspec::resolve_revision(&store, &layout, object) {
+    let h = match revspec::resolve_object(&store, &layout, object) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("bad object '{object}': {e}"), exit::DATAERR),
     };
@@ -131,7 +132,7 @@ fn run_batch(store: &ObjectStore, layout: &kit_core::layout::RepoLayout) -> u8 {
             Ok(l) => l,
             Err(e) => return emit_err(&format!("read stdin: {e}"), exit::NOINPUT),
         };
-        let Ok(h) = revspec::resolve_revision(store, layout, &name) else {
+        let Ok(h) = revspec::resolve_object(store, layout, &name) else {
             let _ = writeln!(stdout, "{name} missing");
             continue;
         };

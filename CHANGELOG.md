@@ -7,6 +7,20 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `rev-list` takes `-n <n>` and `--max-count=<n>`, which keep the first `<n>`
+  commits, and a range `A..B` or `A...B` in place of a revision. It reads the
+  range as `log` does.
+- `log -p` (`--patch`) and `log --stat` follow each commit with its diff against
+  its first parent, in the text of `show`. A root commit is diffed against
+  an empty tree. The flags exclude each other and `--format=json`.
+- `show`, `cat-file` and `rev-parse` take `<rev>:<path>`, the object at
+  `<path>` in the tree of `<rev>`. `libkit::revspec::resolve_object`
+  resolves it. The path is relative, has at most 4096 bytes and has no
+  empty, `.` or `..` component. A missing path, a path through a file and a
+  malformed path are errors.
+
 ## [0.8.0] - 2026-11-10
 
 ### Added

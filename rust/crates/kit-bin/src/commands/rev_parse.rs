@@ -9,7 +9,8 @@
 //!   `.kit`).
 //!
 //! Resolution reuses the shared revspec grammar (refs, full/short hashes,
-//! `HEAD~n`/`^`). The abbreviated id is a BLAKE3 prefix, not a SHA-1 one.
+//! `HEAD~n`/`^`, and `<rev>:<path>` for the object at a path in the tree of
+//! a revision). The abbreviated id is a BLAKE3 prefix, not a SHA-1 one.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -88,7 +89,7 @@ pub fn run(args: &[String]) -> u8 {
             }
             continue;
         }
-        let hash = match revspec::resolve_revision(&store, &layout, spec) {
+        let hash = match revspec::resolve_object(&store, &layout, spec) {
             Ok(h) => h,
             Err(e) => {
                 // A bad revision is an error. kit refuses rather than

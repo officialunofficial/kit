@@ -2099,7 +2099,7 @@ pub fn absolute_config_home_one_iteration(input: &[u8]) {
 
 /// A small repository that the revision and history fuzz targets use. It has
 /// a three-commit chain, the branch `main` at the tip and the tag `v1` at
-/// the root. The fixture is built once per process, because creating a store
+/// the root. Each commit has a tree with the blob `d/f`. The fixture is built once per process, because creating a store
 /// costs more than the per-iteration budget.
 struct RevspecFixture {
     _dir: tempfile::TempDir,
@@ -2108,11 +2108,12 @@ struct RevspecFixture {
     repo: libkit::Repo,
     tip: kit_core::hash::Hash,
     root: kit_core::hash::Hash,
+    blob: kit_core::hash::Hash,
 }
 
 fn revspec_fixture() -> &'static RevspecFixture {
     use kit_core::layout::RepoLayout;
-    use kit_core::object::{Commit, Identity, Object};
+    use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
     use kit_core::store::ObjectStore;
     use std::sync::OnceLock;
 
@@ -2122,11 +2123,31 @@ fn revspec_fixture() -> &'static RevspecFixture {
         let layout = RepoLayout::single(dir.path());
         let store = ObjectStore::init(&layout).expect("init the fixture store");
         kit_core::refs::init(&layout).expect("init the fixture refs");
+        let write = |object: Object| {
+            let bytes =
+                kit_core::serialize::serialize(&object).expect("serialize a fixture object");
+            store.write(&bytes).expect("write a fixture object")
+        };
+        let blob = write(Object::Blob(Blob { data: vec![7] }));
+        let dir_tree = write(Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"f".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }],
+        }));
+        let tree = write(Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"d".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: dir_tree,
+            }],
+        }));
         let mut parents = Vec::new();
         let mut hashes = Vec::new();
         for seed in 1u8..=3 {
             let commit = Commit::new_unannotated(
-                [seed; 32],
+                tree,
                 parents.clone(),
                 Identity::ed25519([seed; 32]),
                 [seed; 32],
@@ -2152,16 +2173,17 @@ fn revspec_fixture() -> &'static RevspecFixture {
             repo,
             tip,
             root,
+            blob,
         }
     })
 }
 
-/// Revision specs (`revspec_parse`): `resolve_revision` never panics on any
-/// text, and a hash that it returns names an object in the store. The
-/// fixture also pins three fixed answers, so a change to the grammar shows
+/// Revision specs (`revspec_parse`): `resolve_revision` and `resolve_object`
+/// never panic on any text, and a hash that either returns names an object
+/// in the store. The fixture also pins five fixed answers, so a change to the grammar shows
 /// up as a failed assertion on every input.
 pub fn revspec_parse_one_iteration(input: &[u8]) {
-    use libkit::revspec::resolve_revision;
+    use libkit::revspec::{resolve_object, resolve_revision};
     let input = &input[..input.len().min(MAX_INPUT)];
     let Ok(text) = core::str::from_utf8(input) else {
         return;
@@ -2173,10 +2195,19 @@ pub fn revspec_parse_one_iteration(input: &[u8]) {
             "a resolved revision must name a stored object"
         );
     }
+    if let Ok(hash) = resolve_object(&fixture.store, &fixture.layout, text) {
+        assert!(
+            fixture.store.contains(&hash),
+            "a resolved object must be stored"
+        );
+    }
     let resolve = |spec: &str| resolve_revision(&fixture.store, &fixture.layout, spec).ok();
     assert_eq!(resolve("HEAD"), Some(fixture.tip));
     assert_eq!(resolve("main~2"), Some(fixture.root));
     assert_eq!(resolve("v1^0"), Some(fixture.root));
+    let object = |spec: &str| resolve_object(&fixture.store, &fixture.layout, spec).ok();
+    assert_eq!(object("main:d/f"), Some(fixture.blob));
+    assert_eq!(object("v1:d/../d/f"), None);
 }
 
 /// History selections and dates (`log_parse`): `log::date::parse` never
@@ -3781,6 +3812,13 @@ mod tests {
             b"HEAD^2",
             b"main^0^0^0",
             b"v1",
+            b"main:d/f",
+            b"main~1:d/f",
+            b"main:",
+            b"main:d//f",
+            b"main:d/f/x",
+            b":d/f",
+            b"v1:./d",
             b"refs/tags/v1",
             b"refs/heads/main",
             b"refs/remotes/origin/main",

@@ -273,6 +273,23 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   regular expression. `--since` and `--until` accept `@<unix>`, `now`,
   `today`, `yesterday`, `<N> <unit> ago`, `YYYY-MM-DD` and
   `YYYY-MM-DD HH:MM:SS`. Git accepts more forms.
+- **`<rev>:<path>`.** `show`, `cat-file` and `rev-parse` resolve
+  `<rev>:<path>` against the tree of `<rev>`. The path is relative, with no
+  empty, `.` or `..` component, so `HEAD:dir/` and `HEAD:./f` are errors. It
+  is at most 4096 bytes. The index form `:<path>` and `:<n>:<path>` is an
+  error. `show <rev>:<dir>` prints the `ls-tree` listing, not the Git
+  header and the names.
+- **`log -p` and `--stat`.** A merge commit shows its diff against its
+  first parent, as `show` does. Git `log -p` shows no diff for a merge.
+  `-p` and `--stat` together are a usage error. Git prints both, with a
+  `---` line between the message and the stat. Neither flag combines
+  with `--format=json`. A blank line ends each commit, also the last
+  one. The diff text is the text of `diff` and `show`.
+- **`rev-list`.** `rev-list` takes one revision or range, with `-n` or
+  `--max-count`. It does not take several revisions, `^<rev>` or `--not`.
+  It does not read the `-<n>` form. A negative count is an error. Git
+  reads `--max-count=-1` as no limit. `rev-list HEAD` in a repository
+  without a commit is an error, as in Git.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -300,14 +317,12 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
-- `log -p` / `--stat` / `--decorate` / `--all` / `--graph` &mdash; kit rejects
-  each flag as an unknown argument.
+- `log --decorate` / `--all` / `--graph` &mdash; kit rejects each flag as an
+  unknown argument.
 - `branch -r` / `-a` / `-u` / `--unset-upstream` &mdash; no remote-tracking
   listing and no upstream setting.
 - `add -n` / `--dry-run` &mdash; kit rejects the flag.
 - `rev-parse --verify` &mdash; kit rejects the flag.
-- `rev-list --max-count` &mdash; kit rejects the flag. `rev-list` takes one
-  revision and no range.
 - `show-ref <pattern>` &mdash; kit rejects the pattern.
 - `fetch --prune` / `--tags` &mdash; kit rejects each flag.
 - `pull --rebase` / `--no-ff` &mdash; kit rejects each flag.
@@ -319,6 +334,4 @@ kit does not implement these flags. A command with a missing flag is
   `restore` for files.
 - `init <dir>` / `init -q` &mdash; `init` takes no argument, and it is an error
   in an existing repository.
-- `<rev>:<path>` &mdash; kit does not resolve this form in `show`, `cat-file`
-  or `rev-parse`.
 - `worktree move` / `lock` / `repair` &mdash; kit has no such subcommand.

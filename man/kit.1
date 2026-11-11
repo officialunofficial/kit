@@ -284,7 +284,12 @@ reads object names from stdin (one per line) and emits a
 header plus the content for each
 .Pq Ql <name> missing No for unknown objects .
 .Ar object
-resolves through the shared revspec grammar.
+resolves through the shared revspec grammar, or as
+.Ar rev Ns : Ns Ar path ,
+the object at
+.Ar path
+in the tree of
+.Ar rev .
 .It Cm show Oo Fl Fl stat Oc Op Ar object ...
 Display objects, like
 .Xr git 1 Cm show ,
@@ -342,18 +347,32 @@ shows only those
 NUL-terminates records with raw paths.
 .It Cm rev-parse Oo Fl Fl short Ns Op = Ns Ar N Oc Oo Fl Fl abbrev-ref Oc Oo Fl Fl show-toplevel Oc Op Ar rev ...
 Resolve revisions to object ids.
+.Ar rev Ns : Ns Ar path
+names the object at
+.Ar path
+in the tree of
+.Ar rev .
 .Fl Fl short
 abbreviates (default 7, a BLAKE3 prefix);
 .Fl Fl abbrev-ref Cm HEAD
 prints the current branch;
 .Fl Fl show-toplevel
 prints the repository root.
-.It Cm rev-list Oo Fl Fl count Oc Ar rev
+.It Cm rev-list Oo Fl Fl count Oc Oo Fl n Ar N | Fl Fl max-count Ns = Ns Ar N Oc Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B
 List the commit ids reachable from
 .Ar rev
-in reverse-chronological order, one per line;
+in reverse-chronological order, one per line. A range is read as in
+.Cm log .
+.Fl n
+and
+.Fl Fl max-count
+keep the first
+.Ar N
+commits, and
 .Fl Fl count
-prints the number instead.
+prints the number of commits left instead.
+.Ar N
+is a non-negative integer.
 .It Cm merge-base Oo Fl Fl is-ancestor Oc Ar a Ar b
 Print the best common ancestor of two commits
 .Pq exit 1, no output, when none .
@@ -487,7 +506,7 @@ launched. The superseded commit is not deleted; it remains on disk as an
 unreachable object until
 .Cm gc
 reclaims it.
-.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl n Ar N Oc Oo Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
+.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl n Ar N Oc Oo Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
 Show commit history. With no argument the walk starts at
 .Cm HEAD ;
 an optional
@@ -528,6 +547,16 @@ prefix, so it is longer than a Git SHA-1 prefix of the same length.
 .Fl Fl format Ar json
 emits one JSON object per commit on stdout, keeping the raw integer Unix
 timestamp for machine consumption.
+.Fl p
+(or
+.Fl Fl patch )
+follows each commit with its unified diff against its first parent, and
+.Fl Fl stat
+with its diffstat. A root commit is diffed against an empty tree, and a merge
+commit against its first parent, as
+.Cm show
+does. The two options exclude each other and
+.Fl Fl format Ar json .
 .Fl Fl author Ar pattern
 and
 .Fl Fl grep Ar pattern

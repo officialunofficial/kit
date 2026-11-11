@@ -193,6 +193,10 @@ complete -c kit -n "__fish_seen_subcommand_from log" \
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -l first-parent -d "Follow only first parents"
 complete -c kit -n "__fish_seen_subcommand_from log" \
+    -s p -l patch -d "Show the patch of each commit"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l stat -d "Show the diffstat of each commit"
+complete -c kit -n "__fish_seen_subcommand_from log" \
     -s n -d "Limit number of commits" -r
 complete -c kit -n "__fish_seen_subcommand_from reflog" \
     -l format -d "Output format (default|json)" -r -a "default json"
@@ -460,6 +464,7 @@ complete -c kit -n "__fish_seen_subcommand_from checkout" -s b -d "Create a bran
 complete -c kit -n "__fish_seen_subcommand_from checkout" -s B -d "Create-or-reset a branch and switch to it" -r
 complete -c kit -n "__fish_seen_subcommand_from merge-base" -l is-ancestor -d "Test ancestry: exit 0/1, no output"
 complete -c kit -n "__fish_seen_subcommand_from rev-list" -l count -d "Print the number of commits"
+complete -c kit -n "__fish_seen_subcommand_from rev-list" -s n -l max-count -d "Limit number of commits" -r
 # New flags on existing commands.
 complete -c kit -n "__fish_seen_subcommand_from diff" -l exit-code -d "Exit 1 when there are differences"
 complete -c kit -n "__fish_seen_subcommand_from diff" -l quiet -d "Like --exit-code but print nothing"
