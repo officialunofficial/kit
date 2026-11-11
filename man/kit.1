@@ -284,7 +284,12 @@ reads object names from stdin (one per line) and emits a
 header plus the content for each
 .Pq Ql <name> missing No for unknown objects .
 .Ar object
-resolves through the shared revspec grammar.
+resolves through the shared revspec grammar, or as
+.Ar rev Ns : Ns Ar path ,
+the object at
+.Ar path
+in the tree of
+.Ar rev .
 .It Cm show Oo Fl Fl stat Oc Op Ar object ...
 Display objects, like
 .Xr git 1 Cm show ,
@@ -342,6 +347,11 @@ shows only those
 NUL-terminates records with raw paths.
 .It Cm rev-parse Oo Fl Fl short Ns Op = Ns Ar N Oc Oo Fl Fl abbrev-ref Oc Oo Fl Fl show-toplevel Oc Op Ar rev ...
 Resolve revisions to object ids.
+.Ar rev Ns : Ns Ar path
+names the object at
+.Ar path
+in the tree of
+.Ar rev .
 .Fl Fl short
 abbreviates (default 7, a BLAKE3 prefix);
 .Fl Fl abbrev-ref Cm HEAD

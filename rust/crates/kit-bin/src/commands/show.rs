@@ -10,6 +10,9 @@
 //! - **tree**: an `ls-tree`-style listing.
 //! - **blob**: the raw contents.
 //!
+//! An object named `<rev>:<path>` is the blob or tree at that path in the
+//! tree of `<rev>`.
+//!
 //! Like `kit log`, the commit/tag headers carry kit's signed `Identity`
 //! and 64-hex BLAKE3 ids, so the header lines diverge from git's
 //! `Author: Name <email>` / 40-hex form — the same documented divergence as
@@ -42,7 +45,8 @@ struct ShowOpts {
     #[arg(long)]
     stat: bool,
     /// Objects to show — revisions, refs, or hashes (e.g. `HEAD`, `main`,
-    /// `HEAD~2`, `<hash>`, `<tag>`). Defaults to `HEAD`.
+    /// `HEAD~2`, `<hash>`, `<tag>`), or `<rev>:<path>` for a file or
+    /// directory of a revision. Defaults to `HEAD`.
     objects: Vec<String>,
 }
 
@@ -69,7 +73,7 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut stdout = std::io::stdout().lock();
     for spec in &specs {
-        let h = match revspec::resolve_revision(repo.store(), repo.layout(), spec) {
+        let h = match revspec::resolve_object(repo.store(), repo.layout(), spec) {
             Ok(h) => h,
             Err(e) => return emit_err(&e.to_string(), exit::GENERAL_ERROR),
         };

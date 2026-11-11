@@ -513,7 +513,8 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   missing` for unknown objects); `<size>` is the byte length of the content
   that follows, so blobs are byte-exact with git while commit/tree content
   (and its size) is kit-shaped, as with `-p`. `<object>` resolves through
-  the shared revspec grammar (hash, ref, `HEAD`, `HEAD~n`/`^`).
+  the shared revspec grammar (hash, ref, `HEAD`, `HEAD~n`/`^`), or as
+  `<rev>:<path>`, the object at `<path>` in the tree of `<rev>`.
 - `kit show [--stat] [<object>...]` &mdash; display objects (like `git show`),
   defaulting
   to `HEAD`. A **commit**/**remix** prints a header (`commit <hash>`,
@@ -529,7 +530,8 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   header carries kit's signed `Identity` and 64-hex BLAKE3 ids, so those
   header lines diverge from git's `Author: Name <email>` / 40-hex form (the
   same documented divergence as `log`); the diff body, tree listing, and blob
-  output match git. `<object>` resolves through the revspec grammar.
+  output match git. `<object>` resolves through the revspec grammar, or as
+  `<rev>:<path>`: the blob or tree at `<path>` in the tree of `<rev>`.
 - `kit ls-tree [-r] [-z] <tree-ish> [<path>...]` &mdash; list a tree's entries
   as `<mode> <type> <hash>\t<name>` (git octal modes
   `100644`/`100755`/`120000`/`040000`; the hash is 64-hex BLAKE3). `-r`
@@ -552,7 +554,8 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   &mdash; resolve revisions to object ids. Bare `<rev>...` prints each resolved
   64-hex id; `--short[=N]` abbreviates (default 7, a BLAKE3 prefix);
   `--abbrev-ref HEAD` prints the current branch; kit always errors on an
-  unresolvable revision; `--show-toplevel` prints the
+  unresolvable revision; `<rev>:<path>` prints the id of the object at
+  `<path>` in the tree of `<rev>`; `--show-toplevel` prints the
   repository root (the directory holding `.kit`, found by walking up from
   cwd).
 - `kit rev-list [--count] <rev>` &mdash; list the commit ids reachable from

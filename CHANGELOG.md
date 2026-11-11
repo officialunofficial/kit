@@ -7,6 +7,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `show`, `cat-file` and `rev-parse` take `<rev>:<path>`, the object at
+  `<path>` in the tree of `<rev>`. `libkit::revspec::resolve_object`
+  resolves it. The path is relative, has at most 4096 bytes and has no
+  empty, `.` or `..` component. A missing path, a path through a file and a
+  malformed path are errors.
+
 ## [0.8.0] - 2026-11-10
 
 ### Added
