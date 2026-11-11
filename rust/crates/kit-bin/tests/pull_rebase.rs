@@ -1,5 +1,7 @@
-//! `kit pull --rebase` over a `kit+file://` remote: it fetches, then replays
-//! the current branch onto the fetched branch through the rebase machinery.
+//! `kit pull --rebase` and `kit pull --no-ff` over a `kit+file://` remote.
+//! `--rebase` fetches, then replays the current branch onto the fetched branch
+//! through the rebase machinery. `--no-ff` fetches, then merges the fetched
+//! branch and always writes a merge commit.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
@@ -213,7 +215,7 @@ fn pull_rebase_conflict_then_skip_drops_the_conflicting_commit() {
 }
 
 #[test]
-fn pull_rebase_does_not_combine_with_all_and_no_ff_is_unknown() {
+fn pull_rebase_does_not_combine_with_all_or_no_ff() {
     let fixture = fixture();
     for args in [
         &["pull", "--rebase", "--all"][..],
@@ -244,4 +246,105 @@ fn pull_rebase_refuses_a_detached_head() {
     let out = run_in(&fixture, &fixture.local, &["pull", "--rebase"]);
     assert_eq!(out.status.code(), Some(64), "{out:?}");
     assert!(!rebase_state(&fixture));
+}
+
+fn parents(fixture: &Fixture, spec: &str) -> Vec<String> {
+    let rev = format!("{spec}^");
+    [rev.clone() + "1", rev + "2"]
+        .iter()
+        .filter_map(|p| {
+            let out = run_in(fixture, &fixture.local, &["rev-parse", p]);
+            out.status
+                .success()
+                .then(|| String::from_utf8(out.stdout).unwrap().trim().to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn pull_no_ff_writes_a_merge_commit_where_a_fast_forward_is_possible() {
+    let fixture = fixture();
+    push_upstream(&fixture, "u.txt", "u\n", "u1");
+    let old = rev(&fixture, &fixture.local, "HEAD");
+
+    let out = run_in(&fixture, &fixture.local, &["pull", "--no-ff"]);
+    assert!(out.status.success(), "{out:?}");
+
+    let head = rev(&fixture, &fixture.local, "HEAD");
+    assert_ne!(head, old);
+    assert_eq!(
+        parents(&fixture, "HEAD"),
+        [old, rev(&fixture, &fixture.upstream, "HEAD")]
+    );
+    assert!(fixture.local.join("u.txt").exists());
+    assert_eq!(
+        subjects(&fixture)[0],
+        "Merge remote-tracking branch 'default/main'"
+    );
+    assert_verifies(&fixture, "HEAD");
+}
+
+#[test]
+fn pull_no_ff_merges_diverged_branches() {
+    let fixture = fixture();
+    push_upstream(&fixture, "u.txt", "u\n", "u1");
+    commit_local(&fixture, "l1.txt", "1\n", "l1");
+
+    ok_in(&fixture, &fixture.local, &["pull", "--no-ff"]);
+
+    assert_eq!(parents(&fixture, "HEAD").len(), 2);
+    for file in ["u.txt", "l1.txt"] {
+        assert!(fixture.local.join(file).exists(), "{file}");
+    }
+    assert_verifies(&fixture, "HEAD");
+}
+
+#[test]
+fn pull_no_ff_changes_nothing_when_the_branch_holds_the_fetched_tip() {
+    let fixture = fixture();
+    commit_local(&fixture, "l1.txt", "1\n", "l1");
+    let old = rev(&fixture, &fixture.local, "HEAD");
+
+    let out = run_in(&fixture, &fixture.local, &["pull", "--no-ff"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("Already up to date.")
+    );
+    assert_eq!(rev(&fixture, &fixture.local, "HEAD"), old);
+}
+
+#[test]
+fn pull_no_ff_conflict_pauses_the_merge_then_continue_finishes() {
+    let fixture = fixture();
+    push_upstream(&fixture, "shared.txt", "upstream\n", "u1");
+    commit_local(&fixture, "shared.txt", "local\n", "l1");
+
+    let out = run_in(&fixture, &fixture.local, &["pull", "--no-ff"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Merge conflict in shared.txt"), "{stderr}");
+
+    fs::write(fixture.local.join("shared.txt"), "resolved\n").unwrap();
+    ok_in(&fixture, &fixture.local, &["add", "shared.txt"]);
+    ok_in(&fixture, &fixture.local, &["merge", "--continue"]);
+    assert_eq!(parents(&fixture, "HEAD").len(), 2);
+    assert_verifies(&fixture, "HEAD");
+}
+
+#[test]
+fn pull_no_ff_does_not_combine_with_all() {
+    let fixture = fixture();
+    let out = run_in(&fixture, &fixture.local, &["pull", "--no-ff", "--all"]);
+    assert_eq!(out.status.code(), Some(64), "{out:?}");
+}
+
+#[test]
+fn pull_no_ff_refuses_a_detached_head() {
+    let fixture = fixture();
+    let head = rev(&fixture, &fixture.local, "HEAD");
+    ok_in(&fixture, &fixture.local, &["checkout", &head]);
+    let out = run_in(&fixture, &fixture.local, &["pull", "--no-ff"]);
+    assert_eq!(out.status.code(), Some(64), "{out:?}");
 }

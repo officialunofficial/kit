@@ -391,6 +391,14 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `/` from the left. `--unset-upstream` removes those keys from `.kit/config`
   only. A user-scoped value stays. Git also accepts a local branch as an
   upstream. kit does not.
+- **`pull --no-ff`.** `pull --no-ff` fetches, then merges the tip of the
+  fetched branch as `merge` does, and writes a merge commit even when a
+  fast-forward is possible. The message is `Merge remote-tracking branch
+  '<remote>/<branch>'`. A branch that holds the fetched tip prints `Already up
+  to date.` and gets no commit. A conflict leaves the state of `merge`, and
+  `merge --continue` and `--abort` finish it. `--no-ff` does not combine with
+  `--all` or `--rebase`, needs a branch `HEAD` with a commit, and ignores
+  `pull.ff`. `--format=json` prints the object of `merge`.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -422,9 +430,9 @@ kit does not implement these flags. A command with a missing flag is
 
 - `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
   tags.
-- `pull --no-ff` &mdash; kit rejects the flag. `pull` never creates a merge
-  commit.
-- `rebase -i` `edit` &mdash; the todo action is not available.
+- `rebase -i` `edit` &mdash; the todo action is not available. The `actions`
+  file of a paused rebase holds a closed list of keywords, and a new keyword
+  would change that state format.
 - `stash push -u` / `--include-untracked` and `stash push <pathspec>` &mdash;
   kit rejects each form. `stash` always saves the whole working tree.
 - `checkout <rev> -- <path>` &mdash; kit rejects it as a usage error. Use

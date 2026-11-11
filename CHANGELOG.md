@@ -10,6 +10,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `kit stash push [-m <message>]` is another name for `kit stash save`.
+- `kit pull --no-ff` fetches, then merges the fetched branch and always writes
+  a merge commit, even when a fast-forward is possible. A conflict leaves the
+  state of `merge`. It does not combine with `--all` or `--rebase`.
+  `libkit::merge::Request` has a `no_ff` field.
 - `kit pull --rebase` fetches with the usual signature checks, then replays
   the current branch onto the fetched branch through the code of `rebase`. A
   conflict leaves the state of `rebase`, and `--continue`, `--skip` and

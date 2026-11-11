@@ -122,6 +122,9 @@ pub struct Request<'a> {
     /// Stage the merged tree and record the merge, but write no commit. A
     /// fast-forward ignores this.
     pub no_commit: bool,
+    /// Write a merge commit even when `HEAD` is an ancestor of the target and
+    /// a fast-forward is possible.
+    pub no_ff: bool,
     /// The message of the merge commit. Without it the message is
     /// `Merge branch '<target>'`, or `Merge remote-tracking branch
     /// '<remote>/<branch>'` for a remote-tracking ref.
@@ -223,7 +226,7 @@ pub fn start(
         other => Error::History(other),
     })?;
 
-    if base == Some(ours) {
+    if base == Some(ours) && !request.no_ff {
         let theirs_tree = commit_tree(store, theirs)?;
         ensure_restore_safe(layout, store, theirs_tree).map_err(Error::Worktree)?;
         restore_worktree_and_index(layout, store, theirs_tree).map_err(Error::Worktree)?;
