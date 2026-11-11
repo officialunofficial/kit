@@ -338,10 +338,6 @@ kit does not implement these flags. A command with a missing flag is
 
 - `log --decorate` / `--all` / `--graph` &mdash; kit rejects each flag as an
   unknown argument.
-- `branch -r` / `-a` / `-u` / `--unset-upstream` &mdash; no remote-tracking
-  listing and no upstream setting.
-- `log -p` / `--stat` / `--decorate` / `--all` / `--graph` &mdash; kit rejects
-  each flag as an unknown argument.
 - `branch -u` / `--unset-upstream` &mdash; kit has no upstream setting
   on `branch`. `push -u` sets one.
 - `add -n` / `--dry-run` &mdash; kit rejects the flag.
