@@ -72,6 +72,14 @@ pub use self::__buffa::view::UpdateRefResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::UpdateRefResponseOwnedView;
 #[doc(inline)]
+pub use self::__buffa::view::ReadRepoCursorView;
+#[doc(inline)]
+pub use self::__buffa::view::ReadRepoCursorOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ReadRepoCursorResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::ReadRepoCursorResponseOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::PackExistsView;
 #[doc(inline)]
 pub use self::__buffa::view::PackExistsOwnedView;

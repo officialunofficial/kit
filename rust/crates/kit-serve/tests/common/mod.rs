@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use kit_core::hash::{Hash, hash};
 use kit_rpc::kit::common::v1::RefExpectation;
 use kit_rpc::kit::rpc::v1::ssh::{
-    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame, UpdateRef, UploadPack,
-    ssh_frame,
+    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, ReadRepoCursor, SshFrame,
+    UpdateRef, UploadPack, ssh_frame,
 };
 use kit_rpc::kit::rpc::v1::{Error as RpcError, ErrorCode, ProtocolVersion};
 use kit_serve::{
@@ -257,6 +257,10 @@ pub fn list_refs(prefix: Option<&str>) -> Option<Body> {
     Some(Body::ListRefs(Box::new(req)))
 }
 
+pub fn read_repo_cursor() -> Option<Body> {
+    Some(Body::ReadRepoCursor(Box::<ReadRepoCursor>::default()))
+}
+
 pub fn exists(id: &[u8]) -> Option<Body> {
     let req = PackExists::default().with_pack_id(id.to_vec());
     Some(Body::PackExists(Box::new(req)))
@@ -285,6 +289,31 @@ pub fn valid_pack() -> (Vec<u8>, Hash) {
     let bytes = b"valid pack bytes".to_vec();
     let id = hash(&bytes);
     (bytes, id)
+}
+
+/// The cursor of a `ReadRepoCursorResponse`, or `None` when the reply holds
+/// none.
+#[track_caller]
+pub fn reply_cursor(f: &SshFrame) -> Option<Vec<u8>> {
+    match &f.body {
+        Some(Body::ReadRepoCursorResponse(r)) => r.cursor.clone(),
+        other => panic!("expected ReadRepoCursorResponse, got {other:?}"),
+    }
+}
+
+/// Set the modification time of the directory `dir` and of every directory
+/// below it to `when`.
+pub fn stamp_dirs(dir: &Path, when: std::time::SystemTime) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            stamp_dirs(&path, when);
+        }
+    }
+    std::fs::File::open(dir)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
 }
 
 /// The names of a `ListRefsResponse`.

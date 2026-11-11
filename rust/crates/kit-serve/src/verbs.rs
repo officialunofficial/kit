@@ -13,6 +13,7 @@
 //! | `UpdateRef` | the write policy refuses the session | `INVALID_REQUEST "write not permitted"` |
 //! | `UpdateRef` | any other | `INVALID_REQUEST "update ref failed"` |
 //! | `ListRefs` | any | `INTERNAL "list refs failed"` |
+//! | `ReadRepoCursor` | any | a reply with no cursor |
 //! | `DownloadPack` | any, before the header | `KEY_NOT_FOUND "pack not found"` |
 //! | `DownloadPack` | a read, after the header | `INTERNAL "pack read failed"` |
 //! | `UploadPack` | the write policy refuses the session | `INVALID_REQUEST "write not permitted"` |
@@ -29,7 +30,7 @@ use kit_core::refs::{RefWriteCondition, validate_ref_name};
 use kit_rpc::kit::common::v1::RefEntry;
 use kit_rpc::kit::rpc::v1::ssh::{
     DownloadPack, DownloadPackHeader, ListRefsResponse, PackChunk, PackExistsResponse,
-    ReadRefResponse, UpdateRef, UploadPack, UploadPackResponse, ssh_frame,
+    ReadRefResponse, ReadRepoCursorResponse, UpdateRef, UploadPack, UploadPackResponse, ssh_frame,
 };
 use kit_rpc::kit::rpc::v1::{Error as RpcError, ErrorCode};
 
@@ -189,8 +190,18 @@ impl<'r> Verbs<'r> {
             Body::ReadRef(req) => self.read_ref(req.name.as_deref().unwrap_or_default()),
             Body::UpdateRef(req) => self.update_ref(req),
             Body::ListRefs(req) => self.list_refs(req.prefix.as_deref().unwrap_or_default()),
+            Body::ReadRepoCursor(_) => Ok(self.read_repo_cursor()),
             _ => return None,
         })
+    }
+
+    /// `ReadRepoCursor` (SPEC-TRANSPORT §1.2): the cursor of the repository,
+    /// or a reply that holds none.
+    fn read_repo_cursor(&self) -> Body {
+        Body::ReadRepoCursorResponse(Box::new(ReadRepoCursorResponse {
+            cursor: self.repo.repo_cursor().map(|c| c.as_bytes().to_vec()),
+            ..Default::default()
+        }))
     }
 
     fn read_ref(&self, name: &str) -> Result<Body, VerbError> {

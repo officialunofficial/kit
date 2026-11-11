@@ -418,6 +418,8 @@ The boot id changes on every boot, so a count lost in a crash never makes a
 cursor repeat. Where the system offers no boot id, the transport offers no
 cursor.
 
+`kit serve` returns this cursor to an ssh client (SPEC-TRANSPORT §4.2.2).
+
 The cursor also covers the path, inode number, modification time and change
 time of every directory under `<root>/refs`, read under the same shared repo
 lock, without reading any ref file. A rename or unlink in a directory changes

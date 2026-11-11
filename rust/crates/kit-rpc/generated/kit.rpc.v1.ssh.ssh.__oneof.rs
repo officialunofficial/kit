@@ -23,6 +23,10 @@ pub mod ssh_frame {
         UpdateRefResponse(
             ::buffa::alloc::boxed::Box<super::super::super::UpdateRefResponse>,
         ),
+        ReadRepoCursor(::buffa::alloc::boxed::Box<super::super::super::ReadRepoCursor>),
+        ReadRepoCursorResponse(
+            ::buffa::alloc::boxed::Box<super::super::super::ReadRepoCursorResponse>,
+        ),
         PackExists(::buffa::alloc::boxed::Box<super::super::super::PackExists>),
         PackExistsResponse(
             ::buffa::alloc::boxed::Box<super::super::super::PackExistsResponse>,
@@ -135,6 +139,27 @@ pub mod ssh_frame {
     }
     impl From<super::super::super::UpdateRefResponse> for ::core::option::Option<Body> {
         fn from(v: super::super::super::UpdateRefResponse) -> Self {
+            Self::Some(Body::from(v))
+        }
+    }
+    impl From<super::super::super::ReadRepoCursor> for Body {
+        fn from(v: super::super::super::ReadRepoCursor) -> Self {
+            Self::ReadRepoCursor(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::ReadRepoCursor> for ::core::option::Option<Body> {
+        fn from(v: super::super::super::ReadRepoCursor) -> Self {
+            Self::Some(Body::from(v))
+        }
+    }
+    impl From<super::super::super::ReadRepoCursorResponse> for Body {
+        fn from(v: super::super::super::ReadRepoCursorResponse) -> Self {
+            Self::ReadRepoCursorResponse(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::ReadRepoCursorResponse>
+    for ::core::option::Option<Body> {
+        fn from(v: super::super::super::ReadRepoCursorResponse) -> Self {
             Self::Some(Body::from(v))
         }
     }

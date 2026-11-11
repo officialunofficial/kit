@@ -2,9 +2,10 @@
 //! file is a script of frames. Each output file is what the server wrote,
 //! byte for byte, with the version in the only frame that names it.
 //!
-//! Sessions 1 and 2 ran against a repository with open writes. Session 3
+//! Sessions 1, 2 and 4 ran against a repository with open writes. Session 3
 //! ran against a repository that only its owner may write, as a session
-//! without the owner key.
+//! without the owner key. Session 4 reads the repository cursor of a
+//! repository that offers none for the read.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
 
 mod common;
@@ -24,6 +25,8 @@ const SESSION_2_IN: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/sess
 const SESSION_2_OUT: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-2.bin");
 const SESSION_3_IN: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-3.in.bin");
 const SESSION_3_OUT: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-3.bin");
+const SESSION_4_IN: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-4.in.bin");
+const SESSION_4_OUT: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-4.bin");
 
 fn encode(bodies: Vec<Option<Body>>) -> Vec<u8> {
     let mut input = Vec::new();
@@ -286,6 +289,33 @@ fn session_3_refuses_a_session_that_is_not_the_owner() {
         Some(ref_id)
     );
     assert!(!fx.pack_present(pack_id));
+}
+
+/// Session 4 asks for the repository cursor, lists the refs and asks again.
+/// The cursor of a repository depends on the machine: its random id, the
+/// boot id and the file times. A ref directory that was modified in the
+/// future makes the repository offer none, so each reply holds no cursor on
+/// every system. The reply that carries a cursor is covered by
+/// `a_cursor_request_returns_the_cursor_of_the_repository`.
+#[test]
+fn session_4_matches_the_capture() {
+    let input = encode(vec![
+        hello(),
+        read_repo_cursor(),
+        list_refs(None),
+        read_repo_cursor(),
+        close(),
+    ]);
+    assert_eq!(
+        input, SESSION_4_IN,
+        "the builder must produce the captured script"
+    );
+
+    let fx = Fixture::new();
+    fx.seed(&[("refs/heads/main", [0x11; 32])], &[]);
+    let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    stamp_dirs(&fx.root().join("refs"), ahead);
+    assert_same(&replay(&fx, None, &input), SESSION_4_OUT);
 }
 
 #[test]

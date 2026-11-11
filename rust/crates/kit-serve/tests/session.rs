@@ -1011,3 +1011,116 @@ fn read_frames_maps_framing_errors() {
         "frame parse error",
     );
 }
+
+// ------------------------------------------------------------ repo cursor
+
+const BRANCH: &str = "refs/heads/main";
+
+/// Whether this system lets the file transport offer a cursor.
+const OFFERS_CURSOR: bool = cfg!(target_os = "linux");
+
+/// The cursor that a fresh session reads.
+fn read_cursor(fx: &Fixture) -> Option<Vec<u8>> {
+    let (end, frames) = fx.run([read_repo_cursor()]);
+    assert_eq!(end, SessionEnd::Clean);
+    assert_eq!(frames.len(), 1);
+    reply_cursor(&frames[0])
+}
+
+/// [`read_cursor`] after the ref directories were made old enough to trust.
+/// Stamping a directory changes its change time, so the cursor of a
+/// repository differs before and after.
+fn settled_cursor(fx: &Fixture) -> Option<Vec<u8>> {
+    let hour = std::time::Duration::from_secs(3600);
+    stamp_dirs(&fx.root().join("refs"), std::time::SystemTime::now() - hour);
+    read_cursor(fx)
+}
+
+#[test]
+fn a_cursor_request_returns_the_cursor_of_the_repository() {
+    let fx = Fixture::new();
+    fx.seed(&[(BRANCH, [1; 32]), ("refs/heads/dev", [2; 32])], &[]);
+    let first = settled_cursor(&fx);
+    assert_eq!(first.is_some(), OFFERS_CURSOR);
+    if let Some(cursor) = &first {
+        assert!((1..=64).contains(&cursor.len()));
+    }
+    // Nothing changed: the same cursor, for this session and the next.
+    assert_eq!(read_cursor(&fx), first);
+    let (_, frames) = fx.run([read_repo_cursor(), read_repo_cursor()]);
+    assert_eq!(reply_cursor(&frames[0]), reply_cursor(&frames[1]));
+
+    // A write through a session changes it.
+    let (_, frames) = fx.run([update(BRANCH, &[3; 32], Some(RefExpectation::Any), None)]);
+    assert!(matches!(frames[0].body, Some(Body::UpdateRefResponse(_))));
+    let second = settled_cursor(&fx);
+    assert_eq!(second.is_some(), OFFERS_CURSOR);
+    assert!(!OFFERS_CURSOR || second != first);
+
+    // So does a write by another writer, here the file transport.
+    FileTransport::new(fx.root())
+        .update_ref("refs/heads/other", RefWriteCondition::Any, &[4; 32])
+        .unwrap();
+    let third = settled_cursor(&fx);
+    assert_eq!(third.is_some(), OFFERS_CURSOR);
+    assert!(!OFFERS_CURSOR || third != second);
+}
+
+#[test]
+fn a_cursor_request_reads_and_writes_no_ref_or_pack() {
+    let fx = Fixture::new();
+    let (bytes, _) = valid_pack();
+    fx.seed(&[(BRANCH, [1; 32])], &[&bytes]);
+    let state = |fx: &Fixture| -> Vec<_> {
+        fx.files()
+            .into_iter()
+            .filter(|p| p.starts_with("refs") || p.starts_with("packs"))
+            .map(|p| (std::fs::read(fx.root().join(&p)).unwrap(), p))
+            .collect()
+    };
+    let held = state(&fx);
+    let _ = settled_cursor(&fx);
+    assert_eq!(state(&fx), held);
+}
+
+#[test]
+fn a_fresh_ref_directory_withholds_the_cursor() {
+    let fx = Fixture::new();
+    fx.seed(&[(BRANCH, [1; 32])], &[]);
+    let hour = std::time::Duration::from_secs(3600);
+    stamp_dirs(&fx.root().join("refs"), std::time::SystemTime::now() + hour);
+    let (end, frames) = fx.run([read_repo_cursor()]);
+    assert_eq!(end, SessionEnd::Clean);
+    assert_eq!(reply_cursor(&frames[0]), None);
+}
+
+#[test]
+fn a_session_that_cannot_write_reads_the_cursor() {
+    let fx = Fixture::with_policy(kit_serve::WritePolicy::ReadOnly);
+    FileTransport::new(fx.root())
+        .update_ref(BRANCH, RefWriteCondition::Any, &[1; 32])
+        .unwrap();
+    assert_eq!(settled_cursor(&fx).is_some(), OFFERS_CURSOR);
+}
+
+/// A server that predates `ReadRepoCursor` reads the frame as one whose body
+/// it does not know: the same bytes as a frame that holds only an unknown
+/// field. The answer is `INVALID_REQUEST`, and the session goes on. A client
+/// that gets it offers no cursor.
+#[test]
+fn an_unknown_request_is_invalid_and_the_session_goes_on() {
+    let fx = Fixture::new();
+    fx.seed(&[(BRANCH, [1; 32])], &[]);
+    let mut input = Vec::new();
+    kit_rpc::write_frame(&mut input, &frame(hello())).unwrap();
+    // Field 30, length-delimited, empty: no `SshFrame` body has this number.
+    input.extend_from_slice(&[3, 0, 0, 0, 0xf2, 0x01, 0x00]);
+    kit_rpc::write_frame(&mut input, &frame(list_refs(None))).unwrap();
+    let mut src = ReadFrames(std::io::Cursor::new(input));
+    let mut sink = VecSink::default();
+    let cfg = SessionConfig::new(SERVER_ID);
+    let end = serve_session(&fx.repo, None, &mut src, &mut sink, &cfg);
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(&sink.frames[1], ErrorCode::InvalidRequest, "empty frame");
+    assert_eq!(listed_names(&sink.frames[2]), ["refs/heads/main"]);
+}

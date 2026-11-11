@@ -47,9 +47,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cursor too (SPEC-REFS §5.1.2). It offers none while a ref directory was
   modified in the last 2 s. On one ext4 disk, a fetch of an unchanged
   `kit+file://` remote with 10,000 branches takes one request and about
-  23 ms; it took 20,001 requests before. The SSH, S3 and Connect transports
-  offer no cursor, and neither does the file transport on other systems: a
-  fetch there works as before.
+  23 ms; it took 20,001 requests before. The SSH transport offers the cursor
+  of the repository that `kit serve` serves, through a new `ReadRepoCursor`
+  request (SPEC-TRANSPORT §4.2.2). A fetch of an unchanged `kit+ssh://`
+  remote takes that one request, and the 4,999-branch limit of a session does
+  not apply to it. A client that talks to an older server, and an older client
+  that talks to this server, work as before. The S3 and Connect transports
+  offer no cursor, and neither does the file transport, or `kit serve` over
+  it, on other systems: a fetch there works as before.
 - FastCDC v2 (SPEC-FASTCDC §11, draft): spread masks at normalization
   level 2 over the v1 gear table and sizes. A v2 manifest carries
   `chunk_size = 0x8000_0002`. kit-core exposes it through

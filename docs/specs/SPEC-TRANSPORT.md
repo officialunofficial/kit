@@ -133,8 +133,11 @@ no record matches it, checks the closure and fetches the chain again.
 
 **Reference-server behavior.** The memory transport's cursor is a number
 unique to the instance and the count of its committed ref writes. The file
-transport's is described in SPEC-REFS §5.1.2. The SSH, S3 and Connect
-transports offer none: their wire carries no cursor yet.
+transport's is described in SPEC-REFS §5.1.2. The SSH transport offers the
+cursor of the transport that `kit serve` serves (§4.2.2), so it offers one
+exactly when the file transport does and a server that knows the request
+answers. The S3 and Connect transports offer none: their wire carries no
+cursor yet.
 
 ## 2. Error taxonomy
 
@@ -242,7 +245,7 @@ server → client:    HelloResponse { proto, server_id }
                       OR
                     Error
 
-client → server:    one of: ListRefs, ReadRef, UpdateRef,
+client → server:    one of: ListRefs, ReadRef, UpdateRef, ReadRepoCursor,
                             PackExists, UploadPack (+ PackChunks),
                             DownloadPack, Close
 server → client:    matching *Response, OR Error
@@ -322,6 +325,58 @@ not as a client-consumed protocol value; a future revision MAY define
 a structured, non-opaque field for this if a real need for it emerges,
 rather than asking clients to parse an "opaque" field.
 
+#### 4.2.2 `ReadRepoCursor` request
+
+`ReadRepoCursor` asks for the repository cursor (§1.2). The request holds no
+field. The reply is `ReadRepoCursorResponse`, which has one optional field,
+`cursor`:
+
+| Reply | Meaning |
+|---|---|
+| `ReadRepoCursorResponse { cursor }`, 1 to 64 bytes | The cursor of the served repository. |
+| `ReadRepoCursorResponse {}`, no `cursor` field | The repository offers none for this read. |
+
+The request and the reply are new oneof variants of `SshFrame` (field numbers
+16 and 17), which SPEC-RPC §2 allows in v1. No existing field, number or
+frame changes.
+
+**Server.** A server returns the cursor of the transport that it serves, as
+that transport defines it (§1.2). `kit serve` serves the file transport, so
+the cursor is the one of SPEC-REFS §5.1.2, with the same rule for the 2 s
+window, a system without a boot id and a root that has too many directories.
+A server that cannot vouch for the cursor at that moment, or fails to read
+it, sends a reply with no `cursor` field and never an invented value. The
+request reads no ref. It takes the repo lock and the stripe locks shared, as
+SPEC-REFS §5.1.2 says. A session that may not write may send it, and it
+changes no ref or pack. It reads only the repository. Its answer does not
+depend on any session, so one client's request cannot change another's
+answer. It costs one frame of the per-connection budget (§4.4).
+
+**Client.** The client sends the request once per fetch, before it lists the
+refs (§1.2). It treats the reply strictly:
+
+- A `cursor` field of 0 bytes or of more than 64 bytes is a protocol error,
+  not "no cursor". The client checks the length against the bound of §1.2
+  before it copies the bytes. The frame cap of SPEC-RPC §1 bounds the frame
+  before that.
+- A reply that holds a field other than `cursor` is a protocol error.
+- Any frame but `ReadRepoCursorResponse` and `Error` is a protocol error.
+- An `Error` with `ERROR_CODE_INVALID_REQUEST` means that the server does not
+  know the request, as SPEC-RPC §2 says, so the client offers no cursor and
+  does its full work. Any other `Error` is an error.
+
+**Older peers.** A client that predates the request never sends it, so a new
+server serves it as before, and the golden sessions 1 to 3 are unchanged. A
+server that predates the request answers the unknown body with `Error {
+ERROR_CODE_INVALID_REQUEST }` and keeps the session open, so the client
+offers no cursor and its fetch works as it did. The failed request costs one
+frame of the budget. Neither side needs a version or a capability field.
+
+**Trust.** A client takes the cursor from the server, as it takes the ref
+listing. A server that holds back a changed cursor can equally hold back a
+changed ref. The fetch verifies every object and signature it applies, so a
+stale cursor can only leave the client at a state the server once offered.
+
 ### 4.3 Trust model
 
 SSH transport security is delegated to the user's `ssh(1)` CLI:
@@ -370,6 +425,11 @@ branch changed: the SSH transport names no repository, so a fetch keeps no
 per-branch checkpoint for it and walks each packmap chain again. With one node
 per packmap chain that is one frame plus two per branch, so one session fetches
 at most 4,999 branches; a fetch of more fails closed with the reply above.
+When the served repository offers a cursor (§4.2.2), a fetch that finds the
+cursor it recorded after its last complete fetch costs one frame, the
+`ReadRepoCursor` request, and the 4,999-branch limit does not apply to it. A
+fetch that finds another cursor, or none, works as above. A server that
+predates the request makes every fetch work as above, plus one frame.
 `kit fetch`, `kit pull` and `kit clone` open one session each. A push walks
 the branch's whole packmap chain over its session. A push re-baselines the
 chain (§7.2), so the walk stays within the re-baseline depth while one node

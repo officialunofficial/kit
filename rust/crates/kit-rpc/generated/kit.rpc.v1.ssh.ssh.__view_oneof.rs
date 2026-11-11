@@ -56,6 +56,16 @@ pub mod ssh_frame {
                 super::super::super::super::__buffa::view::UpdateRefResponseView<'a>,
             >,
         ),
+        ReadRepoCursor(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::ReadRepoCursorView<'a>,
+            >,
+        ),
+        ReadRepoCursorResponse(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::ReadRepoCursorResponseView<'a>,
+            >,
+        ),
         PackExists(
             ::buffa::alloc::boxed::Box<
                 super::super::super::super::__buffa::view::PackExistsView<'a>,

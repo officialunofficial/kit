@@ -50,7 +50,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use kit_core::hash::Hash;
-use kit_core::protocol::{BackoffIterator, PackKey, Transport, TransportError, TransportResult};
+use kit_core::protocol::{
+    BackoffIterator, PackKey, RepoCursor, Transport, TransportError, TransportResult,
+};
 // Aliased: `kit_rpc::kit::rpc::v1::ssh::PackChunk` (the wire protobuf
 // message) is imported unaliased below for the existing frame-building
 // code; `CorePackChunk` is the transport-agnostic streaming type the
@@ -58,11 +60,11 @@ use kit_core::protocol::{BackoffIterator, PackKey, Transport, TransportError, Tr
 // methods speak.
 use kit_core::protocol::PackChunk as CorePackChunk;
 use kit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
-use kit_rpc::kit::rpc::v1::ProtocolVersion;
 use kit_rpc::kit::rpc::v1::ssh::{
-    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame, UpdateRef, UploadPack,
-    ssh_frame,
+    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, ReadRepoCursor, SshFrame,
+    UpdateRef, UploadPack, ssh_frame,
 };
+use kit_rpc::kit::rpc::v1::{ErrorCode, ProtocolVersion};
 use kit_rpc::{
     CHUNK_DATA_MAX, FrameError, MAX_REF_NAME, body_name, cond_to_wire, list_response_refs,
     map_update_ref_error, read_frame, rpc_error_to_transport, unexpected_frame, write_frame,
@@ -329,6 +331,22 @@ impl Drop for SshTransport {
 }
 
 impl Transport for SshTransport {
+    /// Ask the server for its repository cursor (SPEC-TRANSPORT §4.2.2). A
+    /// server that predates the request answers `INVALID_REQUEST` and the
+    /// transport offers none.
+    fn repo_cursor(&self) -> TransportResult<Option<RepoCursor>> {
+        self.with_retry(|io| {
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::ReadRepoCursor(
+                    Box::<ReadRepoCursor>::default(),
+                )),
+                ..Default::default()
+            };
+            write_child_frame_or_err(io, req)?;
+            cursor_from_reply(read_child_frame_or_err(io)?.body)
+        })
+    }
+
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
         self.with_retry(|io| {
             // Header frame announces the pack id + advertised total length.
@@ -626,6 +644,36 @@ impl Transport for SshTransport {
 // Helpers (transport-ssh-specific I/O wrappers; shared frame helpers
 // live in `kit_rpc::helpers`)
 // ---------------------------------------------------------------------------
+
+/// The cursor in the reply to `ReadRepoCursor` (SPEC-TRANSPORT §4.2.2).
+///
+/// `INVALID_REQUEST` is how a server that predates the request answers any
+/// frame it does not know (SPEC-RPC §2), so it means no cursor. Any other
+/// error, any other frame, a field the reply should not hold and a cursor
+/// that is empty or over [`kit_core::protocol::REPO_CURSOR_MAX_LEN`] bytes
+/// are errors, never "no cursor".
+///
+/// # Errors
+/// [`TransportError::InvalidResponse`] for a reply that holds an unknown
+/// field or a cursor of the wrong length, the transport error of any other
+/// server error, and [`TransportError::RemoteError`] for any other frame.
+pub fn cursor_from_reply(body: Option<ssh_frame::Body>) -> TransportResult<Option<RepoCursor>> {
+    match body {
+        Some(ssh_frame::Body::ReadRepoCursorResponse(r)) => {
+            if !r.__buffa_unknown_fields.is_empty() {
+                return Err(TransportError::InvalidResponse);
+            }
+            r.cursor.as_deref().map(RepoCursor::new).transpose()
+        }
+        Some(ssh_frame::Body::Error(e))
+            if e.code.is_some_and(|c| c == ErrorCode::InvalidRequest) =>
+        {
+            Ok(None)
+        }
+        Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
+        other => Err(unexpected_frame("ssh", "ReadRepoCursorResponse", other)),
+    }
+}
 
 /// Assemble the response side of `download_pack` from a frame source.
 ///
@@ -1556,12 +1604,84 @@ mod tests {
         s
     }
 
+    fn cursor_reply(cursor: Option<Vec<u8>>) -> ssh_frame::Body {
+        let r = kit_rpc::kit::rpc::v1::ssh::ReadRepoCursorResponse {
+            cursor,
+            ..Default::default()
+        };
+        ssh_frame::Body::ReadRepoCursorResponse(Box::new(r))
+    }
+
+    fn error_reply(code: ErrorCode) -> ssh_frame::Body {
+        let e = kit_rpc::kit::rpc::v1::Error::default()
+            .with_code(code)
+            .with_message("empty frame");
+        ssh_frame::Body::Error(Box::new(e))
+    }
+
+    #[test]
+    fn cursor_reply_holds_a_cursor_or_none() {
+        for len in [1, 16, 32, 64] {
+            let got = cursor_from_reply(Some(cursor_reply(Some(vec![7; len])))).unwrap();
+            assert_eq!(got.unwrap().as_bytes(), &vec![7; len][..]);
+        }
+        assert_eq!(cursor_from_reply(Some(cursor_reply(None))).unwrap(), None);
+    }
+
+    #[test]
+    fn cursor_reply_rejects_a_cursor_of_the_wrong_length() {
+        for len in [0, 65, 1000] {
+            assert!(matches!(
+                cursor_from_reply(Some(cursor_reply(Some(vec![7; len])))),
+                Err(TransportError::InvalidResponse)
+            ));
+        }
+    }
+
+    #[test]
+    fn cursor_reply_rejects_a_field_it_does_not_define() {
+        // Field 2 after a valid cursor: a trailing field, not "a cursor".
+        let bytes = [0x0a, 0x01, 0x07, 0x12, 0x01, 0x00];
+        let r = <kit_rpc::kit::rpc::v1::ssh::ReadRepoCursorResponse as buffa::Message>::decode_from_slice(
+            &bytes,
+        )
+        .unwrap();
+        assert!(matches!(
+            cursor_from_reply(Some(ssh_frame::Body::ReadRepoCursorResponse(Box::new(r)))),
+            Err(TransportError::InvalidResponse)
+        ));
+    }
+
+    #[test]
+    fn cursor_reply_of_a_server_that_predates_the_request_is_none() {
+        // SPEC-RPC section 2: such a server answers a body it does not know
+        // with INVALID_REQUEST. Any other error and any other frame is an
+        // error, never "no cursor".
+        assert_eq!(
+            cursor_from_reply(Some(error_reply(ErrorCode::InvalidRequest))).unwrap(),
+            None
+        );
+        for code in [ErrorCode::Internal, ErrorCode::KeyNotFound] {
+            assert!(cursor_from_reply(Some(error_reply(code))).is_err());
+        }
+        for body in [
+            None,
+            Some(ssh_frame::Body::UpdateRefResponse(Box::default())),
+            Some(ssh_frame::Body::ListRefsResponse(Box::default())),
+        ] {
+            assert!(matches!(
+                cursor_from_reply(body),
+                Err(TransportError::RemoteError(_))
+            ));
+        }
+    }
+
     #[test]
     fn body_name_covers_every_oneof_variant() {
         // Every `ssh_frame::Body` oneof variant, pinned to its exact
         // `body_name` string. If the proto adds a variant and
         // `body_name` isn't updated, the new arm falls through to
-        // `"(empty body)"` — exhaustively listing all 17 variants here
+        // `"(empty body)"` — exhaustively listing all 19 variants here
         // (plus `None`) means a forgotten arm shows up as a wrong
         // string on an EXISTING case only if it collides; the real
         // guard is that adding a variant to the match in `body_name`
@@ -1597,6 +1717,14 @@ mod tests {
         assert_eq!(
             body_name(&Some(Body::UpdateRefResponse(Box::default()))),
             "update_ref_response"
+        );
+        assert_eq!(
+            body_name(&Some(Body::ReadRepoCursor(Box::default()))),
+            "read_repo_cursor"
+        );
+        assert_eq!(
+            body_name(&Some(Body::ReadRepoCursorResponse(Box::default()))),
+            "read_repo_cursor_response"
         );
         assert_eq!(
             body_name(&Some(Body::PackExists(Box::default()))),
