@@ -267,7 +267,7 @@ History / commits:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
   "is_merge":<bool>,"is_root":<bool>}`.
-- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [-n N] [<rev> | <A>..<B> | <A>...<B>]` &mdash; show
+- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [--graph] [-n N] [--all | <rev> | <A>..<B> | <A>...<B>]` &mdash; show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -296,6 +296,28 @@ History / commits:
   `--oneline` the diff follows the one-line header directly. `-p` and
   `--stat` exclude each other and `--format=json`; each is a usage error
   (exit `64`). A blob that cannot be read ends the output with an error.
+  `--all` starts the walk at `HEAD`, every local branch, every
+  remote-tracking ref and every tag, each followed to its commit. A commit
+  shows once, in the order above. A ref that ends at an object that is not a
+  commit is left out. `--all` together with a revision or a range is a usage
+  error (exit `64`).
+  `--decorate` prints the refs that name a commit after its id, in
+  parentheses: `commit <id> (HEAD -> main, tag: v1, origin/main)`, and
+  `<id> (HEAD -> main, tag: v1, origin/main) <title>` with `--oneline`. The
+  order is `HEAD`, the local branches, the tags, then the remote-tracking
+  refs. A detached `HEAD` shows as `HEAD`. A commit that no ref names has no
+  parentheses. kit reads the refs once. Each name prints with control
+  characters escaped. `--decorate` with `--format=json` is a usage error
+  (exit `64`), because the JSON record has a fixed set of keys.
+  `--graph` draws the commit graph in the left margin: `*` for a commit, `|`
+  for an open branch, `\` where a merge opens a branch and `/` where
+  branches join. It works with the default and the `--oneline` format, and
+  with `--all` and `--decorate`. A merge shows as `|\` on its own line below
+  the commit, and each extra parent of an octopus merge adds a `\`. kit
+  draws an edge only to a parent that the output shows, so a limit, a range
+  or a filter leaves no open line. A history with more than 1024 open
+  branches is an error (exit `65`). `--graph` with `-p`, `--stat` or
+  `--format=json` is a usage error (exit `64`).
   `--author <pattern>` and `--grep <pattern>` filter the walk by a plain
   **substring** match &mdash; `--author` against both the short display form
   (the `Author:` line) and the full `kind:hex`/`mid:N` form

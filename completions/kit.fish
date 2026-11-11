@@ -197,6 +197,12 @@ complete -c kit -n "__fish_seen_subcommand_from log" \
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -l stat -d "Show the diffstat of each commit"
 complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l decorate -d "Show the refs that name each commit"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l graph -d "Draw the commit graph in the left margin"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l all -d "Start from HEAD and every branch, remote-tracking ref and tag"
+complete -c kit -n "__fish_seen_subcommand_from log" \
     -s n -d "Limit number of commits" -r
 complete -c kit -n "__fish_seen_subcommand_from reflog" \
     -l format -d "Output format (default|json)" -r -a "default json"
