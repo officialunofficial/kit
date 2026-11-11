@@ -78,6 +78,8 @@ pub enum StashError {
     InvalidFormat,
     #[error("stash message exceeds {MAX_MESSAGE_LEN} bytes")]
     MessageTooLong,
+    #[error("ignored path '{0}' is in the way of HEAD; move or remove it first")]
+    IgnoredPathInTheWay(String),
     #[error("stash commit object is not a Commit")]
     NotACommit,
     #[error(transparent)]
@@ -107,7 +109,9 @@ pub type StashResult<T> = Result<T, StashError>;
 /// 3. Create an unsigned `Commit` over that tree with `Ed25519` zero
 ///    pubkey author and zeroed signer/signature.
 /// 4. Prepend a new [`StashEntry`] to the manifest.
-/// 5. Restore the worktree to HEAD's tree.
+/// 5. Remove the snapshot's paths that HEAD lacks, then restore HEAD's
+///    tree over the rest. A path the snapshot skipped (an ignored file) is
+///    never removed; a HEAD path that would overwrite one is refused.
 /// 6. Truncate the index.
 pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashResult<()> {
     if message.len() > MAX_MESSAGE_LEN {
@@ -195,6 +199,25 @@ pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashRes
     let stash_hash = batch.write(&commit_bytes)?;
     batch.commit()?;
 
+    // Paths the reset must not touch. A path in HEAD that the snapshot lacks
+    // is an ignored, untracked file the reset would overwrite, so refuse
+    // before the manifest or the worktree changes.
+    let head_tree = match head_hash {
+        Some(hh) => match store.read_object(&hh)? {
+            Object::Commit(c) => Some(c.tree_hash),
+            _ => None,
+        },
+        None => None,
+    };
+    let root = layout.worktree_root();
+    if head_tree.is_some() {
+        for e in &diff_trees(store, Some(tree_hash), head_tree)?.entries {
+            if e.kind == DiffKind::Added && path_blocked(root, &e.path) {
+                return Err(StashError::IgnoredPathInTheWay(e.path.clone()));
+            }
+        }
+    }
+
     // Prepend the new entry.
     let mut list = read_list(layout)?;
     let ts_u32: u32 = timestamp_u64.try_into().unwrap_or(u32::MAX);
@@ -207,46 +230,80 @@ pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashRes
     list.entries.insert(0, new_entry);
     write_list(layout, &list)?;
 
-    // Restore the worktree to HEAD's tree. In an UNBORN repo there is no HEAD,
-    // so clear EVERY path captured in the worktree snapshot (tracked AND
-    // untracked) — mirroring the HEAD case, where `restore_tree` removes
-    // everything not in HEAD. Removing only the staged entries would leave
-    // untracked files that the snapshot also captured, and a later
-    // `pop`/`pop --index` would then refuse to overwrite them.
-    if let Some(hh) = head_hash {
-        let head_obj = store.read_object(&hh)?;
-        if let Object::Commit(c) = head_obj {
-            restore::restore_tree(
-                store,
-                c.tree_hash,
-                layout.worktree_root(),
-                &RestoreOptions::default(),
-            )?;
+    // Reset the worktree to HEAD. Remove exactly the paths the snapshot holds
+    // and HEAD lacks, so a path that the snapshot skipped (an ignored file)
+    // is never removed. The entry is durable before the first removal.
+    for e in &diff_trees(store, head_tree, Some(tree_hash))?.entries {
+        if e.kind == DiffKind::Added {
+            remove_snapshot_path(root, &e.path)?;
         }
-    } else {
-        let snapshot = index::from_tree(store, tree_hash)?;
-        for e in &snapshot.entries {
-            let abs = layout.worktree_root().join(&e.path);
-            if let Err(err) = std::fs::remove_file(&abs)
-                && err.kind() != std::io::ErrorKind::NotFound
-            {
-                return Err(StashError::Io(err));
-            }
-            // Remove now-empty parent directories up to the repo root, so a
-            // later `pop` can recreate the path without tripping the "would
-            // overwrite untracked directory" guard.
-            let mut parent = abs.parent();
-            while let Some(dir) = parent {
-                if dir == layout.worktree_root() || std::fs::remove_dir(dir).is_err() {
-                    break;
-                }
-                parent = dir.parent();
-            }
-        }
+    }
+    if let Some(t) = head_tree {
+        restore::restore_tree(
+            store,
+            t,
+            root,
+            &RestoreOptions {
+                clean: false,
+                sparse_patterns: None,
+            },
+        )?;
     }
 
     // Clear the index.
     let _ = index::write_index(layout, &Index::new());
+    Ok(())
+}
+
+/// True when `rel` cannot be created under `root` without replacing an
+/// existing path: the path exists, or an ancestor exists and is not a
+/// directory. Symlinks are never followed.
+fn path_blocked(root: &std::path::Path, rel: &str) -> bool {
+    let mut cur = root.to_path_buf();
+    let mut parts = rel.split('/').peekable();
+    while let Some(part) = parts.next() {
+        cur.push(part);
+        match std::fs::symlink_metadata(&cur) {
+            Err(_) => return false,
+            Ok(_) if parts.peek().is_none() => return true,
+            Ok(m) if !m.is_dir() => return true,
+            Ok(_) => {}
+        }
+    }
+    false
+}
+
+/// Remove the file or symlink at `rel` under `root`, then each parent
+/// directory that is now empty, stopping at `root`. A path whose ancestor
+/// is a symlink or not a directory is left alone, and a symlink is removed,
+/// never followed.
+fn remove_snapshot_path(root: &std::path::Path, rel: &str) -> io::Result<()> {
+    let mut dir = root.to_path_buf();
+    let parts: Vec<&str> = rel.split('/').collect();
+    let Some((last, parents)) = parts.split_last() else {
+        return Ok(());
+    };
+    for part in parents {
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(m) if m.is_dir() => {}
+            _ => return Ok(()),
+        }
+    }
+    let file = dir.join(last);
+    match std::fs::symlink_metadata(&file) {
+        Ok(m) if !m.is_dir() => std::fs::remove_file(&file)?,
+        Ok(_) => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut parent = Some(dir.as_path());
+    while let Some(d) = parent {
+        if d == root || std::fs::remove_dir(d).is_err() {
+            break;
+        }
+        parent = d.parent();
+    }
     Ok(())
 }
 
@@ -377,9 +434,9 @@ pub fn pop(store: &ObjectStore, layout: &RepoLayout, idx: usize) -> StashResult<
         },
     )
     .map_err(|e| StashError::Io(io::Error::other(format!("recovery log: {e}"))))?;
-    restore::restore_tree(
+    restore::restore_tree_to_worktree(
         store,
-        commit.tree_hash,
+        &commit.tree_hash,
         layout.worktree_root(),
         &RestoreOptions::default(),
     )?;
@@ -446,9 +503,9 @@ pub fn apply(store: &ObjectStore, layout: &RepoLayout, idx: usize) -> StashResul
     let Object::Commit(commit) = obj else {
         return Err(StashError::NotACommit);
     };
-    restore::restore_tree(
+    restore::restore_tree_to_worktree(
         store,
-        commit.tree_hash,
+        &commit.tree_hash,
         layout.worktree_root(),
         &RestoreOptions::default(),
     )?;

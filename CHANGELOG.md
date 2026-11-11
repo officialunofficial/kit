@@ -36,6 +36,16 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as `remotes/<remote>/<branch>`. `libkit::branch::Query::scope` selects them,
   and `libkit::branch::Branch` has a `remote` field.
 
+### Fixed
+
+- `kit stash` removed ignored files from the working tree and did not save
+  them, so `stash pop` could not bring them back. A stash now removes only
+  the paths it saved. It refuses, before it changes anything, when HEAD needs
+  a path that an ignored file holds. The clean sweep of a restore keeps
+  ignored files below a directory that the target lacks, and keeps that
+  directory. The restore safety check no longer refuses an untracked
+  directory that only holds a target path or only holds ignored files.
+
 ## [0.8.0] - 2026-11-10
 
 ### Added
