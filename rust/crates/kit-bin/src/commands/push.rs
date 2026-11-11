@@ -40,6 +40,12 @@ struct PushOpts {
     /// Remote name to push to (defaults to the branch's upstream remote,
     /// else the configured default remote).
     remote: Option<String>,
+    /// Push the local branch `<src>` to the remote branch `<dst>` as
+    /// `<src>:<dst>`. Each side is a branch name or a `refs/heads/` ref.
+    /// Wildcards, a leading `+`, an empty `<src>` (a delete) and refs outside
+    /// `refs/heads/` are errors. Needs a `<remote>`.
+    #[arg(requires = "remote", conflicts_with = "all")]
+    refspec: Option<String>,
     /// Mirror every local branch instead of just the current one.
     #[arg(long)]
     all: bool,
@@ -87,9 +93,15 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    let json = matches!(opts.format, PushFormat::Json);
     let lease = match push::lease(opts.force, opts.force_with_lease) {
         Ok(lease) => lease,
         Err(e) => return plan_failure(e, false),
+    };
+    let refspec = match opts.refspec.as_deref().map(push::parse_refspec) {
+        Some(Ok(spec)) => Some(spec),
+        Some(Err(e)) => return plan_failure(e, json),
+        None => None,
     };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
@@ -107,7 +119,7 @@ pub fn run(args: &[String]) -> u8 {
     if opts.all {
         push_all(&layout, &cfg, &opts)
     } else {
-        push_current(&layout, &cfg, &opts, lease)
+        push_current(&layout, &cfg, &opts, lease, refspec.as_ref())
     }
 }
 
@@ -118,10 +130,15 @@ fn push_current(
     cfg: &config::LayeredConfig,
     opts: &PushOpts,
     lease: PushLease,
+    refspec: Option<&push::Refspec>,
 ) -> u8 {
     let json = matches!(opts.format, PushFormat::Json);
     // An explicit `kit push <remote>` overrides the configured upstream.
-    let plan = match push::plan(layout, cfg, opts.remote.as_deref()) {
+    let planned = match (refspec, opts.remote.as_deref()) {
+        (Some(spec), Some(remote)) => push::plan_refspec(layout, cfg, remote, spec),
+        (_, remote) => push::plan(layout, cfg, remote),
+    };
+    let plan = match planned {
         Ok(plan) => plan,
         Err(e) => return plan_failure(e, json),
     };
@@ -226,16 +243,19 @@ fn push_current(
             // overwrite of an unrelated branch.
             // Best-effort: the push has succeeded, so a failure to write the
             // upstream does not fail the command.
-            let _ = config::record_upstream(
-                layout,
-                cfg,
-                &branch,
-                libkit::config::Upstream {
-                    remote: resolved.name.clone(),
-                    branch: remote_branch.clone(),
-                },
-                opts.set_upstream,
-            );
+            // A refspec push records one only for `-u`.
+            if refspec.is_none() || opts.set_upstream {
+                let _ = config::record_upstream(
+                    layout,
+                    cfg,
+                    &branch,
+                    libkit::config::Upstream {
+                        remote: resolved.name.clone(),
+                        branch: remote_branch.clone(),
+                    },
+                    opts.set_upstream,
+                );
+            }
             // git-style ref-update summary block: `To <url>` then one
             // `<old>..<new>` / `* [new branch]` / `+ …(forced)` line.
             // On a store error during the ancestry check, assume a

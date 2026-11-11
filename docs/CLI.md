@@ -1109,12 +1109,19 @@ Remote / sync:
   remote it iterates.
 - **Library.** `clone`, `fetch` and `pull` run on the `kit-sync` crate
   (`rust/crates/kit-sync/README.md`), which an embedder can call directly.
-- `kit push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]
-  [--format=json] [-q|--quiet]`
+- `kit push [<remote> [<src>:<dst>]] [--all] [--force|--force-with-lease]
+  [--dry-run] [--format=json] [-q|--quiet]`
   &mdash; push refs and packs to a remote. With no `<remote>`, pushes the
   **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
   tracking pair), falling back to the configured default remote; an
-  explicit `<remote>` name overrides that choice. The default push is
+  explicit `<remote>` name overrides that choice. `<src>:<dst>` pushes the
+  local branch `<src>` to the remote branch `<dst>`, and `<src>` need not be
+  the current branch. Each side is a branch name or a `refs/heads/<name>`
+  ref. A refspec push goes through the same path as a plain push, so the
+  lease and the non-fast-forward check apply, and it records an upstream only
+  with `-u`. kit rejects a wildcard, a leading `+` (use `--force`), an empty
+  `<src>` (a remote delete), a ref outside `refs/heads/` and a refspec with
+  `--all`. The default push is
   CAS-protected: a non-fast-forward is rejected using the remote-tracking
   ref as the lease. `--all` mirrors every `refs/heads/*` (also CAS-safe).
   `--force` overwrites the remote branch unconditionally (skips CAS);

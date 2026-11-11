@@ -2503,6 +2503,41 @@ pub fn branch_glob_one_iteration(input: &[u8]) {
     }
 }
 
+/// Push refspecs (`push_refspec`): `push::parse_refspec` never panics on any
+/// text and gives the same answer twice. A refspec that parses has two valid
+/// pushable branch names, and it has no wildcard, no leading `+`, no second
+/// `:` and no ref outside `refs/heads/`. Its two names, joined by `:`, parse
+/// back to the same refspec.
+pub fn push_refspec_one_iteration(input: &[u8]) {
+    use libkit::push::parse_refspec;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let first = parse_refspec(text).ok();
+    assert_eq!(
+        first,
+        parse_refspec(text).ok(),
+        "a refspec gives the same answer twice"
+    );
+    if let Some(spec) = first {
+        assert!(!text.starts_with('+'), "a leading '+' is refused");
+        assert!(!text.contains(['*', '?', '[']), "a wildcard is refused");
+        for name in [&spec.src, &spec.dst] {
+            assert!(
+                kit_core::refs::check_pushable_branch(name).is_ok(),
+                "a branch name can be pushed"
+            );
+            assert!(!name.contains(':'), "a name has no ':'");
+        }
+        assert_eq!(
+            parse_refspec(&format!("{}:{}", spec.src, spec.dst)).ok(),
+            Some(spec),
+            "the joined names parse back to the same refspec"
+        );
+    }
+}
+
 /// Remote addresses and names (`remote_validate`): `remote::validate_url` and
 /// `remote::validate_name` never panic on any text and give the same answer
 /// twice. An address that passes starts with `kit+` or `git+` and has no
@@ -3918,6 +3953,26 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, branch_glob_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_push_refspec() {
+        run_iterated_unit(push_refspec_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"main:release",
+            b"refs/heads/a:refs/heads/b",
+            b"refs/heads/*:refs/heads/*",
+            b"+main:main",
+            b":main",
+            b"main:",
+            b"main:a:b",
+            b"main:refs/tags/v1",
+            b"refs/heads/:refs/heads/",
+            b"\xff\xfe",
+        ] {
+            run_one(case, push_refspec_one_iteration).unwrap();
         }
     }
 

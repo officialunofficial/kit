@@ -20,6 +20,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resolves it. The path is relative, has at most 4096 bytes and has no
   empty, `.` or `..` component. A missing path, a path through a file and a
   malformed path are errors.
+- `kit push <remote> <src>:<dst>` pushes the local branch `<src>` to the
+  remote branch `<dst>` on the path of a plain push, so the lease and the
+  non-fast-forward check apply. Each side is a branch name or a
+  `refs/heads/<name>` ref. A refspec push records an upstream only with `-u`.
+  kit rejects a wildcard, a leading `+`, an empty `<src>` and a ref outside
+  `refs/heads/`. `libkit::push::parse_refspec` and `plan_refspec` back it.
 
 ## [0.8.0] - 2026-11-10
 

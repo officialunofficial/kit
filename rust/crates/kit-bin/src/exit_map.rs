@@ -597,7 +597,8 @@ fn remote_exit_code(error: &remote::Error) -> u8 {
 fn push_exit_code(error: &push::Error) -> u8 {
     match error {
         // The two force switches contradict each other.
-        push::Error::ConflictingForce => exit::USAGE,
+        push::Error::ConflictingForce | push::Error::Refspec(_) => exit::USAGE,
+        push::Error::NoSuchBranch(_) => exit::DATAERR,
         // The branch, the upstream or the remote is missing from the config.
         push::Error::DetachedHead
         | push::Error::ReadHead(_)
@@ -850,6 +851,11 @@ mod tests {
                 exit::CONFIG_ERROR,
             ),
             (push::Error::NoRemote.into(), exit::CONFIG_ERROR),
+            (push::Error::Refspec("x".to_owned()).into(), exit::USAGE),
+            (
+                push::Error::NoSuchBranch("x".to_owned()).into(),
+                exit::DATAERR,
+            ),
             (diff::Error::StagedWithRevision.into(), exit::USAGE),
             (diff::Error::MergeBaseNeedsRevision.into(), exit::USAGE),
             (
