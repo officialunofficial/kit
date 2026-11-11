@@ -347,6 +347,13 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   it replays every commit that the fetched tip does not reach. `--rebase`
   does not combine with `--all`, needs a branch `HEAD` with a commit, and
   ignores `pull.rebase`. `--format=json` prints the object of `rebase`.
+- **`add -n` / `--dry-run`.** `add -n` prints `add '<path>'` for each file that
+  a real add would stage or update, and `remove '<path>'` for each deletion
+  that `-A` would record. It sorts the lines by path, quotes a path with
+  special bytes as `ls-files` does, writes no index and no object, and keeps
+  the errors of a real add. It does not combine with `-p` or `-u`, which is a
+  usage error. A file whose bytes equal the staged bytes but whose chunking
+  differs shows as `add`.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -378,7 +385,6 @@ kit does not implement these flags. A command with a missing flag is
 
 - `branch -u` / `--unset-upstream` &mdash; kit has no upstream setting
   on `branch`. `push -u` sets one.
-- `add -n` / `--dry-run` &mdash; kit rejects the flag.
 - `rev-parse --verify` &mdash; kit rejects the flag.
 - `show-ref <pattern>` &mdash; kit rejects the pattern.
 - `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer

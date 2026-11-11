@@ -38,6 +38,8 @@ complete -c kit -n "__fish_seen_subcommand_from add" \
 complete -c kit -n "__fish_seen_subcommand_from add" \
     -l force -s f -d "Stage an ignored path"
 complete -c kit -n "__fish_seen_subcommand_from add" \
+    -l dry-run -s n -d "Show what would be staged"
+complete -c kit -n "__fish_seen_subcommand_from add" \
     -l patch -s p -d "Interactively choose hunks to stage"
 complete -c kit -n "__fish_seen_subcommand_from rm" \
     -l cached -d "Stage removal only; keep worktree file"

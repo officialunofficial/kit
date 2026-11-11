@@ -97,6 +97,7 @@ _kit() {
                         '(-A --all)'{-A,--all}'[stage all changes incl. deletions]' \
                         '(-u --update)'{-u,--update}'[restage only tracked files]' \
                         '(-f --force)'{-f,--force}'[stage an ignored path]' \
+                        '(-n --dry-run)'{-n,--dry-run}'[show what would be staged]' \
                         '(-p --patch)'{-p,--patch}'[interactively choose hunks to stage]' \
                         '--help[show help]' \
                         '*:file:_files'

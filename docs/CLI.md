@@ -43,7 +43,7 @@ the `.kit/` marker and has no split work-tree / exec-path model.
 Working-tree commands:
 
 - `kit init` &mdash; create a new repository in `.kit/`.
-- `kit add [-A|-u] [-f] [-p] <path>...` / `kit add .` &mdash; stage files for the
+- `kit add [-A|-u] [-f] [-n] [-p] <path>...` / `kit add .` &mdash; stage files for the
   next commit. Multiple pathspecs may be given. `.` stages every non-ignored
   file under the current directory. `-A`/`--all` stages every change in
   the worktree including deletions of tracked files (takes no path
@@ -63,7 +63,10 @@ Working-tree commands:
   are **refused**. An explicitly-named ignored path is refused unless
   `-f`/`--force` (like plain `add`); a path that escapes the repo through
   a symlinked parent is refused. The hunk view and prompts go to stderr;
-  `s` (split) and `e` (manual edit) are follow-ups.
+  `s` (split) and `e` (manual edit) are follow-ups. `-n`/`--dry-run` prints
+  `add '<path>'` for each file that would be staged or updated and
+  `remove '<path>'` for each deletion that `-A` would record. It changes no
+  index and writes no object. It is incompatible with `-p` and `-u`.
 - `kit rm [--cached] [-r|--recursive] [-f|--force] <path>...` &mdash; remove
   paths and stage the deletion for the next commit. By default this
   **deletes the worktree file(s)** and stages the removal; now-empty

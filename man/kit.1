@@ -66,7 +66,7 @@ The highlights:
 Create a new
 .Nm
 repository in the current directory.
-.It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Oo Fl f Oc Oo Fl p Oc Ar path ...
+.It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Oo Fl f Oc Oo Fl n | Fl Fl dry-run Oc Oo Fl p Oc Ar path ...
 Stage files for the next commit. Respects
 .Pa .gitignore
 and
@@ -93,6 +93,20 @@ or
 .Fl Fl force
 stages an explicitly-named ignored path (git refuses these without it;
 already-tracked paths are never subject to ignore).
+.Fl n
+or
+.Fl Fl dry-run
+prints
+.Ql add '<path>'
+for each file that would be staged or updated, and
+.Ql remove '<path>'
+for each deletion that
+.Fl A
+would record. It changes no index and writes no object. It does not combine
+with
+.Fl p
+or
+.Fl u .
 .Fl p
 or
 .Fl Fl patch

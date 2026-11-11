@@ -140,6 +140,7 @@ impl Fixture {
             update: false,
             patch: false,
             force: false,
+            dry_run: false,
             paths: &paths,
         })
     }
@@ -164,6 +165,7 @@ const BULK: Request<'static> = Request {
     update: false,
     patch: false,
     force: false,
+    dry_run: false,
     paths: &[],
 };
 
@@ -206,6 +208,7 @@ fn an_ignored_path_needs_force() {
     let paths = ["run.log".to_owned()];
     f.run(&Request {
         force: true,
+        dry_run: false,
         paths: &paths,
         ..BULK
     })

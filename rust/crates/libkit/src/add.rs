@@ -30,7 +30,7 @@ use kit_core::observer::Observer;
 pub use kit_core::ops::PatchHunk;
 use kit_core::ops::{apply_hunks_subset, enumerate_hunks};
 use kit_core::serialize;
-use kit_core::store::{ObjectSink, ObjectStore, StoreError};
+use kit_core::store::{EphemeralSink, ObjectSink, ObjectStore, StoreError};
 use kit_core::worktree::{self, WorktreeError};
 use kit_sync::fanout;
 use kit_sync::worktree::{index_tracks_path_or_descendant, read_or_seed_index_from_head};
@@ -54,6 +54,9 @@ pub enum Error {
     /// `patch` is on and no path is named.
     #[error("-p/--patch requires one or more file paths")]
     PatchNeedsPaths,
+    /// `dry_run` is on with `patch` or `update`.
+    #[error("-n/--dry-run cannot be combined with -p/--patch or -u/--update")]
+    DryRunWithMode,
     /// `all` and `update` are both on.
     #[error("cannot combine -A/--all with -u/--update")]
     AllWithUpdate,
@@ -189,6 +192,9 @@ pub struct Request<'a> {
     pub patch: bool,
     /// Stage a named path that the ignore files match.
     pub force: bool,
+    /// Report what the call would stage and change nothing: no object, no
+    /// index. This takes neither `patch` nor `update`.
+    pub dry_run: bool,
     /// The named paths. `.` stands for the whole tree.
     pub paths: &'a [String],
 }
@@ -234,6 +240,16 @@ pub enum Event {
         /// How many hunks the file has.
         total: usize,
     },
+    /// A dry run finds a file that the call would stage or update.
+    WouldAdd {
+        /// The path.
+        path: String,
+    },
+    /// A dry run finds a tracked file that the call would record as deleted.
+    WouldRemove {
+        /// The path.
+        path: String,
+    },
 }
 
 /// Stage files as `request` says.
@@ -260,6 +276,9 @@ pub fn stage(
     let store = store_config.open(layout).map_err(Error::NotARepository)?;
     let _lock = lock::acquire_worktree(layout, lock_observer)?;
 
+    if request.dry_run && (request.patch || request.update) {
+        return Err(Error::DryRunWithMode);
+    }
     if request.patch {
         if request.all || request.update {
             return Err(Error::PatchWithBulk);
@@ -286,9 +305,12 @@ pub fn stage(
     // One durability batch for the whole call. A staged object costs no full
     // flush until the commit below, which runs before the index write.
     let batch = store.batch();
+    // A dry run hashes into memory, so the store gets no object.
+    let ephemeral = EphemeralSink::new(&store);
+    let sink: &(dyn ObjectSink + Sync) = if request.dry_run { &ephemeral } else { &batch };
 
     if request.all {
-        add_whole_tree(cwd, &batch, &mut idx)?;
+        add_whole_tree(cwd, sink, &mut idx)?;
     } else if request.paths.is_empty() {
         return Err(Error::NoPaths);
     } else {
@@ -297,7 +319,7 @@ pub fn stage(
         let ignores = ignore::load(cwd).map_err(Error::IgnoreFile)?;
         for target in request.paths {
             if target == "." {
-                add_whole_tree(cwd, &batch, &mut idx)?;
+                add_whole_tree(cwd, sink, &mut idx)?;
             } else {
                 // The walk of the whole tree cannot leave the repository. A
                 // named path can, through a symlink above it.
@@ -308,15 +330,58 @@ pub fn stage(
                     cwd.join(p)
                 };
                 ensure_within_repo(cwd, &abs)?;
-                add_one(cwd, p, &batch, &mut idx, &ignores, request.force)?;
+                add_one(cwd, p, sink, &mut idx, &ignores, request.force)?;
             }
         }
+    }
+
+    if request.dry_run {
+        report_changes(&previous, &idx, observer);
+        return Ok(());
     }
 
     // The objects become durable before the index that names them.
     batch.commit().map_err(Error::Store)?;
     retain_content_identities(&store, &previous, &mut idx)?;
     index::write_index(layout, &idx).map_err(Error::WriteIndex)
+}
+
+/// Report to `observer` each entry of `next` that a real run would add, update
+/// or record as deleted. The report is in path order, whatever the order of the
+/// walk was.
+fn report_changes(previous: &Index, next: &Index, observer: &dyn Observer<Event>) {
+    let old: HashMap<_, _> = previous
+        .entries
+        .iter()
+        .map(|e| (e.path.as_str(), e))
+        .collect();
+    let mut changes: Vec<Event> = Vec::new();
+    for entry in &next.entries {
+        let before = old
+            .get(entry.path.as_str())
+            .filter(|b| b.status != EntryStatus::Removed);
+        let path = entry.path.clone();
+        if entry.status == EntryStatus::Removed {
+            if before.is_some() {
+                changes.push(Event::WouldRemove { path });
+            }
+        } else if before
+            .is_none_or(|b| b.status != entry.status || b.object_hash != entry.object_hash)
+        {
+            changes.push(Event::WouldAdd { path });
+        }
+    }
+    changes.sort_by(|a, b| event_path(a).cmp(event_path(b)));
+    for change in &changes {
+        observer.event(change);
+    }
+}
+
+fn event_path(event: &Event) -> &str {
+    match event {
+        Event::WouldAdd { path } | Event::WouldRemove { path } => path,
+        _ => "",
+    }
 }
 
 /// Stage again the entries that the index tracks. Update the entries of

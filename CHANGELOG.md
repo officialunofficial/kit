@@ -33,6 +33,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remote-tracking ref and every tag. A commit shows once. The flag is a usage
   error together with a revision or a range. `libkit::log::Query::all` selects
   it, and `libkit::log::ref_tips` lists the refs.
+- `add -n` (`--dry-run`) prints `add '<path>'` for each file that a real add
+  would stage or update, and `remove '<path>'` for each deletion that `-A`
+  would record. It writes no index and no object. It excludes `-p` and `-u`.
+  `libkit::add::Request` has a `dry_run` field.
 - `rev-list` takes `-n <n>` and `--max-count=<n>`, which keep the first `<n>`
   commits, and a range `A..B` or `A...B` in place of a revision. It reads the
   range as `log` does.

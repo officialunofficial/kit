@@ -354,6 +354,7 @@ fn add_exit_code(error: &add::Error) -> u8 {
         // The caller combined modes that exclude each other, named an ignored
         // path, or asked for hunks of a file that is not a regular file.
         add::Error::PatchWithBulk
+        | add::Error::DryRunWithMode
         | add::Error::PatchNeedsPaths
         | add::Error::AllWithUpdate
         | add::Error::BulkTakesNoPaths

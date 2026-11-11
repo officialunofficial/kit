@@ -73,6 +73,7 @@ impl Fixture {
                 update: false,
                 patch: false,
                 force: false,
+                dry_run: false,
                 paths: &[".".to_owned()],
             },
             &mut NoChooser,
