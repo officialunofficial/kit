@@ -1,6 +1,6 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-11: main CI green on 60753ef. Nightly formal (quint job) hit its 240 min timeout; opened PR 95 raising it to 350. PRs 90-94 skipped: touched within 24h. Dependabot, audit, Commonware not checked (Monday only).",
+  "last_findings": "2026-11-11: main CI green on 60753ef. Nightly formal (quint job) hit its 240 min timeout; merged PR 95 raising it to 350. PRs 90-94 skipped: touched within 24h. Dependabot, audit, Commonware not checked (Monday only).",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
