@@ -824,6 +824,10 @@ Branches / refs:
   files the target tree drops are removed, with emptied directories
   pruned. Prints `Switched to branch '<n>'`, or `Already on '<n>'` for a
   no-op switch (which still runs the dirty-worktree guard).
+- `kit checkout [-f] -- <path>...` &mdash; restore the paths from the index. It
+  runs `kit restore [-f] <path>...`, so it refuses a file with unstaged edits
+  unless `-f` is given. Any other argument before the `--`, a revision
+  included, is a usage error.
 - `kit checkout -b|-B <new> [<start>]` &mdash; create a branch at the
   start-point (default HEAD) and switch to it; `-b` refuses to clobber an
   existing branch, `-B` create-or-resets. Prints `Switched to a new branch

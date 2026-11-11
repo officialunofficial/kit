@@ -374,6 +374,10 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   prints its success line on stderr. `-q` drops that line and never an error.
   `init` in an existing repository stays an error, and `-q` does not change
   that. kit has no `--bare`, `--initial-branch` or `--template`.
+- **`checkout -- <path>`.** `checkout [-f] -- <path>...` runs `restore
+  [-f] <path>...`, with the same output, exit codes and refusals. It restores
+  from the index. Git discards an edited file without `-f`, and kit refuses it
+  as `restore` does. Anything else before the `--` is a usage error.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -413,6 +417,6 @@ kit does not implement these flags. A command with a missing flag is
 - `revert -m` &mdash; kit does not revert a merge commit.
 - `stash push -u` / `--include-untracked` and `stash push <pathspec>` &mdash;
   kit rejects each form. `stash` always saves the whole working tree.
-- `checkout -- <path>` &mdash; `checkout` takes a branch or a revision. Use
-  `restore` for files.
+- `checkout <rev> -- <path>` &mdash; kit rejects it as a usage error. Use
+  `restore --source <rev> --staged --worktree <path>`.
 - `worktree move` / `lock` / `repair` &mdash; kit has no such subcommand.

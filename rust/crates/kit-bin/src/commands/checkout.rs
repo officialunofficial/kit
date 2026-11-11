@@ -1,6 +1,9 @@
 //! `kit checkout <branch>` — switch HEAD to a branch and materialise
 //! the branch tip's tree into the working directory.
 //!
+//! `kit checkout [-f] -- <path>...` restores paths from the index. It runs
+//! `kit restore` and has no code of its own.
+//!
 //! The file-restoration half calls
 //! `kit_core::ops::restore::restore_tree_to_worktree_with` (via
 //! `crate::restore_fanout::read_chunks_fanout`, the `kit-sync` rayon fan-out
@@ -59,9 +62,34 @@ struct CheckoutOpts {
     target: Option<String>,
 }
 
+/// Run `kit restore` for `checkout [-f] -- <path>...`. `before` is what
+/// precedes the `--`.
+fn restore_paths(before: &[String], paths: &[String]) -> u8 {
+    let force = match before {
+        [] => false,
+        [flag] if flag == "-f" || flag == "--force" => true,
+        _ => return super::usage_error(RESTORE_USAGE),
+    };
+    if paths.is_empty() {
+        return super::usage_error(RESTORE_USAGE);
+    }
+    let mut restore_args: Vec<String> = Vec::new();
+    if force {
+        restore_args.push("--force".to_owned());
+    }
+    restore_args.push("--".to_owned());
+    restore_args.extend_from_slice(paths);
+    super::restore::run(&restore_args)
+}
+
+const RESTORE_USAGE: &str = "usage: kit checkout [-f] -- <path>...";
+
 #[must_use]
 #[allow(clippy::too_many_lines)] // linear flow: create-branch + switch + report
 pub fn run(args: &[String]) -> u8 {
+    if let Some(split) = args.iter().position(|a| a == "--") {
+        return restore_paths(&args[..split], &args[split + 1..]);
+    }
     let opts = match clap_args::parse::<CheckoutOpts>("kit checkout", args) {
         Ok(o) => o,
         Err(code) => return code,

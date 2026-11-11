@@ -807,6 +807,14 @@ Prints
 or
 .Sy Already on Ar n
 for a no-op switch.
+.It Cm checkout Oo Fl f Oc Fl Fl Ar path ...
+Restore the paths from the index. This runs
+.Cm restore
+.Op Fl f
+.Ar path ... ,
+so it refuses a file with unstaged edits unless
+.Fl f
+is given.
 .It Cm checkout Oo Fl b | Fl B Oc Ar new Op Ar start
 Create
 .Pq Fl b , or create-or-reset Fl B
