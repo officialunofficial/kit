@@ -193,6 +193,10 @@ complete -c kit -n "__fish_seen_subcommand_from log" \
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -l first-parent -d "Follow only first parents"
 complete -c kit -n "__fish_seen_subcommand_from log" \
+    -s p -l patch -d "Show the patch of each commit"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l stat -d "Show the diffstat of each commit"
+complete -c kit -n "__fish_seen_subcommand_from log" \
     -s n -d "Limit number of commits" -r
 complete -c kit -n "__fish_seen_subcommand_from reflog" \
     -l format -d "Output format (default|json)" -r -a "default json"

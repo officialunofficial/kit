@@ -22,11 +22,11 @@
 //! - `--format=json` — JSONL, one self-contained JSON object per
 //!   commit. Suitable for piping into `jq`.
 //!
-//! `-p` (`--patch`) follows each commit with its diff against its first
-//! parent, or against an empty tree for a root commit. It renders the same
-//! text as `kit show`, which calls the same code. A merge commit shows its
-//! diff against the first parent, as `kit show` does. The flag excludes
-//! `--format=json`.
+//! `-p` (`--patch`) and `--stat` follow each commit with its diff against its
+//! first parent, or against an empty tree for a root commit. They render the
+//! same text as `kit show`, which calls the same code. A merge commit shows
+//! its diff against the first parent, as `kit show` does. The two flags
+//! exclude each other and `--format=json`.
 //!
 //! History filters — `--author`/`--grep` (substring matches),
 //! `--since`/`--until` (a small explicit date grammar, see
@@ -141,8 +141,12 @@ struct LogOpts {
 
     /// Show the patch of each commit against its first parent (a root
     /// commit against an empty tree).
-    #[arg(short = 'p', long = "patch")]
+    #[arg(short = 'p', long = "patch", conflicts_with = "stat")]
     patch: bool,
+
+    /// Show the diffstat of each commit against its first parent.
+    #[arg(long)]
+    stat: bool,
 
     /// Optional starting revision (`<rev>`), range (`A..B`, `A..`, `..B`), or
     /// symmetric range (`A...B`). Defaults to `HEAD`; an empty range side
@@ -185,8 +189,11 @@ pub fn run(args: &[String]) -> u8 {
     };
     let fmt = opts.render_format();
     let abbrev = opts.abbrev_len();
-    if fmt == Format::Json && opts.patch {
-        return emit_err("-p does not combine with --format=json", exit::USAGE);
+    if fmt == Format::Json && (opts.patch || opts.stat) {
+        return emit_err(
+            "-p and --stat do not combine with --format=json",
+            exit::USAGE,
+        );
     }
 
     // `--since`/`--until` are validated up front (a bad date is a usage
@@ -254,14 +261,14 @@ pub fn run(args: &[String]) -> u8 {
             return exit::TEMPFAIL;
         }
         render_commit(&mut stdout, fmt, abbrev, &entry.hash, &entry.commit);
-        if opts.patch {
+        if opts.patch || opts.stat {
             let c = &entry.commit;
             match super::show::write_commit_diff(
                 &mut stdout,
                 &repo,
                 c.parents.first().copied(),
                 c.tree_hash,
-                false,
+                opts.stat,
             ) {
                 // The default format ends each commit with a blank line.
                 Ok(true) if fmt == Format::Default => {
@@ -390,6 +397,7 @@ mod tests {
             no_merges: false,
             first_parent: false,
             patch: false,
+            stat: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -410,6 +418,7 @@ mod tests {
             no_merges: false,
             first_parent: false,
             patch: false,
+            stat: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Oneline);
@@ -430,6 +439,7 @@ mod tests {
             no_merges: false,
             first_parent: false,
             patch: false,
+            stat: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -450,6 +460,7 @@ mod tests {
             no_merges: false,
             first_parent: false,
             patch: false,
+            stat: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Json);
@@ -469,6 +480,7 @@ mod tests {
             no_merges: false,
             first_parent: false,
             patch: false,
+            stat: false,
             start: None,
         }
     }

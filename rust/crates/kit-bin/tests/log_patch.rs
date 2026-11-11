@@ -1,5 +1,5 @@
-//! `kit log -p`: each commit followed by its diff against its first
-//! parent. The diff text is that of `kit show`.
+//! `kit log -p` and `kit log --stat`: each commit followed by its diff against
+//! its first parent. The diff text is that of `kit show`.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
@@ -79,12 +79,33 @@ fn long_patch_flag_is_the_same_as_short() {
 }
 
 #[test]
+fn stat_follows_each_commit_with_its_diffstat() {
+    let repo = two_commits();
+    let out = stdout(&repo.ok(&["log", "--stat"]));
+    assert!(out.contains("    second\n\n f.txt | 2 +-\n g.txt | 1 +\n 2 files changed, 2 insertions(+), 1 deletion(-)\n\ncommit "));
+    assert!(out.contains("    first\n\n f.txt | 2 ++\n 1 file changed, 2 insertions(+)\n\n"));
+    assert!(!out.contains("diff --git"));
+}
+
+#[test]
+fn stat_text_is_the_text_of_show() {
+    let repo = two_commits();
+    for rev in ["HEAD", "HEAD~1"] {
+        let log = stdout(&repo.ok(&["log", "--stat", "-n1", rev]));
+        let show = stdout(&repo.ok(&["show", "--stat", rev]));
+        assert_eq!(log, format!("{show}\n"), "{rev}");
+    }
+}
+
+#[test]
 fn oneline_puts_the_diff_right_after_the_line() {
     let repo = two_commits();
     let out = stdout(&repo.ok(&["log", "--oneline", "-p", "-n1"]));
     let (line, rest) = out.split_once('\n').unwrap();
     assert!(line.ends_with(" second"), "{line}");
     assert!(rest.starts_with("diff --git a/f.txt b/f.txt\n"), "{rest}");
+    let out = stdout(&repo.ok(&["log", "--oneline", "--stat", "-n1"]));
+    assert!(out.contains(" second\n f.txt | 2 +-\n"), "{out}");
 }
 
 #[test]
@@ -94,6 +115,8 @@ fn a_root_commit_is_a_diff_against_an_empty_tree() {
     let patch = stdout(&repo.ok(&["log", "-p"]));
     assert!(patch.contains("diff --git a/only.txt b/only.txt\nnew file mode 100644\n"));
     assert!(patch.ends_with("+x\n\n"), "{patch}");
+    let stat = stdout(&repo.ok(&["log", "--stat"]));
+    assert!(stat.contains(" only.txt | 1 +\n 1 file changed, 1 insertion(+)\n"));
 }
 
 #[test]
@@ -105,6 +128,11 @@ fn a_merge_commit_shows_its_diff_against_the_first_parent() {
     assert!(!out.contains("c.txt"), "{out}");
     let show = stdout(&repo.ok(&["show", "HEAD"]));
     assert_eq!(out, format!("{show}\n"));
+    let stat = stdout(&repo.ok(&["log", "--stat", "-n1"]));
+    assert!(
+        stat.contains(" b.txt | 1 +\n 1 file changed, 1 insertion(+)\n"),
+        "{stat}"
+    );
 }
 
 #[test]
@@ -135,6 +163,8 @@ fn a_binary_file_shows_as_binary() {
         patch.contains("Binary files /dev/null and b/b.bin differ\n"),
         "{patch}"
     );
+    let stat = stdout(&repo.ok(&["log", "--stat"]));
+    assert!(stat.contains(" b.bin | Bin 0 -> 4 bytes\n"), "{stat}");
 }
 
 #[test]
@@ -145,6 +175,8 @@ fn a_large_file_is_a_complete_patch() {
     let patch = stdout(&repo.ok(&["log", "-p"]));
     assert!(patch.contains("@@ -0,0 +1,5000 @@\n"), "{patch}");
     assert_eq!(patch.lines().filter(|l| *l == "+line").count(), 5000);
+    let stat = stdout(&repo.ok(&["log", "--stat"]));
+    assert!(stat.contains("| 5000 +"), "{stat}");
 }
 
 #[test]
@@ -166,12 +198,22 @@ fn a_repository_without_commits_prints_nothing() {
 }
 
 #[test]
-fn json_format_refuses_patch() {
+fn patch_and_stat_exclude_each_other() {
     let repo = two_commits();
-    let out = repo.run(&["log", "--format=json", "-p"]);
+    let out = repo.run(&["log", "-p", "--stat"]);
     assert_eq!(out.status.code(), Some(64));
     assert!(out.stdout.is_empty());
-    assert!(text(&out.stderr).contains("--format=json"));
+}
+
+#[test]
+fn json_format_refuses_patch_and_stat() {
+    let repo = two_commits();
+    for flag in ["-p", "--stat"] {
+        let out = repo.run(&["log", "--format=json", flag]);
+        assert_eq!(out.status.code(), Some(64), "{flag}");
+        assert!(out.stdout.is_empty(), "{flag}");
+        assert!(text(&out.stderr).contains("--format=json"), "{flag}");
+    }
 }
 
 #[test]
@@ -187,7 +229,9 @@ fn a_missing_blob_is_an_error_not_a_wrong_diff() {
         .unwrap();
     let object = repo.kit_dir().join("objects").join(&id[..2]).join(&id[2..]);
     std::fs::remove_file(object).unwrap();
-    let out = repo.run(&["log", "-p"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(!text(&out.stderr).is_empty());
+    for flag in ["-p", "--stat"] {
+        let out = repo.run(&["log", flag]);
+        assert_eq!(out.status.code(), Some(1), "{flag}");
+        assert!(!text(&out.stderr).is_empty(), "{flag}");
+    }
 }

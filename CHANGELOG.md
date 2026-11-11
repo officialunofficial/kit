@@ -9,9 +9,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `log -p` (`--patch`) follows each commit with its diff against its first
-  parent, in the text of `show`. A root commit is diffed against an empty
-  tree. The flag does not combine with `--format=json`.
+- `log -p` (`--patch`) and `log --stat` follow each commit with its diff against
+  its first parent, in the text of `show`. A root commit is diffed against
+  an empty tree. The flags exclude each other and `--format=json`.
 - `show`, `cat-file` and `rev-parse` take `<rev>:<path>`, the object at
   `<path>` in the tree of `<rev>`. `libkit::revspec::resolve_object`
   resolves it. The path is relative, has at most 4096 bytes and has no
