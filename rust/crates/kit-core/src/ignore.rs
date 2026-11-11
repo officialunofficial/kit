@@ -177,7 +177,7 @@ impl Pattern {
     }
 }
 
-/// One literal-basename pattern of a [`LiteralIndex`].
+/// One indexed pattern of a [`LiteralIndex`].
 #[derive(Debug, Clone, Copy)]
 struct LiteralHit {
     /// Index into `patterns`.
@@ -189,17 +189,28 @@ struct LiteralHit {
 
 impl LiteralIndex {
     /// The answer of a reverse scan of `patterns` for `path`. The
-    /// highest-index literal match comes from the map. The scan then walks
-    /// the other patterns in reverse and stops once it passes that match.
+    /// highest-index match among the literal and extension patterns comes
+    /// from the maps. The scan then walks the other patterns in reverse and
+    /// stops once it passes that match.
     fn is_ignored(&self, patterns: &[Pattern], path: &[&str], is_dir: bool) -> bool {
-        let literal = path
-            .last()
-            .and_then(|name| self.literals.get(*name))
-            .and_then(|hits| {
-                hits.iter()
-                    .rev()
-                    .find(|hit| is_dir || !patterns[hit.pattern].dir_only)
-            });
+        let usable = |hits: &[LiteralHit]| {
+            hits.iter()
+                .rev()
+                .find(|hit| is_dir || !patterns[hit.pattern].dir_only)
+                .copied()
+        };
+        let name = path.last().copied();
+        let by_name = name
+            .and_then(|name| self.literals.get(name))
+            .and_then(|hits| usable(hits));
+        let by_extension = name
+            .and_then(|name| name.rfind('.').map(|dot| &name[dot..]))
+            .and_then(|ext| self.extensions.get(ext))
+            .and_then(|hits| usable(hits));
+        let literal = match (by_name, by_extension) {
+            (Some(a), Some(b)) => Some(if a.pattern > b.pattern { a } else { b }),
+            (a, b) => a.or(b),
+        };
         let below = literal.map_or(0, |hit| hit.scanned_below);
         for &i in self.scanned[below..].iter().rev() {
             let p = &patterns[i];
@@ -214,8 +225,27 @@ impl LiteralIndex {
     }
 }
 
-/// Literal-basename patterns needed before [`IgnoreList`] indexes them. Below
-/// this, hashing the basename costs more than comparing it to each pattern.
+/// Whether `suffix` is a dot and a non-empty name without another dot. A
+/// basename ends with such a suffix exactly when its text from the last dot
+/// equals it.
+fn is_extension(suffix: &str) -> bool {
+    suffix
+        .strip_prefix('.')
+        .is_some_and(|rest| !rest.is_empty() && !rest.contains('.'))
+}
+
+/// Whether the index holds a pattern of this kind.
+fn is_indexable(kind: &BasenameKind) -> bool {
+    match kind {
+        BasenameKind::Literal(_) => true,
+        BasenameKind::Suffix(suffix) => is_extension(suffix),
+        BasenameKind::Prefix(_) | BasenameKind::Glob(_) => false,
+    }
+}
+
+/// Literal-basename and extension patterns needed before [`IgnoreList`]
+/// indexes them. Below this, hashing the basename costs more than comparing
+/// it to each pattern.
 const MIN_INDEXED_LITERALS: usize = 32;
 
 /// Parsed ignore-list (the merged `.gitignore` + `.kitignore` patterns).
@@ -226,12 +256,16 @@ pub struct IgnoreList {
     index: Option<LiteralIndex>,
 }
 
-/// Splits the patterns of an [`IgnoreList`] into literal basenames, found by
-/// name, and the rest, found by a scan.
+/// Splits the patterns of an [`IgnoreList`] into literal basenames and
+/// extensions, found by name, and the rest, found by a scan.
 #[derive(Debug, Default, Clone)]
 struct LiteralIndex {
     /// Literal-basename patterns by name, each list ascending by pattern.
     literals: HashMap<String, Vec<LiteralHit>>,
+    /// Patterns of the form `*.ext` by `.ext`, each list ascending by
+    /// pattern. A basename matches one when its text from the last `.` is
+    /// the key.
+    extensions: HashMap<String, Vec<LiteralHit>>,
     /// Indices into `patterns` of every other pattern, ascending.
     scanned: Vec<usize>,
 }
@@ -247,26 +281,27 @@ impl IgnoreList {
         }
     }
 
-    /// Build a list and index its literal-basename patterns.
+    /// Build a list and index its literal-basename and extension patterns.
     fn from_patterns(patterns: Vec<Pattern>) -> Self {
         let count = patterns
             .iter()
-            .filter(|p| matches!(p.basename_kind.as_deref(), Some(BasenameKind::Literal(_))))
+            .filter(|p| p.basename_kind.as_deref().is_some_and(is_indexable))
             .count();
         let index = (count >= MIN_INDEXED_LITERALS).then(|| {
             let mut index = LiteralIndex::default();
             for (i, p) in patterns.iter().enumerate() {
-                if let Some(BasenameKind::Literal(name)) = p.basename_kind.as_deref() {
-                    index
-                        .literals
-                        .entry(name.clone())
-                        .or_default()
-                        .push(LiteralHit {
-                            pattern: i,
-                            scanned_below: index.scanned.len(),
-                        });
-                } else {
-                    index.scanned.push(i);
+                let hit = LiteralHit {
+                    pattern: i,
+                    scanned_below: index.scanned.len(),
+                };
+                match p.basename_kind.as_deref() {
+                    Some(BasenameKind::Literal(name)) => {
+                        index.literals.entry(name.clone()).or_default().push(hit);
+                    }
+                    Some(BasenameKind::Suffix(ext)) if is_extension(ext) => {
+                        index.extensions.entry(ext.clone()).or_default().push(hit);
+                    }
+                    _ => index.scanned.push(i),
                 }
             }
             index
@@ -716,7 +751,7 @@ mod tests {
         }
         text.push_str(
             "foo\n!foo\nfoo\nbar/\n*.o\n!bar\nbaz\n/anchored\n!baz/\nbaz/\nqux\n!*.x\nqux.x\n*x\n\
-             !*.y\nlit.y\ntop.z\n!*.z\n*.d/\n",
+             !*.y\nlit.y\ntop.z\n!*.z\n*.d/\n*.tar.gz\n*.\n*.a.b\n.hid\n*.hid\n!x.hid\n",
         );
         let list = parse(&text);
         assert!(list.index.is_some());
@@ -739,6 +774,14 @@ mod tests {
             "lit.y",
             "top.z",
             "a.d",
+            "a.tar.gz",
+            "a.gz",
+            "b.",
+            "c.b",
+            ".hid",
+            "x.hid",
+            "d/.y",
+            "noext",
         ] {
             for is_dir in [false, true] {
                 assert_eq!(
