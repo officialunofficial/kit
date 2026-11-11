@@ -258,7 +258,9 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 ## Documented divergences
 
 - **Empty commit.** `commit` creates a commit when the index equals `HEAD`.
-  Git refuses. kit has no `--allow-empty`.
+  Git refuses without `--allow-empty`. kit accepts `--allow-empty` and does not
+  need it there. A first commit with nothing staged needs the flag, as in
+  Git.
 - **`diff` base.** `kit diff` without a revision compares `HEAD` with the
   working tree. The result includes staged changes and untracked files. Git
   compares the index with the working tree. `kit diff --staged` matches Git.
