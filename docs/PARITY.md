@@ -378,6 +378,19 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   [-f] <path>...`, with the same output, exit codes and refusals. It restores
   from the index. Git discards an edited file without `-f`, and kit refuses it
   as `restore` does. Anything else before the `--` is a usage error.
+- **`revert -m`.** `revert -m <parent-number> <merge>` undoes a merge
+  relative to the chosen parent, counted from 1, as `cherry-pick -m` picks
+  one. A merge without `-m`, a number out of range and `-m` on a commit that
+  is not a merge are errors. `-m` does not combine with `--continue` or
+  `--abort`.
+- **`branch -u` / `--unset-upstream`.** `branch -u <remote>/<branch>
+  [<branch>]` (also `--set-upstream-to=<upstream>`) sets the upstream of a
+  branch, or of the current branch. It writes the `branch.<name>.remote` and
+  `branch.<name>.merge` keys of `.kit/config` that `push -u` writes. The
+  remote-tracking ref must exist, and kit tries each split of the name at a
+  `/` from the left. `--unset-upstream` removes those keys from `.kit/config`
+  only. A user-scoped value stays. Git also accepts a local branch as an
+  upstream. kit does not.
 - **`tag` listing.** `kit tag` prints the tag name, the short ID and the tag
   kind. Git prints the names.
 - **`stash`.** Each linked worktree has its own stash. Git shares one stash.
@@ -407,14 +420,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
-- `branch -u` / `--unset-upstream` &mdash; kit has no upstream setting
-  on `branch`. `push -u` sets one.
 - `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
   tags.
 - `pull --no-ff` &mdash; kit rejects the flag. `pull` never creates a merge
   commit.
 - `rebase -i` `edit` &mdash; the todo action is not available.
-- `revert -m` &mdash; kit does not revert a merge commit.
 - `stash push -u` / `--include-untracked` and `stash push <pathspec>` &mdash;
   kit rejects each form. `stash` always saves the whole working tree.
 - `checkout <rev> -- <path>` &mdash; kit rejects it as a usage error. Use

@@ -169,7 +169,78 @@ fn revert_refuses_a_merge_commit() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("merge commit"),
-        "error should explain the merge-commit refusal: {stderr}"
+        stderr.contains("merge commit") && stderr.contains("-m"),
+        "error should explain the refusal and name -m: {stderr}"
     );
+}
+
+/// Parent 1 is `main` (has a.txt), parent 2 is `feature` (has b.txt).
+fn merge_repo() -> (tempfile::TempDir, String) {
+    let td = init_repo();
+    let root = td.path();
+    commit(root, "base.txt", b"base\n", "base");
+    assert!(run_in(root, &["branch", "feature"]).status.success());
+    commit(root, "a.txt", b"a\n", "on main");
+    assert!(run_in(root, &["checkout", "feature"]).status.success());
+    commit(root, "b.txt", b"b\n", "on feature");
+    assert!(run_in(root, &["checkout", "main"]).status.success());
+    assert!(
+        run_in(root, &["merge", "feature"]).status.success(),
+        "merge"
+    );
+    let merge = main_tip(root);
+    (td, merge)
+}
+
+#[test]
+fn revert_mainline_one_undoes_the_merged_in_side() {
+    let (td, merge) = merge_repo();
+    let root = td.path();
+    let out = run_in(root, &["revert", "-m", "1", &merge]);
+    assert!(out.status.success(), "revert -m 1: {out:?}");
+    assert!(root.join("a.txt").exists(), "parent 1 keeps a.txt");
+    assert!(root.join("base.txt").exists());
+    assert!(!root.join("b.txt").exists(), "feature's b.txt is undone");
+    assert_ne!(main_tip(root), merge);
+}
+
+#[test]
+fn revert_mainline_two_undoes_the_other_side() {
+    let (td, merge) = merge_repo();
+    let root = td.path();
+    let out = run_in(root, &["revert", "--mainline", "2", &merge]);
+    assert!(out.status.success(), "revert -m 2: {out:?}");
+    assert!(root.join("b.txt").exists(), "parent 2 keeps b.txt");
+    assert!(!root.join("a.txt").exists(), "main's a.txt is undone");
+}
+
+#[test]
+fn revert_mainline_out_of_range_is_an_error() {
+    let (td, merge) = merge_repo();
+    let root = td.path();
+    for m in ["0", "3"] {
+        let out = run_in(root, &["revert", "-m", m, &merge]);
+        assert!(!out.status.success(), "-m {m} must fail");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("invalid mainline parent"),
+            "{out:?}"
+        );
+    }
+    assert_eq!(main_tip(root), merge, "a refused revert leaves HEAD alone");
+}
+
+#[test]
+fn revert_mainline_on_a_non_merge_is_an_error() {
+    let td = init_repo();
+    let root = td.path();
+    commit(root, "a.txt", b"a\n", "base");
+    commit(root, "b.txt", b"b\n", "add b");
+    let tip = main_tip(root);
+    let out = run_in(root, &["revert", "-m", "1", &tip]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not a merge"),
+        "{out:?}"
+    );
+    assert_eq!(main_tip(root), tip);
 }

@@ -93,6 +93,35 @@ pub fn record_upstream(
     )
 }
 
+/// Set the upstream of a branch for the current command.
+///
+/// # Errors
+/// As [`libkit::branch::set_upstream`].
+pub fn set_upstream(
+    layout: &RepoLayout,
+    branch: Option<&str>,
+    upstream: &str,
+) -> Result<(String, Upstream), libkit::branch::Error> {
+    libkit::branch::set_upstream(
+        layout,
+        &environment::current(),
+        &StderrWarnings,
+        branch,
+        upstream,
+    )
+}
+
+/// Remove the upstream of a branch for the current command.
+///
+/// # Errors
+/// As [`libkit::branch::unset_upstream`].
+pub fn unset_upstream(
+    layout: &RepoLayout,
+    branch: Option<&str>,
+) -> Result<String, libkit::branch::Error> {
+    libkit::branch::unset_upstream(layout, &environment::current(), &StderrWarnings, branch)
+}
+
 /// Write one user-scoped key for the current command.
 pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
     libkit::config::write_user_kv(&environment::current(), key, value)

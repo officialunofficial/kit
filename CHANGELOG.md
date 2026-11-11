@@ -55,6 +55,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   would stage or update, and `remove '<path>'` for each deletion that `-A`
   would record. It writes no index and no object. It excludes `-p` and `-u`.
   `libkit::add::Request` has a `dry_run` field.
+- `kit revert -m <parent-number> <merge>` reverts a merge commit relative to
+  the chosen parent. `kit-core` takes the parent as the `mainline`
+  argument of `ops::revert::revert`. A merge without `-m`, a number out of
+  range and `-m` on a commit that is not a merge are errors.
+- `kit branch -u <remote>/<branch> [<branch>]` (`--set-upstream-to`) records
+  the upstream of a branch in the repo config, and `--unset-upstream` removes
+  it. The remote-tracking ref must exist. `libkit::branch::set_upstream` and
+  `unset_upstream` do the work.
 - `rev-list` takes `-n <n>` and `--max-count=<n>`, which keep the first `<n>`
   commits, and a range `A..B` or `A...B` in place of a revision. It reads the
   range as `log` does.
