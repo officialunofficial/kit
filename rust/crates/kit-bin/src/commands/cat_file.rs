@@ -22,7 +22,6 @@ use std::io::Write;
 use clap::Parser;
 use kit_core::object::{EntryMode, Object};
 use kit_core::store::ObjectStore;
-use kit_core::worktree;
 
 use crate::clap_args;
 use crate::exit;
@@ -192,8 +191,7 @@ fn pretty_print(
             let _ = out.write_all(&b.data);
         }
         Object::ChunkedBlob(_) => {
-            let data = worktree::read_blob(store, h).map_err(|e| format!("reassemble: {e}"))?;
-            let _ = out.write_all(&data);
+            super::stream_blob(store, h, out).map_err(|e| format!("reassemble: {e}"))?;
         }
         Object::Tree(t) => {
             for e in &t.entries {

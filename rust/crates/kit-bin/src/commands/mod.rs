@@ -107,6 +107,34 @@ pub use kit_sync::worktree::{
     write_ref_recording_history,
 };
 
+/// Stream the content of the blob `h` to `out`, one chunk at a time. A write
+/// that fails on `out` (a closed pipe, say) ends the stream and is not an
+/// error, as for a plain blob whose write result a command ignores. Any other
+/// failure is returned.
+pub(crate) fn stream_blob(
+    store: &ObjectStore,
+    h: &Hash,
+    out: &mut impl Write,
+) -> Result<(), core_worktree::WorktreeError> {
+    struct Tracked<'a, W> {
+        out: &'a mut W,
+        failed: bool,
+    }
+    impl<W: Write> Write for Tracked<'_, W> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.out.write(buf).inspect_err(|_| self.failed = true)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.out.flush().inspect_err(|_| self.failed = true)
+        }
+    }
+    let mut tracked = Tracked { out, failed: false };
+    match core_worktree::write_blob(store, h, &mut tracked) {
+        Err(_) if tracked.failed => Ok(()),
+        other => other,
+    }
+}
+
 /// [`refs::list_refs`], with the per-ref read-and-decode step fanned out
 /// across rayon's global thread pool once there's enough work to amortize
 /// dispatch — the directory walk itself stays sequential either way (see
@@ -395,10 +423,8 @@ pub(crate) fn worktree_entry_state(
         Err(e) => return Err(format!("metadata {}: {e}", abs.display())),
     };
     if meta.file_type().is_file() {
-        let (opened_meta, bytes) = core_worktree::read_regular_file_bounded(&abs)
-            .map_err(|e| format!("read {}: {e}", abs.display()))?;
-        let h =
-            core_worktree::store_file_object(store, &bytes).map_err(|e| format!("store: {e}"))?;
+        let (h, opened_meta) = core_worktree::hash_file_with_metadata(store, &abs)
+            .map_err(|e| format!("store {}: {e}", abs.display()))?;
         Ok(Some((file_exec_status(&opened_meta), h)))
     } else if meta.file_type().is_symlink() {
         let target =
@@ -547,8 +573,68 @@ pub(crate) fn remove_dropped_path(abs: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{advance_head, c_quote_path, restore_head_ref};
+    use super::{advance_head, c_quote_path, restore_head_ref, stream_blob};
     use kit_core::hash::Hash;
+
+    /// A chunked blob of three chunks in a fresh store.
+    fn chunked_blob() -> (
+        tempfile::TempDir,
+        kit_core::store::ObjectStore,
+        Hash,
+        Vec<u8>,
+    ) {
+        let td = tempfile::tempdir().unwrap();
+        let store =
+            kit_core::store::ObjectStore::init(&kit_core::layout::RepoLayout::single(td.path()))
+                .unwrap();
+        let parts = [vec![1u8; 300], vec![2u8; 200], vec![3u8; 100]];
+        let chunks = parts
+            .iter()
+            .map(|p| core_worktree_blob(&store, p))
+            .collect::<Vec<_>>();
+        let manifest = kit_core::object::Object::ChunkedBlob(kit_core::object::ChunkedBlob {
+            total_size: 600,
+            chunk_size: 0,
+            chunks,
+        });
+        let h = store
+            .write(&kit_core::serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        (td, store, h, parts.concat())
+    }
+
+    fn core_worktree_blob(store: &kit_core::store::ObjectStore, data: &[u8]) -> Hash {
+        let blob = kit_core::object::Object::Blob(kit_core::object::Blob {
+            data: data.to_vec(),
+        });
+        store
+            .write(&kit_core::serialize::serialize(&blob).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn stream_blob_writes_the_whole_content() {
+        let (_td, store, h, data) = chunked_blob();
+        let mut out = Vec::new();
+        stream_blob(&store, &h, &mut out).unwrap();
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn stream_blob_ignores_a_closed_output_and_reports_a_bad_blob() {
+        struct Closed;
+        impl std::io::Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (_td, store, h, _) = chunked_blob();
+        stream_blob(&store, &h, &mut Closed).unwrap();
+        assert!(stream_blob(&store, &[9u8; 32], &mut Vec::new()).is_err());
+    }
 
     #[test]
     fn c_quote_leaves_plain_paths_alone() {

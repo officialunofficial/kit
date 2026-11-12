@@ -51,7 +51,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 
 use tempfile::TempPath;
@@ -259,6 +259,9 @@ pub struct WriteBatch<'s> {
     // Interior mutability so `&self` writes work and a future parallel
     // ingest can share one batch across worker threads.
     inner: Mutex<BatchState>,
+    // Every write holds the read side while it stages an object. A
+    // checkpoint holds the write side, so it sees no half-staged object.
+    gate: RwLock<()>,
 }
 
 impl<'s> WriteBatch<'s> {
@@ -268,6 +271,7 @@ impl<'s> WriteBatch<'s> {
             policy,
             early: EarlyBarriers::new(store.syncer().clone()),
             inner: Mutex::new(BatchState::default()),
+            gate: RwLock::new(()),
         }
     }
 
@@ -309,6 +313,7 @@ impl<'s> WriteBatch<'s> {
     /// CPU of every clone/fetch). A wrong hash here would corrupt the
     /// content addressing — never expose this publicly.
     pub(crate) fn write_prehashed(&self, h: Hash, parts: &[&[u8]]) -> StoreResult<Hash> {
+        let _gate = self.gate.read().expect("batch gate poisoned");
         let final_path = self.store.path_for(&h);
         let shard_dir = final_path
             .parent()
@@ -423,29 +428,50 @@ impl<'s> WriteBatch<'s> {
     /// visible (content-addressing makes re-running the command
     /// idempotent) and not-yet-renamed temp files are unlinked on drop.
     ///
+    /// # Errors
+    /// A failed barrier, flush or rename.
+    pub fn commit(self) -> StoreResult<()> {
+        self.checkpoint()
+    }
+
+    /// [`Self::commit`] for the objects staged so far, keeping the batch
+    /// open. The batch then stages new objects from empty, so a caller that
+    /// writes many objects bounds the batch by checkpointing in windows.
+    ///
+    /// The objects a checkpoint makes visible are not yet named by any ref or
+    /// index. A crash leaves them unreferenced, which gc collects. The caller
+    /// still orders its ref and index writes after the last checkpoint or
+    /// commit, as for [`Self::commit`].
+    ///
+    /// Writes from other threads wait while a checkpoint runs.
+    ///
+    /// # Errors
+    /// As [`Self::commit`].
+    ///
     /// # Panics
     ///
-    /// Panics only if a previous write panicked while holding the batch
-    /// mutex.
-    pub fn commit(self) -> StoreResult<()> {
-        let Self {
-            store,
-            policy,
-            early,
-            inner,
-        } = self;
+    /// Panics only if a previous write panicked while holding a batch lock.
+    pub fn checkpoint(&self) -> StoreResult<()> {
+        let _gate = self.gate.write().expect("batch gate poisoned");
         // Join the background barrier workers first: every barrier
         // they took has completed once this returns. Paths no worker
         // reached (none could be spawned) come back to be barriered
         // here.
-        let leftover = early.finish()?;
-        let st = inner.into_inner().expect("batch state mutex poisoned");
+        let leftover = self.early.quiesce()?;
+        let (staged, touched_shards) = {
+            let mut st = self.inner.lock().expect("batch state mutex poisoned");
+            (
+                std::mem::take(&mut st.staged),
+                std::mem::take(&mut st.touched_shards),
+            )
+        };
+        let store = self.store;
         let syncer = store.syncer();
-        match policy {
+        match self.policy {
             // Every write was already made durable and visible.
             SyncPolicy::PerObject => Ok(()),
             SyncPolicy::Batch => {
-                let staged: Vec<(Hash, TempPath)> = st.staged.into_iter().collect();
+                let staged: Vec<(Hash, TempPath)> = staged.into_iter().collect();
                 // 1. Barrier every staged file. Each barrier initiates
                 //    writeback for its file and orders it ahead of the
                 //    full flush below. Most were issued in the
@@ -477,7 +503,7 @@ impl<'s> WriteBatch<'s> {
                 // 4. Dirent barriers, once per touched shard dir,
                 //    concurrently (sorted first so the work list is
                 //    deterministic).
-                let mut shards: Vec<PathBuf> = st.touched_shards.into_iter().collect();
+                let mut shards: Vec<PathBuf> = touched_shards.into_iter().collect();
                 shards.sort();
                 if !shards.is_empty() {
                     parallel_io(shards.len(), |i| syncer.dir_barrier(&shards[i]))?;
@@ -574,10 +600,16 @@ impl EarlyBarriers {
         }
     }
 
-    /// Stop accepting work, join every worker, and return the paths no
-    /// worker reached. Fails with the first barrier error, if any.
-    fn finish(self) -> io::Result<Vec<PathBuf>> {
+    /// Join every worker and return the paths no worker reached, then accept
+    /// work again. Fails with the first barrier error, if any. The caller
+    /// holds the batch gate, so no write races the join.
+    fn quiesce(&self) -> io::Result<Vec<PathBuf>> {
         let (queue, error) = self.shutdown();
+        self.shared
+            .state
+            .lock()
+            .expect("barrier queue poisoned")
+            .closed = false;
         match error {
             Some(e) => Err(e),
             None => Ok(queue),
@@ -721,6 +753,10 @@ impl ObjectSink for WriteBatch<'_> {
 
     fn has(&self, h: &Hash) -> bool {
         self.contains(h)
+    }
+
+    fn checkpoint(&self) -> StoreResult<()> {
+        WriteBatch::checkpoint(self)
     }
 }
 
@@ -887,6 +923,89 @@ mod tests {
         batch.commit().unwrap();
         assert!(other.contains(&h), "committed object must be visible");
         assert_eq!(other.read(&h).unwrap(), b"staged bytes");
+    }
+
+    #[test]
+    fn checkpoint_publishes_staged_objects_and_keeps_the_batch_open() {
+        let (dir, store) = fresh_store();
+        let other = ObjectStore::open(&crate::layout::RepoLayout::single(dir.path())).unwrap();
+        let batch = store.batch();
+        let first = batch.write(b"before the checkpoint").unwrap();
+        assert!(!other.contains(&first));
+
+        batch.checkpoint().unwrap();
+        assert!(other.contains(&first), "a checkpoint publishes");
+        assert!(
+            batch.inner.lock().unwrap().staged.is_empty(),
+            "a checkpoint leaves nothing staged"
+        );
+
+        let second = batch.write(b"after the checkpoint").unwrap();
+        assert!(!other.contains(&second), "later writes stage again");
+        batch.commit().unwrap();
+        assert!(other.contains(&second));
+        assert_eq!(other.read(&first).unwrap(), b"before the checkpoint");
+    }
+
+    #[test]
+    fn checkpoints_bound_the_staged_set_and_cost_two_flushes_each() {
+        let (_dir, store, rec) = recording_store();
+        let batch = store.batch();
+        let mut most_staged = 0;
+        for i in 0u32..40 {
+            batch
+                .write(format!("windowed object {i}").as_bytes())
+                .unwrap();
+            most_staged = most_staged.max(batch.inner.lock().unwrap().staged.len());
+            if (i + 1) % 10 == 0 {
+                batch.checkpoint().unwrap();
+            }
+        }
+        batch.commit().unwrap();
+        assert_eq!(most_staged, 10, "no more than one window stays staged");
+        assert_eq!(object_file_count(&store), 40);
+        let fulls = rec
+            .events()
+            .iter()
+            .filter(|e| matches!(e, Ev::Full(_)))
+            .count();
+        // Four windows, each with a data flush and a terminal flush, and a
+        // final commit that stages nothing.
+        assert_eq!(fulls, 8);
+    }
+
+    #[test]
+    fn checkpoint_beside_concurrent_writers_loses_no_object() {
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        let hashes = std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..4u32)
+                .map(|t| {
+                    let batch = &batch;
+                    scope.spawn(move || {
+                        (0..50u32)
+                            .map(|i| {
+                                batch
+                                    .write(format!("writer {t} object {i}").as_bytes())
+                                    .unwrap()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for _ in 0..10 {
+                batch.checkpoint().unwrap();
+            }
+            writers
+                .into_iter()
+                .flat_map(|w| w.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        batch.commit().unwrap();
+        for h in &hashes {
+            store.read(h).unwrap();
+        }
+        assert_eq!(object_file_count(&store), 200);
     }
 
     #[test]
@@ -1279,7 +1398,7 @@ mod tests {
         syncer.set_closed(false);
         assert_eq!(spawned, MAX_SYNC_WORKERS);
         assert!(all_busy, "every worker took a file");
-        assert!(early.finish().unwrap().is_empty());
+        assert!(early.quiesce().unwrap().is_empty());
         assert_eq!(syncer.finished(), count, "every file got its barrier");
     }
 
@@ -1303,7 +1422,7 @@ mod tests {
         syncer.set_closed(false);
         assert_eq!(workers, 2, "a second worker is spawned");
         assert!(overlapped, "the third barrier runs beside the blocked one");
-        assert!(early.finish().unwrap().is_empty());
+        assert!(early.quiesce().unwrap().is_empty());
         assert_eq!(syncer.finished(), 3);
     }
 

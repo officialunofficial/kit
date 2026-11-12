@@ -26,7 +26,7 @@ use crate::ignore::{self, IgnoreList};
 use crate::index::{self, Index};
 use crate::object::{ChunkedBlob, EntryMode, Object, Tree, TreeEntry};
 use crate::serialize;
-use crate::store::{ObjectSink, ObjectStore};
+use crate::store::{ChunkOrigin, ObjectSink, ObjectStore};
 
 /// Files larger than this go through the chunker (1 MiB).
 pub const CHUNK_THRESHOLD: u64 = 1024 * 1024;
@@ -71,7 +71,10 @@ pub enum WorktreeError {
 pub type WorktreeResult<T> = Result<T, WorktreeError>;
 
 mod blob;
-pub use blob::{LoadedBlob, content_eq, content_eq_bytes, content_fingerprint, read_blob};
+pub use blob::{
+    LoadedBlob, content_eq, content_eq_bytes, content_eq_reader, content_fingerprint, read_blob,
+    write_blob,
+};
 
 /// Validate a symlink target: non-empty, relative, and free of `..`
 /// segments. The rule is the same on every platform, so it also rejects
@@ -988,6 +991,31 @@ pub fn read_regular_file_bounded(path: &Path) -> WorktreeResult<(fs::Metadata, V
     Ok((meta, data))
 }
 
+/// Compare the regular file at `path` with the stored content of `object`,
+/// reading both one chunk at a time. Returns the metadata observed when the
+/// file was opened and whether the contents are equal. The final component of
+/// `path` is not followed if it is a symlink.
+///
+/// # Errors
+/// [`WorktreeError::Io`] if `path` cannot be opened or is not a regular file;
+/// [`WorktreeError::Store`] if the stored content cannot be read.
+pub fn file_content_eq(
+    store: &ObjectStore,
+    object: &Hash,
+    path: &Path,
+) -> WorktreeResult<(fs::Metadata, bool)> {
+    let mut file = open_regular_file(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(WorktreeError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        )));
+    }
+    let equal = blob::content_eq_reader(store, object, &mut file)?;
+    Ok((meta, equal))
+}
+
 /// Hash and store a regular file, returning its content-address and the
 /// [`fs::Metadata`] observed when it was opened (for stat-cache use by
 /// callers like `kit add`).
@@ -1072,6 +1100,18 @@ fn hash_file_with_metadata_using<S: ObjectSink + ?Sized>(
 /// reader itself gives, just sized for a batch instead of one chunk.
 const STREAM_HASH_BATCH: usize = 64;
 
+/// Number of chunks a large file stages before its sink makes them durable
+/// and visible with [`ObjectSink::checkpoint`]. A sink that stages a file per
+/// object then holds at most this many staged chunks of one file, whatever the
+/// file's size. 4096 chunks are 256 MiB of file on average (64 KiB per chunk).
+const CHECKPOINT_CHUNKS: usize = 4096;
+
+/// Whether a file's chunk count passed a checkpoint boundary when it grew from
+/// `before` to `after` chunks.
+fn checkpoint_due(before: usize, after: usize, window: usize) -> bool {
+    before / window != after / window
+}
+
 /// Store one already-cut chunk as a canonical Blob object, returning its
 /// content address. The per-chunk unit [`store_large_file_streaming_with`]
 /// fans out over — hashing (BLAKE3, via `put_parts`) and staging a temp
@@ -1085,6 +1125,17 @@ pub fn store_chunk_blob<S: ObjectSink + ?Sized>(sink: &S, chunk: &[u8]) -> Workt
     Ok(sink.put_parts(&[&prologue, chunk])?)
 }
 
+/// [`store_chunk_blob`] for a chunk cut from `origin`, which lets a sink keep
+/// the origin in place of the bytes.
+fn store_chunk_blob_at<S: ObjectSink + ?Sized>(
+    sink: &S,
+    chunk: &[u8],
+    origin: ChunkOrigin<'_>,
+) -> WorktreeResult<Hash> {
+    let prologue = serialize::blob_prologue(chunk.len())?;
+    Ok(sink.put_chunk_parts(&[&prologue, chunk], origin)?)
+}
+
 /// Sequential ingest borrows each chunk directly from the reader window.
 /// It does not allocate owned chunks or retain a batch between writes.
 fn store_large_file_streaming<S: ObjectSink + ?Sized, R: Read>(
@@ -1092,15 +1143,32 @@ fn store_large_file_streaming<S: ObjectSink + ?Sized, R: Read>(
     reader: R,
     path: &Path,
 ) -> WorktreeResult<Hash> {
+    store_large_file_streaming_windowed(sink, reader, path, CHECKPOINT_CHUNKS)
+}
+
+/// [`store_large_file_streaming`] with the checkpoint window in chunks.
+fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
+    sink: &S,
+    reader: R,
+    path: &Path,
+    window: usize,
+) -> WorktreeResult<Hash> {
     let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
     let mut chunks = Vec::new();
     let mut total_size: u64 = 0;
     while let Some(chunk) = chunker.next_chunk_ref()? {
+        let origin = ChunkOrigin {
+            path,
+            offset: total_size,
+        };
         total_size = total_size
             .checked_add(chunk.len() as u64)
             .filter(|&t| t <= MAX_FILE_BYTES)
             .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
-        chunks.push(store_chunk_blob(sink, chunk)?);
+        chunks.push(store_chunk_blob_at(sink, chunk, origin)?);
+        if checkpoint_due(chunks.len() - 1, chunks.len(), window) {
+            sink.checkpoint()?;
+        }
     }
     store_chunk_manifest(sink, total_size, chunks)
 }
@@ -1195,11 +1263,17 @@ pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read + Send>(
 ) -> WorktreeResult<Hash> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        store_large_file_streaming_pipelined(sink, reader, path, &mut hash_chunks)
+        store_large_file_streaming_pipelined(
+            sink,
+            reader,
+            path,
+            &mut hash_chunks,
+            CHECKPOINT_CHUNKS,
+        )
     }
     #[cfg(target_arch = "wasm32")]
     {
-        store_large_file_streaming_batched(sink, reader, path, &mut hash_chunks)
+        store_large_file_streaming_batched(sink, reader, path, &mut hash_chunks, CHECKPOINT_CHUNKS)
     }
 }
 
@@ -1215,6 +1289,7 @@ fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
     reader: R,
     path: &Path,
     hash_chunks: &mut impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
+    window: usize,
 ) -> WorktreeResult<Hash> {
     let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
     let mut chunks = Vec::new();
@@ -1227,7 +1302,11 @@ fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
             .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
         batch.push(chunk);
         if batch.len() == STREAM_HASH_BATCH {
+            let before = chunks.len();
             chunks.extend(checked_hash_chunks(hash_chunks, sink, &batch)?);
+            if checkpoint_due(before, chunks.len(), window) {
+                sink.checkpoint()?;
+            }
             batch.clear();
         }
     }
@@ -1277,6 +1356,7 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
     reader: R,
     path: &Path,
     hash_chunks: &mut impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
+    window: usize,
 ) -> WorktreeResult<Hash> {
     use std::sync::mpsc;
 
@@ -1343,7 +1423,15 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
                 }
                 checked_hash_chunks(hash_chunks, sink, &batch)
             }) {
-                Ok(hashes) => chunks.extend(hashes),
+                Ok(hashes) => {
+                    let before = chunks.len();
+                    chunks.extend(hashes);
+                    if checkpoint_due(before, chunks.len(), window)
+                        && let Err(e) = sink.checkpoint()
+                    {
+                        first_err = Some(e.into());
+                    }
+                }
                 Err(e) => first_err = Some(e),
             }
         }
@@ -1569,7 +1657,7 @@ pub fn stat_matches(entry: &crate::index::IndexEntry, meta: &fs::Metadata) -> bo
 }
 
 #[cfg(unix)]
-fn open_regular_file(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn open_regular_file(path: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
 
     fs::OpenOptions::new()
@@ -1579,7 +1667,7 @@ fn open_regular_file(path: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open_regular_file(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn open_regular_file(path: &Path) -> io::Result<fs::File> {
     // Best-effort direct-symlink rejection on platforms without the
     // Unix O_NOFOLLOW path. This does not close the swap race, but it
     // keeps normal symlinks from being treated as regular files.
@@ -1979,6 +2067,182 @@ mod tests {
                  returning promptly after an early hash_chunks error",
             );
         assert!(errored_correctly);
+    }
+
+    fn pseudo_random(n: usize, seed: u64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(n);
+        let mut state = seed;
+        for _ in 0..n {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            out.push((z & 0xFF) as u8);
+        }
+        out
+    }
+
+    /// A sink over a write batch that counts the objects stored between
+    /// checkpoints.
+    struct WindowSink<'a> {
+        batch: crate::batch::WriteBatch<'a>,
+        since_checkpoint: std::cell::Cell<usize>,
+        most_between_checkpoints: std::cell::Cell<usize>,
+        checkpoints: std::cell::Cell<usize>,
+    }
+
+    impl<'a> WindowSink<'a> {
+        fn new(store: &'a ObjectStore) -> Self {
+            Self {
+                batch: store.batch(),
+                since_checkpoint: std::cell::Cell::new(0),
+                most_between_checkpoints: std::cell::Cell::new(0),
+                checkpoints: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl ObjectSink for WindowSink<'_> {
+        fn put(&self, bytes: &[u8]) -> crate::store::StoreResult<Hash> {
+            self.put_parts(&[bytes])
+        }
+
+        fn put_parts(&self, parts: &[&[u8]]) -> crate::store::StoreResult<Hash> {
+            let n = self.since_checkpoint.get() + 1;
+            self.since_checkpoint.set(n);
+            self.most_between_checkpoints
+                .set(self.most_between_checkpoints.get().max(n));
+            self.batch.write_parts(parts)
+        }
+
+        fn has(&self, h: &Hash) -> bool {
+            self.batch.contains(h)
+        }
+
+        fn checkpoint(&self) -> crate::store::StoreResult<()> {
+            self.since_checkpoint.set(0);
+            self.checkpoints.set(self.checkpoints.get() + 1);
+            self.batch.checkpoint()
+        }
+    }
+
+    #[test]
+    fn sequential_streaming_checkpoints_each_window_and_keeps_the_id() {
+        let data = pseudo_random(4 * 1024 * 1024, 0x51DE);
+        let (_dir, store) = fresh_store();
+        let expected = store_file_object(&store, &data).unwrap();
+        let Object::ChunkedBlob(manifest) = store.read_object(&expected).unwrap() else {
+            panic!("expected a chunked blob");
+        };
+        assert!(manifest.chunks.len() > 32, "the file has many chunks");
+
+        let window = 8;
+        let sink = WindowSink::new(&store);
+        let streamed = store_large_file_streaming_windowed(
+            &sink,
+            io::Cursor::new(&data),
+            Path::new("windowed.bin"),
+            window,
+        )
+        .unwrap();
+        assert_eq!(streamed, expected, "windows do not change the id");
+        assert_eq!(sink.checkpoints.get(), manifest.chunks.len() / window);
+        // One window of chunks, and then the manifest after the last window.
+        assert!(sink.most_between_checkpoints.get() <= window + 1);
+        sink.batch.commit().unwrap();
+        assert_eq!(read_blob(&store, &streamed).unwrap(), data);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pipelined_streaming_checkpoints_each_batch_and_keeps_the_id() {
+        let data = pseudo_random(10 * 1024 * 1024, 0xBA7C);
+        let (_dir, store) = fresh_store();
+        let expected = store_file_object(&store, &data).unwrap();
+        let Object::ChunkedBlob(manifest) = store.read_object(&expected).unwrap() else {
+            panic!("expected a chunked blob");
+        };
+        assert!(manifest.chunks.len() > 2 * STREAM_HASH_BATCH);
+
+        let sink = WindowSink::new(&store);
+        let streamed = store_large_file_streaming_pipelined(
+            &sink,
+            io::Cursor::new(&data),
+            Path::new("windowed.bin"),
+            &mut |sink, batch| {
+                batch
+                    .iter()
+                    .map(|chunk| store_chunk_blob(sink, chunk))
+                    .collect()
+            },
+            8,
+        )
+        .unwrap();
+        assert_eq!(streamed, expected);
+        assert!(sink.checkpoints.get() >= 2);
+        // A batch is the unit of the pipelined path, so a window ends on a
+        // batch boundary.
+        assert!(sink.most_between_checkpoints.get() <= STREAM_HASH_BATCH + 1);
+        assert!(sink.most_between_checkpoints.get() < manifest.chunks.len());
+        sink.batch.commit().unwrap();
+        assert_eq!(read_blob(&store, &streamed).unwrap(), data);
+    }
+
+    #[test]
+    fn a_checkpointed_chunk_is_visible_before_the_commit() {
+        let data = pseudo_random(2 * 1024 * 1024, 0xC0DE);
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        let h = store_large_file_streaming_windowed(
+            &batch,
+            io::Cursor::new(&data),
+            Path::new("windowed.bin"),
+            4,
+        )
+        .unwrap();
+        batch.checkpoint().unwrap();
+        let Object::ChunkedBlob(manifest) = store.read_object(&h).unwrap() else {
+            panic!("expected a chunked blob");
+        };
+        assert!(manifest.chunks.iter().all(|c| store.contains(c)));
+        batch.commit().unwrap();
+    }
+
+    #[test]
+    fn file_content_eq_compares_a_file_with_stored_content() {
+        let data = pseudo_random(2 * 1024 * 1024, 0xF11E);
+        let (dir, store) = fresh_store();
+        let stored = store_file_object(&store, &data).unwrap();
+        let path = dir.path().join("file.bin");
+        fs::write(&path, &data).unwrap();
+        let (meta, equal) = file_content_eq(&store, &stored, &path).unwrap();
+        assert!(equal);
+        assert_eq!(meta.len(), data.len() as u64);
+
+        let mut changed = data.clone();
+        changed[data.len() / 2] ^= 1;
+        fs::write(&path, &changed).unwrap();
+        assert!(!file_content_eq(&store, &stored, &path).unwrap().1);
+
+        fs::write(&path, &data[..data.len() - 1]).unwrap();
+        assert!(!file_content_eq(&store, &stored, &path).unwrap().1);
+
+        assert!(file_content_eq(&store, &stored, &dir.path().join("gone")).is_err());
+        assert!(file_content_eq(&store, &stored, dir.path()).is_err());
+    }
+
+    #[test]
+    fn small_files_never_checkpoint() {
+        let data = pseudo_random(usize::try_from(CHUNK_THRESHOLD).unwrap() / 2, 0x5A11);
+        let (dir, store) = fresh_store();
+        let path = dir.path().join("small.bin");
+        fs::write(&path, &data).unwrap();
+        let sink = WindowSink::new(&store);
+        let (h, _) = hash_file_with_metadata(&sink, &path).unwrap();
+        assert_eq!(sink.checkpoints.get(), 0);
+        sink.batch.commit().unwrap();
+        assert_eq!(read_blob(&store, &h).unwrap(), data);
     }
 
     #[test]

@@ -23,7 +23,6 @@ use std::io::Write;
 use clap::Parser;
 use kit_core::hash::Hash;
 use kit_core::object::{Identity, Object, Tag};
-use kit_core::worktree;
 
 use crate::clap_args;
 use crate::exit;
@@ -139,9 +138,8 @@ fn show_object(
             Ok(())
         }
         Object::ChunkedBlob(_) => {
-            let data = worktree::read_blob(repo.store(), h)
+            super::stream_blob(repo.store(), h, out)
                 .map_err(|e| (format!("reassemble: {e}"), exit::GENERAL_ERROR))?;
-            let _ = out.write_all(&data);
             Ok(())
         }
         // `Delta` is a pack-only encoding and never the result of a plain

@@ -5,7 +5,6 @@ use std::io::Write;
 use clap::Parser;
 use kit_core::hash::from_hex;
 use kit_core::object::Object;
-use kit_core::worktree;
 
 use crate::clap_args;
 use crate::exit;
@@ -48,14 +47,13 @@ pub fn run(args: &[String]) -> u8 {
             let _ = stdout.write_all(&b.data);
         }
         // A ChunkedBlob is the canonical representation for files above
-        // the chunking threshold. Reassemble its chunks and
-        // stream the full content, matching `kit cat` on a plain Blob.
-        Object::ChunkedBlob(_) => match worktree::read_blob(store, &h) {
-            Ok(data) => {
-                let _ = stdout.write_all(&data);
+        // the chunking threshold. Stream its chunks one at a time, matching
+        // `kit cat` on a plain Blob.
+        Object::ChunkedBlob(_) => {
+            if let Err(e) = super::stream_blob(store, &h, &mut stdout) {
+                return emit_err(&format!("reassemble chunked blob: {e}"), exit::NOINPUT);
             }
-            Err(e) => return emit_err(&format!("reassemble chunked blob: {e}"), exit::NOINPUT),
-        },
+        }
         Object::Tree(t) => {
             for e in t.entries {
                 let _ = writeln!(
