@@ -106,6 +106,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as `remotes/<remote>/<branch>`. `libkit::branch::Query::scope` selects them,
   and `libkit::branch::Branch` has a `remote` field.
 
+### Changed
+
+- A disclosure range in a fixed-size `ChunkedBlob` now proves its absolute
+  offset with no length proofs. The verifier computes
+  `index * chunk_size + offset_in_blob`, and `kit prove --with-offsets` emits
+  no length proofs for that layout. Before, each preceding chunk cost about
+  1.5 KB. Bundles with length proofs still verify. Content-defined layouts
+  are unchanged.
+
 ### Fixed
 
 - `kit verify-proof` exits `65` (`DATAERR`) when the commit's embedded
