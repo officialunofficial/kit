@@ -20,6 +20,7 @@ fn merge_request(target: &str) -> Request<'_> {
     Request {
         target,
         no_commit: false,
+        no_ff: false,
         message: None,
     }
 }
@@ -178,6 +179,27 @@ fn a_remote_tracking_target_names_the_remote_in_the_message() {
 }
 
 #[test]
+fn no_ff_writes_a_merge_commit_where_a_fast_forward_is_possible() {
+    let f = init();
+    let base = f.commit(&[("a.txt", "one\n")], &[], "base", 1);
+    let theirs = f.commit(&[("a.txt", "two\n")], &[base], "theirs", 2);
+    refs::write_ref(&f.layout, "topic", &theirs).unwrap();
+    f.checkout("main", base);
+
+    let request = Request {
+        no_ff: true,
+        ..merge_request("topic")
+    };
+    let Outcome::Merged(merged) = start(&f, &request).unwrap() else {
+        panic!("expected a merge commit");
+    };
+    assert_eq!(merged.ours, base);
+    assert_eq!(merged.theirs, theirs);
+    assert_eq!(f.commit_object(merged.commit).parents, [base, theirs]);
+    assert_eq!(refs::resolve_head(&f.layout).unwrap(), Some(merged.commit));
+}
+
+#[test]
 fn a_conflict_pauses_with_markers_and_recorded_state() {
     let f = init();
     let (ours, _) = diverged(&f);
@@ -326,6 +348,7 @@ fn no_commit_stages_the_merge_and_resume_finishes_it() {
 
     let request = Request {
         no_commit: true,
+        no_ff: false,
         ..merge_request("topic")
     };
     let Outcome::Staged { tree } = start(&f, &request).unwrap() else {
@@ -357,6 +380,7 @@ fn no_commit_keeps_a_merge_that_only_deletes_files() {
 
     let request = Request {
         no_commit: true,
+        no_ff: false,
         ..merge_request("topic")
     };
     start(&f, &request).unwrap();

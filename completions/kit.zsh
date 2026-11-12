@@ -97,6 +97,7 @@ _kit() {
                         '(-A --all)'{-A,--all}'[stage all changes incl. deletions]' \
                         '(-u --update)'{-u,--update}'[restage only tracked files]' \
                         '(-f --force)'{-f,--force}'[stage an ignored path]' \
+                        '(-n --dry-run)'{-n,--dry-run}'[show what would be staged]' \
                         '(-p --patch)'{-p,--patch}'[interactively choose hunks to stage]' \
                         '--help[show help]' \
                         '*:file:_files'
@@ -182,6 +183,7 @@ _kit() {
                 rev-list)
                     _arguments \
                         '--count[print the number of commits]' \
+                        '(-n --max-count)'{-n,--max-count=}'[limit number of commits]:count:' \
                         '--help[show help]'
                     ;;
                 cat-file)
@@ -214,6 +216,8 @@ _kit() {
                         '--short=[abbreviate to N chars]:N:' \
                         '--abbrev-ref[print the short symbolic name]' \
                         '--show-toplevel[print the repository root]' \
+                        '--verify[require one revision that resolves]' \
+                        '(-q --quiet)'{-q,--quiet}'[with --verify, print no message]' \
                         '--help[show help]' \
                         '*:rev:'
                     ;;
@@ -221,7 +225,8 @@ _kit() {
                     _arguments \
                         '--heads[only refs/heads]' \
                         '--tags[only refs/tags]' \
-                        '--help[show help]'
+                        '--help[show help]' \
+                        '*:pattern:'
                     ;;
                 for-each-ref)
                     _arguments \
@@ -294,6 +299,11 @@ _kit() {
                         '--until[only commits at or before this date]:date:' \
                         '--no-merges[hide merge commits from the output]' \
                         '--first-parent[follow only first parents]' \
+                        '(-p --patch --stat)'{-p,--patch}'[show the patch of each commit]' \
+                        '(-p --patch --stat)--stat[show the diffstat of each commit]' \
+                        '--decorate[show the refs that name each commit]' \
+                        '--graph[draw the commit graph in the left margin]' \
+                        '--all[start from every ref and HEAD]' \
                         '-n[limit number of commits]:count:' \
                         '--help[show help]'
                     ;;
@@ -347,6 +357,7 @@ _kit() {
                 rebase)
                     _arguments \
                         '(-i --interactive)'{-i,--interactive}'[edit the todo list before replaying]' \
+                        '--onto[replay onto this revision instead of the upstream]:newbase:' \
                         '--continue[continue after conflict resolution]' \
                         '--skip[skip the current commit]' \
                         '--abort[abort rebase]' \
@@ -426,6 +437,7 @@ _kit() {
                 stash)
                     _values 'stash subcommand' \
                         'save[stash working-dir changes]' \
+                        'push[stash working-dir changes (same as save)]' \
                         'list[list stash entries]' \
                         'pop[apply and remove stash entry]' \
                         'apply[apply stash entry without removing it]' \

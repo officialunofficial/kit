@@ -91,10 +91,19 @@ from Git, read [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md).
 ## Non-goals
 
 - **No shallow clone.** `kit clone --depth N` is rejected with a usage error.
+  A clone holds the full history, so every commit verifies with its ancestors.
   kit never silently makes a full clone when you ask for a shallow one.
 - **No import of older repository layouts.** kit reads only repositories in
   its own `.kit/` layout. To bring history in, use `kit git import` on a Git
   upstream.
+- **No Git compatibility layer.** kit does not speak the Git wire protocol, read
+  `.git` or shadow the `git` binary. `kit git` translates history in one
+  direction at a time. [`docs/PARITY.md`](docs/PARITY.md#permanent-non-goals)
+  gives the reason for each and what would reopen it.
+- **No submodules, hooks or `git notes`.** Vendor a dependency, call kit from a
+  script, and attach a signed attestation to a commit.
+  [`docs/PARITY.md`](docs/PARITY.md#decisions-on-submodules-hooks-and-notes)
+  gives the reason for each and what would reopen it.
 - **No Windows build.** Use WSL.
 - **No transport fallback.** The URL scheme picks the transport. kit does not
   try another one when the first fails.

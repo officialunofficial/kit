@@ -198,11 +198,13 @@ fn list_gives_every_branch_with_its_tip() {
             Branch {
                 name: "main".to_owned(),
                 hash: Some(tip),
+                remote: false,
                 subject: None
             },
             Branch {
                 name: "old".to_owned(),
                 hash: Some(root),
+                remote: false,
                 subject: None
             },
         ]
@@ -295,4 +297,109 @@ fn a_filter_that_does_not_name_a_commit_is_an_error() {
     let err = branch::list(&layout, &query).unwrap_err();
     assert!(matches!(err, Error::BadRevision { .. }), "{err:?}");
     assert!(err.to_string().starts_with("bad revision 'nope': "));
+}
+
+fn environment(dir: &std::path::Path) -> libkit::Environment {
+    libkit::Environment {
+        home: Some(dir.to_path_buf()),
+        ..libkit::Environment::new(dir)
+    }
+}
+
+fn repo_upstream(
+    dir: &std::path::Path,
+    layout: &RepoLayout,
+    branch: &str,
+) -> Option<libkit::config::Upstream> {
+    libkit::config::read_layered(layout, &environment(dir), &NoopObserver)
+        .unwrap()
+        .repo
+        .branch_upstreams
+        .get(branch)
+        .cloned()
+}
+
+#[test]
+fn set_upstream_records_a_tracking_branch_and_unset_removes_it() {
+    let (dir, layout, _root, tip) = repo();
+    let env = environment(dir.path());
+    branch::create(&layout, "topic").unwrap();
+    refs::write_remote_ref(&layout, "origin", "main", &tip).unwrap();
+    refs::write_remote_ref(&layout, "origin", "feature/x", &tip).unwrap();
+
+    // The current branch is the default.
+    let (name, up) =
+        branch::set_upstream(&layout, &env, &NoopObserver, None, "origin/main").unwrap();
+    assert_eq!(
+        (name.as_str(), up.remote.as_str(), up.branch.as_str()),
+        ("main", "origin", "main")
+    );
+    assert_eq!(repo_upstream(dir.path(), &layout, "main"), Some(up));
+
+    // A branch name can hold a `/`.
+    branch::set_upstream(
+        &layout,
+        &env,
+        &NoopObserver,
+        Some("topic"),
+        "origin/feature/x",
+    )
+    .unwrap();
+    let up = repo_upstream(dir.path(), &layout, "topic").unwrap();
+    assert_eq!(
+        (up.remote.as_str(), up.branch.as_str()),
+        ("origin", "feature/x")
+    );
+
+    // A later call replaces the upstream.
+    branch::set_upstream(&layout, &env, &NoopObserver, Some("topic"), "origin/main").unwrap();
+    assert_eq!(
+        repo_upstream(dir.path(), &layout, "topic").unwrap().remote,
+        "origin"
+    );
+
+    assert_eq!(
+        branch::unset_upstream(&layout, &env, &NoopObserver, Some("topic")).unwrap(),
+        "topic"
+    );
+    assert_eq!(repo_upstream(dir.path(), &layout, "topic"), None);
+    assert!(repo_upstream(dir.path(), &layout, "main").is_some());
+}
+
+#[test]
+fn set_upstream_refuses_bad_input() {
+    let (dir, layout, _root, tip) = repo();
+    let env = environment(dir.path());
+    refs::write_remote_ref(&layout, "origin", "main", &tip).unwrap();
+    let set = |branch: Option<&str>, up: &str| {
+        branch::set_upstream(&layout, &env, &NoopObserver, branch, up).unwrap_err()
+    };
+    for up in [
+        "origin/missing",
+        "nowhere/main",
+        "main",
+        "origin/",
+        "/main",
+        "origin//main",
+        "../origin/main",
+    ] {
+        assert!(matches!(set(None, up), Error::UpstreamNotFound(_)), "{up}");
+    }
+    assert!(matches!(set(Some("ghost"), "origin/main"), Error::NotFound(n) if n == "ghost"));
+    refs::write_head_detached(&layout, &tip).unwrap();
+    assert!(matches!(set(None, "origin/main"), Error::NoCurrentBranch));
+    assert_eq!(repo_upstream(dir.path(), &layout, "main"), None);
+}
+
+#[test]
+fn unset_upstream_refuses_a_branch_without_one() {
+    let (dir, layout, _root, _tip) = repo();
+    let env = environment(dir.path());
+    let err = branch::unset_upstream(&layout, &env, &NoopObserver, None).unwrap_err();
+    assert!(
+        matches!(err, Error::NoUpstream(ref n) if n == "main"),
+        "{err:?}"
+    );
+    let err = branch::unset_upstream(&layout, &env, &NoopObserver, Some("ghost")).unwrap_err();
+    assert!(matches!(err, Error::NotFound(_)), "{err:?}");
 }

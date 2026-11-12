@@ -33,7 +33,7 @@ _kit_complete() {
     # users get tab-completion for the common fast-path.
     case "${words[1]}" in
         add)
-            COMPREPLY=( $(compgen -W "-A --all -u --update -f --force -p --patch --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-A --all -u --update -f --force -n --dry-run -p --patch --help" -- "$cur") )
             ;;
         rm)
             COMPREPLY=( $(compgen -W "--cached -r --recursive -f --force --help" -- "$cur") )
@@ -63,7 +63,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-s --stage -z --others --ignored --exclude-standard --help" -- "$cur") )
             ;;
         rev-parse)
-            COMPREPLY=( $(compgen -W "--short --abbrev-ref --show-toplevel --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--short --abbrev-ref --show-toplevel --verify -q --quiet --help" -- "$cur") )
             ;;
         show-ref)
             COMPREPLY=( $(compgen -W "--heads --tags --help" -- "$cur") )
@@ -90,7 +90,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace -M --find-moves -C --find-copies --ignore-rev --ignore-revs-file --ignore-rev-precise --first-parent --reverse --help" -- "$cur") )
             ;;
         log)
-            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --author --grep --since --until --no-merges --first-parent -n --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --author --grep --since --until --no-merges --first-parent -p --patch --stat --decorate --graph --all -n --help" -- "$cur") )
             ;;
         reflog)
             COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )
@@ -102,7 +102,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--sparse --help" -- "$cur") )
             ;;
         branch)
-            COMPREPLY=( $(compgen -W "-v --verbose -d -D -m --list --contains --no-contains --merged --no-merged --show-current --format --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-v --verbose -d -D -m -r --remotes -a --all --list --contains --no-contains --merged --no-merged --show-current --format --help" -- "$cur") )
             ;;
         show)
             COMPREPLY=( $(compgen -W "--stat --help" -- "$cur") )
@@ -117,7 +117,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-a --annotate -s --sign -m --message -d --delete -l --list --author --help" -- "$cur") )
             ;;
         rebase)
-            COMPREPLY=( $(compgen -W "-i --interactive --continue --skip --abort --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-i --interactive --onto --continue --skip --abort --help" -- "$cur") )
             ;;
         revert)
             COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit --help" -- "$cur") )
@@ -140,7 +140,7 @@ _kit_complete() {
             return
             ;;
         stash)
-            COMPREPLY=( $(compgen -W "save list pop apply drop clear show" -- "$cur") )
+            COMPREPLY=( $(compgen -W "save push list pop apply drop clear show" -- "$cur") )
             ;;
         remote)
             COMPREPLY=( $(compgen -W "add set remove rename get-url set-url -v --verbose --help" -- "$cur") )
@@ -202,7 +202,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--is-ancestor --help" -- "$cur") )
             ;;
         rev-list)
-            COMPREPLY=( $(compgen -W "--count --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--count -n --max-count --help" -- "$cur") )
             ;;
         *)
             COMPREPLY=( $(compgen -W "--help" -- "$cur") )

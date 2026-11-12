@@ -192,6 +192,8 @@ pub fn body_name(b: &Option<ssh_frame::Body>) -> &'static str {
         Some(Body::ReadRefResponse(_)) => "read_ref_response",
         Some(Body::UpdateRef(_)) => "update_ref",
         Some(Body::UpdateRefResponse(_)) => "update_ref_response",
+        Some(Body::ReadRepoCursor(_)) => "read_repo_cursor",
+        Some(Body::ReadRepoCursorResponse(_)) => "read_repo_cursor_response",
         Some(Body::PackExists(_)) => "pack_exists",
         Some(Body::PackExistsResponse(_)) => "pack_exists_response",
         Some(Body::UploadPack(_)) => "upload_pack",

@@ -86,6 +86,7 @@ pub fn run(args: &[String]) -> u8 {
             &Request {
                 target: branch,
                 no_commit: opts.no_commit,
+                no_ff: false,
                 message: opts.message.as_deref(),
             },
             json,
@@ -111,7 +112,12 @@ fn fail(failure: merge::Error, json: bool) -> u8 {
 }
 
 #[allow(clippy::too_many_lines)] // one arm of the report for each outcome
-fn start(layout: &RepoLayout, store: &ObjectStore, request: &Request<'_>, json: bool) -> u8 {
+pub(super) fn start(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    request: &Request<'_>,
+    json: bool,
+) -> u8 {
     let outcome = match merge::start(
         layout,
         store,

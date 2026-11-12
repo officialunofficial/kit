@@ -3,18 +3,23 @@
 //!
 //! - bare `<rev>...` — print each resolved 64-hex id, one per line;
 //! - `--short[=N]` — abbreviate to N chars (default 7);
+//! - `--verify <rev>` — print the id of exactly one revision that resolves to
+//!   an object, and fail with nothing on stdout otherwise (`-q` also drops the
+//!   message);
 //! - `--abbrev-ref <ref>` — print the short symbolic name (`HEAD` → the
 //!   current branch);
 //! - `--show-toplevel` — print the repository root (the dir holding
 //!   `.kit`).
 //!
 //! Resolution reuses the shared revspec grammar (refs, full/short hashes,
-//! `HEAD~n`/`^`). The abbreviated id is a BLAKE3 prefix, not a SHA-1 one.
+//! `HEAD~n`/`^`, and `<rev>:<path>` for the object at a path in the tree of
+//! a revision). The abbreviated id is a BLAKE3 prefix, not a SHA-1 one.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
+use kit_core::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::refs::{self, Head};
 use kit_core::store::ObjectStore;
@@ -28,6 +33,8 @@ const DEFAULT_ABBREV: usize = 7;
 
 #[derive(Debug, Parser)]
 #[command(name = "kit rev-parse", about = "Resolve revisions to object ids.")]
+// CLI flag struct: each bool is an independent clap switch.
+#[allow(clippy::struct_excessive_bools)]
 struct RevParseOpts {
     /// Abbreviate the id to N chars (default 7). Value must be attached
     /// (`--short` or `--short=N`) so it does not swallow a following rev.
@@ -39,6 +46,13 @@ struct RevParseOpts {
     /// Print the repository root and exit.
     #[arg(long = "show-toplevel")]
     show_toplevel: bool,
+    /// Require exactly one revision that resolves to an object. Print its
+    /// full id. On any other input print nothing on stdout and exit non-zero.
+    #[arg(long, conflicts_with_all = ["abbrev_ref", "show_toplevel"])]
+    verify: bool,
+    /// With `--verify`, print no message when the revision does not resolve.
+    #[arg(short = 'q', long, requires = "verify")]
+    quiet: bool,
     /// Revisions to resolve.
     args: Vec<String>,
 }
@@ -78,6 +92,29 @@ pub fn run(args: &[String]) -> u8 {
         return super::usage_error("usage: kit rev-parse [opts] <rev>...");
     }
 
+    if opts.verify {
+        let [spec] = opts.args.as_slice() else {
+            return super::usage_error("--verify needs exactly one revision");
+        };
+        let found = revspec::resolve_object(&store, &layout, spec)
+            .map_err(|e| e.to_string())
+            .and_then(|h| {
+                if store.contains(&h) {
+                    Ok(h)
+                } else {
+                    Err("object is missing".to_string())
+                }
+            });
+        return match found {
+            Ok(hash) => {
+                let _ = writeln!(stdout, "{}", render(&hash, opts.short));
+                exit::OK
+            }
+            Err(_) if opts.quiet => exit::GENERAL_ERROR,
+            Err(e) => emit_err(&format!("bad revision '{spec}': {e}"), exit::GENERAL_ERROR),
+        };
+    }
+
     for spec in &opts.args {
         if opts.abbrev_ref {
             match abbrev_ref(&layout, spec) {
@@ -88,7 +125,7 @@ pub fn run(args: &[String]) -> u8 {
             }
             continue;
         }
-        let hash = match revspec::resolve_revision(&store, &layout, spec) {
+        let hash = match revspec::resolve_object(&store, &layout, spec) {
             Ok(h) => h,
             Err(e) => {
                 // A bad revision is an error. kit refuses rather than
@@ -96,13 +133,17 @@ pub fn run(args: &[String]) -> u8 {
                 return emit_err(&format!("bad revision '{spec}': {e}"), exit::GENERAL_ERROR);
             }
         };
-        let rendered = match opts.short {
-            Some(n) => format::short_hash(&hash, if n == 0 { DEFAULT_ABBREV } else { n }),
-            None => format::hex_hash(&hash),
-        };
-        let _ = writeln!(stdout, "{rendered}");
+        let _ = writeln!(stdout, "{}", render(&hash, opts.short));
     }
     exit::OK
+}
+
+/// The full id, or the `--short[=N]` abbreviation of it.
+fn render(hash: &Hash, short: Option<usize>) -> String {
+    match short {
+        Some(n) => format::short_hash(hash, if n == 0 { DEFAULT_ABBREV } else { n }),
+        None => format::hex_hash(hash),
+    }
 }
 
 /// `--abbrev-ref` rendering: `HEAD` → the current branch (or `HEAD` when

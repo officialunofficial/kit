@@ -42,8 +42,12 @@ the `.kit/` marker and has no split work-tree / exec-path model.
 
 Working-tree commands:
 
-- `kit init` &mdash; create a new repository in `.kit/`.
-- `kit add [-A|-u] [-f] [-p] <path>...` / `kit add .` &mdash; stage files for the
+- `kit init [-q] [<dir>]` &mdash; create a new repository in `.kit/`, in the
+  current directory or in `<dir>`. kit creates a missing `<dir>`, nested
+  levels included. It refuses a `<dir>` that is a symlink or a file (exit
+  `73`) and a directory that holds a repository already (exit `1`).
+  `-q`/`--quiet` drops the success line and never an error.
+- `kit add [-A|-u] [-f] [-n] [-p] <path>...` / `kit add .` &mdash; stage files for the
   next commit. Multiple pathspecs may be given. `.` stages every non-ignored
   file under the current directory. `-A`/`--all` stages every change in
   the worktree including deletions of tracked files (takes no path
@@ -63,7 +67,10 @@ Working-tree commands:
   are **refused**. An explicitly-named ignored path is refused unless
   `-f`/`--force` (like plain `add`); a path that escapes the repo through
   a symlinked parent is refused. The hunk view and prompts go to stderr;
-  `s` (split) and `e` (manual edit) are follow-ups.
+  `s` (split) and `e` (manual edit) are follow-ups. `-n`/`--dry-run` prints
+  `add '<path>'` for each file that would be staged or updated and
+  `remove '<path>'` for each deletion that `-A` would record. It changes no
+  index and writes no object. It is incompatible with `-p` and `-u`.
 - `kit rm [--cached] [-r|--recursive] [-f|--force] <path>...` &mdash; remove
   paths and stage the deletion for the next commit. By default this
   **deletes the worktree file(s)** and stages the removal; now-empty
@@ -201,9 +208,9 @@ Working-tree commands:
   `.kit/worktrees/<id>/`. Interim limit: `kit gc` refuses to run while
   linked worktrees exist (cross-tree root collection is a tracked
   follow-up) &mdash; remove or prune them first.
-- `kit stash [save|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
+- `kit stash [save|push|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
   save/restore WIP
-  changes. `apply` restores an entry without removing it; `clear` drops
+  changes. `push` is another name for `save`. `apply` restores an entry without removing it; `clear` drops
   every entry. `pop`/`apply`/`drop`/`show` select an entry by index
   (default `0`), accepting either a bare `N` or the `stash@{N}` form
   printed by `stash list`. `pop`/`apply` accept `--index`, which also
@@ -267,7 +274,7 @@ History / commits:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
   "is_merge":<bool>,"is_root":<bool>}`.
-- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]` &mdash; show
+- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [--graph] [-n N] [--all | <rev> | <A>..<B> | <A>...<B>]` &mdash; show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -289,6 +296,35 @@ History / commits:
   object per commit, newest first) with keys `hash`, `parents`, `tree`,
   `author`, `timestamp`, `title`, `message`; the `timestamp` stays a raw
   Unix-seconds integer for machine consumption.
+  `-p` (`--patch`) follows each commit with its unified diff against its
+  first parent, and `--stat` with its diffstat. A root commit is diffed
+  against an empty tree. The text is the text of `kit show`, and a merge
+  commit shows its diff against the first parent, as `show` does. With
+  `--oneline` the diff follows the one-line header directly. `-p` and
+  `--stat` exclude each other and `--format=json`; each is a usage error
+  (exit `64`). A blob that cannot be read ends the output with an error.
+  `--all` starts the walk at `HEAD`, every local branch, every
+  remote-tracking ref and every tag, each followed to its commit. A commit
+  shows once, in the order above. A ref that ends at an object that is not a
+  commit is left out. `--all` together with a revision or a range is a usage
+  error (exit `64`).
+  `--decorate` prints the refs that name a commit after its id, in
+  parentheses: `commit <id> (HEAD -> main, tag: v1, origin/main)`, and
+  `<id> (HEAD -> main, tag: v1, origin/main) <title>` with `--oneline`. The
+  order is `HEAD`, the local branches, the tags, then the remote-tracking
+  refs. A detached `HEAD` shows as `HEAD`. A commit that no ref names has no
+  parentheses. kit reads the refs once. Each name prints with control
+  characters escaped. `--decorate` with `--format=json` is a usage error
+  (exit `64`), because the JSON record has a fixed set of keys.
+  `--graph` draws the commit graph in the left margin: `*` for a commit, `|`
+  for an open branch, `\` where a merge opens a branch and `/` where
+  branches join. It works with the default and the `--oneline` format, and
+  with `--all` and `--decorate`. A merge shows as `|\` on its own line below
+  the commit, and each extra parent of an octopus merge adds a `\`. kit
+  draws an edge only to a parent that the output shows, so a limit, a range
+  or a filter leaves no open line. A history with more than 1024 open
+  branches is an error (exit `65`). `--graph` with `-p`, `--stat` or
+  `--format=json` is a usage error (exit `64`).
   `--author <pattern>` and `--grep <pattern>` filter the walk by a plain
   **substring** match &mdash; `--author` against both the short display form
   (the `Author:` line) and the full `kind:hex`/`mid:N` form
@@ -485,12 +521,16 @@ History / commits:
   fails with `65` (`DATAERR`) on mismatch &mdash; the SPEC-DISCLOSURE rule
   that the caller compares the returned path. `--trusted` /
   `--trust-roots` reuse `kit verify`'s trust-roots flow against
-  `Disclosed.signer`; `signature_valid == false` is reported and, with
-  `--trusted`, is a failure. A verified bundle proves the content
+  `Disclosed.signer`; `signature_valid == false` is always a failure: the
+  command exits `65` (`DATAERR`), with or without trust roots, and writes
+  no `--payload-out` file. A verified bundle proves the content
   belongs to the commit id; binding the signer to a person or org stays
   application policy (trust roots). Default output mirrors `kit
   verify`: `ok: <kind> <path> @ <short id>, <bytes> B, signer <keyid>
-  (valid|INVALID signature)[, signer trusted]` or `bad: <reason>`.
+  (valid|INVALID signature)[, signer trusted]` or `bad: <reason>`. A failure
+  prints `bad:` (never `ok:`), including `bad: ... (INVALID signature)`.
+  The `bad:` line goes to stdout, or to stderr with `--format=json`, which
+  still prints the full report, with `"signature_valid":false`, to stdout.
   `--format=json` prints the disclosure report plus
   `signer_trusted` (`true`/`false`/`null`), including `step_inner_roots`
   (hex array) and `chunk_inner_root` (hex or `null`). `--payload-out FILE`
@@ -513,7 +553,8 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   missing` for unknown objects); `<size>` is the byte length of the content
   that follows, so blobs are byte-exact with git while commit/tree content
   (and its size) is kit-shaped, as with `-p`. `<object>` resolves through
-  the shared revspec grammar (hash, ref, `HEAD`, `HEAD~n`/`^`).
+  the shared revspec grammar (hash, ref, `HEAD`, `HEAD~n`/`^`), or as
+  `<rev>:<path>`, the object at `<path>` in the tree of `<rev>`.
 - `kit show [--stat] [<object>...]` &mdash; display objects (like `git show`),
   defaulting
   to `HEAD`. A **commit**/**remix** prints a header (`commit <hash>`,
@@ -529,7 +570,8 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   header carries kit's signed `Identity` and 64-hex BLAKE3 ids, so those
   header lines diverge from git's `Author: Name <email>` / 40-hex form (the
   same documented divergence as `log`); the diff body, tree listing, and blob
-  output match git. `<object>` resolves through the revspec grammar.
+  output match git. `<object>` resolves through the revspec grammar, or as
+  `<rev>:<path>`: the blob or tree at `<path>` in the tree of `<rev>`.
 - `kit ls-tree [-r] [-z] <tree-ish> [<path>...]` &mdash; list a tree's entries
   as `<mode> <type> <hash>\t<name>` (git octal modes
   `100644`/`100755`/`120000`/`040000`; the hash is 64-hex BLAKE3). `-r`
@@ -548,17 +590,29 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   outside an
   `-o`/`-c` selection). `-z` NUL-terminates records and emits raw paths
   (otherwise special-byte paths &mdash; including under `-s` &mdash; are C-style quoted).
-- `kit rev-parse [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
+- `kit rev-parse [--short[=N]] [--abbrev-ref] [--show-toplevel] [--verify [-q]] [<rev>...]`
   &mdash; resolve revisions to object ids. Bare `<rev>...` prints each resolved
   64-hex id; `--short[=N]` abbreviates (default 7, a BLAKE3 prefix);
   `--abbrev-ref HEAD` prints the current branch; kit always errors on an
-  unresolvable revision; `--show-toplevel` prints the
+  unresolvable revision; `<rev>:<path>` prints the id of the object at
+  `<path>` in the tree of `<rev>`; `--show-toplevel` prints the
   repository root (the directory holding `.kit`, found by walking up from
-  cwd).
-- `kit rev-list [--count] <rev>` &mdash; list the commit ids reachable from
-  `<rev>` in reverse-chronological (topological) order, one 64-hex id per
-  line; `--count` prints the number instead. Reuses `log`'s walk so the
-  order matches. It takes one revision and no range. A walk that would
+  cwd). `--verify <rev>` takes exactly one revision, prints its full id and
+  needs the object in the store. On any other input it prints nothing on
+  stdout and exits `1` (`64` when the count of revisions is not one).
+  `-q`/`--quiet` also drops the message. `--verify` does not combine with
+  `--abbrev-ref` or `--show-toplevel`.
+- `kit rev-list [--count] [-n <n> | --max-count=<n>] <rev>` &mdash; list the
+  commit ids reachable from `<rev>` in reverse-chronological (topological)
+  order, one 64-hex id per line; `--count` prints the number instead.
+  `<rev>` is a revision, a range `A..B` or a symmetric range `A...B`, read
+  as `kit log` reads them, and the walk is the walk of `log`, so the order
+  matches. `-n` and `--max-count` keep the first `<n>` commits of that
+  order, and `--count` counts what is left. `<n>` is a non-negative
+  integer; `0` lists nothing, and a value above the history lists all of
+  it. Any other value, a negative one included, is an error (exit `65`,
+  or `64` when it starts with `-`). It takes one revision or range. A walk
+  that would
   read more than 1,000,000 commits, or that meets a commit that is missing,
   corrupt or not a commit, exits `65` with an error that names the limit
   or the commit.
@@ -571,10 +625,13 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   names it and nothing on stdout, so a script can tell "cannot tell" (`65`)
   from "no" (`1`). A walk that would read more than 1,000,000 commits on
   either side also exits `65`, with an error that names the limit.
-- `kit show-ref [--heads] [--tags]` &mdash; list refs as `<hash> <refname>`,
+- `kit show-ref [--heads] [--tags] [<pattern>...]` &mdash; list refs as `<hash> <refname>`,
   sorted by ref name. Default shows `refs/heads/*`, `refs/tags/*`, and
   any `refs/remotes/*` tracking refs; `--heads`/`--tags` filter to one
-  namespace.
+  namespace. A `<pattern>` keeps a ref that it equals, or whose trailing
+  path components it equals (`main` keeps `refs/heads/main`, not
+  `refs/heads/domain`); several patterns give the union. The command exits
+  `1` with no output when nothing matches.
 - `kit for-each-ref [--format=<fmt>] [<pattern>...]` &mdash; iterate refs
   (heads, tags, and remote-tracking refs), sorted by ref name (like
   `git for-each-ref`). The default line
@@ -741,8 +798,13 @@ Branches / refs:
   `<new>`, and moves HEAD when the renamed branch is checked out.
 - `kit branch --show-current` &mdash; print the checked-out branch name (empty
   output on a detached HEAD), like `git branch --show-current`.
-- `kit branch [--list] [--contains [<c>]] [--no-contains [<c>]] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]`
-  &mdash; filter the listing (like `git branch`). `<pattern>` arguments are
+- `kit branch [-r|-a] [--list] [--contains [<c>]] [--no-contains [<c>]] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]`
+  &mdash; filter the listing (like `git branch`). `-r` lists the
+  remote-tracking branches of every remote as `<remote>/<branch>`. `-a`
+  lists the local branches, then the remote-tracking branches as
+  `remotes/<remote>/<branch>`. Both read local refs and contact no remote,
+  they list like `--list` does (positional patterns filter), and they cannot
+  combine with `-d`, `-D` or `-m`. `<pattern>` arguments are
   shell globs matched against branch names (`*`, `?`, `[…]`; `*` spans
   `/`, so `feature/*` works &mdash; git's non-pathname `wildmatch`); a branch is
   kept if it matches any pattern. Patterns are only treated as filters in
@@ -766,6 +828,10 @@ Branches / refs:
   files the target tree drops are removed, with emptied directories
   pruned. Prints `Switched to branch '<n>'`, or `Already on '<n>'` for a
   no-op switch (which still runs the dirty-worktree guard).
+- `kit checkout [-f] -- <path>...` &mdash; restore the paths from the index. It
+  runs `kit restore [-f] <path>...`, so it refuses a file with unstaged edits
+  unless `-f` is given. Any other argument before the `--`, a revision
+  included, is a usage error.
 - `kit checkout -b|-B <new> [<start>]` &mdash; create a branch at the
   start-point (default HEAD) and switch to it; `-b` refuses to clobber an
   existing branch, `-B` create-or-resets. Prints `Switched to a new branch
@@ -863,9 +929,14 @@ Branches / refs:
   parent is the mainline, and `-m`/mainline selection is not yet
   supported. `--format=json` emits the same outcome-object shape as
   `merge`/`cherry-pick`.
-- `kit rebase [-i|--interactive] [--format=json] <revspec> | --continue | --abort | --skip`
+- `kit rebase [-i|--interactive] [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
   &mdash; replay commits onto a different base. The target is resolved through
   the shared revspec resolver (branch, tag, `HEAD~n`, full/short hash).
+  `--onto <newbase> <upstream> [<branch>]` replays the commits of
+  `<upstream>..<branch>` onto `<newbase>`. `<branch>` is a local branch and
+  defaults to the current one. `<upstream>` is required with `--onto`, and
+  `--onto` does not combine with `--continue`, `--skip` or `--abort`. Those
+  three finish or undo an `--onto` rebase.
   Restore steps refuse to overwrite staged changes, dirty tracked files,
   or untracked path collisions. On conflict the rebase pauses with
   resumable state; `--skip` drops the current commit. See "Resolving
@@ -1033,10 +1104,9 @@ Remote / sync:
   a build with `--features sparse-checkout`). Note this is an
   **enhancement over git**: kit's `--sparse` takes one or more PATTERN
   arguments, whereas git's `clone --sparse` is a boolean flag (it cones
-  to the top-level files and you add patterns afterward). **`--depth N` is parsed but
-  not yet wired**: passing it fails with a clear `--depth is not yet
-  wired` usage error rather than silently producing a full clone; see
-  "Divergences from Git".
+  to the top-level files and you add patterns afterward). **`--depth N` is not
+  supported**: passing it fails with a `--depth is not supported` usage error
+  rather than silently producing a full clone; see "Divergences from Git".
   - `-b`/`--branch <name>` &mdash; check out `<name>` instead of the remote's
     default branch. The branch MUST exist among the remote's advertised
     refs; unlike the default heuristic (current default branch, falling
@@ -1048,8 +1118,14 @@ Remote / sync:
     (mirrors `kit remote add <name> <url>` at clone time). The name
     must be dot-free and ref-safe, like a named `remote add`. Tracking
     refs land under `refs/remotes/<name>/*` to match.
-- `kit fetch [<remote>] [--all] [--no-verify-signatures] [--format=json]
-  [-q|--quiet]` &mdash; download from remote without merging. Fetched branch tips
+- `kit fetch [<remote>] [--all] [-p|--prune] [--no-verify-signatures]
+  [--format=json] [-q|--quiet]` &mdash; download from remote without merging.
+  `--prune` then deletes the `refs/remotes/<remote>/<branch>` refs whose
+  branch the remote lost, and prints ` - [deleted]         (none) ->
+  <remote>/<branch>` for each. It runs only after every remote branch was
+  fetched and verified, and it re-reads each candidate from the remote
+  before it deletes it. It never deletes a local branch or a tag. With
+  `--format=json` the object also has `"pruned":["<branch>"]`. Fetched branch tips
   are stored
   under `refs/remotes/<remote>/<branch>` (`refs/remotes/default/<branch>`
   for the flat default remote) and do not move local branches. `--all`
@@ -1062,10 +1138,18 @@ Remote / sync:
   per remote fetched to stdout: `{"ok":true,"remote":"...","endpoint":"...",
   "updated":[{"name":"...","old":"<hex>|null","new":"<hex>"}]}` on
   success, or `{"ok":false,"error":"..."}` on failure.
-- `kit pull [<remote>] [--all] [--no-verify-signatures] [--format=json]
-  [-q|--quiet]` &mdash; fetch, then fast-forward the current branch from
-  `refs/remotes/<remote>/<branch>`. Divergent histories are refused; use
-  explicit merge/rebase flows after resolving the divergence. The
+- `kit pull [<remote>] [--all] [--rebase] [--no-verify-signatures]
+  [--format=json] [-q|--quiet]` &mdash; fetch, then fast-forward the current
+  branch from `refs/remotes/<remote>/<branch>`. Divergent histories are
+  refused; use `--rebase` or an explicit merge after resolving the
+  divergence. `--rebase` fetches with the same signature checks, then replays
+  the commits of the current branch that the fetched branch lacks onto the
+  fetched branch, as `kit rebase` does. It prints nothing but `Current branch
+  <branch> is up to date.` when the branch holds the fetched tip. A conflict
+  pauses the rebase with the state and the instructions of `kit rebase`;
+  finish it with `kit rebase --continue`, `--skip` or `--abort`. `--rebase`
+  needs a branch `HEAD` with a commit and does not combine with `--all`.
+  With `--format=json` it prints the object of `kit rebase`. The
   fast-forward check reads every commit it walks; a commit that is missing,
   corrupt or not a commit fails the pull with an error that names it. Fresh repos
   with no local branch tip initialize the current branch/worktree from
@@ -1093,12 +1177,19 @@ Remote / sync:
   remote it iterates.
 - **Library.** `clone`, `fetch` and `pull` run on the `kit-sync` crate
   (`rust/crates/kit-sync/README.md`), which an embedder can call directly.
-- `kit push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]
-  [--format=json] [-q|--quiet]`
+- `kit push [<remote> [<src>:<dst>]] [--all] [--force|--force-with-lease]
+  [--dry-run] [--format=json] [-q|--quiet]`
   &mdash; push refs and packs to a remote. With no `<remote>`, pushes the
   **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
   tracking pair), falling back to the configured default remote; an
-  explicit `<remote>` name overrides that choice. The default push is
+  explicit `<remote>` name overrides that choice. `<src>:<dst>` pushes the
+  local branch `<src>` to the remote branch `<dst>`, and `<src>` need not be
+  the current branch. Each side is a branch name or a `refs/heads/<name>`
+  ref. A refspec push goes through the same path as a plain push, so the
+  lease and the non-fast-forward check apply, and it records an upstream only
+  with `-u`. kit rejects a wildcard, a leading `+` (use `--force`), an empty
+  `<src>` (a remote delete), a ref outside `refs/heads/` and a refspec with
+  `--all`. The default push is
   CAS-protected: a non-fast-forward is rejected using the remote-tracking
   ref as the lease. `--all` mirrors every `refs/heads/*` (also CAS-safe).
   `--force` overwrites the remote branch unconditionally (skips CAS);
@@ -1620,10 +1711,10 @@ These are documented behaviors, not bugs:
 - **`kit status --porcelain=v2`** matches git's format except that object
   ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1). Exact renames emit a
   `2` record (`R100`); `--branch` header lines are not emitted.
-- **`kit clone --depth N` is parsed but not yet wired.** The flag is
-  accepted by the parser but `clone` rejects it with a `--depth is not
-  yet wired` usage error rather than silently producing a full clone.
-  Shallow-clone history truncation is a follow-up.
+- **`kit clone --depth N` is not supported.** `clone` rejects it with a
+  `--depth is not supported` usage error rather than silently producing a
+  full clone. A clone holds the full history, so every commit verifies with its
+  ancestors.
 - **`kit blame --ignore-rev-precise` (opt-in) is a content-addressed
   refinement of `--ignore-rev` fall-through, not git's positional guess.**
   git's `--ignore-rev` pairs a changed hunk's k-th added line with its k-th

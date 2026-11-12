@@ -10,6 +10,9 @@
 //! - **tree**: an `ls-tree`-style listing.
 //! - **blob**: the raw contents.
 //!
+//! An object named `<rev>:<path>` is the blob or tree at that path in the
+//! tree of `<rev>`.
+//!
 //! Like `kit log`, the commit/tag headers carry kit's signed `Identity`
 //! and 64-hex BLAKE3 ids, so the header lines diverge from git's
 //! `Author: Name <email>` / 40-hex form — the same documented divergence as
@@ -42,7 +45,8 @@ struct ShowOpts {
     #[arg(long)]
     stat: bool,
     /// Objects to show — revisions, refs, or hashes (e.g. `HEAD`, `main`,
-    /// `HEAD~2`, `<hash>`, `<tag>`). Defaults to `HEAD`.
+    /// `HEAD~2`, `<hash>`, `<tag>`), or `<rev>:<path>` for a file or
+    /// directory of a revision. Defaults to `HEAD`.
     objects: Vec<String>,
 }
 
@@ -69,7 +73,7 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut stdout = std::io::stdout().lock();
     for spec in &specs {
-        let h = match revspec::resolve_revision(repo.store(), repo.layout(), spec) {
+        let h = match revspec::resolve_object(repo.store(), repo.layout(), spec) {
             Ok(h) => h,
             Err(e) => return emit_err(&e.to_string(), exit::GENERAL_ERROR),
         };
@@ -172,8 +176,24 @@ fn show_commit_like(
     write_indented_message(out, message);
     let _ = writeln!(out);
 
-    // Diff the first parent's tree against this tree (None ⇒ empty, so a
-    // root commit shows every file as added), reusing `diff`'s renderer.
+    write_commit_diff(out, repo, parent, tree, stat).map(|_| ())
+}
+
+/// Write the diff of `tree` against the tree of `parent`: the unified diff,
+/// or the diffstat when `stat` is set. `None` for `parent` is an empty tree,
+/// so a root commit shows every file as added. A merge commit passes its
+/// first parent. `kit log -p` and `kit log --stat` share this function.
+/// Returns whether the diff has any change, and so wrote output.
+///
+/// The diff comes from the library that `kit diff` uses, and the renderers
+/// are those of `kit diff`. A blob that cannot be read is an error.
+pub(super) fn write_commit_diff(
+    out: &mut impl Write,
+    repo: &Repo,
+    parent: Option<Hash>,
+    tree: Hash,
+    stat: bool,
+) -> Result<bool, (String, u8)> {
     let parent_tree = match parent {
         Some(p) => Some(
             libkit::revspec::tree_of(repo.store(), &p)
@@ -183,25 +203,24 @@ fn show_commit_like(
     };
     let diff = libkit::diff::between_trees(repo, parent_tree, Some(tree))
         .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
-    // `--stat` renders the diffstat instead of the full patch (like
-    // `git show --stat`), reusing `diff`'s byte-exact stat renderer.
     if stat {
         let rows = diff
             .stats()
             .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
-        return super::diff::render_stat(out, &rows).map_err(|e| (e, exit::GENERAL_ERROR));
+        super::diff::render_stat(out, &rows).map_err(|e| (e, exit::GENERAL_ERROR))?;
+    } else {
+        for e in diff.entries() {
+            super::diff::emit_entry_patch(out, e, || {
+                diff.patch_body(
+                    e,
+                    kit_core::ops::DEFAULT_CONTEXT_LINES,
+                    kit_core::ops::WhitespaceMode::Exact,
+                )
+            })
+            .map_err(|e| (e, exit::GENERAL_ERROR))?;
+        }
     }
-    for e in diff.entries() {
-        super::diff::emit_entry_patch(out, e, || {
-            diff.patch_body(
-                e,
-                kit_core::ops::DEFAULT_CONTEXT_LINES,
-                kit_core::ops::WhitespaceMode::Exact,
-            )
-        })
-        .map_err(|e| (e, exit::GENERAL_ERROR))?;
-    }
-    Ok(())
+    Ok(!diff.entries().is_empty())
 }
 
 /// Render an annotated/signed tag header, then the peeled target object.

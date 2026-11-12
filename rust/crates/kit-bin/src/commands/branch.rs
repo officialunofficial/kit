@@ -19,7 +19,7 @@ use crate::clap_args;
 use crate::exit;
 use crate::format;
 use crate::progress::ServedWarning;
-use libkit::branch::{self, Branch, Query};
+use libkit::branch::{self, Branch, Query, Scope};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum BranchFormat {
@@ -49,6 +49,15 @@ struct BranchOpts {
     /// renamed branch is the checked-out one.
     #[arg(short = 'm', long)]
     rename: bool,
+    /// Set the upstream of a branch to the remote-tracking branch
+    /// `<remote>/<branch>` (like `git branch -u`). The branch is the one
+    /// named, or the current one.
+    #[arg(short = 'u', long = "set-upstream-to", value_name = "UPSTREAM")]
+    set_upstream_to: Option<String>,
+    /// Remove the upstream of a branch (like `git branch --unset-upstream`).
+    /// The branch is the one named, or the current one.
+    #[arg(long = "unset-upstream")]
+    unset_upstream: bool,
     /// Verbose list: also show each branch tip's abbreviated id and
     /// commit subject (like `git branch -v`).
     #[arg(short = 'v', long)]
@@ -58,6 +67,14 @@ struct BranchOpts {
     /// `--list` additionally enables positional `<pattern>` glob filtering.
     #[arg(long)]
     list: bool,
+    /// List the remote-tracking branches, named `<remote>/<branch>`, instead
+    /// of the local ones (like `git branch -r`).
+    #[arg(short = 'r', long = "remotes", conflicts_with = "all")]
+    remotes: bool,
+    /// List the local branches and the remote-tracking branches. The latter
+    /// are named `remotes/<remote>/<branch>` (like `git branch -a`).
+    #[arg(short = 'a', long = "all")]
+    all: bool,
     /// List only branches whose tip has `<commit>` as an ancestor (default
     /// HEAD when omitted, like `git branch --contains`).
     #[arg(long, value_name = "COMMIT", num_args = 0..=1, default_missing_value = "HEAD")]
@@ -117,16 +134,39 @@ pub fn run(args: &[String]) -> u8 {
         return super::usage_error("usage: kit branch [-d|-D|-m] ...  (modes are exclusive)");
     }
 
+    if opts.set_upstream_to.is_some() || opts.unset_upstream {
+        if mode_flags > 0
+            || opts.list
+            || opts.remotes
+            || opts.all
+            || opts.contains.is_some()
+            || opts.no_contains.is_some()
+            || opts.merged.is_some()
+            || opts.no_merged.is_some()
+            || (opts.set_upstream_to.is_some() && opts.unset_upstream)
+        {
+            return super::usage_error(
+                "usage: kit branch -u <upstream> [<branch>] | --unset-upstream [<branch>]",
+            );
+        }
+        return upstream(&layout, opts.set_upstream_to.as_deref(), &opts.names);
+    }
+
     let has_ancestry_filter = opts.contains.is_some()
         || opts.no_contains.is_some()
         || opts.merged.is_some()
         || opts.no_merged.is_some();
-    let has_filter = opts.list || has_ancestry_filter;
+    let scope = match (opts.remotes, opts.all) {
+        (true, _) => Scope::Remote,
+        (_, true) => Scope::All,
+        _ => Scope::Local,
+    };
+    let has_filter = opts.list || has_ancestry_filter || scope != Scope::Local;
 
     if opts.rename || opts.delete || opts.force_delete {
         if has_filter {
             return super::usage_error(
-                "usage: kit branch [--list|--contains|--no-contains|--merged|--no-merged] only \
+                "usage: kit branch [-r|-a|--list|--contains|--no-contains|--merged|--no-merged] only \
                  filter the listing — they cannot combine with -d/-D/-m",
             );
         }
@@ -142,6 +182,7 @@ pub fn run(args: &[String]) -> u8 {
     // are glob patterns that filter the listing, like `git branch --list
     // <pattern>`. Otherwise the positional is a branch name to create.
     let query = |patterns| Query {
+        scope,
         patterns,
         contains: opts.contains.as_deref(),
         no_contains: opts.no_contains.as_deref(),
@@ -156,6 +197,38 @@ pub fn run(args: &[String]) -> u8 {
         [] => list(&layout, json, opts.verbose, &query(&[])),
         [name] => create(&layout, name),
         _ => super::usage_error("usage: kit branch <name>  (create takes one name)"),
+    }
+}
+
+/// `kit branch -u <upstream> [<branch>]` and `kit branch --unset-upstream
+/// [<branch>]` — change where a branch tracks.
+fn upstream(layout: &RepoLayout, set: Option<&str>, names: &[String]) -> u8 {
+    let branch = match names {
+        [] => None,
+        [name] => Some(name.as_str()),
+        _ => {
+            return super::usage_error(
+                "usage: kit branch -u <upstream> [<branch>] | --unset-upstream [<branch>]",
+            );
+        }
+    };
+    let mut stderr = std::io::stderr().lock();
+    match set {
+        Some(up) => match crate::config::set_upstream(layout, branch, up) {
+            Ok((name, up)) => {
+                let _ = writeln!(
+                    stderr,
+                    "branch '{name}' set up to track '{}/{}'.",
+                    up.remote, up.branch
+                );
+                exit::OK
+            }
+            Err(e) => super::fail(e),
+        },
+        None => match crate::config::unset_upstream(layout, branch) {
+            Ok(_) => exit::OK,
+            Err(e) => super::fail(e),
+        },
     }
 }
 
@@ -228,10 +301,13 @@ fn list(layout: &RepoLayout, json: bool, verbose: bool, query: &Query<'_>) -> u8
     let mut stdout = std::io::stdout().lock();
     if json {
         for r in &branches {
-            let is_current = current.as_deref() == Some(r.name.as_str());
+            let is_current = !r.remote && current.as_deref() == Some(r.name.as_str());
             let _ = stdout.write_all(b"{");
             let _ = write!(stdout, "\"name\":\"{}\"", format::json_escape(&r.name));
             let _ = write!(stdout, ",\"current\":{is_current}");
+            if r.remote {
+                let _ = stdout.write_all(b",\"remote\":true");
+            }
             if let Some(h) = &r.hash {
                 let _ = write!(stdout, ",\"hash\":\"{}\"", format::hex_hash(h));
             } else {
@@ -242,16 +318,19 @@ fn list(layout: &RepoLayout, json: bool, verbose: bool, query: &Query<'_>) -> u8
         return exit::OK;
     }
 
-    let marker_for = |name: &str| {
-        current
-            .as_deref()
-            .map_or(' ', |cur| if cur == name { '*' } else { ' ' })
+    let marker_for = |r: &Branch| {
+        current.as_deref().map_or(
+            ' ',
+            |cur| {
+                if !r.remote && cur == r.name { '*' } else { ' ' }
+            },
+        )
     };
 
     if !verbose {
         // Default: `<marker> <name>` only — `git branch` omits the id.
         for r in &branches {
-            let _ = writeln!(stdout, "{} {}", marker_for(&r.name), r.name);
+            let _ = writeln!(stdout, "{} {}", marker_for(r), r.name);
         }
         return exit::OK;
     }
@@ -259,13 +338,14 @@ fn list(layout: &RepoLayout, json: bool, verbose: bool, query: &Query<'_>) -> u8
     // Verbose: `<marker> <name> <short> <subject>`, name column padded to
     // the longest branch name (like `git branch -v`).
     let width = branches.iter().map(|r| r.name.len()).max().unwrap_or(0);
-    for Branch {
-        name,
-        hash,
-        subject,
-    } in &branches
-    {
-        let marker = marker_for(name);
+    for entry in &branches {
+        let Branch {
+            name,
+            hash,
+            subject,
+            ..
+        } = entry;
+        let marker = marker_for(entry);
         match (hash, subject) {
             (Some(h), Some(subject)) => {
                 let short = format::short_hash(h, DEFAULT_ABBREV);

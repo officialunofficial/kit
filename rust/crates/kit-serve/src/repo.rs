@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kit_core::hash::Hash;
-use kit_core::protocol::PackKey;
+use kit_core::protocol::{PackKey, RepoCursor, Transport as _};
 use kit_core::refs::{RefWriteCondition, validate_ref_prefix};
 use kit_transport_file::{FileTransport, RefFileError, SERVER_META_MARKER};
 
@@ -155,6 +155,16 @@ impl Repo {
         PackWriter::begin(self.root(), key)
     }
 
+    /// The repository cursor (SPEC-TRANSPORT §1.2), or `None` when the
+    /// repository cannot vouch for one at this moment: the file transport
+    /// withholds it while a ref directory is fresh or on a system without a
+    /// boot id, and a failed read counts as that too. A client then does
+    /// its full work, which is always correct. The read takes the locks and
+    /// reads the directories that [`FileTransport`] does, and no ref file.
+    pub(crate) fn repo_cursor(&self) -> Option<RepoCursor> {
+        self.tx.repo_cursor().ok().flatten()
+    }
+
     /// The id of the ref `name`; `None` if it is absent. A ref file that
     /// holds no id is an error, never absent.
     pub(crate) fn read_ref(&self, name: &str) -> Result<Option<Hash>, RefFileError> {
@@ -224,7 +234,6 @@ impl Repo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kit_core::protocol::Transport as _;
 
     fn repo(td: &tempfile::TempDir) -> Repo {
         Repo::open(td.path(), WritePolicy::Open).unwrap()

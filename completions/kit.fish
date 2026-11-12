@@ -38,6 +38,8 @@ complete -c kit -n "__fish_seen_subcommand_from add" \
 complete -c kit -n "__fish_seen_subcommand_from add" \
     -l force -s f -d "Stage an ignored path"
 complete -c kit -n "__fish_seen_subcommand_from add" \
+    -l dry-run -s n -d "Show what would be staged"
+complete -c kit -n "__fish_seen_subcommand_from add" \
     -l patch -s p -d "Interactively choose hunks to stage"
 complete -c kit -n "__fish_seen_subcommand_from rm" \
     -l cached -d "Stage removal only; keep worktree file"
@@ -116,7 +118,9 @@ complete -c kit -n "__fish_seen_subcommand_from ls-files" \
 complete -c kit -n "__fish_seen_subcommand_from ls-files" \
     -l exclude-standard -d "Drop .kitignore-ignored files"
 complete -c kit -n "__fish_seen_subcommand_from rev-parse" \
-    -l verify -d "Error on an unresolvable revision"
+    -l verify -d "Require one revision that resolves"
+complete -c kit -n "__fish_seen_subcommand_from rev-parse" \
+    -l quiet -s q -d "With --verify, print no message"
 complete -c kit -n "__fish_seen_subcommand_from rev-parse" \
     -l short -d "Abbreviate the id (default 7)"
 complete -c kit -n "__fish_seen_subcommand_from rev-parse" \
@@ -193,6 +197,16 @@ complete -c kit -n "__fish_seen_subcommand_from log" \
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -l first-parent -d "Follow only first parents"
 complete -c kit -n "__fish_seen_subcommand_from log" \
+    -s p -l patch -d "Show the patch of each commit"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l stat -d "Show the diffstat of each commit"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l decorate -d "Show the refs that name each commit"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l graph -d "Draw the commit graph in the left margin"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l all -d "Start from HEAD and every branch, remote-tracking ref and tag"
+complete -c kit -n "__fish_seen_subcommand_from log" \
     -s n -d "Limit number of commits" -r
 complete -c kit -n "__fish_seen_subcommand_from reflog" \
     -l format -d "Output format (default|json)" -r -a "default json"
@@ -241,6 +255,8 @@ complete -c kit -n "__fish_seen_subcommand_from tag" \
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l interactive -s i -d "Edit the todo list before replaying"
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l onto -d "Replay onto this revision" -r
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l continue -d "Continue an in-progress rebase"
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l skip -d "Skip the current commit"
@@ -285,8 +301,8 @@ complete -c kit -n "__fish_seen_subcommand_from gc" -l dry-run -s n -d "Preview 
 complete -c kit -n "__fish_seen_subcommand_from gc" -l grace-secs -d "Keep objects younger than SECS"
 complete -c kit -n "__fish_seen_subcommand_from worktree; and not __fish_seen_subcommand_from add list remove prune" -a "add list remove prune"
 complete -c kit -n "__fish_seen_subcommand_from stash; \
-    and not __fish_seen_subcommand_from save list pop apply drop clear show" \
-    -a "save list pop apply drop clear show"
+    and not __fish_seen_subcommand_from save push list pop apply drop clear show" \
+    -a "save push list pop apply drop clear show"
 complete -c kit -n "__fish_seen_subcommand_from remote; \
     and not __fish_seen_subcommand_from add set remove rename" \
     -a "add set remove rename"
@@ -460,6 +476,7 @@ complete -c kit -n "__fish_seen_subcommand_from checkout" -s b -d "Create a bran
 complete -c kit -n "__fish_seen_subcommand_from checkout" -s B -d "Create-or-reset a branch and switch to it" -r
 complete -c kit -n "__fish_seen_subcommand_from merge-base" -l is-ancestor -d "Test ancestry: exit 0/1, no output"
 complete -c kit -n "__fish_seen_subcommand_from rev-list" -l count -d "Print the number of commits"
+complete -c kit -n "__fish_seen_subcommand_from rev-list" -s n -l max-count -d "Limit number of commits" -r
 # New flags on existing commands.
 complete -c kit -n "__fish_seen_subcommand_from diff" -l exit-code -d "Exit 1 when there are differences"
 complete -c kit -n "__fish_seen_subcommand_from diff" -l quiet -d "Like --exit-code but print nothing"

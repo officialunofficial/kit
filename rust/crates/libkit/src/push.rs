@@ -52,6 +52,85 @@ pub enum Error {
     /// The upstream cannot be written to the config.
     #[error("write: {0}")]
     RecordUpstream(ConfigError),
+    /// A refspec is malformed or names a ref that a push does not support.
+    #[error("refspec: {0}")]
+    Refspec(String),
+    /// The source of a refspec is not a local branch.
+    #[error("refspec source '{0}' does not match any local branch")]
+    NoSuchBranch(String),
+}
+
+/// A push refspec `<src>:<dst>`: the local branch `src` goes to the remote
+/// branch `dst`. Both are branch names without a prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refspec {
+    /// The local branch.
+    pub src: String,
+    /// The branch name on the remote.
+    pub dst: String,
+}
+
+/// Parse a refspec `<src>:<dst>`. Each side is a branch name or a full
+/// `refs/heads/<name>` ref. The grammar of a ref name leaves no room for a
+/// wildcard, a leading `+` or a second `:`, and each side obeys the length
+/// bound of a pushed branch.
+///
+/// # Errors
+/// [`Error::Refspec`] when the text is over the length bound, has no `:`,
+/// has an empty or deleting side, has a wildcard or a leading `+`, names a
+/// ref outside `refs/heads/`, or names a branch that cannot be pushed.
+pub fn parse_refspec(spec: &str) -> Result<Refspec, Error> {
+    if spec.len() > 2 * refs::MAX_REF_NAME_BYTES + 1 {
+        return Err(Error::Refspec("refspec is too long".to_owned()));
+    }
+    let bad = |reason: &str| Err(Error::Refspec(format!("{reason}: {}", shown(spec))));
+    if spec.starts_with('+') {
+        return bad("a leading '+' is not supported; use --force or --force-with-lease");
+    }
+    if spec.contains(['*', '?', '[']) {
+        return bad("wildcards are not supported");
+    }
+    let Some((src, dst)) = spec.split_once(':') else {
+        return bad("expected <src>:<dst>");
+    };
+    if src.is_empty() {
+        return bad("deleting a remote ref is not supported");
+    }
+    Ok(Refspec {
+        src: refspec_branch(src, spec)?,
+        dst: refspec_branch(dst, spec)?,
+    })
+}
+
+/// The refspec as an error message shows it: escaped and cut to 64 bytes.
+fn shown(spec: &str) -> String {
+    let cut = (0..=64.min(spec.len()))
+        .rev()
+        .find(|&i| spec.is_char_boundary(i))
+        .unwrap_or(0);
+    let ellipsis = if cut < spec.len() { "..." } else { "" };
+    format!("{:?}{ellipsis}", &spec[..cut])
+}
+
+/// The branch name that one side of a refspec names.
+fn refspec_branch(side: &str, spec: &str) -> Result<String, Error> {
+    let name = side.strip_prefix(refs::BRANCH_REF_PREFIX).unwrap_or(side);
+    if side.starts_with("refs/") && name.len() == side.len() {
+        return Err(Error::Refspec(format!(
+            "only refs/heads/ refs can be pushed: {}",
+            shown(spec)
+        )));
+    }
+    match refs::check_pushable_branch(name) {
+        Ok(()) => Ok(name.to_owned()),
+        Err(RefError::RefNameTooLong { .. }) => {
+            Err(Error::Refspec("branch name is too long".to_owned()))
+        }
+        Err(_) => Err(Error::Refspec(format!(
+            "not a valid branch name: {}",
+            shown(spec)
+        ))),
+    }
 }
 
 /// What a push of the current branch would do.
@@ -115,6 +194,36 @@ pub fn plan(layout: &RepoLayout, cfg: &LayeredConfig, remote: Option<&str>) -> R
             None => return Err(Error::NoUpstream(branch)),
         },
     };
+    plan_for(layout, cfg, &remote_name, branch, remote_branch)
+}
+
+/// Plan the push of a refspec to the named remote. The local branch need not
+/// be the current one.
+///
+/// # Errors
+/// [`Error::NoSuchBranch`] when the source branch has no tip.
+/// [`Error::UnknownRemote`] when the remote is not configured.
+pub fn plan_refspec(
+    layout: &RepoLayout,
+    cfg: &LayeredConfig,
+    remote: &str,
+    spec: &Refspec,
+) -> Result<Plan, Error> {
+    let plan = plan_for(layout, cfg, remote, spec.src.clone(), spec.dst.clone())?;
+    if plan.local_tip.is_none() {
+        return Err(Error::NoSuchBranch(spec.src.clone()));
+    }
+    Ok(plan)
+}
+
+fn plan_for(
+    layout: &RepoLayout,
+    cfg: &LayeredConfig,
+    remote_name: &str,
+    branch: String,
+    remote_branch: String,
+) -> Result<Plan, Error> {
+    let remote_name = remote_name.to_owned();
     let resolved =
         config::resolve_remote(cfg, &remote_name).ok_or(Error::UnknownRemote(remote_name))?;
     let local_tip = refs::read_ref(layout, &branch).ok().flatten();

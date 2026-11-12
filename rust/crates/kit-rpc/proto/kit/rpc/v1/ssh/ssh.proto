@@ -45,6 +45,10 @@
 //   client -> server:    UpdateRef{ name, expected_id, new_id }
 //   server -> client:    UpdateRefResponse{}            OR Error
 //
+//   client -> server:    ReadRepoCursor{}
+//   server -> client:    ReadRepoCursorResponse{ cursor }   OR Error
+//                         (an older server answers Error INVALID_REQUEST)
+//
 //   client -> server:    PackExists{ pack_id }
 //   server -> client:    PackExistsResponse{ exists }   OR Error
 //
@@ -87,6 +91,8 @@ message SshFrame {
     ReadRefResponse read_ref_response = 13;
     UpdateRef update_ref = 14;
     UpdateRefResponse update_ref_response = 15;
+    ReadRepoCursor read_repo_cursor = 16;
+    ReadRepoCursorResponse read_repo_cursor_response = 17;
 
     // Packs.
     PackExists pack_exists = 20;
@@ -173,6 +179,17 @@ message UpdateRefResponse {
   // Empty body is success. Server returns Error for CAS mismatch
   // (ERROR_CODE_INVALID_REQUEST with details = current id) or any
   // other failure.
+}
+
+// Asks for the repository cursor (SPEC-TRANSPORT 1.2). Reading it reads
+// no ref.
+message ReadRepoCursor {}
+
+message ReadRepoCursorResponse {
+  // The cursor: 1 to 64 opaque bytes. Absent means the repository offers
+  // none for this read. A present empty value, or one over 64 bytes, is a
+  // protocol error.
+  bytes cursor = 1;
 }
 
 // ----------------------------------------------------------------------------

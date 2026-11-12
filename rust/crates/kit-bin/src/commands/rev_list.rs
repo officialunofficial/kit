@@ -1,12 +1,16 @@
-//! `kit rev-list [--count] <rev>` — list the commit ids reachable from
-//! `<rev>` in reverse-chronological (topological) order, or just their
-//! count. Uses the ordered walk of `libkit::log` so ordering matches `kit log`.
-//! Object ids are full 64-hex BLAKE3 (the documented divergence).
+//! `kit rev-list [--count] [-n <n> | --max-count=<n>] <rev>` — list the
+//! commit ids reachable from `<rev>` in reverse-chronological (topological)
+//! order, or just their count. `<rev>` is a revision, a range `A..B` or a
+//! symmetric range `A...B`, and `kit log` reads all three the same way. The
+//! selection and the walk come from `libkit::log`, so the order matches
+//! `kit log`. `--max-count` keeps the first `<n>` commits of that order, and
+//! `--count` counts what is left. Object ids are full 64-hex BLAKE3 (the
+//! documented divergence).
 
 use std::io::Write;
 
 use clap::Parser;
-use kit_core::store::ObjectStore;
+use libkit::log::{self, Query};
 
 use crate::clap_args;
 use crate::exit;
@@ -21,7 +25,12 @@ struct RevListOpts {
     /// Print the number of commits instead of the list.
     #[arg(long)]
     count: bool,
-    /// Starting revision (branch / tag / commit / HEAD).
+    /// Stop after this many commits. Zero lists none. A value that is not a
+    /// non-negative integer is a usage error.
+    #[arg(short = 'n', long = "max-count", value_name = "N")]
+    max_count: Option<usize>,
+    /// Starting revision (branch / tag / commit / HEAD), range `A..B` or
+    /// symmetric range `A...B`.
     rev: String,
 }
 
@@ -35,28 +44,32 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let layout = match super::resolve_layout(&cwd) {
-        Ok(layout) => layout,
+    let repo = match super::open_repo(&cwd) {
+        Ok(repo) => repo,
         Err(code) => return code,
     };
-    let store = match ObjectStore::open(&layout) {
-        Ok(s) => s,
-        Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
+    let query = Query {
+        start: Some(opts.rev.clone()),
+        limit: opts.max_count,
+        ..Query::default()
     };
-    let tip = match libkit::revspec::resolve_revision(&store, &layout, &opts.rev) {
-        // Peel annotated/signed tags to the commit they point at, like
-        // `log`/`diff`/`branch` (resolve_revision returns the tag object).
-        Ok(h) => libkit::revspec::peel_tags(&store, h),
-        Err(e) => {
+    let commits = match log::history(&repo, &query) {
+        Ok(Some(c)) => c,
+        // `HEAD` names no commit yet, so the revision has no meaning.
+        Ok(None) => {
             return emit_err(
-                &format!("bad revision '{}': {e}", opts.rev),
+                &format!("bad revision '{}': HEAD has no commit", opts.rev),
                 exit::GENERAL_ERROR,
             );
         }
-    };
-    let commits = match libkit::log::walk(&store, &[tip], false) {
-        Ok(c) => c,
-        Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
+        Err(e) => {
+            let code = if matches!(e, log::Error::BadRevision { .. }) {
+                exit::GENERAL_ERROR
+            } else {
+                exit::DATAERR
+            };
+            return emit_err(&e.to_string(), code);
+        }
     };
     let mut stdout = std::io::stdout().lock();
     if opts.count {

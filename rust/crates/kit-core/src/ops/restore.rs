@@ -617,16 +617,10 @@ where
 /// Materialise `tree_hash` into `target_dir`. See module docs for the
 /// invariants.
 ///
-/// Unlike [`restore_tree_to_worktree`]/[`restore_tree_to_worktree_with`],
-/// this has no `_with` counterpart — `stash` (this function's only
-/// caller) restores a snapshot on `push`/`pop`/`apply`, not the
-/// large-file checkout/clone/reset/restore path the perf work behind
-/// `restore_tree_to_worktree_with` targeted, so its `ChunkedBlob` chunks
-/// are always read sequentially via the plain `restore_blob`. Giving
-/// `stash` the same rayon fan-out would mean threading a `read_chunks`
-/// callback through `ops::stash`'s own public API (`save`/`pop`/`apply`)
-/// and `kit-bin`'s stash command — a separate, larger change, not a
-/// side effect of this one.
+/// This function applies no ignore rules, so with `clean: true` its sweep
+/// removes ignored files. A caller that may face ignored files must pass
+/// `clean: false` or use [`restore_tree_to_worktree`]. `stash save` restores
+/// HEAD with `clean: false`. Chunks are read sequentially.
 ///
 /// # Errors
 /// - [`RestoreError::NotATree`] if `tree_hash` is not a tree object.
@@ -1334,13 +1328,50 @@ fn clean_directory(
 
     for item in to_delete {
         let path = target_dir.join(&item.name);
-        if item.is_dir {
+        if item.is_dir
+            && let Some(ignore) = ignore
+        {
+            // Keep ignored descendants and the directories that hold them.
+            let prefix = if path_prefix.is_empty() {
+                item.name.clone()
+            } else {
+                format!("{path_prefix}/{}", item.name)
+            };
+            sweep_unlisted_dir(&path, &prefix, ignore);
+        } else if item.is_dir {
             let _ = fs::remove_dir_all(&path);
         } else {
             let _ = fs::remove_file(&path);
         }
     }
     Ok(())
+}
+
+/// Remove everything under `dir` (repo-relative `prefix`) that the ignore
+/// rules do not match, then `dir` itself if nothing is left. A symlink is
+/// removed, never followed.
+fn sweep_unlisted_dir(dir: &Path, prefix: &str, ignore: &IgnoreList) {
+    let Ok(read) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let rel = format!("{prefix}/{name}");
+        if ignore.is_ignored_with_ancestors(&rel, meta.is_dir()) {
+            continue;
+        }
+        if meta.is_dir() {
+            sweep_unlisted_dir(&entry.path(), &rel, ignore);
+        } else {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    let _ = fs::remove_dir(dir);
 }
 
 #[cfg(test)]
@@ -2882,6 +2913,34 @@ mod tests {
             b"local",
             "an untracked file under an ignored dir must survive the clean sweep"
         );
+    }
+
+    #[test]
+    fn worktree_restore_clean_keeps_ignored_files_in_an_unlisted_directory() {
+        // `build/` is not in the target tree. The sweep removes its plain
+        // file and keeps the ignored file and the directory that holds it. A
+        // directory with nothing ignored goes away whole.
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        fs::write(target.path().join(".kitignore"), "*.log\n").unwrap();
+        fs::create_dir_all(target.path().join("build/deep")).unwrap();
+        fs::write(target.path().join("build/x.log"), b"keep").unwrap();
+        fs::write(target.path().join("build/deep/y.log"), b"keep deep").unwrap();
+        fs::write(target.path().join("build/plain.txt"), b"drop").unwrap();
+        fs::create_dir(target.path().join("gone")).unwrap();
+        fs::write(target.path().join("gone/f.txt"), b"drop").unwrap();
+        let root = put_tree_with(&store, Vec::new());
+        restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default()).unwrap();
+        assert_eq!(
+            fs::read(target.path().join("build/x.log")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(
+            fs::read(target.path().join("build/deep/y.log")).unwrap(),
+            b"keep deep"
+        );
+        assert!(!target.path().join("build/plain.txt").exists());
+        assert!(!target.path().join("gone").exists());
     }
 
     #[cfg(unix)]

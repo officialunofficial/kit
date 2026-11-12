@@ -60,6 +60,8 @@ from recurring.
 | `fuzz_targets/chunked_blob_build.rs` | `worktree::chunked_blob_from_bytes` (the manifest records the input length); `worktree::chunked_blob_from_bytes_with` and `Chunker::FastCdcV2` (the v2 manifest names its chunker, decodes back to itself, and its cuts cover the input); `chunker` cut bounds, coverage, and parallel and streaming cuts matching the sequential iterator |
 | `fuzz_targets/trust_roots_parse.rs` | `trust_roots::parse` / `kit_core::hash::from_hex_bytes` (an accepted file serializes to text that parses back to the same entries; every accepted key has a length that fits its kind) |
 | `fuzz_targets/ssh_url_parse.rs` | `kit_transport_ssh::parse_kit_ssh_url` / `validate_ssh_path` (an accepted target has a user, a host and a valid path, and no control byte) |
+| `fuzz_targets/ssh_cursor_reply.rs` | `kit_transport_ssh::cursor_from_reply` (an accepted cursor is 1 to 64 bytes and comes from a reply with no unknown field) |
+| `fuzz_targets/s3_cursor_listing.rs` | `kit_transport_s3::parse_cursor_page` (an accepted page holds at most one entry per `<Contents>` element, each with a key, an `ETag` and a `LastModified` time) |
 | `fuzz_targets/grant_fields_parse.rs` | The `kit_attest::grant::text` field parsers, `Capabilities::parse`, `RefFlags::parse`, `RefPattern::parse`, `RefScopes::parse`, `AcceptedSchemes::from_tokens`, `is_loopback_origin` and `Grant::parse_with_id` (an accepted value re-encodes to exactly the input; an accepted grant id is the hash of the input) |
 | `fuzz_targets/read_to_end_capped.rs` | `store::read_to_end_capped` (a stream is read whole exactly when it fits the limit, otherwise `ObjectTooLarge`) |
 | `fuzz_targets/self_update_extract.rs` | `self_update::extract_binary_within` (never panics; a well-formed archive extracts whole; a cap below one tar header gives `UnpackedTooLarge`; an entry cap gives `TooManyEntries`) |
@@ -69,6 +71,7 @@ from recurring.
 | `fuzz_targets/diff_args.rs` | `libkit::diff::compute` (never panics on any revisions or paths with any flags; the patch body and the change counts of every entry never panic; `HEAD~1 HEAD` keeps its answer) |
 | `fuzz_targets/blame_line_range.rs` | `libkit::blame::line_range::parse` and `libkit::blame::blame` (a range parses the same twice and sits inside the file; a blame never panics on any range, revision or revision to skip, with or without the reverse walk; `-L 2` on `a.txt` keeps its answer) |
 | `fuzz_targets/branch_glob.rs` | `libkit::branch::glob_match` (never panics on any pattern or name; a match gives the same answer twice; `*` matches every name; a name with no metacharacter matches itself) |
+| `fuzz_targets/push_refspec.rs` | `libkit::push::parse_refspec` (never panics on any text; a refspec gives the same answer twice; an accepted refspec has two pushable branch names, no wildcard and no leading `+`, and its names joined by `:` parse back to it) |
 | `fuzz_targets/index_path_arg.rs` | `libkit::pathspec::index_path_for_arg` (never panics on a relative argument; an argument gives the same answer twice; an answer is a valid index path with no empty, `.` or `..` component; a plain name gives itself) |
 | `fuzz_targets/identity_parse.rs` | `libkit::identity::parse_author` and `libkit::identity::decode_config` (never panic on any text; a text gives the same answer twice; a key that parses has 32 bytes; a DID key that parses is valid; the full form of a key or a DID key parses back to itself) |
 | `fuzz_targets/rebase_todo_parse.rs` | `libkit::rebase::parse_todo` (never panics on any text; a todo list reads the same twice; a result has one action for each commit, names only listed commits and never starts with a squash or a fixup; a full hash names its commit) |
@@ -138,6 +141,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | The revision and path arguments of `libkit::diff::compute` | `diff_args` |
 | `libkit::blame::line_range::parse`, the revision range of `libkit::blame::blame` | `blame_line_range` |
 | `libkit::branch::glob_match` | `branch_glob` |
+| `libkit::push::parse_refspec` | `push_refspec` |
 | `libkit::pathspec::index_path_for_arg` | `index_path_arg` |
 | `libkit::identity::parse_author`, `libkit::identity::decode_config` | `identity_parse` |
 | The branch name and the id that `libkit::linked::add` derives from a path | None. It builds a name from a local path, and then `refs::validate_ref_name` or `layout::validate_worktree_id` must accept the name. Unit tests cover the derivation. |
@@ -153,6 +157,8 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::transfer::scheme` | `transfer_url` |
 | `kit_bin::clap_args::parse`, `term::parse` | None. They wrap the `clap` parser and the terminal setting. They read local arguments only. |
 | `kit_transport_ssh::url::parse_kit_ssh_url`, `validate_ssh_path` | `ssh_url_parse` |
+| `kit_transport_ssh::cursor_from_reply` | `ssh_cursor_reply` |
+| `kit_transport_s3::parse_cursor_page` | `s3_cursor_listing` |
 | `kit_transport_s3::sigv4::parse_host` | None. It strips a scheme prefix from a configured endpoint. It does no other parsing. Unit tests cover it. |
 | `kit_serve::serve_session` wire handling | `ssh_session`, `rpc_decode` |
 | `kit-client` connect stream frame decoder (private) | None. It is not a public function. Unit tests in `connect/tests.rs` cover it. |

@@ -53,6 +53,11 @@ struct CommitOptions {
     /// (mirrors `git commit -a`).
     #[arg(short = 'a', long)]
     all: bool,
+    /// Accept a commit whose tree equals its parent's, and a first commit with
+    /// nothing staged. kit commits an unchanged tree without the flag too, so
+    /// the flag only matters for the first commit.
+    #[arg(long = "allow-empty")]
+    allow_empty: bool,
     /// Replace the current commit (HEAD) instead of adding a new one.
     ///
     /// The new commit re-uses HEAD's parent(s) as its own parent(s)
@@ -171,6 +176,7 @@ pub fn run(args: &[String]) -> u8 {
         author,
         signer_public,
         all: opts.all,
+        allow_empty: opts.allow_empty,
     };
     let created = match libkit::commit::create(
         &layout,

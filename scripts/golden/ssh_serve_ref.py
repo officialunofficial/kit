@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
 # Independent reference check of the captured ssh sessions:
-#   rust/tests/golden/ssh-serve/session-{1,2,3}.in.bin   (client frames)
-#   rust/tests/golden/ssh-serve/session-{1,2,3}.bin      (server frames)
+#   rust/tests/golden/ssh-serve/session-{1,2,3,4}.in.bin   (client frames)
+#   rust/tests/golden/ssh-serve/session-{1,2,3,4}.bin      (server frames)
 #
 # The check shares no code with the Rust crates. It reads only SPEC-RPC section 1
 # (framing), SPEC-TRANSPORT section 4 (conversation, CAS and caps), SPEC-REFS
@@ -18,6 +18,9 @@
 #   * ReadRef, and UpdateRef with the three CAS expectations, the
 #     `details` field that holds the current value, and the refusal of a name
 #     that breaks the ref grammar;
+#   * ReadRepoCursor (SPEC-TRANSPORT 4.2.2): a reply that holds no cursor in
+#     session 4, whose repository offers none for the read, and a cursor of
+#     1 to 64 bytes wherever a reply holds one;
 #   * PackExists, UploadPack (header, ordered chunks, exact length and BLAKE3
 #     of the bytes), and DownloadPack (header, chunks of at most 800 KiB, a
 #     single empty last chunk for the empty pack);
@@ -65,6 +68,8 @@ TAGS = {
     13: "read_ref_response",
     14: "update_ref",
     15: "update_ref_response",
+    16: "read_repo_cursor",
+    17: "read_repo_cursor_response",
     20: "pack_exists",
     21: "pack_exists_response",
     22: "upload_pack",
@@ -93,7 +98,10 @@ SESSIONS = {
         "writable": True,
     },
     3: {"refs": {"refs/heads/main": b"\x44" * 32}, "packs": {}, "writable": False},
+    # A repository that offers no cursor: a ref directory was modified in the future.
+    4: {"refs": {"refs/heads/main": b"\x11" * 32}, "packs": {}, "writable": True, "cursor": False},
 }
+MAX_CURSOR = 64
 
 
 def read_frames(data):
@@ -159,6 +167,7 @@ class Model:
         self.packs = {bytes.fromhex(k): None for k in state["packs"]}
         self.sizes = {bytes.fromhex(k): v for k, v in state["packs"].items()}
         self.writable = state["writable"]
+        self.cursor = state.get("cursor")
         self.handshake = False
 
     def error(self, code, details=b""):
@@ -213,6 +222,10 @@ class Model:
             if prefix and not (ref_name_valid(prefix.rstrip("/")) or prefix.rstrip("/") == ""):
                 return self.error(BAD_NAME), 0
             return [("list", tuple(list_refs(self.refs, prefix)))], 0
+        if kind == "read_repo_cursor":
+            if self.cursor is not False:
+                raise ValueError("the model knows no cursor for this session")
+            return [("read_repo_cursor_response", None)], 0
         if kind == "read_ref":
             name = f.get(1, b"").decode()
             if not ref_name_valid(name):
@@ -282,6 +295,11 @@ def normalize(frames):
         elif kind == "list_refs_response":
             refs = tuple((pairs(r)[1].decode(), pairs(r)[2]) for r in f.get(1, []))
             events.append(("list", refs))
+        elif kind == "read_repo_cursor_response":
+            expect(set(f) <= {1}, "ReadRepoCursorResponse holds only field 1")
+            cursor = f.get(1)
+            expect(cursor is None or 0 < len(cursor) <= MAX_CURSOR, "a cursor is 1 to 64 bytes")
+            events.append(("read_repo_cursor_response", cursor))
         elif kind == "read_ref_response":
             events.append(("read_ref_response", f.get(1, b"")))
         elif kind in ("update_ref_response", "upload_pack_response"):
@@ -347,7 +365,7 @@ def main():
     if len(sys.argv) != 2:
         sys.exit("usage: ssh_serve_ref.py <rust/tests/golden>")
     root = sys.argv[1]
-    for n in (1, 2, 3):
+    for n in (1, 2, 3, 4):
         check_session(root, n)
     if o.FAILURES:
         sys.exit(1)

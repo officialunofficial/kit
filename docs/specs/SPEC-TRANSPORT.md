@@ -133,8 +133,32 @@ no record matches it, checks the closure and fetches the chain again.
 
 **Reference-server behavior.** The memory transport's cursor is a number
 unique to the instance and the count of its committed ref writes. The file
-transport's is described in SPEC-REFS §5.1.2. The SSH, S3 and Connect
-transports offer none: their wire carries no cursor yet.
+transport's is described in SPEC-REFS §5.1.2. The SSH transport offers the
+cursor of the transport that `kit serve` serves (§4.2.2), so it offers one
+exactly when the file transport does and a server that knows the request
+answers. The S3 transport's is a digest of its ref listing (§6.8). The Connect
+transport offers none: its wire carries no cursor yet.
+
+### 1.3 Pruning remote-tracking refs
+
+A fetch that prunes deletes the remote-tracking refs of a remote whose branch
+the remote no longer has. It deletes nothing else: no local branch, no tag and
+no ref of another remote.
+
+- It prunes only after every branch of the listing was fetched and verified.
+  A fetch that fails prunes nothing.
+- A pruning fetch lists the remote even when the repository cursor (§1.2) is
+  unchanged, because a tracking ref can outlive its branch from an earlier
+  fetch that did not prune.
+- A listing can be stale (SPEC-TRANSPORT-CONNECT §7.9). A tracking ref whose
+  branch the listing lacks is deleted only when `read_ref` of
+  `refs/heads/<name>` answers absent. A branch that the read finds is kept. A
+  failed read fails the fetch and prunes no further ref.
+- The deletes run under the worktree lock. A tracking ref that is gone already
+  counts as pruned.
+
+Pruning is local. It uses `list_refs` and `read_ref` and sends no write, so no
+transport verb or wire format changes.
 
 ## 2. Error taxonomy
 
@@ -242,7 +266,7 @@ server → client:    HelloResponse { proto, server_id }
                       OR
                     Error
 
-client → server:    one of: ListRefs, ReadRef, UpdateRef,
+client → server:    one of: ListRefs, ReadRef, UpdateRef, ReadRepoCursor,
                             PackExists, UploadPack (+ PackChunks),
                             DownloadPack, Close
 server → client:    matching *Response, OR Error
@@ -322,6 +346,58 @@ not as a client-consumed protocol value; a future revision MAY define
 a structured, non-opaque field for this if a real need for it emerges,
 rather than asking clients to parse an "opaque" field.
 
+#### 4.2.2 `ReadRepoCursor` request
+
+`ReadRepoCursor` asks for the repository cursor (§1.2). The request holds no
+field. The reply is `ReadRepoCursorResponse`, which has one optional field,
+`cursor`:
+
+| Reply | Meaning |
+|---|---|
+| `ReadRepoCursorResponse { cursor }`, 1 to 64 bytes | The cursor of the served repository. |
+| `ReadRepoCursorResponse {}`, no `cursor` field | The repository offers none for this read. |
+
+The request and the reply are new oneof variants of `SshFrame` (field numbers
+16 and 17), which SPEC-RPC §2 allows in v1. No existing field, number or
+frame changes.
+
+**Server.** A server returns the cursor of the transport that it serves, as
+that transport defines it (§1.2). `kit serve` serves the file transport, so
+the cursor is the one of SPEC-REFS §5.1.2, with the same rule for the 2 s
+window, a system without a boot id and a root that has too many directories.
+A server that cannot vouch for the cursor at that moment, or fails to read
+it, sends a reply with no `cursor` field and never an invented value. The
+request reads no ref. It takes the repo lock and the stripe locks shared, as
+SPEC-REFS §5.1.2 says. A session that may not write may send it, and it
+changes no ref or pack. It reads only the repository. Its answer does not
+depend on any session, so one client's request cannot change another's
+answer. It costs one frame of the per-connection budget (§4.4).
+
+**Client.** The client sends the request once per fetch, before it lists the
+refs (§1.2). It treats the reply strictly:
+
+- A `cursor` field of 0 bytes or of more than 64 bytes is a protocol error,
+  not "no cursor". The client checks the length against the bound of §1.2
+  before it copies the bytes. The frame cap of SPEC-RPC §1 bounds the frame
+  before that.
+- A reply that holds a field other than `cursor` is a protocol error.
+- Any frame but `ReadRepoCursorResponse` and `Error` is a protocol error.
+- An `Error` with `ERROR_CODE_INVALID_REQUEST` means that the server does not
+  know the request, as SPEC-RPC §2 says, so the client offers no cursor and
+  does its full work. Any other `Error` is an error.
+
+**Older peers.** A client that predates the request never sends it, so a new
+server serves it as before, and the golden sessions 1 to 3 are unchanged. A
+server that predates the request answers the unknown body with `Error {
+ERROR_CODE_INVALID_REQUEST }` and keeps the session open, so the client
+offers no cursor and its fetch works as it did. The failed request costs one
+frame of the budget. Neither side needs a version or a capability field.
+
+**Trust.** A client takes the cursor from the server, as it takes the ref
+listing. A server that holds back a changed cursor can equally hold back a
+changed ref. The fetch verifies every object and signature it applies, so a
+stale cursor can only leave the client at a state the server once offered.
+
 ### 4.3 Trust model
 
 SSH transport security is delegated to the user's `ssh(1)` CLI:
@@ -370,6 +446,11 @@ branch changed: the SSH transport names no repository, so a fetch keeps no
 per-branch checkpoint for it and walks each packmap chain again. With one node
 per packmap chain that is one frame plus two per branch, so one session fetches
 at most 4,999 branches; a fetch of more fails closed with the reply above.
+When the served repository offers a cursor (§4.2.2), a fetch that finds the
+cursor it recorded after its last complete fetch costs one frame, the
+`ReadRepoCursor` request, and the 4,999-branch limit does not apply to it. A
+fetch that finds another cursor, or none, works as above. A server that
+predates the request makes every fetch work as above, plus one frame.
 `kit fetch`, `kit pull` and `kit clone` open one session each. A push walks
 the branch's whole packmap chain over its session. A push re-baselines the
 chain (§7.2), so the walk stays within the re-baseline depth while one node
@@ -613,6 +694,40 @@ identical upload of the same digest) is therefore treated as the
 idempotent no-op that SPEC-TRANSPORT §7 requires of `upload_pack`,
 not a caller-visible error &mdash; matching the single-PUT path's
 unconditional-overwrite behavior for the same scenario.
+
+### 6.8 Repository cursor
+
+The S3 transport offers the repository cursor of §1.2. It adds no object and
+needs no change to a writer, so a repository written by any version of the
+client has one.
+
+**Protocol requirement.** The cursor is the BLAKE3 digest of the tag
+`kit-s3-repo-cursor-v1`, a zero byte, and then every entry that
+`ListObjectsV2` returns for the prefix `refs/` (under the URL prefix, if any),
+in listing order. Each entry adds its key, its `ETag` and its `LastModified`
+text. Each of the three is an 8-byte little-endian length and the bytes. The
+cursor is 32 bytes.
+
+- A ref write changes the `ETag` of its object, because the `ETag` is the MD5
+  of the 65-byte ref wire (§6.3). A new ref adds an entry. The write reports
+  success only when the store holds the object, so the next listing shows it.
+- A bucket that is emptied and filled again with the same refs has other
+  `LastModified` values, so it returns another cursor.
+- The listing follows the rules of `list_refs`: pages of at most 1,000 keys,
+  keys strictly increasing across pages, a page cap and a retained-state cap.
+  A listing that breaks a rule is an error.
+- A body that is not UTF-8, or an entry with no key, no `ETag` or no
+  `LastModified`, gives no cursor for that read. The fetch then does its full
+  work.
+
+**Reference-client behavior.** An unchanged fetch lists `refs/` once per 1,000
+refs and reads no ref and no packmap. It costs one request for a repository of
+at most 1,000 refs. The listing covers every branch, tag and packmap. A client
+that sees another cursor does its full work.
+
+**Trust.** The listing comes from the store, as the one of `list_refs` does. A
+store that returns an old listing can only leave the client at a state that the
+store once held.
 
 ---
 

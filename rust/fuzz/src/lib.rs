@@ -1873,6 +1873,45 @@ pub fn ssh_url_parse_one_iteration(input: &[u8]) {
     }
 }
 
+/// The reply to `ReadRepoCursor` (`ssh_cursor_reply`): `cursor_from_reply`
+/// never panics on a decoded frame. An accepted cursor is 1 to 64 bytes and
+/// the reply that carries it holds no unknown field.
+pub fn ssh_cursor_reply_one_iteration(input: &[u8]) {
+    use kit_core::protocol::REPO_CURSOR_MAX_LEN;
+    use kit_rpc::kit::rpc::v1::ssh::{SshFrame, ssh_frame};
+    use kit_transport_ssh::cursor_from_reply;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(frame) = kit_rpc::frame_decode_options().decode_from_slice::<SshFrame>(input) else {
+        return;
+    };
+    let reply = match &frame.body {
+        Some(ssh_frame::Body::ReadRepoCursorResponse(r)) => Some(r.clone()),
+        _ => None,
+    };
+    if let Ok(Some(cursor)) = cursor_from_reply(frame.body) {
+        let reply = reply.expect("only a cursor reply yields a cursor");
+        assert!((1..=REPO_CURSOR_MAX_LEN).contains(&cursor.as_bytes().len()));
+        assert!(reply.__buffa_unknown_fields.is_empty());
+        assert_eq!(reply.cursor.as_deref(), Some(cursor.as_bytes()));
+    }
+}
+
+/// The listing that the S3 cursor reads (`s3_cursor_listing`):
+/// `parse_cursor_page` never panics. An accepted page holds at most one entry for each
+/// `<Contents>` element, and every entry names a key, an `ETag` and a
+/// `LastModified` time.
+pub fn s3_cursor_listing_one_iteration(input: &[u8]) {
+    use kit_transport_s3::parse_cursor_page;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Some(page) = parse_cursor_page(input) {
+        let text = std::str::from_utf8(input).expect("only UTF-8 is accepted");
+        assert!(page.entries.len() <= text.matches("<Contents>").count());
+        for entry in &page.entries {
+            assert!(!entry.etag.is_empty() && !entry.last_modified.is_empty());
+        }
+    }
+}
+
 /// The field-level grant parsers (`grant_fields_parse`): the `text` helpers,
 /// `Capabilities`, `RefFlags`, `RefPattern`, `RefScopes`,
 /// `AcceptedSchemes::from_tokens`, `is_loopback_origin` and
@@ -2099,7 +2138,7 @@ pub fn absolute_config_home_one_iteration(input: &[u8]) {
 
 /// A small repository that the revision and history fuzz targets use. It has
 /// a three-commit chain, the branch `main` at the tip and the tag `v1` at
-/// the root. The fixture is built once per process, because creating a store
+/// the root. Each commit has a tree with the blob `d/f`. The fixture is built once per process, because creating a store
 /// costs more than the per-iteration budget.
 struct RevspecFixture {
     _dir: tempfile::TempDir,
@@ -2108,11 +2147,12 @@ struct RevspecFixture {
     repo: libkit::Repo,
     tip: kit_core::hash::Hash,
     root: kit_core::hash::Hash,
+    blob: kit_core::hash::Hash,
 }
 
 fn revspec_fixture() -> &'static RevspecFixture {
     use kit_core::layout::RepoLayout;
-    use kit_core::object::{Commit, Identity, Object};
+    use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
     use kit_core::store::ObjectStore;
     use std::sync::OnceLock;
 
@@ -2122,11 +2162,31 @@ fn revspec_fixture() -> &'static RevspecFixture {
         let layout = RepoLayout::single(dir.path());
         let store = ObjectStore::init(&layout).expect("init the fixture store");
         kit_core::refs::init(&layout).expect("init the fixture refs");
+        let write = |object: Object| {
+            let bytes =
+                kit_core::serialize::serialize(&object).expect("serialize a fixture object");
+            store.write(&bytes).expect("write a fixture object")
+        };
+        let blob = write(Object::Blob(Blob { data: vec![7] }));
+        let dir_tree = write(Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"f".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }],
+        }));
+        let tree = write(Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"d".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: dir_tree,
+            }],
+        }));
         let mut parents = Vec::new();
         let mut hashes = Vec::new();
         for seed in 1u8..=3 {
             let commit = Commit::new_unannotated(
-                [seed; 32],
+                tree,
                 parents.clone(),
                 Identity::ed25519([seed; 32]),
                 [seed; 32],
@@ -2152,16 +2212,17 @@ fn revspec_fixture() -> &'static RevspecFixture {
             repo,
             tip,
             root,
+            blob,
         }
     })
 }
 
-/// Revision specs (`revspec_parse`): `resolve_revision` never panics on any
-/// text, and a hash that it returns names an object in the store. The
-/// fixture also pins three fixed answers, so a change to the grammar shows
+/// Revision specs (`revspec_parse`): `resolve_revision` and `resolve_object`
+/// never panic on any text, and a hash that either returns names an object
+/// in the store. The fixture also pins five fixed answers, so a change to the grammar shows
 /// up as a failed assertion on every input.
 pub fn revspec_parse_one_iteration(input: &[u8]) {
-    use libkit::revspec::resolve_revision;
+    use libkit::revspec::{resolve_object, resolve_revision};
     let input = &input[..input.len().min(MAX_INPUT)];
     let Ok(text) = core::str::from_utf8(input) else {
         return;
@@ -2173,10 +2234,19 @@ pub fn revspec_parse_one_iteration(input: &[u8]) {
             "a resolved revision must name a stored object"
         );
     }
+    if let Ok(hash) = resolve_object(&fixture.store, &fixture.layout, text) {
+        assert!(
+            fixture.store.contains(&hash),
+            "a resolved object must be stored"
+        );
+    }
     let resolve = |spec: &str| resolve_revision(&fixture.store, &fixture.layout, spec).ok();
     assert_eq!(resolve("HEAD"), Some(fixture.tip));
     assert_eq!(resolve("main~2"), Some(fixture.root));
     assert_eq!(resolve("v1^0"), Some(fixture.root));
+    let object = |spec: &str| resolve_object(&fixture.store, &fixture.layout, spec).ok();
+    assert_eq!(object("main:d/f"), Some(fixture.blob));
+    assert_eq!(object("v1:d/../d/f"), None);
 }
 
 /// History selections and dates (`log_parse`): `log::date::parse` never
@@ -2446,6 +2516,41 @@ pub fn branch_glob_one_iteration(input: &[u8]) {
     assert!(glob_match("*", name), "`*` matches every name");
     if !name.contains(['*', '?', '[', '\\']) {
         assert!(glob_match(name, name), "a plain name matches itself");
+    }
+}
+
+/// Push refspecs (`push_refspec`): `push::parse_refspec` never panics on any
+/// text and gives the same answer twice. A refspec that parses has two valid
+/// pushable branch names, and it has no wildcard, no leading `+`, no second
+/// `:` and no ref outside `refs/heads/`. Its two names, joined by `:`, parse
+/// back to the same refspec.
+pub fn push_refspec_one_iteration(input: &[u8]) {
+    use libkit::push::parse_refspec;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let first = parse_refspec(text).ok();
+    assert_eq!(
+        first,
+        parse_refspec(text).ok(),
+        "a refspec gives the same answer twice"
+    );
+    if let Some(spec) = first {
+        assert!(!text.starts_with('+'), "a leading '+' is refused");
+        assert!(!text.contains(['*', '?', '[']), "a wildcard is refused");
+        for name in [&spec.src, &spec.dst] {
+            assert!(
+                kit_core::refs::check_pushable_branch(name).is_ok(),
+                "a branch name can be pushed"
+            );
+            assert!(!name.contains(':'), "a name has no ':'");
+        }
+        assert_eq!(
+            parse_refspec(&format!("{}:{}", spec.src, spec.dst)).ok(),
+            Some(spec),
+            "the joined names parse back to the same refspec"
+        );
     }
 }
 
@@ -3247,6 +3352,38 @@ mod tests {
     }
 
     #[test]
+    fn unit_ssh_cursor_reply() {
+        run_iterated_unit(ssh_cursor_reply_one_iteration).unwrap();
+        // A cursor reply, an empty one, one over the bound and an error.
+        for case in [
+            &[0x8a, 0x01, 0x04, 0x0a, 0x02, 7, 7][..],
+            &[0x8a, 0x01, 0x02, 0x0a, 0x00],
+            &[0x8a, 0x01, 0x00],
+            &[0x1a, 0x04, 0x08, 0x01, 0x12, 0x00],
+            b"",
+            &[0xFF; 64][..],
+        ] {
+            run_one(case, ssh_cursor_reply_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_s3_cursor_listing() {
+        run_iterated_unit(s3_cursor_listing_one_iteration).unwrap();
+        for case in [
+            &b"<ListBucketResult><Contents><Key>refs/a</Key><ETag>e</ETag><LastModified>t</LastModified></Contents></ListBucketResult>"[..],
+            b"<Contents><Key>refs/a</Key></Contents>",
+            b"<Contents><Key>a</Key><ETag></ETag><LastModified>t</LastModified></Contents>",
+            b"<Contents>",
+            b"<Contents><Contents></Contents>",
+            b"",
+            &[0xFF; 64][..],
+        ] {
+            run_one(case, s3_cursor_listing_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
     fn unit_grant_fields_parse() {
         run_iterated_unit(grant_field_parsers_one_iteration).unwrap();
         for case in [
@@ -3781,6 +3918,13 @@ mod tests {
             b"HEAD^2",
             b"main^0^0^0",
             b"v1",
+            b"main:d/f",
+            b"main~1:d/f",
+            b"main:",
+            b"main:d//f",
+            b"main:d/f/x",
+            b":d/f",
+            b"v1:./d",
             b"refs/tags/v1",
             b"refs/heads/main",
             b"refs/remotes/origin/main",
@@ -3841,6 +3985,26 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, branch_glob_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_push_refspec() {
+        run_iterated_unit(push_refspec_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"main:release",
+            b"refs/heads/a:refs/heads/b",
+            b"refs/heads/*:refs/heads/*",
+            b"+main:main",
+            b":main",
+            b"main:",
+            b"main:a:b",
+            b"main:refs/tags/v1",
+            b"refs/heads/:refs/heads/",
+            b"\xff\xfe",
+        ] {
+            run_one(case, push_refspec_one_iteration).unwrap();
         }
     }
 

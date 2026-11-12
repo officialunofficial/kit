@@ -11,7 +11,11 @@ use std::time::{Duration, Instant};
 
 use common::{KEY_SEED, Repo};
 use kit_core::hash::to_hex_bytes;
+use kit_core::layout::RepoLayout;
+use kit_core::object::Object;
+use kit_core::serialize::serialize;
 use kit_core::sign::KeyPair;
+use kit_core::store::ObjectStore;
 use kit_core::verify::MAX_BUNDLE_BYTES;
 
 fn stdout(out: &std::process::Output) -> String {
@@ -184,6 +188,45 @@ fn tampered_bundle_fails() {
     let out = repo.run(&["verify-proof", &commit, "a.kdpb"]);
     assert_eq!(out.status.code(), Some(65));
     assert!(stdout(&out).contains("bad:"), "{}", stdout(&out));
+}
+
+/// Store a copy of HEAD whose signature does not verify and return its id.
+fn forged_head(repo: &Repo) -> String {
+    let layout = RepoLayout::single(repo.path());
+    let head = kit_core::refs::resolve_head(&layout).unwrap().unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
+    let Object::Commit(mut c) = store.read_object(&head).unwrap() else {
+        panic!("HEAD is not a commit");
+    };
+    c.signature[0] ^= 0xff;
+    let id = store
+        .write(&serialize(&Object::Commit(c)).unwrap())
+        .unwrap();
+    kit_core::to_hex(&id)
+}
+
+#[test]
+fn invalid_signature_is_dataerr_without_trust_roots() {
+    let repo = fixture_repo();
+    let forged = forged_head(&repo);
+    repo.ok(&["prove", &forged, "a.txt", "-o", "a.kdpb"]);
+
+    let out = repo.run(&["verify-proof", &forged, "a.kdpb", "--payload-out", "p.out"]);
+    assert_eq!(out.status.code(), Some(65), "{}", stdout(&out));
+    let text = stdout(&out);
+    assert!(text.starts_with("bad: "), "{text}");
+    assert!(text.contains("INVALID signature"), "{text}");
+    assert!(!text.contains("ok:"), "{text}");
+    assert!(!repo.path().join("p.out").exists());
+
+    let out = repo.run(&["verify-proof", &forged, "a.kdpb", "--format=json"]);
+    assert_eq!(out.status.code(), Some(65));
+    assert!(
+        stdout(&out).contains("\"signature_valid\":false"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(stderr(&out).starts_with("bad: "), "{}", stderr(&out));
 }
 
 #[test]

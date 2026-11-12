@@ -113,7 +113,12 @@ fn start(
     rebase::start(
         &f.layout,
         &f.store,
-        &Request { onto, interactive },
+        &Request {
+            onto,
+            upstream: None,
+            branch: None,
+            interactive,
+        },
         &TestSigning,
         editor,
         &NoopObserver,
@@ -231,6 +236,90 @@ fn a_base_that_does_not_resolve_is_an_error() {
     let err = start(&l.f, "nope", false, &mut Script::default()).unwrap_err();
     assert!(matches!(err, Error::NoSuchCommit { .. }), "{err:?}");
     assert!(err.to_string().starts_with("no such commit: nope ("));
+}
+
+#[test]
+fn an_upstream_limits_the_replay_to_the_commits_after_it() {
+    let l = linear();
+    let request = Request {
+        onto: "main",
+        upstream: Some(&short(&l.t[0])),
+        branch: None,
+        interactive: false,
+    };
+    let outcome = rebase::start(
+        &l.f.layout,
+        &l.f.store,
+        &request,
+        &TestSigning,
+        &mut Script::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let (old, new, replayed) = finished(outcome);
+    assert_eq!((old, replayed), (l.t[2], 2));
+    assert_eq!(messages(&l.f, new, 4), ["t3", "t2", "m1", "base"]);
+    assert!(!l.f.path("t1.txt").exists());
+    for commit in [new, l.f.commit_object(new).parents[0]] {
+        sign::verify_commit(&l.f.commit_object(commit)).unwrap();
+    }
+}
+
+#[test]
+fn a_named_branch_is_the_one_that_moves() {
+    let l = linear();
+    refs::write_ref(&l.f.layout, "other", &l.t[0]).unwrap();
+    l.f.checkout("main", l.m1);
+    let request = Request {
+        onto: "main",
+        upstream: None,
+        branch: Some("topic"),
+        interactive: false,
+    };
+    let outcome = rebase::start(
+        &l.f.layout,
+        &l.f.store,
+        &request,
+        &TestSigning,
+        &mut Script::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let (old, new, _) = finished(outcome);
+    assert_eq!(old, l.t[2]);
+    assert_eq!(refs::read_ref(&l.f.layout, "topic").unwrap(), Some(new));
+    assert_eq!(refs::read_ref(&l.f.layout, "other").unwrap(), Some(l.t[0]));
+    assert_eq!(
+        refs::read_head(&l.f.layout).unwrap(),
+        Head::Branch("topic".to_owned())
+    );
+}
+
+#[test]
+fn an_unknown_upstream_or_branch_is_an_error() {
+    let l = linear();
+    for (upstream, branch) in [(Some("nope"), None), (None, Some("nope"))] {
+        let request = Request {
+            onto: "main",
+            upstream,
+            branch,
+            interactive: false,
+        };
+        let err = rebase::start(
+            &l.f.layout,
+            &l.f.store,
+            &request,
+            &TestSigning,
+            &mut Script::default(),
+            &NoopObserver,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::NoSuchCommit { .. } | Error::NoSuchBranch(_)),
+            "{err:?}"
+        );
+        assert!(!is_rebase_in_progress(&l.f.layout));
+    }
 }
 
 /// `main` and `topic` both change `shared.txt`. `topic` has a second commit
@@ -392,6 +481,8 @@ fn reword_asks_the_editor_for_a_message_and_an_empty_reply_keeps_the_old_one() {
         &l.f.store,
         &Request {
             onto: "main",
+            upstream: None,
+            branch: None,
             interactive: true,
         },
         &TestSigning,

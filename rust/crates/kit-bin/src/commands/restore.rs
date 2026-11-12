@@ -145,6 +145,9 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
 
+    // The dirty guard compares the worktree with the index as it was before
+    // `--staged` rewrote it. Otherwise a clean file differs from the new entry.
+    let index_before = idx.clone();
     if do_staged && let Err(code) = restore_staged(&layout, &mut idx, restore_index.as_ref(), &rels)
     {
         return code;
@@ -155,6 +158,7 @@ pub fn run(args: &[String]) -> u8 {
             &cwd,
             &store,
             &idx,
+            &index_before,
             restore_index.as_ref(),
             &rels,
             source_tree.is_some(),
@@ -272,6 +276,7 @@ fn restore_worktree(
     cwd: &Path,
     store: &ObjectStore,
     idx: &Index,
+    index_before: &Index,
     restore_index: Option<&Index>,
     rels: &[String],
     explicit_source: bool,
@@ -301,12 +306,12 @@ fn restore_worktree(
     to_write.dedup_by(|a, b| a.path == b.path);
 
     // Dirty guard (unless --force): refuse to overwrite a worktree file
-    // that diverges from its *index* entry — that is an un-staged edit
+    // that diverges from its *index* entry (as of before the restore) — that is an un-staged edit
     // the user would lose. A path absent from the index, or whose
     // worktree content matches the index, is safe to rewrite.
     if !force {
         for entry in &to_write {
-            if let Some(reason) = dirty_reason(cwd, store, idx, &entry.path) {
+            if let Some(reason) = dirty_reason(cwd, store, index_before, &entry.path) {
                 return Err(emit_err(&reason, exit::GENERAL_ERROR));
             }
         }

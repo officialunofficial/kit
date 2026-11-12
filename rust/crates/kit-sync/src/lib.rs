@@ -95,9 +95,19 @@ pub struct SyncOptions {
     /// Directory under which downloaded packs are staged before they are
     /// unpacked. `None` uses the system temporary directory.
     pub staging_dir: Option<std::path::PathBuf>,
+    /// After a complete fetch, delete the remote-tracking refs whose branch
+    /// is gone from the remote. Only [`fetch`] acts on it.
+    pub prune: bool,
 }
 
 impl SyncOptions {
+    /// Set [`prune`](Self::prune).
+    #[must_use]
+    pub fn with_prune(mut self, prune: bool) -> Self {
+        self.prune = prune;
+        self
+    }
+
     /// Set [`verify_signatures`](Self::verify_signatures).
     #[must_use]
     pub fn with_verify_signatures(mut self, verify: bool) -> Self {
@@ -134,6 +144,7 @@ impl Default for SyncOptions {
             target_branch: None,
             sync_policy: SyncPolicy::Batch,
             staging_dir: None,
+            prune: false,
         }
     }
 }

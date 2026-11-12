@@ -56,6 +56,7 @@ kit-serve = { path = "../crates/kit-serve" }
 kit-sync = { path = "../crates/kit-sync" }
 kit-bin = { path = "../crates/kit-bin", features = ["fuzzing"] }
 libkit = { path = "../crates/libkit", features = ["git-bridge", "transport-connect"] }
+kit-transport-s3 = { path = "../crates/kit-transport-s3" }
 kit-transport-ssh = { path = "../crates/kit-transport-ssh" }
 tar = "0.4.46"
 tempfile = "3.27.0"
@@ -403,6 +404,22 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "ssh_cursor_reply"
+path = "fuzz_targets/ssh_cursor_reply.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "s3_cursor_listing"
+path = "fuzz_targets/s3_cursor_listing.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "grant_fields_parse"
 path = "fuzz_targets/grant_fields_parse.rs"
 test = false
@@ -565,6 +582,14 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "grants_spec"
 path = "fuzz_targets/grants_spec.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "push_refspec"
+path = "fuzz_targets/push_refspec.rs"
 test = false
 doc = false
 bench = false

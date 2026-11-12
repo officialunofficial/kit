@@ -1,4 +1,4 @@
-//! Branches: create, delete, rename and list.
+//! Branches: create, delete, rename, list and set the upstream.
 //!
 //! Each operation takes the [`RepoLayout`] of the tree that runs it. A
 //! branch write goes through the ref writers of `kit-core`, so a build with
@@ -8,6 +8,10 @@
 //! their whole run. A branch has one writer at a time, and the lock keeps a
 //! concurrent `checkout` or `worktree add` from taking the branch between the
 //! check and the change.
+//!
+//! [`set_upstream`] and [`unset_upstream`] change the `branch.<name>.remote`
+//! and `branch.<name>.merge` keys of the repo config, the keys that a first
+//! push with `-u` writes.
 //!
 //! [`glob_match`] is the name pattern of [`list`]. [`list`] can also keep the
 //! branches whose tips contain, or are merged into, a commit.
@@ -23,7 +27,8 @@ use kit_core::ops::merge::is_ancestor_strict;
 use kit_core::refs::{self, Head, Ref, RefError, RefWriteCondition};
 use kit_core::store::{ObjectStore, StoreError};
 
-use crate::{lock, revspec, worktrees};
+use crate::config::{self, ConfigError, ConfigEvent, Upstream};
+use crate::{Environment, lock, revspec, worktrees};
 
 /// Errors from a branch operation.
 #[derive(Debug, thiserror::Error)]
@@ -136,6 +141,18 @@ pub enum Error {
     /// The registry lock cannot be taken.
     #[error(transparent)]
     Lock(#[from] lock::Error),
+    /// `HEAD` is detached and no branch was named.
+    #[error("HEAD is detached (name the branch)")]
+    NoCurrentBranch,
+    /// The requested upstream is not a remote-tracking branch that exists.
+    #[error("the requested upstream branch '{0}' does not exist")]
+    UpstreamNotFound(String),
+    /// The branch has no upstream in the repo config.
+    #[error("branch '{0}' has no upstream information")]
+    NoUpstream(String),
+    /// The config cannot be read or written.
+    #[error("config: {0}")]
+    Config(#[from] ConfigError),
 }
 
 /// Start a branch at `HEAD`.
@@ -274,6 +291,85 @@ pub fn rename(
     Ok(())
 }
 
+/// The local branch that a set or unset names, or the branch of `HEAD`. The
+/// branch must exist.
+fn existing_branch(layout: &RepoLayout, name: Option<&str>) -> Result<String, Error> {
+    let name = match name {
+        Some(name) => name.to_owned(),
+        None => current(layout).ok_or(Error::NoCurrentBranch)?,
+    };
+    match refs::read_ref(layout, &name) {
+        Ok(Some(_)) => Ok(name),
+        Ok(None) => Err(Error::NotFound(name)),
+        Err(source) => Err(Error::Read { name, source }),
+    }
+}
+
+/// Make `upstream`, a remote-tracking branch written `<remote>/<branch>`, the
+/// upstream of `branch`, or of the branch of `HEAD` when `branch` is `None`.
+/// Return the branch that changed and its new upstream.
+///
+/// The remote-tracking ref must exist. A remote name may hold a `/`, so the
+/// call tries each split of `upstream` from the left, and the first split
+/// whose ref exists is the one in use. The call
+/// changes the repo layer of the config only, as [`crate::push::record_upstream`]
+/// does, and it replaces an upstream that is set already.
+///
+/// # Errors
+/// [`Error::NoCurrentBranch`] for a detached `HEAD` with no branch named.
+/// [`Error::NotFound`] when the branch does not exist.
+/// [`Error::UpstreamNotFound`] when no remote-tracking ref matches.
+/// [`Error::Config`] when the config cannot be read or written.
+pub fn set_upstream(
+    layout: &RepoLayout,
+    environment: &Environment,
+    observer: &dyn Observer<ConfigEvent>,
+    branch: Option<&str>,
+    upstream: &str,
+) -> Result<(String, Upstream), Error> {
+    let branch = existing_branch(layout, branch)?;
+    let found = upstream
+        .match_indices('/')
+        .map(|(at, _)| (&upstream[..at], &upstream[at + 1..]))
+        .filter(|(remote, name)| !remote.is_empty() && !name.is_empty())
+        .find(|(remote, name)| matches!(refs::read_remote_ref(layout, remote, name), Ok(Some(_))));
+    let Some((remote, name)) = found else {
+        return Err(Error::UpstreamNotFound(upstream.to_owned()));
+    };
+    let upstream = Upstream {
+        remote: remote.to_owned(),
+        branch: name.to_owned(),
+    };
+    let mut repo = config::read_layered(layout, environment, observer)?.repo;
+    repo.branch_upstreams
+        .insert(branch.clone(), upstream.clone());
+    config::write(layout, &repo)?;
+    Ok((branch, upstream))
+}
+
+/// Remove the upstream of `branch`, or of the branch of `HEAD` when `branch`
+/// is `None`, from the repo config. Return the branch that changed.
+///
+/// # Errors
+/// [`Error::NoCurrentBranch`] for a detached `HEAD` with no branch named.
+/// [`Error::NotFound`] when the branch does not exist. [`Error::NoUpstream`]
+/// when the repo config holds no upstream for it. [`Error::Config`] when the
+/// config cannot be read or written.
+pub fn unset_upstream(
+    layout: &RepoLayout,
+    environment: &Environment,
+    observer: &dyn Observer<ConfigEvent>,
+    branch: Option<&str>,
+) -> Result<String, Error> {
+    let branch = existing_branch(layout, branch)?;
+    let mut repo = config::read_layered(layout, environment, observer)?.repo;
+    if repo.branch_upstreams.remove(&branch).is_none() {
+        return Err(Error::NoUpstream(branch));
+    }
+    config::write(layout, &repo)?;
+    Ok(branch)
+}
+
 /// The branch that `HEAD` names. `None` for a detached or unreadable `HEAD`.
 #[must_use]
 pub fn current(layout: &RepoLayout) -> Option<String> {
@@ -289,6 +385,8 @@ pub fn current(layout: &RepoLayout) -> Option<String> {
 /// It must name a commit, or a tag of a commit.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Query<'a> {
+    /// Which branches to list: local, remote-tracking or both.
+    pub scope: Scope,
     /// Keep a branch whose name matches any of these patterns, as
     /// [`glob_match`] reads them. No pattern keeps every branch.
     pub patterns: &'a [String],
@@ -302,6 +400,19 @@ pub struct Query<'a> {
     pub no_merged: Option<&'a str>,
     /// Read the subject of each tip.
     pub subjects: bool,
+}
+
+/// The branches that a listing covers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Scope {
+    /// The local branches, named `<branch>`.
+    #[default]
+    Local,
+    /// The remote-tracking branches, named `<remote>/<branch>`.
+    Remote,
+    /// The local branches, then the remote-tracking branches named
+    /// `remotes/<remote>/<branch>`.
+    All,
 }
 
 impl Query<'_> {
@@ -320,6 +431,8 @@ pub struct Branch {
     pub name: String,
     /// The tip, when the ref holds one.
     pub hash: Option<Hash>,
+    /// The branch is a remote-tracking branch.
+    pub remote: bool,
     /// The first line of the message of the tip. `Some` only when the query
     /// asked for subjects and the branch has a tip. It is empty when the tip
     /// is not a commit or a remix.
@@ -336,11 +449,37 @@ pub struct Branch {
 /// walk cannot be read, and [`Error::Ancestry`] when the walk reaches its
 /// limit.
 pub fn list(layout: &RepoLayout, query: &Query<'_>) -> Result<Vec<Branch>, Error> {
-    let mut branches = list_refs(layout).map_err(Error::ListRefs)?;
+    let mut branches: Vec<(Ref, bool)> = Vec::new();
+    if query.scope != Scope::Remote {
+        branches.extend(
+            list_refs(layout)
+                .map_err(Error::ListRefs)?
+                .into_iter()
+                .map(|r| (r, false)),
+        );
+    }
+    if query.scope != Scope::Local {
+        let prefix = if query.scope == Scope::All {
+            "remotes/"
+        } else {
+            ""
+        };
+        for remote in refs::list_remote_names(layout).map_err(Error::ListRefs)? {
+            for r in refs::list_remote_refs(layout, &remote).map_err(Error::ListRefs)? {
+                branches.push((
+                    Ref {
+                        name: format!("{prefix}{remote}/{}", r.name),
+                        hash: r.hash,
+                    },
+                    true,
+                ));
+            }
+        }
+    }
 
     // Cut by name first, so no commit of an excluded branch is read.
     if !query.patterns.is_empty() {
-        branches.retain(|r| query.patterns.iter().any(|p| glob_match(p, &r.name)));
+        branches.retain(|(r, _)| query.patterns.iter().any(|p| glob_match(p, &r.name)));
     }
 
     let store = if query.subjects || query.has_ancestry_filter() {
@@ -354,12 +493,12 @@ pub fn list(layout: &RepoLayout, query: &Query<'_>) -> Result<Vec<Branch>, Error
     {
         let filter = Filter::resolve(store, layout, query)?;
         let mut kept = Vec::with_capacity(branches.len());
-        for r in branches {
+        for entry in branches {
             // A ref with no tip cannot pass a commit filter.
-            if let Some(tip) = &r.hash
+            if let Some(tip) = &entry.0.hash
                 && filter.keeps(store, tip)?
             {
-                kept.push(r);
+                kept.push(entry);
             }
         }
         branches = kept;
@@ -367,7 +506,7 @@ pub fn list(layout: &RepoLayout, query: &Query<'_>) -> Result<Vec<Branch>, Error
 
     Ok(branches
         .into_iter()
-        .map(|r| {
+        .map(|(r, remote)| {
             let subject = match (&store, &r.hash) {
                 (Some(store), Some(tip)) if query.subjects => Some(tip_subject(store, tip)),
                 _ => None,
@@ -375,6 +514,7 @@ pub fn list(layout: &RepoLayout, query: &Query<'_>) -> Result<Vec<Branch>, Error
             Branch {
                 name: r.name,
                 hash: r.hash,
+                remote,
                 subject,
             }
         })

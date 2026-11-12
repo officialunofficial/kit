@@ -23,6 +23,9 @@
 //! The grammar has no pathspecs, no `:/text` message search, no reflog
 //! (`@{n}`) syntax and no ranges. A caller splits `A..B` before it passes
 //! each end here.
+//!
+//! [`resolve_object`] adds `<rev>:<path>`: the object at `<path>` in the tree
+//! of `<rev>`.
 
 use std::io;
 
@@ -75,7 +78,29 @@ pub enum Error {
     /// The object is not a commit, a remix, a tree or a tag of one of them.
     #[error("{0} is not a commit, remix, or tree")]
     NotTreeish(String),
+    /// The text after the colon of `<rev>:<path>` is not a plain relative
+    /// path: it is empty, or it has an empty, `.` or `..` component, or it
+    /// is longer than [`MAX_TREE_PATH`] bytes.
+    #[error("bad path in '{spec}': {detail}")]
+    BadPath {
+        /// The full spec that the caller supplied.
+        spec: String,
+        /// What went wrong.
+        detail: &'static str,
+    },
+    /// The path of `<rev>:<path>` names nothing in the tree of the revision,
+    /// or it goes through an entry that is not a tree.
+    #[error("path '{path}' does not exist in '{rev}'")]
+    PathNotFound {
+        /// The revision part of the spec.
+        rev: String,
+        /// The path part of the spec.
+        path: String,
+    },
 }
+
+/// The longest path that `<rev>:<path>` accepts, in bytes.
+pub const MAX_TREE_PATH: usize = 4096;
 
 /// Resolve `spec` to a single object [`Hash`](tyalias@kit_core::Hash).
 ///
@@ -122,6 +147,56 @@ pub fn resolve_revision(
                 });
             }
         }
+    }
+    Ok(current)
+}
+
+/// Resolve `spec` to one object. The text is `<rev>` as in
+/// [`resolve_revision`], or `<rev>:<path>`, the object at `<path>` in the
+/// tree of `<rev>`. A tag is peeled to its commit first. The path is
+/// relative and has no empty, `.` or `..` component, so it cannot leave the
+/// tree. The first colon splits the spec, and a ref name has no colon.
+///
+/// # Errors
+/// Every error of [`resolve_revision`] and [`tree_of`]. [`Error::BadPath`]
+/// when the path is malformed, [`Error::PathNotFound`] when the tree has no
+/// such entry or the path goes through a non-tree, and
+/// [`Error::ReadObject`] when a tree on the path cannot be read.
+pub fn resolve_object(store: &ObjectStore, layout: &RepoLayout, spec: &str) -> Result<Hash, Error> {
+    let Some((rev, path)) = spec.split_once(':') else {
+        return resolve_revision(store, layout, spec);
+    };
+    let bad = |detail| Error::BadPath {
+        spec: spec.to_string(),
+        detail,
+    };
+    if path.is_empty() {
+        return Err(bad("the path is empty"));
+    }
+    if path.len() > MAX_TREE_PATH {
+        return Err(bad("the path is too long"));
+    }
+    if path
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(bad("a component is empty, '.' or '..'"));
+    }
+    let mut current = tree_of(store, &resolve_revision(store, layout, rev)?)?;
+    for part in path.split('/') {
+        let not_found = || Error::PathNotFound {
+            rev: rev.to_string(),
+            path: path.to_string(),
+        };
+        let Object::Tree(tree) = store.read_object(&current).map_err(Error::ReadObject)? else {
+            return Err(not_found());
+        };
+        let entry = tree
+            .entries
+            .iter()
+            .find(|e| e.name == part.as_bytes())
+            .ok_or_else(not_found)?;
+        current = entry.object_hash;
     }
     Ok(current)
 }
@@ -348,7 +423,9 @@ fn is_hex(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kit_core::object::{Blob, Commit, Identity, Object, ObjectType, Tree};
+    use kit_core::object::{
+        Blob, Commit, EntryMode, Identity, Object, ObjectType, Tree, TreeEntry,
+    };
     use kit_core::refs;
     use kit_core::serialize;
     use tempfile::TempDir;
@@ -600,6 +677,158 @@ mod tests {
         assert!(matches!(tree_of(&store, &b), Err(Error::NotTreeish(_))));
         assert!(matches!(
             tree_of(&store, &[0xee; 32]),
+            Err(Error::ReadObject(_))
+        ));
+    }
+
+    /// A commit whose tree holds `d/f` (blob `[9]`) and `top` (blob `[1]`).
+    fn commit_with_files(store: &ObjectStore) -> (Hash, Hash, Hash) {
+        let put = |object: Object| {
+            store
+                .write(&serialize::serialize(&object).unwrap())
+                .unwrap()
+        };
+        let top = put(Object::Blob(Blob { data: vec![1] }));
+        let f = put(Object::Blob(Blob { data: vec![9] }));
+        let entry = |name: &str, mode, object_hash| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode,
+            object_hash,
+        };
+        let d = put(Object::Tree(Tree {
+            entries: vec![entry("f", EntryMode::Blob, f)],
+        }));
+        let tree = put(Object::Tree(Tree {
+            entries: vec![
+                entry("d", EntryMode::Tree, d),
+                entry("top", EntryMode::Blob, top),
+            ],
+        }));
+        let commit =
+            Commit::new_unannotated(tree, vec![], author(), [0u8; 32], vec![1], 1, [0u8; 64]);
+        let c = put(Object::Commit(commit));
+        (c, d, f)
+    }
+
+    #[test]
+    fn resolve_object_without_a_colon_is_resolve_revision() {
+        let (_d, store, kit) = fresh_repo();
+        let (c, _, _) = commit_with_files(&store);
+        let hex = hash::to_hex(&c);
+        assert_eq!(resolve_object(&store, &kit, &hex).unwrap(), c);
+        assert!(matches!(
+            resolve_object(&store, &kit, "nope"),
+            Err(Error::Unknown(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_object_finds_a_file_a_directory_and_a_nested_file() {
+        let (_d, store, kit) = fresh_repo();
+        let (c, d, f) = commit_with_files(&store);
+        let hex = hash::to_hex(&c);
+        assert_eq!(
+            resolve_object(&store, &kit, &format!("{hex}:d/f")).unwrap(),
+            f
+        );
+        assert_eq!(
+            resolve_object(&store, &kit, &format!("{hex}:d")).unwrap(),
+            d
+        );
+        let short = &hex[..12];
+        assert_eq!(
+            resolve_object(&store, &kit, &format!("{short}:d/f")).unwrap(),
+            f
+        );
+        let tagged = write_tag(&store, c, ObjectType::Commit, 5);
+        refs::write_tag(&kit, "t", &tagged).unwrap();
+        assert_eq!(resolve_object(&store, &kit, "t:d/f").unwrap(), f);
+    }
+
+    #[test]
+    fn resolve_object_accepts_a_tree_as_the_revision() {
+        let (_d, store, kit) = fresh_repo();
+        let (_, d, f) = commit_with_files(&store);
+        let hex = hash::to_hex(&d);
+        assert_eq!(
+            resolve_object(&store, &kit, &format!("{hex}:f")).unwrap(),
+            f
+        );
+    }
+
+    #[test]
+    fn resolve_object_refuses_a_malformed_path() {
+        let (_d, store, kit) = fresh_repo();
+        let (c, _, _) = commit_with_files(&store);
+        let hex = hash::to_hex(&c);
+        for path in ["", "/d", "d/", "d//f", ".", "./d", "d/.", "d/../d", ".."] {
+            let spec = format!("{hex}:{path}");
+            assert!(
+                matches!(
+                    resolve_object(&store, &kit, &spec),
+                    Err(Error::BadPath { .. })
+                ),
+                "{spec}"
+            );
+        }
+        let long = format!("{hex}:{}", "a/".repeat(MAX_TREE_PATH));
+        assert!(matches!(
+            resolve_object(&store, &kit, &long),
+            Err(Error::BadPath { .. })
+        ));
+    }
+
+    #[test]
+    fn resolve_object_refuses_an_empty_or_unknown_revision() {
+        let (_d, store, kit) = fresh_repo();
+        commit_with_files(&store);
+        assert!(matches!(
+            resolve_object(&store, &kit, ":top"),
+            Err(Error::Unknown(_))
+        ));
+        assert!(matches!(
+            resolve_object(&store, &kit, "nope:top"),
+            Err(Error::Unknown(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_object_refuses_a_missing_path_and_a_path_through_a_blob() {
+        let (_d, store, kit) = fresh_repo();
+        let (c, _, _) = commit_with_files(&store);
+        let hex = hash::to_hex(&c);
+        for path in ["missing", "d/missing", "top/x", "d/f/x"] {
+            let spec = format!("{hex}:{path}");
+            assert!(
+                matches!(
+                    resolve_object(&store, &kit, &spec),
+                    Err(Error::PathNotFound { .. })
+                ),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_object_refuses_a_revision_without_a_tree() {
+        let (_d, store, kit) = fresh_repo();
+        let blob = store
+            .write(&serialize::serialize(&Object::Blob(Blob { data: vec![1] })).unwrap())
+            .unwrap();
+        let spec = format!("{}:x", hash::to_hex(&blob));
+        assert!(matches!(
+            resolve_object(&store, &kit, &spec),
+            Err(Error::NotTreeish(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_object_reports_a_missing_tree_object() {
+        let (_d, store, kit) = fresh_repo();
+        let c = write_commit(&store, vec![], 1);
+        let spec = format!("{}:x", hash::to_hex(&c));
+        assert!(matches!(
+            resolve_object(&store, &kit, &spec),
             Err(Error::ReadObject(_))
         ));
     }

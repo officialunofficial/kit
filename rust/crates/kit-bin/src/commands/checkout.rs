@@ -1,6 +1,10 @@
 //! `kit checkout <branch>` — switch HEAD to a branch and materialise
 //! the branch tip's tree into the working directory.
 //!
+//! `kit checkout [-f] [<rev>] -- <path>...` restores paths from the index, or
+//! from `<rev>` into the index and the working tree. It runs `kit restore` and
+//! has no code of its own.
+//!
 //! The file-restoration half calls
 //! `kit_core::ops::restore::restore_tree_to_worktree_with` (via
 //! `crate::restore_fanout::read_chunks_fanout`, the `kit-sync` rayon fan-out
@@ -59,9 +63,43 @@ struct CheckoutOpts {
     target: Option<String>,
 }
 
+/// Run `kit restore` for `checkout [-f] [<rev>] -- <path>...`. `before` is
+/// what precedes the `--`. A `<rev>` restores the paths from that revision
+/// into the index and the working tree.
+fn restore_paths(before: &[String], paths: &[String]) -> u8 {
+    let (force, rest) = match before {
+        [flag, rest @ ..] if flag == "-f" || flag == "--force" => (true, rest),
+        _ => (false, before),
+    };
+    let rev = match rest {
+        [] => None,
+        [rev] if !rev.starts_with('-') => Some(rev),
+        _ => return super::usage_error(RESTORE_USAGE),
+    };
+    if paths.is_empty() {
+        return super::usage_error(RESTORE_USAGE);
+    }
+    let mut restore_args: Vec<String> = Vec::new();
+    if force {
+        restore_args.push("--force".to_owned());
+    }
+    if let Some(rev) = rev {
+        restore_args
+            .extend(["--source", rev.as_str(), "--staged", "--worktree"].map(str::to_owned));
+    }
+    restore_args.push("--".to_owned());
+    restore_args.extend_from_slice(paths);
+    super::restore::run(&restore_args)
+}
+
+const RESTORE_USAGE: &str = "usage: kit checkout [-f] [<rev>] -- <path>...";
+
 #[must_use]
 #[allow(clippy::too_many_lines)] // linear flow: create-branch + switch + report
 pub fn run(args: &[String]) -> u8 {
+    if let Some(split) = args.iter().position(|a| a == "--") {
+        return restore_paths(&args[..split], &args[split + 1..]);
+    }
     let opts = match clap_args::parse::<CheckoutOpts>("kit checkout", args) {
         Ok(o) => o,
         Err(code) => return code,

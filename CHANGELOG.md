@@ -7,6 +7,120 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The S3 transport offers a repository cursor (SPEC-TRANSPORT §6.8). It is a
+  digest of the key, `ETag` and `LastModified` of every object under `refs/`,
+  read from the listing alone, so it needs no new object and no change to a
+  writer. A fetch of an unchanged `kit+s3://` remote takes one request for up
+  to 1,000 refs, and one more for each further 1,000. It took one listing and
+  one read per ref, and a packmap read per branch, before. A store that
+  returns no `ETag` or `LastModified` offers no cursor, and the fetch works as
+  before.
+- `kit stash push [-m <message>]` is another name for `kit stash save`.
+- `kit pull --no-ff` fetches, then merges the fetched branch and always writes
+  a merge commit, even when a fast-forward is possible. A conflict leaves the
+  state of `merge`. It does not combine with `--all` or `--rebase`.
+  `libkit::merge::Request` has a `no_ff` field.
+- `kit pull --rebase` fetches with the usual signature checks, then replays
+  the current branch onto the fetched branch through the code of `rebase`. A
+  conflict leaves the state of `rebase`, and `--continue`, `--skip` and
+  `--abort` finish it. It does not combine with `--all`.
+- `kit rebase --onto <newbase> <upstream> [<branch>]` replays the commits of
+  `<upstream>..<branch>` onto `<newbase>`. `<branch>` is a local branch and
+  defaults to the current branch. `--continue`, `--skip` and `--abort` work
+  after a conflict. The replayed commits are signed as in any rebase.
+  `libkit::rebase::Request` has `upstream` and `branch` fields, and
+  `libkit::rebase::Error::NoSuchBranch` reports a missing branch.
+- `log --graph` draws the commit graph in the left margin with `*`, `|`, `/`
+  and `\`, for the default and the `--oneline` format. It draws an edge only
+  to a parent that the output shows. It is a usage error together with `-p`,
+  `--stat` or `--format=json`, and an error for a history with more than 1024
+  open branches.
+- `log --decorate` prints the refs that name a commit after its id, as
+  `(HEAD -> main, tag: v1, origin/main)`. It reads the refs once and prints
+  each name with control characters escaped. It is a usage error together
+  with `--format=json`.
+- `log --all` starts the walk at `HEAD`, every local branch, every
+  remote-tracking ref and every tag. A commit shows once. The flag is a usage
+  error together with a revision or a range. `libkit::log::Query::all` selects
+  it, and `libkit::log::ref_tips` lists the refs.
+- `commit --allow-empty` is accepted. It makes a first commit with an empty
+  tree when nothing is staged. A commit that has a parent never needed it.
+- `checkout -- <path>...` restores the paths from the index. It runs
+  `restore <path>...`, so it refuses a file with unstaged edits, and `-f`
+  (`--force`) overrides the refusal.
+- `checkout <rev> -- <path>...` restores the paths from `<rev>` into the index
+  and the working tree. It refuses a file with unstaged edits, and `-f`
+  overrides the refusal.
+- `init <dir>` creates `<dir>`, nested levels included, and initialises it. It
+  refuses a `<dir>` that is a symlink, a dangling one included, or a file.
+  `init -q` (`--quiet`) drops the success line and never an error. `init` in
+  an existing repository stays an error.
+- `show-ref <pattern>...` keeps the refs that a pattern names: the full ref
+  name, or its trailing path components. `main` keeps `refs/heads/main` and
+  not `refs/heads/domain`. Several patterns give the union, and an empty
+  pattern is a usage error. `show-ref` exits `1` with no output when nothing
+  matches.
+- `rev-parse --verify <rev>` takes exactly one revision, or `<rev>:<path>`,
+  and prints its full ID. The object must exist in the store. Any other input
+  prints nothing on stdout and exits `1`, or `64` when the count of
+  revisions is not one. `-q` (`--quiet`) drops the message. It does not
+  combine with `--abbrev-ref` or `--show-toplevel`.
+- `add -n` (`--dry-run`) prints `add '<path>'` for each file that a real add
+  would stage or update, and `remove '<path>'` for each deletion that `-A`
+  would record. It writes no index and no object. It excludes `-p` and `-u`.
+  `libkit::add::Request` has a `dry_run` field.
+- `kit revert -m <parent-number> <merge>` reverts a merge commit relative to
+  the chosen parent. `kit-core` takes the parent as the `mainline`
+  argument of `ops::revert::revert`. A merge without `-m`, a number out of
+  range and `-m` on a commit that is not a merge are errors.
+- `kit branch -u <remote>/<branch> [<branch>]` (`--set-upstream-to`) records
+  the upstream of a branch in the repo config, and `--unset-upstream` removes
+  it. The remote-tracking ref must exist. `libkit::branch::set_upstream` and
+  `unset_upstream` do the work.
+- `rev-list` takes `-n <n>` and `--max-count=<n>`, which keep the first `<n>`
+  commits, and a range `A..B` or `A...B` in place of a revision. It reads the
+  range as `log` does.
+- `log -p` (`--patch`) and `log --stat` follow each commit with its diff against
+  its first parent, in the text of `show`. A root commit is diffed against
+  an empty tree. The flags exclude each other and `--format=json`.
+- `show`, `cat-file` and `rev-parse` take `<rev>:<path>`, the object at
+  `<path>` in the tree of `<rev>`. `libkit::revspec::resolve_object`
+  resolves it. The path is relative, has at most 4096 bytes and has no
+  empty, `.` or `..` component. A missing path, a path through a file and a
+  malformed path are errors.
+- `kit push <remote> <src>:<dst>` pushes the local branch `<src>` to the
+  remote branch `<dst>` on the path of a plain push, so the lease and the
+  non-fast-forward check apply. Each side is a branch name or a
+  `refs/heads/<name>` ref. A refspec push records an upstream only with `-u`.
+  kit rejects a wildcard, a leading `+`, an empty `<src>` and a ref outside
+  `refs/heads/`. `libkit::push::parse_refspec` and `plan_refspec` back it.
+- `kit fetch --prune` (`-p`) deletes the remote-tracking refs of branches the
+  remote lost (SPEC-TRANSPORT §1.3). It runs only after a complete, verified
+  fetch, re-reads each candidate from the remote, and never deletes a local
+  branch or a tag. `SyncOptions::prune` and `FetchReport::branches_pruned`
+  carry it; `libkit::transfer::fetch_with_source` takes a `prune` argument.
+- `kit branch -r` lists the remote-tracking branches as `<remote>/<branch>`,
+  and `kit branch -a` lists the local branches and then the tracking branches
+  as `remotes/<remote>/<branch>`. `libkit::branch::Query::scope` selects them,
+  and `libkit::branch::Branch` has a `remote` field.
+
+### Fixed
+
+- `kit verify-proof` exits `65` (`DATAERR`) when the commit's embedded
+  signature does not verify, with or without trust roots. It used to print
+  `ok: ... (INVALID signature)` and exit `0` unless trust roots were loaded.
+  It now prints `bad:` instead of `ok:`, and writes no `--payload-out` file.
+  The report still shows what the bundle disclosed.
+- `kit stash` removed ignored files from the working tree and did not save
+  them, so `stash pop` could not bring them back. A stash now removes only
+  the paths it saved. It refuses, before it changes anything, when HEAD needs
+  a path that an ignored file holds. The clean sweep of a restore keeps
+  ignored files below a directory that the target lacks, and keeps that
+  directory. The restore safety check no longer refuses an untracked
+  directory that only holds a target path or only holds ignored files.
+
 ## [0.8.0] - 2026-11-10
 
 ### Added
@@ -33,9 +147,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cursor too (SPEC-REFS §5.1.2). It offers none while a ref directory was
   modified in the last 2 s. On one ext4 disk, a fetch of an unchanged
   `kit+file://` remote with 10,000 branches takes one request and about
-  23 ms; it took 20,001 requests before. The SSH, S3 and Connect transports
-  offer no cursor, and neither does the file transport on other systems: a
-  fetch there works as before.
+  23 ms; it took 20,001 requests before. The SSH transport offers the cursor
+  of the repository that `kit serve` serves, through a new `ReadRepoCursor`
+  request (SPEC-TRANSPORT §4.2.2). A fetch of an unchanged `kit+ssh://`
+  remote takes that one request, and the 4,999-branch limit of a session does
+  not apply to it. A client that talks to an older server, and an older client
+  that talks to this server, work as before. The S3 and Connect transports
+  offer no cursor, and neither does the file transport, or `kit serve` over
+  it, on other systems: a fetch there works as before.
 - FastCDC v2 (SPEC-FASTCDC §11, draft): spread masks at normalization
   level 2 over the v1 gear table and sizes. A v2 manifest carries
   `chunk_size = 0x8000_0002`. kit-core exposes it through

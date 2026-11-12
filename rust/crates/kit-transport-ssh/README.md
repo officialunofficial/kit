@@ -4,7 +4,7 @@ SSH transport for kit using a forced-command server pattern over a system
 `ssh(1)` child process.
 
 Implements the `Transport` trait (`docs/specs/SPEC-TRANSPORT.md`) over a long-lived
-system `ssh(1)` child process, exchanging the seven kit verbs as
+system `ssh(1)` child process, exchanging the kit verbs as
 length-prefixed protobuf `SshFrame` messages defined in
 `kit-rpc/proto/kit/rpc/v1/ssh/ssh.proto`.
 
