@@ -1328,9 +1328,9 @@ mod tests {
     #[test]
     fn a_failed_checkpoint_fails_the_batch_for_good() {
         let (_dir, store, rec) = recording_store();
+        rec.fail_barriers();
         let batch = store.batch();
         let first = batch.write(b"staged before the failure").unwrap();
-        rec.fail_barriers();
         assert!(batch.checkpoint().is_err());
         assert!(!store.contains(&first), "nothing becomes visible");
         // Later calls cannot hide the loss of the objects the failed
