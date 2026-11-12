@@ -1,6 +1,6 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-12: main Rust CI failed once on a protoc download 503 (setup step); re-ran failed jobs. PRs 111, 114, 115 touched within 24h, skipped. PR 90 failed only the changed-lines mutants check (6 missed, equivalent-looking mutants); pushed tests that pin the index contents, merged main into the branch, awaiting checks. Dependabot, audit, Commonware not checked (Monday only).",
+  "last_findings": "2026-11-12: main Rust CI failed once on a protoc download 503; the re-run passed. PR 90 failed only the changed-lines mutants check; added tests pinning the index contents, merged main in, checks green, squash-merged. PRs 111, 114, 115 touched within 24h, skipped. Dependabot, audit, Commonware not checked (Monday only).",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
