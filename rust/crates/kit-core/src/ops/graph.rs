@@ -238,7 +238,7 @@ pub(crate) fn type_bit(ty: ObjectType) -> u8 {
 }
 
 /// The object types a file entry may name.
-const FILE_TYPES: u8 = (1 << ObjectType::Blob as u8) | (1 << ObjectType::ChunkedBlob as u8);
+const FILE_TYPES: u8 = (1 << ObjectType::Blob as u8) + (1 << ObjectType::ChunkedBlob as u8);
 
 impl ChildKind {
     /// Bit `1 << type` for each object type the edge allows.
