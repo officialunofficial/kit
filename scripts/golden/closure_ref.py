@@ -138,18 +138,20 @@ TREE_MODE = 2
 def children(data, mode):
     """SPEC-DISCLOSURE section 7.1: (id, allowed object types) per reference.
 
-    A tree entry of mode Tree names a tree. Any other entry names a blob or a
-    chunked blob. A chunk names a blob.
+    The tree of a commit or remix is a tree. The target of a tag has the type
+    that the tag records. A tree entry of mode Tree names a tree. Any other
+    entry names a blob or a chunked blob. A chunk names a blob.
     """
     kind = data[0]
     if kind in (o.COMMIT, o.REMIX):
         r = o.Reader(data)
         r.take(6)
-        out = [r.take(32)]
+        tree = r.take(32)
         parents = [r.take(32) for _ in range(r.u32())]
+        out = [(tree, (o.TREE,))]
         if mode == HISTORY:
-            out += parents
-        return [(h, ANY) for h in out]
+            out += [(h, ANY) for h in parents]
+        return out
     if kind == o.TREE:
         return [
             (h, (o.TREE,) if m == TREE_MODE else (o.BLOB, o.CHUNKED))
@@ -158,7 +160,7 @@ def children(data, mode):
     if kind == o.CHUNKED:
         return [(h, (o.BLOB,)) for h in o.parse_chunked(data)["chunks"]]
     if kind == o.TAG:
-        return [(data[6:38], ANY)]
+        return [(data[6:38], (data[38],))]
     return []
 
 

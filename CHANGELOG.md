@@ -140,6 +140,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chunked blob for every other mode. Before, a step of mode `Blob` could name
   a tree and return that tree's bytes under a path that reports a blob.
   `verify::VerifyError` has a `PayloadTypeMismatch` variant.
+- The closure verifier now also checks the type of the tree of a commit or a
+  remix, which must be a tree, and of the target of a tag, which must have the
+  type that the tag records. A mismatch is `corrupt`.
 - `kit stash` removed ignored files from the working tree and did not save
   them, so `stash pop` could not bring them back. A stash now removes only
   the paths it saved. It refuses, before it changes anything, when HEAD needs

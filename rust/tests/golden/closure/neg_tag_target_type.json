@@ -1,0 +1,18 @@
+{
+  "bin": "neg_tag_target_type.manifest.bin",
+  "blake3": "ef9c0d08ddc20e21501d7670b825f35afc37649160359a89aafed876d84d8562",
+  "description": "A tag records target_type Commit but its target is a tree.",
+  "expect": "incomplete",
+  "ids": [],
+  "mode": "snapshot",
+  "n_packs": 1,
+  "name": "neg_tag_target_type",
+  "pack_hashes": [
+    "a2086f7865131b5fcdaa36434d658e6cc2039392933e426ba72b95a6e1960d76"
+  ],
+  "reason": "corrupt",
+  "root_hex": "85a081f6a125840dfe62beb9480742fa77b94287dda8535ea2fe68bfe15a45da",
+  "size": 71,
+  "unreferenced": [],
+  "verified": 0
+}

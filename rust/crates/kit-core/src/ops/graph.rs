@@ -227,6 +227,9 @@ pub(crate) enum ChildKind {
     Entry(EntryMode),
     /// A chunk of a [`ObjectType::ChunkedBlob`]: a [`ObjectType::Blob`].
     Chunk,
+    /// Exactly this type: the tree of a commit or remix, or the target of a
+    /// tag, which records its type.
+    Type(ObjectType),
 }
 
 /// Bit `1 << ty` in a [`ChildKind::mask`].
@@ -243,6 +246,7 @@ impl ChildKind {
             Self::Entry(EntryMode::Tree) => type_bit(ObjectType::Tree),
             Self::Entry(_) => type_bit(ObjectType::Blob) | type_bit(ObjectType::ChunkedBlob),
             Self::Chunk => type_bit(ObjectType::Blob),
+            Self::Type(ty) => type_bit(ty),
         }
     }
 }
@@ -270,10 +274,11 @@ pub fn children(obj: &Object, mode: ClosureMode) -> Vec<Hash> {
 #[must_use]
 pub(crate) fn typed_children(obj: &Object, mode: ClosureMode) -> Vec<(Hash, ChildKind)> {
     let any = |id: &Hash| (*id, ChildKind::Any);
+    let tree = |id: &Hash| (*id, ChildKind::Type(ObjectType::Tree));
     match obj {
         Object::Commit(c) => {
             let mut out = Vec::with_capacity(1 + c.parents.len());
-            out.push(any(&c.tree_hash));
+            out.push(tree(&c.tree_hash));
             if mode == ClosureMode::History {
                 out.extend(c.parents.iter().map(any));
             }
@@ -281,7 +286,7 @@ pub(crate) fn typed_children(obj: &Object, mode: ClosureMode) -> Vec<(Hash, Chil
         }
         Object::Remix(r) => {
             let mut out = Vec::with_capacity(1 + r.parents.len());
-            out.push(any(&r.tree_hash));
+            out.push(tree(&r.tree_hash));
             if mode == ClosureMode::History {
                 out.extend(r.parents.iter().map(any));
             }
@@ -293,7 +298,7 @@ pub(crate) fn typed_children(obj: &Object, mode: ClosureMode) -> Vec<(Hash, Chil
             .map(|e| (e.object_hash, ChildKind::Entry(e.mode)))
             .collect(),
         Object::ChunkedBlob(cb) => cb.chunks.iter().map(|c| (*c, ChildKind::Chunk)).collect(),
-        Object::Tag(t) => vec![any(&t.target)],
+        Object::Tag(t) => vec![(t.target, ChildKind::Type(t.target_type))],
         Object::Blob(_) | Object::Delta(_) => Vec::new(),
     }
 }

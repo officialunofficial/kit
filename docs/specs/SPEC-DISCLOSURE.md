@@ -371,7 +371,9 @@ Each reference also states which object types its target may have:
 | tree entry of mode `Tree` | `Tree` |
 | tree entry of mode `Blob`, `Executable` or `Symlink` | `Blob` or `ChunkedBlob` |
 | chunk of a `ChunkedBlob` | `Blob` |
-| any other reference | not restricted here |
+| `tree_hash` of a `Commit` or a `Remix` | `Tree` |
+| `target` of a `Tag` | the type in the tag's `target_type` (SPEC-OBJECTS §6a) |
+| `parents` of a `Commit` or a `Remix` | not restricted here |
 
 The root, when present, MUST deserialize as a `Commit`, `Remix`, or
 `Tag`. A typed error is raised otherwise.
@@ -482,8 +484,11 @@ flipped, so the referenced id is `missing` and the damaged bytes are
 `unreferenced`); a tree entry of mode `Tree` that names a blob
 (`neg_tree_mode_names_blob`); a tree entry of mode `Blob` that names a tree
 (`neg_blob_mode_names_tree`); a chunk id that names a tree
-(`neg_chunk_names_non_blob`); chunk lengths that add up to 12 for a
-`total_size` of 13 (`neg_chunk_length_sum`); unreferenced extra (still
+(`neg_chunk_names_non_blob`); a commit or a remix whose `tree_hash` names a
+blob (`neg_commit_tree_names_blob`, `neg_remix_tree_names_blob`); a tag
+that records `target_type` `Commit` but names a tree (`neg_tag_target_type`);
+chunk lengths that add up to 12 for a `total_size` of 13
+(`neg_chunk_length_sum`); unreferenced extra (still
 complete); `unreferenced_undecodable_extra`, bytes that decode to no object
 (unreferenced, still complete); a delta entry; a compressed entry; a manifest
 pack-hash mismatch; the wrong root id; a manifest whose `root` differs

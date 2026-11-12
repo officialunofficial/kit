@@ -23,10 +23,10 @@ use kit_core::chunker::{ChunkIterator, FastCdc};
 use kit_core::hash::{Hash, ZERO, from_hex, hash, to_hex};
 use kit_core::layout::RepoLayout;
 use kit_core::object::{
-    Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, ObjectType, Tag, Tree, TreeEntry,
+    Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, ObjectType, Remix, Tag, Tree, TreeEntry,
 };
 use kit_core::pack::{PackEntries, PackEntry, PackWriter, pack_key};
-use kit_core::sign::{KeyPair, sign_commit, sign_tag};
+use kit_core::sign::{KeyPair, sign_commit, sign_remix, sign_tag};
 use kit_core::store::ObjectStore;
 use kit_core::verify::{
     ClosureManifest, ObjectSource, export_closure, verify_closure, verify_closure_manifest,
@@ -324,6 +324,40 @@ fn signed_commit(tree_hash: Hash) -> (Hash, Vec<u8>) {
     object_bytes(Object::Commit(commit))
 }
 
+/// An incomplete vector whose root has a reachable object that does not fit.
+fn corrupt_vector(
+    name: &'static str,
+    description: &str,
+    root: Hash,
+    objects: &[Vec<u8>],
+) -> Vector {
+    let pack = pack_objects(objects);
+    let manifest = ClosureManifest {
+        root,
+        mode: ClosureMode::Snapshot,
+        packs: vec![pack_key(&pack)],
+    }
+    .encode();
+    Vector {
+        name,
+        description: description.into(),
+        json: accept_json(
+            name,
+            description,
+            &root,
+            ClosureMode::Snapshot,
+            std::slice::from_ref(&pack),
+            0,
+            &[],
+            &[],
+            "incomplete",
+            Some("corrupt"),
+        ),
+        manifest,
+        packs: vec![pack],
+    }
+}
+
 fn build_vectors() -> Vec<Vector> {
     let f = build_fixture();
     let mut v = Vec::new();
@@ -542,7 +576,7 @@ fn build_vectors() -> Vec<Vector> {
                 "A chunk id of a ChunkedBlob names a tree.",
                 EntryMode::Blob,
                 names_tree_id,
-                vec![names_tree_bytes, inner_bytes, blob_bytes],
+                vec![names_tree_bytes, inner_bytes.clone(), blob_bytes.clone()],
             ),
             (
                 "neg_chunk_length_sum",
@@ -562,32 +596,59 @@ fn build_vectors() -> Vec<Vector> {
             let (root, commit_bytes) = signed_commit(tree_id);
             let mut objects = objects;
             objects.extend([commit_bytes, tree_bytes]);
-            let pack = pack_objects(&objects);
-            let manifest = ClosureManifest {
-                root,
-                mode: ClosureMode::Snapshot,
-                packs: vec![pack_key(&pack)],
-            }
-            .encode();
-            v.push(Vector {
-                name,
-                description: description.into(),
-                json: accept_json(
-                    name,
-                    description,
-                    &root,
-                    ClosureMode::Snapshot,
-                    std::slice::from_ref(&pack),
-                    0,
-                    &[],
-                    &[],
-                    "incomplete",
-                    Some("corrupt"),
-                ),
-                manifest,
-                packs: vec![pack],
-            });
+            v.push(corrupt_vector(name, description, root, &objects));
         }
+
+        // A commit, a remix and a tag whose tree or target has the wrong type.
+        let (remix_id, remix_bytes) = {
+            let kp = KeyPair::from_seed([0x07; 32]);
+            let mut remix = Remix {
+                tree_hash: blob_id,
+                parents: vec![],
+                sources: vec![],
+                author: Identity::ed25519(kp.public.0),
+                signer: kp.public.0,
+                message: b"SPEC-DISCLOSURE closure remix vector".to_vec(),
+                timestamp: 1_726_300_004,
+                signature: [0u8; 64],
+            };
+            remix.signature = sign_remix(&remix, &kp).unwrap().0;
+            object_bytes(Object::Remix(remix))
+        };
+        let (commit_id, commit_bytes) = signed_commit(blob_id);
+        let (tag_id, tag_bytes) = {
+            let kp = KeyPair::from_seed([0x07; 32]);
+            let mut tag = Tag {
+                target: inner_id,
+                target_type: ObjectType::Commit,
+                name: b"v-closure-lie".to_vec(),
+                tagger: Identity::ed25519(kp.public.0),
+                signer: kp.public.0,
+                message: b"records a commit, names a tree".to_vec(),
+                timestamp: 1_726_300_005,
+                signature: [0u8; 64],
+            };
+            tag.signature = sign_tag(&tag, &kp).unwrap().0;
+            object_bytes(Object::Tag(tag))
+        };
+        v.push(corrupt_vector(
+            "neg_commit_tree_names_blob",
+            "A commit's tree_hash names a blob.",
+            commit_id,
+            &[commit_bytes, blob_bytes.clone()],
+        ));
+        v.push(corrupt_vector(
+            "neg_remix_tree_names_blob",
+            "A remix's tree_hash names a blob.",
+            remix_id,
+            &[remix_bytes, blob_bytes.clone()],
+        ));
+        v.push(corrupt_vector(
+            "neg_tag_target_type",
+            "A tag records target_type Commit but its target is a tree.",
+            tag_id,
+            &[tag_bytes, inner_bytes, blob_bytes],
+        ));
     }
 
     // undecodable extra: bytes that are no object are unreferenced

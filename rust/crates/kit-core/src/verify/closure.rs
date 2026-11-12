@@ -958,7 +958,8 @@ mod tests {
     use crate::object::{
         Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, ObjectType, Tree, TreeEntry,
     };
-    use crate::sign::{KeyPair, sign_commit};
+    use crate::object::{Remix, Tag};
+    use crate::sign::{KeyPair, sign_commit, sign_remix, sign_tag};
 
     #[test]
     fn largest_manifest_fits_the_manifest_byte_limit() {
@@ -1332,6 +1333,73 @@ mod tests {
         let root = commit_over(root_tree.0, vec![]);
         let report = closure_of(root.0, &[&root, &root_tree, &deeper, &file]);
         assert_eq!(corrupt_ids(&report), vec![file.0], "{report:?}");
+    }
+
+    fn remix_over(tree_hash: Hash) -> (Hash, Vec<u8>) {
+        let kp = KeyPair::from_seed([0x11; 32]);
+        let mut remix = Remix {
+            tree_hash,
+            parents: vec![],
+            sources: vec![],
+            author: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"remix".to_vec(),
+            timestamp: 1,
+            signature: [0u8; 64],
+        };
+        remix.signature = sign_remix(&remix, &kp).unwrap().0;
+        object(&Object::Remix(remix))
+    }
+
+    fn tag_of(target: Hash, target_type: ObjectType) -> (Hash, Vec<u8>) {
+        let kp = KeyPair::from_seed([0x11; 32]);
+        let mut tag = Tag {
+            target,
+            target_type,
+            name: b"v1".to_vec(),
+            tagger: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"tag".to_vec(),
+            timestamp: 1,
+            signature: [0u8; 64],
+        };
+        tag.signature = sign_tag(&tag, &kp).unwrap().0;
+        object(&Object::Tag(tag))
+    }
+
+    #[test]
+    fn commit_and_remix_trees_must_be_trees() {
+        let file = blob(b"file");
+        let tree_obj = tree(&[(b"f", EntryMode::Blob, file.0)]);
+        for make in [commit_over_noparents, remix_over] {
+            let ok = make(tree_obj.0);
+            let report = closure_of(ok.0, &[&ok, &tree_obj, &file]);
+            assert!(report.is_complete(), "{report:?}");
+
+            let bad = make(file.0);
+            let report = closure_of(bad.0, &[&bad, &file]);
+            assert_eq!(corrupt_ids(&report), vec![file.0], "{report:?}");
+        }
+    }
+
+    fn commit_over_noparents(tree_hash: Hash) -> (Hash, Vec<u8>) {
+        commit_over(tree_hash, vec![])
+    }
+
+    #[test]
+    fn tag_target_must_have_the_recorded_type() {
+        let file = blob(b"file");
+        let tree_obj = tree(&[(b"f", EntryMode::Blob, file.0)]);
+        let commit = commit_over(tree_obj.0, vec![]);
+        let tag = tag_of(commit.0, ObjectType::Commit);
+        let report = closure_of(tag.0, &[&tag, &commit, &tree_obj, &file]);
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(report.verified, 4);
+
+        // The tag records a commit; the target is a tree.
+        let lying = tag_of(tree_obj.0, ObjectType::Commit);
+        let report = closure_of(lying.0, &[&lying, &tree_obj, &file]);
+        assert_eq!(corrupt_ids(&report), vec![tree_obj.0], "{report:?}");
     }
 
     #[test]
