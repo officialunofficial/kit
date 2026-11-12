@@ -291,6 +291,7 @@ distinct digests.
 
 Therefore, a signature over any one of the commit/remix/tag domain
 digests cannot be replayed as a signature over either of the other two.
+§8 extends this argument to the auth v2, grant, DSSE and SSH roles.
 
 This is the defense against cross-domain signature confusion. The previous scheme used only the
 ObjectType tag byte (0x03/0x04) as separator &mdash; one byte of domain &mdash; and
@@ -400,43 +401,154 @@ ACLs apply).
 
 ---
 
-## 8. One key, many roles
+## 8. Signing roles and cross-role separation
 
-The Ed25519 seed in `.kit/keys/default.key` MAY be reused for other
-Ed25519 roles in the wider kit ecosystem:
+One Ed25519 seed MAY sign several kinds of message. This section lists
+every Ed25519 signing role in kit, gives the exact message each one
+signs, and shows that the messages of two different roles cannot be the
+same byte string. `rust/crates/kit-attest/tests/signing_roles.rs` checks
+the prefix rules below against the production constants and encoders.
+A new role adds a row here and a row to that test.
 
-- **Commit/remix/tag signing** (this document, §§3-4a) &mdash; the
-  message signed is always `BLAKE3(domain ‖ signing_bytes)` for one of
-  the three domains in §2.
-- **DSSE attestation signing** via the `repo-key` signer
-  (`SPEC-ATTESTATIONS.md` §6.2) &mdash; the message signed there is the raw
-  DSSE pre-authentication-encoding (PAE) byte string, not a domain
-  digest from this document.
-- **SSH transport authentication** when pushing to `kit+ssh://`
-  servers &mdash; the message signed there is whatever byte string the SSH
-  protocol itself defines for public-key authentication (RFC 4252
-  §7), entirely outside kit's control.
+### 8.1 Role table
 
-OpenSSH does not accept a raw Ed25519 seed as its `id_ed25519` private
-key. Its private-key files use the `openssh-key-v1` container format (a
-bcrypt-KDF-wrapped, base64, PEM-bracketed structure), not a bare 32-byte
-seed. Reusing a kit seed as an SSH identity requires an explicit
-conversion step (wrapping the same 32 bytes into that container), which
-is outside this document's scope.
+Eight roles sign a 32-byte BLAKE3 digest. They are the **digest roles**.
+The DSSE role signs the raw PAE. SSH is outside kit.
 
-**Cross-protocol domain separation is not yet analyzed.** §5's
-disjointness argument covers only the three domains this document
-defines; it says nothing about whether a 32-byte value that is a valid
-`signing_hash` under §2.1 could ever also be validly interpreted as a
-DSSE PAE byte string or an SSH signed blob under those other
-protocols' own framing. Recommending key reuse without that analysis
-is a real, open gap: cross-protocol domain separation is not analyzed
-here. Until that analysis exists, treat cross-protocol key reuse as
-convenient but **unproven** rather than as a stated security property.
+| Role | Signed message | Length | First bytes of the hashed input (digest roles) or of the message | Key |
+|---|---|---|---|---|
+| Commit (§3) | `BLAKE3(u16_le(11) ‖ "kit.commit\0" ‖ signing_bytes)` | 32 | `0b 00 "kit.commit\0"` | the signer's key |
+| Remix (§4) | `BLAKE3(u16_le(10) ‖ "kit.remix\0" ‖ signing_bytes)` | 32 | `0a 00 "kit.remix\0"` | the signer's key |
+| Tag (§4a) | `BLAKE3(u16_le(8) ‖ "kit.tag\0" ‖ signing_bytes)` | 32 | `08 00 "kit.tag\0"` | the signer's key |
+| Auth v2 request (SPEC-TRANSPORT-CONNECT §7.1) | `BLAKE3(canonical request)` | 32 | `"kit-write:v2\n"` | the signer's key |
+| Write grant (SPEC-WRITE-GRANTS §3, §4) | `BLAKE3(canonical statement)` | 32 | `"kit-write-grant:v1\n"` | the namespace key |
+| Epoch statement (SPEC-WRITE-GRANTS §5.1) | `BLAKE3(canonical statement)` | 32 | `"kit-write-epoch:v1\n"` | the namespace key |
+| Visibility statement (SPEC-WRITE-GRANTS §9.1) | `BLAKE3(canonical statement)` | 32 | `"kit-repo-visibility:v1\n"` | the namespace key |
+| URL token (SPEC-WRITE-GRANTS §9.4) | `BLAKE3(canonical statement)` | 32 | `"kit-url-token:v1\n"` | a dedicated deployment key, never a user key |
+| DSSE attestation (SPEC-ATTESTATIONS §2.1, §6.2) | `PAE(payloadType, payload)` | at least 13, variable | `"DSSEv1 "` | the repo key |
+| SSH public-key authentication (RFC 4252 §7) | the SSH signed blob | more than 32 | `00 00 00 xx` (the session id length) | an SSH identity, only if the same key is imported there |
 
-Nothing in the protocol REQUIRES a single key &mdash; separate signing and
-transport keys are valid, and are the safer default until the
-cross-protocol analysis above is complete.
+Every Ed25519 `verify` call in kit belongs to one of these rows. Other
+signature schemes (secp256k1, P-256, WebAuthn) have their own keys and
+are outside this section.
+
+Three code paths sign bytes the caller supplies without adding a prefix.
+They are not roles. They sign messages built for a row above, and they do
+not check which row:
+
+- `KeySigner::sign` (kit-keystore) signs the bytes it receives. The
+  keystore commit path passes a commit digest, and the Connect envelope
+  path passes an auth v2 digest.
+- `ed25519_sign(msg, seed)` (kit-wasm) signs any `msg`.
+- `kit-sign-file` signs the `payload` of a `SignRequest` and does not
+  require it to be a PAE.
+
+A caller that can reach one of them can obtain a signature over any role's
+message, so access to these paths is the trust boundary for the key
+(SPEC-EXTERNAL-SIGNER, SPEC-KEYSTORE). Domain separation does not defend
+against a signer that is willing to sign any bytes.
+
+### 8.2 Separation argument
+
+Ed25519 binds a signature to the whole message. By the strong
+unforgeability of §8.3, a signature made over `M` verifies only over `M`.
+Two roles can therefore share a signature only if one message is a valid
+message of both roles. The cases below show that this cannot happen.
+
+**Two digest roles.** The two messages are equal only if the two hash
+inputs hash to the same digest. The hash inputs differ and neither is a
+prefix of the other, because their first bytes differ:
+
+- An object role starts with `u16_le(len)` of its domain, so its first
+  byte is `0x0b`, `0x0a` or `0x08` and its second byte is `0x00`. The
+  three domains also differ in length and in the first byte after
+  `"kit."` (§5).
+- An auth v2 request or a statement starts with its domain and a line
+  feed. The first byte is `k` (`0x6b`), which no object role uses. Every
+  field of these texts is free of the line feed, so the first line is
+  exactly the domain. The four statement domains and `kit-write:v2` are
+  different strings, and none of them followed by a line feed starts with
+  another: `kit-write:v2` and `kit-write-grant:v1` differ at byte 9.
+
+Different inputs that hash to the same digest are a BLAKE3 collision.
+**Assumption: BLAKE3 collision resistance.** No other assumption is used
+for these roles. The two encodings (length prefix for objects, line feed
+for text) are both unambiguous on their own and are separated from each
+other by the first byte.
+
+**A digest role and DSSE.** A PAE can be 32 bytes long. For example
+`"DSSEv1 1 t 18 "` followed by 18 payload bytes is 32 bytes. The length of
+the message therefore does not separate DSSE from the digest roles. A
+message of any other length is separated by its length alone, since a
+digest role always signs exactly 32 bytes.
+
+For the 32-byte case the digest would have to be a PAE. A PAE starts
+with `"DSSEv1 "`, then a decimal length, a space, the type, a space, a
+decimal length and a space. A 32-byte PAE has two decimal lengths that
+cannot both be one digit, so at least 13 of its 32 bytes are fixed by
+the format. A digest that equals such a string needs a match on at least
+13 fixed bytes (104 bits) of a hash output the attacker does not control.
+**Assumption: BLAKE3 outputs cannot be steered to match 104 chosen bits
+cheaply, that is, about 2¹⁰⁴ hash evaluations.** The attacker can search
+over the object content, but must then get the victim to sign that
+content. Conversely, a PAE signature is useful as a digest-role signature
+only if the same 32 bytes are the digest of a well-formed object, which
+is the same event.
+
+**A digest role and SSH.** An SSH publickey-authentication blob starts
+with the length of the session id, a field of at least 20 bytes, and then
+holds the message number and five more fields, so it is longer than 100
+bytes and never equals a digest-role message. SSH needs no hash assumption against the
+digest roles. An SSH agent, however, signs any bytes a client asks it to
+sign. A host that holds a forwarded agent connection can request a
+signature over any 32 bytes, which includes the digest of a commit of its
+choosing. Separation does not hold against that signer.
+
+**DSSE and SSH.** A PAE starts with `D` (`0x44`) and an SSH blob starts
+with `0x00`. The two cannot be equal.
+
+**Same role, different object.** Within one role the domain is fixed, and
+the rest of the message encodes every field with a length prefix or a fixed
+width (§3 to §4a, SPEC-WRITE-GRANTS §3), so two different objects have
+different messages up to a BLAKE3 collision.
+
+### 8.3 Signature properties kit relies on
+
+The §1 predicate checks that `A` and `R` are canonical and not of small
+order, that `S < L`, and the cofactored equation. Together with the
+unforgeability of Ed25519, the predicate gives the two properties below
+for a key that an honest signer generated.
+
+- **EUF-CMA** (existential unforgeability under chosen messages). A
+  verifier that accepts a signature only as proof that the key holder
+  signed the message needs this. Every row of §8.1 uses it.
+- **SUF-CMA** (strong unforgeability under chosen messages). A third party
+  who sees a valid signature cannot produce a second, different valid
+  signature on the same message. kit needs this where the signature
+  bytes are part of an identifier: an object id covers the 64-byte
+  signature of a commit, remix or tag, and an attestation id covers the
+  signatures of its envelope. Without SUF-CMA a third party could mint
+  a second id for the same content. The checks on `R` and `S` in §1
+  remove the malleable encodings that would break it.
+
+kit does not claim either property, or any binding of a signature to a
+single key, for a public key that an adversary chose.
+
+### 8.4 Key reuse
+
+Nothing in the protocol REQUIRES a single key. Commit, remix, tag, auth v2
+and DSSE signing share the repo key by default. The separation argument
+above covers those roles and the grant roles. It does not cover a key that
+also signs SSH sessions, because kit does not control what an SSH client
+or agent signs (§8.2).
+
+A deployment SHOULD keep a separate Ed25519 key for SSH and MUST NOT
+assume that sharing one key with SSH is safe. OpenSSH does not accept a
+raw seed as an identity. Its `id_ed25519` file uses the `openssh-key-v1`
+container (a bcrypt-KDF-wrapped, base64, PEM-bracketed structure), so
+using a kit seed for SSH takes an explicit conversion that this document
+does not cover. The URL token key is already separate (SPEC-WRITE-GRANTS
+§9.4).
 
 ---
 
@@ -467,6 +579,9 @@ cross-protocol analysis above is complete.
    `rust/tests/golden/tags/`.
 9. **Tag cross-domain negative**: a tag-domain signature MUST NOT verify
    under `"kit.commit\x00"` or `"kit.remix\x00"`, and vice versa.
+10. **Role prefixes**: the message prefixes of every role in §8.1 are
+    pairwise distinct and none extends another. Checked by
+    `rust/crates/kit-attest/tests/signing_roles.rs`.
 
 ---
 
@@ -489,6 +604,7 @@ and the mechanism that enforces or detects each.
 | Invariant | Enforced by |
 |---|---|
 | A signature in one domain never verifies in another (commit ↔ remix ↔ tag) | `u16_le(domain.len)` prefix + disjoint domain strings, both preceding any user-controlled byte (§2.1, §5) |
+| No message of one signing role is a valid message of another | distinct, prefix-free message prefixes; BLAKE3 collision resistance between digest roles; the DSSE case rests on a 104-bit match (§8.2) |
 | Flipping any covered field (tree, parents, author, message, timestamp, signer, tag target/type/name) invalidates the signature | signing bytes cover every identity field of the object (§3, §4, §4a) |
 | No field-boundary ambiguity in signing bytes | every variable-length field is length-prefixed (`Identity`, `message_len`, `parent_count`, `name_len`) (§3, §4, §4a) |
 | A signature is bound to one object type and schema version | the 6-byte PROLOGUE leads the signing bytes (§3) |
