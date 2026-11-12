@@ -915,6 +915,23 @@ mod equality_tests {
     }
 
     #[test]
+    fn content_eq_reader_reports_a_failed_read() {
+        struct Failing;
+        impl io::Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("disk gone"))
+            }
+        }
+        let (_dir, store) = fresh_store();
+        let stored = put(
+            &store,
+            &Object::ChunkedBlob(manifest(&store, &[&[1; 10], &[2; 10]])),
+        );
+        let err = content_eq_reader(&store, &stored, &mut Failing).unwrap_err();
+        assert!(err.to_string().contains("disk gone"), "got {err}");
+    }
+
+    #[test]
     fn content_eq_reader_stops_at_the_first_difference() {
         let (_dir, store) = fresh_store();
         let a = chunk(&store, &[1; 100]);
