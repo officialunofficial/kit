@@ -1,10 +1,12 @@
-//! Linked working trees: add, list, remove and prune.
+//! Linked working trees: add, list, remove, prune, move, lock, unlock and
+//! repair.
 //!
 //! Every linked tree shares the object store and the shared refs of the main
 //! tree. Each tree has its own `HEAD`, index and in-progress operation state.
 //! The registry in the common directory lists the linked trees. [`add`],
-//! [`remove`] and [`prune`] take the registry lock for their whole change, so
-//! two of them never run side by side.
+//! [`remove`], [`prune`], [`move_to`], [`fn@lock`], [`unlock`] and [`repair`] take
+//! the registry lock for their whole change, so two of them never run side by
+//! side.
 //!
 //! [`add`] writes in a crash-safe order. The state directory of the new tree
 //! is complete before the pointer file exists. A crash in between leaves a
@@ -186,12 +188,82 @@ pub enum Error {
         /// The entries that were pruned before the failure.
         pruned: Vec<Pruned>,
     },
+    /// The path names the main tree, and the action does not apply to it.
+    #[error("the main working tree cannot be {0}")]
+    MainTree(&'static str),
+    /// The tree is locked.
+    #[error("worktree is locked{}; unlock it or pass --force twice", why(.reason))]
+    Locked {
+        /// The reason that the lock holds. Empty when it has none.
+        reason: String,
+    },
+    /// The tree is already locked.
+    #[error("worktree is already locked")]
+    AlreadyLocked,
+    /// The tree is not locked.
+    #[error("worktree is not locked")]
+    NotLocked,
+    /// The lock file cannot be written or removed, or the reason is not
+    /// acceptable.
+    #[error("lock: {0}")]
+    LockFile(io::Error),
+    /// The caller works inside the tree to move.
+    #[error("cannot move the worktree you are currently inside")]
+    MoveCurrent,
+    /// The tree to move is gone, so there is nothing to move.
+    #[error("worktree at '{}' is missing; run `worktree repair` or `worktree prune`", .0.display())]
+    TreeMissing(PathBuf),
+    /// The destination of a move exists.
+    #[error("'{}' already exists", .0.display())]
+    MoveTargetExists(PathBuf),
+    /// The destination of a move is not acceptable. The first field is the
+    /// text that the caller gave.
+    #[error("invalid destination '{0}': {1}")]
+    MoveTargetInvalid(String, &'static str),
+    /// The tree cannot be renamed to the destination.
+    #[error("move '{}' to '{}': {source}", from.display(), to.display())]
+    Move {
+        /// The old root.
+        from: PathBuf,
+        /// The new root.
+        to: PathBuf,
+        /// Why the rename failed.
+        source: io::Error,
+    },
+    /// The back-pointer cannot be updated. The tree is back at its old root.
+    #[error("update back-pointer: {0}")]
+    WriteBackPointer(io::Error),
+    /// The tree moved, but a file that names its new root was not updated.
+    /// `worktree repair <path>` finishes the job.
+    #[error("moved to '{}', but updating the pointer failed: {source}; run `worktree repair`", to.display())]
+    MoveIncomplete {
+        /// The new root.
+        to: PathBuf,
+        /// Why the update failed.
+        source: io::Error,
+    },
+    /// A path to repair is not a repairable linked tree of this repository.
+    #[error("cannot repair '{}': {reason}", path.display())]
+    Unrepairable {
+        /// The path that the caller gave.
+        path: PathBuf,
+        /// Why not.
+        reason: String,
+    },
     /// The trees of the repository cannot be read.
     #[error(transparent)]
     Worktrees(#[from] worktrees::Error),
     /// A lock cannot be taken.
     #[error(transparent)]
     Lock(#[from] lock::Error),
+}
+
+fn why(reason: &str) -> String {
+    if reason.is_empty() {
+        String::new()
+    } else {
+        format!(" ({reason})")
+    }
 }
 
 /// What a new tree has checked out.
@@ -291,8 +363,8 @@ pub fn add(
     })
 }
 
-/// Refuse a target inside an existing tree, or one that is not empty.
-fn check_add_target(layout: &RepoLayout, target: &Path) -> Result<(), Error> {
+/// Refuse a target inside an existing tree.
+fn refuse_inside_worktree(layout: &RepoLayout, target: &Path) -> Result<(), Error> {
     for (tree_root, _) in worktrees::all_layouts(layout)? {
         if target.starts_with(canonical_or_lexical(&tree_root)) {
             return Err(Error::InsideWorktree {
@@ -301,6 +373,12 @@ fn check_add_target(layout: &RepoLayout, target: &Path) -> Result<(), Error> {
             });
         }
     }
+    Ok(())
+}
+
+/// Refuse a target inside an existing tree, or one that is not empty.
+fn check_add_target(layout: &RepoLayout, target: &Path) -> Result<(), Error> {
+    refuse_inside_worktree(layout, target)?;
     match std::fs::read_dir(target) {
         Ok(mut entries) => {
             if entries.next().is_some() {
@@ -413,10 +491,7 @@ fn create_worktree(
         ),
         (
             "back-pointer",
-            std::fs::write(
-                state_dir.join(layout::BACKPOINTER_FILE_NAME),
-                format!("{}\n", target.join(kit_core::KIT_DIR).display()),
-            ),
+            layout::write_backpointer(&state_dir, target),
         ),
     ];
     for (what, result) in steps {
@@ -460,6 +535,9 @@ pub struct Entry {
     pub branch: Option<String>,
     /// Why the entry is broken. [`prune`] removes a broken entry.
     pub prunable: Option<String>,
+    /// The reason of the lock, empty when it has none. `None` when the tree
+    /// is not locked. The main tree is never locked.
+    pub locked: Option<String>,
 }
 
 /// List the main tree, each healthy linked tree, and each broken registry
@@ -483,15 +561,20 @@ pub fn list(layout: &RepoLayout, store_config: &StoreConfig<'_>) -> Result<Vec<E
                 _ => None,
             },
             prunable: None,
+            locked: (!tree.is_single())
+                .then(|| layout::lock_reason(tree.worktree_state_dir()))
+                .flatten(),
         });
     }
     for entry in registry(layout)? {
         if let Some(reason) = entry.prunable {
+            let locked = layout::lock_reason(&entry.state_dir);
             rows.push(Entry {
                 path: entry.tree_root.unwrap_or(entry.state_dir),
                 head: None,
                 branch: None,
                 prunable: Some(reason),
+                locked,
             });
         }
     }
@@ -500,8 +583,9 @@ pub fn list(layout: &RepoLayout, store_config: &StoreConfig<'_>) -> Result<Vec<E
 
 /// Remove the linked tree at `path`, and its state directory.
 ///
-/// A relative `path` resolves against `cwd`. Without `force`, the operation
-/// refuses a tree that is in the middle of an operation, or that has staged
+/// A relative `path` resolves against `cwd`. A locked tree needs
+/// `force_locked`, which is separate from `force`. Without `force`, the
+/// operation refuses a tree that is in the middle of an operation, or that has staged
 /// changes, unstaged changes or untracked files. It holds the registry lock
 /// and then the lock of the tree to remove, in that order. Another process
 /// that works inside the tree could be in the middle of a commit.
@@ -518,6 +602,7 @@ pub fn remove(
     cwd: &Path,
     path: &str,
     force: bool,
+    force_locked: bool,
     observer: &dyn Observer<lock::Event>,
 ) -> Result<(), Error> {
     let target = canonical_or_lexical(&absolutize(cwd, Path::new(path)));
@@ -538,6 +623,7 @@ pub fn remove(
     }) else {
         return Err(Error::NotLinked(target));
     };
+    refuse_locked(&entry.state_dir, force_locked)?;
 
     // Local work counts: an operation in progress, staged and unstaged
     // changes, and untracked files, which exist in that tree only.
@@ -552,6 +638,8 @@ pub fn remove(
     }
 
     let _registry = lock::acquire_registry(layout, observer)?;
+    // A sibling `lock` may have run since the first check.
+    refuse_locked(&entry.state_dir, force_locked)?;
     // The registry lock comes first, in the global lock order.
     let _tree_lock = if entry.state_dir.is_dir() {
         let tree = RepoLayout::linked(&target, &entry.state_dir, layout.common_dir());
@@ -571,6 +659,14 @@ pub fn remove(
         path: entry.state_dir,
         source,
     })
+}
+
+/// Refuse a locked tree, unless `force_locked`.
+fn refuse_locked(state_dir: &Path, force_locked: bool) -> Result<(), Error> {
+    match layout::lock_reason(state_dir) {
+        Some(reason) if !force_locked => Err(Error::Locked { reason }),
+        _ => Ok(()),
+    }
 }
 
 /// A description of the local work in a tree, relative to its own `HEAD`.
@@ -624,7 +720,8 @@ pub struct Pruned {
     pub reason: String,
 }
 
-/// Delete the registry entries whose linked tree is gone. Return them.
+/// Delete the registry entries whose linked tree is gone. Return them. A
+/// locked entry stays.
 ///
 /// With `dry_run`, nothing is deleted and no lock is taken. Otherwise the
 /// lock comes first and the scan second. A scan before the lock could take an
@@ -649,6 +746,11 @@ pub fn prune(
         let Some(reason) = entry.prunable else {
             continue;
         };
+        // A lock protects a tree that is only out of reach, such as one on a
+        // disk that is not mounted.
+        if layout::lock_reason(&entry.state_dir).is_some() {
+            continue;
+        }
         if !dry_run && let Err(source) = std::fs::remove_dir_all(&entry.state_dir) {
             return Err(Error::Prune {
                 id: entry.id,
@@ -662,6 +764,276 @@ pub fn prune(
         });
     }
     Ok(pruned)
+}
+
+/// The registry entry of the linked tree at `path`, and its canonical root.
+/// `action` names what the caller does, for the error of the main tree.
+fn find_linked(
+    layout: &RepoLayout,
+    cwd: &Path,
+    path: &str,
+    action: &'static str,
+) -> Result<(PathBuf, layout::WorktreeEntry), Error> {
+    let target = canonical_or_lexical(&absolutize(cwd, Path::new(path)));
+    let main_root = layout.common_dir().parent().map(canonical_or_lexical);
+    if main_root.as_deref() == Some(target.as_path()) {
+        return Err(Error::MainTree(action));
+    }
+    let entry = registry(layout)?.into_iter().find(|entry| {
+        entry
+            .tree_root
+            .as_deref()
+            .is_some_and(|root| canonical_or_lexical(root) == target)
+    });
+    match entry {
+        Some(entry) => Ok((target, entry)),
+        None => Err(Error::NotLinked(target)),
+    }
+}
+
+/// Lock the linked tree at `path`, with `reason`.
+///
+/// A locked tree survives [`remove`], [`prune`] and [`move_to`] unless the
+/// caller forces them. The tree may be gone, such as on a disk that is not
+/// mounted.
+///
+/// # Errors
+/// [`Error::MainTree`], [`Error::NotLinked`], [`Error::AlreadyLocked`], or
+/// [`Error::LockFile`] for a reason that is too long or has a control
+/// character.
+pub fn lock(
+    layout: &RepoLayout,
+    cwd: &Path,
+    path: &str,
+    reason: &str,
+    observer: &dyn Observer<lock::Event>,
+) -> Result<(), Error> {
+    let _registry = lock::acquire_registry(layout, observer)?;
+    let (_, entry) = find_linked(layout, cwd, path, "locked")?;
+    layout::write_lock(&entry.state_dir, reason).map_err(|e| {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            Error::AlreadyLocked
+        } else {
+            Error::LockFile(e)
+        }
+    })
+}
+
+/// Unlock the linked tree at `path`.
+///
+/// # Errors
+/// [`Error::MainTree`], [`Error::NotLinked`], [`Error::NotLocked`], or
+/// [`Error::LockFile`].
+pub fn unlock(
+    layout: &RepoLayout,
+    cwd: &Path,
+    path: &str,
+    observer: &dyn Observer<lock::Event>,
+) -> Result<(), Error> {
+    let _registry = lock::acquire_registry(layout, observer)?;
+    let (_, entry) = find_linked(layout, cwd, path, "unlocked")?;
+    layout::remove_lock(&entry.state_dir).map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            Error::NotLocked
+        } else {
+            Error::LockFile(e)
+        }
+    })
+}
+
+/// Check the destination of a move and return its canonical form.
+///
+/// The destination must not exist, even as a dangling link. It has no `..`
+/// component, and its parent is an existing directory. It does not sit inside
+/// a tree of the repository.
+fn check_move_target(layout: &RepoLayout, cwd: &Path, new_path: &str) -> Result<PathBuf, Error> {
+    let invalid = |why| Error::MoveTargetInvalid(new_path.to_owned(), why);
+    let raw = Path::new(new_path);
+    if new_path.is_empty() || new_path.contains('\0') {
+        return Err(invalid("the path is empty or has a NUL"));
+    }
+    if raw
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(invalid("the path has a `..` component"));
+    }
+    let target = canonical_or_lexical(&absolutize(cwd, raw));
+    if target.file_name().is_none() {
+        return Err(invalid("the path has no final component"));
+    }
+    match std::fs::symlink_metadata(&target) {
+        Ok(_) => return Err(Error::MoveTargetExists(target)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(Error::InspectTarget {
+                path: target,
+                source,
+            });
+        }
+    }
+    if !target.parent().is_some_and(Path::is_dir) {
+        return Err(invalid("the parent directory does not exist"));
+    }
+    refuse_inside_worktree(layout, &target)?;
+    Ok(target)
+}
+
+/// Move the linked tree at `path` to `new_path`. Return the new root.
+///
+/// The destination must not exist, and its parent must. The operation
+/// renames the directory, so it stays on one filesystem. Then it rewrites the
+/// back-pointer in the state directory and the pointer file in the tree. If
+/// the back-pointer write fails, the tree goes back to its old root. A
+/// locked tree needs `force_locked`.
+///
+/// # Errors
+/// [`Error`], with one variant for each failed step.
+pub fn move_to(
+    layout: &RepoLayout,
+    cwd: &Path,
+    path: &str,
+    new_path: &str,
+    force_locked: bool,
+    observer: &dyn Observer<lock::Event>,
+) -> Result<PathBuf, Error> {
+    let _registry = lock::acquire_registry(layout, observer)?;
+    let (source, entry) = find_linked(layout, cwd, path, "moved")?;
+    if canonical_or_lexical(cwd).starts_with(&source) {
+        return Err(Error::MoveCurrent);
+    }
+    refuse_locked(&entry.state_dir, force_locked)?;
+    if entry.prunable.is_some() || !source.is_dir() {
+        return Err(Error::TreeMissing(source));
+    }
+    let target = check_move_target(layout, cwd, new_path)?;
+
+    let tree = RepoLayout::linked(&source, &entry.state_dir, layout.common_dir());
+    let _tree_lock = lock::acquire_worktree(&tree, observer)?;
+
+    std::fs::rename(&source, &target).map_err(|e| Error::Move {
+        from: source.clone(),
+        to: target.clone(),
+        source: e,
+    })?;
+    if let Err(e) = layout::write_backpointer(&entry.state_dir, &target) {
+        return match std::fs::rename(&target, &source) {
+            Ok(()) => Err(Error::WriteBackPointer(e)),
+            Err(_) => Err(Error::MoveIncomplete {
+                to: target,
+                source: e,
+            }),
+        };
+    }
+    layout::write_pointer_file(&target, &entry.state_dir).map_err(|e| Error::MoveIncomplete {
+        to: target.clone(),
+        source: e,
+    })?;
+    Ok(target)
+}
+
+/// What [`repair`] fixed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repaired {
+    /// The registry id.
+    pub id: String,
+    /// The file that was rewritten.
+    pub what: &'static str,
+}
+
+/// Repair the files that tie linked trees to the registry.
+///
+/// With `paths`, each path is the root of a linked tree that was moved by
+/// hand. The tree names its state directory in its pointer file, so the
+/// operation rewrites the back-pointer to name the tree at `path`. With no
+/// `paths`, the operation looks at every registry entry that is broken while
+/// its tree directory exists, and rewrites a missing or unreadable pointer
+/// file. It leaves a tree that points at another live state directory, and a
+/// `.kit` that is a directory or a link.
+///
+/// # Errors
+/// [`Error::Unrepairable`] for a path that is not a linked tree of this
+/// repository. The fix stops at the first such path.
+pub fn repair(
+    layout: &RepoLayout,
+    cwd: &Path,
+    paths: &[String],
+    observer: &dyn Observer<lock::Event>,
+) -> Result<Vec<Repaired>, Error> {
+    let _registry = lock::acquire_registry(layout, observer)?;
+    let mut fixed = Vec::new();
+    if paths.is_empty() {
+        for entry in registry(layout)? {
+            let Some(root) = entry.tree_root.as_deref() else {
+                continue;
+            };
+            if entry.prunable.is_none() || !root.is_dir() || !pointer_is_replaceable(root) {
+                continue;
+            }
+            layout::write_pointer_file(root, &entry.state_dir).map_err(|e| {
+                Error::Unrepairable {
+                    path: root.to_path_buf(),
+                    reason: format!("write pointer: {e}"),
+                }
+            })?;
+            fixed.push(Repaired {
+                id: entry.id,
+                what: "pointer",
+            });
+        }
+        return Ok(fixed);
+    }
+    for path in paths {
+        let root = canonical_or_lexical(&absolutize(cwd, Path::new(path)));
+        let unrepairable = |reason: String| Error::Unrepairable {
+            path: root.clone(),
+            reason,
+        };
+        let linked = layout::discover(&root).map_err(|e| unrepairable(e.to_string()))?;
+        let state = linked.worktree_state_dir();
+        // A repository with no linked tree has no registry directory.
+        let registry_dir = layout.worktrees_dir().canonicalize().ok();
+        let id = state
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|id| layout::validate_worktree_id(id));
+        let (false, true, Some(id)) = (
+            linked.is_single(),
+            registry_dir.is_some() && state.parent() == registry_dir.as_deref(),
+            id,
+        ) else {
+            return Err(unrepairable(
+                "not a linked worktree of this repository".to_owned(),
+            ));
+        };
+        let current = kit_core::bounded_read::read_capped_string(
+            &state.join(layout::BACKPOINTER_FILE_NAME),
+            layout::MAX_POINTER_FILE_BYTES,
+        )
+        .ok();
+        let want = format!("{}\n", root.join(kit_core::KIT_DIR).display());
+        if current.as_deref() != Some(want.as_str()) {
+            layout::write_backpointer(state, &root)
+                .map_err(|e| unrepairable(format!("write back-pointer: {e}")))?;
+            fixed.push(Repaired {
+                id: id.to_owned(),
+                what: "back-pointer",
+            });
+        }
+    }
+    Ok(fixed)
+}
+
+/// Whether the `.kit` of the tree at `root` may be rewritten. It may when it
+/// is absent, or a regular file that names no live state directory.
+fn pointer_is_replaceable(root: &Path) -> bool {
+    match std::fs::symlink_metadata(root.join(kit_core::KIT_DIR)) {
+        Err(e) => e.kind() == io::ErrorKind::NotFound,
+        Ok(meta) => {
+            meta.file_type().is_file()
+                && !matches!(layout::discover(root), Ok(linked) if !linked.is_single())
+        }
+    }
 }
 
 fn registry(layout: &RepoLayout) -> Result<Vec<layout::WorktreeEntry>, Error> {

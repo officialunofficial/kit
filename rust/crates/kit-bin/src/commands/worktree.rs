@@ -1,7 +1,9 @@
 //! `kit worktree` — manage linked working trees.
 //!
 //! `add <path> [<commit-ish>]`, `list [--porcelain]`,
-//! `remove [--force] <path>`, `prune [--dry-run]`, with git's
+//! `remove [--force] <path>`, `prune [--dry-run]`,
+//! `move [--force] <path> <new-path>`, `lock [--reason <text>] <path>`,
+//! `unlock <path>` and `repair [<path>...]`, with git's
 //! semantics: every linked tree shares the one object store and the
 //! shared refs; each tree has its own HEAD, index, and in-progress-op
 //! state (see `kit_core::layout` for the split). The logic is in
@@ -48,9 +50,9 @@ enum WorktreeCmd {
     /// Remove a linked working tree and its state dir.
     Remove {
         /// Remove even if the tree has local changes or an operation
-        /// in progress.
-        #[arg(long, short)]
-        force: bool,
+        /// in progress. Give it twice to remove a locked tree.
+        #[arg(long, short, action = clap::ArgAction::Count)]
+        force: u8,
         path: String,
     },
     /// Delete registry entries whose linked tree is gone.
@@ -59,6 +61,31 @@ enum WorktreeCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Move a linked working tree to <new-path>.
+    ///
+    /// The new path must not exist, and its parent must. The main tree
+    /// cannot move.
+    Move {
+        /// Give it twice to move a locked tree.
+        #[arg(long, short, action = clap::ArgAction::Count)]
+        force: u8,
+        path: String,
+        new_path: String,
+    },
+    /// Lock a linked working tree against remove, prune and move.
+    Lock {
+        /// Why the tree is locked.
+        #[arg(long, default_value = "")]
+        reason: String,
+        path: String,
+    },
+    /// Unlock a linked working tree.
+    Unlock { path: String },
+    /// Repair the links between linked trees and the registry.
+    ///
+    /// With paths, each path is a tree that was moved by hand. With none,
+    /// every tree whose pointer file is missing or broken is repaired.
+    Repair { paths: Vec<String> },
 }
 
 #[must_use]
@@ -81,6 +108,27 @@ pub fn run(args: &[String]) -> u8 {
         WorktreeCmd::List { porcelain } => list(&layout, porcelain),
         WorktreeCmd::Remove { force, path } => remove(&layout, &cwd, &path, force),
         WorktreeCmd::Prune { dry_run } => prune(&layout, dry_run),
+        WorktreeCmd::Move {
+            force,
+            path,
+            new_path,
+        } => match linked::move_to(&layout, &cwd, &path, &new_path, force >= 2, &ServedWarning) {
+            Ok(_) => exit::OK,
+            Err(e) => super::fail(e),
+        },
+        WorktreeCmd::Lock { reason, path } => {
+            match linked::lock(&layout, &cwd, &path, &reason, &ServedWarning) {
+                Ok(()) => exit::OK,
+                Err(e) => super::fail(e),
+            }
+        }
+        WorktreeCmd::Unlock { path } => {
+            match linked::unlock(&layout, &cwd, &path, &ServedWarning) {
+                Ok(()) => exit::OK,
+                Err(e) => super::fail(e),
+            }
+        }
+        WorktreeCmd::Repair { paths } => repair(&layout, &cwd, &paths),
     }
 }
 
@@ -129,6 +177,7 @@ fn list(layout: &RepoLayout, porcelain: bool) -> u8 {
         head,
         branch,
         prunable,
+        locked,
     } in rows
     {
         if porcelain {
@@ -147,6 +196,15 @@ fn list(layout: &RepoLayout, porcelain: bool) -> u8 {
                     let _ = writeln!(stdout, "detached");
                 }
             }
+            match &locked {
+                Some(reason) if reason.is_empty() => {
+                    let _ = writeln!(stdout, "locked");
+                }
+                Some(reason) => {
+                    let _ = writeln!(stdout, "locked {reason}");
+                }
+                None => {}
+            }
             let _ = writeln!(stdout);
         } else {
             let hash_col = head.map_or_else(|| "-".repeat(8), |h| format::short_hash(&h, 8));
@@ -155,15 +213,24 @@ fn list(layout: &RepoLayout, porcelain: bool) -> u8 {
                 (Some(b), None) => format!("[{b}]"),
                 (None, None) => "(detached HEAD)".to_owned(),
             };
-            let _ = writeln!(stdout, "{}  {hash_col} {desc}", path.display());
+            let lock_mark = if locked.is_some() { " locked" } else { "" };
+            let _ = writeln!(stdout, "{}  {hash_col} {desc}{lock_mark}", path.display());
         }
     }
     exit::OK
 }
 
-fn remove(layout: &RepoLayout, cwd: &Path, path: &str, force: bool) -> u8 {
+fn remove(layout: &RepoLayout, cwd: &Path, path: &str, force: u8) -> u8 {
     match super::with_store_config(|config| {
-        linked::remove(layout, config, cwd, path, force, &ServedWarning)
+        linked::remove(
+            layout,
+            config,
+            cwd,
+            path,
+            force >= 1,
+            force >= 2,
+            &ServedWarning,
+        )
     }) {
         Ok(()) => exit::OK,
         Err(e) => super::fail(e),
@@ -186,6 +253,19 @@ fn prune(layout: &RepoLayout, dry_run: bool) -> u8 {
     }
     match result {
         Ok(_) => exit::OK,
+        Err(e) => super::fail(e),
+    }
+}
+
+fn repair(layout: &RepoLayout, cwd: &Path, paths: &[String]) -> u8 {
+    match linked::repair(layout, cwd, paths, &ServedWarning) {
+        Ok(fixed) => {
+            let mut stdout = std::io::stdout().lock();
+            for linked::Repaired { id, what } in fixed {
+                let _ = writeln!(stdout, "repaired worktrees/{id}: {what}");
+            }
+            exit::OK
+        }
         Err(e) => super::fail(e),
     }
 }

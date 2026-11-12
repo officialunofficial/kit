@@ -8,8 +8,7 @@ audience: implementers of repository layout, discovery, and gc
 # SPEC-WORKTREE &mdash; linked working trees
 
 Status: **Normative** for the state/locking/discovery model specified
-here; **Draft** because §5's out-of-scope surface (`worktree
-move`/`lock`/`repair`) is not yet covered by this document.
+here; **Draft** because §5 lists what this document leaves out.
 Scope: the common-dir / per-worktree state split, the linked-tree
 pointer-file format, the `worktrees/` registry, repository discovery,
 cross-worktree locking, and gc root-collection semantics.
@@ -28,7 +27,7 @@ of two classes:
 | Class | Contents |
 |---|---|
 | **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `history-v1/`, `recovery-log`, `attestations/`, `applied-packs/`, `upload-parts/`, `git/`, `sparse/`, `worktrees/`, `refs-history-<branch>.lock`, `refs-<ref>.lock`, `worktrees.lock`, `serve.lock` (SPEC-CONCURRENCY §2) |
-| **worktree state dir** (private to one tree) | `HEAD`, `index`, `PULL_HEAD`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock` |
+| **worktree state dir** (private to one tree) | `HEAD`, `index`, `PULL_HEAD`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock`, `locked` |
 
 `PULL_HEAD` is exactly 130 bytes: the target commit in canonical ref encoding
 (64 lowercase hex digits and LF), then the pre-pull tree in the same encoding.
@@ -133,6 +132,11 @@ kitdir: <path>\n
   file.
 - `kitdir` &mdash; the absolute path of the linked tree's pointer file (the
   back-pointer `worktree prune` verifies). Same single-line/size rules.
+- `locked` &mdash; optional. Its presence locks the tree. Its content is the
+  reason: at most 1024 bytes of UTF-8 with no control character, possibly
+  empty. A reader MUST treat any `locked` entry as a lock, even one that is
+  not a small regular UTF-8 file. `worktree remove`, `move` and `prune`
+  refuse a locked tree; `-f -f` overrides `remove` and `move`.
 
 ### 2.3 Worktree ids
 
@@ -295,9 +299,30 @@ Reference implementation: `kit-core/src/ops/stash.rs`
 (`serialize_list`, `deserialize_list`). The uniqueness test in
 `kit-core/tests/unique_tags.rs` covers the `KSTS` constant.
 
+### 4.7 `worktree move`, `lock`, `unlock` and `repair`
+
+All four hold the registry lock. `lock` and `unlock` write and remove the
+`locked` file (§2.2) and refuse the main tree. `lock` refuses a tree that is
+locked, and `unlock` one that is not.
+
+`move` refuses the main tree, the tree of the caller, a locked tree (unless
+forced twice) and a tree whose directory is gone. The destination MUST NOT
+exist, not even as a dangling link, MUST have no `..` component, MUST have an
+existing parent directory and MUST NOT lie inside a tree of the repository.
+`move` takes the `worktree.lock` of the tree, renames the directory, rewrites
+the back-pointer atomically, then rewrites the pointer file. If the
+back-pointer write fails, the rename is undone. A crash after the rename leaves
+a prunable entry that `worktree repair <path>` fixes.
+
+`repair <path>` reads the pointer file of the tree at `<path>` and refuses it
+unless its state dir is a direct child of this repository's registry. Then it
+rewrites the back-pointer to name `<path>/.kit`. `repair` with no path rewrites
+the pointer file of each prunable entry whose tree directory exists, and
+leaves a `.kit` that is a directory, a link, or a pointer to a live state dir.
+
 ## 5. Out of scope (v1)
 
-`worktree move`/`lock`/`repair` (follow-ups), submodule interplay
+Submodule interplay
 (submodules are a non-goal), and sharing a repository between kit
 versions with and without worktree support while linked trees exist.
 

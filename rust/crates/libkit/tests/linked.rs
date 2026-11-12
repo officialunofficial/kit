@@ -50,6 +50,7 @@ impl Fixture {
             &self.base,
             path,
             force,
+            false,
             &NoopObserver,
         )
     }
@@ -302,6 +303,7 @@ fn remove_refuses_the_main_tree_the_current_tree_and_a_stranger() {
         &f.base.join("t1"),
         ".",
         true,
+        false,
         &NoopObserver,
     )
     .unwrap_err();
@@ -339,4 +341,134 @@ fn prune_removes_the_entry_of_a_tree_that_is_gone() {
         linked::prune(&f.layout, false, &NoopObserver).unwrap(),
         Vec::<Pruned>::new()
     );
+}
+
+#[test]
+fn a_lock_stops_remove_move_and_prune_until_forced() {
+    let f = fixture();
+    f.add("t1", None).unwrap();
+    linked::lock(&f.layout, &f.base, "t1", "away", &NoopObserver).unwrap();
+    let rows = linked::list(&f.layout, &f.config()).unwrap();
+    assert_eq!(rows[1].locked.as_deref(), Some("away"));
+    assert_eq!(rows[0].locked, None);
+
+    let err = f.remove("t1", true).unwrap_err();
+    assert!(
+        matches!(err, Error::Locked { ref reason } if reason == "away"),
+        "{err:?}"
+    );
+    let err = linked::move_to(&f.layout, &f.base, "t1", "t2", false, &NoopObserver).unwrap_err();
+    assert!(matches!(err, Error::Locked { .. }), "{err:?}");
+    let err = linked::lock(&f.layout, &f.base, "t1", "", &NoopObserver).unwrap_err();
+    assert!(matches!(err, Error::AlreadyLocked), "{err:?}");
+
+    fs::remove_dir_all(f.base.join("t1")).unwrap();
+    assert!(
+        linked::prune(&f.layout, false, &NoopObserver)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(f.layout.worktrees_dir().join("t1").exists());
+
+    linked::unlock(&f.layout, &f.base, "t1", &NoopObserver).unwrap();
+    let err = linked::unlock(&f.layout, &f.base, "t1", &NoopObserver).unwrap_err();
+    assert!(matches!(err, Error::NotLocked), "{err:?}");
+    assert_eq!(
+        linked::prune(&f.layout, false, &NoopObserver)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn lock_and_unlock_refuse_the_main_tree_and_a_stranger() {
+    let f = fixture();
+    let main = f
+        .layout
+        .common_dir()
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    for result in [
+        linked::lock(&f.layout, &f.base, &main, "", &NoopObserver),
+        linked::unlock(&f.layout, &f.base, &main, &NoopObserver),
+    ] {
+        assert!(matches!(result.unwrap_err(), Error::MainTree(_)));
+    }
+    let err = linked::lock(&f.layout, &f.base, "nowhere", "", &NoopObserver).unwrap_err();
+    assert!(matches!(err, Error::NotLinked(_)), "{err:?}");
+    f.add("t1", None).unwrap();
+    let err = linked::lock(&f.layout, &f.base, "t1", "a\nb", &NoopObserver).unwrap_err();
+    assert!(matches!(err, Error::LockFile(_)), "{err:?}");
+}
+
+#[test]
+fn move_renames_the_tree_and_updates_both_links() {
+    let f = fixture();
+    f.add("t1", None).unwrap();
+    let to = linked::move_to(&f.layout, &f.base, "t1", "t2", false, &NoopObserver).unwrap();
+    assert_eq!(to, f.base.join("t2"));
+    assert!(!f.base.join("t1").exists());
+    let rows = linked::list(&f.layout, &f.config()).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.prunable.is_none()), "{rows:?}");
+    assert_eq!(rows[1].path, f.base.join("t2"));
+    let back = fs::read_to_string(f.layout.worktrees_dir().join("t1/kitdir")).unwrap();
+    assert_eq!(back, format!("{}\n", to.join(".kit").display()));
+}
+
+#[test]
+fn move_refuses_a_bad_destination_the_main_tree_and_a_gone_tree() {
+    let f = fixture();
+    f.add("t1", None).unwrap();
+    let mv = |from: &str, to: &str| {
+        linked::move_to(&f.layout, &f.base, from, to, false, &NoopObserver).unwrap_err()
+    };
+    fs::create_dir(f.base.join("busy")).unwrap();
+    assert!(matches!(mv("t1", "busy"), Error::MoveTargetExists(_)));
+    assert!(matches!(mv("t1", "a/../b"), Error::MoveTargetInvalid(..)));
+    assert!(matches!(mv("t1", "absent/b"), Error::MoveTargetInvalid(..)));
+    assert!(matches!(mv("t1", ""), Error::MoveTargetInvalid(..)));
+    assert!(matches!(mv("t1", "t1/inner"), Error::InsideWorktree { .. }));
+    assert!(matches!(mv("nowhere", "t2"), Error::NotLinked(_)));
+    let main = f
+        .layout
+        .common_dir()
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(matches!(mv(&main, "t2"), Error::MainTree(_)));
+    fs::remove_dir_all(f.base.join("t1")).unwrap();
+    assert!(matches!(mv("t1", "t2"), Error::TreeMissing(_)));
+}
+
+#[test]
+fn repair_fixes_the_back_pointer_of_a_tree_moved_by_hand() {
+    let f = fixture();
+    f.add("t1", None).unwrap();
+    fs::rename(f.base.join("t1"), f.base.join("t2")).unwrap();
+    let fixed = linked::repair(&f.layout, &f.base, &["t2".to_owned()], &NoopObserver).unwrap();
+    assert_eq!(
+        fixed,
+        [linked::Repaired {
+            id: "t1".to_owned(),
+            what: "back-pointer"
+        }]
+    );
+    assert!(
+        linked::list(&f.layout, &f.config())
+            .unwrap()
+            .iter()
+            .all(|r| r.prunable.is_none())
+    );
+    let again = linked::repair(&f.layout, &f.base, &["t2".to_owned()], &NoopObserver).unwrap();
+    assert!(again.is_empty());
+    let err =
+        linked::repair(&f.layout, &f.base, &["nowhere".to_owned()], &NoopObserver).unwrap_err();
+    assert!(matches!(err, Error::Unrepairable { .. }), "{err:?}");
 }

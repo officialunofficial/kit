@@ -432,7 +432,11 @@ _kit() {
                         'add[create a linked working tree]' \
                         'list[list working trees]' \
                         'remove[remove a linked working tree]' \
-                        'prune[delete dead registry entries]'
+                        'prune[delete dead registry entries]' \
+                        'move[move a linked working tree]' \
+                        'lock[lock a linked working tree]' \
+                        'unlock[unlock a linked working tree]' \
+                        'repair[repair worktree links]'
                     ;;
                 stash)
                     _values 'stash subcommand' \
