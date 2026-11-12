@@ -636,37 +636,110 @@ fn fetch_moves_only_the_tracking_ref() {
 }
 
 #[test]
-fn fetch_stops_at_the_staging_budget_and_the_default_budget_fetches() {
+fn fetch_past_the_staging_budget_applies_each_pack_as_it_arrives() {
     let remote = Remote::new();
     let first = remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
     clone_into(&remote, &target);
     let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let third = remote.publish(Some(second), &[("a.txt", b"three\n")], true);
     let layout = RepoLayout::single(&target);
+    let staging = dir.path().join("stage");
+    std::fs::create_dir(&staging).unwrap();
 
-    let small = SyncOptions::default().with_max_staged_bytes(1);
-    let err = fetch(&target, &remote.source(), "default", &small, &NoopObserver).unwrap_err();
-    assert!(
-        matches!(err, kit_sync::SyncError::Io(ref e) if e.kind() == std::io::ErrorKind::StorageFull),
-        "{err:?}"
-    );
-    assert_ne!(
-        refs::read_remote_ref(&layout, "default", "main").unwrap(),
-        Some(second)
-    );
+    let small = SyncOptions::default()
+        .with_max_staged_bytes(1)
+        .with_staging_dir(Some(staging.clone()));
+    let report = fetch(&target, &remote.source(), "default", &small, &NoopObserver).unwrap();
 
-    fetch(
-        &target,
-        &remote.source(),
-        "default",
-        &SyncOptions::default(),
-        &NoopObserver,
-    )
-    .unwrap();
+    assert_eq!(report.packs_downloaded, 2);
+    assert_eq!(report.packs_already_applied, 1);
     assert_eq!(
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
-        Some(second)
+        Some(third)
+    );
+    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+}
+
+/// A source whose `fail_at`-th pack download fails, counting from one.
+struct FailingPack<'a> {
+    inner: TransportSource<'a>,
+    downloads: Cell<usize>,
+    fail_at: usize,
+}
+
+impl RemoteSource for FailingPack<'_> {
+    fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_branches()
+    }
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
+        self.inner.read_ref(name)
+    }
+    fn download_blob_via_ref(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        self.inner.download_blob_via_ref(key, ref_name)
+    }
+    fn download_pack_via_ref(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        self.downloads.set(self.downloads.get() + 1);
+        if self.downloads.get() == self.fail_at {
+            return Err(kit_sync::SourceError::ConnectionFailed);
+        }
+        self.inner.download_pack_via_ref(key, ref_name)
+    }
+}
+
+#[test]
+fn a_failure_past_the_staging_budget_keeps_the_applied_packs_recorded() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let third = remote.publish(Some(second), &[("a.txt", b"three\n")], true);
+    let fourth = remote.publish(Some(third), &[("a.txt", b"four\n")], true);
+    let layout = RepoLayout::single(&target);
+    let staging = dir.path().join("stage");
+    std::fs::create_dir(&staging).unwrap();
+    let small = SyncOptions::default()
+        .with_max_staged_bytes(1)
+        .with_staging_dir(Some(staging.clone()));
+    // The second pack is downloaded, dropped at the budget, then downloaded
+    // and applied under the lock. The third pack's download fails.
+    let failing = FailingPack {
+        inner: remote.source(),
+        downloads: Cell::new(0),
+        fail_at: 3,
+    };
+
+    let err = fetch(&target, &failing, "default", &small, &NoopObserver).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            SyncError::Source(kit_sync::SourceError::ConnectionFailed)
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(first)
+    );
+    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+    let report = fetch(&target, &remote.source(), "default", &small, &NoopObserver).unwrap();
+    assert_eq!(report.packs_already_applied, 2);
+    assert_eq!(report.packs_downloaded, 2);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(fourth)
     );
 }
 

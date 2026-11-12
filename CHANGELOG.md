@@ -9,8 +9,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `SyncOptions::max_staged_bytes` sets the most bytes a fetch stages before it
-  fails. It defaults to 64 GiB, as before. `kit` has no flag for it.
+- `SyncOptions::max_staged_bytes` sets the most bytes a fetch stages without
+  the repository lock. It defaults to 64 GiB. `kit` has no flag for it.
 - The S3 transport offers a repository cursor (SPEC-TRANSPORT §6.8). It is a
   digest of the key, `ETag` and `LastModified` of every object under `refs/`,
   read from the listing alone, so it needs no new object and no change to a
@@ -115,6 +115,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A fetch no longer fails when its packs pass the staging budget. It stages
+  packs without the lock while they fit, then takes the lock and downloads,
+  checks, applies and records each later pack before the next. A clone of a
+  file larger than the budget works, and the staged bytes never pass it. A
+  failure part way leaves the applied packs recorded; the next fetch skips
+  them.
 - The closure check before a fetch publishes a ref reads each chunk's type
   and no longer counts chunks toward its 10,000,000-object cap. A repository
   of many large files can be fetched. `gc` and push still count every chunk.

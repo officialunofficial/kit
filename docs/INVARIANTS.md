@@ -896,6 +896,25 @@ entry decompression or retained delta targets.
 **Enforced by:** `pack::tests` resident-peak, bomb, retention-equivalence and
 maximum-wire-length regressions.
 
+## A fetch stages at most its budget
+
+**Always:** a fetch stages missing packs outside the repository lock only while
+the staged bytes fit the staging budget. It applies the packs past the budget
+one at a time under the lock, each downloaded, authenticated, unpacked,
+recorded and dropped before the next.
+
+**Because:** one large file is many packs. Staging the whole chain would make
+the disk a clone needs grow with the file, and a file larger than the budget
+could never be cloned.
+
+**If violated:** a clone of a repository with a large file fails on the staging
+budget or exhausts disk.
+
+**Enforced by:** `kit-sync` `fetch_past_the_staging_budget_applies_each_pack_as_it_arrives`,
+`a_failure_past_the_staging_budget_keeps_the_applied_packs_recorded`,
+`a_file_of_many_chunks_clones_within_a_small_staging_budget`, and
+`stage::tests::packs_past_the_budget_apply_and_skip_applied_keys`.
+
 ## A fetch closure check counts no chunk
 
 **Always:** the closure check before a fetch publishes a ref reads each chunk's

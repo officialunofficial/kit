@@ -48,8 +48,8 @@ pub(crate) const MAX_PACK_CHAIN_DEPTH: usize = 100_000;
 /// within one packlist. At most one million pack keys plus one hundred
 /// thousand nodes.
 pub(crate) const MAX_FETCH_PACKS: usize = 1_000_000;
-/// Private download staging has a separate disk ceiling from one-pack memory.
-/// A larger history must be fetched incrementally or re-baselined by its owner.
+/// The default staging budget: the most bytes a fetch stages without the
+/// repository lock. A larger chain applies its later packs as they arrive.
 pub(crate) const MAX_FETCH_STAGED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Download and decode one packlist node by key. Packlist nodes are
