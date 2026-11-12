@@ -91,7 +91,8 @@ set. In particular:
   unsound, so gc must abort rather than prune. Push planning fails
   closed the same way: `reachable_closure`, `reachable_objects` and
   `reachable_snapshot` return `OperationLimitExceeded` at the cap, so a
-  push whose closure reaches it fails before it publishes, split or not.
+  push whose new tip's closure reaches it fails before it publishes the cut
+  step. A cut in the remote tip's walk only makes the push send more.
 
 ## Recovery log
 

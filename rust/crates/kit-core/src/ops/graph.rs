@@ -392,7 +392,7 @@ pub const REACHABLE_LIMIT: &str = "10,000,000-object closure walk";
 
 /// The closure of a walk, or [`StoreError::OperationLimitExceeded`] when the
 /// cap cut it.
-fn complete(
+pub(crate) fn complete(
     walk: Result<(BTreeSet<Hash>, bool), StoreError>,
 ) -> Result<BTreeSet<Hash>, StoreError> {
     match walk? {
