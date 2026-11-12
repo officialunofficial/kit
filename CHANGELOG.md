@@ -9,6 +9,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The S3 transport offers a repository cursor (SPEC-TRANSPORT §6.8). It is a
+  digest of the key, `ETag` and `LastModified` of every object under `refs/`,
+  read from the listing alone, so it needs no new object and no change to a
+  writer. A fetch of an unchanged `kit+s3://` remote takes one request for up
+  to 1,000 refs, and one more for each further 1,000. It took one listing and
+  one read per ref, and a packmap read per branch, before. A store that
+  returns no `ETag` or `LastModified` offers no cursor, and the fetch works as
+  before.
 - `kit stash push [-m <message>]` is another name for `kit stash save`.
 - `kit pull --no-ff` fetches, then merges the fetched branch and always writes
   a merge commit, even when a fast-forward is possible. A conflict leaves the

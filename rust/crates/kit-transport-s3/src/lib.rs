@@ -44,9 +44,10 @@ use std::io::Read as _;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use kit_core::hash::Hasher;
 use kit_core::hash::{Hash, to_hex};
 use kit_core::protocol::{
-    BackoffIterator, PackKey, Transport, TransportError, TransportResult, is_retryable,
+    BackoffIterator, PackKey, RepoCursor, Transport, TransportError, TransportResult, is_retryable,
 };
 use kit_core::refs::{
     Ref, RefWriteCondition, parse_lowercase_hash, validate_ref_name, validate_ref_prefix,
@@ -785,6 +786,57 @@ impl S3Transport {
 // ---------------------------------------------------------------------------
 
 impl Transport for S3Transport {
+    /// The cursor of SPEC-TRANSPORT §6.8: a digest of the key, `ETag` and
+    /// `LastModified` of every object under `refs/`, read from the listing
+    /// alone. It costs one request per 1,000 refs and no ref read.
+    fn repo_cursor(&self) -> TransportResult<Option<RepoCursor>> {
+        let query_prefix = self.effective_list_prefix("refs/");
+        let mut listing = RefListing::<String>::new(MAX_PAGES);
+        let mut digest = Hasher::new();
+        digest.update(CURSOR_DOMAIN);
+        loop {
+            if !listing.can_request() {
+                return Err(invalid_listing());
+            }
+            let query = match listing.cursor() {
+                "" => Self::build_list_query(&query_prefix),
+                token => Self::build_list_query_continued(&query_prefix, token),
+            };
+            let resp = self.http_request(
+                &Method::GET,
+                "",
+                &query,
+                None,
+                &[],
+                Some(REF_LIST_BODY_LIMIT),
+            )?;
+            match resp.status {
+                200 => {}
+                403 | 401 => return Err(TransportError::AccessDenied),
+                s => return Err(TransportError::ServerError { status: s }),
+            }
+            let Some(page) = parse_cursor_page(&resp.body) else {
+                // An entry without an `ETag` or `LastModified` cannot vouch
+                // for the ref it names.
+                return Ok(None);
+            };
+            let keys = page.entries.iter().map(|e| e.key.clone()).collect();
+            for entry in &page.entries {
+                for field in [&entry.key, &entry.etag, &entry.last_modified] {
+                    digest.update(&(field.len() as u64).to_le_bytes());
+                    digest.update(field.as_bytes());
+                }
+            }
+            if listing
+                .push(keys, page.next_continuation_token, |key| key)
+                .map_err(|_| invalid_listing())?
+            {
+                break;
+            }
+        }
+        RepoCursor::new(&digest.finalize()).map(Some)
+    }
+
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
         // PACK_BODY_LIMIT is the absolute pack-body ceiling enforced on
         // every transport (it bounds `download_pack`'s in-memory buffer
@@ -1075,6 +1127,55 @@ struct ListPage {
     /// `<NextContinuationToken>` is present — feed it back as the
     /// `continuation-token` query parameter to fetch the next page.
     next_continuation_token: Option<String>,
+}
+
+/// Domain-separation tag of the digest that [`Transport::repo_cursor`] returns.
+const CURSOR_DOMAIN: &[u8] = b"kit-s3-repo-cursor-v1\0";
+
+/// One `<Contents>` entry of a listing, as the cursor reads it.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorEntry {
+    pub key: String,
+    pub etag: String,
+    pub last_modified: String,
+}
+
+/// One page of a listing for the cursor.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorPage {
+    pub entries: Vec<CursorEntry>,
+    pub next_continuation_token: Option<String>,
+}
+
+/// Parse a `ListObjectsV2` body for the cursor. `None` when the body is not
+/// UTF-8 or any entry lacks its key, `ETag` or `LastModified`.
+#[doc(hidden)]
+#[must_use]
+pub fn parse_cursor_page(xml: &[u8]) -> Option<CursorPage> {
+    let s = std::str::from_utf8(xml).ok()?;
+    let mut entries = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("<Contents>") {
+        let body = &rest[start + "<Contents>".len()..];
+        let end = body.find("</Contents>")?;
+        let block = &body[..end];
+        entries.push(CursorEntry {
+            key: extract_element(block, "Key")?,
+            etag: extract_element(block, "ETag").filter(|v| !v.is_empty())?,
+            last_modified: extract_element(block, "LastModified").filter(|v| !v.is_empty())?,
+        });
+        rest = &body[end + "</Contents>".len()..];
+    }
+    let ListPage {
+        next_continuation_token,
+        ..
+    } = parse_list_page(xml);
+    Some(CursorPage {
+        entries,
+        next_continuation_token,
+    })
 }
 
 /// Extract every `<Key>...</Key>` value from a ListBucketResult body.

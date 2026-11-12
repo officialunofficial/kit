@@ -136,8 +136,8 @@ unique to the instance and the count of its committed ref writes. The file
 transport's is described in SPEC-REFS §5.1.2. The SSH transport offers the
 cursor of the transport that `kit serve` serves (§4.2.2), so it offers one
 exactly when the file transport does and a server that knows the request
-answers. The S3 and Connect transports offer none: their wire carries no
-cursor yet.
+answers. The S3 transport's is a digest of its ref listing (§6.8). The Connect
+transport offers none: its wire carries no cursor yet.
 
 ### 1.3 Pruning remote-tracking refs
 
@@ -694,6 +694,40 @@ identical upload of the same digest) is therefore treated as the
 idempotent no-op that SPEC-TRANSPORT §7 requires of `upload_pack`,
 not a caller-visible error &mdash; matching the single-PUT path's
 unconditional-overwrite behavior for the same scenario.
+
+### 6.8 Repository cursor
+
+The S3 transport offers the repository cursor of §1.2. It adds no object and
+needs no change to a writer, so a repository written by any version of the
+client has one.
+
+**Protocol requirement.** The cursor is the BLAKE3 digest of the tag
+`kit-s3-repo-cursor-v1`, a zero byte, and then every entry that
+`ListObjectsV2` returns for the prefix `refs/` (under the URL prefix, if any),
+in listing order. Each entry adds its key, its `ETag` and its `LastModified`
+text. Each of the three is an 8-byte little-endian length and the bytes. The
+cursor is 32 bytes.
+
+- A ref write changes the `ETag` of its object, because the `ETag` is the MD5
+  of the 65-byte ref wire (§6.3). A new ref adds an entry. The write reports
+  success only when the store holds the object, so the next listing shows it.
+- A bucket that is emptied and filled again with the same refs has other
+  `LastModified` values, so it returns another cursor.
+- The listing follows the rules of `list_refs`: pages of at most 1,000 keys,
+  keys strictly increasing across pages, a page cap and a retained-state cap.
+  A listing that breaks a rule is an error.
+- A body that is not UTF-8, or an entry with no key, no `ETag` or no
+  `LastModified`, gives no cursor for that read. The fetch then does its full
+  work.
+
+**Reference-client behavior.** An unchanged fetch lists `refs/` once per 1,000
+refs and reads no ref and no packmap. It costs one request for a repository of
+at most 1,000 refs. The listing covers every branch, tag and packmap. A client
+that sees another cursor does its full work.
+
+**Trust.** The listing comes from the store, as the one of `list_refs` does. A
+store that returns an old listing can only leave the client at a state that the
+store once held.
 
 ---
 
