@@ -115,7 +115,10 @@ SPEC-FASTCDC leaves the threshold an implementer choice; for
 importers `CHUNK_THRESHOLD = 1 MiB` is **normative** (a different
 threshold would fork hashes across implementations).
 Blobs over `worktree::MAX_FILE_BYTES` (1 GiB, the per-file cap)
-refuse per-ref.
+refuse per-ref. The cap stays at 1 GiB, although a `ChunkedBlob` may
+hold 128 GiB (SPEC-OBJECTS §7). The importer holds a git blob whole in
+memory, and the export refuses a manifest above the same cap
+(SPEC-GIT-BRIDGE §4).
 
 ### 3.2 Commits
 

@@ -242,14 +242,32 @@ fn write_tag(buf: &mut Vec<u8>, t: &Tag) -> Result<(), KitError> {
     Ok(())
 }
 
+/// Check the header fields of a `ChunkedBlob` manifest against the decode
+/// rules of SPEC-OBJECTS §7: the chunk cap, the size bound and the layout.
+/// [`deserialize`] and the writer apply the same rules. A caller that
+/// reads a raw manifest without decoding it, for example to feed
+/// [`crate::merkle::ChunkedIdFold`], checks the header with this first.
+///
+/// # Errors
+/// [`KitError::TooManyChunks`] above [`MAX_CHUNKS`], and
+/// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
+/// [`MAX_CHUNKED_TOTAL_SIZE`] or impossible for the layout.
+pub fn check_chunked_header(
+    total_size: u64,
+    chunk_size: u32,
+    chunk_count: u32,
+) -> Result<(), KitError> {
+    if chunk_count > MAX_CHUNKS {
+        return Err(KitError::TooManyChunks);
+    }
+    check_chunked_total_size(total_size, chunk_size, chunk_count)
+}
+
 /// Refuse a manifest that [`deserialize`] would refuse, so a writer never
 /// stores an undecodable manifest.
 fn write_chunked_blob(buf: &mut Vec<u8>, cb: &ChunkedBlob) -> Result<(), KitError> {
-    let chunk_count = u32::try_from(cb.chunks.len())
-        .ok()
-        .filter(|&count| count <= MAX_CHUNKS)
-        .ok_or(KitError::TooManyChunks)?;
-    check_chunked_total_size(cb.total_size, cb.chunk_size, chunk_count)?;
+    let chunk_count = u32::try_from(cb.chunks.len()).map_err(|_| KitError::TooManyChunks)?;
+    check_chunked_header(cb.total_size, cb.chunk_size, chunk_count)?;
     write_u64_le(buf, cb.total_size);
     write_u32_le(buf, cb.chunk_size);
     write_u32_le(buf, chunk_count);
@@ -1255,6 +1273,26 @@ mod tests {
         assert!(deserialize(&chunked_bytes(196_609, 65_536, 3)).is_err());
         // Content-defined: every chunk holds at least one byte.
         assert!(deserialize(&chunked_bytes(2, 0, 3)).is_err());
+    }
+
+    #[test]
+    fn check_chunked_header_applies_the_decode_rules() {
+        assert_eq!(
+            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE, 0, MAX_CHUNKS),
+            Ok(())
+        );
+        assert_eq!(
+            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE, 0, MAX_CHUNKS + 1),
+            Err(KitError::TooManyChunks)
+        );
+        assert_eq!(
+            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE + 1, 0, 2),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+        assert_eq!(
+            check_chunked_header(1, 0, 2),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
     }
 
     #[test]

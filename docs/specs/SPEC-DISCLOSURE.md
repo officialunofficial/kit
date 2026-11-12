@@ -570,6 +570,10 @@ A decoder MUST reject an encoded container larger than 64 MiB before
 any decoding or allocation. It MUST bound each vector length by the
 remaining input and 64 MiB, and chunk count to at most 1,000,000, before
 allocation. The verifier classifies a zero or one chunk count under §8.2.
+This bundle cap belongs to the span container. It is not the chunk cap
+of SPEC-OBJECTS §7 (8,388,608), and it stays at 1,000,000. Each bundle
+carries a commit, its steps, a proof and a chunk Blob, so a container
+within 64 MiB holds far fewer bundles than either cap.
 The decoder MUST reject trailing bytes, unknown magic or version,
 truncated fields, and invalid varints. A deployment SHOULD also cap
 requested content, for example at 8 MiB; this service cap is separate

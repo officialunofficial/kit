@@ -152,7 +152,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Tree` and `ChunkedBlob` ids come from a streaming fold that holds one node
   per level, so an id costs O(log n) memory, not about 96 bytes per chunk.
   Ids do not change. `merkle::ChunkedIdFold` computes a `ChunkedBlob` id from
-  its header fields and one chunk id at a time.
+  its header fields and its chunk ids, one at a time or as the raw id bytes
+  of a manifest, so a caller need not decode the manifest.
+  `serialize::check_chunked_header` checks the header first, with the
+  decoder's rules. Breaking: `MerkleError` gains `TooManyLeaves` and
+  `PartialChunkId`.
 
 ### Fixed
 

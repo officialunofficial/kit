@@ -174,6 +174,9 @@ pub enum MerkleError {
     /// A fold was given more than `u32::MAX` leaves.
     #[error("merkle tree has more than u32::MAX leaves")]
     TooManyLeaves,
+    /// Raw chunk id bytes are not a whole number of 32-byte ids.
+    #[error("chunk id bytes are not a whole number of 32-byte ids")]
+    PartialChunkId,
 }
 
 impl From<CodecError> for MerkleError {
@@ -339,12 +342,17 @@ impl BmtFold {
 /// The id equals [`compute_chunked_id`] of the same manifest. Memory is
 /// O(log n) in the chunk count, so a caller can address a manifest
 /// without decoding it whole: read `total_size` and `chunk_size` from the
-/// header, then push each 32-byte chunk id in order.
+/// header, then push the chunk ids in order, one at a time with
+/// [`Self::push`] or as the raw id bytes of a manifest with
+/// [`Self::push_ids`].
 ///
-/// The fold applies none of the decode checks of SPEC-OBJECTS §7. A
-/// caller that reads a raw manifest checks the chunk count against
-/// [`crate::serialize::MAX_CHUNKS`] and `total_size` against its layout
-/// first, or it addresses a manifest that no reader decodes.
+/// The fold applies none of the decode checks of SPEC-OBJECTS §7, and the
+/// id does not bind `chunk_count` by itself. A caller that reads a raw
+/// manifest checks the prologue, checks the header with
+/// [`crate::serialize::check_chunked_header`], checks that the object is
+/// exactly `22 + 32 * chunk_count` bytes long, and pushes exactly
+/// `chunk_count` ids. Otherwise it addresses a manifest that no reader
+/// decodes, or a different manifest.
 #[derive(Debug)]
 pub struct ChunkedIdFold {
     fold: BmtFold,
@@ -371,6 +379,25 @@ impl ChunkedIdFold {
     /// leaves.
     pub fn push(&mut self, chunk: &Hash) -> Result<(), MerkleError> {
         self.fold.push(chunk)
+    }
+
+    /// Append the chunk ids in `ids`, a run of whole 32-byte ids as they
+    /// sit in a manifest's encoding, in order. A caller can pass a
+    /// manifest's id bytes in slices of any whole-id length.
+    ///
+    /// # Errors
+    /// [`MerkleError::PartialChunkId`] if `ids` is not a whole number of
+    /// ids, before any id is pushed, and [`MerkleError::TooManyLeaves`]
+    /// once the fold holds `u32::MAX` leaves.
+    pub fn push_ids(&mut self, ids: &[u8]) -> Result<(), MerkleError> {
+        let (ids, rest) = ids.as_chunks::<HASH_LEN>();
+        if !rest.is_empty() {
+            return Err(MerkleError::PartialChunkId);
+        }
+        for id in ids {
+            self.fold.push(id)?;
+        }
+        Ok(())
     }
 
     /// The bare (pre-wrap) BMT root, as [`chunked_inner_root`] returns it.
@@ -1680,6 +1707,26 @@ mod tests {
                 build_bmt(&chunked_leaves(&manifest)).root
             );
         }
+    }
+
+    /// Folding a manifest's raw id bytes, in uneven slices, gives the
+    /// decoded manifest's id, and a partial id is refused.
+    #[test]
+    fn push_ids_matches_the_decoded_manifest() {
+        let manifest = generated_manifest(1000);
+        let bytes =
+            crate::serialize::serialize(&crate::object::Object::ChunkedBlob(manifest.clone()))
+                .unwrap();
+        // Prologue 6, total_size 8, chunk_size 4, chunk_count 4.
+        let ids = &bytes[22..];
+        let mut fold = ChunkedIdFold::new(manifest.total_size, manifest.chunk_size);
+        for slice in [&ids[..32], &ids[32..32 * 7], &ids[32 * 7..]] {
+            fold.push_ids(slice).unwrap();
+        }
+        assert_eq!(fold.id(), compute_chunked_id(&manifest));
+        let mut partial = ChunkedIdFold::new(0, 0);
+        assert_eq!(partial.push_ids(&[0; 33]), Err(MerkleError::PartialChunkId));
+        assert_eq!(partial.id(), ChunkedIdFold::new(0, 0).id());
     }
 
     /// A fold refuses a leaf past `u32::MAX` instead of wrapping its

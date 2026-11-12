@@ -76,7 +76,8 @@ list finalizes `BLAKE3("")` with `N = 0`.
 
 The result equals §1.1 for every `N`. kit computes every object id this
 way (`kit_core::merkle::ChunkedIdFold` for a `ChunkedBlob`, which takes
-the header fields and then one chunk id at a time). Tests compare the
+the header fields and then the chunk ids, one at a time or as the raw id
+bytes of a manifest). Tests compare the
 fold with the level build for every `N` up to 1,024, around each power of
 two up to 2^14, and at 1,000,001 and 8,388,608 chunks; the two large
 ids are pinned in `merkle::tests`.
