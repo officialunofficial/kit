@@ -1896,6 +1896,22 @@ pub fn ssh_cursor_reply_one_iteration(input: &[u8]) {
     }
 }
 
+/// The listing that the S3 cursor reads (`s3_cursor_listing`):
+/// `parse_cursor_page` never panics. An accepted page holds at most one entry for each
+/// `<Contents>` element, and every entry names a key, an `ETag` and a
+/// `LastModified` time.
+pub fn s3_cursor_listing_one_iteration(input: &[u8]) {
+    use kit_transport_s3::parse_cursor_page;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Some(page) = parse_cursor_page(input) {
+        let text = std::str::from_utf8(input).expect("only UTF-8 is accepted");
+        assert!(page.entries.len() <= text.matches("<Contents>").count());
+        for entry in &page.entries {
+            assert!(!entry.etag.is_empty() && !entry.last_modified.is_empty());
+        }
+    }
+}
+
 /// The field-level grant parsers (`grant_fields_parse`): the `text` helpers,
 /// `Capabilities`, `RefFlags`, `RefPattern`, `RefScopes`,
 /// `AcceptedSchemes::from_tokens`, `is_loopback_origin` and
@@ -3348,6 +3364,22 @@ mod tests {
             &[0xFF; 64][..],
         ] {
             run_one(case, ssh_cursor_reply_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_s3_cursor_listing() {
+        run_iterated_unit(s3_cursor_listing_one_iteration).unwrap();
+        for case in [
+            &b"<ListBucketResult><Contents><Key>refs/a</Key><ETag>e</ETag><LastModified>t</LastModified></Contents></ListBucketResult>"[..],
+            b"<Contents><Key>refs/a</Key></Contents>",
+            b"<Contents><Key>a</Key><ETag></ETag><LastModified>t</LastModified></Contents>",
+            b"<Contents>",
+            b"<Contents><Contents></Contents>",
+            b"",
+            &[0xFF; 64][..],
+        ] {
+            run_one(case, s3_cursor_listing_one_iteration).unwrap();
         }
     }
 
