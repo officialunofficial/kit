@@ -225,6 +225,17 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
        commonware-native verifier runs the wrap check and then upstream
        `bmt::Proof::verify_multi_inclusion` against `inner_root`
        unmodified.
+       The verifier never decodes the manifest, so it **MUST** then apply
+       the manifest decoder's `total_size` rules (SPEC-OBJECTS §7) to
+       `total_size`, `chunk_size` and a chunk count of `leaf_count - 1`
+       from the folded proof, and reject a layout they refuse
+       (`ChunkedBlobTotalSizeInvalid`). `bytes` shorter than the 10-byte
+       Blob prologue is rejected. For a fixed-size layout (`chunk_size`
+       other than `0` and `0x8000_0002`), the chunk's content length (the
+       length of `bytes` less its prologue) **MUST** be the length the
+       layout requires of chunk `index`: exactly `chunk_size` for every
+       chunk but the last, and `total_size - index * chunk_size` for the
+       last. Otherwise reject with `FixedChunkLength`.
     - **`Range`**, `chunk = None` (the leaf is a plain `Blob`): **MUST**
       reject `len == 0`. **MUST** verify a Bao slice proving `len` bytes
       at content offset `offset_in_blob` (Bao offset `offset_in_blob +
@@ -236,7 +247,8 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
        **MUST** reject `len == 0`. **MUST** apply the same wrap-check-first
        and fold-equals-declared rules as `Chunk` to `hdr.inner_root`.
        **MUST** run the same `{0, index + 1}` multi-proof as `Chunk` above
-       (using `hdr.chunk_id` as the second leaf) against the leaf id.
+       (using `hdr.chunk_id` as the second leaf) against the leaf id, and
+       the same `total_size` rules as `Chunk`.
        **MUST** verify a Bao slice proving
       `len` bytes at content offset `offset_in_blob` (Bao offset
       `offset_in_blob + 10`) against `hdr.chunk_id`. If `hdr.index == 0`,
@@ -246,20 +258,21 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
       silently ignored; `absolute_offset` is then
       `Some(offset_in_blob)` (already absolute). Otherwise, if
       `chunk_len_proofs` is empty, `absolute_offset` is `None` (not
-      requested) for a content-defined layout (`chunk_size` `0` or
-      `0x8000_0002`, SPEC-OBJECTS §7). For a fixed-size layout the
-      verifier derives it: `absolute_offset` is
-      `Some(index * chunk_size + offset_in_blob)`, because SPEC-OBJECTS §7
-      places chunk `index` at `index * chunk_size` and the metadata leaf
-      authenticates `chunk_size`. A builder emits no length proofs for a
-      fixed-size layout. Otherwise, `chunk_len_proofs` **MUST** cover exactly
+      requested), for every layout. A verifier **MUST NOT** derive it as
+      `index * chunk_size` for a fixed-size layout: the manifest binds no
+      chunk lengths, so a manifest whose chunks break its layout would make
+      that offset name bytes the file holds elsewhere. A non-empty
+      `chunk_len_proofs` **MUST** cover exactly
       the index set `0..hdr.index`, with no gaps and no duplicates &mdash; an
       incomplete or malformed set **MUST** be rejected as a typed error,
       **never** silently treated as "absent". When it does cover
       `0..hdr.index` completely, each entry's chunk id **MUST** verify
       (single-leaf proof, `verify_chunk`) against the leaf id at position
       `index + 1`, and each entry's `slice` **MUST** verify as a length
-      proof (§4.1 below) against that chunk id; `absolute_offset` is then
+      proof (§4.1 below) against that chunk id. For a fixed-size layout,
+      each proven length **MUST** be `chunk_size`, since no chunk before
+      `hdr.index` is the last; otherwise reject with `FixedChunkLength`.
+      `absolute_offset` is then
       `Some(sum of every proven length + offset_in_blob)`.
 
 ### 4.1 Length proofs

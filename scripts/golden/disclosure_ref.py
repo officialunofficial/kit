@@ -303,6 +303,26 @@ def check_chunk_proof(hdr, chunk_hash, leaf_id):
         raise Reject("chunk proof does not fold to the declared inner root")
 
 
+def check_layout(hdr):
+    """SPEC-OBJECTS section 7: total_size must fit the layout, as when a
+    manifest is decoded. The chunk count comes from the folded proof."""
+    try:
+        o.check_chunked_layout(hdr["total_size"], hdr["chunk_size"], hdr["proof"][0] - 1)
+    except ValueError as e:
+        raise Reject(str(e))
+
+
+def check_fixed_len(hdr, index, actual):
+    """SPEC-OBJECTS section 7: in a fixed-size layout every chunk but the last
+    holds exactly chunk_size bytes, and the last holds the rest of total_size."""
+    if hdr["chunk_size"] in o.CONTENT_DEFINED:
+        return
+    count = hdr["proof"][0] - 1
+    want = hdr["chunk_size"] if index + 1 < count else hdr["total_size"] - index * hdr["chunk_size"]
+    if actual != want:
+        raise Reject("a fixed-size chunk has the wrong length")
+
+
 def verify_bundle(data, trusted_commit_id):
     b = decode_bundle(data)
     if b["commit_id"] != trusted_commit_id:
@@ -386,6 +406,10 @@ def verify_bundle(data, trusted_commit_id):
     elif kind == 1:
         hdr = b["chunk"]
         check_chunk_proof(hdr, blake3(b["bytes"]), leaf_id)
+        check_layout(hdr)
+        if len(b["bytes"]) < 10:
+            raise Reject("chunk is shorter than a blob prologue")
+        check_fixed_len(hdr, hdr["index"], len(b["bytes"]) - 10)
         result["_content"] = b["bytes"]
         result["chunk_inner_root_hex"] = hdr["inner_root"].hex()
         result["payload"] = {
@@ -406,6 +430,7 @@ def verify_bundle(data, trusted_commit_id):
             blob_id, absolute, chunk = leaf_id, b["offset"], None
         else:
             check_chunk_proof(hdr, hdr["chunk_id"], leaf_id)
+            check_layout(hdr)
             result["chunk_inner_root_hex"] = hdr["inner_root"].hex()
             blob_id = hdr["chunk_id"]
             chunk = {k: hdr[k] for k in ("total_size", "chunk_size", "index")}
@@ -427,7 +452,9 @@ def verify_bundle(data, trusted_commit_id):
                         raise Reject(str(err))
                     if folded != hdr["inner_root"]:
                         raise Reject("length proof does not fold to the inner root")
-                    total += length_proof(e["slice"], e["chunk_id"])
+                    length = length_proof(e["slice"], e["chunk_id"])
+                    check_fixed_len(hdr, e["index"], length)
+                    total += length
                 absolute = total + b["offset"]
         content, _ = bao_slice(b["slice"], blob_id, b["offset"] + 10, b["len"])
         result["_content"] = content

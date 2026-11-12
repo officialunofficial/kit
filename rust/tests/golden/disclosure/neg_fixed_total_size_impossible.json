@@ -1,0 +1,14 @@
+{
+  "bin": "neg_fixed_total_size_impossible.bin",
+  "blake3": "722ae4c58eea577cd1433934bae46c7a4db0e3fc68c07b6d9ef5eaeb1e4d8121",
+  "commit_id_hex": "9dab7653974a95f5795f30f44cfe340a910e300af4193f121e9546e3ac313262",
+  "description": "Chunk 2 of a fixed-size layout that claims total_size 5 in three chunks of chunk_size 10.",
+  "expect": "reject",
+  "name": "neg_fixed_total_size_impossible",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "total_size does not fit the fixed-size layout",
+  "selector": "chunk(2) [total_size 5 below (3 - 1) * 10]",
+  "size": 543
+}

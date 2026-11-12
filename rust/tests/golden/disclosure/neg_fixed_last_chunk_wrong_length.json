@@ -1,0 +1,14 @@
+{
+  "bin": "neg_fixed_last_chunk_wrong_length.bin",
+  "blake3": "4e12238ee77ee1eb1735cb5a02f11387ff06e7d32ac820bcd18ed091125d84b2",
+  "commit_id_hex": "639697a75f50ce75e39b9f6f0ee57fb4a752cc04d5b0534f7167205a713eb360",
+  "description": "The last chunk of a fixed-size layout holding 3 bytes where total_size 53 leaves 5.",
+  "expect": "reject",
+  "name": "neg_fixed_last_chunk_wrong_length",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "the last chunk of a fixed-size layout is not the rest of total_size",
+  "selector": "chunk(3) [holds 3 bytes]",
+  "size": 546
+}

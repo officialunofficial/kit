@@ -622,7 +622,7 @@ fn read_chunked_blob(r: &mut Reader<'_>) -> Result<ChunkedBlob, KitError> {
 /// Reject a `total_size` that the chunk layout cannot produce. Readers
 /// size buffers and disk writes from `total_size`, so it must be bounded
 /// before any caller sees it (SPEC-OBJECTS §7).
-fn check_chunked_total_size(
+pub(crate) fn check_chunked_total_size(
     total_size: u64,
     chunk_size: u32,
     chunk_count: u32,

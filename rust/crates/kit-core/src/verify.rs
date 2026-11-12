@@ -97,7 +97,6 @@ use bytes::{Buf as _, BufMut};
 use commonware_codec::{Buf, Copying};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write};
 
-use crate::chunker::Chunker;
 use crate::hash::{HASH_LEN, Hash, hash};
 use crate::list_decode::read_list;
 use crate::merkle::{self, MerkleError, ObjectKind, Proof};
@@ -241,6 +240,19 @@ pub enum VerifyError {
     /// the first chunk).
     #[error("chunk_len_proofs is only meaningful for a ChunkedBlob range at chunk index > 0")]
     UnexpectedLengthProofs,
+    /// A chunk of a fixed-size `ChunkedBlob` does not hold the length its
+    /// layout requires (SPEC-OBJECTS §7): every chunk but the last holds
+    /// exactly `chunk_size` bytes, and the last holds the rest of
+    /// `total_size`.
+    #[error("chunk {index} holds {actual} bytes, but its fixed-size layout requires {expected}")]
+    FixedChunkLength {
+        /// The chunk's index within the manifest.
+        index: u32,
+        /// The length the layout requires.
+        expected: u64,
+        /// The chunk's authenticated content length.
+        actual: u64,
+    },
     /// A Bao slice failed to verify against the expected root/offset/len.
     #[error("Bao slice verification failed: {0}")]
     Bao(String),
@@ -495,8 +507,8 @@ pub enum DisclosedPayload {
         /// `ChunkedBlob` at `index > 0`, `Some(sum of every preceding
         /// chunk's authenticated length + offset_in_blob)` when a complete
         /// `0..index` length-proof set was supplied, else `None` (not
-        /// requested). A fixed-size layout needs no proofs: the offset is
-        /// `index * chunk_size + offset_in_blob`.
+        /// requested). In a fixed-size layout every proven length must be
+        /// `chunk_size` ([`VerifyError::FixedChunkLength`]).
         absolute_offset: Option<u64>,
         /// The disclosed bytes.
         bytes: Vec<u8>,
@@ -518,8 +530,7 @@ pub enum Selector {
         len: u64,
         /// When the leaf is a `ChunkedBlob`, also emit length proofs for
         /// every chunk before the one containing `offset`, so a verifier
-        /// can compute an absolute file offset. A fixed-size layout needs
-        /// none, so none are emitted for it.
+        /// can compute an absolute file offset.
         with_offsets: bool,
     },
 }
@@ -1167,15 +1178,17 @@ fn encode_disclosure(
 /// # Errors
 ///
 /// [`VerifyError::IncompleteLengthProofSet`] if `chunk_len_proofs` is
-/// non-empty but does not cover exactly `0..index`; propagates
-/// [`VerifyError::Merkle`]/Bao errors from an individual proof.
+/// non-empty but does not cover exactly `0..index`;
+/// [`VerifyError::FixedChunkLength`] if a fixed-size layout's proven
+/// length is not `chunk_size`; propagates [`VerifyError::Merkle`]/Bao
+/// errors from an individual proof.
 fn resolve_absolute_offset(
     chunked_id: &Hash,
-    index: u32,
-    chunk_size: u32,
+    hdr: &ChunkHdr,
     chunk_len_proofs: &[LenProof],
     offset_in_blob: u64,
 ) -> Result<Option<u64>, VerifyError> {
+    let index = hdr.index;
     if index == 0 {
         // Nothing precedes the first chunk; the offset is already
         // absolute regardless of whether the caller bothered to ask. A
@@ -1188,18 +1201,12 @@ fn resolve_absolute_offset(
         return Ok(Some(offset_in_blob));
     }
     if chunk_len_proofs.is_empty() {
-        // A fixed-size layout places chunk `index` at `index * chunk_size`
-        // (SPEC-OBJECTS §7), and the metadata leaf authenticates both
-        // `chunk_size` and `index`. Nothing more needs proving.
-        if Chunker::from_chunk_size(chunk_size).is_none() {
-            return u64::from(index)
-                .checked_mul(u64::from(chunk_size))
-                .and_then(|start| start.checked_add(offset_in_blob))
-                .map(Some)
-                .ok_or(VerifyError::OffsetOverflow);
-        }
+        // A fixed-size layout does not prove where chunk `index` starts:
+        // the manifest carries no chunk lengths, so only the length proofs
+        // of the chunks before it can.
         return Ok(None);
     }
+    let chunk_count = hdr.proof.leaf_count.saturating_sub(1);
     let mut by_index: BTreeMap<u32, u32> = BTreeMap::new();
     for lp in chunk_len_proofs {
         if lp.index >= index || by_index.contains_key(&lp.index) {
@@ -1207,6 +1214,13 @@ fn resolve_absolute_offset(
         }
         merkle::verify_chunk(chunked_id, &lp.chunk_id, lp.index + 1, &lp.proof)?;
         let len_j = verify_blob_len_proof(&lp.chunk_id, &lp.slice)?;
+        check_fixed_chunk_len(
+            hdr.total_size,
+            hdr.chunk_size,
+            chunk_count,
+            lp.index,
+            u64::from(len_j),
+        )?;
         by_index.insert(lp.index, len_j);
     }
     if u32::try_from(by_index.len()).unwrap_or(u32::MAX) != index {
@@ -1218,6 +1232,28 @@ fn resolve_absolute_offset(
         .checked_add(offset_in_blob)
         .ok_or(VerifyError::OffsetOverflow)?;
     Ok(Some(absolute))
+}
+
+/// Reject chunk `index` of a fixed-size layout whose authenticated content
+/// length `actual` is not the length SPEC-OBJECTS §7 requires. A
+/// content-defined layout passes. The caller has already checked that
+/// `total_size` fits the layout (`check_chunked_total_size`), so the last
+/// chunk's required length is between 1 and `chunk_size`.
+fn check_fixed_chunk_len(
+    total_size: u64,
+    chunk_size: u32,
+    chunk_count: u32,
+    index: u32,
+    actual: u64,
+) -> Result<(), VerifyError> {
+    match crate::object::ChunkedBlob::fixed_chunk_len(total_size, chunk_size, chunk_count, index) {
+        Some(expected) if expected != actual => Err(VerifyError::FixedChunkLength {
+            index,
+            expected,
+            actual,
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// The mode the authenticated path gives its leaf: the last step's, or
@@ -1267,6 +1303,20 @@ fn compose_payload(
                 &chunk_hash,
                 index,
                 &proof,
+            )?;
+            let chunk_count = proof.leaf_count.saturating_sub(1);
+            crate::serialize::check_chunked_total_size(total_size, chunk_size, chunk_count)?;
+            // A chunk is a `Blob`: a 10-byte prologue, then its content.
+            let content_len = bytes
+                .len()
+                .checked_sub(10)
+                .ok_or(VerifyError::Decode(KitError::UnexpectedEof))?;
+            check_fixed_chunk_len(
+                total_size,
+                chunk_size,
+                chunk_count,
+                index,
+                content_len as u64,
             )?;
             Ok(DisclosedPayload::Chunk {
                 total_size,
@@ -1318,14 +1368,14 @@ fn compose_payload(
                 hdr.index,
                 &hdr.proof,
             )?;
-            let bytes = verify_blob_slice(&hdr.chunk_id, offset_in_blob, len, &slice)?;
-            let absolute_offset = resolve_absolute_offset(
-                &leaf_id,
-                hdr.index,
+            crate::serialize::check_chunked_total_size(
+                hdr.total_size,
                 hdr.chunk_size,
-                &chunk_len_proofs,
-                offset_in_blob,
+                hdr.proof.leaf_count.saturating_sub(1),
             )?;
+            let bytes = verify_blob_slice(&hdr.chunk_id, offset_in_blob, len, &slice)?;
+            let absolute_offset =
+                resolve_absolute_offset(&leaf_id, &hdr, &chunk_len_proofs, offset_in_blob)?;
             Ok(DisclosedPayload::Range {
                 blob_id: hdr.chunk_id,
                 chunk: Some((hdr.index, hdr.total_size, hdr.chunk_size)),
@@ -1671,10 +1721,7 @@ fn build_chunked_range_payload<S: crate::store::ObjectSource + ?Sized>(
     let slice = extract_bao_slice(&chunk_bytes[index], bao_offset, len)?;
 
     let mut chunk_len_proofs = Vec::new();
-    // A fixed-size layout needs no length proofs: the verifier derives the
-    // offset from `chunk_size`.
-    let content_defined = Chunker::from_chunk_size(cb.chunk_size).is_some();
-    if with_offsets && content_defined {
+    if with_offsets {
         for (j, preceding_bytes) in chunk_bytes.iter().enumerate().take(index) {
             let j_u32 = u32::try_from(j).map_err(|_| VerifyError::TooManyChunks)?;
             let position_j = j_u32.checked_add(1).ok_or(VerifyError::TooManyChunks)?;
@@ -2295,26 +2342,14 @@ mod tests {
         assert!(hdr.index > 0, "test fixture assumption: chunk index > 0");
 
         assert!(matches!(
-            resolve_absolute_offset(
-                &leaf_id,
-                hdr.index,
-                hdr.chunk_size,
-                &chunk_len_proofs,
-                u64::MAX
-            ),
+            resolve_absolute_offset(&leaf_id, &hdr, &chunk_len_proofs, u64::MAX),
             Err(VerifyError::OffsetOverflow)
         ));
 
         // Sanity: the same, real proof set still resolves with a
         // non-overflowing offset.
-        resolve_absolute_offset(
-            &leaf_id,
-            hdr.index,
-            hdr.chunk_size,
-            &chunk_len_proofs,
-            offset_in_blob,
-        )
-        .expect("freshly built length proofs must resolve");
+        resolve_absolute_offset(&leaf_id, &hdr, &chunk_len_proofs, offset_in_blob)
+            .expect("freshly built length proofs must resolve");
     }
 
     #[test]
@@ -3083,22 +3118,39 @@ mod tests {
         chunks: u32,
         chunk_size: u32,
     ) -> (tempfile::TempDir, ObjectStore, Hash, Vec<u8>) {
+        let mut lens = vec![chunk_size as usize; chunks as usize];
+        *lens.last_mut().unwrap() -= 1;
+        fixed_layout_fixture_with(chunk_size, &lens)
+    }
+
+    /// A commit over one file whose manifest names the fixed `chunk_size`
+    /// layout but whose chunks hold `lens` bytes each, so a test can build
+    /// a manifest that breaks its own layout. Returns the store, commit id
+    /// and the file bytes.
+    fn fixed_layout_fixture_with(
+        chunk_size: u32,
+        lens: &[usize],
+    ) -> (tempfile::TempDir, ObjectStore, Hash, Vec<u8>) {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
-        let total = u64::from(chunks) * u64::from(chunk_size) - 1;
-        let mut data = vec![0u8; usize::try_from(total).unwrap()];
+        let total: usize = lens.iter().sum();
+        let mut data = vec![0u8; total];
         let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
         for b in &mut data {
             x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
             *b = (x >> 56) as u8;
         }
-        let ids: Vec<Hash> = data
-            .chunks(chunk_size as usize)
-            .map(|c| {
+        let mut rest = data.as_slice();
+        let ids: Vec<Hash> = lens
+            .iter()
+            .map(|&n| {
+                let (c, tail) = rest.split_at(n);
+                rest = tail;
                 let prologue = crate::serialize::blob_prologue(c.len()).unwrap();
                 store.put_parts(&[&prologue, c]).unwrap()
             })
             .collect();
+        let total = total as u64;
         let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
             total_size: total,
             chunk_size,
@@ -3121,111 +3173,124 @@ mod tests {
         (dir, store, commit_id, data)
     }
 
-    /// A fixed-size layout proves an absolute offset with no length
-    /// proofs: the bundle stays small however far the range sits, and the
-    /// verifier derives the offset from `chunk_size`. The bundle for a
-    /// range in the last of 2048 chunks was about 3.1 MB when it carried
-    /// length proofs.
+    /// A fixed-size layout proves an absolute offset only through the
+    /// length proofs of the chunks before the range, like a
+    /// content-defined one: the manifest carries no chunk lengths.
     #[test]
-    fn fixed_layout_offset_needs_no_length_proofs() {
-        let (_d, store, commit_id, data) = fixed_layout_fixture(2048, 1024);
-        let offset = data.len() as u64 - 8;
+    fn fixed_layout_offset_comes_from_length_proofs() {
+        let (_d, store, commit_id, data) = fixed_layout_fixture(8, 1024);
+        let offset: usize = 3 * 1024 + 5;
+        for with_offsets in [false, true] {
+            let bundle = build_disclosure(
+                &store,
+                &commit_id,
+                &[b"fixed.bin"],
+                Selector::Range {
+                    offset: offset as u64,
+                    len: 4,
+                    with_offsets,
+                },
+            )
+            .unwrap();
+            let d = verify_disclosure(&commit_id, &bundle).unwrap();
+            let DisclosedPayload::Range {
+                chunk,
+                offset_in_blob,
+                absolute_offset,
+                bytes,
+                ..
+            } = d.payload
+            else {
+                panic!("expected Range payload");
+            };
+            assert_eq!(chunk, Some((3, data.len() as u64, 1024)));
+            assert_eq!(offset_in_blob, 5);
+            assert_eq!(absolute_offset, with_offsets.then_some(offset as u64));
+            assert_eq!(bytes, data[offset..offset + 4]);
+        }
+    }
+
+    /// A fixed-size manifest whose chunks break its own layout: chunk
+    /// size 10, 30 bytes, but chunks of 5, 15 and 10 bytes. Before the
+    /// verifier checked fixed-size chunk lengths, a range at file offset
+    /// 5 verified with `absolute_offset` 10, so the proof named bytes that
+    /// the file holds at a different offset.
+    #[test]
+    fn fixed_layout_chunk_of_wrong_length_is_rejected() {
+        let (_d, store, commit_id, _data) = fixed_layout_fixture_with(10, &[5, 15, 10]);
         let bundle = build_disclosure(
             &store,
             &commit_id,
             &[b"fixed.bin"],
             Selector::Range {
-                offset,
-                len: 8,
+                offset: 5,
+                len: 3,
                 with_offsets: true,
             },
         )
         .unwrap();
-        assert!(bundle.len() < 4096, "bundle is {} bytes", bundle.len());
-        let d = verify_disclosure(&commit_id, &bundle).unwrap();
-        let DisclosedPayload::Range {
-            chunk,
-            offset_in_blob,
-            absolute_offset,
-            bytes,
-            ..
-        } = d.payload
-        else {
-            panic!("expected Range payload");
-        };
-        assert_eq!(chunk, Some((2047, data.len() as u64, 1024)));
-        assert_eq!(offset_in_blob, 1015);
-        assert_eq!(absolute_offset, Some(offset));
-        assert_eq!(bytes, data[data.len() - 8..]);
+        assert!(matches!(
+            verify_disclosure(&commit_id, &bundle),
+            Err(VerifyError::FixedChunkLength {
+                index: 0,
+                expected: 10,
+                actual: 5
+            })
+        ));
+        for (index, actual) in [(0, 5), (1, 15)] {
+            let bundle =
+                build_disclosure(&store, &commit_id, &[b"fixed.bin"], Selector::Chunk(index))
+                    .unwrap();
+            let err = verify_disclosure(&commit_id, &bundle).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    VerifyError::FixedChunkLength { index: i, expected: 10, actual: a }
+                        if i == index && a == actual
+                ),
+                "{err:?}"
+            );
+        }
+        // The last chunk holds the 10 bytes its layout leaves for it.
+        let bundle =
+            build_disclosure(&store, &commit_id, &[b"fixed.bin"], Selector::Chunk(2)).unwrap();
+        verify_disclosure(&commit_id, &bundle).unwrap();
     }
 
-    /// A fixed-size range bundle that carries length proofs (the shape
-    /// older builders emit) still verifies and resolves to the same offset.
+    /// The last chunk of a fixed-size layout holds exactly what remains of
+    /// `total_size`, never more or less.
     #[test]
-    fn fixed_layout_accepts_legacy_length_proofs() {
-        let (_d, store, commit_id, data) = fixed_layout_fixture(8, 1024);
-        let offset: usize = 3 * 1024 + 5;
-        let bundle = build_disclosure(
-            &store,
-            &commit_id,
-            &[b"fixed.bin"],
-            Selector::Range {
-                offset: offset as u64,
-                len: 4,
-                with_offsets: false,
-            },
-        )
-        .unwrap();
-        let (id, commit_bytes, steps, payload) = decode_disclosure(&bundle).unwrap();
-        let PayloadWire::Range {
-            chunk,
-            offset_in_blob,
-            len,
-            slice,
-            ..
-        } = payload
-        else {
-            panic!("expected Range payload");
-        };
-        let hdr = chunk.expect("chunked leaf");
-        let leaf_id = steps[0].child_id;
-        let Object::ChunkedBlob(cb) =
-            crate::serialize::deserialize(&store.read(&leaf_id).unwrap()).unwrap()
-        else {
-            panic!("expected ChunkedBlob");
-        };
-        let chunk_len_proofs: Vec<LenProof> = (0..hdr.index)
-            .map(|j| LenProof {
-                index: j,
-                chunk_id: cb.chunks[j as usize],
-                proof: merkle::build_chunk_proof(&cb, j + 1).unwrap(),
-                slice: extract_bao_slice(&store.read(&cb.chunks[j as usize]).unwrap(), 0, 10)
-                    .unwrap(),
+    fn fixed_layout_last_chunk_of_wrong_length_is_rejected() {
+        let (_d, store, commit_id, _data) = fixed_layout_fixture_with(10, &[10, 12, 8]);
+        let bundle =
+            build_disclosure(&store, &commit_id, &[b"fixed.bin"], Selector::Chunk(2)).unwrap();
+        assert!(matches!(
+            verify_disclosure(&commit_id, &bundle),
+            Err(VerifyError::FixedChunkLength {
+                index: 2,
+                expected: 10,
+                actual: 8
             })
-            .collect();
-        let legacy = encode_disclosure(
-            &id,
-            &commit_bytes,
-            &steps,
-            &PayloadWire::Range {
-                chunk: Some(hdr),
-                offset_in_blob,
-                len,
-                slice,
-                chunk_len_proofs,
-            },
+        ));
+        let (_d, store, commit_id, _data) = fixed_layout_fixture_with(10, &[10, 10, 7]);
+        let bundle =
+            build_disclosure(&store, &commit_id, &[b"fixed.bin"], Selector::Chunk(2)).unwrap();
+        verify_disclosure(&commit_id, &bundle).unwrap();
+    }
+
+    #[test]
+    fn fixed_chunk_len_follows_the_layout() {
+        use crate::object::ChunkedBlob;
+        assert_eq!(ChunkedBlob::fixed_chunk_len(25, 10, 3, 0), Some(10));
+        assert_eq!(ChunkedBlob::fixed_chunk_len(25, 10, 3, 1), Some(10));
+        assert_eq!(ChunkedBlob::fixed_chunk_len(25, 10, 3, 2), Some(5));
+        assert_eq!(ChunkedBlob::fixed_chunk_len(30, 10, 3, 2), Some(10));
+        assert_eq!(ChunkedBlob::fixed_chunk_len(30, 10, 3, 3), None);
+        assert_eq!(ChunkedBlob::fixed_chunk_len(25, 0, 3, 0), None);
+        assert_eq!(
+            ChunkedBlob::fixed_chunk_len(25, crate::chunker::CHUNK_SIZE_FASTCDC_V2, 3, 0),
+            None
         );
-        let d = verify_disclosure(&commit_id, &legacy).unwrap();
-        let DisclosedPayload::Range {
-            absolute_offset,
-            bytes,
-            ..
-        } = d.payload
-        else {
-            panic!("expected Range payload");
-        };
-        assert_eq!(absolute_offset, Some(offset as u64));
-        assert_eq!(bytes, data[offset..offset + 4]);
     }
 
     /// Content-defined layouts still need length proofs: without them the
@@ -3252,18 +3317,5 @@ mod tests {
             panic!("expected Range payload");
         };
         assert_eq!(absolute_offset, None);
-    }
-
-    #[test]
-    fn fixed_layout_offset_overflow_is_rejected() {
-        let hdr_id = ZERO;
-        assert!(matches!(
-            resolve_absolute_offset(&hdr_id, u32::MAX, u32::MAX, &[], u64::MAX),
-            Err(VerifyError::OffsetOverflow)
-        ));
-        assert_eq!(
-            resolve_absolute_offset(&hdr_id, 3, 1000, &[], 7).unwrap(),
-            Some(3007)
-        );
     }
 }
