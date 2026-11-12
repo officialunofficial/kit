@@ -196,10 +196,20 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
    when `steps` is empty &mdash; disclosing the root tree). A verifier
    compares this authenticated path against whatever path string it
    asked for; **it MUST NOT trust a claimed path** carried any other way.
-10. Dispatch on `payload_kind`:
+10. Dispatch on `payload_kind`. For `Chunk` and `Range` the leaf is blob
+    data (a `ChunkedBlob`, or a plain `Blob` for a `Range` with `chunk =
+    None`), so the verifier **MUST** reject the bundle, before it checks
+    anything else in the payload, when the mode of the final step is
+    `Tree` or when there is no step (the root tree). The mode of the final
+    step is `Blob`, `Executable` or `Symlink` in every accepted case.
     - **`Object`**: **MUST** deserialize `bytes` and check its
       content-address (BLAKE3, or the BMT root for a `Tree`/`ChunkedBlob`
-      &mdash; SPEC-MERKLE-OBJECTS §2) equals the leaf id.
+      &mdash; SPEC-MERKLE-OBJECTS §2) equals the leaf id. **MUST** then
+      require the decoded type to match the mode of the final step: a
+      `Tree` object for mode `Tree`, a `Blob` or `ChunkedBlob` object for
+      every other mode. The root tree, which has no step, counts as mode
+      `Tree`. Reject on a mismatch: without this check the authenticated
+      path would report a blob under bytes that are a tree.
     - **`Chunk`**: **MUST** first check
        `domain_digest(b"kit.chunked\x00", inner_root) == leaf_id`, else
        reject with `InnerRootMismatch`. **MUST** then require that the
@@ -317,8 +327,15 @@ chunk-index-0 range (`neg_len_proofs_on_chunk0`); `steps.len() = 129`;
 root that does not wrap to the parent id (`neg_inner_root_forged`); a
 declared inner root that wraps correctly but whose proof was built for
 a different tree (`neg_inner_root_fold_mismatch`); a trailing byte
-after the declared body; and `commit_bytes` that decode to a `Tag` (a
-valid, signed object &mdash; just not one with a `tree_hash`). Accept
+after the declared body; `commit_bytes` that decode to a `Tag` (a
+valid, signed object &mdash; just not one with a `tree_hash`); an `Object`
+payload that is a tree under a final step of mode `Blob`
+(`neg_blob_mode_names_tree`); and an `Object` payload that is a blob under
+a final step of mode `Tree` (`neg_tree_mode_names_blob`); a `Chunk` payload
+and a `Range` payload over a chunked blob under a final step of mode `Tree`
+(`neg_tree_mode_chunk_payload`, `neg_tree_mode_range_chunked`); and a
+`Range` payload over a plain blob under a final step of mode `Tree`
+(`neg_tree_mode_range_blob`). Accept
 sidecars record `step_inner_roots_hex` and `chunk_inner_root_hex`.
 
 `rust/crates/kit-core/tests/golden_disclosure.rs` reads only the
@@ -355,6 +372,17 @@ object reference":
 - `ChunkedBlob`: every chunk.
 - `Tag`: `target`.
 - `Blob` / `Delta`: none (`Delta.base_hash` is not followed).
+
+Each reference also states which object types its target may have:
+
+| Reference | Target type |
+|---|---|
+| tree entry of mode `Tree` | `Tree` |
+| tree entry of mode `Blob`, `Executable` or `Symlink` | `Blob` or `ChunkedBlob` |
+| chunk of a `ChunkedBlob` | `Blob` |
+| `tree_hash` of a `Commit` or a `Remix` | `Tree` |
+| `target` of a `Tag` | the type in the tag's `target_type` (SPEC-OBJECTS §6a) |
+| `parents` of a `Commit` or a `Remix` | not restricted here |
 
 The root, when present, MUST deserialize as a `Commit`, `Remix`, or
 `Tag`. A typed error is raised otherwise.
@@ -395,8 +423,10 @@ entry point directly and ignore the manifest.
 ### 7.4 Verifier MUSTs
 
 1. Re-hash every supplied object (`deserialize` then `id_from_object`).
-   In the store-less map path, a deserialize failure is `corrupt` under
-   the BLAKE3 of those bytes. A bit-flipped object that still deserializes
+   In the store-less map path, bytes that fail to deserialize are not an
+   object and no id derives from them: they are `unreferenced` under the
+   BLAKE3 of those bytes, never `corrupt`, so they do not fail
+   completeness. A bit-flipped object that still deserializes
    is content-addressed under a *different* id and surfaces as `missing`
    (the referenced id) plus `unreferenced` (the supplied one), not
    `corrupt`. A verifier that fetches by id MAY report a hash mismatch as
@@ -423,6 +453,17 @@ entry point directly and ignore the manifest.
    caps. Tree depth, tree entries, chunks, and parents reuse
    `store::MAX_TREE_DEPTH`, `serialize::MAX_TREE_ENTRIES`,
    `serialize::MAX_CHUNKS`, `serialize::MAX_PARENTS`.
+9. The objects MUST fit together as a checkout. A reached object whose
+   type is not allowed by a reference to it (§7.1) is `corrupt` under its
+   id, and the verifier does not descend into it. An id that two references
+   require to have types that no object has (for example a `Tree` entry and
+   a `Blob` entry naming one id) is `corrupt`.
+10. The chunk lengths of a `ChunkedBlob` MUST add up to its `total_size`.
+    The length of a chunk is the length of its `Blob` data. When every
+    chunk was read, the sum is checked, with a chunk listed twice counted
+    twice; a `ChunkedBlob` whose sum differs is `corrupt` under its id.
+    A `ChunkedBlob` with a chunk that is missing or not read is already
+    incomplete, and its sum is not checked.
 
 ### 7.5 Bounds
 
@@ -447,8 +488,18 @@ snapshot; the parent's tree objects are present only in history),
 `tag_root` (tag &rarr; commit, snapshot). Sidecars record the root, mode,
 pack hashes, expected `verified` count, and the sorted id list.
 
-Reject / incomplete vectors: missing chunk; corrupt blob; unreferenced
-extra (still complete); a delta entry; a compressed entry; a manifest
+Reject / incomplete vectors: missing chunk; a damaged blob (its magic byte
+flipped, so the referenced id is `missing` and the damaged bytes are
+`unreferenced`); a tree entry of mode `Tree` that names a blob
+(`neg_tree_mode_names_blob`); a tree entry of mode `Blob` that names a tree
+(`neg_blob_mode_names_tree`); a chunk id that names a tree
+(`neg_chunk_names_non_blob`); a commit or a remix whose `tree_hash` names a
+blob (`neg_commit_tree_names_blob`, `neg_remix_tree_names_blob`); a tag
+that records `target_type` `Commit` but names a tree (`neg_tag_target_type`);
+chunk lengths that add up to 12 for a `total_size` of 13
+(`neg_chunk_length_sum`); unreferenced extra (still
+complete); `unreferenced_undecodable_extra`, bytes that decode to no object
+(unreferenced, still complete); a delta entry; a compressed entry; a manifest
 pack-hash mismatch; the wrong root id; a manifest whose `root` differs
 from the caller's trusted root; manifest version 2; a trailing byte on
 the manifest.

@@ -25,9 +25,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use commonware_codec::Write as CodecWrite;
-use kit_core::hash::{Hash, hash, to_hex};
+use kit_core::hash::{Hash, ZERO, hash, to_hex};
 use kit_core::merkle;
-use kit_core::object::{EntryMode, Identity, Object};
+use kit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+use kit_core::sign::{KeyPair, sign_commit};
 use kit_core::store::ObjectStore;
 use kit_core::verify::{self, Disclosed, DisclosedPayload, Selector, Step, VerifyError};
 use serde_json::{Value, json};
@@ -291,6 +292,43 @@ fn disclosed_summary(d: &Disclosed) -> Value {
         "step_inner_roots_hex": d.step_inner_roots.iter().map(to_hex).collect::<Vec<_>>(),
         "chunk_inner_root_hex": d.chunk_inner_root.as_ref().map(to_hex),
     })
+}
+
+/// A signed commit whose tree has one entry `x` of `mode` naming `target`.
+fn commit_with_entry(store: &ObjectStore, mode: EntryMode, target: Hash) -> Hash {
+    let tree = Tree {
+        entries: vec![TreeEntry {
+            name: b"x".to_vec(),
+            mode,
+            object_hash: target,
+        }],
+    };
+    let tree_hash = store
+        .write(&kit_core::serialize::serialize(&Object::Tree(tree)).unwrap())
+        .unwrap();
+    let kp = KeyPair::from_seed([0x23; 32]);
+    let mut commit = Commit {
+        tree_hash,
+        parents: vec![],
+        author: Identity::ed25519(kp.public.0),
+        signer: kp.public.0,
+        message: b"SPEC-DISCLOSURE entry mode vector".to_vec(),
+        timestamp: 1_726_400_000,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0u8; 64],
+    };
+    commit.signature = sign_commit(&commit, &kp).unwrap().0;
+    store
+        .write(&kit_core::serialize::serialize(&Object::Commit(commit)).unwrap())
+        .unwrap()
+}
+
+fn tree_of_commit(store: &ObjectStore, commit_id: &Hash) -> Hash {
+    let Object::Commit(commit) = store.read_object(commit_id).unwrap() else {
+        panic!("expected a commit");
+    };
+    commit.tree_hash
 }
 
 #[allow(clippy::too_many_lines)] // one block per golden vector, kept together for auditability
@@ -1121,6 +1159,119 @@ fn build_vectors() -> Vec<Vector> {
                 false,
                 Some("forged total_size no longer folds to the ChunkedBlob id"),
             ),
+        });
+    }
+
+    // 19, 20. The final step's mode disagrees with the type of the
+    //     Object payload. The commit is signed and its tree is valid; the
+    //     entry names an object of the wrong type for its mode.
+    for (name, description, mode, target, reason) in [
+        (
+            "neg_blob_mode_names_tree",
+            "The final step has mode Blob but its child id is a tree; the Object payload is that tree.",
+            EntryMode::Blob,
+            f.tree_hash,
+            "Object payload is a Tree under a Blob mode",
+        ),
+        (
+            "neg_tree_mode_names_blob",
+            "The final step has mode Tree but its child id is a blob; the Object payload is that blob.",
+            EntryMode::Tree,
+            kit_core::worktree::store_file_object(&f.store, b"shallow file content").unwrap(),
+            "Object payload is a Blob under a Tree mode",
+        ),
+    ] {
+        let commit_id = commit_with_entry(&f.store, mode, target);
+        let tree_hash = tree_of_commit(&f.store, &commit_id);
+        let (steps, leaf) = walk_path(&f.store, tree_hash, &[b"x"]);
+        let bytes = canonical_bytes(&f.store, &leaf);
+        let commit_bytes = canonical_bytes(&f.store, &commit_id);
+        let bin = wire::bundle(
+            &commit_id,
+            &commit_bytes,
+            &steps,
+            &wire::object_payload(&bytes),
+        );
+        v.push(Vector {
+            name,
+            description,
+            bin,
+            json: base_json(&commit_id, &[b"x"], "object", false, Some(reason)),
+        });
+    }
+
+    // 21-23. A Chunk or Range payload is blob data, so a final step of mode
+    //     Tree cannot name its leaf.
+    {
+        let chunked = f
+            .store
+            .read_object(&{
+                let Object::Tree(root) = f.store.read_object(&f.tree_hash).unwrap() else {
+                    panic!("root is a Tree");
+                };
+                root.entries
+                    .iter()
+                    .find(|e| e.name == b"chunked.bin")
+                    .unwrap()
+                    .object_hash
+            })
+            .map(|_| ())
+            .ok();
+        assert!(chunked.is_some());
+    }
+    for (name, description, small, selector, selector_desc, reason) in [
+        (
+            "neg_tree_mode_chunk_payload",
+            "The final step has mode Tree but names a chunked blob; the payload is one of its chunks.",
+            false,
+            Selector::Chunk(1),
+            "chunk(1)",
+            "Chunk payload under a Tree mode",
+        ),
+        (
+            "neg_tree_mode_range_chunked",
+            "The final step has mode Tree but names a chunked blob; the payload is a range inside a chunk.",
+            false,
+            Selector::Range {
+                offset: 0,
+                len: 8,
+                with_offsets: false,
+            },
+            "range(offset=0,len=8)",
+            "Range payload over a chunked blob under a Tree mode",
+        ),
+        (
+            "neg_tree_mode_range_blob",
+            "The final step has mode Tree but names a plain blob; the payload is a range of it.",
+            true,
+            Selector::Range {
+                offset: 0,
+                len: 8,
+                with_offsets: false,
+            },
+            "range(offset=0,len=8)",
+            "Range payload over a blob under a Tree mode",
+        ),
+    ] {
+        let target = if small {
+            kit_core::worktree::store_file_object(&f.store, &f.range_blob).unwrap()
+        } else {
+            let Object::Tree(root) = f.store.read_object(&f.tree_hash).unwrap() else {
+                panic!("root is a Tree");
+            };
+            root.entries
+                .iter()
+                .find(|e| e.name == b"chunked.bin")
+                .unwrap()
+                .object_hash
+        };
+        let commit_id = commit_with_entry(&f.store, EntryMode::Tree, target);
+        let bin = verify::build_disclosure(&f.store, &commit_id, &[b"x"], selector).unwrap();
+        v.push(Vector {
+            name,
+            description,
+            bin,
+            json: base_json(&commit_id, &[b"x"], selector_desc, false, Some(reason)),
         });
     }
 

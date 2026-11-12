@@ -1,0 +1,14 @@
+{
+  "bin": "neg_tree_mode_range_chunked.bin",
+  "blake3": "e5be960ed701dfa6b0f818dc925a8faef049e8f491db920b46b340a3356c656a",
+  "commit_id_hex": "ce34b9a663383fd915990584b51f0e22771d65294a517d8041c899f9cf4ed736",
+  "description": "The final step has mode Tree but names a chunked blob; the payload is a range inside a chunk.",
+  "expect": "reject",
+  "name": "neg_tree_mode_range_chunked",
+  "path_hex": [
+    "78"
+  ],
+  "reject_reason": "Range payload over a chunked blob under a Tree mode",
+  "selector": "range(offset=0,len=8)",
+  "size": 1952
+}

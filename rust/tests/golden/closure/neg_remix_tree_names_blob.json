@@ -1,0 +1,18 @@
+{
+  "bin": "neg_remix_tree_names_blob.manifest.bin",
+  "blake3": "eb4ea7a0748b0dbcd2e0e8c2ea825aadbc51f25026c4a218711e9c6d265dc281",
+  "description": "A remix's tree_hash names a blob.",
+  "expect": "incomplete",
+  "ids": [],
+  "mode": "snapshot",
+  "n_packs": 1,
+  "name": "neg_remix_tree_names_blob",
+  "pack_hashes": [
+    "a3251a15aa78b67e1458ced2869930f07abc51d3cf1bf8e4c68dc86248495623"
+  ],
+  "reason": "corrupt",
+  "root_hex": "a81aadb048dfbd54fd815d0e842f72bcec4f95756f6c2c7baaa64b9fdf992e86",
+  "size": 71,
+  "unreferenced": [],
+  "verified": 0
+}

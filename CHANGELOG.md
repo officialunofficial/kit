@@ -129,6 +129,25 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ok: ... (INVALID signature)` and exit `0` unless trust roots were loaded.
   It now prints `bad:` instead of `ok:`, and writes no `--payload-out` file.
   The report still shows what the bundle disclosed.
+- The closure verifier now checks that the objects fit together as a
+  checkout. A tree entry of mode `Tree` must name a tree. An entry of mode
+  `Blob`, `Executable` or `Symlink` must name a blob or a chunked blob. A
+  chunk must name a blob. The chunk lengths of a chunked blob must add up to
+  its `total_size`. A mismatch is `corrupt`. Before, a set with such objects
+  was complete. Bytes that decode to no object are now `unreferenced`
+  instead of `corrupt`, so an extra object that does not decode no longer
+  makes a map-based or pack-based verdict incomplete.
+- Disclosure verification now checks that an `Object` payload has the type
+  that the mode of the final step names: a tree for mode `Tree`, a blob or a
+  chunked blob for every other mode. Before, a step of mode `Blob` could name
+  a tree and return that tree's bytes under a path that reports a blob.
+  `verify::VerifyError` has a `PayloadTypeMismatch` variant.
+- The closure verifier now also checks the type of the tree of a commit or a
+  remix, which must be a tree, and of the target of a tag, which must have the
+  type that the tag records. A mismatch is `corrupt`.
+- Disclosure verification now rejects a `Chunk` or `Range` payload when the
+  final step has mode `Tree`, or when there is no step. Both payloads are blob
+  data, so the final step must name a blob, an executable or a symlink.
 - `kit stash` removed ignored files from the working tree and did not save
   them, so `stash pop` could not bring them back. A stash now removes only
   the paths it saved. It refuses, before it changes anything, when HEAD needs

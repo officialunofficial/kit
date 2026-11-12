@@ -1,0 +1,18 @@
+{
+  "bin": "neg_commit_tree_names_blob.manifest.bin",
+  "blake3": "9ba78aac7327c3a287a9c88ce162ab3a5b3f2810876e3bf1d8b46281ef581108",
+  "description": "A commit's tree_hash names a blob.",
+  "expect": "incomplete",
+  "ids": [],
+  "mode": "snapshot",
+  "n_packs": 1,
+  "name": "neg_commit_tree_names_blob",
+  "pack_hashes": [
+    "3b87f9f35c884bc6a71607561d23cce91c2290d1fc66ef53a137610ecaf095b2"
+  ],
+  "reason": "corrupt",
+  "root_hex": "9eb36307900fa690c8ed25931c3019b67a91a5fbc7f505733e54864aa3affe9e",
+  "size": 71,
+  "unreferenced": [],
+  "verified": 0
+}

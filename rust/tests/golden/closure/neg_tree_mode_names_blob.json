@@ -1,0 +1,18 @@
+{
+  "bin": "neg_tree_mode_names_blob.manifest.bin",
+  "blake3": "c616479152fee53719787d1e80f759d7e97cbbcb45bebb527123f3de82780854",
+  "description": "A tree entry of mode Tree names a blob.",
+  "expect": "incomplete",
+  "ids": [],
+  "mode": "snapshot",
+  "n_packs": 1,
+  "name": "neg_tree_mode_names_blob",
+  "pack_hashes": [
+    "004581c157b028e315dfa3947aa2590ce1579b3163791d15a7448137e844681a"
+  ],
+  "reason": "corrupt",
+  "root_hex": "f8a087d25050e7f2cfcaa4d960820e1c3e2dc6eea7cfef7621b39fc8ed261d8a",
+  "size": 71,
+  "unreferenced": [],
+  "verified": 0
+}

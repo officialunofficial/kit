@@ -192,7 +192,7 @@ def parse_blob(data):
     n = r.u32()
     r.take(n)
     r.end()
-    return {}
+    return {"len": n}
 
 
 def parse_tree(data):

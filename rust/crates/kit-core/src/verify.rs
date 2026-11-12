@@ -102,6 +102,7 @@ use crate::hash::{HASH_LEN, Hash, hash};
 use crate::list_decode::read_list;
 use crate::merkle::{self, MerkleError, ObjectKind, Proof};
 use crate::object::{EntryMode, KitError, MAGIC, Object, ObjectType, SCHEMA_VERSION, TreeEntry};
+use crate::ops::graph::{ChildKind, type_bit};
 use crate::sign::{verify_commit, verify_remix};
 use crate::store::MAX_TREE_DEPTH;
 
@@ -198,6 +199,19 @@ pub enum VerifyError {
     /// authenticated leaf id.
     #[error("disclosed Object payload's id does not equal the authenticated leaf id")]
     PayloadIdMismatch,
+    /// The disclosed leaf has a type that the authenticated final step's
+    /// mode does not allow (a `Tree` mode names a tree; every other mode
+    /// names a blob or a chunked blob). `found` is the decoded type of an
+    /// `Object` payload, or the type that a `Chunk` or `Range` payload
+    /// requires of its leaf: a chunked blob, or a blob for a `Range` over a
+    /// plain blob.
+    #[error("disclosed leaf is a {found:?}, which entry mode {mode:?} does not allow")]
+    PayloadTypeMismatch {
+        /// The final step's mode (`Tree` for a root-tree disclosure).
+        mode: EntryMode,
+        /// The type of the leaf.
+        found: ObjectType,
+    },
     /// A chunk `index` (or a length-proof's `index`) is out of range for
     /// the `ChunkedBlob`'s proven `leaf_count`.
     #[error("chunk index {index} is out of range for a {leaf_count}-leaf ChunkedBlob proof")]
@@ -1206,10 +1220,33 @@ fn resolve_absolute_offset(
     Ok(Some(absolute))
 }
 
-fn compose_payload(leaf_id: Hash, payload: PayloadWire) -> Result<DisclosedPayload, VerifyError> {
+/// The mode the authenticated path gives its leaf: the last step's, or
+/// `Tree` for the root tree.
+fn leaf_mode(path: &[(Vec<u8>, EntryMode)]) -> EntryMode {
+    path.last().map_or(EntryMode::Tree, |(_, mode)| *mode)
+}
+
+/// Reject a leaf of type `found` under a final step of mode `leaf_mode` when
+/// the mode does not name that type.
+fn check_leaf_type(leaf_mode: EntryMode, found: ObjectType) -> Result<(), VerifyError> {
+    if ChildKind::Entry(leaf_mode).mask() & type_bit(found) == 0 {
+        return Err(VerifyError::PayloadTypeMismatch {
+            mode: leaf_mode,
+            found,
+        });
+    }
+    Ok(())
+}
+
+fn compose_payload(
+    leaf_id: Hash,
+    leaf_mode: EntryMode,
+    payload: PayloadWire,
+) -> Result<DisclosedPayload, VerifyError> {
     match payload {
         PayloadWire::Object { bytes } => {
-            verify_object_id(&bytes, &leaf_id)?;
+            let found = verify_object_id(&bytes, &leaf_id)?.object_type();
+            check_leaf_type(leaf_mode, found)?;
             Ok(DisclosedPayload::Object { bytes })
         }
         PayloadWire::Chunk {
@@ -1220,6 +1257,7 @@ fn compose_payload(leaf_id: Hash, payload: PayloadWire) -> Result<DisclosedPaylo
             proof,
             bytes,
         } => {
+            check_leaf_type(leaf_mode, ObjectType::ChunkedBlob)?;
             let chunk_hash = hash(&bytes);
             verify_chunk_with_declared_root(
                 &leaf_id,
@@ -1244,6 +1282,7 @@ fn compose_payload(leaf_id: Hash, payload: PayloadWire) -> Result<DisclosedPaylo
             slice,
             chunk_len_proofs,
         } => {
+            check_leaf_type(leaf_mode, ObjectType::Blob)?;
             if !chunk_len_proofs.is_empty() {
                 return Err(VerifyError::UnexpectedLengthProofs);
             }
@@ -1263,6 +1302,7 @@ fn compose_payload(leaf_id: Hash, payload: PayloadWire) -> Result<DisclosedPaylo
             slice,
             chunk_len_proofs,
         } => {
+            check_leaf_type(leaf_mode, ObjectType::ChunkedBlob)?;
             // SPEC-DISCLOSURE §4: `len == 0` is rejected before the
             // wrap/fold checks below, so it wins over e.g. InnerRootMismatch
             // when a bundle is malformed both ways.
@@ -1319,7 +1359,7 @@ pub fn verify_disclosure(commit_id: &Hash, bundle: &[u8]) -> Result<Disclosed, V
         } => Some(hdr.inner_root),
         _ => None,
     };
-    let payload = compose_payload(verified.leaf_id, payload)?;
+    let payload = compose_payload(verified.leaf_id, leaf_mode(&verified.path), payload)?;
     Ok(Disclosed {
         commit_id: *commit_id,
         tree_hash: verified.tree_hash,
@@ -1353,7 +1393,7 @@ pub(crate) fn verify_disclosure_reusing_context(
         } => Some(hdr.inner_root),
         _ => None,
     };
-    let payload = compose_payload(verified.leaf_id, payload)?;
+    let payload = compose_payload(verified.leaf_id, leaf_mode(&verified.path), payload)?;
     Ok(Disclosed {
         commit_id: *commit_id,
         tree_hash: verified.tree_hash,
@@ -2422,6 +2462,129 @@ mod tests {
             verify_disclosure(&f.commit_id, &tampered),
             Err(VerifyError::PayloadIdMismatch)
         ));
+    }
+
+    /// A signed commit over a tree of one entry `x` with `mode` naming
+    /// `target`, written to `f`'s store.
+    fn commit_with_entry(f: &Fixture, mode: EntryMode, target: Hash) -> Hash {
+        let tree = Tree {
+            entries: vec![TreeEntry {
+                name: b"x".to_vec(),
+                mode,
+                object_hash: target,
+            }],
+        };
+        let tree_hash = f
+            .store
+            .write(&crate::serialize::serialize(&Object::Tree(tree)).unwrap())
+            .unwrap();
+        let kp = KeyPair::from_seed([0x22; 32]);
+        let mut commit = Commit {
+            tree_hash,
+            parents: vec![],
+            author: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"hostile modes".to_vec(),
+            timestamp: 1,
+            message_hash: ZERO,
+            content_digest: ZERO,
+            signature: [0u8; 64],
+        };
+        commit.signature = sign_commit(&commit, &kp).unwrap().0;
+        f.store
+            .write(&crate::serialize::serialize(&Object::Commit(commit)).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn object_payload_must_match_the_final_step_mode() {
+        let f = build_fixture();
+        let tree_id = root_tree_id(&f.store, &f.commit_id);
+        let blob_id = store_file_object(&f.store, b"a plain file").unwrap();
+
+        // Blob, Executable and Symlink modes name a file, not a tree.
+        for mode in [EntryMode::Blob, EntryMode::Executable, EntryMode::Symlink] {
+            let commit = commit_with_entry(&f, mode, tree_id);
+            let bundle = build_disclosure(&f.store, &commit, &[b"x"], Selector::Object).unwrap();
+            assert!(
+                matches!(
+                    verify_disclosure(&commit, &bundle),
+                    Err(VerifyError::PayloadTypeMismatch {
+                        mode: m,
+                        found: ObjectType::Tree
+                    }) if m == mode
+                ),
+                "{mode:?}"
+            );
+        }
+
+        // Tree mode names a tree, not a file.
+        let commit = commit_with_entry(&f, EntryMode::Tree, blob_id);
+        let bundle = build_disclosure(&f.store, &commit, &[b"x"], Selector::Object).unwrap();
+        assert!(matches!(
+            verify_disclosure(&commit, &bundle),
+            Err(VerifyError::PayloadTypeMismatch {
+                mode: EntryMode::Tree,
+                found: ObjectType::Blob
+            })
+        ));
+    }
+
+    #[test]
+    fn chunk_and_range_payloads_need_a_file_mode() {
+        let f = build_fixture();
+        let chunked = store_file_object(&f.store, &f.chunked_bytes).unwrap();
+        let blob_id = store_file_object(&f.store, b"a plain file").unwrap();
+        let range = |len| Selector::Range {
+            offset: 0,
+            len,
+            with_offsets: false,
+        };
+        for (target, selector, found) in [
+            (chunked, Selector::Chunk(1), ObjectType::ChunkedBlob),
+            (chunked, range(8), ObjectType::ChunkedBlob),
+            (blob_id, range(4), ObjectType::Blob),
+        ] {
+            // A file mode accepts the same bundle.
+            let ok = commit_with_entry(&f, EntryMode::Executable, target);
+            let bundle = build_disclosure(&f.store, &ok, &[b"x"], selector).unwrap();
+            verify_disclosure(&ok, &bundle).unwrap();
+
+            let bad = commit_with_entry(&f, EntryMode::Tree, target);
+            let bundle = build_disclosure(&f.store, &bad, &[b"x"], selector).unwrap();
+            assert!(
+                matches!(
+                    verify_disclosure(&bad, &bundle),
+                    Err(VerifyError::PayloadTypeMismatch {
+                        mode: EntryMode::Tree,
+                        found: f
+                    }) if f == found
+                ),
+                "{found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn object_payload_of_the_matching_type_is_accepted() {
+        let f = build_fixture();
+        let tree_id = root_tree_id(&f.store, &f.commit_id);
+        let blob_id = store_file_object(&f.store, b"a plain file").unwrap();
+        let chunked = store_file_object(&f.store, &f.chunked_bytes).unwrap();
+        for (mode, target) in [
+            (EntryMode::Tree, tree_id),
+            (EntryMode::Blob, blob_id),
+            (EntryMode::Symlink, blob_id),
+            (EntryMode::Executable, chunked),
+            (EntryMode::Blob, chunked),
+        ] {
+            let commit = commit_with_entry(&f, mode, target);
+            let bundle = build_disclosure(&f.store, &commit, &[b"x"], Selector::Object).unwrap();
+            verify_disclosure(&commit, &bundle).unwrap_or_else(|e| panic!("{mode:?}: {e}"));
+        }
+        // The root tree has no step: its mode is `Tree`.
+        let bundle = build_disclosure(&f.store, &f.commit_id, &[], Selector::Object).unwrap();
+        verify_disclosure(&f.commit_id, &bundle).unwrap();
     }
 
     #[test]
