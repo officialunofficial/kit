@@ -1335,6 +1335,24 @@ mod tests {
         assert_eq!(corrupt_ids(&report), vec![file.0], "{report:?}");
     }
 
+    #[test]
+    fn a_decoded_commit_named_as_a_file_later_is_corrupt() {
+        let empty = tree(&[]);
+        let parent = commit_over(empty.0, vec![]);
+        // The parent is decoded as a commit before a deeper entry names it as a file.
+        let deeper = tree(&[(b"x", EntryMode::Blob, parent.0)]);
+        let root_tree = tree(&[(b"d", EntryMode::Tree, deeper.0)]);
+        let root = commit_over(root_tree.0, vec![parent.0]);
+        let objects = [&root, &root_tree, &deeper, &parent, &empty];
+        let report = verify_closure(
+            &root.0,
+            ClosureMode::History,
+            objects.iter().map(|(_, bytes)| bytes.as_slice()),
+        )
+        .unwrap();
+        assert_eq!(corrupt_ids(&report), vec![parent.0], "{report:?}");
+    }
+
     fn remix_over(tree_hash: Hash) -> (Hash, Vec<u8>) {
         let kp = KeyPair::from_seed([0x11; 32]);
         let mut remix = Remix {

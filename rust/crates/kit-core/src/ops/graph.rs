@@ -237,6 +237,9 @@ pub(crate) fn type_bit(ty: ObjectType) -> u8 {
     1 << ty as u8
 }
 
+/// The object types a file entry may name.
+const FILE_TYPES: u8 = (1 << ObjectType::Blob as u8) | (1 << ObjectType::ChunkedBlob as u8);
+
 impl ChildKind {
     /// Bit `1 << type` for each object type the edge allows.
     #[must_use]
@@ -244,7 +247,7 @@ impl ChildKind {
         match self {
             Self::Any => u8::MAX,
             Self::Entry(EntryMode::Tree) => type_bit(ObjectType::Tree),
-            Self::Entry(_) => type_bit(ObjectType::Blob) | type_bit(ObjectType::ChunkedBlob),
+            Self::Entry(_) => FILE_TYPES,
             Self::Chunk => type_bit(ObjectType::Blob),
             Self::Type(ty) => type_bit(ty),
         }
@@ -901,6 +904,25 @@ mod tests {
         });
         assert!(children(&blob, ClosureMode::History).is_empty());
         assert!(children(&blob, ClosureMode::Snapshot).is_empty());
+    }
+
+    #[test]
+    fn remix_children_follow_parents_only_in_history() {
+        use crate::object::Remix;
+        let t = [1u8; 32];
+        let p = [2u8; 32];
+        let remix = Object::Remix(Remix {
+            tree_hash: t,
+            parents: vec![p],
+            sources: vec![],
+            author: Identity::ed25519([0; 32]),
+            signer: [0; 32],
+            message: b"m".to_vec(),
+            timestamp: 1,
+            signature: [0; 64],
+        });
+        assert_eq!(children(&remix, ClosureMode::Snapshot), vec![t]);
+        assert_eq!(children(&remix, ClosureMode::History), vec![t, p]);
     }
 
     #[test]
