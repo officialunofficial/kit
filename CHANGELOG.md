@@ -113,17 +113,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as `remotes/<remote>/<branch>`. `libkit::branch::Query::scope` selects them,
   and `libkit::branch::Branch` has a `remote` field.
 
-### Changed
-
-- A disclosure range in a fixed-size `ChunkedBlob` now proves its absolute
-  offset with no length proofs. The verifier computes
-  `index * chunk_size + offset_in_blob`, and `kit prove --with-offsets` emits
-  no length proofs for that layout. Before, each preceding chunk cost about
-  1.5 KB. Bundles with length proofs still verify. Content-defined layouts
-  are unchanged.
-
 ### Fixed
 
+- The disclosure verifier checks fixed-size chunk lengths. In a fixed-size
+  `ChunkedBlob` every chunk but the last must hold exactly `chunk_size` bytes,
+  and the last the rest of `total_size` (SPEC-OBJECTS §7), but the manifest
+  binds no chunk lengths. A disclosed whole chunk and every length proof of a
+  fixed-size layout must now have the length the layout requires, or
+  verification fails with `VerifyError::FixedChunkLength`. A disclosed chunk
+  or range of a `ChunkedBlob` must also have a `total_size` that its layout
+  can produce, by the same rules as decoding a manifest. An absolute offset
+  still comes only from length proofs, for every layout.
 - `kit verify-proof` exits `65` (`DATAERR`) when the commit's embedded
   signature does not verify, with or without trust roots. It used to print
   `ok: ... (INVALID signature)` and exit `0` unless trust roots were loaded.
@@ -133,7 +133,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checkout. A tree entry of mode `Tree` must name a tree. An entry of mode
   `Blob`, `Executable` or `Symlink` must name a blob or a chunked blob. A
   chunk must name a blob. The chunk lengths of a chunked blob must add up to
-  its `total_size`. A mismatch is `corrupt`. Before, a set with such objects
+  its `total_size`, and in a fixed-size layout each chunk must hold the
+  length the layout requires. A mismatch is `corrupt`. Before, a set with such objects
   was complete. Bytes that decode to no object are now `unreferenced`
   instead of `corrupt`, so an extra object that does not decode no longer
   makes a map-based or pack-based verdict incomplete.

@@ -194,13 +194,14 @@ def walk(root, mode, payloads):
             if child not in seen:
                 seen.add(child)
                 queue.append(child)
-    # An id named with types that disagree, or whose object has a type that
-    # an entry forbids, is corrupt.
+    # An id named with types that disagree is corrupt, even when no pack
+    # supplies it. So is an object whose type an entry forbids.
     for oid, kinds in allowed.items():
         data = objects.get(oid)
-        if data is not None and data[0] not in kinds:
+        if not kinds or (data is not None and data[0] not in kinds):
             corrupt.add(oid)
-    # Chunk lengths add up to total_size once every chunk is a read blob.
+    # Chunk lengths add up to total_size once every chunk is a read blob, and
+    # in a fixed-size layout each chunk holds the length the layout requires.
     for oid in visited:
         data = objects[oid]
         if data[0] != o.CHUNKED:
@@ -213,7 +214,13 @@ def walk(root, mode, payloads):
                 break
             lens.append(o.parse_blob(blob)["len"])
         else:
+            size, count = manifest["chunk_size"], len(lens)
+            fixed = [
+                size if i + 1 < count else manifest["total"] - i * size for i in range(count)
+            ]
             if sum(lens) != manifest["total"]:
+                corrupt.add(oid)
+            elif size not in o.CONTENT_DEFINED and lens != fixed:
                 corrupt.add(oid)
     unreferenced = sorted((set(objects) - set(seen)) | unreferenced_junk)
     return sorted(set(visited) - corrupt), missing, sorted(corrupt), unreferenced

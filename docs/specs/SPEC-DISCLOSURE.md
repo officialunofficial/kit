@@ -225,6 +225,17 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
        commonware-native verifier runs the wrap check and then upstream
        `bmt::Proof::verify_multi_inclusion` against `inner_root`
        unmodified.
+       The verifier never decodes the manifest, so it **MUST** then apply
+       the manifest decoder's `total_size` rules (SPEC-OBJECTS §7) to
+       `total_size`, `chunk_size` and a chunk count of `leaf_count - 1`
+       from the folded proof, and reject a layout they refuse
+       (`ChunkedBlobTotalSizeInvalid`). `bytes` shorter than the 10-byte
+       Blob prologue is rejected. For a fixed-size layout (`chunk_size`
+       other than `0` and `0x8000_0002`), the chunk's content length (the
+       length of `bytes` less its prologue) **MUST** be the length the
+       layout requires of chunk `index`: exactly `chunk_size` for every
+       chunk but the last, and `total_size - index * chunk_size` for the
+       last. Otherwise reject with `FixedChunkLength`.
     - **`Range`**, `chunk = None` (the leaf is a plain `Blob`): **MUST**
       reject `len == 0`. **MUST** verify a Bao slice proving `len` bytes
       at content offset `offset_in_blob` (Bao offset `offset_in_blob +
@@ -236,7 +247,8 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
        **MUST** reject `len == 0`. **MUST** apply the same wrap-check-first
        and fold-equals-declared rules as `Chunk` to `hdr.inner_root`.
        **MUST** run the same `{0, index + 1}` multi-proof as `Chunk` above
-       (using `hdr.chunk_id` as the second leaf) against the leaf id.
+       (using `hdr.chunk_id` as the second leaf) against the leaf id, and
+       the same `total_size` rules as `Chunk`.
        **MUST** verify a Bao slice proving
       `len` bytes at content offset `offset_in_blob` (Bao offset
       `offset_in_blob + 10`) against `hdr.chunk_id`. If `hdr.index == 0`,
@@ -246,20 +258,21 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
       silently ignored; `absolute_offset` is then
       `Some(offset_in_blob)` (already absolute). Otherwise, if
       `chunk_len_proofs` is empty, `absolute_offset` is `None` (not
-      requested) for a content-defined layout (`chunk_size` `0` or
-      `0x8000_0002`, SPEC-OBJECTS §7). For a fixed-size layout the
-      verifier derives it: `absolute_offset` is
-      `Some(index * chunk_size + offset_in_blob)`, because SPEC-OBJECTS §7
-      places chunk `index` at `index * chunk_size` and the metadata leaf
-      authenticates `chunk_size`. A builder emits no length proofs for a
-      fixed-size layout. Otherwise, `chunk_len_proofs` **MUST** cover exactly
+      requested), for every layout. A verifier **MUST NOT** derive it as
+      `index * chunk_size` for a fixed-size layout: the manifest binds no
+      chunk lengths, so a manifest whose chunks break its layout would make
+      that offset name bytes the file holds elsewhere. A non-empty
+      `chunk_len_proofs` **MUST** cover exactly
       the index set `0..hdr.index`, with no gaps and no duplicates &mdash; an
       incomplete or malformed set **MUST** be rejected as a typed error,
       **never** silently treated as "absent". When it does cover
       `0..hdr.index` completely, each entry's chunk id **MUST** verify
       (single-leaf proof, `verify_chunk`) against the leaf id at position
       `index + 1`, and each entry's `slice` **MUST** verify as a length
-      proof (§4.1 below) against that chunk id; `absolute_offset` is then
+      proof (§4.1 below) against that chunk id. For a fixed-size layout,
+      each proven length **MUST** be `chunk_size`, since no chunk before
+      `hdr.index` is the last; otherwise reject with `FixedChunkLength`.
+      `absolute_offset` is then
       `Some(sum of every proven length + offset_in_blob)`.
 
 ### 4.1 Length proofs
@@ -457,13 +470,18 @@ entry point directly and ignore the manifest.
    type is not allowed by a reference to it (§7.1) is `corrupt` under its
    id, and the verifier does not descend into it. An id that two references
    require to have types that no object has (for example a `Tree` entry and
-   a `Blob` entry naming one id) is `corrupt`.
+   a `Blob` entry naming one id) is `corrupt`, even when it is also
+   `missing`.
 10. The chunk lengths of a `ChunkedBlob` MUST add up to its `total_size`.
     The length of a chunk is the length of its `Blob` data. When every
     chunk was read, the sum is checked, with a chunk listed twice counted
     twice; a `ChunkedBlob` whose sum differs is `corrupt` under its id.
-    A `ChunkedBlob` with a chunk that is missing or not read is already
-    incomplete, and its sum is not checked.
+    In a fixed-size layout each chunk MUST also hold the length
+    SPEC-OBJECTS §7 requires: exactly `chunk_size` bytes, except the last,
+    which holds the rest of `total_size`. A `ChunkedBlob` with a chunk of
+    another length is `corrupt` under its id. A `ChunkedBlob` with a chunk
+    that is missing or not read is already incomplete, and its lengths are
+    not checked.
 
 ### 7.5 Bounds
 
@@ -497,7 +515,10 @@ flipped, so the referenced id is `missing` and the damaged bytes are
 blob (`neg_commit_tree_names_blob`, `neg_remix_tree_names_blob`); a tag
 that records `target_type` `Commit` but names a tree (`neg_tag_target_type`);
 chunk lengths that add up to 12 for a `total_size` of 13
-(`neg_chunk_length_sum`); unreferenced extra (still
+(`neg_chunk_length_sum`); a fixed-size layout of `chunk_size` 6 whose chunks
+hold 5 and 7 bytes (`neg_fixed_chunk_length`); a `Tree` entry and a `Blob`
+entry that name one absent id (`neg_conflicting_edges_to_missing`);
+unreferenced extra (still
 complete); `unreferenced_undecodable_extra`, bytes that decode to no object
 (unreferenced, still complete); a delta entry; a compressed entry; a manifest
 pack-hash mismatch; the wrong root id; a manifest whose `root` differs

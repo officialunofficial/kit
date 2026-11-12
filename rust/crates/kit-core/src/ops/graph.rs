@@ -247,7 +247,7 @@ impl ChildKind {
         match self {
             Self::Any => u8::MAX,
             Self::Entry(EntryMode::Tree) => type_bit(ObjectType::Tree),
-            Self::Entry(_) => FILE_TYPES,
+            Self::Entry(EntryMode::Blob | EntryMode::Executable | EntryMode::Symlink) => FILE_TYPES,
             Self::Chunk => type_bit(ObjectType::Blob),
             Self::Type(ty) => type_bit(ty),
         }

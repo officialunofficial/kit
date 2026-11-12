@@ -156,6 +156,86 @@ mod wire {
 
 use common::build_fixture;
 
+/// A signed commit over one file, `fixed.bin`, whose manifest names the
+/// fixed-size layout `chunk_size = 16` and `total_size = 53` (four chunks)
+/// but whose chunks hold `lens` bytes each. The commit, signer and file
+/// bytes are fixed, so the vectors stay byte-identical.
+fn fixed_layout_commit(lens: &[usize]) -> (tempfile::TempDir, ObjectStore, Hash) {
+    let (dir, store, commit_id, _) = layout_commit(53, 16, lens);
+    (dir, store, commit_id)
+}
+
+/// Like [`fixed_layout_commit`], for any `total_size`/`chunk_size`. The
+/// manifest is stored only when it decodes; otherwise only its id, the
+/// root of its merkle leaves, is referenced, as a forged tree would.
+fn layout_commit(
+    total_size: u64,
+    chunk_size: u32,
+    lens: &[usize],
+) -> (
+    tempfile::TempDir,
+    ObjectStore,
+    Hash,
+    kit_core::object::ChunkedBlob,
+) {
+    use kit_core::hash::ZERO;
+    use kit_core::object::{Blob, ChunkedBlob};
+    use kit_core::serialize::serialize;
+    use kit_core::sign::{KeyPair, sign_commit};
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
+    let data = common::prng_bytes(0xF1_7ED5, lens.iter().sum());
+    let mut rest = data.as_slice();
+    let chunks = lens
+        .iter()
+        .map(|&n| {
+            let (chunk, tail) = rest.split_at(n);
+            rest = tail;
+            let blob = Object::Blob(Blob {
+                data: chunk.to_vec(),
+            });
+            store.write(&serialize(&blob).unwrap()).unwrap()
+        })
+        .collect();
+    let cb = ChunkedBlob {
+        total_size,
+        chunk_size,
+        chunks,
+    };
+    let manifest = Object::ChunkedBlob(cb.clone());
+    let manifest_bytes = serialize(&manifest).unwrap();
+    let file = kit_core::object::id_from_object(&manifest, &manifest_bytes);
+    if kit_core::serialize::deserialize(&manifest_bytes).is_ok() {
+        assert_eq!(store.write(&manifest_bytes).unwrap(), file);
+    }
+    let tree = Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"fixed.bin".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: file,
+        }],
+    });
+    let tree_hash = store.write(&serialize(&tree).unwrap()).unwrap();
+    let kp = KeyPair::from_seed([0x07; 32]);
+    let mut commit = Commit {
+        tree_hash,
+        parents: vec![],
+        author: Identity::ed25519(kp.public.0),
+        signer: kp.public.0,
+        message: b"SPEC-DISCLOSURE fixed-size layout fixture".to_vec(),
+        timestamp: 1_726_300_000,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0u8; 64],
+    };
+    commit.signature = sign_commit(&commit, &kp).unwrap().0;
+    let commit_id = store
+        .write(&serialize(&Object::Commit(commit)).unwrap())
+        .unwrap();
+    (dir, store, commit_id, cb)
+}
+
 /// Walk `path` from the fixture's root tree, independently of
 /// `verify::build_disclosure`, returning the authenticated `Step`s and
 /// the leaf id. Used by every vector builder below so reject vectors can
@@ -1272,6 +1352,133 @@ fn build_vectors() -> Vec<Vector> {
             description,
             bin,
             json: base_json(&commit_id, &[b"x"], selector_desc, false, Some(reason)),
+        });
+    }
+
+    // ---- fixed-size layout: every chunk length is checked ----
+
+    let fixed_path = [b"fixed.bin".as_slice()];
+    for (name, description, lens, selector, desc, reject_reason) in [
+        (
+            "fixed_range_with_offsets",
+            "A range in chunk 2 of a fixed-size layout (chunk_size 16), with the length proofs of chunks 0 and 1.",
+            &[16, 16, 16, 5][..],
+            Selector::Range {
+                offset: 34,
+                len: 4,
+                with_offsets: true,
+            },
+            "range(offset=34,len=4,with_offsets=true)",
+            None,
+        ),
+        (
+            "fixed_chunk_last",
+            "The last chunk of a fixed-size layout, holding the 5 bytes left of total_size 53.",
+            &[16, 16, 16, 5][..],
+            Selector::Chunk(3),
+            "chunk(3)",
+            None,
+        ),
+        (
+            "neg_fixed_len_proof_wrong_length",
+            "A range in chunk 2 of a fixed-size layout (chunk_size 16) whose chunk 0 holds 8 bytes and chunk 1 holds 24.",
+            &[8, 24, 16, 5][..],
+            Selector::Range {
+                offset: 34,
+                len: 4,
+                with_offsets: true,
+            },
+            "range(offset=34,len=4,with_offsets=true) [chunk 0 holds 8 bytes]",
+            Some("a length proof of a fixed-size layout is not chunk_size"),
+        ),
+        (
+            "neg_fixed_chunk_wrong_length",
+            "Chunk 1 of a fixed-size layout (chunk_size 16) that holds 24 bytes.",
+            &[8, 24, 16, 5][..],
+            Selector::Chunk(1),
+            "chunk(1) [holds 24 bytes]",
+            Some("a non-last chunk of a fixed-size layout is not chunk_size"),
+        ),
+        (
+            "neg_fixed_last_chunk_wrong_length",
+            "The last chunk of a fixed-size layout holding 3 bytes where total_size 53 leaves 5.",
+            &[16, 16, 16, 3][..],
+            Selector::Chunk(3),
+            "chunk(3) [holds 3 bytes]",
+            Some("the last chunk of a fixed-size layout is not the rest of total_size"),
+        ),
+    ] {
+        let (_dir, store, commit_id) = fixed_layout_commit(lens);
+        let bin = verify::build_disclosure(&store, &commit_id, &fixed_path, selector).unwrap();
+        let result = verify::verify_disclosure(&commit_id, &bin);
+        let mut json = base_json(
+            &commit_id,
+            &fixed_path,
+            desc,
+            reject_reason.is_none(),
+            reject_reason,
+        );
+        match result {
+            Ok(disclosed) => {
+                assert!(reject_reason.is_none(), "{name} must be rejected");
+                json.as_object_mut()
+                    .unwrap()
+                    .insert("disclosed".into(), disclosed_summary(&disclosed));
+            }
+            Err(error) => assert!(
+                reject_reason.is_some() && matches!(error, VerifyError::FixedChunkLength { .. }),
+                "{name}: {error:?}"
+            ),
+        }
+        v.push(Vector {
+            name,
+            description,
+            bin,
+            json,
+        });
+    }
+
+    // A fixed-size layout whose total_size it cannot produce: 5 bytes in
+    // three chunks of 10. No decoder accepts the manifest, but a forged
+    // tree can still name its id, so the verifier checks total_size itself.
+    {
+        let (_dir, store, commit_id, cb) = layout_commit(5, 10, &[10, 10, 0]);
+        let Object::Commit(commit) = store.read_object(&commit_id).unwrap() else {
+            panic!("commit");
+        };
+        let (steps, _) = walk_path(&store, commit.tree_hash, &fixed_path);
+        let proof = merkle::build_chunks_multi_proof(&cb, [0, 3]).unwrap();
+        let chunk_bytes = canonical_bytes(&store, &cb.chunks[2]);
+        let bin = wire::bundle(
+            &commit_id,
+            &canonical_bytes(&store, &commit_id),
+            &steps,
+            &wire::chunk_payload(
+                cb.total_size,
+                cb.chunk_size,
+                2,
+                &merkle::chunked_inner_root(&cb),
+                &proof,
+                &chunk_bytes,
+            ),
+        );
+        assert!(matches!(
+            verify::verify_disclosure(&commit_id, &bin),
+            Err(VerifyError::Decode(
+                kit_core::object::KitError::ChunkedBlobTotalSizeInvalid
+            ))
+        ));
+        v.push(Vector {
+            name: "neg_fixed_total_size_impossible",
+            description: "Chunk 2 of a fixed-size layout that claims total_size 5 in three chunks of chunk_size 10.",
+            bin,
+            json: base_json(
+                &commit_id,
+                &fixed_path,
+                "chunk(2) [total_size 5 below (3 - 1) * 10]",
+                false,
+                Some("total_size does not fit the fixed-size layout"),
+            ),
         });
     }
 

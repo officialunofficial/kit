@@ -1,0 +1,18 @@
+{
+  "bin": "neg_fixed_chunk_length.manifest.bin",
+  "blake3": "0d8d0b3f93ac38a2d241e250b43ded1a58a4335e6448a22a1fe687d4c7e3bf7d",
+  "description": "A ChunkedBlob of chunk_size 6 and total_size 12 whose chunks hold 5 and 7 bytes.",
+  "expect": "incomplete",
+  "ids": [],
+  "mode": "snapshot",
+  "n_packs": 1,
+  "name": "neg_fixed_chunk_length",
+  "pack_hashes": [
+    "2a05b14388696c02f7f259efc619c40c0e0045f03df4a470cbb5f96e69f5032a"
+  ],
+  "reason": "corrupt",
+  "root_hex": "02366d1b97813ea45f4cc2e92cb85d7aa750a753e1cb26850070ca1f2b541fac",
+  "size": 71,
+  "unreferenced": [],
+  "verified": 0
+}

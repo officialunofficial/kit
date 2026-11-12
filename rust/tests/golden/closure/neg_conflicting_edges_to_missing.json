@@ -1,0 +1,18 @@
+{
+  "bin": "neg_conflicting_edges_to_missing.manifest.bin",
+  "blake3": "4184d2c588bcd229c9e109a6e81599e56c439f3bfd5dc68e6514d27d51211b52",
+  "description": "Two tree entries name one absent object, one as a tree and one as a file.",
+  "expect": "incomplete",
+  "ids": [],
+  "mode": "snapshot",
+  "n_packs": 1,
+  "name": "neg_conflicting_edges_to_missing",
+  "pack_hashes": [
+    "2425d2a67057b0cde7d50eb971f33720e03b142846a3dbb5073562c3a6e093bf"
+  ],
+  "reason": "corrupt",
+  "root_hex": "23eb7d9561dd7ee7fbbef0a3f37fcead52bddb2d7b803e4cfb12ad1ab90ad93f",
+  "size": 71,
+  "unreferenced": [],
+  "verified": 0
+}

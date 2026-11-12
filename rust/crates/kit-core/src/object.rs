@@ -457,6 +457,28 @@ impl ChunkedBlob {
         }
         Ok(())
     }
+
+    /// The content length SPEC-OBJECTS §7 requires of chunk `index` in a
+    /// fixed-size layout of `chunk_count` chunks: exactly `chunk_size` for
+    /// every chunk but the last, and the rest of `total_size` for the
+    /// last. `None` for a content-defined layout, whose chunk lengths are
+    /// free, and for an `index` past the last chunk.
+    #[must_use]
+    pub fn fixed_chunk_len(
+        total_size: u64,
+        chunk_size: u32,
+        chunk_count: u32,
+        index: u32,
+    ) -> Option<u64> {
+        if crate::chunker::Chunker::from_chunk_size(chunk_size).is_some() || index >= chunk_count {
+            return None;
+        }
+        let size = u64::from(chunk_size);
+        if index + 1 < chunk_count {
+            return Some(size);
+        }
+        Some(total_size.saturating_sub(u64::from(index).saturating_mul(size)))
+    }
 }
 
 /// Delta object (pack-only). See `SPEC-OBJECTS.md` §8.
