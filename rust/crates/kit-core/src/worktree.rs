@@ -1165,8 +1165,9 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
             .checked_add(chunk.len() as u64)
             .filter(|&t| t <= MAX_FILE_BYTES)
             .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
+        let before = chunks.len();
         chunks.push(store_chunk_blob_at(sink, chunk, origin)?);
-        if checkpoint_due(chunks.len() - 1, chunks.len(), window) {
+        if checkpoint_due(before, chunks.len(), window) {
             sink.checkpoint()?;
         }
     }
@@ -1283,7 +1284,7 @@ pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read + Send>(
 /// across) uses this directly; native builds use
 /// `store_large_file_streaming_pipelined` instead (native-only; not a
 /// valid intra-doc link from a wasm32 doc build).
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
     sink: &S,
     reader: R,
@@ -2150,6 +2151,40 @@ mod tests {
         assert_eq!(sink.checkpoints.get(), manifest.chunks.len() / window);
         // One window of chunks, and then the manifest after the last window.
         assert!(sink.most_between_checkpoints.get() <= window + 1);
+        sink.batch.commit().unwrap();
+        assert_eq!(read_blob(&store, &streamed).unwrap(), data);
+    }
+
+    #[test]
+    fn batched_streaming_checkpoints_each_batch_and_keeps_the_id() {
+        let data = pseudo_random(10 * 1024 * 1024, 0xBA7C);
+        let (_dir, store) = fresh_store();
+        let expected = store_file_object(&store, &data).unwrap();
+        let Object::ChunkedBlob(manifest) = store.read_object(&expected).unwrap() else {
+            panic!("expected a chunked blob");
+        };
+        assert!(manifest.chunks.len() > 2 * STREAM_HASH_BATCH);
+
+        let sink = WindowSink::new(&store);
+        let streamed = store_large_file_streaming_batched(
+            &sink,
+            io::Cursor::new(&data),
+            Path::new("windowed.bin"),
+            &mut |sink, batch| {
+                batch
+                    .iter()
+                    .map(|chunk| store_chunk_blob(sink, chunk))
+                    .collect()
+            },
+            8,
+        )
+        .unwrap();
+        assert_eq!(streamed, expected);
+        assert_eq!(
+            sink.checkpoints.get(),
+            manifest.chunks.len() / STREAM_HASH_BATCH
+        );
+        assert!(sink.most_between_checkpoints.get() <= STREAM_HASH_BATCH + 1);
         sink.batch.commit().unwrap();
         assert_eq!(read_blob(&store, &streamed).unwrap(), data);
     }

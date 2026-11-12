@@ -532,6 +532,7 @@ mod tests {
             sink.chunks.lock().unwrap().by_id.len(),
             manifest.chunks.len()
         );
+        assert!(!sink.has(&crate::hash::hash(b"no such object")));
         for chunk in &manifest.chunks {
             assert!(sink.has(chunk));
             assert!(!store.contains(chunk), "nothing reaches the store");
