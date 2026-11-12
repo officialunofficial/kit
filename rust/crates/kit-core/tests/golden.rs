@@ -225,15 +225,17 @@ const ACCEPTED_CHUNKED: &[(u64, u32, u32)] = &[
     (1, 65_536, 1),
     (65_536, 65_536, 1),
     (1 << 30, 0, 2),
+    ((1 << 30) + 1, 0, 2),
+    (128 << 30, 0, 2),
     (0, 0x8000_0002, 0),
     (3, 0x8000_0002, 3),
-    (1 << 30, 0x8000_0002, 2),
+    (128 << 30, 0x8000_0002, 2),
     (1, 0x8000_0001, 1),
 ];
 const REFUSED_CHUNKED: &[(u64, u32, u32)] = &[
     (1, 0, 0),
     (2, 0, 3),
-    ((1 << 30) + 1, 0, 2),
+    ((128 << 30) + 1, 0, 2),
     (196_609, 65_536, 3),
     (131_072, 65_536, 3),
     (65_536, 65_536, 2),
@@ -241,9 +243,13 @@ const REFUSED_CHUNKED: &[(u64, u32, u32)] = &[
     (0, 65_536, 1),
     (1, 0x8000_0002, 0),
     (2, 0x8000_0002, 3),
-    ((1 << 30) + 1, 0x8000_0002, 2),
+    ((128 << 30) + 1, 0x8000_0002, 2),
     (3, 0x8000_0001, 3),
 ];
+
+/// SPEC-OBJECTS section 7: the largest `chunk_count` a reader accepts. The
+/// reference check in `scripts/golden/objects_ref.py` holds the same value.
+const MAX_CHUNK_COUNT: u32 = 8_388_608;
 
 fn chunked_manifest_bytes(total: u64, chunk_size: u32, count: u32) -> Vec<u8> {
     let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
@@ -254,6 +260,27 @@ fn chunked_manifest_bytes(total: u64, chunk_size: u32, count: u32) -> Vec<u8> {
         buf.extend_from_slice(&hash(&i.to_le_bytes()));
     }
     buf
+}
+
+/// A header at the chunk cap passes the count check and fails only for its
+/// missing chunk ids; one more chunk is refused on the count alone.
+#[test]
+fn chunk_count_cap_matches_spec() {
+    let header = |count: u32| {
+        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
+        buf.extend_from_slice(&(128u64 << 30).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        buf
+    };
+    assert_eq!(
+        deserialize(&header(MAX_CHUNK_COUNT)),
+        Err(kit_core::object::KitError::UnexpectedEof)
+    );
+    assert_eq!(
+        deserialize(&header(MAX_CHUNK_COUNT + 1)),
+        Err(kit_core::object::KitError::TooManyChunks)
+    );
 }
 
 #[test]

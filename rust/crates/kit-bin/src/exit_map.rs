@@ -385,7 +385,9 @@ fn add_exit_code(error: &add::Error) -> u8 {
             exit::CANTCREAT
         }
         add::Error::Hash { source, .. } => match source {
-            WorktreeError::Io(_) | WorktreeError::FileTooLarge(_) => exit::NOINPUT,
+            WorktreeError::Io(_)
+            | WorktreeError::FileTooLarge(_)
+            | WorktreeError::ContentTooLarge { .. } => exit::NOINPUT,
             WorktreeError::Object(_) | WorktreeError::Store(_) => exit::CANTCREAT,
             WorktreeError::InvalidSymlinkTarget(_) | WorktreeError::InvalidUtf8 => exit::DATAERR,
             // A contract violation between kit-core and its caller, which no

@@ -171,6 +171,9 @@ pub enum MerkleError {
     /// The proof did not verify against the given root/id.
     #[error("merkle proof verification failed")]
     VerificationFailed,
+    /// A fold was given more than `u32::MAX` leaves.
+    #[error("merkle tree has more than u32::MAX leaves")]
+    TooManyLeaves,
 }
 
 impl From<CodecError> for MerkleError {
@@ -183,11 +186,12 @@ impl From<CodecError> for MerkleError {
 // BMT primitive (over `blake3`)
 // ---------------------------------------------------------------------------
 
-/// Leaf/index count as `u32`. Objects are decode-capped at 1M
-/// entries/chunks (see `serialize.rs`), far below `u32::MAX`, so this
-/// only panics on a programmer error that bypassed those caps.
+/// Leaf/index count as `u32`. Objects are decode-capped at 1,000,000
+/// tree entries and 8,388,608 chunks (see `serialize.rs`), far below
+/// `u32::MAX`, so this only panics on a programmer error that bypassed
+/// those caps.
 fn u32_of(n: usize) -> u32 {
-    u32::try_from(n).expect("merkle leaf/index count fits u32 (objects capped at 1M)")
+    u32::try_from(n).expect("merkle leaf/index count fits u32 (objects are decode-capped)")
 }
 
 /// `BLAKE3(a ‖ b)`.
@@ -212,9 +216,9 @@ fn levels_in_tree(leaf_count: u32) -> usize {
 }
 
 /// A built BMT: every level from the position-hashed leaves up to the
-/// single pre-finalize root node, plus the finalized root. Kept around so
-/// one build serves many proofs cheaply — mirrors commonware's
-/// `Builder`/`Tree` split.
+/// single pre-finalize root node. Kept around so one build serves many
+/// proofs cheaply — mirrors commonware's `Builder`/`Tree` split. Object
+/// ids come from [`BmtFold`], which holds one node per level instead.
 struct BmtTree {
     /// The real leaf count (0 for an empty tree, even though `levels[0]`
     /// then holds a single placeholder node).
@@ -225,7 +229,9 @@ struct BmtTree {
     /// placeholder); `levels[levels.len() - 1]` = the single pre-finalize
     /// tree root node.
     levels: Vec<Vec<Hash>>,
-    /// The finalized root: `H(leaf_count_be32 ‖ levels.last()[0])`.
+    /// The finalized root: `H(leaf_count_be32 ‖ levels.last()[0])`. Tests
+    /// compare it with the fold and with commonware.
+    #[cfg(test)]
     root: Hash,
 }
 
@@ -251,14 +257,139 @@ fn build_bmt(leaves: &[Hash]) -> BmtTree {
         }
         levels.push(next);
     }
-    let tree_root = levels.last().expect("levels is never empty")[0];
-    let root = h2(&leaf_count.to_be_bytes(), &tree_root);
     BmtTree {
         leaf_count,
         empty,
+        #[cfg(test)]
+        root: h2(
+            &leaf_count.to_be_bytes(),
+            &levels.last().expect("levels is never empty")[0],
+        ),
         levels,
-        root,
     }
+}
+
+/// The finalized BMT root, computed in one pass over the leaves.
+///
+/// It holds at most one node per level, so it needs O(log n) memory
+/// where [`build_bmt`] holds every level. The root equals
+/// `build_bmt(leaves).root` for every leaf count.
+#[derive(Debug)]
+struct BmtFold {
+    /// Leaves pushed so far.
+    count: u32,
+    /// `pending[l]` is the left node of an unpaired pair at level `l`.
+    /// A tree of at most `u32::MAX` leaves has at most `MAX_LEVELS + 1`
+    /// levels.
+    pending: [Option<Hash>; MAX_LEVELS + 1],
+}
+
+impl BmtFold {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            pending: [None; MAX_LEVELS + 1],
+        }
+    }
+
+    /// Append the next leaf. Each completed pair moves up a level at once.
+    fn push(&mut self, leaf: &Hash) -> Result<(), MerkleError> {
+        let mut node = position_leaf(self.count, leaf);
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or(MerkleError::TooManyLeaves)?;
+        let mut level = 0;
+        while let Some(left) = self.pending[level].take() {
+            node = h2(&left, &node);
+            level += 1;
+        }
+        self.pending[level] = Some(node);
+        Ok(())
+    }
+
+    /// Close every unpaired node from the bottom up, duplicating a level's
+    /// last node when the level has an odd count, then bind the leaf
+    /// count. Below the top level, the node carried up from level `l - 1`
+    /// is the last node of level `l`.
+    fn root(&self) -> Hash {
+        if self.count == 0 {
+            return h2(&0u32.to_be_bytes(), &hash(b""));
+        }
+        let top = levels_in_tree(self.count) - 1;
+        let mut carry: Option<Hash> = None;
+        for pending in &self.pending[..top] {
+            carry = match (pending, carry) {
+                (Some(left), Some(right)) => Some(h2(left, &right)),
+                (Some(last), None) => Some(h2(last, last)),
+                (None, Some(last)) => Some(h2(&last, &last)),
+                (None, None) => None,
+            };
+        }
+        let tree_root = carry
+            .or(self.pending[top])
+            .expect("a fold of at least one leaf has a node at its top level");
+        h2(&self.count.to_be_bytes(), &tree_root)
+    }
+}
+
+/// Computes a `ChunkedBlob` id from its header fields and its chunk ids,
+/// one chunk id at a time.
+///
+/// The id equals [`compute_chunked_id`] of the same manifest. Memory is
+/// O(log n) in the chunk count, so a caller can address a manifest
+/// without decoding it whole: read `total_size` and `chunk_size` from the
+/// header, then push each 32-byte chunk id in order.
+#[derive(Debug)]
+pub struct ChunkedIdFold {
+    fold: BmtFold,
+}
+
+impl ChunkedIdFold {
+    /// Start a fold for a manifest with these header fields. The metadata
+    /// leaf takes position 0.
+    #[must_use]
+    pub fn new(total_size: u64, chunk_size: u32) -> Self {
+        let mut fold = BmtFold::new();
+        fold.pending[0] = Some(position_leaf(
+            0,
+            &chunked_meta_leaf_raw(total_size, chunk_size),
+        ));
+        fold.count = 1;
+        Self { fold }
+    }
+
+    /// Append the next chunk id.
+    ///
+    /// # Errors
+    /// [`MerkleError::TooManyLeaves`] once the fold holds `u32::MAX`
+    /// leaves.
+    pub fn push(&mut self, chunk: &Hash) -> Result<(), MerkleError> {
+        self.fold.push(chunk)
+    }
+
+    /// The bare (pre-wrap) BMT root, as [`chunked_inner_root`] returns it.
+    #[must_use]
+    pub fn inner_root(&self) -> Hash {
+        self.fold.root()
+    }
+
+    /// The object id, as [`compute_chunked_id`] returns it.
+    #[must_use]
+    pub fn id(&self) -> Hash {
+        wrap_id(ObjectKind::ChunkedBlob, &self.fold.root())
+    }
+}
+
+/// Fold `leaves` into a finalized root. `leaves` comes from an object
+/// whose decode caps its count far below `u32::MAX`.
+fn fold_root(leaves: impl IntoIterator<Item = Hash>) -> Hash {
+    let mut fold = BmtFold::new();
+    for leaf in leaves {
+        fold.push(&leaf)
+            .expect("merkle leaf count fits u32 (objects are decode-capped)");
+    }
+    fold.root()
 }
 
 /// Returns the sorted, deduplicated `(level, index)` positions of siblings
@@ -774,9 +905,18 @@ fn tree_leaves(tree: &Tree) -> Vec<Hash> {
 /// Bare (pre-wrap) BMT root over a `ChunkedBlob`'s leaves (`[meta] ++
 /// chunks`). A commonware-based verifier's `verify_*_inclusion` checks
 /// against this; kit callers use the id-based [`verify_chunk`] instead.
+///
+/// # Panics
+/// If `cb` has `u32::MAX` chunks or more. A decoded manifest has at most
+/// [`crate::serialize::MAX_CHUNKS`].
 #[must_use]
 pub fn chunked_inner_root(cb: &ChunkedBlob) -> Hash {
-    build_bmt(&chunked_leaves(cb)).root
+    let mut fold = ChunkedIdFold::new(cb.total_size, cb.chunk_size);
+    for chunk in &cb.chunks {
+        fold.push(chunk)
+            .expect("merkle leaf count fits u32 (objects are decode-capped)");
+    }
+    fold.inner_root()
 }
 
 /// Bare (pre-wrap) BMT root over a `Tree`'s entry leaves. A
@@ -784,7 +924,7 @@ pub fn chunked_inner_root(cb: &ChunkedBlob) -> Hash {
 /// kit callers use the id-based [`verify_tree_entry`] instead.
 #[must_use]
 pub fn tree_inner_root(tree: &Tree) -> Hash {
-    build_bmt(&tree_leaves(tree)).root
+    fold_root(tree.entries.iter().map(tree_entry_leaf))
 }
 
 /// The content-address (object id) of a `ChunkedBlob`.
@@ -1440,6 +1580,112 @@ mod tests {
         assert_eq!(Proof::decode(&bytes, 0), Err(MerkleError::MalformedProof));
     }
 
+    /// The fold and the level build give the same root for every leaf
+    /// count to 1,024, and around every power of two to 2^14, where the
+    /// odd-node duplication changes shape.
+    #[test]
+    fn fold_root_matches_level_build() {
+        let max = (1usize << 14) + 1;
+        let leaves: Vec<Hash> = (0..max).map(|i| hash(&(i as u64).to_le_bytes())).collect();
+        let mut counts: Vec<usize> = (0..=1024).collect();
+        for k in 11..=14 {
+            counts.extend([(1 << k) - 1, 1 << k, (1 << k) + 1]);
+        }
+        for n in counts {
+            assert_eq!(
+                fold_root(leaves[..n].iter().copied()),
+                build_bmt(&leaves[..n]).root,
+                "fold diverged from the level build at n={n}"
+            );
+        }
+    }
+
+    /// The id of a `FastCDC` manifest of `count` generated 16 KiB chunks.
+    /// Chunk `i` is `i` as a little-endian u64, zero-padded to 32 bytes.
+    fn generated_manifest(count: u32) -> ChunkedBlob {
+        ChunkedBlob {
+            total_size: u64::from(count) * 16 * 1024,
+            chunk_size: 0,
+            chunks: (0..count)
+                .map(|i| {
+                    let mut id = [0u8; 32];
+                    id[..8].copy_from_slice(&u64::from(i).to_le_bytes());
+                    id
+                })
+                .collect(),
+        }
+    }
+
+    /// The level-build ids of `generated_manifest(1_000_001)` and
+    /// `generated_manifest(MAX_CHUNKS)`.
+    const ID_AT_1_000_001_CHUNKS: &str =
+        "b0dca84f37350aeb6cfbf8f240f4c6a0d68b795d8412057bbc8fdfbbde0da767";
+    const ID_AT_THE_CHUNK_CAP: &str =
+        "2703e358293c235eb9103a36a25088cba7133be0cc4a957787632ecd8b77140e";
+
+    /// A manifest just past the old 1,000,000-chunk cap keeps the id the
+    /// level build gives it.
+    #[test]
+    fn chunked_id_at_1_000_001_chunks_is_pinned() {
+        let manifest = generated_manifest(1_000_001);
+        assert_eq!(
+            crate::hash::to_hex(&compute_chunked_id(&manifest)),
+            ID_AT_1_000_001_CHUNKS
+        );
+    }
+
+    /// The level build gives the pinned ids, and the fold gives the same id
+    /// at the 8,388,608-chunk cap. The unoptimized build takes over a
+    /// minute and about 1 GiB, so it runs in the ignored lane.
+    #[test]
+    #[ignore = "slow: level-builds 8,388,608 chunks; runs in the ignored lane"]
+    fn chunked_id_at_the_chunk_cap_is_pinned() {
+        for (count, pinned) in [
+            (1_000_001, ID_AT_1_000_001_CHUNKS),
+            (crate::serialize::MAX_CHUNKS, ID_AT_THE_CHUNK_CAP),
+        ] {
+            let manifest = generated_manifest(count);
+            let levels = wrap_id(
+                ObjectKind::ChunkedBlob,
+                &build_bmt(&chunked_leaves(&manifest)).root,
+            );
+            assert_eq!(
+                crate::hash::to_hex(&levels),
+                pinned,
+                "level build at {count}"
+            );
+            assert_eq!(compute_chunked_id(&manifest), levels, "fold at {count}");
+        }
+    }
+
+    /// `ChunkedIdFold` gives the stored id of a manifest, and its inner
+    /// root is the one a commonware verifier checks against.
+    #[test]
+    fn chunked_id_fold_matches_compute_chunked_id() {
+        for n in [0u8, 1, 2, 3, 7, 8, 9] {
+            let manifest = cb(u64::from(n) * 5, 0, &(1..=n).collect::<Vec<_>>());
+            let mut fold = ChunkedIdFold::new(manifest.total_size, manifest.chunk_size);
+            for chunk in &manifest.chunks {
+                fold.push(chunk).unwrap();
+            }
+            assert_eq!(fold.id(), compute_chunked_id(&manifest));
+            assert_eq!(fold.inner_root(), chunked_inner_root(&manifest));
+            assert_eq!(
+                fold.inner_root(),
+                build_bmt(&chunked_leaves(&manifest)).root
+            );
+        }
+    }
+
+    /// A fold refuses a leaf past `u32::MAX` instead of wrapping its
+    /// position.
+    #[test]
+    fn fold_refuses_more_than_u32_max_leaves() {
+        let mut fold = BmtFold::new();
+        fold.count = u32::MAX;
+        assert_eq!(fold.push(&[0; 32]), Err(MerkleError::TooManyLeaves));
+    }
+
     /// Cross-verify the BMT root against `commonware_storage::bmt`
     /// (native-only dev-dep) for several leaf counts incl. odd ones.
     #[test]
@@ -1457,8 +1703,16 @@ mod tests {
                 builder.add(&Digest(*l));
             }
             let cw_root = builder.build().root().0;
-            let ours = build_bmt(&leaves).root;
-            assert_eq!(ours, cw_root, "BMT root diverged at n={n}");
+            assert_eq!(
+                build_bmt(&leaves).root,
+                cw_root,
+                "BMT root diverged at n={n}"
+            );
+            assert_eq!(
+                fold_root(leaves.iter().copied()),
+                cw_root,
+                "fold root diverged at n={n}"
+            );
         }
     }
 

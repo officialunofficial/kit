@@ -467,6 +467,41 @@ dropped/added sibling, wrong `leaf_count`). The same test checks that
 both builders and both verifiers reject a position list that is repeated or
 not ascending (next entry).
 
+## Chunked files stay within one bound, and ids need O(log n) memory
+
+**Always:** a `ChunkedBlob` holds at most 8,388,608 chunks and at most
+128 GiB (`serialize::MAX_CHUNKS`, `serialize::MAX_CHUNKED_TOTAL_SIZE`).
+The reader checks both from the header before it reads a chunk id, and
+the writer refuses any manifest the reader would refuse. A reader that
+holds a whole file in memory refuses content above 1 GiB
+(`worktree::MAX_FILE_BYTES`) with a typed error before it reads a chunk.
+Every `Tree` and `ChunkedBlob` id comes from a streaming fold that holds
+one node per level, and it equals the level build of
+SPEC-MERKLE-OBJECTS §1.1 for every leaf count.
+
+**Because:** SPEC-OBJECTS §7 sets the bound, and readers size work from
+the header. A writer that skipped the checks would store a manifest under
+an id no reader can decode. A level build holds about 96 bytes per chunk
+on every manifest read and write, 768 MiB at the chunk cap.
+
+**If violated:** an over-cap manifest becomes an unreadable object, a
+whole-file reader allocates up to 128 GiB, or a changed fold gives
+existing objects new ids.
+
+**Enforced by:** `serialize::tests::serialize_refuses_a_manifest_the_reader_refuses`,
+`serialize::tests::accepts_the_chunk_cap_in_the_header`,
+`golden::chunk_count_cap_matches_spec` and
+`golden::chunked_blob_layout_rules_match_spec` (with
+`scripts/golden/objects_ref.py`), `merkle::tests::fold_root_matches_level_build`,
+`merkle::tests::root_matches_commonware`, the pinned ids of
+`merkle::tests::chunked_id_at_1_000_001_chunks_is_pinned` and
+`merkle::tests::chunked_id_at_the_chunk_cap_is_pinned` (ignored lane), every
+merkelized id in `rust/tests/golden/`, and
+`worktree::blob::equality_tests::into_content_refuses_content_above_the_memory_limit`,
+`ops::blame::tests::blame_refuses_a_file_above_the_memory_limit`,
+`verify::tests::range_disclosure_refuses_a_file_above_the_memory_limit` and
+`round_trip::manifest_above_the_blob_cap_is_refused_before_any_read`.
+
 ## Multi-leaf proof positions are strictly ascending
 
 **Always:** `merkle::BmtTree::multi_proof`, `proof_encoded_size` and every

@@ -222,7 +222,7 @@ pub enum VerifyError {
         leaf_count: u32,
     },
     /// A proof's implied chunk count (`leaf_count - 1`) exceeds
-    /// `serialize::MAX_CHUNKS` (crate-private, not linkable from here).
+    /// [`crate::serialize::MAX_CHUNKS`].
     #[error("proof leaf_count implies more chunks than MAX_CHUNKS allows")]
     TooManyChunks,
     /// A `Range` payload's `len` is zero — there is nothing to disclose
@@ -287,6 +287,14 @@ pub enum VerifyError {
     /// leaf's actual content length.
     #[error("byte range is out of bounds for the leaf's content length")]
     RangeOutOfBounds,
+    /// [`build_disclosure`]: a byte range of a `ChunkedBlob` larger than
+    /// [`MAX_FILE_BYTES`](crate::worktree::MAX_FILE_BYTES). The builder
+    /// reads every chunk into memory, so it refuses before it reads one.
+    #[error("file of {size} bytes is too large for a byte-range disclosure")]
+    ContentTooLarge {
+        /// The `ChunkedBlob`'s `total_size`.
+        size: u64,
+    },
     /// [`build_disclosure`]: a path component was not found in its
     /// parent tree.
     #[error("path component {0} was not found in its parent tree")]
@@ -1683,6 +1691,11 @@ fn build_chunked_range_payload<S: crate::store::ObjectSource + ?Sized>(
     len: u64,
     with_offsets: bool,
 ) -> Result<PayloadWire, VerifyError> {
+    if cb.total_size > crate::worktree::MAX_FILE_BYTES {
+        return Err(VerifyError::ContentTooLarge {
+            size: cb.total_size,
+        });
+    }
     // Read every chunk's canonical bytes once, up front: needed both to
     // locate the containing chunk (chunk lengths aren't in the manifest)
     // and, when `with_offsets` is set, to build each preceding chunk's
@@ -1810,6 +1823,32 @@ mod tests {
         commit.signature = sign_commit(&commit, &kp).unwrap().0;
         let commit_bytes = crate::serialize::serialize(&Object::Commit(commit)).unwrap();
         store.write(&commit_bytes).unwrap()
+    }
+
+    /// A byte-range disclosure of a file above the in-memory limit is
+    /// refused before any chunk is read. The chunks here do not exist, so
+    /// a read would fail with a different error.
+    #[test]
+    fn range_disclosure_refuses_a_file_above_the_memory_limit() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: crate::worktree::MAX_FILE_BYTES + 1,
+            chunk_size: 0,
+            chunks: vec![[1u8; 32], [2u8; 32]],
+        });
+        let leaf = store
+            .write(&crate::serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        let selector = Selector::Range {
+            offset: 0,
+            len: 1,
+            with_offsets: false,
+        };
+        assert!(matches!(
+            build_payload(&store, &leaf, selector),
+            Err(VerifyError::ContentTooLarge { size }) if size == crate::worktree::MAX_FILE_BYTES + 1
+        ));
     }
 
     fn build_fixture() -> Fixture {

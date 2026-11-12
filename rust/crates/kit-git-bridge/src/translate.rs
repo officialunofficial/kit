@@ -101,6 +101,14 @@ pub fn translate_chunked<S: ObjectSource>(
         }
         .into());
     }
+    // The git blob holds the whole file in memory.
+    if manifest.total_size > kit_core::worktree::MAX_FILE_BYTES {
+        return Err(Refusal::BlobTooLarge {
+            object: *hash,
+            size: manifest.total_size,
+        }
+        .into());
+    }
     if manifest.total_size <= kit_core::worktree::CHUNK_THRESHOLD {
         // A conformant writer stores this as a plain blob (§4 item 2).
         return Err(Refusal::NonCanonicalChunking {

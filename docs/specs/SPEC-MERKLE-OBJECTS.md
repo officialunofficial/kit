@@ -55,6 +55,32 @@ Given an ordered list of **leaf digests** `L[0..N]`:
 
 All integers are big-endian, matching commonware.
 
+### 1.2 Streaming fold (informative)
+
+The root of §1.1 can be computed in one pass over the leaves with one
+pending node per level, so memory is O(log N), not O(N). For each leaf,
+position-hash it, then, while the current level holds a pending node,
+hash `pending ‖ node` and move up one level. Store the result as the
+pending node of the level it reached. To finish, walk the levels below
+the top (`ceil(log2(N))` of them) from the bottom. At each level, the
+node carried from below is the last node of that level:
+
+- a pending node and a carried node give `BLAKE3(pending ‖ carried)`;
+- a pending node alone, or a carried node alone, is a last node with no
+  partner, and gives `BLAKE3(node ‖ node)`;
+- neither carries nothing up.
+
+The top node is the carried node, or the pending node at the top level
+when `N` is a power of two. Finalize it as in §1.1 step 3. An empty
+list finalizes `BLAKE3("")` with `N = 0`.
+
+The result equals §1.1 for every `N`. kit computes every object id this
+way (`kit_core::merkle::ChunkedIdFold` for a `ChunkedBlob`, which takes
+the header fields and then one chunk id at a time). Tests compare the
+fold with the level build for every `N` up to 1,024, around each power of
+two up to 2^14, and at 1,000,001 and 8,388,608 chunks; the two large
+ids are pinned in `merkle::tests`.
+
 ## 2. Identity
 
 A merkelized object's id is the **domain-bound** BMT root:

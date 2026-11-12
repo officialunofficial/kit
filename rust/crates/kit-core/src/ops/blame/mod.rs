@@ -290,6 +290,11 @@ pub enum BlameError {
     /// Reassembly and splitting precede the check; attribution follows it.
     #[error("file has too many lines for blame ({lines} > {max})", max = BLAME_MAX_LINES)]
     FileTooLarge { lines: usize },
+    /// A stored file is larger than
+    /// [`MAX_FILE_BYTES`](crate::worktree::MAX_FILE_BYTES). Blame holds the
+    /// whole file in memory, so it refuses before it reads a chunk.
+    #[error("file of {size} bytes is too large for blame (limit {max})", max = crate::worktree::MAX_FILE_BYTES)]
+    ContentTooLarge { size: u64 },
     #[error(transparent)]
     Object(#[from] crate::object::KitError),
     #[error(transparent)]
@@ -702,7 +707,12 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
     let data: Vec<u8> = match obj {
         Object::Blob(b) => b.data,
         Object::ChunkedBlob(cb) => {
-            let mut buf: Vec<u8> = Vec::with_capacity(usize::try_from(cb.total_size).unwrap_or(0));
+            if cb.total_size > crate::worktree::MAX_FILE_BYTES {
+                return Err(BlameError::ContentTooLarge {
+                    size: cb.total_size,
+                });
+            }
+            let mut buf: Vec<u8> = Vec::new();
             for ch in &cb.chunks {
                 let chunk_obj = store.read_object(ch)?;
                 let Object::Blob(b) = chunk_obj else {
@@ -996,6 +1006,25 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = ObjectStore::init(&crate::layout::RepoLayout::single(dir.path())).unwrap();
         (dir, store)
+    }
+
+    /// Blame refuses a stored file above the in-memory limit before it
+    /// reads a chunk. The chunks here do not exist, so a read would fail
+    /// with a different error.
+    #[test]
+    fn blame_refuses_a_file_above_the_memory_limit() {
+        let (_d, store) = fresh_store();
+        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: crate::worktree::MAX_FILE_BYTES + 1,
+            chunk_size: 0,
+            chunks: vec![[1u8; 32], [2u8; 32]],
+        });
+        let h = crate::store::ObjectSink::put(&store, &serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        assert!(matches!(
+            load_blob_lines(&store, h),
+            Err(BlameError::ContentTooLarge { size }) if size == crate::worktree::MAX_FILE_BYTES + 1
+        ));
     }
 
     fn put_blob(store: &ObjectStore, data: &[u8]) -> Hash {

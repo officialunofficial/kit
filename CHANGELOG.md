@@ -143,6 +143,16 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   size. A closed output still ends `kit cat` and `kit show` without an error.
   `worktree::write_blob`, `worktree::content_eq_reader` and
   `worktree::file_content_eq` stream.
+- A `ChunkedBlob` holds up to 128 GiB and 8,388,608 chunks (SPEC-OBJECTS §7).
+  It held 1 GiB and 1,000,000 chunks before, and an earlier reader refuses a
+  larger manifest. Writers now refuse any manifest a reader refuses. Readers
+  that hold a whole file in memory (`read_blob`, blame, byte-range
+  disclosure and the git export) refuse content above 1 GiB with a typed
+  error before they read a chunk. Worktree files stay at 1 GiB.
+- `Tree` and `ChunkedBlob` ids come from a streaming fold that holds one node
+  per level, so an id costs O(log n) memory, not about 96 bytes per chunk.
+  Ids do not change. `merkle::ChunkedIdFold` computes a `ChunkedBlob` id from
+  its header fields and one chunk id at a time.
 
 ### Fixed
 
