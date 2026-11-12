@@ -27,7 +27,7 @@ use crate::packmap::{
     walk_pack_chain_until,
 };
 use crate::source::RemoteSource;
-use crate::stage::{StagedPacks, download_pack_chain, unpack_downloaded_packs};
+use crate::stage::{StagedPacks, download_pack_chain_with_limits, unpack_downloaded_packs};
 
 /// What a fetch did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,6 +52,13 @@ pub struct FetchReport {
     /// and the remote-tracking refs were as that fetch left them, so the
     /// fetch made no other request (SPEC-TRANSPORT §1.2).
     pub remote_unchanged: bool,
+}
+
+/// Where a fetch stages packs and how many bytes it may stage.
+#[derive(Clone, Copy)]
+pub(crate) struct Staging<'a> {
+    pub(crate) parent: Option<&'a Path>,
+    pub(crate) max_bytes: u64,
 }
 
 /// One branch's pack chain, resolved and downloaded over the network with
@@ -85,7 +92,7 @@ pub(crate) fn resolve_and_download_chain(
     branch: &str,
     head_key: Hash,
     applied: &AppliedPacks,
-    stage_parent: Option<&Path>,
+    staging: Staging<'_>,
     checkpoint: Option<Checkpoint>,
 ) -> Result<FetchedChain, SyncError> {
     let (nodes, reached) = walk_pack_chain_until(
@@ -106,7 +113,15 @@ pub(crate) fn resolve_and_download_chain(
             source: None,
         });
     }
-    let downloaded = download_pack_chain(source, observer, branch, &chain, applied, stage_parent)?;
+    let downloaded = download_pack_chain_with_limits(
+        source,
+        observer,
+        branch,
+        &chain,
+        applied,
+        staging.max_bytes,
+        staging.parent,
+    )?;
     Ok(FetchedChain {
         chain,
         downloaded,
@@ -167,7 +182,7 @@ pub(crate) fn apply_fetched_chain(
     tip: Hash,
     applied: &mut AppliedPacks,
     require_signed: bool,
-    stage_parent: Option<&Path>,
+    staging: Staging<'_>,
 ) -> Result<Applied, SyncError> {
     let FetchedChain {
         mut chain,
@@ -192,8 +207,15 @@ pub(crate) fn apply_fetched_chain(
             drop(chain);
             chain = resolve_pack_chain(source, observer, branch, head)?;
             prefix_packs = 0;
-            let downloaded =
-                download_pack_chain(source, observer, branch, &chain, applied, stage_parent)?;
+            let downloaded = download_pack_chain_with_limits(
+                source,
+                observer,
+                branch,
+                &chain,
+                applied,
+                staging.max_bytes,
+                staging.parent,
+            )?;
             stats.packs_downloaded = downloaded.packs.len();
             stats.packs_skipped = chain.len() - downloaded.packs.len();
             stats.objects_unpacked +=
@@ -224,8 +246,15 @@ pub(crate) fn apply_fetched_chain(
                 drop(chain);
                 chain = resolve_pack_chain(source, observer, branch, head)?;
             }
-            let downloaded =
-                download_pack_chain(source, observer, branch, &chain, applied, stage_parent)?;
+            let downloaded = download_pack_chain_with_limits(
+                source,
+                observer,
+                branch,
+                &chain,
+                applied,
+                staging.max_bytes,
+                staging.parent,
+            )?;
             stats.packs_downloaded = downloaded.packs.len();
             stats.packs_skipped = 0;
             stats.objects_unpacked +=
@@ -336,7 +365,10 @@ fn fetch_objects_inner(
 ) -> Result<(), SyncError> {
     let target_branch = options.target_branch.as_deref();
     let require_signed = options.verify_signatures;
-    let stage_parent = options.staging_dir.as_deref();
+    let staging = Staging {
+        parent: options.staging_dir.as_deref(),
+        max_bytes: options.max_staged_bytes,
+    };
     // The cursor is read before the listing, so a write the listing misses
     // changes a later cursor.
     let cursor = source
@@ -423,13 +455,7 @@ fn fetch_objects_inner(
             // Step 1: resolve this branch's chain and download its packs.
             // No repo lock is held.
             let fetched = resolve_and_download_chain(
-                source,
-                observer,
-                &r.name,
-                chain_head,
-                applied,
-                stage_parent,
-                checkpoint,
+                source, observer, &r.name, chain_head, applied, staging, checkpoint,
             )?;
             let completed = Checkpoint {
                 head: chain_head,
@@ -458,7 +484,7 @@ fn fetch_objects_inner(
                 h,
                 applied,
                 require_signed,
-                stage_parent,
+                staging,
             ) {
                 Ok(stats) => (completed, lock, stats),
                 Err(e @ SyncError::RemoteMissingObject(_)) => {
@@ -478,13 +504,7 @@ fn fetch_objects_inner(
                     // which still need the GC-prune protection.
                     drop(lock);
                     let fresh_fetched = resolve_and_download_chain(
-                        source,
-                        observer,
-                        &r.name,
-                        fresh_head,
-                        applied,
-                        stage_parent,
-                        None,
+                        source, observer, &r.name, fresh_head, applied, staging, None,
                     )?;
                     let completed = Checkpoint {
                         head: fresh_head,
@@ -503,7 +523,7 @@ fn fetch_objects_inner(
                         fresh_h,
                         applied,
                         require_signed,
-                        stage_parent,
+                        staging,
                     )?;
                     (completed, lock, stats)
                 }

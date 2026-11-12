@@ -636,6 +636,41 @@ fn fetch_moves_only_the_tracking_ref() {
 }
 
 #[test]
+fn fetch_stops_at_the_staging_budget_and_the_default_budget_fetches() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let layout = RepoLayout::single(&target);
+
+    let small = SyncOptions::default().with_max_staged_bytes(1);
+    let err = fetch(&target, &remote.source(), "default", &small, &NoopObserver).unwrap_err();
+    assert!(
+        matches!(err, kit_sync::SyncError::Io(ref e) if e.kind() == std::io::ErrorKind::StorageFull),
+        "{err:?}"
+    );
+    assert_ne!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(second)
+    );
+
+    fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(second)
+    );
+}
+
+#[test]
 fn pull_refuses_anything_that_is_not_a_fast_forward() {
     let remote = Remote::new();
     let first = remote.publish(None, &[("a.txt", b"one\n")], true);

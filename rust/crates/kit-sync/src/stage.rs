@@ -14,7 +14,7 @@ use kit_core::store::ObjectStore;
 use crate::applied_packs::AppliedPacks;
 use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
-use crate::packmap::{MAX_FETCH_PACKS, MAX_FETCH_STAGED_BYTES, branch_ref_hint};
+use crate::packmap::{MAX_FETCH_PACKS, branch_ref_hint};
 use crate::source::RemoteSource;
 use crate::verify::verify_new_object_signatures;
 
@@ -35,25 +35,6 @@ pub(crate) struct StagedPack {
 /// Download to private files without holding the repo lock. Only one returned
 /// pack buffer exists at a time; chain metadata and staging disk have explicit
 /// aggregate limits. No authoritative objects or applied records are changed.
-pub(crate) fn download_pack_chain(
-    source: &dyn RemoteSource,
-    observer: &dyn Observer<SyncEvent>,
-    branch: &str,
-    chain: &[Hash],
-    applied: &AppliedPacks,
-    stage_parent: Option<&std::path::Path>,
-) -> Result<StagedPacks, SyncError> {
-    download_pack_chain_with_limits(
-        source,
-        observer,
-        branch,
-        chain,
-        applied,
-        MAX_FETCH_STAGED_BYTES,
-        stage_parent,
-    )
-}
-
 pub(crate) fn download_pack_chain_with_limits(
     source: &dyn RemoteSource,
     observer: &dyn Observer<SyncEvent>,
@@ -192,7 +173,7 @@ pub(crate) fn unpack_downloaded_packs(
 mod tests {
     use super::*;
     use crate::observer::NoopObserver;
-    use crate::packmap::download_packlist_node;
+    use crate::packmap::{MAX_FETCH_STAGED_BYTES, download_packlist_node};
     use crate::source::TransportSource;
     use kit_core::hash;
     use kit_core::object::Object;
@@ -245,12 +226,13 @@ mod tests {
         let applied = AppliedPacks::load(&RepoLayout::single(td.path()), "origin").unwrap();
 
         assert!(matches!(
-            download_pack_chain(
+            download_pack_chain_with_limits(
                 &TransportSource::new(&tx),
                 &NoopObserver,
                 "main",
                 &[key],
                 &applied,
+                MAX_FETCH_STAGED_BYTES,
                 None
             ),
             Err(SyncError::Source(crate::SourceError::InvalidResponse))
@@ -281,12 +263,13 @@ mod tests {
         let applied =
             AppliedPacks::load(&kit_core::layout::RepoLayout::single(td.path()), "origin").unwrap();
         PEAK_RETAINED_PACK_BYTES.with(|peak| peak.set(0));
-        let downloaded = download_pack_chain(
+        let downloaded = download_pack_chain_with_limits(
             &TransportSource::new(&tx),
             &NoopObserver,
             "main",
             &vec![key; 32],
             &applied,
+            MAX_FETCH_STAGED_BYTES,
             None,
         )
         .unwrap();
