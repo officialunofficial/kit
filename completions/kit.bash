@@ -136,7 +136,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-n --dry-run --grace-secs --help" -- "$cur") )
             ;;
         worktree)
-            COMPREPLY=( $(compgen -W "add list remove prune --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "add list remove prune move lock unlock repair --help" -- "$cur") )
             return
             ;;
         stash)

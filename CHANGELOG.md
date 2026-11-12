@@ -17,6 +17,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one read per ref, and a packmap read per branch, before. A store that
   returns no `ETag` or `LastModified` offers no cursor, and the fetch works as
   before.
+- `kit worktree move [-f] <path> <new-path>`, `lock [--reason <text>] <path>`,
+  `unlock <path>` and `repair [<path>...]`. A locked tree is refused by
+  `remove` and `move` unless `-f` is given twice, and `prune` keeps it.
+  `worktree list` shows the lock. A locked tree has an optional `locked` file
+  in its state directory. No existing file changes.
 - `kit stash push [-m <message>]` is another name for `kit stash save`.
 - `kit pull --no-ff` fetches, then merges the fetched branch and always writes
   a merge commit, even when a fast-forward is possible. A conflict leaves the

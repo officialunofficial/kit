@@ -202,6 +202,16 @@ even when a command reaches parity on everything else.
   without a warning.
 - `worktree remove` refuses to delete a tree with untracked files or local
   changes. `--force` overrides the guard.
+- `worktree lock` writes a `locked` file in the state directory of the tree,
+  as Git does. A kit that predates the file ignores it. `worktree remove` and
+  `move` refuse a locked tree unless `-f` is given twice, as Git does.
+  `worktree prune` keeps a locked entry. `worktree move` refuses an existing
+  destination, even an empty directory, a destination with a `..` component
+  and a missing parent. It does not fall back to a copy across filesystems.
+  `worktree repair <path>` fixes the back-pointer only, from the pointer file
+  of the tree. A tree whose pointer file is relative and that moved by hand
+  needs the pointer file fixed first, and `repair` with no path does that only
+  when the tree is at the recorded place.
 - `update-ref -d` refuses to delete the current branch. Git deletes it.
 - Repository config cannot hold the signing key. `config --local signing_key`
   is an error. `-c signing_key=...` is ignored with a warning. A cloned
@@ -433,10 +443,11 @@ kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
 - `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
-  tags.
+  tags. `push` sends none, and the pack chain of a branch carries only the
+  objects that the branch reaches, so a remote tag object has no transfer
+  path. Tags need a listing and a transfer step in the transport first.
 - `rebase -i` `edit` &mdash; the todo action is not available. The `actions`
   file of a paused rebase holds a closed list of keywords, and a new keyword
   would change that state format.
 - `stash push -u` / `--include-untracked` and `stash push <pathspec>` &mdash;
   kit rejects each form. `stash` always saves the whole working tree.
-- `worktree move` / `lock` / `repair` &mdash; kit has no such subcommand.

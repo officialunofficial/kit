@@ -187,7 +187,9 @@ Working-tree commands:
   `--unified=<n>` sets the number of unchanged context lines around each
   hunk (default 3, matching git's `-U3`).
 - `kit worktree add <path> [<commit-ish>]` / `list [--porcelain]` /
-  `remove [--force] <path>` / `prune [--dry-run]` &mdash; manage linked working
+  `remove [--force] <path>` / `prune [--dry-run]` /
+  `move [--force] <path> <new-path>` / `lock [--reason <text>] <path>` /
+  `unlock <path>` / `repair [<path>...]` &mdash; manage linked working
   trees (git-worktree parity). Linked trees share the one object
   store and the shared refs; each tree keeps its own `HEAD`, index,
   in-progress-operation state, and stash (note: git shares the stash
@@ -203,7 +205,14 @@ Working-tree commands:
   untracked files, or an operation in progress unless `--force` is
   given, and never removes the main tree or the tree you are standing
   in. `prune` deletes registry entries whose tree has vanished
-  (`--dry-run` previews). On-disk: a linked tree's `.kit` is a pointer
+  (`--dry-run` previews) and keeps a locked entry. `lock` marks a tree, with
+  an optional reason, and `list` shows it. `remove` and `move` refuse a
+  locked tree unless `--force` is given twice. `move` renames the tree
+  to a path that does not exist, whose parent does, with no `..` component
+  and outside every tree. It refuses the main tree and the tree you are
+  standing in. `repair <path>` fixes the back-pointer of a tree that was
+  moved by hand; `repair` with no path rewrites a missing or broken pointer
+  file. On-disk: a linked tree's `.kit` is a pointer
   *file* (`kitdir: <path>`) into the main repository's
   `.kit/worktrees/<id>/`. Interim limit: `kit gc` refuses to run while
   linked worktrees exist (cross-tree root collection is a tracked

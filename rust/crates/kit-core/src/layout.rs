@@ -137,6 +137,12 @@ pub const COMMONDIR_FILE_NAME: &str = "commondir";
 /// linked tree's pointer file — the back-pointer `worktree prune`
 /// checks before deleting a state dir.
 pub const BACKPOINTER_FILE_NAME: &str = "kitdir";
+/// File inside a per-tree state dir that marks the tree as locked. Its
+/// content is the reason, possibly empty. `worktree remove`, `prune` and
+/// `move` refuse a tree that has it.
+pub const LOCKED_FILE_NAME: &str = "locked";
+/// Longest lock reason that [`write_lock`] accepts, in bytes.
+pub const MAX_LOCK_REASON_BYTES: usize = 1024;
 /// Hard cap on the pointer, `commondir`, and back-pointer files. Far
 /// above any real path, small enough that a corrupt or hostile file
 /// cannot balloon discovery.
@@ -532,6 +538,69 @@ fn read_capped_line(path: &Path) -> Result<Option<String>, DiscoverError> {
 pub fn write_pointer_file(tree_root: &Path, state_dir: &Path) -> std::io::Result<()> {
     let body = format!("{POINTER_PREFIX}{}\n", state_dir.display());
     crate::atomic::write_atomic(&tree_root.join(KIT_DIR), body.as_bytes(), false)
+}
+
+/// Write the back-pointer of a state dir: the path of
+/// `<tree_root>/.kit`, one line. `worktree add` and `worktree move` use it.
+///
+/// # Errors
+/// Propagates filesystem errors from the atomic write.
+pub fn write_backpointer(state_dir: &Path, tree_root: &Path) -> std::io::Result<()> {
+    let body = format!("{}\n", tree_root.join(KIT_DIR).display());
+    crate::atomic::write_atomic(
+        &state_dir.join(BACKPOINTER_FILE_NAME),
+        body.as_bytes(),
+        false,
+    )
+}
+
+/// The lock reason of the tree with state dir `state_dir`. `None` when the
+/// tree is not locked.
+///
+/// The check fails closed. A `locked` entry that is not a small regular file
+/// of valid UTF-8 still locks the tree, with an empty reason.
+#[must_use]
+pub fn lock_reason(state_dir: &Path) -> Option<String> {
+    let path = state_dir.join(LOCKED_FILE_NAME);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.file_type().is_file() {
+        return Some(String::new());
+    }
+    let text = crate::bounded_read::read_capped_string(&path, MAX_LOCK_REASON_BYTES as u64 + 1)
+        .unwrap_or_default();
+    Some(text.strip_suffix('\n').unwrap_or(&text).to_owned())
+}
+
+/// Lock the tree with state dir `state_dir`, with `reason`.
+///
+/// # Errors
+/// [`std::io::ErrorKind::InvalidInput`] when the reason is longer than
+/// [`MAX_LOCK_REASON_BYTES`] or has a control character.
+/// [`std::io::ErrorKind::AlreadyExists`] when the tree is locked.
+/// Otherwise the filesystem error of the atomic write.
+pub fn write_lock(state_dir: &Path, reason: &str) -> std::io::Result<()> {
+    if reason.len() > MAX_LOCK_REASON_BYTES || reason.chars().any(char::is_control) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "lock reason is too long or has a control character",
+        ));
+    }
+    if lock_reason(state_dir).is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "worktree is already locked",
+        ));
+    }
+    crate::atomic::write_atomic(&state_dir.join(LOCKED_FILE_NAME), reason.as_bytes(), false)
+}
+
+/// Unlock the tree with state dir `state_dir`.
+///
+/// # Errors
+/// [`std::io::ErrorKind::NotFound`] when the tree is not locked. Otherwise
+/// the filesystem error of the delete.
+pub fn remove_lock(state_dir: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(state_dir.join(LOCKED_FILE_NAME))
 }
 
 /// Resolve the [`RepoLayout`] for the repository whose working tree is
@@ -1201,5 +1270,77 @@ mod tests {
         write_pointer_file(tmp.path(), Path::new("/main/.kit/worktrees/w1")).unwrap();
         let bytes = std::fs::read(tmp.path().join(KIT_DIR)).unwrap();
         assert_eq!(bytes, b"kitdir: /main/.kit/worktrees/w1\n");
+    }
+
+    #[test]
+    fn a_lock_round_trips_and_refuses_a_second_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(lock_reason(tmp.path()), None);
+        write_lock(tmp.path(), "on a usb disk").unwrap();
+        assert_eq!(lock_reason(tmp.path()).as_deref(), Some("on a usb disk"));
+        let err = write_lock(tmp.path(), "again").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        remove_lock(tmp.path()).unwrap();
+        assert_eq!(lock_reason(tmp.path()), None);
+        let err = remove_lock(tmp.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn an_empty_reason_still_locks() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_lock(tmp.path(), "").unwrap();
+        assert_eq!(lock_reason(tmp.path()).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn a_lock_reason_is_bounded_and_has_no_control_characters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let at_cap = "a".repeat(MAX_LOCK_REASON_BYTES);
+        write_lock(tmp.path(), &at_cap).unwrap();
+        assert_eq!(lock_reason(tmp.path()).as_deref(), Some(at_cap.as_str()));
+        remove_lock(tmp.path()).unwrap();
+        for bad in ["a\nb", "a\0b", "a\u{7f}"] {
+            let err = write_lock(tmp.path(), bad).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+        let err = write_lock(tmp.path(), &"a".repeat(MAX_LOCK_REASON_BYTES + 1)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(lock_reason(tmp.path()), None);
+    }
+
+    #[test]
+    fn a_malformed_lock_entry_still_locks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(LOCKED_FILE_NAME);
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+        assert_eq!(lock_reason(tmp.path()).as_deref(), Some(""));
+        std::fs::write(&path, vec![b'a'; MAX_LOCK_REASON_BYTES + 100]).unwrap();
+        assert_eq!(lock_reason(tmp.path()).as_deref(), Some(""));
+        // A reason at the cap with its newline is read in full.
+        let mut at_cap = "a".repeat(MAX_LOCK_REASON_BYTES);
+        at_cap.push('\n');
+        std::fs::write(&path, &at_cap).unwrap();
+        assert_eq!(
+            lock_reason(tmp.path()).as_deref(),
+            Some(&at_cap[..MAX_LOCK_REASON_BYTES])
+        );
+        // One byte more is over the cap.
+        at_cap.push('a');
+        std::fs::write(&path, &at_cap).unwrap();
+        assert_eq!(lock_reason(tmp.path()).as_deref(), Some(""));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(lock_reason(tmp.path()).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn the_back_pointer_golden_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_backpointer(tmp.path(), Path::new("/w/tree")).unwrap();
+        assert_eq!(
+            std::fs::read(tmp.path().join(BACKPOINTER_FILE_NAME)).unwrap(),
+            b"/w/tree/.kit\n"
+        );
     }
 }

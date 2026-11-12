@@ -299,7 +299,7 @@ complete -c kit -n "__fish_seen_subcommand_from bisect; \
     -a "start good bad reset"
 complete -c kit -n "__fish_seen_subcommand_from gc" -l dry-run -s n -d "Preview without deleting"
 complete -c kit -n "__fish_seen_subcommand_from gc" -l grace-secs -d "Keep objects younger than SECS"
-complete -c kit -n "__fish_seen_subcommand_from worktree; and not __fish_seen_subcommand_from add list remove prune" -a "add list remove prune"
+complete -c kit -n "__fish_seen_subcommand_from worktree; and not __fish_seen_subcommand_from add list remove prune move lock unlock repair" -a "add list remove prune move lock unlock repair"
 complete -c kit -n "__fish_seen_subcommand_from stash; \
     and not __fish_seen_subcommand_from save push list pop apply drop clear show" \
     -a "save push list pop apply drop clear show"

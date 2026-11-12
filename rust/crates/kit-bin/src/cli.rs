@@ -205,6 +205,10 @@ commands:
   worktree list [--porcelain]  List the main and every linked working tree
   worktree remove [--force] <path>     Remove a linked working tree
   worktree prune [--dry-run]   Delete registry entries whose tree is gone
+  worktree move [-f] <path> <new-path>  Move a linked working tree
+  worktree lock [--reason <text>] <path>  Lock a tree against remove/prune/move
+  worktree unlock <path>  Unlock a linked working tree
+  worktree repair [<path>...]  Repair the links between trees and the registry
   stash [--format=json]  Stash working dir changes (save WIP; -m for a message;
                     --format=json emits a JSON outcome, or JSONL on `list`)
   stash save -m <msg>  Stash with a message
