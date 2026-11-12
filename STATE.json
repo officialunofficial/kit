@@ -1,12 +1,14 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-11: main CI green on 60753ef. Nightly formal (quint job) hit its 240 min timeout; merged PR 95 raising it to 350. PRs 90-94 skipped: touched within 24h. Dependabot, audit, Commonware not checked (Monday only).",
+  "last_findings": "2026-11-12: main Rust CI failed once on a protoc download 503 (setup step); re-ran failed jobs. PRs 111, 114, 115 touched within 24h, skipped. PR 90 failed only the changed-lines mutants check (6 missed, equivalent-looking mutants); pushed tests that pin the index contents, merged main into the branch, awaiting checks. Dependabot, audit, Commonware not checked (Monday only).",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
     "commonwarexyz/monorepo is not readable through the GitHub tools; fetch its releases page with WebFetch instead.",
     "Replacing a conflicted PR: rebase locally, push a new branch, open a new PR, comment and close the old one. Do not cite PR numbers in the new PR body (AGENTS.md).",
     "get_job_logs needs return_content=true and tail_lines; the mutation job log tail shows only cleanup, so read the uploaded mutants report artifact instead.",
-    "Nightly formal run time grew 63 min to over 4 h; a cancelled run at exactly the timeout means a timeout, not a user cancel."
+    "Nightly formal run time grew 63 min to over 4 h; a cancelled run at exactly the timeout means a timeout, not a user cancel.",
+    "A mutants miss on a perf index that keeps output identical needs tests that assert the index internals; rebasing a PR branch locally makes the push non-fast-forward, so cherry-pick the fix onto the PR head and call update_pull_request_branch.",
+    "A setup-step failure from a download 503 is an infra flake; rerun_failed_jobs via actions_run_trigger instead of changing code."
   ]
 }
