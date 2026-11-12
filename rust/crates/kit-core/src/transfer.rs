@@ -647,14 +647,17 @@ enum BlobSlot {
 ///
 /// Propagates [`StoreError`] from the local closure walk or from
 /// `encode_deltas`, including [`StoreError::OperationLimitExceeded`] when
-/// the closure of the new or the remote tip reaches
-/// [`crate::ops::graph::MAX_REACHABLE`]: a plan never omits the objects
-/// past a cut. Also returns [`StoreError::DeltaBatchLengthMismatch`]
-/// if `encode_deltas` returns a `Vec` of a different length than the
-/// candidate slice it was given — a contract violation by the caller, not
-/// a normal runtime condition, but reported as a typed error rather than
-/// a panic since a push is a network-facing operation where a clean error
-/// is a better failure mode than crashing the process.
+/// the closure of the new tip reaches [`crate::ops::graph::MAX_REACHABLE`]:
+/// a plan never omits the objects past a cut. A cut in the walk of the
+/// remote tip is no error. The plan then treats the remote as holding only
+/// the objects the walk reached, so it sends more and loses nothing.
+///
+/// Also returns [`StoreError::DeltaBatchLengthMismatch`] if `encode_deltas`
+/// returns a `Vec` of a different length than the candidate slice it was given
+/// — a contract violation by the caller, not a normal runtime condition, but
+/// reported as a typed error rather than a panic since a push is a
+/// network-facing operation where a clean error is a better failure mode than
+/// crashing the process.
 pub fn plan_pack_with(
     store: &ObjectStore,
     new_tip: Hash,
@@ -664,7 +667,34 @@ pub fn plan_pack_with(
         &[DeltaCandidate],
     ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
 ) -> Result<PackPlan, StoreError> {
-    let new_set = crate::ops::reachable_objects(store, &new_tip)?;
+    plan_pack_capped(
+        store,
+        new_tip,
+        old_tip,
+        encode_deltas,
+        crate::ops::graph::MAX_REACHABLE,
+    )
+}
+
+/// [`plan_pack_with`] with a caller-supplied closure cap, so a test can cut
+/// either walk.
+fn plan_pack_capped(
+    store: &ObjectStore,
+    new_tip: Hash,
+    old_tip: Option<Hash>,
+    encode_deltas: impl FnOnce(
+        &ObjectStore,
+        &[DeltaCandidate],
+    ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
+    cap: usize,
+) -> Result<PackPlan, StoreError> {
+    use crate::ops::graph::{complete, reachable_closure_checked_with_cap};
+
+    let new_set = complete(reachable_closure_checked_with_cap(
+        store,
+        std::iter::once(&new_tip),
+        cap,
+    ))?;
 
     // What the remote already holds = the closure of its current tip, if we
     // can compute it locally. A partial local history (some referenced
@@ -675,8 +705,10 @@ pub fn plan_pack_with(
     if let Some(o) = old_tip
         && store.contains(&o)
     {
-        match crate::ops::reachable_objects(store, &o) {
-            Ok(s) => {
+        // A cut walk reaches part of what the remote holds. Sending against
+        // that part only adds objects the remote may already have.
+        match reachable_closure_checked_with_cap(store, std::iter::once(&o), cap) {
+            Ok((s, _cut)) => {
                 remote_set = s;
                 base_map = select_chunk_delta_bases(store, new_tip, o)?;
                 have_old = true;
@@ -1150,6 +1182,61 @@ mod tests {
             );
             assert_eq!(got, src.read(&h).unwrap());
         }
+    }
+
+    #[test]
+    fn a_cut_remote_walk_sends_more_and_a_cut_new_walk_fails() {
+        let (_d, s) = store();
+        // The remote holds a long history; the new tip is a small root with
+        // no parents, as a force push of a fresh branch is.
+        let mut remote_tip = None;
+        let oldest = put_chunked(&s, &[0; 64]);
+        for i in 0..8u8 {
+            let file = put_chunked(&s, &[i; 64]);
+            remote_tip = Some(commit_with_file(
+                &s,
+                file,
+                remote_tip.into_iter().collect(),
+                &format!("old {i}"),
+            ));
+        }
+        let remote_tip = remote_tip.unwrap();
+        // The new tip names the remote's oldest file, which the cut walk
+        // does not reach.
+        let new_tip = commit_with_file(&s, oldest, vec![], "new");
+        let new_len = crate::ops::reachable_objects(&s, &new_tip).unwrap().len();
+        let remote_len = crate::ops::reachable_objects(&s, &remote_tip)
+            .unwrap()
+            .len();
+        assert!(new_len < remote_len);
+
+        // The cap holds the new tip's closure and cuts the remote's.
+        let plan = plan_pack_capped(
+            &s,
+            new_tip,
+            Some(remote_tip),
+            |s, c| c.iter().map(|&c| encode_delta_candidate(s, c)).collect(),
+            new_len,
+        )
+        .unwrap();
+        assert!(
+            plan.raw.contains(&oldest),
+            "a file the remote holds past the cut is sent again"
+        );
+        assert_pack_reconstructs(&s, &plan, remote_tip, new_tip);
+
+        assert!(matches!(
+            plan_pack_capped(
+                &s,
+                new_tip,
+                Some(remote_tip),
+                |_, _| Ok(Vec::new()),
+                new_len - 1
+            ),
+            Err(StoreError::OperationLimitExceeded(
+                crate::ops::graph::REACHABLE_LIMIT
+            ))
+        ));
     }
 
     #[test]
