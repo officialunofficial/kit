@@ -1,0 +1,14 @@
+{
+  "bin": "neg_tree_mode_range_blob.bin",
+  "blake3": "9e358fde557616396604f86e11aeb622d5dcd6676a81b14a224a4f421f0255ec",
+  "commit_id_hex": "bd3711ba8cf97cc3b773b1bdf31268e679d812810a3d0e7a1146be98fda38a14",
+  "description": "The final step has mode Tree but names a plain blob; the payload is a range of it.",
+  "expect": "reject",
+  "name": "neg_tree_mode_range_blob",
+  "path_hex": [
+    "78"
+  ],
+  "reject_reason": "Range payload over a blob under a Tree mode",
+  "selector": "range(offset=0,len=8)",
+  "size": 1515
+}

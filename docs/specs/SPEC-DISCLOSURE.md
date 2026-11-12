@@ -196,7 +196,12 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
    when `steps` is empty &mdash; disclosing the root tree). A verifier
    compares this authenticated path against whatever path string it
    asked for; **it MUST NOT trust a claimed path** carried any other way.
-10. Dispatch on `payload_kind`:
+10. Dispatch on `payload_kind`. For `Chunk` and `Range` the leaf is blob
+    data (a `ChunkedBlob`, or a plain `Blob` for a `Range` with `chunk =
+    None`), so the verifier **MUST** reject the bundle, before it checks
+    anything else in the payload, when the mode of the final step is
+    `Tree` or when there is no step (the root tree). The mode of the final
+    step is `Blob`, `Executable` or `Symlink` in every accepted case.
     - **`Object`**: **MUST** deserialize `bytes` and check its
       content-address (BLAKE3, or the BMT root for a `Tree`/`ChunkedBlob`
       &mdash; SPEC-MERKLE-OBJECTS §2) equals the leaf id. **MUST** then
@@ -326,7 +331,11 @@ after the declared body; `commit_bytes` that decode to a `Tag` (a
 valid, signed object &mdash; just not one with a `tree_hash`); an `Object`
 payload that is a tree under a final step of mode `Blob`
 (`neg_blob_mode_names_tree`); and an `Object` payload that is a blob under
-a final step of mode `Tree` (`neg_tree_mode_names_blob`). Accept
+a final step of mode `Tree` (`neg_tree_mode_names_blob`); a `Chunk` payload
+and a `Range` payload over a chunked blob under a final step of mode `Tree`
+(`neg_tree_mode_chunk_payload`, `neg_tree_mode_range_chunked`); and a
+`Range` payload over a plain blob under a final step of mode `Tree`
+(`neg_tree_mode_range_blob`). Accept
 sidecars record `step_inner_roots_hex` and `chunk_inner_root_hex`.
 
 `rust/crates/kit-core/tests/golden_disclosure.rs` reads only the

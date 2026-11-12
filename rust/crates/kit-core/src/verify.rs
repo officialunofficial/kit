@@ -199,14 +199,17 @@ pub enum VerifyError {
     /// authenticated leaf id.
     #[error("disclosed Object payload's id does not equal the authenticated leaf id")]
     PayloadIdMismatch,
-    /// An `Object` payload decodes to a type that the authenticated final
-    /// step's mode does not allow (a `Tree` mode names a tree; every other
-    /// mode names a blob or a chunked blob).
-    #[error("disclosed Object payload is a {found:?}, which entry mode {mode:?} does not allow")]
+    /// The disclosed leaf has a type that the authenticated final step's
+    /// mode does not allow (a `Tree` mode names a tree; every other mode
+    /// names a blob or a chunked blob). `found` is the decoded type of an
+    /// `Object` payload, or the type that a `Chunk` or `Range` payload
+    /// requires of its leaf: a chunked blob, or a blob for a `Range` over a
+    /// plain blob.
+    #[error("disclosed leaf is a {found:?}, which entry mode {mode:?} does not allow")]
     PayloadTypeMismatch {
         /// The final step's mode (`Tree` for a root-tree disclosure).
         mode: EntryMode,
-        /// The decoded payload's type.
+        /// The type of the leaf.
         found: ObjectType,
     },
     /// A chunk `index` (or a length-proof's `index`) is out of range for
@@ -1223,6 +1226,18 @@ fn leaf_mode(path: &[(Vec<u8>, EntryMode)]) -> EntryMode {
     path.last().map_or(EntryMode::Tree, |(_, mode)| *mode)
 }
 
+/// Reject a leaf of type `found` under a final step of mode `leaf_mode` when
+/// the mode does not name that type.
+fn check_leaf_type(leaf_mode: EntryMode, found: ObjectType) -> Result<(), VerifyError> {
+    if ChildKind::Entry(leaf_mode).mask() & type_bit(found) == 0 {
+        return Err(VerifyError::PayloadTypeMismatch {
+            mode: leaf_mode,
+            found,
+        });
+    }
+    Ok(())
+}
+
 fn compose_payload(
     leaf_id: Hash,
     leaf_mode: EntryMode,
@@ -1231,12 +1246,7 @@ fn compose_payload(
     match payload {
         PayloadWire::Object { bytes } => {
             let found = verify_object_id(&bytes, &leaf_id)?.object_type();
-            if ChildKind::Entry(leaf_mode).mask() & type_bit(found) == 0 {
-                return Err(VerifyError::PayloadTypeMismatch {
-                    mode: leaf_mode,
-                    found,
-                });
-            }
+            check_leaf_type(leaf_mode, found)?;
             Ok(DisclosedPayload::Object { bytes })
         }
         PayloadWire::Chunk {
@@ -1247,6 +1257,7 @@ fn compose_payload(
             proof,
             bytes,
         } => {
+            check_leaf_type(leaf_mode, ObjectType::ChunkedBlob)?;
             let chunk_hash = hash(&bytes);
             verify_chunk_with_declared_root(
                 &leaf_id,
@@ -1271,6 +1282,7 @@ fn compose_payload(
             slice,
             chunk_len_proofs,
         } => {
+            check_leaf_type(leaf_mode, ObjectType::Blob)?;
             if !chunk_len_proofs.is_empty() {
                 return Err(VerifyError::UnexpectedLengthProofs);
             }
@@ -1290,6 +1302,7 @@ fn compose_payload(
             slice,
             chunk_len_proofs,
         } => {
+            check_leaf_type(leaf_mode, ObjectType::ChunkedBlob)?;
             // SPEC-DISCLOSURE §4: `len == 0` is rejected before the
             // wrap/fold checks below, so it wins over e.g. InnerRootMismatch
             // when a bundle is malformed both ways.
@@ -2515,6 +2528,41 @@ mod tests {
                 found: ObjectType::Blob
             })
         ));
+    }
+
+    #[test]
+    fn chunk_and_range_payloads_need_a_file_mode() {
+        let f = build_fixture();
+        let chunked = store_file_object(&f.store, &f.chunked_bytes).unwrap();
+        let blob_id = store_file_object(&f.store, b"a plain file").unwrap();
+        let range = |len| Selector::Range {
+            offset: 0,
+            len,
+            with_offsets: false,
+        };
+        for (target, selector, found) in [
+            (chunked, Selector::Chunk(1), ObjectType::ChunkedBlob),
+            (chunked, range(8), ObjectType::ChunkedBlob),
+            (blob_id, range(4), ObjectType::Blob),
+        ] {
+            // A file mode accepts the same bundle.
+            let ok = commit_with_entry(&f, EntryMode::Executable, target);
+            let bundle = build_disclosure(&f.store, &ok, &[b"x"], selector).unwrap();
+            verify_disclosure(&ok, &bundle).unwrap();
+
+            let bad = commit_with_entry(&f, EntryMode::Tree, target);
+            let bundle = build_disclosure(&f.store, &bad, &[b"x"], selector).unwrap();
+            assert!(
+                matches!(
+                    verify_disclosure(&bad, &bundle),
+                    Err(VerifyError::PayloadTypeMismatch {
+                        mode: EntryMode::Tree,
+                        found: f
+                    }) if f == found
+                ),
+                "{found:?}"
+            );
+        }
     }
 
     #[test]

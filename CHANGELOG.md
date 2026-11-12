@@ -143,6 +143,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The closure verifier now also checks the type of the tree of a commit or a
   remix, which must be a tree, and of the target of a tag, which must have the
   type that the tag records. A mismatch is `corrupt`.
+- Disclosure verification now rejects a `Chunk` or `Range` payload when the
+  final step has mode `Tree`, or when there is no step. Both payloads are blob
+  data, so the final step must name a blob, an executable or a symlink.
 - `kit stash` removed ignored files from the working tree and did not save
   them, so `stash pop` could not bring them back. A stash now removes only
   the paths it saved. It refuses, before it changes anything, when HEAD needs

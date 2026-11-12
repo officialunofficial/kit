@@ -1,0 +1,14 @@
+{
+  "bin": "neg_tree_mode_chunk_payload.bin",
+  "blake3": "03b59c15ab677fa04eb8870d3641dbe8c059e739b78f44e6dee4e01a301e2576",
+  "commit_id_hex": "ce34b9a663383fd915990584b51f0e22771d65294a517d8041c899f9cf4ed736",
+  "description": "The final step has mode Tree but names a chunked blob; the payload is one of its chunks.",
+  "expect": "reject",
+  "name": "neg_tree_mode_chunk_payload",
+  "path_hex": [
+    "78"
+  ],
+  "reject_reason": "Chunk payload under a Tree mode",
+  "selector": "chunk(1)",
+  "size": 19155
+}

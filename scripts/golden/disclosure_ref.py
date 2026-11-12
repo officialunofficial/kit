@@ -18,7 +18,8 @@
 #     varints and no trailing byte;
 #   * verifies the commit id, the commit signature, every tree step, the
 #     payload and any length proofs, in the order of section 4, including the
-#     check that an Object payload has the type that the leaf mode names;
+#     check that an Object payload has the type that the leaf mode names and
+#     that a Chunk or Range payload has a leaf mode that is not Tree;
 #   * compares the result with the `disclosed` summary in the sidecar, or
 #     checks that the bundle is rejected when the sidecar says so.
 #
@@ -365,6 +366,10 @@ def verify_bundle(data, trusted_commit_id):
     result["_bundle"] = b
     result["_content"] = b""
     kind = b["kind"]
+    leaf_mode = path[-1]["mode"] if path else TREE_MODE
+    if kind != 0 and leaf_mode == TREE_MODE:
+        # A Chunk or Range payload is blob data: its leaf is never a tree.
+        raise Reject("blob payload under a Tree mode")
     if kind == 0:
         try:
             oid = c.object_id(b["bytes"])
@@ -373,7 +378,6 @@ def verify_bundle(data, trusted_commit_id):
         if oid != leaf_id:
             raise Reject("payload id differs from the leaf id")
         # A Tree mode names a tree; every other mode names a blob or a chunked blob.
-        leaf_mode = path[-1]["mode"] if path else TREE_MODE
         allowed = (o.TREE,) if leaf_mode == TREE_MODE else (o.BLOB, o.CHUNKED)
         if b["bytes"][0] not in allowed:
             raise Reject("payload type does not match the leaf mode")
