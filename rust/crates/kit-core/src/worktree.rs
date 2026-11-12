@@ -2192,6 +2192,8 @@ mod tests {
     #[test]
     fn a_checkpointed_chunk_is_visible_before_the_commit() {
         let data = pseudo_random(2 * 1024 * 1024, 0xC0DE);
+        let expected = chunked_blob_from_bytes(&data).unwrap();
+        assert!(expected.chunks.len() > 8, "the file has several windows");
         let (_dir, store) = fresh_store();
         let batch = store.batch();
         let h = store_large_file_streaming_windowed(
@@ -2201,12 +2203,13 @@ mod tests {
             4,
         )
         .unwrap();
-        batch.checkpoint().unwrap();
-        let Object::ChunkedBlob(manifest) = store.read_object(&h).unwrap() else {
-            panic!("expected a chunked blob");
-        };
-        assert!(manifest.chunks.iter().all(|c| store.contains(c)));
+        // No explicit checkpoint yet: the full windows are visible, and the
+        // chunks and manifest after the last window are still staged.
+        assert!(store.contains(&expected.chunks[0]));
+        assert!(store.contains(&expected.chunks[3]));
+        assert!(!store.contains(&h));
         batch.commit().unwrap();
+        assert_eq!(read_blob(&store, &h).unwrap(), data);
     }
 
     #[test]

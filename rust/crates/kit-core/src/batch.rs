@@ -51,6 +51,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 
@@ -262,6 +263,10 @@ pub struct WriteBatch<'s> {
     // Every write holds the read side while it stages an object. A
     // checkpoint holds the write side, so it sees no half-staged object.
     gate: RwLock<()>,
+    // Set when a checkpoint fails. The objects it took are gone, so the batch
+    // can no longer promise that a hash it returned is durable. Every later
+    // write, checkpoint and commit fails.
+    failed: AtomicBool,
 }
 
 impl<'s> WriteBatch<'s> {
@@ -272,6 +277,7 @@ impl<'s> WriteBatch<'s> {
             early: EarlyBarriers::new(store.syncer().clone()),
             inner: Mutex::new(BatchState::default()),
             gate: RwLock::new(()),
+            failed: AtomicBool::new(false),
         }
     }
 
@@ -314,6 +320,7 @@ impl<'s> WriteBatch<'s> {
     /// content addressing — never expose this publicly.
     pub(crate) fn write_prehashed(&self, h: Hash, parts: &[&[u8]]) -> StoreResult<Hash> {
         let _gate = self.gate.read().expect("batch gate poisoned");
+        self.check_not_failed()?;
         let final_path = self.store.path_for(&h);
         let shard_dir = final_path
             .parent()
@@ -453,6 +460,25 @@ impl<'s> WriteBatch<'s> {
     /// Panics only if a previous write panicked while holding a batch lock.
     pub fn checkpoint(&self) -> StoreResult<()> {
         let _gate = self.gate.write().expect("batch gate poisoned");
+        self.check_not_failed()?;
+        let result = self.flush_staged();
+        if result.is_err() {
+            self.failed.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn check_not_failed(&self) -> StoreResult<()> {
+        if self.failed.load(Ordering::Relaxed) {
+            return Err(StoreError::Io(io::Error::other(
+                "an earlier checkpoint of this batch failed",
+            )));
+        }
+        Ok(())
+    }
+
+    /// The flush of [`Self::checkpoint`], with the gate held.
+    fn flush_staged(&self) -> StoreResult<()> {
         // Join the background barrier workers first: every barrier
         // they took has completed once this returns. Paths no worker
         // reached (none could be spawned) come back to be barriered
@@ -993,7 +1019,8 @@ mod tests {
                     })
                 })
                 .collect();
-            for _ in 0..10 {
+            // Checkpoint until every writer is done, so the two overlap.
+            while writers.iter().any(|w| !w.is_finished()) {
                 batch.checkpoint().unwrap();
             }
             writers
@@ -1296,6 +1323,25 @@ mod tests {
             "nothing is renamed into place"
         );
         assert_eq!(any_file_count(&store), 0, "temp files are cleaned up");
+    }
+
+    #[test]
+    fn a_failed_checkpoint_fails_the_batch_for_good() {
+        let (_dir, store, rec) = recording_store();
+        let batch = store.batch();
+        let first = batch.write(b"staged before the failure").unwrap();
+        rec.fail_barriers();
+        assert!(batch.checkpoint().is_err());
+        assert!(!store.contains(&first), "nothing becomes visible");
+        // Later calls cannot hide the loss of the objects the failed
+        // checkpoint took.
+        assert!(batch.write(b"staged after the failure").is_err());
+        assert!(batch.checkpoint().is_err());
+        assert!(batch.commit().is_err());
+        assert!(
+            !rec.events().iter().any(|e| matches!(e, Ev::Rename { .. })),
+            "nothing is renamed into place"
+        );
     }
 
     /// Syncer whose barriers block while its gate is closed, so tests can

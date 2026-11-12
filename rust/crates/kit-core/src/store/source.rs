@@ -154,8 +154,20 @@ fn read_chunk_blob(h: &Hash, path: &Path, found: ChunkRef) -> StoreResult<Vec<u8
     let mut bytes = Vec::with_capacity(prologue.len() + len);
     bytes.extend_from_slice(&prologue);
     bytes.resize(prologue.len() + len, 0);
-    file.read_exact(&mut bytes[prologue.len()..])?;
-    check_hash(h, &object_id_from_parts(&[&bytes]))?;
+    file.read_exact(&mut bytes[prologue.len()..])
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::UnexpectedEof => std::io::Error::other(format!(
+                "{} changed while it was being read",
+                path.display()
+            )),
+            _ => e,
+        })?;
+    if check_hash(h, &object_id_from_parts(&[&bytes])).is_err() {
+        return Err(StoreError::Io(std::io::Error::other(format!(
+            "{} changed while it was being read",
+            path.display()
+        ))));
+    }
     Ok(bytes)
 }
 
@@ -549,6 +561,35 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         assert!(crate::worktree::read_blob(&sink, &h).is_err());
+    }
+
+    #[test]
+    fn ephemeral_sink_names_the_file_that_changed() {
+        let (_dir, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        let (path, data) = random_file(&work, "big.bin", 2 * 1024 * 1024, 0xABCD);
+        let sink = EphemeralSink::new(&store);
+        let (h, _) = crate::worktree::hash_file_with_metadata(&sink, &path).unwrap();
+
+        // A truncated file and a file with other bytes both fail the read.
+        std::fs::write(&path, &data[..data.len() / 2]).unwrap();
+        let err = crate::worktree::read_blob(&sink, &h).unwrap_err();
+        assert!(err.to_string().contains("big.bin changed"), "got {err}");
+        let mut other = data;
+        other[0] ^= 1;
+        std::fs::write(&path, &other).unwrap();
+        let err = crate::worktree::read_blob(&sink, &h).unwrap_err();
+        assert!(err.to_string().contains("big.bin changed"), "got {err}");
+
+        // A symlink in place of the file is refused.
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path).unwrap();
+            let target = work.path().join("target.bin");
+            std::fs::write(&target, &other).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(crate::worktree::read_blob(&sink, &h).is_err());
+        }
     }
 
     #[test]

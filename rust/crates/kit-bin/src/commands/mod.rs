@@ -120,12 +120,20 @@ pub(crate) fn stream_blob(
         out: &'a mut W,
         failed: bool,
     }
+    impl<W> Tracked<'_, W> {
+        /// `write_all` retries an interrupted write, so that is no failure.
+        fn note(&mut self, e: &std::io::Error) {
+            if e.kind() != std::io::ErrorKind::Interrupted {
+                self.failed = true;
+            }
+        }
+    }
     impl<W: Write> Write for Tracked<'_, W> {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.out.write(buf).inspect_err(|_| self.failed = true)
+            self.out.write(buf).inspect_err(|e| self.note(e))
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            self.out.flush().inspect_err(|_| self.failed = true)
+            self.out.flush().inspect_err(|e| self.note(e))
         }
     }
     let mut tracked = Tracked { out, failed: false };
