@@ -1274,6 +1274,31 @@ fn check_leaf_type(leaf_mode: EntryMode, found: ObjectType) -> Result<(), Verify
     Ok(())
 }
 
+/// Check a disclosed chunk against its proven layout: `total_size` fits the
+/// chunk count, and in a fixed-size layout the chunk holds the length the
+/// layout requires.
+fn check_disclosed_chunk(
+    total_size: u64,
+    chunk_size: u32,
+    chunk_count: u32,
+    index: u32,
+    bytes: &[u8],
+) -> Result<(), VerifyError> {
+    crate::serialize::check_chunked_total_size(total_size, chunk_size, chunk_count)?;
+    // A chunk is a `Blob`: a 10-byte prologue, then its content.
+    let content_len = bytes
+        .len()
+        .checked_sub(10)
+        .ok_or(VerifyError::Decode(KitError::UnexpectedEof))?;
+    check_fixed_chunk_len(
+        total_size,
+        chunk_size,
+        chunk_count,
+        index,
+        content_len as u64,
+    )
+}
+
 fn compose_payload(
     leaf_id: Hash,
     leaf_mode: EntryMode,
@@ -1305,19 +1330,7 @@ fn compose_payload(
                 &proof,
             )?;
             let chunk_count = proof.leaf_count.saturating_sub(1);
-            crate::serialize::check_chunked_total_size(total_size, chunk_size, chunk_count)?;
-            // A chunk is a `Blob`: a 10-byte prologue, then its content.
-            let content_len = bytes
-                .len()
-                .checked_sub(10)
-                .ok_or(VerifyError::Decode(KitError::UnexpectedEof))?;
-            check_fixed_chunk_len(
-                total_size,
-                chunk_size,
-                chunk_count,
-                index,
-                content_len as u64,
-            )?;
+            check_disclosed_chunk(total_size, chunk_size, chunk_count, index, &bytes)?;
             Ok(DisclosedPayload::Chunk {
                 total_size,
                 chunk_size,

@@ -297,8 +297,8 @@ pub(crate) fn walk(
     let root_set: BTreeSet<Hash> = roots.iter().copied().collect();
     let mut out = Walk::default();
     let mut queue: VecDeque<Hash> = VecDeque::new();
-    // Chunked blobs whose chunk lengths are summed once every chunk is read.
-    let mut manifests: Vec<(Hash, u64, Vec<Hash>)> = Vec::new();
+    // Chunked blobs whose chunk lengths are checked once every chunk is read.
+    let mut manifests: Vec<(Hash, u64, u32, Vec<Hash>)> = Vec::new();
     for root in roots {
         reach(&mut out, &mut queue, *root, ChildKind::Any)?;
     }
@@ -370,7 +370,7 @@ pub(crate) fn walk(
         let child_ids = typed_children(&object, mode);
         if let Object::ChunkedBlob(manifest) = &object {
             let chunks = child_ids.iter().map(|(chunk, _)| *chunk).collect();
-            manifests.push((id, manifest.total_size, chunks));
+            manifests.push((id, manifest.total_size, manifest.chunk_size, chunks));
         }
         out.verified += 1;
         drop(object);
@@ -430,21 +430,43 @@ fn reach(
 }
 
 /// Report each chunked blob whose chunk lengths do not add up to its
-/// `total_size`. A manifest with a chunk that was not read as a blob is
-/// skipped: that chunk is already missing, corrupt or a frontier stop.
-fn check_chunk_lengths(out: &mut Walk, manifests: Vec<(Hash, u64, Vec<Hash>)>) {
-    for (id, total_size, chunks) in manifests {
-        // At most 1,000,000 chunks of at most `u64::MAX` bytes fit a `u128`.
+/// `total_size`, or, in a fixed-size layout, whose chunk does not hold the
+/// length the layout requires (SPEC-OBJECTS §7). A manifest with a chunk
+/// that was not read as a blob is skipped: that chunk is already missing,
+/// corrupt or a frontier stop.
+fn check_chunk_lengths(out: &mut Walk, manifests: Vec<(Hash, u64, u32, Vec<Hash>)>) {
+    for (id, total_size, chunk_size, chunks) in manifests {
+        // The chunk count fits a `u32`, so a sum of `u64` lengths fits a `u128`.
+        let count = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
         let mut sum = 0u128;
         let mut known_lens = true;
-        for chunk in &chunks {
+        let mut wrong_fixed = None;
+        for (index, chunk) in (0u32..).zip(&chunks) {
             let Some(len) = out.visited.get(chunk).and_then(|r| r.blob_len) else {
                 known_lens = false;
                 break;
             };
+            if wrong_fixed.is_none()
+                && let Some(expected) = crate::object::ChunkedBlob::fixed_chunk_len(
+                    total_size, chunk_size, count, index,
+                )
+                && expected != len
+            {
+                wrong_fixed = Some((index, len, expected));
+            }
             sum += u128::from(len);
         }
-        if known_lens && sum != u128::from(total_size) {
+        if !known_lens {
+            continue;
+        }
+        if let Some((index, len, expected)) = wrong_fixed {
+            out.corrupt.push((
+                id,
+                format!(
+                    "chunk {index} holds {len} bytes, but its fixed-size layout requires {expected}"
+                ),
+            ));
+        } else if sum != u128::from(total_size) {
             out.corrupt.push((
                 id,
                 format!("chunk lengths do not add up to total_size {total_size}"),

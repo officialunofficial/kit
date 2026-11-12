@@ -133,7 +133,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checkout. A tree entry of mode `Tree` must name a tree. An entry of mode
   `Blob`, `Executable` or `Symlink` must name a blob or a chunked blob. A
   chunk must name a blob. The chunk lengths of a chunked blob must add up to
-  its `total_size`. A mismatch is `corrupt`. Before, a set with such objects
+  its `total_size`, and in a fixed-size layout each chunk must hold the
+  length the layout requires. A mismatch is `corrupt`. Before, a set with such objects
   was complete. Bytes that decode to no object are now `unreferenced`
   instead of `corrupt`, so an extra object that does not decode no longer
   makes a map-based or pack-based verdict incomplete.

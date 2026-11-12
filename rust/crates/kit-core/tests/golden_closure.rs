@@ -556,6 +556,11 @@ fn build_vectors() -> Vec<Vector> {
         };
         let (names_tree_id, names_tree_bytes) = chunked(&[inner_id]);
         let (sum_id, sum_bytes) = chunked(&[five_id, seven_id]);
+        let (fixed_id, fixed_bytes) = object_bytes(Object::ChunkedBlob(ChunkedBlob {
+            total_size: 12,
+            chunk_size: 6,
+            chunks: vec![five_id, seven_id],
+        }));
         for (name, description, mode, target, objects) in [
             (
                 "neg_tree_mode_names_blob",
@@ -579,6 +584,13 @@ fn build_vectors() -> Vec<Vector> {
                 vec![names_tree_bytes, inner_bytes.clone(), blob_bytes.clone()],
             ),
             (
+                "neg_fixed_chunk_length",
+                "A ChunkedBlob of chunk_size 6 and total_size 12 whose chunks hold 5 and 7 bytes.",
+                EntryMode::Blob,
+                fixed_id,
+                vec![fixed_bytes, five_bytes.clone(), seven_bytes.clone()],
+            ),
+            (
                 "neg_chunk_length_sum",
                 "The chunk lengths of a ChunkedBlob add up to 12, but its total_size is 13.",
                 EntryMode::Blob,
@@ -598,6 +610,31 @@ fn build_vectors() -> Vec<Vector> {
             objects.extend([commit_bytes, tree_bytes]);
             v.push(corrupt_vector(name, description, root, &objects));
         }
+
+        // Two entries name one absent object, as a tree and as a file. The
+        // edges conflict, so the id is corrupt as well as missing.
+        let absent = hash(b"an object no pack supplies");
+        let (tree_id, tree_bytes) = object_bytes(Object::Tree(Tree {
+            entries: vec![
+                TreeEntry {
+                    name: b"a".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: absent,
+                },
+                TreeEntry {
+                    name: b"b".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: absent,
+                },
+            ],
+        }));
+        let (root, commit_bytes) = signed_commit(tree_id);
+        v.push(corrupt_vector(
+            "neg_conflicting_edges_to_missing",
+            "Two tree entries name one absent object, one as a tree and one as a file.",
+            root,
+            &[commit_bytes, tree_bytes],
+        ));
 
         // A commit, a remix and a tag whose tree or target has the wrong type.
         let (remix_id, remix_bytes) = {

@@ -470,13 +470,18 @@ entry point directly and ignore the manifest.
    type is not allowed by a reference to it (§7.1) is `corrupt` under its
    id, and the verifier does not descend into it. An id that two references
    require to have types that no object has (for example a `Tree` entry and
-   a `Blob` entry naming one id) is `corrupt`.
+   a `Blob` entry naming one id) is `corrupt`, even when it is also
+   `missing`.
 10. The chunk lengths of a `ChunkedBlob` MUST add up to its `total_size`.
     The length of a chunk is the length of its `Blob` data. When every
     chunk was read, the sum is checked, with a chunk listed twice counted
     twice; a `ChunkedBlob` whose sum differs is `corrupt` under its id.
-    A `ChunkedBlob` with a chunk that is missing or not read is already
-    incomplete, and its sum is not checked.
+    In a fixed-size layout each chunk MUST also hold the length
+    SPEC-OBJECTS §7 requires: exactly `chunk_size` bytes, except the last,
+    which holds the rest of `total_size`. A `ChunkedBlob` with a chunk of
+    another length is `corrupt` under its id. A `ChunkedBlob` with a chunk
+    that is missing or not read is already incomplete, and its lengths are
+    not checked.
 
 ### 7.5 Bounds
 
@@ -510,7 +515,10 @@ flipped, so the referenced id is `missing` and the damaged bytes are
 blob (`neg_commit_tree_names_blob`, `neg_remix_tree_names_blob`); a tag
 that records `target_type` `Commit` but names a tree (`neg_tag_target_type`);
 chunk lengths that add up to 12 for a `total_size` of 13
-(`neg_chunk_length_sum`); unreferenced extra (still
+(`neg_chunk_length_sum`); a fixed-size layout of `chunk_size` 6 whose chunks
+hold 5 and 7 bytes (`neg_fixed_chunk_length`); a `Tree` entry and a `Blob`
+entry that name one absent id (`neg_conflicting_edges_to_missing`);
+unreferenced extra (still
 complete); `unreferenced_undecodable_extra`, bytes that decode to no object
 (unreferenced, still complete); a delta entry; a compressed entry; a manifest
 pack-hash mismatch; the wrong root id; a manifest whose `root` differs
