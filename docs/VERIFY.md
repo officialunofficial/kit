@@ -342,7 +342,10 @@ to be proven separately when wanted. A **length proof**
 (`chunk_len_proofs`, `--with-offsets` on the CLI) is a tiny Bao slice over
 just the canonical prologue (bytes `0..10`, at Bao offset `0`, not `+10`)
 of one preceding chunk, authenticating its `le32` content-length field
-without disclosing any of its actual content.
+without disclosing any of its actual content. A fixed-size layout needs no
+length proofs: chunk `index` starts at `index * chunk_size`, so the verifier
+derives `absolute_offset` itself and a builder emits none. Length proofs
+matter for content-defined layouts, where each costs about 1.5 KB.
 
 The set is all-or-nothing by design: `chunk_len_proofs` is either empty
 (no absolute offset requested/available, `absolute_offset: None`) or

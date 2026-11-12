@@ -236,7 +236,13 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
       silently ignored; `absolute_offset` is then
       `Some(offset_in_blob)` (already absolute). Otherwise, if
       `chunk_len_proofs` is empty, `absolute_offset` is `None` (not
-      requested). Otherwise, `chunk_len_proofs` **MUST** cover exactly
+      requested) for a content-defined layout (`chunk_size` `0` or
+      `0x8000_0002`, SPEC-OBJECTS §7). For a fixed-size layout the
+      verifier derives it: `absolute_offset` is
+      `Some(index * chunk_size + offset_in_blob)`, because SPEC-OBJECTS §7
+      places chunk `index` at `index * chunk_size` and the metadata leaf
+      authenticates `chunk_size`. A builder emits no length proofs for a
+      fixed-size layout. Otherwise, `chunk_len_proofs` **MUST** cover exactly
       the index set `0..hdr.index`, with no gaps and no duplicates &mdash; an
       incomplete or malformed set **MUST** be rejected as a typed error,
       **never** silently treated as "absent". When it does cover
