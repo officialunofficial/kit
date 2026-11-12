@@ -176,7 +176,7 @@ pub use refs::{
 pub use repo_lock::{DEFAULT_TIMEOUT as LOCK_DEFAULT_TIMEOUT, LockError, LockResult, RepoLock};
 pub use worktree::{
     CHUNK_THRESHOLD, LoadedBlob, MAX_FILE_BYTES, WorktreeError, WorktreeResult, read_blob,
-    store_file_object, validate_symlink_target,
+    store_file_object, validate_symlink_target, write_blob,
 };
 
 // Cross-transport types. The SSH-specific wire bytes live in

@@ -1882,6 +1882,72 @@ mod tests {
         assert_eq!(observations[0].object_hash, chunked);
     }
 
+    /// Bytes for a file of many chunks.
+    fn many_chunk_bytes(len: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                (state >> 56) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn status_of_a_file_of_many_chunks() {
+        let (_d, s) = fresh_store();
+        let work = fresh_workdir();
+        let data = many_chunk_bytes(3 << 20, 0x57A7);
+        let stored = crate::worktree::store_file_object(&s, &data).unwrap();
+        let old = put_tree(&s, vec![entry(b"big.bin", EntryMode::Blob, stored)]);
+        let idx = crate::index::from_tree(&s, old).unwrap();
+        let stored_objects = s.iter_object_hashes().unwrap().len();
+
+        std::fs::write(work.path().join("big.bin"), &data).unwrap();
+        let (status, _) = status_diff_observed(&s, Some(&old), work.path(), Some(&idx)).unwrap();
+        assert!(status.is_empty(), "an unchanged file is clean");
+
+        let mut edited = data;
+        edited[1 << 20] ^= 0xFF;
+        std::fs::write(work.path().join("big.bin"), &edited).unwrap();
+        let (status, _) = status_diff_observed(&s, Some(&old), work.path(), Some(&idx)).unwrap();
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].diff.kind, DiffKind::Modified);
+        assert_eq!(status[0].diff.path, "big.bin");
+        assert_eq!(
+            s.iter_object_hashes().unwrap().len(),
+            stored_objects,
+            "status writes no object to the store"
+        );
+    }
+
+    #[test]
+    fn status_reads_a_changed_chunk_back_from_the_file_to_compare_layouts() {
+        let (_d, s) = fresh_store();
+        let work = fresh_workdir();
+        let data = many_chunk_bytes(3 << 20, 0x1A70);
+        // The same bytes stored in a fixed layout of 1 MiB chunks: a different
+        // id from the content-defined manifest the worktree file hashes to.
+        let chunks: Vec<Hash> = data.chunks(1 << 20).map(|c| put_blob(&s, c)).collect();
+        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: data.len() as u64,
+            chunk_size: 1 << 20,
+            chunks,
+        });
+        let fixed = s.write(&serialize::serialize(&manifest).unwrap()).unwrap();
+        let old = put_tree(&s, vec![entry(b"big.bin", EntryMode::Blob, fixed)]);
+        let idx = crate::index::from_tree(&s, old).unwrap();
+
+        std::fs::write(work.path().join("big.bin"), &data).unwrap();
+        let (status, _) = status_diff_observed(&s, Some(&old), work.path(), Some(&idx)).unwrap();
+        assert!(
+            status.is_empty(),
+            "equal content in another layout is clean"
+        );
+    }
+
     #[test]
     fn identical_trees_no_diff() {
         let (_d, s) = fresh_store();

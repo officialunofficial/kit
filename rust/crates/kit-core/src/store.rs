@@ -59,6 +59,16 @@ pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
 pub use source::{DisplaySource, EphemeralSink, ObjectSource};
 
+/// Where a chunk's bytes sit in a worktree file, so a sink that keeps no
+/// copy of them can read them back.
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkOrigin<'a> {
+    /// The file the chunk was cut from.
+    pub path: &'a Path,
+    /// The offset of the chunk's first byte in that file.
+    pub offset: u64,
+}
+
 /// Top-level repository directory name.
 pub const KIT_DIR: &str = ".kit";
 /// Subdirectory under `.kit/` that holds raw object files.
@@ -892,6 +902,18 @@ pub trait ObjectSink {
     fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash>;
     /// True when the object is already present (or staged) in this sink.
     fn has(&self, h: &Hash) -> bool;
+    /// Store one chunk blob, the concatenation of `parts`, that was cut from
+    /// `origin`. A sink may keep the origin in place of the bytes and read the
+    /// chunk back from the file. The default stores the bytes.
+    fn put_chunk_parts(&self, parts: &[&[u8]], _origin: ChunkOrigin<'_>) -> StoreResult<Hash> {
+        self.put_parts(parts)
+    }
+    /// Make the objects stored so far durable and visible, so a writer of many
+    /// objects keeps its staged set bounded. The default does nothing, for a
+    /// sink that is durable or keeps no state per object.
+    fn checkpoint(&self) -> StoreResult<()> {
+        Ok(())
+    }
 }
 
 impl ObjectSink for ObjectStore {

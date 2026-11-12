@@ -37,6 +37,20 @@ pub fn read_blob<S: crate::store::ObjectSource + ?Sized>(
     LoadedBlob::load(store, hash)?.into_content(store)
 }
 
+/// [`read_blob`] for a blob too large to hold: write the content of the
+/// `Blob` or `ChunkedBlob` at `hash` to `out`, one chunk at a time.
+///
+/// # Errors
+/// As [`LoadedBlob::write_content`], and as [`read_blob`] for a missing or
+/// wrong-type object.
+pub fn write_blob<S: crate::store::ObjectSource + ?Sized, W: io::Write>(
+    store: &S,
+    hash: &Hash,
+    out: &mut W,
+) -> WorktreeResult<()> {
+    LoadedBlob::load(store, hash)?.write_content(store, out)
+}
+
 /// A blob's top-level object, read from the store exactly once and held so
 /// a caller needing several views of the same blob — byte length, bounded
 /// prefix, full content — pays a single top-level `read_object` instead of
@@ -155,24 +169,54 @@ impl LoadedBlob {
     ) -> WorktreeResult<Vec<u8>> {
         match self {
             Self::Inline(data) => Ok(data),
-            Self::Chunked(manifest) => {
+            chunked @ Self::Chunked(_) => {
                 let mut data = Vec::new();
+                chunked.write_content(store, &mut data)?;
+                Ok(data)
+            }
+        }
+    }
+
+    /// Write the full content to `out`, one chunk at a time. Memory is one
+    /// chunk, whatever the blob's size, so this is the reader for a blob that
+    /// is too large to hold. The length is enforced against the manifest's
+    /// `total_size` as for [`Self::into_content`]; a failure can come after
+    /// `out` has received a prefix of the content.
+    ///
+    /// # Errors
+    /// As [`Self::into_content`], plus [`WorktreeError::Io`] if `out` fails.
+    pub fn write_content<S: crate::store::ObjectSource + ?Sized, W: io::Write>(
+        &self,
+        store: &S,
+        out: &mut W,
+    ) -> WorktreeResult<()> {
+        match self {
+            Self::Inline(data) => Ok(out.write_all(data)?),
+            Self::Chunked(manifest) => {
+                let mut written: u64 = 0;
                 for chunk in &manifest.chunks {
                     let part = read_chunk(store, chunk)?;
                     // Stop at the first chunk that passes `total_size`, so a
-                    // manifest that repeats one chunk cannot grow `data`.
-                    let next = data.len() as u64 + part.len() as u64;
-                    if next > manifest.total_size {
+                    // manifest that repeats one chunk cannot write without
+                    // end.
+                    written = written.saturating_add(part.len() as u64);
+                    if written > manifest.total_size {
                         return Err(crate::object::KitError::ChunkedBlobSizeMismatch {
                             expected: manifest.total_size,
-                            actual: next,
+                            actual: written,
                         }
                         .into());
                     }
-                    data.extend_from_slice(&part);
+                    out.write_all(&part)?;
                 }
-                manifest.check_reassembled_size(data.len())?;
-                Ok(data)
+                if written != manifest.total_size {
+                    return Err(crate::object::KitError::ChunkedBlobSizeMismatch {
+                        expected: manifest.total_size,
+                        actual: written,
+                    }
+                    .into());
+                }
+                Ok(())
             }
         }
     }
@@ -499,6 +543,40 @@ pub fn content_eq_bytes<S: crate::store::ObjectSource + ?Sized>(
     }
 }
 
+/// Compare stored content to the rest of `reader`, one stored chunk at a time.
+/// Memory is one chunk, whatever the content's size. The read stops at the
+/// first difference.
+///
+/// # Errors
+/// Propagates errors from reading the stored content or `reader`.
+pub fn content_eq_reader<S: crate::store::ObjectSource + ?Sized, R: io::Read>(
+    store: &S,
+    object: &Hash,
+    reader: &mut R,
+) -> Result<bool, crate::store::StoreError> {
+    let mut cursor = ContentCursor::load(store, object)?;
+    let mut scratch = Vec::new();
+    loop {
+        let chunk = cursor.remaining(store)?;
+        if chunk.is_empty() {
+            // The stored content ended: the reader must end too.
+            let mut probe = [0u8; 1];
+            return Ok(reader.read(&mut probe)? == 0);
+        }
+        scratch.resize(chunk.len(), 0);
+        match reader.read_exact(&mut scratch) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+            Err(e) => return Err(e.into()),
+        }
+        if scratch != chunk {
+            return Ok(false);
+        }
+        let len = chunk.len();
+        cursor.offset += len;
+    }
+}
+
 struct ContentCursor {
     data: Vec<u8>,
     offset: usize,
@@ -710,6 +788,170 @@ mod equality_tests {
         );
         assert!(
             source.reads.get() <= 3,
+            "read {} chunks",
+            source.reads.get()
+        );
+    }
+
+    /// A writer that records the size of each write.
+    #[derive(Default)]
+    struct SizedWrites {
+        bytes: Vec<u8>,
+        writes: Vec<usize>,
+    }
+
+    impl io::Write for SizedWrites {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            self.writes.push(buf.len());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_content_streams_one_chunk_per_write() {
+        let (_dir, store) = fresh_store();
+        let parts: [&[u8]; 3] = [&[1; 300], &[2; 200], &[3; 100]];
+        let h = put(&store, &Object::ChunkedBlob(manifest(&store, &parts)));
+        let mut out = SizedWrites::default();
+        write_blob(&store, &h, &mut out).unwrap();
+        assert_eq!(out.writes, vec![300, 200, 100], "no write holds the file");
+        assert_eq!(out.bytes, read_blob(&store, &h).unwrap());
+
+        let inline = chunk(&store, b"inline bytes");
+        let mut out = SizedWrites::default();
+        write_blob(&store, &inline, &mut out).unwrap();
+        assert_eq!(out.bytes, b"inline bytes");
+    }
+
+    #[test]
+    fn write_content_rejects_a_short_total_size() {
+        let (_dir, store) = fresh_store();
+        let a = chunk(&store, &[1; 100]);
+        let bad = |total_size| ChunkedBlob {
+            total_size,
+            chunk_size: 0,
+            chunks: vec![a, a],
+        };
+        for total_size in [150, 250] {
+            let mut out = SizedWrites::default();
+            let err = LoadedBlob::Chunked(bad(total_size))
+                .write_content(&store, &mut out)
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    WorktreeError::Object(crate::object::KitError::ChunkedBlobSizeMismatch { .. })
+                ),
+                "got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_content_reports_a_failed_writer() {
+        struct Broken;
+        impl io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (_dir, store) = fresh_store();
+        let h = put(
+            &store,
+            &Object::ChunkedBlob(manifest(&store, &[&[1; 10], &[2; 10]])),
+        );
+        let err = write_blob(&store, &h, &mut Broken).unwrap_err();
+        assert!(matches!(err, WorktreeError::Io(_)), "got {err:?}");
+    }
+
+    /// A reader that returns one byte per read.
+    struct OneByte<'a>(&'a [u8]);
+
+    impl io::Read for OneByte<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.0.len().min(1).min(buf.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn content_eq_reader_compares_without_reassembling() {
+        let (_dir, store) = fresh_store();
+        let parts: [&[u8]; 3] = [&[1; 300], &[2; 200], &[3; 100]];
+        let stored = put(&store, &Object::ChunkedBlob(manifest(&store, &parts)));
+        let whole: Vec<u8> = parts.concat();
+        let eq = |bytes: &[u8]| content_eq_reader(&store, &stored, &mut io::Cursor::new(bytes));
+
+        assert!(eq(&whole).unwrap());
+        // A reader that splits its reads differently from the chunks.
+        assert!(content_eq_reader(&store, &stored, &mut OneByte(&whole)).unwrap());
+
+        let mut last = whole.clone();
+        *last.last_mut().unwrap() ^= 1;
+        assert!(!eq(&last).unwrap(), "a changed last byte differs");
+        let mut first = whole.clone();
+        first[0] ^= 1;
+        assert!(!eq(&first).unwrap(), "a changed first byte differs");
+        assert!(!eq(&whole[..whole.len() - 1]).unwrap(), "a short reader");
+        assert!(
+            !eq(&[whole.clone(), vec![0]].concat()).unwrap(),
+            "a long reader"
+        );
+        assert!(!eq(&[]).unwrap());
+
+        let inline = chunk(&store, b"abc");
+        assert!(content_eq_reader(&store, &inline, &mut io::Cursor::new(b"abc")).unwrap());
+        assert!(!content_eq_reader(&store, &inline, &mut io::Cursor::new(b"abd")).unwrap());
+    }
+
+    #[test]
+    fn content_eq_reader_reports_a_failed_read() {
+        struct Failing;
+        impl io::Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("disk gone"))
+            }
+        }
+        let (_dir, store) = fresh_store();
+        let stored = put(
+            &store,
+            &Object::ChunkedBlob(manifest(&store, &[&[1; 10], &[2; 10]])),
+        );
+        let err = content_eq_reader(&store, &stored, &mut Failing).unwrap_err();
+        assert!(err.to_string().contains("disk gone"), "got {err}");
+    }
+
+    #[test]
+    fn content_eq_reader_stops_at_the_first_difference() {
+        let (_dir, store) = fresh_store();
+        let a = chunk(&store, &[1; 100]);
+        let stored = put(
+            &store,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 100 * 1000,
+                chunk_size: 0,
+                chunks: vec![a; 1000],
+            }),
+        );
+        let source = CountingSource {
+            store: &store,
+            reads: std::cell::Cell::new(0),
+        };
+        let mut other = vec![1u8; 100 * 1000];
+        other[150] = 9;
+        assert!(!content_eq_reader(&source, &stored, &mut io::Cursor::new(other)).unwrap());
+        assert!(
+            source.reads.get() <= 4,
             "read {} chunks",
             source.reads.get()
         );

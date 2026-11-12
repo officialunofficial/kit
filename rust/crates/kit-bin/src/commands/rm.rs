@@ -170,15 +170,8 @@ fn dirty_reason(root: &Path, store: &ObjectStore, entry: &IndexEntry) -> Option<
         let target_str = target.to_str()?;
         symlink_blob_hash(target_str)?
     } else if meta.file_type().is_file() {
-        let clean = worktree::read_regular_file_bounded(&abs)
-            .ok()
-            .and_then(|(opened, data)| {
-                if super::file_exec_status(&opened) != entry.status {
-                    return Some(false);
-                }
-                worktree::content_eq_bytes(store, &entry.object_hash, &data).ok()
-            })
-            .unwrap_or(false);
+        let clean = worktree::file_content_eq(store, &entry.object_hash, &abs)
+            .is_ok_and(|(opened, equal)| equal && super::file_exec_status(&opened) == entry.status);
         return if clean {
             None
         } else {

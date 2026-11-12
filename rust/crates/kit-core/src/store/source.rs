@@ -7,11 +7,18 @@
 //! consumers of the store's read API, distinct from its on-disk write/fsync
 //! machinery.
 
+use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
 use crate::hash::Hash;
 use crate::object::{Object, object_id_from_parts};
 use crate::serialize;
 
-use super::{MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, StoreError, StoreResult};
+use super::{
+    ChunkOrigin, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, StoreError, StoreResult, check_hash,
+};
 
 /// Read source shared by [`ObjectStore`] and snapshot overlays, so
 /// tree-diff code can resolve objects from either the durable store or
@@ -84,10 +91,34 @@ impl ObjectSource for ObjectStore {
 ///
 /// Reads fall through to the underlying store, so diff walkers can
 /// resolve a snapshot tree that references committed objects.
+///
+/// A chunk blob cut from a worktree file is not copied. The overlay keeps the
+/// file path, the offset and the length of the chunk, about 64 bytes, and reads
+/// the chunk back from the file when asked. The read checks the chunk's id, so
+/// a file that changed since the snapshot fails the read and never returns
+/// other bytes. A snapshot of a file of many chunks then costs memory in
+/// proportion to its chunk count and not to its size.
 #[derive(Debug)]
 pub struct EphemeralSink<'s> {
     store: &'s ObjectStore,
-    objects: std::sync::Mutex<std::collections::HashMap<Hash, Vec<u8>>>,
+    objects: Mutex<HashMap<Hash, Vec<u8>>>,
+    chunks: Mutex<ChunkRefs>,
+}
+
+/// Chunk blobs the overlay reads back from worktree files.
+#[derive(Debug, Default)]
+struct ChunkRefs {
+    /// Each distinct file path once, so a chunk entry holds an index.
+    paths: Vec<PathBuf>,
+    path_index: HashMap<PathBuf, u32>,
+    by_id: HashMap<Hash, ChunkRef>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChunkRef {
+    path: u32,
+    offset: u64,
+    len: u32,
 }
 
 impl<'s> EphemeralSink<'s> {
@@ -96,9 +127,48 @@ impl<'s> EphemeralSink<'s> {
     pub fn new(store: &'s ObjectStore) -> Self {
         Self {
             store,
-            objects: std::sync::Mutex::new(std::collections::HashMap::new()),
+            objects: Mutex::new(HashMap::new()),
+            chunks: Mutex::new(ChunkRefs::default()),
         }
     }
+
+    /// Read a chunk blob back from the file it was cut from. `None` when the
+    /// overlay holds no such chunk.
+    fn read_chunk(&self, h: &Hash) -> Option<StoreResult<Vec<u8>>> {
+        let (path, found) = {
+            let chunks = self.chunks.lock().expect("ephemeral sink chunk mutex");
+            let found = *chunks.by_id.get(h)?;
+            (chunks.paths[found.path as usize].clone(), found)
+        };
+        Some(read_chunk_blob(h, &path, found))
+    }
+}
+
+/// The canonical bytes of the chunk blob `found` in `path`, checked against
+/// `h`.
+fn read_chunk_blob(h: &Hash, path: &Path, found: ChunkRef) -> StoreResult<Vec<u8>> {
+    let len = found.len as usize;
+    let prologue = serialize::blob_prologue(len)?;
+    let mut file = crate::worktree::open_regular_file(path)?;
+    file.seek(SeekFrom::Start(found.offset))?;
+    let mut bytes = Vec::with_capacity(prologue.len() + len);
+    bytes.extend_from_slice(&prologue);
+    bytes.resize(prologue.len() + len, 0);
+    file.read_exact(&mut bytes[prologue.len()..])
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::UnexpectedEof => std::io::Error::other(format!(
+                "{} changed while it was being read",
+                path.display()
+            )),
+            _ => e,
+        })?;
+    if check_hash(h, &object_id_from_parts(&[&bytes])).is_err() {
+        return Err(StoreError::Io(std::io::Error::other(format!(
+            "{} changed while it was being read",
+            path.display()
+        ))));
+    }
+    Ok(bytes)
 }
 
 impl ObjectSink for EphemeralSink<'_> {
@@ -143,7 +213,58 @@ impl ObjectSink for EphemeralSink<'_> {
             .lock()
             .expect("ephemeral sink mutex")
             .contains_key(h)
+            || self
+                .chunks
+                .lock()
+                .expect("ephemeral sink chunk mutex")
+                .by_id
+                .contains_key(h)
             || self.store.contains(h)
+    }
+
+    /// Keeps the origin of a chunk of a worktree file and no copy of its
+    /// bytes. `parts` is the blob prologue and then the chunk.
+    fn put_chunk_parts(&self, parts: &[&[u8]], origin: ChunkOrigin<'_>) -> StoreResult<Hash> {
+        let &[_, chunk] = parts else {
+            return self.put_parts(parts);
+        };
+        let len = u32::try_from(chunk.len()).map_err(|_| StoreError::ObjectTooLarge)?;
+        let h = object_id_from_parts(parts);
+        if self.store.contains(&h)
+            || self
+                .objects
+                .lock()
+                .expect("ephemeral sink mutex")
+                .contains_key(&h)
+        {
+            return Ok(h);
+        }
+        let mut chunks = self.chunks.lock().expect("ephemeral sink chunk mutex");
+        let ChunkRefs {
+            paths,
+            path_index,
+            by_id,
+        } = &mut *chunks;
+        if by_id.contains_key(&h) {
+            return Ok(h);
+        }
+        let path = if let Some(&i) = path_index.get(origin.path) {
+            i
+        } else {
+            let i = u32::try_from(paths.len()).map_err(|_| StoreError::ObjectTooLarge)?;
+            paths.push(origin.path.to_path_buf());
+            path_index.insert(origin.path.to_path_buf(), i);
+            i
+        };
+        by_id.insert(
+            h,
+            ChunkRef {
+                path,
+                offset: origin.offset,
+                len,
+            },
+        );
+        Ok(h)
     }
 }
 
@@ -164,8 +285,11 @@ impl EphemeralSink<'_> {
 
 impl ObjectSource for EphemeralSink<'_> {
     fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        match self.overlay_get(h) {
-            Some(bytes) => Ok(bytes),
+        if let Some(bytes) = self.overlay_get(h) {
+            return Ok(bytes);
+        }
+        match self.read_chunk(h) {
+            Some(read) => read,
             None => self.store.read(h),
         }
     }
@@ -180,8 +304,11 @@ impl ObjectSource for EphemeralSink<'_> {
     /// store-side decode instead — `diff`/`status`, which resolve staged
     /// trees through this overlay, are the paths this matters for.
     fn read_object(&self, h: &Hash) -> StoreResult<Object> {
-        match self.overlay_get(h) {
-            Some(bytes) => Ok(serialize::deserialize(&bytes)?),
+        if let Some(bytes) = self.overlay_get(h) {
+            return Ok(serialize::deserialize(&bytes)?);
+        }
+        match self.read_chunk(h) {
+            Some(read) => Ok(serialize::deserialize(&read?)?),
             None => self.store.read_object(h),
         }
     }
@@ -190,8 +317,11 @@ impl ObjectSource for EphemeralSink<'_> {
         // Private-map hits are already trusted, same as the verifying
         // `read` path above. Only the store fall-through actually skips a
         // hash check.
-        match self.overlay_get(h) {
-            Some(bytes) => Ok(bytes),
+        if let Some(bytes) = self.overlay_get(h) {
+            return Ok(bytes);
+        }
+        match self.read_chunk(h) {
+            Some(read) => read,
             None => self.store.read_unverified(h),
         }
     }
@@ -365,6 +495,116 @@ mod tests {
         let mut corrupted = durable_bytes.clone();
         corrupted[0] ^= 0xFF;
         assert_eq!(display.read(&durable_h).unwrap(), corrupted);
+    }
+
+    fn random_file(dir: &TempDir, name: &str, len: usize, seed: u64) -> (PathBuf, Vec<u8>) {
+        let mut state = seed;
+        let data: Vec<u8> = (0..len)
+            .map(|_| {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                ((z ^ (z >> 31)) & 0xFF) as u8
+            })
+            .collect();
+        let path = dir.path().join(name);
+        std::fs::write(&path, &data).unwrap();
+        (path, data)
+    }
+
+    #[test]
+    fn ephemeral_sink_keeps_the_origin_of_a_chunk_and_not_its_bytes() {
+        let (_dir, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        let (path, data) = random_file(&work, "big.bin", 4 * 1024 * 1024, 0xFEED);
+
+        let sink = EphemeralSink::new(&store);
+        let (h, _) = crate::worktree::hash_file_with_metadata(&sink, &path).unwrap();
+
+        let Object::ChunkedBlob(manifest) = sink.read_object(&h).unwrap() else {
+            panic!("expected a chunked blob");
+        };
+        assert!(manifest.chunks.len() > 32);
+        // The overlay holds the manifest as bytes and every chunk as an origin.
+        assert_eq!(sink.objects.lock().unwrap().len(), 1);
+        assert_eq!(
+            sink.chunks.lock().unwrap().by_id.len(),
+            manifest.chunks.len()
+        );
+        assert!(!sink.has(&crate::hash::hash(b"no such object")));
+        for chunk in &manifest.chunks {
+            assert!(sink.has(chunk));
+            assert!(!store.contains(chunk), "nothing reaches the store");
+        }
+        // The snapshot still reads back whole, and the id matches a stored copy.
+        assert_eq!(crate::worktree::read_blob(&sink, &h).unwrap(), data);
+        assert_eq!(
+            crate::worktree::store_file_object(&store, &data).unwrap(),
+            h
+        );
+    }
+
+    #[test]
+    fn ephemeral_sink_refuses_a_chunk_whose_file_changed() {
+        let (_dir, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        let (path, mut data) = random_file(&work, "big.bin", 2 * 1024 * 1024, 0xBEEF);
+
+        let sink = EphemeralSink::new(&store);
+        let (h, _) = crate::worktree::hash_file_with_metadata(&sink, &path).unwrap();
+        data[1024 * 1024] ^= 0xFF;
+        std::fs::write(&path, &data).unwrap();
+        assert!(
+            crate::worktree::read_blob(&sink, &h).is_err(),
+            "a changed file never yields other bytes"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(crate::worktree::read_blob(&sink, &h).is_err());
+    }
+
+    #[test]
+    fn ephemeral_sink_names_the_file_that_changed() {
+        let (_dir, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        let (path, data) = random_file(&work, "big.bin", 2 * 1024 * 1024, 0xABCD);
+        let sink = EphemeralSink::new(&store);
+        let (h, _) = crate::worktree::hash_file_with_metadata(&sink, &path).unwrap();
+
+        // A truncated file and a file with other bytes both fail the read.
+        std::fs::write(&path, &data[..data.len() / 2]).unwrap();
+        let err = crate::worktree::read_blob(&sink, &h).unwrap_err();
+        assert!(err.to_string().contains("big.bin changed"), "got {err}");
+        let mut other = data;
+        other[0] ^= 1;
+        std::fs::write(&path, &other).unwrap();
+        let err = crate::worktree::read_blob(&sink, &h).unwrap_err();
+        assert!(err.to_string().contains("big.bin changed"), "got {err}");
+
+        // A symlink in place of the file is refused.
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path).unwrap();
+            let target = work.path().join("target.bin");
+            std::fs::write(&target, &other).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(crate::worktree::read_blob(&sink, &h).is_err());
+        }
+    }
+
+    #[test]
+    fn ephemeral_sink_skips_a_chunk_the_store_holds() {
+        let (_dir, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        let (path, data) = random_file(&work, "big.bin", 2 * 1024 * 1024, 0xCAFE);
+        crate::worktree::store_file_object(&store, &data).unwrap();
+
+        let sink = EphemeralSink::new(&store);
+        let (h, _) = crate::worktree::hash_file_with_metadata(&sink, &path).unwrap();
+        assert!(sink.chunks.lock().unwrap().by_id.is_empty());
+        assert!(sink.objects.lock().unwrap().is_empty());
+        assert_eq!(crate::worktree::read_blob(&sink, &h).unwrap(), data);
     }
 
     #[test]

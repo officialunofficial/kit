@@ -124,6 +124,25 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The closure check before a fetch publishes a ref reads each chunk's type
   and no longer counts chunks toward its 10,000,000-object cap. A repository
   of many large files can be fetched. `gc` and push still count every chunk.
+- `kit add` makes the chunks of a large file durable in windows of 4,096
+  chunks, and no longer stages every chunk of the file until the command
+  ends. The staged set of one file stays bounded whatever the file's size. The
+  chunks become visible before the index names them. A command that fails
+  leaves them unreferenced, and `gc` collects them. `ObjectSink::checkpoint`
+  and `WriteBatch::checkpoint` make the objects stored so far durable and
+  visible while the batch stays open.
+- `kit status` keeps no copy of the new chunks of a changed file. The snapshot
+  holds the file path, the offset and the length of each chunk, about 64 bytes
+  per chunk, and reads a chunk back from the file when a comparison needs it.
+  The read checks the chunk's id, so a file that changed under the snapshot
+  fails the read. `ObjectSink::put_chunk_parts` and `ChunkOrigin` carry the
+  origin to a sink.
+- `kit cat`, `kit cat-file -p` and `kit show` write a chunked blob one chunk
+  at a time, and `kit rm` and `kit restore` compare a worktree file with a
+  chunked blob one chunk at a time. Memory is one chunk, whatever the file's
+  size. A closed output still ends `kit cat` and `kit show` without an error.
+  `worktree::write_blob`, `worktree::content_eq_reader` and
+  `worktree::file_content_eq` stream.
 
 ### Fixed
 
