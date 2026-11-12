@@ -1860,6 +1860,50 @@ mod tests {
             build_payload(&store, &leaf, selector),
             Err(VerifyError::ContentTooLarge { size }) if size == crate::worktree::MAX_FILE_BYTES + 1
         ));
+
+        // At the limit the builder goes on to the chunks, which are missing.
+        let at_limit = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: crate::worktree::MAX_FILE_BYTES,
+            chunk_size: 0,
+            chunks: vec![[1u8; 32], [2u8; 32]],
+        });
+        let leaf = store
+            .write(&crate::serialize::serialize(&at_limit).unwrap())
+            .unwrap();
+        assert!(matches!(
+            build_payload(&store, &leaf, selector),
+            Err(VerifyError::Store(_))
+        ));
+    }
+
+    /// A byte-range disclosure whose chunks sum to exactly `total_size`
+    /// reads every chunk and discloses from the last one.
+    #[test]
+    fn range_disclosure_reads_chunks_up_to_the_declared_size() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+        let chunk_bytes = crate::serialize::serialize(&Object::Blob(crate::object::Blob {
+            data: vec![b'a'; 1000],
+        }))
+        .unwrap();
+        let chunk = store.write(&chunk_bytes).unwrap();
+        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 2000,
+            chunk_size: 0,
+            chunks: vec![chunk; 2],
+        });
+        let leaf = store
+            .write(&crate::serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        let selector = Selector::Range {
+            offset: 1999,
+            len: 1,
+            with_offsets: false,
+        };
+        assert!(matches!(
+            build_payload(&store, &leaf, selector),
+            Ok(PayloadWire::Range { len: 1, .. })
+        ));
     }
 
     /// A byte-range disclosure of a manifest that repeats one chunk past

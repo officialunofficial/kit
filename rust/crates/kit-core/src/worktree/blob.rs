@@ -778,6 +778,18 @@ mod equality_tests {
             "got {err}"
         );
         assert_eq!(source.reads.get(), 0);
+
+        // At the limit the reader goes on to the chunks, which are missing.
+        let at_limit = ChunkedBlob {
+            total_size: crate::worktree::MAX_FILE_BYTES,
+            chunk_size: 0,
+            chunks: vec![[1u8; 32], [2u8; 32]],
+        };
+        let err = LoadedBlob::Chunked(at_limit)
+            .into_content(&source)
+            .unwrap_err();
+        assert!(matches!(err, WorktreeError::Store(_)), "got {err}");
+        assert_eq!(source.reads.get(), 1);
     }
 
     /// A source that counts chunk reads, to show where a read loop stops.

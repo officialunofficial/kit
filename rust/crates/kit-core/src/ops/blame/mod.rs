@@ -1035,6 +1035,19 @@ mod tests {
             load_blob_lines(&store, h),
             Err(BlameError::ContentTooLarge { size }) if size == crate::worktree::MAX_FILE_BYTES + 1
         ));
+
+        // At the limit blame goes on to the chunks, which are missing.
+        let at_limit = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: crate::worktree::MAX_FILE_BYTES,
+            chunk_size: 0,
+            chunks: vec![[1u8; 32], [2u8; 32]],
+        });
+        let h = crate::store::ObjectSink::put(&store, &serialize::serialize(&at_limit).unwrap())
+            .unwrap();
+        assert!(matches!(
+            load_blob_lines(&store, h),
+            Err(BlameError::Store(_))
+        ));
     }
 
     /// A manifest that repeats one chunk past its `total_size` stops at

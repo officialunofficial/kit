@@ -492,6 +492,15 @@ fn manifest_above_the_blob_cap_is_refused_before_any_read() {
         "got {err}"
     );
     assert_eq!(source.reads.get(), 0);
+
+    // At the cap the bridge goes on to the chunks, which are missing.
+    let at_cap = kit_core::object::ChunkedBlob {
+        total_size: kit_core::worktree::MAX_FILE_BYTES,
+        ..manifest
+    };
+    let err = kit_git_bridge::translate::translate_chunked(&hash, &at_cap, &source).unwrap_err();
+    assert!(matches!(err, BridgeError::Source(_)), "got {err}");
+    assert_eq!(source.reads.get(), 1);
 }
 
 #[test]
