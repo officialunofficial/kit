@@ -88,8 +88,10 @@ set. In particular:
   walk (`StoreError::ObjectNotFound`) propagates.
 - If the closure hits the [`MAX_REACHABLE`] cap, `live_objects` returns
   `GcRootsError::Truncated` &mdash; beyond the cap the "unreachable" verdict is
-  unsound, so gc must abort rather than prune. (The push path, by
-  contrast, tolerates cap truncation and splits the push.)
+  unsound, so gc must abort rather than prune. Push planning fails
+  closed the same way: `reachable_closure`, `reachable_objects` and
+  `reachable_snapshot` return `OperationLimitExceeded` at the cap, so a
+  push whose closure reaches it fails before it publishes, split or not.
 
 ## Recovery log
 

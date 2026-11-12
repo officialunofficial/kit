@@ -330,6 +330,8 @@ pub(crate) fn typed_children(obj: &Object, mode: ClosureMode) -> Vec<(Hash, Chil
 ///   blob that got pruned) are a harder failure and propagate via the
 ///   same variant — callers pushing partial repos should fix their
 ///   store before pushing.
+/// - [`StoreError::OperationLimitExceeded`] naming [`REACHABLE_LIMIT`]
+///   when the closure reaches [`MAX_REACHABLE`].
 /// - Other [`StoreError`] variants propagate as-is.
 pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Hash>, StoreError> {
     reachable_closure(store, std::iter::once(root))
@@ -371,14 +373,32 @@ pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Ha
 /// content integrity, so this narrowing is intentional; it just means
 /// `gc`/push-planning are no longer an incidental corruption-detection
 /// pass the way they used to be.
+///
+/// A walk that reaches [`MAX_REACHABLE`] fails with
+/// [`StoreError::OperationLimitExceeded`] naming [`REACHABLE_LIMIT`]: a
+/// cut closure would let push send a pack that lacks every object past
+/// the cut. A caller that can split its work asks
+/// [`reachable_closure_checked`] first.
 pub fn reachable_closure<'a, I>(store: &ObjectStore, roots: I) -> Result<BTreeSet<Hash>, StoreError>
 where
     I: IntoIterator<Item = &'a Hash>,
 {
-    // Push-path callers tolerate cap truncation (they split pushes), so
-    // the truncation flag is dropped here. gc must NOT — it uses
-    // [`reachable_closure_checked`] and fails closed.
-    reachable_closure_checked(store, roots).map(|(out, _truncated)| out)
+    complete(reachable_closure_checked(store, roots))
+}
+
+/// The limit [`reachable_closure`], [`reachable_objects`] and
+/// [`reachable_snapshot`] report when a walk reaches [`MAX_REACHABLE`].
+pub const REACHABLE_LIMIT: &str = "10,000,000-object closure walk";
+
+/// The closure of a walk, or [`StoreError::OperationLimitExceeded`] when the
+/// cap cut it.
+fn complete(
+    walk: Result<(BTreeSet<Hash>, bool), StoreError>,
+) -> Result<BTreeSet<Hash>, StoreError> {
+    match walk? {
+        (out, false) => Ok(out),
+        (_, true) => Err(StoreError::OperationLimitExceeded(REACHABLE_LIMIT)),
+    }
 }
 
 /// Like [`reachable_closure`] but also reports whether the
@@ -407,15 +427,16 @@ where
 ///
 /// # Errors
 ///
-/// Propagates [`StoreError`] as [`reachable_objects`] does.
+/// Propagates [`StoreError`] as [`reachable_objects`] does, including
+/// [`StoreError::OperationLimitExceeded`] when the walk reaches
+/// [`MAX_REACHABLE`].
 pub fn reachable_snapshot(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Hash>, StoreError> {
-    reachable_with_mode(
+    complete(reachable_with_mode(
         store,
         std::iter::once(root),
         ClosureMode::Snapshot,
         MAX_REACHABLE,
-    )
-    .map(|(out, _truncated)| out)
+    ))
 }
 
 /// Same walk as [`reachable_closure_checked`], but with a caller-supplied
@@ -1018,6 +1039,20 @@ mod tests {
             check_closure_present(&s, [&c2]),
             Err(StoreError::ObjectNotFound(_))
         ));
+    }
+
+    #[test]
+    fn a_cut_closure_walk_fails_closed() {
+        let (_d, s) = store();
+        let (c1, _chunks) = chunked_history(&s, 4);
+        let walk = reachable_closure_checked_with_cap(&s, [&c1], 3);
+        assert!(matches!(
+            complete(walk),
+            Err(StoreError::OperationLimitExceeded(REACHABLE_LIMIT))
+        ));
+        let whole = complete(reachable_closure_checked_with_cap(&s, [&c1], 7)).unwrap();
+        assert_eq!(whole, reachable_objects(&s, &c1).unwrap());
+        assert_eq!(whole.len(), 7);
     }
 
     #[test]

@@ -127,6 +127,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Push planning fails when its closure walk reaches the 10,000,000-object
+  cap. `reachable_closure`, `reachable_objects` and `reachable_snapshot`
+  return `OperationLimitExceeded` there instead of a cut set, so a push no
+  longer sends a pack without the objects past the cut and then moves the
+  branch.
 - The disclosure verifier checks fixed-size chunk lengths. In a fixed-size
   `ChunkedBlob` every chunk but the last must hold exactly `chunk_size` bytes,
   and the last the rest of `total_size` (SPEC-OBJECTS §7), but the manifest
