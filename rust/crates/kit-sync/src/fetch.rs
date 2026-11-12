@@ -1,13 +1,18 @@
 //! Fetching: reconstruct every remote branch from its packmap chain and
 //! publish remote-tracking refs.
 //!
-//! Each branch is fetched in two phases: the packs are fully
-//! downloaded to private staging before the repo lock is taken, and the lock
-//! is held only from the first local write through the branch's ref publish.
-//! That is narrow enough that a slow transfer does not serialize out
-//! unrelated commands, while still closing the GC-prune race: a concurrent
-//! `gc` needs the same lock, so it can never observe a downloaded but
-//! unpublished object.
+//! Each branch is fetched in two phases: the packs are downloaded to private
+//! staging, up to the staging budget, before the repo lock is taken, and the
+//! lock is held from the first local write through the branch's ref publish.
+//! A chain that fits the budget, the usual case, therefore downloads without
+//! the lock, so a slow transfer does not serialize out unrelated commands.
+//! The packs past the budget are downloaded and applied one at a time under
+//! the lock, so a chain of any size stages at most the budget. Every store
+//! write happens under the lock, and a concurrent `gc` needs the same lock,
+//! so it never observes a downloaded but unpublished object while the lock
+//! is held. A failed or retried apply releases the lock with objects already
+//! written; the stale-marker recovery repairs a store that `gc` pruned
+//! meanwhile.
 
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
@@ -27,7 +32,7 @@ use crate::packmap::{
     walk_pack_chain_until,
 };
 use crate::source::RemoteSource;
-use crate::stage::{StagedPacks, download_pack_chain_with_limits, unpack_downloaded_packs};
+use crate::stage::{StagedPacks, apply_pack_chain, download_pack_chain_with_limits};
 
 /// What a fetch did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -40,7 +45,8 @@ pub struct FetchReport {
     /// Remote-tracking refs deleted because the remote no longer has the
     /// branch. Empty unless the fetch pruned.
     pub branches_pruned: Vec<String>,
-    /// Packs downloaded and applied. Like the other counters, this covers the
+    /// Packs applied from the remote. The first pack past the staging budget
+    /// is downloaded twice but counted once. Like the other counters, this covers the
     /// attempt that published each branch (a branch retried after a concurrent
     /// re-baseline reports only its successful second attempt).
     pub packs_downloaded: usize,
@@ -54,7 +60,8 @@ pub struct FetchReport {
     pub remote_unchanged: bool,
 }
 
-/// Where a fetch stages packs and how many bytes it may stage.
+/// Where a fetch stages packs and how many bytes it may stage before it
+/// takes the repo lock.
 #[derive(Clone, Copy)]
 pub(crate) struct Staging<'a> {
     pub(crate) parent: Option<&'a Path>,
@@ -69,8 +76,8 @@ pub(crate) struct FetchedChain {
     /// self-heal retry inside [`apply_fetched_chain`] can re-download it.
     /// An omitted prefix is resolved in full only on self-heal.
     chain: Vec<Hash>,
-    /// Private, verified files for missing packs in apply order. Payload
-    /// bytes are never retained across download iterations.
+    /// Private, verified files for missing packs in apply order, up to the
+    /// staging budget. [`apply_fetched_chain`] downloads the rest.
     downloaded: StagedPacks,
     head: Hash,
     /// Counts for the complete chain, including its verified prefix.
@@ -80,9 +87,9 @@ pub(crate) struct FetchedChain {
 }
 
 /// Step 1 of a branch fetch: walk `branch`'s packmap chain from `head_key`
-/// and download every pack in it not already recorded in `applied`. Pure
-/// network I/O (the local object store is never touched), so the caller does
-/// not need the repo lock.
+/// and stage the packs in it not already recorded in `applied`, up to the
+/// staging budget. Pure network I/O (the local object store is never
+/// touched), so the caller does not need the repo lock.
 ///
 /// A matching checkpoint skips the immutable prefix. Missing or unrelated
 /// checkpoints leave the full walk unchanged.
@@ -140,9 +147,10 @@ pub(crate) struct Applied {
     pub(crate) objects_unpacked: usize,
 }
 
-/// Step 2 of a branch fetch: unpack `fetched`'s downloaded packs into
-/// `store` and verify the closure at `tip` is complete, running the
-/// applied-pack self-heal retry on a stale-record failure.
+/// Step 2 of a branch fetch: unpack `fetched`'s staged packs into `store`,
+/// then download and unpack the packs past the staging budget one at a time,
+/// and verify the closure at `tip` is complete, running the applied-pack
+/// self-heal retry on a stale-record failure.
 ///
 /// **The caller MUST hold the repo lock across this call, through the
 /// branch's subsequent ref publish.** Unpacking writes objects to the local
@@ -166,6 +174,9 @@ pub(crate) struct Applied {
 /// stale: a corrupt pack, a remote missing a pack, a transport error, a
 /// closure too large to verify, an interruption, or a failed signature.
 ///
+/// Each retry holds the lock and applies every pack as it arrives, so it
+/// stages nothing.
+///
 /// # Signature verification
 ///
 /// When `require_signed` is `true` every commit, remix and tag in each
@@ -182,7 +193,6 @@ pub(crate) fn apply_fetched_chain(
     tip: Hash,
     applied: &mut AppliedPacks,
     require_signed: bool,
-    staging: Staging<'_>,
 ) -> Result<Applied, SyncError> {
     let FetchedChain {
         mut chain,
@@ -191,13 +201,17 @@ pub(crate) fn apply_fetched_chain(
         mut prefix_packs,
         ..
     } = fetched;
-    let mut stats = Applied {
-        packs_downloaded: downloaded.packs.len(),
-        packs_skipped: chain.len() + prefix_packs - downloaded.packs.len(),
-        objects_unpacked: 0,
-    };
-    match unpack_downloaded_packs(store, observer, downloaded, applied, require_signed) {
-        Ok(count) => stats.objects_unpacked += count,
+    let done = match apply_pack_chain(
+        store,
+        source,
+        observer,
+        branch,
+        &chain,
+        Some(downloaded),
+        applied,
+        require_signed,
+    ) {
+        Ok(done) => done,
         Err(SyncError::Pack(kit_core::pack::PackError::DeltaBaseMissing(_)))
             if prefix_packs > 0 =>
         {
@@ -207,22 +221,24 @@ pub(crate) fn apply_fetched_chain(
             drop(chain);
             chain = resolve_pack_chain(source, observer, branch, head)?;
             prefix_packs = 0;
-            let downloaded = download_pack_chain_with_limits(
+            apply_pack_chain(
+                store,
                 source,
                 observer,
                 branch,
                 &chain,
+                None,
                 applied,
-                staging.max_bytes,
-                staging.parent,
-            )?;
-            stats.packs_downloaded = downloaded.packs.len();
-            stats.packs_skipped = chain.len() - downloaded.packs.len();
-            stats.objects_unpacked +=
-                unpack_downloaded_packs(store, observer, downloaded, applied, require_signed)?;
+                require_signed,
+            )?
         }
         Err(e) => return Err(e),
-    }
+    };
+    let mut stats = Applied {
+        packs_downloaded: done.packs,
+        packs_skipped: chain.len() + prefix_packs - done.packs,
+        objects_unpacked: done.objects,
+    };
 
     // Closure completeness. With skips this is the sole guarantee the store
     // is whole, and a `RemoteMissingObject` here is the ONLY self-heal
@@ -246,19 +262,19 @@ pub(crate) fn apply_fetched_chain(
                 drop(chain);
                 chain = resolve_pack_chain(source, observer, branch, head)?;
             }
-            let downloaded = download_pack_chain_with_limits(
+            let done = apply_pack_chain(
+                store,
                 source,
                 observer,
                 branch,
                 &chain,
+                None,
                 applied,
-                staging.max_bytes,
-                staging.parent,
+                require_signed,
             )?;
-            stats.packs_downloaded = downloaded.packs.len();
+            stats.packs_downloaded = done.packs;
             stats.packs_skipped = 0;
-            stats.objects_unpacked +=
-                unpack_downloaded_packs(store, observer, downloaded, applied, require_signed)?;
+            stats.objects_unpacked += done.objects;
             verify_closure_present(store, &tip)?;
             Ok(stats)
         }
@@ -272,14 +288,16 @@ pub(crate) fn apply_fetched_chain(
 /// deliver surfaces as [`SyncError::RemoteMissingObject`], so the fetch aborts
 /// loudly rather than publishing a ref to a closure it cannot reconstruct.
 ///
-/// A closure exceeding the [`kit_core::ops::graph::MAX_REACHABLE`] cap leaves
-/// objects past the cap unchecked, which over a partially wiped store could
-/// hide missing objects, so truncation is a hard
-/// [`SyncError::ClosureTooLarge`] (deliberately not a self-heal trigger).
+/// The check retains no chunk of a chunked blob, so the
+/// [`kit_core::ops::graph::MAX_REACHABLE`] cap counts commits, trees, blobs
+/// and manifests only. A closure exceeding it leaves objects past the cap
+/// unchecked, which over a partially wiped store could hide missing objects,
+/// so truncation is a hard [`SyncError::ClosureTooLarge`] (deliberately not a
+/// self-heal trigger).
 pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<(), SyncError> {
-    match kit_core::ops::reachable_closure_checked(store, std::iter::once(tip)) {
-        Ok((_, false)) => Ok(()),
-        Ok((_, true)) => Err(SyncError::ClosureTooLarge(
+    match kit_core::ops::check_closure_present(store, std::iter::once(tip)) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(SyncError::ClosureTooLarge(
             kit_core::ops::graph::MAX_REACHABLE,
         )),
         Err(StoreError::ObjectNotFound(hex)) => Err(SyncError::RemoteMissingObject(hex)),
@@ -484,7 +502,6 @@ fn fetch_objects_inner(
                 h,
                 applied,
                 require_signed,
-                staging,
             ) {
                 Ok(stats) => (completed, lock, stats),
                 Err(e @ SyncError::RemoteMissingObject(_)) => {
@@ -523,7 +540,6 @@ fn fetch_objects_inner(
                         fresh_h,
                         applied,
                         require_signed,
-                        staging,
                     )?;
                     (completed, lock, stats)
                 }

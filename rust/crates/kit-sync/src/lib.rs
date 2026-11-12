@@ -95,9 +95,13 @@ pub struct SyncOptions {
     /// Directory under which downloaded packs are staged before they are
     /// unpacked. `None` uses the system temporary directory.
     pub staging_dir: Option<std::path::PathBuf>,
-    /// The most bytes a fetch stages before it fails. It defaults to 64 GiB.
-    /// A fetch that needs more fails with a full-storage error and starts
-    /// again from the beginning.
+    /// The most bytes a fetch stages without the repository lock. It defaults
+    /// to 64 GiB. Past it, the fetch takes the lock, applies the staged packs
+    /// and then downloads and applies each further pack as it arrives, so the
+    /// staged bytes never exceed it. A smaller value bounds the disk a fetch
+    /// uses beside the object store; `0` applies every pack as it arrives. The
+    /// first pack past the budget is downloaded twice: once to find that it
+    /// does not fit, and again under the lock.
     pub max_staged_bytes: u64,
     /// After a complete fetch, delete the remote-tracking refs whose branch
     /// is gone from the remote. Only [`fetch`] acts on it.

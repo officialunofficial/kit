@@ -702,8 +702,10 @@ per-object hash verification of §3.
 The CLI stages authenticated missing packs to private temporary files before
 applying them in chain order under the repository lock. It retains at most one
 pack payload buffer in the staging layer, plus bounded chain metadata; the
-cumulative disk budget is 64 GiB, with one million packs and 100,000 pack-list
-nodes. A lifetime-owned temporary directory cleans up on every return path.
-Application uses one pack and one pack's stored-object IDs at a time. Ref
-publication follows signature and closure checks. Unpack allocations are
-additional one-pack working memory.
+staging budget defaults to 64 GiB, with one million packs and 100,000 pack-list
+nodes. The packs past the budget are applied as they arrive, under the lock,
+one at a time, so the staged bytes never exceed the budget (SPEC-TRANSPORT,
+"Bounded pack-chain fetch staging"). A lifetime-owned temporary directory
+cleans up on every return path. Application uses one pack and one pack's
+stored-object IDs at a time. Ref publication follows signature and closure
+checks. Unpack allocations are additional one-pack working memory.

@@ -646,7 +646,10 @@ enum BlobSlot {
 /// # Errors
 ///
 /// Propagates [`StoreError`] from the local closure walk or from
-/// `encode_deltas`. Also returns [`StoreError::DeltaBatchLengthMismatch`]
+/// `encode_deltas`, including [`StoreError::OperationLimitExceeded`] when
+/// the closure of the new or the remote tip reaches
+/// [`crate::ops::graph::MAX_REACHABLE`]: a plan never omits the objects
+/// past a cut. Also returns [`StoreError::DeltaBatchLengthMismatch`]
 /// if `encode_deltas` returns a `Vec` of a different length than the
 /// candidate slice it was given — a contract violation by the caller, not
 /// a normal runtime condition, but reported as a typed error rather than
