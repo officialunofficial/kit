@@ -207,10 +207,10 @@ impl LiteralIndex {
             .and_then(|name| name.rfind('.').map(|dot| &name[dot..]))
             .and_then(|ext| self.extensions.get(ext))
             .and_then(|hits| usable(hits));
-        let literal = match (by_name, by_extension) {
-            (Some(a), Some(b)) => Some(if a.pattern > b.pattern { a } else { b }),
-            (a, b) => a.or(b),
-        };
+        let literal = by_name
+            .into_iter()
+            .chain(by_extension)
+            .max_by_key(|hit| hit.pattern);
         let below = literal.map_or(0, |hit| hit.scanned_below);
         for &i in self.scanned[below..].iter().rev() {
             let p = &patterns[i];
@@ -791,6 +791,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn index_holds_only_literals_and_single_dot_extensions() {
+        let mut text = String::new();
+        for i in 0..MIN_INDEXED_LITERALS {
+            let _ = writeln!(text, "pad{i}");
+        }
+        text.push_str("*.o\n*.tar.gz\n*.\n*.a.b\npre*\n*mid*\n");
+        let list = parse(&text);
+        let index = list.index.as_ref().expect("indexed");
+        assert_eq!(index.literals.len(), MIN_INDEXED_LITERALS);
+        assert_eq!(index.extensions.keys().collect::<Vec<_>>(), [".o"]);
+        assert_eq!(index.scanned.len(), 5);
+    }
+
+    #[test]
+    fn prefix_and_glob_patterns_do_not_count_toward_the_index() {
+        let mut text = String::new();
+        for i in 0..MIN_INDEXED_LITERALS - 1 {
+            let _ = writeln!(text, "pad{i}");
+        }
+        text.push_str("pre*\n*mid*\n*.tar.gz\n*.\n");
+        assert!(parse(&text).index.is_none());
     }
 
     #[test]
