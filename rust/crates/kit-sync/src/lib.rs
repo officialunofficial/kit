@@ -95,6 +95,10 @@ pub struct SyncOptions {
     /// Directory under which downloaded packs are staged before they are
     /// unpacked. `None` uses the system temporary directory.
     pub staging_dir: Option<std::path::PathBuf>,
+    /// The most bytes a fetch stages before it fails. It defaults to 64 GiB.
+    /// A fetch that needs more fails with a full-storage error and starts
+    /// again from the beginning.
+    pub max_staged_bytes: u64,
     /// After a complete fetch, delete the remote-tracking refs whose branch
     /// is gone from the remote. Only [`fetch`] acts on it.
     pub prune: bool,
@@ -129,6 +133,13 @@ impl SyncOptions {
         self
     }
 
+    /// Set [`max_staged_bytes`](Self::max_staged_bytes).
+    #[must_use]
+    pub fn with_max_staged_bytes(mut self, bytes: u64) -> Self {
+        self.max_staged_bytes = bytes;
+        self
+    }
+
     /// Set [`staging_dir`](Self::staging_dir).
     #[must_use]
     pub fn with_staging_dir(mut self, dir: Option<std::path::PathBuf>) -> Self {
@@ -144,6 +155,7 @@ impl Default for SyncOptions {
             target_branch: None,
             sync_policy: SyncPolicy::Batch,
             staging_dir: None,
+            max_staged_bytes: packmap::MAX_FETCH_STAGED_BYTES,
             prune: false,
         }
     }

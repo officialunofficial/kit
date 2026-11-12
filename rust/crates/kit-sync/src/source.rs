@@ -602,12 +602,13 @@ mod tests {
                 .unwrap();
         let Err(SyncError::AdvertisedPackMissing {
             source: pack_cause, ..
-        }) = crate::stage::download_pack_chain(
+        }) = crate::stage::download_pack_chain_with_limits(
             &source,
             &crate::NoopObserver,
             "main",
             &[[0; 32]],
             &applied,
+            crate::packmap::MAX_FETCH_STAGED_BYTES,
             Some(td.path()),
         )
         else {

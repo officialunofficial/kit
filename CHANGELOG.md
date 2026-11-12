@@ -9,6 +9,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `SyncOptions::max_staged_bytes` sets the most bytes a fetch stages before it
+  fails. It defaults to 64 GiB, as before. `kit` has no flag for it.
 - The S3 transport offers a repository cursor (SPEC-TRANSPORT §6.8). It is a
   digest of the key, `ETag` and `LastModified` of every object under `refs/`,
   read from the listing alone, so it needs no new object and no change to a
