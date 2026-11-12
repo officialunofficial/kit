@@ -443,7 +443,9 @@ kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
 - `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
-  tags.
+  tags. `push` sends none, and the pack chain of a branch carries only the
+  objects that the branch reaches, so a remote tag object has no transfer
+  path. Tags need a listing and a transfer step in the transport first.
 - `rebase -i` `edit` &mdash; the todo action is not available. The `actions`
   file of a paused rebase holds a closed list of keywords, and a new keyword
   would change that state format.
