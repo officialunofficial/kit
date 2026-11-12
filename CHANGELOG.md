@@ -100,6 +100,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `kit verify-proof` exits `65` (`DATAERR`) when the commit's embedded
+  signature does not verify, with or without trust roots. It used to print
+  `ok: ... (INVALID signature)` and exit `0` unless trust roots were loaded.
+  It now prints `bad:` instead of `ok:`, and writes no `--payload-out` file.
+  The report still shows what the bundle disclosed.
 - `kit stash` removed ignored files from the working tree and did not save
   them, so `stash pop` could not bring them back. A stash now removes only
   the paths it saved. It refuses, before it changes anything, when HEAD needs

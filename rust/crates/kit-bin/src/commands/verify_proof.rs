@@ -40,7 +40,7 @@ struct VerifyProofOpts {
     #[arg(long, value_name = "PATH")]
     expect_path: Option<String>,
     /// Also cross-check the signer against the trust-roots registry
-    /// (default path). `signature_valid == false` is a failure with this flag.
+    /// (default path). An invalid signature is always a failure.
     #[arg(long)]
     trusted: bool,
     /// Path to a trust-roots TOML file. Implies `--trusted`.
@@ -128,24 +128,15 @@ pub fn run(args: &[String]) -> u8 {
         } else {
             signer_trusted = Some(false);
         }
-        if !disclosed.signature_valid {
-            emit_result(
-                &disclosed,
-                signer_trusted.as_ref(),
-                trusted_keyid.as_deref(),
-                json,
-            );
-            return exit::DATAERR;
-        }
-        if signer_trusted == Some(false) {
-            emit_result(
-                &disclosed,
-                signer_trusted.as_ref(),
-                trusted_keyid.as_deref(),
-                json,
-            );
-            return exit::DATAERR;
-        }
+    }
+    if !disclosed.signature_valid || signer_trusted == Some(false) {
+        emit_result(
+            &disclosed,
+            signer_trusted.as_ref(),
+            trusted_keyid.as_deref(),
+            json,
+        );
+        return exit::DATAERR;
     }
 
     if let Some(path) = opts.payload_out.as_deref() {
@@ -161,11 +152,7 @@ pub fn run(args: &[String]) -> u8 {
         trusted_keyid.as_deref(),
         json,
     );
-    if want_trust && (signer_trusted != Some(true) || !disclosed.signature_valid) {
-        exit::DATAERR
-    } else {
-        exit::OK
-    }
+    exit::OK
 }
 
 fn read_bundle(spec: &str) -> Result<Vec<u8>, (String, u8)> {
@@ -192,8 +179,7 @@ fn emit_result(
     trusted_keyid: Option<&str>,
     json: bool,
 ) {
-    let failed =
-        matches!(signer_trusted, Some(false)) || (signer_trusted.is_some() && !d.signature_valid);
+    let failed = matches!(signer_trusted, Some(false)) || !d.signature_valid;
     if json {
         emit_json(d, signer_trusted.copied());
         emit_human(&human_line(d, trusted_keyid, failed), true);

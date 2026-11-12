@@ -521,12 +521,16 @@ History / commits:
   fails with `65` (`DATAERR`) on mismatch &mdash; the SPEC-DISCLOSURE rule
   that the caller compares the returned path. `--trusted` /
   `--trust-roots` reuse `kit verify`'s trust-roots flow against
-  `Disclosed.signer`; `signature_valid == false` is reported and, with
-  `--trusted`, is a failure. A verified bundle proves the content
+  `Disclosed.signer`; `signature_valid == false` is always a failure: the
+  command exits `65` (`DATAERR`), with or without trust roots, and writes
+  no `--payload-out` file. A verified bundle proves the content
   belongs to the commit id; binding the signer to a person or org stays
   application policy (trust roots). Default output mirrors `kit
   verify`: `ok: <kind> <path> @ <short id>, <bytes> B, signer <keyid>
-  (valid|INVALID signature)[, signer trusted]` or `bad: <reason>`.
+  (valid|INVALID signature)[, signer trusted]` or `bad: <reason>`. A failure
+  prints `bad:` (never `ok:`), including `bad: ... (INVALID signature)`.
+  The `bad:` line goes to stdout, or to stderr with `--format=json`, which
+  still prints the full report, with `"signature_valid":false`, to stdout.
   `--format=json` prints the disclosure report plus
   `signer_trusted` (`true`/`false`/`null`), including `step_inner_roots`
   (hex array) and `chunk_inner_root` (hex or `null`). `--payload-out FILE`
