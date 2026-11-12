@@ -474,7 +474,9 @@ not ascending (next entry).
 The reader checks both from the header before it reads a chunk id, and
 the writer refuses any manifest the reader would refuse. A reader that
 holds a whole file in memory refuses content above 1 GiB
-(`worktree::MAX_FILE_BYTES`) with a typed error before it reads a chunk.
+(`worktree::MAX_FILE_BYTES`) with a typed error before it reads a chunk,
+and stops at the first chunk that takes its running length past
+`total_size`, so a manifest that repeats one chunk cannot grow it.
 Every `Tree` and `ChunkedBlob` id comes from a streaming fold that holds
 one node per level, and it equals the level build of
 SPEC-MERKLE-OBJECTS §1.1 for every leaf count.
@@ -499,7 +501,9 @@ existing objects new ids.
 merkelized id in `rust/tests/golden/`, and
 `worktree::blob::equality_tests::into_content_refuses_content_above_the_memory_limit`,
 `ops::blame::tests::blame_refuses_a_file_above_the_memory_limit`,
-`verify::tests::range_disclosure_refuses_a_file_above_the_memory_limit` and
+`verify::tests::range_disclosure_refuses_a_file_above_the_memory_limit`,
+`ops::blame::tests::blame_stops_a_repeated_chunk_at_the_declared_size`,
+`verify::tests::range_disclosure_stops_a_repeated_chunk_at_the_declared_size` and
 `round_trip::manifest_above_the_blob_cap_is_refused_before_any_read`.
 
 ## Multi-leaf proof positions are strictly ascending

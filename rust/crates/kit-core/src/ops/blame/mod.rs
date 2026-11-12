@@ -718,6 +718,16 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
                 let Object::Blob(b) = chunk_obj else {
                     return Err(BlameError::NotABlob);
                 };
+                // Stop at the first chunk that passes `total_size`, so a
+                // manifest that repeats one chunk cannot grow `buf`.
+                let next = buf.len() as u64 + b.data.len() as u64;
+                if next > cb.total_size {
+                    return Err(crate::object::KitError::ChunkedBlobSizeMismatch {
+                        expected: cb.total_size,
+                        actual: next,
+                    }
+                    .into());
+                }
                 buf.extend_from_slice(&b.data);
             }
             cb.check_reassembled_size(buf.len())?;
@@ -1024,6 +1034,30 @@ mod tests {
         assert!(matches!(
             load_blob_lines(&store, h),
             Err(BlameError::ContentTooLarge { size }) if size == crate::worktree::MAX_FILE_BYTES + 1
+        ));
+    }
+
+    /// A manifest that repeats one chunk past its `total_size` stops at
+    /// the first chunk that passes it, so the buffer stays bounded.
+    #[test]
+    fn blame_stops_a_repeated_chunk_at_the_declared_size() {
+        let (_d, store) = fresh_store();
+        let chunk = put_blob(&store, &[b'a'; 1000]);
+        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 1500,
+            chunk_size: 0,
+            chunks: vec![chunk; 1000],
+        });
+        let h = crate::store::ObjectSink::put(&store, &serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        assert!(matches!(
+            load_blob_lines(&store, h),
+            Err(BlameError::Object(
+                crate::object::KitError::ChunkedBlobSizeMismatch {
+                    expected: 1500,
+                    actual: 2000,
+                }
+            ))
         ));
     }
 

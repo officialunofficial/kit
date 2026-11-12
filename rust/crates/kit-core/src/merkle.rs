@@ -340,6 +340,11 @@ impl BmtFold {
 /// O(log n) in the chunk count, so a caller can address a manifest
 /// without decoding it whole: read `total_size` and `chunk_size` from the
 /// header, then push each 32-byte chunk id in order.
+///
+/// The fold applies none of the decode checks of SPEC-OBJECTS §7. A
+/// caller that reads a raw manifest checks the chunk count against
+/// [`crate::serialize::MAX_CHUNKS`] and `total_size` against its layout
+/// first, or it addresses a manifest that no reader decodes.
 #[derive(Debug)]
 pub struct ChunkedIdFold {
     fold: BmtFold,

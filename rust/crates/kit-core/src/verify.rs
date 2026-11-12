@@ -1700,11 +1700,22 @@ fn build_chunked_range_payload<S: crate::store::ObjectSource + ?Sized>(
     // locate the containing chunk (chunk lengths aren't in the manifest)
     // and, when `with_offsets` is set, to build each preceding chunk's
     // length proof.
-    let chunk_bytes: Vec<Vec<u8>> = cb
-        .chunks
-        .iter()
-        .map(|id| source.read(id))
-        .collect::<Result<_, _>>()?;
+    // Stop at the first chunk that passes `total_size`, so a manifest that
+    // repeats one chunk cannot grow the read set past the in-memory limit.
+    let mut chunk_bytes: Vec<Vec<u8>> = Vec::new();
+    let mut read_len: u64 = 0;
+    for id in &cb.chunks {
+        let bytes = source.read(id)?;
+        read_len = read_len.saturating_add(bytes.len().saturating_sub(10) as u64);
+        if read_len > cb.total_size {
+            return Err(KitError::ChunkedBlobSizeMismatch {
+                expected: cb.total_size,
+                actual: read_len,
+            }
+            .into());
+        }
+        chunk_bytes.push(bytes);
+    }
 
     // Every length and offset below is checked: `source` bytes and the
     // caller's `offset`/`len` are both untrusted here, and a panic (the
@@ -1848,6 +1859,39 @@ mod tests {
         assert!(matches!(
             build_payload(&store, &leaf, selector),
             Err(VerifyError::ContentTooLarge { size }) if size == crate::worktree::MAX_FILE_BYTES + 1
+        ));
+    }
+
+    /// A byte-range disclosure of a manifest that repeats one chunk past
+    /// its `total_size` stops at the first chunk that passes it.
+    #[test]
+    fn range_disclosure_stops_a_repeated_chunk_at_the_declared_size() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+        let chunk_bytes = crate::serialize::serialize(&Object::Blob(crate::object::Blob {
+            data: vec![b'a'; 1000],
+        }))
+        .unwrap();
+        let chunk = store.write(&chunk_bytes).unwrap();
+        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 1500,
+            chunk_size: 0,
+            chunks: vec![chunk; 1000],
+        });
+        let leaf = store
+            .write(&crate::serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        let selector = Selector::Range {
+            offset: 0,
+            len: 1,
+            with_offsets: false,
+        };
+        assert!(matches!(
+            build_payload(&store, &leaf, selector),
+            Err(VerifyError::Decode(KitError::ChunkedBlobSizeMismatch {
+                expected: 1500,
+                actual: 2000,
+            }))
         ));
     }
 
