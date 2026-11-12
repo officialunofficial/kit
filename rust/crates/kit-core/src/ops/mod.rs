@@ -36,8 +36,8 @@ pub use diff::{
 };
 pub use gc::{GcReport, GcRootsError, collect_roots, live_objects, run_gc};
 pub use graph::{
-    ClosureMode, children, collect_ancestor_set, reachable_closure, reachable_closure_checked,
-    reachable_objects, reachable_snapshot,
+    ClosureMode, check_closure_present, children, collect_ancestor_set, reachable_closure,
+    reachable_closure_checked, reachable_objects, reachable_snapshot,
 };
 pub use merge::{
     Conflict, ConflictKind, MergeResult, find_merge_base, find_merge_base_strict, is_ancestor,

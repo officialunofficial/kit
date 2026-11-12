@@ -192,11 +192,13 @@ impl From<LimitReached> for AncestorError {
     }
 }
 
-/// Hard cap on the total number of objects [`reachable_objects`] will
-/// visit per call. Matches the scale of [`MAX_ANCESTORS`] but applies
-/// to the full object closure (commits + trees + blobs + chunks), so it
-/// is intentionally larger. A repo that exceeds this cap has to split
-/// pushes — the push-path is the only caller for now.
+/// Hard cap on the object ids a closure walk retains per call. Matches the
+/// scale of [`MAX_ANCESTORS`] but applies to the object closure, so it is
+/// intentionally larger. The cap bounds the retained id set to about half a
+/// GiB. [`reachable_objects`], and so `gc` and push, count every chunk
+/// toward it, so a repository with more chunks than the cap can be fetched
+/// but not collected or pushed whole. [`check_closure_present`], the check a
+/// fetch runs, counts no chunk.
 pub const MAX_REACHABLE: usize = 10_000_000;
 
 /// How a closure walk treats commit/remix parents.
@@ -435,11 +437,86 @@ where
     reachable_with_mode(store, roots, ClosureMode::History, cap)
 }
 
+/// Check that every object reachable from `roots` in
+/// [`ClosureMode::History`] is in the store, the walk of
+/// [`reachable_closure_checked`]. Returns `true` when the [`MAX_REACHABLE`]
+/// cap truncated the walk, so objects past it went unchecked.
+///
+/// A chunk of a chunked blob needs only its type, so it is checked without
+/// being queued, and the cap counts commits, trees, blobs and manifests only.
+/// The walk remembers up to [`MAX_CHECKED_CHUNKS`] checked chunk ids, so a
+/// chunk that several versions of a file share is read once. Past that bound
+/// a chunk is checked again for each manifest that names it, and memory stays
+/// fixed. A repository past the cap in chunks still passes this check, while
+/// `gc` and push, which retain every chunk, refuse it.
+///
+/// # Errors
+///
+/// [`StoreError::ObjectNotFound`] for a missing root, object or chunk, and
+/// every other [`StoreError`] as [`reachable_objects`] reports it.
+pub fn check_closure_present<'a, I>(store: &ObjectStore, roots: I) -> Result<bool, StoreError>
+where
+    I: IntoIterator<Item = &'a Hash>,
+{
+    check_closure_present_with_cap(store, roots, MAX_REACHABLE, MAX_CHECKED_CHUNKS)
+}
+
+/// The most checked chunk ids [`check_closure_present`] remembers, about
+/// 100 MiB: the chunks of about 128 GiB of typical content.
+pub const MAX_CHECKED_CHUNKS: usize = 2_097_152;
+
+/// [`check_closure_present`] with a caller-supplied cap and chunk memory, so
+/// a test can show that chunks do not count toward the cap and that the
+/// walk remembers at most `chunk_memory` checked chunks.
+pub(crate) fn check_closure_present_with_cap<'a, I>(
+    store: &ObjectStore,
+    roots: I,
+    cap: usize,
+    chunk_memory: usize,
+) -> Result<bool, StoreError>
+where
+    I: IntoIterator<Item = &'a Hash>,
+{
+    walk_closure(
+        store,
+        roots,
+        ClosureMode::History,
+        cap,
+        Chunks::Check {
+            memory: chunk_memory,
+        },
+    )
+    .map(|(_out, truncated)| truncated)
+}
+
+/// What a closure walk does with the chunks of a chunked blob.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Chunks {
+    /// Retain each chunk id in the returned set.
+    Retain,
+    /// Check each chunk's type without queueing it, and remember at most
+    /// `memory` checked chunk ids.
+    Check { memory: usize },
+}
+
 fn reachable_with_mode<'a, I>(
     store: &ObjectStore,
     roots: I,
     mode: ClosureMode,
     cap: usize,
+) -> Result<(BTreeSet<Hash>, bool), StoreError>
+where
+    I: IntoIterator<Item = &'a Hash>,
+{
+    walk_closure(store, roots, mode, cap, Chunks::Retain)
+}
+
+fn walk_closure<'a, I>(
+    store: &ObjectStore,
+    roots: I,
+    mode: ClosureMode,
+    cap: usize,
+    chunks: Chunks,
 ) -> Result<(BTreeSet<Hash>, bool), StoreError>
 where
     I: IntoIterator<Item = &'a Hash>,
@@ -450,6 +527,7 @@ where
         queue.push_back(*root);
     }
 
+    let mut checked_chunks: BTreeSet<Hash> = BTreeSet::new();
     let mut truncated = false;
     while let Some(h) = queue.pop_front() {
         if out.len() >= cap {
@@ -482,11 +560,42 @@ where
         // [`children`] is the single source of truth for the edges;
         // History mode preserves the pre-existing walk exactly.
         let obj = store.read_object(&h)?;
-        for child in children(&obj, mode) {
+        let chunk_memory = match (chunks, &obj) {
+            (Chunks::Check { memory }, Object::ChunkedBlob(_)) => Some(memory),
+            _ => None,
+        };
+        let edges = children(&obj, mode);
+        drop(obj);
+        for child in edges {
+            // A leaf chunk needs only its type, so it is checked here and
+            // never queued. Any other type takes the ordinary path.
+            if let Some(memory) = chunk_memory {
+                if checked_chunks.contains(&child) {
+                    continue;
+                }
+                #[cfg(test)]
+                CHUNK_TYPE_READS.with(|reads| reads.set(reads.get() + 1));
+                if matches!(
+                    store.object_type(&child)?,
+                    ObjectType::Blob | ObjectType::Delta
+                ) {
+                    if checked_chunks.len() < memory {
+                        checked_chunks.insert(child);
+                    }
+                    continue;
+                }
+            }
             queue.push_back(child);
         }
     }
     Ok((out, truncated))
+}
+
+#[cfg(test)]
+std::thread_local! {
+    // Chunk type reads in the presence check. Thread-local state keeps
+    // concurrently running unit tests independent.
+    static CHUNK_TYPE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 // =====================================================================
@@ -819,6 +928,108 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(reach, expected);
+    }
+
+    /// A commit whose tree holds one chunked blob of `count` chunks.
+    fn chunked_history(s: &ObjectStore, count: usize) -> (Hash, Vec<Hash>) {
+        let chunks: Vec<Hash> = (0..count)
+            .map(|i| put_blob(s, format!("chunk-{i}").as_bytes()))
+            .collect();
+        let total_size = (0..count).map(|i| format!("chunk-{i}").len() as u64).sum();
+        let manifest = serialize::serialize(&Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size,
+            chunk_size: 0,
+            chunks: chunks.clone(),
+        }))
+        .unwrap();
+        let manifest = s.write(&manifest).unwrap();
+        let tree = put_tree(
+            s,
+            vec![TreeEntry {
+                name: b"big".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: manifest,
+            }],
+        );
+        (make_commit(s, tree, &[], "c1"), chunks)
+    }
+
+    #[test]
+    fn presence_check_does_not_count_chunks_toward_the_cap() {
+        let (_d, s) = store();
+        let (c1, _chunks) = chunked_history(&s, 2_000);
+        // The commit, its tree and the manifest are the only retained ids.
+        assert!(!check_closure_present_with_cap(&s, [&c1], 3, MAX_CHECKED_CHUNKS).unwrap());
+        let (_, truncated) = reachable_closure_checked_with_cap(&s, [&c1], 3).unwrap();
+        assert!(truncated, "the full walk retains every chunk");
+        assert!(check_closure_present_with_cap(&s, [&c1], 2, MAX_CHECKED_CHUNKS).unwrap());
+    }
+
+    /// Two versions of an 8-chunk file. The second replaces chunk 0 and
+    /// shares chunks 1 to 7. Returns the second commit and the first
+    /// version's chunks.
+    fn two_versions(s: &ObjectStore) -> (Hash, Vec<Hash>) {
+        let (c1, chunks) = chunked_history(s, 8);
+        let mut changed = chunks.clone();
+        changed[0] = put_blob(s, b"changed-0");
+        let manifest = serialize::serialize(&Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 1024,
+            chunk_size: 0,
+            chunks: changed,
+        }))
+        .unwrap();
+        let manifest = s.write(&manifest).unwrap();
+        let tree = put_tree(
+            s,
+            vec![TreeEntry {
+                name: b"big".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: manifest,
+            }],
+        );
+        (make_commit(s, tree, &[c1], "c2"), chunks)
+    }
+
+    fn chunk_reads(s: &ObjectStore, root: &Hash, memory: usize) -> usize {
+        CHUNK_TYPE_READS.with(|reads| reads.set(0));
+        assert!(!check_closure_present_with_cap(s, [root], MAX_REACHABLE, memory).unwrap());
+        CHUNK_TYPE_READS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn presence_check_reads_a_remembered_chunk_once() {
+        let (_d, s) = store();
+        let (c2, _chunks) = two_versions(&s);
+        // The second version's 8 chunks, then chunk 0 of the first.
+        assert_eq!(chunk_reads(&s, &c2, MAX_CHECKED_CHUNKS), 9);
+        // Three remembered: the first version reads chunk 0 and chunks 3 to 7.
+        assert_eq!(chunk_reads(&s, &c2, 3), 14);
+        // None remembered: every chunk of both versions.
+        assert_eq!(chunk_reads(&s, &c2, 0), 16);
+    }
+
+    #[test]
+    fn presence_check_reports_a_missing_chunk_two_manifests_share() {
+        let (_d, s) = store();
+        let (c2, chunks) = two_versions(&s);
+        assert!(!check_closure_present(&s, [&c2]).unwrap());
+        std::fs::remove_file(s.path_for(&chunks[3])).unwrap();
+        assert!(matches!(
+            check_closure_present(&s, [&c2]),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn presence_check_reports_a_missing_chunk() {
+        let (_d, s) = store();
+        let (c1, chunks) = chunked_history(&s, 8);
+        std::fs::remove_file(s.path_for(&chunks[5])).unwrap();
+        let hex = hash::to_hex(&chunks[5]);
+        assert!(matches!(
+            check_closure_present(&s, [&c1]),
+            Err(StoreError::ObjectNotFound(ref missing)) if *missing == hex
+        ));
     }
 
     #[test]

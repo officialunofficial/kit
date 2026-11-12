@@ -955,7 +955,11 @@ The CLI limits staged payloads to 64 GiB, chain packs to one million, and
 pack-list nodes to 100,000. Disk exhaustion and limit failures abort before ref
 publication. Applied-pack markers are rechecked under the lock; stale markers
 retain the existing object-closure recovery behavior. Stored-object ID lists
-are checked per pack and are not accumulated over the chain.
+are checked per pack and are not accumulated over the chain. The closure check
+before ref publication reads the type of each chunk of a chunked blob without
+queueing it, so its 10,000,000-object cap counts commits, trees, blobs and
+chunked-blob manifests only. It remembers at most 2,097,152 checked chunk IDs;
+past that, a chunk is checked again for each manifest that names it.
 
 Unpack working memory remains bounded by one pack, rather than total
 chain payload size. This is not a chunk-streaming pack parser and does not

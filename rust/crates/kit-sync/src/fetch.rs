@@ -272,14 +272,16 @@ pub(crate) fn apply_fetched_chain(
 /// deliver surfaces as [`SyncError::RemoteMissingObject`], so the fetch aborts
 /// loudly rather than publishing a ref to a closure it cannot reconstruct.
 ///
-/// A closure exceeding the [`kit_core::ops::graph::MAX_REACHABLE`] cap leaves
-/// objects past the cap unchecked, which over a partially wiped store could
-/// hide missing objects, so truncation is a hard
-/// [`SyncError::ClosureTooLarge`] (deliberately not a self-heal trigger).
+/// The check retains no chunk of a chunked blob, so the
+/// [`kit_core::ops::graph::MAX_REACHABLE`] cap counts commits, trees, blobs
+/// and manifests only. A closure exceeding it leaves objects past the cap
+/// unchecked, which over a partially wiped store could hide missing objects,
+/// so truncation is a hard [`SyncError::ClosureTooLarge`] (deliberately not a
+/// self-heal trigger).
 pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<(), SyncError> {
-    match kit_core::ops::reachable_closure_checked(store, std::iter::once(tip)) {
-        Ok((_, false)) => Ok(()),
-        Ok((_, true)) => Err(SyncError::ClosureTooLarge(
+    match kit_core::ops::check_closure_present(store, std::iter::once(tip)) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(SyncError::ClosureTooLarge(
             kit_core::ops::graph::MAX_REACHABLE,
         )),
         Err(StoreError::ObjectNotFound(hex)) => Err(SyncError::RemoteMissingObject(hex)),

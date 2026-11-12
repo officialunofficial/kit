@@ -113,6 +113,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as `remotes/<remote>/<branch>`. `libkit::branch::Query::scope` selects them,
   and `libkit::branch::Branch` has a `remote` field.
 
+### Changed
+
+- The closure check before a fetch publishes a ref reads each chunk's type
+  and no longer counts chunks toward its 10,000,000-object cap. A repository
+  of many large files can be fetched. `gc` and push still count every chunk.
+
 ### Fixed
 
 - The disclosure verifier checks fixed-size chunk lengths. In a fixed-size
