@@ -1317,6 +1317,18 @@ mod tests {
         assert_eq!(lock_reason(tmp.path()).as_deref(), Some(""));
         std::fs::write(&path, vec![b'a'; MAX_LOCK_REASON_BYTES + 100]).unwrap();
         assert_eq!(lock_reason(tmp.path()).as_deref(), Some(""));
+        // A reason at the cap with its newline is read in full.
+        let mut at_cap = "a".repeat(MAX_LOCK_REASON_BYTES);
+        at_cap.push('\n');
+        std::fs::write(&path, &at_cap).unwrap();
+        assert_eq!(
+            lock_reason(tmp.path()).as_deref(),
+            Some(&at_cap[..MAX_LOCK_REASON_BYTES])
+        );
+        // One byte more is over the cap.
+        at_cap.push('a');
+        std::fs::write(&path, &at_cap).unwrap();
+        assert_eq!(lock_reason(tmp.path()).as_deref(), Some(""));
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert_eq!(lock_reason(tmp.path()).as_deref(), Some(""));
