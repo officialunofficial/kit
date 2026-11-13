@@ -82,7 +82,7 @@
 //! friends) stay `pub(crate)`, kept only so the cross-check test can
 //! compare directly against upstream's verifiers.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::{Buf as _, BufMut};
 use commonware_codec::{Buf, Copying};
@@ -219,9 +219,10 @@ fn levels_in_tree(leaf_count: u32) -> usize {
 }
 
 /// A built BMT: every level from the position-hashed leaves up to the
-/// single pre-finalize root node. Kept around so one build serves many
-/// proofs cheaply — mirrors commonware's `Builder`/`Tree` split. Object
-/// ids come from [`BmtFold`], which holds one node per level instead.
+/// single pre-finalize root node. Test-only reference that the streaming
+/// proof builder ([`stream_proof`]) and [`BmtFold`] are checked against;
+/// production code holds no level.
+#[cfg(test)]
 struct BmtTree {
     /// The real leaf count (0 for an empty tree, even though `levels[0]`
     /// then holds a single placeholder node).
@@ -234,10 +235,10 @@ struct BmtTree {
     levels: Vec<Vec<Hash>>,
     /// The finalized root: `H(leaf_count_be32 ‖ levels.last()[0])`. Tests
     /// compare it with the fold and with commonware.
-    #[cfg(test)]
     root: Hash,
 }
 
+#[cfg(test)]
 fn build_bmt(leaves: &[Hash]) -> BmtTree {
     let leaf_count = u32_of(leaves.len());
     let empty = leaves.is_empty();
@@ -263,7 +264,6 @@ fn build_bmt(leaves: &[Hash]) -> BmtTree {
     BmtTree {
         leaf_count,
         empty,
-        #[cfg(test)]
         root: h2(
             &leaf_count.to_be_bytes(),
             &levels.last().expect("levels is never empty")[0],
@@ -275,8 +275,8 @@ fn build_bmt(leaves: &[Hash]) -> BmtTree {
 /// The finalized BMT root, computed in one pass over the leaves.
 ///
 /// It holds at most one node per level, so it needs O(log n) memory
-/// where [`build_bmt`] holds every level. The root equals
-/// `build_bmt(leaves).root` for every leaf count.
+/// where the level build holds every level. The root equals the level
+/// build's root for every leaf count.
 #[derive(Debug)]
 struct BmtFold {
     /// Leaves pushed so far.
@@ -523,6 +523,128 @@ fn siblings_required_for_range_proof(
     Ok(sibling_positions)
 }
 
+/// The sibling digests named by `required`, in the order the set defines
+/// (level-major, then index ascending), from one pass over `leaves`.
+///
+/// `leaves` holds the raw leaves of a tree of `leaf_count` leaves, in
+/// order. The pass pairs nodes as [`BmtFold`] does: a pair completes
+/// upward at once and an odd trailing node pairs with itself. Memory is
+/// one pending node and one node count per level plus the recorded
+/// siblings, so a proof never holds a level.
+///
+/// `required` comes from [`siblings_required_for_multi_proof`] or
+/// [`siblings_required_for_range_proof`] for the same `leaf_count`. Every
+/// entry lies below the top level and below its level's node count, so the
+/// pass produces each one.
+fn stream_proof(
+    leaf_count: u32,
+    leaves: impl Iterator<Item = Hash>,
+    required: &BTreeSet<(usize, usize)>,
+) -> Vec<Hash> {
+    let mut found: BTreeMap<(usize, usize), Hash> = BTreeMap::new();
+    let mut pending = [None::<Hash>; MAX_LEVELS + 1];
+    let mut produced = [0usize; MAX_LEVELS + 1];
+    // A node made at `level` takes the next index there and is kept when
+    // the proof needs it.
+    let mut emit = |level: usize, node: &Hash| {
+        let index = produced[level];
+        produced[level] += 1;
+        if required.contains(&(level, index)) {
+            found.insert((level, index), *node);
+        }
+    };
+
+    let mut count = 0u32;
+    for leaf in leaves {
+        let mut node = position_leaf(count, &leaf);
+        count += 1;
+        let mut level = 0;
+        emit(level, &node);
+        while let Some(left) = pending[level].take() {
+            node = h2(&left, &node);
+            level += 1;
+            emit(level, &node);
+        }
+        pending[level] = Some(node);
+    }
+    debug_assert_eq!(
+        count, leaf_count,
+        "the leaf iterator matches the leaf count"
+    );
+
+    // Close the unpaired nodes bottom-up, as `BmtFold::root` does. The node
+    // carried out of a level is the last node of the level above.
+    let top = levels_in_tree(leaf_count) - 1;
+    let mut carry: Option<Hash> = None;
+    for (level, unpaired) in pending.iter().enumerate().take(top) {
+        carry = match (*unpaired, carry) {
+            (Some(left), Some(right)) => Some(h2(&left, &right)),
+            (Some(last), None) | (None, Some(last)) => Some(h2(&last, &last)),
+            (None, None) => None,
+        };
+        if let Some(node) = &carry {
+            emit(level + 1, node);
+        }
+    }
+
+    required
+        .iter()
+        .map(|key| {
+            found
+                .remove(key)
+                .expect("the pass makes every sibling that the tree shape requires")
+        })
+        .collect()
+}
+
+/// A proof for the leaves at `positions`, built in one pass over `leaves`.
+///
+/// Positions must be strictly ascending: a repeated position is
+/// [`MerkleError::DuplicatePosition`] and a lower one is
+/// [`MerkleError::UnsortedPosition`]. `leaves` is not read when the
+/// positions are refused.
+fn multi_proof_streaming(
+    leaf_count: u32,
+    leaves: impl Iterator<Item = Hash>,
+    positions: impl IntoIterator<Item = u32>,
+) -> Result<Proof, MerkleError> {
+    let mut positions = positions.into_iter().peekable();
+    let first = *positions.peek().ok_or(MerkleError::NoPositions)?;
+    if leaf_count == 0 {
+        return Err(MerkleError::PositionOutOfRange(first));
+    }
+    let required = siblings_required_for_multi_proof(leaf_count, positions)?;
+    Ok(Proof {
+        leaf_count,
+        siblings: stream_proof(leaf_count, leaves, &required),
+    })
+}
+
+/// A range proof for the leaves `start..=end`, built in one pass over
+/// `leaves`.
+fn range_proof_streaming(
+    leaf_count: u32,
+    leaves: impl Iterator<Item = Hash>,
+    start: u32,
+    end: u32,
+) -> Result<Proof, MerkleError> {
+    // Intentional divergence from `commonware_storage::bmt`, whose
+    // `range_proof(0, 0)` on an empty tree returns `Proof::default()`:
+    // SPEC-MERKLE-OBJECTS §5.4 requires a builder to refuse every
+    // position of the empty `Tree`, including the range `0..=0`.
+    // `tests::proofs_match_commonware` only draws `n >= 1`, so the
+    // cross-check never compares this case.
+    if leaf_count == 0 {
+        return Err(MerkleError::PositionOutOfRange(start));
+    }
+    let required = siblings_required_for_range_proof(leaf_count, start, end)?;
+    Ok(Proof {
+        leaf_count,
+        siblings: stream_proof(leaf_count, leaves, &required),
+    })
+}
+
+#[cfg(test)]
 impl BmtTree {
     /// Generates a proof for the leaf at `position`. A single-element
     /// multi-proof.
@@ -919,15 +1041,19 @@ pub(crate) fn tree_entry_leaf(e: &TreeEntry) -> Hash {
     domain_digest(TREE_ENTRY_DOMAIN, &body)
 }
 
-fn chunked_leaves(cb: &ChunkedBlob) -> Vec<Hash> {
-    let mut leaves = Vec::with_capacity(1 + cb.chunks.len());
-    leaves.push(chunked_meta_leaf(cb));
-    leaves.extend_from_slice(&cb.chunks);
-    leaves
+/// The raw leaves of a `ChunkedBlob`: the metadata leaf, then the chunks.
+fn chunked_leaves(cb: &ChunkedBlob) -> impl Iterator<Item = Hash> + '_ {
+    core::iter::once(chunked_meta_leaf(cb)).chain(cb.chunks.iter().copied())
 }
 
-fn tree_leaves(tree: &Tree) -> Vec<Hash> {
-    tree.entries.iter().map(tree_entry_leaf).collect()
+/// The leaf count of a `ChunkedBlob`'s tree: the metadata leaf plus the chunks.
+fn chunked_leaf_count(cb: &ChunkedBlob) -> u32 {
+    u32_of(1 + cb.chunks.len())
+}
+
+/// The raw leaves of a `Tree`: one per entry.
+fn tree_leaves(tree: &Tree) -> impl Iterator<Item = Hash> + '_ {
+    tree.entries.iter().map(tree_entry_leaf)
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,7 +1149,11 @@ pub(crate) fn proof_encoded_size(
 /// Build an inclusion proof that the chunk at `position` (= chunk index +
 /// 1, per [`chunk_position`]) belongs to `cb`.
 pub fn build_chunk_proof(cb: &ChunkedBlob, position: u32) -> Result<Proof, MerkleError> {
-    build_bmt(&chunked_leaves(cb)).proof(position)
+    multi_proof_streaming(
+        chunked_leaf_count(cb),
+        chunked_leaves(cb),
+        core::iter::once(position),
+    )
 }
 
 /// Build a range proof that the chunks at `start..=end` belong to `cb`.
@@ -1032,7 +1162,7 @@ pub fn build_chunks_range_proof(
     start: u32,
     end: u32,
 ) -> Result<Proof, MerkleError> {
-    build_bmt(&chunked_leaves(cb)).range_proof(start, end)
+    range_proof_streaming(chunked_leaf_count(cb), chunked_leaves(cb), start, end)
 }
 
 /// Build a multi-leaf proof that the chunks at `positions` belong to `cb`.
@@ -1041,13 +1171,17 @@ pub fn build_chunks_multi_proof(
     cb: &ChunkedBlob,
     positions: impl IntoIterator<Item = u32>,
 ) -> Result<Proof, MerkleError> {
-    build_bmt(&chunked_leaves(cb)).multi_proof(positions)
+    multi_proof_streaming(chunked_leaf_count(cb), chunked_leaves(cb), positions)
 }
 
 /// Build an inclusion proof that the entry at `position` (= entry index)
 /// belongs to `tree`.
 pub fn build_tree_entry_proof(tree: &Tree, position: u32) -> Result<Proof, MerkleError> {
-    build_bmt(&tree_leaves(tree)).proof(position)
+    multi_proof_streaming(
+        u32_of(tree.entries.len()),
+        tree_leaves(tree),
+        core::iter::once(position),
+    )
 }
 
 /// Build a range proof that the entries at `start..=end` belong to `tree`.
@@ -1056,7 +1190,7 @@ pub fn build_tree_entries_range_proof(
     start: u32,
     end: u32,
 ) -> Result<Proof, MerkleError> {
-    build_bmt(&tree_leaves(tree)).range_proof(start, end)
+    range_proof_streaming(u32_of(tree.entries.len()), tree_leaves(tree), start, end)
 }
 
 /// Build a multi-leaf proof that the entries at `positions` belong to
@@ -1065,7 +1199,7 @@ pub fn build_tree_entries_multi_proof(
     tree: &Tree,
     positions: impl IntoIterator<Item = u32>,
 ) -> Result<Proof, MerkleError> {
-    build_bmt(&tree_leaves(tree)).multi_proof(positions)
+    multi_proof_streaming(u32_of(tree.entries.len()), tree_leaves(tree), positions)
 }
 
 // ---------------------------------------------------------------------------
@@ -1632,6 +1766,175 @@ mod tests {
         }
     }
 
+    /// Leaf counts that exercise the odd trailing node at every level:
+    /// 1 to 70, every power of two to 2^10 and its neighbours, and a few
+    /// sizes in between.
+    fn stream_leaf_counts() -> Vec<usize> {
+        let mut counts: Vec<usize> = (1..=70).collect();
+        for k in 7..=10 {
+            counts.extend([(1 << k) - 1, 1 << k, (1 << k) + 1]);
+        }
+        counts.extend([100, 333, 1000]);
+        counts
+    }
+
+    /// Every single, range and multi proof of the streaming builder equals
+    /// the level build's, byte for byte, for every leaf count shape and
+    /// for every position that is a boundary of a pair at some level.
+    #[test]
+    fn streaming_proofs_equal_the_level_build_for_every_shape() {
+        for n in stream_leaf_counts() {
+            let leaves: Vec<Hash> = (0..n).map(|i| hash(&(i as u64).to_le_bytes())).collect();
+            let reference = build_bmt(&leaves);
+            let count = u32_of(n);
+            let last = count - 1;
+            let mut interesting: Vec<u32> = vec![0, last, last / 2];
+            interesting.extend([1, 2, 3].into_iter().filter(|p| *p <= last));
+            let mut k = 1;
+            while k <= last {
+                interesting.extend([k - 1, k, (k + 1).min(last)]);
+                k <<= 1;
+            }
+            interesting.sort_unstable();
+            interesting.dedup();
+            for &p in &interesting {
+                assert_eq!(
+                    multi_proof_streaming(count, leaves.iter().copied(), [p]),
+                    reference.proof(p),
+                    "single proof at n={n}, p={p}"
+                );
+                for q in [p, p + (last - p) / 2, last] {
+                    assert_eq!(
+                        range_proof_streaming(count, leaves.iter().copied(), p, q),
+                        reference.range_proof(p, q),
+                        "range proof at n={n}, {p}..={q}"
+                    );
+                }
+            }
+            for window in interesting.windows(3) {
+                assert_eq!(
+                    multi_proof_streaming(count, leaves.iter().copied(), window.iter().copied()),
+                    reference.multi_proof(window.iter().copied()),
+                    "multi proof at n={n}, {window:?}"
+                );
+            }
+            assert_eq!(
+                multi_proof_streaming(count, leaves.iter().copied(), 0..count),
+                reference.multi_proof(0..count),
+                "multi proof of every leaf at n={n}"
+            );
+        }
+    }
+
+    /// The streaming builders refuse every position of an empty tree, the
+    /// range `0..=0` included, as the level build does.
+    #[test]
+    fn streaming_proofs_refuse_every_position_of_an_empty_tree() {
+        let reference = build_bmt(&[]);
+        for positions in [vec![0u32], vec![3], vec![2, 1], vec![1, 1]] {
+            assert_eq!(
+                multi_proof_streaming(0, core::iter::empty(), positions.iter().copied()),
+                reference.multi_proof(positions.iter().copied()),
+                "multi {positions:?}"
+            );
+        }
+        assert_eq!(
+            multi_proof_streaming(0, core::iter::empty(), core::iter::empty()),
+            Err(MerkleError::NoPositions)
+        );
+        for (start, end) in [(0u32, 0u32), (2, 1), (5, 9)] {
+            assert_eq!(
+                range_proof_streaming(0, core::iter::empty(), start, end),
+                reference.range_proof(start, end),
+                "range {start}..={end}"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(600))]
+
+        /// For random leaf counts and random positions, valid or not, the
+        /// streaming proof and its error equal the level build's.
+        #[test]
+        fn streaming_proofs_equal_the_level_build(
+            n in proptest::prop_oneof![
+                3 => 1usize..=2000,
+                2 => proptest::sample::select(stream_leaf_counts()),
+            ],
+            single in 0u32..2100,
+            range in (0u32..2100, 0u32..2100),
+            raw in proptest::collection::vec(0u32..2100, 0..=6),
+            sorted in proptest::collection::btree_set(0u32..2000, 1..=40),
+        ) {
+            let leaves: Vec<Hash> = (0..n).map(|i| hash(&(i as u64).to_le_bytes())).collect();
+            let reference = build_bmt(&leaves);
+            let count = u32_of(n);
+            proptest::prop_assert_eq!(
+                multi_proof_streaming(count, leaves.iter().copied(), [single]),
+                reference.proof(single)
+            );
+            proptest::prop_assert_eq!(
+                range_proof_streaming(count, leaves.iter().copied(), range.0, range.1),
+                reference.range_proof(range.0, range.1)
+            );
+            proptest::prop_assert_eq!(
+                multi_proof_streaming(count, leaves.iter().copied(), raw.iter().copied()),
+                reference.multi_proof(raw.iter().copied())
+            );
+            proptest::prop_assert_eq!(
+                multi_proof_streaming(count, leaves.iter().copied(), sorted.iter().copied()),
+                reference.multi_proof(sorted.iter().copied())
+            );
+        }
+    }
+
+    /// The public builders give the level build's proof for a manifest and
+    /// for a tree.
+    #[test]
+    fn public_builders_equal_the_level_build() {
+        for chunks in [0usize, 1, 2, 3, 6, 7, 8, 9, 31, 32, 33, 100] {
+            let ids: Vec<u8> = (1..=u8::try_from(chunks).unwrap()).collect();
+            let manifest = cb(chunks as u64 * 10, 0, &ids);
+            let reference = build_bmt(&chunked_leaves(&manifest).collect::<Vec<_>>());
+            let last = u32_of(chunks);
+            for p in [0, last / 2, last] {
+                assert_eq!(build_chunk_proof(&manifest, p), reference.proof(p));
+                assert_eq!(
+                    build_chunks_range_proof(&manifest, p, last),
+                    reference.range_proof(p, last)
+                );
+                assert_eq!(
+                    build_chunks_multi_proof(&manifest, [p, last + 1]),
+                    reference.multi_proof([p, last + 1])
+                );
+            }
+            assert_eq!(
+                build_chunks_multi_proof(&manifest, 0..=last),
+                reference.multi_proof(0..=last)
+            );
+        }
+        for entries in [0usize, 1, 2, 3, 5, 8, 9, 40] {
+            let names: Vec<TreeEntry> = (0..u8::try_from(entries).unwrap())
+                .map(|i| entry(format!("e{i:03}").as_bytes(), EntryMode::Blob, i))
+                .collect();
+            let t = tree(names);
+            let reference = build_bmt(&tree_leaves(&t).collect::<Vec<_>>());
+            let count = u32_of(entries);
+            for p in [0, count / 2, count.saturating_sub(1), count] {
+                assert_eq!(build_tree_entry_proof(&t, p), reference.proof(p));
+                assert_eq!(
+                    build_tree_entries_range_proof(&t, p, count),
+                    reference.range_proof(p, count)
+                );
+                assert_eq!(
+                    build_tree_entries_multi_proof(&t, [p]),
+                    reference.multi_proof([p])
+                );
+            }
+        }
+    }
+
     /// The id of a `FastCDC` manifest of `count` generated 16 KiB chunks.
     /// Chunk `i` is `i` as a little-endian u64, zero-padded to 32 bytes.
     fn generated_manifest(count: u32) -> ChunkedBlob {
@@ -1679,7 +1982,7 @@ mod tests {
             let manifest = generated_manifest(count);
             let levels = wrap_id(
                 ObjectKind::ChunkedBlob,
-                &build_bmt(&chunked_leaves(&manifest)).root,
+                &build_bmt(&chunked_leaves(&manifest).collect::<Vec<_>>()).root,
             );
             assert_eq!(
                 crate::hash::to_hex(&levels),
@@ -1704,7 +2007,7 @@ mod tests {
             assert_eq!(fold.inner_root(), chunked_inner_root(&manifest));
             assert_eq!(
                 fold.inner_root(),
-                build_bmt(&chunked_leaves(&manifest)).root
+                build_bmt(&chunked_leaves(&manifest).collect::<Vec<_>>()).root
             );
         }
     }
