@@ -29,9 +29,9 @@ include a byte-range disclosure proof:
 a proof range is selected by `?proof=1&range=a-b`, never by `Range`.
 The proof is a separate representation with its own validator and media type.
 This lets a verifier request the complete proof without HTTP slicing it.
-The proof uses the KDSP container of existing KDPB v2 bundles
+The proof uses the KDSP v2 container of KDPB v3 bundles
 ([SPEC-DISCLOSURE](SPEC-DISCLOSURE.md), multi-chunk span section).
-KDPB payload kind 3 remains reserved; KDPB v2 bytes are unchanged.
+KDPB payload kind 3 remains reserved.
 
 ## 2. Routes and URL syntax
 
@@ -283,8 +283,8 @@ The generic KDPB/KDSP formats and client verification remain supported.
 bytes for a ChunkedBlob and canonical tree bytes for an empty root path.
 `?proof=1&range=a-b` MUST return a KDPB Range bundle when the inclusive
 range lies within one chunk or a plain blob; otherwise it MUST return KDSP.
-The server MUST prove absolute offsets for chunked KDPB ranges with the
-complete preceding chunk-length proof set. Query ranges MUST NOT be
+The absolute offset of a chunked KDPB range is proven by the chunk's committed
+span, with no extra proof. Query ranges MUST NOT be
 clipped: any endpoint outside content is 416. The inclusive query becomes
 `offset=a, len=b-a+1` using checked arithmetic; overflow is 416.
 Non-blob leaves do not support proof ranges and yield 416.
@@ -300,13 +300,13 @@ encoded-size cap; exceeding either yields 416 before Admission. A proof's
 constructing the proof. The encoded-size cap MUST likewise be established
 from indexed metadata before Admission. The server MUST build the proof only
 after Admission allows it.
-Informative: complete preceding chunk-length proofs make ranges beyond
-roughly 30,000 preceding chunks (about 2 GiB of file) exceed the 64 MiB
-bundle cap and return 416. A boundary-aware builder reduces reads
-and peak memory by retaining only the needed chunk bytes. It does not reduce
-the encoded proof size: the complete preceding proof set grows with the first
-chunk index. An oversized proof still returns 416. Changing that proof-size
-limit would require a separate format change.
+Informative: a chunk's span is part of its leaf, so a proof of an offset is
+one multi-proof of about 46 siblings (about 1.5 KB) at any position in the
+file, and its size does not grow with the chunk index. A proof that spans
+chunks carries one full chunk Blob for each chunk it needs, so the encoded-size
+cap and the requested-content cap bound it.
+A builder finds the chunk of an offset by binary search over the manifest's
+ends and reads only the chunk or chunks the range needs.
 
 The proof ETag MUST be `"<commit>.<leaf>.<selector>"`, with lowercase
 64hex ids and selector `object` or `range-a-b` (minimal decimal inclusive
@@ -480,8 +480,7 @@ applicable reader-view `kit.transport.v1.RedactionNotice`, with
 tombstoned id ahead of 304, and 451 precedence against 304 and
 Admission, including the tombstoned-manifest chunk case.
 
-Token-bearing URL vectors, the product KDSP verifier, the boundary-aware
-builder, verifier bindings, HTTP query ranges and Workers prefetch are
+Token-bearing URL vectors, the product KDSP verifier, verifier bindings, HTTP query ranges and Workers prefetch are
 future work. Signed-read HTTP GETs and schema
 extensions for an object-id admission field or token principal require
 separate work.
@@ -493,8 +492,8 @@ separate work.
 | 1 | draft | Extend §5.1 with inline MP4/WebM video, MP3/Ogg/WAV audio, HEIC images, Markdown and CSV. Dangerous extensions remain binary attachments; filename encoding, security headers and ordinary byte ranges are unchanged. |
 | 1 | draft | Adds an extension allowlist and encoded filenames to successful ordinary ref-path Blob/ChunkedBlob responses, including HEAD and 206; object-id, proof, non-file, 304 and error responses are unchanged. |
 | 1 | draft | Clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it. |
-| 1 | draft | Clarifies that the boundary-aware builder reduces reads and memory, while complete preceding length proofs still impose an O(first chunk index) encoded-size cost and 416 on oversize. |
-| 1 | draft | Initial HTTP contract, selecting KDPB v2 or KDSP v1 without changing object bytes or protobuf. Fix round 1 clarifies bearer and admission-gated caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |
+| 1 | draft | Selects KDPB v3 or KDSP v2. A proof of an offset no longer carries a length proof for each preceding chunk, so its size is the same at any chunk index. |
+| 1 | draft | Initial HTTP contract, selecting a KDPB bundle or a KDSP container without changing object bytes or protobuf. Fix round 1 clarifies bearer and admission-gated caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |
 
 ## 11. Invariants
 
