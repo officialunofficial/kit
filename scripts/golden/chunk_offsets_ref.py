@@ -581,6 +581,32 @@ def build_negative():
     else:
         raise AssertionError("a v2 bundle must be refused")
     out.append(neg_entry("bundle_version_2", "plan 4.6: KDPB version 2 is UnsupportedBundleVersion(2)", raw, w.commit_id, "unsupported bundle version 2"))
+    # Plan 4.7 step 1 in a content-defined layout: the header's start or end
+    # differs from the span in the leaf, so the multi-proof does not fold. The
+    # header is patched in the bytes of an honest bundle (start at byte 16 and
+    # end at byte 24 of the Chunk header, after total_size, chunk_size, index).
+    w = honest_world(61, 0, [10, 15, 5])
+    honest = w.chunk_bundle(1)
+    hdr_at = len(w._head(3)) + 1
+    for field, shift, name in ((16, -1, "wrong_start_cdc"), (24, -1, "wrong_end_cdc")):
+        raw = bytearray(honest)
+        value = struct.unpack(">Q", raw[hdr_at + field : hdr_at + field + 8])[0] + shift
+        raw[hdr_at + field : hdr_at + field + 8] = be64(value)
+        raw = bytes(raw)
+        try:
+            d.verify_bundle(raw, w.commit_id)
+        except d.Reject as e:
+            assert "does not fold" in str(e), (name, str(e))
+        else:
+            raise AssertionError(f"{name} must be refused")
+        which = "start" if field == 16 else "end"
+        out.append(neg_entry(name, f"plan 4.7 step 1: a content-defined chunk whose header {which} is 1 below the committed value; the leaf changes, so the multi-proof does not fold", raw, w.commit_id, "does not fold"))
+    # Plan 4.7 step 2, second rule: a span above 1 GiB less 10 bytes. The
+    # header-only total check passes (content-defined, total_size >= chunk
+    # count), and the span is inside the file.
+    cap = o.MAX_CHUNK_LEN
+    two = [make_blob(contents(62, [3])[0]), make_blob(contents(63, [1])[0])]
+    bad_chunk("span_above_object_limit", "plan 4.7 step 2: end - start is 1 GiB less 9 bytes, one above the cap of 1 GiB less 10", [(0, cap + 1), (cap + 1, cap + 2)], cap + 2, 0, [], 0, "span above the object limit", blobs=two)
     # Spans.
     spans_out = []
 
