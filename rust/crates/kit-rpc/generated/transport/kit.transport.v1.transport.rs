@@ -6453,6 +6453,18 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub max_pack_location_lifetime_ms: ::core::option::Option<u64>,
+    /// Most upload tickets one AdvanceRefs request may carry in ticket_ids
+    /// (SPEC-TRANSPORT-CONNECT §2.1, §4). Absent means seven; a client treats a
+    /// value below two as absent and a value above 1,024 as 1,024.
+    ///
+    /// Field 22: `max_tickets_per_advance`
+    #[serde(
+        rename = "maxTicketsPerAdvance",
+        alias = "max_tickets_per_advance",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub max_tickets_per_advance: ::core::option::Option<u32>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -6481,6 +6493,7 @@ impl ::core::fmt::Debug for GetServerInfoResponse {
             .field("inspection_max_objects", &self.inspection_max_objects)
             .field("supports_pack_locations", &self.supports_pack_locations)
             .field("max_pack_location_lifetime_ms", &self.max_pack_location_lifetime_ms)
+            .field("max_tickets_per_advance", &self.max_tickets_per_advance)
             .finish()
     }
 }
@@ -6644,6 +6657,13 @@ impl GetServerInfoResponse {
         self.max_pack_location_lifetime_ms = Some(value);
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::max_tickets_per_advance`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_max_tickets_per_advance(mut self, value: u32) -> Self {
+        self.max_tickets_per_advance = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(GetServerInfoResponse);
 impl ::buffa::MessageName for GetServerInfoResponse {
@@ -6728,6 +6748,9 @@ impl ::buffa::Message for GetServerInfoResponse {
         if let Some(v) = self.max_pack_location_lifetime_ms {
             size += 2u64 + ::buffa::types::uint64_encoded_len(v) as u64;
         }
+        if let Some(v) = self.max_tickets_per_advance {
+            size += 2u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -6800,6 +6823,9 @@ impl ::buffa::Message for GetServerInfoResponse {
         }
         if let Some(v) = self.max_pack_location_lifetime_ms {
             ::buffa::types::put_uint64_field(21u32, v, buf);
+        }
+        if let Some(v) = self.max_tickets_per_advance {
+            ::buffa::types::put_uint32_field(22u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -7017,6 +7043,15 @@ impl ::buffa::Message for GetServerInfoResponse {
                     ::buffa::types::decode_uint64(buf)?,
                 );
             }
+            22u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.max_tickets_per_advance = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -7046,6 +7081,7 @@ impl ::buffa::Message for GetServerInfoResponse {
         self.inspection_max_objects = ::core::option::Option::None;
         self.supports_pack_locations = ::core::option::Option::None;
         self.max_pack_location_lifetime_ms = ::core::option::Option::None;
+        self.max_tickets_per_advance = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }

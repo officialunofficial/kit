@@ -114,6 +114,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `kit branch -a` lists the local branches and then the tracking branches
   as `remotes/<remote>/<branch>`. `libkit::branch::Query::scope` selects them,
   and `libkit::branch::Branch` has a `remote` field.
+- `GetServerInfoResponse` has a field `max_tickets_per_advance` (field 22).
+  A server advertises the most upload tickets one `AdvanceRefs` request may
+  name. The sync client (the CLI and `libkit`) uses it in place of the fixed
+  seven, for the split of a push and for the check of an advance. An absent
+  field or a value below two means seven, and a value above 1,024 is cut to
+  1,024. A server rejects a longer `ticket_ids` list with `invalid_argument`.
+  The `kit-client` crate does not read the field yet and still names up to
+  seven.
 
 ### Changed
 
@@ -179,6 +187,20 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `serialize::check_chunked_header` checks the header first, with the
   decoder's rules. Breaking: `MerkleError` gains `TooManyLeaves` and
   `PartialChunkId`.
+- A rollover node of the packmap chain lists up to 4,096 packs, up from 1,024
+  (`ROLLOVER_MAX_PACKS`). A chain of up to 4,096 packs rolls into one node,
+  which is 131,080 bytes. A reader accepts the node as before. A server that
+  limits a node to 1,024 packs must accept 4,096 before it is used with this
+  client.
+- A push builds packs of at most 256 MiB by default (`DEFAULT_PACK_PAYLOAD_CAP`),
+  down from 4 GiB, so a push holds one pack of that size and one prepared batch
+  in memory. `PushOptions::pack_payload_cap` still takes any value up to the
+  format limit of 4 GiB. One object larger than the cap still goes into a pack
+  of its own. A single commit that cannot be split now carries at most one
+  advance's data packs of 256 MiB each, where it carried packs of up to 4 GiB;
+  against a server that does not advertise `max_tickets_per_advance` that is
+  about 1.5 GiB of objects under the cap. The `kit` command has no flag to
+  raise the cap.
 
 ### Fixed
 

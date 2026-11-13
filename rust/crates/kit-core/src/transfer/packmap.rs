@@ -23,9 +23,9 @@ pub enum ChainState {
     Reset { prior: Option<Hash> },
 }
 
-/// The most packs a rollover node lists. A Connect server accepts a node
-/// that lists at most this many packs (SPEC-TRANSPORT-CONNECT §7.4).
-pub const ROLLOVER_MAX_PACKS: usize = 1024;
+/// The most packs a rollover node lists (SPEC-TRANSPORT-CONNECT §7.4). A node of
+/// this many packs is 131,080 bytes, far under the 1 MiB a reader downloads.
+pub const ROLLOVER_MAX_PACKS: usize = 4096;
 
 impl ChainState {
     /// The state for a validated chain of `depth` nodes that lists `packs`,

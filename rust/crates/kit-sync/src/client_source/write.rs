@@ -265,6 +265,23 @@ fn remote_is(error: &SourceError, code: &str) -> bool {
     matches!(error, SourceError::Remote(remote) if remote.code == code)
 }
 
+/// Tickets one advance carries when the server advertises no limit.
+const DEFAULT_TICKETS_PER_ADVANCE: usize = 7;
+
+/// The most tickets a client names in one advance, however many the server
+/// advertises.
+const MAX_TICKETS_PER_ADVANCE: usize = 1024;
+
+/// The tickets one advance may carry: the server's advertised limit, seven when
+/// it advertises none. One ticket is the packmap node's, so a value below two
+/// leaves no room for data and is ignored; a value above 1,024 is cut to 1,024.
+fn advance_ticket_limit(info: &GetServerInfoResponse) -> usize {
+    match info.max_tickets_per_advance {
+        Some(limit) if limit >= 2 => (limit as usize).min(MAX_TICKETS_PER_ADVANCE),
+        _ => DEFAULT_TICKETS_PER_ADVANCE,
+    }
+}
+
 fn valid_info(info: &GetServerInfoResponse) -> bool {
     info.protocol.as_deref() == Some("kit.transport.v1")
         && info.spec_version.is_some_and(|version| version >= 2)
@@ -884,10 +901,16 @@ impl<
             .iter()
             .map(|(_, ticket)| ticket.id.clone().unwrap_or_default())
             .collect::<Vec<_>>();
-        if ids.len() > 7 || ids.iter().collect::<HashSet<_>>().len() != ids.len() {
-            return Err(SourceError::InvalidRef(
-                "advance contains more than seven or duplicate upload tickets".into(),
-            ));
+        // The push planner has already read the server's limits, so this reads
+        // the cached answer and makes no call of its own.
+        let ticket_limit = match self.write_state().info.get() {
+            Some(Ok(info)) => advance_ticket_limit(info),
+            _ => DEFAULT_TICKETS_PER_ADVANCE,
+        };
+        if ids.len() > ticket_limit || ids.iter().collect::<HashSet<_>>().len() != ids.len() {
+            return Err(SourceError::InvalidRef(format!(
+                "advance contains more than {ticket_limit} or duplicate upload tickets"
+            )));
         }
         if !ids.is_empty()
             && head
@@ -987,13 +1010,13 @@ impl<
         match self.write_info() {
             Some(info) if info.spec_version.is_some_and(|version| version >= 2) => UploadLimits {
                 max_pack_bytes: info.max_pack_bytes,
-                tickets_per_advance: signed.then_some(7),
+                tickets_per_advance: signed.then(|| advance_ticket_limit(&info)),
                 ticket_threshold_bytes: signed
                     .then_some(info.begin_upload_threshold_bytes.unwrap_or(0)),
             },
             None if signed => UploadLimits {
                 max_pack_bytes: None,
-                tickets_per_advance: Some(7),
+                tickets_per_advance: Some(DEFAULT_TICKETS_PER_ADVANCE),
                 ticket_threshold_bytes: Some(0),
             },
             _ => UploadLimits::default(),
@@ -1021,6 +1044,24 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::time::Duration;
+
+    #[test]
+    fn the_ticket_limit_is_the_advertised_value_within_bounds() {
+        let limit = |advertised| {
+            advance_ticket_limit(&GetServerInfoResponse {
+                max_tickets_per_advance: advertised,
+                ..GetServerInfoResponse::default()
+            })
+        };
+        assert_eq!(limit(None), 7);
+        assert_eq!(limit(Some(0)), 7);
+        assert_eq!(limit(Some(1)), 7);
+        assert_eq!(limit(Some(2)), 2);
+        assert_eq!(limit(Some(8)), 8);
+        assert_eq!(limit(Some(1024)), 1024);
+        assert_eq!(limit(Some(5000)), 1024);
+        assert_eq!(limit(Some(u32::MAX)), 1024);
+    }
 
     struct Key;
     impl Signer for Key {
@@ -1058,10 +1099,12 @@ mod tests {
             request: Request<Vec<u8>>,
             _: usize,
         ) -> Result<Response<Vec<u8>>, String> {
+            // A read (`GetServerInfo`) carries no idempotency key.
             self.nonces.borrow_mut().push(
-                request.headers()["idempotency-key"]
-                    .to_str()
-                    .unwrap()
+                request
+                    .headers()
+                    .get("idempotency-key")
+                    .map_or("", |key| key.to_str().unwrap())
                     .into(),
             );
             Ok(self
@@ -1333,6 +1376,110 @@ mod tests {
             CommitOutcome::Advanced(AdvanceOutcome::Committed)
         );
         assert_eq!(*events.lock().unwrap(), ["receipt", "forget"]);
+    }
+
+    #[test]
+    fn an_advance_may_name_as_many_tickets_as_the_server_advertises() {
+        use buffa::Message as _;
+        let reply = |body: Vec<u8>| {
+            Response::builder()
+                .status(200)
+                .header("content-type", "application/proto")
+                .body(body)
+                .unwrap()
+        };
+        let info = |limit: Option<u32>| {
+            reply(
+                proto::GetServerInfoResponse {
+                    protocol: Some("kit.transport.v1".into()),
+                    spec_version: Some(2),
+                    part_size: Some(8 << 20),
+                    max_parts: Some(1),
+                    max_list_refs_page_size: Some(1),
+                    max_tickets_per_advance: limit,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            )
+        };
+        let committed = || {
+            reply(
+                proto::AdvanceRefsResponse {
+                    outcome: Some(proto::AdvanceOutcome::Committed.into()),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            )
+        };
+        // (advertised, tickets named, accepted)
+        for (advertised, named, accepted) in [
+            (Some(16), 16, true),
+            (Some(16), 17, false),
+            (Some(3), 3, true),
+            (Some(3), 4, false),
+            (None, 7, true),
+            (None, 8, false),
+            (Some(1), 8, false),
+            (Some(5000), 1024, true),
+            (Some(5000), 1025, false),
+        ] {
+            let channel = Channel {
+                replies: RefCell::new([info(advertised), committed()].into()),
+                nonces: RefCell::new(Vec::new()),
+            };
+            let time = Time::default();
+            let client = Client::signed(
+                &channel,
+                Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
+                &Key,
+                &time,
+            );
+            let source = ClientSource::new(&client, &super::super::FuturesExecutor);
+            // A push reads the limits before it plans, which caches them.
+            source.write_upload_limits();
+            let keys: Vec<PackKey> = (0..named)
+                .map(|i: u16| {
+                    let mut key = [0; 32];
+                    key[..2].copy_from_slice(&i.to_le_bytes());
+                    PackKey::from_hash(key)
+                })
+                .collect();
+            for (n, key) in (0_u16..).zip(&keys) {
+                let mut id = [7_u8; 32];
+                id[..2].copy_from_slice(&n.to_le_bytes());
+                source.write_state().tickets.borrow_mut().insert(
+                    ("refs/heads/main".into(), *key),
+                    UploadTicket {
+                        id: Some(id.to_vec()),
+                        token: Some(vec![8]),
+                        part_size: Some(8 << 20),
+                        expires_unix_ms: Some(100_000),
+                        ..Default::default()
+                    },
+                );
+            }
+            let result = source.write_advance_refs_committing(
+                "refs/heads/main",
+                RefWriteCondition::Missing,
+                &[4; 32],
+                "refs/kit/packmap/main",
+                RefWriteCondition::Missing,
+                &[5; 32],
+                &keys,
+            );
+            if accepted {
+                assert_eq!(
+                    result.unwrap_or_else(|error| panic!("{advertised:?} {named}: {error:?}")),
+                    CommitOutcome::Advanced(AdvanceOutcome::Committed),
+                    "{advertised:?} {named}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(SourceError::InvalidRef(_))),
+                    "{advertised:?} {named}: {result:?}"
+                );
+            }
+        }
     }
 
     struct Refusal;

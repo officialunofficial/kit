@@ -1,8 +1,9 @@
 //! Splitting an oversized ticketed push along first-parent history.
 //!
-//! A Connect advance may consume at most seven tickets, one of them for the
-//! packmap node, so a push whose new data needs more than six packs cannot land
-//! in one advance. This module chooses intermediate first-parent commits
+//! A Connect advance may consume at most the advertised number of tickets
+//! (seven unless the server says otherwise), one of them for the packmap node,
+//! so a push whose new data needs more packs than that cannot land in one
+//! advance. This module chooses intermediate first-parent commits
 //! ("cuts") so that each advance carries a closure that fits, and the caller
 //! (`push_branch_steps`) publishes them one after another.
 //!
@@ -14,9 +15,9 @@
 //!   remote already holds.
 //! * [`cumulative_weights`] makes one forward pass that sizes what each chain
 //!   commit adds, in serialized bytes (raw size plus one frame per object).
-//! * [`select_steps`] cuts the chain: a guaranteed floor of `3 * cap` per step
-//!   (under next-fit any two consecutive packs together exceed the cap, so
-//!   three caps of weight never need more than six packs), extended greedily to
+//! * [`select_steps`] cuts the chain: a guaranteed floor of `budget / 2` caps
+//!   per step (under next-fit any two consecutive packs together exceed the
+//!   cap, so that weight never needs more than `budget` packs), extended greedily to
 //!   the furthest commit whose real plan still fits, found by binary search.
 //!   A single commit heavier than the floor is verified with the real plan and,
 //!   if its estimate is over budget, an exact local dry seal.
@@ -100,11 +101,12 @@ impl Default for PushControl<'_> {
 }
 
 /// Data packs one advance may carry: the ticket allowance minus the packmap
-/// node's ticket. Six unless the transport advertises less.
+/// node's ticket. Six unless the transport advertises another allowance, and
+/// never less than one.
 pub(super) fn data_pack_budget(limits: UploadLimits) -> usize {
     limits
         .tickets_per_advance
-        .map_or(6, |tickets| tickets.min(7).saturating_sub(1))
+        .map_or(6, |tickets| tickets.saturating_sub(1).max(1))
 }
 
 /// The first-parent commits between the remote's history and the tip.
@@ -451,7 +453,7 @@ pub fn plan_push_steps(
     while from < chain.commits.len() {
         if steps.len() >= ctl.max_steps {
             return Err(PushError::PushSplitLimit(format!(
-                "this push would need more than {} advances; no advance of this branch was published. Ask the operator to raise max_pack_bytes, or push an ancestor commit first",
+                "this push would need more than {} advances; no advance of this branch was published. Ask the operator to raise the tickets per advance (or max_pack_bytes, if it is under 256 MiB), or push an ancestor commit first",
                 ctl.max_steps
             )));
         }
@@ -543,6 +545,25 @@ mod tests {
             commits.push(commit(store, &files, parents, i));
         }
         commits
+    }
+
+    #[test]
+    fn the_budget_is_the_advertised_allowance_minus_the_packmap_ticket() {
+        let budget = |tickets_per_advance| {
+            data_pack_budget(UploadLimits {
+                tickets_per_advance,
+                ..UploadLimits::default()
+            })
+        };
+        assert_eq!(budget(None), 6);
+        assert_eq!(budget(Some(2)), 1);
+        assert_eq!(budget(Some(3)), 2);
+        assert_eq!(budget(Some(7)), 6);
+        assert_eq!(budget(Some(8)), 7);
+        assert_eq!(budget(Some(1024)), 1023);
+        // A limits value built by hand never gives a budget of zero.
+        assert_eq!(budget(Some(1)), 1);
+        assert_eq!(budget(Some(0)), 1);
     }
 
     #[test]

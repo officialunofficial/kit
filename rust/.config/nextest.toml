@@ -85,6 +85,16 @@ filter = 'package(kit-core) and (test(/history::ancestry::tests::/) or test(=wor
 retries = 0
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# The default pack cap test pushes 300 MiB twice in the unoptimized profile.
+# It takes about a minute and holds about 1 GiB. It does not hang.
+[[profile.default.overrides]]
+filter = 'test(=a_push_of_more_than_the_default_pack_cap_splits_unless_a_larger_cap_is_set)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'test(=a_push_of_more_than_the_default_pack_cap_splits_unless_a_larger_cap_is_set)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
 [profile.ignored-lane]
 # A few tests need real subprocess sleeps, real timers or a real `ssh`
 # connection. They sit behind `#[ignore]` instead of running in every test

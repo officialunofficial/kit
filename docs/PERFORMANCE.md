@@ -149,7 +149,7 @@ upload 0.86 MB. A fetch into an empty repository downloads one pack for each
 push and reads at most 64 nodes. A fetch into a clone taken before the pushes
 downloads the K new packs.
 
-A node lists at most 1,024 packs. A branch that holds more appends one node
+A node lists at most 4,096 packs. A branch that holds more appends one node
 with each push, and a push and a clone then read one more node each time.
 
 The rows ran once for each size over the file transport, on one 30-CPU arm64

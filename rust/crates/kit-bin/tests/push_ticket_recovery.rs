@@ -594,6 +594,73 @@ fn oversized_push_is_split_along_first_parent_history() {
 }
 
 #[test]
+fn a_server_that_advertises_three_tickets_gets_at_most_three_per_advance() {
+    let repo = Repo::new();
+    long_history(&repo, 14, 3000);
+    let seven = planned_steps(&repo, &split_transport(), None);
+
+    let scratch = Repo::new();
+    let mut tx = split_transport();
+    tx.tickets_per_advance = Some(3);
+    tx.verify_into = Some(scratch.path().to_path_buf());
+    let three = planned_steps(&repo, &tx, None);
+    assert!(three.len() > seven.len(), "{three:?} vs {seven:?}");
+
+    let (result, heads) = push_steps(
+        &repo,
+        &tx,
+        RefWriteCondition::Missing,
+        &PushControl::default(),
+    );
+    assert_eq!(result.unwrap(), three.len());
+    assert_eq!(heads, three);
+    // Each advance names the packmap node's ticket and at most two data packs.
+    let log = tx.advance_log.lock().unwrap();
+    assert!(log.iter().all(|advance| advance.tickets <= 3));
+    drop(log);
+    assert_eq!(*tx.verified.lock().unwrap(), heads);
+    let closure = reachable_objects(&store(&scratch), &tip(&repo)).unwrap();
+    assert_eq!(
+        closure,
+        reachable_objects(&store(&repo), &tip(&repo)).unwrap()
+    );
+}
+
+#[test]
+fn a_server_that_advertises_sixteen_tickets_gets_more_than_seven_in_one_advance() {
+    let repo = Repo::new();
+    long_history(&repo, 14, 3000);
+    let seven = planned_steps(&repo, &split_transport(), None);
+
+    let scratch = Repo::new();
+    let mut tx = split_transport();
+    tx.tickets_per_advance = Some(16);
+    tx.verify_into = Some(scratch.path().to_path_buf());
+    let sixteen = planned_steps(&repo, &tx, None);
+    assert!(sixteen.len() < seven.len(), "{sixteen:?} vs {seven:?}");
+
+    let (result, heads) = push_steps(
+        &repo,
+        &tx,
+        RefWriteCondition::Missing,
+        &PushControl::default(),
+    );
+    assert_eq!(result.unwrap(), sixteen.len());
+    assert_eq!(heads, sixteen);
+    let log = tx.advance_log.lock().unwrap();
+    assert!(log.iter().all(|advance| advance.tickets <= 16));
+    assert!(
+        log.iter().any(|advance| advance.tickets > 7),
+        "{:?}",
+        log.iter()
+            .map(|advance| advance.tickets)
+            .collect::<Vec<_>>()
+    );
+    drop(log);
+    assert_eq!(*tx.verified.lock().unwrap(), heads);
+}
+
+#[test]
 fn later_steps_stay_conditional_under_force() {
     let repo = Repo::new();
     long_history(&repo, 14, 3000);

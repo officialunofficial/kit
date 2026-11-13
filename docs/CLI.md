@@ -1235,8 +1235,9 @@ Remote / sync:
   (`{"ok":false,"error":"..."}` for any other failure).
   On a V2 Connect remote, pushes at or above its advertised upload threshold
   open a signed ticket for each data pack and packmap node, then consume those
-  tickets with the branch advance. A single advance can carry six data packs.
-  A push that needs more is split automatically along the branch's
+  tickets with the branch advance. A single advance carries one fewer data
+  pack than the tickets the server allows per advance (six unless the server
+  advertises another number). A push that needs more is split automatically along the branch's
   first-parent history into several advances, each moving the branch to an
   intermediate commit whose closure fits; nothing is uploaded ahead of its
   advance. **Every intermediate state is published**: the remote branch, its
@@ -1252,9 +1253,10 @@ Remote / sync:
   `u`-only fast-forwards land; the owner key needs no grant. A push
   that would be refused midway is refused up front, with no advance
   published. A single commit or merge that cannot be split (a merge always
-  lands whole) and still needs more than six packs is refused before any
-  upload, naming the commit; ask the operator to raise `max_pack_bytes`. On a
-  terminal the progress line reads `Writing objects (step 2/5)`; piped, a
+  lands whole) and still needs more packs than one advance carries is refused
+  before any upload, naming the commit; ask the operator to raise the tickets
+  per advance (or `max_pack_bytes`, if it is under 256 MiB). On a terminal the
+  progress line reads `Writing objects (step 2/5)`; piped, a
   `pushed step 2/5: branch now at <hex>` line follows each advance; `--quiet`
   prints neither. Large packs upload in parts. Receipt files in the
   repository's common `upload-parts/` cache let the next `kit push` resume
