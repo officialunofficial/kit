@@ -120,11 +120,22 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   seven, for the split of a push and for the check of an advance. An absent
   field or a value below two means seven, and a value above 1,024 is cut to
   1,024. A server rejects a longer `ticket_ids` list with `invalid_argument`.
-  The `kit-client` crate does not read the field yet and still names up to
-  seven.
+  The `kit-client` crate reads it too, as described under Changed.
 
 ### Changed
 
+- **Breaking:** `kit_client::Limits` has a new field `max_tickets`, the most
+  tickets one advance may name, the packlist node's included.
+  `Limits::from_server_info` fills it from `max_tickets_per_advance`: seven
+  when the field is absent or below two, and at most 1,024.
+  `Limits::default()` holds seven. `Plan::prepare` refuses a plan with more
+  ticketed data packs than `max_tickets - 1`, where it refused more than six,
+  and `Push::run` refuses a plan whose `max_tickets` is above the limit of the
+  server it reaches. The public function `kit_client::advance_ticket_limit`
+  holds the rule, with the constants `DEFAULT_TICKETS_PER_ADVANCE` and
+  `MAX_TICKETS_PER_ADVANCE`, and the sync client uses it too. Code that builds
+  a `Limits` with a struct literal adds the field or ends the literal with
+  `..Limits::default()`. No trait or signature of the crate changes.
 - A pack read charges 896 bytes of memory per entry, up from 704. The old
   figure was below the real cost of a pack read with a long store path. A
   client now refuses a pack of more than about 2.40 million entries (a small

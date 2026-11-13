@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::{Error, proto::GetServerInfoResponse};
 use kit_core::{
     hash::Hash,
     pack::{self, PackWriter},
@@ -12,6 +12,25 @@ pub enum Entry {
     Delta { base: Hash, stream: Vec<u8> },
 }
 
+/// Tickets one advance may name when the server advertises no limit.
+pub const DEFAULT_TICKETS_PER_ADVANCE: u32 = 7;
+
+/// The most tickets a client names in one advance, however many the server
+/// advertises.
+pub const MAX_TICKETS_PER_ADVANCE: u32 = 1024;
+
+/// The tickets one advance may name: the server's advertised
+/// `max_tickets_per_advance`, seven when it advertises none. One ticket is the
+/// packmap node's, so a value below two leaves no room for data and is
+/// ignored; a value above 1,024 is cut to 1,024.
+#[must_use]
+pub fn advance_ticket_limit(info: &GetServerInfoResponse) -> u32 {
+    match info.max_tickets_per_advance {
+        Some(limit) if limit >= 2 => limit.min(MAX_TICKETS_PER_ADVANCE),
+        _ => DEFAULT_TICKETS_PER_ADVANCE,
+    }
+}
+
 /// Explicit limits for one advance. Larger histories are scheduled as
 /// separate advances by the host, with a fresh head lease for each step.
 #[derive(Clone, Copy, Debug)]
@@ -22,6 +41,10 @@ pub struct Limits {
     pub ticket_threshold_bytes: u64,
     /// Peak retained sealed input, including the packlist node.
     pub max_staged_bytes: u64,
+    /// The most upload tickets one advance may name, the packlist node's
+    /// included. A plan with more ticketed data packs than one fewer than this
+    /// is refused before anything is uploaded.
+    pub max_tickets: u32,
 }
 
 impl Limits {
@@ -46,6 +69,7 @@ impl Limits {
                 .begin_upload_threshold_bytes
                 .ok_or(Error::Invalid("server ticket threshold"))?,
             max_staged_bytes,
+            max_tickets: advance_ticket_limit(info),
         })
     }
 }
@@ -58,6 +82,7 @@ impl Default for Limits {
             max_parts: 8192,
             ticket_threshold_bytes: 0,
             max_staged_bytes: 64 * 1024 * 1024,
+            max_tickets: DEFAULT_TICKETS_PER_ADVANCE,
         }
     }
 }
@@ -223,16 +248,17 @@ fn seal(
     if bytes.len() as u64 > limits.max_pack_bytes || *staged > limits.max_staged_bytes {
         return Err(Error::Limit("sealed input limit"));
     }
-    // Always reserve one of the seven ticket slots for the packlist node.
+    // Always reserve one of the advance's ticket slots for the packlist node.
     if bytes.len() as u64 >= limits.ticket_threshold_bytes
         && packs
             .iter()
             .filter(|p| p.bytes.len() as u64 >= limits.ticket_threshold_bytes)
-            .count()
-            >= 6
+            .count() as u64
+            + 2
+            > u64::from(limits.max_tickets)
     {
         return Err(Error::Limit(
-            "advance requires more than six ticketed data packs",
+            "advance requires more ticketed data packs than the server allows",
         ));
     }
     packs.push(Pack {
@@ -282,6 +308,100 @@ mod tests {
             Err(Error::Limit(_))
         ));
     }
+    fn tiny_pack_entry(salt: u8) -> Entry {
+        let bytes = serialize(&Object::Blob(Blob { data: vec![salt] })).unwrap();
+        Entry::Raw {
+            id: kit_core::hash::hash(&bytes),
+            bytes,
+        }
+    }
+
+    /// Limits that seal one pack for each entry of `tiny_pack_entry`.
+    fn one_entry_per_pack(max_tickets: u32) -> Limits {
+        Limits {
+            payload_bytes: serialize(&Object::Blob(Blob { data: vec![0] }))
+                .unwrap()
+                .len() as u64,
+            max_pack_bytes: 1024,
+            ticket_threshold_bytes: 0,
+            max_tickets,
+            ..Limits::default()
+        }
+    }
+
+    #[test]
+    fn the_ticket_limit_is_the_advertised_value_within_bounds() {
+        let limit = |advertised| {
+            advance_ticket_limit(&GetServerInfoResponse {
+                max_tickets_per_advance: advertised,
+                ..GetServerInfoResponse::default()
+            })
+        };
+        assert_eq!(limit(None), 7);
+        assert_eq!(limit(Some(0)), 7);
+        assert_eq!(limit(Some(1)), 7);
+        assert_eq!(limit(Some(2)), 2);
+        assert_eq!(limit(Some(8)), 8);
+        assert_eq!(limit(Some(1024)), 1024);
+        assert_eq!(limit(Some(2000)), 1024);
+        assert_eq!(limit(Some(u32::MAX)), 1024);
+    }
+
+    #[test]
+    fn limits_from_server_info_carry_the_ticket_limit() {
+        let info = |advertised| GetServerInfoResponse {
+            protocol: Some("kit.transport.v1".to_owned()),
+            spec_version: Some(2),
+            atomic_advance: Some(true),
+            max_pack_bytes: Some(1 << 20),
+            max_parts: Some(8),
+            begin_upload_threshold_bytes: Some(0),
+            max_tickets_per_advance: advertised,
+            ..GetServerInfoResponse::default()
+        };
+        let tickets = |advertised| {
+            Limits::from_server_info(&info(advertised), 1 << 16, 1 << 20)
+                .unwrap()
+                .max_tickets
+        };
+        assert_eq!(tickets(None), 7);
+        assert_eq!(tickets(Some(1)), 7);
+        assert_eq!(tickets(Some(2)), 2);
+        assert_eq!(tickets(Some(8)), 8);
+        assert_eq!(tickets(Some(2000)), 1024);
+    }
+
+    #[test]
+    fn a_plan_is_refused_one_data_pack_past_the_advertised_limit() {
+        // One ticket of the advance is the packlist node's.
+        for fits in [1_u8, 2, 7, 15] {
+            let limits = one_entry_per_pack(u32::from(fits) + 1);
+            let plan = Plan::prepare((0..fits).map(tiny_pack_entry), limits).unwrap();
+            assert_eq!(plan.packs.len(), usize::from(fits));
+            assert!(
+                matches!(
+                    Plan::prepare((0..=fits).map(tiny_pack_entry), limits),
+                    Err(Error::Limit(_))
+                ),
+                "{fits}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plan_is_refused_before_the_whole_input_is_consumed() {
+        let consumed = std::cell::Cell::new(0_usize);
+        let entries = (0..100_u8).map(|salt| {
+            consumed.set(consumed.get() + 1);
+            tiny_pack_entry(salt)
+        });
+        assert!(matches!(
+            Plan::prepare(entries, one_entry_per_pack(3)),
+            Err(Error::Limit(_))
+        ));
+        assert!(consumed.get() < 10, "{}", consumed.get());
+    }
+
     #[test]
     fn repeated_sealed_packs_keep_first_order_and_use_one_ticket_slot_each() {
         let make = |salt| {

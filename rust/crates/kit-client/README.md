@@ -206,10 +206,13 @@ the body once for the transport. A ticketed upload frames one part at a time
 (parts are at least 8 MiB), so the per-request buffer is bounded by the part
 size, not the pack; an un-ticketed upload is bounded by the server's
 `begin_upload_threshold_bytes`. `Plan` holds the sealed packs
-(`Limits::max_staged_bytes`, 64 MiB by default). Responses are capped while
-received: 1 MiB by default, 2 MiB for a `ListRefs` page, and for
-`download_pack` the caller's `max_bytes` plus framing; the returned pack is a
-second copy, so a download peaks near twice `max_bytes`.
+(`Limits::max_staged_bytes`, 64 MiB by default) and refuses a plan with more
+ticketed data packs than `Limits::max_tickets - 1`, where `max_tickets` comes
+from the server's `max_tickets_per_advance` (seven when it advertises none);
+`Push::run` checks the plan against the limit of the server it reaches.
+Responses are capped while received: 1 MiB by default, 2 MiB for a `ListRefs`
+page, and for `download_pack` the caller's `max_bytes` plus framing; the
+returned pack is a second copy, so a download peaks near twice `max_bytes`.
 
 Complete ref listings validate strict name ordering across pages, reject cursor
 cycles, and retain at most 128 MiB of charged state (names, entries, cursor
@@ -250,8 +253,9 @@ reconstruct the same plan on restart. A current head equal to the requested tip
 is treated as landed, as in the CLI. This is an observation of the requested
 state, not proof that a particular expired operation performed a write.
 
-`Push` accepts one bounded advance (at most six ticketed data packs plus one
-packmap ticket) and does not change the CLI's push path. The pack
+`Push` accepts one bounded advance (at most `Limits::max_tickets` tickets, one
+of them the packmap node's, so six ticketed data packs by default) and does not
+change the CLI's push path. The pack
 encoding follows enabled `kit-core` features: default builds write raw packs;
 a native host may enable the `pack-zstd` feature. The same feature choice and entry
 order are required to reproduce identical pack ids across restarts.
