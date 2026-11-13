@@ -117,6 +117,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A pack read charges 896 bytes of memory per entry, up from 704. The old
+  figure was below the real cost of a pack read with a long store path. A
+  client now refuses a pack of more than about 2.40 million entries (a small
+  pack) or 4.79 million entries (a 256 MiB pack), where it refused more than
+  about 3.05 million and 6.10 million.
+- `rebase` walks up to 1,000,000 ancestors of its base, and `bisect` walks
+  up to 1,000,000 ancestors of a good commit and 1,000,000 candidates of a
+  range, as `merge` and `log` do. A longer walk fails with an error that
+  names the 1,000,000-commit limit. The limit was 10,000. A rebase still
+  replays at most 10,000 commits, and a bisect keeps at most 10,000 skipped
+  commits; one more fails with an error.
 - A fetch no longer fails when its packs pass the staging budget. It stages
   packs without the lock while they fit, then takes the lock and downloads,
   checks, applies and records each later pack before the next. A clone of a
@@ -177,6 +188,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit merge --continue` and `kit rebase --continue` hash a resolved file one
   chunk at a time, and no longer read it whole to hash it. The scan for
   conflict markers skips a file above 1 GiB, where it failed on one.
+- The `kit+file://` transport opens its repository lock and stripe lock files
+  without following a link. A link planted at a lock path fails the write and
+  leaves its target as it was. The files were opened through a link before.
 - Push planning fails when its closure walk reaches the 10,000,000-object
   cap. `reachable_closure`, `reachable_objects` and `reachable_snapshot`
   return `OperationLimitExceeded` there instead of a cut set, so a push no

@@ -74,11 +74,38 @@ fn tiny_blob_pack(count: u32) -> Vec<u8> {
     writer.finish().unwrap()
 }
 
-#[test]
-fn many_tiny_entries_stay_inside_the_per_entry_charge() {
+/// The tests share the counting allocator, so they run one at a time.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A short fixed root for the store, so the staged paths stay short.
+fn short_root() -> std::path::PathBuf {
+    if cfg!(unix) {
+        std::path::PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+/// Reads a pack of `ENTRIES` tiny blobs into a store whose directory path is
+/// `path_len` characters long, or as short as it gets when `path_len` is
+/// zero, and checks the peak heap use per entry against the charge.
+fn assert_inside_the_charge(path_len: usize) {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let pack = tiny_blob_pack(ENTRIES);
-    let dir = tempfile::TempDir::new().unwrap();
-    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+    let base = tempfile::Builder::new()
+        .prefix("k")
+        .tempdir_in(short_root())
+        .unwrap();
+    let mut dir = base.path().to_path_buf();
+    if path_len > 0 {
+        // One padding directory brings the store path to `path_len` characters.
+        let pad = path_len.saturating_sub(dir.as_os_str().len() + 1);
+        dir.push("p".repeat(pad));
+        std::fs::create_dir_all(&dir).unwrap();
+    }
+    let store = ObjectStore::init(&RepoLayout::single(&dir)).unwrap();
 
     let baseline = LIVE.load(Ordering::Relaxed);
     PEAK.store(baseline, Ordering::Relaxed);
@@ -87,9 +114,22 @@ fn many_tiny_entries_stay_inside_the_per_entry_charge() {
 
     assert_eq!(report.stored.len(), ENTRIES as usize);
     let per_entry = peak / ENTRIES as usize;
-    eprintln!("measured {per_entry} bytes per entry, charged {PACK_ENTRY_RESIDENT_COST}");
+    eprintln!(
+        "measured {per_entry} bytes per entry under {} characters, charged {PACK_ENTRY_RESIDENT_COST}",
+        dir.as_os_str().len()
+    );
     assert!(
         per_entry <= PACK_ENTRY_RESIDENT_COST,
         "a read used {per_entry} bytes per entry, above the {PACK_ENTRY_RESIDENT_COST} charged"
     );
+}
+
+#[test]
+fn many_tiny_entries_stay_inside_the_per_entry_charge() {
+    assert_inside_the_charge(0);
+}
+
+#[test]
+fn many_tiny_entries_with_a_long_store_path_stay_inside_the_per_entry_charge() {
+    assert_inside_the_charge(100);
 }

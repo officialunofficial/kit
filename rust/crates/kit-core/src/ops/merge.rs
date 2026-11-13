@@ -232,8 +232,8 @@ pub fn is_ancestor<S: ObjectSource + ?Sized>(
 }
 
 /// The most commits that each side of a strict walk reads. It matches the
-/// history walk of `kit log`.
-const MAX_STRICT_WALK_COMMITS: usize = 1_000_000;
+/// history walk of `kit log`. Rebase and bisect use it for their walks too.
+pub(crate) const MAX_STRICT_WALK_COMMITS: usize = 1_000_000;
 
 /// The limit [`find_merge_base_strict`] reports when one of its two walks
 /// reaches [`MAX_STRICT_WALK_COMMITS`].

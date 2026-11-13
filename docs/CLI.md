@@ -961,7 +961,7 @@ Branches / refs:
   conflicts" below. A commit to replay or an ancestor of the base that is
   missing, corrupt or not a commit fails the rebase before any change. So
   does a branch with more than 10,000 commits to replay, or a base with
-  more than 10,000 ancestors, with an error that names the limit.
+  more than 1,000,000 ancestors, with an error that names the limit.
   `-i`/`--interactive` opens the todo list in `$EDITOR` before any
   mutation. Each line is `<command> <commit> <subject>`, oldest-first
   (top is applied first). Reorder lines to reorder commits; delete a line
@@ -999,8 +999,9 @@ Branches / refs:
   Bisect reads every commit of the range and every ancestor of each good
   commit. One that is missing, corrupt or not a commit fails the step with
   an error that names it, and bisect offers no candidate. A range with more
-  than 10,000 candidates, or a good commit with more than 10,000
-  ancestors, fails the step with an error that names the limit.
+  than 1,000,000 candidates, or a good commit with more than 1,000,000
+  ancestors, fails the step with an error that names the limit. A bisect
+  keeps at most 10,000 skipped commits; one more fails the skip.
 - `kit gc [-n|--dry-run] [--grace-secs <secs>]` &mdash; reclaim unreachable
   objects (mark-and-sweep). Under the repo lock it expires stale recovery
   entries, computes the live set reachable from the retention roots (refs,

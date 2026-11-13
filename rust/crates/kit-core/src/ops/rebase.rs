@@ -46,6 +46,10 @@ const MAX_HASH_LIST_BYTES: u64 = 1024 * 1024;
 
 /// Maximum commits [`collect_commits_to_replay`] replays. A longer branch
 /// fails with [`REPLAY_LIMIT`].
+///
+/// The todo, done and actions files hold one line per commit and are read
+/// back under [`MAX_HASH_LIST_BYTES`], so a longer replay could not be
+/// resumed or aborted. This limit keeps them inside it.
 const MAX_REPLAY_DEPTH: usize = 10_000;
 
 /// The limit a rebase reports when the branch has more than
@@ -53,8 +57,8 @@ const MAX_REPLAY_DEPTH: usize = 10_000;
 const REPLAY_LIMIT: &str = "10,000-commit replay of a rebase";
 
 /// The limit a rebase reports when the ancestors of its base exceed
-/// [`crate::ops::graph::MAX_ANCESTORS`].
-const ONTO_ANCESTOR_LIMIT: &str = "10,000-commit ancestor walk of the rebase base";
+/// [`crate::ops::merge::MAX_STRICT_WALK_COMMITS`].
+const ONTO_ANCESTOR_LIMIT: &str = "1,000,000-commit ancestor walk of the rebase base";
 
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
@@ -297,7 +301,7 @@ pub fn collect_commits_to_replay(
         head_hash,
         onto_hash,
         MAX_REPLAY_DEPTH,
-        crate::ops::graph::MAX_ANCESTORS,
+        crate::ops::merge::MAX_STRICT_WALK_COMMITS,
     )
 }
 
@@ -510,6 +514,14 @@ mod tests {
         ));
         let bytes = serialize::serialize(&commit).unwrap();
         store.write(&bytes).unwrap()
+    }
+
+    #[test]
+    fn the_rebase_base_walk_reaches_a_million_commits() {
+        assert_eq!(MAX_REPLAY_DEPTH, 10_000);
+        assert!(MAX_REPLAY_DEPTH as u64 * 65 <= MAX_HASH_LIST_BYTES);
+        assert_eq!(crate::ops::merge::MAX_STRICT_WALK_COMMITS, 1_000_000);
+        assert!(ONTO_ANCESTOR_LIMIT.starts_with("1,000,000-commit"));
     }
 
     #[test]
