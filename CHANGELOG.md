@@ -117,6 +117,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `rebase` and `bisect` walk up to 1,000,000 commits, as `merge` and `log`
+  do. A branch with more commits to replay, a base with more ancestors, or a
+  bisect range with more candidates fails with an error that names the
+  1,000,000-commit limit. The limit was 10,000.
 - A fetch no longer fails when its packs pass the staging budget. It stages
   packs without the lock while they fit, then takes the lock and downloads,
   checks, applies and records each later pack before the next. A clone of a

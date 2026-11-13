@@ -41,12 +41,12 @@ pub const BISECT_FILE: &str = "bisect";
 const MAX_BISECT_FILE_BYTES: u64 = 1024 * 1024;
 
 /// The limit bisect reports when the ancestors of a good commit exceed
-/// [`crate::ops::graph::MAX_ANCESTORS`].
-const GOOD_ANCESTOR_LIMIT: &str = "10,000-commit ancestor walk of a good commit";
+/// [`crate::ops::merge::MAX_STRICT_WALK_COMMITS`].
+const GOOD_ANCESTOR_LIMIT: &str = "1,000,000-commit ancestor walk of a good commit";
 
 /// The limit bisect reports when the candidates of a range exceed
-/// [`crate::ops::graph::MAX_ANCESTORS`].
-const CANDIDATE_LIMIT: &str = "10,000-commit candidate walk of a bisect range";
+/// [`crate::ops::merge::MAX_STRICT_WALK_COMMITS`].
+const CANDIDATE_LIMIT: &str = "1,000,000-commit candidate walk of a bisect range";
 
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
@@ -263,7 +263,12 @@ pub fn enumerate_range(
     bad: Hash,
     good_hashes: &[Hash],
 ) -> BisectResult<Vec<Hash>> {
-    enumerate_range_with_cap(store, bad, good_hashes, crate::ops::graph::MAX_ANCESTORS)
+    enumerate_range_with_cap(
+        store,
+        bad,
+        good_hashes,
+        crate::ops::merge::MAX_STRICT_WALK_COMMITS,
+    )
 }
 
 /// [`enumerate_range`] with a caller-supplied cap on the ancestors of each
@@ -664,6 +669,13 @@ mod tests {
     #[test]
     fn pick_midpoint_empty_returns_zero() {
         assert_eq!(pick_midpoint(&[]), ZERO);
+    }
+
+    #[test]
+    fn the_bisect_walks_reach_a_million_commits() {
+        assert_eq!(crate::ops::merge::MAX_STRICT_WALK_COMMITS, 1_000_000);
+        assert!(GOOD_ANCESTOR_LIMIT.starts_with("1,000,000-commit"));
+        assert!(CANDIDATE_LIMIT.starts_with("1,000,000-commit"));
     }
 
     #[test]
