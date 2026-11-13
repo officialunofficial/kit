@@ -121,6 +121,8 @@ fn payload_json(payload: &DisclosedPayload) -> serde_json::Value {
             total_size,
             chunk_size,
             index,
+            start,
+            end,
             ..
         } => serde_json::json!({
             "kind": "chunk",
@@ -129,12 +131,16 @@ fn payload_json(payload: &DisclosedPayload) -> serde_json::Value {
             "index": index,
             "total_size": total_size,
             "chunk_size": chunk_size,
+            "start": start,
+            "end": end,
         }),
         DisclosedPayload::Range {
             blob_id,
             chunk,
             offset_in_blob,
             absolute_offset,
+            start,
+            end,
             ..
         } => serde_json::json!({
             "kind": "range",
@@ -150,10 +156,9 @@ fn payload_json(payload: &DisclosedPayload) -> serde_json::Value {
                 }),
             },
             "offset_in_blob": offset_in_blob,
-            "absolute_offset": match absolute_offset {
-                Some(off) => serde_json::json!(off),
-                None => serde_json::Value::Null,
-            },
+            "start": start,
+            "end": end,
+            "absolute_offset": absolute_offset,
         }),
     }
 }
@@ -499,8 +504,9 @@ pub fn verify_tree_entry(
 
 /// Verify a single chunk inclusion proof against a `ChunkedBlob` id.
 ///
-/// `position` is the BMT position (chunk index + 1). Position 0 is the
-/// metadata leaf and is never a valid chunk proof. Returns `Ok(false)`
+/// The chunk's leaf commits its span `[start, end)` with its id, so both
+/// are part of the claim. `position` is the BMT position (chunk index + 1).
+/// Position 0 is the metadata leaf and is never a valid chunk proof. Returns `Ok(false)`
 /// on [`MerkleError::VerificationFailed`]; `Err` on malformed input.
 ///
 /// # Errors
@@ -511,22 +517,24 @@ pub fn verify_tree_entry(
 pub fn verify_chunk(
     chunked_id_hex: &str,
     chunk_id_hex: &str,
+    start: u64,
+    end: u64,
     position: u32,
     proof: &[u8],
 ) -> Result<bool, String> {
     let chunked_id = hash_hex(chunked_id_hex)?;
-    let chunk_id = hash_hex(chunk_id_hex)?;
+    let chunk = merkle::SpannedChunk {
+        id: hash_hex(chunk_id_hex)?,
+        start,
+        end,
+    };
     let proof = Proof::decode(proof, 1).map_err(|e| e.to_string())?;
-    merkle_bool(merkle::verify_chunk(
-        &chunked_id,
-        &chunk_id,
-        position,
-        &proof,
-    ))
+    merkle_bool(merkle::verify_chunk(&chunked_id, &chunk, position, &proof))
 }
 
 /// Decode a canonical `ChunkedBlob` object into JSON
-/// `{ total_size, chunk_size, chunks: [hex] }`.
+/// `{ total_size, chunk_size, chunks: [hex], ends: [u64] }`. `ends[i]` is the
+/// offset one past the last byte of chunk `i`.
 ///
 /// Input is capped at 16 MiB, matching [`crate::chunked_blob_encode`]'s
 /// workspace admission limit.
@@ -546,6 +554,7 @@ pub fn chunked_blob_decode(bytes: &[u8]) -> Result<String, String> {
         "total_size": manifest.total_size(),
         "chunk_size": manifest.chunk_size(),
         "chunks": manifest.chunks().iter().map(to_hex).collect::<Vec<_>>(),
+        "ends": manifest.ends(),
     }))
     .map_err(|e| format!("chunked blob JSON: {e}"))
 }
@@ -645,7 +654,7 @@ mod tests {
 
     #[test]
     fn chunked_blob_decode_round_trip() {
-        let cb = ChunkedBlob::new(3, 0, vec![[1u8; 32]]).unwrap();
+        let cb = ChunkedBlob::new(3, 0, vec![([1u8; 32], 3)]).unwrap();
         let bytes = serialize(&Object::ChunkedBlob(cb)).unwrap();
         let json: serde_json::Value =
             serde_json::from_str(&chunked_blob_decode(&bytes).unwrap()).unwrap();

@@ -502,8 +502,13 @@ mod tests {
 
         // Guard against regressing to a manifest of raw chunk-content hashes
         // (the prior bug): those leaves are not resolvable Blob ids.
-        let raw_chunks: Vec<[u8; 32]> = ChunkIterator::new(FastCdc::v1(), &data)
-            .map(|b| hash(&data[b.offset..b.offset + b.length]))
+        let raw_chunks: Vec<([u8; 32], u64)> = ChunkIterator::new(FastCdc::v1(), &data)
+            .map(|b| {
+                (
+                    hash(&data[b.offset..b.offset + b.length]),
+                    (b.offset + b.length) as u64,
+                )
+            })
             .collect();
         let raw_cb = kit_core::object::ChunkedBlob::new(data.len() as u64, 0, raw_chunks).unwrap();
         let raw_root = to_hex(&kit_core::merkle::compute_chunked_id(&raw_cb));

@@ -39,7 +39,7 @@ impl ObjectSource for MemorySource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object::{Blob, ChunkedBlob, EntryMode, Tree, TreeEntry};
+    use crate::object::{Blob, EntryMode, Tree, TreeEntry};
     use crate::{object::Object, serialize};
 
     fn put(source: &mut MemorySource, object: &Object) -> Hash {
@@ -57,7 +57,8 @@ mod tests {
             data: b"chunk".to_vec(),
         });
         let chunk = put(&mut source, &blob);
-        let manifest = Object::ChunkedBlob(ChunkedBlob::new(5, 0, vec![chunk]).unwrap());
+        let manifest =
+            Object::ChunkedBlob(crate::object::testing::spread(5, 0, vec![chunk]).unwrap());
         let file = put(&mut source, &manifest);
         let tree = Object::Tree(Tree {
             entries: vec![TreeEntry {
@@ -125,7 +126,7 @@ mod tests {
             data: b"chunk".to_vec(),
         }));
         let manifest = add(Object::ChunkedBlob(
-            ChunkedBlob::new(5, 0, vec![chunk]).unwrap(),
+            crate::object::testing::spread(5, 0, vec![chunk]).unwrap(),
         ));
         let tree = add(Object::Tree(Tree {
             entries: vec![TreeEntry {

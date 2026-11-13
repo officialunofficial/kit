@@ -11,8 +11,8 @@
 
 use crate::hash::{HASH_LEN, Hash};
 use crate::object::{
-    Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind,
-    KitError, MAGIC, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, TAG_NAME_MAX_LEN, Tag,
+    Blob, ChunkedBlob, ChunkedBlobBuilder, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity,
+    IdentityKind, KitError, MAGIC, Object, ObjectType, Remix, RemixSource, TAG_NAME_MAX_LEN, Tag,
     Tree, TreeEntry,
 };
 
@@ -33,6 +33,16 @@ pub const MAX_CHUNKED_TOTAL_SIZE: u64 = 128 * 1024 * 1024 * 1024;
 /// writers both enforce it, and `crate::verify` bounds a disclosure
 /// bundle's claimed chunk count with it.
 pub const MAX_CHUNKS: u32 = 8_388_608;
+/// Bytes of a `ChunkedBlob` manifest before its entries: the 6-byte
+/// prologue, `total_size`, `chunk_size` and `chunk_count`.
+pub const CHUNKED_HEADER_LEN: usize = 22;
+/// Bytes of one `ChunkedBlob` manifest entry: a 32-byte chunk id and the
+/// `u64` end offset of the chunk. A manifest of `n` chunks is
+/// `CHUNKED_HEADER_LEN + CHUNKED_ENTRY_LEN * n` bytes long.
+pub const CHUNKED_ENTRY_LEN: usize = 40;
+/// The longest span one chunk may cover: a Blob object of at most
+/// [`crate::store::MAX_RAW_OBJECT_SIZE`] bytes, less its 10-byte prologue.
+pub const MAX_CHUNK_LEN: u64 = crate::store::MAX_RAW_OBJECT_SIZE as u64 - 10;
 
 // ---------------------------------------------------------------------
 // Public API
@@ -88,7 +98,7 @@ pub fn blob_prologue(len: usize) -> Result<[u8; PROLOGUE_LEN + 4], KitError> {
     let mut out = [0u8; PROLOGUE_LEN + 4];
     out[0] = ObjectType::Blob as u8;
     out[1..5].copy_from_slice(&MAGIC);
-    out[5] = SCHEMA_VERSION;
+    out[5] = ObjectType::Blob.schema_version();
     out[6..10].copy_from_slice(&len_le);
     Ok(out)
 }
@@ -103,7 +113,7 @@ pub fn deserialize(data: &[u8]) -> Result<Object, KitError> {
     if data[1..5] != MAGIC {
         return Err(KitError::InvalidMagic);
     }
-    if data[5] != SCHEMA_VERSION {
+    if data[5] != tag.schema_version() {
         return Err(KitError::UnsupportedObjectVersion);
     }
     let mut r = Reader::new(&data[PROLOGUE_LEN..]);
@@ -129,7 +139,7 @@ pub fn deserialize(data: &[u8]) -> Result<Object, KitError> {
 fn write_prologue(buf: &mut Vec<u8>, t: ObjectType) {
     buf.push(t as u8);
     buf.extend_from_slice(&MAGIC);
-    buf.push(SCHEMA_VERSION);
+    buf.push(t.schema_version());
 }
 
 fn write_u16_le(buf: &mut Vec<u8>, v: u16) {
@@ -242,25 +252,86 @@ fn write_tag(buf: &mut Vec<u8>, t: &Tag) -> Result<(), KitError> {
     Ok(())
 }
 
-/// Check the header fields of a `ChunkedBlob` manifest against the decode
-/// rules of SPEC-OBJECTS §7: the chunk cap, the size bound and the layout.
-/// [`deserialize`] and the writer apply the same rules. A caller that
-/// reads a raw manifest without decoding it, for example to feed
-/// [`crate::merkle::ChunkedIdFold`], checks the header with this first.
+/// Check the count and the size of a `ChunkedBlob` manifest header against
+/// decode checks 1 and 3 of SPEC-OBJECTS §7. This is the header step of the
+/// manifest decoder and of [`crate::merkle::ChunkedIdFold`]; the entries
+/// carry the rest of the checks. The whole header check, which needs the
+/// chunk size too, is [`check_chunked_total_size`], run by a disclosure
+/// verifier that holds no entries.
 ///
 /// # Errors
 /// [`KitError::TooManyChunks`] above [`MAX_CHUNKS`], and
 /// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
-/// [`MAX_CHUNKED_TOTAL_SIZE`] or impossible for the layout.
-pub fn check_chunked_header(
-    total_size: u64,
-    chunk_size: u32,
-    chunk_count: u32,
-) -> Result<(), KitError> {
+/// [`MAX_CHUNKED_TOTAL_SIZE`].
+pub fn check_chunked_header(total_size: u64, chunk_count: u32) -> Result<(), KitError> {
     if chunk_count > MAX_CHUNKS {
         return Err(KitError::TooManyChunks);
     }
-    check_chunked_total_size(total_size, chunk_size, chunk_count)
+    if total_size > MAX_CHUNKED_TOTAL_SIZE {
+        return Err(KitError::ChunkedBlobTotalSizeInvalid);
+    }
+    Ok(())
+}
+
+/// Check one manifest entry against decode check 4 of SPEC-OBJECTS §7: the
+/// chunk at `index` ends at `end`, and the chunk before it ended at
+/// `prev_end` (`0` for the first). In order: the end increases, the span fits
+/// in one Blob object, the end is at most `total_size`, and in a fixed-size
+/// layout the end is `min((index + 1) * chunk_size, total_size)`. The
+/// manifest decoder, [`ChunkedBlob::new`] and
+/// [`crate::merkle::ChunkedIdFold`] all run this one function, so each
+/// refuses at the same entry with the same error.
+///
+/// # Errors
+/// [`KitError::ChunkEndNotIncreasing`], [`KitError::ChunkLengthAboveLimit`],
+/// [`KitError::ChunkEndAboveTotalSize`] and [`KitError::FixedChunkEnd`], in
+/// that order.
+pub fn check_chunk_entry(
+    index: u32,
+    chunk_size: u32,
+    total_size: u64,
+    prev_end: u64,
+    end: u64,
+) -> Result<(), KitError> {
+    if end <= prev_end {
+        return Err(KitError::ChunkEndNotIncreasing { index });
+    }
+    if end - prev_end > MAX_CHUNK_LEN {
+        return Err(KitError::ChunkLengthAboveLimit { index });
+    }
+    if end > total_size {
+        return Err(KitError::ChunkEndAboveTotalSize { index });
+    }
+    if crate::chunker::Chunker::from_chunk_size(chunk_size).is_none() {
+        let fixed_end = u64::from(index)
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(u64::from(chunk_size)))
+            .ok_or(KitError::FixedChunkEnd { index })?
+            .min(total_size);
+        if end != fixed_end {
+            return Err(KitError::FixedChunkEnd { index });
+        }
+    }
+    Ok(())
+}
+
+/// Check decode check 5 of SPEC-OBJECTS §7 once every entry has passed
+/// [`check_chunk_entry`]: the last end equals `total_size`, and with no
+/// chunks `total_size` is `0`. `last_end` is `0` when there are no chunks.
+///
+/// # Errors
+/// [`KitError::ChunkedBlobTotalSizeInvalid`] for a non-zero `total_size`
+/// with no chunks, and [`KitError::ChunkedBlobLastEnd`] for a last end
+/// below `total_size`.
+pub fn check_last_end(total_size: u64, chunk_count: usize, last_end: u64) -> Result<(), KitError> {
+    if chunk_count == 0 {
+        if total_size != 0 {
+            return Err(KitError::ChunkedBlobTotalSizeInvalid);
+        }
+    } else if last_end != total_size {
+        return Err(KitError::ChunkedBlobLastEnd);
+    }
+    Ok(())
 }
 
 /// Refuse a manifest that [`deserialize`] would refuse, so a writer never
@@ -268,12 +339,19 @@ pub fn check_chunked_header(
 /// checks; this is the second line of defence.
 fn write_chunked_blob(buf: &mut Vec<u8>, cb: &ChunkedBlob) -> Result<(), KitError> {
     let chunk_count = u32::try_from(cb.chunks().len()).map_err(|_| KitError::TooManyChunks)?;
-    check_chunked_header(cb.total_size(), cb.chunk_size(), chunk_count)?;
+    check_chunked_header(cb.total_size(), chunk_count)?;
+    let mut prev_end = 0;
+    for (index, &end) in (0..chunk_count).zip(cb.ends()) {
+        check_chunk_entry(index, cb.chunk_size(), cb.total_size(), prev_end, end)?;
+        prev_end = end;
+    }
+    check_last_end(cb.total_size(), cb.chunks().len(), prev_end)?;
     write_u64_le(buf, cb.total_size());
     write_u32_le(buf, cb.chunk_size());
     write_u32_le(buf, chunk_count);
-    for c in cb.chunks() {
-        buf.extend_from_slice(c);
+    for (chunk, end) in cb.entries() {
+        buf.extend_from_slice(&chunk);
+        write_u64_le(buf, end);
     }
     Ok(())
 }
@@ -322,7 +400,7 @@ fn estimated_body_len(obj: &Object) -> usize {
                 + 32
                 + 64
         }
-        Object::ChunkedBlob(cb) => 8 + 4 + 4 + cb.chunks().len() * 32,
+        Object::ChunkedBlob(cb) => 8 + 4 + 4 + cb.chunks().len() * CHUNKED_ENTRY_LEN,
         Object::Delta(d) => 32 + 4 + 4 + d.instructions.len(),
         Object::Tag(t) => {
             32 + 1
@@ -631,18 +709,22 @@ fn read_chunked_blob(r: &mut Reader<'_>) -> Result<ChunkedBlob, KitError> {
     let total_size = r.read_u64()?;
     let chunk_size = r.read_u32()?;
     let chunk_count = r.read_u32()?;
+    // Decode check 1, then check 2 before any allocation: the entries are
+    // exactly what remains.
     if chunk_count > MAX_CHUNKS {
         return Err(KitError::TooManyChunks);
     }
-    if (chunk_count as usize).saturating_mul(HASH_LEN) > r.remaining() {
-        return Err(KitError::UnexpectedEof);
+    if (chunk_count as usize).saturating_mul(CHUNKED_ENTRY_LEN) != r.remaining() {
+        return Err(KitError::ChunkedBlobLength);
     }
-    check_chunked_total_size(total_size, chunk_size, chunk_count)?;
-    let mut chunks = Vec::with_capacity(chunk_count as usize);
+    // Decode checks 3, 4 and 5.
+    let mut builder = ChunkedBlobBuilder::new(total_size, chunk_size, chunk_count as usize)?;
     for _ in 0..chunk_count {
-        chunks.push(r.read_hash()?);
+        let chunk = r.read_hash()?;
+        let end = r.read_u64()?;
+        builder.push(chunk, end)?;
     }
-    ChunkedBlob::new(total_size, chunk_size, chunks)
+    builder.finish()
 }
 
 /// Reject a `total_size` that the chunk layout cannot produce. Readers
@@ -850,7 +932,7 @@ mod tests {
     #[test]
     fn chunked_blob_roundtrip() {
         let obj = Object::ChunkedBlob(
-            ChunkedBlob::new(
+            crate::object::testing::spread(
                 3 * 65536,
                 65536,
                 vec![hash(b"c1"), hash(b"c2"), hash(b"c3")],
@@ -865,7 +947,7 @@ mod tests {
     #[test]
     fn chunked_blob_cdc_marker_roundtrips() {
         let obj = Object::ChunkedBlob(
-            ChunkedBlob::new(100_000, 0, vec![hash(b"x"), hash(b"y")]).unwrap(),
+            crate::object::testing::spread(100_000, 0, vec![hash(b"x"), hash(b"y")]).unwrap(),
         );
         assert_eq!(deserialize(&serialize(&obj).unwrap()).unwrap(), obj);
     }
@@ -1043,16 +1125,6 @@ mod tests {
         assert_eq!(deserialize(&buf), Err(KitError::TooManyEntries));
     }
 
-    #[test]
-    fn rejects_truncated_chunk_list() {
-        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
-        buf.extend_from_slice(&1024u64.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&2u32.to_le_bytes()); // chunk_count = 2
-        buf.extend_from_slice(&[0xAA; 32]); // only one chunk
-        assert_eq!(deserialize(&buf), Err(KitError::UnexpectedEof));
-    }
-
     // ---- Fallible-serialize tests ----
 
     #[test]
@@ -1179,78 +1251,173 @@ mod tests {
         assert_eq!(deserialize(&buf), Err(KitError::TooManySources));
     }
 
-    #[test]
-    fn rejects_too_many_chunks() {
-        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
-        buf.extend_from_slice(&1024u64.to_le_bytes()); // total_size
-        buf.extend_from_slice(&0u32.to_le_bytes()); // chunk_size
-        buf.extend_from_slice(&(MAX_CHUNKS + 1).to_le_bytes()); // chunk_count
-        assert_eq!(deserialize(&buf), Err(KitError::TooManyChunks));
-    }
-
-    fn chunked_bytes(total: u64, chunk_size: u32, count: u32) -> Vec<u8> {
-        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
+    /// The 22-byte prologue and header of a manifest.
+    fn chunked_header(total: u64, chunk_size: u32, count: u32) -> Vec<u8> {
+        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x02];
         buf.extend_from_slice(&total.to_le_bytes());
         buf.extend_from_slice(&chunk_size.to_le_bytes());
         buf.extend_from_slice(&count.to_le_bytes());
-        for i in 0..count {
-            buf.extend_from_slice(&hash(&i.to_le_bytes()));
+        buf
+    }
+
+    /// A manifest whose chunk `i` is `hash(le32(i))` and ends at `ends[i]`.
+    fn chunked_bytes(total: u64, chunk_size: u32, ends: &[u64]) -> Vec<u8> {
+        let mut buf = chunked_header(total, chunk_size, u32::try_from(ends.len()).unwrap());
+        for (i, end) in ends.iter().enumerate() {
+            buf.extend_from_slice(&hash(&u32::try_from(i).unwrap().to_le_bytes()));
+            buf.extend_from_slice(&end.to_le_bytes());
         }
         buf
+    }
+
+    #[test]
+    fn rejects_too_many_chunks() {
+        assert_eq!(
+            deserialize(&chunked_header(1024, 0, MAX_CHUNKS + 1)),
+            Err(KitError::TooManyChunks)
+        );
+    }
+
+    /// The manifest is version 2, and the old version is refused.
+    #[test]
+    fn a_manifest_is_schema_version_2() {
+        let mut bytes = chunked_bytes(10, 0, &[10]);
+        assert_eq!(bytes[5], 0x02);
+        assert!(deserialize(&bytes).is_ok());
+        bytes[5] = 0x01;
+        assert_eq!(deserialize(&bytes), Err(KitError::UnsupportedObjectVersion));
+    }
+
+    /// Decode check 2: the entries are exactly what remains, checked before
+    /// any allocation, so a short or long body is a length error.
+    #[test]
+    fn rejects_a_chunk_list_of_the_wrong_length() {
+        let mut short = chunked_header(1024, 0, 2);
+        short.extend_from_slice(&[0xAA; 40]); // one entry of two
+        assert_eq!(deserialize(&short), Err(KitError::ChunkedBlobLength));
+        let mut long = chunked_bytes(10, 0, &[10]);
+        long.push(0);
+        assert_eq!(deserialize(&long), Err(KitError::ChunkedBlobLength));
+        // A header at the chunk cap with no entries fails on the length,
+        // not on an allocation.
+        assert_eq!(
+            deserialize(&chunked_header(MAX_CHUNKED_TOTAL_SIZE, 0, MAX_CHUNKS)),
+            Err(KitError::ChunkedBlobLength)
+        );
+        // Fewer than 22 bytes is a truncated header.
+        assert_eq!(
+            deserialize(&chunked_header(1, 0, 0)[..20]),
+            Err(KitError::UnexpectedEof)
+        );
     }
 
     #[test]
     fn rejects_chunked_blob_total_size_beyond_the_bound() {
         for total in [u64::MAX, 1 << 62, MAX_CHUNKED_TOTAL_SIZE + 1] {
             assert_eq!(
-                deserialize(&chunked_bytes(total, 0, 2)),
+                deserialize(&chunked_bytes(total, 0, &[1, 2])),
                 Err(KitError::ChunkedBlobTotalSizeInvalid)
             );
         }
-        assert!(deserialize(&chunked_bytes(MAX_CHUNKED_TOTAL_SIZE, 0, 2)).is_ok());
     }
 
-    /// A header at the chunk cap passes the count check and fails only for
-    /// its missing chunk ids, before any allocation.
+    /// Decode check 4, per entry, in the order the checks run.
     #[test]
-    fn accepts_the_chunk_cap_in_the_header() {
-        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
-        buf.extend_from_slice(&MAX_CHUNKED_TOTAL_SIZE.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&MAX_CHUNKS.to_le_bytes());
-        assert_eq!(deserialize(&buf), Err(KitError::UnexpectedEof));
+    fn rejects_each_bad_entry_with_its_own_error() {
+        // Not increasing: a repeated end, and a zero end.
+        assert_eq!(
+            deserialize(&chunked_bytes(10, 0, &[5, 5, 10])),
+            Err(KitError::ChunkEndNotIncreasing { index: 1 })
+        );
+        assert_eq!(
+            deserialize(&chunked_bytes(10, 0, &[0, 10])),
+            Err(KitError::ChunkEndNotIncreasing { index: 0 })
+        );
+        // A span above one Blob object.
+        assert_eq!(
+            deserialize(&chunked_bytes(MAX_CHUNK_LEN + 1, 0, &[MAX_CHUNK_LEN + 1])),
+            Err(KitError::ChunkLengthAboveLimit { index: 0 })
+        );
+        // An end past the total.
+        assert_eq!(
+            deserialize(&chunked_bytes(10, 0, &[11])),
+            Err(KitError::ChunkEndAboveTotalSize { index: 0 })
+        );
+        // A fixed layout that does not end at `min((i + 1) * size, total)`.
+        assert_eq!(
+            deserialize(&chunked_bytes(196_608, 65_536, &[65_536, 100_000, 196_608])),
+            Err(KitError::FixedChunkEnd { index: 1 })
+        );
+        // Decode check 5: the last end is the total, and no chunks mean no
+        // bytes.
+        assert_eq!(
+            deserialize(&chunked_bytes(10, 0, &[4, 9])),
+            Err(KitError::ChunkedBlobLastEnd)
+        );
+        assert_eq!(
+            deserialize(&chunked_bytes(1, 0, &[])),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+        // Good manifests of both layouts.
+        assert!(deserialize(&chunked_bytes(10, 0, &[3, 4, 10])).is_ok());
+        assert!(deserialize(&chunked_bytes(131_073, 65_536, &[65_536, 131_072, 131_073])).is_ok());
+        assert!(deserialize(&chunked_bytes(0, 0, &[])).is_ok());
+    }
+
+    /// Each manifest entry is a 32-byte id then the end, little-endian.
+    #[test]
+    fn a_manifest_is_laid_out_as_22_plus_40_per_chunk() {
+        let cb = ChunkedBlob::new(10, 0, [([1u8; 32], 4), ([2u8; 32], 10)]).unwrap();
+        let bytes = serialize(&Object::ChunkedBlob(cb)).unwrap();
+        assert_eq!(bytes.len(), CHUNKED_HEADER_LEN + 2 * CHUNKED_ENTRY_LEN);
+        assert_eq!(&bytes[..6], &[0x05, b'K', b'O', b'B', b'1', 0x02]);
+        assert_eq!(&bytes[6..14], &10u64.to_le_bytes());
+        assert_eq!(&bytes[14..18], &0u32.to_le_bytes());
+        assert_eq!(&bytes[18..22], &2u32.to_le_bytes());
+        assert_eq!(&bytes[22..54], &[1u8; 32]);
+        assert_eq!(&bytes[54..62], &4u64.to_le_bytes());
+        assert_eq!(&bytes[62..94], &[2u8; 32]);
+        assert_eq!(&bytes[94..102], &10u64.to_le_bytes());
     }
 
     /// `ChunkedBlob::new` refuses every manifest the reader refuses, so no
     /// value the writer sees is undecodable.
     #[test]
     fn new_refuses_a_manifest_the_reader_refuses() {
-        // Zeroed: the allocator maps the pages lazily, and `new` refuses on
-        // the length before it reads one.
+        // Zeroed: the allocator maps the pages lazily, and `new` refuses at
+        // the count before it reads one.
         assert_eq!(
             ChunkedBlob::new(
                 MAX_CHUNKED_TOTAL_SIZE,
                 0,
-                vec![[0u8; 32]; MAX_CHUNKS as usize + 1]
+                (0..=u64::from(MAX_CHUNKS)).map(|i| ([0u8; 32], i + 1))
             ),
             Err(KitError::TooManyChunks)
         );
         assert_eq!(
-            ChunkedBlob::new(MAX_CHUNKED_TOTAL_SIZE + 1, 0, vec![[1u8; 32], [2u8; 32]]),
+            ChunkedBlob::new(MAX_CHUNKED_TOTAL_SIZE + 1, 0, [([1u8; 32], 5)]),
             Err(KitError::ChunkedBlobTotalSizeInvalid)
         );
         assert_eq!(
-            ChunkedBlob::new(1, 0, vec![[1u8; 32], [2u8; 32]]),
-            Err(KitError::ChunkedBlobTotalSizeInvalid)
+            ChunkedBlob::new(10, 0, [([1u8; 32], 5), ([1u8; 32], 5)]),
+            Err(KitError::ChunkEndNotIncreasing { index: 1 })
+        );
+        assert_eq!(
+            ChunkedBlob::new(10, 0, [([1u8; 32], 11)]),
+            Err(KitError::ChunkEndAboveTotalSize { index: 0 })
+        );
+        assert_eq!(
+            ChunkedBlob::new(10, 0, [([1u8; 32], 5)]),
+            Err(KitError::ChunkedBlobLastEnd)
         );
         // A fixed size the chunks cannot fill, and one they overfill.
         assert_eq!(
-            ChunkedBlob::new(131_072, 65_536, vec![[1u8; 32]; 3]),
-            Err(KitError::ChunkedBlobTotalSizeInvalid)
+            ChunkedBlob::new(131_072, 65_536, [([1u8; 32], 65_536)]),
+            Err(KitError::ChunkedBlobLastEnd)
         );
         assert_eq!(
-            ChunkedBlob::new(196_609, 65_536, vec![[1u8; 32]; 3]),
-            Err(KitError::ChunkedBlobTotalSizeInvalid)
+            ChunkedBlob::new(65_536, 65_536, [([1u8; 32], 65_536), ([2u8; 32], 65_537)]),
+            Err(KitError::ChunkEndAboveTotalSize { index: 1 })
         );
         // Zero chunks mean zero bytes.
         assert_eq!(
@@ -1262,39 +1429,52 @@ mod tests {
     /// The bounds themselves still build, serialize and decode.
     #[test]
     fn a_manifest_at_the_bound_round_trips() {
+        let count = MAX_CHUNKED_TOTAL_SIZE.div_ceil(MAX_CHUNK_LEN);
         let at_bound = Object::ChunkedBlob(
-            ChunkedBlob::new(MAX_CHUNKED_TOTAL_SIZE, 0, vec![[1u8; 32], [2u8; 32]]).unwrap(),
+            ChunkedBlob::new(
+                MAX_CHUNKED_TOTAL_SIZE,
+                0,
+                (1..=count).map(|i| {
+                    (
+                        hash(&i.to_le_bytes()),
+                        (i * MAX_CHUNK_LEN).min(MAX_CHUNKED_TOTAL_SIZE),
+                    )
+                }),
+            )
+            .unwrap(),
         );
         assert_eq!(deserialize(&serialize(&at_bound).unwrap()), Ok(at_bound));
         let empty = Object::ChunkedBlob(ChunkedBlob::new(0, 0, Vec::new()).unwrap());
         assert_eq!(deserialize(&serialize(&empty).unwrap()), Ok(empty));
     }
 
-    /// The writer checks the header too, as a second line of defence: a
+    /// The writer checks every entry too, as a second line of defence: a
     /// value built past `new` is still refused before any byte is written.
     #[test]
     fn serialize_refuses_a_manifest_the_reader_refuses() {
-        let over_count = Object::ChunkedBlob(ChunkedBlob::new_unchecked(
-            MAX_CHUNKED_TOTAL_SIZE,
-            0,
-            vec![[0u8; 32]; MAX_CHUNKS as usize + 1],
-        ));
-        assert_eq!(serialize(&over_count), Err(KitError::TooManyChunks));
         let over_size = Object::ChunkedBlob(ChunkedBlob::new_unchecked(
             MAX_CHUNKED_TOTAL_SIZE + 1,
             0,
-            vec![[1u8; 32], [2u8; 32]],
+            vec![[1u8; 32]],
+            vec![MAX_CHUNKED_TOTAL_SIZE + 1],
         ));
         assert_eq!(
             serialize(&over_size),
             Err(KitError::ChunkedBlobTotalSizeInvalid)
         );
-        let inconsistent =
-            Object::ChunkedBlob(ChunkedBlob::new_unchecked(1, 0, vec![[1u8; 32], [2u8; 32]]));
+        let flat = Object::ChunkedBlob(ChunkedBlob::new_unchecked(
+            10,
+            0,
+            vec![[1u8; 32], [2u8; 32]],
+            vec![5, 5],
+        ));
         assert_eq!(
-            serialize(&inconsistent),
-            Err(KitError::ChunkedBlobTotalSizeInvalid)
+            serialize(&flat),
+            Err(KitError::ChunkEndNotIncreasing { index: 1 })
         );
+        let short =
+            Object::ChunkedBlob(ChunkedBlob::new_unchecked(10, 0, vec![[1u8; 32]], vec![5]));
+        assert_eq!(serialize(&short), Err(KitError::ChunkedBlobLastEnd));
     }
 
     /// The capacity hint of a manifest is its exact encoded length, so
@@ -1302,7 +1482,8 @@ mod tests {
     #[test]
     fn the_capacity_estimate_of_a_manifest_is_its_encoded_length() {
         for count in [0usize, 1, 3] {
-            let cb = ChunkedBlob::new(count as u64, 0, vec![[1u8; 32]; count]).unwrap();
+            let cb =
+                crate::object::testing::spread(count as u64, 0, vec![[1u8; 32]; count]).unwrap();
             let obj = Object::ChunkedBlob(cb);
             assert_eq!(
                 PROLOGUE_LEN + estimated_body_len(&obj),
@@ -1312,37 +1493,73 @@ mod tests {
     }
 
     #[test]
-    fn rejects_chunked_blob_total_size_inconsistent_with_layout() {
-        // Zero chunks must mean zero bytes.
-        assert!(deserialize(&chunked_bytes(0, 0, 0)).is_ok());
-        assert!(deserialize(&chunked_bytes(1, 0, 0)).is_err());
-        // Fixed size: (count-1)*size < total <= count*size.
-        assert!(deserialize(&chunked_bytes(196_608, 65_536, 3)).is_ok());
-        assert!(deserialize(&chunked_bytes(131_073, 65_536, 3)).is_ok());
-        assert!(deserialize(&chunked_bytes(131_072, 65_536, 3)).is_err());
-        assert!(deserialize(&chunked_bytes(196_609, 65_536, 3)).is_err());
-        // Content-defined: every chunk holds at least one byte.
-        assert!(deserialize(&chunked_bytes(2, 0, 3)).is_err());
-    }
-
-    #[test]
     fn check_chunked_header_applies_the_decode_rules() {
         assert_eq!(
-            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE, 0, MAX_CHUNKS),
+            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE, MAX_CHUNKS),
             Ok(())
         );
         assert_eq!(
-            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE, 0, MAX_CHUNKS + 1),
+            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE, MAX_CHUNKS + 1),
             Err(KitError::TooManyChunks)
         );
         assert_eq!(
-            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE + 1, 0, 2),
+            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE + 1, 2),
             Err(KitError::ChunkedBlobTotalSizeInvalid)
         );
-        assert_eq!(
-            check_chunked_header(1, 0, 2),
-            Err(KitError::ChunkedBlobTotalSizeInvalid)
-        );
+        // The header run by the decoder and the fold is checks 1 and 3: it
+        // does not see the layout.
+        assert_eq!(check_chunked_header(1, 2), Ok(()));
+    }
+
+    /// SPEC-OBJECTS section 7: the header layouts, as `(total_size,
+    /// chunk_size, chunk_count)`, that the header-only check accepts and
+    /// refuses. The reference check in `scripts/golden/objects_ref.py` holds
+    /// the same table.
+    #[test]
+    fn check_chunked_total_size_matches_the_layout_table() {
+        const ACCEPTED: &[(u64, u32, u32)] = &[
+            (0, 0, 0),
+            (3, 0, 3),
+            (196_608, 65_536, 3),
+            (131_073, 65_536, 3),
+            (1, 65_536, 1),
+            (65_536, 65_536, 1),
+            (1 << 30, 0, 2),
+            ((1 << 30) + 1, 0, 2),
+            (128 << 30, 0, 2),
+            (0, 0x8000_0002, 0),
+            (3, 0x8000_0002, 3),
+            (128 << 30, 0x8000_0002, 2),
+            (1, 0x8000_0001, 1),
+        ];
+        const REFUSED: &[(u64, u32, u32)] = &[
+            (1, 0, 0),
+            (2, 0, 3),
+            ((128 << 30) + 1, 0, 2),
+            (196_609, 65_536, 3),
+            (131_072, 65_536, 3),
+            (65_536, 65_536, 2),
+            (1, 65_536, 2),
+            (0, 65_536, 1),
+            (1, 0x8000_0002, 0),
+            (2, 0x8000_0002, 3),
+            ((128 << 30) + 1, 0x8000_0002, 2),
+            (3, 0x8000_0001, 3),
+        ];
+        for &(total, size, count) in ACCEPTED {
+            assert_eq!(
+                check_chunked_total_size(total, size, count),
+                Ok(()),
+                "({total}, {size}, {count}) must be accepted"
+            );
+        }
+        for &(total, size, count) in REFUSED {
+            assert_eq!(
+                check_chunked_total_size(total, size, count),
+                Err(KitError::ChunkedBlobTotalSizeInvalid),
+                "({total}, {size}, {count}) must be refused"
+            );
+        }
     }
 
     #[test]

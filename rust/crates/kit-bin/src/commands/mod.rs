@@ -596,9 +596,13 @@ mod tests {
             kit_core::store::ObjectStore::init(&kit_core::layout::RepoLayout::single(td.path()))
                 .unwrap();
         let parts = [vec![1u8; 300], vec![2u8; 200], vec![3u8; 100]];
+        let mut end = 0u64;
         let chunks = parts
             .iter()
-            .map(|p| core_worktree_blob(&store, p))
+            .map(|p| {
+                end += p.len() as u64;
+                (core_worktree_blob(&store, p), end)
+            })
             .collect::<Vec<_>>();
         let manifest = kit_core::object::Object::ChunkedBlob(
             kit_core::object::ChunkedBlob::new(600, 0, chunks).unwrap(),

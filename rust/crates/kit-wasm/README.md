@@ -79,7 +79,7 @@ Attestations (in-toto/DSSE-style envelopes):
 Chunking, delta, and streaming:
 - `chunk_boundaries(bytes)` &mdash; FastCDC chunk boundary report.
 - `chunked_blob_encode(bytes)` &mdash; chunked-blob object construction.
-- `chunked_blob_decode(bytes) -> json` &mdash; `{ total_size, chunk_size, chunks }` from a canonical `ChunkedBlob` (16 MiB cap).
+- `chunked_blob_decode(bytes) -> json` &mdash; `{ total_size, chunk_size, chunks, ends }` from a canonical `ChunkedBlob` (16 MiB cap); `ends[i]` is the offset one past the last byte of chunk `i`.
 - `delta_encode(base, target)` &mdash; produce a delta summary.
 - `bao_encode(bytes)` &mdash; Bao outboard over **raw** file bytes (for streaming demos).
 - `bao_slice(...)` / `bao_verify_slice(...)` &mdash; verified streaming of those raw bytes.
@@ -94,7 +94,7 @@ Disclosure and closure verification:
 - `verify_closure_packs(root_hex, mode, packs, pack_lengths_json) -> json` &mdash; `mode` is `"snapshot"` or `"history"`. `packs` is the concatenation of each pack; `pack_lengths_json` is a JSON array of those lengths (for example `"[1024,2048]"`). Concatenated packs are capped independently of a disclosure bundle, at 1 GiB (`MAX_CLOSURE_INPUT_BYTES`, matching the native store's per-object cap) &mdash; a closure is every object reachable from a commit, a realistically much larger shape than a handful of proofs. The result includes `unreferenced_checked: true` because the pack index can enumerate every supplied object.
 - `verify_closure_manifest(expected_root_hex, manifest, packs, pack_lengths_json) -> json` &mdash; same pack framing; the manifest is a locator, never a trust anchor. Both closure exports return `unreferenced_checked` alongside `root`, `mode`, `verified`, `complete`, `missing`, `corrupt`, and `unreferenced`.
 - `verify_tree_entry(tree_id_hex, entry_json, position, proof) -> bool` &mdash; `entry_json` is `{ "name" | "name_hex", "mode", "object_hash" }`. Returns `false` when the proof does not fold to the id; throws on malformed input.
-- `verify_chunk(chunked_id_hex, chunk_id_hex, position, proof) -> bool` &mdash; same accept/reject split. Position 0 is never a chunk.
+- `verify_chunk(chunked_id_hex, chunk_id_hex, start, end, position, proof) -> bool` &mdash; same accept/reject split; `start` and `end` are the chunk's span, which its leaf commits (BigInt). Position 0 is never a chunk.
 - `wrap_object_id(kind, inner_root_hex) -> hex` &mdash; `kind` is `"tree"` or `"chunked_blob"`. Apply after a commonware BMT verifier checked the inner root.
 
 ### Verifying a commit hash

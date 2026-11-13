@@ -70,7 +70,7 @@ mod wire {
     ) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(b"KDPB");
-        out.push(2u8);
+        out.push(3u8);
         commit_id.write(&mut out);
         commit_bytes.write(&mut out);
         steps.write(&mut out);
@@ -84,157 +84,376 @@ mod wire {
         out
     }
 
-    pub(crate) fn chunk_payload(
-        total_size: u64,
-        chunk_size: u32,
-        index: u32,
-        inner_root: &Hash,
-        proof: &Proof,
-        bytes: &[u8],
-    ) -> Vec<u8> {
+    /// A chunk with the span its leaf commits (SPEC-DISCLOSURE §3).
+    pub(crate) struct Span {
+        pub(crate) start: u64,
+        pub(crate) end: u64,
+    }
+
+    pub(crate) struct ChunkFields<'a> {
+        pub(crate) total_size: u64,
+        pub(crate) chunk_size: u32,
+        pub(crate) index: u32,
+        pub(crate) span: Span,
+        pub(crate) inner_root: &'a Hash,
+        pub(crate) proof: &'a Proof,
+    }
+
+    pub(crate) fn chunk_payload(fields: &ChunkFields<'_>, bytes: &[u8]) -> Vec<u8> {
         let mut out = vec![1u8];
-        total_size.write(&mut out);
-        chunk_size.write(&mut out);
-        index.write(&mut out);
-        inner_root.write(&mut out);
-        proof.write(&mut out);
+        fields.total_size.write(&mut out);
+        fields.chunk_size.write(&mut out);
+        fields.index.write(&mut out);
+        fields.span.start.write(&mut out);
+        fields.span.end.write(&mut out);
+        fields.inner_root.write(&mut out);
+        fields.proof.write(&mut out);
         bytes.write(&mut out);
         out
     }
 
     /// Range payload's `ChunkHdr` sub-message fields (SPEC-DISCLOSURE §3).
-    pub(crate) struct ChunkHdr {
-        pub(crate) total_size: u64,
-        pub(crate) chunk_size: u32,
-        pub(crate) index: u32,
-        pub(crate) inner_root: Hash,
+    pub(crate) struct ChunkHdr<'a> {
+        pub(crate) fields: ChunkFields<'a>,
         pub(crate) chunk_id: Hash,
-        pub(crate) proof: Proof,
-    }
-
-    /// Range payload's `LenProof` sub-message fields (SPEC-DISCLOSURE §3).
-    pub(crate) struct LenProof {
-        pub(crate) index: u32,
-        pub(crate) chunk_id: Hash,
-        pub(crate) proof: Proof,
-        pub(crate) slice: Vec<u8>,
     }
 
     pub(crate) fn range_payload(
-        chunk: Option<&ChunkHdr>,
+        chunk: Option<&ChunkHdr<'_>>,
         offset_in_blob: u64,
         len: u64,
         slice: &[u8],
-        chunk_len_proofs: &[LenProof],
     ) -> Vec<u8> {
         let mut out = vec![2u8];
         match chunk {
             None => false.write(&mut out),
             Some(c) => {
                 true.write(&mut out);
-                c.total_size.write(&mut out);
-                c.chunk_size.write(&mut out);
-                c.index.write(&mut out);
-                c.inner_root.write(&mut out);
+                c.fields.total_size.write(&mut out);
+                c.fields.chunk_size.write(&mut out);
+                c.fields.index.write(&mut out);
+                c.fields.span.start.write(&mut out);
+                c.fields.span.end.write(&mut out);
+                c.fields.inner_root.write(&mut out);
                 c.chunk_id.write(&mut out);
-                c.proof.write(&mut out);
+                c.fields.proof.write(&mut out);
             }
         }
         offset_in_blob.write(&mut out);
         len.write(&mut out);
         slice.write(&mut out);
-        chunk_len_proofs.len().write(&mut out);
-        for lp in chunk_len_proofs {
-            lp.index.write(&mut out);
-            lp.chunk_id.write(&mut out);
-            lp.proof.write(&mut out);
-            lp.slice.write(&mut out);
-        }
         out
+    }
+}
+
+/// A chunked-file id built from leaves alone, the way a forged tree names an
+/// id no manifest decodes to (SPEC-MERKLE-OBJECTS §1.1 and §3.1). Written
+/// from the spec, with no call into `kit_core`'s tree code, so a vector can
+/// name a span the manifest rules would refuse and still carry a proof that
+/// folds to the id.
+mod forge {
+    use kit_core::hash::{Hash, domain_digest, hash};
+    use kit_core::merkle::{ObjectKind, Proof, wrap_id};
+
+    pub(crate) fn meta_leaf(total_size: u64, chunk_size: u32) -> Hash {
+        let mut body = total_size.to_le_bytes().to_vec();
+        body.extend_from_slice(&chunk_size.to_le_bytes());
+        domain_digest(b"kit-cblob-meta-v2", &body)
+    }
+
+    pub(crate) fn chunk_leaf(start: u64, end: u64, id: &Hash) -> Hash {
+        let mut body = start.to_le_bytes().to_vec();
+        body.extend_from_slice(&end.to_le_bytes());
+        body.extend_from_slice(id);
+        domain_digest(b"kit-cblob-chunk-v1", &body)
+    }
+
+    fn node(position: u32, leaf: &Hash) -> Hash {
+        let mut body = position.to_be_bytes().to_vec();
+        body.extend_from_slice(leaf);
+        hash(&body)
+    }
+
+    fn pair(left: &Hash, right: &Hash) -> Hash {
+        let mut body = left.to_vec();
+        body.extend_from_slice(right);
+        hash(&body)
+    }
+
+    /// The bare root of the BMT over `leaves`.
+    pub(crate) fn inner_root(leaves: &[Hash]) -> Hash {
+        let mut level: Vec<Hash> = (0u32..).zip(leaves).map(|(i, l)| node(i, l)).collect();
+        while level.len() > 1 {
+            if level.len() % 2 == 1 {
+                level.push(*level.last().unwrap());
+            }
+            level = level.chunks(2).map(|p| pair(&p[0], &p[1])).collect();
+        }
+        let mut body = u32::try_from(leaves.len()).unwrap().to_be_bytes().to_vec();
+        body.extend_from_slice(&level[0]);
+        hash(&body)
+    }
+
+    pub(crate) fn chunked_id(inner_root: &Hash) -> Hash {
+        wrap_id(ObjectKind::ChunkedBlob, inner_root)
+    }
+
+    /// The multi-proof of `positions` over `leaves`.
+    pub(crate) fn proof(leaves: &[Hash], positions: &[u32]) -> Proof {
+        let mut level: Vec<Hash> = (0u32..).zip(leaves).map(|(i, l)| node(i, l)).collect();
+        let mut known: Vec<usize> = positions.iter().map(|&p| p as usize).collect();
+        known.sort_unstable();
+        known.dedup();
+        let mut siblings = Vec::new();
+        while level.len() > 1 {
+            let size = level.len();
+            let mut parents = Vec::new();
+            for &pos in &known {
+                let sib = if pos % 2 == 0 {
+                    if pos + 1 < size { pos + 1 } else { pos }
+                } else {
+                    pos - 1
+                };
+                if sib != pos && !known.contains(&sib) {
+                    siblings.push(level[sib]);
+                }
+                parents.push(pos / 2);
+            }
+            parents.dedup();
+            if size % 2 == 1 {
+                level.push(*level.last().unwrap());
+            }
+            level = level.chunks(2).map(|p| pair(&p[0], &p[1])).collect();
+            known = parents;
+        }
+        Proof {
+            leaf_count: u32::try_from(leaves.len()).unwrap(),
+            siblings,
+        }
     }
 }
 
 use common::build_fixture;
 
-/// A signed commit over one file, `fixed.bin`, whose manifest names the
-/// fixed-size layout `chunk_size = 16` and `total_size = 53` (four chunks)
-/// but whose chunks hold `lens` bytes each. The commit, signer and file
-/// bytes are fixed, so the vectors stay byte-identical.
-fn fixed_layout_commit(lens: &[usize]) -> (tempfile::TempDir, ObjectStore, Hash) {
-    let (dir, store, commit_id, _) = layout_commit(53, 16, lens);
-    (dir, store, commit_id)
-}
-
-/// Like [`fixed_layout_commit`], for any `total_size`/`chunk_size`. The
-/// manifest is stored only when it decodes; otherwise only its id, the
-/// root of its merkle leaves, is referenced, as a forged tree would.
-fn layout_commit(
-    total_size: u64,
-    chunk_size: u32,
-    lens: &[usize],
-) -> (tempfile::TempDir, ObjectStore, Hash, Vec<Hash>) {
+/// A signed commit over one file `name` whose id is `file_id`. The commit,
+/// signer and timestamp are fixed, so the vectors stay byte-identical.
+fn commit_over_file(store: &ObjectStore, name: &[u8], file_id: Hash) -> Hash {
     use kit_core::hash::ZERO;
-    use kit_core::merkle::ChunkedIdFold;
-    use kit_core::object::Blob;
     use kit_core::serialize::serialize;
     use kit_core::sign::{KeyPair, sign_commit};
 
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
-    let data = common::prng_bytes(0xF1_7ED5, lens.iter().sum());
-    let mut rest = data.as_slice();
-    let chunks: Vec<Hash> = lens
-        .iter()
-        .map(|&n| {
-            let (chunk, tail) = rest.split_at(n);
-            rest = tail;
-            let blob = Object::Blob(Blob {
-                data: chunk.to_vec(),
-            });
-            store.write(&serialize(&blob).unwrap()).unwrap()
-        })
-        .collect();
-    // Encoded by hand: a `ChunkedBlob` is always valid, and some vectors
-    // need a layout that a reader refuses. The id comes from the fields
-    // alone.
-    let mut manifest_bytes = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
-    manifest_bytes.extend_from_slice(&total_size.to_le_bytes());
-    manifest_bytes.extend_from_slice(&chunk_size.to_le_bytes());
-    manifest_bytes.extend_from_slice(&u32::try_from(chunks.len()).unwrap().to_le_bytes());
-    let mut fold = ChunkedIdFold::new(total_size, chunk_size);
-    for chunk in &chunks {
-        manifest_bytes.extend_from_slice(chunk);
-        fold.push(chunk).unwrap();
-    }
-    let file = fold.id();
-    if kit_core::serialize::deserialize(&manifest_bytes).is_ok() {
-        assert_eq!(store.write(&manifest_bytes).unwrap(), file);
-    }
-    let tree = Object::Tree(Tree {
+    let tree = Tree {
         entries: vec![TreeEntry {
-            name: b"fixed.bin".to_vec(),
+            name: name.to_vec(),
             mode: EntryMode::Blob,
-            object_hash: file,
+            object_hash: file_id,
         }],
-    });
-    let tree_hash = store.write(&serialize(&tree).unwrap()).unwrap();
-    let kp = KeyPair::from_seed([0x07; 32]);
+    };
+    let tree_hash = store
+        .write(&serialize(&Object::Tree(tree)).unwrap())
+        .unwrap();
+    let kp = KeyPair::from_seed([0x11; 32]);
     let mut commit = Commit {
         tree_hash,
         parents: vec![],
         author: Identity::ed25519(kp.public.0),
         signer: kp.public.0,
-        message: b"SPEC-DISCLOSURE fixed-size layout fixture".to_vec(),
+        message: b"SPEC-DISCLOSURE chunk span fixture".to_vec(),
         timestamp: 1_726_300_000,
         message_hash: ZERO,
         content_digest: ZERO,
         signature: [0u8; 64],
     };
     commit.signature = sign_commit(&commit, &kp).unwrap().0;
-    let commit_id = store
+    store
         .write(&serialize(&Object::Commit(commit)).unwrap())
+        .unwrap()
+}
+
+/// Write one chunk blob of `len` deterministic bytes, returning its id and
+/// canonical bytes. `seed` makes two chunks of one length differ.
+fn write_chunk(store: &ObjectStore, seed: u64, len: usize) -> (Hash, Vec<u8>) {
+    let blob = Object::Blob(kit_core::object::Blob {
+        data: common::prng_bytes(0xF1_7ED5 + seed, len),
+    });
+    let bytes = kit_core::serialize::serialize(&blob).unwrap();
+    (store.write(&bytes).unwrap(), bytes)
+}
+
+/// A signed commit over one file, `fixed.bin`, whose manifest names the
+/// fixed-size layout `chunk_size = 16` and `total_size = 53` (four chunks of
+/// 16, 16, 16 and 5 bytes) while its chunk blobs hold `lens` bytes each.
+fn fixed_layout_commit(lens: &[usize]) -> (tempfile::TempDir, ObjectStore, Hash) {
+    let (dir, store, commit_id, _) = layout_commit(16, &[16, 16, 16, 5], lens);
+    (dir, store, commit_id)
+}
+
+/// A signed commit over one file, `fixed.bin`, whose valid manifest has
+/// the spans `span_lens` under `chunk_size`, while its chunk blobs hold
+/// `lens` bytes each. Returns the chunk ids too.
+fn layout_commit(
+    chunk_size: u32,
+    span_lens: &[u64],
+    lens: &[usize],
+) -> (tempfile::TempDir, ObjectStore, Hash, Vec<Hash>) {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
+    let chunks: Vec<Hash> = lens
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| write_chunk(&store, i as u64, n).0)
+        .collect();
+    let mut end = 0;
+    let manifest = kit_core::object::ChunkedBlob::new(
+        span_lens.iter().sum(),
+        chunk_size,
+        chunks.iter().zip(span_lens).map(|(&id, &len)| {
+            end += len;
+            (id, end)
+        }),
+    )
+    .unwrap();
+    let file = store
+        .write(&kit_core::serialize::serialize(&Object::ChunkedBlob(manifest)).unwrap())
         .unwrap();
+    let commit_id = commit_over_file(&store, b"fixed.bin", file);
     (dir, store, commit_id, chunks)
+}
+
+/// The `ChunkedBlob` the one file of a `layout_commit` commit names.
+fn layout_manifest(store: &ObjectStore, commit_id: &Hash) -> kit_core::object::ChunkedBlob {
+    let tree_hash = tree_of_commit(store, commit_id);
+    let (_, leaf) = walk_path(store, tree_hash, &[b"fixed.bin".as_slice()]);
+    let Object::ChunkedBlob(cb) = store.read_object(&leaf).unwrap() else {
+        panic!("fixed.bin is a ChunkedBlob");
+    };
+    cb
+}
+
+/// A bundle over `fixed.bin` of a `layout_commit` commit with `payload`.
+fn layout_bundle(store: &ObjectStore, commit_id: &Hash, payload: &[u8]) -> Vec<u8> {
+    let tree_hash = tree_of_commit(store, commit_id);
+    let (steps, _) = walk_path(store, tree_hash, &[b"fixed.bin".as_slice()]);
+    wire::bundle(
+        commit_id,
+        &canonical_bytes(store, commit_id),
+        &steps,
+        payload,
+    )
+}
+
+/// A chunked file whose spans are committed as given, whatever the manifest
+/// rules say, and one disclosed chunk of it.
+struct Forged<'a> {
+    name: &'static str,
+    description: &'static str,
+    total_size: u64,
+    chunk_size: u32,
+    spans: &'a [(u64, u64)],
+    /// Each chunk blob's length; only the disclosed chunk's bytes are shipped.
+    blob_lens: &'a [usize],
+    index: u32,
+    /// `None` for a vector the verifier must accept.
+    reason: Option<&'static str>,
+}
+
+/// Build the `Chunk` disclosure of `forged`, with a proof that folds to the
+/// id its leaves name. `refused_by` recognises the error a reject vector
+/// must fail with; an accept vector never calls it.
+fn forged_chunk_vector(
+    forged: &Forged<'_>,
+    raw_bytes: Option<&[u8]>,
+    refused_by: impl Fn(&VerifyError) -> bool,
+) -> Vector {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
+    let mut ids: Vec<Hash> = forged
+        .blob_lens
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| write_chunk(&store, i as u64, n).0)
+        .collect();
+    // A chunk id is the hash of its bytes whatever they are, so a forged tree
+    // can name bytes that are not a Blob.
+    if let Some(raw) = raw_bytes {
+        ids[forged.index as usize] = hash(raw);
+    }
+    let mut leaves = vec![forge::meta_leaf(forged.total_size, forged.chunk_size)];
+    leaves.extend(
+        forged
+            .spans
+            .iter()
+            .zip(&ids)
+            .map(|(&(start, end), id)| forge::chunk_leaf(start, end, id)),
+    );
+    let inner_root = forge::inner_root(&leaves);
+    let commit_id = commit_over_file(&store, b"fixed.bin", forge::chunked_id(&inner_root));
+    let index = forged.index as usize;
+    let (start, end) = forged.spans[index];
+    let proof = forge::proof(&leaves, &[0, forged.index + 1]);
+    let bin = layout_bundle(
+        &store,
+        &commit_id,
+        &wire::chunk_payload(
+            &wire::ChunkFields {
+                total_size: forged.total_size,
+                chunk_size: forged.chunk_size,
+                index: forged.index,
+                span: wire::Span { start, end },
+                inner_root: &inner_root,
+                proof: &proof,
+            },
+            &raw_bytes.map_or_else(|| canonical_bytes(&store, &ids[index]), <[u8]>::to_vec),
+        ),
+    );
+    let path = [b"fixed.bin".as_slice()];
+    let selector = format!("chunk({})", forged.index);
+    let mut json = base_json(
+        &commit_id,
+        &path,
+        &selector,
+        forged.reason.is_none(),
+        forged.reason,
+    );
+    match verify::verify_disclosure(&commit_id, &bin) {
+        Ok(d) => {
+            assert!(forged.reason.is_none(), "{} must be rejected", forged.name);
+            json.as_object_mut()
+                .unwrap()
+                .insert("disclosed".into(), disclosed_summary(&d));
+        }
+        Err(e) => assert!(
+            forged.reason.is_some() && refused_by(&e),
+            "{}: {e:?}",
+            forged.name
+        ),
+    }
+    Vector {
+        name: forged.name,
+        description: forged.description,
+        bin,
+        json,
+    }
+}
+
+/// The spec-written `forge` fold agrees with `kit_core`'s on a manifest both
+/// can build, so a forged id is the id a real tree would carry.
+#[test]
+fn forge_matches_the_real_fold() {
+    let (_dir, store, commit_id, ids) = layout_commit(16, &[16, 16, 16, 5], &[16, 16, 16, 5]);
+    let cb = layout_manifest(&store, &commit_id);
+    let mut leaves = vec![forge::meta_leaf(53, 16)];
+    let mut start = 0;
+    for (i, id) in ids.iter().enumerate() {
+        let end = cb.span(u32::try_from(i).unwrap()).unwrap().1;
+        leaves.push(forge::chunk_leaf(start, end, id));
+        start = end;
+    }
+    assert_eq!(forge::inner_root(&leaves), merkle::chunked_inner_root(&cb));
+    let mine = forge::proof(&leaves, &[0, 3]);
+    let real = merkle::build_chunks_multi_proof(&cb, [0, 3]).unwrap();
+    assert_eq!(mine.leaf_count, real.leaf_count);
+    assert_eq!(mine.siblings, real.siblings);
 }
 
 /// Walk `path` from the fixture's root tree, independently of
@@ -338,25 +557,39 @@ fn disclosed_summary(d: &Disclosed) -> Value {
             total_size,
             chunk_size,
             index,
+            start,
+            end,
             bytes,
         } => json!({
             "kind": "chunk",
             "total_size": total_size,
             "chunk_size": chunk_size,
             "index": index,
+            // Span values are decimal strings: a JSON number loses precision
+            // near `u64::MAX`.
+            "start": start.to_string(),
+            "end": end.to_string(),
             "bytes_blake3": to_hex(&hash(bytes)),
             "len": bytes.len(),
         }),
         DisclosedPayload::Range {
             blob_id,
             chunk,
+            start,
+            end,
             offset_in_blob,
             absolute_offset,
             bytes,
         } => json!({
             "kind": "range",
             "blob_id_hex": to_hex(blob_id),
-            "chunk": chunk.map(|(idx, ts, cs)| json!({"index": idx, "total_size": ts, "chunk_size": cs})),
+            "chunk": chunk.map(|(idx, ts, cs)| json!({
+                "index": idx,
+                "total_size": ts,
+                "chunk_size": cs,
+                "start": start.unwrap().to_string(),
+                "end": end.unwrap().to_string(),
+            })),
             "offset_in_blob": offset_in_blob,
             "absolute_offset": absolute_offset,
             "bytes_blake3": to_hex(&hash(bytes)),
@@ -460,78 +693,52 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
-    // ---- accept: one chunk of the chunked file ----
+    // ---- accept: chunks of the chunked file: first, middle and last ----
 
     let chunked_path = [b"chunked.bin".as_slice()];
-    let bundle =
-        verify::build_disclosure(&f.store, &f.commit_id, &chunked_path, Selector::Chunk(1))
-            .unwrap();
-    let d = verify::verify_disclosure(&f.commit_id, &bundle).unwrap();
-    let mut j = base_json(&f.commit_id, &chunked_path, "chunk(1)", true, None);
-    j.as_object_mut()
-        .unwrap()
-        .insert("disclosed".into(), disclosed_summary(&d));
-    v.push(Vector {
-        name: "chunked_file_chunk1",
-        description: "Chunk index 1 of the chunked file.",
-        bin: bundle,
-        json: j,
-    });
-
-    // ---- accept: a range inside a chunk, without/with offsets ----
-
-    // Locate an offset guaranteed to fall inside a chunk other than
-    // chunk 0 (so the with-offsets vector has a non-trivial length-proof
-    // set to verify).
-    let range_offset: u64 = {
+    let chunk_count = {
         let Object::ChunkedBlob(cb) = f
             .store
-            .read_object(&{
-                let Object::Tree(root) = f.store.read_object(&f.tree_hash).unwrap() else {
-                    panic!("root is a Tree");
-                };
-                root.entries
-                    .iter()
-                    .find(|e| e.name == b"chunked.bin")
-                    .unwrap()
-                    .object_hash
-            })
+            .read_object(&walk_path(&f.store, f.tree_hash, &chunked_path).1)
             .unwrap()
         else {
             panic!("chunked.bin is a ChunkedBlob");
         };
-        let first_chunk_len = f.store.read(&cb.chunks()[0]).unwrap().len() as u64 - 10;
-        first_chunk_len + 32 // safely inside chunk 1 (index > 0)
+        u32::try_from(cb.chunks().len()).unwrap()
     };
-
-    for (name, description, with_offsets) in [
+    assert!(
+        chunk_count >= 3,
+        "fixture needs a first, middle and last chunk"
+    );
+    for (name, description, index) in [
         (
-            "chunked_range_no_offsets",
-            "A 64-byte range inside a non-first chunk, no absolute-offset proof.",
-            false,
+            "chunked_file_chunk0",
+            "Chunk index 0 of the chunked file: it starts at offset 0.",
+            0,
         ),
         (
-            "chunked_range_with_offsets",
-            "The same range, with a complete chunk_len_proofs set proving the absolute file offset.",
-            true,
+            "chunked_file_chunk1",
+            "Chunk index 1 of the chunked file, a middle chunk.",
+            1,
+        ),
+        (
+            "chunked_file_chunk_last",
+            "The last chunk of the chunked file: it ends at total_size.",
+            chunk_count - 1,
         ),
     ] {
         let bundle = verify::build_disclosure(
             &f.store,
             &f.commit_id,
             &chunked_path,
-            Selector::Range {
-                offset: range_offset,
-                len: 64,
-                with_offsets,
-            },
+            Selector::Chunk(index),
         )
         .unwrap();
         let d = verify::verify_disclosure(&f.commit_id, &bundle).unwrap();
         let mut j = base_json(
             &f.commit_id,
             &chunked_path,
-            &format!("range(offset={range_offset},len=64,with_offsets={with_offsets})"),
+            &format!("chunk({index})"),
             true,
             None,
         );
@@ -541,6 +748,50 @@ fn build_vectors() -> Vec<Vector> {
         v.push(Vector {
             name,
             description,
+            bin: bundle,
+            json: j,
+        });
+    }
+
+    // ---- accept: a range inside a chunk ----
+
+    // An offset inside a chunk other than chunk 0, so the absolute offset
+    // is the committed start plus the offset in the chunk.
+    let range_offset: u64 = {
+        let Object::ChunkedBlob(cb) = f
+            .store
+            .read_object(&walk_path(&f.store, f.tree_hash, &chunked_path).1)
+            .unwrap()
+        else {
+            panic!("chunked.bin is a ChunkedBlob");
+        };
+        cb.span(0).unwrap().1 + 32
+    };
+    {
+        let bundle = verify::build_disclosure(
+            &f.store,
+            &f.commit_id,
+            &chunked_path,
+            Selector::Range {
+                offset: range_offset,
+                len: 64,
+            },
+        )
+        .unwrap();
+        let d = verify::verify_disclosure(&f.commit_id, &bundle).unwrap();
+        let mut j = base_json(
+            &f.commit_id,
+            &chunked_path,
+            &format!("range(offset={range_offset},len=64)"),
+            true,
+            None,
+        );
+        j.as_object_mut()
+            .unwrap()
+            .insert("disclosed".into(), disclosed_summary(&d));
+        v.push(Vector {
+            name: "chunked_range",
+            description: "A 64-byte range inside a non-first chunk; the absolute offset is the committed start of the chunk plus the offset in it.",
             bin: bundle,
             json: j,
         });
@@ -573,11 +824,7 @@ fn build_vectors() -> Vec<Vector> {
             &f.store,
             &f.commit_id,
             &range_path,
-            Selector::Range {
-                offset,
-                len,
-                with_offsets: false,
-            },
+            Selector::Range { offset, len },
         )
         .unwrap();
         let d = verify::verify_disclosure(&f.commit_id, &bundle).unwrap();
@@ -718,17 +965,21 @@ fn build_vectors() -> Vec<Vector> {
         let position = merkle::chunk_position(&cb, &cb.chunks()[1]).unwrap();
         let proof = merkle::build_chunks_multi_proof(&cb, [0, position]).unwrap();
         let chunk_bytes = canonical_bytes(&f.store, &cb.chunks()[1]);
+        let (start, end) = cb.span(1).unwrap();
         let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
         let bin = wire::bundle(
             &f.commit_id,
             &commit_bytes,
             &steps,
             &wire::chunk_payload(
-                cb.total_size() + 1,
-                cb.chunk_size(),
-                1,
-                &merkle::chunked_inner_root(&cb),
-                &proof,
+                &wire::ChunkFields {
+                    total_size: cb.total_size() + 1,
+                    chunk_size: cb.chunk_size(),
+                    index: 1,
+                    span: wire::Span { start, end },
+                    inner_root: &merkle::chunked_inner_root(&cb),
+                    proof: &proof,
+                },
                 &chunk_bytes,
             ),
         );
@@ -763,7 +1014,7 @@ fn build_vectors() -> Vec<Vector> {
             &f.commit_id,
             &commit_bytes,
             &steps,
-            &wire::range_payload(None, 1024, 32, &slice, &[]), // claims chunk 1, not chunk 0
+            &wire::range_payload(None, 1024, 32, &slice), // claims chunk 1, not chunk 0
         );
         v.push(Vector {
             name: "neg_slice_wrong_offset",
@@ -789,7 +1040,7 @@ fn build_vectors() -> Vec<Vector> {
             &f.commit_id,
             &commit_bytes,
             &steps,
-            &wire::range_payload(None, 0, 0, &slice, &[]),
+            &wire::range_payload(None, 0, 0, &slice),
         );
         v.push(Vector {
             name: "neg_zero_length_range",
@@ -801,94 +1052,6 @@ fn build_vectors() -> Vec<Vector> {
                 "range(offset=0,len=0)",
                 false,
                 Some("byte range length is zero"),
-            ),
-        });
-    }
-
-    // 8. Incomplete chunk_len_proofs (drops the proof for index 0 out of
-    //    a set that should cover 0..index).
-    {
-        let (steps, leaf) = walk_path(&f.store, f.tree_hash, &chunked_path);
-        let Object::ChunkedBlob(cb) = f.store.read_object(&leaf).unwrap() else {
-            panic!("expected ChunkedBlob");
-        };
-        // The target offset MUST land at least 2 chunks in: dropping
-        // index 0's proof from a set covering only `{0}` (target index 1)
-        // would leave an *empty* vec, indistinguishable from "offsets not
-        // requested" — the gap must leave at least one other entry behind
-        // to actually exercise incomplete-set detection.
-        let first_two_chunks_len: u64 = cb.chunks()[..2]
-            .iter()
-            .map(|id| f.store.read(id).unwrap().len() as u64 - 10)
-            .sum();
-        let target_offset = first_two_chunks_len + 32;
-        let mut cumulative = 0u64;
-        let mut target_index = 0usize;
-        for (idx, id) in cb.chunks().iter().enumerate() {
-            let content_len = f.store.read(id).unwrap().len() as u64 - 10;
-            if target_offset < cumulative + content_len {
-                target_index = idx;
-                break;
-            }
-            cumulative += content_len;
-        }
-        assert!(
-            target_index >= 2,
-            "fixture assumption: target chunk index >= 2 (got {target_index})"
-        );
-        let position = merkle::chunk_position(&cb, &cb.chunks()[target_index]).unwrap();
-        let hdr_proof = merkle::build_chunks_multi_proof(&cb, [0, position]).unwrap();
-        let chunk_canonical = f.store.read(&cb.chunks()[target_index]).unwrap();
-        let offset_in_chunk = target_offset - cumulative;
-        let slice = bao_slice(&chunk_canonical, offset_in_chunk + 10, 16);
-
-        // A complete set would cover 0..target_index; drop index 0.
-        let mut len_proofs = Vec::new();
-        for j in 0..target_index {
-            if j == 0 {
-                continue; // the gap
-            }
-            let jpos = merkle::chunk_position(&cb, &cb.chunks()[j]).unwrap();
-            let jproof = merkle::build_chunk_proof(&cb, jpos).unwrap();
-            let jcanonical = f.store.read(&cb.chunks()[j]).unwrap();
-            let jslice = bao_slice(&jcanonical, 0, 10);
-            len_proofs.push(wire::LenProof {
-                index: u32::try_from(j).unwrap(),
-                chunk_id: cb.chunks()[j],
-                proof: jproof,
-                slice: jslice,
-            });
-        }
-        let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
-        let bin = wire::bundle(
-            &f.commit_id,
-            &commit_bytes,
-            &steps,
-            &wire::range_payload(
-                Some(&wire::ChunkHdr {
-                    total_size: cb.total_size(),
-                    chunk_size: cb.chunk_size(),
-                    index: u32::try_from(target_index).unwrap(),
-                    inner_root: merkle::chunked_inner_root(&cb),
-                    chunk_id: cb.chunks()[target_index],
-                    proof: hdr_proof,
-                }),
-                offset_in_chunk,
-                16,
-                &slice,
-                &len_proofs,
-            ),
-        );
-        v.push(Vector {
-            name: "neg_incomplete_length_proof_set",
-            description: "chunk_len_proofs is missing the proof for index 0, an incomplete 0..index set.",
-            bin,
-            json: base_json(
-                &f.commit_id,
-                &chunked_path,
-                "range [chunk_len_proofs missing index 0]",
-                false,
-                Some("chunk_len_proofs does not cover exactly 0..index"),
             ),
         });
     }
@@ -919,7 +1082,7 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
-    // 10. version = 3 (unknown; v2 is the only supported value).
+    // 10. version = 4 (unknown; v3 is the only supported value).
     {
         let (steps, leaf) = walk_path(&f.store, f.tree_hash, &["shallow.txt".as_bytes()]);
         let bytes = canonical_bytes(&f.store, &leaf);
@@ -930,10 +1093,10 @@ fn build_vectors() -> Vec<Vector> {
             &steps,
             &wire::object_payload(&bytes),
         );
-        bin[4] = 3;
+        bin[4] = 4;
         v.push(Vector {
             name: "neg_unsupported_version",
-            description: "The version byte is 3 instead of the only supported value, 2.",
+            description: "The version byte is 4 instead of the only supported value, 3.",
             bin,
             json: base_json(
                 &f.commit_id,
@@ -996,65 +1159,6 @@ fn build_vectors() -> Vec<Vector> {
                 "object",
                 false,
                 Some("commit_bytes decode to a Tag"),
-            ),
-        });
-    }
-
-    // 13. chunk_len_proofs present when the disclosed chunk is index 0.
-    //     Nothing precedes chunk 0, so any entry here — however
-    //     plausible-looking — MUST be rejected outright, the same as the
-    //     plain-Blob path already rejects a non-empty set.
-    {
-        let (steps, leaf) = walk_path(&f.store, f.tree_hash, &chunked_path);
-        let Object::ChunkedBlob(cb) = f.store.read_object(&leaf).unwrap() else {
-            panic!("expected ChunkedBlob");
-        };
-        let position0 = merkle::chunk_position(&cb, &cb.chunks()[0]).unwrap();
-        let hdr_proof = merkle::build_chunks_multi_proof(&cb, [0, position0]).unwrap();
-        let chunk0_canonical = f.store.read(&cb.chunks()[0]).unwrap();
-        let slice = bao_slice(&chunk0_canonical, 10, 16); // offset 0, len 16 inside chunk 0
-
-        // A plausible-looking but structurally invalid entry: it claims
-        // to describe "the chunk before index 0" using chunk 0's own
-        // (otherwise genuine) proof and length slice.
-        let len_proof_entry_proof = merkle::build_chunk_proof(&cb, position0).unwrap();
-        let len_slice = bao_slice(&chunk0_canonical, 0, 10);
-
-        let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
-        let bin = wire::bundle(
-            &f.commit_id,
-            &commit_bytes,
-            &steps,
-            &wire::range_payload(
-                Some(&wire::ChunkHdr {
-                    total_size: cb.total_size(),
-                    chunk_size: cb.chunk_size(),
-                    index: 0,
-                    inner_root: merkle::chunked_inner_root(&cb),
-                    chunk_id: cb.chunks()[0],
-                    proof: hdr_proof,
-                }),
-                0,
-                16,
-                &slice,
-                &[wire::LenProof {
-                    index: 0,
-                    chunk_id: cb.chunks()[0],
-                    proof: len_proof_entry_proof,
-                    slice: len_slice,
-                }],
-            ),
-        );
-        v.push(Vector {
-            name: "neg_len_proofs_on_chunk0",
-            description: "A Range payload discloses chunk index 0 but still carries a chunk_len_proofs entry; index 0 has nothing preceding it to describe, so any entry there is rejected outright.",
-            bin,
-            json: base_json(
-                &f.commit_id,
-                &chunked_path,
-                "range(offset=0,len=16) [chunk_len_proofs on chunk 0]",
-                false,
-                Some("chunk_len_proofs is only meaningful at chunk index > 0"),
             ),
         });
     }
@@ -1136,7 +1240,7 @@ fn build_vectors() -> Vec<Vector> {
         bin[4] = 1;
         v.push(Vector {
             name: "neg_bundle_version_1",
-            description: "The version byte is 1; v2 is the only supported value.",
+            description: "The version byte is 1; v3 is the only supported value.",
             bin,
             json: base_json(
                 &f.commit_id,
@@ -1144,6 +1248,32 @@ fn build_vectors() -> Vec<Vector> {
                 "object",
                 false,
                 Some("unsupported bundle version 1"),
+            ),
+        });
+    }
+
+    // 16b. version = 2: the bundle of the format before chunk spans.
+    {
+        let (steps, leaf) = walk_path(&f.store, f.tree_hash, &["shallow.txt".as_bytes()]);
+        let bytes = canonical_bytes(&f.store, &leaf);
+        let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
+        let mut bin = wire::bundle(
+            &f.commit_id,
+            &commit_bytes,
+            &steps,
+            &wire::object_payload(&bytes),
+        );
+        bin[4] = 2;
+        v.push(Vector {
+            name: "neg_bundle_version_2",
+            description: "The version byte is 2, the version before chunks carried their spans.",
+            bin,
+            json: base_json(
+                &f.commit_id,
+                &[b"shallow.txt"],
+                "object",
+                false,
+                Some("unsupported bundle version 2"),
             ),
         });
     }
@@ -1164,23 +1294,27 @@ fn build_vectors() -> Vec<Vector> {
         // (0) is what must be rejected, independent of the slice content.
         let slice = bao_slice(&chunk1_canonical, 10 + 32, 1);
         let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
+        let (start, end) = cb.span(1).unwrap();
+        let inner_root = merkle::chunked_inner_root(&cb);
         let bin = wire::bundle(
             &f.commit_id,
             &commit_bytes,
             &steps,
             &wire::range_payload(
                 Some(&wire::ChunkHdr {
-                    total_size: cb.total_size(),
-                    chunk_size: cb.chunk_size(),
-                    index: 1,
-                    inner_root: merkle::chunked_inner_root(&cb),
+                    fields: wire::ChunkFields {
+                        total_size: cb.total_size(),
+                        chunk_size: cb.chunk_size(),
+                        index: 1,
+                        span: wire::Span { start, end },
+                        inner_root: &inner_root,
+                        proof: &hdr_proof,
+                    },
                     chunk_id: cb.chunks()[1],
-                    proof: hdr_proof,
                 }),
                 32,
                 0,
                 &slice,
-                &[],
             ),
         );
         v.push(Vector {
@@ -1210,23 +1344,27 @@ fn build_vectors() -> Vec<Vector> {
         let chunk1_canonical = f.store.read(&cb.chunks()[1]).unwrap();
         let slice = bao_slice(&chunk1_canonical, 10 + 32, 16);
         let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
+        let (start, end) = cb.span(1).unwrap();
+        let inner_root = merkle::chunked_inner_root(&cb);
         let bin = wire::bundle(
             &f.commit_id,
             &commit_bytes,
             &steps,
             &wire::range_payload(
                 Some(&wire::ChunkHdr {
-                    total_size: cb.total_size() + 1,
-                    chunk_size: cb.chunk_size(),
-                    index: 1,
-                    inner_root: merkle::chunked_inner_root(&cb),
+                    fields: wire::ChunkFields {
+                        total_size: cb.total_size() + 1,
+                        chunk_size: cb.chunk_size(),
+                        index: 1,
+                        span: wire::Span { start, end },
+                        inner_root: &inner_root,
+                        proof: &hdr_proof,
+                    },
                     chunk_id: cb.chunks()[1],
-                    proof: hdr_proof,
                 }),
                 32,
                 16,
                 &slice,
-                &[],
             ),
         );
         v.push(Vector {
@@ -1313,11 +1451,7 @@ fn build_vectors() -> Vec<Vector> {
             "neg_tree_mode_range_chunked",
             "The final step has mode Tree but names a chunked blob; the payload is a range inside a chunk.",
             false,
-            Selector::Range {
-                offset: 0,
-                len: 8,
-                with_offsets: false,
-            },
+            Selector::Range { offset: 0, len: 8 },
             "range(offset=0,len=8)",
             "Range payload over a chunked blob under a Tree mode",
         ),
@@ -1325,11 +1459,7 @@ fn build_vectors() -> Vec<Vector> {
             "neg_tree_mode_range_blob",
             "The final step has mode Tree but names a plain blob; the payload is a range of it.",
             true,
-            Selector::Range {
-                offset: 0,
-                len: 8,
-                with_offsets: false,
-            },
+            Selector::Range { offset: 0, len: 8 },
             "range(offset=0,len=8)",
             "Range payload over a blob under a Tree mode",
         ),
@@ -1356,81 +1486,30 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
-    // ---- fixed-size layout: every chunk length is checked ----
+    // ---- chunk spans: layouts the committed offsets describe ----
 
     let fixed_path = [b"fixed.bin".as_slice()];
-    for (name, description, lens, selector, desc, reject_reason) in [
+    for (name, description, selector, desc) in [
         (
-            "fixed_range_with_offsets",
-            "A range in chunk 2 of a fixed-size layout (chunk_size 16), with the length proofs of chunks 0 and 1.",
-            &[16, 16, 16, 5][..],
-            Selector::Range {
-                offset: 34,
-                len: 4,
-                with_offsets: true,
-            },
-            "range(offset=34,len=4,with_offsets=true)",
-            None,
+            "fixed_range",
+            "A range in chunk 2 of a fixed-size layout (chunk_size 16); the absolute offset is 2 * 16 + 2.",
+            Selector::Range { offset: 34, len: 4 },
+            "range(offset=34,len=4)",
         ),
         (
             "fixed_chunk_last",
             "The last chunk of a fixed-size layout, holding the 5 bytes left of total_size 53.",
-            &[16, 16, 16, 5][..],
             Selector::Chunk(3),
             "chunk(3)",
-            None,
-        ),
-        (
-            "neg_fixed_len_proof_wrong_length",
-            "A range in chunk 2 of a fixed-size layout (chunk_size 16) whose chunk 0 holds 8 bytes and chunk 1 holds 24.",
-            &[8, 24, 16, 5][..],
-            Selector::Range {
-                offset: 34,
-                len: 4,
-                with_offsets: true,
-            },
-            "range(offset=34,len=4,with_offsets=true) [chunk 0 holds 8 bytes]",
-            Some("a length proof of a fixed-size layout is not chunk_size"),
-        ),
-        (
-            "neg_fixed_chunk_wrong_length",
-            "Chunk 1 of a fixed-size layout (chunk_size 16) that holds 24 bytes.",
-            &[8, 24, 16, 5][..],
-            Selector::Chunk(1),
-            "chunk(1) [holds 24 bytes]",
-            Some("a non-last chunk of a fixed-size layout is not chunk_size"),
-        ),
-        (
-            "neg_fixed_last_chunk_wrong_length",
-            "The last chunk of a fixed-size layout holding 3 bytes where total_size 53 leaves 5.",
-            &[16, 16, 16, 3][..],
-            Selector::Chunk(3),
-            "chunk(3) [holds 3 bytes]",
-            Some("the last chunk of a fixed-size layout is not the rest of total_size"),
         ),
     ] {
-        let (_dir, store, commit_id) = fixed_layout_commit(lens);
+        let (_dir, store, commit_id) = fixed_layout_commit(&[16, 16, 16, 5]);
         let bin = verify::build_disclosure(&store, &commit_id, &fixed_path, selector).unwrap();
-        let result = verify::verify_disclosure(&commit_id, &bin);
-        let mut json = base_json(
-            &commit_id,
-            &fixed_path,
-            desc,
-            reject_reason.is_none(),
-            reject_reason,
-        );
-        match result {
-            Ok(disclosed) => {
-                assert!(reject_reason.is_none(), "{name} must be rejected");
-                json.as_object_mut()
-                    .unwrap()
-                    .insert("disclosed".into(), disclosed_summary(&disclosed));
-            }
-            Err(error) => assert!(
-                reject_reason.is_some() && matches!(error, VerifyError::FixedChunkLength { .. }),
-                "{name}: {error:?}"
-            ),
-        }
+        let d = verify::verify_disclosure(&commit_id, &bin).unwrap();
+        let mut json = base_json(&commit_id, &fixed_path, desc, true, None);
+        json.as_object_mut()
+            .unwrap()
+            .insert("disclosed".into(), disclosed_summary(&d));
         v.push(Vector {
             name,
             description,
@@ -1439,47 +1518,375 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
-    // A fixed-size layout whose total_size it cannot produce: 5 bytes in
-    // three chunks of 10. No decoder accepts the manifest, but a forged
-    // tree can still name its id, so the verifier checks total_size itself.
+    // A one-chunk file: chunk 0 is both the first and the last.
     {
-        let (_dir, store, commit_id, chunks) = layout_commit(5, 10, &[10, 10, 0]);
-        let Object::Commit(commit) = store.read_object(&commit_id).unwrap() else {
-            panic!("commit");
-        };
-        let (steps, _) = walk_path(&store, commit.tree_hash, &fixed_path);
-        // The proof of positions 0 and 3 in four leaves holds the siblings
-        // of leaves 1 and 2, so it does not depend on the header. A manifest
-        // of the same chunks with a header that is valid gives its bytes.
-        let proof_source = kit_core::object::ChunkedBlob::new(25, 10, chunks.clone()).unwrap();
-        let proof = merkle::build_chunks_multi_proof(&proof_source, [0, 3]).unwrap();
-        let mut fold = merkle::ChunkedIdFold::new(5, 10);
-        for chunk in &chunks {
-            fold.push(chunk).unwrap();
-        }
-        let chunk_bytes = canonical_bytes(&store, &chunks[2]);
-        let bin = wire::bundle(
-            &commit_id,
-            &canonical_bytes(&store, &commit_id),
-            &steps,
-            &wire::chunk_payload(5, 10, 2, &fold.inner_root(), &proof, &chunk_bytes),
-        );
-        assert!(matches!(
-            verify::verify_disclosure(&commit_id, &bin),
-            Err(VerifyError::Decode(
-                kit_core::object::KitError::ChunkedBlobTotalSizeInvalid
-            ))
-        ));
+        let (_dir, store, commit_id, _) = layout_commit(0, &[8], &[8]);
+        let bin =
+            verify::build_disclosure(&store, &commit_id, &fixed_path, Selector::Chunk(0)).unwrap();
+        let d = verify::verify_disclosure(&commit_id, &bin).unwrap();
+        let mut json = base_json(&commit_id, &fixed_path, "chunk(0)", true, None);
+        json.as_object_mut()
+            .unwrap()
+            .insert("disclosed".into(), disclosed_summary(&d));
         v.push(Vector {
-            name: "neg_fixed_total_size_impossible",
-            description: "Chunk 2 of a fixed-size layout that claims total_size 5 in three chunks of chunk_size 10.",
+            name: "chunked_one_chunk",
+            description: "The only chunk of a one-chunk file: it starts at 0 and ends at total_size.",
+            bin,
+            json,
+        });
+    }
+
+    // One chunk id at two indices: the spans, not the ids, tell them apart.
+    for (name, description, index) in [
+        (
+            "chunk_same_id_first",
+            "Index 0 of a file whose chunks 0 and 1 are the same blob.",
+            0,
+        ),
+        (
+            "chunk_same_id_second",
+            "Index 1 of a file whose chunks 0 and 1 are the same blob: its span is [8, 16).",
+            1,
+        ),
+    ] {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
+        let (same, _) = write_chunk(&store, 0, 8);
+        let (other, _) = write_chunk(&store, 1, 4);
+        let manifest =
+            kit_core::object::ChunkedBlob::new(20, 0, [(same, 8), (same, 16), (other, 20)])
+                .unwrap();
+        let file = store
+            .write(&kit_core::serialize::serialize(&Object::ChunkedBlob(manifest)).unwrap())
+            .unwrap();
+        let commit_id = commit_over_file(&store, b"fixed.bin", file);
+        let bin = verify::build_disclosure(&store, &commit_id, &fixed_path, Selector::Chunk(index))
+            .unwrap();
+        let d = verify::verify_disclosure(&commit_id, &bin).unwrap();
+        let mut json = base_json(
+            &commit_id,
+            &fixed_path,
+            &format!("chunk({index})"),
+            true,
+            None,
+        );
+        json.as_object_mut()
+            .unwrap()
+            .insert("disclosed".into(), disclosed_summary(&d));
+        v.push(Vector {
+            name,
+            description,
+            bin,
+            json,
+        });
+    }
+
+    // Spans that overlap. The manifest rules never produce them, but the leaf
+    // commits whatever the tree names, and the verifier checks each span
+    // alone, so both disclosures verify.
+    for (name, description, index) in [
+        (
+            "chunk_overlap_first",
+            "Chunk 0 of a forged file whose chunks cover [0, 12) and [8, 16).",
+            0,
+        ),
+        (
+            "chunk_overlap_second",
+            "Chunk 1 of a forged file whose chunks cover [0, 12) and [8, 16).",
+            1,
+        ),
+    ] {
+        v.push(forged_chunk_vector(
+            &Forged {
+                name,
+                description,
+                total_size: 16,
+                chunk_size: 0,
+                spans: &[(0, 12), (8, 16)],
+                blob_lens: &[12, 8],
+                index,
+                reason: None,
+            },
+            None,
+            |_| false,
+        ));
+    }
+
+    // Forged spans a verifier must refuse, one per rule, each with a proof
+    // that folds to the tree's chunked-file id.
+    let over_limit = kit_core::serialize::MAX_CHUNK_LEN + 1;
+    for (forged, expect) in [
+        (
+            Forged {
+                name: "neg_span_first_start_not_zero",
+                description: "Chunk 0 whose span starts at 4.",
+                total_size: 20,
+                chunk_size: 0,
+                spans: &[(4, 12), (12, 20)],
+                blob_lens: &[8, 8],
+                index: 0,
+                reason: Some("index 0 and start 0 disagree"),
+            },
+            (|e: &VerifyError| matches!(e, VerifyError::FirstChunkStart { index: 0, start: 4 }))
+                as fn(&VerifyError) -> bool,
+        ),
+        (
+            Forged {
+                name: "neg_span_last_end_not_total",
+                description: "The last chunk whose span ends at 16, short of total_size 20.",
+                total_size: 20,
+                chunk_size: 0,
+                spans: &[(0, 8), (8, 16)],
+                blob_lens: &[8, 8],
+                index: 1,
+                reason: Some("the last chunk does not end at total_size"),
+            },
+            |e| matches!(e, VerifyError::LastChunkEnd { index: 1, end: 16 }),
+        ),
+        (
+            Forged {
+                name: "neg_span_middle_ends_at_total",
+                description: "A middle chunk whose span ends at total_size.",
+                total_size: 20,
+                chunk_size: 0,
+                spans: &[(0, 8), (8, 20), (20, 24)],
+                blob_lens: &[8, 12, 4],
+                index: 1,
+                reason: Some("a chunk that is not the last ends at total_size"),
+            },
+            |e| matches!(e, VerifyError::LastChunkEnd { index: 1, end: 20 }),
+        ),
+        (
+            Forged {
+                name: "neg_span_empty",
+                description: "A chunk whose span is empty.",
+                total_size: 8,
+                chunk_size: 0,
+                spans: &[(0, 0), (0, 8)],
+                blob_lens: &[0, 8],
+                index: 0,
+                reason: Some("the span is empty"),
+            },
+            |e| {
+                matches!(
+                    e,
+                    VerifyError::SpanOutsideFile {
+                        start: 0,
+                        end: 0,
+                        total_size: 8
+                    }
+                )
+            },
+        ),
+        (
+            Forged {
+                name: "neg_span_end_above_total",
+                description: "A chunk whose span ends at 12, past total_size 8.",
+                total_size: 8,
+                chunk_size: 0,
+                spans: &[(0, 12)],
+                blob_lens: &[12],
+                index: 0,
+                reason: Some("the span reaches past total_size"),
+            },
+            |e| {
+                matches!(
+                    e,
+                    VerifyError::SpanOutsideFile {
+                        start: 0,
+                        end: 12,
+                        total_size: 8
+                    }
+                )
+            },
+        ),
+        (
+            Forged {
+                name: "neg_span_above_object_limit",
+                description: "A chunk whose span is one byte longer than a chunk blob can be.",
+                total_size: over_limit,
+                chunk_size: 0,
+                spans: &[(0, over_limit)],
+                blob_lens: &[8],
+                index: 0,
+                reason: Some("the span is longer than a blob can be"),
+            },
+            |e| matches!(e, VerifyError::SpanAboveObjectLimit { start: 0, .. }),
+        ),
+        (
+            Forged {
+                name: "neg_span_fixed_end_off_by_one",
+                description: "Chunk 1 of a fixed-size layout (chunk_size 16) whose span ends at 31.",
+                total_size: 40,
+                chunk_size: 16,
+                spans: &[(0, 16), (16, 31), (31, 40)],
+                blob_lens: &[16, 15, 9],
+                index: 1,
+                reason: Some("a fixed-size chunk does not end where its layout says"),
+            },
+            |e| {
+                matches!(
+                    e,
+                    VerifyError::FixedChunkLength {
+                        index: 1,
+                        start: 16,
+                        end: 31
+                    }
+                )
+            },
+        ),
+    ] {
+        v.push(forged_chunk_vector(&forged, None, expect));
+    }
+
+    // A real chunk whose payload claims another span: the leaf the verifier
+    // folds is not the leaf the tree commits.
+    {
+        let (_dir, store, commit_id, chunks) = layout_commit(0, &[8, 12, 5], &[8, 12, 5]);
+        let cb = layout_manifest(&store, &commit_id);
+        let proof = merkle::build_chunks_multi_proof(&cb, [0, 2]).unwrap();
+        let inner_root = merkle::chunked_inner_root(&cb);
+        let bin = layout_bundle(
+            &store,
+            &commit_id,
+            &wire::chunk_payload(
+                &wire::ChunkFields {
+                    total_size: cb.total_size(),
+                    chunk_size: cb.chunk_size(),
+                    index: 1,
+                    // The same length as the real span [8, 20), shifted by one.
+                    span: wire::Span { start: 9, end: 21 },
+                    inner_root: &inner_root,
+                    proof: &proof,
+                },
+                &canonical_bytes(&store, &chunks[1]),
+            ),
+        );
+        assert!(verify::verify_disclosure(&commit_id, &bin).is_err());
+        v.push(Vector {
+            name: "neg_span_moved",
+            description: "Chunk 1 with the span [9, 21) where the tree commits [8, 20).",
             bin,
             json: base_json(
                 &commit_id,
                 &fixed_path,
-                "chunk(2) [total_size 5 below (3 - 1) * 10]",
+                "chunk(1) [claims span 9..21]",
                 false,
-                Some("total_size does not fit the fixed-size layout"),
+                Some("the claimed span is not the committed span"),
+            ),
+        });
+    }
+
+    // Chunk bytes that are not a Blob: the tree names the hash of twelve raw
+    // bytes, so the proof folds and only the bytes themselves are wrong.
+    v.push(forged_chunk_vector(
+        &Forged {
+            name: "neg_chunk_bytes_not_blob",
+            description: "Chunk 1 whose bytes are twelve raw bytes, not a Blob object.",
+            total_size: 20,
+            chunk_size: 0,
+            spans: &[(0, 8), (8, 20)],
+            blob_lens: &[8, 12],
+            index: 1,
+            reason: Some("a chunk is one blob"),
+        },
+        Some(b"twelve bytes"),
+        |e| matches!(e, VerifyError::ChunkBytesNotBlob),
+    ));
+
+    // A chunk blob that does not hold its span.
+    {
+        let (_dir, store, commit_id, chunks) = layout_commit(16, &[16, 16, 16, 5], &[8, 16, 16, 5]);
+        let cb = layout_manifest(&store, &commit_id);
+        let proof = merkle::build_chunks_multi_proof(&cb, [0, 1]).unwrap();
+        let inner_root = merkle::chunked_inner_root(&cb);
+        let bin = layout_bundle(
+            &store,
+            &commit_id,
+            &wire::chunk_payload(
+                &wire::ChunkFields {
+                    total_size: cb.total_size(),
+                    chunk_size: cb.chunk_size(),
+                    index: 0,
+                    span: wire::Span { start: 0, end: 16 },
+                    inner_root: &inner_root,
+                    proof: &proof,
+                },
+                &canonical_bytes(&store, &chunks[0]),
+            ),
+        );
+        assert!(matches!(
+            verify::verify_disclosure(&commit_id, &bin),
+            Err(VerifyError::ChunkLengthDiffersFromSpan {
+                index: 0,
+                expected: 16,
+                actual: 8
+            })
+        ));
+        v.push(Vector {
+            name: "neg_chunk_length_differs_from_span",
+            description: "Chunk 0 of a fixed-size layout (chunk_size 16) whose blob holds 8 bytes where its span is 16.",
+            bin,
+            json: base_json(
+                &commit_id,
+                &fixed_path,
+                "chunk(0) [holds 8 bytes]",
+                false,
+                Some("the blob's length is not the span's length"),
+            ),
+        });
+    }
+
+    // A range past the span, inside a real chunk that is longer than its
+    // span. The Bao slice is genuine; the span is what rules it out.
+    {
+        let (_dir, store, commit_id, chunks) =
+            layout_commit(16, &[16, 16, 16, 5], &[16, 24, 16, 5]);
+        let cb = layout_manifest(&store, &commit_id);
+        let proof = merkle::build_chunks_multi_proof(&cb, [0, 2]).unwrap();
+        let inner_root = merkle::chunked_inner_root(&cb);
+        let canonical = canonical_bytes(&store, &chunks[1]);
+        // Bytes 20..22 of chunk 1: inside the 24 bytes it holds, past the 16
+        // its span covers.
+        let slice = bao_slice(&canonical, 10 + 20, 2);
+        let bin = layout_bundle(
+            &store,
+            &commit_id,
+            &wire::range_payload(
+                Some(&wire::ChunkHdr {
+                    fields: wire::ChunkFields {
+                        total_size: cb.total_size(),
+                        chunk_size: cb.chunk_size(),
+                        index: 1,
+                        span: wire::Span { start: 16, end: 32 },
+                        inner_root: &inner_root,
+                        proof: &proof,
+                    },
+                    chunk_id: chunks[1],
+                }),
+                20,
+                2,
+                &slice,
+            ),
+        );
+        assert!(matches!(
+            verify::verify_disclosure(&commit_id, &bin),
+            Err(VerifyError::RangePastSpan {
+                offset_in_blob: 20,
+                len: 2,
+                span_len: 16
+            })
+        ));
+        v.push(Vector {
+            name: "neg_range_past_span",
+            description: "A range at offset 20 of chunk 1, whose blob holds 24 bytes but whose span is 16.",
+            bin,
+            json: base_json(
+                &commit_id,
+                &fixed_path,
+                "range(chunk=1,offset=20,len=2)",
+                false,
+                Some("the range reaches past the committed span"),
             ),
         });
     }
@@ -1624,8 +2031,8 @@ fn verify_vector(name: &str, want_digest: &str) {
             {
                 let want_abs = want["payload"]["absolute_offset"].as_u64();
                 assert_eq!(
-                    absolute_offset.map(i128::from),
-                    want_abs.map(i128::from),
+                    Some(*absolute_offset),
+                    want_abs,
                     "{name}: absolute_offset mismatch"
                 );
             }

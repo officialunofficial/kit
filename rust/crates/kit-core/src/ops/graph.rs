@@ -9,11 +9,11 @@
 //! set: a caller that leaves out an incomplete ancestor set would let
 //! ancestors through.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
 use crate::hash::{self, Hash};
-use crate::object::{EntryMode, Object, ObjectType};
+use crate::object::{ChunkedBlob, EntryMode, KitError, Object, ObjectType};
 use crate::store::{ObjectSource, ObjectStore, StoreError};
 
 /// Why a strict ancestor walk failed. A strict walk reads every commit of
@@ -340,19 +340,24 @@ pub fn reachable_snapshot(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<H
 /// [`reachable_objects`]. Returns `true` when the [`MAX_REACHABLE`]
 /// cap truncated the walk, so objects past it went unchecked.
 ///
-/// A chunk of a chunked blob needs only its type, so it is checked without
-/// being queued, and the cap counts commits, trees, blobs and manifests only.
-/// The walk remembers up to [`MAX_CHECKED_CHUNKS`] checked chunk ids, so a
-/// chunk that several versions of a file share is read once. Past that bound
-/// a chunk is checked again for each manifest that names it, and memory stays
-/// fixed. A repository past the cap in chunks still passes this check, and
+/// A chunk of a chunked blob needs only its type and its length, which are
+/// the first 10 bytes of the object, so it is checked without being queued,
+/// and the cap counts commits, trees, blobs and manifests only. A chunk that
+/// is not a `Blob`, or whose length differs from its span in the manifest, is
+/// refused. The walk remembers up to [`MAX_CHECKED_CHUNKS`] checked chunk ids
+/// with their lengths, so a chunk that several versions of a file share is
+/// read once, and one named under two different spans is still caught. Past
+/// that bound a chunk is checked again for each manifest that names it, and
+/// memory stays fixed. A repository past the cap in chunks still passes this check, and
 /// so do the push walk and `gc`, which count no chunk toward the cap.
 /// [`reachable_objects`], which retains every chunk, refuses it.
 ///
 /// # Errors
 ///
-/// [`StoreError::ObjectNotFound`] for a missing root, object or chunk, and
-/// every other [`StoreError`] as [`reachable_objects`] reports it.
+/// [`StoreError::ObjectNotFound`] for a missing root, object or chunk,
+/// [`StoreError::Decode`] with [`KitError::ChunkNotBlob`] or
+/// [`KitError::ChunkLengthMismatch`] for a chunk that breaks its manifest,
+/// and every other [`StoreError`] as [`reachable_objects`] reports it.
 pub fn check_closure_present<'a, I>(store: &ObjectStore, roots: I) -> Result<bool, StoreError>
 where
     I: IntoIterator<Item = &'a Hash>,
@@ -360,8 +365,8 @@ where
     check_closure_present_with_cap(store, roots, MAX_REACHABLE, MAX_CHECKED_CHUNKS)
 }
 
-/// The most checked chunk ids [`check_closure_present`] remembers, about
-/// 100 MiB: the chunks of about 128 GiB of typical content.
+/// The most checked chunk ids [`check_closure_present`] remembers, with their
+/// lengths, about 128 MiB: the chunks of about 128 GiB of typical content.
 pub const MAX_CHECKED_CHUNKS: usize = 2_097_152;
 
 /// [`check_closure_present`] with a caller-supplied cap and chunk memory, so
@@ -426,7 +431,7 @@ where
         queue.push_back(*root);
     }
 
-    let mut checked_chunks: BTreeSet<Hash> = BTreeSet::new();
+    let mut checked_chunks: BTreeMap<Hash, u64> = BTreeMap::new();
     let mut truncated = false;
     while let Some(h) = queue.pop_front() {
         if out.contains(&h) {
@@ -460,36 +465,47 @@ where
         // so this still pays for a full read+verify+decode.
         // [`children`] is the single source of truth for the edges;
         // History mode preserves the pre-existing walk exactly.
-        let obj = store.read_object(&h)?;
-        let chunk_memory = match (chunks, &obj) {
-            (Chunks::Check { memory }, Object::ChunkedBlob(_)) => Some(memory),
-            _ => None,
+        let obj = match (chunks, store.read_object(&h)?) {
+            // A chunk needs only its type and length, so it is checked here
+            // against the manifest's span and never queued.
+            (Chunks::Check { memory }, Object::ChunkedBlob(manifest)) => {
+                check_manifest_chunks(store, &manifest, memory, &mut checked_chunks)?;
+                continue;
+            }
+            (_, obj) => obj,
         };
         let edges = children(&obj, mode);
         drop(obj);
-        for child in edges {
-            // A leaf chunk needs only its type, so it is checked here and
-            // never queued. Any other type takes the ordinary path.
-            if let Some(memory) = chunk_memory {
-                if checked_chunks.contains(&child) {
-                    continue;
-                }
-                #[cfg(test)]
-                CHUNK_TYPE_READS.with(|reads| reads.set(reads.get() + 1));
-                if matches!(
-                    store.object_type(&child)?,
-                    ObjectType::Blob | ObjectType::Delta
-                ) {
-                    if checked_chunks.len() < memory {
-                        checked_chunks.insert(child);
-                    }
-                    continue;
-                }
-            }
-            queue.push_back(child);
-        }
+        queue.extend(edges);
     }
     Ok((out, truncated))
+}
+
+/// Check each chunk of `manifest` against its span: it is a `Blob` whose
+/// content length is `end - start`. Reads the first 10 bytes of a chunk not
+/// already in `checked`, and remembers at most `memory` chunks.
+fn check_manifest_chunks(
+    store: &ObjectStore,
+    manifest: &ChunkedBlob,
+    memory: usize,
+    checked: &mut BTreeMap<Hash, u64>,
+) -> Result<(), StoreError> {
+    for (index, (chunk, _end)) in (0u32..).zip(manifest.entries()) {
+        let len = if let Some(&len) = checked.get(&chunk) {
+            len
+        } else {
+            #[cfg(test)]
+            CHUNK_TYPE_READS.with(|reads| reads.set(reads.get() + 1));
+            let (_, len) = store.object_head(&chunk)?;
+            let len = len.ok_or(KitError::ChunkNotBlob { index })?;
+            if checked.len() < memory {
+                checked.insert(chunk, len);
+            }
+            len
+        };
+        manifest.check_chunk_length(index, len)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -640,12 +656,11 @@ mod tests {
 
     #[test]
     fn reachable_walks_chunked_blob_chunks() {
-        use crate::object::ChunkedBlob;
         let (_d, s) = store();
         let c0 = put_blob(&s, b"A");
         let c1 = put_blob(&s, b"B");
         let cb_bytes = serialize::serialize(&Object::ChunkedBlob(
-            ChunkedBlob::new(2, 1, vec![c0, c1]).unwrap(),
+            crate::object::testing::spread(2, 1, vec![c0, c1]).unwrap(),
         ))
         .unwrap();
         let cb = s.write(&cb_bytes).unwrap();
@@ -718,7 +733,7 @@ mod tests {
         let chunk_a = put_blob(&s, b"chunk-a");
         let chunk_b = put_blob(&s, b"chunk-b");
         let cb_bytes = serialize::serialize(&Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(14, 7, vec![chunk_a, chunk_b]).unwrap(),
+            crate::object::testing::spread(14, 7, vec![chunk_a, chunk_b]).unwrap(),
         ))
         .unwrap();
         let cb = s.write(&cb_bytes).unwrap();
@@ -747,14 +762,26 @@ mod tests {
         assert_eq!(reach, expected);
     }
 
+    /// `ids` with the length of each blob, for a manifest whose spans match
+    /// the blobs.
+    fn with_lengths(s: &ObjectStore, ids: &[Hash]) -> Vec<(Hash, u64)> {
+        ids.iter()
+            .map(|id| {
+                let Object::Blob(blob) = s.read_object(id).unwrap() else {
+                    panic!("not a blob");
+                };
+                (*id, blob.data.len() as u64)
+            })
+            .collect()
+    }
+
     /// A commit whose tree holds one chunked blob of `count` chunks.
     fn chunked_history(s: &ObjectStore, count: usize) -> (Hash, Vec<Hash>) {
         let chunks: Vec<Hash> = (0..count)
             .map(|i| put_blob(s, format!("chunk-{i}").as_bytes()))
             .collect();
-        let total_size = (0..count).map(|i| format!("chunk-{i}").len() as u64).sum();
         let manifest = serialize::serialize(&Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(total_size, 0, chunks.clone()).unwrap(),
+            crate::object::testing::sized(0, with_lengths(s, &chunks)).unwrap(),
         ))
         .unwrap();
         let manifest = s.write(&manifest).unwrap();
@@ -811,7 +838,7 @@ mod tests {
         let mut changed = chunks.clone();
         changed[0] = put_blob(s, b"changed-0");
         let manifest = serialize::serialize(&Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(1024, 0, changed).unwrap(),
+            crate::object::testing::sized(0, with_lengths(s, &changed)).unwrap(),
         ))
         .unwrap();
         let manifest = s.write(&manifest).unwrap();

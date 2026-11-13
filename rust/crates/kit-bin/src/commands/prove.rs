@@ -41,10 +41,6 @@ struct ProveOpts {
         value_parser = parse_range_arg
     )]
     range: Option<(u64, u64)>,
-    /// Include per-preceding-chunk length proofs so the range's absolute
-    /// file offset is authenticated. Only valid with `--range`.
-    #[arg(long, requires = "range")]
-    with_offsets: bool,
     /// Write the bundle to FILE instead of stdout.
     #[arg(short = 'o', long = "output", value_name = "FILE")]
     output: Option<PathBuf>,
@@ -97,14 +93,10 @@ pub fn run(args: &[String]) -> u8 {
         Err(msg) => return emit_err(&msg, exit::USAGE),
     };
     let path_refs: Vec<&[u8]> = path_owned.iter().map(Vec::as_slice).collect();
-    let selector = match (&opts.chunk, opts.range, opts.with_offsets) {
-        (None, None, false) => Selector::Object,
-        (Some(n), None, false) => Selector::Chunk(*n),
-        (None, Some((offset, len)), with_offsets) => Selector::Range {
-            offset,
-            len,
-            with_offsets,
-        },
+    let selector = match (&opts.chunk, opts.range) {
+        (None, None) => Selector::Object,
+        (Some(n), None) => Selector::Chunk(*n),
+        (None, Some((offset, len))) => Selector::Range { offset, len },
         _ => return emit_err("invalid selector combination", exit::USAGE),
     };
     let bundle = match build_disclosure(&store, &commit_id, &path_refs, selector) {
@@ -190,15 +182,10 @@ fn emit_prove_json(
             sel.field_str("kind", "chunk")
                 .field_u64("index", u64::from(index));
         }
-        Selector::Range {
-            offset,
-            len,
-            with_offsets,
-        } => {
+        Selector::Range { offset, len } => {
             sel.field_str("kind", "range")
                 .field_u64("offset", offset)
-                .field_u64("len", len)
-                .field_bool("with_offsets", with_offsets);
+                .field_u64("len", len);
         }
     }
     let mut top = JsonObject::new();
@@ -285,7 +272,6 @@ mod tests {
         assert!(p.path.is_none());
         assert!(p.chunk.is_none());
         assert!(p.range.is_none());
-        assert!(!p.with_offsets);
     }
 
     #[test]
@@ -302,8 +288,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_with_offsets_requires_range() {
-        let err = parse_args(&["HEAD".into(), "a.txt".into(), "--with-offsets".into()]);
+    fn parse_with_offsets_is_gone() {
+        let err = parse_args(&[
+            "HEAD".into(),
+            "a.txt".into(),
+            "--range".into(),
+            "0:10".into(),
+            "--with-offsets".into(),
+        ]);
         assert!(err.is_err());
     }
 

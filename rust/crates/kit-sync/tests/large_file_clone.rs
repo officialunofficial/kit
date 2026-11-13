@@ -144,7 +144,7 @@ fn large_file(chunks: usize, chunk_len: usize, per_pack: usize) -> LargeFile {
         let data = chunk_bytes(index, chunk_len);
         content.extend_from_slice(&data);
         let blob = Object::Blob(Blob { data });
-        chunk_ids.push(blob.id().unwrap());
+        chunk_ids.push((blob.id().unwrap(), ((index + 1) * chunk_len) as u64));
         pending.push(blob);
         if pending.len() == per_pack {
             upload(&mut pending);

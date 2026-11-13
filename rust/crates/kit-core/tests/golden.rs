@@ -210,98 +210,43 @@ fn chunked_blob_matches_golden() {
         ChunkedBlob::new(
             4 * 65536,
             65536,
-            vec![[0x01; 32], [0x02; 32], [0x03; 32], [0x04; 32]],
+            vec![
+                ([0x01; 32], 65_536),
+                ([0x02; 32], 131_072),
+                ([0x03; 32], 196_608),
+                ([0x04; 32], 262_144),
+            ],
         )
         .unwrap(),
     );
     assert_object_matches("chunked_blob", &obj);
 }
 
-/// SPEC-OBJECTS section 7: the manifest layouts that the decoder accepts and
-/// refuses, as `(total_size, chunk_size, chunk_count)`. The reference check
-/// in `scripts/golden/objects_ref.py` holds the same table.
-const ACCEPTED_CHUNKED: &[(u64, u32, u32)] = &[
-    (0, 0, 0),
-    (3, 0, 3),
-    (196_608, 65_536, 3),
-    (131_073, 65_536, 3),
-    (1, 65_536, 1),
-    (65_536, 65_536, 1),
-    (1 << 30, 0, 2),
-    ((1 << 30) + 1, 0, 2),
-    (128 << 30, 0, 2),
-    (0, 0x8000_0002, 0),
-    (3, 0x8000_0002, 3),
-    (128 << 30, 0x8000_0002, 2),
-    (1, 0x8000_0001, 1),
-];
-const REFUSED_CHUNKED: &[(u64, u32, u32)] = &[
-    (1, 0, 0),
-    (2, 0, 3),
-    ((128 << 30) + 1, 0, 2),
-    (196_609, 65_536, 3),
-    (131_072, 65_536, 3),
-    (65_536, 65_536, 2),
-    (1, 65_536, 2),
-    (0, 65_536, 1),
-    (1, 0x8000_0002, 0),
-    (2, 0x8000_0002, 3),
-    ((128 << 30) + 1, 0x8000_0002, 2),
-    (3, 0x8000_0001, 3),
-];
-
 /// SPEC-OBJECTS section 7: the largest `chunk_count` a reader accepts. The
 /// reference check in `scripts/golden/objects_ref.py` holds the same value.
 const MAX_CHUNK_COUNT: u32 = 8_388_608;
 
-fn chunked_manifest_bytes(total: u64, chunk_size: u32, count: u32) -> Vec<u8> {
-    let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
-    buf.extend_from_slice(&total.to_le_bytes());
-    buf.extend_from_slice(&chunk_size.to_le_bytes());
+/// A manifest header with `count` and no entries.
+fn chunked_header(count: u32) -> Vec<u8> {
+    let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x02];
+    buf.extend_from_slice(&(128u64 << 30).to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes());
     buf.extend_from_slice(&count.to_le_bytes());
-    for i in 0..count {
-        buf.extend_from_slice(&hash(&i.to_le_bytes()));
-    }
     buf
 }
 
-/// A header at the chunk cap passes the count check and fails only for its
-/// missing chunk ids; one more chunk is refused on the count alone.
+/// A count above the cap is refused on the count alone, and a count at the
+/// cap with no entries on the length, before either allocates.
 #[test]
 fn chunk_count_cap_matches_spec() {
-    let header = |count: u32| {
-        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
-        buf.extend_from_slice(&(128u64 << 30).to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&count.to_le_bytes());
-        buf
-    };
     assert_eq!(
-        deserialize(&header(MAX_CHUNK_COUNT)),
-        Err(kit_core::object::KitError::UnexpectedEof)
+        deserialize(&chunked_header(MAX_CHUNK_COUNT)),
+        Err(kit_core::object::KitError::ChunkedBlobLength)
     );
     assert_eq!(
-        deserialize(&header(MAX_CHUNK_COUNT + 1)),
+        deserialize(&chunked_header(MAX_CHUNK_COUNT + 1)),
         Err(kit_core::object::KitError::TooManyChunks)
     );
-}
-
-#[test]
-fn chunked_blob_layout_rules_match_spec() {
-    for &(total, size, count) in ACCEPTED_CHUNKED {
-        let bytes = chunked_manifest_bytes(total, size, count);
-        assert!(
-            deserialize(&bytes).is_ok(),
-            "layout ({total}, {size}, {count}) must be accepted"
-        );
-    }
-    for &(total, size, count) in REFUSED_CHUNKED {
-        let bytes = chunked_manifest_bytes(total, size, count);
-        assert!(
-            deserialize(&bytes).is_err(),
-            "layout ({total}, {size}, {count}) must be refused"
-        );
-    }
 }
 
 // ---- SPEC-OBJECTS §13 mandatory vectors ----
@@ -341,17 +286,27 @@ fn tree_single_file_matches_golden() {
 
 #[test]
 fn chunked_blob_cs0_3chunks_matches_golden() {
-    // SPEC §13.7: chunk_size=0 (CDC marker) + 3 chunks => exactly 118 bytes.
+    // SPEC §13.7: chunk_size=0 (CDC marker) + 3 chunks => exactly 142 bytes.
     let obj = Object::ChunkedBlob(
-        ChunkedBlob::new(1_000_000, 0, vec![[0xA1; 32], [0xA2; 32], [0xA3; 32]]).unwrap(),
+        ChunkedBlob::new(
+            1_000_000,
+            0,
+            vec![
+                ([0xA1; 32], 300_000),
+                ([0xA2; 32], 700_000),
+                ([0xA3; 32], 1_000_000),
+            ],
+        )
+        .unwrap(),
     );
     assert_object_matches("chunked_blob_cs0_3chunks", &obj);
     let bytes = serialize(&obj).unwrap();
-    // 6 (prologue) + 8 (total_size u64) + 4 (chunk_size u32) + 4 (count u32) + 32*3 = 118
+    // 6 (prologue) + 8 (total_size u64) + 4 (chunk_size u32) + 4 (count u32)
+    // + 40*3 (32-byte chunk id and u64 end) = 142
     assert_eq!(
         bytes.len(),
-        118,
-        "chunked_blob_cs0_3chunks must be exactly 118 bytes per SPEC §13.7"
+        142,
+        "chunked_blob_cs0_3chunks must be exactly 142 bytes per SPEC §13.7"
     );
 }
 

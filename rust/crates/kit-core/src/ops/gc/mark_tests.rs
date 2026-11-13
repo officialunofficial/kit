@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::index::{EntryStatus, Index, IndexEntry};
-use crate::object::{Blob, ChunkedBlob, Commit, Delta, EntryMode, Identity, Tree, TreeEntry};
+use crate::object::{Blob, Commit, Delta, EntryMode, Identity, Tree, TreeEntry};
 use crate::serialize;
 
 /// Run gc at the end of time with no grace, so every unreachable object is old
@@ -85,7 +85,7 @@ impl Fx {
     /// A manifest of the given chunks, in the given order.
     fn manifest(&self, chunks: &[Hash]) -> Hash {
         self.put(&Object::ChunkedBlob(
-            ChunkedBlob::new(chunks.len() as u64, 0, chunks.to_vec()).unwrap(),
+            crate::object::testing::spread(chunks.len() as u64, 0, chunks.to_vec()).unwrap(),
         ))
     }
 

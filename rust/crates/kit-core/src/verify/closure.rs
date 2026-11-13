@@ -236,8 +236,30 @@ const TYPE_CONFLICT: &str = "referenced as object types that no single object ca
 pub(crate) struct Reach {
     /// Object types that every edge into the id allows ([`ChildKind::mask`]).
     allowed: u8,
-    /// Content length when the id decoded as a `Blob`.
+    /// Content length when the id decoded as a `Blob`, or when the caller's
+    /// frontier reported it ([`Known::Blob`]).
     blob_len: Option<u64>,
+    /// The frontier stopped at the id without a content length
+    /// ([`Known::Yes`]).
+    frontier: bool,
+}
+
+/// The caller's answer for one id at the frontier of [`verify_push`] and the
+/// other closure walks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Known {
+    /// Not known: the walk fetches it.
+    No,
+    /// Known, and its closure was verified: a frontier stop. The walk cannot
+    /// check a chunk answered this way against its span, so a chunk of a
+    /// manifest the walk reads must be answered [`Known::Blob`] instead; a
+    /// manifest with a chunk answered `Yes` is reported corrupt.
+    Yes,
+    /// Known, and it is a `Blob` of this content length: a frontier stop
+    /// that also lets the walk check the length against the span of the
+    /// chunk that names it.
+    Blob(u64),
 }
 
 /// Outcome of the shared [`walk`].
@@ -267,8 +289,8 @@ pub(crate) struct Walk {
 /// Starting from every id in `roots`, each id is queued and visited at
 /// most once (an id is marked reached when it is queued, so a tree whose
 /// entries repeat one id does not grow the queue):
-/// - `known(id)` true: a frontier stop, counted and neither fetched nor
-///   descended;
+/// - `known(id)` not [`Known::No`]: a frontier stop, counted and neither
+///   fetched nor descended;
 /// - otherwise fetched once from `source`, deserialized and re-hashed
 ///   ([`crate::object::id_from_object`]); absent → `missing`, bad bytes
 ///   or a different derived id → `corrupt` (not descended);
@@ -290,7 +312,7 @@ pub(crate) fn walk(
     roots: &[Hash],
     mode: ClosureMode,
     source: &mut impl ObjectSource,
-    mut known: impl FnMut(&Hash) -> bool,
+    mut known: impl FnMut(&Hash) -> Known,
     root_rule: RootRule,
     mut visit: impl FnMut(&Hash, &Object) -> Result<(), VerifyError>,
 ) -> Result<Walk, VerifyError> {
@@ -298,15 +320,24 @@ pub(crate) fn walk(
     let mut out = Walk::default();
     let mut queue: VecDeque<Hash> = VecDeque::new();
     // Chunked blobs whose chunk lengths are checked once every chunk is read.
-    let mut manifests: Vec<(Hash, u64, u32, Vec<Hash>)> = Vec::new();
+    let mut manifests: Vec<(Hash, crate::object::ChunkedBlob)> = Vec::new();
     for root in roots {
         reach(&mut out, &mut queue, *root, ChildKind::Any)?;
     }
 
     while let Some(id) = queue.pop_front() {
-        if known(&id) {
-            out.skipped_known += 1;
-            continue;
+        match known(&id) {
+            Known::No => {}
+            answer => {
+                out.skipped_known += 1;
+                if let Some(reach) = out.visited.get_mut(&id) {
+                    match answer {
+                        Known::Blob(len) => reach.blob_len = Some(len),
+                        _ => reach.frontier = true,
+                    }
+                }
+                continue;
+            }
         }
 
         let Some(bytes) = source.fetch(&id)? else {
@@ -369,8 +400,7 @@ pub(crate) fn walk(
 
         let child_ids = typed_children(&object, mode);
         if let Object::ChunkedBlob(manifest) = &object {
-            let chunks = child_ids.iter().map(|(chunk, _)| *chunk).collect();
-            manifests.push((id, manifest.total_size(), manifest.chunk_size(), chunks));
+            manifests.push((id, manifest.clone()));
         }
         out.verified += 1;
         drop(object);
@@ -410,6 +440,7 @@ fn reach(
             slot.insert(Reach {
                 allowed: kind.mask(),
                 blob_len: None,
+                frontier: false,
             });
             queue.push_back(id);
             #[cfg(test)]
@@ -429,47 +460,48 @@ fn reach(
     Ok(())
 }
 
-/// Report each chunked blob whose chunk lengths do not add up to its
-/// `total_size`, or, in a fixed-size layout, whose chunk does not hold the
-/// length the layout requires (SPEC-OBJECTS §7). A manifest with a chunk
-/// that was not read as a blob is skipped: that chunk is already missing,
-/// corrupt or a frontier stop.
-fn check_chunk_lengths(out: &mut Walk, manifests: Vec<(Hash, u64, u32, Vec<Hash>)>) {
-    for (id, total_size, chunk_size, chunks) in manifests {
-        // The chunk count fits a `u32`, so a sum of `u64` lengths fits a `u128`.
-        let count = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
-        let mut sum = 0u128;
+/// Report each chunked blob that has a chunk whose content length is not the
+/// length of its span, `end - start` (SPEC-OBJECTS §7). Every chunk is checked
+/// on its own, in both layouts, and the lowest wrong index is reported. A
+/// manifest with a chunk that was not read as a blob is skipped: that chunk is
+/// already missing, corrupt or a frontier stop. A chunk the frontier stopped
+/// at without a length ([`Known::Yes`]) cannot be checked, so its manifest is
+/// reported corrupt.
+fn check_chunk_lengths(out: &mut Walk, manifests: Vec<(Hash, crate::object::ChunkedBlob)>) {
+    for (id, manifest) in manifests {
+        let mut wrong = None;
+        let mut unconfirmed = None;
         let mut known_lens = true;
-        let mut wrong_fixed = None;
-        for (index, chunk) in (0u32..).zip(&chunks) {
-            let Some(len) = out.visited.get(chunk).and_then(|r| r.blob_len) else {
-                known_lens = false;
-                break;
-            };
-            if wrong_fixed.is_none()
-                && let Some(expected) = crate::object::ChunkedBlob::fixed_chunk_len(
-                    total_size, chunk_size, count, index,
-                )
-                && expected != len
-            {
-                wrong_fixed = Some((index, len, expected));
+        for (index, (chunk, end)) in (0u32..).zip(manifest.entries()) {
+            let reach = out.visited.get(&chunk);
+            match reach.and_then(|r| r.blob_len) {
+                Some(len) => {
+                    let span_len = end - manifest.span(index).map_or(0, |(start, _)| start);
+                    if wrong.is_none() && len != span_len {
+                        wrong = Some((index, len, span_len));
+                    }
+                }
+                None if reach.is_some_and(|r| r.frontier) => {
+                    unconfirmed.get_or_insert(index);
+                }
+                None => {
+                    known_lens = false;
+                    break;
+                }
             }
-            sum += u128::from(len);
         }
         if !known_lens {
             continue;
         }
-        if let Some((index, len, expected)) = wrong_fixed {
+        if let Some((index, len, span_len)) = wrong {
             out.corrupt.push((
                 id,
-                format!(
-                    "chunk {index} holds {len} bytes, but its fixed-size layout requires {expected}"
-                ),
+                format!("chunk {index} holds {len} bytes, but its span is {span_len} bytes"),
             ));
-        } else if sum != u128::from(total_size) {
+        } else if let Some(index) = unconfirmed {
             out.corrupt.push((
                 id,
-                format!("chunk lengths do not add up to total_size {total_size}"),
+                format!("chunk {index} was reported known without its length, so its span cannot be checked"),
             ));
         }
     }
@@ -486,7 +518,7 @@ fn walk_closure(
         std::slice::from_ref(root),
         mode,
         source,
-        |_| false,
+        |_| Known::No,
         RootRule::Fail,
         |_, _| Ok(()),
     )?;
@@ -982,9 +1014,7 @@ mod tests {
 
     use crate::hash::ZERO;
     use crate::layout::RepoLayout;
-    use crate::object::{
-        Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, ObjectType, Tree, TreeEntry,
-    };
+    use crate::object::{Blob, Commit, EntryMode, Identity, Object, ObjectType, Tree, TreeEntry};
     use crate::object::{Remix, Tag};
     use crate::sign::{KeyPair, sign_commit, sign_remix, sign_tag};
 
@@ -1157,7 +1187,7 @@ mod tests {
             &[root, root],
             ClosureMode::History,
             &mut source,
-            |_| false,
+            |_| Known::No,
             RootRule::Fail,
             |_, _| Ok(()),
         )
@@ -1214,7 +1244,7 @@ mod tests {
 
     fn chunked(total_size: u64, chunks: &[Hash]) -> (Hash, Vec<u8>) {
         object(&Object::ChunkedBlob(
-            ChunkedBlob::new(total_size, 0, chunks.to_vec()).unwrap(),
+            crate::object::testing::spread(total_size, 0, chunks.to_vec()).unwrap(),
         ))
     }
 
@@ -1309,15 +1339,25 @@ mod tests {
     }
 
     #[test]
-    fn chunk_lengths_must_add_up_to_total_size() {
+    fn each_chunk_must_hold_its_span() {
         let one = blob(b"12345");
         let two = blob(b"1234567");
-        for (total, ok) in [(12, true), (13, false), (11, false)] {
-            let big = chunked(total, &[one.0, two.0]);
+        // The spans of the two chunks as their ends, and whether they fit
+        // blobs of 5 and 7 bytes.
+        for (ends, ok) in [
+            ([5, 12], true),
+            ([6, 12], false),
+            ([5, 13], false),
+            ([5, 11], false),
+        ] {
+            let big = object(&Object::ChunkedBlob(
+                crate::object::ChunkedBlob::new(ends[1], 0, [(one.0, ends[0]), (two.0, ends[1])])
+                    .unwrap(),
+            ));
             let root_tree = tree(&[(b"big", EntryMode::Blob, big.0)]);
             let root = commit_over(root_tree.0, vec![]);
             let report = closure_of(root.0, &[&root, &root_tree, &big, &one, &two]);
-            assert_eq!(report.is_complete(), ok, "total {total}: {report:?}");
+            assert_eq!(report.is_complete(), ok, "ends {ends:?}: {report:?}");
             if !ok {
                 assert_eq!(corrupt_ids(&report), vec![big.0]);
             }

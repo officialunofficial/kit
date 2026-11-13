@@ -138,14 +138,7 @@ fn prove_verify_chunk_and_range() {
     assert_eq!(got, &big[..100]);
 
     repo.ok(&[
-        "prove",
-        "HEAD",
-        "big.bin",
-        "--range",
-        "0:100",
-        "--with-offsets",
-        "-o",
-        "ro.kdpb",
+        "prove", "HEAD", "big.bin", "--range", "0:100", "-o", "ro.kdpb",
     ]);
     let out = repo.ok(&["verify-proof", &commit, "ro.kdpb"]);
     assert!(

@@ -34,12 +34,11 @@ fn directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/http-objects")
 }
 
-fn encoded_span(commit: Hash, offset: u64, len: u64, anchor: &[u8], chunks: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = b"KDSP\x01".to_vec();
+fn encoded_span(commit: Hash, offset: u64, len: u64, chunks: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = b"KDSP\x02".to_vec();
     commit.write(&mut out);
     offset.write(&mut out);
     len.write(&mut out);
-    anchor.write(&mut out);
     chunks.write(&mut out);
     out
 }
@@ -248,7 +247,6 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
             Selector::Range {
                 offset: 32,
                 len: 16,
-                with_offsets: true,
             },
         ),
     ] {
@@ -296,7 +294,6 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         Selector::Range {
             offset: lengths[0] + 32,
             len: 16,
-            with_offsets: true,
         },
     );
     let disclosed = verify_disclosure(&fixture.commit_id, &in_chunk).unwrap();
@@ -308,29 +305,11 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         json!({"accept": true, "disclosed": summary(&disclosed)}),
     );
 
-    let anchor = |commit, first: usize, with_offsets| {
-        build(
-            commit,
-            path,
-            Selector::Range {
-                offset: lengths[..first].iter().sum(),
-                len: 1,
-                with_offsets,
-            },
-        )
-    };
     let chunk = |commit, i| build(commit, path, Selector::Chunk(i));
     let start = lengths[0];
     let offset = start + lengths[1] - 10;
-    let anchor_bundle = anchor(fixture.commit_id, 1, true);
     let chunk_bundles = vec![chunk(fixture.commit_id, 1), chunk(fixture.commit_id, 2)];
-    let valid = encoded_span(
-        fixture.commit_id,
-        offset,
-        20,
-        &anchor_bundle,
-        &chunk_bundles,
-    );
+    let valid = encoded_span(fixture.commit_id, offset, 20, &chunk_bundles);
     let mut vectors = vec![
         (
             "span_two_chunks",
@@ -346,7 +325,6 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
                 fixture.commit_id,
                 lengths[0] - 10,
                 20,
-                &anchor(fixture.commit_id, 0, true),
                 &[chunk(fixture.commit_id, 0), chunk(fixture.commit_id, 1)],
             ),
             None,
@@ -359,7 +337,6 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
                 fixture.commit_id,
                 lengths[0] - 10,
                 lengths[1] + 20,
-                &anchor(fixture.commit_id, 0, true),
                 &[
                     chunk(fixture.commit_id, 0),
                     chunk(fixture.commit_id, 1),
@@ -376,7 +353,6 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
                 fixture.commit_id,
                 offset,
                 20,
-                &anchor_bundle,
                 &[chunk(fixture.commit_id, 0), chunk(fixture.commit_id, 2)],
             ),
             Some("span_chunk_order"),
@@ -389,7 +365,6 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
                 fixture.commit_id,
                 lengths[0] - 10,
                 20,
-                &anchor(fixture.commit_id, 0, true),
                 &[chunk(fixture.commit_id, 0), chunk(fixture.commit_id, 2)],
             ),
             Some("span_chunk_order"),
@@ -402,7 +377,6 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
                 fixture.commit_id,
                 lengths[0] - 10,
                 lengths[1] + 20,
-                &anchor(fixture.commit_id, 0, true),
                 &[
                     chunk(fixture.commit_id, 0),
                     chunk(fixture.commit_id, 1),
@@ -419,30 +393,9 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
                 fixture.commit_id,
                 offset,
                 20,
-                &anchor_bundle,
                 &[chunk_bundles[1].clone(), chunk_bundles[0].clone()],
             ),
             Some("span_chunk_order"),
-            None,
-        ),
-        (
-            "neg_missing_anchor",
-            fixture.commit_id,
-            encoded_span(fixture.commit_id, offset, 20, &[], &chunk_bundles),
-            Some("span_anchor_invalid"),
-            None,
-        ),
-        (
-            "neg_anchor_selector",
-            fixture.commit_id,
-            encoded_span(
-                fixture.commit_id,
-                offset,
-                20,
-                &chunk_bundles[0],
-                &chunk_bundles,
-            ),
-            Some("span_anchor_selector"),
             None,
         ),
         (
@@ -452,35 +405,18 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
                 fixture.commit_id,
                 offset,
                 20,
-                &anchor_bundle,
-                &[anchor_bundle.clone(), chunk_bundles[1].clone()],
+                &[
+                    files["in_chunk_range.bin"].clone(),
+                    chunk_bundles[1].clone(),
+                ],
             ),
             Some("span_chunk_selector"),
             None,
         ),
         (
-            "neg_missing_offsets",
-            fixture.commit_id,
-            encoded_span(
-                fixture.commit_id,
-                offset,
-                20,
-                &anchor(fixture.commit_id, 1, false),
-                &chunk_bundles,
-            ),
-            Some("span_anchor_offset"),
-            None,
-        ),
-        (
             "neg_outside_span",
             fixture.commit_id,
-            encoded_span(
-                fixture.commit_id,
-                start - 1,
-                20,
-                &anchor_bundle,
-                &chunk_bundles,
-            ),
+            encoded_span(fixture.commit_id, start - 1, 20, &chunk_bundles),
             Some("span_range_outside"),
             None,
         ),
@@ -491,7 +427,6 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
                 fixture.commit_id,
                 offset,
                 lengths[1] + lengths[2],
-                &anchor_bundle,
                 &chunk_bundles,
             ),
             Some("span_range_outside"),
@@ -500,40 +435,28 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         (
             "neg_superfluous_last",
             fixture.commit_id,
-            encoded_span(fixture.commit_id, start, 1, &anchor_bundle, &chunk_bundles),
+            encoded_span(fixture.commit_id, start, 1, &chunk_bundles),
             Some("span_last_unneeded"),
             None,
         ),
         (
             "neg_zero_length",
             fixture.commit_id,
-            encoded_span(fixture.commit_id, offset, 0, &anchor_bundle, &chunk_bundles),
+            encoded_span(fixture.commit_id, offset, 0, &chunk_bundles),
             Some("span_range_arithmetic"),
             None,
         ),
         (
             "neg_overflow",
             fixture.commit_id,
-            encoded_span(
-                fixture.commit_id,
-                u64::MAX,
-                2,
-                &anchor_bundle,
-                &chunk_bundles,
-            ),
+            encoded_span(fixture.commit_id, u64::MAX, 2, &chunk_bundles),
             Some("span_range_arithmetic"),
             None,
         ),
         (
             "neg_one_chunk",
             fixture.commit_id,
-            encoded_span(
-                fixture.commit_id,
-                offset,
-                20,
-                &anchor_bundle,
-                &chunk_bundles[..1],
-            ),
+            encoded_span(fixture.commit_id, offset, 20, &chunk_bundles[..1]),
             Some("span_chunk_count"),
             None,
         ),
@@ -557,7 +480,6 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
             fixture.commit_id,
             offset,
             20,
-            &anchor_bundle,
             &[chunk_bundles[0].clone(), chunk(second, 2)],
         ),
         Some("span_inner_invalid"),
@@ -570,7 +492,7 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         Some("span_commit"),
         None,
     ));
-    // An extended tree in the SAME fixture store provides anchor_bundle genuine different
+    // An extended tree in the SAME fixture store provides a genuine different
     // chunked leaf under one commit, without changing the shared fixture.
     let other = kit_core::worktree::store_file_object(
         &fixture.store,
@@ -599,31 +521,46 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
     vectors.push((
         "neg_mismatched_leaf",
         extended,
-        encoded_span(
-            extended,
-            offset,
-            20,
-            &anchor(extended, 1, true),
-            &[chunk(extended, 1), other_chunk],
-        ),
+        encoded_span(extended, offset, 20, &[chunk(extended, 1), other_chunk]),
         Some("span_leaf_context"),
         None,
     ));
-    // Existing invalid KDPB anchor proves that nonempty but incomplete length
-    // sets are rejected, rather than silently treated as omitted.
-    let incomplete = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/golden/disclosure/neg_incomplete_length_proof_set.bin");
+    // Two genuine chunk bundles of one forged file whose spans overlap, [0, 12)
+    // and [8, 16): consecutive indices, one leaf, one manifest, but the first
+    // chunk does not end where the second begins. The disclosure vectors pin
+    // both bundles.
+    let overlap = |name: &str| {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/disclosure");
+        let sidecar: Value =
+            serde_json::from_slice(&fs::read(dir.join(format!("{name}.json"))).unwrap()).unwrap();
+        let commit: Hash =
+            kit_core::hash::from_hex(sidecar["commit_id_hex"].as_str().unwrap()).unwrap();
+        (commit, fs::read(dir.join(format!("{name}.bin"))).unwrap())
+    };
+    let (overlap_commit, overlap_first) = overlap("chunk_overlap_first");
+    let (same_commit, overlap_second) = overlap("chunk_overlap_second");
+    assert_eq!(overlap_commit, same_commit);
     vectors.push((
-        "neg_incomplete_anchor",
+        "neg_chunk_chain",
+        overlap_commit,
+        encoded_span(overlap_commit, 4, 10, &[overlap_first, overlap_second]),
+        Some("span_chunk_chain"),
+        None,
+    ));
+    // A KDPB v2 bundle, the format before chunks carried their spans, as one
+    // of the chunk bundles.
+    let mut inner_v2 = chunk_bundles[1].clone();
+    inner_v2[4] = 2;
+    vectors.push((
+        "neg_inner_kdpb_v2",
         fixture.commit_id,
         encoded_span(
             fixture.commit_id,
             offset,
             20,
-            &fs::read(incomplete).unwrap(),
-            &chunk_bundles,
+            &[chunk_bundles[0].clone(), inner_v2],
         ),
-        Some("span_anchor_invalid"),
+        Some("span_inner_invalid"),
         None,
     ));
     let mut magic = valid.clone();
@@ -636,7 +573,7 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         None,
     ));
     let mut version = valid.clone();
-    version[4] = 2;
+    version[4] = 1;
     vectors.push((
         "neg_version",
         fixture.commit_id,
@@ -661,13 +598,13 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         None,
     ));
     // Structural failures must be diagnosed before any embedded KDPB
-    // verification. Each bad varint replaces the anchor's length prefix in an
+    // verification. Each bad varint replaces the first bundle's length prefix in an
     // otherwise complete valid container, so a lenient reader would accept
     // (or fail for a different reason) rather than stop with `span_encoding`.
-    let (anchor_len, anchor_len_bytes) = read_varint(&valid[53..]);
-    let rest = &valid[53 + anchor_len_bytes..];
-    let mut nonminimal = valid[..53].to_vec();
-    nonminimal.extend_from_slice(&encode_varint(anchor_len, true)); // padded with a zero group
+    let (bundle_len, bundle_len_bytes) = read_varint(&valid[54..]);
+    let rest = &valid[54 + bundle_len_bytes..];
+    let mut nonminimal = valid[..54].to_vec();
+    nonminimal.extend_from_slice(&encode_varint(bundle_len, true)); // padded with a zero group
     nonminimal.extend_from_slice(rest);
     vectors.push((
         "neg_nonminimal_varint",
@@ -677,8 +614,8 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         None,
     ));
     // The real length plus 2^32: a reader that truncates to u32 would accept.
-    let mut over_u32 = valid[..53].to_vec();
-    over_u32.extend_from_slice(&encode_varint(anchor_len + (1 << 32), false));
+    let mut over_u32 = valid[..54].to_vec();
+    over_u32.extend_from_slice(&encode_varint(bundle_len + (1 << 32), false));
     over_u32.extend_from_slice(rest);
     vectors.push((
         "neg_varint_over_u32",
@@ -695,17 +632,22 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         None,
     ));
     vectors.push((
-        "neg_kdsp_anchor",
+        "neg_kdsp_as_chunk",
         fixture.commit_id,
-        encoded_span(fixture.commit_id, offset, 20, &valid, &chunk_bundles),
-        Some("span_anchor_invalid"),
+        encoded_span(
+            fixture.commit_id,
+            offset,
+            20,
+            &[valid.clone(), chunk_bundles[1].clone()],
+        ),
+        Some("span_inner_invalid"),
         None,
     ));
     // Count 1,000,001 followed by exactly that many zero-length vectors
     // (the sidecar's `expand_to` zero-fills), so `count > remaining` cannot
     // fire and only the 1,000,000 cap rejects the container.
     let mut excessive_count = valid[..53].to_vec();
-    excessive_count.extend_from_slice(&[0, 0xc1, 0x84, 0x3d]); // anchor length 0; count 1,000,001
+    excessive_count.extend_from_slice(&[0xc1, 0x84, 0x3d]); // count 1,000,001
     let excessive_expanded = excessive_count.len() + 1_000_001;
     vectors.push((
         "neg_chunk_count_too_large",
@@ -717,7 +659,7 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
     vectors.push((
         "neg_oversize",
         fixture.commit_id,
-        b"KDSP\x01".to_vec(),
+        b"KDSP\x02".to_vec(),
         Some("span_too_large"),
         Some(CAP + 1),
     ));
@@ -783,7 +725,7 @@ fn write_http_object_goldens_if_requested() {
     }
     let files = fixture_files();
     let mut manifest = String::from(
-        "# SPEC-HTTP-OBJECTS and KDSP v1; <artifact> <BLAKE3>\n# KIT_WRITE_GOLDEN=1 cargo test -p kit-core --test golden_http_objects\n",
+        "# SPEC-HTTP-OBJECTS and KDSP v2; <artifact> <BLAKE3>\n# KIT_WRITE_GOLDEN=1 cargo test -p kit-core --test golden_http_objects\n",
     );
     for (name, bytes) in files {
         writeln!(manifest, "{name} {}", to_hex(&hash(&bytes))).unwrap();
@@ -922,7 +864,7 @@ fn chunk_boundaries(fixture: &common::Fixture) -> Vec<u64> {
 }
 
 #[test]
-fn boundary_aware_builder_matches_committed_bytes() {
+fn builder_matches_committed_bytes() {
     let fixture = common::build_fixture();
     let boundaries = chunk_boundaries(&fixture);
     let starts = &boundaries;
@@ -937,36 +879,25 @@ fn boundary_aware_builder_matches_committed_bytes() {
         ("in_chunk_range", starts[1] + 32, 16),
     ];
     for (name, offset, len) in cases {
-        for hints in [None, Some(boundaries.as_slice())] {
-            let proof = build_range_proof_from(
-                &fixture.store,
-                &fixture.commit_id,
-                &[b"chunked.bin"],
-                offset,
-                len,
-                hints,
-            )
-            .unwrap();
-            let (RangeProof::Kdpb(bytes) | RangeProof::Kdsp(bytes)) = proof else {
-                unreachable!("non-exhaustive RangeProof")
-            };
-            assert_eq!(
-                bytes,
-                fs::read(directory().join(format!("{name}.bin"))).unwrap(),
-                "{name} hints={}",
-                hints.is_some()
-            );
-        }
+        let proof = build_range_proof_from(
+            &fixture.store,
+            &fixture.commit_id,
+            &[b"chunked.bin"],
+            offset,
+            len,
+        )
+        .unwrap();
+        let (RangeProof::Kdpb(bytes) | RangeProof::Kdsp(bytes)) = proof else {
+            unreachable!("non-exhaustive RangeProof")
+        };
+        assert_eq!(
+            bytes,
+            fs::read(directory().join(format!("{name}.bin"))).unwrap(),
+            "{name}"
+        );
     }
-    let proof = build_range_proof_from(
-        &fixture.store,
-        &fixture.commit_id,
-        &[b"range.bin"],
-        32,
-        16,
-        None,
-    )
-    .unwrap();
+    let proof = build_range_proof_from(&fixture.store, &fixture.commit_id, &[b"range.bin"], 32, 16)
+        .unwrap();
     let RangeProof::Kdpb(bytes) = proof else {
         panic!("plain Blob must use KDPB")
     };
@@ -1034,7 +965,6 @@ proptest! {
             &[b"chunked.bin"],
             offset,
             len,
-            Some(&boundaries),
         ).unwrap();
         let first = boundaries.partition_point(|&start| start <= offset) - 1;
         let last = boundaries.partition_point(|&start| start < offset + len) - 1;

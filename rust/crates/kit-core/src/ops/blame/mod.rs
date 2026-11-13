@@ -713,11 +713,12 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
                 });
             }
             let mut buf: Vec<u8> = Vec::new();
-            for ch in cb.chunks() {
+            for (index, ch) in (0u32..).zip(cb.chunks()) {
                 let chunk_obj = store.read_object(ch)?;
                 let Object::Blob(b) = chunk_obj else {
                     return Err(BlameError::NotABlob);
                 };
+                cb.check_chunk_length(index, b.data.len() as u64)?;
                 // Stop at the first chunk that passes `total_size`, so a
                 // manifest that repeats one chunk cannot grow `buf`.
                 let next = buf.len() as u64 + b.data.len() as u64;
@@ -1025,7 +1026,7 @@ mod tests {
     fn blame_refuses_a_file_above_the_memory_limit() {
         let (_d, store) = fresh_store();
         let manifest = Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(
+            crate::object::testing::spread(
                 crate::worktree::MAX_FILE_BYTES + 1,
                 0,
                 vec![[1u8; 32], [2u8; 32]],
@@ -1041,7 +1042,7 @@ mod tests {
 
         // At the limit blame goes on to the chunks, which are missing.
         let at_limit = Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(
+            crate::object::testing::spread(
                 crate::worktree::MAX_FILE_BYTES,
                 0,
                 vec![[1u8; 32], [2u8; 32]],
@@ -1056,23 +1057,24 @@ mod tests {
         ));
     }
 
-    /// A manifest that repeats one chunk past its `total_size` stops at
-    /// the first chunk that passes it, so the buffer stays bounded.
+    /// A manifest that repeats one chunk under spans shorter than the chunk
+    /// stops at the first chunk, so the buffer stays bounded.
     #[test]
-    fn blame_stops_a_repeated_chunk_at_the_declared_size() {
+    fn blame_stops_a_repeated_chunk_at_its_span() {
         let (_d, store) = fresh_store();
         let chunk = put_blob(&store, &[b'a'; 1000]);
         let manifest = Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(1500, 0, vec![chunk; 1000]).unwrap(),
+            crate::object::testing::spread(1500, 0, vec![chunk; 1000]).unwrap(),
         );
         let h = crate::store::ObjectSink::put(&store, &serialize::serialize(&manifest).unwrap())
             .unwrap();
         assert!(matches!(
             load_blob_lines(&store, h),
             Err(BlameError::Object(
-                crate::object::KitError::ChunkedBlobSizeMismatch {
-                    expected: 1500,
-                    actual: 2000,
+                crate::object::KitError::ChunkLengthMismatch {
+                    index: 0,
+                    expected: 1,
+                    actual: 1000,
                 }
             ))
         ));
@@ -1084,7 +1086,7 @@ mod tests {
         let (_d, store) = fresh_store();
         let chunk = put_blob(&store, &[b'a'; 1000]);
         let manifest =
-            Object::ChunkedBlob(crate::object::ChunkedBlob::new(2000, 0, vec![chunk; 2]).unwrap());
+            Object::ChunkedBlob(crate::object::testing::spread(2000, 0, vec![chunk; 2]).unwrap());
         let h = crate::store::ObjectSink::put(&store, &serialize::serialize(&manifest).unwrap())
             .unwrap();
         assert_eq!(load_blob_lines(&store, h).unwrap(), vec![vec![b'a'; 2000]]);
@@ -1182,11 +1184,10 @@ mod tests {
     /// must reject a manifest whose forged `total_size` disagrees with
     /// its (valid) chunks.
     #[test]
-    fn blame_rejects_chunked_total_size_mismatch() {
+    fn blame_rejects_a_chunk_that_is_not_its_span() {
         let (_d, store) = fresh_store();
         let chunk = put_blob(&store, b"one line\n");
-        let cb =
-            Object::ChunkedBlob(crate::object::ChunkedBlob::new(4096, 0, vec![chunk]).unwrap());
+        let cb = Object::ChunkedBlob(crate::object::testing::spread(4096, 0, vec![chunk]).unwrap());
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_single_file_tree(&store, "big.bin", cb_h);
         let commit = Object::Commit(Commit::new_unannotated(
@@ -1205,12 +1206,13 @@ mod tests {
         assert!(
             matches!(
                 err,
-                BlameError::Object(crate::object::KitError::ChunkedBlobSizeMismatch {
+                BlameError::Object(crate::object::KitError::ChunkLengthMismatch {
+                    index: 0,
                     expected: 4096,
                     actual: 9,
                 })
             ),
-            "expected ChunkedBlobSizeMismatch, got {err:?}"
+            "expected ChunkLengthMismatch, got {err:?}"
         );
     }
 

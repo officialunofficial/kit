@@ -13,7 +13,7 @@ use crate::object::ObjectType;
 use crate::ops::graph::ClosureMode;
 use crate::verify::VerifyError;
 
-use super::closure::{ObjectSource, RootRule, walk};
+use super::closure::{Known, ObjectSource, RootRule, walk};
 
 /// What [`verify_push`] found. The push is acceptable only when
 /// [`Self::is_accepted`] holds.
@@ -67,13 +67,18 @@ impl PushReport {
 ///   store, or by another repository, turns this check into a cross-repo
 ///   existence oracle and lets a push "close" over objects its
 ///   repository never held.
-/// - `known(id)` is a frontier: ids for which it returns `true` are
-///   neither fetched nor descended. It MUST return `true` only for
-///   objects whose **whole closure in this `mode` was already verified
+/// - `known(id)` is a frontier: ids for which it returns [`Known::Yes`] or
+///   [`Known::Blob`] are neither fetched nor descended. It MUST do so only
+///   for objects whose **whole closure in this `mode` was already verified
 ///   in this repository** — never for "exists somewhere", and never for
-///   an object merely present in the pushed pack. A `known` tip is
+///   an object merely present in the pushed pack. A known tip is
 ///   skipped entirely, including its commit/remix/tag type check; the
 ///   caller's index already knows that object's type.
+/// - A chunk of a manifest in the push is never read when it is known, so
+///   its length cannot be checked against the manifest's span unless the
+///   answer carries it: answer [`Known::Blob`] with the chunk's content
+///   length. A manifest with a chunk answered [`Known::Yes`] is reported
+///   in [`PushReport::corrupt`].
 ///
 /// # Errors
 ///
@@ -84,7 +89,7 @@ pub fn verify_push(
     new_tips: &[Hash],
     mode: ClosureMode,
     source: &mut impl ObjectSource,
-    known: impl FnMut(&Hash) -> bool,
+    known: impl FnMut(&Hash) -> Known,
 ) -> Result<PushReport, VerifyError> {
     let mut bad_signatures = Vec::new();
     let walked = walk(
@@ -120,8 +125,7 @@ mod tests {
 
     use crate::hash::ZERO;
     use crate::object::{
-        Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, Remix, RemixSource, Tag, Tree,
-        TreeEntry,
+        Blob, Commit, EntryMode, Identity, Object, Remix, RemixSource, Tag, Tree, TreeEntry,
     };
     use crate::sign::{KeyPair, sign_commit, sign_remix, sign_tag};
 
@@ -239,7 +243,7 @@ mod tests {
     fn good_push_verifies_all_new_objects() {
         let mut src = Source::default();
         let (_c1, c2) = two_commits(&mut src);
-        let report = verify_push(&[c2], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[c2], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert!(report.is_accepted(), "{report:?}");
         assert_eq!(report.verified, 6);
         assert_eq!(report.skipped_known, 0);
@@ -268,7 +272,10 @@ mod tests {
         only_c1.insert(tree.entries[0].object_hash);
         src.forbidden = only_c1.clone();
 
-        let report = verify_push(&[c2], ClosureMode::History, &mut src, |id| *id == c1).unwrap();
+        let report = verify_push(&[c2], ClosureMode::History, &mut src, |id| {
+            if *id == c1 { Known::Yes } else { Known::No }
+        })
+        .unwrap();
         assert!(report.is_accepted(), "{report:?}");
         assert_eq!(report.skipped_known, 1);
         assert_eq!(report.verified, 3);
@@ -287,7 +294,7 @@ mod tests {
         let mut src = Source::default();
         let (_c1, c2) = two_commits(&mut src);
         src.forbidden = src.objects.keys().copied().collect();
-        let report = verify_push(&[c2], ClosureMode::History, &mut src, |_| true).unwrap();
+        let report = verify_push(&[c2], ClosureMode::History, &mut src, |_| Known::Yes).unwrap();
         assert!(report.is_accepted());
         assert_eq!(report.skipped_known, 1);
         assert_eq!(report.verified, 0);
@@ -302,7 +309,7 @@ mod tests {
         let mut commit = signed_commit(tree, vec![], b"unsigned");
         commit.signature = [0u8; 64];
         let c = src.put(&Object::Commit(commit));
-        let report = verify_push(&[c], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[c], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert!(!report.is_accepted());
         assert_eq!(report.bad_signatures.len(), 1);
         assert_eq!(report.bad_signatures[0].0, c);
@@ -320,7 +327,7 @@ mod tests {
         let mut tag = signed_tag(c2, ObjectType::Commit, b"v1");
         tag.signer = KeyPair::from_seed([0x99; 32]).public.0;
         let t = src.put(&Object::Tag(tag));
-        let report = verify_push(&[t], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[t], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert_eq!(
             report
                 .bad_signatures
@@ -350,12 +357,12 @@ mod tests {
         };
         remix.signature = sign_remix(&remix, &kp).unwrap().0;
         let good = src.put(&Object::Remix(remix.clone()));
-        let report = verify_push(&[good], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[good], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert!(report.is_accepted(), "{report:?}");
 
         remix.message = b"tampered".to_vec();
         let bad = src.put(&Object::Remix(remix));
-        let report = verify_push(&[bad], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[bad], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert_eq!(report.bad_signatures.len(), 1);
         assert_eq!(report.bad_signatures[0].0, bad);
     }
@@ -366,7 +373,7 @@ mod tests {
         let absent = crate::hash::hash(b"never supplied");
         let tree = src.tree(&[(b"gone", absent)]);
         let c = src.commit(tree, vec![], b"dangling");
-        let report = verify_push(&[c], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[c], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert_eq!(report.missing, vec![absent]);
         assert!(!report.is_accepted());
     }
@@ -382,14 +389,14 @@ mod tests {
         }))
         .unwrap();
         src.objects.insert(blob, other);
-        let report = verify_push(&[c], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[c], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert_eq!(
             report.corrupt.iter().map(|c| c.0).collect::<Vec<_>>(),
             vec![blob]
         );
 
         src.objects.insert(blob, b"not an object".to_vec());
-        let report = verify_push(&[c], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[c], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert_eq!(
             report.corrupt.iter().map(|c| c.0).collect::<Vec<_>>(),
             vec![blob]
@@ -402,7 +409,7 @@ mod tests {
         let mut src = Source::default();
         let blob = src.blob(b"t");
         let tree = src.tree(&[(b"t", blob)]);
-        let report = verify_push(&[tree], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[tree], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert_eq!(report.bad_tips, vec![(tree, ObjectType::Tree)]);
         assert!(!report.is_accepted());
     }
@@ -413,7 +420,7 @@ mod tests {
         let (_c1, c2) = two_commits(&mut src);
         let inner = src.put(&Object::Tag(signed_tag(c2, ObjectType::Commit, b"inner")));
         let outer = src.put(&Object::Tag(signed_tag(inner, ObjectType::Tag, b"outer")));
-        let report = verify_push(&[outer], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[outer], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert!(report.is_accepted(), "{report:?}");
         assert_eq!(report.verified, 8);
         assert_eq!(src.fetches.len(), src.objects.len());
@@ -425,11 +432,11 @@ mod tests {
         let chunk_a = src.blob(b"chunk-a");
         let chunk_b = crate::hash::hash(b"chunk-b never supplied");
         let manifest = src.put(&Object::ChunkedBlob(
-            ChunkedBlob::new(14, 7, vec![chunk_a, chunk_b]).unwrap(),
+            crate::object::testing::spread(14, 7, vec![chunk_a, chunk_b]).unwrap(),
         ));
         let tree = src.tree(&[(b"big", manifest)]);
         let c = src.commit(tree, vec![], b"chunked");
-        let report = verify_push(&[c], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[c], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert_eq!(report.missing, vec![chunk_b]);
         assert!(src.fetches.contains_key(&chunk_a));
         assert_eq!(report.verified, 4);
@@ -443,10 +450,10 @@ mod tests {
         let tree = src.tree(&[(b"h", blob)]);
         let c = src.commit(tree, vec![absent_parent], b"child");
 
-        let history = verify_push(&[c], ClosureMode::History, &mut src, |_| false).unwrap();
+        let history = verify_push(&[c], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert_eq!(history.missing, vec![absent_parent]);
 
-        let snapshot = verify_push(&[c], ClosureMode::Snapshot, &mut src, |_| false).unwrap();
+        let snapshot = verify_push(&[c], ClosureMode::Snapshot, &mut src, |_| Known::No).unwrap();
         assert!(snapshot.is_accepted(), "{snapshot:?}");
     }
 
@@ -464,7 +471,7 @@ mod tests {
             &[c4, c2, c3, c4, c1],
             ClosureMode::History,
             &mut src,
-            |_| false,
+            |_| Known::No,
         )
         .unwrap();
         assert!(report.is_accepted(), "{report:?}");
@@ -497,7 +504,7 @@ mod tests {
         remix.signature = sign_remix(&remix, &kp).unwrap().0;
         let r = src.put(&Object::Remix(remix));
         for mode in [ClosureMode::History, ClosureMode::Snapshot] {
-            let report = verify_push(&[r], mode, &mut src, |_| false).unwrap();
+            let report = verify_push(&[r], mode, &mut src, |_| Known::No).unwrap();
             assert!(report.is_accepted(), "{mode:?}: {report:?}");
             assert!(report.missing.is_empty());
         }
@@ -507,7 +514,7 @@ mod tests {
     fn missing_tip_is_missing() {
         let mut src = Source::default();
         let absent = crate::hash::hash(b"tip not pushed");
-        let report = verify_push(&[absent], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[absent], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert_eq!(report.missing, vec![absent]);
         assert!(report.bad_tips.is_empty());
         assert!(!report.is_accepted());
@@ -516,7 +523,7 @@ mod tests {
     #[test]
     fn empty_tips_is_accepted_noop() {
         let mut src = Source::default();
-        let report = verify_push(&[], ClosureMode::History, &mut src, |_| false).unwrap();
+        let report = verify_push(&[], ClosureMode::History, &mut src, |_| Known::No).unwrap();
         assert_eq!(report, PushReport::default());
         assert!(report.is_accepted());
     }

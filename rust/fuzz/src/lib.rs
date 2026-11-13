@@ -582,17 +582,31 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
             h
         })
         .collect();
-    // At most 64 chunks and one input byte per chunk at least, so the header
-    // rules always hold.
-    let cb = ChunkedBlob::new(input.len() as u64, 0, chunks.clone())
-        .expect("a header within the manifest bounds");
+    // Chunk `i` covers the input bytes `[32 i, 32 (i + 1))`, up to the last
+    // byte of the (at most 64 * 32 byte) input it is carved from. That is at
+    // least one byte per chunk, so the manifest rules always hold.
+    let total = input.len().min(64 * 32) as u64;
+    let span = |i: usize| (i as u64 * 32, ((i as u64 + 1) * 32).min(total));
+    let cb = ChunkedBlob::new(
+        total,
+        0,
+        chunks.iter().enumerate().map(|(i, id)| (*id, span(i).1)),
+    )
+    .expect("a header within the manifest bounds");
     let cid = merkle::compute_chunked_id(&cb);
     assert_eq!(cid.len(), 32);
     if !chunks.is_empty() {
         // position 0 is the meta leaf; chunk i is at position i+1.
         let pos = (input.first().copied().unwrap_or(0) as usize % chunks.len()) as u32 + 1;
         if let Ok(proof) = merkle::build_chunk_proof(&cb, pos) {
-            merkle::verify_chunk(&cid, &chunks[(pos - 1) as usize], pos, &proof)
+            let i = (pos - 1) as usize;
+            let (start, end) = span(i);
+            let chunk = merkle::SpannedChunk {
+                id: chunks[i],
+                start,
+                end,
+            };
+            merkle::verify_chunk(&cid, &chunk, pos, &proof)
                 .expect("freshly built chunk proof must verify");
         }
         // Adversarial proof bytes / position must reject without panicking.
@@ -601,7 +615,12 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
         // decoded proof to `verify_chunk` — a decode failure is itself a
         // clean rejection.
         if let Ok(proof) = merkle::Proof::decode(input, 1) {
-            let _ = merkle::verify_chunk(&cid, &chunks[0], 0, &proof);
+            let chunk = merkle::SpannedChunk {
+                id: chunks[0],
+                start: 0,
+                end: span(0).1,
+            };
+            let _ = merkle::verify_chunk(&cid, &chunk, 0, &proof);
         }
     }
 
@@ -749,12 +768,16 @@ pub fn build_span_fixture() -> SpanFixture {
     let plaintext: Vec<u8> = (0..CHUNK * CHUNKS)
         .map(|i| u8::try_from(i % 251).expect("byte") ^ 0x5a)
         .collect();
-    let chunk_ids: Vec<[u8; 32]> = plaintext
+    let chunk_ids: Vec<([u8; 32], u64)> = plaintext
         .chunks(CHUNK)
-        .map(|c| {
+        .enumerate()
+        .map(|(i, c)| {
             let bytes = kit_core::serialize::serialize(&Object::Blob(Blob { data: c.to_vec() }))
                 .expect("serialize chunk");
-            store.write(&bytes).expect("write chunk")
+            (
+                store.write(&bytes).expect("write chunk"),
+                ((i + 1) * CHUNK) as u64,
+            )
         })
         .collect();
     let manifest = ChunkedBlob::new(plaintext.len() as u64, CHUNK as u32, chunk_ids)
@@ -809,8 +832,6 @@ pub fn verify_span_one_iteration(input: &[u8]) {
 pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
     use kit_core::verify::span::{RangeProof, build_range_proof_from};
 
-    const CHUNK: usize = SPAN_CHUNK;
-    const CHUNKS: usize = SPAN_CHUNKS;
     let SpanFixture {
         store,
         commit_id,
@@ -825,9 +846,7 @@ pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
     let total = plaintext.len() as u64;
     let offset = word(0) % total;
     let len = 1 + word(2) % (total - offset);
-    let boundaries: Vec<u64> = (0..=CHUNKS as u64).map(|i| i * CHUNK as u64).collect();
-    let hints = (byte(4) & 1 == 1).then_some(boundaries.as_slice());
-    let proof = build_range_proof_from(store, &commit_id, &[b"f.bin"], offset, len, hints)
+    let proof = build_range_proof_from(store, &commit_id, &[b"f.bin"], offset, len)
         .expect("in-range proof must build");
     let expected = &plaintext
         [usize::try_from(offset).expect("offset")..usize::try_from(offset + len).expect("end")];

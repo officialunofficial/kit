@@ -923,8 +923,12 @@ mod tests {
         put(
             store,
             &Object::ChunkedBlob(
-                kit_core::object::ChunkedBlob::new(100 * chunks.len() as u64, 0, chunks.to_vec())
-                    .unwrap(),
+                kit_core::object::ChunkedBlob::new(
+                    100 * chunks.len() as u64,
+                    0,
+                    chunks.iter().zip(1u64..).map(|(&id, n)| (id, 100 * n)),
+                )
+                .unwrap(),
             ),
         )
     }
@@ -1740,7 +1744,12 @@ mod step_fit_tests {
         put(
             store,
             &Object::ChunkedBlob(
-                ChunkedBlob::new(3000 * chunks.len() as u64, 0, chunks.to_vec()).unwrap(),
+                ChunkedBlob::new(
+                    3000 * chunks.len() as u64,
+                    0,
+                    chunks.iter().zip(1u64..).map(|(&id, n)| (id, 3000 * n)),
+                )
+                .unwrap(),
             ),
         )
     }

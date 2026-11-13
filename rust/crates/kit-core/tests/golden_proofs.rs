@@ -147,6 +147,30 @@ fn vector(
     }
 }
 
+/// The chunks a sidecar lists: each chunk hash with its span.
+fn spanned_chunks(sidecar: &Value) -> Vec<merkle::SpannedChunk> {
+    let hashes = sidecar["chunk_hashes_hex"].as_array().unwrap();
+    let spans = sidecar["chunk_spans"].as_array().unwrap();
+    assert_eq!(hashes.len(), spans.len());
+    let decimal = |v: &Value| v.as_str().unwrap().parse::<u64>().unwrap();
+    hashes
+        .iter()
+        .zip(spans)
+        .map(|(h, span)| merkle::SpannedChunk {
+            id: from_hex(h.as_str().unwrap()).unwrap(),
+            start: decimal(&span[0]),
+            end: decimal(&span[1]),
+        })
+        .collect()
+}
+
+/// Chunk `index`'s span as a pair of decimal strings: a JSON number loses
+/// precision near `u64::MAX`.
+fn span_json(cb: &kit_core::object::ChunkedBlob, index: u32) -> Value {
+    let (start, end) = cb.span(index).unwrap();
+    json!([start.to_string(), end.to_string()])
+}
+
 #[allow(clippy::too_many_lines)] // one block per golden vector, kept together for auditability
 fn build_vectors() -> Vec<Vector> {
     let mut v = Vec::new();
@@ -313,6 +337,7 @@ fn build_vectors() -> Vec<Vector> {
                 "total_size": cb.total_size(),
                 "chunk_size": cb.chunk_size(),
                 "chunk_hashes_hex": [to_hex(&cb.chunks()[(pos - 1) as usize])],
+                "chunk_spans": [span_json(&cb, pos - 1)],
             }),
         ));
     }
@@ -334,6 +359,7 @@ fn build_vectors() -> Vec<Vector> {
             "total_size": cb.total_size(),
             "chunk_size": cb.chunk_size(),
             "chunk_hashes_hex": cb.chunks().iter().map(to_hex).collect::<Vec<_>>(),
+            "chunk_spans": (0..3).map(|i| span_json(&cb, i)).collect::<Vec<_>>(),
         }),
     ));
 
@@ -358,6 +384,7 @@ fn build_vectors() -> Vec<Vector> {
             // reachable from outside merkle.rs, and isn't needed — a verifier
             // rejects on position alone, before ever hashing a leaf.
             "chunk_hashes_hex": [],
+            "chunk_spans": [],
         }),
     ));
 
@@ -672,25 +699,24 @@ fn verify_vector(name: &str, want_digest: &str) {
         }
         ("chunk", "single") => {
             let position = u32::try_from(sidecar["position"].as_u64().unwrap()).unwrap();
-            let hashes = sidecar["chunk_hashes_hex"].as_array().unwrap();
-            if hashes.is_empty() {
-                // The meta-leaf negative vector carries no chunk hash — any
-                // hash is fine, `verify_chunk` must reject on position alone.
-                merkle::verify_chunk(&object_id, &[0u8; 32], position, &proof)
+            let chunks = spanned_chunks(&sidecar);
+            if chunks.is_empty() {
+                // The meta-leaf negative vector carries no chunk — any chunk
+                // is fine, `verify_chunk` must reject on position alone.
+                let none = merkle::SpannedChunk {
+                    id: [0u8; 32],
+                    start: 0,
+                    end: 1,
+                };
+                merkle::verify_chunk(&object_id, &none, position, &proof)
             } else {
-                let chunk_hash: Hash = from_hex(hashes[0].as_str().unwrap()).unwrap();
-                merkle::verify_chunk(&object_id, &chunk_hash, position, &proof)
+                merkle::verify_chunk(&object_id, &chunks[0], position, &proof)
             }
         }
         ("chunk", "range") => {
             let start = u32::try_from(sidecar["start"].as_u64().unwrap()).unwrap();
-            let chunk_hashes: Vec<Hash> = sidecar["chunk_hashes_hex"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|h| from_hex(h.as_str().unwrap()).unwrap())
-                .collect();
-            merkle::verify_chunks_range(&object_id, start, &chunk_hashes, &proof)
+            let chunks = spanned_chunks(&sidecar);
+            merkle::verify_chunks_range(&object_id, start, &chunks, &proof)
         }
         (k, p) => panic!("{name}: unknown (kind, proof_kind) = ({k}, {p})"),
     };

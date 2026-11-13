@@ -1,4 +1,4 @@
-//! Native-only acceptance test for SPEC-DISCLOSURE v2 inner roots
+//! Native-only acceptance test for SPEC-DISCLOSURE v3 inner roots
 //! Every accept golden is verified using **only** bundle
 //! fields, `commonware_storage::bmt::Proof`, `commonware_cryptography::blake3`,
 //! and `kit_core::hash::domain_digest` with the hardcoded domain byte
@@ -23,7 +23,8 @@ use serde_json::Value;
 const TREE_DOMAIN: &[u8] = b"kit.tree\x00";
 const CHUNKED_DOMAIN: &[u8] = b"kit.chunked\x00";
 const TREE_ENTRY_DOMAIN: &[u8] = b"kit-tree-entry-v1";
-const CBLOB_META_DOMAIN: &[u8] = b"kit-cblob-meta-v1";
+const CBLOB_META_DOMAIN: &[u8] = b"kit-cblob-meta-v2";
+const CBLOB_CHUNK_DOMAIN: &[u8] = b"kit-cblob-chunk-v1";
 
 fn golden_dir() -> PathBuf {
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -49,6 +50,15 @@ fn chunked_meta_leaf(total_size: u64, chunk_size: u32) -> Hash {
     body[..8].copy_from_slice(&total_size.to_le_bytes());
     body[8..].copy_from_slice(&chunk_size.to_le_bytes());
     domain_digest(CBLOB_META_DOMAIN, &body)
+}
+
+/// SPEC-MERKLE-OBJECTS §3: the leaf of one chunk binds its span and its id.
+fn chunked_chunk_leaf(start: u64, end: u64, chunk_id: &Hash) -> Hash {
+    let mut body = [0u8; 16 + 32];
+    body[..8].copy_from_slice(&start.to_le_bytes());
+    body[8..16].copy_from_slice(&end.to_le_bytes());
+    body[16..].copy_from_slice(chunk_id);
+    domain_digest(CBLOB_CHUNK_DOMAIN, &body)
 }
 
 enum NativeFail {
@@ -83,14 +93,14 @@ fn upstream_element(proof_bytes: &[u8], leaf: Hash, position: u32, inner_root: H
         .is_ok()
 }
 
-/// Decode a v2 bundle far enough to check every step and chunk header
+/// Decode a v3 bundle far enough to check every step and chunk header
 /// with upstream BMT, without calling kit verifiers.
 fn native_check(bundle: &[u8]) -> Result<(), NativeFail> {
     if bundle.len() < 5 || &bundle[..4] != b"KDPB" {
         return Err(NativeFail::Other("bad magic"));
     }
     let version = bundle[4];
-    if version != 2 {
+    if version != 3 {
         return Err(NativeFail::Version(version));
     }
     let mut r = Copying(&bundle[5..]);
@@ -130,22 +140,37 @@ fn native_check(bundle: &[u8]) -> Result<(), NativeFail> {
     check_payload(&mut r, leaf_id)
 }
 
-fn check_chunked(
-    leaf_id: Hash,
+struct ChunkClaim {
     total_size: u64,
     chunk_size: u32,
     index: u32,
+    start: u64,
+    end: u64,
     inner_root: Hash,
-    second_leaf: Hash,
+    chunk_id: Hash,
+}
+
+fn check_chunked(
+    leaf_id: Hash,
+    claim: &ChunkClaim,
     proof: &UpstreamProof<Digest>,
 ) -> Result<(), NativeFail> {
+    let ChunkClaim {
+        total_size,
+        chunk_size,
+        index,
+        start,
+        end,
+        inner_root,
+        chunk_id,
+    } = *claim;
     if !wrap_ok(CHUNKED_DOMAIN, &inner_root, &leaf_id) {
         return Err(NativeFail::Wrap);
     }
     let position = index.checked_add(1).ok_or(NativeFail::Other("index+1"))?;
     let cw = [
         (Digest(chunked_meta_leaf(total_size, chunk_size)), 0u32),
-        (Digest(second_leaf), position),
+        (Digest(chunked_chunk_leaf(start, end, &chunk_id)), position),
     ];
     if proof
         .verify_multi_inclusion::<Blake3>(&cw, &Digest(inner_root))
@@ -163,20 +188,23 @@ fn check_payload(r: &mut Copying<'_>, leaf_id: Hash) -> Result<(), NativeFail> {
             let total_size = u64::read(r).map_err(|_| NativeFail::Other("total_size"))?;
             let chunk_size = u32::read(r).map_err(|_| NativeFail::Other("chunk_size"))?;
             let index = u32::read(r).map_err(|_| NativeFail::Other("index"))?;
+            let start = u64::read(r).map_err(|_| NativeFail::Other("start"))?;
+            let end = u64::read(r).map_err(|_| NativeFail::Other("end"))?;
             let inner_root = Hash::read(r).map_err(|_| NativeFail::Other("chunk inner_root"))?;
             let proof = UpstreamProof::<Digest>::read_cfg(r, &2usize)
                 .map_err(|_| NativeFail::Other("chunk proof"))?;
             let bytes = Vec::<u8>::read_range(r, ..=kit_core::store::MAX_RAW_OBJECT_SIZE)
                 .map_err(|_| NativeFail::Other("chunk bytes"))?;
-            check_chunked(
-                leaf_id,
+            let claim = ChunkClaim {
                 total_size,
                 chunk_size,
                 index,
+                start,
+                end,
                 inner_root,
-                hash(&bytes),
-                &proof,
-            )
+                chunk_id: hash(&bytes),
+            };
+            check_chunked(leaf_id, &claim, &proof)
         }
         2 => {
             let present = bool::read(r).map_err(|_| NativeFail::Other("chunk option"))?;
@@ -186,13 +214,22 @@ fn check_payload(r: &mut Copying<'_>, leaf_id: Hash) -> Result<(), NativeFail> {
             let total_size = u64::read(r).map_err(|_| NativeFail::Other("hdr total_size"))?;
             let chunk_size = u32::read(r).map_err(|_| NativeFail::Other("hdr chunk_size"))?;
             let index = u32::read(r).map_err(|_| NativeFail::Other("hdr index"))?;
+            let start = u64::read(r).map_err(|_| NativeFail::Other("hdr start"))?;
+            let end = u64::read(r).map_err(|_| NativeFail::Other("hdr end"))?;
             let inner_root = Hash::read(r).map_err(|_| NativeFail::Other("hdr inner_root"))?;
             let chunk_id = Hash::read(r).map_err(|_| NativeFail::Other("hdr chunk_id"))?;
             let proof = UpstreamProof::<Digest>::read_cfg(r, &2usize)
                 .map_err(|_| NativeFail::Other("hdr proof"))?;
-            check_chunked(
-                leaf_id, total_size, chunk_size, index, inner_root, chunk_id, &proof,
-            )
+            let claim = ChunkClaim {
+                total_size,
+                chunk_size,
+                index,
+                start,
+                end,
+                inner_root,
+                chunk_id,
+            };
+            check_chunked(leaf_id, &claim, &proof)
         }
         _ => Ok(()),
     }
@@ -232,6 +269,8 @@ fn new_negatives_fail_at_wrap_or_upstream() {
         ("neg_inner_root_forged", "wrap"),
         ("neg_inner_root_fold_mismatch", "upstream"),
         ("neg_bundle_version_1", "version"),
+        ("neg_bundle_version_2", "version"),
+        ("neg_span_moved", "upstream"),
     ];
     for (name, want) in cases {
         let bin = fs::read(dir.join(format!("{name}.bin"))).unwrap_or_else(|_| {
@@ -244,7 +283,7 @@ fn new_negatives_fail_at_wrap_or_upstream() {
             (want, &err),
             ("wrap", NativeFail::Wrap)
                 | ("upstream", NativeFail::Upstream)
-                | ("version", NativeFail::Version(1))
+                | ("version", NativeFail::Version(1 | 2))
         );
         assert!(ok, "{name}: expected {want}, got {err}");
     }

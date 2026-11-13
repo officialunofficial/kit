@@ -871,7 +871,7 @@ fn try_delta_with(
 mod tests {
     use super::*;
     use crate::chunker::{ChunkIterator, FastCdc};
-    use crate::object::{Blob, ChunkedBlob, Commit, EntryMode, Identity, Tree, TreeEntry};
+    use crate::object::{Blob, Commit, EntryMode, Identity, Tree, TreeEntry};
     use crate::pack::{PackReader, PackWriter};
     use crate::serialize;
     use tempfile::TempDir;
@@ -929,20 +929,21 @@ mod tests {
     /// Store `data` as `FastCDC` chunks + a `ChunkedBlob` manifest, mirroring
     /// the worktree large-file path. Returns the manifest hash.
     pub(super) fn put_chunked(s: &ObjectStore, data: &[u8]) -> Hash {
-        let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), data)
+        let chunks: Vec<(Hash, u64)> = ChunkIterator::new(FastCdc::v1(), data)
             .take(data.len() + 1)
             .map(|b| {
-                put(
+                let id = put(
                     s,
                     &Object::Blob(Blob {
                         data: data[b.offset..b.offset + b.length].to_vec(),
                     }),
-                )
+                );
+                (id, b.length as u64)
             })
             .collect();
         put(
             s,
-            &Object::ChunkedBlob(ChunkedBlob::new(data.len() as u64, 0, chunks).unwrap()),
+            &Object::ChunkedBlob(crate::object::testing::sized(0, chunks).unwrap()),
         )
     }
 
@@ -1326,11 +1327,13 @@ mod tests {
     /// Build a `ChunkedBlob` from explicit chunk contents (bypassing
     /// `FastCDC`) so a test can control chunk boundaries and shifts precisely.
     pub(super) fn put_chunked_from(s: &ObjectStore, chunks: &[Vec<u8>]) -> Hash {
-        let total: usize = chunks.iter().map(Vec::len).sum();
-        let chunk_ids: Vec<Hash> = chunks.iter().map(|c| put_blob(s, c.clone())).collect();
+        let entries: Vec<(Hash, u64)> = chunks
+            .iter()
+            .map(|c| (put_blob(s, c.clone()), c.len() as u64))
+            .collect();
         put(
             s,
-            &Object::ChunkedBlob(ChunkedBlob::new(total as u64, 0, chunk_ids).unwrap()),
+            &Object::ChunkedBlob(crate::object::testing::sized(0, entries).unwrap()),
         )
     }
 

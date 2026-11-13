@@ -54,7 +54,6 @@ struct Decoded<'a> {
     commit: Hash,
     offset: u64,
     len: u64,
-    anchor_bytes: &'a [u8],
     chunks: Vec<&'a [u8]>,
 }
 
@@ -66,13 +65,12 @@ fn decode(input: &[u8]) -> Result<Decoded<'_>> {
     if r.take(4)? != b"KDSP" {
         return Err("span_magic");
     }
-    if r.take(1)? != [1] {
+    if r.take(1)? != [2] {
         return Err("span_version");
     }
     let commit: Hash = r.take(32)?.try_into().unwrap();
     let offset = r.number()?;
     let len = r.number()?;
-    let anchor_bytes = r.vector()?;
     let count = r.length(1_000_000)?;
     // Bound allocations by both the declared count and actual remaining input.
     if count > r.0.len() {
@@ -89,40 +87,8 @@ fn decode(input: &[u8]) -> Result<Decoded<'_>> {
         commit,
         offset,
         len,
-        anchor_bytes,
         chunks,
     })
-}
-
-fn slice_content(
-    content: &[Vec<u8>],
-    total: u64,
-    start: u64,
-    offset: u64,
-    end: u64,
-) -> Result<Vec<u8>> {
-    let mut span_end = start;
-    let mut last_start = start;
-    for b in content {
-        last_start = span_end;
-        span_end = span_end
-            .checked_add(b.len() as u64)
-            .ok_or("span_range_outside")?;
-    }
-    let first_end = start
-        .checked_add(content[0].len() as u64)
-        .ok_or("span_range_outside")?;
-    if span_end > total || offset < start || offset >= first_end || end > span_end {
-        return Err("span_range_outside");
-    }
-    if end <= last_start {
-        return Err("span_last_unneeded");
-    }
-    let all = content.concat();
-    Ok(
-        all[usize::try_from(offset - start).unwrap()..usize::try_from(end - start).unwrap()]
-            .to_vec(),
-    )
 }
 
 pub(super) fn verify(trusted: &Hash, input: &[u8]) -> Result<Span> {
@@ -130,7 +96,6 @@ pub(super) fn verify(trusted: &Hash, input: &[u8]) -> Result<Span> {
         commit,
         offset,
         len,
-        anchor_bytes,
         chunks,
     } = decode(input)?;
     let count = chunks.len();
@@ -144,21 +109,6 @@ pub(super) fn verify(trusted: &Hash, input: &[u8]) -> Result<Span> {
     if count < 2 {
         return Err("span_chunk_count");
     }
-    let anchor = verify_disclosure(trusted, anchor_bytes).map_err(|_| "span_anchor_invalid")?;
-    let DisclosedPayload::Range {
-        blob_id,
-        chunk: Some((first, total, chunk_size)),
-        offset_in_blob: 0,
-        absolute_offset,
-        bytes,
-    } = &anchor.payload
-    else {
-        return Err("span_anchor_selector");
-    };
-    if bytes.len() != 1 {
-        return Err("span_anchor_selector");
-    }
-    let start = absolute_offset.ok_or("span_anchor_offset")?;
     // Validate in passes, preserving the specification's first-failure order.
     let disclosed: Vec<Disclosed> = chunks
         .iter()
@@ -170,49 +120,63 @@ pub(super) fn verify(trusted: &Hash, input: &[u8]) -> Result<Span> {
             total_size,
             chunk_size,
             index,
+            start,
+            end,
             bytes,
         } = &d.payload
         else {
             return Err("span_chunk_selector");
         };
-        parsed.push((*total_size, *chunk_size, *index, bytes));
+        parsed.push((*total_size, *chunk_size, *index, *start, *end, bytes));
     }
+    let first = &disclosed[0];
     if disclosed
         .iter()
-        .any(|d| d.path != anchor.path || d.leaf_id != anchor.leaf_id)
+        .any(|d| d.path != first.path || d.leaf_id != first.leaf_id)
     {
         return Err("span_leaf_context");
     }
     if disclosed.iter().zip(&parsed).any(|(d, p)| {
-        p.0 != *total || p.1 != *chunk_size || d.chunk_inner_root != anchor.chunk_inner_root
+        (p.0, p.1, &d.chunk_inner_root) != (parsed[0].0, parsed[0].1, &first.chunk_inner_root)
     }) {
         return Err("span_chunk_context");
     }
     if parsed
         .iter()
         .enumerate()
-        .any(|(i, p)| first.checked_add(u32::try_from(i).unwrap()) != Some(p.2))
+        .any(|(i, p)| parsed[0].2.checked_add(u32::try_from(i).unwrap()) != Some(p.2))
     {
         return Err("span_chunk_order");
     }
-    let content: Vec<Vec<u8>> = parsed
-        .iter()
-        .map(
-            |p| match deserialize(p.3).map_err(|_| "span_chunk_bytes")? {
-                Object::Blob(b) if !b.data.is_empty() => Ok(b.data),
-                _ => Err("span_chunk_bytes"),
-            },
-        )
-        .collect::<Result<_>>()?;
-    if hash(parsed[0].3) != *blob_id || content[0][0] != bytes[0] {
-        return Err("span_anchor_binding");
+    if parsed.windows(2).any(|pair| pair[0].4 != pair[1].3) {
+        return Err("span_chunk_chain");
     }
-    let output = slice_content(&content, *total, start, offset, end)?;
+    let (span_start, first_end) = (parsed[0].3, parsed[0].4);
+    let (last_start, span_end) = (parsed[count - 1].3, parsed[count - 1].4);
+    if offset < span_start || offset >= first_end || end > span_end {
+        return Err("span_range_outside");
+    }
+    if end <= last_start {
+        return Err("span_last_unneeded");
+    }
+    let mut output = Vec::new();
+    for p in &parsed {
+        let content = match deserialize(p.5).map_err(|_| "span_chunk_bytes")? {
+            Object::Blob(b) if b.data.len() as u64 == p.4 - p.3 => b.data,
+            _ => return Err("span_chunk_bytes"),
+        };
+        let (from, to) = (offset.max(p.3), end.min(p.4));
+        if from < to {
+            output.extend_from_slice(
+                &content[usize::try_from(from - p.3).unwrap()..usize::try_from(to - p.3).unwrap()],
+            );
+        }
+    }
     Ok(Span {
         offset,
         bytes: output,
-        leaf: anchor.leaf_id,
-        path: anchor.path.iter().map(|(name, _)| name.clone()).collect(),
-        signature_valid: anchor.signature_valid,
+        leaf: first.leaf_id,
+        path: first.path.iter().map(|(name, _)| name.clone()).collect(),
+        signature_valid: first.signature_valid,
     })
 }
