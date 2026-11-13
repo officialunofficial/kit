@@ -334,6 +334,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `pack::MIN_TOTAL_DECODED` are public. `kit+file://`
   refuses to store a pack above the fetch body limit, as the S3 transport
   does.
+- Planning a push no longer pairs the chunks of a file with more than 65,536
+  chunks (about 4 GiB) by content when an edit changes its chunk count. It
+  read every chunk of both versions for that. Its changed chunks are sent
+  raw.
 - A closure of exactly the walk cap is complete. The walk reported it cut when
   an object it had already seen was still queued, so a repository of exactly
   10,000,000 objects failed a fetch with `ClosureTooLarge`.

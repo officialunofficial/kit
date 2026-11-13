@@ -312,9 +312,13 @@ fn pair_entry(
         (Ok(Object::Tree(_)), Ok(Object::Tree(_))) => {
             pair_trees(store, new_hash, old_hash, depth + 1, out)
         }
-        (Ok(Object::ChunkedBlob(new_cb)), Ok(Object::ChunkedBlob(old_cb))) => {
-            pair_chunks(store, &new_cb.chunks, &old_cb.chunks, out)
-        }
+        (Ok(Object::ChunkedBlob(new_cb)), Ok(Object::ChunkedBlob(old_cb))) => pair_chunks(
+            store,
+            &new_cb.chunks,
+            &old_cb.chunks,
+            MAX_PAIRED_CHUNKS,
+            out,
+        ),
         // A changed same-path small blob: the old blob at this path is a
         // natural delta base for the new one. Never overwrite an
         // existing pairing for `new_hash`, mirroring `pair_chunks`'
@@ -338,6 +342,11 @@ const FEATURE_WINDOW: usize = 16;
 /// index cheap; the delta size-gate in [`plan_pack`] is the final judge of a
 /// pick, so a few features are enough signal to rank candidates.
 const FEATURE_COUNT: usize = 4;
+/// Most chunks of either manifest for which a shifted file is paired by
+/// content. Pairing reads every chunk of both manifests and indexes four
+/// features per old chunk, so its cost grows with the file. Above this (a
+/// file of about 4 GiB) the changed chunks are sent raw.
+const MAX_PAIRED_CHUNKS: usize = 65_536;
 
 /// Pair each changed new chunk against a base chunk in the old manifest.
 /// Skips chunks already present byte-identically in the old manifest (those
@@ -356,11 +365,14 @@ const FEATURE_COUNT: usize = 4;
 ///   falling back to the clamped same-index chunk when there is no overlap.
 ///   This reads the changed file's chunk content (`O(file size)`), but only
 ///   when there actually was a shift — and it trades those local reads for a
-///   much smaller upload than re-sending the shifted chunks raw.
+///   much smaller upload than re-sending the shifted chunks raw. A manifest
+///   of more than [`MAX_PAIRED_CHUNKS`] chunks is not paired: its changed
+///   chunks are sent raw.
 fn pair_chunks(
     store: &ObjectStore,
     new_chunks: &[Hash],
     old_chunks: &[Hash],
+    max_chunks: usize,
     out: &mut HashMap<Hash, Hash>,
 ) -> Result<(), StoreError> {
     if old_chunks.is_empty() {
@@ -378,6 +390,11 @@ fn pair_chunks(
                 out.insert(*nj, old_chunks[j]);
             }
         }
+        return Ok(());
+    }
+
+    // Shifted, in a file too large to read twice for a plan: no pairing.
+    if new_chunks.len().max(old_chunks.len()) > max_chunks {
         return Ok(());
     }
 
@@ -1338,6 +1355,101 @@ mod tests {
             !bases.contains_key(&z_id),
             "a dissimilar new chunk must be left unpaired (sent raw), not clamped to a base"
         );
+    }
+
+    #[test]
+    fn a_shifted_file_in_a_subdirectory_is_paired_like_one_at_the_root() {
+        let (_d, s) = store();
+        let chunks: Vec<Vec<u8>> = (1..=5).map(|i| chunk_content(i, 400)).collect();
+        let mut e_mod = chunks[4].clone();
+        e_mod[200] ^= 0xFF;
+        let old_file = put_chunked_from(&s, &chunks);
+        let new_file = put_chunked_from(
+            &s,
+            &[
+                chunks[1].clone(),
+                chunks[2].clone(),
+                chunks[3].clone(),
+                e_mod.clone(),
+            ],
+        );
+        let nested = |file: Hash, parents: Vec<Hash>, msg: &str| {
+            let dir = put(
+                &s,
+                &Object::Tree(Tree {
+                    entries: vec![TreeEntry {
+                        name: b"big.bin".to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: file,
+                    }],
+                }),
+            );
+            let root = put(
+                &s,
+                &Object::Tree(Tree {
+                    entries: vec![TreeEntry {
+                        name: b"dir".to_vec(),
+                        mode: EntryMode::Tree,
+                        object_hash: dir,
+                    }],
+                }),
+            );
+            put(
+                &s,
+                &Object::Commit(Commit::new_unannotated(
+                    root,
+                    parents,
+                    Identity::ed25519([7; 32]),
+                    [0; 32],
+                    msg.as_bytes().to_vec(),
+                    msg.len() as u64,
+                    [0; 64],
+                )),
+            )
+        };
+        let c_old = nested(old_file, vec![], "old");
+        let c_new = nested(new_file, vec![c_old], "new");
+        let bases = select_chunk_delta_bases(&s, c_new, c_old).unwrap();
+        assert_eq!(
+            bases.get(&put_blob(&s, e_mod)),
+            Some(&put_blob(&s, chunks[4].clone()))
+        );
+    }
+
+    #[test]
+    fn a_shifted_file_over_the_pairing_bound_sends_its_changed_chunks_raw() {
+        // old = [A,B,C,D,E]; new = [B,C,D,E']: counts differ, and E' is E with
+        // one byte changed. Within the bound E' pairs with E; one chunk over
+        // the bound on either side, nothing pairs. The bound is inclusive.
+        let (_d, s) = store();
+        let chunks: Vec<Vec<u8>> = (1..=5).map(|i| chunk_content(i, 400)).collect();
+        let mut e_mod = chunks[4].clone();
+        e_mod[200] ^= 0xFF;
+        let ids = |contents: &[Vec<u8>]| -> Vec<Hash> {
+            contents.iter().map(|c| put_blob(&s, c.clone())).collect()
+        };
+        let old = ids(&chunks);
+        let new = ids(&[
+            chunks[1].clone(),
+            chunks[2].clone(),
+            chunks[3].clone(),
+            e_mod,
+        ]);
+        let pair = |max| {
+            let mut out = HashMap::new();
+            pair_chunks(&s, &new, &old, max, &mut out).unwrap();
+            out
+        };
+        assert_eq!(pair(5), HashMap::from([(new[3], old[4])]));
+        assert!(pair(4).is_empty());
+        // Equal counts need no content reads, so the bound does not apply.
+        let mut out = HashMap::new();
+        pair_chunks(&s, &new, &new, 0, &mut out).unwrap();
+        assert!(out.is_empty());
+        let mut same_count = old.clone();
+        same_count[4] = new[3];
+        pair_chunks(&s, &same_count, &old, 0, &mut out).unwrap();
+        assert_eq!(out, HashMap::from([(new[3], old[4])]));
     }
 
     #[test]
