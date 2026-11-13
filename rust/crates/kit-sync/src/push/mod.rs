@@ -80,11 +80,18 @@ pub struct PushOptions<'a> {
     /// Pushes re-baseline a chain past this depth into one node that lists
     /// every pack of the chain; zero disables it.
     pub rebaseline_threshold: usize,
-    /// Per-pack payload bound, further limited by the remote and format.
+    /// Per-pack payload bound, further limited by the remote and format. It
+    /// defaults to [`DEFAULT_PACK_PAYLOAD_CAP`]; the format allows up to
+    /// [`pack::MAX_TOTAL_PAYLOAD`].
     pub pack_payload_cap: u64,
     /// Observer, split bounds, shallow boundaries and host authority hook.
     pub control: PushControl<'a>,
 }
+
+/// The default payload bound of one pushed pack, 256 MiB. A push builds one
+/// pack in memory at a time, so the bound is the memory a pack costs.
+pub const DEFAULT_PACK_PAYLOAD_CAP: u64 = 256 * 1024 * 1024;
+
 impl PushOptions<'_> {
     /// Select a branch mapping or mirror push.
     #[must_use]
@@ -100,7 +107,7 @@ impl Default for PushOptions<'_> {
             remote_name: "default",
             sync_policy: kit_core::store::SyncPolicy::Batch,
             rebaseline_threshold: 64,
-            pack_payload_cap: pack::MAX_TOTAL_PAYLOAD,
+            pack_payload_cap: DEFAULT_PACK_PAYLOAD_CAP,
             control: PushControl::default(),
         }
     }
@@ -350,6 +357,8 @@ fn run_steps(
     };
     let plan = transfer::plan_pack_with(store, tip, remote_tip, encode_delta_candidates_batch)?;
     let cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
+    // The total, not the ticketed count: compression can merge packs and carry
+    // one past the ticket threshold, and only the exact dry seal below knows.
     if estimate_pack_sizes(store, &plan, cap, limits.max_pack_bytes)?.len()
         <= split::data_pack_budget(limits)
     {
@@ -597,8 +606,9 @@ fn push_branch_once(
     }
 
     // No pre-flight PushTooLarge: the estimate uses uncompressed sizes, so it
-    // would refuse pushes that compress into six packs. The seal-time gate is
-    // exact and still stops before the seventh ticketed pack's BeginUpload.
+    // would refuse pushes that compress into the budget. The seal-time gate is
+    // exact and still stops before the BeginUpload of the first pack past the
+    // data-pack budget.
 
     // Build the plan into one or more payload-bounded packs (splitting
     // when the plan exceeds `pack_payload_cap`) and upload
@@ -776,9 +786,12 @@ enum PackSink<'a> {
 /// checked against [`PackWriter::total_payload`]'s real (compressed)
 /// running total, so a sealed pack never exceeds `payload_cap` — it may
 /// under-fill when compression bites, yielding more packs than the
-/// theoretical minimum, never fewer. Peak memory is one pack buffer
-/// PLUS one prepared batch, not every pack (or the whole plan) held at
-/// once: [`size_capped_batch_lens`] caps each batch at `payload_cap`
+/// theoretical minimum, never fewer. Peak memory is one pack of at most
+/// `payload_cap` ([`DEFAULT_PACK_PAYLOAD_CAP`] unless the caller sets
+/// another) PLUS one prepared batch, not every pack (or the whole plan)
+/// held at once. One object larger than the cap still goes into a pack of
+/// its own, and that pack is the only kind that can exceed the cap.
+/// [`size_capped_batch_lens`] caps each batch at `payload_cap`
 /// conservative bytes (the same budget the writer itself is bounded
 /// by) as well as [`pack_fanout_threshold`]-many entries, so a plan
 /// containing very large objects can't balloon a batch past what one
@@ -911,7 +924,7 @@ fn report_packed(sink: PackSink<'_>, observer: &dyn Observer<SyncEvent>) {
 /// compress all of them before any of `payload_cap`'s own bookkeeping
 /// ever runs. The entry cap exists for the opposite corpus shape: many
 /// small objects would otherwise form one enormous `payload_cap`-sized
-/// (default 4 GiB) batch, both blowing past `pack_fanout_threshold`'s
+/// (default 256 MiB) batch, both blowing past `pack_fanout_threshold`'s
 /// bench-measured parallel-dispatch sizing and stalling progress
 /// reporting for the whole batch's compression time.
 fn size_capped_batch_lens(sizes: &[u64], payload_cap: u64, max_entries: usize) -> Vec<usize> {
@@ -1099,10 +1112,10 @@ fn cache_delta_bases(
 
 /// Would pushing an entry of (conservative, uncompressed) size
 /// `add_bound` into `w` exceed `payload_cap`? Never true for an empty
-/// writer — a single entry over the cap (only reachable with a
-/// test-injected tiny cap; production entries are bounded well under
-/// [`pack::MAX_TOTAL_PAYLOAD`] by [`kit_core::store::MAX_RAW_OBJECT_SIZE`])
-/// lands alone in its own pack rather than looping forever.
+/// writer — a single entry over the cap (a blob between the cap and
+/// [`kit_core::store::MAX_RAW_OBJECT_SIZE`], or a test-injected tiny cap;
+/// entries stay under [`pack::MAX_TOTAL_PAYLOAD`] because of that size
+/// limit) lands alone in its own pack rather than looping forever.
 fn should_seal(
     w: &PackWriter,
     add_bound: u64,
@@ -1173,6 +1186,24 @@ mod rebaseline_tests;
 mod tests {
     use super::*;
     use kit_core::layout::RepoLayout;
+
+    #[test]
+    fn a_pack_holds_at_most_256_mib_unless_the_caller_says_otherwise() {
+        let cap = PushOptions::default().pack_payload_cap;
+        assert_eq!(cap, DEFAULT_PACK_PAYLOAD_CAP);
+        assert_eq!(cap, 268_435_456);
+        assert!(cap < pack::MAX_TOTAL_PAYLOAD);
+        // The option still reaches the format limit and no further.
+        assert_eq!(
+            effective_payload_cap(pack::MAX_TOTAL_PAYLOAD, None).unwrap(),
+            pack::MAX_TOTAL_PAYLOAD
+        );
+        assert_eq!(effective_payload_cap(cap, Some(1 << 20)).unwrap(), 1 << 20);
+        assert_eq!(
+            effective_payload_cap(u64::MAX, None).unwrap(),
+            pack::MAX_TOTAL_PAYLOAD
+        );
+    }
     #[test]
     fn batch_lens_empty_input_is_no_batches() {
         assert_eq!(

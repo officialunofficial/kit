@@ -190,7 +190,7 @@ re-baselines it: one node with no predecessor lists every pack of the chain
 and then the new packs. The advance uploads no pack again, and a fetcher
 that holds the old packs downloads only the new ones. The node holds
 everything the chain held, so every source and every head condition allows
-it. A chain that holds more than 1,024 packs with the new ones keeps
+it. A chain that holds more than 4,096 packs with the new ones keeps
 appending. A force push on an atomic or serialized source appends.
 
 `PushReport` contains the completed ref count, advance count, and optional

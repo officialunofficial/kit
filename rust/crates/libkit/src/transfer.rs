@@ -20,7 +20,6 @@ use std::path::Path;
 
 use kit_core::hash::Hash;
 use kit_core::observer::{NoopObserver, Observer};
-use kit_core::pack;
 use kit_core::protocol::Transport;
 use kit_core::refs::RefWriteCondition;
 use kit_core::store::{ObjectStore, SyncPolicy};
@@ -305,12 +304,12 @@ pub fn push_branch_with_depth(
         tip,
         condition,
         rebaseline_threshold,
-        pack::MAX_TOTAL_PAYLOAD,
+        kit_sync::push::DEFAULT_PACK_PAYLOAD_CAP,
     )
 }
 
 /// [`push_branch_with_depth`] with a bound on the payload of one pack in place
-/// of the bound of the format.
+/// of the default of 256 MiB.
 ///
 /// # Errors
 /// As [`push_branch`].

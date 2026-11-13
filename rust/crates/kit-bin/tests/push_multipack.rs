@@ -1,8 +1,8 @@
 //! Multi-pack push integration tests.
 //!
 //! `push_branch`/`push_branch_with_depth` build the whole push plan into a
-//! single pack, hard-capped at `pack::MAX_TOTAL_PAYLOAD` (4 GiB in
-//! production). A push whose plan exceeds that in one pack now splits
+//! single pack, capped at 256 MiB by default and at most
+//! `pack::MAX_TOTAL_PAYLOAD` (4 GiB). A push whose plan exceeds that in one pack splits
 //! across multiple packs — sealed and uploaded as they fill — recorded
 //! together on ONE packmap node (`PackListNode.packs: Vec<Hash>`, apply
 //! order preserved) instead of failing with `PackfileTooLarge`.
@@ -20,6 +20,7 @@ use std::path::Path;
 use common::Repo;
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
+use kit_core::pack::{self, ENTRY_FRAME_LEN, HEADER_LEN, TRAILER_LEN};
 use kit_core::protocol::{PackKey, RefWriteCondition, Transport};
 use kit_core::refs;
 use kit_core::store::ObjectStore;
@@ -148,4 +149,80 @@ fn normal_push_still_produces_exactly_one_pack() {
         1,
         "a plan well under the payload cap must still produce exactly one pack"
     );
+}
+
+/// Bytes zstd cannot shrink: the output of splitmix64, whose low bits are as
+/// random as its high bits (an LCG's low bytes repeat and compress well).
+fn random_bytes(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed;
+    let mut buf = vec![0u8; len];
+    for chunk in buf.chunks_mut(8) {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        chunk.copy_from_slice(&z.to_le_bytes()[..chunk.len()]);
+    }
+    buf
+}
+
+#[test]
+fn a_push_of_more_than_the_default_pack_cap_splits_unless_a_larger_cap_is_set() {
+    // 300 files of 1 MiB, 300 MiB in all: more than the 256 MiB default.
+    const FILES: u64 = 300;
+    const LEN: usize = 1 << 20;
+    assert!(FILES * LEN as u64 > kit_sync::push::DEFAULT_PACK_PAYLOAD_CAP);
+
+    let alice = Repo::new();
+    for i in 0..FILES {
+        alice.write(&format!("f{i}.bin"), &random_bytes(0xCAFE_0000 + i, LEN));
+    }
+    alice.ok(&["add", "."]);
+    alice.ok(&["commit", "-m", "three hundred incompressible files"]);
+    let tip = head_hash(alice.path());
+
+    // The default: more than one pack, each within the cap.
+    let tx = MemoryTransport::new();
+    push_all(alice.path(), &tx).expect("push with the default cap");
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip));
+    let chain = packmap_chain(&tx, "main");
+    assert_eq!(chain.len(), 1);
+    let packs = &chain[0].packs;
+    assert!(packs.len() > 1, "{} pack(s)", packs.len());
+    let framing = (HEADER_LEN + TRAILER_LEN) as u64 + (FILES + 2) * ENTRY_FRAME_LEN as u64;
+    for key in packs {
+        let pack = tx.download_pack(&PackKey::from_hash(*key)).unwrap();
+        assert!(
+            pack.len() as u64 <= kit_sync::push::DEFAULT_PACK_PAYLOAD_CAP + framing,
+            "{} bytes",
+            pack.len()
+        );
+    }
+    let bob = Repo::new();
+    pull_all(bob.path(), &tx, "default", None).expect("clone from a split push");
+    assert_eq!(head_hash(bob.path()), tip);
+    for i in [0, FILES / 2, FILES - 1] {
+        assert_eq!(
+            fs::read(bob.path().join(format!("f{i}.bin"))).unwrap(),
+            random_bytes(0xCAFE_0000 + i, LEN)
+        );
+    }
+
+    // An explicit larger cap still makes one pack.
+    let tx = MemoryTransport::new();
+    let store = ObjectStore::open(&RepoLayout::single(alice.path())).unwrap();
+    push_branch_with_limits(
+        &tx,
+        &store,
+        "main",
+        tip,
+        RefWriteCondition::Missing,
+        0,
+        pack::MAX_TOTAL_PAYLOAD,
+    )
+    .expect("push with the format cap");
+    let chain = packmap_chain(&tx, "main");
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].packs.len(), 1);
 }

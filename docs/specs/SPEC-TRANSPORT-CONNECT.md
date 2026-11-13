@@ -157,6 +157,7 @@ headers or a bearer token. The response MAY be cached with
 | `inspection_max_objects` | Maximum distinct objects in one advance's complete inspected set. Present only when inspectors are configured; absence imposes no inspection-specific object-count limit. A client exceeding the advertised limit MUST replan into smaller advances; the server rejects the oversized advance before calling inspectors or accepting changes. |
 | `supports_pack_locations` | Whether the server supports optional `DownloadPack` locations (§6.2). Absent or false disables location negotiation. |
 | `max_pack_location_lifetime_ms` | Maximum location lifetime in milliseconds (§6.2). MUST be present and positive when `supports_pack_locations` is true; absent when support is disabled. |
+| `max_tickets_per_advance` | The most upload tickets one `AdvanceRefs` request may name in `ticket_ids` (§4). Absent means seven. A server that advertises it advertises at least two, because one ticket is the packmap node's. A client treats a value below two as absent and a value above 1,024 as 1,024, and reads the value once per session. A server SHOULD NOT lower the limit while pushes are in flight. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
 from this call. `atomic_advance` replaces the client-side opt-in of v1
@@ -341,10 +342,10 @@ A server MAY require `packmap_ref` to be `refs/kit/packmap/<x>` when
 `head_ref` is `refs/heads/<x>` (SPEC-REFS §2), and answer any other pairing with
 `invalid_argument`; every kit client already sends that pairing.
 
-**Reference-server behavior.** The reference server limits
-`max_tickets_per_advance` to seven and rejects a larger `ticket_ids` list with
-`invalid_argument` before acceptance. This limit bounds its receipt envelope;
-it is not a required limit for other servers.
+A server advertises its limit in `max_tickets_per_advance` (§2.1); an absent
+field means seven. A server MUST reject a `ticket_ids` list longer than its
+limit with `invalid_argument` before acceptance. A client MUST NOT name more
+tickets in one advance than the limit it derives from §2.1.
 
 ### 4.1 Create a branch from a published source
 
@@ -1307,7 +1308,7 @@ uploaded and verified in a session (at most seven before a packmap
 write) may be consumed into membership by that session's packmap write
 — never by a later session's. The packmap check only refuses: the
 node's `prev` is absent or the packmap value the write replaces, the
-node and every pack it lists — at most 1,024 — are pending in this
+node and every pack it lists — at most 4,096 — are pending in this
 session or already members (a pending packlist listed as a pack is
 refused: a packlist is a node, not a pack), or the write is refused. The on-disk layout
 under the repository's path is unchanged,
@@ -1531,7 +1532,9 @@ naming the tickets it consumes. A ticket can be consumed only by an
 advance of the ref it names; any other advance is `failed_precondition`.
 A head-only `UpdateRef` consumes no tickets. Packlist nodes (`KPKL`) are
 uploads like any other pack, and need tickets too.
-**Reference-server behavior.** An advance names at most seven tickets (§4).
+
+An advance names at most `max_tickets_per_advance` tickets, seven when the
+server advertises none (§2.1, §4).
 
 **Protocol requirement.**
 
@@ -1968,6 +1971,7 @@ Explicitly deferred to later work:
 | `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1); §7.7 ticket-pack loss clarified as a defensive abort case. |
 | `2` | draft | Additive `GetServerInfoResponse.async_inspection = 18` (§2.1); §7.1 never stores a sync inspector `unavailable` for replay; §7.6 `AlreadyPresent` is never answered for a pack with hidden content. |
 | `2` | draft | Additive `GetServerInfoResponse.inspection_max_objects = 19` (§2.1) advertises the configured synchronous-inspection advance cap, absent without inspectors. |
+| `2` | draft | Additive `GetServerInfoResponse.max_tickets_per_advance = 22` (§2.1) advertises the most tickets one `AdvanceRefs` request may name (§4); absent means seven. §7.4 raises the most packs a node lists to 4,096. |
 | `2` | draft | Additive `GetReceipt` signed writer-view read (§2.2), storage-receipt fields on `UpdateRefResponse` and `AdvanceRefsResponse` (§§3–4), and current receipt-and-notice key semantics in `GetServerInfo` (§2.1). |
 | `2` | draft | Editorial: §3 and §7.3 retry obligations for `UpdateRef`/`AdvanceRefs` reconciled with SPEC-TRANSPORT §7 (verification toolchain). |
 | `1` | draft | Initial `kit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending shared-proto extraction. |

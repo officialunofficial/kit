@@ -30,7 +30,7 @@ pub enum PushError {
     /// further when the refusal came from the pre-flight dry seal, before
     /// anything was published; without it the seal-time backstop fired.
     #[error(
-        "push needs {packs} data packs but this server permits {limit} per advance{}{}; ask the operator to raise max_pack_bytes",
+        "push needs {packs} data packs but this server permits {limit} per advance{}{}; ask the operator to raise the tickets per advance (or max_pack_bytes, if it is under 256 MiB)",
         .commit.as_ref().map_or_else(String::new, |c| format!(" ({c} cannot be split further)")),
         if *.holds_remote_head {
             " (it is the first commit that contains the remote head: rebase onto the remote head, or merge it in a smaller or earlier commit)"

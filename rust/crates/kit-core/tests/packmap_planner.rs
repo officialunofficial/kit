@@ -420,3 +420,33 @@ fn a_validated_chain_rolls_over_only_at_the_threshold_and_within_one_node() {
     assert!(!rolls(64, ROLLOVER_MAX_PACKS - 1, 2, 64));
     assert!(!rolls(64, 2, usize::MAX, 64), "the count saturates");
 }
+
+#[test]
+fn a_rollover_node_of_the_most_packs_is_far_under_the_node_download_limit() {
+    use kit_core::transfer::packmap::ROLLOVER_MAX_PACKS;
+    const NODE_LIMIT: u64 = 1024 * 1024;
+    let key = |i: usize| {
+        let mut key = [0; 32];
+        key[..8].copy_from_slice(&(i as u64).to_le_bytes());
+        key
+    };
+    let chain: Vec<Hash> = (0..ROLLOVER_MAX_PACKS - 1).map(key).collect();
+    let new = key(ROLLOVER_MAX_PACKS);
+    let node = plan_advance(
+        ChainState::Rollover {
+            head: [0x11; 32],
+            packs: chain,
+        },
+        &[new],
+        Some(NODE_LIMIT),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(ROLLOVER_MAX_PACKS, 4096);
+    assert!(
+        (node.bytes.len() as u64) < NODE_LIMIT / 4,
+        "{}",
+        node.bytes.len()
+    );
+    assert_eq!(node.bytes.len(), 8 + 32 * ROLLOVER_MAX_PACKS);
+}

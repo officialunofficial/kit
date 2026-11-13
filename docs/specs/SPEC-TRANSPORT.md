@@ -843,7 +843,7 @@ downloads only the new ones. The node is a superset of the chain it
 replaces, so it is consistent on every transport and under every head
 condition, as an append is. Its packmap write is conditioned on the chain
 head the push read, and a push that loses that write reads the chain and
-decides again. A re-baseline lists at most 1,024 packs
+decides again. A re-baseline lists at most 4,096 packs
 ([SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md)). A chain that
 holds more with the new packs keeps appending.
 
