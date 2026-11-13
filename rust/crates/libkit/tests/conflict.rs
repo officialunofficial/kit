@@ -319,7 +319,8 @@ fn a_file_above_the_scan_limit_holds_no_marker_and_is_not_read() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(p.f.path("a.txt"), std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(p.f.path("a.txt"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
     }
     assert_eq!(
         conflict::first_unresolved_marker(p.f.layout.worktree_root(), &records).unwrap(),
