@@ -19,9 +19,10 @@
 #     required headers and the forbidden headers;
 #   * KDPB bodies (object_*, blob_range, chunk, in_chunk_range): verifies the
 #     bundle and compares the disclosed summary;
-#   * KDSP bodies (span_* and neg_*): rebuilds each body from its recipe,
-#     checks the pinned size and digest, then runs the checks of
-#     SPEC-DISCLOSURE section 8.2 in order and compares the outcome or the
+#   * KDSP version 2 bodies (span_* and neg_*): rebuilds each body from its
+#     recipe, checks the pinned size and digest, then runs the checks of
+#     SPEC-DISCLOSURE section 8.2 as changed by plan 4.7 (no anchor; the new
+#     span_chunk_chain reason) in order and compares the outcome or the
 #     reject reason.
 #
 # Usage:
@@ -246,13 +247,18 @@ def kdpb_summary(result):
     kind = {"object": "Object", "chunk": "Chunk", "range": "Range"}[payload["kind"]]
     out = {"kind": kind}
     if kind == "Chunk":
-        out.update(chunk_size=payload["chunk_size"], index=payload["index"], total_size=payload["total_size"])
+        out.update(
+            chunk_size=payload["chunk_size"], index=payload["index"], total_size=payload["total_size"],
+            start=payload["start"], end=payload["end"],
+        )
     if kind == "Range":
         chunk = payload["chunk"]
         out.update(
             absolute_offset=payload["absolute_offset"],
             offset_in_blob=payload["offset_in_blob"],
             chunk=None if chunk is None else [chunk["index"], chunk["total_size"], chunk["chunk_size"]],
+            start=None if chunk is None else chunk["start"],
+            end=None if chunk is None else chunk["end"],
         )
     content = result["_content"]
     return {
@@ -285,128 +291,20 @@ def check_kdpb(root, name):
             expect(got[key] == value, f"{name}: {key}: {got[key]} != {value}")
 
 
-class SpanReject(Exception):
-    """A KDSP check failed. The text is the reject reason of section 8.2."""
-
-
-MAX_SPAN = 64 << 20
-MAX_SPAN_CHUNKS = 1_000_000
-
-
-class SpanReader:
-    def __init__(self, data):
-        self.data, self.pos = data, 0
-
-    def take(self, n):
-        if n > len(self.data) - self.pos:
-            raise SpanReject("span_encoding")
-        out = self.data[self.pos : self.pos + n]
-        self.pos += n
-        return out
-
-    def varint(self, cap):
-        value = 0
-        for i in range(5):
-            b = self.take(1)[0]
-            if (i > 0 and b == 0) or (i == 4 and b > 15):
-                raise SpanReject("span_encoding")
-            value |= (b & 0x7F) << (7 * i)
-            if not b & 0x80:
-                if value > cap:
-                    raise SpanReject("span_encoding")
-                return value
-        raise SpanReject("span_encoding")
-
-    def vector(self):
-        return self.take(self.varint(min(MAX_SPAN, len(self.data) - self.pos)))
+SpanReject = d.SpanReject
 
 
 def verify_span(data, trusted):
-    """SPEC-DISCLOSURE section 8.2. Returns the disclosed span or raises SpanReject."""
-    if len(data) > MAX_SPAN:
-        raise SpanReject("span_too_large")
-    r = SpanReader(data)
-    if r.take(4) != b"KDSP":
-        raise SpanReject("span_magic")
-    if r.take(1) != b"\x01":
-        raise SpanReject("span_version")
-    commit = r.take(32)
-    offset = struct.unpack(">Q", r.take(8))[0]
-    length = struct.unpack(">Q", r.take(8))[0]
-    anchor = r.vector()
-    count = r.varint(MAX_SPAN_CHUNKS)
-    if count > len(data) - r.pos:
-        raise SpanReject("span_encoding")
-    chunks = [r.vector() for _ in range(count)]
-    if r.pos != len(data):
-        raise SpanReject("span_trailing_bytes")
-    if commit != trusted:
-        raise SpanReject("span_commit")
-    if length == 0 or offset + length >= 1 << 64:
-        raise SpanReject("span_range_arithmetic")
-    if count < 2:
-        raise SpanReject("span_chunk_count")
-    try:
-        a = d.verify_bundle(anchor, trusted)
-    except d.Reject:
-        raise SpanReject("span_anchor_invalid")
-    ab = a["_bundle"]
-    if ab["kind"] != 2 or ab["hdr"] is None or ab["offset"] != 0 or ab["len"] != 1:
-        raise SpanReject("span_anchor_selector")
-    first = ab["hdr"]["index"]
-    absolute = a["payload"]["absolute_offset"]
-    if absolute is None:
-        raise SpanReject("span_anchor_offset")
-    results = []
-    for body in chunks:
-        try:
-            results.append(d.verify_bundle(body, trusted))
-        except d.Reject:
-            raise SpanReject("span_inner_invalid")
-    if any(x["_bundle"]["kind"] != 1 for x in results):
-        raise SpanReject("span_chunk_selector")
-    if any(x["path"] != a["path"] or x["leaf_id_hex"] != a["leaf_id_hex"] for x in results):
-        raise SpanReject("span_leaf_context")
-    ahdr = ab["hdr"]
-    for x in results:
-        c = x["_bundle"]["chunk"]
-        if (c["total_size"], c["chunk_size"], c["inner_root"]) != (
-            ahdr["total_size"],
-            ahdr["chunk_size"],
-            ahdr["inner_root"],
-        ):
-            raise SpanReject("span_chunk_context")
-    indices = [x["_bundle"]["chunk"]["index"] for x in results]
-    if indices != list(range(first, first + len(results))):
-        raise SpanReject("span_chunk_order")
-    contents = []
-    for x in results:
-        raw = x["_content"]
-        try:
-            rr = o.Reader(raw)
-            o.prologue(rr, o.BLOB)
-            body = rr.take(rr.u32())
-            rr.end()
-        except ValueError:
-            raise SpanReject("span_chunk_bytes")
-        if not body:
-            raise SpanReject("span_chunk_bytes")
-        contents.append(body)
-    if not contents[0].startswith(a["_content"]) or blake3(results[0]["_content"]) != bytes.fromhex(a["payload"]["blob_id_hex"]):
-        raise SpanReject("span_anchor_binding")
-    start = absolute
-    end_of_span = start + sum(len(c) for c in contents)
-    if end_of_span > ahdr["total_size"] or offset < start or offset >= start + len(contents[0]) or offset + length > end_of_span:
-        raise SpanReject("span_range_outside")
-    if offset + length <= end_of_span - len(contents[-1]):
-        raise SpanReject("span_last_unneeded")
-    joined = b"".join(contents)
+    """SPEC-DISCLOSURE section 8.2 as changed by plan 4.7 (KDSP version 2, no
+    anchor): disclosure_ref.verify_span, reduced to the sidecar fields."""
+    got = d.verify_span(data, trusted)
+    first = got["results"][0]
     return {
-        "bytes": joined[offset - start : offset - start + length],
-        "offset": offset,
-        "leaf": a["leaf_id_hex"],
-        "path_hex": [step["name_hex"] for step in a["path"]],
-        "signature_valid": a["signature_valid"],
+        "bytes": got["content"],
+        "offset": got["offset"],
+        "leaf": first["leaf_id_hex"],
+        "path_hex": [step["name_hex"] for step in first["path"]],
+        "signature_valid": first["signature_valid"],
     }
 
 
@@ -439,7 +337,7 @@ def check_span(root, name):
         got = verify_span(data, commit)
         outcome, reason = True, None
     except SpanReject as e:
-        got, outcome, reason = None, False, str(e)
+        got, outcome, reason = None, False, e.reason
     expect(outcome == want["accept"], f"{name}: accept={outcome}, sidecar says {want['accept']} ({reason})")
     if outcome and want["accept"]:
         expect(blake3(got["bytes"]).hex() == want["bytes_blake3"], f"{name}: bytes_blake3")

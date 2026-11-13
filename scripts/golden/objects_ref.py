@@ -9,7 +9,8 @@
 #   rust/tests/golden/fastcdc/
 #
 # The check shares no code with the Rust crates. It reads only the specs:
-# SPEC-OBJECTS, SPEC-SIGNING, SPEC-MERKLE-OBJECTS and SPEC-FASTCDC. BLAKE3
+# SPEC-OBJECTS, SPEC-SIGNING, SPEC-MERKLE-OBJECTS and SPEC-FASTCDC, with the
+# chunk-offsets format of the kit 0.8.0 plan (section 4) applied. BLAKE3
 # comes from the pure-Python transcription in blake3_subtree_ref.py. Ed25519
 # signing and the splitmix64 stream are written here from RFC 8032 and the
 # splitmix64 definition.
@@ -20,14 +21,17 @@
 #   * every object parsed strictly: prologue, field order, sort order, name
 #     rules, and no trailing byte;
 #   * the entry name rules against a table of accepted and refused names;
-#   * the chunked blob layout rules against a table of accepted and refused
-#     layouts;
+#   * the chunked blob header rules against a table of accepted and refused
+#     layouts, and the manifest decode rules (40-byte entries with end
+#     offsets, schema_version 0x02 for type 0x05 only) against a table of
+#     accepted and refused manifests;
 #   * the signing bytes of the commit, remix and tag vectors rebuilt from the
 #     parsed fields, with the domain string and the u16 length prefix of
 #     SPEC-SIGNING;
 #   * the tag signing hash and the signed tag signature from seed [0x07; 32];
 #   * the ids of the empty tree, the single-file tree and the three-chunk
-#     chunked blob, which pin the "kit.tree" and "kit.chunked" domains;
+#     chunked blob, which pin the "kit.tree" and "kit.chunked" domains and
+#     the "kit-cblob-meta-v2" and "kit-cblob-chunk-v1" leaf domains;
 #   * the FastCDC gear table, the v1 and v2 masks, the v1 and v2 chunk
 #     boundaries of the pinned streams, and the v2 manifest bytes and id.
 #
@@ -47,8 +51,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from blake3_subtree_ref import blake3  # noqa: E402
 
 PROLOGUE_MAGIC = b"KOB1"
-SCHEMA_VERSION = 1
 BLOB, TREE, COMMIT, REMIX, CHUNKED, DELTA, TAG = 1, 2, 3, 4, 5, 6, 7
+
+
+def schema_version(object_type):
+    """Plan 4.6: 0x02 for object type 0x05 only; every other type stays 0x01.
+    The commit signing bytes keep 0x01 (the signing bytes copy the prologue of
+    a commit, whose type is not 0x05)."""
+    return 2 if object_type == CHUNKED else 1
+
 
 # SPEC-SIGNING section 2 and SPEC-MERKLE-OBJECTS section 2.
 COMMIT_DOMAIN = b"kit.commit\x00"
@@ -112,8 +123,8 @@ def prologue(r, want):
         raise ValueError(f"object_type {t:#x}, want {want:#x}")
     if r.take(4) != PROLOGUE_MAGIC:
         raise ValueError("bad magic")
-    if r.u8() != SCHEMA_VERSION:
-        raise ValueError("bad schema version")
+    if r.u8() != schema_version(want):
+        raise ValueError("unsupported object version")
 
 
 def identity(r):
@@ -324,8 +335,10 @@ def parse_tag(data):
     }
 
 
-# SPEC-OBJECTS section 7: manifest layouts as (total_size, chunk_size,
-# chunk_count) that a reader accepts and refuses at decode time.
+# SPEC-OBJECTS section 7: header layouts as (total_size, chunk_size,
+# chunk_count) that the header-only check accepts and refuses. The decoder and
+# the disclosure verifier both run it; the entries are checked on top of it by
+# the decoder (plan 4.4).
 ACCEPTED_CHUNKED = [
     (0, 0, 0),
     (3, 0, 3),
@@ -356,10 +369,22 @@ REFUSED_CHUNKED = [
     (3, 0x8000_0001, 3),
 ]
 
-# SPEC-OBJECTS section 7: the bounds of a manifest. The largest chunk_count
-# is the largest total_size cut at the 16 KiB FastCDC minimum chunk size.
+# SPEC-OBJECTS section 7 and plan 4.4: the bounds of a manifest. The largest
+# chunk_count is the largest total_size cut at the 16 KiB FastCDC minimum chunk
+# size.
 MAX_TOTAL_SIZE = 128 << 30
 MAX_CHUNKS = 8_388_608
+MAX_RAW_OBJECT_SIZE = 1 << 30
+# A chunk is a Blob: a 10-byte prologue and its content, in one raw object.
+MAX_CHUNK_LEN = MAX_RAW_OBJECT_SIZE - 10
+# Plan 4.4: the manifest header is the 6-byte prologue, u64, u32, u32; an entry
+# is a 32-byte chunk hash and a u64 end offset.
+CHUNKED_HEADER_LEN = 22
+CHUNK_ENTRY_LEN = 40
+
+
+def manifest_len(count):
+    return CHUNKED_HEADER_LEN + CHUNK_ENTRY_LEN * count
 
 
 # SPEC-OBJECTS section 7: chunk_size values that name a content-defined
@@ -368,6 +393,8 @@ CONTENT_DEFINED = (0, 0x8000_0002)
 
 
 def check_chunked_layout(total, size, count):
+    """The header-only check (`check_chunked_total_size`), which stays: a
+    disclosure verifier runs it on (total_size, chunk_size, leaf_count - 1)."""
     if total > MAX_TOTAL_SIZE:
         raise ValueError("total_size above the file limit")
     if count == 0:
@@ -380,21 +407,46 @@ def check_chunked_layout(total, size, count):
         raise ValueError("total_size outside the fixed-size layout")
 
 
+def check_chunk_end(index, size, total, prev_end, end):
+    """Plan 4.4 check 4: the per-entry rule that the decoder and the fold
+    share. Raises ValueError with one label per rule."""
+    if end <= prev_end:
+        raise ValueError("end not increasing")
+    if end - prev_end > MAX_CHUNK_LEN:
+        raise ValueError("chunk length above the object limit")
+    if size not in CONTENT_DEFINED and end != min((index + 1) * size, total):
+        raise ValueError("fixed layout end")
+
+
+def check_last_end(total, count, last_end):
+    """Plan 4.4 check 5."""
+    if count == 0:
+        if total != 0:
+            raise ValueError("total_size without chunks")
+    elif last_end != total:
+        raise ValueError("last end differs from total_size")
+
+
 def check_chunked_rules():
     if MAX_CHUNKS != MAX_TOTAL_SIZE // (16 * 1024):
         fail("the chunk cap must be the size bound over the minimum chunk size")
-    for count, refused in ((MAX_CHUNKS, False), (MAX_CHUNKS + 1, True)):
+    if manifest_len(MAX_CHUNKS) != 335_544_342:
+        fail("largest manifest length (plan 4.4)")
+    # Plan 4.4 check 1 runs before check 2: a count above the cap with a short
+    # body is "too many chunks", and a count at the cap with a short body is a
+    # length error.
+    for count, want in ((MAX_CHUNKS, "manifest length"), (MAX_CHUNKS + 1, "too many chunks")):
         header = (
-            bytes([CHUNKED]) + b"KOB1\x01"
+            bytes([CHUNKED]) + PROLOGUE_MAGIC + bytes([schema_version(CHUNKED)])
             + struct.pack("<QII", MAX_TOTAL_SIZE, 0, count)
         )
         try:
             parse_chunked(header)
         except ValueError as err:
-            if refused != (str(err) == "too many chunks"):
-                fail(f"chunk count {count}: unexpected refusal {err}")
+            if str(err) != want:
+                fail(f"chunk count {count}: refused with {err}, want {want}")
             continue
-        fail(f"chunk count {count}: a header without chunk ids must be refused")
+        fail(f"chunk count {count}: a header without entries must be refused")
     for layout in ACCEPTED_CHUNKED:
         try:
             check_chunked_layout(*layout)
@@ -406,20 +458,116 @@ def check_chunked_rules():
         except ValueError:
             continue
         fail(f"chunked layout {layout} must be refused")
+    # Plan 4.6: schema 0x02 is for type 0x05 only; every other type stays 0x01.
+    for t in (BLOB, TREE, COMMIT, REMIX, TAG):
+        for version in (0, 2):
+            try:
+                prologue(Reader(bytes([t]) + PROLOGUE_MAGIC + bytes([version])), t)
+            except ValueError:
+                continue
+            fail(f"type {t:#x} with schema {version:#x} must be refused")
+        prologue(Reader(bytes([t]) + PROLOGUE_MAGIC + b"\x01"), t)
+    for name, total, size, entries, tweak, want in MANIFEST_CASES:
+        data = build_manifest_unchecked(total, size, entries)
+        if tweak is not None:
+            data = tweak(data)
+        try:
+            parse_chunked(data)
+        except ValueError as err:
+            if want is None:
+                fail(f"manifest case {name}: refused with {err}, must be accepted")
+            elif str(err) != want:
+                fail(f"manifest case {name}: refused with {err!r}, want {want!r}")
+            continue
+        if want is not None:
+            fail(f"manifest case {name}: must be refused with {want!r}")
+
+
+def build_manifest_unchecked(total, chunk_size, entries, schema=None):
+    """Plan 4.4 manifest bytes from (chunk hash, end offset) entries, with no
+    validation. `build_manifest` is the checked writer."""
+    schema = schema_version(CHUNKED) if schema is None else schema
+    return (
+        bytes([CHUNKED]) + PROLOGUE_MAGIC + bytes([schema])
+        + struct.pack("<QII", total, chunk_size, len(entries))
+        + b"".join(h + struct.pack("<Q", e) for h, e in entries)
+    )
+
+
+def build_manifest(total, chunk_size, entries):
+    """The checked writer: it refuses what `parse_chunked` refuses (plan 4.4)."""
+    data = build_manifest_unchecked(total, chunk_size, entries)
+    parse_chunked(data)
+    return data
 
 
 def parse_chunked(data):
+    """Plan 4.4: the five decode checks, in order, each with its own label."""
     r = Reader(data)
     prologue(r, CHUNKED)
     total = r.u64()
     chunk_size = r.u32()
     count = r.u32()
-    if count > MAX_CHUNKS:
+    if count > MAX_CHUNKS:  # check 1
         raise ValueError("too many chunks")
-    check_chunked_layout(total, chunk_size, count)
-    chunks = [r.take(32) for _ in range(count)]
+    if len(data) != manifest_len(count):  # check 2, before any entry is read
+        raise ValueError("manifest length")
+    if total > MAX_TOTAL_SIZE:  # check 3
+        raise ValueError("total_size above the file limit")
+    chunks, ends, prev = [], [], 0
+    for i in range(count):  # check 4
+        chunks.append(r.take(32))
+        end = r.u64()
+        check_chunk_end(i, chunk_size, total, prev, end)
+        ends.append(end)
+        prev = end
+    check_last_end(total, count, prev)  # check 5
     r.end()
-    return {"total": total, "chunk_size": chunk_size, "chunks": chunks}
+    return {"total": total, "chunk_size": chunk_size, "chunks": chunks, "ends": ends}
+
+
+def spans_of(ends):
+    """start_0 = 0 and start_i = end_(i-1)."""
+    return list(zip([0] + ends[:-1], ends))
+
+
+def _h(i):
+    return bytes([i]) * 32
+
+
+def _with_schema(version):
+    return lambda data: data[:5] + bytes([version]) + data[6:]
+
+
+# Plan 4.4 and 4.9: (name, total_size, chunk_size, [(hash, end)], tweak of the
+# bytes, expected refusal label or None when accepted). Each refused case
+# breaks exactly one rule so its label is the first failing check.
+MANIFEST_CASES = [
+    ("zero chunks", 0, 0, [], None, None),
+    ("one chunk", 5, 0, [(_h(1), 5)], None, None),
+    ("three chunks", 30, 0, [(_h(1), 10), (_h(2), 25), (_h(3), 30)], None, None),
+    ("fixed layout, short last", 2500, 1000, [(_h(1), 1000), (_h(2), 2000), (_h(3), 2500)], None, None),
+    ("fixed layout, exact", 2000, 1000, [(_h(1), 1000), (_h(2), 2000)], None, None),
+    ("fastcdc v2 layout", 9, 0x8000_0002, [(_h(1), 4), (_h(2), 9)], None, None),
+    ("same chunk hash twice", 20, 0, [(_h(1), 10), (_h(1), 20)], None, None),
+    ("chunk at the length cap", MAX_CHUNK_LEN, 0, [(_h(1), MAX_CHUNK_LEN)], None, None),
+    ("end does not increase", 10, 0, [(_h(1), 10), (_h(2), 10)], None, "end not increasing"),
+    ("end_0 is 0", 0, 0, [(_h(1), 0)], None, "end not increasing"),
+    ("zero-length chunk in the middle", 9, 0, [(_h(1), 5), (_h(2), 5), (_h(3), 9)], None, "end not increasing"),
+    ("ends decrease", 20, 0, [(_h(1), 10), (_h(2), 5), (_h(3), 20)], None, "end not increasing"),
+    ("last end below total_size", 25, 0, [(_h(1), 10), (_h(2), 20)], None, "last end differs from total_size"),
+    ("last end above total_size", 15, 0, [(_h(1), 10), (_h(2), 20)], None, "last end differs from total_size"),
+    ("total_size without chunks", 1, 0, [], None, "total_size without chunks"),
+    ("total_size above the limit", MAX_TOTAL_SIZE + 1, 0, [], None, "total_size above the file limit"),
+    ("chunk above the length cap", MAX_CHUNK_LEN + 1, 0, [(_h(1), MAX_CHUNK_LEN + 1)], None, "chunk length above the object limit"),
+    ("fixed layout, last end off by one", 2001, 1000, [(_h(1), 1000), (_h(2), 2001)], None, "fixed layout end"),
+    ("fixed layout, first end off by one", 2000, 1000, [(_h(1), 999), (_h(2), 2000)], None, "fixed layout end"),
+    ("fixed layout, ends too long for the layout", 2000, 1000, [(_h(1), 1500), (_h(2), 2000)], None, "fixed layout end"),
+    ("one byte too long", 20, 0, [(_h(1), 10), (_h(2), 20)], lambda d: d + b"\x00", "manifest length"),
+    ("one byte too short", 20, 0, [(_h(1), 10), (_h(2), 20)], lambda d: d[:-1], "manifest length"),
+    ("type 0x05 with schema 0x01", 5, 0, [(_h(1), 5)], _with_schema(1), "unsupported object version"),
+    ("type 0x05 with schema 0x03", 5, 0, [(_h(1), 5)], _with_schema(3), "unsupported object version"),
+]
 
 
 # ----------------------------------------------------------- merkle ids
@@ -448,11 +596,31 @@ def tree_id(entries):
     return domain_digest(TREE_DOMAIN, bmt_root(leaves))
 
 
-def chunked_id(total, chunk_size, chunks):
-    meta = domain_digest(
-        b"kit-cblob-meta-v1", struct.pack("<Q", total) + struct.pack("<I", chunk_size)
-    )
-    return domain_digest(CHUNKED_DOMAIN, bmt_root([meta] + list(chunks)))
+def meta_leaf(total, chunk_size):
+    """Plan 4.3: L[0]."""
+    return domain_digest(b"kit-cblob-meta-v2", struct.pack("<Q", total) + struct.pack("<I", chunk_size))
+
+
+def chunk_leaf(start, end, chunk_id):
+    """Plan 4.3: L[i + 1] commits the span and the chunk id."""
+    return domain_digest(b"kit-cblob-chunk-v1", struct.pack("<QQ", start, end) + chunk_id)
+
+
+def chunk_leaves(total, chunk_size, spans, chunks):
+    """All leaves of the BMT: the meta leaf, then one per chunk. `spans` are
+    (start, end) pairs, taken as given (no validation)."""
+    return [meta_leaf(total, chunk_size)] + [
+        chunk_leaf(s, e, h) for (s, e), h in zip(spans, chunks)
+    ]
+
+
+def chunked_id_of_spans(total, chunk_size, spans, chunks):
+    """The id of the leaves, whether or not any manifest decodes to them."""
+    return domain_digest(CHUNKED_DOMAIN, bmt_root(chunk_leaves(total, chunk_size, spans, chunks)))
+
+
+def chunked_id(total, chunk_size, chunks, ends):
+    return chunked_id_of_spans(total, chunk_size, spans_of(ends), chunks)
 
 
 # -------------------------------------------------------------- ed25519
@@ -595,7 +763,7 @@ def runs_stream():
 
 def blob_id(data):
     """SPEC-OBJECTS sections 2 and 3: BLAKE3 of the canonical blob bytes."""
-    return blake3(bytes([BLOB]) + PROLOGUE_MAGIC + bytes([SCHEMA_VERSION]) + struct.pack("<I", len(data)) + data)
+    return blake3(bytes([BLOB]) + PROLOGUE_MAGIC + bytes([schema_version(BLOB)]) + struct.pack("<I", len(data)) + data)
 
 
 FASTCDC_V2_CHUNK_SIZE = 0x8000_0002  # SPEC-OBJECTS section 7
@@ -678,7 +846,7 @@ def check_objects(root):
     # Signing bytes of the commit and the remix vectors.
     for name in ("commit_0parent", "remix_2sources"):
         expect(
-            parsed[name]["signing"] == files[name + "_signing_bytes"],
+            name in parsed and parsed[name]["signing"] == files[name + "_signing_bytes"],
             f"objects/{name}: rebuilt signing bytes differ from {name}_signing_bytes.bin",
         )
     # Empty tree and chunked blob ids.
@@ -690,8 +858,11 @@ def check_objects(root):
         files["empty_blob"] == b"\x01KOB1\x01\x00\x00\x00\x00",
         "empty blob bytes",
     )
-    cb = parsed["chunked_blob_cs0_3chunks"]
-    expect(len(files["chunked_blob_cs0_3chunks"]) == 118, "chunked blob length is 118")
+    cb = parsed.get("chunked_blob_cs0_3chunks")
+    expect(
+        len(files["chunked_blob_cs0_3chunks"]) == manifest_len(3) == 142,
+        "chunked blob length is 22 + 40 * 3 = 142",
+    )
     return files, parsed, cb
 
 
@@ -709,8 +880,10 @@ def check_proof_ids(root, files, parsed, cb):
         "tree_single_file id differs from the proof vector",
     )
     chunk = seen["chunked_blob_cs0_3chunks_pos1"]["object_id_hex"]
+    if cb is None:
+        return  # the manifest did not decode; that is already a failure
     expect(
-        chunked_id(cb["total"], cb["chunk_size"], cb["chunks"]).hex() == chunk,
+        chunked_id(cb["total"], cb["chunk_size"], cb["chunks"], cb["ends"]).hex() == chunk,
         "chunked_blob_cs0_3chunks id differs from the proof vector",
     )
 
@@ -765,18 +938,13 @@ def fastcdc_v2_manifest(gear):
     """SPEC-FASTCDC section 8, vector 14: the v2 manifest of a 2 MiB
     splitmix64 stream, and its object id."""
     data = splitmix_bytes(0x4B49_5446_4344_4332, 2 * 1024 * 1024)
-    chunks, start = [], 0
+    chunks, ends, start = [], [], 0
     for end in boundaries(data, gear, v2_masks()):
         chunks.append(blob_id(data[start:end]))
+        ends.append(end)
         start = end
-    body = (
-        bytes([CHUNKED])
-        + PROLOGUE_MAGIC
-        + bytes([SCHEMA_VERSION])
-        + struct.pack("<QII", len(data), FASTCDC_V2_CHUNK_SIZE, len(chunks))
-        + b"".join(chunks)
-    )
-    return body, chunked_id(len(data), FASTCDC_V2_CHUNK_SIZE, chunks)
+    body = build_manifest(len(data), FASTCDC_V2_CHUNK_SIZE, list(zip(chunks, ends)))
+    return body, chunked_id(len(data), FASTCDC_V2_CHUNK_SIZE, chunks, ends)
 
 
 def check_fastcdc(root):
