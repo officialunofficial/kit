@@ -80,9 +80,11 @@ pub struct PushOptions<'a> {
     /// Pushes re-baseline a chain past this depth into one node that lists
     /// every pack of the chain; zero disables it.
     pub rebaseline_threshold: usize,
-    /// Per-pack payload bound, further limited by the remote and format. It
-    /// defaults to [`DEFAULT_PACK_PAYLOAD_CAP`]; the format allows up to
-    /// [`pack::MAX_TOTAL_PAYLOAD`].
+    /// Preferred per-pack payload bound, further limited by the remote and
+    /// format. It defaults to [`DEFAULT_PACK_PAYLOAD_CAP`]; the format allows
+    /// up to [`pack::MAX_TOTAL_PAYLOAD`]. A push uses larger packs only when a
+    /// single commit cannot fit a ticketed advance otherwise, and then only as
+    /// large as that commit needs, up to what the format and the remote allow.
     pub pack_payload_cap: u64,
     /// Observer, split bounds, shallow boundaries and host authority hook.
     pub control: PushControl<'a>,
@@ -334,7 +336,7 @@ fn run_steps(
     on_step: &mut dyn FnMut(Hash) -> Result<(), PushError>,
 ) -> Result<usize, PushError> {
     let limits = force::checked_upload_limits(tx, condition)?;
-    let mut single = |plan| {
+    let mut single = |plan, pack_payload_cap| {
         push_step_recovering(
             tx,
             store,
@@ -349,11 +351,11 @@ fn run_steps(
         Ok(1)
     };
     if limits.tickets_per_advance.is_none() {
-        return single(None);
+        return single(None, pack_payload_cap);
     }
     refs::check_pushable_branch(branch)?;
     let LeaseHead::Holds(remote_tip) = lease_head(tx, branch, condition, tip)? else {
-        return single(None);
+        return single(None, pack_payload_cap);
     };
     let plan = transfer::plan_pack_with(store, tip, remote_tip, encode_delta_candidates_batch)?;
     let cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
@@ -363,20 +365,25 @@ fn run_steps(
         <= split::data_pack_budget(limits)
     {
         let force = force::snapshot(tx, branch, remote_tip, condition)?;
-        return single(Some(PreparedPlan { pack: plan, force }));
+        return single(Some(PreparedPlan { pack: plan, force }), pack_payload_cap);
     }
     // The estimate is uncompressed: a push that compresses into the budget
     // is not split (exact dry seal), and one against a remote tip this store
     // lacks is left to the head CAS rather than walking all of history.
     if remote_tip.is_some_and(|remote| !store.contains(&remote)) {
-        return single(None);
+        return single(None, pack_payload_cap);
     }
     match build_and_upload_packs(PackSink::Count, store, plan, cap, limits, tx.observer) {
         Err(PushError::PushTooLarge { .. }) => {}
         Err(error @ PushError::Sync(SyncError::Interrupted)) => return Err(error),
-        _ => return single(None),
+        _ => return single(None, pack_payload_cap),
     }
-    let steps = plan_push_steps(
+    // The split fixes the pack size for the whole push: larger than the
+    // preferred one only when a single commit needs it.
+    let split::SplitPlan {
+        steps,
+        payload_cap: pack_payload_cap,
+    } = split::plan_split(
         store,
         tip,
         remote_tip,
@@ -387,8 +394,33 @@ fn run_steps(
         branch,
     )?;
     if steps.len() == 1 {
-        return single(None);
+        return single(None, pack_payload_cap);
     }
+    publish_steps(
+        tx,
+        store,
+        branch,
+        steps,
+        condition,
+        rebaseline_threshold,
+        pack_payload_cap,
+        on_step,
+    )
+}
+
+/// Advance the remote head through `steps` one after another, each a `Match`
+/// on the previous, and report how the push stopped if one fails.
+#[allow(clippy::too_many_arguments)]
+fn publish_steps(
+    tx: &PushContext<'_>,
+    store: &ObjectStore,
+    branch: &str,
+    steps: Vec<Hash>,
+    condition: refs::RefWriteCondition,
+    rebaseline_threshold: usize,
+    pack_payload_cap: u64,
+    on_step: &mut dyn FnMut(Hash) -> Result<(), PushError>,
+) -> Result<usize, PushError> {
     let total = steps.len();
     let mut published: Option<Hash> = None;
     for (index, step_tip) in steps.into_iter().enumerate() {

@@ -264,33 +264,65 @@ fn typed_ticket_failures_restart_once_and_landed_write_succeeds() {
     assert_eq!(tx.advances.load(Ordering::SeqCst), 2);
 }
 
-#[test]
-fn seventh_data_pack_is_refused_before_its_begin_upload() {
-    let repo = Repo::new();
-    for i in 0_u64..18 {
-        let bytes = filler(i * 2 + 1, 2048);
-        repo.write(&format!("f{i}.bin"), &bytes);
+/// Most bytes a pack's frames, header and trailer add to its payload here.
+const FRAMING: usize = 512;
+
+/// One commit of `files` incompressible files of `len` bytes.
+fn one_big_commit(repo: &Repo, files: u64, len: usize) {
+    for i in 0..files {
+        repo.write(&format!("f{i}.bin"), &filler(i * 2 + 1, len));
     }
     repo.ok(&["add", "."]);
     repo.ok(&["commit", "-m", "many files"]);
-    let tx = TicketTransport::new(Fault::None);
+}
+
+#[test]
+fn a_commit_past_the_budget_is_refused_before_any_upload_when_no_pack_size_fits_it() {
+    let repo = Repo::new();
+    one_big_commit(&repo, 40, 2048);
+    let mut tx = TicketTransport::new(Fault::None);
+    // The remote takes 4 KiB packs at most, so six of them cannot hold it.
+    tx.max_pack_bytes = Some(4096);
     let err = push(&repo, &tx, 4096).unwrap_err();
-    // One commit cannot be split, so the exact local dry seal refuses it
-    // before any pack goes up; it names the commit.
-    match &err {
-        TransferError::PushTooLarge {
-            packs: 7,
-            limit: 6,
-            commit: Some(commit),
-            ..
-        } => assert!(
-            commit.contains(&kit_core::hash::to_hex(&tip(&repo))),
-            "{err}"
-        ),
-        other => panic!("{other:?}"),
-    }
+    assert!(matches!(err, TransferError::PushSplitLimit(_)), "{err:?}");
     assert_eq!(tx.uploads.load(Ordering::SeqCst), 0);
     assert_eq!(tx.advances.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn one_commit_past_the_budget_pushes_with_larger_packs() {
+    let repo = Repo::new();
+    one_big_commit(&repo, 40, 2048);
+    let tx = TicketTransport::new(Fault::None);
+    push(&repo, &tx, 4096).unwrap();
+    assert_eq!(tx.advances.load(Ordering::SeqCst), 1);
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip(&repo)));
+    // Six data packs and the packmap node at most, some above the preferred
+    // size plus its framing.
+    assert!(tx.uploads.load(Ordering::SeqCst) <= 7);
+    assert!(tx.largest_upload.load(Ordering::SeqCst) > 4096 + FRAMING);
+}
+
+#[test]
+fn the_same_data_over_many_commits_keeps_packs_at_the_preferred_size() {
+    let repo = Repo::new();
+    long_history(&repo, 40, 2048);
+    let tx = TicketTransport::new(Fault::None);
+    let store = store(&repo);
+    let steps = push_branch_steps(
+        &tx,
+        &store,
+        "main",
+        tip(&repo),
+        RefWriteCondition::Missing,
+        0,
+        4096,
+        &PushControl::default(),
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    assert!(steps > 1, "{steps}");
+    assert!(tx.largest_upload.load(Ordering::SeqCst) <= 4096 + FRAMING);
 }
 
 #[test]
@@ -1194,7 +1226,7 @@ fn every_published_head_contains_the_remote_head_it_replaced() {
     // Local work that then merges it: the remote head is reachable only
     // through the merge's second parent.
     repo.ok(&["checkout", "main"]);
-    long_history(&repo, 10, 3000);
+    long_history(&repo, 40, 3000);
     repo.ok(&["merge", "theirs"]);
     // The first advance must already contain their commit, so the whole
     // prefix is one step; too big for one advance, it is refused up front

@@ -1253,9 +1253,10 @@ Remote / sync:
   `u`-only fast-forwards land; the owner key needs no grant. A push
   that would be refused midway is refused up front, with no advance
   published. A single commit or merge that cannot be split (a merge always
-  lands whole) and still needs more packs than one advance carries is refused
-  before any upload, naming the commit; ask the operator to raise the tickets
-  per advance (or `max_pack_bytes`, if it is under 256 MiB). On a terminal the
+  lands whole) and still needs more packs than one advance carries is pushed
+  with larger packs, up to the size the format and the server allow. One that
+  does not fit even then is refused before any upload, naming the commit; ask
+  the operator to raise the tickets per advance (or `max_pack_bytes`). On a terminal the
   progress line reads `Writing objects (step 2/5)`; piped, a
   `pushed step 2/5: branch now at <hex>` line follows each advance; `--quiet`
   prints neither. Large packs upload in parts. Receipt files in the

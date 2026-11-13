@@ -192,15 +192,21 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which is 131,080 bytes. A reader accepts the node as before. A server that
   limits a node to 1,024 packs must accept 4,096 before it is used with this
   client.
-- A push builds packs of at most 256 MiB by default (`DEFAULT_PACK_PAYLOAD_CAP`),
-  down from 4 GiB, so a push holds one pack of that size and one prepared batch
-  in memory. `PushOptions::pack_payload_cap` still takes any value up to the
-  format limit of 4 GiB. One object larger than the cap still goes into a pack
-  of its own. A single commit that cannot be split now carries at most one
-  advance's data packs of 256 MiB each, where it carried packs of up to 4 GiB;
-  against a server that does not advertise `max_tickets_per_advance` that is
-  about 1.5 GiB of objects under the cap. The `kit` command has no flag to
-  raise the cap.
+- A push prefers packs of at most 256 MiB (`DEFAULT_PACK_PAYLOAD_CAP`), down
+  from 4 GiB, so a push holds one pack of that size and one prepared batch in
+  memory. `PushOptions::pack_payload_cap` is the preferred size and still takes
+  any value up to the format limit of 4 GiB. One object larger than the cap
+  still goes into a pack of its own. A push uses larger packs only when a
+  single commit cannot fit one advance's data packs otherwise: it raises the
+  size for that push, once, to what that commit needs, never past the format
+  limit or the largest pack the remote accepts. Against a server that does not
+  advertise `max_tickets_per_advance`, one commit can then carry about 24 GiB
+  of objects, where it carries about 1.5 GiB at the preferred size. A commit
+  that does not fit even then is refused before any upload, with
+  `PushSplitLimit` when its weight passes what the largest packs hold and
+  with `PushTooLarge` when packing leaves it just over. A push that raises
+  the size holds up to two packs of that size in memory (one pack and one
+  prepared batch). The `kit` command has no flag to raise the cap.
 
 ### Fixed
 
