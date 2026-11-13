@@ -140,7 +140,7 @@ impl Transport for Remote<'_> {
     }
     fn upload_limits(&self) -> UploadLimits {
         UploadLimits {
-            tickets_per_advance: self.tickets.then_some(7),
+            data_packs_per_advance: self.tickets.then_some(6),
             ..UploadLimits::default()
         }
     }

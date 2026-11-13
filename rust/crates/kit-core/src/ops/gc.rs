@@ -40,6 +40,7 @@ use crate::layout::RepoLayout;
 use crate::object::{Object, ObjectType};
 use crate::store::{ObjectStore, StoreError};
 
+use super::bisect;
 use super::conflict_state;
 use super::graph::{ClosureMode, MAX_REACHABLE, children};
 use super::rebase;
@@ -70,6 +71,8 @@ pub enum GcRootsError {
     ConflictState(#[from] conflict_state::ConflictStateError),
     #[error("rebase state: {0}")]
     Rebase(#[from] rebase::RebaseError),
+    #[error("bisect state: {0}")]
+    Bisect(#[from] bisect::BisectError),
     #[error("recovery log: {0}")]
     Recovery(#[from] recovery::RecoveryError),
     #[error("staging index: {0}")]
@@ -134,8 +137,8 @@ pub enum GcRootsError {
 
 /// Collect the complete set of GC retention roots for the repo at
 /// the repository described by `layout`. The returned hashes are roots,
-/// not the closure — feed them to `reachable_closure` (or use
-/// [`live_objects`]) to get the full keep-set.
+/// not the closure — feed them to the mark that `run_gc` runs to
+/// get the full keep-set.
 ///
 /// The all-zero hash is filtered out (an unset ref / `ORIG_HEAD`).
 ///
@@ -249,6 +252,24 @@ fn collect_tree_roots(
         add(r.orig_head, roots);
     }
 
+    // In-progress bisect: where it started, the known-bad commit, the
+    // known-good commits and the skipped ones. Without them, a bisect resumed
+    // after the grace period would find its commits pruned.
+    match bisect::read_state(tree) {
+        Ok(state) => {
+            add(state.orig_head, roots);
+            for h in state.bad_hash.into_iter().chain(state.good_hashes) {
+                add(h, roots);
+            }
+            for h in state.skipped {
+                add(h, roots);
+            }
+        }
+        // No bisect, or none at the moment the file was read.
+        Err(bisect::BisectError::NoBisectInProgress) => {}
+        Err(e) => return Err(e.into()),
+    }
+
     // In-progress rebase: target + every commit still to replay or
     // already replayed onto the new base.
     if rebase::is_rebase_in_progress(tree) {
@@ -265,7 +286,21 @@ fn collect_tree_roots(
     // in the state dir; rebase writes its sidecar inside
     // `rebase-apply/`. Both are empty/absent when no conflict is
     // recorded.
-    for dir in [tree.worktree_state_dir().to_path_buf(), tree.rebase_dir()] {
+    let merge_like = conflict_state::is_merge_in_progress(tree)
+        || conflict_state::is_cherry_pick_in_progress(tree)
+        || conflict_state::is_revert_in_progress(tree);
+    for (dir, in_progress) in [
+        (tree.worktree_state_dir().to_path_buf(), merge_like),
+        (tree.rebase_dir(), rebase::is_rebase_in_progress(tree)),
+    ] {
+        // The operation's result tree: a merge, cherry-pick, revert or rebase
+        // that is resumed or aborted reads it back. A file left behind with
+        // no operation to resume it (a crash while the state was cleared) is
+        // no root: nothing reads it, and keeping it would hold its tree and
+        // fail gc once an earlier run had pruned that tree.
+        if in_progress && let Some(tree_hash) = conflict_state::read_result_tree(&dir)? {
+            add(tree_hash, roots);
+        }
         for c in conflict_state::read_conflicts(&dir)? {
             for h in [c.base_hash, c.ours_hash, c.theirs_hash]
                 .into_iter()
@@ -278,7 +313,7 @@ fn collect_tree_roots(
     Ok(())
 }
 
-/// Most distinct chunk ids [`live_objects`] holds: 134,217,728, which is 4 GiB
+/// Most distinct chunk ids `live_objects_with` holds: 134,217,728, which is 4 GiB
 /// of ids. Past it the mark fails with [`GcRootsError::TooManyChunks`]. The
 /// chunk id buffer is checked at a compaction, so before the error it can hold
 /// about twice that.
@@ -351,8 +386,8 @@ impl LiveSet {
     }
 
     /// Live chunks, counted in [`len`](Self::len) too.
-    #[must_use]
-    pub fn chunks_len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn chunks_len(&self) -> usize {
         self.chunks.len()
     }
 
@@ -458,7 +493,7 @@ fn mark_live(
         }
         objects.insert(h);
         // A blob or delta is a leaf. Its type is all gc needs, so its
-        // content is not read or verified (see [`live_objects`]).
+        // content is not read or verified (see `live_objects_with`).
         if matches!(store.object_type(&h)?, ObjectType::Blob | ObjectType::Delta) {
             continue;
         }
@@ -510,16 +545,25 @@ fn manifest_listing(
     Ok(hash::ZERO)
 }
 
+/// `live_objects_with` at the default limits.
+#[cfg(test)]
+pub(crate) fn live_objects(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+) -> Result<LiveSet, GcRootsError> {
+    live_objects_with(store, layout, MarkLimits::DEFAULT)
+}
+
 /// The full live-object keep-set for `kit gc`: the closure over every
 /// retention root from [`collect_roots`], with chunks held apart (see
 /// [`LiveSet`]).
 ///
 /// The closure follows commits, trees, tags and parents like
-/// [`super::graph::reachable_closure`]. The chunks of a manifest count toward
+/// [`super::graph::reachable_objects`]. The chunks of a manifest count toward
 /// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob or a delta.
 ///
 /// Does not verify leaf (blob/delta) content integrity as part of the
-/// walk — see [`super::graph::reachable_closure`]'s "Content integrity
+/// walk — see [`super::graph::reachable_objects`]'s "Content integrity
 /// of leaves" doc section. `gc` is therefore no longer an incidental
 /// corruption-detection pass over blob content the way it was before the
 /// object-type short-circuit; it still fails closed on a *missing* object, just not on a
@@ -532,10 +576,6 @@ fn manifest_listing(
 /// [`GcRootsError::Truncated`] past [`MAX_REACHABLE`] objects,
 /// [`GcRootsError::TooManyChunks`] past [`MAX_LIVE_CHUNKS`] distinct chunks,
 /// or [`GcRootsError::ChunkNotBlob`] for a chunk of another kind.
-pub fn live_objects(store: &ObjectStore, layout: &RepoLayout) -> Result<LiveSet, GcRootsError> {
-    live_objects_with(store, layout, MarkLimits::DEFAULT)
-}
-
 fn live_objects_with(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -568,7 +608,7 @@ pub struct GcReport {
 }
 
 /// Mark-and-sweep prune: keep every object reachable from the retention
-/// roots ([`live_objects`]) plus every unreachable object younger than
+/// roots (`live_objects_with`) plus every unreachable object younger than
 /// `grace_secs` (relative to `now_secs`); delete the rest. With
 /// `dry_run`, computes the report without deleting anything.
 ///
@@ -585,7 +625,7 @@ pub struct GcReport {
 /// holds the id of every loose object.
 ///
 /// # Errors
-/// [`GcRootsError`] from [`live_objects`], store enumeration, or a delete.
+/// [`GcRootsError`] from `live_objects_with`, store enumeration, or a delete.
 /// An error from the sweep itself leaves the objects of earlier directories
 /// pruned, which is safe because only unreachable objects are.
 pub fn run_gc(
@@ -1019,19 +1059,6 @@ mod tests {
     }
 
     #[test]
-    fn reachable_closure_is_union_of_single_root_closures() {
-        let (_d, s) = repo();
-        let (c1, b1) = commit_one(&s, b"a", b"a", vec![]);
-        let (c2, b2) = commit_one(&s, b"b", b"b", vec![]);
-        let multi = super::super::graph::reachable_closure(&s, [&c1, &c2]).unwrap();
-        let single1 = super::super::graph::reachable_objects(&s, &c1).unwrap();
-        let single2 = super::super::graph::reachable_objects(&s, &c2).unwrap();
-        let union: BTreeSet<Hash> = single1.union(&single2).copied().collect();
-        assert_eq!(multi, union);
-        assert!([c1, b1, c2, b2].iter().all(|h| multi.contains(h)));
-    }
-
-    #[test]
     fn strict_walk_picks_up_nested_remote_ref() {
         let (d, s) = repo();
         let md = layout(&d);
@@ -1113,6 +1140,89 @@ mod tests {
         );
         // Sanity: kept objects accounted as live.
         assert!(s.contains(&kept) && s.contains(&kept_blob));
+    }
+
+    /// The tree a commit names.
+    fn tree_of(s: &ObjectStore, commit: &Hash) -> Hash {
+        match s.read_object(commit).unwrap() {
+            Object::Commit(c) => c.tree_hash,
+            other => panic!("not a commit: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_gc_keeps_the_objects_of_an_unfinished_merge_and_bisect_until_the_state_is_gone() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+
+        // Objects no ref reaches, held only by operation state.
+        let (result, result_blob) = commit_one(&s, b"result", b"result", vec![]);
+        let result_tree = tree_of(&s, &result);
+        let (start, _) = commit_one(&s, b"start", b"start", vec![]);
+        let (bad, _) = commit_one(&s, b"bad", b"bad", vec![]);
+        let (good, _) = commit_one(&s, b"good", b"good", vec![]);
+        let (skipped, _) = commit_one(&s, b"skipped", b"skipped", vec![]);
+        let (orphan, orphan_blob) = commit_one(&s, b"orphan", b"orphan", vec![]);
+        conflict_state::write_merge_state(
+            &md,
+            &conflict_state::MergeState {
+                merge_head: kept,
+                orig_head: kept,
+                message: b"merge".to_vec(),
+            },
+            &[],
+        )
+        .unwrap();
+        conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
+        bisect::write_state(
+            &md,
+            &bisect::BisectState {
+                orig_head: start,
+                orig_branch: None,
+                bad_hash: Some(bad),
+                good_hashes: vec![good],
+                skipped: BTreeSet::from([skipped]),
+            },
+        )
+        .unwrap();
+
+        // Every object is older than the grace period.
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        for h in [result_tree, result_blob, start, bad, good, skipped] {
+            assert!(s.contains(&h), "{} was pruned", hash::to_hex(&h));
+        }
+        assert!(!s.contains(&orphan) && !s.contains(&orphan_blob));
+        // The commit that only names the result tree is not held.
+        assert!(!s.contains(&result));
+
+        // With the state gone nothing keeps them.
+        conflict_state::clear_merge_state(&md).unwrap();
+        bisect::cleanup_bisect(&md).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        for h in [result_tree, result_blob, start, bad, good, skipped] {
+            assert!(!s.contains(&h), "{} was kept", hash::to_hex(&h));
+        }
+        assert!(s.contains(&kept));
+    }
+
+    #[test]
+    fn run_gc_ignores_a_result_tree_with_no_operation_to_resume() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        let (result, result_blob) = commit_one(&s, b"result", b"result", vec![]);
+        let result_tree = tree_of(&s, &result);
+        // A crash while the merge state was cleared leaves the file alone.
+        conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
+
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert!(!s.contains(&result_tree) && !s.contains(&result_blob));
+        // A second gc finds nothing left to read, and still succeeds.
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert!(s.contains(&kept));
     }
 
     #[test]

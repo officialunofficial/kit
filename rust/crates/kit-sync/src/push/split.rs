@@ -114,15 +114,6 @@ impl Default for PushControl<'_> {
     }
 }
 
-/// Data packs one advance may carry: the ticket allowance minus the packmap
-/// node's ticket. Six unless the transport advertises another allowance, and
-/// never less than one.
-pub(super) fn data_pack_budget(limits: UploadLimits) -> usize {
-    limits
-        .tickets_per_advance
-        .map_or(6, |tickets| tickets.saturating_sub(1).max(1))
-}
-
 /// The first-parent commits between the remote's history and the tip.
 struct Chain {
     /// Oldest first; the last is the tip.
@@ -321,11 +312,11 @@ fn cumulative_weights_capped(
 
 /// The largest total weight (payload plus frames) after which a pack must
 /// seal: either the payload cap, or the serialized limit net of header and
-/// trailer. Two consecutive packs always weigh more than this together.
+/// trailer. A search heuristic only: the decoded-byte and entry seals can close
+/// a lighter pack, so the real plan is always checked, never this weight.
 fn pack_weight_cap(payload_cap: u64, max_pack_bytes: Option<u64>) -> u64 {
-    let serialized = max_pack_bytes.map_or(u64::MAX, |limit| {
-        limit.saturating_sub((pack::HEADER_LEN + pack::TRAILER_LEN) as u64)
-    });
+    let serialized = pack::serialized_limit(max_pack_bytes)
+        .saturating_sub((pack::HEADER_LEN + pack::TRAILER_LEN) as u64);
     payload_cap.min(serialized).max(1)
 }
 
@@ -621,11 +612,15 @@ fn raised_payload_cap(
 /// The commits to advance the remote head through, oldest first, ending at
 /// `tip`. One entry means the push is not split.
 ///
-/// Refuses, before anything is uploaded, a push that would need more than
-/// `ctl.max_steps` advances (counted at the pack size the push starts with,
-/// unless a step that needs larger packs has been found by then), one whose
-/// grants do not cover every advance, and one containing a single commit that
-/// cannot fit in an advance.
+/// Without a ticket budget (`limits.data_packs_per_advance` is `None`) there
+/// is no allowance to split for: the answer is `[tip]`, with no walk and no
+/// check of the grants.
+///
+/// Otherwise refuses, before anything is uploaded, a push that would need more
+/// than `ctl.max_steps` advances (counted at the pack size the push starts
+/// with, unless a step that needs larger packs has been found by then), one
+/// whose grants do not cover every advance, and one containing a single commit
+/// that cannot fit in an advance.
 ///
 /// # Errors
 /// [`PushError::PushSplitLimit`], [`PushError::PushNotAuthorized`],
@@ -666,6 +661,13 @@ pub(super) fn plan_split(
     condition: RefWriteCondition,
     branch: &str,
 ) -> Result<SplitPlan, PushError> {
+    // Without tickets there is no allowance to split for: one advance.
+    let Some(budget) = limits.data_packs_per_advance else {
+        return Ok(SplitPlan {
+            steps: vec![tip],
+            payload_cap: pack_payload_cap,
+        });
+    };
     let chain = walk_chain(store, tip, remote_tip, ctl)?;
     if chain.commits.is_empty() {
         return Ok(SplitPlan {
@@ -681,7 +683,6 @@ pub(super) fn plan_split(
     let Weights {
         cumulative: weights,
     } = cumulative_weights(store, &chain, ctl)?;
-    let budget = data_pack_budget(limits);
     let mut cutter = Cutter {
         observer: ctl.observer,
         store,
@@ -869,25 +870,6 @@ mod tests {
             commits.push(commit(store, &files, parents, i));
         }
         commits
-    }
-
-    #[test]
-    fn the_budget_is_the_advertised_allowance_minus_the_packmap_ticket() {
-        let budget = |tickets_per_advance| {
-            data_pack_budget(UploadLimits {
-                tickets_per_advance,
-                ..UploadLimits::default()
-            })
-        };
-        assert_eq!(budget(None), 6);
-        assert_eq!(budget(Some(2)), 1);
-        assert_eq!(budget(Some(3)), 2);
-        assert_eq!(budget(Some(7)), 6);
-        assert_eq!(budget(Some(8)), 7);
-        assert_eq!(budget(Some(1024)), 1023);
-        // A limits value built by hand never gives a budget of zero.
-        assert_eq!(budget(Some(1)), 1);
-        assert_eq!(budget(Some(0)), 1);
     }
 
     #[test]
@@ -1217,7 +1199,7 @@ mod tests {
         for step in &plan.steps {
             assert!(
                 step_packs(&store, *step, base, limits, plan.payload_cap)
-                    <= data_pack_budget(limits),
+                    <= limits.data_packs_per_advance.unwrap(),
                 "a step needs more packs than an advance may carry"
             );
             base = Some(*step);
@@ -1306,7 +1288,7 @@ mod tests {
         let merge = commit(&store, &big, vec![a[3], theirs], 91);
         let limits = UploadLimits {
             max_pack_bytes: Some(8192),
-            tickets_per_advance: Some(7),
+            data_packs_per_advance: Some(6),
             ticket_threshold_bytes: Some(0),
         };
         let error = plan_push_steps(
@@ -1339,7 +1321,7 @@ mod tests {
     fn ticketed(max_pack_bytes: Option<u64>) -> UploadLimits {
         UploadLimits {
             max_pack_bytes,
-            tickets_per_advance: Some(7),
+            data_packs_per_advance: Some(6),
             ticket_threshold_bytes: Some(0),
         }
     }
@@ -1402,7 +1384,10 @@ mod tests {
     #[test]
     fn the_raised_cap_never_passes_the_format_or_the_advertised_maximum() {
         // The weight fits only by filling every pack: clamped, not refused.
-        let ceiling = pack::MAX_TOTAL_PAYLOAD;
+        // With no advertised limit the body limit every fetch applies sets
+        // the ceiling, net of the header and trailer.
+        let ceiling = pack_weight_cap(pack::MAX_TOTAL_PAYLOAD, None);
+        assert_eq!(ceiling, kit_core::protocol::PACK_BODY_LIMIT - 44);
         let limits = ticketed(None);
         assert_eq!(
             raised_payload_cap(limits, 6, 6 * ceiling, 0, 1 << 20).unwrap(),
@@ -1429,7 +1414,7 @@ mod tests {
 
     #[test]
     fn a_forced_first_advance_past_the_ceiling_is_left_to_the_cut() {
-        let ceiling = pack::MAX_TOTAL_PAYLOAD;
+        let ceiling = pack_weight_cap(pack::MAX_TOTAL_PAYLOAD, None);
         // Clamped to the ceiling, not refused: the cut names the remedy.
         let cap = raised_payload_cap(ticketed(None), 6, 1, 7 * ceiling, 0)
             .unwrap()
@@ -1588,7 +1573,7 @@ mod tests {
             // No ticket gate: count every pack the seal produces.
             let limits = UploadLimits {
                 max_pack_bytes: max_pack,
-                tickets_per_advance: None,
+                data_packs_per_advance: None,
                 ticket_threshold_bytes: None,
             };
             let cap = effective_payload_cap(payload_cap, max_pack).unwrap();
@@ -1699,7 +1684,7 @@ mod step_fit_tests {
     fn ticketed(max_pack_bytes: Option<u64>) -> UploadLimits {
         UploadLimits {
             max_pack_bytes,
-            tickets_per_advance: Some(7),
+            data_packs_per_advance: Some(6),
             ticket_threshold_bytes: Some(0),
         }
     }
@@ -1755,7 +1740,7 @@ mod step_fit_tests {
         for step in &plan.steps {
             assert!(
                 step_packs(store, *step, Some(base), limits, plan.payload_cap)
-                    <= data_pack_budget(limits),
+                    <= limits.data_packs_per_advance.unwrap(),
                 "a step needs more packs than an advance may carry"
             );
             base = *step;

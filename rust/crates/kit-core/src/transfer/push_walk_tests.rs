@@ -1319,3 +1319,371 @@ proptest! {
         assert_applies(&s, &blind, &seed, new);
     }
 }
+
+// ---------------------------------------------------------------------
+// A deeper random model. Nested directories, entries taken from any parent,
+// moved subtrees, type changes at a path, random walk bounds, held commits
+// this store cannot read, and a push made in several steps.
+// ---------------------------------------------------------------------
+
+mod random_histories {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum Node {
+        File(Hash),
+        Dir(BTreeMap<&'static str, Node>),
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % n as u64).unwrap_or(0)
+        }
+    }
+
+    const NAMES: [&str; 3] = ["a", "b", "c"];
+
+    fn chunk(s: &ObjectStore, k: usize) -> Hash {
+        let mut content = chunk_content(u8::try_from(k % 8).unwrap_or(0), 600);
+        if k >= 8 {
+            content[300] ^= 0xFF;
+        }
+        put_blob(s, content)
+    }
+
+    fn any_file(s: &ObjectStore, rng: &mut Rng) -> Hash {
+        match rng.below(10) {
+            0..=2 => {
+                let mut content = chunk_content(40 + u8::try_from(rng.below(3)).unwrap_or(0), 300);
+                if rng.below(2) == 0 {
+                    content[100] ^= 0xFF;
+                }
+                put_blob(s, content)
+            }
+            // A plain blob that is also a chunk of the pool.
+            3 => chunk(s, rng.below(16)),
+            _ => {
+                let count = 1 + rng.below(5);
+                let chunks: Vec<Hash> = (0..count).map(|_| chunk(s, rng.below(16))).collect();
+                put(
+                    s,
+                    &Object::ChunkedBlob(ChunkedBlob {
+                        total_size: chunks.len() as u64 * 600,
+                        chunk_size: 0,
+                        chunks,
+                    }),
+                )
+            }
+        }
+    }
+
+    fn any_path(rng: &mut Rng) -> Vec<&'static str> {
+        (0..=rng.below(3))
+            .map(|_| NAMES[rng.below(NAMES.len())])
+            .collect()
+    }
+
+    fn get<'a>(root: &'a Node, path: &[&'static str]) -> Option<&'a Node> {
+        let mut at = root;
+        for name in path {
+            match at {
+                Node::Dir(entries) => at = entries.get(name)?,
+                Node::File(_) => return None,
+            }
+        }
+        Some(at)
+    }
+
+    fn set(root: &mut Node, path: &[&'static str], value: Option<Node>) {
+        let Node::Dir(entries) = root else {
+            unreachable!()
+        };
+        let (name, rest) = path.split_first().unwrap();
+        if rest.is_empty() {
+            match value {
+                Some(value) => {
+                    entries.insert(name, value);
+                }
+                None => {
+                    entries.remove(name);
+                }
+            }
+            return;
+        }
+        if value.is_none() && !matches!(entries.get(name), Some(Node::Dir(_))) {
+            return;
+        }
+        let child = entries
+            .entry(name)
+            .and_modify(|child| {
+                if matches!(child, Node::File(_)) {
+                    *child = Node::Dir(BTreeMap::new());
+                }
+            })
+            .or_insert_with(|| Node::Dir(BTreeMap::new()));
+        set(child, rest, value);
+    }
+
+    fn write(s: &ObjectStore, node: &Node) -> Option<Hash> {
+        match node {
+            Node::File(hash) => Some(*hash),
+            Node::Dir(entries) => {
+                let listed: Vec<(&str, Hash)> = entries
+                    .iter()
+                    .filter_map(|(name, child)| write(s, child).map(|hash| (*name, hash)))
+                    .collect();
+                (!listed.is_empty()).then(|| tree_of(s, &listed))
+            }
+        }
+    }
+
+    struct History {
+        commits: Vec<Hash>,
+        parents: Vec<Vec<usize>>,
+    }
+
+    fn build(s: &ObjectStore, rng: &mut Rng, count: usize, tag: &str) -> History {
+        let mut commits: Vec<Hash> = Vec::new();
+        let mut snapshots: Vec<Node> = Vec::new();
+        let mut all_parents: Vec<Vec<usize>> = Vec::new();
+        for i in 0..count {
+            let mut parents: Vec<usize> = Vec::new();
+            if i > 0 {
+                for _ in 0..[1, 1, 1, 2, 2, 0][rng.below(6)] {
+                    // Mostly a recent commit, so chains form.
+                    let p = if rng.below(3) == 0 {
+                        rng.below(i)
+                    } else {
+                        i - 1 - rng.below(i.min(2))
+                    };
+                    if !parents.contains(&p) {
+                        parents.push(p);
+                    }
+                }
+            }
+            let mut snapshot = match parents.len() {
+                0 => Node::Dir(BTreeMap::new()),
+                n => snapshots[parents[rng.below(n)]].clone(),
+            };
+            for _ in 0..rng.below(4) {
+                let path = any_path(rng);
+                match rng.below(8) {
+                    0 => set(&mut snapshot, &path, None),
+                    // Take what some earlier commit has here, or elsewhere.
+                    1 | 2 if i > 0 => {
+                        let from = &snapshots[rng.below(i)];
+                        let source = if rng.below(2) == 0 {
+                            path.clone()
+                        } else {
+                            any_path(rng)
+                        };
+                        if let Some(node) = get(from, &source).cloned() {
+                            set(&mut snapshot, &path, Some(node));
+                        }
+                    }
+                    // Move a subtree of this snapshot.
+                    3 => {
+                        let source = any_path(rng);
+                        if let Some(node) = get(&snapshot, &source).cloned() {
+                            set(&mut snapshot, &source, None);
+                            set(&mut snapshot, &path, Some(node));
+                        }
+                    }
+                    _ => {
+                        let file = any_file(s, rng);
+                        set(&mut snapshot, &path, Some(Node::File(file)));
+                    }
+                }
+            }
+            let tree = write(s, &snapshot).unwrap_or_else(|| tree_of(s, &[]));
+            let parent_ids: Vec<Hash> = parents.iter().map(|p| commits[*p]).collect();
+            commits.push(commit(s, tree, &parent_ids, &format!("{tag}-{i}")));
+            snapshots.push(snapshot);
+            all_parents.push(parents);
+        }
+        History {
+            commits,
+            parents: all_parents,
+        }
+    }
+
+    fn apply(src: &ObjectStore, plan: &PackPlan, dst: &ObjectStore) {
+        if plan.is_empty() {
+            return;
+        }
+        let mut w = PackWriter::new();
+        for h in &plan.raw {
+            w.push_raw(*h, &src.read(h).unwrap()).unwrap();
+        }
+        for d in &plan.deltas {
+            w.push_delta(&d.base, &d.stream).unwrap();
+        }
+        PackReader::read(&w.finish().unwrap(), dst).unwrap();
+    }
+
+    fn complete(dst: &ObjectStore, tip: &Hash) -> bool {
+        matches!(check_closure_present(dst, [tip]), Ok(false))
+    }
+
+    fn any_limits(rng: &mut Rng) -> WalkLimits {
+        WalkLimits {
+            objects: MAX_PUSH_WALK,
+            held_scan: [0, 1, 2, 5, MAX_HELD_SCAN][rng.below(5)],
+            chunk_memory: [0, 1, 3, MAX_CHUNK_MEMORY][rng.below(4)],
+        }
+    }
+
+    fn run(seed: u64) -> Result<(), String> {
+        let mut rng = Rng(seed);
+        let (_d, s) = store();
+        let count = 2 + rng.below(13);
+        let history = build(&s, &mut rng, count, "main");
+        let tip_at = rng.below(history.commits.len());
+        let tip = history.commits[tip_at];
+        let remote_tip = match rng.below(6) {
+            0 => None,
+            1 => {
+                let others = 1 + rng.below(4);
+                build(&s, &mut rng, others, "other")
+            }
+            .commits
+            .last()
+            .copied(),
+            _ => Some(history.commits[rng.below(history.commits.len())]),
+        };
+
+        // The remote: a store that holds the whole closure of its head.
+        let (_r, remote) = store();
+        let mut remote_closure = BTreeSet::new();
+        if let Some(head) = remote_tip {
+            remote_closure = reachable_objects(&s, &head).unwrap();
+            for h in &remote_closure {
+                remote.write(&s.read(h).unwrap()).unwrap();
+            }
+        }
+        let new_closure = reachable_objects(&s, &tip).unwrap();
+        let lacks: BTreeSet<Hash> = new_closure.difference(&remote_closure).copied().collect();
+
+        // One plan, at random bounds.
+        let limits = any_limits(&mut rng);
+        let plan = plan_pack_capped(&s, tip, remote_tip, sequential, limits)
+            .map_err(|e| format!("plan failed: {e}"))?;
+        let sent = ids(&plan);
+        if !lacks.is_subset(&sent) {
+            return Err(format!(
+                "one plan omits {} objects (limits {limits:?})",
+                lacks.difference(&sent).count()
+            ));
+        }
+        {
+            let (_c, copy) = store();
+            for h in &remote_closure {
+                copy.write(&s.read(h).unwrap()).unwrap();
+            }
+            apply(&s, &plan, &copy);
+            if !complete(&copy, &tip) {
+                return Err("one plan leaves the closure incomplete".into());
+            }
+        }
+
+        // The same push in steps along the first parents, each planned from
+        // the step before, as a split push does.
+        let mut chain = vec![tip_at];
+        while let Some(&first) = history.parents[*chain.last().unwrap()].first() {
+            if remote_closure.contains(&history.commits[first]) {
+                break;
+            }
+            chain.push(first);
+        }
+        chain.reverse();
+        let mut base = remote_tip;
+        for at in chain {
+            let step = history.commits[at];
+            let limits = any_limits(&mut rng);
+            let plan = plan_pack_capped(&s, step, base, sequential, limits)
+                .map_err(|e| format!("step plan failed: {e}"))?;
+            apply(&s, &plan, &remote);
+            if !complete(&remote, &step) {
+                return Err(format!(
+                    "a step leaves the closure incomplete (limits {limits:?})"
+                ));
+            }
+            base = Some(step);
+        }
+
+        // Held commits this store cannot read: the plan may send more, and
+        // must never send less.
+        if let Some(head) = remote_tip {
+            let (_h, holder) = store();
+            for h in &remote_closure {
+                holder.write(&s.read(h).unwrap()).unwrap();
+            }
+            let mut removed = 0;
+            for h in &remote_closure {
+                if *h != head
+                    && !new_closure.contains(h)
+                    && s.object_type(h).unwrap() == ObjectType::Commit
+                    && rng.below(2) == 0
+                {
+                    remove(&s, h);
+                    removed += 1;
+                }
+            }
+            if removed > 0 {
+                let limits = any_limits(&mut rng);
+                let plan = plan_pack_capped(&s, tip, remote_tip, sequential, limits)
+                    .map_err(|e| format!("no plan past an unreadable held commit: {e}"))?;
+                apply(&s, &plan, &holder);
+                if !complete(&holder, &tip) {
+                    return Err("a plan past an unreadable held commit is incomplete".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Run `default_cases` histories, or `HISTORY_CASES` of them from seed
+    /// `HISTORY_START`.
+    fn run_cases(default_cases: u64) {
+        let cases: u64 = std::env::var("HISTORY_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default_cases);
+        let start: u64 = std::env::var("HISTORY_START")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut failures = Vec::new();
+        for seed in start..start + cases {
+            if let Err(why) = run(seed) {
+                failures.push((seed, why));
+                if failures.len() >= 5 {
+                    break;
+                }
+            }
+        }
+        assert!(failures.is_empty(), "failing seeds: {failures:?}");
+    }
+
+    #[test]
+    fn random_histories_plan_complete_packs() {
+        run_cases(20);
+    }
+
+    #[test]
+    #[ignore = "runs 200 histories, about a minute in a debug build"]
+    fn many_random_histories_plan_complete_packs() {
+        run_cases(200);
+    }
+}

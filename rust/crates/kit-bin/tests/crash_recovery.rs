@@ -11,7 +11,7 @@
 //!   * **garbled / unparseable** image → assert ONLY: exit allowlisted, no
 //!     panic, and `check_store_intact` (the object DAG is not corrupted). The
 //!     full `check_invariants` would correctly fail-closed here because
-//!     `live_objects()` reads the malformed operation-state roots.
+//!     `collect_roots()` reads the malformed operation-state roots.
 //!   * **parseable partial** image → the same, PLUS: if the recovery command
 //!     reports success, the full `check_invariants` must hold.
 //!   * **successful `--abort`** → no in-progress marker / residue remains.
@@ -67,7 +67,7 @@ fn assert_recovers(repo: &Repo, verb: &str, recovery: &str, label: &str) {
 
     // The FULL battery is only valid once the operation state is fully resolved
     // — an incomplete/garbled in-progress state legitimately makes
-    // `live_objects()` (via `collect_roots`) fail closed, which is not repo
+    // `collect_roots()` fail closed, which is not repo
     // corruption. So gate on "no op in progress AND no residue" after recovery,
     // regardless of how the crash image was built.
     let resolved = in_progress(&repo.kit_dir()).is_none()

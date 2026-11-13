@@ -692,7 +692,7 @@ and builder byte-identity checks
 ## Closure walks share one `children` function
 
 **Always:** every reachability walk &mdash; store-backed
-`reachable_objects` / `reachable_closure` / `reachable_snapshot`, the
+`reachable_objects` / `reachable_snapshot`, the
 store-less `verify_closure` BFS, the pull-based `verify_closure_streaming`
 walk, push verification (`verify_push`), fetch pack planning, and the
 `kit gc` mark (`ops::gc::mark_live`) &mdash; takes

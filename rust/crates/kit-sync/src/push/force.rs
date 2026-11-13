@@ -2,8 +2,8 @@
 //! on an atomic or a serialized advance.
 use super::{
     PackSink, PreparedPlan, PushContext, PushError, RetryReason, build_and_upload_packs,
-    effective_payload_cap, encode_delta_candidates_batch, estimate_pack_sizes,
-    estimated_ticketed_count, packmap::PACKMAP_CAS_ATTEMPTS, repository_operation_error, split,
+    effective_payload_cap, encode_delta_candidates_batch, estimate_exceeds_ticket_budget,
+    estimate_pack_sizes, packmap::PACKMAP_CAS_ATTEMPTS, repository_operation_error,
 };
 use crate::SyncError;
 use crate::packmap::{flatten_oldest_first, packmap_ref, walk_pack_chain};
@@ -246,10 +246,12 @@ impl ForcePush<'_, '_> {
             None
         };
         if let Some(reason) = recovery.or(replanned.then_some(RetryReason::PackmapChanged))
-            && estimated_ticketed_count(
+            && let Some(budget) = self.limits.data_packs_per_advance
+            && estimate_exceeds_ticket_budget(
                 &estimate_pack_sizes(self.store, &plan, self.cap, self.limits.max_pack_bytes)?,
                 self.limits,
-            ) > split::data_pack_budget(self.limits)
+                budget,
+            )
             && let Err(PushError::PushTooLarge { packs, limit, .. }) = build_and_upload_packs(
                 PackSink::Count,
                 self.store,

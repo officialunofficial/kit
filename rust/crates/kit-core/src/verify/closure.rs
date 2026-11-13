@@ -897,8 +897,10 @@ pub fn verify_closure_manifest(
 /// objects in sorted id order, and return the encoded manifest plus
 /// packs. Native-only (`ObjectStore`).
 ///
-/// Packs split when the next object would exceed
-/// [`pack::MAX_TOTAL_PAYLOAD`] or [`pack::MAX_ENTRIES`].
+/// Packs split before a pack would pass a limit a reader applies, see
+/// [`pack::PackFill::seals_before`]: [`pack::MAX_TOTAL_PAYLOAD`] of payload,
+/// [`crate::protocol::PACK_BODY_LIMIT`] bytes in all or [`pack::MAX_WRITE_ENTRIES`]
+/// entries.
 ///
 /// # Errors
 ///
@@ -941,10 +943,14 @@ pub(crate) fn export_closure_with_limits(
     let mut writer = PackWriter::new_raw_only();
     for h in &hashes {
         let bytes = store.read(h)?;
-        let next_payload = writer.total_payload().saturating_add(bytes.len() as u64);
-        if writer.entry_count() > 0
-            && (next_payload > max_pack_payload || writer.entry_count() >= max_entries as usize)
-        {
+        // A raw-only pack stores every object as is, so a reader decodes none.
+        if pack::PackFill::of(&writer).seals_before(
+            bytes.len() as u64,
+            0,
+            max_pack_payload,
+            None,
+            max_entries as usize,
+        ) {
             packs.push(writer.finish()?);
             writer = PackWriter::new_raw_only();
         }

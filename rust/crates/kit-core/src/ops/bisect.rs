@@ -853,7 +853,14 @@ mod tests {
     fn lenient_range(store: &ObjectStore, bad: Hash, good_hashes: &[Hash]) -> Vec<Hash> {
         let mut good_set: HashSet<Hash> = HashSet::new();
         for g in good_hashes {
-            crate::ops::graph::collect_ancestor_set(store, *g, &mut good_set).unwrap();
+            crate::ops::graph::collect_history_with_cap(
+                store,
+                *g,
+                &mut good_set,
+                usize::MAX,
+                "test walk",
+            )
+            .unwrap();
         }
         let mut visited: HashSet<Hash> = HashSet::new();
         let mut candidates: Vec<Hash> = Vec::new();

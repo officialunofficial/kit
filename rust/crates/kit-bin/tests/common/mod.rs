@@ -19,7 +19,7 @@ use kit_core::Hash;
 use kit_core::index::read_index;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
-use kit_core::ops::live_objects;
+use kit_core::ops::{collect_roots, reachable_objects};
 use kit_core::refs;
 use kit_core::sign::{KeyPair, save_key, verify_commit, verify_remix, verify_tag};
 use kit_core::store::ObjectStore;
@@ -147,8 +147,8 @@ pub(crate) fn check_exit(out: &Output, label: &str) -> Result<(), String> {
 ///
 /// This is the right oracle after a *deliberately garbled* operation-state
 /// image (a malformed `MERGE_HEAD` / `rebase-apply/todo`, …), where the full
-/// [`check_invariants`] would correctly fail-closed: `live_objects()` →
-/// `collect_roots()` reads those sidecar files and errors on malformed roots,
+/// [`check_invariants`] would correctly fail closed: its gc root collection
+/// (`collect_roots()`) reads those sidecar files and errors on malformed roots,
 /// which is expected for a garbled state, not a sign of repo corruption.
 pub(crate) fn check_store_intact(root: &Path, label: &str) -> Result<(), String> {
     let layout = RepoLayout::single(root);
@@ -170,6 +170,22 @@ pub(crate) fn check_store_intact(root: &Path, label: &str) -> Result<(), String>
 
     // Index parses.
     read_index(&layout).map_err(|e| format!("[{label}] index unparseable: {e}"))?;
+    Ok(())
+}
+
+/// Every object kit's gc would retain, a closure of each of its roots, is
+/// present and readable.
+fn check_gc_live_set(store: &ObjectStore, layout: &RepoLayout, label: &str) -> Result<(), String> {
+    let roots = collect_roots(layout).map_err(|e| format!("[{label}] collect gc roots: {e}"))?;
+    for root in &roots {
+        let live = reachable_objects(store, root)
+            .map_err(|e| format!("[{label}] live closure of {}: {e}", to_hex(root)))?;
+        for h in &live {
+            store
+                .read(h)
+                .map_err(|e| format!("[{label}] live object {} missing/corrupt: {e}", to_hex(h)))?;
+        }
+    }
     Ok(())
 }
 
@@ -260,13 +276,7 @@ pub(crate) fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
     // gc-safety: every object kit would retain (its own live-set — refs, stash,
     // ORIG_HEAD, in-progress state, conflict sidecars, attestations, recovery
     // roots, and their closure incl. chunked-blob chunks) must be present.
-    let live =
-        live_objects(&store, &layout).map_err(|e| format!("[{label}] collect gc live-set: {e}"))?;
-    for h in &live {
-        store
-            .read(h)
-            .map_err(|e| format!("[{label}] live object {} missing/corrupt: {e}", to_hex(h)))?;
-    }
+    check_gc_live_set(&store, &layout, label)?;
 
     // No leaked *held* locks: every `.kit/*.lock` is acquired and released
     // within a single command, so none may still be kernel-locked once the

@@ -174,14 +174,19 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `Push::run` refuses a plan whose `max_tickets` is above the limit of the
   server it reaches. The public function `kit_client::advance_ticket_limit`
   holds the rule, with the constants `DEFAULT_TICKETS_PER_ADVANCE` and
-  `MAX_TICKETS_PER_ADVANCE`, and the sync client uses it too. Code that builds
+  `MAX_TICKETS_PER_ADVANCE`, and the sync client uses it too.
+  `Plan::prepare` refuses a `Limits` whose `max_tickets` is below two, which
+  leaves no ticket for a data pack. Code that builds
   a `Limits` with a struct literal adds the field or ends the literal with
   `..Limits::default()`. No trait or signature of the crate changes.
 - A pack read charges 896 bytes of memory per entry, up from 704. The old
   figure was below the real cost of a pack read with a long store path. A
   client now refuses a pack of more than about 2.40 million entries (a small
   pack) or 4.79 million entries (a 256 MiB pack), where it refused more than
-  about 3.05 million and 6.10 million.
+  about 3.05 million and 6.10 million. A push seals a pack before it holds
+  more than `pack::MAX_WRITE_ENTRIES` entries (1,198,372), half the
+  small-pack figure, where it sealed at the format's 10,000,000. The other
+  half of the reader's memory floor stays free for the objects of the pack.
 - `rebase` walks up to 1,000,000 ancestors of its base, and `bisect` walks
   up to 1,000,000 ancestors of a good commit and 1,000,000 candidates of a
   range, as `merge` and `log` do. A longer walk fails with an error that
@@ -209,7 +214,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reused. gc reports those objects as kept.
 - The closure check before a fetch publishes a ref reads each chunk's type
   and no longer counts chunks toward its 10,000,000-object cap. A repository
-  of many large files can be fetched. Push still counts every chunk.
+  of many large files can be fetched.
 - `kit gc` counts no chunk of a chunked file toward its 10,000,000-object
   cap. It keeps the chunk ids apart in a sorted list that it deduplicates as
   it grows, so memory stays near twice the 32 bytes of each distinct chunk
@@ -218,7 +223,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deletes anything, and refuses a chunk that is not a blob or a delta, as
   `GcRootsError::ChunkNotBlob`, which names the manifest. Its sweep lists one
   object directory at a time. The summary line shows the live chunk count.
-  `live_objects` returns a `LiveSet`, and `GcReport` has a `live_chunks` field.
+  The gc mark returns a `LiveSet`, and `GcReport` has a `live_chunks` field.
 - `kit add` makes the chunks of a large file durable in windows of 4,096
   chunks, and no longer stages every chunk of the file until the command
   ends. The staged set of one file stays bounded whatever the file's size. The
@@ -298,7 +303,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still goes into a pack of its own. A push uses larger packs only when a
   single commit cannot fit one advance's data packs otherwise: it raises the
   size for that push, once, to what that commit needs, never past the format
-  limit or the largest pack the remote accepts. Against a server that does not
+  limit, the body limit every fetch applies (4 GiB, header and trailer
+  included) or the largest pack the remote accepts. Against a server that does not
   advertise `max_tickets_per_advance`, one commit can then carry about 24 GiB
   of objects, where it carries about 1.5 GiB at the preferred size. A commit
   that does not fit even then is refused before any upload, with
@@ -306,6 +312,57 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with `PushTooLarge` when packing leaves it just over. A push that raises
   the size holds up to two packs of that size in memory (one pack and one
   prepared batch). The `kit` command has no flag to raise the cap.
+
+- A push seals only packs that every reader accepts. A pack stays within the
+  fetch body limit of 4 GiB even when the remote advertises no pack limit (a
+  `kit+file://`, `kit+ssh://` or `kit+s3://` remote). It stays within the
+  bytes a pack read decodes (`pack::decoded_bytes_cap`, from 2 GiB for a
+  small pack up to 16 GiB), so objects that compress well no longer make a
+  pack a read refuses. It holds at most `pack::MAX_WRITE_ENTRIES` entries.
+  A push that sealed such a pack succeeded, and a clone then failed. One rule
+  decides every seal, `pack::PackFill::seals_before`, with
+  `pack::serialized_limit` and `pack::serialized_bound`. The push, the
+  planning of its split, `kit_client::Plan::prepare` and the closure export
+  all use it, and `pack::rewrite_excluding` refuses a rewritten pack that
+  a writer would not seal (above the fetch body limit, the decoded cap or
+  `MAX_WRITE_ENTRIES` entries) with `PackfileTooLarge`. When the remote issues
+  upload tickets, a single commit that adds more than the data-pack budget
+  (one fewer than the ticket allowance) times `MAX_WRITE_ENTRIES` new objects,
+  about 7.2 million at seven tickets, is now refused with `PushTooLarge` when
+  its packs need tickets, because a writer seals no more entries than that per pack. `Plan::prepare`
+  also cuts the server's `max_pack_bytes` to the fetch body limit.
+  `PackWriter` reports `total_decoded` and `serialized_len`, and
+  `PreparedRaw` and `PreparedDelta` report `decoded_len`. `pack::delta_decoded_len`
+  and `pack::MIN_TOTAL_DECODED` are public. `kit+file://`
+  refuses to store a pack above the fetch body limit, as the S3 transport
+  does.
+- **Breaking:** `kit_core::protocol::UploadLimits::tickets_per_advance` is
+  now `data_packs_per_advance`, the data packs one advance may carry: one
+  fewer than the ticket allowance. `kit_client::data_pack_budget` holds the
+  rule beside `advance_ticket_limit`, and the sync client takes the value
+  from it. The unticketed fallback of six is gone. `plan_push_steps` with no
+  ticket allowance returns one step. `Plan::prepare` is unchanged for
+  `max_tickets` of two or more.
+- **Breaking:** `kit_core` no longer exports `ops::graph::MAX_ANCESTORS`,
+  `ops::graph::ANCESTOR_LIMIT`, `collect_ancestor_set`,
+  `reachable_closure`, `reachable_closure_checked` and `ops::live_objects`,
+  and `transfer::plan_pack` and `LiveSet::chunks_len` are gone. Only tests
+  used them. Use `reachable_objects`, `reachable_snapshot`, `plan_pack_with`
+  and the walks the commands run. `transfer::walk::Manifest` is renamed
+  `ChunkList`.
+- Planning a push no longer pairs the chunks of a file with more than 65,536
+  chunks (about 4 GiB) by content when an edit changes its chunk count. It
+  read every chunk of both versions for that. Its changed chunks are sent
+  raw.
+- `kit gc` keeps the result tree of an unfinished merge, cherry-pick, revert
+  or rebase, and the commits of an unfinished bisect. A gc after the grace
+  period could prune them while the operation was waiting to resume. The
+  result tree is a root only while its operation is in progress. `kit bisect
+  reset` removes a state file it cannot read, so a damaged file no longer
+  blocks gc. `GcRootsError` has a `Bisect` variant for such a file.
+- A closure of exactly the walk cap is complete. The walk reported it cut when
+  an object it had already seen was still queued, so a repository of exactly
+  10,000,000 objects failed a fetch with `ClosureTooLarge`.
 
 ### Fixed
 
@@ -332,7 +389,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without following a link. A link planted at a lock path fails the write and
   leaves its target as it was. The files were opened through a link before.
 - Push planning fails when its closure walk reaches the 10,000,000-object
-  cap. `reachable_closure`, `reachable_objects` and `reachable_snapshot`
+  cap. `reachable_objects` and `reachable_snapshot`
   return `OperationLimitExceeded` there instead of a cut set, so a push no
   longer sends a pack without the objects past the cut and then moves the
   branch. A cut in the walk of the remote's tip is no error: the push treats
@@ -344,8 +401,19 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fixed-size layout must now have the length the layout requires, or
   verification fails with `VerifyError::FixedChunkLength`. A disclosed chunk
   or range of a `ChunkedBlob` must also have a `total_size` that its layout
-  can produce, by the same rules as decoding a manifest. An absolute offset
-  still comes only from length proofs, for every layout.
+  can produce, by the same rules as decoding a manifest.
+- **Breaking:** the absolute offset of a range disclosure comes only from
+  length proofs, for every layout. A range disclosure of a fixed-size chunked
+  file that carries no length proofs now verifies with `absolute_offset =
+  None`. It returned `Some(index * chunk_size + offset)` before, so a bundle
+  built without length proofs loses its offset.
+- **Breaking:** `verify::VerifyError` has a new variant, `ContentTooLarge
+  { size }`. The disclosure builder returns it for a byte range of a
+  `ChunkedBlob` above `worktree::MAX_FILE_BYTES`. The enum is not
+  `#[non_exhaustive]`, so an exhaustive `match` adds an arm.
+- **Breaking:** the text of `KitError::TooManyChunks` reads
+  `chunked_blob.chunk_count > 8_388_608`. It read `> 1_000_000`. Code that
+  matches the message text updates the number. The variant is the same.
 - `kit verify-proof` exits `65` (`DATAERR`) when the commit's embedded
   signature does not verify, with or without trust roots. It used to print
   `ok: ... (INVALID signature)` and exit `0` unless trust roots were loaded.

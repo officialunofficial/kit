@@ -273,6 +273,21 @@ fn bisect_start_creates_state_file() {
 }
 
 #[test]
+fn bisect_reset_removes_a_state_file_it_cannot_read() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"1\n", "c1");
+    assert!(run_in(td.path(), &["bisect", "start"]).status.success());
+    let head_before = fs::read(td.path().join(".kit/HEAD")).unwrap();
+    fs::write(td.path().join(".kit/bisect"), b"not a bisect state").unwrap();
+
+    let reset = run_in(td.path(), &["bisect", "reset"]);
+    assert!(reset.status.success(), "reset failed: {reset:?}");
+    assert!(!td.path().join(".kit/bisect").exists());
+    assert_eq!(fs::read(td.path().join(".kit/HEAD")).unwrap(), head_before);
+}
+
+#[test]
 fn bisect_run_converges_to_first_bad_commit() {
     // `bisect run <cmd>` drives the loop automatically — it checks
     // out each candidate, runs the command, and maps the exit code (0=good,

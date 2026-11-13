@@ -1,14 +1,13 @@
 //! Commit-graph traversal helpers.
 //!
-//! This module exposes [`collect_ancestor_set`]. Higher-level walks
+//! This module walks ancestor sets and object closures. Higher-level walks
 //! (`is_ancestor`, `find_merge_base` and their strict variants) live in
 //! [`super::merge`] alongside the merge algorithm that consumes them.
 //!
-//! Bound: at most [`MAX_ANCESTORS`] (`10_000`) commits are visited per
-//! call. A walk that would visit more fails with
-//! [`StoreError::OperationLimitExceeded`] and never returns a partial set:
-//! a caller that leaves out an incomplete ancestor set would let ancestors
-//! through.
+//! Bound: every ancestor walk takes the cap of its caller. A walk that would
+//! visit more commits fails with a limit error and never returns a partial
+//! set: a caller that leaves out an incomplete ancestor set would let
+//! ancestors through.
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::hash::BuildHasher;
@@ -16,39 +15,6 @@ use std::hash::BuildHasher;
 use crate::hash::{self, Hash};
 use crate::object::{EntryMode, Object, ObjectType};
 use crate::store::{ObjectSource, ObjectStore, StoreError};
-
-/// Hard cap on commits visited per call.
-pub const MAX_ANCESTORS: usize = 10_000;
-
-/// The limit [`collect_ancestor_set`] reports when it reaches
-/// [`MAX_ANCESTORS`].
-pub const ANCESTOR_LIMIT: &str = "10,000-commit ancestor walk";
-
-/// Collect the set of all ancestor commits of `start`, including
-/// `start` itself, by DFS over `Commit::parents`. The walk:
-///
-/// * Adds `start` to `set` even if its object is not in the store
-///   (the hash is recorded, then the missing-object error
-///   short-circuits the parent walk for that node).
-/// * Treats non-commit objects at a hash as terminators (no parents to
-///   follow).
-/// * Fails with [`StoreError::OperationLimitExceeded`] naming
-///   [`ANCESTOR_LIMIT`] when it would insert more than [`MAX_ANCESTORS`]
-///   commits. `set` may then hold part of the ancestors; do not use it.
-///
-/// # Errors
-///
-/// All source errors, including resource-budget exhaustion, propagate except
-/// [`StoreError::ObjectNotFound`]. Reaching the cap is an error.
-/// `ObjectNotFound` is *swallowed* — see test
-/// `handles_non_existent_parent_gracefully`.
-pub fn collect_ancestor_set<S: BuildHasher>(
-    store: &(impl ObjectSource + ?Sized),
-    start: Hash,
-    set: &mut HashSet<Hash, S>,
-) -> Result<(), StoreError> {
-    collect_ancestor_set_with_cap(store, start, set, MAX_ANCESTORS, ANCESTOR_LIMIT)
-}
 
 /// Why a strict ancestor walk failed. A strict walk reads every commit of
 /// the history: a walk that ended at a commit it could not read would miss
@@ -105,29 +71,6 @@ pub(crate) fn read_history_commit(
         Ok(_) => Err(AncestorError::NotACommit(hash)),
         Err(source) => Err(AncestorError::Unreadable { hash, source }),
     }
-}
-
-/// [`collect_ancestor_set`] with a caller-supplied cap and the limit name
-/// its error reports.
-///
-/// # Errors
-///
-/// As [`collect_ancestor_set`], with `cap` in place of [`MAX_ANCESTORS`].
-pub(crate) fn collect_ancestor_set_with_cap<S: BuildHasher>(
-    store: &(impl ObjectSource + ?Sized),
-    start: Hash,
-    set: &mut HashSet<Hash, S>,
-    cap: usize,
-    limit: &'static str,
-) -> Result<(), StoreError> {
-    walk_ancestors(start, set, cap, limit, |current| {
-        match store.read_object(&current) {
-            Ok(Object::Commit(c)) => Ok(c.parents),
-            // A non-commit or a missing object ends the path.
-            Ok(_) | Err(StoreError::ObjectNotFound(_)) => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
-    })
 }
 
 /// Collect `start` and all of its ancestors into `set`, reading every one
@@ -192,13 +135,10 @@ impl From<LimitReached> for AncestorError {
     }
 }
 
-/// Hard cap on the object ids a closure walk retains per call. Matches the
-/// scale of [`MAX_ANCESTORS`] but applies to the object closure, so it is
-/// intentionally larger. The cap bounds the retained id set to about half a
-/// GiB. [`reachable_objects`], and so push, count every chunk toward it, so
-/// a repository with more chunks than the cap can be fetched or collected
-/// but not pushed whole. [`check_closure_present`], the check a fetch runs,
-/// and `gc` (see [`super::gc::live_objects`]) count no chunk.
+/// Hard cap on the object ids a closure walk retains per call. The cap
+/// bounds the retained id set to about half a GiB. [`reachable_objects`] counts every chunk toward it, so it refuses a
+/// repository with more chunks than the cap. [`check_closure_present`], the
+/// check a fetch runs, the push walk and `gc` count no chunk.
 pub const MAX_REACHABLE: usize = 10_000_000;
 
 /// How a closure walk treats commit/remix parents.
@@ -333,28 +273,6 @@ pub(crate) fn typed_children(obj: &Object, mode: ClosureMode) -> Vec<(Hash, Chil
 /// - [`StoreError::OperationLimitExceeded`] naming [`REACHABLE_LIMIT`]
 ///   when the closure reaches [`MAX_REACHABLE`].
 /// - Other [`StoreError`] variants propagate as-is.
-pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Hash>, StoreError> {
-    reachable_closure(store, std::iter::once(root))
-}
-
-/// Collect every object reachable from **any** of `roots` — the
-/// multi-root generalization of [`reachable_objects`]. `kit gc` does not
-/// use it: [`super::gc::live_objects`] marks the closure of the roots from
-/// [`super::gc::collect_roots`] with the chunks held apart, so that a chunk
-/// counts toward no cap.
-///
-/// Identical walk semantics to [`reachable_objects`] (commits/remixes →
-/// tree + parents, trees → entries, chunked-blobs → chunks, tags →
-/// target, blobs/deltas are leaves), deduped via the returned
-/// [`BTreeSet`], and capped at [`MAX_REACHABLE`] total objects. With a
-/// single root the result is byte-identical to [`reachable_objects`].
-///
-/// # Errors
-///
-/// Propagates [`StoreError`] as [`reachable_objects`] does — notably
-/// [`StoreError::ObjectNotFound`] for a missing root or referenced
-/// object, so a caller (gc) fails closed rather than under-counting the
-/// live set.
 ///
 /// # Content integrity of leaves
 ///
@@ -374,19 +292,16 @@ pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Ha
 /// `gc`/push-planning are no longer an incidental corruption-detection
 /// pass the way they used to be.
 ///
-/// A walk that reaches [`MAX_REACHABLE`] fails with
-/// [`StoreError::OperationLimitExceeded`] naming [`REACHABLE_LIMIT`]: a
-/// cut closure would let push send a pack that lacks every object past
-/// the cut. A caller that can split its work asks
-/// [`reachable_closure_checked`] first.
-pub fn reachable_closure<'a, I>(store: &ObjectStore, roots: I) -> Result<BTreeSet<Hash>, StoreError>
-where
-    I: IntoIterator<Item = &'a Hash>,
-{
-    complete(reachable_closure_checked(store, roots))
+pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Hash>, StoreError> {
+    complete(reachable_with_mode(
+        store,
+        std::iter::once(root),
+        ClosureMode::History,
+        MAX_REACHABLE,
+    ))
 }
 
-/// The limit [`reachable_closure`], [`reachable_objects`] and
+/// The limit [`reachable_objects`] and
 /// [`reachable_snapshot`] report when a walk reaches [`MAX_REACHABLE`].
 pub const REACHABLE_LIMIT: &str = "10,000,000-object closure walk";
 
@@ -399,25 +314,6 @@ pub(crate) fn complete(
         (out, false) => Ok(out),
         (_, true) => Err(StoreError::OperationLimitExceeded(REACHABLE_LIMIT)),
     }
-}
-
-/// Like [`reachable_closure`] but also reports whether the
-/// [`MAX_REACHABLE`] cap truncated the walk (`true` = incomplete). A
-/// caller that would *delete* unreachable objects MUST treat
-/// `truncated == true` as fatal: beyond the cap the "unreachable" verdict
-/// is unsound, so pruning would drop live data.
-///
-/// # Errors
-///
-/// Propagates [`StoreError`] as [`reachable_objects`] does.
-pub fn reachable_closure_checked<'a, I>(
-    store: &ObjectStore,
-    roots: I,
-) -> Result<(BTreeSet<Hash>, bool), StoreError>
-where
-    I: IntoIterator<Item = &'a Hash>,
-{
-    reachable_closure_checked_with_cap(store, roots, MAX_REACHABLE)
 }
 
 /// Collect every object reachable from `root` in [`ClosureMode::Snapshot`]:
@@ -439,28 +335,9 @@ pub fn reachable_snapshot(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<H
     ))
 }
 
-/// Same walk as [`reachable_closure_checked`], but with a caller-supplied
-/// cap instead of the hardcoded [`MAX_REACHABLE`] (10 million).
-///
-/// Injection point for tests and for the push walks: a truncation has
-/// no other way to be exercised without actually constructing
-/// ten million objects. `pub(crate)`, not part of the public API — real
-/// external callers MUST use [`reachable_closure_checked`] (or
-/// [`reachable_closure`]) instead.
-pub(crate) fn reachable_closure_checked_with_cap<'a, I>(
-    store: &ObjectStore,
-    roots: I,
-    cap: usize,
-) -> Result<(BTreeSet<Hash>, bool), StoreError>
-where
-    I: IntoIterator<Item = &'a Hash>,
-{
-    reachable_with_mode(store, roots, ClosureMode::History, cap)
-}
-
 /// Check that every object reachable from `roots` in
 /// [`ClosureMode::History`] is in the store, the walk of
-/// [`reachable_closure_checked`]. Returns `true` when the [`MAX_REACHABLE`]
+/// [`reachable_objects`]. Returns `true` when the [`MAX_REACHABLE`]
 /// cap truncated the walk, so objects past it went unchecked.
 ///
 /// A chunk of a chunked blob needs only its type, so it is checked without
@@ -469,8 +346,8 @@ where
 /// chunk that several versions of a file share is read once. Past that bound
 /// a chunk is checked again for each manifest that names it, and memory stays
 /// fixed. A repository past the cap in chunks still passes this check, and
-/// so does `gc`, which counts no chunk toward the cap. Push, which retains
-/// every chunk, refuses it.
+/// so do the push walk and `gc`, which count no chunk toward the cap.
+/// [`reachable_objects`], which retains every chunk, refuses it.
 ///
 /// # Errors
 ///
@@ -552,15 +429,17 @@ where
     let mut checked_chunks: BTreeSet<Hash> = BTreeSet::new();
     let mut truncated = false;
     while let Some(h) = queue.pop_front() {
+        if out.contains(&h) {
+            continue;
+        }
         if out.len() >= cap {
-            // Still had work to do but hit the cap — the closure is
-            // incomplete.
+            // A new object past the cap — the closure is incomplete. An
+            // object already seen does not count, so a closure of exactly
+            // `cap` objects is complete.
             truncated = true;
             break;
         }
-        if !out.insert(h) {
-            continue;
-        }
+        out.insert(h);
         // Classify the node via the cheap 6-byte prologue check
         // (`object_type`) instead of a full read+verify+decode
         // (`read_object`) — INV-14. Missing objects bubble up here
@@ -628,6 +507,19 @@ std::thread_local! {
 #[allow(clippy::many_single_char_names)] // single-letter commit names keep the test tables compact
 mod tests {
     use super::*;
+
+    /// The history walk with a caller-supplied cap, so a test reaches the cap
+    /// without ten million objects.
+    fn history_walk<'a, I>(
+        store: &ObjectStore,
+        roots: I,
+        cap: usize,
+    ) -> Result<(BTreeSet<Hash>, bool), StoreError>
+    where
+        I: IntoIterator<Item = &'a Hash>,
+    {
+        reachable_with_mode(store, roots, ClosureMode::History, cap)
+    }
     use crate::hash;
     use crate::object::EntryMode;
     use crate::object::{Blob, Commit, Identity, Object, Tree, TreeEntry};
@@ -679,99 +571,6 @@ mod tests {
         };
         let bytes = serialize::serialize(&Object::Commit(c)).unwrap();
         s.write(&bytes).unwrap()
-    }
-
-    #[test]
-    fn an_ancestor_walk_over_its_cap_fails_and_never_returns_a_prefix() {
-        let (_d, s) = store();
-        let tree = make_single_file_tree(&s, b"f", b"data");
-        let c1 = make_commit(&s, tree, &[], "c1");
-        let c2 = make_commit(&s, tree, &[c1], "c2--");
-        let c3 = make_commit(&s, tree, &[c2], "c3----");
-        let mut set = HashSet::new();
-        let err = collect_ancestor_set_with_cap(&s, c3, &mut set, 2, ANCESTOR_LIMIT).unwrap_err();
-        assert!(matches!(
-            err,
-            StoreError::OperationLimitExceeded(ANCESTOR_LIMIT)
-        ));
-        let mut set = HashSet::new();
-        collect_ancestor_set_with_cap(&s, c3, &mut set, 3, ANCESTOR_LIMIT).unwrap();
-        assert_eq!(set.len(), 3);
-        // The error names the cap.
-        assert!(ANCESTOR_LIMIT.starts_with("10,000-"));
-        assert_eq!(MAX_ANCESTORS, 10_000);
-    }
-
-    #[test]
-    fn linear_chain_3_commits() {
-        let (_d, s) = store();
-        let tree = make_single_file_tree(&s, b"f", b"data");
-        let c1 = make_commit(&s, tree, &[], "c1");
-        let c2 = make_commit(&s, tree, &[c1], "c2");
-        let c3 = make_commit(&s, tree, &[c2], "c3");
-
-        let mut set = HashSet::new();
-        collect_ancestor_set(&s, c3, &mut set).unwrap();
-        assert_eq!(set.len(), 3);
-        assert!(set.contains(&c1));
-        assert!(set.contains(&c2));
-        assert!(set.contains(&c3));
-    }
-
-    #[test]
-    fn diamond_dag() {
-        let (_d, s) = store();
-        let tree = make_single_file_tree(&s, b"f.txt", b"data");
-        let c1 = make_commit(&s, tree, &[], "c1");
-        let c2 = make_commit(&s, tree, &[c1], "c2");
-        let c3 = make_commit(&s, tree, &[c1], "c3");
-        let c4 = make_commit(&s, tree, &[c2, c3], "c4");
-
-        let mut set = HashSet::new();
-        collect_ancestor_set(&s, c4, &mut set).unwrap();
-        assert_eq!(set.len(), 4);
-        assert!(set.contains(&c1));
-        assert!(set.contains(&c2));
-        assert!(set.contains(&c3));
-        assert!(set.contains(&c4));
-    }
-
-    #[test]
-    fn root_commit_alone() {
-        let (_d, s) = store();
-        let tree = make_single_file_tree(&s, b"f.txt", b"data");
-        let c1 = make_commit(&s, tree, &[], "root");
-
-        let mut set = HashSet::new();
-        collect_ancestor_set(&s, c1, &mut set).unwrap();
-        assert_eq!(set.len(), 1);
-        assert!(set.contains(&c1));
-    }
-
-    #[test]
-    fn handles_non_existent_parent_gracefully() {
-        let (_d, s) = store();
-        let tree = make_single_file_tree(&s, b"f.txt", b"data");
-        let fake_parent = hash::hash(b"nonexistent-parent");
-        let c1 = make_commit(&s, tree, &[fake_parent], "orphan");
-
-        let mut set = HashSet::new();
-        collect_ancestor_set(&s, c1, &mut set).unwrap();
-        // Both c1 and the fake hash end up in the set; the fake hash
-        // doesn't continue the walk because the object lookup fails.
-        assert_eq!(set.len(), 2);
-        assert!(set.contains(&c1));
-        assert!(set.contains(&fake_parent));
-    }
-
-    #[test]
-    fn empty_store_records_starting_hash() {
-        let (_d, s) = store();
-        let fake = hash::hash(b"does-not-exist");
-        let mut set = HashSet::new();
-        collect_ancestor_set(&s, fake, &mut set).unwrap();
-        assert_eq!(set.len(), 1);
-        assert!(set.contains(&fake));
     }
 
     // =================================================================
@@ -976,13 +775,36 @@ mod tests {
         (make_commit(s, tree, &[], "c1"), chunks)
     }
 
+    /// A closure of exactly `cap` objects is complete, even while an object
+    /// already seen is still queued.
+    #[test]
+    fn a_closure_of_exactly_the_cap_is_not_cut() {
+        let (_d, s) = store();
+        let tree = put_tree(
+            &s,
+            vec![TreeEntry {
+                name: b"f".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&s, b"content"),
+            }],
+        );
+        let c1 = make_commit(&s, tree, &[], "c1");
+        let c2 = make_commit(&s, tree, &[c1], "c2");
+        // c2, c1, the tree and the blob: four objects.
+        assert_eq!(reachable_objects(&s, &c2).unwrap().len(), 4);
+        assert!(
+            !check_closure_present_with_cap(&s, [&c2], 4, MAX_CHECKED_CHUNKS).unwrap(),
+            "four objects fit a cap of four"
+        );
+    }
+
     #[test]
     fn presence_check_does_not_count_chunks_toward_the_cap() {
         let (_d, s) = store();
         let (c1, _chunks) = chunked_history(&s, 2_000);
         // The commit, its tree and the manifest are the only retained ids.
         assert!(!check_closure_present_with_cap(&s, [&c1], 3, MAX_CHECKED_CHUNKS).unwrap());
-        let (_, truncated) = reachable_closure_checked_with_cap(&s, [&c1], 3).unwrap();
+        let (_, truncated) = history_walk(&s, [&c1], 3).unwrap();
         assert!(truncated, "the full walk retains every chunk");
         assert!(check_closure_present_with_cap(&s, [&c1], 2, MAX_CHECKED_CHUNKS).unwrap());
     }
@@ -1046,12 +868,12 @@ mod tests {
     fn a_cut_closure_walk_fails_closed() {
         let (_d, s) = store();
         let (c1, _chunks) = chunked_history(&s, 4);
-        let walk = reachable_closure_checked_with_cap(&s, [&c1], 3);
+        let walk = history_walk(&s, [&c1], 3);
         assert!(matches!(
             complete(walk),
             Err(StoreError::OperationLimitExceeded(REACHABLE_LIMIT))
         ));
-        let whole = complete(reachable_closure_checked_with_cap(&s, [&c1], 7)).unwrap();
+        let whole = complete(history_walk(&s, [&c1], 7)).unwrap();
         assert_eq!(whole, reachable_objects(&s, &c1).unwrap());
         assert_eq!(whole.len(), 7);
     }
@@ -1097,7 +919,7 @@ mod tests {
         // has no children, and the intact type prologue already answers
         // that. Content integrity is a concern for whoever reads the bytes
         // later, not for this classification.
-        let (reach, truncated) = reachable_closure_checked(&s, [c1].iter()).unwrap();
+        let (reach, truncated) = history_walk(&s, [c1].iter(), MAX_REACHABLE).unwrap();
         assert!(!truncated);
         assert!(reach.contains(&c1));
         assert!(reach.contains(&tree));
@@ -1125,7 +947,7 @@ mod tests {
 
         corrupt_payload_byte(&s, &tree);
 
-        let err = reachable_closure_checked(&s, [c1].iter()).unwrap_err();
+        let err = history_walk(&s, [c1].iter(), MAX_REACHABLE).unwrap_err();
         assert!(matches!(err, StoreError::HashMismatch { .. }));
     }
 

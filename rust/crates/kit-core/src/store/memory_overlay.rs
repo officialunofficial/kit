@@ -281,12 +281,18 @@ mod tests {
             let error = match op {
                 0 => crate::ops::is_ancestor(&overlay, [2; 32], id).unwrap_err(),
                 1 => crate::ops::find_merge_base(&overlay, id, [2; 32]).unwrap_err(),
-                _ => crate::ops::collect_ancestor_set(
+                _ => match crate::ops::graph::collect_history_with_cap(
                     &overlay,
                     id,
                     &mut std::collections::HashSet::new(),
+                    10,
+                    "test walk",
                 )
-                .unwrap_err(),
+                .unwrap_err()
+                {
+                    crate::ops::graph::AncestorError::Unreadable { source, .. } => source,
+                    other => panic!("{other:?}"),
+                },
             };
             assert!(matches!(
                 error,

@@ -1,7 +1,7 @@
 use crate::{Error, proto::GetServerInfoResponse};
 use kit_core::{
     hash::Hash,
-    pack::{self, PackWriter},
+    pack::{self, PackFill, PackWriter, serialized_bound, serialized_limit},
 };
 
 /// Ordered canonical input. Staging, closure selection, delta policy and
@@ -29,6 +29,13 @@ pub fn advance_ticket_limit(info: &GetServerInfoResponse) -> u32 {
         Some(limit) if limit >= 2 => limit.min(MAX_TICKETS_PER_ADVANCE),
         _ => DEFAULT_TICKETS_PER_ADVANCE,
     }
+}
+
+/// The data packs one advance may carry when it may name `max_tickets`
+/// tickets: one ticket is the packmap node's. Never less than one.
+#[must_use]
+pub fn data_pack_budget(max_tickets: u32) -> usize {
+    (max_tickets as usize).saturating_sub(1).max(1)
 }
 
 /// Explicit limits for one advance. Larger histories are scheduled as
@@ -133,6 +140,10 @@ impl Plan {
         if limits.payload_bytes == 0 || limits.max_pack_bytes == 0 || limits.max_parts == 0 {
             return Err(Error::Limit("zero pack limit"));
         }
+        // One ticket is the packmap node's, so fewer than two leave no data pack.
+        if limits.max_tickets < 2 {
+            return Err(Error::Limit("advance ticket limit leaves no data pack"));
+        }
         // Reserve a prior pointer and the largest u32 length prefix. The
         // empty canonical node has a one-byte prefix, which can grow by four.
         let node_overhead =
@@ -148,13 +159,17 @@ impl Plan {
                 Entry::Raw { bytes, .. } => bytes.len() as u64,
                 Entry::Delta { stream, .. } => (32 + stream.len()) as u64,
             };
-            if writer.entry_count() > 0
-                && (writer.total_payload().saturating_add(size) > cap
-                    || bound(
-                        writer.total_payload().saturating_add(size),
-                        writer.entry_count() + 1,
-                    ) > limits.max_pack_bytes)
-            {
+            let decoded = match &entry {
+                Entry::Raw { .. } => size,
+                Entry::Delta { stream, .. } => pack::delta_decoded_len(stream, true),
+            };
+            if PackFill::of(&writer).seals_before(
+                size,
+                decoded,
+                cap,
+                Some(limits.max_pack_bytes),
+                pack::MAX_WRITE_ENTRIES,
+            ) {
                 seal(
                     &mut writer,
                     &mut pending,
@@ -164,7 +179,9 @@ impl Plan {
                     limits,
                 )?;
             }
-            if size > cap || bound(size, 1) > limits.max_pack_bytes {
+            if size > cap
+                || serialized_bound(size, 1) > serialized_limit(Some(limits.max_pack_bytes))
+            {
                 return Err(Error::Limit("one entry exceeds pack limit"));
             }
             // Bound memory before accepting an input entry, even if it
@@ -174,7 +191,7 @@ impl Plan {
             if pack_count > u64::from(kit_core::transfer::PACKLIST_MAX_ENTRIES)
                 || node_bound > limits.max_pack_bytes
                 || staged
-                    .saturating_add(bound(
+                    .saturating_add(serialized_bound(
                         writer.total_payload().saturating_add(size),
                         writer.entry_count() + 1,
                     ))
@@ -221,12 +238,6 @@ impl Plan {
     }
 }
 
-fn bound(payload: u64, entries: usize) -> u64 {
-    payload
-        .saturating_add((entries as u64).saturating_mul(pack::ENTRY_FRAME_LEN as u64))
-        .saturating_add((pack::HEADER_LEN + pack::TRAILER_LEN) as u64)
-}
-
 fn seal(
     writer: &mut PackWriter,
     pending: &mut Pending,
@@ -245,7 +256,9 @@ fn seal(
         return Ok(());
     }
     *staged = staged.saturating_add(bytes.len() as u64);
-    if bytes.len() as u64 > limits.max_pack_bytes || *staged > limits.max_staged_bytes {
+    if bytes.len() as u64 > serialized_limit(Some(limits.max_pack_bytes))
+        || *staged > limits.max_staged_bytes
+    {
         return Err(Error::Limit("sealed input limit"));
     }
     // Always reserve one of the advance's ticket slots for the packlist node.
@@ -253,9 +266,8 @@ fn seal(
         && packs
             .iter()
             .filter(|p| p.bytes.len() as u64 >= limits.ticket_threshold_bytes)
-            .count() as u64
-            + 2
-            > u64::from(limits.max_tickets)
+            .count()
+            >= data_pack_budget(limits.max_tickets)
     {
         return Err(Error::Limit(
             "advance requires more ticketed data packs than the server allows",
@@ -330,6 +342,99 @@ mod tests {
     }
 
     #[test]
+    fn a_single_entry_is_refused_one_byte_over_a_pack_limit() {
+        // Large enough that the pack is longer than the packmap node it needs.
+        // Bytes zstd cannot shrink, so the pack is as long as its bound.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let data: Vec<u8> = (0..300)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[0]
+            })
+            .collect();
+        let bytes = serialize(&Object::Blob(Blob { data })).unwrap();
+        let len = bytes.len() as u64;
+        let entry = Entry::Raw {
+            id: kit_core::hash::hash(&bytes),
+            bytes,
+        };
+        let fits = |payload_bytes, max_pack_bytes| {
+            let limits = Limits {
+                payload_bytes,
+                max_pack_bytes,
+                ..Limits::default()
+            };
+            Plan::prepare([entry.clone()], limits).is_ok()
+        };
+        let exact = serialized_bound(len, 1);
+        assert!(fits(len, exact));
+        // The payload cap alone.
+        assert!(!fits(len - 1, u64::MAX));
+        // The serialized limit alone, and the pack that lands on it.
+        assert!(!fits(u64::MAX, exact - 1));
+        // A limit above the body limit is cut to it, so a larger one changes nothing.
+        assert!(fits(u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn a_pack_is_sealed_before_it_passes_a_limit_a_reader_applies() {
+        // The pack ends at the entry bound, however large a pack the server takes.
+        let entries = pack::MAX_WRITE_ENTRIES + 3;
+        let limits = Limits {
+            payload_bytes: pack::MAX_TOTAL_PAYLOAD,
+            max_pack_bytes: u64::MAX,
+            max_parts: u32::MAX,
+            max_staged_bytes: u64::MAX,
+            ticket_threshold_bytes: u64::MAX,
+            ..Limits::default()
+        };
+        let plan = Plan::prepare(
+            (0..entries as u64).map(|i| {
+                let bytes = serialize(&Object::Blob(Blob {
+                    data: i.to_le_bytes().to_vec(),
+                }))
+                .unwrap();
+                Entry::Raw {
+                    id: kit_core::hash::hash(&bytes),
+                    bytes,
+                }
+            }),
+            limits,
+        )
+        .unwrap();
+        let counts: Vec<u32> = plan
+            .packs
+            .iter()
+            .map(|p| u32::from_le_bytes(p.bytes[8..12].try_into().unwrap()))
+            .collect();
+        assert_eq!(counts, [u32::try_from(pack::MAX_WRITE_ENTRIES).unwrap(), 3]);
+    }
+
+    #[test]
+    fn fewer_than_two_tickets_leave_no_data_pack() {
+        for tickets in [0, 1] {
+            let limits = Limits {
+                max_tickets: tickets,
+                ..Limits::default()
+            };
+            assert!(
+                matches!(
+                    Plan::prepare([tiny_pack_entry(1)], limits),
+                    Err(Error::Limit(_))
+                ),
+                "{tickets}"
+            );
+        }
+        let limits = Limits {
+            max_tickets: 2,
+            ..Limits::default()
+        };
+        assert!(Plan::prepare([tiny_pack_entry(1)], limits).is_ok());
+    }
+
+    #[test]
     fn the_ticket_limit_is_the_advertised_value_within_bounds() {
         let limit = |advertised| {
             advance_ticket_limit(&GetServerInfoResponse {
@@ -345,6 +450,17 @@ mod tests {
         assert_eq!(limit(Some(1024)), 1024);
         assert_eq!(limit(Some(2000)), 1024);
         assert_eq!(limit(Some(u32::MAX)), 1024);
+    }
+
+    #[test]
+    fn the_data_pack_budget_is_the_allowance_minus_the_packmap_ticket() {
+        assert_eq!(data_pack_budget(2), 1);
+        assert_eq!(data_pack_budget(3), 2);
+        assert_eq!(data_pack_budget(DEFAULT_TICKETS_PER_ADVANCE), 6);
+        assert_eq!(data_pack_budget(1024), 1023);
+        // A limits value built by hand never gives a budget of zero.
+        assert_eq!(data_pack_budget(1), 1);
+        assert_eq!(data_pack_budget(0), 1);
     }
 
     #[test]

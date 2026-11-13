@@ -185,16 +185,27 @@ fn reset(layout: &RepoLayout) -> u8 {
     if !is_bisect_in_progress(layout) {
         return emit_err("no bisect in progress", exit::GENERAL_ERROR);
     }
-    let state = match read_state(layout) {
-        Ok(s) => s,
-        Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
-    };
-    if let Some(branch) = state.orig_branch.as_deref() {
-        let _ = refs::write_head_branch(layout, branch);
-    } else {
-        let _ = refs::write_head_detached(layout, &state.orig_head);
+    match read_state(layout) {
+        Ok(state) => {
+            if let Some(branch) = state.orig_branch.as_deref() {
+                let _ = refs::write_head_branch(layout, branch);
+            } else {
+                let _ = refs::write_head_detached(layout, &state.orig_head);
+            }
+        }
+        // A state file that cannot be read still has to go: `gc` refuses to
+        // run while it is there. HEAD stays where it is.
+        Err(e) => {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "bisect state unreadable ({e}); removing it, HEAD is unchanged"
+            );
+        }
     }
-    let _ = cleanup_bisect(layout);
+    if let Err(e) = cleanup_bisect(layout) {
+        return emit_err(&format!("remove state: {e}"), exit::GENERAL_ERROR);
+    }
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "bisect reset");
     exit::OK
