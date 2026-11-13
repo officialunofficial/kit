@@ -160,9 +160,9 @@ fn a_two_gib_file_ingests_in_bounded_memory_and_status_stays_clean() {
         "batched ingest held {} MiB",
         peak / MIB
     );
-    fs::remove_file(&batched).unwrap();
 
-    // `status` finds the file clean in bounded memory.
+    // `status` finds the batched file clean in bounded memory.
+    let (id, file) = (batched_id, batched);
     let tree = Object::Tree(Tree {
         entries: vec![TreeEntry {
             name: b"big.bin".to_vec(),
@@ -172,6 +172,7 @@ fn a_two_gib_file_ingests_in_bounded_memory_and_status_stays_clean() {
     });
     let tree_id = store.write(&serialize::serialize(&tree).unwrap()).unwrap();
     let idx = index::from_tree(&store, tree_id).unwrap();
+    fs::rename(&file, work.join("big.bin")).unwrap();
     let (clean, peak) = peak_of(|| status_diff(&store, Some(&tree_id), &work, Some(&idx)));
     assert!(clean.unwrap().is_empty());
     assert!(peak < INGEST_CEILING, "status held {} MiB", peak / MIB);

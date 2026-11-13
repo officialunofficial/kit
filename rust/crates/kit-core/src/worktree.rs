@@ -1213,8 +1213,8 @@ fn store_chunk_manifest<S: ObjectSink + ?Sized>(
         chunks,
     });
     let manifest_bytes = serialize::serialize(&manifest)?;
-    // Free the id list before the sink stages the bytes, so a manifest of
-    // millions of chunks is never held twice beside the staged copy.
+    // Free the id list before the sink stores the bytes, so the typed list and
+    // the serialized bytes are not held together with the sink's own copies.
     drop(manifest);
     Ok(sink.put(&manifest_bytes)?)
 }
@@ -1533,8 +1533,8 @@ pub fn store_file_object_with<S: ObjectSink + ?Sized>(
         chunks,
     });
     let manifest_bytes = serialize::serialize(&manifest)?;
-    // Free the id list before the sink stages the bytes, so a manifest of
-    // millions of chunks is never held twice beside the staged copy.
+    // Free the id list before the sink stores the bytes, so the typed list and
+    // the serialized bytes are not held together with the sink's own copies.
     drop(manifest);
     Ok(sink.put(&manifest_bytes)?)
 }

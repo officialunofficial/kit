@@ -2909,7 +2909,8 @@ fn the_restore_safety_messages_are_unchanged() {
         refusal(run(dir.path(), &remote)),
         "restore would overwrite local changes; commit, stash, or reset 'a.txt' first"
     );
-    // The same edit to a file the pull would leave alone is no obstacle.
+    // An edit to a file the pull would leave alone is refused too: recovery
+    // and the safety check cover every tracked path.
     std::fs::write(dir.path().join("a.txt"), b"one\n").unwrap();
     std::fs::write(dir.path().join("c.txt"), b"local edit\n").unwrap();
     assert!(matches!(

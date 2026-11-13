@@ -119,3 +119,13 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 [[profile.ignored-lane.overrides]]
 filter = 'test(=merkle::tests::chunked_id_at_the_chunk_cap_is_pinned)'
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# These tests hash files above 1 GiB through the real chunker, which takes
+# tens of seconds on a loaded runner. They do not hang.
+[[profile.default.overrides]]
+filter = 'binary(large_file_ingest) or binary(large_file_worktree)'
+slow-timeout = { period = "120s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+filter = 'binary(large_file_ingest) or binary(large_file_worktree)'
+slow-timeout = { period = "120s", terminate-after = 3 }

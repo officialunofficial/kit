@@ -628,7 +628,12 @@ pub(crate) fn object_id_from_parts(parts: &[&[u8]]) -> Hash {
         .and_then(|b| ObjectType::from_u8(*b).ok())
         .is_some_and(ObjectType::is_merkle);
     if merkle {
-        return object_id_from_bytes(&parts.concat());
+        // One part is already contiguous: a manifest of millions of chunk ids
+        // is not copied to hash it.
+        return match parts {
+            [only] => object_id_from_bytes(only),
+            _ => object_id_from_bytes(&parts.concat()),
+        };
     }
     let mut hasher = crate::hash::Hasher::new();
     for p in parts {

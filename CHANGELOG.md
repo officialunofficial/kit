@@ -163,8 +163,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   disclosure and the git export) refuse content above 1 GiB with a typed
   error before they read a chunk.
 - `kit add`, `status`, `diff --stat` and `stash` take a worktree file up to
-  128 GiB, the bound of a `ChunkedBlob`, with the memory of a 1 GiB file. The
-  hasher refused a file above 1 GiB before it read a byte. A file above
+  128 GiB, the bound of a `ChunkedBlob`. Memory is one window of chunks plus
+  about 32 bytes for each chunk id, a few copies of the id list at most
+  while the manifest is stored. The hasher refused a file above 1 GiB before
+  it read a byte. A file of 1 MiB or less that grows past 1 MiB while it is
+  read now fails with an I/O error, where it was stored as one oversized blob. A file above
   128 GiB still fails with `WorktreeError::FileTooLarge`, which now carries the
   limit that applied (`FileTooLarge { path, limit }`), and nothing is written.
   `worktree::MAX_FILE_BYTES` keeps its value and its meaning, the limit of a

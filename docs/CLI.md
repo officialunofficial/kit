@@ -57,8 +57,8 @@ Working-tree commands:
   exclusive. An explicitly-named path that is ignored (by
   `.gitignore`/`.kitignore`) is refused unless `-f`/`--force` is given
   (git parity); already-tracked paths are never subject to ignore.
-  A file up to 128 GiB is hashed by streaming it, so memory does not grow with
-  its size; a larger file is refused. `-p`/`--patch` interactively presents each hunk between the staged (or
+  A file up to 128 GiB is hashed by streaming it, so memory grows only by
+  about 32 bytes for each chunk; a larger file is refused. `-p`/`--patch` interactively presents each hunk between the staged (or
   HEAD) blob and the worktree file and stages only the accepted ones &mdash;
   per hunk: `y` stage, `n` skip, `a` stage this and all later hunks, `d`
   skip this and all later hunks, `q` quit (keeping hunks already chosen).

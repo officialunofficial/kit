@@ -512,12 +512,12 @@ merkelized id in `rust/tests/golden/`, and
 to `serialize::MAX_CHUNKED_TOTAL_SIZE` (128 GiB) by streaming it. A file above
 that bound fails with `WorktreeError::FileTooLarge` before any byte is read or
 stored, and the error names the bound. Only a reader that holds a whole file in
-memory (`read_regular_file_bounded`) keeps the 1 GiB limit
+memory (`read_regular_file_bounded`, and `add -p`) keeps the 1 GiB limit
 (`worktree::MAX_FILE_BYTES`). The manifest is serialized once, and its list of
 chunk ids is freed before the bytes are stored.
 
-**Because:** the streaming paths hold one window of chunks and 32 bytes per
-chunk id, however large the file. The old 1 GiB check refused files that
+**Because:** the streaming paths hold one window of chunks and about 32 bytes
+per chunk id, however large the file. The old 1 GiB check refused files that
 those paths handle.
 
 **If violated:** a file between 1 GiB and 128 GiB cannot be added, or an ingest
@@ -533,7 +533,7 @@ holds a whole file in memory.
 **Always:** `pull` passes the tree of HEAD to the restore only after
 `ensure_restore_safe` has proved that the index equals that tree, that no
 tracked file differs from the index, and that no untracked path outside the
-ignore rules exists. The restore then skips every entry whose mode and object
+ignore rules exists, apart from real directories. The restore then skips every entry whose mode and object
 id equal the entry in that tree, and sweeps the directories it enters. A
 resumed pull passes no base tree. The refusal messages of the safety check do
 not change.
