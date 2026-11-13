@@ -15,7 +15,7 @@
 #   * decodes the proof strictly: big-endian leaf count, minimal varint
 #     sibling count, the max_items * 32 bound and no trailing byte;
 #   * rebuilds the leaves from the sidecar (a chunk leaf is built from the
-#     `chunk_spans` pair [start, end] and the chunk hash at the same index of
+#     `chunk_spans` pair of decimal strings [start, end] and the chunk hash at the same index of
 #     `chunk_hashes_hex`), folds the proof level by level
 #     with the sibling selection of section 5.3, and compares the wrapped
 #     result with the object id;
@@ -170,7 +170,11 @@ def leaves_for(meta):
         spans = meta["chunk_spans"]
         if len(spans) != len(hashes):
             raise SidecarError("chunk_spans and chunk_hashes_hex differ in length")
-        leaves = [o.chunk_leaf(a, b, h) for (a, b), h in zip(spans, hashes)]
+        # Span values are decimal strings (plan section 13): values near the
+        # u64 maximum lose precision as JSON numbers.
+        if not all(isinstance(v, str) and v.isascii() and v.isdigit() for pair in spans for v in pair):
+            raise SidecarError("chunk_spans values must be decimal strings")
+        leaves = [o.chunk_leaf(int(a), int(b), h) for (a, b), h in zip(spans, hashes)]
         domain, base = o.CHUNKED_DOMAIN, 1
     kind = meta["proof_kind"]
     if kind == "single":

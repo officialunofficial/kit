@@ -165,6 +165,11 @@ def children(data, mode):
     return []
 
 
+# The lowest wrong chunk index of each corrupt manifest from the last walk
+# (plan section 13, item 7). A sidecar may name it as `corrupt_chunk_index`.
+WRONG_INDEX = {}
+
+
 def walk(root, mode, payloads):
     """Return (verified ids, missing ids, corrupt ids, unreferenced ids)."""
     objects = {}
@@ -208,17 +213,20 @@ def walk(root, mode, payloads):
     # missing. A chunk that is absent or not a Blob is not measured here (it
     # is incomplete or corrupt already). The sum needs no check of its own: the
     # decoder made the last end equal total_size and the spans contiguous.
+    WRONG_INDEX.clear()
     for oid in visited:
         data = objects[oid]
         if data[0] != o.CHUNKED:
             continue
         manifest = o.parse_chunked(data)
-        for chunk, (start, end) in zip(manifest["chunks"], o.spans_of(manifest["ends"])):
+        for i, (chunk, (start, end)) in enumerate(zip(manifest["chunks"], o.spans_of(manifest["ends"]))):
             blob = objects.get(chunk)
             if blob is None or blob[0] != o.BLOB:
                 continue
             if o.parse_blob(blob)["len"] != end - start:
                 corrupt.add(oid)
+                WRONG_INDEX[oid] = i  # the lowest wrong index is the one reported
+                break
     unreferenced = sorted((set(objects) - set(seen)) | unreferenced_junk)
     return sorted(set(visited) - corrupt), missing, sorted(corrupt), unreferenced
 
@@ -252,6 +260,11 @@ def check_vector(root_dir, sidecar_name, man):
         return "reject"
     if missing or corrupt:
         o.expect(expect == "incomplete", f"{name}: incomplete but sidecar says {expect}")
+        if "corrupt_chunk_index" in meta:
+            o.expect(
+                sorted(WRONG_INDEX.values())[:1] == [meta["corrupt_chunk_index"]],
+                f"{name}: lowest wrong chunk index",
+            )
         if meta.get("reason") == "corrupt":
             o.expect(len(corrupt) > 0, f"{name}: expected a corrupt object")
         if meta.get("reason") == "missing":
