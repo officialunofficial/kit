@@ -44,7 +44,8 @@ pub enum WorktreeError {
     #[error("symlink target '{0}' is invalid (absolute or contains '..')")]
     InvalidSymlinkTarget(String),
     /// A file is larger than `limit`: [`MAX_FILE_BYTES`] for a reader that holds
-    /// the whole file, [`serialize::MAX_CHUNKED_TOTAL_SIZE`] for ingest.
+    /// the whole file, [`CHUNK_THRESHOLD`] for a file at or below it that grew
+    /// while it was read, [`serialize::MAX_CHUNKED_TOTAL_SIZE`] for ingest.
     #[error("file '{}' exceeds the {limit} byte limit", path.display())]
     FileTooLarge {
         /// The file that exceeded the limit.
@@ -3687,5 +3688,26 @@ mod tests {
         })
         .unwrap();
         assert_eq!(hash, stub);
+    }
+
+    #[test]
+    fn a_file_of_exactly_the_chunk_threshold_is_one_blob() {
+        let (dir, store) = fresh_store();
+        let data = vec![5u8; usize::try_from(CHUNK_THRESHOLD).unwrap()];
+        let file = dir.path().join("edge.bin");
+        fs::write(&file, &data).unwrap();
+        let (id, _) = hash_file_with_metadata(&store, &file).unwrap();
+        assert_eq!(id, store_file_object(&store, &data).unwrap());
+        assert!(matches!(
+            store.read_object(&id).unwrap(),
+            crate::object::Object::Blob(_)
+        ));
+        let above = dir.path().join("above.bin");
+        fs::write(&above, vec![5u8; data.len() + 1]).unwrap();
+        let (id, _) = hash_file_with_metadata(&store, &above).unwrap();
+        assert!(matches!(
+            store.read_object(&id).unwrap(),
+            crate::object::Object::ChunkedBlob(_)
+        ));
     }
 }

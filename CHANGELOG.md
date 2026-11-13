@@ -163,14 +163,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   disclosure and the git export) refuse content above 1 GiB with a typed
   error before they read a chunk.
 - `kit add`, `status` and `stash` take a worktree file up to 128 GiB, the
-  bound of a `ChunkedBlob`, and so does `diff --stat` for binary content. Memory
-  is one window of chunks plus a few copies of the list of chunk ids, 32 bytes
-  each, while the manifest is stored. The line diff of text content above
-  1 GiB still fails with `ContentTooLarge`. The hasher refused a file above 1 GiB before
-  it read a byte. A file of 1 MiB or less that grows past 1 MiB while it is
-  read now fails with an I/O error, where it was stored as one oversized blob. A file above
-  128 GiB still fails with `WorktreeError::FileTooLarge`, which now carries the
-  limit that applied (`FileTooLarge { path, limit }`), and nothing is written.
+  bound of a `ChunkedBlob`, and so does `diff --stat` for binary content.
+  Memory is one window of chunks plus a few copies of the list of chunk ids,
+  32 bytes each, while the manifest is stored. The line diff of text content
+  above 1 GiB still fails with `ContentTooLarge`. The hasher refused a file
+  above 1 GiB before it read a byte. A file of 1 MiB or less that grows past 1
+  MiB while it is read now fails with `FileTooLarge` naming 1 MiB, where it
+  was stored as one oversized blob. A file above 128 GiB still fails with
+  `WorktreeError::FileTooLarge`, which now carries the limit that applied
+  (`FileTooLarge { path, limit }`), and nothing is written.
   `worktree::MAX_FILE_BYTES` keeps its value and its meaning, the limit of a
   reader that holds a whole file. Breaking: `WorktreeError::FileTooLarge`
   changes from a tuple to a struct variant.
