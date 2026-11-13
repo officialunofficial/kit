@@ -542,8 +542,9 @@ impl ChunkedBlob {
     /// # Errors
     /// [`KitError::TooManyChunks`] above [`crate::serialize::MAX_CHUNKS`],
     /// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
-    /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`] or a non-zero
-    /// `total_size` without chunks, and the entry and last-end errors of
+    /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`],
+    /// [`KitError::ChunkedBlobNoChunks`] for a non-zero `total_size` without
+    /// chunks, and the entry and last-end errors of
     /// [`crate::serialize::check_chunk_entry`] and
     /// [`crate::serialize::check_last_end`].
     pub fn new(

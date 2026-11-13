@@ -2559,6 +2559,9 @@ mod kani_proofs {
             (word(body) ^ word(middle).rotate_left(8) ^ word(tail).rotate_left(24)).to_le_bytes();
         toy(&mixed, domain)
     }
+    fn toy_hash(data: &[u8]) -> Hash {
+        toy(data, &[])
+    }
     /// SPEC-MERKLE-OBJECTS §5.3/§5.4: number of wire siblings a
     /// single-leaf proof of `position` in a `leaf_count`-leaf tree
     /// consumes (odd trailing nodes fold with themselves, no sibling).
