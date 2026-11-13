@@ -186,6 +186,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit merge --continue` and `kit rebase --continue` hash a resolved file one
   chunk at a time, and no longer read it whole to hash it. The scan for
   conflict markers skips a file above 1 GiB, where it failed on one.
+- The `kit+file://` transport opens its repository lock and stripe lock files
+  without following a link. A link planted at a lock path fails the write and
+  leaves its target as it was. The files were opened through a link before.
 - Push planning fails when its closure walk reaches the 10,000,000-object
   cap. `reachable_closure`, `reachable_objects` and `reachable_snapshot`
   return `OperationLimitExceeded` there instead of a cut set, so a push no

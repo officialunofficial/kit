@@ -85,6 +85,29 @@ fn open_pack_file(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
+/// Open the lock file at `path` for reading and writing, creating it when it
+/// is missing and never through a link. A link at `path` fails the open, so a
+/// planted link cannot make a lock create or write a file elsewhere.
+///
+/// # Errors
+/// The open fails, which includes a link at `path`.
+fn open_lock_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open a link itself, not its target.
+        options.custom_flags(0x0020_0000);
+    }
+    options.open(path)
+}
+
 use kit_core::bounded_read;
 use kit_core::hash::Hash;
 use kit_core::protocol::{
@@ -452,12 +475,7 @@ impl RefLock {
         }
 
         let lock_path = lock_dir.join(file_name);
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)?;
+        let file = open_lock_file(&lock_path)?;
 
         #[cfg(unix)]
         {
@@ -1045,12 +1063,7 @@ impl FileTransport {
     /// one step.
     fn bump_stripe_version(&self, name: &str) -> io::Result<()> {
         let path = self.lock_dir().join(stripe_lock_file(ref_stripe(name)));
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
+        let file = open_lock_file(&path)?;
         bump_version_in(&file)
     }
 
@@ -1913,6 +1926,73 @@ mod tests {
             open_pack_file(dir.path()).is_err(),
             "a directory is no pack"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_is_opened_without_following_a_link() {
+        let dir = tmp();
+        let target = dir.path().join("target");
+        fs::write(&target, b"secret").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(open_lock_file(&link).is_err());
+        let dangling = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("created"), &dangling).unwrap();
+        assert!(open_lock_file(&dangling).is_err());
+        assert!(!dir.path().join("created").exists());
+        assert!(open_lock_file(&dir.path().join("fresh")).is_ok());
+        assert!(open_lock_file(&target).is_ok());
+        assert_eq!(fs::read(&target).unwrap(), b"secret");
+    }
+
+    /// A link planted at a lock path makes the operation fail and leaves the
+    /// link's target as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_planted_at_a_lock_path_fails_the_write_and_leaves_its_target() {
+        let name = "refs/heads/main";
+        let cases: [(&str, String); 2] = [
+            ("repo lock", ".lock".to_owned()),
+            ("stripe lock", stripe_lock_file(ref_stripe(name))),
+        ];
+        for (what, lock_name) in cases {
+            let dir = tmp();
+            let tx = FileTransport::new(dir.path());
+            let lock_dir = tx.lock_dir();
+            fs::create_dir_all(&lock_dir).unwrap();
+            let target = dir.path().join("target");
+            fs::write(&target, b"secret").unwrap();
+            std::os::unix::fs::symlink(&target, lock_dir.join(&lock_name)).unwrap();
+
+            let err = tx
+                .update_ref(name, RefWriteCondition::Missing, &value(0, 0))
+                .unwrap_err();
+            assert!(
+                !matches!(err, TransportError::RefConflict),
+                "{what}: {err:?}"
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"secret", "{what}");
+            assert!(tx.read_ref(name).unwrap().is_none(), "{what}");
+        }
+    }
+
+    /// The count of a stripe is written through the same open: a link at the
+    /// stripe's lock path fails it and the target stays as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_planted_at_a_stripe_lock_path_fails_its_count() {
+        let dir = tmp();
+        let tx = FileTransport::new(dir.path());
+        let name = "refs/heads/main";
+        let lock_dir = tx.lock_dir();
+        fs::create_dir_all(&lock_dir).unwrap();
+        let target = dir.path().join("target");
+        fs::write(&target, b"secret").unwrap();
+        std::os::unix::fs::symlink(&target, lock_dir.join(stripe_lock_file(ref_stripe(name))))
+            .unwrap();
+        assert!(tx.bump_stripe_version(name).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"secret");
     }
 
     #[test]
