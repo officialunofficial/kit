@@ -354,6 +354,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chunks (about 4 GiB) by content when an edit changes its chunk count. It
   read every chunk of both versions for that. Its changed chunks are sent
   raw.
+- `kit gc` keeps the result tree of an unfinished merge, cherry-pick, revert
+  or rebase, and the commits of an unfinished bisect. A gc after the grace
+  period could prune them while the operation was waiting to resume. The
+  result tree is a root only while its operation is in progress. `kit bisect
+  reset` removes a state file it cannot read, so a damaged file no longer
+  blocks gc. `GcRootsError` has a `Bisect` variant for such a file.
 - A closure of exactly the walk cap is complete. The walk reported it cut when
   an object it had already seen was still queued, so a repository of exactly
   10,000,000 objects failed a fetch with `ClosureTooLarge`.

@@ -40,6 +40,7 @@ use crate::layout::RepoLayout;
 use crate::object::{Object, ObjectType};
 use crate::store::{ObjectStore, StoreError};
 
+use super::bisect;
 use super::conflict_state;
 use super::graph::{ClosureMode, MAX_REACHABLE, children};
 use super::rebase;
@@ -70,6 +71,8 @@ pub enum GcRootsError {
     ConflictState(#[from] conflict_state::ConflictStateError),
     #[error("rebase state: {0}")]
     Rebase(#[from] rebase::RebaseError),
+    #[error("bisect state: {0}")]
+    Bisect(#[from] bisect::BisectError),
     #[error("recovery log: {0}")]
     Recovery(#[from] recovery::RecoveryError),
     #[error("staging index: {0}")]
@@ -249,6 +252,24 @@ fn collect_tree_roots(
         add(r.orig_head, roots);
     }
 
+    // In-progress bisect: where it started, the known-bad commit, the
+    // known-good commits and the skipped ones. Without them, a bisect resumed
+    // after the grace period would find its commits pruned.
+    match bisect::read_state(tree) {
+        Ok(state) => {
+            add(state.orig_head, roots);
+            for h in state.bad_hash.into_iter().chain(state.good_hashes) {
+                add(h, roots);
+            }
+            for h in state.skipped {
+                add(h, roots);
+            }
+        }
+        // No bisect, or none at the moment the file was read.
+        Err(bisect::BisectError::NoBisectInProgress) => {}
+        Err(e) => return Err(e.into()),
+    }
+
     // In-progress rebase: target + every commit still to replay or
     // already replayed onto the new base.
     if rebase::is_rebase_in_progress(tree) {
@@ -265,7 +286,21 @@ fn collect_tree_roots(
     // in the state dir; rebase writes its sidecar inside
     // `rebase-apply/`. Both are empty/absent when no conflict is
     // recorded.
-    for dir in [tree.worktree_state_dir().to_path_buf(), tree.rebase_dir()] {
+    let merge_like = conflict_state::is_merge_in_progress(tree)
+        || conflict_state::is_cherry_pick_in_progress(tree)
+        || conflict_state::is_revert_in_progress(tree);
+    for (dir, in_progress) in [
+        (tree.worktree_state_dir().to_path_buf(), merge_like),
+        (tree.rebase_dir(), rebase::is_rebase_in_progress(tree)),
+    ] {
+        // The operation's result tree: a merge, cherry-pick, revert or rebase
+        // that is resumed or aborted reads it back. A file left behind with
+        // no operation to resume it (a crash while the state was cleared) is
+        // no root: nothing reads it, and keeping it would hold its tree and
+        // fail gc once an earlier run had pruned that tree.
+        if in_progress && let Some(tree_hash) = conflict_state::read_result_tree(&dir)? {
+            add(tree_hash, roots);
+        }
         for c in conflict_state::read_conflicts(&dir)? {
             for h in [c.base_hash, c.ours_hash, c.theirs_hash]
                 .into_iter()
@@ -1105,6 +1140,89 @@ mod tests {
         );
         // Sanity: kept objects accounted as live.
         assert!(s.contains(&kept) && s.contains(&kept_blob));
+    }
+
+    /// The tree a commit names.
+    fn tree_of(s: &ObjectStore, commit: &Hash) -> Hash {
+        match s.read_object(commit).unwrap() {
+            Object::Commit(c) => c.tree_hash,
+            other => panic!("not a commit: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_gc_keeps_the_objects_of_an_unfinished_merge_and_bisect_until_the_state_is_gone() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+
+        // Objects no ref reaches, held only by operation state.
+        let (result, result_blob) = commit_one(&s, b"result", b"result", vec![]);
+        let result_tree = tree_of(&s, &result);
+        let (start, _) = commit_one(&s, b"start", b"start", vec![]);
+        let (bad, _) = commit_one(&s, b"bad", b"bad", vec![]);
+        let (good, _) = commit_one(&s, b"good", b"good", vec![]);
+        let (skipped, _) = commit_one(&s, b"skipped", b"skipped", vec![]);
+        let (orphan, orphan_blob) = commit_one(&s, b"orphan", b"orphan", vec![]);
+        conflict_state::write_merge_state(
+            &md,
+            &conflict_state::MergeState {
+                merge_head: kept,
+                orig_head: kept,
+                message: b"merge".to_vec(),
+            },
+            &[],
+        )
+        .unwrap();
+        conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
+        bisect::write_state(
+            &md,
+            &bisect::BisectState {
+                orig_head: start,
+                orig_branch: None,
+                bad_hash: Some(bad),
+                good_hashes: vec![good],
+                skipped: BTreeSet::from([skipped]),
+            },
+        )
+        .unwrap();
+
+        // Every object is older than the grace period.
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        for h in [result_tree, result_blob, start, bad, good, skipped] {
+            assert!(s.contains(&h), "{} was pruned", hash::to_hex(&h));
+        }
+        assert!(!s.contains(&orphan) && !s.contains(&orphan_blob));
+        // The commit that only names the result tree is not held.
+        assert!(!s.contains(&result));
+
+        // With the state gone nothing keeps them.
+        conflict_state::clear_merge_state(&md).unwrap();
+        bisect::cleanup_bisect(&md).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        for h in [result_tree, result_blob, start, bad, good, skipped] {
+            assert!(!s.contains(&h), "{} was kept", hash::to_hex(&h));
+        }
+        assert!(s.contains(&kept));
+    }
+
+    #[test]
+    fn run_gc_ignores_a_result_tree_with_no_operation_to_resume() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        let (result, result_blob) = commit_one(&s, b"result", b"result", vec![]);
+        let result_tree = tree_of(&s, &result);
+        // A crash while the merge state was cleared leaves the file alone.
+        conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
+
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert!(!s.contains(&result_tree) && !s.contains(&result_blob));
+        // A second gc finds nothing left to read, and still succeeds.
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert!(s.contains(&kept));
     }
 
     #[test]

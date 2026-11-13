@@ -58,6 +58,8 @@ all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 | Cherry-pick in progress | `.kit/CHERRY_PICK_HEAD` (+`ORIG_HEAD`) | `cherry_pick_head`, `orig_head` |
 | Revert in progress | `.kit/REVERT_HEAD` (+`ORIG_HEAD`) | `revert_head`, `orig_head` |
 | Rebase in progress | `.kit/rebase-apply/{orig-head,onto,todo,done}` | `orig_head`, `onto`, every `todo` + `done` commit |
+| Bisect in progress | `.kit/bisect` | `orig_head`, the bad commit, every good and skipped commit |
+| Operation result tree | `.kit/KIT_OP_RESULT` and `.kit/rebase-apply/KIT_OP_RESULT` | the tree a merge, cherry-pick, revert or rebase wrote, until the operation ends |
 | Conflict sidecar | `.kit/kit-conflicts` and `.kit/rebase-apply/kit-conflicts` | each record's `base`/`ours`/`theirs` blob (when present) |
 | Attestations | `.kit/attestations/<commit-hex>/` | each attested commit (dir name) |
 | Pending history publication | `.kit/history-v1/branches/<ref-key>/transaction` | previous and target ref values; strict parse even without `history-mmr` |
