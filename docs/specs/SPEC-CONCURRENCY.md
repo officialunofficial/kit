@@ -109,7 +109,7 @@ stderr and proceeds anyway &mdash; it does not refuse or block. The paths that
 take `worktree.lock` without the helper call the same probe directly
 (`libkit::lock::warn_if_served`) right after acquiring it: the per-branch
 publish step of `fetch`/`pull` and the fast-forward phase of
-`pull` (`kit_sync::fetch` and `remote_dispatch::pull_all_with`), and
+`pull` (`kit_sync::fetch` and `kit_sync::pull`), and
 `status`'s opportunistic index refresh. So every command that takes
 `worktree.lock` or `worktrees.lock` emits the warning: the
 worktree-mutating commands, `gc` (which takes both), `tag` (create),
@@ -266,7 +266,7 @@ the history lock):
 | `tag <name>` (lightweight and annotated create) | this tree's `worktree.lock`, held across the target re-check (and, for an annotated tag, the tag-object write) and the ref publish, then the tag ref's `refs-<ref>.lock` (`tag.rs`). `tag -d` takes only the tag ref's `refs-<ref>.lock` |
 | `attest` | this tree's `worktree.lock`, held across the subject re-check and the attestation write, after signing (`attest.rs`); no ref lock |
 | `fetch`, and the fetch phase of `pull` | the shared `format` lock (the prune guard) for the whole fetch, taken first. Per remote branch: download, unpack and record the packs with no `worktree.lock` held, then this tree's `worktree.lock` around the remote-tracking ref publish and its checkpoint, then that ref's `refs-<ref>.lock`; released before the next branch (`kit_sync::fetch::fetch_objects_inner`). The wait for `worktree.lock` has no deadline, reports once that it waits, and ends on an interrupt. A retry after a concurrent re-baseline downloads again with no lock held |
-| `pull` (fast-forward phase) | this tree's `worktree.lock` across the restore-safety check, the branch write and the worktree restore, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`remote_dispatch::pull_all_with`) |
+| `pull` (fast-forward phase) | this tree's `worktree.lock` across the restore-safety check, the branch write and the worktree restore, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`kit_sync::pull`) |
 | `push` | no `worktree.lock`; each remote-tracking ref write takes its `refs-<ref>.lock` |
 | `kit git import`/`fetch`/`pull` (import phase) | `git-<remote>.lock`, then (first import only) `git-import-key.lock`, then per written tag or remote-tracking ref its `refs-<ref>.lock`; no `worktree.lock` (`git_import::import_into`) |
 | `kit git export` | `git-<remote>.lock` only; it reads local refs and writes no local ref (`git::export`) |

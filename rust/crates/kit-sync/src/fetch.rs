@@ -435,7 +435,7 @@ fn fetch_objects_inner(
 
             let checkpoint_path = checkpoint::path(layout, source, remote, &r.name);
             // The immutable prefix remains verified even if tracking moved.
-            // Always check the listed tip's closure under the apply lock below,
+            // Always check the listed tip's closure before publishing,
             // including when the head matches but that tip changed.
             let checkpoint = checkpoint_path.as_deref().and_then(Checkpoint::load);
 

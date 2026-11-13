@@ -185,12 +185,12 @@ is protected by a prune guard instead: it holds the shared kernel lock on
 the `format` file (below) from before it reads its record of applied packs
 until after its last ref publish. While any guard is held, the sweep's final
 check cannot take the exclusive lock, so it keeps every candidate at any
-grace, including zero. The guard stops only the delete step. It protects a fetch from a gc
-that holds the worktree locks of SPEC-CONCURRENCY §4 from its mark through its
-sweep, so the mark sees the ref the fetch publishes. A fetch that dies
-releases the guard with its process. The objects of a dead fetch are then ordinary unreachable objects,
-and a later fetch repairs the store if a gc pruned any of them
-(SPEC-TRANSPORT, "Pack-chain fetch").
+grace, including zero. The guard stops only the delete step. It protects a
+fetch from a gc that holds the worktree locks of SPEC-CONCURRENCY §4 from its
+mark through its sweep, so the mark sees the ref the fetch publishes. A fetch
+that dies releases the guard with its process. The objects of a dead fetch are
+then ordinary unreachable objects, and a later fetch repairs the store if a gc
+pruned any of them (SPEC-TRANSPORT, "Pack-chain fetch").
 
 A push through the file transport (`kit push kit+file://...`) or one
 received by `kit serve` or a layout server is not such a writer. It stores

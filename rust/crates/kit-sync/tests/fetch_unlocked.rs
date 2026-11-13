@@ -627,38 +627,64 @@ fn a_fetch_killed_in_any_download_resumes_with_only_the_remaining_packs() {
 // 6. gc after a killed fetch, then a fetch
 // ---------------------------------------------------------------------------
 
-#[test]
-fn a_fetch_after_gc_pruned_a_killed_fetchs_objects_heals() {
+/// Three packs; the third holds a delta against the blob of the first.
+fn remote_with_a_delta_across_packs() -> Remote {
     let mut remote = Remote::new();
     remote.push_file("base.bin", &noise(16 * 1024, 1));
     remote.push_file("other.txt", b"other\n");
-    // The third pack holds a delta against the blob of the first.
     let mut changed = noise(16 * 1024, 1);
     changed[100] ^= 0xff;
     remote.push_delta_file("changed.bin", "base.bin", &changed);
+    remote
+}
 
-    let (_dir, target, layout) = fresh_target();
-    let dying = HookSource::new(&remote, 3, Action::Panic);
+/// Kill a fetch in its `die_at`-th download, then gc away what it wrote, then
+/// fetch again. Returns the second fetch's report and how often it healed.
+fn heal_after_gc(remote: &Remote, die_at: usize) -> (FetchReport, usize, RepoLayout) {
+    let (dir, target, layout) = fresh_target();
+    // Keep the directory for the rest of the process; the caller's layout
+    // points into it.
+    std::mem::forget(dir);
+    let dying = HookSource::new(remote, die_at, Action::Panic);
     let died = catch_unwind(AssertUnwindSafe(|| {
         run_fetch(&target, &dying, &NoopObserver)
     }));
     assert!(died.is_err());
-    // The first two packs are recorded, and nothing references their objects.
     let pruned = gc_now(&layout).pruned;
     assert!(pruned > 0, "gc must prune the dead fetch's objects");
 
     let probe = Probe::default();
     let report = run_fetch(&target, &remote.source(), &probe).unwrap();
+    let stale = probe.stale.load(Ordering::SeqCst);
+    (report, stale, layout)
+}
 
-    assert_eq!(
-        probe.stale.load(Ordering::SeqCst),
-        1,
-        "the fetch heals once"
-    );
+#[test]
+fn a_fetch_after_gc_pruned_a_killed_fetchs_objects_heals() {
+    let remote = remote_with_a_delta_across_packs();
+    // The first two packs are recorded and nothing references their objects.
+    let (report, stale, layout) = heal_after_gc(&remote, 3);
+
+    assert_eq!(stale, 1, "the fetch heals once");
     assert_eq!(report.packs_downloaded, 3);
     assert_eq!(report.packs_already_applied, 0);
     assert_eq!(tracking_tip(&layout), Some(remote.tip()));
     assert_closure_complete(&layout, remote.tip());
+}
+
+#[test]
+fn a_heal_reports_only_the_attempt_that_published() {
+    let remote = remote_with_a_delta_across_packs();
+    // Only the first pack is recorded. The retry's first attempt skips it,
+    // applies the second pack, and fails on the third pack's delta.
+    let (report, stale, layout) = heal_after_gc(&remote, 2);
+
+    assert_eq!(stale, 1);
+    assert_eq!(report.packs_downloaded, 3);
+    assert_eq!(report.packs_already_applied, 0);
+    let objects: usize = remote.objects.iter().map(Vec::len).sum();
+    assert_eq!(report.objects_unpacked, objects);
+    assert_eq!(tracking_tip(&layout), Some(remote.tip()));
 }
 
 // ---------------------------------------------------------------------------
