@@ -94,3 +94,40 @@ fn update_ref_acquires_repo_lock() {
 fn attest_acquires_repo_lock() {
     assert_blocks_on_held_lock(&["attest"]);
 }
+
+/// Every `bisect` command that writes the state file takes the same lock `gc`
+/// holds across its mark and sweep, so a commit named by `bisect good` is
+/// either seen by the sweep as a root or resolved after the sweep ran.
+#[test]
+fn bisect_start_acquires_repo_lock() {
+    assert_blocks_on_held_lock(&["bisect", "start"]);
+}
+
+#[test]
+fn bisect_good_bad_and_reset_acquire_repo_lock() {
+    for args in [
+        &["bisect", "good", "HEAD"][..],
+        &["bisect", "bad", "HEAD"][..],
+        &["bisect", "reset"][..],
+    ] {
+        let (td, xdg) = repo_with_commit();
+        ok(td.path(), xdg.path(), &["bisect", "start"]);
+        let state = fs::read(td.path().join(".kit/bisect")).unwrap();
+        let guard = kit_core::repo_lock::acquire_default(&td.path().join(".kit"), "worktree.lock")
+            .expect("acquire repo lock in test");
+
+        let out = run(td.path(), xdg.path(), args);
+        assert!(
+            !out.status.success(),
+            "kit {args:?} should fail while the repo lock is held"
+        );
+        assert_eq!(
+            fs::read(td.path().join(".kit/bisect")).unwrap(),
+            state,
+            "kit {args:?} wrote the state without the lock"
+        );
+
+        drop(guard);
+        ok(td.path(), xdg.path(), args);
+    }
+}
