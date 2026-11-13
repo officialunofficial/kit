@@ -124,6 +124,21 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A push plans from what changed. It reads the history of the remote head and
+  walks only the commits the remote lacks, and for each one it keeps the tree
+  entries that differ from the trees of its parents. It no longer walks two
+  whole closures. A chunk of a large file counts toward no cap, so a repository
+  of many large files pushes. The walk's cap is 10,000,000 held commits, new
+  commits and kept objects, and it fails with `OperationLimitExceeded`
+  (`10,000,000-object push walk`). A
+  file that returns at a path the remote head's snapshot does not hold, a file
+  reverted to an older version, a directory restored after the remote head
+  deleted it, and a chunk shared with a file the remote lacks are sent again,
+  up to a whole file or directory. In a push cut into steps, each step
+  counts as the remote head for the next, so a directory deleted in one step
+  and restored in a later one is sent again too. A history the remote holds and
+  this store lacks no longer makes the push send everything. A pack seals at 10,000,000
+  entries.
 - **Breaking:** `kit_client::Limits` has a new field `max_tickets`, the most
   tickets one advance may name, the packlist node's included.
   `Limits::from_server_info` fills it from `max_tickets_per_advance`: seven

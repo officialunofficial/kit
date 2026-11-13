@@ -757,6 +757,18 @@ fn estimate_pack_sizes(
     payload_cap: u64,
     max_pack_bytes: Option<u64>,
 ) -> Result<Vec<u64>, PushError> {
+    estimate_pack_sizes_with(store, plan, payload_cap, max_pack_bytes, MAX_PACK_ENTRIES)
+}
+
+/// [`estimate_pack_sizes`] with the entry bound a pack holds, so a test can
+/// reach it without ten million entries.
+fn estimate_pack_sizes_with(
+    store: &ObjectStore,
+    plan: &transfer::PackPlan,
+    payload_cap: u64,
+    max_pack_bytes: Option<u64>,
+    max_entries: usize,
+) -> Result<Vec<u64>, PushError> {
     let mut packs = Vec::new();
     let mut payload = 0_u64;
     let mut entries = 0_usize;
@@ -772,7 +784,8 @@ fn estimate_pack_sizes(
     ) {
         let next_payload = payload.saturating_add(size);
         if entries > 0
-            && (next_payload > payload_cap
+            && (entries >= max_entries
+                || next_payload > payload_cap
                 || max_pack_bytes
                     .is_some_and(|limit| serialized_bound(next_payload, entries + 1) > limit))
         {
@@ -869,6 +882,7 @@ fn build_and_upload_packs(
                 entry.conservative_len() as u64,
                 payload_cap,
                 limits.max_pack_bytes,
+                MAX_PACK_ENTRIES,
             ) {
                 seal_pack(
                     sink,
@@ -903,6 +917,7 @@ fn build_and_upload_packs(
                 entry.conservative_len() as u64,
                 payload_cap,
                 limits.max_pack_bytes,
+                MAX_PACK_ENTRIES,
             ) {
                 seal_pack(
                     sink,
@@ -1142,9 +1157,14 @@ fn cache_delta_bases(
     Ok(cache)
 }
 
+/// Most entries one pack holds. A plan can pass it, because a chunk of a large
+/// file counts toward no cap and a repeated chunk may be listed twice.
+const MAX_PACK_ENTRIES: usize = pack::MAX_ENTRIES as usize;
+
 /// Would pushing an entry of (conservative, uncompressed) size
-/// `add_bound` into `w` exceed `payload_cap`? Never true for an empty
-/// writer — a single entry over the cap (a blob between the cap and
+/// `add_bound` into `w` exceed `payload_cap`, or does `w` already hold
+/// `max_entries` entries? Never true for an empty writer — a single entry
+/// over the cap (a blob between the cap and
 /// [`kit_core::store::MAX_RAW_OBJECT_SIZE`], or a test-injected tiny cap;
 /// entries stay under [`pack::MAX_TOTAL_PAYLOAD`] because of that size
 /// limit) lands alone in its own pack rather than looping forever.
@@ -1153,10 +1173,12 @@ fn should_seal(
     add_bound: u64,
     payload_cap: u64,
     max_pack_bytes: Option<u64>,
+    max_entries: usize,
 ) -> bool {
     let next_payload = w.total_payload().saturating_add(add_bound);
     w.entry_count() > 0
-        && (next_payload > payload_cap
+        && (w.entry_count() >= max_entries
+            || next_payload > payload_cap
             || max_pack_bytes
                 .is_some_and(|limit| serialized_bound(next_payload, w.entry_count() + 1) > limit))
 }
@@ -1236,6 +1258,75 @@ mod tests {
             pack::MAX_TOTAL_PAYLOAD
         );
     }
+    fn blob_hashes(store: &ObjectStore, count: usize) -> Vec<Hash> {
+        (0..count)
+            .map(|i| {
+                let blob = kit_core::object::Object::Blob(kit_core::object::Blob {
+                    data: format!("entry {i}").into_bytes(),
+                });
+                store
+                    .write(&kit_core::serialize::serialize(&blob).unwrap())
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pack_seals_when_it_holds_the_most_entries_it_may() {
+        let (_dir, store) = store();
+        let hashes = blob_hashes(&store, 3);
+        let mut w = PackWriter::new();
+        // An empty writer never seals, whatever the bound.
+        assert!(!should_seal(&w, 1, u64::MAX, None, 0));
+        for hash in &hashes {
+            w.push_raw(*hash, &store.read(hash).unwrap()).unwrap();
+        }
+        assert!(!should_seal(&w, 1, u64::MAX, None, 4));
+        assert!(should_seal(&w, 1, u64::MAX, None, 3));
+        assert!(should_seal(&w, 1, u64::MAX, None, 2));
+        // The format's own bound is the production one.
+        assert_eq!(MAX_PACK_ENTRIES, pack::MAX_ENTRIES as usize);
+        assert!(!should_seal(&w, 1, u64::MAX, None, MAX_PACK_ENTRIES));
+    }
+
+    #[test]
+    fn the_pack_estimate_splits_at_the_entry_bound() {
+        let (_dir, store) = store();
+        let hashes = blob_hashes(&store, 5);
+        let plan = transfer::PackPlan {
+            raw: hashes,
+            deltas: Vec::new(),
+            self_contained: true,
+        };
+        let packs = |max_entries| {
+            estimate_pack_sizes_with(&store, &plan, u64::MAX, None, max_entries)
+                .unwrap()
+                .len()
+        };
+        assert_eq!(packs(5), 1);
+        assert_eq!(packs(4), 2);
+        assert_eq!(packs(2), 3);
+        assert_eq!(packs(1), 5);
+        // A plan that lists one object twice counts it twice.
+        let twice = transfer::PackPlan {
+            raw: vec![plan.raw[0], plan.raw[0], plan.raw[0]],
+            deltas: Vec::new(),
+            self_contained: true,
+        };
+        assert_eq!(
+            estimate_pack_sizes_with(&store, &twice, u64::MAX, None, 2)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            estimate_pack_sizes(&store, &plan, u64::MAX, None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     #[test]
     fn batch_lens_empty_input_is_no_batches() {
         assert_eq!(

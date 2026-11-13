@@ -861,7 +861,10 @@ only when one of these holds:
   writes and after a crash between them.
 
 A push plans its packs against the head it reads, and leaves out what that
-head holds. A push conditioned on `Missing` or `Match` MUST plan only
+head holds. It decides what the head holds from the head alone: the commits
+that are ancestors of the head, and the trees of the head's own snapshot. A
+plan may send an object the remote holds. It never omits one the remote lacks.
+A push conditioned on `Missing` or `Match` MUST plan only
 against a head its condition holds for. When the head it reads fails the
 condition, the push is refused as a non-fast-forward before it plans,
 unless that head is already the new head, in which case an earlier
