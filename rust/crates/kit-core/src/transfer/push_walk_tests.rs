@@ -534,6 +534,79 @@ fn the_cap_counts_held_commits_too_and_every_path_fails() {
 }
 
 #[test]
+fn a_walk_of_only_commits_fits_a_cap_equal_to_its_count() {
+    let (_d, s) = store();
+    let t = tree_of(&s, &[("f", put_blob(&s, b"x".to_vec()))]);
+    let held = commit(&s, t, &[], "held");
+    let c1 = commit(&s, t, &[held], "c1");
+    let c2 = commit(&s, t, &[c1], "c2");
+    // One held commit and two new ones, and no tree or blob is new.
+    let plan = plan_pack_capped(&s, c2, Some(held), sequential, limits(3)).unwrap();
+    assert_eq!(ids(&plan), BTreeSet::from([c1, c2]));
+    assert!(matches!(
+        plan_pack_capped(&s, c2, Some(held), sequential, limits(2)),
+        Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+    ));
+}
+
+#[test]
+fn a_held_set_of_one_commit_fits_a_cap_of_one_and_not_zero() {
+    let (_d, s) = store();
+    let t = tree_of(&s, &[("f", put_blob(&s, b"x".to_vec()))]);
+    let only = commit(&s, t, &[], "only");
+    assert_eq!(HeldCommits::collect(&s, Some(only), 1).unwrap().len(), 1);
+    assert!(matches!(
+        HeldCommits::collect(&s, Some(only), 0),
+        Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+    ));
+}
+
+#[test]
+fn the_cap_stops_the_commit_walk_before_it_reads_further_history() {
+    let (_d, s) = store();
+    let t = tree_of(&s, &[("f", put_blob(&s, b"x".to_vec()))]);
+    let c1 = commit(&s, t, &[], "1");
+    let c2 = commit(&s, t, &[c1], "22");
+    let c3 = commit(&s, t, &[c2], "333");
+    remove(&s, &c1);
+    // Past the cap at c1, the walk fails on the cap and does not go looking
+    // for the commit it cannot read.
+    assert!(matches!(
+        plan_pack_capped(&s, c3, None, sequential, limits(2)),
+        Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+    ));
+    assert!(matches!(
+        plan_pack_capped(&s, c3, None, sequential, limits(3)),
+        Err(StoreError::ObjectNotFound(_))
+    ));
+}
+
+#[test]
+fn a_parent_that_is_not_a_commit_is_its_own_root() {
+    let (_d, s) = store();
+    let first = put_blob(&s, b"first".to_vec());
+    let second = put_blob(&s, b"second".to_vec());
+    let t = tree_of(&s, &[("f", put_blob(&s, b"in the tree".to_vec()))]);
+    let c = commit(&s, t, &[first, second], "odd parents");
+    let mut brought = Vec::new();
+    PushWalk::run(
+        &s,
+        c,
+        &HeldCommits::default(),
+        &HashSet::new(),
+        WalkLimits::default(),
+        Some(&mut |root, id| {
+            brought.push((*root, *id));
+            Ok(())
+        }),
+    )
+    .unwrap();
+    assert!(brought.contains(&(c, c)) && brought.contains(&(c, t)));
+    assert!(brought.contains(&(first, first)));
+    assert!(brought.contains(&(second, second)));
+}
+
+#[test]
 fn no_chunk_enters_a_counted_set() {
     let (_d, s) = store();
     let a = file(&s, &[1, 2, 3]);

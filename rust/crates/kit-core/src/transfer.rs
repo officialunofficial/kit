@@ -721,8 +721,8 @@ fn plan_pack_capped(
     let held = HeldCommits::collect(store, old_tip, limits.objects)?;
     let walk = PushWalk::run(store, new_tip, &held, &HashSet::new(), limits, None)?;
     let base_map = match held.tip() {
-        Some(old) if !walk.objects().is_empty() => select_chunk_delta_bases(store, new_tip, old)?,
-        Some(_) | None => HashMap::new(),
+        Some(old) => select_chunk_delta_bases(store, new_tip, old)?,
+        None => HashMap::new(),
     };
 
     // Objects the walk kept, in BLAKE3 order so the plan, and so the pack
