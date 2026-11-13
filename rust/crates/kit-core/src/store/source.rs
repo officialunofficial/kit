@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::hash::Hash;
 use crate::object::{Object, object_id_from_parts};
@@ -327,6 +328,69 @@ impl ObjectSource for EphemeralSink<'_> {
     }
 }
 
+/// A sink that hashes what it receives and keeps nothing.
+///
+/// A dry run uses it to learn the ids that a real write would produce. It
+/// holds no bytes and no per-object state, so its memory is the same for a
+/// file of one chunk and a file of a million. It counts the objects and the
+/// bytes it hashed. It cannot be read back, and it reports no object as
+/// present.
+#[derive(Debug, Default)]
+pub struct HashOnlySink {
+    objects: AtomicU64,
+    bytes: AtomicU64,
+}
+
+impl HashOnlySink {
+    /// Create a sink that has hashed nothing.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The number of objects hashed so far.
+    #[must_use]
+    pub fn objects(&self) -> u64 {
+        self.objects.load(Ordering::Relaxed)
+    }
+
+    /// The number of object bytes hashed so far.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
+    }
+}
+
+/// Whether an object of `len` bytes is within the size that the store accepts.
+fn fits_object_limit(len: usize) -> bool {
+    len <= MAX_RAW_OBJECT_SIZE
+}
+
+impl ObjectSink for HashOnlySink {
+    fn put(&self, bytes: &[u8]) -> StoreResult<Hash> {
+        self.put_parts(&[bytes])
+    }
+
+    fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
+        let mut total: usize = 0;
+        for p in parts {
+            total = total
+                .checked_add(p.len())
+                .ok_or(StoreError::ObjectTooLarge)?;
+        }
+        if !fits_object_limit(total) {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        self.objects.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(total as u64, Ordering::Relaxed);
+        Ok(object_id_from_parts(parts))
+    }
+
+    fn has(&self, _h: &Hash) -> bool {
+        false
+    }
+}
+
 /// Adapter that makes any [`ObjectSource`] read without BLAKE3
 /// verification, for display-only rendering (`diff`, `show`, and the
 /// commit/merge/pull post-op summaries). Wrap the source once at the
@@ -389,6 +453,66 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("init");
         (dir, store)
+    }
+
+    #[test]
+    fn hash_only_sink_gives_the_store_id_and_keeps_nothing() {
+        let (_dir, store) = fresh_store();
+        let sink = HashOnlySink::new();
+        let id = sink.put_parts(&[b"blob 5\0", b"hello"]).unwrap();
+        assert_eq!(id, object_id_from_parts(&[b"blob 5\0", b"hello"]));
+        assert_eq!(sink.objects(), 1);
+        assert_eq!(sink.bytes(), 12);
+        assert!(!sink.has(&id));
+        assert!(!store.contains(&id));
+    }
+
+    #[test]
+    fn hash_only_sink_refuses_an_object_the_store_refuses() {
+        assert!(fits_object_limit(0));
+        assert!(fits_object_limit(MAX_RAW_OBJECT_SIZE));
+        assert!(!fits_object_limit(MAX_RAW_OBJECT_SIZE + 1));
+        // Parts that add up past the limit are refused without a hash.
+        let zeros = vec![0_u8; 1 << 20];
+        let mut parts: Vec<&[u8]> = vec![&zeros; MAX_RAW_OBJECT_SIZE >> 20];
+        parts.push(&[0]);
+        let sink = HashOnlySink::new();
+        assert!(matches!(
+            sink.put_parts(&parts),
+            Err(StoreError::ObjectTooLarge)
+        ));
+        assert_eq!(sink.objects(), 0);
+    }
+
+    /// `len` bytes from a fixed xorshift stream, so a file cuts into chunks.
+    fn pseudo_random(len: usize) -> Vec<u8> {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            out.extend_from_slice(&state.to_le_bytes());
+        }
+        out.truncate(len);
+        out
+    }
+
+    #[test]
+    fn hash_only_sink_hashes_a_file_of_many_chunks_like_the_store_does() {
+        let (dir, store) = fresh_store();
+        let file = dir.path().join("big.bin");
+        std::fs::write(&file, pseudo_random(96 * 1024 * 1024)).unwrap();
+
+        let sink = HashOnlySink::new();
+        let hashed = crate::worktree::hash_file(&sink, &file).unwrap();
+        // The file cuts into thousands of chunks, and the sink hashed each one.
+        assert!(sink.objects() > 1000, "{} objects", sink.objects());
+        assert!(sink.bytes() > 96 * 1024 * 1024);
+        assert!(!store.contains(&hashed));
+
+        let stored = crate::worktree::hash_file(&store, &file).unwrap();
+        assert_eq!(hashed, stored);
     }
 
     /// Flip the first byte of the on-disk object file for `h`, in place.

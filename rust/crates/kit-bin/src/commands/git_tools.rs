@@ -212,7 +212,7 @@ fn render_patch(patch: &mut patch::Patch) -> CmdResult<String> {
     let mut buf: Vec<u8> = Vec::new();
     for change in std::mem::take(&mut patch.changes) {
         super::diff::emit_entry_patch(&mut buf, &change.entry, || Ok(change.body))
-            .map_err(|m| (m, exit::GENERAL_ERROR))?;
+            .map_err(super::diff::patch_failure)?;
     }
     out.push_str(&String::from_utf8_lossy(&buf));
     out.push_str("-- \nkit git format-patch\n\n");

@@ -258,17 +258,24 @@ pub fn run(args: &[String]) -> u8 {
                 // the uncolored path.
                 Ok(()) => stdout
                     .write_all(&colorize_patch(&buf))
-                    .map_err(|err| format!("write: {err}")),
-                Err(msg) => Err(msg),
+                    .map_err(|err| (format!("write: {err}"), exit::GENERAL_ERROR)),
+                Err(error) => Err(patch_failure(error)),
             }
         } else {
             emit_entry_patch(&mut stdout, e, || diff.patch_body(e, context, ws_mode))
+                .map_err(patch_failure)
         };
-        if let Err(msg) = res {
-            return emit_err(&msg, exit::GENERAL_ERROR);
+        if let Err((msg, code)) = res {
+            return emit_err(&msg, code);
         }
     }
     diff_status
+}
+
+/// The message and exit code of a patch body that cannot be read.
+pub(super) fn patch_failure(error: diff::Error) -> (String, u8) {
+    let error = libkit::Error::from(error);
+    (exit_map::message(&error), exit_map::exit_code(&error))
 }
 
 /// Print a library failure and return its exit code.
@@ -414,14 +421,19 @@ fn abbrev(h: Option<Hash>) -> String {
 /// byte-identical to `kit diff <parent> <commit>` when both use the default
 /// context and the exact comparison (git's `-U3`).
 ///
-/// `read_body` supplies the patch body after the header lines are written.
-/// The caller picks the context, the whitespace mode and the read source
-/// that it passes to the library.
+/// `read_body` supplies the patch body. It runs before the first header line,
+/// so a body that cannot be read leaves no partial header in `out`. The
+/// caller picks the context, the whitespace mode and the read source that it
+/// passes to the library.
+///
+/// # Errors
+/// The error of `read_body`.
 pub(super) fn emit_entry_patch(
     out: &mut impl Write,
     e: &DiffEntry,
     read_body: impl FnOnce() -> Result<PatchBody, diff::Error>,
-) -> Result<(), String> {
+) -> Result<(), diff::Error> {
+    let body = read_body()?;
     // git C-style quotes special-byte paths in the header (core.quotePath),
     // quoting the whole `a/<path>` / `b/<path>` token as a unit. For a
     // rename the `a/` side is the source path, the `b/` side the dest.
@@ -475,7 +487,6 @@ pub(super) fn emit_entry_patch(
         }
     }
 
-    let body = read_body().map_err(|err| err.to_string())?;
     // `--- a/p` / `+++ b/p` (quoted), with `/dev/null` for the absent side.
     let (minus, plus) = match e.kind {
         DiffKind::Added => ("/dev/null".to_string(), b_path.clone()),
@@ -520,6 +531,24 @@ mod tests {
             new_mode: None,
             old_path: None,
         }
+    }
+
+    #[test]
+    fn a_body_that_cannot_be_read_leaves_no_header() {
+        let mut entry = de("big.txt", DiffKind::Modified);
+        entry.old_hash = Some([1; 32]);
+        entry.new_hash = Some([2; 32]);
+        let mut out = Vec::new();
+        let err = emit_entry_patch(&mut out, &entry, || {
+            Err(diff::Error::ReadObject(
+                kit_core::worktree::WorktreeError::ContentTooLarge { size: 1 << 40 },
+            ))
+        })
+        .unwrap_err();
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        let (message, code) = patch_failure(err);
+        assert_eq!(code, exit::NOINPUT);
+        assert!(message.contains("exceeds"), "{message}");
     }
 
     fn render(e: &DiffEntry, name_status: bool, z: bool) -> String {

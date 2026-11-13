@@ -265,17 +265,40 @@ pub fn patch_body<S: ObjectSource + ?Sized>(
     if matches!(entry.kind, DiffKind::Renamed | DiffKind::ModeChanged) {
         return Ok(PatchBody::Empty);
     }
-    let read = |hash: Option<Hash>| match hash {
-        Some(hash) => worktree::read_blob(source, &hash).map_err(Error::ReadObject),
-        None => Ok(Vec::new()),
+    let load = |hash: Option<Hash>| match hash {
+        Some(hash) => LoadedBlob::load(source, &hash).map_err(Error::ReadObject),
+        None => Ok(LoadedBlob::empty()),
     };
-    let old = read(entry.old_hash)?;
-    let new = read(entry.new_hash)?;
-    Ok(match unified_hunks_opts(&old, &new, context, mode) {
-        None => PatchBody::Binary,
-        Some(hunks) if hunks.is_empty() => PatchBody::Empty,
-        Some(hunks) => PatchBody::Hunks(hunks),
-    })
+    let old = load(entry.old_hash)?;
+    let new = load(entry.new_hash)?;
+    if sides_are_binary(source, &old, &new)? {
+        return Ok(PatchBody::Binary);
+    }
+    let old_bytes = old.into_content(source).map_err(Error::ReadObject)?;
+    let new_bytes = new.into_content(source).map_err(Error::ReadObject)?;
+    Ok(
+        match unified_hunks_opts(&old_bytes, &new_bytes, context, mode) {
+            None => PatchBody::Binary,
+            Some(hunks) if hunks.is_empty() => PatchBody::Empty,
+            Some(hunks) => PatchBody::Hunks(hunks),
+        },
+    )
+}
+
+/// Whether either side is binary. The check reads a bounded prefix of each
+/// side, never a whole chunked blob.
+fn sides_are_binary<S: ObjectSource + ?Sized>(
+    source: &S,
+    old: &LoadedBlob,
+    new: &LoadedBlob,
+) -> Result<bool, Error> {
+    let old_prefix = old
+        .prefix(source, BINARY_SNIFF_LEN)
+        .map_err(Error::ReadObject)?;
+    let new_prefix = new
+        .prefix(source, BINARY_SNIFF_LEN)
+        .map_err(Error::ReadObject)?;
+    Ok(is_binary(&old_prefix) || is_binary(&new_prefix))
 }
 
 /// The change counts of `entries`, read from `source`.
@@ -325,16 +348,7 @@ fn stat_change<S: ObjectSource + ?Sized>(
     };
     let old = load(entry.old_hash)?;
     let new = load(entry.new_hash)?;
-    let binary = {
-        let old_prefix = old
-            .prefix(source, BINARY_SNIFF_LEN)
-            .map_err(Error::ReadObject)?;
-        let new_prefix = new
-            .prefix(source, BINARY_SNIFF_LEN)
-            .map_err(Error::ReadObject)?;
-        is_binary(&old_prefix) || is_binary(&new_prefix)
-    };
-    if binary {
+    if sides_are_binary(source, &old, &new)? {
         return Ok(StatChange::Binary {
             old_len: old.len(),
             new_len: new.len(),
@@ -983,6 +997,116 @@ mod tests {
             .unwrap(),
             PatchBody::Empty
         );
+    }
+
+    /// A chunked blob of two chunks. Only the first chunk is stored, so a
+    /// read of the second fails the call. The manifest claims `total_size`.
+    fn chunked_with_first_chunk_only(
+        source: &mut RecordingSource,
+        tag: u8,
+        first: Vec<u8>,
+        total_size: u64,
+    ) -> (Hash, Hash) {
+        let (chunk0, chunk1, manifest) = (fake_hash(tag), fake_hash(tag + 1), fake_hash(tag + 2));
+        source.put(chunk0, &Object::Blob(Blob { data: first }));
+        source.put(
+            manifest,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size,
+                chunk_size: 0,
+                chunks: vec![chunk0, chunk1],
+            }),
+        );
+        (manifest, chunk1)
+    }
+
+    #[test]
+    fn a_chunked_binary_patch_body_reads_no_trailing_chunk() {
+        let mut source = RecordingSource::default();
+        let (old, old_tail) = chunked_with_first_chunk_only(
+            &mut source,
+            1,
+            binary_bytes(b'a', BINARY_SNIFF_LEN + 1000),
+            3_000_000,
+        );
+        let (new, new_tail) = chunked_with_first_chunk_only(
+            &mut source,
+            4,
+            binary_bytes(b'b', BINARY_SNIFF_LEN + 500),
+            4_000_000,
+        );
+        let body = patch_body(
+            &source,
+            &modified("big.bin", old, new),
+            3,
+            WhitespaceMode::Exact,
+        )
+        .unwrap();
+        assert_eq!(body, PatchBody::Binary);
+        assert_eq!(reads_of(&source, &old_tail), 0);
+        assert_eq!(reads_of(&source, &new_tail), 0);
+    }
+
+    #[test]
+    fn a_binary_side_makes_the_pair_binary_without_reading_the_text_side() {
+        let mut source = RecordingSource::default();
+        let (bin, bin_tail) = chunked_with_first_chunk_only(
+            &mut source,
+            1,
+            binary_bytes(b'a', BINARY_SNIFF_LEN + 1000),
+            3_000_000,
+        );
+        let (text, text_tail) = chunked_with_first_chunk_only(
+            &mut source,
+            4,
+            vec![b'x'; BINARY_SNIFF_LEN + 500],
+            4_000_000,
+        );
+        let body = patch_body(
+            &source,
+            &modified("big", text, bin),
+            3,
+            WhitespaceMode::Exact,
+        )
+        .unwrap();
+        assert_eq!(body, PatchBody::Binary);
+        assert_eq!(reads_of(&source, &bin_tail), 0);
+        assert_eq!(reads_of(&source, &text_tail), 0);
+    }
+
+    #[test]
+    fn a_stored_text_above_the_memory_limit_is_refused_before_a_chunk_is_read() {
+        let mut source = RecordingSource::default();
+        let (old, old_tail) = chunked_with_first_chunk_only(
+            &mut source,
+            1,
+            vec![b'a'; BINARY_SNIFF_LEN + 1000],
+            worktree::MAX_FILE_BYTES + 1,
+        );
+        let (new, new_tail) = chunked_with_first_chunk_only(
+            &mut source,
+            4,
+            vec![b'b'; BINARY_SNIFF_LEN + 500],
+            worktree::MAX_FILE_BYTES + 1,
+        );
+        let err = patch_body(
+            &source,
+            &modified("big.txt", old, new),
+            3,
+            WhitespaceMode::Exact,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::ReadObject(WorktreeError::ContentTooLarge { size })
+                    if size == worktree::MAX_FILE_BYTES + 1
+            ),
+            "got {err:?}"
+        );
+        // Only the sniffed prefix was read.
+        assert_eq!(reads_of(&source, &old_tail), 0);
+        assert_eq!(reads_of(&source, &new_tail), 0);
     }
 
     #[test]

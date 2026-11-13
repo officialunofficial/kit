@@ -436,3 +436,159 @@ fn patch_reports_a_file_with_no_change_and_asks_nothing() {
         }]
     );
 }
+
+/// A file of `len` bytes that starts with `head` and has a hole after it, so
+/// it takes no disk space.
+fn sparse_file(path: &std::path::Path, head: &[u8], len: u64) {
+    use std::io::Write as _;
+    let mut file = fs::File::create(path).unwrap();
+    file.write_all(head).unwrap();
+    file.set_len(len).unwrap();
+}
+
+/// `len` bytes from a fixed xorshift stream. They hold NUL bytes, and a file of
+/// them cuts into chunks.
+fn pseudo_random(len: usize) -> Vec<u8> {
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut out = Vec::with_capacity(len);
+    while out.len() < len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.extend_from_slice(&state.to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+fn patch_request(paths: &[String]) -> Request<'_> {
+    Request {
+        patch: true,
+        paths,
+        ..BULK
+    }
+}
+
+#[test]
+fn patch_skips_a_binary_file_above_the_memory_limit_without_reading_it() {
+    let f = Fixture::new(&[], &[]);
+    let mut head = vec![b'a'; 100];
+    head[10] = 0;
+    sparse_file(
+        &f.root.join("big.bin"),
+        &head,
+        kit_core::worktree::MAX_FILE_BYTES + 1,
+    );
+    let paths = ["big.bin".to_owned()];
+    let events = Events::default();
+    f.run_with(&patch_request(&paths), &mut NoChooser, &events)
+        .unwrap();
+    assert_eq!(
+        *events.0.lock().unwrap(),
+        vec![Event::BinarySkipped {
+            path: "big.bin".to_owned()
+        }]
+    );
+}
+
+#[test]
+fn patch_refuses_a_text_file_above_the_memory_limit() {
+    let f = Fixture::new(&[], &[]);
+    sparse_file(
+        &f.root.join("big.txt"),
+        "line\n".repeat(4000).as_bytes(),
+        kit_core::worktree::MAX_FILE_BYTES + 1,
+    );
+    let paths = ["big.txt".to_owned()];
+    let err = f
+        .run_with(&patch_request(&paths), &mut NoChooser, &NoopObserver)
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::ReadFile {
+                source: kit_core::worktree::WorktreeError::FileTooLarge(_),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn patch_skips_a_chunked_binary_blob_that_is_staged() {
+    let f = Fixture::new(&[], &[]);
+    let data = pseudo_random(3 * 1024 * 1024);
+    let staged = kit_core::worktree::store_file_object(&f.store, &data).unwrap();
+    assert!(matches!(
+        f.store.read_object(&staged).unwrap(),
+        Object::ChunkedBlob(_)
+    ));
+    let mut idx = Index::new();
+    idx.upsert_entry(IndexEntry {
+        path: "big.bin".to_owned(),
+        status: EntryStatus::Blob,
+        object_hash: staged,
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
+    });
+    index::write_index(&f.layout, &idx).unwrap();
+    // The file in the tree is text, so only the staged side is binary.
+    fs::write(f.root.join("big.bin"), "text\n").unwrap();
+    let paths = ["big.bin".to_owned()];
+    let events = Events::default();
+    f.run_with(&patch_request(&paths), &mut NoChooser, &events)
+        .unwrap();
+    assert_eq!(
+        *events.0.lock().unwrap(),
+        vec![Event::BinarySkipped {
+            path: "big.bin".to_owned()
+        }]
+    );
+}
+
+/// The number of files under the object directory.
+fn object_files(f: &Fixture) -> usize {
+    fn walk(dir: &std::path::Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                if path.is_dir() { walk(&path) } else { 1 }
+            })
+            .sum()
+    }
+    walk(&f.root.join(".kit/objects"))
+}
+
+#[test]
+fn a_dry_run_of_a_file_of_many_chunks_stores_nothing_and_reports_what_add_stages() {
+    let f = Fixture::new(&[], &[]);
+    fs::write(f.root.join("big.bin"), pseudo_random(24 * 1024 * 1024)).unwrap();
+    let before = object_files(&f);
+    let paths = ["big.bin".to_owned()];
+    let request = Request {
+        dry_run: true,
+        paths: &paths,
+        ..BULK
+    };
+    let events = Events::default();
+    f.run_with(&request, &mut NoChooser, &events).unwrap();
+    assert_eq!(
+        *events.0.lock().unwrap(),
+        vec![Event::WouldAdd {
+            path: "big.bin".to_owned()
+        }]
+    );
+    assert_eq!(object_files(&f), before);
+    assert!(index::read_index(&f.layout).unwrap().entries.is_empty());
+
+    // The same request without `dry_run` stages the path that was reported.
+    f.paths(&["big.bin"]).unwrap();
+    let idx = index::read_index(&f.layout).unwrap();
+    assert_eq!(idx.entries.len(), 1);
+    assert_eq!(idx.entries[0].path, "big.bin");
+    assert!(object_files(&f) > before);
+}

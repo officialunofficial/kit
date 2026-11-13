@@ -70,7 +70,11 @@ Working-tree commands:
   `s` (split) and `e` (manual edit) are follow-ups. `-n`/`--dry-run` prints
   `add '<path>'` for each file that would be staged or updated and
   `remove '<path>'` for each deletion that `-A` would record. It changes no
-  index and writes no object. It is incompatible with `-p` and `-u`.
+  index and writes no object, and it keeps no object in memory, however large
+  the file is. It is incompatible with `-p` and `-u`. A binary file is skipped
+  by `-p` after a read of its first bytes, however large it is. A text file
+  above the in-memory limit (1 GiB) is refused with exit `66`, and so is a
+  staged text blob above it.
 - `kit rm [--cached] [-r|--recursive] [-f|--force] <path>...` &mdash; remove
   paths and stage the deletion for the next commit. By default this
   **deletes the worktree file(s)** and stages the removal; now-empty
@@ -158,6 +162,11 @@ Working-tree commands:
   keeps its memory near 64 MiB. Past that, `diff` and `show` keep the best
   alignment that the search reached, and report the rest as replaced.
   Such a patch still applies, but it can be larger than git's.
+  A binary pair of stored blobs prints `Binary files … differ` after a read of
+  the first bytes of each side, however large the blobs are. A stored text
+  blob above the in-memory limit (1 GiB) fails the diff with exit `66` before
+  any header is printed, as does a worktree file above the limit. `kit show`
+  and `kit status` exit `66` for the same cases.
   `--name-only` instead lists one changed path per line; `--name-status`
   prefixes each with a status letter (`A`/`D`/`M`; `T` marks a kit mode
   change). `--stat` shows a diffstat: one `<name> | <count> <graph>` row
@@ -1053,7 +1062,9 @@ by a symlink or directory without `kit add`. An *unchanged* conflict
 executable / symlink mode) needs no re-`add` and continues. The committed
 tree is built from the **resolved index/worktree** &mdash; not the
 conflict-time "ours wins" snapshot &mdash; so your edits (including a third
-distinct resolution) and the merge's clean changes both land.
+distinct resolution) and the merge's clean changes both land. The check
+that a resolution is staged hashes a large file one chunk at a time, and the
+scan for markers skips a file above 1 GiB and reads a smaller one whole.
 
 Alternatively:
 

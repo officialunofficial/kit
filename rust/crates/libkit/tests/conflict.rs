@@ -271,3 +271,59 @@ fn stage_removals_adds_a_removal_for_each_deleted_path() {
     let live = idx.entries.iter().find(|e| e.path == "a.txt").unwrap();
     assert_eq!(live.status, EntryStatus::Blob);
 }
+
+#[test]
+fn a_resolved_chunked_file_hashes_to_the_id_that_add_stages() {
+    let p = pause(
+        &[("a.txt", "base\n")],
+        &[("a.txt", "ours\n")],
+        &[("a.txt", "theirs\n")],
+    );
+    let records = materialize(&p, &NoopObserver);
+    // A resolution of several megabytes cuts into chunks.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut data = Vec::new();
+    while data.len() < 3 * 1024 * 1024 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        data.extend_from_slice(&state.to_le_bytes());
+    }
+    std::fs::write(p.f.path("a.txt"), &data).unwrap();
+    assert_eq!(
+        conflict::first_unresolved_marker(p.f.layout.worktree_root(), &records).unwrap(),
+        None
+    );
+    assert!(matches!(
+        conflict::ensure_staged(&p.f.layout, &p.f.store, &records).unwrap_err(),
+        Error::NotStaged(_)
+    ));
+    // `stage` stores the file as `kit add` does, whole.
+    p.f.stage("a.txt");
+    conflict::ensure_staged(&p.f.layout, &p.f.store, &records).unwrap();
+}
+
+#[test]
+fn a_file_above_the_scan_limit_holds_no_marker_and_is_not_read() {
+    let p = pause(
+        &[("a.txt", "base\n")],
+        &[("a.txt", "ours\n")],
+        &[("a.txt", "theirs\n")],
+    );
+    let records = materialize(&p, &NoopObserver);
+    // The marker lines start the file, so a scan that read it would find them.
+    let file = std::fs::File::create(p.f.path("a.txt")).unwrap();
+    std::io::Write::write_all(&mut &file, b"<<<<<<< ours\n=======\n>>>>>>> theirs\n").unwrap();
+    file.set_len(1024 * 1024 * 1024 + 1).unwrap();
+    // A read of the file fails, so only a scan that skips on the size passes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(p.f.path("a.txt"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+    }
+    assert_eq!(
+        conflict::first_unresolved_marker(p.f.layout.worktree_root(), &records).unwrap(),
+        None
+    );
+}
