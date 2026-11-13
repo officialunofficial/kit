@@ -492,19 +492,18 @@ whole-file reader allocates up to 128 GiB, or a changed fold gives
 existing objects new ids.
 
 **Enforced by:** `serialize::tests::serialize_refuses_a_manifest_the_reader_refuses`,
-`serialize::tests::accepts_the_chunk_cap_in_the_header`,
-`golden::chunk_count_cap_matches_spec` and
-`golden::chunked_blob_layout_rules_match_spec` (with
-`scripts/golden/objects_ref.py`), `merkle::tests::fold_root_matches_level_build`,
+`serialize::tests::rejects_each_bad_entry_with_its_own_error`,
+`serialize::tests::a_manifest_is_laid_out_as_22_plus_40_per_chunk`,
+`golden::chunk_count_cap_matches_spec` (with
+`scripts/golden/objects_ref.py`) and `golden_chunk_offsets`, `merkle::tests::fold_root_matches_level_build`,
 `merkle::tests::root_matches_commonware`, the pinned ids of
 `merkle::tests::chunked_id_at_1_000_001_chunks_is_pinned` and
 `merkle::tests::chunked_id_at_the_chunk_cap_is_pinned` (ignored lane), every
 merkelized id in `rust/tests/golden/`, and
 `worktree::blob::equality_tests::into_content_refuses_content_above_the_memory_limit`,
 `ops::blame::tests::blame_refuses_a_file_above_the_memory_limit`,
-`verify::tests::range_disclosure_refuses_a_file_above_the_memory_limit`,
-`ops::blame::tests::blame_stops_a_repeated_chunk_at_the_declared_size`,
-`verify::tests::range_disclosure_stops_a_repeated_chunk_at_the_declared_size` and
+`ops::blame::tests::blame_stops_a_repeated_chunk_at_its_span`,
+`verify::tests::range_disclosure_refuses_a_chunk_that_is_not_its_span` and
 `round_trip::manifest_above_the_blob_cap_is_refused_before_any_read`.
 
 ## A worktree file up to the chunked bound ingests in bounded memory
@@ -517,8 +516,8 @@ memory (`read_regular_file_bounded`, and `add -p`) keeps the 1 GiB limit
 (`worktree::MAX_FILE_BYTES`). The manifest is serialized once, and its list of
 chunk ids is freed before the bytes are stored.
 
-**Because:** the streaming paths hold one window of chunks and a few copies of a
-32-byte id per chunk, however large the file. The old 1 GiB check refused files that
+**Because:** the streaming paths hold one window of chunks and a few copies of an
+id and an end offset (40 bytes) per chunk, however large the file. The old 1 GiB check refused files that
 those paths handle.
 
 **If violated:** a file between 1 GiB and 128 GiB cannot be added, or an ingest
@@ -759,6 +758,11 @@ server, never a global content store. A source that does not have a base
 and a source that may not serve it give the same `DeltaBaseMissing` error;
 an unverified source's bytes are re-derived, so a wrong object is never
 used as a base.
+
+A chunk the `known` callback answers `Known::Yes` has no length, so
+its manifest is reported corrupt; answer `Known::Blob(len)` and the walk
+checks the chunk against its span
+(`verify::push::tests::a_known_chunk_is_checked_against_its_span`).
 
 A `known` tip is skipped whole, including the commit/remix/tag type check
 `verify_push` applies to every fetched tip. Callers MUST type-check known

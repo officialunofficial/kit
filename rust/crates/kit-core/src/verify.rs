@@ -1591,6 +1591,10 @@ fn build_payload<S: crate::store::ObjectSource + ?Sized>(
             let chunk_id = cb.chunks()[index as usize];
             let proof = merkle::build_chunks_multi_proof(&cb, [0, position])?;
             let bytes = source.read(&chunk_id)?;
+            // The source is untrusted: a chunk that is not one Blob as long
+            // as its span would make a bundle that does not verify.
+            let content_len = blob_content_len(&bytes).ok_or(VerifyError::ChunkBytesNotBlob)?;
+            cb.check_chunk_length(index, content_len)?;
             Ok(PayloadWire::Chunk {
                 total_size: cb.total_size(),
                 chunk_size: cb.chunk_size(),
@@ -1847,6 +1851,40 @@ mod tests {
             .unwrap();
         assert!(matches!(
             build_payload(&store, &leaf, selector),
+            Err(VerifyError::ChunkBytesNotBlob)
+        ));
+    }
+
+    /// The chunk selector holds the same line: a chunk that is not as long as
+    /// its span, or not a Blob, builds no bundle.
+    #[test]
+    fn chunk_disclosure_refuses_a_chunk_that_is_not_its_span() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+        let chunk = write_blob(&store, b'a', 1000);
+        let manifest =
+            Object::ChunkedBlob(crate::object::testing::spread(1500, 0, vec![chunk; 2]).unwrap());
+        let leaf = store
+            .write(&crate::serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        assert!(matches!(
+            build_payload(&store, &leaf, Selector::Chunk(1)),
+            Err(VerifyError::Decode(KitError::ChunkLengthMismatch {
+                index: 1,
+                ..
+            }))
+        ));
+        let not_a_blob = store
+            .write(&crate::serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        let manifest = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(10, 0, [(not_a_blob, 10)]).unwrap(),
+        );
+        let leaf = store
+            .write(&crate::serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        assert!(matches!(
+            build_payload(&store, &leaf, Selector::Chunk(0)),
             Err(VerifyError::ChunkBytesNotBlob)
         ));
     }
@@ -2515,7 +2553,7 @@ mod tests {
     }
 
     /// A chunk whose Blob holds a different number of bytes than its span
-    /// is refused by the verifier, and so is one that is not a Blob.
+    /// is refused by the builder, and so is one that is not a Blob.
     #[test]
     fn chunk_bytes_must_be_one_blob_of_the_span() {
         let f = build_fixture();
@@ -2528,14 +2566,16 @@ mod tests {
             .write(&crate::serialize::serialize(&manifest).unwrap())
             .unwrap();
         let commit = commit_with_entry(&f, EntryMode::Blob, manifest_id);
-        let bundle = build_disclosure(&f.store, &commit, &[b"x"], Selector::Chunk(0)).unwrap();
+        // The builder refuses it. The verifier's refusal of a forged bundle is
+        // pinned by the vectors `neg_chunk_length_differs_from_span` and
+        // `neg_chunk_bytes_not_blob`.
         assert!(matches!(
-            verify_disclosure(&commit, &bundle),
-            Err(VerifyError::ChunkLengthDiffersFromSpan {
+            build_disclosure(&f.store, &commit, &[b"x"], Selector::Chunk(0)),
+            Err(VerifyError::Decode(KitError::ChunkLengthMismatch {
                 index: 0,
                 expected: 750,
                 actual: 1000
-            })
+            }))
         ));
 
         // A chunk id that names a commit, not a Blob: a commit's id is the hash
@@ -2550,9 +2590,8 @@ mod tests {
             .write(&crate::serialize::serialize(&manifest).unwrap())
             .unwrap();
         let commit = commit_with_entry(&f, EntryMode::Blob, manifest_id);
-        let bundle = build_disclosure(&f.store, &commit, &[b"x"], Selector::Chunk(0)).unwrap();
         assert!(matches!(
-            verify_disclosure(&commit, &bundle),
+            build_disclosure(&f.store, &commit, &[b"x"], Selector::Chunk(0)),
             Err(VerifyError::ChunkBytesNotBlob)
         ));
 

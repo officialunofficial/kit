@@ -667,7 +667,7 @@ const GOOD_SPAN: &[u8] = include_bytes!("../../tests/golden/http-objects/span_tw
 /// Exercise the KDSP verifier on arbitrary bytes. The trusted id is the
 /// committed fixture's real commit, and a copy of the input with that commit
 /// spliced into the header is also verified, so mutated containers get past
-/// the commit comparison and reach the anchor and chunk checks.
+/// the commit comparison and reach the chain and chunk checks.
 pub fn span_decode_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
     let commit: [u8; 32] = GOOD_SPAN[5..37].try_into().expect("committed commit id");

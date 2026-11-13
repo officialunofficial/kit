@@ -86,10 +86,10 @@ for why that ordering is load-bearing, not cosmetic.
 | One chunk step | at most `32 * 2 * ceil(log2(N + 1))` sibling bytes, `N` = the file's chunk count (`+1` for the metadata leaf); the step is one multi-proof over positions `{0, index + 1}` |
 | A Bao slice of `len` content bytes | roughly one 1 KiB Bao leaf block per 1 KiB of `len`, plus `~64 * log2(blocks)` bytes of Bao tree-hash overhead |
 
-A concrete example, captured from a real v2-bundle run against a small
+A concrete example, captured from a real v3-bundle run against a small
 demo repo (commit `64ccb22…`, a two-level path `src/lib.rs`, a 40-byte
 range at offset 100): the whole disclosure bundle &mdash; commit bytes, two
-tree-entry steps, and a Bao-slice range payload &mdash; was **684 bytes**. A single file
+tree-entry steps, and a Bao-slice range payload &mdash; was **683 bytes**. A single file
 directly under the root instead of two levels deep would be smaller still;
 a 1 GiB chunked file has about 16,384 chunks at the 64 KiB average, so its
 chunk step carries at most 28 sibling digests (under 1 KiB),
@@ -357,7 +357,7 @@ against a trusted commit id, and recover exactly the disclosed bytes:
 
 ```console
 $ kit prove HEAD src/lib.rs --range 100:40 -o p.bin
-proof: 684 B for src/lib.rs @ 64ccb22 (range)
+proof: 683 B for src/lib.rs @ 64ccb22 (range)
 
 $ kit verify-proof 64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93 \
     p.bin --expect-path src/lib.rs --payload-out slice.bin
@@ -478,12 +478,12 @@ not implement. `Copying` wraps the slice so that it does. The test
 lines of this sample and of the next one against a real `Tree`, and fails if
 this document stops printing them.
 
-A v2 disclosure bundle carries that inner root on every `Step` and
+A v3 disclosure bundle carries that inner root on every `Step` and
 chunk header, so a commonware-native verifier reads it from the decoded
 bundle and runs the two-step sequence above with no out-of-band channel:
 
 ```rust
-// After decoding a v2 `Step` (SPEC-DISCLOSURE §3):
+// After decoding a v3 `Step` (SPEC-DISCLOSURE §3):
 let trusted_tree_id = /* commit.tree_hash, or the previous step's child_id */;
 assert_eq!(
     domain_digest(b"kit.tree\x00", &step.inner_root),
@@ -499,7 +499,7 @@ proof.verify_element_inclusion::<Blake3>(
 )?;
 ```
 
-The field is mandatory (bundle version 2; a version byte of 1 is
+The field is mandatory (bundle version 3; a version byte of 1 or 2 is
 rejected). It is wrap-checked against the
 trusted id before use and cross-checked against the proof fold, so it
 adds no trust surface.
@@ -602,7 +602,7 @@ shape, common to both:
    closure, `children(obj, mode)` from the root).
 6. Only then interpret the payload/leaf content, and always **against the
    authenticated id**, never a caller-supplied path/offset/length that
-    wasn't itself part of what got verified. A v2 disclosure bundle
+    wasn't itself part of what got verified. A v3 disclosure bundle
     carries a bare inner root on each `Step` and chunk header, but that
     field is wrap-checked against the trusted id **before** it is used
     for anything (§5); the comparison against a trusted value remains
@@ -682,7 +682,7 @@ own test harness should take.
 - **A single bundle cannot prove a range that crosses a chunk boundary.**
   `kit prove --range` rejects such a request (`RangeCrossesChunkBoundary`)
   rather than silently splitting it into multiple chunk proofs. The KDSP
-  span container ([SPEC-DISCLOSURE §8](specs/SPEC-DISCLOSURE.md#8-multi-chunk-span-container-kdsp-v1))
+  span container ([SPEC-DISCLOSURE §8](specs/SPEC-DISCLOSURE.md#8-multi-chunk-span-container-kdsp-v2))
   proves such a range: `kit_core::verify::span` builds and verifies it, but
   `kit prove` does not emit it.
 - **git SHA-1 hashes support full disclosure only.** A git blob is a flat
@@ -719,7 +719,7 @@ own test harness should take.
 | `verify_closure_packs(root, mode, packs) -> ClosureReport` | closure check over raw-only packs | SPEC-DISCLOSURE §7.2/§7.4 |
 | `verify_closure_manifest(expected_root, manifest, packs) -> ClosureReport` | closure check + manifest-root binding | SPEC-DISCLOSURE §7.3/§7.4 |
 | `export_closure(store, root, mode) -> ClosureExport` (native) | producer side of a closure | SPEC-DISCLOSURE §7.2/§7.3 |
-| `merkle::wrap_id(kind, inner_root) -> Hash` | apply the outer type-domain wrap (§5's step 1); a v2 `Step.inner_root` is wrap-checked with this before upstream BMT verify | SPEC-MERKLE-OBJECTS §2 |
+| `merkle::wrap_id(kind, inner_root) -> Hash` | apply the outer type-domain wrap (§5's step 1); a v3 `Step.inner_root` is wrap-checked with this before upstream BMT verify | SPEC-MERKLE-OBJECTS §2 |
 | `merkle::verify_tree_entry` / `verify_chunk` (+ `*_range` / `*_multi`) | single/range/multi-leaf BMT inclusion proofs, against the object id | SPEC-MERKLE-OBJECTS §5.4 |
 | **MCP tools** (`kit mcp`) | | |
 | `kit_prove` / `kit_verify_proof` / `kit_closure_verify` | agent-facing equivalents of the CLI commands above | &mdash; |

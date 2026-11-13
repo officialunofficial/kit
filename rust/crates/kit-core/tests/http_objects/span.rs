@@ -161,10 +161,13 @@ pub(super) fn verify(trusted: &Hash, input: &[u8]) -> Result<Span> {
     }
     let mut output = Vec::new();
     for p in &parsed {
-        let content = match deserialize(p.5).map_err(|_| "span_chunk_bytes")? {
-            Object::Blob(b) if b.data.len() as u64 == p.4 - p.3 => b.data,
-            _ => return Err("span_chunk_bytes"),
+        // The inner bundle was verified, so its chunk is a Blob as long as
+        // its span.
+        let Object::Blob(blob) = deserialize(p.5).unwrap() else {
+            unreachable!("a verified chunk is a Blob")
         };
+        assert_eq!(blob.data.len() as u64, p.4 - p.3);
+        let content = blob.data;
         let (from, to) = (offset.max(p.3), end.min(p.4));
         if from < to {
             output.extend_from_slice(

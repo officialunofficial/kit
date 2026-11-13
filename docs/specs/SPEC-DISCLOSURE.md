@@ -342,7 +342,10 @@ offset); a range covering a whole small blob (the first Bao block, and a
 last partial block); the same chunk id at two indices; a range inside the
 committed span of a real chunk that is longer than its span; and two
 disclosures under an id whose spans overlap, which both verify and pin the
-trust statement of §1.
+trust statement of §1. The last two are in
+`scripts/golden/chunk_offsets_expected.json` (`long_chunk_range`, `overlap`),
+which `golden_chunk_offsets.rs` checks, and the overlap also has the vectors
+`chunk_overlap_first` and `chunk_overlap_second`.
 
 Reject vectors: a non-`Tree` intermediate step mode; a step's proof
 checked against the wrong parent (two steps swapped); an invalid entry
@@ -540,8 +543,7 @@ flipped, so the referenced id is `missing` and the damaged bytes are
 blob (`neg_commit_tree_names_blob`, `neg_remix_tree_names_blob`); a tag
 that records `target_type` `Commit` but names a tree (`neg_tag_target_type`);
 chunks whose lengths are swapped but sum correctly
-(`neg_chunk_length_swapped`); a chunk shorter than its span
-(`neg_chunk_length_short`); a fixed-size layout of `chunk_size` 6 whose chunks
+(`neg_chunk_lengths_swapped`); a fixed-size layout of `chunk_size` 6 whose chunks
 hold 5 and 7 bytes (`neg_fixed_chunk_length`); a `Tree` entry and a `Blob`
 entry that name one absent id (`neg_conflicting_edges_to_missing`);
 unreferenced extra (still

@@ -206,6 +206,16 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `span_chunk_chain`; the `span_anchor_*` reasons are gone. The import
   attestation `specVersion` is 2 (`IMPORT_SPEC_VERSION`), so an attestation
   of version 1 no longer verifies.
+- **Breaking:** the types of the disclosure API follow the bundle:
+  `verify::Selector::Range` has no `with_offsets` field,
+  `DisclosedPayload::Chunk` and `DisclosedPayload::Range` gain `start` and
+  `end` (`Option<u64>` for a range), and the `absolute_offset` of a range is
+  a `u64`, not an `Option<u64>`. The enums are not `#[non_exhaustive]`, so a
+  struct pattern adds the fields. `verify::span::SpanError` loses
+  `AnchorInvalid`, `AnchorSelector`, `AnchorOffset`, `AnchorBinding` and
+  `ChunkBytes` and gains `ChunkChain`, so the reasons `span_anchor_*` and
+  `span_chunk_bytes` are gone and `span_chunk_chain` is new.
+  `RangeProofError` loses `InvalidBoundaries` and `HintMismatch`.
 - **Breaking:** the `known` callback of `verify::verify_push` and the other
   closure walks returns `verify::Known` (`No`, `Yes` or
   `Blob(content_len)`) instead of a `bool`. The walk checks a known chunk's
