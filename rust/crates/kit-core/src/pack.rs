@@ -133,16 +133,18 @@ fn read_budget(pack_len: usize, owned_bytes: Option<&AtomicU64>) -> ResidentBudg
         .with_decoded_cap(decoded_bytes_cap(pack_len))
 }
 /// Bytes of resident bookkeeping that [`PackReader::read`] charges to its
-/// budget for each pack entry, before it allocates any of it. An entry costs
+/// budget for each pack entry, before it allocates any of it. An entry holds
 /// a wire frame in the entry list, a hash in the report, a share of the
-/// base-use map, and a share of one staging window (a temp file path, a
-/// staged-map slot and a stage result). A minimal entry is a few bytes on the
-/// wire, so a pack of ten million of them is small yet needs this much memory
-/// per entry. The charge makes the memory cap, not the entry cap, refuse such
-/// a pack. A test that counts the real peak heap use pins this value. The
-/// measured cost is about 600 bytes per entry, and the value adds a margin
-/// for longer store paths.
-pub const PACK_ENTRY_RESIDENT_COST: usize = 704;
+/// base-use map, and a share of one staging window: the temp file path, a
+/// staged-map slot and a stage result. The path is held twice while the entry
+/// waits in the queue, so the figure includes two copies of a store path of
+/// up to about 100 bytes. A minimal entry is a few bytes on the wire, so a
+/// pack of ten million of them is small yet needs this much memory per entry.
+/// The charge makes the memory cap, not the entry cap, refuse such a pack. A
+/// test that counts the real peak heap use pins this value. The measured
+/// cost depends on the store path and on scheduling: 691 to 705 bytes per
+/// entry under `/tmp`, and 728 to 754 under a path of 37 characters.
+pub const PACK_ENTRY_RESIDENT_COST: usize = 896;
 /// Entries that [`PackReader::read`] stages before it commits them. Each
 /// window holds at most this many temp files and staged-map slots, so a
 /// pack with millions of entries does not fill the disk or the heap.

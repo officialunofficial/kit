@@ -117,6 +117,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A pack read charges 896 bytes of memory per entry, up from 704. The old
+  figure was below the real cost with a long store path. A client now refuses
+  a pack of more than about 2.39 million entries (a small pack) or 4.79 million
+  entries (a 256 MiB pack), where it refused more than about 3.05 million and
+  6.10 million.
 - `rebase` and `bisect` walk up to 1,000,000 commits, as `merge` and `log`
   do. A branch with more commits to replay, a base with more ancestors, or a
   bisect range with more candidates fails with an error that names the
