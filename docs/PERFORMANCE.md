@@ -170,8 +170,8 @@ pack and one prepared batch, each up to the raised size.
 ### The memory of a proof
 
 Building a proof makes one pass over the leaves. Its memory is one pending
-node per level plus the sibling digests of the proof, so it is O(log n) plus
-the proof. A manifest of 8,388,608 chunks peaked at 1,050,212 kB to build one
+node per level plus the positions and the sibling digests of the proof, so it
+is O(log n) plus the proof. A manifest of 8,388,608 chunks peaked at 1,050,212 kB to build one
 chunk proof, and at 263,980 kB, the size of the manifest alone, after the
 change. A multi proof of two positions gave the same two numbers. Each ran
 once as a release build on one 32-CPU machine, and each took about 1.9

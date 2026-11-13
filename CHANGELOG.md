@@ -142,8 +142,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Building a proof no longer holds the leaves or the levels of the tree. One
   pass over the leaves keeps one pending node per level and the siblings the
   proof names. A proof of a manifest of 8,388,608 chunks took about 770 MiB
-  of memory above the manifest itself and now takes none that shows. The proof
-  bytes, ids and signatures are the same.
+  of memory above the manifest itself and now stays within the manifest's own
+  size. The proof bytes, ids and signatures are the same.
 - **Breaking:** `kit_client::Limits` has a new field `max_tickets`, the most
   tickets one advance may name, the packlist node's included.
   `Limits::from_server_info` fills it from `max_tickets_per_advance`: seven

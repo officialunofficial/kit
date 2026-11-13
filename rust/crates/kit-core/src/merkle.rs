@@ -542,8 +542,9 @@ fn stream_proof(
     required: &BTreeSet<(usize, usize)>,
 ) -> Vec<Hash> {
     let mut found: BTreeMap<(usize, usize), Hash> = BTreeMap::new();
-    let mut pending = [None::<Hash>; MAX_LEVELS + 1];
-    let mut produced = [0usize; MAX_LEVELS + 1];
+    let levels = levels_in_tree(leaf_count);
+    let mut pending = vec![None::<Hash>; levels];
+    let mut produced = vec![0usize; levels];
     // A node made at `level` takes the next index there and is kept when
     // the proof needs it.
     let mut emit = |level: usize, node: &Hash| {
@@ -574,7 +575,7 @@ fn stream_proof(
 
     // Close the unpaired nodes bottom-up, as `BmtFold::root` does. The node
     // carried out of a level is the last node of the level above.
-    let top = levels_in_tree(leaf_count) - 1;
+    let top = levels - 1;
     let mut carry: Option<Hash> = None;
     for (level, unpaired) in pending.iter().enumerate().take(top) {
         carry = match (*unpaired, carry) {
