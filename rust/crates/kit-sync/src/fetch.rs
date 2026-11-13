@@ -402,6 +402,8 @@ fn fetch_objects_inner(
     // Unidentified sources retain batched tracking writes. Checkpoints need
     // each tracking rename durable before the checkpoint is published.
     let mut tracking = refs::RemoteRefBatch::new(layout, remote)?;
+    // The tracking refs this fetch published, with the tip it gave each.
+    let mut published: Vec<(String, Hash)> = Vec::new();
     let result: Result<(), SyncError> = (|| {
         for r in remote_refs {
             if observer.cancelled() {
@@ -508,6 +510,7 @@ fn fetch_objects_inner(
             // Make the tracking rename durable before its checkpoint; a
             // crash between them leaves the old record.
             tracking.write(&r.name, &completed.tip)?;
+            published.push((r.name.clone(), completed.tip));
             if require_signed && let Some(path) = &checkpoint_path {
                 let batch =
                     std::mem::replace(&mut tracking, refs::RemoteRefBatch::new(layout, remote)?);
@@ -531,14 +534,31 @@ fn fetch_objects_inner(
     if let Some(cursor) = cursor {
         // A disposable cache: failing to write it costs the next fetch a
         // full walk, never this fetch.
-        let record = crate::cursor::CursorRecord {
-            cursor,
-            tracking: crate::cursor::tracking_digest(layout, remote)?,
-            signed: require_signed,
-        };
-        let _ = record.persist(&cursor_path);
+        let tracking_digest = crate::cursor::tracking_digest(layout, remote)?;
+        // Another fetch of this remote may have moved a ref this fetch
+        // published, for example back to the tip of an older listing. The
+        // digest above then describes refs that do not match the cursor, so
+        // no record is written and the next fetch lists the remote again. The
+        // refs are read after the digest: a ref that still holds its tip now
+        // held it when the digest was taken, or the digest no longer matches
+        // the refs on disk.
+        if tips_still_published(layout, remote, &published) {
+            let record = crate::cursor::CursorRecord {
+                cursor,
+                tracking: tracking_digest,
+                signed: require_signed,
+            };
+            let _ = record.persist(&cursor_path);
+        }
     }
     Ok(())
+}
+
+/// Whether every ref in `published` still holds the tip this fetch gave it.
+fn tips_still_published(layout: &RepoLayout, remote: &str, published: &[(String, Hash)]) -> bool {
+    published.iter().all(|(name, tip)| {
+        matches!(refs::read_remote_ref(layout, remote, name), Ok(Some(held)) if held == *tip)
+    })
 }
 
 /// Delete the tracking refs of `remote` whose branch the listing lacks. It
