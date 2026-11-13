@@ -416,27 +416,35 @@ impl Cutter<'_> {
     }
 
     /// The furthest position after `from` up to `over` whose real plan fits
-    /// the budget, given that every position up to `fits` does. Plans grow
+    /// the budget, given that every position up to `fits` does, and the packs
+    /// of the plan at the position it found when it probed one. Plans grow
     /// with the position, so a binary search finds it.
-    fn widest(&self, from: usize, mut fits: usize, mut over: usize) -> Result<usize, PushError> {
+    fn widest(
+        &self,
+        from: usize,
+        mut fits: usize,
+        mut packs: Option<usize>,
+        mut over: usize,
+    ) -> Result<(usize, Option<usize>), PushError> {
         while fits < over {
             let mid = fits + (over - fits).div_ceil(2);
-            if self.probe(from, mid)?.1 <= self.budget {
-                fits = mid;
+            let mid_packs = self.probe(from, mid)?.1;
+            if mid_packs <= self.budget {
+                (fits, packs) = (mid, Some(mid_packs));
             } else {
                 over = mid - 1;
             }
         }
-        Ok(fits)
+        Ok((fits, packs))
     }
 
     /// The end position of the step that starts at `from`: the furthest one
     /// whose real plan fits the budget. The weights say where to start looking
     /// and never decide: each position taken has been probed with its real
     /// plan, and the search goes on past the weights' ceiling while plans fit
-    /// (a moved directory weighs all it holds and sends none of it). The least
-    /// step cannot be divided; it is checked exactly, and `Cut::TooBig` says
-    /// what it weighs when it does not fit.
+    /// and leave room (a moved directory weighs all it holds and sends none of
+    /// it). The least step cannot be divided; it is checked exactly, and
+    /// `Cut::TooBig` says what it weighs when it does not fit.
     fn cut(&self, from: usize) -> Result<Cut, PushError> {
         let wcap = pack_weight_cap(self.cap, self.limits.max_pack_bytes);
         let natural = self.furthest(from, wcap.saturating_mul((self.budget / 2) as u64));
@@ -452,14 +460,30 @@ impl Cutter<'_> {
             .furthest(from, wcap.saturating_mul(self.budget as u64))
             .max(least);
         let end = self.weights.len() - 1;
-        let mut fits = self.widest(from, least, ceiling)?;
-        let (mut reached, mut stride) = (ceiling, 1);
-        while fits == reached && reached < end {
-            let next = (reached + stride).min(end);
-            if self.probe(from, next)?.1 <= self.budget {
-                (fits, reached, stride) = (next, next, stride * 2);
+        // The weights say a step up to `natural` fits, which is the usual
+        // answer, so look there first.
+        let (mut fits, mut packs, mut over) = (least, None, ceiling);
+        if natural > least && natural <= ceiling {
+            let natural_packs = self.probe(from, natural)?.1;
+            if natural_packs <= self.budget {
+                (fits, packs) = (natural, Some(natural_packs));
             } else {
-                fits = self.widest(from, fits, next - 1)?;
+                over = natural - 1;
+            }
+        }
+        (fits, packs) = self.widest(from, fits, packs, over)?;
+        let (mut reached, mut stride) = (ceiling, 1);
+        while over == ceiling
+            && fits == reached
+            && reached < end
+            && packs.is_none_or(|used| used < self.budget)
+        {
+            let next = (reached + stride).min(end);
+            let next_packs = self.probe(from, next)?.1;
+            if next_packs <= self.budget {
+                (fits, packs, reached, stride) = (next, Some(next_packs), next, stride * 2);
+            } else {
+                (fits, _) = self.widest(from, fits, packs, next - 1)?;
                 break;
             }
         }
@@ -683,11 +707,10 @@ pub(super) fn plan_split(
         let mut needed: Option<u64> = None;
         let mut refusal: Option<PushError> = None;
         while from < chain.commits.len() {
-            if steps.len() >= ctl.max_steps {
-                return Err(PushError::PushSplitLimit(format!(
-                    "this push would need more than {} advances; no advance of this branch was published. Ask the operator to raise the tickets per advance (or max_pack_bytes), or push an ancestor commit first",
-                    ctl.max_steps
-                )));
+            // A pass that will be cut again at a larger size may have more
+            // steps than the last one needs.
+            if needed.is_none() && steps.len() >= ctl.max_steps {
+                return Err(too_many_steps(ctl.max_steps));
             }
             match cutter.cut(from)? {
                 Cut::To(to) => from = to,
@@ -728,6 +751,13 @@ pub(super) fn plan_split(
         payload_cap = cap;
         cutter.cap = cap;
     }
+}
+
+/// The refusal of a push that needs more advances than `max_steps`.
+fn too_many_steps(max_steps: usize) -> PushError {
+    PushError::PushSplitLimit(format!(
+        "this push would need more than {max_steps} advances; no advance of this branch was published. Ask the operator to raise the tickets per advance (or max_pack_bytes), or push an ancestor commit first"
+    ))
 }
 
 /// The refusal of a commit that adds more than the budget's packs of the
@@ -1929,5 +1959,51 @@ mod step_fit_tests {
         .unwrap();
         assert!(plan.steps.len() <= 3, "{} steps", plan.steps.len());
         assert_every_step_seals(&store, &plan, remote, limits);
+    }
+
+    #[test]
+    fn the_step_limit_applies_to_the_cut_at_the_final_pack_size() {
+        let (_dir, store) = store();
+        let remote = commit(
+            &store,
+            tree(&store, &[("r", blob(&store, 1, 10))]),
+            vec![],
+            1,
+        );
+        let mut files: Vec<(String, Hash)> = (0..10)
+            .map(|i| (format!("h{i:02}"), blob(&store, 100 + i, 3000)))
+            .collect();
+        let mut tip = commit(&store, tree_of(&store, &files), vec![remote], 2);
+        for i in 0..40_u8 {
+            files.push((format!("l{i:02}"), blob(&store, 500 + u64::from(i), 3000)));
+            tip = commit(&store, tree_of(&store, &files), vec![tip], 10 + i);
+        }
+        let limits = ticketed(None);
+        let plan_with = |max_steps: usize| {
+            let control = PushControl {
+                max_steps,
+                ..PushControl::default()
+            };
+            plan_split(
+                &store,
+                tip,
+                Some(remote),
+                limits,
+                2500,
+                &control,
+                RefWriteCondition::Match(remote),
+                "main",
+            )
+        };
+        let unlimited = plan_with(MAX_SPLIT_STEPS).unwrap();
+        assert!(unlimited.payload_cap > 2500);
+        // The heavy commit comes first, so the pass at the preferred size would
+        // have used more steps than the final one needs.
+        let exact = plan_with(unlimited.steps.len()).unwrap();
+        assert_eq!(exact.steps, unlimited.steps);
+        assert!(matches!(
+            plan_with(unlimited.steps.len() - 1),
+            Err(PushError::PushSplitLimit(_))
+        ));
     }
 }
