@@ -126,8 +126,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of many large files can be fetched. Push still counts every chunk.
 - `kit gc` counts no chunk of a chunked file toward its 10,000,000-object
   cap. It keeps the chunk ids apart in a sorted list that it deduplicates as
-  it grows, so memory stays near twice the 32 bytes of each distinct chunk id. gc
-  refuses a repository of more than 134,217,728 distinct live chunks, as
+  it grows, so memory stays near twice the 32 bytes of each distinct chunk
+  id. gc refuses a repository of more than 134,217,728 distinct live chunks, as
   `GcRootsError::TooManyChunks`. It reads the type of each chunk before it
   deletes anything, and refuses a chunk that is not a blob or a delta, as
   `GcRootsError::ChunkNotBlob`, which names the manifest. Its sweep lists one

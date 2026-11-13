@@ -279,7 +279,9 @@ fn collect_tree_roots(
 }
 
 /// Most distinct chunk ids [`live_objects`] holds: 134,217,728, which is 4 GiB
-/// of ids. Past it the mark fails with [`GcRootsError::TooManyChunks`].
+/// of ids. Past it the mark fails with [`GcRootsError::TooManyChunks`]. The
+/// chunk id buffer is checked at a compaction, so before the error it can hold
+/// about twice that.
 pub const MAX_LIVE_CHUNKS: usize = 134_217_728;
 
 /// The chunk id buffer compacts only when its capacity would grow past this
@@ -462,9 +464,13 @@ fn mark_live(
         if matches!(store.object_type(&h)?, ObjectType::Blob | ObjectType::Delta) {
             continue;
         }
-        match store.read_object(&h)? {
-            Object::ChunkedBlob(manifest) => ids.extend(&manifest.chunks)?,
-            other => queue.extend(children(&other, ClosureMode::History)),
+        let object = store.read_object(&h)?;
+        let edges = children(&object, ClosureMode::History);
+        if matches!(object, Object::ChunkedBlob(_)) {
+            drop(object);
+            ids.extend(&edges)?;
+        } else {
+            queue.extend(edges);
         }
     }
     drop(queue);

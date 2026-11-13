@@ -469,8 +469,8 @@ where
 /// chunk that several versions of a file share is read once. Past that bound
 /// a chunk is checked again for each manifest that names it, and memory stays
 /// fixed. A repository past the cap in chunks still passes this check, and
-/// so it does `gc`, which counts no chunk toward the cap. Push, which
-/// retains every chunk, refuses it.
+/// so does `gc`, which counts no chunk toward the cap. Push, which retains
+/// every chunk, refuses it.
 ///
 /// # Errors
 ///

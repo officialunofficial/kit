@@ -649,7 +649,8 @@ and builder byte-identity checks
 **Always:** every reachability walk &mdash; store-backed
 `reachable_objects` / `reachable_closure` / `reachable_snapshot`, the
 store-less `verify_closure` BFS, the pull-based `verify_closure_streaming`
-walk, push verification (`verify_push`), and push/fetch pack planning &mdash; takes
+walk, push verification (`verify_push`), push/fetch pack planning, and the
+`kit gc` mark (`ops::gc::mark_live`) &mdash; takes
 its edges from `ops::graph::children(obj, mode)`. The verifiers
 (`verify_closure*` and `verify_push`) share one BFS, `verify::closure::walk`;
 none keeps a walker of its own. Snapshot mode omits

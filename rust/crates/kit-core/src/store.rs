@@ -687,8 +687,9 @@ impl ObjectStore {
     /// Enumerate every object hash currently in the store by walking
     /// `objects/<2-hex>/<62-hex>`. Entries whose names are not the
     /// expected hex shape (stray files, atomic-write temp files, unknown
-    /// dirs) are skipped — they are not objects. Used by `gc` to find
-    /// prune candidates.
+    /// dirs) are skipped — they are not objects. Holds every id at once; a
+    /// caller that can work a directory at a time uses
+    /// [`list_shard`](Self::list_shard).
     ///
     /// # Errors
     /// [`StoreError::Io`] if a directory cannot be read (gc must then

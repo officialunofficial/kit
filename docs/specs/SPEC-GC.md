@@ -79,9 +79,11 @@ chunked blob.
   (10,000,000), and no chunk counts toward the cap.
 - `chunks` holds the ids that reached manifests list, sorted, without
   duplicates and disjoint from `objects`. It is capped at 134,217,728
-  distinct ids, which is 4 GiB of ids. Each chunk MUST be a blob or a delta,
-  since a chunk is a leaf and gc cannot tell what an object of another kind
-  reaches. An object of any other kind in a manifest is an error, not a chunk. A manifest that another manifest lists
+  distinct ids, which is 4 GiB of ids. The id buffer is checked at a
+  compaction, so it can hold about twice that before the error. Each chunk
+  MUST be a blob or a delta, since a chunk is a leaf and gc cannot tell what
+  an object of another kind reaches. An object of another kind that a manifest
+  lists, and that the walk reaches no other way, is an error, not a chunk. A manifest that another manifest lists
   as a chunk and that is also reached as a file is an object, and its own
   chunks are live.
 - An object is live when it is in `objects` or in `chunks`.

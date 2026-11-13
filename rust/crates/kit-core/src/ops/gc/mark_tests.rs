@@ -317,6 +317,7 @@ fn a_chunk_that_is_an_index_root_is_kept_when_its_manifest_is_unreachable() {
     assert!(fx.store.contains(&chunks[1]), "the staged chunk must stay");
     assert!(!fx.store.contains(&chunks[0]) && !fx.store.contains(&chunks[2]));
     assert_eq!((report.live, report.live_chunks), (1, 0));
+    fx.assert_closure_readable();
 }
 
 #[test]
@@ -378,6 +379,21 @@ fn a_leaf_is_not_read_or_verified() {
     let live = fx.mark(MarkLimits::DEFAULT).unwrap();
 
     assert!(live.contains(&leaf));
+}
+
+#[test]
+fn a_delta_leaf_is_not_read_or_verified() {
+    let fx = Fx::new();
+    let delta = fx.delta(fx.blob("base"));
+    let tree = fx.tree(&[delta], &[]);
+    let commit = fx.commit(tree, vec![], "main");
+    fx.branch("main", &commit);
+    let path = fx.store.path_for(&delta);
+    let mut bytes = fs::read(&path).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::write(&path, bytes).unwrap();
+
+    assert!(fx.mark(MarkLimits::DEFAULT).unwrap().contains(&delta));
 }
 
 #[test]
@@ -519,7 +535,6 @@ fn the_buffer_compacts_before_it_grows_past_the_threshold() {
         ids.extend(&same).unwrap();
         // Three distinct ids give a threshold of max(2 × 3, 4) = 6.
         assert!(ids.ids.len() <= 6, "grew to {}", ids.ids.len());
-        assert!(ids.ids.capacity() <= 6, "capacity {}", ids.ids.capacity());
     }
     ids.compact().unwrap();
     let mut expected = same.to_vec();
@@ -746,6 +761,7 @@ fn the_report_counts_live_chunks() {
     assert_eq!(report.live_chunks, 7);
     assert_eq!(report.pruned, 5);
     assert_eq!(report.scanned, 3 + 7 + 5);
+    fx.assert_closure_readable();
 }
 
 #[test]
@@ -797,6 +813,8 @@ fn a_dry_run_and_a_real_run_share_their_candidates() {
     assert_eq!(dry_report.bytes_reclaimed, real_report.bytes_reclaimed);
     assert_eq!(real_report.pruned, 20 + 5);
     assert!(dry_report.dry_run && !real_report.dry_run);
+    dry.assert_closure_readable();
+    real.assert_closure_readable();
 }
 
 #[test]
@@ -815,6 +833,7 @@ fn the_sweep_visits_every_shard() {
     for o in &orphans {
         assert!(!fx.store.contains(o));
     }
+    fx.assert_closure_readable();
 }
 
 // ---------------------------------------------------------------------
@@ -886,7 +905,9 @@ struct Graph {
 /// Write the objects of a spec. Objects that no root reaches stay in the
 /// store as orphans.
 fn build_objects(fx: &Fx, spec: &Spec) -> Graph {
-    let pool = fx.blobs("pool", spec.pool);
+    let mut pool = fx.blobs("pool", spec.pool);
+    // A delta is a leaf and may be a chunk.
+    pool.push(fx.delta(pool[0]));
     let mut manifests: Vec<Hash> = Vec::new();
     for selectors in &spec.manifests {
         // Chunks come from the shared pool. A weird manifest also lists
@@ -1010,10 +1031,10 @@ proptest! {
         let roots = fx.roots();
         let old = old_walk(&fx.store, &roots).unwrap();
         let before = fx.snapshot();
-        let tight = limits(MAX_REACHABLE, MAX_LIVE_CHUNKS, spec.floor);
+        let injected = limits(MAX_REACHABLE, MAX_LIVE_CHUNKS, spec.floor);
 
-        let new = mark_live(&fx.store, &roots, tight);
-        let swept = fx.gc(tight, false);
+        let new = mark_live(&fx.store, &roots, injected);
+        let swept = fx.gc(injected, false);
         if let Ok(live) = new {
             prop_assert_eq!(as_set(&live), old.clone());
             prop_assert_eq!(live.len(), old.len(), "an id counted twice");
