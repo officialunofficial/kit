@@ -644,6 +644,43 @@ fn a_parent_that_is_not_a_commit_is_its_own_root() {
     assert!(brought.contains(&(second, second)));
 }
 
+fn one(s: &ObjectStore, id: Hash, shallow: &[Hash]) -> BTreeSet<Hash> {
+    let shallow: HashSet<Hash> = shallow.iter().copied().collect();
+    PushWalk::run_one(
+        s,
+        id,
+        &HeldCommits::default(),
+        &shallow,
+        WalkLimits::default(),
+    )
+    .unwrap()
+    .objects()
+    .clone()
+}
+
+#[test]
+fn one_commit_is_sized_on_its_own_and_an_object_two_commits_bring_counts_for_both() {
+    let (_d, s) = store();
+    let first = put_blob(&s, b"first".to_vec());
+    let back = put_blob(&s, b"returns".to_vec());
+    let other = put_blob(&s, b"other".to_vec());
+    let c1 = commit(&s, tree_of(&s, &[("f", back), ("g", first)]), &[], "1");
+    let t2 = tree_of(&s, &[("f", other), ("g", first)]);
+    let c2 = commit(&s, t2, &[c1], "22");
+    let t3 = tree_of(&s, &[("f", back), ("g", first)]);
+    // The same tree as the first commit, so only the commit itself differs.
+    let c3 = commit(&s, t3, &[c2], "333");
+    // Against its parent alone, the second commit brings its tree and one blob.
+    assert_eq!(one(&s, c2, &[]), BTreeSet::from([c2, t2, other]));
+    // The third brings the returning blob again, though the first brought it.
+    assert_eq!(one(&s, c3, &[]), BTreeSet::from([c3, t3, back]));
+    assert!(one(&s, c1, &[]).contains(&back));
+    // A shallow commit has no parent to compare with.
+    assert_eq!(one(&s, c3, &[c3]), BTreeSet::from([c3, t3, back, first]));
+    // An object that is not a commit brings its closure.
+    assert_eq!(one(&s, t3, &[]), BTreeSet::from([t3, back, first]));
+}
+
 #[test]
 fn no_chunk_enters_a_counted_set() {
     let (_d, s) = store();
