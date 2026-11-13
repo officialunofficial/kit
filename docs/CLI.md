@@ -162,10 +162,11 @@ Working-tree commands:
   keeps its memory near 64 MiB. Past that, `diff` and `show` keep the best
   alignment that the search reached, and report the rest as replaced.
   Such a patch still applies, but it can be larger than git's.
-  A binary pair prints `Binary files … differ` after a read of the first bytes
-  of each side, however large the files are. A text file above the in-memory
-  limit (1 GiB), in the worktree or in the store, fails the diff with exit
-  `66` before any header is printed, and so does `kit status`.
+  A binary pair of stored blobs prints `Binary files … differ` after a read of
+  the first bytes of each side, however large the blobs are. A stored text
+  blob above the in-memory limit (1 GiB) fails the diff with exit `66` before
+  any header is printed, as does a worktree file above the limit. `kit show`
+  and `kit status` exit `66` for the same cases.
   `--name-only` instead lists one changed path per line; `--name-status`
   prefixes each with a status letter (`A`/`D`/`M`; `T` marks a kit mode
   change). `--stat` shows a diffstat: one `<name> | <count> <graph>` row
@@ -1063,7 +1064,7 @@ tree is built from the **resolved index/worktree** &mdash; not the
 conflict-time "ours wins" snapshot &mdash; so your edits (including a third
 distinct resolution) and the merge's clean changes both land. The check
 that a resolution is staged hashes a large file one chunk at a time, and the
-scan for markers skips a file above 1 GiB.
+scan for markers skips a file above 1 GiB and reads a smaller one whole.
 
 Alternatively:
 

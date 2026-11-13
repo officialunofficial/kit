@@ -361,6 +361,11 @@ impl HashOnlySink {
     }
 }
 
+/// Whether an object of `len` bytes is within the size that the store accepts.
+fn fits_object_limit(len: usize) -> bool {
+    len <= MAX_RAW_OBJECT_SIZE
+}
+
 impl ObjectSink for HashOnlySink {
     fn put(&self, bytes: &[u8]) -> StoreResult<Hash> {
         self.put_parts(&[bytes])
@@ -373,7 +378,7 @@ impl ObjectSink for HashOnlySink {
                 .checked_add(p.len())
                 .ok_or(StoreError::ObjectTooLarge)?;
         }
-        if total > MAX_RAW_OBJECT_SIZE {
+        if !fits_object_limit(total) {
             return Err(StoreError::ObjectTooLarge);
         }
         self.objects.fetch_add(1, Ordering::Relaxed);
@@ -460,6 +465,23 @@ mod tests {
         assert_eq!(sink.bytes(), 12);
         assert!(!sink.has(&id));
         assert!(!store.contains(&id));
+    }
+
+    #[test]
+    fn hash_only_sink_refuses_an_object_the_store_refuses() {
+        assert!(fits_object_limit(0));
+        assert!(fits_object_limit(MAX_RAW_OBJECT_SIZE));
+        assert!(!fits_object_limit(MAX_RAW_OBJECT_SIZE + 1));
+        // Parts that add up past the limit are refused without a hash.
+        let zeros = vec![0_u8; 1 << 20];
+        let mut parts: Vec<&[u8]> = vec![&zeros; MAX_RAW_OBJECT_SIZE >> 20];
+        parts.push(&[0]);
+        let sink = HashOnlySink::new();
+        assert!(matches!(
+            sink.put_parts(&parts),
+            Err(StoreError::ObjectTooLarge)
+        ));
+        assert_eq!(sink.objects(), 0);
     }
 
     /// `len` bytes from a fixed xorshift stream, so a file cuts into chunks.
