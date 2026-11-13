@@ -1,9 +1,9 @@
-//! A file of many chunks clones within a staging budget far smaller than its
-//! packs, and a fetch of it holds about one pack in memory.
+//! A file of many chunks clones with each pack downloaded once and nothing
+//! staged on disk, and a fetch of it holds about one pack in memory.
 //!
-//! The remote holds one chunked blob spread over many packs. The source
-//! measures the staging directory before every pack download, and a counting
-//! allocator records the heap a fetch holds at once.
+//! The remote holds one chunked blob spread over many packs. The source looks
+//! for a staging directory in the clone before every pack download, and a
+//! counting allocator records the heap a fetch holds at once.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 #![allow(unsafe_code)] // the counting allocator below wraps `System`
 
@@ -98,7 +98,6 @@ struct LargeFile {
     tip: Hash,
     content: Vec<u8>,
     pack_bytes: usize,
-    largest_pack: usize,
 }
 
 fn chunk_bytes(index: usize, chunk_len: usize) -> Vec<u8> {
@@ -133,14 +132,12 @@ fn large_file(chunks: usize, chunk_len: usize, per_pack: usize) -> LargeFile {
     let mut chunk_ids = Vec::with_capacity(chunks);
     let mut pending = Vec::new();
     let mut pack_bytes = 0;
-    let mut largest_pack = 0;
     let mut upload = |objects: &mut Vec<Object>| {
         let bytes = pack_of(objects);
         objects.clear();
         let key = pack::pack_key(&bytes);
         tx.upload_pack(&bytes, &PackKey::from_hash(key)).unwrap();
         pack_bytes += bytes.len();
-        largest_pack = largest_pack.max(bytes.len());
         keys.push(key);
     };
     for index in 0..chunks {
@@ -198,31 +195,33 @@ fn large_file(chunks: usize, chunk_len: usize, per_pack: usize) -> LargeFile {
         tip,
         content,
         pack_bytes,
-        largest_pack,
     }
 }
 
-/// Bytes in the files under `dir`, at any depth.
-fn bytes_under(dir: &Path) -> u64 {
-    let mut total = 0;
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let entry = entry.unwrap();
-        let meta = entry.metadata().unwrap();
-        total += if meta.is_dir() {
-            bytes_under(&entry.path())
-        } else {
-            meta.len()
-        };
-    }
-    total
+/// Entries named `kit-fetch-*` directly under `dir`. A fetch once staged its
+/// packs in a directory of that name.
+fn staging_entries(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("kit-fetch-")
+        })
+        .count()
 }
 
-/// Delegates to a transport, recording the staged bytes before each pack
-/// download and how many packs it served.
+/// Delegates to a transport, counting the packs it served and the staging
+/// directories it saw in the clone before each download.
 struct MeasuredSource<'a> {
     inner: TransportSource<'a>,
-    staging: &'a Path,
-    peak_staged: Cell<u64>,
+    work: &'a Path,
+    staging_seen: Cell<usize>,
     packs: Cell<usize>,
 }
 
@@ -237,18 +236,18 @@ impl RemoteSource for MeasuredSource<'_> {
         self.inner.download_blob_via_ref(key, ref_name)
     }
     fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        let staged = bytes_under(self.staging);
-        self.peak_staged.set(self.peak_staged.get().max(staged));
+        let seen = staging_entries(self.work) + staging_entries(&self.work.join(".kit"));
+        self.staging_seen.set(self.staging_seen.get() + seen);
         self.packs.set(self.packs.get() + 1);
         self.inner.download_pack_via_ref(key, ref_name)
     }
 }
 
-fn measured<'a>(file: &'a LargeFile, staging: &'a Path) -> MeasuredSource<'a> {
+fn measured<'a>(file: &'a LargeFile, work: &'a Path) -> MeasuredSource<'a> {
     MeasuredSource {
         inner: TransportSource::new(&file.tx),
-        staging,
-        peak_staged: Cell::new(0),
+        work,
+        staging_seen: Cell::new(0),
         packs: Cell::new(0),
     }
 }
@@ -262,36 +261,33 @@ fn remote() -> CloneRemote {
 }
 
 #[test]
-fn a_file_of_many_chunks_clones_within_a_small_staging_budget() {
+fn a_file_of_many_chunks_clones_with_each_pack_downloaded_once() {
     let _guard = serial();
     let file = large_file(4_096, KIB, 128);
-    let budget = 3 * file.largest_pack as u64;
-    assert!(budget * 8 < file.pack_bytes as u64);
     let dir = tempfile::tempdir().unwrap();
-    let staging = dir.path().join("stage");
-    std::fs::create_dir(&staging).unwrap();
-    let source = measured(&file, &staging);
-    let options = SyncOptions::default()
-        .with_staging_dir(Some(staging.clone()))
-        .with_max_staged_bytes(budget);
     let target = dir.path().join("work");
+    let source = measured(&file, &target);
 
-    clone(&target, &source, &remote(), &options, &NoopObserver).unwrap();
+    clone(
+        &target,
+        &source,
+        &remote(),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
 
     assert_eq!(
         std::fs::read(target.join("large.bin")).unwrap(),
         file.content
     );
-    // Each pack downloads once, except the first past the budget, which is
-    // dropped and downloaded again under the lock.
-    assert_eq!(source.packs.get(), 4_096 / 128 + 2);
-    let peak = source.peak_staged.get();
-    assert!(peak > 0, "the packs that fit the budget are staged");
-    assert!(
-        peak <= budget,
-        "staged {peak} bytes over a {budget}-byte budget"
+    // 32 packs of chunks and one holding the manifest, tree and commit.
+    assert_eq!(source.packs.get(), 4_096 / 128 + 1);
+    assert_eq!(source.staging_seen.get(), 0, "no pack is staged on disk");
+    assert_eq!(
+        staging_entries(&target) + staging_entries(&target.join(".kit")),
+        0
     );
-    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
 }
 
 #[test]
@@ -299,23 +295,26 @@ fn fetching_a_file_of_many_chunks_holds_about_one_pack() {
     let _guard = serial();
     let file = large_file(16_384, 2 * KIB, 256);
     let dir = tempfile::tempdir().unwrap();
-    let staging = dir.path().join("stage");
-    std::fs::create_dir(&staging).unwrap();
-    let source = measured(&file, &staging);
     let target = dir.path().join("work");
+    let source = measured(&file, &target);
     init_clone_dir(&target, &remote()).unwrap();
-    let options = SyncOptions::default()
-        .with_staging_dir(Some(staging.clone()))
-        .with_max_staged_bytes(0);
 
-    let (report, peak) = peak_of(|| fetch(&target, &source, "default", &options, &NoopObserver));
+    let (report, peak) = peak_of(|| {
+        fetch(
+            &target,
+            &source,
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+    });
 
     report.unwrap();
     assert_eq!(
         refs::read_remote_ref(&RepoLayout::single(&target), "default", "main").unwrap(),
         Some(file.tip)
     );
-    assert_eq!(source.peak_staged.get(), 0, "a zero budget stages nothing");
+    assert_eq!(source.staging_seen.get(), 0, "no pack is staged on disk");
     // One pack, its unpack working set and the manifest, far below the
     // 32 MiB of packs.
     let ceiling = 8 * MIB;

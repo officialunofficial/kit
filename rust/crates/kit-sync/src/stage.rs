@@ -1,13 +1,12 @@
-//! Private staging of downloaded packs, and applying them.
+//! Downloading and applying the packs of a chain.
 //!
-//! Packs are downloaded to files in a private directory without any repo
-//! lock held, up to the staging budget, then unpacked into the object store
-//! under the lock. The packs past the budget are applied as they arrive, with
-//! the lock held: each is downloaded, checked, unpacked and recorded, then
-//! dropped, so a chain of any size stages at most the budget. Success,
-//! cancellation and every error remove the private directory.
-
-use std::io::{Read as _, Write as _};
+//! Each pack is downloaded, checked against its key, unpacked into the object
+//! store, signature-checked and recorded as applied, then dropped, in chain
+//! order. Nothing is staged on disk and no repository lock is held, so a
+//! chain of any size needs one pack of memory. The caller holds a
+//! [`kit_core::store::PruneGuard`] for the whole fetch: the objects of a pack
+//! applied here are unreferenced until the fetch publishes its ref, and the
+//! guard keeps gc from deleting them.
 
 use kit_core::hash::Hash;
 use kit_core::pack::PackReader;
@@ -17,101 +16,19 @@ use kit_core::store::ObjectStore;
 use crate::applied_packs::AppliedPacks;
 use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
-use crate::packmap::{MAX_FETCH_PACKS, branch_ref_hint};
+use crate::packmap::branch_ref_hint;
 use crate::source::RemoteSource;
 use crate::verify::verify_new_object_signatures;
 
-/// Owns all staging paths; success, cancellation and every error remove the
-/// private directory. Files are closed between operations, so a large history
-/// does not also require one live file descriptor per pack.
-pub(crate) struct StagedPacks {
-    pub(crate) directory: tempfile::TempDir,
-    pub(crate) packs: Vec<StagedPack>,
-    pub(crate) bytes: u64,
-    /// The index in the chain of the first pack that was not staged. It is
-    /// the chain length when every missing pack fit the budget.
-    rest: usize,
-}
-
-pub(crate) struct StagedPack {
-    key: PackKey,
-    bytes: usize,
-}
-
-/// Packs a chain application downloaded and applied, and the objects they
-/// wrote.
+/// What applying a chain did: the packs it downloaded and applied, the packs
+/// it skipped because the record already holds them, and the objects the
+/// applied packs wrote. It is filled in as the chain applies, so a caller
+/// reads how far a failed chain got.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ChainApplied {
     pub(crate) packs: usize,
+    pub(crate) skipped: usize,
     pub(crate) objects: usize,
-}
-
-/// Download to private files without holding the repo lock, until the next
-/// pack would take the staged bytes past `disk_limit`. That pack is dropped,
-/// and it and the rest of the chain are left to [`apply_pack_chain`], which
-/// downloads them again under the lock. Only one pack buffer exists at a
-/// time, and chain metadata has an explicit aggregate limit. No
-/// authoritative objects or applied records are changed.
-pub(crate) fn download_pack_chain_with_limits(
-    source: &dyn RemoteSource,
-    observer: &dyn Observer<SyncEvent>,
-    branch: &str,
-    chain: &[Hash],
-    applied: &AppliedPacks,
-    disk_limit: u64,
-    stage_parent: Option<&std::path::Path>,
-) -> Result<StagedPacks, SyncError> {
-    if chain.len() > MAX_FETCH_PACKS {
-        return Err(SyncError::PackChainInvalid {
-            branch: branch.to_owned(),
-            source: None,
-        });
-    }
-    let directory = match stage_parent {
-        Some(parent) => tempfile::Builder::new()
-            .prefix("kit-fetch-")
-            .tempdir_in(parent)?,
-        None => tempfile::Builder::new().prefix("kit-fetch-").tempdir()?,
-    };
-    let mut staged = StagedPacks {
-        directory,
-        packs: Vec::new(),
-        bytes: 0,
-        rest: chain.len(),
-    };
-    let ref_name = branch_ref_hint(branch);
-    for (index, &pk) in chain.iter().enumerate() {
-        if observer.cancelled() {
-            return Err(SyncError::Interrupted);
-        }
-        let key = PackKey::from_hash(pk);
-        if applied.contains(&key) {
-            continue;
-        }
-        let pack = download_checked_pack(source, branch, &ref_name, &key)?;
-        let Some(next_bytes) = staged
-            .bytes
-            .checked_add(pack.len() as u64)
-            .filter(|&bytes| bytes <= disk_limit)
-        else {
-            staged.rest = index;
-            break;
-        };
-        let path = staged.directory.path().join(staged.packs.len().to_string());
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        file.write_all(&pack)?;
-        staged.packs.push(StagedPack {
-            key,
-            bytes: pack.len(),
-        });
-        staged.bytes = next_bytes;
-        // `pack` and the file handle drop before the next download. No fsync
-        // is needed for disposable staging: a crash never publishes a ref.
-    }
-    Ok(staged)
 }
 
 /// Download one pack and check its size and its bytes against `key`.
@@ -153,90 +70,64 @@ fn observe_retained_pack_bytes(bytes: usize) {
     PEAK_RETAINED_PACK_BYTES.with(|peak| peak.set(peak.get().max(bytes)));
 }
 
-/// Apply `chain` in order while the caller holds the repo lock through ref
-/// publication: first the packs in `staged`, then each later pack of the
-/// chain as it is downloaded. `staged` must come from
-/// [`download_pack_chain_with_limits`] over the same `chain`; `None` applies
-/// the whole chain as it arrives.
+/// Download and apply every pack of `chain`, oldest first, into `store`,
+/// recording each in `applied` as soon as its objects are committed and its
+/// signatures checked. A pack already recorded is skipped. `done` counts the
+/// work as it goes, including on failure.
 ///
-/// One pack is held in memory at a time. Signature checks run per pack, so
-/// the full history's newly stored-object IDs are not accumulated in memory.
-/// A pack is recorded as applied only after its digest, unpack and signature
-/// checks succeed, and a pack already recorded is skipped.
+/// The caller MUST hold a [`kit_core::store::PruneGuard`] across this call and
+/// through the ref publish that makes the written objects reachable.
+///
+/// One pack is held in memory at a time, and so are the ids of one pack's
+/// stored objects: the full history's ids are never accumulated. The record
+/// holds a pack only after its digest, unpack and signature checks succeed, so
+/// a failed or killed fetch leaves the record naming only packs whose objects
+/// are in the store.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_pack_chain(
     store: &ObjectStore,
     source: &dyn RemoteSource,
     observer: &dyn Observer<SyncEvent>,
+    remote: &str,
     branch: &str,
     chain: &[Hash],
-    staged: Option<StagedPacks>,
     applied: &mut AppliedPacks,
     require_signed: bool,
-) -> Result<ChainApplied, SyncError> {
-    let mut done = ChainApplied::default();
-    let rest = match staged {
-        Some(staged) => {
-            apply_staged_packs(store, observer, &staged, applied, require_signed, &mut done)?;
-            // Dropping the owner removes the private directory.
-            staged.rest
-        }
-        None => 0,
-    };
+    done: &mut ChainApplied,
+) -> Result<(), SyncError> {
     let ref_name = branch_ref_hint(branch);
-    for &pk in &chain[rest..] {
+    for &pk in chain {
         if observer.cancelled() {
             return Err(SyncError::Interrupted);
         }
         let key = PackKey::from_hash(pk);
         if applied.contains(&key) {
+            done.skipped += 1;
             continue;
         }
         let pack = download_checked_pack(source, branch, &ref_name, &key)?;
-        done.objects += apply_pack(store, observer, &key, &pack, applied, require_signed)?;
+        done.objects += apply_pack(
+            store,
+            observer,
+            remote,
+            &key,
+            &pack,
+            applied,
+            require_signed,
+        )?;
         done.packs += 1;
-    }
-    Ok(done)
-}
-
-fn apply_staged_packs(
-    store: &ObjectStore,
-    observer: &dyn Observer<SyncEvent>,
-    staged: &StagedPacks,
-    applied: &mut AppliedPacks,
-    require_signed: bool,
-    done: &mut ChainApplied,
-) -> Result<(), SyncError> {
-    for (index, entry) in staged.packs.iter().enumerate() {
-        if observer.cancelled() {
-            return Err(SyncError::Interrupted);
-        }
-        let path = staged.directory.path().join(index.to_string());
-        let file = std::fs::File::open(&path)?;
-        let mut pack = Vec::new();
-        // Bound the read even if local temporary bytes were modified. The
-        // independently requested digest is rechecked before store effects.
-        file.take(entry.bytes as u64 + 1).read_to_end(&mut pack)?;
-        if pack.len() != entry.bytes {
-            return Err(crate::SourceError::InvalidResponse.into());
-        }
-        entry
-            .key
-            .verify_bytes(&pack)
-            .map_err(crate::SourceError::from)?;
-        done.objects += apply_pack(store, observer, &entry.key, &pack, applied, require_signed)?;
-        done.packs += 1;
-        drop(pack);
-        std::fs::remove_file(path)?;
     }
     Ok(())
 }
 
 /// Unpack `pack`, already checked against `key`, check the signatures of the
 /// objects it stored, and record it as applied. Returns the objects it wrote.
+/// A record that cannot be appended is reported and does not fail the fetch:
+/// the objects landed, and the record is a cache.
 fn apply_pack(
     store: &ObjectStore,
     observer: &dyn Observer<SyncEvent>,
+    remote: &str,
     key: &PackKey,
     pack: &[u8],
     applied: &mut AppliedPacks,
@@ -248,7 +139,12 @@ fn apply_pack(
         observer.event(&SyncEvent::ObjectsUnpacked { count: unpacked });
     }
     verify_new_object_signatures(store, &report.stored, require_signed)?;
-    applied.insert(key);
+    if let Err(e) = applied.record_applied(key) {
+        observer.event(&SyncEvent::AppliedPacksPersistFailed {
+            remote: remote.to_owned(),
+            error: e.to_string(),
+        });
+    }
     Ok(unpacked)
 }
 
@@ -256,9 +152,10 @@ fn apply_pack(
 mod tests {
     use super::*;
     use crate::observer::NoopObserver;
-    use crate::packmap::{MAX_FETCH_STAGED_BYTES, download_packlist_node};
+    use crate::packmap::download_packlist_node;
     use crate::source::TransportSource;
     use kit_core::hash;
+    use kit_core::layout::RepoLayout;
     use kit_core::object::Object;
     use kit_core::pack;
     use kit_core::protocol::Transport as _;
@@ -269,20 +166,65 @@ mod tests {
         hash::hash(seed.as_bytes())
     }
 
+    /// A fresh store and an empty record in a temporary directory.
+    fn store_and_record() -> (tempfile::TempDir, RepoLayout, ObjectStore, AppliedPacks) {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::create_dir(td.path().join("repo")).unwrap();
+        let layout = RepoLayout::single(td.path().join("repo"));
+        let store = ObjectStore::init(&layout).unwrap();
+        let applied = AppliedPacks::load(&layout, "origin").unwrap();
+        (td, layout, store, applied)
+    }
+
+    fn blob(data: &[u8]) -> Object {
+        Object::Blob(kit_core::object::Blob {
+            data: data.to_vec(),
+        })
+    }
+
+    /// A pack of `blobs`, uploaded to `tx`, and its key.
+    fn upload_blob_pack(tx: &MemoryTransport, blobs: &[&[u8]]) -> Hash {
+        let mut writer = pack::PackWriter::new();
+        for data in blobs {
+            let blob = blob(data);
+            writer
+                .push_raw(
+                    blob.id().unwrap(),
+                    &kit_core::serialize::serialize(&blob).unwrap(),
+                )
+                .unwrap();
+        }
+        let bytes = writer.finish().unwrap();
+        let key = pack::pack_key(&bytes);
+        tx.upload_pack(&bytes, &PackKey::from_hash(key)).unwrap();
+        key
+    }
+
+    fn apply(
+        store: &ObjectStore,
+        source: &dyn RemoteSource,
+        chain: &[Hash],
+        applied: &mut AppliedPacks,
+        done: &mut ChainApplied,
+    ) -> Result<(), SyncError> {
+        apply_pack_chain(
+            store,
+            source,
+            &NoopObserver,
+            "origin",
+            "main",
+            chain,
+            applied,
+            false,
+            done,
+        )
+    }
+
     #[test]
     fn requested_pack_identity_rejects_valid_substitute_before_unpack() {
-        use kit_core::layout::RepoLayout;
-        use kit_core::object::Blob;
         use kit_core::pack::PackWriter;
 
-        let objects = [
-            Object::Blob(Blob {
-                data: b"first".to_vec(),
-            }),
-            Object::Blob(Blob {
-                data: b"second".to_vec(),
-            }),
-        ];
+        let objects = [blob(b"first"), blob(b"second")];
         let mut a = PackWriter::new();
         let mut b = PackWriter::new();
         for object in &objects {
@@ -305,22 +247,22 @@ mod tests {
         assert_ne!(key, pack::pack_key(&b));
         let tx = MemoryTransport::new();
         tx.upload_pack(&b, &PackKey::from_hash(key)).unwrap();
-        let td = tempfile::tempdir().unwrap();
-        let applied = AppliedPacks::load(&RepoLayout::single(td.path()), "origin").unwrap();
+        let (_td, _layout, store, mut applied) = store_and_record();
 
         assert!(matches!(
-            download_pack_chain_with_limits(
+            apply(
+                &store,
                 &TransportSource::new(&tx),
-                &NoopObserver,
-                "main",
                 &[key],
-                &applied,
-                MAX_FETCH_STAGED_BYTES,
-                None
+                &mut applied,
+                &mut ChainApplied::default()
             ),
             Err(SyncError::Source(crate::SourceError::InvalidResponse))
         ));
         assert!(!applied.contains(&PackKey::from_hash(key)));
+        for object in &objects {
+            assert!(!store.contains(&object.id().unwrap()));
+        }
     }
 
     #[test]
@@ -339,190 +281,85 @@ mod tests {
     #[test]
     fn fetch_retains_at_most_one_downloaded_pack() {
         let tx = MemoryTransport::new();
-        let bytes = vec![0xAB; 1024 * 1024];
-        let key = hash::hash(&bytes);
-        tx.upload_pack(&bytes, &PackKey::from_hash(key)).unwrap();
-        let td = tempfile::tempdir().unwrap();
-        let applied =
-            AppliedPacks::load(&kit_core::layout::RepoLayout::single(td.path()), "origin").unwrap();
+        let mut keys = Vec::new();
+        for seed in 0..8_u8 {
+            let data: Vec<u8> = (0..1024 * 1024_u32)
+                .map(|i| {
+                    u8::try_from(i % 251)
+                        .unwrap()
+                        .wrapping_mul(31)
+                        .wrapping_add(seed)
+                })
+                .collect();
+            keys.push(upload_blob_pack(&tx, &[&data]));
+        }
+        let (_td, _layout, store, mut applied) = store_and_record();
         PEAK_RETAINED_PACK_BYTES.with(|peak| peak.set(0));
-        let downloaded = download_pack_chain_with_limits(
+        let mut done = ChainApplied::default();
+        apply(
+            &store,
             &TransportSource::new(&tx),
-            &NoopObserver,
-            "main",
-            &vec![key; 32],
-            &applied,
-            MAX_FETCH_STAGED_BYTES,
-            None,
+            &keys,
+            &mut applied,
+            &mut done,
         )
         .unwrap();
+        assert_eq!(done.packs, 8);
         let peak = PEAK_RETAINED_PACK_BYTES.with(std::cell::Cell::get);
         assert!(
-            peak <= bytes.len(),
+            peak < 2 * 1024 * 1024,
             "retained {peak} bytes for one-MiB packs"
         );
-        drop(downloaded);
-    }
-
-    /// A pack of `blobs`, uploaded to `tx`, and its key.
-    fn upload_blob_pack(tx: &MemoryTransport, blobs: &[&[u8]]) -> (Hash, usize) {
-        let mut writer = pack::PackWriter::new();
-        for data in blobs {
-            let blob = Object::Blob(kit_core::object::Blob {
-                data: data.to_vec(),
-            });
-            writer
-                .push_raw(
-                    blob.id().unwrap(),
-                    &kit_core::serialize::serialize(&blob).unwrap(),
-                )
-                .unwrap();
-        }
-        let bytes = writer.finish().unwrap();
-        let key = pack::pack_key(&bytes);
-        tx.upload_pack(&bytes, &PackKey::from_hash(key)).unwrap();
-        (key, bytes.len())
     }
 
     #[test]
-    fn staging_stops_at_the_budget_and_drops_the_next_pack() {
+    fn apply_pack_chain_records_each_pack_and_skips_applied_keys() {
         let tx = MemoryTransport::new();
-        let bytes = vec![0xAB; 128];
-        let key = hash::hash(&bytes);
-        tx.upload_pack(&bytes, &PackKey::from_hash(key)).unwrap();
-        let td = tempfile::tempdir().unwrap();
-        let applied =
-            AppliedPacks::load(&kit_core::layout::RepoLayout::single(td.path()), "origin").unwrap();
-        let staged = download_pack_chain_with_limits(
-            &TransportSource::new(&tx),
-            &NoopObserver,
-            "main",
-            &[key, key, key],
-            &applied,
-            128,
-            Some(td.path()),
-        )
-        .unwrap();
-        assert_eq!(staged.packs.len(), 1);
-        assert_eq!(staged.bytes, 128);
-        assert_eq!(staged.rest, 1);
-        assert!(!applied.contains(&PackKey::from_hash(key)));
-        drop(staged);
-        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn packs_past_the_budget_apply_and_skip_applied_keys() {
-        use kit_core::layout::RepoLayout;
-
-        let tx = MemoryTransport::new();
-        let (a, a_len) = upload_blob_pack(&tx, &[b"first"]);
-        let (b, _) = upload_blob_pack(&tx, &[b"second"]);
-        let (c, _) = upload_blob_pack(&tx, &[b"third"]);
-        let td = tempfile::tempdir().unwrap();
-        std::fs::create_dir(td.path().join("repo")).unwrap();
-        let layout = RepoLayout::single(td.path().join("repo"));
-        let store = ObjectStore::init(&layout).unwrap();
-        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+        let a = upload_blob_pack(&tx, &[b"first"]);
+        let b = upload_blob_pack(&tx, &[b"second"]);
+        let c = upload_blob_pack(&tx, &[b"third"]);
+        let (_td, layout, store, mut applied) = store_and_record();
         let source = TransportSource::new(&tx);
-        // `a` repeats where the budget runs out, so it is skipped as applied.
+        // `a` repeats, so its second turn is skipped as applied.
         let chain = [a, a, b, c];
-        let staged = download_pack_chain_with_limits(
-            &source,
-            &NoopObserver,
-            "main",
-            &chain,
-            &applied,
-            a_len as u64,
-            Some(td.path()),
-        )
-        .unwrap();
-        assert_eq!(staged.rest, 1);
+        let mut done = ChainApplied::default();
+        apply(&store, &source, &chain, &mut applied, &mut done).unwrap();
 
-        let done = apply_pack_chain(
-            &store,
-            &source,
-            &NoopObserver,
-            "main",
-            &chain,
-            Some(staged),
-            &mut applied,
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(done.packs, 3);
-        assert_eq!(done.objects, 3);
+        assert_eq!((done.packs, done.skipped, done.objects), (3, 1, 3));
         for key in [a, b, c] {
             assert!(applied.contains(&PackKey::from_hash(key)));
         }
         for data in [&b"first"[..], b"second", b"third"] {
-            let id = Object::Blob(kit_core::object::Blob {
-                data: data.to_vec(),
-            })
-            .id()
-            .unwrap();
-            assert!(store.contains(&id));
+            assert!(store.contains(&blob(data).id().unwrap()));
         }
-        let leftovers = std::fs::read_dir(td.path())
-            .unwrap()
-            .filter(|entry| entry.as_ref().unwrap().file_name() != "repo")
-            .count();
-        assert_eq!(leftovers, 0, "the staging directory is removed");
+        // The lines are on disk already, without a persist.
+        let reloaded = AppliedPacks::load(&layout, "origin").unwrap();
+        for key in [a, b, c] {
+            assert!(reloaded.contains(&PackKey::from_hash(key)));
+        }
     }
 
     #[test]
-    fn fetch_staging_drop_removes_successful_downloads() {
+    fn a_failed_pack_leaves_the_earlier_packs_recorded_and_itself_not() {
         let tx = MemoryTransport::new();
-        let bytes = b"downloaded object bytes";
-        let key = hash::hash(bytes);
-        tx.upload_pack(bytes, &PackKey::from_hash(key)).unwrap();
-        let td = tempfile::tempdir().unwrap();
-        let applied =
-            AppliedPacks::load(&kit_core::layout::RepoLayout::single(td.path()), "origin").unwrap();
-        let staged = download_pack_chain_with_limits(
+        let a = upload_blob_pack(&tx, &[b"first"]);
+        let b = upload_blob_pack(&tx, &[b"second"]);
+        let missing = h("not uploaded");
+        let (_td, layout, store, mut applied) = store_and_record();
+        let mut done = ChainApplied::default();
+        let error = apply(
+            &store,
             &TransportSource::new(&tx),
-            &NoopObserver,
-            "main",
-            &[key],
-            &applied,
-            1024,
-            Some(td.path()),
+            &[a, b, missing],
+            &mut applied,
+            &mut done,
         )
-        .unwrap();
-        assert_eq!(
-            std::fs::read(staged.directory.path().join("0")).unwrap(),
-            bytes
-        );
-        assert_eq!(staged.bytes, bytes.len() as u64);
-        drop(staged);
-        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn fetch_staging_digest_failure_cleans_prior_downloads() {
-        let tx = MemoryTransport::new();
-        let valid = b"valid first bytes";
-        let first = hash::hash(valid);
-        let wrong = h("missing expected bytes");
-        tx.upload_pack(valid, &PackKey::from_hash(first)).unwrap();
-        tx.upload_pack(b"substitute", &PackKey::from_hash(wrong))
-            .unwrap();
-        let td = tempfile::tempdir().unwrap();
-        let applied =
-            AppliedPacks::load(&kit_core::layout::RepoLayout::single(td.path()), "origin").unwrap();
-        assert!(matches!(
-            download_pack_chain_with_limits(
-                &TransportSource::new(&tx),
-                &NoopObserver,
-                "main",
-                &[first, wrong],
-                &applied,
-                1024,
-                Some(td.path())
-            ),
-            Err(SyncError::Source(crate::SourceError::InvalidResponse))
-        ));
-        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 0);
+        .unwrap_err();
+        assert!(matches!(error, SyncError::AdvertisedPackMissing { .. }));
+        assert_eq!(done.packs, 2);
+        let reloaded = AppliedPacks::load(&layout, "origin").unwrap();
+        assert!(reloaded.contains(&PackKey::from_hash(a)));
+        assert!(reloaded.contains(&PackKey::from_hash(b)));
+        assert!(!reloaded.contains(&PackKey::from_hash(missing)));
     }
 }

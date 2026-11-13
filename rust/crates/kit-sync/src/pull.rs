@@ -72,13 +72,14 @@ pub(crate) fn open_store(
 ///
 /// # Locking
 ///
-/// The fetch phase takes the repo lock itself, narrowly and per branch, around
-/// only the local unpack and remote-ref publish window; no lock is held across
-/// the network transfer. The fast-forward phase then takes the worktree lock
-/// around just the branch ref, HEAD and worktree update. The objects the
-/// remote tip points at are already reachable via the remote-tracking ref
-/// published during the fetch, so this lock's job is worktree-mutation
-/// exclusivity against concurrent commands, not GC protection.
+/// The fetch phase holds no repo lock while it downloads and applies packs; it
+/// takes the lock itself, per branch, around only the remote-ref publish. The
+/// fast-forward phase then takes the worktree lock around just the branch ref,
+/// HEAD and worktree update. The objects the remote tip points at are already
+/// reachable via the remote-tracking ref published during the fetch, so this
+/// lock's job is worktree-mutation exclusivity against concurrent commands,
+/// not GC protection. The fetch's own protection from gc is a
+/// [`kit_core::store::PruneGuard`], released before this phase starts.
 pub fn pull(
     dir: &Path,
     source: &dyn RemoteSource,
@@ -202,8 +203,8 @@ pub fn fetch(
     observer: &dyn Observer<SyncEvent>,
 ) -> Result<FetchReport, SyncError> {
     let layout = kit_core::layout::discover(dir)?;
-    // No outer lock: `fetch_objects` takes the repo lock itself, narrowly and
-    // per branch, around only the local unpack and ref-publish window.
+    // No outer lock: `fetch_objects` takes the repo lock itself, per branch,
+    // around only the ref publish.
     let store = open_store(&layout, options)?;
     fetch_objects(&store, &layout, source, observer, remote, options)
 }

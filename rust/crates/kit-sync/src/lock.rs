@@ -1,8 +1,10 @@
 //! The per-worktree lock a fetch publishes under, and the served-repository
 //! probe that accompanies it.
 
+use std::time::Duration;
+
 use kit_core::layout::RepoLayout;
-use kit_core::repo_lock::{self, RepoLock};
+use kit_core::repo_lock::{self, LockError, RepoLock};
 
 use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
@@ -30,4 +32,38 @@ pub(crate) fn acquire_worktree_lock(
     let lock = repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK)?;
     warn_if_served(layout, observer);
     Ok(lock)
+}
+
+/// How long a fetch sleeps between attempts to take a held lock.
+const PUBLISH_LOCK_POLL: Duration = Duration::from_millis(100);
+
+/// Take the worktree lock for a fetch's publish step, however long another
+/// process holds it, then run the served-repository probe. A fetch has
+/// already downloaded and applied its packs by then, so giving up would throw
+/// that work away. The wait sends [`SyncEvent::WaitingForRepoLock`] once and
+/// returns [`SyncError::Interrupted`] when the observer cancels. It polls with
+/// non-blocking attempts, so an abandoned wait leaves no thread behind.
+pub(crate) fn wait_for_worktree_lock(
+    layout: &RepoLayout,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<RepoLock, SyncError> {
+    let mut announced = false;
+    loop {
+        match repo_lock::acquire(layout.worktree_state_dir(), WORKTREE_LOCK, Duration::ZERO) {
+            Ok(lock) => {
+                warn_if_served(layout, observer);
+                return Ok(lock);
+            }
+            Err(LockError::Busy(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        if observer.cancelled() {
+            return Err(SyncError::Interrupted);
+        }
+        if !announced {
+            announced = true;
+            observer.event(&SyncEvent::WaitingForRepoLock);
+        }
+        std::thread::sleep(PUBLISH_LOCK_POLL);
+    }
 }

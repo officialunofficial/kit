@@ -542,6 +542,11 @@ impl Observer<SyncEvent> for Terminal {
                     "warning: could not persist applied-packs record for remote '{remote}' ({error}); it will be rebuilt on the next fetch"
                 );
             }
+            SyncEvent::WaitingForRepoLock => {
+                eprintln!(
+                    "waiting for the repository lock; another kit command holds it (interrupt to stop)"
+                );
+            }
             SyncEvent::RepositoryServed { worktree_root } => warn_served(worktree_root),
             _ => {}
         }

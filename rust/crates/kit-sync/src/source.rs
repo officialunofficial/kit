@@ -597,19 +597,21 @@ mod tests {
             panic!("wrong chain error")
         };
         let td = tempfile::tempdir().unwrap();
-        let applied =
-            crate::AppliedPacks::load(&kit_core::layout::RepoLayout::single(td.path()), "origin")
-                .unwrap();
+        let layout = kit_core::layout::RepoLayout::single(td.path());
+        let store = kit_core::store::ObjectStore::init(&layout).unwrap();
+        let mut applied = crate::AppliedPacks::load(&layout, "origin").unwrap();
         let Err(SyncError::AdvertisedPackMissing {
             source: pack_cause, ..
-        }) = crate::stage::download_pack_chain_with_limits(
+        }) = crate::stage::apply_pack_chain(
+            &store,
             &source,
             &crate::NoopObserver,
+            "origin",
             "main",
             &[[0; 32]],
-            &applied,
-            crate::packmap::MAX_FETCH_STAGED_BYTES,
-            Some(td.path()),
+            &mut applied,
+            false,
+            &mut crate::stage::ChainApplied::default(),
         )
         else {
             panic!("wrong pack error")

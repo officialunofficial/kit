@@ -42,7 +42,7 @@ document points here.
 | `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | held shared by a single-ref write and by a two-ref advance of existing refs, and exclusive by a multi-file step and by a two-ref advance that creates a ref; the exclusive hold excludes every file-transport write (`kit-transport-file`'s `RefLock`) | SPEC-REFS §5.1.1, §3.1 (this document) |
 | `<root>/.kit/refs/refs-<hh>.lock` | transport root, keyed on the first byte of the BLAKE3 digest of the full ref name | per-stripe (256), **local to the file transport only** | a single-ref write's Any, Missing and Match critical section, and the checks and writes of a two-ref advance of existing refs | SPEC-REFS §5.1.1 |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-bin`'s `git_import::import_into`, `git::export`) | §4 (this document) |
-| shared/exclusive `format` handle | existing immutable common-dir `format` file | per-repo, short object-store critical section | shared during a bulk write or cached reuse and during format validation; exclusive during gc's final age check and unlink | SPEC-GC, §3.4 (this document) |
+| shared/exclusive `format` handle | existing immutable common-dir `format` file | per-repo; short object-store critical section, except a fetch's guard, which lasts the whole fetch | shared during a bulk write or cached reuse and during format validation, and for the whole run of a fetch (the prune guard); exclusive, try-only, during gc's final age check and unlink | SPEC-GC, §3.4 (this document) |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
 | `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `kit serve` (stdin SSH-frame, its only mode) and any layout server, meaning a server that embeds the `.kit` filesystem layout (which also holds `server.lock` exclusively, so one layout server serves a root at a time); taken exclusive without waiting by a starting `kit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
 
@@ -174,10 +174,31 @@ Gc takes a nonblocking exclusive lock for each final age-check/unlink;
 contention keeps the object. No object changes namespace while this lock is
 held, so process death requires no persistent sweep recovery.
 
-This lock is innermost: acquire it after any registry, worktree, git-remote,
-history or ref locks already held. Its holder MUST NOT acquire another
-repository lock. Bulk commit does not hold it while publishing refs. The
-existing local-filesystem locking assumptions apply.
+No process ever blocks on the exclusive format lock. Gc takes it with a
+non-blocking try, and keeps the object when the try fails. A process that
+waited for it would wait as long as the longest shared holder, and a fetch
+holds the shared lock for hours.
+
+A fetch takes the shared lock as a prune guard before it reads its record of
+applied packs, and holds it until after its last remote-tracking ref publish.
+While a guard is held, gc keeps every candidate at any grace, so the objects
+a fetch has written and no ref names yet survive (SPEC-GC, "Concurrent
+writers and the grace window"). The guard relies on a local filesystem, as
+every lock here does. On Linux NFS a shared `flock` can vanish when another
+handle to the file closes.
+
+The shared lock is innermost for a bulk write: acquire it after any registry,
+worktree, git-remote, history or ref locks already held. Its holder MUST NOT
+acquire another repository lock. Bulk commit does not hold it while
+publishing refs. The prune guard is the one exception. A fetch holds it and
+then takes `worktree.lock`, and the ref locks below it, to publish a ref.
+This inverts the order above and cannot deadlock. The guard is a shared lock,
+so it never waits for another shared holder. The one process that holds
+`worktree.lock` and wants the exclusive format lock is gc, and it only tries
+the exclusive lock and moves on, so a fetch that waits for gc's
+`worktree.lock` while holding the guard waits for gc to finish, not for a
+lock gc is waiting on. The existing local-filesystem locking assumptions
+apply.
 
 ## 4. Global lock order and per-command lock sets
 
@@ -244,7 +265,7 @@ the history lock):
 | `status` (opportunistic index refresh) | this tree's `worktree.lock`, tried with a 10 ms timeout; on contention the refresh is skipped |
 | `tag <name>` (lightweight and annotated create) | this tree's `worktree.lock`, held across the target re-check (and, for an annotated tag, the tag-object write) and the ref publish, then the tag ref's `refs-<ref>.lock` (`tag.rs`). `tag -d` takes only the tag ref's `refs-<ref>.lock` |
 | `attest` | this tree's `worktree.lock`, held across the subject re-check and the attestation write, after signing (`attest.rs`); no ref lock |
-| `fetch`, and the fetch phase of `pull` | per remote branch: download with no lock held, then this tree's `worktree.lock` around unpack and the remote-tracking ref publish, then that ref's `refs-<ref>.lock`; released before the next branch (`remote_dispatch::fetch_objects_inner`). A retry after a concurrent re-baseline releases the lock for its download and acquires it again |
+| `fetch`, and the fetch phase of `pull` | the shared `format` lock (the prune guard) for the whole fetch, taken first. Per remote branch: download, unpack and record the packs with no `worktree.lock` held, then this tree's `worktree.lock` around the remote-tracking ref publish and its checkpoint, then that ref's `refs-<ref>.lock`; released before the next branch (`remote_dispatch::fetch_objects_inner`). The wait for `worktree.lock` has no deadline, reports once that it waits, and ends on an interrupt. A retry after a concurrent re-baseline downloads again with no lock held |
 | `pull` (fast-forward phase) | this tree's `worktree.lock` across the restore-safety check, the branch write and the worktree restore, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`remote_dispatch::pull_all_with`) |
 | `push` | no `worktree.lock`; each remote-tracking ref write takes its `refs-<ref>.lock` |
 | `kit git import`/`fetch`/`pull` (import phase) | `git-<remote>.lock`, then (first import only) `git-import-key.lock`, then per written tag or remote-tracking ref its `refs-<ref>.lock`; no `worktree.lock` (`git_import::import_into`) |

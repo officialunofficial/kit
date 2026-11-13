@@ -944,36 +944,44 @@ These hold for every conformant transport, regardless of scheme:
 Per-transport CAS strength differs (AWS S3 multipart breaks `Match`);
 the normative summary is the table in §7.1.
 
-### Bounded pack-chain fetch staging
+### Pack-chain fetch
 
 Fetch MUST authenticate each requested pack and pack-list node before decoding
-or applying it. The CLI stages missing packs sequentially in a private temporary
-directory outside the repository lock, up to a staging budget. It retains keys
-and sizes, closes each file between operations, then reads and applies one
-staged pack at a time under the existing repository lock. A pack that would
-take the staged bytes past the budget is dropped, not staged: the fetch takes
-the lock, applies the staged packs, then downloads, authenticates, applies and
-records that pack and each later one in chain order, and drops each before the
-next. The staged bytes never exceed the budget, so a chain of any size fetches
-within it. The lock is held through the downloads past the budget, so other
-commands on the repository fail as busy until they finish. Signature and closure validation
-still precede ref publication; GC exclusion is unchanged. A failed download,
-digest check, write or apply drops the temporary-directory owner, removing
-completed and partial stage files. The packs applied before the failure stay
-in the store and stay recorded as applied, with no ref naming their objects. A
-later `gc` may prune those objects; the next fetch then repairs the store
-through the stale-marker recovery below.
+or applying it. The CLI downloads the missing packs of a chain one at a time
+in chain order. It authenticates each pack, unpacks it into the object store,
+checks the signatures of the objects it wrote, records it as applied, and
+drops it before the next download. Nothing is staged on disk, and no
+repository lock is held while the packs download and apply, so other commands
+run during a fetch of any size. The CLI limits chain packs to one million and
+pack-list nodes to 100,000.
 
-The staging budget defaults to 64 GiB and the caller may set it. The CLI limits
-chain packs to one million and pack-list nodes to 100,000. Disk exhaustion and
-limit failures abort before ref publication. Applied-pack markers are rechecked
-under the lock; stale markers retain the existing object-closure recovery
-behavior, which applies each pack as it arrives. Stored-object ID lists are
-checked per pack and are not accumulated over the chain. The closure check
-before ref publication reads the type of each chunk of a chunked blob without
-queueing it, so its 10,000,000-object cap counts commits, trees, blobs and
-chunked-blob manifests only. It remembers at most 2,097,152 checked chunk IDs;
-past that, a chunk is checked again for each manifest that names it.
+The fetch takes the repository's prune guard, a shared lock on the `format`
+file, before it reads its record of applied packs, and holds it until after
+its last ref publish (SPEC-CONCURRENCY §3.4). While a guard is held, gc
+deletes no object at any grace period, so the objects of an applied pack
+survive until a ref names them. Signature and closure validation precede ref
+publication. The fetch takes `worktree.lock` only around the remote-tracking
+ref write and the checkpoint. It waits for that lock with no deadline, tells
+its observer once that it waits, and stops on an interrupt, because its
+downloads are done and a timeout would discard them.
+
+The applied-pack record gains a line for each pack as the pack is applied,
+after the pack's objects are committed and its signatures are checked. A
+fetch that dies resumes after its last applied pack. A failed, interrupted or
+killed fetch leaves the packs it applied in the store and in the record, with
+no ref naming their objects. A later `gc` may prune those objects. The record
+is then stale, and the next fetch repairs the store: when a run that skipped
+a recorded pack finds an object missing, whether a delta base during unpack
+or an object of the tip's closure, it clears the record and applies the whole
+chain again, once. Every other failure propagates. A failed download, digest
+check, write or apply publishes no ref.
+
+Stored-object ID lists are checked per pack and are not accumulated over the
+chain. The closure check before ref publication reads the type of each chunk
+of a chunked blob without queueing it, so its 10,000,000-object cap counts
+commits, trees, blobs and chunked-blob manifests only. It remembers at most
+2,097,152 checked chunk IDs; past that, a chunk is checked again for each
+manifest that names it.
 
 Unpack working memory remains bounded by one pack, rather than total
 chain payload size. This is not a chunk-streaming pack parser and does not

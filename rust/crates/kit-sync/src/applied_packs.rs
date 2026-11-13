@@ -11,8 +11,10 @@
 //! One file per remote: `.kit/applied-packs/<record>` (the `applied-packs/`
 //! directory is created on first write). Contents are a lowercase 64-hex
 //! BLAKE3 pack digest per line, LF-terminated, with no header. Unknown or
-//! malformed lines are ignored on load. Writes
-//! are atomic: a sibling `.tmp` file is written, fsynced, and renamed over
+//! malformed lines are ignored on load, so a torn final line from a killed
+//! process is harmless. A fetch appends one line per pack as it applies the
+//! pack ([`AppliedPacks::record_applied`]), with no fsync. The full rewrite
+//! is atomic: a sibling `.tmp` file is written, fsynced, and renamed over
 //! the destination — the same temp+fsync+rename pattern
 //! `kit_core::refs`/`kit_core::atomic` use for ref files.
 //!
@@ -34,9 +36,9 @@
 //! purely a performance win, never a correctness risk *on its own*. The one
 //! hazard this record introduces is staleness relative to the object store
 //! (e.g. `.kit/objects` wiped out-of-band while `applied-packs/` survives);
-//! the fetch-side self-heal path in `apply_fetched_chain` handles that by
+//! the fetch-side self-heal path in `apply_and_verify_chain` handles that by
 //! clearing the record and retrying once with a full re-download whenever a
-//! run that skipped at least one pack also hits an error.
+//! run that skipped at least one pack then finds an object missing.
 //!
 //! # Repo-layout classification (cross-link: `RepoLayout`)
 //!
@@ -91,6 +93,9 @@ pub struct AppliedPacks {
     set: HashSet<Hash>,
     path: PathBuf,
     dirty: bool,
+    /// An append has failed and been reported once. Later failures stay
+    /// silent, so a read-only record costs one warning, not one per pack.
+    append_failed: bool,
 }
 
 impl AppliedPacks {
@@ -117,6 +122,7 @@ impl AppliedPacks {
             set,
             path,
             dirty: false,
+            append_failed: false,
         })
     }
 
@@ -140,6 +146,7 @@ impl AppliedPacks {
                 set: HashSet::new(),
                 path: record_path(layout, remote),
                 dirty: false,
+                append_failed: false,
             }
         })
     }
@@ -155,6 +162,43 @@ impl AppliedPacks {
     pub fn insert(&mut self, key: &PackKey) {
         self.set.insert(key.into_hash());
         self.dirty = true;
+    }
+
+    /// Record `key`'s digest as applied and append it to the on-disk record
+    /// at once, so a fetch that dies later still skips this pack. The append
+    /// is one `hex\n` line with no fsync: the record is a cache, and a torn or
+    /// lost line is ignored on load and costs one download. The digest is
+    /// recorded in memory even when the append fails. The record is marked
+    /// dirty, so the next [`Self::persist`] still rewrites it atomically.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of creating the directory or appending the line, for the
+    /// first failure of this record only. Later appends are still tried, and
+    /// their failures return `Ok`, so a caller that reports each error reports
+    /// an unwritable record once.
+    pub fn record_applied(&mut self, key: &PackKey) -> io::Result<()> {
+        self.insert(key);
+        match self.append_line(key) {
+            Err(e) if !self.append_failed => {
+                self.append_failed = true;
+                Err(e)
+            }
+            Err(_) | Ok(()) => Ok(()),
+        }
+    }
+
+    fn append_line(&self, key: &PackKey) -> io::Result<()> {
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let mut line = to_hex(&key.into_hash());
+        line.push('\n');
+        fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&self.path)?
+            .write_all(line.as_bytes())
     }
 
     /// Atomically rewrite the on-disk record with the full current set
@@ -378,6 +422,51 @@ mod tests {
         let (_dir, kit_dir) = fresh_kit_dir();
         let applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
         assert!(!applied.contains(&pk("a")));
+    }
+
+    #[test]
+    fn record_applied_appends_a_line_a_later_load_sees() {
+        let (_dir, kit_dir) = fresh_kit_dir();
+        let (k1, k2) = (pk("pack-1"), pk("pack-2"));
+        let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        applied.record_applied(&k1).unwrap();
+        applied.record_applied(&k2).unwrap();
+        // No persist: a process that died here still left both lines.
+        let reloaded = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        assert!(reloaded.contains(&k1) && reloaded.contains(&k2));
+        let text = fs::read_to_string(record_path(&kit_dir, "origin")).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn a_torn_appended_line_is_ignored_on_load() {
+        let (_dir, kit_dir) = fresh_kit_dir();
+        let k1 = pk("pack-1");
+        let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        applied.record_applied(&k1).unwrap();
+        let path = record_path(&kit_dir, "origin");
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&to_hex(&h("torn")).as_bytes()[..30])
+            .unwrap();
+        let reloaded = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        assert!(reloaded.contains(&k1));
+        assert!(!reloaded.contains(&pk("torn")));
+    }
+
+    #[test]
+    fn record_applied_keeps_the_digest_and_reports_only_the_first_failed_append() {
+        let (_dir, kit_dir) = fresh_kit_dir();
+        // A directory where the record file belongs makes the append fail.
+        fs::create_dir_all(record_path(&kit_dir, "origin")).unwrap();
+        let mut applied = AppliedPacks::load_or_empty(&kit_dir, "origin", &crate::NoopObserver);
+        let key = pk("pack-1");
+        assert!(applied.record_applied(&key).is_err());
+        assert!(applied.contains(&key));
+        // Only the first failure is reported; the digest is still recorded.
+        let next = pk("pack-2");
+        assert!(applied.record_applied(&next).is_ok());
+        assert!(applied.contains(&next));
     }
 
     #[test]

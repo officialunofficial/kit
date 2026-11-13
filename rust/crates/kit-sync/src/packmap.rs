@@ -44,13 +44,10 @@ pub(crate) fn branch_ref_hint(branch: &str) -> String {
 /// bound additionally caps an acyclic but pathologically long chain.)
 pub(crate) const MAX_PACK_CHAIN_DEPTH: usize = 100_000;
 
-/// Bounds retained chain and stage metadata across all nodes, not only
+/// Bounds retained chain metadata across all nodes, not only
 /// within one packlist. At most one million pack keys plus one hundred
 /// thousand nodes.
 pub(crate) const MAX_FETCH_PACKS: usize = 1_000_000;
-/// The default staging budget: the most bytes a fetch stages without the
-/// repository lock. A larger chain applies its later packs as they arrive.
-pub(crate) const MAX_FETCH_STAGED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Download and decode one packlist node by key. Packlist nodes are
 /// auxiliary transfer metadata, not packfiles, so they travel over the

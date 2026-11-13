@@ -6,11 +6,14 @@
 //! [`Observer`] as typed [`SyncEvent`]s, and cancellation is polled through it.
 //!
 //! * No kit config, credentials or environment variables are read by the
-//!   library itself (downloaded packs are staged under the system temporary
-//!   directory unless [`SyncOptions::staging_dir`] says otherwise). The caller
-//!   passes the [`RemoteSource`] (already authenticated; for the transport
-//!   backend the credentials live in the [`Transport`](kit_core::protocol::Transport)
-//!   it was built with) and the [`SyncOptions`].
+//!   library itself. The caller passes the [`RemoteSource`] (already
+//!   authenticated; for the transport backend the credentials live in the
+//!   [`Transport`](kit_core::protocol::Transport) it was built with) and the
+//!   [`SyncOptions`].
+//! * A fetch holds no repository lock while it downloads and applies packs. It
+//!   keeps gc from deleting its objects with a
+//!   [`PruneGuard`](kit_core::store::PruneGuard), and takes the worktree lock
+//!   only to publish its refs.
 //! * Signature verification of every commit, remix and tag a fetch
 //!   introduces is on by default and fails closed. Turning it off is an
 //!   explicit option.
@@ -92,17 +95,6 @@ pub struct SyncOptions {
     pub target_branch: Option<String>,
     /// Object-store durability schedule.
     pub sync_policy: SyncPolicy,
-    /// Directory under which downloaded packs are staged before they are
-    /// unpacked. `None` uses the system temporary directory.
-    pub staging_dir: Option<std::path::PathBuf>,
-    /// The most bytes a fetch stages without the repository lock. It defaults
-    /// to 64 GiB. Past it, the fetch takes the lock, applies the staged packs
-    /// and then downloads and applies each further pack as it arrives, so the
-    /// staged bytes never exceed it. A smaller value bounds the disk a fetch
-    /// uses beside the object store; `0` applies every pack as it arrives. The
-    /// first pack past the budget is downloaded twice: once to find that it
-    /// does not fit, and again under the lock.
-    pub max_staged_bytes: u64,
     /// After a complete fetch, delete the remote-tracking refs whose branch
     /// is gone from the remote. Only [`fetch`] acts on it.
     pub prune: bool,
@@ -136,20 +128,6 @@ impl SyncOptions {
         self.sync_policy = policy;
         self
     }
-
-    /// Set [`max_staged_bytes`](Self::max_staged_bytes).
-    #[must_use]
-    pub fn with_max_staged_bytes(mut self, bytes: u64) -> Self {
-        self.max_staged_bytes = bytes;
-        self
-    }
-
-    /// Set [`staging_dir`](Self::staging_dir).
-    #[must_use]
-    pub fn with_staging_dir(mut self, dir: Option<std::path::PathBuf>) -> Self {
-        self.staging_dir = dir;
-        self
-    }
 }
 
 impl Default for SyncOptions {
@@ -158,8 +136,6 @@ impl Default for SyncOptions {
             verify_signatures: true,
             target_branch: None,
             sync_policy: SyncPolicy::Batch,
-            staging_dir: None,
-            max_staged_bytes: packmap::MAX_FETCH_STAGED_BYTES,
             prune: false,
         }
     }

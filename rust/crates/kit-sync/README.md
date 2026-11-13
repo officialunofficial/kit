@@ -3,11 +3,16 @@
 Native clone, fetch, pull, and push for `.kit` repositories, as a library.
 
 `kit-sync` is the filesystem layer behind the `kit` command line's `clone`,
-`fetch`, `pull`, and `push`. The read path walks a branch's packmap chain, downloads the packs it
-does not already have, unpacks them under the per-branch repository lock,
+`fetch`, `pull`, and `push`. The read path walks a branch's packmap chain,
+downloads the packs it does not already have, and unpacks and records each one
+as it arrives, with no repository lock held and nothing staged on disk. It
 verifies the signature of every commit, remix and tag it introduced, checks
-the tip's closure is complete, publishes the remote-tracking ref, and (for
-`pull`) fast-forwards the branch, HEAD and worktree with rollback on failure.
+the tip's closure is complete, publishes the remote-tracking ref under the
+repository lock, and (for `pull`) fast-forwards the branch, HEAD and worktree
+with rollback on failure. A `PruneGuard` keeps gc from deleting the fetch's
+objects before a ref names them. The wait for the repository lock has no
+deadline, sends `SyncEvent::WaitingForRepoLock` once, and ends on an
+interrupt.
 
 The push path plans from what changed: it walks the commits the remote lacks,
 compares each tree with the trees of its parents, and plans deltas. A chunk of
@@ -18,8 +23,6 @@ ref. It preserves split-push bounds and resumable uploads.
 Every call returns a typed report or a typed error. **Nothing is printed**
 (`#![deny(clippy::print_stdout, clippy::print_stderr)]`), and the library
 reads **no kit config, credentials or environment variables** of its own.
-(Downloaded packs are staged under the system temporary directory unless
-`SyncOptions::staging_dir` names another.)
 
 ## API
 
@@ -58,7 +61,6 @@ let pulled = pull(&dir, &source, "default", &SyncOptions::default(), &NoopObserv
 * `target_branch`: land on this branch. It must exist on the remote; there is
   no silent fallback (`SyncError::RemoteBranchMissing`).
 * `sync_policy`: object-store durability (`Batch` by default).
-* `staging_dir`: where downloaded packs are staged (system temp dir by default).
 
 `SyncOptions` is `#[non_exhaustive]`: start from `SyncOptions::default()` and
 use the `with_*` setters.

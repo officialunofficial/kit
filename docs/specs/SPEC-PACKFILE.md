@@ -697,15 +697,12 @@ The trailer detects accidental corruption; it is not a signature (§1).
 Authenticity rests on the caller-supplied content address (§7) and the
 per-object hash verification of §3.
 
-### Fetch staging resource limits
+### Fetch resource limits
 
-The CLI stages authenticated missing packs to private temporary files before
-applying them in chain order under the repository lock. It retains at most one
-pack payload buffer in the staging layer, plus bounded chain metadata; the
-staging budget defaults to 64 GiB, with one million packs and 100,000 pack-list
-nodes. The packs past the budget are applied as they arrive, under the lock,
-one at a time, so the staged bytes never exceed the budget (SPEC-TRANSPORT,
-"Bounded pack-chain fetch staging"). A lifetime-owned temporary directory
-cleans up on every return path. Application uses one pack and one pack's
-stored-object IDs at a time. Ref publication follows signature and closure
-checks. Unpack allocations are additional one-pack working memory.
+The CLI downloads and applies the packs of a chain one at a time, in chain
+order, with no repository lock and no staging on disk (SPEC-TRANSPORT,
+"Pack-chain fetch"). It retains at most one pack payload buffer, plus bounded
+chain metadata: one million packs and 100,000 pack-list nodes. Application
+uses one pack and one pack's stored-object IDs at a time. Ref publication
+follows signature and closure checks. Unpack allocations are additional
+one-pack working memory.
