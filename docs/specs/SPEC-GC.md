@@ -177,6 +177,21 @@ gc sweeps is the import phase of `kit git import`/`fetch`/`pull`, which
 writes objects and then tags and remote-tracking refs under
 `git-<remote>.lock` only (SPEC-CONCURRENCY §4).
 
+A native `kit fetch`, `kit pull` and `kit clone` also write objects with no
+`worktree.lock` held, for hours on a large repository, and take the lock
+only to publish a remote-tracking ref. Grace does not protect their
+objects, because an object the fetch reuses keeps its old `mtime`. A fetch
+is protected by a prune guard instead: it holds the shared kernel lock on
+the `format` file (below) from before it reads its record of applied packs
+until after its last ref publish. While any guard is held, the sweep's final
+check cannot take the exclusive lock, so it keeps every candidate at any
+grace, including zero. The guard stops only the delete step. It protects a
+fetch from a gc that holds the worktree locks of SPEC-CONCURRENCY §4 from its
+mark through its sweep, so the mark sees the ref the fetch publishes. A fetch
+that dies releases the guard with its process. The objects of a dead fetch are
+then ordinary unreachable objects, and a later fetch repairs the store if a gc
+pruned any of them (SPEC-TRANSPORT, "Pack-chain fetch").
+
 A push through the file transport (`kit push kit+file://...`) or one
 received by `kit serve` or a layout server is not such a writer. It stores
 packs as `<root>/packs/<hex>` and refs as `<root>/<name>` under the
@@ -206,11 +221,12 @@ locks and do not need an mtime refresh.
 The sweep's preliminary metadata read is advisory. Its final age check and
 unlink hold an exclusive kernel lock on the existing, immutable common-dir
 `format` file. Bulk writes and cached reuse hold the corresponding shared
-lock across their presence check, refresh and any rewrite. If refresh wins,
-the final check sees the new mtime; if unlink wins, a later write recreates
-the object and cached reuse refuses the missing object. Lock contention or
-uncertain metadata keeps the candidate. The lock order is specified by
-SPEC-CONCURRENCY.
+lock across their presence check, refresh and any rewrite, and a fetch
+holds it for its whole run. If refresh wins, the final check sees the new
+mtime; if unlink wins, a later write recreates the object and cached reuse
+refuses the missing object. Lock contention or uncertain metadata keeps the
+candidate. No process ever blocks on the exclusive lock: the sweep only tries
+it. The lock order is specified by SPEC-CONCURRENCY.
 
 Objects are never renamed out of the canonical namespace during a sweep.
 A crash before unlink leaves the object there, and the kernel releases the

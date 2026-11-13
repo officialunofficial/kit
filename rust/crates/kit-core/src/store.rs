@@ -11,9 +11,11 @@
 //!
 //! Writes are atomic: bytes are first written to a sibling temp file, made
 //! durable, then renamed into place. A single or batched write names the temp
-//! file `.<name>.tmp.<pid>.<seq>`; a bulk write names it `.kit.tmp.<pid>.<seq>`.
-//! A crash mid-write leaves only the temp file behind and never
-//! produces a visible object that fails the read-time hash check.
+//! file `.<name>.tmp.<pid>.<seq>` followed by a random suffix; a bulk write
+//! names it `.kit.tmp.<pid>.<seq>` the same way. Enumeration skips every file
+//! whose name is not 62 hex digits, so temp files are never objects. A crash
+//! mid-write leaves only the temp file behind and never produces a visible
+//! object that fails the read-time hash check.
 //!
 //! Durability comes in three shapes (see [`crate::batch`] for the full
 //! contract): [`ObjectStore::write`] flushes per object
@@ -260,6 +262,14 @@ impl BulkWriter<'_> {
         }
         Ok(())
     }
+}
+
+/// Proof that the holder keeps gc from deleting objects. See
+/// [`ObjectStore::prune_guard`]. The lock is released when the guard drops.
+#[must_use = "the guard protects the store only while it is alive"]
+#[derive(Debug)]
+pub struct PruneGuard {
+    _format: File,
 }
 
 /// Result alias used throughout this module.
@@ -764,6 +774,34 @@ impl ObjectStore {
         Ok(file)
     }
 
+    /// Keep gc from deleting any object of this store until the guard drops.
+    ///
+    /// The guard holds the shared lock on the `format` file. gc's only delete
+    /// path, `prune_if_old`, needs the exclusive lock and keeps the object
+    /// when it cannot take it, so no object is deleted at any grace period
+    /// while a guard is alive. A process that dies releases it with its file
+    /// handle, so no marker file is needed. A fetch takes the guard before it
+    /// reads its record of applied packs and keeps it until its last ref
+    /// publish, because an object a fetch reuses keeps its old modification
+    /// time, so the grace period does not protect it.
+    ///
+    /// The guard protects only against a gc that holds the worktree locks
+    /// across its mark and sweep, as `kit gc` does: a gc that marks before the
+    /// fetch publishes and sweeps after the guard drops would not see the new
+    /// ref. It stops the delete step, not the mark.
+    ///
+    /// The guard relies on a local filesystem that honours kernel file locks,
+    /// as SPEC-CONCURRENCY already requires. On Linux NFS a shared lock can
+    /// vanish when another handle to the file closes.
+    ///
+    /// # Errors
+    /// [`StoreError::Io`] if the `format` file cannot be opened or locked.
+    pub fn prune_guard(&self) -> StoreResult<PruneGuard> {
+        Ok(PruneGuard {
+            _format: self.lock_writer()?,
+        })
+    }
+
     fn cached_children(&self, h: &Hash) -> StoreResult<Vec<Hash>> {
         use crate::object::ObjectType;
         if matches!(self.object_type(h)?, ObjectType::Blob | ObjectType::Delta) {
@@ -779,6 +817,11 @@ impl ObjectStore {
     /// Final grace-window check and unlink, excluded from concurrent bulk
     /// refreshes. Contention or uncertain age keeps the object. A crash before
     /// unlink leaves the canonical file; afterwards only an old orphan is gone.
+    ///
+    /// The exclusive lock is always a `try_lock`, never a blocking one. A
+    /// fetch holds the shared lock (see [`prune_guard`](Self::prune_guard))
+    /// for hours, so a process that waited for the exclusive lock would wait
+    /// that long. No code may block on the exclusive lock of `format`.
     pub(crate) fn prune_if_old(&self, h: &Hash, now: u64, grace: u64) -> StoreResult<Option<u64>> {
         self.prune_if_old_with_hook(h, now, grace, || {})
     }
@@ -880,9 +923,9 @@ fn check_hash(expected: &Hash, actual: &Hash) -> StoreResult<()> {
 
 /// Create a uniquely-named sibling temp file in `parent` for the object
 /// file `file_name`. A bulk write ([`BulkWriter`]) names its temp files
-/// `.kit.tmp.*` instead. The `.{name}.tmp.{pid}.{seq}` shape is what
-/// [`ObjectStore::iter_object_hashes`] and the stale-temp tests rely on
-/// to skip non-objects.
+/// `.kit.tmp.*` instead. The name is `.{name}.tmp.{pid}.{seq}` followed by
+/// the random suffix that `NamedTempFile` appends. [`ObjectStore::iter_object_hashes`]
+/// does not rely on that shape: it keeps only files named with 62 hex digits.
 pub(crate) fn temp_file_in(parent: &Path, file_name: &str) -> io::Result<NamedTempFile> {
     let pid = process::id();
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);

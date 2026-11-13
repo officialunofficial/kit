@@ -1,24 +1,25 @@
-//! Narrow `pull_all`/`fetch_all`'s repo-lock hold to the
-//! ref-publish window instead of the whole network transfer, without
-//! reopening the GC-prune race.
+//! A fetch or pull holds no repo lock while it downloads and applies packs. It
+//! takes the lock only to publish its remote-tracking refs, and a prune guard
+//! keeps gc from deleting the objects it has written but not yet published.
 //!
-//! Four things are under test:
+//! Five things are under test:
 //!
 //! 1. [`fetch_all_does_not_hold_repo_lock_during_pack_download`] and
 //!    [`pull_all_does_not_hold_repo_lock_during_pack_download`] prove the
-//!    lock is free while a pack is in flight over the network — the bug
-//!    the code fixes. Run against the pre-fix code, these fail (the
-//!    lock-probe times out because the whole transfer holds the lock).
+//!    lock is free while a pack is in flight over the network. A lock held
+//!    across the transfer makes the lock probe time out.
 //! 2. [`gc_blocks_while_repo_lock_held_mid_fetch_critical_section`] proves
-//!    the mechanism the narrowed design leans on for safety: a concurrent
+//!    the mechanism the publish step leans on: a concurrent
 //!    `gc --grace-secs 0` cannot make progress while the SAME lock a
-//!    fetch/pull holds across its local-write + ref-publish window
-//!    (`kit_sync` `apply_fetched_chain`) is held.
+//!    fetch/pull holds across its ref publish is held.
 //! 3. [`fetch_objects_survive_a_grace_zero_gc_run_during_the_unlocked_download_phase`]
-//!    exercises the main hazard: an aggressive
-//!    concurrent `gc --grace-secs 0` running purely during the (now
-//!    unlocked) download window must never corrupt the eventual fetch.
-//! 4. [`concurrent_fetch_and_aggressive_gc_never_lose_fetched_objects`] is
+//!    and [`gc_between_two_packs_keeps_the_objects_of_the_first`] exercise
+//!    the main hazard: an aggressive concurrent `gc --grace-secs 0` while
+//!    the fetch has written objects no ref names yet must never corrupt the
+//!    eventual fetch.
+//! 4. [`add_and_commit_run_while_a_fetch_is_paused_between_packs`] proves the
+//!    point of the design: other commands run during a long fetch.
+//! 5. [`concurrent_fetch_and_aggressive_gc_never_lose_fetched_objects`] is
 //!    a soak test mirroring `lock_contention.rs`'s
 //!    `publisher_vs_gc_never_corrupts` (the original regression test)
 //!    but for `fetch` instead of `tag -a`, driving the real subprocesses
@@ -28,9 +29,10 @@
 mod common;
 
 use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{Repo, check_invariants};
 use kit_core::hash::Hash;
@@ -122,9 +124,9 @@ impl Gate {
     }
 }
 
-/// Wraps [`MemoryTransport`], routing every real pack download through
-/// [`Gate::enter_and_wait`] so a test can pause a fetch/pull exactly while
-/// it is in the network phase. Packlist chain-node downloads
+/// Wraps [`MemoryTransport`], routing the `block_at`-th real pack download
+/// (counting from one) through [`Gate::enter_and_wait`] so a test can pause a
+/// fetch/pull exactly while it is in the network phase. Packlist chain-node downloads
 /// (`download_blob`) are explicitly delegated straight to `inner` —
 /// bypassing the gate — so only genuine pack transfers (the slow part a
 /// WAN fetch spends its time on) trip it, mirroring `download_pack`'s
@@ -133,6 +135,19 @@ impl Gate {
 struct BlockingTransport {
     inner: MemoryTransport,
     gate: Arc<Gate>,
+    block_at: usize,
+    downloads: AtomicUsize,
+}
+
+impl BlockingTransport {
+    fn new(inner: MemoryTransport, gate: &Arc<Gate>, block_at: usize) -> Self {
+        Self {
+            inner,
+            gate: gate.clone(),
+            block_at,
+            downloads: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl Transport for BlockingTransport {
@@ -141,7 +156,9 @@ impl Transport for BlockingTransport {
     }
 
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.gate.enter_and_wait();
+        if self.downloads.fetch_add(1, Ordering::SeqCst) + 1 == self.block_at {
+            self.gate.enter_and_wait();
+        }
         self.inner.download_pack(key)
     }
 
@@ -210,10 +227,7 @@ fn fetch_all_does_not_hold_repo_lock_during_pack_download() {
     push_all(alice.path(), &plain).expect("push");
 
     let gate = Arc::new(Gate::new());
-    let tx = BlockingTransport {
-        inner: plain,
-        gate: gate.clone(),
-    };
+    let tx = BlockingTransport::new(plain, &gate, 1);
     let bob_layout = RepoLayout::single(bob.path());
     let bob_path = bob.path();
 
@@ -268,10 +282,7 @@ fn pull_all_does_not_hold_repo_lock_during_pack_download() {
     push_all(alice.path(), &plain).expect("push");
 
     let gate = Arc::new(Gate::new());
-    let tx = BlockingTransport {
-        inner: plain,
-        gate: gate.clone(),
-    };
+    let tx = BlockingTransport::new(plain, &gate, 1);
     let bob_layout = RepoLayout::single(bob.path());
     let bob_path = bob.path();
 
@@ -315,12 +326,11 @@ fn pull_all_does_not_hold_repo_lock_during_pack_download() {
 
 #[test]
 fn gc_blocks_while_repo_lock_held_mid_fetch_critical_section() {
-    // `kit_sync` `apply_fetched_chain` holds the repo lock continuously from
-    // the first object it unpacks through the caller's ref publish.
-    // Simulate being inside that window by holding the same lock directly,
-    // and confirm a concurrent `gc --grace-secs 0` cannot proceed until it
-    // is released — the invariant the narrowed lock design depends
-    // on: gc can never observe a downloaded-but-not-yet-referenced object.
+    // A fetch holds the repo lock across its tracking-ref publish. Simulate
+    // being inside that window by holding the same lock directly, and
+    // confirm a concurrent `gc --grace-secs 0` cannot proceed until it is
+    // released: a gc either ends before the publish or starts after it and
+    // sees the new ref.
     let repo = Repo::new();
     repo.commit_file("base.txt", b"base\n", "base");
     let layout = RepoLayout::single(repo.path());
@@ -372,10 +382,7 @@ fn fetch_objects_survive_a_grace_zero_gc_run_during_the_unlocked_download_phase(
     push_all(alice.path(), &plain).expect("push");
 
     let gate = Arc::new(Gate::new());
-    let tx = BlockingTransport {
-        inner: plain,
-        gate: gate.clone(),
-    };
+    let tx = BlockingTransport::new(plain, &gate, 1);
     let bob_layout = RepoLayout::single(bob.path());
     let bob_path = bob.path();
 
@@ -387,9 +394,8 @@ fn fetch_objects_survive_a_grace_zero_gc_run_during_the_unlocked_download_phase(
         let started = gate.wait_started(Duration::from_secs(5));
 
         // An aggressive concurrent gc while the download is in flight and
-        // no repo lock is held: at this point the download hasn't unpacked
-        // anything yet, so there's nothing new to prune — this must be
-        // completely harmless, and the gc itself must succeed cleanly.
+        // no repo lock is held: nothing has been unpacked yet, so this must
+        // be completely harmless, and the gc itself must succeed cleanly.
         let gc_out = started.then(|| run_in(bob_path, &["gc", "--grace-secs", "0"]));
 
         gate.release();
@@ -420,7 +426,116 @@ fn fetch_objects_survive_a_grace_zero_gc_run_during_the_unlocked_download_phase(
 }
 
 // ---------------------------------------------------------------------------
-// 4. Soak test mirroring lock_contention.rs's `publisher_vs_gc_never_corrupts`
+// 4. Between two packs: gc keeps the first pack's objects, and other
+//    commands run.
+// ---------------------------------------------------------------------------
+
+/// Alice's history in two pushes, so the remote holds two packs, and a
+/// fetch of it paused in the download of the second.
+struct PausedBetweenPacks {
+    alice: tempfile::TempDir,
+    bob: tempfile::TempDir,
+    gate: Arc<Gate>,
+    tx: BlockingTransport,
+}
+
+fn paused_between_packs() -> PausedBetweenPacks {
+    let alice = tempfile::tempdir().unwrap();
+    let bob = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    init_repo(bob.path());
+    let plain = MemoryTransport::new();
+    for (name, body) in [("a.txt", "v1"), ("b.txt", "v2")] {
+        fs::write(alice.path().join(name), body).unwrap();
+        commit_all(alice.path(), name);
+        push_all(alice.path(), &plain).expect("push");
+    }
+    let gate = Arc::new(Gate::new());
+    let tx = BlockingTransport::new(plain, &gate, 2);
+    PausedBetweenPacks {
+        alice,
+        bob,
+        gate,
+        tx,
+    }
+}
+
+#[test]
+fn gc_between_two_packs_keeps_the_objects_of_the_first() {
+    let paused = paused_between_packs();
+    let bob_layout = RepoLayout::single(paused.bob.path());
+    let bob_path = paused.bob.path();
+
+    let (started, gc_out, fetch_result) = thread::scope(|s| {
+        let handle = s.spawn(|| fetch_all(bob_path, &paused.tx, "default"));
+        let started = paused.gate.wait_started(Duration::from_secs(10));
+        // The first pack is applied and recorded, and no ref names its
+        // objects yet.
+        let gc_out = started.then(|| run_in(bob_path, &["gc", "--grace-secs", "0"]));
+        paused.gate.release();
+        (
+            started,
+            gc_out,
+            handle.join().expect("fetch thread panicked"),
+        )
+    });
+
+    assert!(started, "fetch never reached its second pack download");
+    let gc_out = gc_out.unwrap();
+    assert!(gc_out.status.success(), "{gc_out:?}");
+    let stderr = String::from_utf8_lossy(&gc_out.stderr);
+    assert!(
+        stderr.contains("pruned 0 object(s)"),
+        "gc must delete nothing while a fetch runs: {stderr}"
+    );
+    assert_eq!(fetch_result.expect("fetch must succeed"), 1);
+    let tip = refs::read_remote_ref(&bob_layout, "default", "main")
+        .unwrap()
+        .expect("remote-tracking ref must be published");
+    reachable_objects(&ObjectStore::open(&bob_layout).unwrap(), &tip)
+        .expect("the closure survived the gc");
+    let alice_main = fs::read_to_string(paused.alice.path().join(".kit/refs/heads/main")).unwrap();
+    assert_eq!(alice_main.trim(), kit_core::hash::to_hex(&tip));
+}
+
+#[test]
+fn add_and_commit_run_while_a_fetch_is_paused_between_packs() {
+    let paused = paused_between_packs();
+    let bob_path = paused.bob.path();
+
+    let (started, add, commit, fetch_result) = thread::scope(|s| {
+        let handle = s.spawn(|| fetch_all(bob_path, &paused.tx, "default"));
+        let started = paused.gate.wait_started(Duration::from_secs(10));
+        let timed = |args: &[&str]| {
+            let begun = Instant::now();
+            let out = run_in(bob_path, args);
+            (out, begun.elapsed())
+        };
+        fs::write(bob_path.join("local.txt"), b"local").unwrap();
+        let add = started.then(|| timed(&["add", "local.txt"]));
+        let commit = started.then(|| timed(&["commit", "-m", "local"]));
+        paused.gate.release();
+        (
+            started,
+            add,
+            commit,
+            handle.join().expect("fetch thread panicked"),
+        )
+    });
+
+    assert!(started, "fetch never reached its second pack download");
+    for (name, (out, took)) in [("add", add.unwrap()), ("commit", commit.unwrap())] {
+        assert!(out.status.success(), "{name}: {out:?}");
+        assert!(
+            took < Duration::from_secs(2),
+            "{name} took {took:?} during a paused fetch"
+        );
+    }
+    assert_eq!(fetch_result.expect("fetch must succeed"), 1);
+}
+
+// ---------------------------------------------------------------------------
+// 5. Soak test mirroring lock_contention.rs's `publisher_vs_gc_never_corrupts`
 //    but for `fetch` instead of `tag -a`.
 // ---------------------------------------------------------------------------
 
@@ -469,8 +584,7 @@ fn concurrent_fetch_and_aggressive_gc_never_lose_fetched_objects() {
         check_invariants(bob.path(), &format!("fetch-vs-gc/{k}")).unwrap();
 
         // If the tracking ref moved this iteration, its closure must be
-        // fully intact — the race this narrowed lock must still
-        // close.
+        // fully intact.
         let bob_layout = RepoLayout::single(bob.path());
         if let Some(tip) = refs::read_remote_ref(&bob_layout, "origin", "main").unwrap() {
             let bob_store = ObjectStore::open(&bob_layout).unwrap();

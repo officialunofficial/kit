@@ -709,7 +709,7 @@ fn fetch_moves_only_the_tracking_ref() {
 }
 
 #[test]
-fn fetch_past_the_staging_budget_applies_each_pack_as_it_arrives() {
+fn fetch_applies_each_pack_as_it_arrives() {
     let remote = Remote::new();
     let first = remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
@@ -718,13 +718,15 @@ fn fetch_past_the_staging_budget_applies_each_pack_as_it_arrives() {
     let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
     let third = remote.publish(Some(second), &[("a.txt", b"three\n")], true);
     let layout = RepoLayout::single(&target);
-    let staging = dir.path().join("stage");
-    std::fs::create_dir(&staging).unwrap();
 
-    let small = SyncOptions::default()
-        .with_max_staged_bytes(1)
-        .with_staging_dir(Some(staging.clone()));
-    let report = fetch(&target, &remote.source(), "default", &small, &NoopObserver).unwrap();
+    let report = fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
 
     assert_eq!(report.packs_downloaded, 2);
     assert_eq!(report.packs_already_applied, 1);
@@ -732,7 +734,6 @@ fn fetch_past_the_staging_budget_applies_each_pack_as_it_arrives() {
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(third)
     );
-    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
 }
 
 /// A source whose `fail_at`-th pack download fails, counting from one.
@@ -770,7 +771,7 @@ impl RemoteSource for FailingPack<'_> {
 }
 
 #[test]
-fn a_failure_past_the_staging_budget_keeps_the_applied_packs_recorded() {
+fn a_failed_download_keeps_the_applied_packs_recorded() {
     let remote = Remote::new();
     let first = remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
@@ -780,20 +781,22 @@ fn a_failure_past_the_staging_budget_keeps_the_applied_packs_recorded() {
     let third = remote.publish(Some(second), &[("a.txt", b"three\n")], true);
     let fourth = remote.publish(Some(third), &[("a.txt", b"four\n")], true);
     let layout = RepoLayout::single(&target);
-    let staging = dir.path().join("stage");
-    std::fs::create_dir(&staging).unwrap();
-    let small = SyncOptions::default()
-        .with_max_staged_bytes(1)
-        .with_staging_dir(Some(staging.clone()));
-    // The second pack is downloaded, dropped at the budget, then downloaded
-    // and applied under the lock. The third pack's download fails.
+    // The first pack is recorded from the clone, the second applies, and the
+    // download of the third fails.
     let failing = FailingPack {
         inner: remote.source(),
         downloads: Cell::new(0),
-        fail_at: 3,
+        fail_at: 2,
     };
 
-    let err = fetch(&target, &failing, "default", &small, &NoopObserver).unwrap_err();
+    let err = fetch(
+        &target,
+        &failing,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
 
     assert!(
         matches!(
@@ -806,8 +809,14 @@ fn a_failure_past_the_staging_budget_keeps_the_applied_packs_recorded() {
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(first)
     );
-    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
-    let report = fetch(&target, &remote.source(), "default", &small, &NoopObserver).unwrap();
+    let report = fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
     assert_eq!(report.packs_already_applied, 2);
     assert_eq!(report.packs_downloaded, 2);
     assert_eq!(
@@ -1398,38 +1407,6 @@ fn a_live_server_is_reported_as_an_event() {
     );
 }
 
-#[test]
-fn staging_honours_the_configured_directory() {
-    let remote = Remote::new();
-    remote.publish(None, &[("a.txt", b"one\n")], true);
-    let dir = tempfile::tempdir().unwrap();
-    let staging = dir.path().join("stage");
-    std::fs::create_dir(&staging).unwrap();
-    let options = SyncOptions::default().with_staging_dir(Some(staging.clone()));
-
-    clone(
-        &dir.path().join("work"),
-        &remote.source(),
-        &default_remote("kit+memory://x"),
-        &options,
-        &NoopObserver,
-    )
-    .unwrap();
-
-    // Staging directories are removed on success; the directory itself stays.
-    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
-    let missing = SyncOptions::default().with_staging_dir(Some(dir.path().join("nope")));
-    let err = clone(
-        &dir.path().join("work2"),
-        &remote.source(),
-        &default_remote("kit+memory://x"),
-        &missing,
-        &NoopObserver,
-    )
-    .unwrap_err();
-    assert!(matches!(err, kit_sync::CloneError::Sync(SyncError::Io(_))));
-}
-
 /// A signed one-commit history whose pack carries a zstd entry
 /// (`examples/gen_zstd_fixture.rs` regenerates it).
 const ZSTD_PACK: &[u8] = include_bytes!("fixtures/zstd.pack");
@@ -1780,8 +1757,11 @@ fn checkpoint_self_heals_a_missing_prefix_and_verifies_new_signatures() {
     );
 }
 
-#[test]
-fn omitted_prefix_restores_delta_bases_when_applied_record_is_missing() {
+/// A store wiped under a checkpoint that omits its first pack: the second
+/// pack's delta has no base. The omitted prefix counts as skipped, so the
+/// fetch clears the record, resolves the full chain and retries once, with
+/// the applied-pack record present or missing.
+fn omitted_prefix_heals_a_missing_delta_base(keep_record: bool) {
     let remote = Remote::new();
     let base = Object::Blob(Blob {
         data: vec![b'a'; 1024],
@@ -1819,37 +1799,27 @@ fn omitted_prefix_restores_delta_bases_when_applied_record_is_missing() {
     let layout = RepoLayout::single(&target);
     std::fs::remove_dir_all(layout.objects_dir()).unwrap();
     std::fs::create_dir_all(layout.objects_dir()).unwrap();
-    // A stale applied-pack record already failed this way before checkpoints.
-    // Falling back must retain those skips rather than broaden that recovery.
-    let error = fetch(
-        &target,
-        &counted,
-        "default",
-        &SyncOptions::default(),
-        &NoopObserver,
-    )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        SyncError::Pack(pack::PackError::DeltaBaseMissing(_))
-    ));
-    assert_eq!(std::fs::read(&checkpoint).unwrap(), before);
-    assert_eq!(
-        refs::read_remote_ref(&layout, "default", "main").unwrap(),
-        Some(first)
-    );
-    // With no pack record, the original full walk restores the raw prefix
-    // before decoding its delta. An omitted prefix must preserve that behavior.
-    std::fs::remove_file(layout.applied_packs_dir().join("default")).unwrap();
+    if !keep_record {
+        std::fs::remove_file(layout.applied_packs_dir().join("default")).unwrap();
+    }
     counted.take();
+    let recorder = Recorder::default();
     let report = fetch(
         &target,
         &counted,
         "default",
         &SyncOptions::default(),
-        &NoopObserver,
+        &recorder,
     )
     .unwrap();
+    assert!(
+        recorder
+            .events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, SyncEvent::AppliedPacksStale { .. })),
+        "the fetch heals once"
+    );
     assert_eq!(report.packs_downloaded, 2);
     assert_eq!(counted.take().len(), 8); // suffix attempt, then one full walk
     assert_eq!(
@@ -1869,6 +1839,16 @@ fn omitted_prefix_restores_delta_bases_when_applied_record_is_missing() {
         counted.take(),
         ["ListRefs", "ReadRef refs/kit/packmap/main"]
     );
+}
+
+#[test]
+fn omitted_prefix_heals_a_missing_delta_base_with_a_stale_record() {
+    omitted_prefix_heals_a_missing_delta_base(true);
+}
+
+#[test]
+fn omitted_prefix_heals_a_missing_delta_base_when_the_record_is_missing() {
+    omitted_prefix_heals_a_missing_delta_base(false);
 }
 
 #[test]

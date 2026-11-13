@@ -1,18 +1,19 @@
 //! Fetching: reconstruct every remote branch from its packmap chain and
 //! publish remote-tracking refs.
 //!
-//! Each branch is fetched in two phases: the packs are downloaded to private
-//! staging, up to the staging budget, before the repo lock is taken, and the
-//! lock is held from the first local write through the branch's ref publish.
-//! A chain that fits the budget, the usual case, therefore downloads without
-//! the lock, so a slow transfer does not serialize out unrelated commands.
-//! The packs past the budget are downloaded and applied one at a time under
-//! the lock, so a chain of any size stages at most the budget. Every store
-//! write happens under the lock, and a concurrent `gc` needs the same lock,
-//! so it never observes a downloaded but unpublished object while the lock
-//! is held. A failed or retried apply releases the lock with objects already
-//! written; the stale-marker recovery repairs a store that `gc` pruned
-//! meanwhile.
+//! A fetch holds no repository lock while it downloads and applies packs.
+//! Each pack is downloaded, checked, unpacked and recorded as it arrives, in
+//! chain order, so `add`, `commit` and `checkout` run during a clone of any
+//! size. The lock a fetch takes is `worktree.lock`, and only around the
+//! tracking-ref write and the checkpoint.
+//!
+//! What keeps gc away from the objects a fetch has written but not yet
+//! published is the [`kit_core::store::PruneGuard`] that [`fetch_objects`]
+//! takes first and holds until its last ref publish. gc deletes objects only
+//! through `ObjectStore::prune_if_old`, which keeps every object while any
+//! guard is held, so a fetch is safe at any grace period. A fetch that dies
+//! leaves the packs it applied as unreferenced objects, recorded as applied;
+//! the next fetch skips them, or heals if a gc removed them meanwhile.
 
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
@@ -21,18 +22,17 @@ use kit_core::store::{ObjectStore, StoreError};
 
 use crate::applied_packs::AppliedPacks;
 use crate::checkpoint::{self, Checkpoint};
-use std::path::Path;
 
 use crate::SyncOptions;
 use crate::error::SyncError;
-use crate::lock::acquire_worktree_lock;
+use crate::lock::wait_for_worktree_lock;
 use crate::observer::{Observer, SyncEvent};
 use crate::packmap::{
     MAX_FETCH_PACKS, MAX_PACK_CHAIN_DEPTH, flatten_oldest_first, packmap_ref, resolve_pack_chain,
     walk_pack_chain_until,
 };
 use crate::source::RemoteSource;
-use crate::stage::{StagedPacks, apply_pack_chain, download_pack_chain_with_limits};
+use crate::stage::{ChainApplied, apply_pack_chain};
 
 /// What a fetch did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -45,10 +45,10 @@ pub struct FetchReport {
     /// Remote-tracking refs deleted because the remote no longer has the
     /// branch. Empty unless the fetch pruned.
     pub branches_pruned: Vec<String>,
-    /// Packs applied from the remote. The first pack past the staging budget
-    /// is downloaded twice but counted once. Like the other counters, this covers the
-    /// attempt that published each branch (a branch retried after a concurrent
-    /// re-baseline reports only its successful second attempt).
+    /// Packs downloaded and applied from the remote. Like the other counters,
+    /// this covers the attempt that published each branch (a branch retried
+    /// after a concurrent re-baseline reports only its successful second
+    /// attempt).
     pub packs_downloaded: usize,
     /// Packs already recorded as applied, so neither downloaded nor unpacked.
     pub packs_already_applied: usize,
@@ -60,25 +60,13 @@ pub struct FetchReport {
     pub remote_unchanged: bool,
 }
 
-/// Where a fetch stages packs and how many bytes it may stage before it
-/// takes the repo lock.
-#[derive(Clone, Copy)]
-pub(crate) struct Staging<'a> {
-    pub(crate) parent: Option<&'a Path>,
-    pub(crate) max_bytes: u64,
-}
-
-/// One branch's pack chain, resolved and downloaded over the network with
-/// **no repo lock held**. Consumed by [`apply_fetched_chain`], which the
-/// caller must run under the repo lock.
-pub(crate) struct FetchedChain {
-    /// Oldest-first flattened chain. Retained (not just `downloaded`) so a
-    /// self-heal retry inside [`apply_fetched_chain`] can re-download it.
-    /// An omitted prefix is resolved in full only on self-heal.
+/// One branch's pack chain, resolved over the network. Consumed by
+/// [`apply_and_verify_chain`].
+pub(crate) struct ResolvedChain {
+    /// Oldest-first flattened chain of the packs past the checkpoint's
+    /// verified prefix. An omitted prefix is resolved in full only on
+    /// self-heal.
     chain: Vec<Hash>,
-    /// Private, verified files for missing packs in apply order, up to the
-    /// staging budget. [`apply_fetched_chain`] downloads the rest.
-    downloaded: StagedPacks,
     head: Hash,
     /// Counts for the complete chain, including its verified prefix.
     packs: usize,
@@ -87,21 +75,18 @@ pub(crate) struct FetchedChain {
 }
 
 /// Step 1 of a branch fetch: walk `branch`'s packmap chain from `head_key`
-/// and stage the packs in it not already recorded in `applied`, up to the
-/// staging budget. Pure network I/O (the local object store is never
-/// touched), so the caller does not need the repo lock.
+/// and check its length limits. Pure network I/O: it downloads only packlist
+/// nodes, never packs, and touches neither the object store nor any lock.
 ///
 /// A matching checkpoint skips the immutable prefix. Missing or unrelated
 /// checkpoints leave the full walk unchanged.
-pub(crate) fn resolve_and_download_chain(
+pub(crate) fn resolve_chain(
     source: &dyn RemoteSource,
     observer: &dyn Observer<SyncEvent>,
     branch: &str,
     head_key: Hash,
-    applied: &AppliedPacks,
-    staging: Staging<'_>,
     checkpoint: Option<Checkpoint>,
-) -> Result<FetchedChain, SyncError> {
+) -> Result<ResolvedChain, SyncError> {
     let (nodes, reached) = walk_pack_chain_until(
         source,
         observer,
@@ -120,18 +105,8 @@ pub(crate) fn resolve_and_download_chain(
             source: None,
         });
     }
-    let downloaded = download_pack_chain_with_limits(
-        source,
-        observer,
-        branch,
-        &chain,
-        applied,
-        staging.max_bytes,
-        staging.parent,
-    )?;
-    Ok(FetchedChain {
+    Ok(ResolvedChain {
         chain,
-        downloaded,
         head: head_key,
         packs,
         nodes: node_count,
@@ -139,7 +114,7 @@ pub(crate) fn resolve_and_download_chain(
     })
 }
 
-/// What [`apply_fetched_chain`] did, for the report.
+/// What [`apply_and_verify_chain`] did, for the report.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct Applied {
     pub(crate) packs_downloaded: usize,
@@ -147,35 +122,30 @@ pub(crate) struct Applied {
     pub(crate) objects_unpacked: usize,
 }
 
-/// Step 2 of a branch fetch: unpack `fetched`'s staged packs into `store`,
-/// then download and unpack the packs past the staging budget one at a time,
-/// and verify the closure at `tip` is complete, running the applied-pack
-/// self-heal retry on a stale-record failure.
+/// Step 2 of a branch fetch: download and unpack each pack of `resolved`
+/// into `store` as it arrives, recording each one, then verify the closure at
+/// `tip` is complete, running the applied-pack self-heal retry on a stale
+/// record.
 ///
-/// **The caller MUST hold the repo lock across this call, through the
-/// branch's subsequent ref publish.** Unpacking writes objects to the local
-/// store before this branch's ref makes them reachable; a concurrent `gc`
-/// must not be able to observe that store state.
+/// **The caller MUST hold a [`kit_core::store::PruneGuard`] across this call
+/// and through the branch's subsequent ref publish.** Unpacking writes
+/// objects to the local store before this branch's ref makes them reachable,
+/// and a gc that deleted them meanwhile would leave the fetch with a ref to a
+/// broken closure. No repository lock is needed.
 ///
 /// # Self-heal
 ///
-/// An omitted prefix may contain a delta base missing from the local store.
-/// On that unpack failure, resolve the full chain once using the current
-/// applied-pack skips, restoring the behavior of the original full walk.
-///
-/// Local staleness recovery remains limited to the closure check
-/// reporting [`SyncError::RemoteMissingObject`] on a run that skipped at least
-/// one recorded pack. The record claimed packs were applied but their objects
-/// are not in the store (for example `.kit/objects` was wiped while
-/// `applied-packs/` survived), so `applied` is cleared in memory and the
-/// whole chain is resolved if necessary and retried once with no skips.
+/// The record may name packs whose objects the store no longer holds, for
+/// example after `.kit/objects` was wiped while `applied-packs/` survived, or
+/// after a gc pruned the objects of a fetch that died. So when this run
+/// skipped at least one pack, whether recorded or inside the checkpoint's
+/// verified prefix, and then either a delta base is missing or the closure
+/// check reports [`SyncError::RemoteMissingObject`], `applied` is cleared and
+/// the whole chain is resolved if necessary and retried once with no skips.
 /// Every other failure propagates without triggering self-heal, because none
-/// is evidence the local store is
-/// stale: a corrupt pack, a remote missing a pack, a transport error, a
-/// closure too large to verify, an interruption, or a failed signature.
-///
-/// Each retry holds the lock and applies every pack as it arrives, so it
-/// stages nothing.
+/// is evidence the local store is stale: a corrupt pack, a remote missing a
+/// pack, a transport error, a closure too large to verify, an interruption,
+/// or a failed signature.
 ///
 /// # Signature verification
 ///
@@ -183,102 +153,99 @@ pub(crate) struct Applied {
 /// freshly unpacked pack is verified before the pack is recorded as applied.
 /// On the self-heal path every re-downloaded object is re-verified.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_fetched_chain(
+pub(crate) fn apply_and_verify_chain(
     store: &ObjectStore,
     source: &dyn RemoteSource,
     observer: &dyn Observer<SyncEvent>,
     remote: &str,
     branch: &str,
-    fetched: FetchedChain,
+    resolved: ResolvedChain,
     tip: Hash,
     applied: &mut AppliedPacks,
     require_signed: bool,
 ) -> Result<Applied, SyncError> {
-    let FetchedChain {
+    let ResolvedChain {
         mut chain,
-        downloaded,
         head,
-        mut prefix_packs,
+        prefix_packs,
         ..
-    } = fetched;
-    let done = match apply_pack_chain(
+    } = resolved;
+    let mut done = ChainApplied::default();
+    let first = apply_pack_chain(
         store,
         source,
         observer,
+        remote,
         branch,
         &chain,
-        Some(downloaded),
         applied,
         require_signed,
-    ) {
-        Ok(done) => done,
-        Err(SyncError::Pack(kit_core::pack::PackError::DeltaBaseMissing(_)))
-            if prefix_packs > 0 =>
-        {
-            // The original full walk would have downloaded any unrecorded
-            // prefix packs before decoding this delta. Restore that ordering
-            // once, preserving applied-pack skips and all verification errors.
-            drop(chain);
-            chain = resolve_pack_chain(source, observer, branch, head)?;
-            prefix_packs = 0;
-            apply_pack_chain(
-                store,
-                source,
-                observer,
-                branch,
-                &chain,
-                None,
-                applied,
-                require_signed,
-            )?
-        }
-        Err(e) => return Err(e),
-    };
-    let mut stats = Applied {
+        &mut done,
+    )
+    // Closure completeness. With skips this is the sole guarantee the store
+    // is whole.
+    .and_then(|()| verify_closure_present(store, &tip));
+    let skipped = done.skipped + prefix_packs;
+    let stats = Applied {
         packs_downloaded: done.packs,
-        packs_skipped: chain.len() + prefix_packs - done.packs,
+        packs_skipped: skipped,
         objects_unpacked: done.objects,
     };
+    let stale = match first {
+        Ok(()) => return Ok(stats),
+        Err(
+            e @ (SyncError::RemoteMissingObject(_)
+            | SyncError::Pack(kit_core::pack::PackError::DeltaBaseMissing(_))),
+        ) if skipped > 0 => e,
+        Err(e) => return Err(e),
+    };
+    observer.event(&SyncEvent::AppliedPacksStale {
+        remote: remote.to_owned(),
+        branch: branch.to_owned(),
+        cause: stale.to_string(),
+    });
+    // Clear the suspected-stale record and retry the whole chain with no
+    // skips. Clearing intentionally discards digests inserted by other
+    // branches earlier in this same fetch: the store wipe or gc that trips
+    // self-heal makes those entries just as stale. The cleared record goes to
+    // disk at once, so a retry that dies does not leave the stale lines to
+    // be read again.
+    applied.clear();
+    persist_record(applied, observer, remote);
+    if prefix_packs > 0 {
+        // Release suffix metadata before allocating the complete walk.
+        drop(chain);
+        chain = resolve_pack_chain(source, observer, branch, head)?;
+    }
+    let mut retry = ChainApplied::default();
+    apply_pack_chain(
+        store,
+        source,
+        observer,
+        remote,
+        branch,
+        &chain,
+        applied,
+        require_signed,
+        &mut retry,
+    )?;
+    verify_closure_present(store, &tip)?;
+    // The report covers the attempt that published.
+    Ok(Applied {
+        packs_downloaded: retry.packs,
+        packs_skipped: retry.skipped,
+        objects_unpacked: retry.objects,
+    })
+}
 
-    // Closure completeness. With skips this is the sole guarantee the store
-    // is whole, and a `RemoteMissingObject` here is the ONLY self-heal
-    // trigger.
-    match verify_closure_present(store, &tip) {
-        Ok(()) => Ok(stats),
-        Err(e @ SyncError::RemoteMissingObject(_)) if stats.packs_skipped > 0 => {
-            observer.event(&SyncEvent::AppliedPacksStale {
-                remote: remote.to_owned(),
-                branch: branch.to_owned(),
-                cause: e.to_string(),
-            });
-            // Clear the suspected-stale record in memory and retry the whole
-            // chain with no skips. Clearing intentionally discards digests
-            // inserted by other branches earlier in this same fetch: the
-            // store wipe that trips self-heal makes those entries just as
-            // stale.
-            applied.clear();
-            if prefix_packs > 0 {
-                // Release suffix metadata before allocating the complete walk.
-                drop(chain);
-                chain = resolve_pack_chain(source, observer, branch, head)?;
-            }
-            let done = apply_pack_chain(
-                store,
-                source,
-                observer,
-                branch,
-                &chain,
-                None,
-                applied,
-                require_signed,
-            )?;
-            stats.packs_downloaded = done.packs;
-            stats.packs_skipped = 0;
-            stats.objects_unpacked += done.objects;
-            verify_closure_present(store, &tip)?;
-            Ok(stats)
-        }
-        Err(e) => Err(e),
+/// Rewrite the applied-packs record atomically. The record is a cache, so a
+/// failure is reported and never fails the fetch.
+fn persist_record(applied: &mut AppliedPacks, observer: &dyn Observer<SyncEvent>, remote: &str) {
+    if let Err(e) = applied.persist() {
+        observer.event(&SyncEvent::AppliedPacksPersistFailed {
+            remote: remote.to_owned(),
+            error: e.to_string(),
+        });
     }
 }
 
@@ -314,17 +281,26 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 /// For every advertised branch the flow is exactly:
 ///
 /// 1. read the branch's packmap ref (`refs/kit/packmap/<branch>`),
-/// 2. walk its chain oldest-first and download any pack the applied-pack
-///    record does not already have, with no repo lock held,
-/// 3. acquire the repo lock, unpack the downloaded packs and assert the tip's
-///    closure is fully present, then publish the remote-tracking ref and
-///    release the lock.
+/// 2. walk its chain oldest-first, then download, check, unpack and record
+///    each pack the applied-pack record does not already have, one at a time,
+///    with no repo lock held, and assert the tip's closure is fully present,
+/// 3. acquire the repo lock, publish the remote-tracking ref and its
+///    checkpoint, and release the lock.
 ///
-/// Steps 3's unpack and closure check are one call so a closure failure
+/// Step 2's unpack and closure check are one call so a closure failure
 /// counts toward the applied-pack self-heal retry. An absent packmap beside a
 /// present head is [`SyncError::PackmapMissing`]; a head absent too is a stale
 /// listing, and the branch is skipped. A tracking ref is never published for
 /// a closure that could not be fully materialised.
+///
+/// # Protection from gc
+///
+/// The first statement takes the store's [`kit_core::store::PruneGuard`], and
+/// the function holds it on every return path, after its last ref publish.
+/// While it is held, gc deletes nothing, so the objects of step 2, which no
+/// ref names yet, survive any grace period. The guard comes before the
+/// applied-packs record is read: a gc that ran between reading the record and
+/// taking the guard could delete an object of a pack the record names.
 ///
 /// # Concurrent re-baseline
 ///
@@ -338,9 +314,10 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 /// # Applied-packs record
 ///
 /// The record is keyed by remote, so this function owns its lifecycle for the
-/// whole fetch: loaded once before the branch loop, persisted once after,
-/// unconditionally and best-effort (a pure performance cache whose own I/O
-/// must never fail a fetch whose objects durably landed).
+/// whole fetch: loaded once before the branch loop, appended to as each pack
+/// is applied, and rewritten atomically once after, unconditionally and
+/// best-effort (a pure performance cache whose own I/O must never fail a
+/// fetch whose objects durably landed).
 pub(crate) fn fetch_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -349,6 +326,7 @@ pub(crate) fn fetch_objects(
     remote: &str,
     options: &SyncOptions,
 ) -> Result<FetchReport, SyncError> {
+    let _prune_guard = store.prune_guard()?;
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
     let mut report = FetchReport::default();
     let result = fetch_objects_inner(
@@ -361,12 +339,7 @@ pub(crate) fn fetch_objects(
         &mut applied,
         &mut report,
     );
-    if let Err(e) = applied.persist() {
-        observer.event(&SyncEvent::AppliedPacksPersistFailed {
-            remote: remote.to_owned(),
-            error: e.to_string(),
-        });
-    }
+    persist_record(&mut applied, observer, remote);
     result.map(|()| report)
 }
 
@@ -383,10 +356,6 @@ fn fetch_objects_inner(
 ) -> Result<(), SyncError> {
     let target_branch = options.target_branch.as_deref();
     let require_signed = options.verify_signatures;
-    let staging = Staging {
-        parent: options.staging_dir.as_deref(),
-        max_bytes: options.max_staged_bytes,
-    };
     // The cursor is read before the listing, so a write the listing misses
     // changes a later cursor.
     let cursor = source
@@ -466,44 +435,35 @@ fn fetch_objects_inner(
 
             let checkpoint_path = checkpoint::path(layout, source, remote, &r.name);
             // The immutable prefix remains verified even if tracking moved.
-            // Always check the listed tip's closure under the apply lock below,
+            // Always check the listed tip's closure before publishing,
             // including when the head matches but that tip changed.
             let checkpoint = checkpoint_path.as_deref().and_then(Checkpoint::load);
 
-            // Step 1: resolve this branch's chain and download its packs.
-            // No repo lock is held.
-            let fetched = resolve_and_download_chain(
-                source, observer, &r.name, chain_head, applied, staging, checkpoint,
-            )?;
+            // Step 1: resolve this branch's chain.
+            let resolved = resolve_chain(source, observer, &r.name, chain_head, checkpoint)?;
             let completed = Checkpoint {
                 head: chain_head,
                 tip: h,
-                packs: fetched.packs,
-                nodes: fetched.nodes,
+                packs: resolved.packs,
+                nodes: resolved.nodes,
             };
 
-            // Step 2: unpack, verify and publish this branch's ref under a
-            // repo lock acquired fresh for this branch and released once this
-            // loop iteration ends, never held across another branch's
-            // download.
-            let lock = acquire_worktree_lock(layout, observer)?;
-            // The tip we publish: normally the listed `h`, but if the chain
-            // fails because a concurrent re-baseline moved the branch under
-            // us, the freshly re-read tip. The match also carries the lock
-            // guard out, so whichever branch runs, the correct (possibly
-            // re-acquired) guard is held at the tracking write below.
-            let (completed, _lock, applied_stats) = match apply_fetched_chain(
+            // Step 2: download, unpack and record each pack as it arrives,
+            // then verify the closure. No repo lock is held. The prune guard
+            // that `fetch_objects` holds keeps gc from deleting the objects
+            // that no ref names yet.
+            let (completed, applied_stats) = match apply_and_verify_chain(
                 store,
                 source,
                 observer,
                 remote,
                 &r.name,
-                fetched,
+                resolved,
                 h,
                 applied,
                 require_signed,
             ) {
-                Ok(stats) => (completed, lock, stats),
+                Ok(stats) => (completed, stats),
                 Err(e @ SyncError::RemoteMissingObject(_)) => {
                     // Re-read the branch's CURRENT tip and packmap. If either
                     // is gone (branch deleted mid-fetch) the original error
@@ -515,38 +475,38 @@ fn fetch_objects_inner(
                     ) else {
                         return Err(e);
                     };
-                    // Release the lock for the retry's network re-download
-                    // too, mirroring step 1's unlocked download, and
-                    // re-acquire before the retry's local unpack and publish,
-                    // which still need the GC-prune protection.
-                    drop(lock);
-                    let fresh_fetched = resolve_and_download_chain(
-                        source, observer, &r.name, fresh_head, applied, staging, None,
-                    )?;
+                    let fresh = resolve_chain(source, observer, &r.name, fresh_head, None)?;
                     let completed = Checkpoint {
                         head: fresh_head,
                         tip: fresh_h,
-                        packs: fresh_fetched.packs,
-                        nodes: fresh_fetched.nodes,
+                        packs: fresh.packs,
+                        nodes: fresh.nodes,
                     };
-                    let lock = acquire_worktree_lock(layout, observer)?;
-                    let stats = apply_fetched_chain(
+                    let stats = apply_and_verify_chain(
                         store,
                         source,
                         observer,
                         remote,
                         &r.name,
-                        fresh_fetched,
+                        fresh,
                         fresh_h,
                         applied,
                         require_signed,
                     )?;
-                    (completed, lock, stats)
+                    (completed, stats)
                 }
                 Err(e) => return Err(e),
             };
-            // Still inside the lock's scope. Make the tracking rename durable
-            // before its checkpoint; a crash between them leaves the old record.
+
+            // Step 3: publish under a repo lock acquired fresh for this
+            // branch and released once this loop iteration ends. The wait
+            // has no deadline: the work above is done, and an interrupt
+            // ends it. The fetch holds only the shared lock of the prune
+            // guard, and no process blocks on the exclusive one, so this
+            // wait cannot deadlock.
+            let _lock = wait_for_worktree_lock(layout, observer)?;
+            // Make the tracking rename durable before its checkpoint; a
+            // crash between them leaves the old record.
             tracking.write(&r.name, &completed.tip)?;
             if require_signed && let Some(path) = &checkpoint_path {
                 let batch =
@@ -607,7 +567,7 @@ fn prune_tracking(
     if gone.is_empty() {
         return Ok(());
     }
-    let _lock = acquire_worktree_lock(layout, observer)?;
+    let _lock = wait_for_worktree_lock(layout, observer)?;
     for name in gone {
         match refs::delete_remote_ref(layout, remote, &name) {
             Ok(()) | Err(refs::RefError::NotFound(_)) => report.branches_pruned.push(name),

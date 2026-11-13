@@ -491,15 +491,21 @@ fn multi_branch_fetch_loads_the_record_exactly_once() {
         "a three-branch fetch must load the applied-packs record exactly once, \
          not once per branch; stderr:\n{stderr}"
     );
-    // The end-of-fetch persist replaces the unreadable file via the atomic
-    // tmp+rename (which needs only directory write permission), so it must
-    // NOT have warned.
+    // Appending a line to the unreadable file fails once, and is reported
+    // once rather than once per pack. The end-of-fetch rewrite replaces the
+    // unreadable file via the atomic tmp+rename (which needs only directory
+    // write permission), so it must NOT have warned.
     assert_eq!(
         stderr
             .matches("could not persist applied-packs record")
             .count(),
+        1,
+        "the failed appends must be reported once; stderr:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("/.origin.tmp").count(),
         0,
-        "the single persist over the unreadable record must succeed; stderr:\n{stderr}"
+        "the single rewrite over the unreadable record must succeed; stderr:\n{stderr}"
     );
     // All three branches were still fetched.
     for branch in ["main", "bbb", "ccc"] {
@@ -555,12 +561,20 @@ fn multi_branch_fetch_persists_the_record_at_most_once() {
     fs::set_permissions(&record_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // One warning is for the failed appends, reported once, and one is for
+    // the rewrite, which names its temporary file. The rewrite runs once, not
+    // once per branch.
     assert_eq!(
         stderr
             .matches("could not persist applied-packs record")
             .count(),
+        2,
+        "expected one append warning and one rewrite warning; stderr:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("/.origin.tmp").count(),
         1,
-        "a three-branch fetch must persist the applied-packs record exactly once, \
+        "a three-branch fetch must rewrite the applied-packs record exactly once, \
          not once per branch; stderr:\n{stderr}"
     );
     assert_eq!(

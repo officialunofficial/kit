@@ -9,10 +9,16 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `kit_core::store::ObjectStore::prune_guard` returns a `PruneGuard`. While
+  one is alive, `kit gc` deletes no object of the store at any grace period.
+  It holds a shared lock on the `format` file, which a process that dies
+  releases. It relies on a local filesystem.
+- `SyncEvent::WaitingForRepoLock`, sent once for each time a fetch waits for
+  the repository lock to publish a branch's ref. `kit` prints a line for it.
+- `AppliedPacks::record_applied` records a pack and appends its digest to the
+  on-disk record at once.
 - `kit_core::store::HashOnlySink` hashes the objects put into it and keeps
   none. It counts the objects and the bytes.
-- `SyncOptions::max_staged_bytes` sets the most bytes a fetch stages without
-  the repository lock. It defaults to 64 GiB. `kit` has no flag for it.
 - The S3 transport offers a repository cursor (SPEC-TRANSPORT §6.8). It is a
   digest of the key, `ETag` and `LastModified` of every object under `refs/`,
   read from the listing alone, so it needs no new object and no change to a
@@ -167,12 +173,25 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names the 1,000,000-commit limit. The limit was 10,000. A rebase still
   replays at most 10,000 commits, and a bisect keeps at most 10,000 skipped
   commits; one more fails with an error.
-- A fetch no longer fails when its packs pass the staging budget. It stages
-  packs without the lock while they fit, then takes the lock and downloads,
-  checks, applies and records each later pack before the next. A clone of a
-  file larger than the budget works, and the staged bytes never pass it. A
-  failure part way leaves the applied packs recorded; the next fetch skips
-  them.
+- **Breaking:** a fetch holds no repository lock while it downloads and
+  applies packs. It downloads, checks, applies and records each pack as it
+  arrives, in chain order, and stages nothing on disk, so `add`, `commit` and
+  `checkout` run during a clone of any size. It takes `worktree.lock` only
+  around the tracking-ref write and the checkpoint. That wait has no
+  deadline, sends `SyncEvent::WaitingForRepoLock` once, and ends on an
+  interrupt. A failure part way leaves the applied packs in the store and in
+  the applied-packs record, now appended as each pack lands; the next fetch
+  skips them, and heals if a gc pruned them meanwhile. A delta base missing
+  after a skipped pack now clears the record and retries once, as a missing
+  closure object already did. `SyncOptions::staging_dir` and
+  `SyncOptions::with_staging_dir` are removed. Remove the calls; a fetch needs
+  no replacement. The publish step no longer fails with `SyncError::RepoLock`
+  when another process holds `worktree.lock`: it waits. A caller with an
+  observer that never cancels waits as long as the holder does, and a fetch
+  that waits holds its prune guard, so gc prunes nothing meanwhile.
+- A fetch keeps gc from deleting its objects with a prune guard, so
+  `kit gc --grace-secs 0` run during a fetch prunes nothing the fetch wrote or
+  reused. gc reports those objects as kept.
 - The closure check before a fetch publishes a ref reads each chunk's type
   and no longer counts chunks toward its 10,000,000-object cap. A repository
   of many large files can be fetched. Push still counts every chunk.

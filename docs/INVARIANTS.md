@@ -289,7 +289,7 @@ non-blocking-exclusive (`kit_core::repo_lock::probe_exclusive`) and, if it
 finds the lock busy, prints a warning to stderr naming the served root
 before proceeding. Most commands do this through
 `libkit::lock::acquire_worktree` / `libkit::lock::acquire_registry`; the
-paths that take `worktree.lock` directly (the `fetch`/`pull` phases in
+paths that take `worktree.lock` directly (the `fetch`/`pull` publish step in
 `remote_dispatch` and `status`'s index refresh) call the same
 `libkit::lock::warn_if_served` probe (SPEC-CONCURRENCY §3.1). The one exclusive holder: at startup
 `kit serve` tries `serve.lock` exclusively without waiting, and only
@@ -1006,24 +1006,40 @@ old one-set walk (equal live set, or an error and a byte-identical store), the
 fail-closed, cap, boundary and dry-run tests, and the reference walk run again
 after every gc.
 
-## A fetch stages at most its budget
+## A fetch holds a prune guard, not the repository lock
 
-**Always:** a fetch stages missing packs outside the repository lock only while
-the staged bytes fit the staging budget. It applies the packs past the budget
-one at a time under the lock, each downloaded, authenticated, unpacked,
-recorded and dropped before the next.
+**Always:** a fetch downloads, authenticates, unpacks and records each pack as
+it arrives, in chain order, with no `worktree.lock` held and nothing staged on
+disk. It takes `ObjectStore::prune_guard` first, before it reads the
+applied-packs record, and holds it until after its last ref publish, on every
+return path. While any guard is held, gc deletes no object at any grace period.
+`worktree.lock` is taken only around the tracking-ref write and the checkpoint.
+That wait has no deadline, reports itself once, and ends on an interrupt. No
+process ever blocks on the exclusive lock of the `format` file: gc only tries it.
+A pack is recorded as applied only after its objects are committed and its
+signatures are checked, and the record is appended as each pack lands. When a
+run that skipped a recorded pack finds a delta base or a closure object
+missing, it clears the record and applies the whole chain again, once.
 
-**Because:** one large file is many packs. Staging the whole chain would make
-the disk a clone needs grow with the file, and a file larger than the budget
-could never be cloned.
+**Because:** one large file is many packs, so a clone can take hours. A lock
+held that long stops `add`, `commit` and `checkout`. Staging the packs first
+makes the disk a clone needs grow with the file. The lock was only there to keep
+gc away from objects no ref names yet, and a dedup hit leaves an old object's
+modification time, so the grace period does not protect an object a fetch
+reuses. A guard keeps gc away without any wait. The guard relies on a local
+filesystem, as every lock does (SPEC-CONCURRENCY §3.4).
 
-**If violated:** a clone of a repository with a large file fails on the staging
-budget or exhausts disk.
+**If violated:** commands fail as busy during a clone, or gc deletes an object
+a running fetch has written or reused, and the fetch publishes a ref to a broken
+closure or fails on a missing object. A process that blocked on the exclusive
+lock would wait as long as the longest fetch.
 
-**Enforced by:** `kit-sync` `fetch_past_the_staging_budget_applies_each_pack_as_it_arrives`,
-`a_failure_past_the_staging_budget_keeps_the_applied_packs_recorded`,
-`a_file_of_many_chunks_clones_within_a_small_staging_budget`, and
-`stage::tests::packs_past_the_budget_apply_and_skip_applied_keys`.
+**Enforced by:** `kit-core` `prune_guard` tests; `kit-sync` `fetch_unlocked`
+(the lock free mid-download and mid-apply, the publish wait and its interrupt,
+gc during a fetch with and without a reused old object, a fetch killed in each
+download, gc after a killed fetch then a fetch, two fetches at once, a resumed
+clone equal to an uninterrupted one); `kit-bin` `fetch_pull_lock_scope`
+(`add` and `commit` during a paused fetch); and `stage::tests`.
 
 ## A fetch closure check counts no chunk
 
@@ -1171,8 +1187,8 @@ core budget/page-cap tests, and `shared_listing_adversaries` in each driver.
 identity and origin, and records only a fully applied, verified packmap chain.
 Fetch publishes the tracking ref durably before the checkpoint under the same
 worktree lock. An unchanged remote tip and head download nothing. Every listed
-tip still passes locked closure verification; new nodes retain digest and
-signature checks.
+tip still passes closure verification under the fetch's prune guard; new nodes
+retain digest and signature checks.
 Missing local objects trigger full-chain recovery before publication.
 
 **Because:** immutable packmap nodes permit skipping verified ancestors, but

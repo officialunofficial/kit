@@ -15,13 +15,16 @@
 //! unreachable object regardless of age.
 //!
 //! Concurrency: gc holds the repo lock for its whole run, and the
-//! root-publishing paths now take the same lock around their object-write +
-//! ref/attestation-publish window — `tag` (annotated/signed), `fetch` /
-//! `pull`, and `attest` — so they are serialized against gc. The
-//! grace window remains the belt-and-suspenders net (like Git's default
+//! root-publishing paths take the same lock around their object-write +
+//! ref/attestation-publish window — `tag` (annotated/signed) and `attest` —
+//! so they are serialized against gc. `fetch` / `pull` write objects with no
+//! lock held, and take the lock only to publish a ref. They are protected
+//! instead by a prune guard, a shared lock on the `format` file: while any
+//! fetch holds it, gc's delete step keeps every object, at any grace period.
+//! The grace window remains the belt-and-suspenders net (like Git's default
 //! `gc.pruneExpire`, vs `prune --expire=now`): `--grace-secs 0` bypasses it
-//! and prints a warning, but with the publishers now locked it is safe even
-//! under concurrency.
+//! and prints a warning, but with the publishers locked or guarded it is safe
+//! even under concurrency.
 
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -82,10 +85,12 @@ pub fn run(args: &[String]) -> u8 {
     // invoking one, plus other gc runs. Acquisition order is
     // deterministic (main first, then registry ids ascending, from
     // `all_state_layouts`) so concurrent multi-lock takers cannot
-    // deadlock. The root publishers `tag`, `fetch` and `attest` take
-    // their tree's worktree.lock, so they serialize against gc;
-    // the grace window protects only writers outside gc's lock set
-    // (SPEC-GC "Concurrent writers and the grace window").
+    // deadlock. The root publishers `tag` and `attest` take their tree's
+    // worktree.lock, and `fetch` takes it around its ref publish, so they
+    // serialize against gc. A fetch's unpublished objects are kept by its
+    // prune guard, not by this lock. The grace window protects only writers
+    // outside gc's lock set (SPEC-GC "Concurrent writers and the grace
+    // window").
     // Registry lock FIRST (global lock order: worktrees.lock before
     // any per-tree worktree.lock, see SPEC-WORKTREE §4.3): freezes the
     // worktree set for the whole run, so a `worktree add` cannot
