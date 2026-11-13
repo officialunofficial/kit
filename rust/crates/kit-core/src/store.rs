@@ -869,8 +869,11 @@ impl ObjectStore {
     /// bytes freed.
     ///
     /// A writer that is alive does not lose its file. A fetch or a bulk write
-    /// holds the shared lock this needs to be free. Any other writer holds a
-    /// worktree lock, which gc holds across its sweep. A writer that has gone
+    /// holds the shared lock this needs to be free. A writer that holds a
+    /// worktree lock (add, commit, merge and the like) is kept out of gc's
+    /// sweep by that lock. A writer that holds neither, such as `kit
+    /// hash-object -w` or a caller of `ObjectStore::write` with no lock, is
+    /// protected only by the age of its temp file. A writer that has gone
     /// quiet for the whole grace period is taken to be dead.
     pub(crate) fn prune_temp_file_if_old(
         &self,

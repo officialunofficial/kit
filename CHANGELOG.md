@@ -366,6 +366,25 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A closure of exactly the walk cap is complete. The walk reported it cut when
   an object it had already seen was still queued, so a repository of exactly
   10,000,000 objects failed a fetch with `ClosureTooLarge`.
+- The restore safety check hashes a file that grows past 1 MiB while it is
+  read, as 0.7.3 did. Three inputs that ended in a check error (`check working
+  tree changes: ...` or `working tree: ...`) now pass it: an untracked file
+  that grows and is not in the way, a tracked file outside the sparse scope
+  that grows, and a removed entry whose file grows. None of them is a path the
+  restore writes. The eight restore-safety messages are unchanged.
+- A file above 1 MiB at stat time that is at most 1 MiB when it is read is
+  stored as one blob, as the same bytes are in a file of that length. The
+  stored form depends only on the bytes read, whether the file grew or shrank
+  in between. Before, it was stored chunked, and the next `status` reported a
+  change that was not there.
+- `kit gc` prints ` and N temp file(s)` after the object count when it removed
+  temp files.
+- `kit bisect reset` exits non-zero with `remove state: ...` when it cannot
+  remove the state file. It ignored the failure.
+- Every `kit bisect` command that writes the state file takes the worktree
+  lock that `kit gc` holds across its mark and sweep. `bisect run` takes it
+  around each state write, because its checkout of a candidate takes the lock
+  too.
 
 ### Fixed
 
