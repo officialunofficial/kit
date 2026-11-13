@@ -79,12 +79,19 @@ fn push_that_cannot_write_its_pack_leaves_no_temporary_file() {
     let out = run_with_file_size_limit(root, x, &["push", "origin", "--all"]);
 
     assert!(!out.status.success(), "the push should fail: {out:?}");
-    let leftovers: Vec<_> = fs::read_dir(bare.path().join("packs"))
-        .map(|dir| {
-            dir.map(|entry| entry.unwrap().file_name().into_string().unwrap())
-                .filter(|name| name.contains(".tmp."))
-                .collect()
-        })
-        .unwrap_or_default();
+    // The push must fail at the pack upload, not earlier. A push that failed
+    // before it made the `packs` directory would pass the checks below too.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("upload_pack I/O error"),
+        "the failure should name the pack upload: {stderr}"
+    );
+    let packs = bare.path().join("packs");
+    assert!(packs.is_dir(), "the upload should have made {packs:?}");
+    let leftovers: Vec<_> = fs::read_dir(&packs)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.contains(".tmp."))
+        .collect();
     assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
 }
