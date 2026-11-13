@@ -507,7 +507,7 @@ fn patch_refuses_a_text_file_above_the_memory_limit() {
         matches!(
             err,
             Error::ReadFile {
-                source: kit_core::worktree::WorktreeError::FileTooLarge(_),
+                source: kit_core::worktree::WorktreeError::FileTooLarge { .. },
                 ..
             }
         ),

@@ -178,7 +178,7 @@ fn diff_exit_code(error: &diff::Error) -> u8 {
         | diff::Error::NoMergeBase => exit::DATAERR,
         // A file or a stored blob is above the size that kit holds in memory.
         diff::Error::ReadObject(WorktreeError::ContentTooLarge { .. })
-        | diff::Error::BuildTree(WorktreeError::FileTooLarge(_)) => exit::NOINPUT,
+        | diff::Error::BuildTree(WorktreeError::FileTooLarge { .. }) => exit::NOINPUT,
         diff::Error::Tree(_)
         | diff::Error::MergeBase(_)
         | diff::Error::ResolveHead(_)
@@ -342,7 +342,7 @@ fn status_exit_code(error: &status::Error) -> u8 {
         // A worktree file or a stored blob is above the size that kit holds
         // in memory.
         status::Error::Compare(DiffError::Worktree(
-            WorktreeError::FileTooLarge(_) | WorktreeError::ContentTooLarge { .. },
+            WorktreeError::FileTooLarge { .. } | WorktreeError::ContentTooLarge { .. },
         )) => exit::NOINPUT,
         status::Error::NotARepository(_)
         | status::Error::HeadTree(_)
@@ -395,7 +395,7 @@ fn add_exit_code(error: &add::Error) -> u8 {
         }
         add::Error::Hash { source, .. } => match source {
             WorktreeError::Io(_)
-            | WorktreeError::FileTooLarge(_)
+            | WorktreeError::FileTooLarge { .. }
             | WorktreeError::ContentTooLarge { .. } => exit::NOINPUT,
             WorktreeError::Object(_) | WorktreeError::Store(_) => exit::CANTCREAT,
             WorktreeError::InvalidSymlinkTarget(_) | WorktreeError::InvalidUtf8 => exit::DATAERR,
@@ -826,8 +826,11 @@ mod tests {
                 exit::GENERAL_ERROR,
             ),
             (
-                status::Error::Compare(DiffError::Worktree(WorktreeError::FileTooLarge(path())))
-                    .into(),
+                status::Error::Compare(DiffError::Worktree(WorktreeError::FileTooLarge {
+                    path: path(),
+                    limit: 1,
+                }))
+                .into(),
                 exit::NOINPUT,
             ),
             (
@@ -842,7 +845,11 @@ mod tests {
                 exit::NOINPUT,
             ),
             (
-                diff::Error::BuildTree(WorktreeError::FileTooLarge(path())).into(),
+                diff::Error::BuildTree(WorktreeError::FileTooLarge {
+                    path: path(),
+                    limit: 1,
+                })
+                .into(),
                 exit::NOINPUT,
             ),
             (
@@ -856,7 +863,10 @@ mod tests {
             (
                 add::Error::ReadFile {
                     path: path(),
-                    source: WorktreeError::FileTooLarge(path()),
+                    source: WorktreeError::FileTooLarge {
+                        path: path(),
+                        limit: 1,
+                    },
                 }
                 .into(),
                 exit::NOINPUT,

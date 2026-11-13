@@ -57,7 +57,8 @@ Working-tree commands:
   exclusive. An explicitly-named path that is ignored (by
   `.gitignore`/`.kitignore`) is refused unless `-f`/`--force` is given
   (git parity); already-tracked paths are never subject to ignore.
-  `-p`/`--patch` interactively presents each hunk between the staged (or
+  A file up to 128 GiB is hashed by streaming it, so memory grows only by
+  a few copies of a 32-byte id for each chunk; a larger file is refused. `-p`/`--patch` interactively presents each hunk between the staged (or
   HEAD) blob and the worktree file and stages only the accepted ones &mdash;
   per hunk: `y` stage, `n` skip, `a` stage this and all later hunks, `d`
   skip this and all later hunks, `q` quit (keeping hunks already chosen).
@@ -1161,7 +1162,9 @@ Remote / sync:
   success, or `{"ok":false,"error":"..."}` on failure.
 - `kit pull [<remote>] [--all] [--rebase] [--no-verify-signatures]
   [--format=json] [-q|--quiet]` &mdash; fetch, then fast-forward the current
-  branch from `refs/remotes/<remote>/<branch>`. Divergent histories are
+  branch from `refs/remotes/<remote>/<branch>`. The fast-forward writes only
+  the files the new tip changed; the others keep their inode and mtime.
+  Divergent histories are
   refused; use `--rebase` or an explicit merge after resolving the
   divergence. `--rebase` fetches with the same signature checks, then replays
   the commits of the current branch that the fetched branch lacks onto the

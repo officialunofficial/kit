@@ -19,8 +19,8 @@ use crate::lock::acquire_worktree_lock;
 use crate::observer::{Observer, SyncEvent};
 use crate::source::RemoteSource;
 use crate::worktree::{
-    ensure_restore_safe, list_remote_refs_parallel, restore_worktree_and_index,
-    write_ref_recording_history,
+    current_head_tree, ensure_restore_safe, list_remote_refs_parallel, restore_worktree_and_index,
+    restore_worktree_and_index_from, write_ref_recording_history,
 };
 
 /// What a pull did to the local branch.
@@ -154,6 +154,9 @@ pub fn pull(
 
     let tree = load_tree_hash(&store, remote_tip)?;
     ensure_restore_safe(&layout, &store, tree).map_err(SyncError::RestoreSafety)?;
+    // The check above proved that the worktree and the index equal the tree
+    // of HEAD, so the restore only writes what the new tip changed.
+    let base_tree = current_head_tree(&layout, &store).map_err(SyncError::RestoreSafety)?;
     if observer.cancelled() {
         return Err(SyncError::Interrupted);
     }
@@ -167,7 +170,7 @@ pub fn pull(
     if observer.cancelled() {
         return Err(SyncError::Interrupted);
     }
-    if let Err(e) = restore_worktree_and_index(&layout, &store, tree) {
+    if let Err(e) = restore_worktree_and_index_from(&layout, &store, tree, base_tree) {
         if let Err(rollback) =
             rollback_pull_ref_and_head(&layout, &branch, local_tip, remote_tip, original_head)
         {
@@ -382,7 +385,7 @@ fn ensure_pull_restore_safe(
         Some(&tracked),
         &mut Vec::new(),
     )
-    .map_err(|e| format!("working tree: {e}"))?;
+    .map_err(|e| recovery_snapshot_error(root, &tracked, &e))?;
     let from_old =
         diff_trees(&snapshot, Some(before_tree), Some(current)).map_err(|e| e.to_string())?;
     let from_target =
@@ -399,12 +402,29 @@ fn ensure_pull_restore_safe(
                 && (entry.path == ".kitignore" || entry.path == ".gitignore")
                 && !target.has_tracked_file_at(&entry.path))
     }) {
-        return Err(format!(
-            "pull recovery would overwrite local changes at '{}'; copy it elsewhere or run `kit restore -f <path>`, then pull again",
-            entry.path
-        ));
+        return Err(pull_recovery_changes_message(&entry.path));
     }
     Ok(())
+}
+
+/// The error for a failed worktree snapshot during recovery: a growing tracked
+/// file is a local change, anything else fails the check.
+fn recovery_snapshot_error(
+    root: &Path,
+    tracked: &kit_core::index::Index,
+    error: &kit_core::worktree::WorktreeError,
+) -> String {
+    match crate::worktree::grown_tracked_file(root, tracked, error) {
+        Some(path) => pull_recovery_changes_message(&path),
+        None => format!("working tree: {error}"),
+    }
+}
+
+/// The refusal for a path the unfinished pull would overwrite.
+fn pull_recovery_changes_message(path: &str) -> String {
+    format!(
+        "pull recovery would overwrite local changes at '{path}'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
+    )
 }
 
 fn write_pull_head(
@@ -443,4 +463,44 @@ fn clear_pull_head(layout: &RepoLayout) -> Result<(), SyncError> {
     fs::remove_file(layout.pull_head_file())?;
     crate::applied_packs::sync_parent_dir(layout.worktree_state_dir())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod recovery_message_tests {
+    #[test]
+    fn a_growing_tracked_file_is_a_local_change_in_recovery() {
+        use kit_core::index::{EntryStatus, Index, IndexEntry};
+        let mut index = Index::new();
+        index.upsert_entry(IndexEntry {
+            path: "a.bin".to_owned(),
+            status: EntryStatus::Blob,
+            object_hash: [1; 32],
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        });
+        let root = std::path::Path::new("/work");
+        let grew = kit_core::worktree::WorktreeError::FileTooLarge {
+            path: root.join("a.bin"),
+            limit: kit_core::worktree::CHUNK_THRESHOLD,
+        };
+        assert!(
+            super::recovery_snapshot_error(root, &index, &grew)
+                .starts_with("pull recovery would overwrite local changes at 'a.bin'; ")
+        );
+        let other = kit_core::worktree::WorktreeError::FileTooLarge {
+            path: root.join("b.bin"),
+            limit: kit_core::worktree::CHUNK_THRESHOLD,
+        };
+        assert!(super::recovery_snapshot_error(root, &index, &other).starts_with("working tree: "));
+    }
+
+    #[test]
+    fn the_recovery_refusal_text_is_unchanged() {
+        assert_eq!(
+            super::pull_recovery_changes_message("a b"),
+            "pull recovery would overwrite local changes at 'a b'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
+        );
+    }
 }

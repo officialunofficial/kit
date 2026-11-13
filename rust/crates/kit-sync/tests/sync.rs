@@ -56,6 +56,29 @@ impl Remote {
         tip
     }
 
+    /// Publish one commit on `main` carrying `items`, each a path with `/`
+    /// separators, a mode and its content (a symlink's content is its target),
+    /// parented on `parent`.
+    fn publish_paths(&self, parent: Option<Hash>, items: &[(&str, EntryMode, &[u8])]) -> Hash {
+        let mut objects = Vec::new();
+        let tree_hash = nested_tree(&mut objects, items);
+        let mut commit = Commit::new_unannotated(
+            tree_hash,
+            parent.into_iter().collect(),
+            Identity::ed25519(self.key.public.0),
+            self.key.public.0,
+            format!("commit {}", items.len()).into_bytes(),
+            1_700_000_000 + u64::from(parent.is_some()),
+            [0u8; 64],
+        );
+        commit.signature = sign::sign_commit(&commit, &self.key).unwrap().0;
+        let commit = Object::Commit(commit);
+        let tip = commit.id().unwrap();
+        objects.push(commit);
+        self.publish_objects(&objects, tip, false);
+        tip
+    }
+
     fn build(
         &self,
         parent: Option<Hash>,
@@ -148,6 +171,56 @@ impl Remote {
     fn source(&self) -> TransportSource<'_> {
         TransportSource::new(&self.tx)
     }
+}
+
+/// The tree object of `items` (see [`Remote::publish_paths`]), with every blob
+/// and subtree pushed to `objects`. Returns the root tree's id.
+fn nested_tree(objects: &mut Vec<Object>, items: &[(&str, EntryMode, &[u8])]) -> Hash {
+    type PathItem<'a> = (&'a str, EntryMode, &'a [u8]);
+    let mut entries = Vec::new();
+    let mut dirs: std::collections::BTreeMap<&str, Vec<PathItem>> =
+        std::collections::BTreeMap::new();
+    for &(path, mode, data) in items {
+        if let Some((dir, rest)) = path.split_once('/') {
+            dirs.entry(dir).or_default().push((rest, mode, data));
+        } else {
+            let object_hash = if data.len() as u64 > kit_core::worktree::CHUNK_THRESHOLD {
+                // A file above the threshold is a manifest and its chunks.
+                let dir = tempfile::tempdir().unwrap();
+                let store =
+                    kit_core::store::ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+                let id = kit_core::worktree::store_file_object(&store, data).unwrap();
+                for hash in store.iter_object_hashes().unwrap() {
+                    objects.push(store.read_object(&hash).unwrap());
+                }
+                id
+            } else {
+                let blob = Object::Blob(Blob {
+                    data: data.to_vec(),
+                });
+                let id = blob.id().unwrap();
+                objects.push(blob);
+                id
+            };
+            entries.push(TreeEntry {
+                name: path.as_bytes().to_vec(),
+                mode,
+                object_hash,
+            });
+        }
+    }
+    for (dir, sub) in dirs {
+        entries.push(TreeEntry {
+            name: dir.as_bytes().to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: nested_tree(objects, &sub),
+        });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let tree = Object::Tree(Tree { entries });
+    let id = tree.id().unwrap();
+    objects.push(tree);
+    id
 }
 
 #[derive(Default)]
@@ -2607,4 +2680,377 @@ fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
     let (report, _) = counted_fetch(&remote, &target, &options);
     assert!(!report.remote_unchanged);
     assert!(store.contains(&blob), "a full fetch heals the closure");
+}
+
+// ---- A pull writes only what the new tip changed ------------------------
+
+#[cfg(unix)]
+type Item = (&'static str, EntryMode, &'static [u8]);
+
+/// Every file, directory and symlink under `root` outside `.kit`, with its
+/// content and whether it is executable.
+#[cfg(unix)]
+fn worktree_snapshot(root: &Path) -> std::collections::BTreeMap<String, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            if rel == ".kit" {
+                continue;
+            }
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                out.insert(rel, "dir".to_owned());
+                walk(root, &path, out);
+            } else if meta.file_type().is_symlink() {
+                let target = std::fs::read_link(&path).unwrap();
+                out.insert(rel, format!("symlink {}", target.display()));
+            } else {
+                let exec = meta.permissions().mode() & 0o111 != 0;
+                let content = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+                out.insert(rel, format!("file exec={exec} {content:?}"));
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+#[cfg(unix)]
+/// The index entries without their stat cache, which differs by machine and time.
+fn index_snapshot(root: &Path) -> Vec<(String, kit_core::index::EntryStatus, Hash)> {
+    let layout = RepoLayout::single(root);
+    kit_core::index::read_index(&layout)
+        .unwrap()
+        .entries
+        .iter()
+        .map(|e| (e.path.clone(), e.status, e.object_hash))
+        .collect()
+}
+
+/// Each index entry's object id and stat cache, by path.
+#[cfg(unix)]
+fn index_snapshot_with_stat(
+    root: &Path,
+) -> std::collections::BTreeMap<String, (Hash, u64, u64, u64, u64)> {
+    kit_core::index::read_index(&RepoLayout::single(root))
+        .unwrap()
+        .entries
+        .iter()
+        .map(|e| {
+            (
+                e.path.clone(),
+                (e.object_hash, e.mtime_ns, e.size, e.ino, e.ctime_ns),
+            )
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn pull_ok(dir: &Path, remote: &Remote) {
+    let report = pull(
+        dir,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(
+        matches!(report.outcome, PullOutcome::FastForwarded { .. }),
+        "{:?}",
+        report.outcome
+    );
+}
+
+/// Added, changed, deleted, renamed and mode-changed files, a file that
+/// becomes a directory and a directory that becomes a file, and a symlink that
+/// changes its target.
+#[cfg(unix)]
+#[test]
+fn a_pull_leaves_the_worktree_and_index_equal_to_a_fresh_checkout_of_the_tip() {
+    let before: &[Item] = &[
+        ("keep.txt", EntryMode::Blob, b"keep\n"),
+        ("change.txt", EntryMode::Blob, b"old\n"),
+        ("delete.txt", EntryMode::Blob, b"gone\n"),
+        ("old-name.txt", EntryMode::Blob, b"renamed\n"),
+        ("mode.sh", EntryMode::Blob, b"#!/bin/sh\n"),
+        ("flip.sh", EntryMode::Executable, b"#!/bin/sh\n"),
+        ("file-to-dir", EntryMode::Blob, b"was a file\n"),
+        ("dir-to-file/inner.txt", EntryMode::Blob, b"was a dir\n"),
+        ("link", EntryMode::Symlink, b"keep.txt"),
+        ("same-link", EntryMode::Symlink, b"keep.txt"),
+        ("dir/same.txt", EntryMode::Blob, b"same\n"),
+        ("dir/inner.txt", EntryMode::Blob, b"inner\n"),
+        ("untouched/deep/a.txt", EntryMode::Blob, b"a\n"),
+    ];
+    let after: &[Item] = &[
+        ("keep.txt", EntryMode::Blob, b"keep\n"),
+        ("change.txt", EntryMode::Blob, b"new\n"),
+        ("new-name.txt", EntryMode::Blob, b"renamed\n"),
+        ("added.txt", EntryMode::Blob, b"added\n"),
+        ("mode.sh", EntryMode::Executable, b"#!/bin/sh\n"),
+        ("flip.sh", EntryMode::Blob, b"#!/bin/sh\n"),
+        ("file-to-dir/now.txt", EntryMode::Blob, b"now a dir\n"),
+        ("dir-to-file", EntryMode::Blob, b"now a file\n"),
+        ("link", EntryMode::Symlink, b"change.txt"),
+        ("same-link", EntryMode::Symlink, b"keep.txt"),
+        ("dir/same.txt", EntryMode::Blob, b"same\n"),
+        ("dir/inner.txt", EntryMode::Blob, b"inner changed\n"),
+        ("untouched/deep/a.txt", EntryMode::Blob, b"a\n"),
+    ];
+    let remote = Remote::new();
+    let first = remote.publish_paths(None, before);
+    let dir = tempfile::tempdir().unwrap();
+    let pulled = dir.path().join("pulled");
+    clone_into(&remote, &pulled);
+    remote.publish_paths(Some(first), after);
+    pull_ok(&pulled, &remote);
+
+    let fresh = dir.path().join("fresh");
+    clone_into(&remote, &fresh);
+    assert_eq!(worktree_snapshot(&pulled), worktree_snapshot(&fresh));
+    assert_eq!(index_snapshot(&pulled), index_snapshot(&fresh));
+    assert_eq!(
+        worktree_snapshot(&pulled)["change.txt"],
+        "file exec=false \"new\\n\""
+    );
+}
+
+/// The files a pull did not change keep their inode and mtime.
+#[cfg(unix)]
+#[test]
+fn a_pull_does_not_rewrite_the_files_the_tip_left_unchanged() {
+    use std::os::unix::fs::MetadataExt;
+
+    let before: &[Item] = &[
+        ("keep.txt", EntryMode::Blob, b"keep\n"),
+        ("change.txt", EntryMode::Blob, b"old\n"),
+        ("dir/same.txt", EntryMode::Blob, b"same\n"),
+        ("dir/inner/deep.txt", EntryMode::Blob, b"deep\n"),
+        ("run.sh", EntryMode::Executable, b"#!/bin/sh\n"),
+        ("link", EntryMode::Symlink, b"keep.txt"),
+    ];
+    let after: &[Item] = &[
+        ("keep.txt", EntryMode::Blob, b"keep\n"),
+        ("change.txt", EntryMode::Blob, b"new\n"),
+        ("dir/same.txt", EntryMode::Blob, b"same\n"),
+        ("dir/inner/deep.txt", EntryMode::Blob, b"deep\n"),
+        ("run.sh", EntryMode::Executable, b"#!/bin/sh\n"),
+        ("link", EntryMode::Symlink, b"keep.txt"),
+    ];
+    let remote = Remote::new();
+    let first = remote.publish_paths(None, before);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let stat = |name: &str| {
+        let meta = std::fs::symlink_metadata(target.join(name)).unwrap();
+        (meta.ino(), meta.mtime(), meta.mtime_nsec())
+    };
+    let untouched = [
+        "keep.txt",
+        "dir/same.txt",
+        "dir/inner/deep.txt",
+        "run.sh",
+        "link",
+    ];
+    let recorded: Vec<_> = untouched.iter().map(|n| stat(n)).collect();
+    let changed_before = stat("change.txt");
+    let index_before = index_snapshot_with_stat(&target);
+
+    remote.publish_paths(Some(first), after);
+    pull_ok(&target, &remote);
+
+    let now: Vec<_> = untouched.iter().map(|n| stat(n)).collect();
+    assert_eq!(recorded, now, "an unchanged file was rewritten");
+    assert_ne!(
+        changed_before.0,
+        stat("change.txt").0,
+        "the changed file was not replaced"
+    );
+    assert_eq!(std::fs::read(target.join("change.txt")).unwrap(), b"new\n");
+    // The stat cache of an unchanged file survives, so the next command does
+    // not re-hash it.
+    let index_after = index_snapshot_with_stat(&target);
+    for name in untouched {
+        assert_eq!(index_before[name], index_after[name], "{name}");
+    }
+    assert_ne!(index_before["change.txt"].0, index_after["change.txt"].0);
+}
+
+/// A pull whose safety check finds a local change refuses with the same
+/// messages as before, and the three message prefixes stay as they are.
+#[test]
+fn the_restore_safety_messages_are_unchanged() {
+    fn refusal(result: Result<kit_sync::PullReport, SyncError>) -> String {
+        match result {
+            Err(SyncError::RestoreSafety(message)) => message,
+            other => panic!("expected a restore safety refusal, got {other:?}"),
+        }
+    }
+    let run = |dir: &Path, remote: &Remote| {
+        pull(
+            dir,
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+    };
+
+    // A local edit to a file the pull would rewrite.
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n"), ("c.txt", b"same\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    remote.publish(
+        Some(first),
+        &[("a.txt", b"two\n"), ("c.txt", b"same\n")],
+        true,
+    );
+    std::fs::write(dir.path().join("a.txt"), b"local edit\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would overwrite local changes; commit, stash, or reset 'a.txt' first"
+    );
+    // An edit to a file the pull would leave alone is refused too: recovery
+    // and the safety check cover every tracked path.
+    std::fs::write(dir.path().join("a.txt"), b"one\n").unwrap();
+    std::fs::write(dir.path().join("c.txt"), b"local edit\n").unwrap();
+    assert!(matches!(
+        run(dir.path(), &remote),
+        Err(SyncError::RestoreSafety(_))
+    ));
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
+
+    // An untracked file in the way of the new tip.
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    remote.publish(Some(first), &[("a.txt", b"one\n"), ("b.txt", b"b\n")], true);
+    std::fs::write(dir.path().join("b.txt"), b"mine\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would overwrite untracked path 'b.txt'; move or remove it first"
+    );
+
+    // A recovery that would overwrite a local edit.
+    let (remote, dir, _, _, _) = pending_restore();
+    std::fs::write(dir.path().join("c.txt"), b"local edit\n").unwrap();
+    let message = refusal(run(dir.path(), &remote));
+    assert!(
+        message.starts_with("pull recovery would overwrite local changes at 'c.txt'; "),
+        "{message}"
+    );
+
+    // A recovery with no remote branch left to finish against.
+    let (_, dir, layout, _, _) = pending_restore();
+    refs::delete_remote_ref(&layout, "default", "main").unwrap();
+    let message = refusal(run(dir.path(), &Remote::new()));
+    assert!(
+        message.starts_with("unfinished pull cannot recover without a remote branch"),
+        "{message}"
+    );
+}
+
+/// A tracked file of many chunks that another process keeps appending to while
+/// the pull's safety check hashes it. The check must report the file as a local
+/// change, so the pull refuses with the usual message, and not fail with an
+/// error about a file that changed while it was read.
+#[cfg(unix)]
+#[test]
+fn a_file_growing_during_the_safety_check_makes_the_pull_refuse_cleanly() {
+    let chunked = 3_000_000;
+    assert_growing_file_refuses_the_pull(chunked);
+}
+
+/// The same race for a file just below the single-blob size, which grows past
+/// it between the length check and the read.
+#[cfg(unix)]
+#[test]
+fn a_small_file_growing_past_the_threshold_makes_the_pull_refuse_cleanly() {
+    let below = usize::try_from(kit_core::worktree::CHUNK_THRESHOLD).unwrap() - 16;
+    assert_growing_file_refuses_the_pull(below);
+}
+
+#[cfg(unix)]
+fn assert_growing_file_refuses_the_pull(len: usize) {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let big: Vec<u8> = (0..len)
+        .map(|i| i.wrapping_mul(2_654_435_761).to_le_bytes()[1])
+        .collect();
+    let mut refused = 0;
+    for round in 0..40 {
+        let remote = Remote::new();
+        let first = remote.publish_paths(
+            None,
+            &[
+                ("big.bin", EntryMode::Blob, &big),
+                ("small.txt", EntryMode::Blob, b"one\n"),
+            ],
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("work");
+        clone_into(&remote, &target);
+        remote.publish_paths(
+            Some(first),
+            &[
+                ("big.bin", EntryMode::Blob, &big),
+                ("small.txt", EntryMode::Blob, b"two\n"),
+            ],
+        );
+        // Same bytes, new mtime: the stat entry no longer matches, so the safety
+        // check has to hash the file instead of trusting the index.
+        std::fs::write(target.join("big.bin"), &big).unwrap();
+        let stop = AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(target.join("big.bin"))
+                    .unwrap();
+                std::thread::sleep(std::time::Duration::from_micros(200 * (round % 8)));
+                while !stop.load(Ordering::Relaxed) {
+                    file.write_all(b"x").unwrap();
+                    file.flush().unwrap();
+                }
+            });
+            let result = pull(
+                &target,
+                &remote.source(),
+                "default",
+                &SyncOptions::default(),
+                &NoopObserver,
+            );
+            stop.store(true, Ordering::Relaxed);
+            result
+        });
+        // The appender may not have written yet when the file is hashed, and
+        // the pull then proceeds. Any refusal must be the usual one.
+        match result {
+            Ok(_) => {}
+            Err(SyncError::RestoreSafety(message)) => {
+                assert!(
+                    message.starts_with("restore would overwrite local changes; "),
+                    "{message}"
+                );
+                refused += 1;
+            }
+            other => panic!("expected the usual refusal or success, got {other:?}"),
+        }
+    }
+    assert!(refused > 0, "no round was refused");
 }

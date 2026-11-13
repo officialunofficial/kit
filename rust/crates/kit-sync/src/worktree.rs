@@ -90,11 +90,27 @@ pub fn restore_worktree_and_index(
     store: &ObjectStore,
     tree_hash: Hash,
 ) -> Result<(), String> {
+    restore_worktree_and_index_from(layout, store, tree_hash, None)
+}
+
+/// [`restore_worktree_and_index`] that leaves alone every entry whose mode and
+/// object id are the same in `base_tree`, so a file the tip did not change is
+/// not read, written or re-stat'ed.
+///
+/// The caller must have proved that the worktree and the index equal
+/// `base_tree` for every tracked path, as [`ensure_restore_safe`] does for the
+/// tree of HEAD. Pass `None` when it has not.
+pub fn restore_worktree_and_index_from(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+    base_tree: Option<Hash>,
+) -> Result<(), String> {
     let mut observed = Vec::new();
     restore_tree_to_worktree_observed(
         store,
         &tree_hash,
-        None,
+        base_tree,
         layout.worktree_root(),
         &RestoreOptions::default(),
         &crate::restore_fanout::read_chunks_fanout,
@@ -111,6 +127,46 @@ pub fn ensure_restore_safe(
     target_tree: Hash,
 ) -> Result<(), String> {
     ensure_restore_safe_with_options(layout, store, target_tree, &RestoreOptions::default())
+}
+
+/// The refusal for a tracked path that differs from the index.
+fn local_changes_message(path: &str) -> String {
+    format!("restore would overwrite local changes; commit, stash, or reset '{path}' first")
+}
+
+/// The tracked path of a file that grew past the single-blob size while the
+/// snapshot read it. Such a file is being written, so it counts as a local
+/// change and not as a failed check.
+pub(crate) fn grown_tracked_file(
+    root: &Path,
+    index: &Index,
+    error: &core_worktree::WorktreeError,
+) -> Option<String> {
+    let core_worktree::WorktreeError::FileTooLarge { path, limit } = error else {
+        return None;
+    };
+    if *limit != core_worktree::CHUNK_THRESHOLD {
+        return None;
+    }
+    let relative = path.strip_prefix(root).ok()?.to_str()?;
+    let position = index.find_entry(relative)?;
+    // A removed entry has no tracked content to differ from.
+    (index.entries[position].status != kit_core::index::EntryStatus::Removed)
+        .then(|| relative.to_owned())
+}
+
+/// The error for a failed worktree snapshot: a growing tracked file in the
+/// restored paths is a local change, anything else fails the check.
+fn snapshot_error(
+    root: &Path,
+    index: &Index,
+    options: &RestoreOptions,
+    error: &core_worktree::WorktreeError,
+) -> String {
+    match grown_tracked_file(root, index, error) {
+        Some(path) if restore_affects_path(options, &path) => local_changes_message(&path),
+        _ => format!("check working tree changes: {error}"),
+    }
 }
 
 /// Refuse a destructive restore when affected index/worktree paths contain user work.
@@ -149,7 +205,7 @@ pub fn ensure_restore_safe_with_options(
         Some(&idx),
         &mut Vec::new(),
     )
-    .map_err(|e| format!("check working tree changes: {e}"))?;
+    .map_err(|e| snapshot_error(root, &idx, options, &e))?;
     let unstaged = diff_trees(&snapshot, Some(index_tree), Some(worktree_tree))
         .map_err(|e| format!("check working tree changes: {e}"))?;
     if let Some(entry) = unstaged
@@ -157,10 +213,7 @@ pub fn ensure_restore_safe_with_options(
         .iter()
         .find(|entry| entry.kind != DiffKind::Added && restore_affects_path(options, &entry.path))
     {
-        return Err(format!(
-            "restore would overwrite local changes; commit, stash, or reset '{}' first",
-            entry.path
-        ));
+        return Err(local_changes_message(&entry.path));
     }
 
     let target_writes = diff_trees(&snapshot, Some(index_tree), Some(target_tree))
@@ -342,6 +395,92 @@ mod tests {
     use super::*;
     use kit_core::object::{Blob, EntryMode, Tree, TreeEntry};
     use kit_core::serialize;
+
+    fn too_large(path: &str, limit: u64) -> core_worktree::WorktreeError {
+        core_worktree::WorktreeError::FileTooLarge {
+            path: Path::new("/work").join(path),
+            limit,
+        }
+    }
+
+    fn tracked(path: &str) -> Index {
+        let mut index = Index::new();
+        index.upsert_entry(kit_core::index::IndexEntry {
+            path: path.to_owned(),
+            status: kit_core::index::EntryStatus::Blob,
+            object_hash: [1; 32],
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        });
+        index
+    }
+
+    /// Only a tracked file that grew past the single-blob size counts as a
+    /// local change. Everything else keeps its own error.
+    #[test]
+    fn a_tracked_file_that_grew_is_reported_by_its_relative_path() {
+        let root = Path::new("/work");
+        let index = tracked("dir/a.bin");
+        let grew = too_large("dir/a.bin", core_worktree::CHUNK_THRESHOLD);
+        assert_eq!(
+            grown_tracked_file(root, &index, &grew).as_deref(),
+            Some("dir/a.bin")
+        );
+        // Untracked.
+        let other = too_large("dir/b.bin", core_worktree::CHUNK_THRESHOLD);
+        assert_eq!(grown_tracked_file(root, &index, &other), None);
+        // Over the ingest bound, not a growing file.
+        let huge = too_large("dir/a.bin", kit_core::serialize::MAX_CHUNKED_TOTAL_SIZE);
+        assert_eq!(grown_tracked_file(root, &index, &huge), None);
+        // Outside the worktree.
+        let outside = core_worktree::WorktreeError::FileTooLarge {
+            path: Path::new("/elsewhere/dir/a.bin").to_path_buf(),
+            limit: core_worktree::CHUNK_THRESHOLD,
+        };
+        assert_eq!(grown_tracked_file(root, &index, &outside), None);
+        // A removed entry.
+        let mut removed = tracked("dir/a.bin");
+        removed.entries[0].status = kit_core::index::EntryStatus::Removed;
+        assert_eq!(grown_tracked_file(root, &removed, &grew), None);
+        // Another kind of error.
+        let io = core_worktree::WorktreeError::Io(std::io::Error::other("x"));
+        assert_eq!(grown_tracked_file(root, &index, &io), None);
+    }
+
+    #[test]
+    fn a_growing_tracked_file_is_a_local_change_only_where_the_restore_reaches() {
+        let root = Path::new("/work");
+        let index = tracked("dir/a.bin");
+        let grew = too_large("dir/a.bin", core_worktree::CHUNK_THRESHOLD);
+        let all = RestoreOptions::default();
+        assert_eq!(
+            snapshot_error(root, &index, &all, &grew),
+            "restore would overwrite local changes; commit, stash, or reset 'dir/a.bin' first"
+        );
+        let elsewhere = RestoreOptions {
+            sparse_patterns: Some(kit_core::ops::restore::parse_sparse_patterns("other/\n")),
+            ..RestoreOptions::default()
+        };
+        assert!(
+            snapshot_error(root, &index, &elsewhere, &grew)
+                .starts_with("check working tree changes: ")
+        );
+        let untracked = too_large("dir/b.bin", core_worktree::CHUNK_THRESHOLD);
+        assert!(
+            snapshot_error(root, &index, &all, &untracked)
+                .starts_with("check working tree changes: ")
+        );
+    }
+
+    #[test]
+    fn the_local_changes_message_is_unchanged() {
+        assert_eq!(
+            local_changes_message("a b"),
+            "restore would overwrite local changes; commit, stash, or reset 'a b' first"
+        );
+    }
 
     fn put(store: &ObjectStore, obj: &Object) -> Hash {
         store.write(&serialize::serialize(obj).unwrap()).unwrap()

@@ -870,7 +870,7 @@ fn worktree_object(store: &ObjectStore, abs: &Path) -> Result<Option<(EntryStatu
         // keeps no object, because the caller compares the id only.
         let (h, opened) =
             worktree::hash_file_with_metadata(&HashOnlySink::new(), abs).map_err(|e| match e {
-                WorktreeError::Io(_) | WorktreeError::FileTooLarge(_) => Error::ReadFile {
+                WorktreeError::Io(_) | WorktreeError::FileTooLarge { .. } => Error::ReadFile {
                     path: abs.to_path_buf(),
                     source: io::Error::other(e),
                 },

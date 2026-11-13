@@ -114,3 +114,12 @@ overflow-checks = true
 inherits = "release"
 debug = true
 strip = false
+
+# Tests that hash a file above 1 GiB (`kit-core/tests/large_file_ingest.rs`,
+# `kit-bin/tests/large_file_worktree.rs`) finish inside the test timeout only
+# with an optimised hash and chunker. Everything else stays unoptimised.
+[profile.dev.package.blake3]
+opt-level = 3
+
+[profile.dev.package.kit-core]
+opt-level = 1
