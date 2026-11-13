@@ -224,13 +224,14 @@ def manifest_ids(root, directory):
 def chunked_manifest():
     """The pinned content, chunked with FastCDC (SPEC-FASTCDC), and its manifest."""
     gear = o.gear_table()
-    chunks, pos = [], 0
+    chunks, ends, pos = [], [], 0
     for end in o.boundaries(BIG, gear):
         data = BIG[pos:end]
         chunks.append(blake3(b"\x01KOB1\x01" + struct.pack("<I", len(data)) + data))
+        ends.append(end)
         pos = end
-    body = b"\x05KOB1\x01" + struct.pack("<QII", len(BIG), 0, len(chunks)) + b"".join(chunks)
-    return body, o.chunked_id(len(BIG), 0, chunks)
+    body = o.build_manifest(len(BIG), 0, list(zip(chunks, ends)))
+    return body, o.chunked_id(len(BIG), 0, chunks, ends)
 
 
 def check_export(root):
