@@ -508,7 +508,7 @@ merkelized id in `rust/tests/golden/`, and
 
 ## A worktree file up to the chunked bound ingests in bounded memory
 
-**Always:** `add`, `status`, `diff --stat` and `stash` hash a worktree file up
+**Always:** `add`, `status`, `diff --stat` (of binary content) and `stash` hash a worktree file up
 to `serialize::MAX_CHUNKED_TOTAL_SIZE` (128 GiB) by streaming it. A file above
 that bound fails with `WorktreeError::FileTooLarge` before any byte is read or
 stored, and the error names the bound. Only a reader that holds a whole file in
@@ -516,8 +516,8 @@ memory (`read_regular_file_bounded`, and `add -p`) keeps the 1 GiB limit
 (`worktree::MAX_FILE_BYTES`). The manifest is serialized once, and its list of
 chunk ids is freed before the bytes are stored.
 
-**Because:** the streaming paths hold one window of chunks and about 32 bytes
-per chunk id, however large the file. The old 1 GiB check refused files that
+**Because:** the streaming paths hold one window of chunks and a few copies of a
+32-byte id per chunk, however large the file. The old 1 GiB check refused files that
 those paths handle.
 
 **If violated:** a file between 1 GiB and 128 GiB cannot be added, or an ingest

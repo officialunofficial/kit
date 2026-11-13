@@ -162,10 +162,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that hold a whole file in memory (`read_blob`, blame, byte-range
   disclosure and the git export) refuse content above 1 GiB with a typed
   error before they read a chunk.
-- `kit add`, `status`, `diff --stat` and `stash` take a worktree file up to
-  128 GiB, the bound of a `ChunkedBlob`. Memory is one window of chunks plus
-  about 32 bytes for each chunk id, a few copies of the id list at most
-  while the manifest is stored. The hasher refused a file above 1 GiB before
+- `kit add`, `status` and `stash` take a worktree file up to 128 GiB, the
+  bound of a `ChunkedBlob`, and so does `diff --stat` for binary content. Memory
+  is one window of chunks plus a few copies of the list of chunk ids, 32 bytes
+  each, while the manifest is stored. The line diff of text content above
+  1 GiB still fails with `ContentTooLarge`. The hasher refused a file above 1 GiB before
   it read a byte. A file of 1 MiB or less that grows past 1 MiB while it is
   read now fails with an I/O error, where it was stored as one oversized blob. A file above
   128 GiB still fails with `WorktreeError::FileTooLarge`, which now carries the

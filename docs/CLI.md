@@ -58,7 +58,7 @@ Working-tree commands:
   `.gitignore`/`.kitignore`) is refused unless `-f`/`--force` is given
   (git parity); already-tracked paths are never subject to ignore.
   A file up to 128 GiB is hashed by streaming it, so memory grows only by
-  about 32 bytes for each chunk; a larger file is refused. `-p`/`--patch` interactively presents each hunk between the staged (or
+  a few copies of a 32-byte id for each chunk; a larger file is refused. `-p`/`--patch` interactively presents each hunk between the staged (or
   HEAD) blob and the worktree file and stages only the accepted ones &mdash;
   per hunk: `y` stage, `n` skip, `a` stage this and all later hunks, `d`
   skip this and all later hunks, `q` quit (keeping hunks already chosen).
