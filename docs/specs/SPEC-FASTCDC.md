@@ -380,12 +380,11 @@ about runs of one byte value applies unchanged.
 ### 11.2 Chunker id
 
 A v2 manifest is a `chunked_blob` (SPEC-OBJECTS §7) with
-`chunk_size = 0x8000_0002`. The value is far above the 1 GiB file
-limit, so before this revision it was valid only for a manifest of at
-most one chunk. Every such manifest still decodes, and its bytes and id
-do not change. A reader of an earlier revision refuses a v2 manifest of
-two or more chunks at decode time, as it refuses any fixed-size layout
-it cannot hold.
+`chunk_size = 0x8000_0002`. A reader of an earlier revision reads the
+value as a fixed chunk size of about 2 GiB, above its 1 GiB file limit.
+It accepts such a manifest only with at most one chunk, and that
+manifest keeps its bytes and id under this revision. It refuses a v2
+manifest of two or more chunks at decode time.
 
 ### 11.3 Selecting a chunker
 

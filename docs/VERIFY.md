@@ -631,12 +631,13 @@ itself checked against a fixed cap:
 | `steps` (tree depth) | `MAX_TREE_DEPTH` = 128 |
 | a proof's sibling count | `max_items * MAX_LEVELS` (32), checked *before* reading any sibling digest |
 | `Object`/`Chunk` payload bytes | `MAX_RAW_OBJECT_SIZE` = 1 GiB |
-| `chunk_len_proofs` count | `MAX_CHUNKS` = 1,000,000 |
+| `chunk_len_proofs` count | `MAX_CHUNKS` = 8,388,608 |
 | one length-proof's Bao slice | 8 KiB |
 | closure manifest's pack list | `MAX_CLOSURE_PACKS` = 65,536 |
 | closure object count | `pack::MAX_ENTRIES` = 10,000,000 |
 | closure pack payload sum | `pack::MAX_TOTAL_PAYLOAD` = 4 GiB |
-| tree entries / chunks per object | `MAX_TREE_ENTRIES` / `MAX_CHUNKS` = 1,000,000 each |
+| tree entries per object | `MAX_TREE_ENTRIES` = 1,000,000 |
+| chunks per object | `MAX_CHUNKS` = 8,388,608 |
 | parents per commit | `MAX_PARENTS` = 1,000 |
 
 A `leaf_count` embedded in any proof is **compared**, never used to size an

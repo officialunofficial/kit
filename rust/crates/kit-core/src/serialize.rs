@@ -24,11 +24,15 @@ const PROLOGUE_LEN: usize = 6;
 pub const MAX_TREE_ENTRIES: u32 = 1_000_000;
 const MAX_PARENTS: u32 = 1_000;
 const MAX_REMIX_SOURCES: u32 = 10_000;
-/// Decode-side cap on `ChunkedBlob` chunk count. `pub(crate)` (not
-/// private) so `crate::verify` can bound a disclosure bundle's claimed
-/// chunk count against the same limit a real `ChunkedBlob` is decoded
-/// under.
-pub(crate) const MAX_CHUNKS: u32 = 1_000_000;
+/// Cap on a `ChunkedBlob`'s `total_size`: 128 GiB (SPEC-OBJECTS §7).
+/// Readers and writers both enforce it. A reader that holds a whole file
+/// in memory has its own, lower cap, [`crate::worktree::MAX_FILE_BYTES`].
+pub const MAX_CHUNKED_TOTAL_SIZE: u64 = 128 * 1024 * 1024 * 1024;
+/// Cap on a `ChunkedBlob`'s chunk count: [`MAX_CHUNKED_TOTAL_SIZE`] cut
+/// at the 16 KiB `FastCDC` minimum chunk size, 8,388,608. Readers and
+/// writers both enforce it, and `crate::verify` bounds a disclosure
+/// bundle's claimed chunk count with it.
+pub const MAX_CHUNKS: u32 = 8_388_608;
 
 // ---------------------------------------------------------------------
 // Public API
@@ -238,10 +242,35 @@ fn write_tag(buf: &mut Vec<u8>, t: &Tag) -> Result<(), KitError> {
     Ok(())
 }
 
+/// Check the header fields of a `ChunkedBlob` manifest against the decode
+/// rules of SPEC-OBJECTS §7: the chunk cap, the size bound and the layout.
+/// [`deserialize`] and the writer apply the same rules. A caller that
+/// reads a raw manifest without decoding it, for example to feed
+/// [`crate::merkle::ChunkedIdFold`], checks the header with this first.
+///
+/// # Errors
+/// [`KitError::TooManyChunks`] above [`MAX_CHUNKS`], and
+/// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
+/// [`MAX_CHUNKED_TOTAL_SIZE`] or impossible for the layout.
+pub fn check_chunked_header(
+    total_size: u64,
+    chunk_size: u32,
+    chunk_count: u32,
+) -> Result<(), KitError> {
+    if chunk_count > MAX_CHUNKS {
+        return Err(KitError::TooManyChunks);
+    }
+    check_chunked_total_size(total_size, chunk_size, chunk_count)
+}
+
+/// Refuse a manifest that [`deserialize`] would refuse, so a writer never
+/// stores an undecodable manifest.
 fn write_chunked_blob(buf: &mut Vec<u8>, cb: &ChunkedBlob) -> Result<(), KitError> {
+    let chunk_count = u32::try_from(cb.chunks.len()).map_err(|_| KitError::TooManyChunks)?;
+    check_chunked_header(cb.total_size, cb.chunk_size, chunk_count)?;
     write_u64_le(buf, cb.total_size);
     write_u32_le(buf, cb.chunk_size);
-    write_u32_le(buf, checked_u32("chunked_blob.chunks", cb.chunks.len())?);
+    write_u32_le(buf, chunk_count);
     for c in &cb.chunks {
         buf.extend_from_slice(c);
     }
@@ -629,7 +658,7 @@ pub(crate) fn check_chunked_total_size(
 ) -> Result<(), KitError> {
     let count = u64::from(chunk_count);
     let size = u64::from(chunk_size);
-    let valid = total_size <= crate::worktree::MAX_FILE_BYTES
+    let valid = total_size <= MAX_CHUNKED_TOTAL_SIZE
         && if count == 0 {
             total_size == 0
         } else {
@@ -1173,13 +1202,63 @@ mod tests {
     }
 
     #[test]
-    fn rejects_chunked_blob_total_size_beyond_file_limit() {
-        for total in [u64::MAX, 1 << 62, crate::worktree::MAX_FILE_BYTES + 1] {
+    fn rejects_chunked_blob_total_size_beyond_the_bound() {
+        for total in [u64::MAX, 1 << 62, MAX_CHUNKED_TOTAL_SIZE + 1] {
             assert_eq!(
                 deserialize(&chunked_bytes(total, 0, 2)),
                 Err(KitError::ChunkedBlobTotalSizeInvalid)
             );
         }
+        assert!(deserialize(&chunked_bytes(MAX_CHUNKED_TOTAL_SIZE, 0, 2)).is_ok());
+    }
+
+    /// A header at the chunk cap passes the count check and fails only for
+    /// its missing chunk ids, before any allocation.
+    #[test]
+    fn accepts_the_chunk_cap_in_the_header() {
+        let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
+        buf.extend_from_slice(&MAX_CHUNKED_TOTAL_SIZE.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&MAX_CHUNKS.to_le_bytes());
+        assert_eq!(deserialize(&buf), Err(KitError::UnexpectedEof));
+    }
+
+    /// The writer refuses a manifest the reader would refuse, so no
+    /// undecodable manifest is ever stored.
+    #[test]
+    fn serialize_refuses_a_manifest_the_reader_refuses() {
+        let over_count = Object::ChunkedBlob(ChunkedBlob {
+            total_size: MAX_CHUNKED_TOTAL_SIZE,
+            chunk_size: 0,
+            // Zeroed: the allocator maps the pages lazily, and the writer
+            // refuses on the length before it reads one.
+            chunks: vec![[0u8; 32]; MAX_CHUNKS as usize + 1],
+        });
+        assert_eq!(serialize(&over_count), Err(KitError::TooManyChunks));
+        let over_size = Object::ChunkedBlob(ChunkedBlob {
+            total_size: MAX_CHUNKED_TOTAL_SIZE + 1,
+            chunk_size: 0,
+            chunks: vec![[1u8; 32], [2u8; 32]],
+        });
+        assert_eq!(
+            serialize(&over_size),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+        let inconsistent = Object::ChunkedBlob(ChunkedBlob {
+            total_size: 1,
+            chunk_size: 0,
+            chunks: vec![[1u8; 32], [2u8; 32]],
+        });
+        assert_eq!(
+            serialize(&inconsistent),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+        let at_bound = Object::ChunkedBlob(ChunkedBlob {
+            total_size: MAX_CHUNKED_TOTAL_SIZE,
+            chunk_size: 0,
+            chunks: vec![[1u8; 32], [2u8; 32]],
+        });
+        assert_eq!(deserialize(&serialize(&at_bound).unwrap()), Ok(at_bound));
     }
 
     #[test]
@@ -1194,6 +1273,26 @@ mod tests {
         assert!(deserialize(&chunked_bytes(196_609, 65_536, 3)).is_err());
         // Content-defined: every chunk holds at least one byte.
         assert!(deserialize(&chunked_bytes(2, 0, 3)).is_err());
+    }
+
+    #[test]
+    fn check_chunked_header_applies_the_decode_rules() {
+        assert_eq!(
+            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE, 0, MAX_CHUNKS),
+            Ok(())
+        );
+        assert_eq!(
+            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE, 0, MAX_CHUNKS + 1),
+            Err(KitError::TooManyChunks)
+        );
+        assert_eq!(
+            check_chunked_header(MAX_CHUNKED_TOTAL_SIZE + 1, 0, 2),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+        assert_eq!(
+            check_chunked_header(1, 0, 2),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
     }
 
     #[test]

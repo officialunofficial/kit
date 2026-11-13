@@ -467,6 +467,42 @@ fn repeated_chunk_stops_at_the_declared_total() {
     );
 }
 
+/// A manifest above the 1 GiB git blob cap is refused before any chunk is
+/// read.
+#[test]
+fn manifest_above_the_blob_cap_is_refused_before_any_read() {
+    let (_d, store) = store();
+    let manifest = kit_core::object::ChunkedBlob {
+        total_size: kit_core::worktree::MAX_FILE_BYTES + 1,
+        chunk_size: 0,
+        chunks: vec![[1u8; 32], [2u8; 32]],
+    };
+    let source = CountingSource {
+        store: &store,
+        reads: std::cell::Cell::new(0),
+    };
+    let hash = Hash::from([1u8; 32]);
+    let err = kit_git_bridge::translate::translate_chunked(&hash, &manifest, &source).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::Refused(kit_git_bridge::Refusal::BlobTooLarge { size, .. })
+                if size == kit_core::worktree::MAX_FILE_BYTES + 1
+        ),
+        "got {err}"
+    );
+    assert_eq!(source.reads.get(), 0);
+
+    // At the cap the bridge goes on to the chunks, which are missing.
+    let at_cap = kit_core::object::ChunkedBlob {
+        total_size: kit_core::worktree::MAX_FILE_BYTES,
+        ..manifest
+    };
+    let err = kit_git_bridge::translate::translate_chunked(&hash, &at_cap, &source).unwrap_err();
+    assert!(matches!(err, BridgeError::Source(_)), "got {err}");
+    assert_eq!(source.reads.get(), 1);
+}
+
 #[test]
 fn below_threshold_manifest_is_refused() {
     let (_d, store) = store();

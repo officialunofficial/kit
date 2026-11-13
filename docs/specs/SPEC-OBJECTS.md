@@ -313,7 +313,7 @@ The tag object is content-addressed like every other object; its hash is
 [prologue 6]
 [u64 LE total_size]
 [u32 LE chunk_size]                       0 or 0x8000_0002 == content-defined (FastCDC)
-[u32 LE chunk_count]                      0..=1_000_000
+[u32 LE chunk_count]                      0..=8_388_608
 repeat chunk_count:
     [32 bytes chunk_hash]                 each chunk stored as its own blob
 ```
@@ -334,7 +334,7 @@ The concatenated length MUST equal `total_size`.
 Readers MUST reject a manifest at decode time when `total_size` is
 impossible for its layout:
 
-- `total_size` is above 1 GiB (1,073,741,824).
+- `total_size` is above 128 GiB (137,438,953,472).
 - `chunk_count` is `0` and `total_size` is not `0`.
 - `chunk_count` is above `0` and `total_size` is less than `chunk_count`.
 - the layout is fixed-size and `total_size` is above
@@ -344,6 +344,17 @@ impossible for its layout:
 
 Readers MUST NOT size a buffer from `total_size`. Readers MUST stop
 writing when the running byte count passes `total_size`.
+
+Writers MUST refuse to encode a manifest that a reader rejects: a
+`chunk_count` above 8,388,608 or a `total_size` that breaks a rule above.
+A manifest is otherwise stored under an id no reader can decode.
+
+The 128 GiB bound is the largest file kit stores. The chunk cap,
+8,388,608, is that bound cut at the 16 KiB FastCDC minimum chunk size
+(SPEC-FASTCDC). A reader that holds a whole file in memory, such as a
+text diff, blame or a git export, MAY refuse a file above its own
+smaller limit. It refuses with a typed error and before it reads a
+chunk. kit's limit for such readers is 1 GiB.
 
 File-content equality MUST be independent of the chosen valid Blob or
 ChunkedBlob representation. Equal object IDs permit a fast path; otherwise
@@ -358,7 +369,7 @@ Status, diff, staging, merge decisions and overwrite protection use this
 content contract. Restaging equal bytes preserves the previous staged object
 ID. Writer chunking policy does not invalidate an otherwise conforming object.
 
-`chunk_count > 1_000_000` → `TooManyChunks`.
+`chunk_count > 8_388_608` → `TooManyChunks`.
 
 **Identity:** a `ChunkedBlob`'s object id is its Binary Merkle Tree root
 (leaves = a metadata leaf binding `total_size`/`chunk_size`, then the
@@ -551,8 +562,15 @@ multi-version readers.
     object of §13.7. Record the encoded proof bytes, the proven chunk's
     position (chunk index + 1, per SPEC-MERKLE-OBJECTS §3.1/§5.5), and
     the object id it verifies against.
+12. **ChunkedBlob bounds** (§7): a reader accepts a FastCDC manifest of
+    2 chunks with `total_size` 128 GiB and refuses one with 128 GiB + 1. A
+    header that declares 8,388,608 chunks passes the count check, and one
+    that declares 8,388,609 fails `TooManyChunks` before any chunk id is
+    read.
 
-Vectors 1–7 are committed under `rust/tests/golden/objects/`; the tag
+Vectors 1–7 are committed under `rust/tests/golden/objects/`; vector 12
+is the layout table of `rust/crates/kit-core/tests/golden.rs` and
+`scripts/golden/objects_ref.py`; the tag
 vectors 8–9 under `rust/tests/golden/tags/`; the proof vectors 10–11
 (alongside range/multi-leaf and negative proof vectors not individually
 enumerated above) under `rust/tests/golden/proofs/`, per
@@ -576,7 +594,7 @@ mechanism that enforces or detects each:
 | Tree entries are canonical: lex-sorted byte-wise, no duplicates | reader rejection `InvalidEntryOrder` (§4) |
 | Tree entry names cannot alias, escape, or shadow repo metadata | name grammar → `InvalidEntryName` (§4.1); mode whitelist → `InvalidEntryMode` (§4.2) |
 | Remix sources are canonical and duplicate-free | `(upstream_id, commit_hash)` sort → `InvalidSourceOrder` (§6.1) |
-| Collection counts are bounded | `TooManyEntries` ≤ 1 000 000 (§4); `TooManyParents` ≤ 1 000 (§5.2); `source_count` ≤ 10 000 (§6); `TooManyChunks` ≤ 1 000 000 (§7) |
+| Collection counts are bounded | `TooManyEntries` ≤ 1 000 000 (§4); `TooManyParents` ≤ 1 000 (§5.2); `source_count` ≤ 10 000 (§6); `TooManyChunks` ≤ 8 388 608 (§7) |
 | Identity payloads are non-empty, bounded, and of known kind | `InvalidIdentity`/`IdentityTooLarge`/`UnknownIdentityKind` (§9) |
 | A tag targets only a storable object, with an unambiguous name | `target_type` whitelist → `TagTargetTypeInvalid`; name floor → `TagNameInvalid` (§6a) |
 | Delta objects never appear in the object store | pack-only rule (§1, §8) |

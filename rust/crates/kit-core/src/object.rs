@@ -671,7 +671,7 @@ pub enum KitError {
     TagTargetTypeInvalid(u8),
     #[error("remix sources are not sorted by (upstream_id, commit_hash)")]
     InvalidSourceOrder,
-    #[error("chunked_blob.chunk_count > 1_000_000")]
+    #[error("chunked_blob.chunk_count > 8_388_608")]
     TooManyChunks,
     /// A `ChunkedBlob`'s chunks concatenated to a different length than
     /// its `total_size` claims — the manifest is corrupt (SPEC-OBJECTS
@@ -679,7 +679,7 @@ pub enum KitError {
     #[error("chunked blob reassembles to {actual} bytes, manifest total_size is {expected}")]
     ChunkedBlobSizeMismatch { expected: u64, actual: u64 },
     /// A `ChunkedBlob`'s `total_size` is impossible for its chunk count
-    /// and chunk size, or above the per-file limit (SPEC-OBJECTS §7).
+    /// and chunk size, or above 128 GiB (SPEC-OBJECTS §7).
     #[error("chunked blob total_size is inconsistent with its chunk layout or too large")]
     ChunkedBlobTotalSizeInvalid,
     #[error("identity kind byte {0:#04x} is not 0x01..=0x03")]

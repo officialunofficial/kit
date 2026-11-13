@@ -31,7 +31,10 @@ use crate::store::{ChunkOrigin, ObjectSink, ObjectStore};
 /// Files larger than this go through the chunker (1 MiB).
 pub const CHUNK_THRESHOLD: u64 = 1024 * 1024;
 
-/// Hard cap on a single file (1 GiB).
+/// Cap on a file that kit reads from the worktree or holds whole in
+/// memory (1 GiB). A stored `ChunkedBlob` may be larger, up to
+/// [`serialize::MAX_CHUNKED_TOTAL_SIZE`]; a reader that would hold such a
+/// file whole refuses it with [`WorktreeError::ContentTooLarge`].
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Errors returned by this module.
@@ -43,6 +46,13 @@ pub enum WorktreeError {
     /// File exceeded [`MAX_FILE_BYTES`].
     #[error("file '{0}' exceeds the {MAX_FILE_BYTES} byte limit")]
     FileTooLarge(PathBuf),
+    /// A stored file's content is larger than [`MAX_FILE_BYTES`], so a
+    /// reader that holds the whole file in memory refuses it.
+    #[error("stored content of {size} bytes exceeds the {MAX_FILE_BYTES} byte in-memory limit")]
+    ContentTooLarge {
+        /// The content's size from its manifest.
+        size: u64,
+    },
     /// Path component had non-UTF-8 bytes; tree entry names must be UTF-8.
     #[error("path component is not valid UTF-8")]
     InvalidUtf8,
@@ -1485,9 +1495,9 @@ pub fn store_file_object_with<S: ObjectSink + ?Sized>(
     }
 
     // Large file: split with the chunker, store each chunk as a Blob, and
-    // assemble a ChunkedBlob manifest. Per-manifest chunk count is
-    // bounded by serialize::MAX_CHUNKS (1_000_000); MAX_FILE_BYTES
-    // (1 GiB) ÷ FastCDC MIN_SIZE (16 KiB) = ~65k, well under the cap.
+    // assemble a ChunkedBlob manifest. `data` is in memory, so it is far
+    // below serialize::MAX_CHUNKED_TOTAL_SIZE, and its chunk count is far
+    // below serialize::MAX_CHUNKS.
     let total_size = data.len() as u64;
     let chunks: Vec<Hash> = chunk_slices(data, chunker)
         .map(|chunk| {

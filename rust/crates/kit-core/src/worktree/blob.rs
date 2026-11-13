@@ -21,8 +21,8 @@ use super::{WorktreeError, WorktreeResult};
 /// [`ChunkedBlob`] manifest is reassembled
 /// by concatenating each referenced chunk (every chunk must itself be a
 /// `Blob`). This is the shared counterpart to [`store_file_object`](super::store_file_object) and
-/// backs `kit cat`, `kit diff`, conflict rendering, and blame so they
-/// all reconstruct large-file content the same way.
+/// backs `kit diff` and conflict rendering so they reconstruct large-file
+/// content the same way. [`write_blob`] writes content too large to hold.
 ///
 /// # Errors
 /// - [`WorktreeError::Store`] if `hash` or any chunk is missing.
@@ -30,6 +30,8 @@ use super::{WorktreeError, WorktreeResult};
 ///   that is neither a `Blob` nor a `ChunkedBlob` of `Blob`s.
 /// - [`WorktreeError::Object`] if the concatenated chunks do not total
 ///   the manifest's `total_size` (SPEC-OBJECTS §7).
+/// - [`WorktreeError::ContentTooLarge`] if the manifest's `total_size` is
+///   above [`MAX_FILE_BYTES`](super::MAX_FILE_BYTES).
 pub fn read_blob<S: crate::store::ObjectSource + ?Sized>(
     store: &S,
     hash: &Hash,
@@ -163,15 +165,23 @@ impl LoadedBlob {
     /// - [`WorktreeError::Object`] if the concatenated chunks do not total
     ///   the manifest's `total_size`. The read stops at the first chunk
     ///   that takes the running length past `total_size`.
+    /// - [`WorktreeError::ContentTooLarge`] if the manifest's `total_size`
+    ///   is above [`MAX_FILE_BYTES`](super::MAX_FILE_BYTES), before any
+    ///   chunk is read.
     pub fn into_content<S: crate::store::ObjectSource + ?Sized>(
         self,
         store: &S,
     ) -> WorktreeResult<Vec<u8>> {
         match self {
             Self::Inline(data) => Ok(data),
-            chunked @ Self::Chunked(_) => {
+            Self::Chunked(manifest) => {
+                if manifest.total_size > super::MAX_FILE_BYTES {
+                    return Err(WorktreeError::ContentTooLarge {
+                        size: manifest.total_size,
+                    });
+                }
                 let mut data = Vec::new();
-                chunked.write_content(store, &mut data)?;
+                Self::Chunked(manifest).write_content(store, &mut data)?;
                 Ok(data)
             }
         }
@@ -184,7 +194,8 @@ impl LoadedBlob {
     /// `out` has received a prefix of the content.
     ///
     /// # Errors
-    /// As [`Self::into_content`], plus [`WorktreeError::Io`] if `out` fails.
+    /// As [`Self::into_content`], except that no size is too large, plus
+    /// [`WorktreeError::Io`] if `out` fails.
     pub fn write_content<S: crate::store::ObjectSource + ?Sized, W: io::Write>(
         &self,
         store: &S,
@@ -742,6 +753,43 @@ mod equality_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         (dir, store)
+    }
+
+    /// A manifest above the in-memory limit is refused from its header,
+    /// before any chunk is read.
+    #[test]
+    fn into_content_refuses_content_above_the_memory_limit() {
+        let (_dir, store) = fresh_store();
+        let source = CountingSource {
+            store: &store,
+            reads: std::cell::Cell::new(0),
+        };
+        let manifest = crate::object::ChunkedBlob {
+            total_size: crate::worktree::MAX_FILE_BYTES + 1,
+            chunk_size: 0,
+            chunks: vec![[1u8; 32], [2u8; 32]],
+        };
+        let err = LoadedBlob::Chunked(manifest)
+            .into_content(&source)
+            .unwrap_err();
+        assert!(
+            matches!(err, WorktreeError::ContentTooLarge { size }
+                if size == crate::worktree::MAX_FILE_BYTES + 1),
+            "got {err}"
+        );
+        assert_eq!(source.reads.get(), 0);
+
+        // At the limit the reader goes on to the chunks, which are missing.
+        let at_limit = ChunkedBlob {
+            total_size: crate::worktree::MAX_FILE_BYTES,
+            chunk_size: 0,
+            chunks: vec![[1u8; 32], [2u8; 32]],
+        };
+        let err = LoadedBlob::Chunked(at_limit)
+            .into_content(&source)
+            .unwrap_err();
+        assert!(matches!(err, WorktreeError::Store(_)), "got {err}");
+        assert_eq!(source.reads.get(), 1);
     }
 
     /// A source that counts chunk reads, to show where a read loop stops.

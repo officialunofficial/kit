@@ -50,7 +50,9 @@ pub enum Refusal {
     /// Import: structurally unparsable git object (SPEC-GIT-IMPORT
     /// §3.2/§3.5 — refused per-ref, never coerced).
     Unparsable { object: Hash, detail: String },
-    /// Import: blob over the 1 GiB per-file cap (SPEC-GIT-IMPORT §3.1).
+    /// A blob over the 1 GiB per-file cap: a git blob on import
+    /// (SPEC-GIT-IMPORT §3.1) or a chunked blob on export (SPEC-GIT-BRIDGE
+    /// §4).
     BlobTooLarge { object: Hash, size: u64 },
     /// Import: git tree with more entries than kit's decode cap —
     /// storing it would poison a signed object the store can never
@@ -165,7 +167,7 @@ impl fmt::Display for Refusal {
             ),
             Self::BlobTooLarge { object, size } => write!(
                 f,
-                "git blob {} is {size} bytes, over the 1 GiB per-file cap (SPEC-GIT-IMPORT §3.1)",
+                "blob {} is {size} bytes, over the 1 GiB per-file cap of the git bridge",
                 &to_hex(object)[..40]
             ),
             Self::NegativeTimestamp { object, timestamp } => write!(

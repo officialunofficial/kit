@@ -334,15 +334,17 @@ ACCEPTED_CHUNKED = [
     (1, 65_536, 1),
     (65_536, 65_536, 1),
     (1 << 30, 0, 2),
+    ((1 << 30) + 1, 0, 2),
+    (128 << 30, 0, 2),
     (0, 0x8000_0002, 0),
     (3, 0x8000_0002, 3),
-    (1 << 30, 0x8000_0002, 2),
+    (128 << 30, 0x8000_0002, 2),
     (1, 0x8000_0001, 1),
 ]
 REFUSED_CHUNKED = [
     (1, 0, 0),
     (2, 0, 3),
-    ((1 << 30) + 1, 0, 2),
+    ((128 << 30) + 1, 0, 2),
     (196_609, 65_536, 3),
     (131_072, 65_536, 3),
     (65_536, 65_536, 2),
@@ -350,9 +352,14 @@ REFUSED_CHUNKED = [
     (0, 65_536, 1),
     (1, 0x8000_0002, 0),
     (2, 0x8000_0002, 3),
-    ((1 << 30) + 1, 0x8000_0002, 2),
+    ((128 << 30) + 1, 0x8000_0002, 2),
     (3, 0x8000_0001, 3),
 ]
+
+# SPEC-OBJECTS section 7: the bounds of a manifest. The largest chunk_count
+# is the largest total_size cut at the 16 KiB FastCDC minimum chunk size.
+MAX_TOTAL_SIZE = 128 << 30
+MAX_CHUNKS = 8_388_608
 
 
 # SPEC-OBJECTS section 7: chunk_size values that name a content-defined
@@ -361,7 +368,7 @@ CONTENT_DEFINED = (0, 0x8000_0002)
 
 
 def check_chunked_layout(total, size, count):
-    if total > 1 << 30:
+    if total > MAX_TOTAL_SIZE:
         raise ValueError("total_size above the file limit")
     if count == 0:
         if total != 0:
@@ -374,6 +381,20 @@ def check_chunked_layout(total, size, count):
 
 
 def check_chunked_rules():
+    if MAX_CHUNKS != MAX_TOTAL_SIZE // (16 * 1024):
+        fail("the chunk cap must be the size bound over the minimum chunk size")
+    for count, refused in ((MAX_CHUNKS, False), (MAX_CHUNKS + 1, True)):
+        header = (
+            bytes([CHUNKED]) + b"KOB1\x01"
+            + struct.pack("<QII", MAX_TOTAL_SIZE, 0, count)
+        )
+        try:
+            parse_chunked(header)
+        except ValueError as err:
+            if refused != (str(err) == "too many chunks"):
+                fail(f"chunk count {count}: unexpected refusal {err}")
+            continue
+        fail(f"chunk count {count}: a header without chunk ids must be refused")
     for layout in ACCEPTED_CHUNKED:
         try:
             check_chunked_layout(*layout)
@@ -393,7 +414,7 @@ def parse_chunked(data):
     total = r.u64()
     chunk_size = r.u32()
     count = r.u32()
-    if count > 1_000_000:
+    if count > MAX_CHUNKS:
         raise ValueError("too many chunks")
     check_chunked_layout(total, chunk_size, count)
     chunks = [r.take(32) for _ in range(count)]

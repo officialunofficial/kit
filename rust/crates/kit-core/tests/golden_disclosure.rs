@@ -204,7 +204,15 @@ fn layout_commit(
         chunks,
     };
     let manifest = Object::ChunkedBlob(cb.clone());
-    let manifest_bytes = serialize(&manifest).unwrap();
+    // Encoded by hand: the writer refuses a layout that a reader refuses,
+    // and some vectors need one. The id comes from the fields alone.
+    let mut manifest_bytes = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
+    manifest_bytes.extend_from_slice(&cb.total_size.to_le_bytes());
+    manifest_bytes.extend_from_slice(&cb.chunk_size.to_le_bytes());
+    manifest_bytes.extend_from_slice(&u32::try_from(cb.chunks.len()).unwrap().to_le_bytes());
+    for chunk in &cb.chunks {
+        manifest_bytes.extend_from_slice(chunk);
+    }
     let file = kit_core::object::id_from_object(&manifest, &manifest_bytes);
     if kit_core::serialize::deserialize(&manifest_bytes).is_ok() {
         assert_eq!(store.write(&manifest_bytes).unwrap(), file);

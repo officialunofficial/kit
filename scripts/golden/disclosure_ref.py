@@ -43,7 +43,7 @@ from objects_ref import blake3, domain_digest, expect  # noqa: E402
 MAX_BUNDLE_BYTES = 64 << 20
 MAX_COMMIT_BYTES = 4 << 20
 MAX_TREE_DEPTH = 128
-MAX_CHUNKS = 1_000_000
+MAX_CHUNKS = 8_388_608
 MAX_OBJECT = 1 << 30
 MAX_LEN_SLICE = 8 << 10
 TREE_MODE = 2

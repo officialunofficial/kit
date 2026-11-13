@@ -135,7 +135,10 @@ an actionable error naming the object, any manifest that:
    round-trip would change the object graph); or
 3. has chunk boundaries that differ from the pinned FastCDC output
    over the flattened bytes (verified by re-running the chunker
-   during translation).
+   during translation); or
+4. has `total_size` above 1 GiB, the per-file cap of a git blob on
+   import (SPEC-GIT-IMPORT §3.1). The bridge refuses it before it reads
+   a chunk.
 
 These refusals are what make the §1.1 lossless guarantee
 unconditional for everything the bridge actually emits.

@@ -297,7 +297,7 @@ id, not a value Bao invents.
 | `Step.name` | 1..=255 bytes | SPEC-OBJECTS §4.1 |
 | `Object.bytes` / `Chunk.bytes` | `MAX_RAW_OBJECT_SIZE` = 1 GiB | the store's existing object-size cap |
 | `Step`/`Chunk`/`ChunkHdr` proof siblings | `max_items * MAX_LEVELS` (32) | SPEC-MERKLE-OBJECTS §5.2, before any sibling is read |
-| `chunk_len_proofs` | `MAX_CHUNKS` = 1,000,000 | the store's existing per-manifest chunk-count cap |
+| `chunk_len_proofs` | `MAX_CHUNKS` = 8,388,608 | the store's per-manifest chunk-count cap (SPEC-OBJECTS §7) |
 | a single `LenProof.slice` | 8 KiB | proving 10 bytes needs one 1 KiB Bao leaf chunk plus at most `MAX_LEVELS` 64-byte parent hashes plus an 8-byte header &mdash; comfortably under 4 KiB; 8 KiB leaves headroom |
 
 A malicious `leaf_count` inside any embedded `Proof` cannot force a large
@@ -492,7 +492,8 @@ entry point directly and ignore the manifest.
 | raw object size | 1 GiB | each object (store cap) |
 | manifest packs | 65,536 | `packs` vector |
 | tree depth | 128 | inherited from object decode |
-| tree entries / chunks | 1,000,000 | inherited from object decode |
+| tree entries | 1,000,000 | inherited from object decode |
+| chunks | 8,388,608 | inherited from object decode |
 | parents | 1,000 | inherited from object decode |
 
 ### 7.6 Vectors
@@ -569,6 +570,10 @@ A decoder MUST reject an encoded container larger than 64 MiB before
 any decoding or allocation. It MUST bound each vector length by the
 remaining input and 64 MiB, and chunk count to at most 1,000,000, before
 allocation. The verifier classifies a zero or one chunk count under §8.2.
+This bundle cap belongs to the span container. It is not the chunk cap
+of SPEC-OBJECTS §7 (8,388,608), and it stays at 1,000,000. Each bundle
+carries a commit, its steps, a proof and a chunk Blob, so a container
+within 64 MiB holds far fewer bundles than either cap.
 The decoder MUST reject trailing bytes, unknown magic or version,
 truncated fields, and invalid varints. A deployment SHOULD also cap
 requested content, for example at 8 MiB; this service cap is separate
