@@ -531,7 +531,7 @@ fn run_fetch_with(
 }
 
 #[test]
-fn a_deadline_ends_the_publish_wait_with_a_typed_error_and_the_next_fetch_resumes() {
+fn a_limit_ends_the_publish_wait_with_a_typed_error_and_the_next_fetch_resumes() {
     let remote = Remote::with_commits(3);
     let (_dir, target, layout) = fresh_target();
     let held = repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK).unwrap();
@@ -561,7 +561,7 @@ fn a_deadline_ends_the_publish_wait_with_a_typed_error_and_the_next_fetch_resume
 }
 
 #[test]
-fn a_lock_released_before_the_deadline_lets_the_publish_proceed() {
+fn a_lock_released_before_the_limit_lets_the_publish_proceed() {
     let remote = Remote::with_commits(2);
     let (_dir, target, layout) = fresh_target();
     let probe = Probe::default();
@@ -575,6 +575,27 @@ fn a_lock_released_before_the_deadline_lets_the_publish_proceed() {
         });
         drop(held);
         fetching.join().unwrap().unwrap();
+    });
+    assert_eq!(tracking_tip(&layout), Some(remote.tip()));
+}
+
+#[test]
+fn the_longest_lock_wait_pulls_once_the_lock_is_released() {
+    let remote = Remote::with_commits(2);
+    let (_dir, target, layout) = fresh_target();
+    let probe = Probe::default();
+    let held = repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK).unwrap();
+    let options = SyncOptions::default().with_lock_wait(Some(Duration::MAX));
+
+    std::thread::scope(|scope| {
+        let pulling =
+            scope.spawn(|| pull(&target, &remote.source(), "origin", &options, &probe).unwrap());
+        wait_until("the publish wait", || {
+            probe.waiting.load(Ordering::SeqCst) > 0
+        });
+        drop(held);
+        let report = pulling.join().unwrap();
+        assert!(matches!(report.outcome, PullOutcome::FastForwarded { .. }));
     });
     assert_eq!(tracking_tip(&layout), Some(remote.tip()));
 }

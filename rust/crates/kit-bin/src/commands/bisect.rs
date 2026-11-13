@@ -84,6 +84,10 @@ pub fn run(args: &[String]) -> u8 {
 }
 
 fn start(layout: &RepoLayout) -> u8 {
+    let _lock = match super::acquire_worktree_lock(layout) {
+        Ok(lock) => lock,
+        Err(code) => return code,
+    };
     if is_bisect_in_progress(layout) {
         return emit_err(
             "a bisect is already in progress (use `kit bisect reset` first)",
@@ -118,6 +122,12 @@ fn start(layout: &RepoLayout) -> u8 {
 }
 
 fn mark(store: &ObjectStore, layout: &RepoLayout, arg: Option<&str>, good: bool) -> u8 {
+    // The lock is held from resolving the commit to writing the state, so a
+    // `gc` either ran before the commit was named, or finds it as a root.
+    let lock = match super::acquire_worktree_lock(layout) {
+        Ok(lock) => lock,
+        Err(code) => return code,
+    };
     if !is_bisect_in_progress(layout) {
         return emit_err("no bisect in progress", exit::GENERAL_ERROR);
     }
@@ -143,10 +153,16 @@ fn mark(store: &ObjectStore, layout: &RepoLayout, arg: Option<&str>, good: bool)
     if let Err(e) = write_state(layout, &state) {
         return emit_err(&format!("persist state: {e}"), exit::CANTCREAT);
     }
+    // The walk of the candidates needs no lock.
+    drop(lock);
     report_step(store, &state)
 }
 
 fn skip(store: &ObjectStore, layout: &RepoLayout) -> u8 {
+    let lock = match super::acquire_worktree_lock(layout) {
+        Ok(lock) => lock,
+        Err(code) => return code,
+    };
     if !is_bisect_in_progress(layout) {
         return emit_err("no bisect in progress", exit::GENERAL_ERROR);
     }
@@ -171,6 +187,7 @@ fn skip(store: &ObjectStore, layout: &RepoLayout) -> u8 {
     if let Err(e) = write_state(layout, &state) {
         return emit_err(&format!("persist state: {e}"), persist_exit(&e));
     }
+    drop(lock);
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
         stderr,
@@ -182,6 +199,10 @@ fn skip(store: &ObjectStore, layout: &RepoLayout) -> u8 {
 }
 
 fn reset(layout: &RepoLayout) -> u8 {
+    let _lock = match super::acquire_worktree_lock(layout) {
+        Ok(lock) => lock,
+        Err(code) => return code,
+    };
     if !is_bisect_in_progress(layout) {
         return emit_err("no bisect in progress", exit::GENERAL_ERROR);
     }
@@ -342,11 +363,21 @@ fn run_automated(store: &ObjectStore, cwd: &Path, layout: &RepoLayout, argv: &[S
                 );
             }
         }
-        if let Err(e) = write_state(layout, &state) {
+        if let Err(code) = persist_locked(layout, &state) {
             let _ = restore_head(cwd, &state);
-            return emit_err(&format!("persist state: {e}"), persist_exit(&e));
+            return code;
         }
     }
+}
+
+/// Write the bisect state under the worktree lock. `bisect run` cannot hold
+/// the lock for its whole loop, because each candidate is checked out by a
+/// child `kit checkout` that takes the same lock. The candidates are between
+/// the endpoints the state already names, so `gc` keeps them without it.
+fn persist_locked(layout: &RepoLayout, state: &BisectState) -> Result<(), u8> {
+    let _lock = super::acquire_worktree_lock(layout)?;
+    write_state(layout, state)
+        .map_err(|e| emit_err(&format!("persist state: {e}"), persist_exit(&e)))
 }
 
 /// The exit code for a failed write of the bisect state: the limit on skipped

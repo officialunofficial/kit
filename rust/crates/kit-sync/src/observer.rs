@@ -47,7 +47,7 @@ pub enum SyncEvent {
     AppliedPacksPersistFailed { remote: String, error: String },
     /// A fetch finished its downloads and is waiting for another process to
     /// release the repository lock before it publishes its refs. Sent once
-    /// per wait. The wait has no deadline and stops when the observer cancels.
+    /// per wait. The wait has no limit unless [`SyncOptions::lock_wait`](crate::SyncOptions::lock_wait) sets one, and it stops when the observer cancels.
     WaitingForRepoLock,
     /// A live server process is serving this repository, so a worktree
     /// mutation is not coordinated with it.

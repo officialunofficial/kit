@@ -22,12 +22,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   grace window. It deletes each one under the same exclusive lock as an
   object, so a running fetch keeps its files. `GcReport::temp_files_pruned`
   counts them, and `bytes_reclaimed` includes their bytes.
-- `SyncOptions::lock_wait` (`with_lock_wait`) bounds how long one clone, fetch
-  or pull waits for `worktree.lock` when it publishes. The default, `None`,
-  waits as long as it takes at each publish of a fetch, and a pull's final
-  update keeps its 5 second wait. With `Some`, one deadline starts at the
-  first failed attempt and covers every later wait of the call, on wall-clock
-  time. When it passes, the
+- `SyncOptions::lock_wait` (`with_lock_wait`) bounds the total waiting time
+  of one clone, fetch or pull for `worktree.lock`, summed over every wait of
+  the call. Work between two waits is not charged. The default, `None`, waits
+  as long as it takes at each publish of a fetch, and a pull's final update
+  keeps its 5 second wait. With `Some`, every wait draws from the one limit,
+  the pull's final update included, which has no separate 5 second wait.
+  `Some(Duration::MAX)` waits with no bound. When the limit is reached, the
   call fails with `SyncError::RepoLock` and publishes nothing more, and the
   next call resumes from the packs already applied. `kit` keeps the default.
 - `kit_core::repo_lock::is_served` tells whether a server process is alive
@@ -175,8 +176,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server it reaches. The public function `kit_client::advance_ticket_limit`
   holds the rule, with the constants `DEFAULT_TICKETS_PER_ADVANCE` and
   `MAX_TICKETS_PER_ADVANCE`, and the sync client uses it too.
-  `Plan::prepare` refuses a `Limits` whose `max_tickets` is below two, which
-  leaves no ticket for a data pack. Code that builds
+  `kit_client::data_pack_budget` returns `max_tickets - 1` with no floor, so a
+  `max_tickets` below two gives a budget of zero. `Plan::prepare` then fails
+  with the limit error at the first ticketed data pack, and prepares any plan
+  that holds none. Code that builds
   a `Limits` with a struct literal adds the field or ends the literal with
   `..Limits::default()`. No trait or signature of the crate changes.
 - A pack read charges 896 bytes of memory per entry, up from 704. The old
@@ -363,6 +366,25 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A closure of exactly the walk cap is complete. The walk reported it cut when
   an object it had already seen was still queued, so a repository of exactly
   10,000,000 objects failed a fetch with `ClosureTooLarge`.
+- The restore safety check hashes a file that grows past 1 MiB while it is
+  read, as 0.7.3 did. Three inputs that ended in a check error (`check working
+  tree changes: ...` or `working tree: ...`) now pass it: an untracked file
+  that grows and is not in the way, a tracked file outside the sparse scope
+  that grows, and a removed entry whose file grows. None of them is a path the
+  restore writes. The eight restore-safety messages are unchanged.
+- A file above 1 MiB at stat time that is at most 1 MiB when it is read is
+  stored as one blob, as the same bytes are in a file of that length. The
+  stored form depends only on the bytes read, whether the file grew or shrank
+  in between. Before, it was stored chunked, and the next `status` reported a
+  change that was not there.
+- `kit gc` prints ` and N temp file(s)` after the object count when it removed
+  temp files.
+- `kit bisect reset` exits non-zero with `remove state: ...` when it cannot
+  remove the state file. It ignored the failure.
+- Every `kit bisect` command that writes the state file takes the worktree
+  lock that `kit gc` holds across its mark and sweep. `bisect run` takes it
+  around each state write, because its checkout of a candidate takes the lock
+  too.
 
 ### Fixed
 

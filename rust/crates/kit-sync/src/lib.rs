@@ -97,16 +97,19 @@ pub struct SyncOptions {
     /// After a complete fetch, delete the remote-tracking refs whose branch
     /// is gone from the remote. Only [`fetch`] acts on it.
     pub prune: bool,
-    /// How long one clone, fetch or pull waits for the worktree lock that it
-    /// takes to publish. `None` waits for as long as it takes at each publish
-    /// of a fetch, and a pull's final update of the branch, HEAD and worktree
-    /// keeps its usual 5 second wait. With `Some`, a single deadline covers
-    /// every wait of the same call, that final update included. It starts at
-    /// the first failed attempt to take the lock and runs on wall-clock time,
-    /// so it also bounds a later wait of a long call, and a lock that changes
-    /// hands does not restart it. When it passes, the call fails with
-    /// [`SyncError::RepoLock`] and publishes nothing more. What it applied
-    /// stays in the store, and the next call resumes from it.
+    /// The total time one clone, fetch or pull may spend blocked waiting for
+    /// the worktree lock, summed over every wait of the call. `None` waits for
+    /// as long as it takes at each publish of a fetch, and a pull's final
+    /// update of the branch, HEAD and worktree keeps its usual 5 second wait.
+    /// With `Some`, every wait of the call draws from the one limit, the
+    /// pull's final update included, and that update has no separate 5 second
+    /// wait. Only the time spent waiting counts: the work between two waits
+    /// (a download, an apply) is not charged, and a lock that changes hands
+    /// does not restart the count. `Some(Duration::MAX)` waits with no bound,
+    /// as `None` does at a publish. When the limit is reached, the call fails
+    /// with [`SyncError::RepoLock`] (`LockError::Busy`) and publishes nothing
+    /// more. What it applied stays in the store, and the next call resumes
+    /// from it.
     pub lock_wait: Option<std::time::Duration>,
 }
 

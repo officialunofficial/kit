@@ -1072,11 +1072,12 @@ pub fn file_content_eq(
 ///
 /// Files at or below [`CHUNK_THRESHOLD`] are read fully into memory — a
 /// single [`Blob`](crate::object::Blob) needs its bytes contiguous
-/// anyway, and the threshold keeps this small (1 MiB). Files above the
-/// threshold are streamed chunk-by-chunk directly from the open file
-/// handle instead of first buffering the whole file:
-/// ingest memory is bounded by one `FastCdc` window regardless of the
-/// file's total size.
+/// anyway, and the threshold keeps this small (1 MiB). The first MiB plus one
+/// byte is read whatever the file's size at stat time, and the stored form
+/// follows from what was read. Content above the threshold is then streamed
+/// chunk-by-chunk, those bytes first and the rest from the open file handle,
+/// instead of first buffering the whole file: ingest memory is bounded by one
+/// `FastCdc` window plus that first read, regardless of the file's total size.
 ///
 /// # Errors
 /// See [`WorktreeError`].
@@ -1120,7 +1121,7 @@ fn hash_file_with_metadata_using<S: ObjectSink + ?Sized>(
         )));
     }
     ensure_within(meta.len(), serialize::MAX_CHUNKED_TOTAL_SIZE, path)?;
-    let hash = hash_reader_using(sink, file, meta.len(), path, stream)?;
+    let hash = hash_reader_using(sink, file, path, stream)?;
     Ok((hash, meta))
 }
 
@@ -1129,32 +1130,28 @@ fn hash_file_with_metadata_using<S: ObjectSink + ?Sized>(
 /// one byte so that a longer file is seen as too large.
 type StreamedFile<R> = io::Take<io::Chain<io::Cursor<Vec<u8>>, R>>;
 
-/// Store the content of `reader`, which `declared` bytes were reported to
-/// hold. Content of at most [`CHUNK_THRESHOLD`] bytes is one blob. Anything
-/// longer goes to `stream`, whatever `declared` said: a file can grow between
-/// its stat and its read.
+/// Store the content of `reader`. The stored form depends only on the bytes
+/// read, never on the size the file had at stat time: a file can grow or
+/// shrink between its stat and its read. Content of at most
+/// [`CHUNK_THRESHOLD`] bytes is one blob. Anything longer goes to `stream`.
 fn hash_reader_using<S: ObjectSink + ?Sized, R: Read>(
     sink: &S,
     mut reader: R,
-    declared: u64,
     path: &Path,
     stream: impl FnOnce(&S, StreamedFile<R>, &Path) -> WorktreeResult<Hash>,
 ) -> WorktreeResult<Hash> {
-    // The bytes read before the content was found to be longer than the
-    // single-blob size.
+    // One byte past the threshold tells content that is longer than a single
+    // blob from content that is not.
     let mut head = Vec::new();
-    if declared <= CHUNK_THRESHOLD {
-        head.reserve_exact(usize::try_from(declared).unwrap_or(0).saturating_add(1));
-        // One byte past the threshold tells content that grew from content
-        // that is still a single blob.
-        reader
-            .by_ref()
-            .take(CHUNK_THRESHOLD + 1)
-            .read_to_end(&mut head)?;
-        if u64::try_from(head.len()).unwrap_or(u64::MAX) <= CHUNK_THRESHOLD {
-            return store_file_object(sink, &head);
-        }
+    reader
+        .by_ref()
+        .take(CHUNK_THRESHOLD + 1)
+        .read_to_end(&mut head)?;
+    if u64::try_from(head.len()).unwrap_or(u64::MAX) <= CHUNK_THRESHOLD {
+        return store_file_object(sink, &head);
     }
+    // Hand the bytes already read, then the rest of the file, to the chunked
+    // path.
     let rest = io::Cursor::new(head).chain(reader);
     stream(sink, rest.take(serialize::MAX_CHUNKED_TOTAL_SIZE + 1), path)
 }
@@ -3731,27 +3728,23 @@ mod tests {
         let grown: Vec<u8> = (0..usize::try_from(CHUNK_THRESHOLD).unwrap() + 700 * 1024)
             .map(|i| u8::try_from(i.wrapping_mul(2_654_435_761) >> 13 & 0xff).unwrap())
             .collect();
-        for declared in [0, 10, CHUNK_THRESHOLD] {
-            let id = hash_reader_using(
-                &store,
-                &grown[..],
-                declared,
-                Path::new("f"),
-                store_large_file_streaming,
-            )
-            .unwrap();
-            assert_eq!(id, store_file_object(&store, &grown).unwrap());
-            assert!(matches!(
-                store.read_object(&id).unwrap(),
-                crate::object::Object::ChunkedBlob(_)
-            ));
-        }
+        let id = hash_reader_using(
+            &store,
+            &grown[..],
+            Path::new("f"),
+            store_large_file_streaming,
+        )
+        .unwrap();
+        assert_eq!(id, store_file_object(&store, &grown).unwrap());
+        assert!(matches!(
+            store.read_object(&id).unwrap(),
+            crate::object::Object::ChunkedBlob(_)
+        ));
         // One byte past the threshold is the smallest chunked file.
         let just_over = &grown[..=usize::try_from(CHUNK_THRESHOLD).unwrap()];
         let id = hash_reader_using(
             &store,
             just_over,
-            1,
             Path::new("f"),
             store_large_file_streaming,
         )
@@ -3759,7 +3752,7 @@ mod tests {
         assert_eq!(id, store_file_object(&store, just_over).unwrap());
         // Exactly the threshold is still one blob.
         let exact = &grown[..usize::try_from(CHUNK_THRESHOLD).unwrap()];
-        let id = hash_reader_using(&store, exact, 1, Path::new("f"), |_, _, _| {
+        let id = hash_reader_using(&store, exact, Path::new("f"), |_, _, _| {
             panic!("one blob does not stream")
         })
         .unwrap();
@@ -3767,6 +3760,28 @@ mod tests {
             store.read_object(&id).unwrap(),
             crate::object::Object::Blob(_)
         ));
+    }
+
+    /// A file that was above the threshold at stat time and is at most the
+    /// threshold when it is read is one blob, as the same bytes are when they
+    /// are in a file of that length to begin with.
+    #[test]
+    fn a_large_file_that_shrinks_to_the_threshold_while_read_is_one_blob() {
+        let (_dir, store) = fresh_store();
+        let small = vec![7u8; 4096];
+        let id = hash_reader_using(&store, &small[..], Path::new("f"), |_, _, _| {
+            panic!("one blob does not stream")
+        })
+        .unwrap();
+        assert!(
+            matches!(
+                store.read_object(&id).unwrap(),
+                crate::object::Object::Blob(_)
+            ),
+            "4,096 bytes were stored as {:?}",
+            store.object_type(&id).unwrap()
+        );
+        assert_eq!(id, store_file_object(&store, &small).unwrap());
     }
 
     #[test]
