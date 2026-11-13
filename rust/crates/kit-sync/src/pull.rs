@@ -386,7 +386,7 @@ fn ensure_pull_restore_safe(
         Some(&tracked),
         &mut Vec::new(),
     )
-    .map_err(|e| recovery_snapshot_error(root, &tracked, &e))?;
+    .map_err(|e| format!("working tree: {e}"))?;
     let from_old =
         diff_trees(&snapshot, Some(before_tree), Some(current)).map_err(|e| e.to_string())?;
     let from_target =
@@ -406,19 +406,6 @@ fn ensure_pull_restore_safe(
         return Err(pull_recovery_changes_message(&entry.path));
     }
     Ok(())
-}
-
-/// The error for a failed worktree snapshot during recovery: a growing tracked
-/// file is a local change, anything else fails the check.
-fn recovery_snapshot_error(
-    root: &Path,
-    tracked: &kit_core::index::Index,
-    error: &kit_core::worktree::WorktreeError,
-) -> String {
-    match crate::worktree::grown_tracked_file(root, tracked, error) {
-        Some(path) => pull_recovery_changes_message(&path),
-        None => format!("working tree: {error}"),
-    }
 }
 
 /// The refusal for a path the unfinished pull would overwrite.
@@ -468,35 +455,6 @@ fn clear_pull_head(layout: &RepoLayout) -> Result<(), SyncError> {
 
 #[cfg(test)]
 mod recovery_message_tests {
-    #[test]
-    fn a_growing_tracked_file_is_a_local_change_in_recovery() {
-        use kit_core::index::{EntryStatus, Index, IndexEntry};
-        let mut index = Index::new();
-        index.upsert_entry(IndexEntry {
-            path: "a.bin".to_owned(),
-            status: EntryStatus::Blob,
-            object_hash: [1; 32],
-            mtime_ns: 0,
-            size: 0,
-            ino: 0,
-            ctime_ns: 0,
-        });
-        let root = std::path::Path::new("/work");
-        let grew = kit_core::worktree::WorktreeError::FileTooLarge {
-            path: root.join("a.bin"),
-            limit: kit_core::worktree::CHUNK_THRESHOLD,
-        };
-        assert!(
-            super::recovery_snapshot_error(root, &index, &grew)
-                .starts_with("pull recovery would overwrite local changes at 'a.bin'; ")
-        );
-        let other = kit_core::worktree::WorktreeError::FileTooLarge {
-            path: root.join("b.bin"),
-            limit: kit_core::worktree::CHUNK_THRESHOLD,
-        };
-        assert!(super::recovery_snapshot_error(root, &index, &other).starts_with("working tree: "));
-    }
-
     #[test]
     fn the_recovery_refusal_text_is_unchanged() {
         assert_eq!(

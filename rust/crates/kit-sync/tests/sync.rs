@@ -3023,9 +3023,9 @@ fn assert_growing_file_refuses_the_pull(len: usize) {
         match result {
             Ok(_) => {}
             Err(SyncError::RestoreSafety(message)) => {
-                assert!(
-                    message.starts_with("restore would overwrite local changes; "),
-                    "{message}"
+                assert_eq!(
+                    message,
+                    "restore would overwrite local changes; commit, stash, or reset 'big.bin' first"
                 );
                 refused += 1;
             }
