@@ -756,7 +756,7 @@ fn restore_blob(
                     }
                     tmp.write_all(&buf)?;
                 }
-                cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
+                cb.check_reassembled_size(written)?;
                 Ok(())
             })();
             #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
@@ -820,7 +820,7 @@ where
                 &mut tmp,
             )
             .and_then(|written| {
-                cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))
+                cb.check_reassembled_size(written)
                     .map_err(RestoreError::from)
             });
             let written = if observe && result.is_ok() {
