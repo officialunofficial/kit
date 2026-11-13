@@ -155,3 +155,14 @@ with each push, and a push and a clone then read one more node each time.
 The rows ran once for each size over the file transport, on one 30-CPU arm64
 machine under heavy load from other builds, so they report no times.
 
+### The pack size of a push
+
+A push builds packs of at most 256 MiB, so it holds one pack of that size and
+one prepared batch in memory. A ticketed advance carries six data packs unless
+the server advertises another number, which is about 1.5 GiB of objects. A
+push that has a single commit heavier than that raises the pack size for that
+push, once, to what the commit needs and no further. It never passes the
+format limit of 4 GiB or the largest pack the server accepts. The same objects
+spread over several commits keep packs of 256 MiB. A push of one large commit
+therefore holds a larger pack in memory than a push of many small ones: one
+pack and one prepared batch, each up to the raised size.

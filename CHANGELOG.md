@@ -120,11 +120,22 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   seven, for the split of a push and for the check of an advance. An absent
   field or a value below two means seven, and a value above 1,024 is cut to
   1,024. A server rejects a longer `ticket_ids` list with `invalid_argument`.
-  The `kit-client` crate does not read the field yet and still names up to
-  seven.
+  The `kit-client` crate reads it too, as described under Changed.
 
 ### Changed
 
+- **Breaking:** `kit_client::Limits` has a new field `max_tickets`, the most
+  tickets one advance may name, the packlist node's included.
+  `Limits::from_server_info` fills it from `max_tickets_per_advance`: seven
+  when the field is absent or below two, and at most 1,024.
+  `Limits::default()` holds seven. `Plan::prepare` refuses a plan with more
+  ticketed data packs than `max_tickets - 1`, where it refused more than six,
+  and `Push::run` refuses a plan whose `max_tickets` is above the limit of the
+  server it reaches. The public function `kit_client::advance_ticket_limit`
+  holds the rule, with the constants `DEFAULT_TICKETS_PER_ADVANCE` and
+  `MAX_TICKETS_PER_ADVANCE`, and the sync client uses it too. Code that builds
+  a `Limits` with a struct literal adds the field or ends the literal with
+  `..Limits::default()`. No trait or signature of the crate changes.
 - A pack read charges 896 bytes of memory per entry, up from 704. The old
   figure was below the real cost of a pack read with a long store path. A
   client now refuses a pack of more than about 2.40 million entries (a small
@@ -192,15 +203,21 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which is 131,080 bytes. A reader accepts the node as before. A server that
   limits a node to 1,024 packs must accept 4,096 before it is used with this
   client.
-- A push builds packs of at most 256 MiB by default (`DEFAULT_PACK_PAYLOAD_CAP`),
-  down from 4 GiB, so a push holds one pack of that size and one prepared batch
-  in memory. `PushOptions::pack_payload_cap` still takes any value up to the
-  format limit of 4 GiB. One object larger than the cap still goes into a pack
-  of its own. A single commit that cannot be split now carries at most one
-  advance's data packs of 256 MiB each, where it carried packs of up to 4 GiB;
-  against a server that does not advertise `max_tickets_per_advance` that is
-  about 1.5 GiB of objects under the cap. The `kit` command has no flag to
-  raise the cap.
+- A push prefers packs of at most 256 MiB (`DEFAULT_PACK_PAYLOAD_CAP`), down
+  from 4 GiB, so a push holds one pack of that size and one prepared batch in
+  memory. `PushOptions::pack_payload_cap` is the preferred size and still takes
+  any value up to the format limit of 4 GiB. One object larger than the cap
+  still goes into a pack of its own. A push uses larger packs only when a
+  single commit cannot fit one advance's data packs otherwise: it raises the
+  size for that push, once, to what that commit needs, never past the format
+  limit or the largest pack the remote accepts. Against a server that does not
+  advertise `max_tickets_per_advance`, one commit can then carry about 24 GiB
+  of objects, where it carries about 1.5 GiB at the preferred size. A commit
+  that does not fit even then is refused before any upload, with
+  `PushSplitLimit` when its weight passes what the largest packs hold and
+  with `PushTooLarge` when packing leaves it just over. A push that raises
+  the size holds up to two packs of that size in memory (one pack and one
+  prepared batch). The `kit` command has no flag to raise the cap.
 
 ### Fixed
 

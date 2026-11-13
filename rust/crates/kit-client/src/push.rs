@@ -140,6 +140,7 @@ impl Push {
             || self.plan.limits.max_parts > info.max_parts.unwrap_or(0)
             || self.plan.limits.ticket_threshold_bytes
                 != info.begin_upload_threshold_bytes.unwrap_or(0)
+            || self.plan.limits.max_tickets > crate::advance_ticket_limit(&info)
         {
             return Err(Error::Invalid("plan limits exceed server capabilities"));
         }

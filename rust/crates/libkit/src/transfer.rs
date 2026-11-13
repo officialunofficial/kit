@@ -309,7 +309,7 @@ pub fn push_branch_with_depth(
 }
 
 /// [`push_branch_with_depth`] with a bound on the payload of one pack in place
-/// of the default of 256 MiB.
+/// of the preferred size of 256 MiB. The push grows it only when one commit needs more.
 ///
 /// # Errors
 /// As [`push_branch`].

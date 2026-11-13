@@ -9,7 +9,9 @@
 //!
 //! The cuts are a pure function of (store, tip, remote head, limits): a
 //! resumed push recomputes them from the new remote head and regenerates
-//! identical packs for the interrupted step.
+//! identical packs for the interrupted step, unless a commit that raised the
+//! pack size is already published; the resumed push then builds that step's
+//! packs at the smaller size.
 //!
 //! * [`walk_chain`] walks the tip's first parents back to the first commit the
 //!   remote already holds.
@@ -21,6 +23,13 @@
 //!   the furthest commit whose real plan still fits, found by binary search.
 //!   A single commit heavier than the floor is verified with the real plan and,
 //!   if its estimate is over budget, an exact local dry seal.
+//!
+//! The caller's pack payload cap is a preferred size. When one commit (or the
+//! first advance, forced to hold the remote head) weighs more than the budget
+//! can carry at that size, [`plan_split`] raises the cap for the whole push,
+//! once, to what that commit needs, never past the format maximum or the
+//! largest pack the remote accepts. Every cut, probe and upload then uses the
+//! same value.
 
 use std::collections::HashSet;
 
@@ -192,18 +201,27 @@ fn walk_chain(
     Ok(Chain { commits, seed })
 }
 
-/// Serialized bytes each chain prefix adds: `weights[j]` is what the first `j`
-/// chain commits contribute beyond `chain.seed`. One pass, each object visited
+/// What a pass over the chain measured.
+struct Weights {
+    /// `cumulative[j]` is what the first `j` chain commits contribute beyond
+    /// `chain.seed`, in serialized bytes.
+    cumulative: Vec<u64>,
+    /// The serialized size of the largest single object in the chain.
+    largest_object: u64,
+}
+
+/// Serialized bytes each chain prefix adds. One pass, each object visited
 /// once; a walk from a chain commit stops at anything already seen, since a
 /// closure is closed under its children.
 fn cumulative_weights(
     store: &ObjectStore,
     chain: &Chain,
     ctl: &PushControl<'_>,
-) -> Result<Vec<u64>, PushError> {
+) -> Result<Weights, PushError> {
     let mut seen = chain.seed.clone();
     let mut cumulative = Vec::with_capacity(chain.commits.len() + 1);
     let mut total = 0_u64;
+    let mut largest_object = 0_u64;
     cumulative.push(0);
     for commit in &chain.commits {
         if ctl.observer.cancelled() {
@@ -217,9 +235,12 @@ fn cumulative_weights(
             if seen.len() > MAX_REACHABLE {
                 return Err(too_large_to_split());
             }
-            total = total
-                .saturating_add(store.object_metadata(&hash)?.len())
+            let weight = store
+                .object_metadata(&hash)?
+                .len()
                 .saturating_add(pack::ENTRY_FRAME_LEN as u64);
+            largest_object = largest_object.max(weight);
+            total = total.saturating_add(weight);
             if matches!(
                 store.object_type(&hash)?,
                 ObjectType::Blob | ObjectType::Delta
@@ -236,7 +257,10 @@ fn cumulative_weights(
         }
         cumulative.push(total);
     }
-    Ok(cumulative)
+    Ok(Weights {
+        cumulative,
+        largest_object,
+    })
 }
 
 /// The largest total weight (payload plus frames) after which a pack must
@@ -282,6 +306,23 @@ impl Cutter<'_> {
         let packs =
             estimate_pack_sizes(self.store, &plan, self.cap, self.limits.max_pack_bytes)?.len();
         Ok((plan, packs))
+    }
+
+    /// Whether the step from `from` to `to`, which no cut can divide, needs
+    /// more than the budget's packs at this cutter's cap. Within the natural
+    /// floor a step always fits, and past the budget's weight it never does;
+    /// between them the packs depend on the sizes of the objects, so a real
+    /// plan decides.
+    fn overflows(&self, from: usize, to: usize) -> Result<bool, PushError> {
+        let weight = self.weights[to] - self.weights[from];
+        let wcap = pack_weight_cap(self.cap, self.limits.max_pack_bytes);
+        if weight <= wcap.saturating_mul((self.budget / 2) as u64) {
+            return Ok(false);
+        }
+        if weight > wcap.saturating_mul(self.budget as u64) {
+            return Ok(true);
+        }
+        Ok(self.probe(from, to)?.1 > self.budget)
     }
 
     /// The furthest position after `from` whose cumulative weight stays within
@@ -405,6 +446,49 @@ fn positions_to_reach(
     Ok(low)
 }
 
+/// The steps of a push and the pack payload cap they are cut and uploaded at.
+pub(super) struct SplitPlan {
+    /// The commits to advance the remote head through, oldest first, ending
+    /// at the tip.
+    pub steps: Vec<Hash>,
+    /// The preferred pack payload cap for every upload of this push: the
+    /// caller's, or a larger one when a single commit cannot fit otherwise.
+    pub payload_cap: u64,
+}
+
+/// The payload cap at which a commit of `commit` serialized bytes, and a
+/// first advance forced to hold the remote head of `first` bytes (zero when
+/// nothing forces it), fit `budget` packs: the smallest that always does,
+/// never past what the format and the remote allow.
+///
+/// Under next-fit each sealed pack weighs more than the cap less the largest
+/// object, so `weight / budget` plus that object suffices. `None` when the
+/// commit cannot fit even at the ceiling. A forced first advance that cannot
+/// is clamped to it and left to the cut, whose refusal tells how to avoid
+/// holding the remote head.
+fn raised_payload_cap(
+    limits: UploadLimits,
+    budget: usize,
+    commit: u64,
+    first: u64,
+    largest_object: u64,
+) -> Result<Option<u64>, PushError> {
+    let budget = budget as u64;
+    let ceiling = effective_payload_cap(u64::MAX, limits.max_pack_bytes)?;
+    let ceiling_weight = pack_weight_cap(ceiling, limits.max_pack_bytes);
+    if commit > ceiling_weight.saturating_mul(budget) {
+        return Ok(None);
+    }
+    Ok(Some(
+        commit
+            .max(first)
+            .div_ceil(budget)
+            .saturating_add(largest_object)
+            .saturating_add(1)
+            .min(ceiling_weight),
+    ))
+}
+
 /// The commits to advance the remote head through, oldest first, ending at
 /// `tip`. One entry means the push is not split.
 ///
@@ -426,41 +510,107 @@ pub fn plan_push_steps(
     condition: RefWriteCondition,
     branch: &str,
 ) -> Result<Vec<Hash>, PushError> {
-    let cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
+    plan_split(
+        store,
+        tip,
+        remote_tip,
+        limits,
+        pack_payload_cap,
+        ctl,
+        condition,
+        branch,
+    )
+    .map(|plan| plan.steps)
+}
+
+/// [`plan_push_steps`] with the payload cap the steps are uploaded at.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn plan_split(
+    store: &ObjectStore,
+    tip: Hash,
+    remote_tip: Option<Hash>,
+    limits: UploadLimits,
+    pack_payload_cap: u64,
+    ctl: &PushControl<'_>,
+    condition: RefWriteCondition,
+    branch: &str,
+) -> Result<SplitPlan, PushError> {
     let chain = walk_chain(store, tip, remote_tip, ctl)?;
     if chain.commits.is_empty() {
-        return Ok(vec![tip]);
+        return Ok(SplitPlan {
+            steps: vec![tip],
+            payload_cap: pack_payload_cap,
+        });
     }
     if let Some(authority) = ctl.authority {
         authority
             .authorize(branch, condition, chain.commits.len() > 1)
             .map_err(PushError::PushNotAuthorized)?;
     }
-    let weights = cumulative_weights(store, &chain, ctl)?;
-    let cutter = Cutter {
+    let Weights {
+        cumulative: weights,
+        largest_object,
+    } = cumulative_weights(store, &chain, ctl)?;
+    let budget = data_pack_budget(limits);
+    let mut cutter = Cutter {
         observer: ctl.observer,
         store,
         chain: &chain,
         weights: &weights,
         remote_tip,
         limits,
-        cap,
-        budget: data_pack_budget(limits),
+        cap: effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?,
+        budget,
         must_reach: positions_to_reach(store, &chain, remote_tip)?,
     };
+    // The pack size is fixed here, once: every cut, probe and upload of this
+    // push uses it. It grows past the preferred size only when something no
+    // cut can divide, a single commit or the first advance (forced to hold
+    // the remote head), needs more than the budget's packs.
+    let mut payload_cap = pack_payload_cap;
+    let mut needs_more = cutter.must_reach > 0 && cutter.overflows(0, cutter.must_reach)?;
+    for commit in 0..chain.commits.len() {
+        if needs_more {
+            break;
+        }
+        needs_more = cutter.overflows(commit, commit + 1)?;
+    }
+    if needs_more {
+        let (heaviest, commit_weight) = weights
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .enumerate()
+            .max_by_key(|&(_, weight)| weight)
+            .unwrap_or_default();
+        let raised = raised_payload_cap(
+            limits,
+            budget,
+            commit_weight,
+            weights[cutter.must_reach],
+            largest_object,
+        )?
+        .ok_or_else(|| {
+            PushError::PushSplitLimit(format!(
+                "{} adds more than {budget} packs of the largest size the format and the remote allow; no advance of this branch was published",
+                cutter.describe(chain.commits[heaviest])
+            ))
+        })?;
+        payload_cap = raised.max(cutter.cap);
+        cutter.cap = effective_payload_cap(payload_cap, limits.max_pack_bytes)?;
+    }
     let mut steps = Vec::new();
     let mut from = 0;
     while from < chain.commits.len() {
         if steps.len() >= ctl.max_steps {
             return Err(PushError::PushSplitLimit(format!(
-                "this push would need more than {} advances; no advance of this branch was published. Ask the operator to raise the tickets per advance (or max_pack_bytes, if it is under 256 MiB), or push an ancestor commit first",
+                "this push would need more than {} advances; no advance of this branch was published. Ask the operator to raise the tickets per advance (or max_pack_bytes), or push an ancestor commit first",
                 ctl.max_steps
             )));
         }
         from = cutter.cut(from)?;
         steps.push(chain.commits[from - 1]);
     }
-    Ok(steps)
+    Ok(SplitPlan { steps, payload_cap })
 }
 
 #[cfg(test)]
@@ -601,7 +751,9 @@ mod tests {
         let chain = walk_chain(&store, merge, None, &PushControl::default()).unwrap();
         assert_eq!(chain.commits, [c[0], c[1], c[2], c[3], merge]);
         // The side branch's objects are weighed with the merge that brings them.
-        let weights = cumulative_weights(&store, &chain, &PushControl::default()).unwrap();
+        let weights = cumulative_weights(&store, &chain, &PushControl::default())
+            .unwrap()
+            .cumulative;
         let brought = weights[5] - weights[4];
         let lone = weights[4] - weights[3];
         assert!(brought > lone, "{weights:?}");
@@ -618,8 +770,12 @@ mod tests {
         let chain = walk_chain(&store, c[5], None, &control).unwrap();
         assert_eq!(chain.commits, [c[3], c[4], c[5]]);
         // The boundary commit weighs its own tree closure only.
-        let weights = cumulative_weights(&store, &chain, &control).unwrap();
-        let everything = cumulative_weights(&store, &chain, &PushControl::default()).unwrap();
+        let weights = cumulative_weights(&store, &chain, &control)
+            .unwrap()
+            .cumulative;
+        let everything = cumulative_weights(&store, &chain, &PushControl::default())
+            .unwrap()
+            .cumulative;
         assert!(weights[1] < everything[1]);
     }
 
@@ -640,7 +796,9 @@ mod tests {
         let (_dir, store) = store();
         let c = line(&store, 6);
         let chain = walk_chain(&store, c[5], Some(c[1]), &PushControl::default()).unwrap();
-        let weights = cumulative_weights(&store, &chain, &PushControl::default()).unwrap();
+        let weights = cumulative_weights(&store, &chain, &PushControl::default())
+            .unwrap()
+            .cumulative;
         assert_eq!(weights.len(), chain.commits.len() + 1);
         assert!(weights.windows(2).all(|w| w[0] < w[1]));
         let held = reachable_objects(&store, &c[1]).unwrap();
@@ -657,7 +815,18 @@ mod tests {
     #[test]
     fn a_step_forced_to_reach_the_remote_head_says_how_to_avoid_it() {
         let (_dir, store) = store();
-        let a = line(&store, 4);
+        // Four commits of eight files each, then a merge of the remote head
+        // with twenty more. The merge fits the remote's largest (8 KiB) packs
+        // on its own, but the first advance must hold the whole prefix.
+        let mut a: Vec<Hash> = Vec::new();
+        let mut files = Vec::new();
+        for i in 0..4_u8 {
+            for j in 0..8_u64 {
+                files.push(blob(&store, 1000 + u64::from(i) * 8 + j, 2048));
+            }
+            let parents = a.last().copied().into_iter().collect();
+            a.push(commit(&store, &files, parents, i));
+        }
         let their_file = blob(&store, 900, 100);
         let theirs = commit(&store, &[their_file], Vec::new(), 90);
         let big: Vec<Hash> = (0..20).map(|i| blob(&store, 300 + i, 2048)).collect();
@@ -692,6 +861,206 @@ mod tests {
             error.to_string().contains("rebase onto the remote head"),
             "{error}"
         );
+    }
+
+    fn ticketed(max_pack_bytes: Option<u64>) -> UploadLimits {
+        UploadLimits {
+            max_pack_bytes,
+            tickets_per_advance: Some(7),
+            ticket_threshold_bytes: Some(0),
+        }
+    }
+
+    fn split(
+        store: &ObjectStore,
+        tip: Hash,
+        limits: UploadLimits,
+        cap: u64,
+    ) -> Result<SplitPlan, PushError> {
+        plan_split(
+            store,
+            tip,
+            None,
+            limits,
+            cap,
+            &PushControl::default(),
+            RefWriteCondition::Missing,
+            "main",
+        )
+    }
+
+    /// The packs an exact dry seal of `tip`'s whole closure makes at `cap`.
+    fn sealed_packs(store: &ObjectStore, tip: Hash, limits: UploadLimits, cap: u64) -> usize {
+        let plan = transfer::plan_pack_with(store, tip, None, |_, candidates| {
+            Ok(vec![None; candidates.len()])
+        })
+        .unwrap();
+        let cap = effective_payload_cap(cap, limits.max_pack_bytes).unwrap();
+        build_and_upload_packs(
+            PackSink::Count,
+            store,
+            plan,
+            cap,
+            limits,
+            &crate::NoopObserver,
+        )
+        .map_or(usize::MAX, |keys| keys.len())
+    }
+
+    #[test]
+    fn the_raised_cap_is_what_the_commit_needs() {
+        let limits = ticketed(None);
+        let cap = raised_payload_cap(limits, 6, 60_000, 0, 3_005)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cap, 10_000 + 3_005 + 1);
+        // A larger budget needs a smaller raise.
+        let wider = raised_payload_cap(limits, 15, 60_000, 0, 3_005)
+            .unwrap()
+            .unwrap();
+        assert!(wider < cap, "{wider} {cap}");
+        // The first advance, forced to hold the remote head, counts too.
+        let forced = raised_payload_cap(limits, 6, 1_000, 60_000, 3_005)
+            .unwrap()
+            .unwrap();
+        assert_eq!(forced, cap);
+    }
+
+    #[test]
+    fn the_raised_cap_never_passes_the_format_or_the_advertised_maximum() {
+        // The weight fits only by filling every pack: clamped, not refused.
+        let ceiling = pack::MAX_TOTAL_PAYLOAD;
+        let limits = ticketed(None);
+        assert_eq!(
+            raised_payload_cap(limits, 6, 6 * ceiling, 0, 1 << 20).unwrap(),
+            Some(ceiling)
+        );
+        assert_eq!(
+            raised_payload_cap(limits, 6, 6 * ceiling + 1, 0, 0).unwrap(),
+            None
+        );
+
+        let advertised = 100_000;
+        let limits = ticketed(Some(advertised));
+        let weight_cap = pack_weight_cap(advertised, Some(advertised));
+        let cap = raised_payload_cap(limits, 6, 6 * weight_cap, 0, 1 << 20)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cap, weight_cap);
+        assert!(cap <= advertised);
+        assert_eq!(
+            raised_payload_cap(limits, 6, 6 * weight_cap + 1, 0, 0).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_forced_first_advance_past_the_ceiling_is_left_to_the_cut() {
+        let ceiling = pack::MAX_TOTAL_PAYLOAD;
+        // Clamped to the ceiling, not refused: the cut names the remedy.
+        let cap = raised_payload_cap(ticketed(None), 6, 1, 7 * ceiling, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cap, ceiling);
+    }
+
+    #[test]
+    fn one_commit_that_needs_more_than_the_budget_pushes_with_larger_packs() {
+        let (_dir, store) = store();
+        let files: Vec<Hash> = (0..20).map(|i| blob(&store, i + 1, 3000)).collect();
+        let tip = commit(&store, &files, Vec::new(), 1);
+        let limits = ticketed(None);
+        // 60 KB over 4 KiB packs is at least fifteen packs: far over six.
+        assert!(sealed_packs(&store, tip, limits, 4096) > 6);
+
+        let plan = split(&store, tip, limits, 4096).unwrap();
+        assert_eq!(plan.steps, [tip]);
+        assert!(plan.payload_cap > 4096, "{}", plan.payload_cap);
+        assert!(plan.payload_cap <= pack::MAX_TOTAL_PAYLOAD);
+        assert!(sealed_packs(&store, tip, limits, plan.payload_cap) <= 6);
+    }
+
+    #[test]
+    fn the_same_objects_over_many_commits_keep_the_preferred_cap() {
+        let (_dir, store) = store();
+        let mut files = Vec::new();
+        let mut commits: Vec<Hash> = Vec::new();
+        for i in 0..20_u8 {
+            files.push(blob(&store, u64::from(i) + 1, 3000));
+            let parents = commits.last().copied().into_iter().collect();
+            commits.push(commit(&store, &files, parents, i));
+        }
+        let plan = split(&store, commits[19], ticketed(None), 4096).unwrap();
+        assert_eq!(plan.payload_cap, 4096);
+        assert!(plan.steps.len() > 1, "{}", plan.steps.len());
+    }
+
+    #[test]
+    fn a_commit_too_large_even_at_the_ceiling_is_refused_before_any_upload() {
+        let (_dir, store) = store();
+        let files: Vec<Hash> = (0..40).map(|i| blob(&store, i + 1, 3000)).collect();
+        let tip = commit(&store, &files, Vec::new(), 1);
+        // The remote takes 8 KiB packs at most: six hold under 49 KB.
+        let error = split(&store, tip, ticketed(Some(8192)), 4096)
+            .err()
+            .unwrap();
+        assert!(matches!(error, PushError::PushSplitLimit(_)), "{error:?}");
+        assert!(error.to_string().contains("no advance"), "{error}");
+        assert!(error.to_string().contains(&to_hex(&tip)), "{error}");
+    }
+
+    #[test]
+    fn a_commit_that_fits_by_weight_but_not_by_packing_pushes_with_larger_packs() {
+        let (_dir, store) = store();
+        // Each blob is about 1.7 KB stored, so two fit a 4 KiB pack and a
+        // third does not: 13 blobs weigh under six caps but need seven packs.
+        let files: Vec<Hash> = (0..13).map(|i| blob(&store, i + 1, 3000)).collect();
+        let tip = commit(&store, &files, Vec::new(), 1);
+        let limits = ticketed(None);
+        let chain = walk_chain(&store, tip, None, &PushControl::default()).unwrap();
+        let weight = *cumulative_weights(&store, &chain, &PushControl::default())
+            .unwrap()
+            .cumulative
+            .last()
+            .unwrap();
+        assert!(weight < 6 * 4096, "{weight}");
+        assert!(sealed_packs(&store, tip, limits, 4096) > 6);
+
+        let plan = split(&store, tip, limits, 4096).unwrap();
+        assert!(plan.payload_cap > 4096, "{}", plan.payload_cap);
+        assert!(sealed_packs(&store, tip, limits, plan.payload_cap) <= 6);
+    }
+
+    #[test]
+    fn a_first_step_forced_to_reach_the_remote_head_counts_toward_the_cap() {
+        let (_dir, store) = store();
+        let theirs = commit(&store, &[blob(&store, 900, 100)], Vec::new(), 90);
+        let files: Vec<Hash> = (0..14).map(|i| blob(&store, i + 1, 3000)).collect();
+        // Each commit alone fits six 4 KiB packs (seven blobs make four), but
+        // the first advance must hold the remote head, which only the merge
+        // reaches: both together need seven.
+        let first = commit(&store, &files[..7], Vec::new(), 1);
+        let merge = commit(&store, &files, vec![first, theirs], 2);
+        let split_at = |remote: Option<Hash>, condition| {
+            plan_split(
+                &store,
+                merge,
+                remote,
+                ticketed(None),
+                4096,
+                &PushControl::default(),
+                condition,
+                "main",
+            )
+            .unwrap()
+        };
+        let forced = split_at(Some(theirs), RefWriteCondition::Match(theirs));
+        assert!(forced.payload_cap > 4096, "{}", forced.payload_cap);
+        // With no remote head to hold, the same commits split at the preferred
+        // size.
+        let free = split_at(None, RefWriteCondition::Missing);
+        assert_eq!(free.payload_cap, 4096);
+        assert!(free.steps.len() > 1, "{}", free.steps.len());
     }
 
     proptest! {
@@ -757,6 +1126,7 @@ mod tests {
             let chain = Chain { commits: vec![tip], seed };
             let weight = *cumulative_weights(&store, &chain, &PushControl::default())
                 .unwrap()
+                .cumulative
                 .last()
                 .unwrap();
             if weight <= 3 * pack_weight_cap(cap, max_pack) {

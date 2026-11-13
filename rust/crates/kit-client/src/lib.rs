@@ -20,7 +20,9 @@ pub use connect::{
 pub use kit_core::protocol::{AdmissionChallengeEntry, AdmissionRequired};
 /// Canonical messages, shared with the native client and server.
 pub use kit_rpc::transport::kit::transport::v1 as proto;
-pub use plan::{Entry, Limits, Plan};
+pub use plan::{
+    DEFAULT_TICKETS_PER_ADVANCE, Entry, Limits, MAX_TICKETS_PER_ADVANCE, Plan, advance_ticket_limit,
+};
 pub use push::{Outcome, PackmapMode, Push};
 pub use read::{MemorySink, ObjectSink, UnpackOptions, Unpacked, Verification, unpack};
 pub use receipts::{MemoryPartReceiptStore, PartReceiptStore, StoredPart, TicketMetadata};

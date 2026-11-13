@@ -1224,6 +1224,37 @@ fn a_whole_push_runs_the_observer_and_signer_for_every_write() {
 }
 
 #[test]
+fn a_push_refuses_a_plan_that_names_more_tickets_than_the_server_now_allows() {
+    // The plan was made against a server that allowed eight tickets; the
+    // server the push reaches advertises none, which means seven.
+    let advertised = proto::GetServerInfoResponse {
+        max_tickets_per_advance: Some(8),
+        ..info()
+    };
+    let limits = Limits::from_server_info(&advertised, 1 << 16, 1 << 20).unwrap();
+    assert_eq!(limits.max_tickets, 8);
+    let plan = Plan::prepare([blob(1)], limits).unwrap();
+    let push = Push::new(
+        destination(),
+        "main",
+        RefWriteCondition::Missing,
+        [4; 32],
+        PackmapMode::Append {
+            self_contained: true,
+        },
+        plan,
+        i64::MAX,
+    )
+    .unwrap();
+    let log = log();
+    let script = server(&log, |_| unreachable!());
+    let result = block_on(push.run(&script, &PolicySigner::new(&log), &TestClock::new()));
+    assert!(matches!(result, Err(Error::Invalid(_))), "{result:?}");
+    let sent: Vec<_> = script.seen.borrow().iter().map(method).collect();
+    assert_eq!(sent, ["GetServerInfo"], "nothing was uploaded");
+}
+
+#[test]
 fn a_veto_in_a_whole_push_sends_no_write() {
     let log = log();
     let script = server(&log, |_| unreachable!());

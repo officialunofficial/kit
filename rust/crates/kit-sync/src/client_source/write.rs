@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use kit_client::proto::{self, GetServerInfoResponse, UploadTicket};
 use kit_client::{
-    Error, Identity, MemoryPartReceiptStore, PartReceiptStore, StoredPart, TicketMetadata,
+    DEFAULT_TICKETS_PER_ADVANCE, Error, Identity, MemoryPartReceiptStore, PartReceiptStore,
+    StoredPart, TicketMetadata, advance_ticket_limit,
 };
 use kit_core::hash::{Hash, to_hex};
 use kit_core::protocol::{AdvanceOutcome, CommitOutcome, PACK_BODY_LIMIT, PackKey, UploadLimits};
@@ -263,23 +264,6 @@ impl WriteState {
 
 fn remote_is(error: &SourceError, code: &str) -> bool {
     matches!(error, SourceError::Remote(remote) if remote.code == code)
-}
-
-/// Tickets one advance carries when the server advertises no limit.
-const DEFAULT_TICKETS_PER_ADVANCE: usize = 7;
-
-/// The most tickets a client names in one advance, however many the server
-/// advertises.
-const MAX_TICKETS_PER_ADVANCE: usize = 1024;
-
-/// The tickets one advance may carry: the server's advertised limit, seven when
-/// it advertises none. One ticket is the packmap node's, so a value below two
-/// leaves no room for data and is ignored; a value above 1,024 is cut to 1,024.
-fn advance_ticket_limit(info: &GetServerInfoResponse) -> usize {
-    match info.max_tickets_per_advance {
-        Some(limit) if limit >= 2 => (limit as usize).min(MAX_TICKETS_PER_ADVANCE),
-        _ => DEFAULT_TICKETS_PER_ADVANCE,
-    }
 }
 
 fn valid_info(info: &GetServerInfoResponse) -> bool {
@@ -904,8 +888,8 @@ impl<
         // The push planner has already read the server's limits, so this reads
         // the cached answer and makes no call of its own.
         let ticket_limit = match self.write_state().info.get() {
-            Some(Ok(info)) => advance_ticket_limit(info),
-            _ => DEFAULT_TICKETS_PER_ADVANCE,
+            Some(Ok(info)) => advance_ticket_limit(info) as usize,
+            _ => DEFAULT_TICKETS_PER_ADVANCE as usize,
         };
         if ids.len() > ticket_limit || ids.iter().collect::<HashSet<_>>().len() != ids.len() {
             return Err(SourceError::InvalidRef(format!(
@@ -1010,13 +994,13 @@ impl<
         match self.write_info() {
             Some(info) if info.spec_version.is_some_and(|version| version >= 2) => UploadLimits {
                 max_pack_bytes: info.max_pack_bytes,
-                tickets_per_advance: signed.then(|| advance_ticket_limit(&info)),
+                tickets_per_advance: signed.then(|| advance_ticket_limit(&info) as usize),
                 ticket_threshold_bytes: signed
                     .then_some(info.begin_upload_threshold_bytes.unwrap_or(0)),
             },
             None if signed => UploadLimits {
                 max_pack_bytes: None,
-                tickets_per_advance: Some(DEFAULT_TICKETS_PER_ADVANCE),
+                tickets_per_advance: Some(DEFAULT_TICKETS_PER_ADVANCE as usize),
                 ticket_threshold_bytes: Some(0),
             },
             _ => UploadLimits::default(),
