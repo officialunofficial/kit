@@ -106,7 +106,15 @@ set. In particular:
   walk depth cap is an error, never a silent skip. (Dot-prefixed
   atomic-write temp files are ignored.)
 - A root or referenced object missing from the store during the closure
-  walk (`StoreError::ObjectNotFound`) propagates.
+  walk (`StoreError::ObjectNotFound`) propagates. One kind of root is the
+  exception: the result tree of an operation in progress and the commits of a
+  bisect are named by a state file alone, and an older gc may have pruned
+  them, or a part of what they reach. When the store lacks such an object, or
+  an object that the closure of such a root reaches, gc skips the root, lists
+  the state file in `GcReport::skipped_state_files` and `kit gc` warns with
+  its path. An object that a ref or any other root reaches is never skipped.
+  The objects that a skipped root would have kept are live only if another
+  root reaches them.
 - If the walk reaches [`MAX_REACHABLE`] objects, the mark returns
   `GcRootsError::Truncated` &mdash; beyond the cap the "unreachable" verdict is
   unsound, so gc must abort rather than prune. Push planning fails

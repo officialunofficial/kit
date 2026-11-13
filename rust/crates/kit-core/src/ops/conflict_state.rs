@@ -38,7 +38,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::hash::{self, HEX_LEN, Hash};
 use crate::index::validate_index_path;
@@ -220,12 +220,18 @@ pub fn write_result_tree(dir: &Path, tree: &Hash) -> ConflictStateResult<()> {
 /// # Errors
 /// [`ConflictStateError::Invalid`] if the file is malformed.
 pub fn read_result_tree(dir: &Path) -> ConflictStateResult<Option<Hash>> {
-    read_hex_file(&dir.join(RESULT_TREE))
+    read_hex_file(&result_tree_path(dir))
+}
+
+/// The file in `dir` that holds the operation result tree.
+#[must_use]
+pub fn result_tree_path(dir: &Path) -> PathBuf {
+    dir.join(RESULT_TREE)
 }
 
 /// Remove the persisted operation result tree (best-effort).
 pub fn clear_result_tree(dir: &Path) {
-    let _ = fs::remove_file(dir.join(RESULT_TREE));
+    let _ = fs::remove_file(result_tree_path(dir));
 }
 
 fn write_hex_file(state_dir: &Path, name: &str, h: &Hash) -> ConflictStateResult<()> {
@@ -532,6 +538,20 @@ mod tests {
 
     fn h(seed: &str) -> Hash {
         hash::hash(seed.as_bytes())
+    }
+
+    #[test]
+    fn the_result_tree_is_written_read_and_cleared() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(read_result_tree(dir.path()).unwrap(), None);
+        write_result_tree(dir.path(), &h("tree")).unwrap();
+        assert!(result_tree_path(dir.path()).is_file());
+        assert_eq!(read_result_tree(dir.path()).unwrap(), Some(h("tree")));
+        clear_result_tree(dir.path());
+        assert!(!result_tree_path(dir.path()).exists());
+        assert_eq!(read_result_tree(dir.path()).unwrap(), None);
+        // Clearing what is not there is no error.
+        clear_result_tree(dir.path());
     }
 
     #[test]

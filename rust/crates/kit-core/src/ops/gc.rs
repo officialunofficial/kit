@@ -31,7 +31,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::bounded_read;
 use crate::hash::{self, Hash};
@@ -147,7 +147,24 @@ pub enum GcRootsError {
 /// [`GcRootsError`] if any source (refs, stash, op state, attestation
 /// dir) cannot be read — the caller must then abort, never prune.
 pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError> {
+    let (mut roots, soft) = collect_root_sets(layout)?;
+    roots.extend(soft.into_iter().map(|root| root.hash));
+    Ok(roots)
+}
+
+/// A root that only an in-progress operation's state file names, and that an
+/// older gc did not keep. If the object is gone, the state file is stale: gc
+/// skips the root and says which file named it. Every other root is a ref or
+/// a state an older gc already kept, so a missing object under it is damage.
+struct SoftRoot {
+    hash: Hash,
+    state_file: PathBuf,
+}
+
+/// [`collect_roots`], with the [`SoftRoot`]s held apart from the rest.
+fn collect_root_sets(layout: &RepoLayout) -> Result<(BTreeSet<Hash>, Vec<SoftRoot>), GcRootsError> {
     let mut roots: BTreeSet<Hash> = BTreeSet::new();
+    let mut soft: Vec<SoftRoot> = Vec::new();
     let add = |h: Hash, set: &mut BTreeSet<Hash>| {
         if h != hash::ZERO {
             set.insert(h);
@@ -173,7 +190,7 @@ pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError
     // a registry error or an unreadable sibling state aborts
     // collection entirely.
     for tree in crate::layout::all_state_layouts(layout)? {
-        collect_tree_roots(&tree, &add, &mut roots)?;
+        collect_tree_roots(&tree, &add, &mut roots, &mut soft)?;
     }
 
     // Attested commits — pinned so an attestation never dangles.
@@ -195,7 +212,7 @@ pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError
         add(h, &mut roots);
     }
 
-    Ok(roots)
+    Ok((roots, soft))
 }
 
 /// One worktree's per-tree retention roots: HEAD, staging index,
@@ -205,7 +222,13 @@ fn collect_tree_roots(
     tree: &crate::layout::RepoLayout,
     add: &impl Fn(Hash, &mut BTreeSet<Hash>),
     roots: &mut BTreeSet<Hash>,
+    soft: &mut Vec<SoftRoot>,
 ) -> Result<(), GcRootsError> {
+    let add_soft = |hash: Hash, state_file: PathBuf, soft: &mut Vec<SoftRoot>| {
+        if hash != hash::ZERO {
+            soft.push(SoftRoot { hash, state_file });
+        }
+    };
     // HEAD (covers a detached HEAD not present under refs/heads).
     if let Some(h) = refs::resolve_head(tree)? {
         add(h, roots);
@@ -257,12 +280,13 @@ fn collect_tree_roots(
     // after the grace period would find its commits pruned.
     match bisect::read_state(tree) {
         Ok(state) => {
-            add(state.orig_head, roots);
-            for h in state.bad_hash.into_iter().chain(state.good_hashes) {
-                add(h, roots);
-            }
-            for h in state.skipped {
-                add(h, roots);
+            let file = tree.bisect_file();
+            let commits = std::iter::once(state.orig_head)
+                .chain(state.bad_hash)
+                .chain(state.good_hashes)
+                .chain(state.skipped);
+            for h in commits {
+                add_soft(h, file.clone(), soft);
             }
         }
         // No bisect, or none at the moment the file was read.
@@ -299,7 +323,7 @@ fn collect_tree_roots(
         // no root: nothing reads it, and keeping it would hold its tree and
         // fail gc once an earlier run had pruned that tree.
         if in_progress && let Some(tree_hash) = conflict_state::read_result_tree(&dir)? {
-            add(tree_hash, roots);
+            add_soft(tree_hash, conflict_state::result_tree_path(&dir), soft);
         }
         for c in conflict_state::read_conflicts(&dir)? {
             for h in [c.base_hash, c.ours_hash, c.theirs_hash]
@@ -551,12 +575,17 @@ pub(crate) fn live_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
 ) -> Result<LiveSet, GcRootsError> {
-    live_objects_with(store, layout, MarkLimits::DEFAULT)
+    live_objects_with(store, layout, MarkLimits::DEFAULT).map(|(live, _)| live)
 }
 
 /// The full live-object keep-set for `kit gc`: the closure over every
 /// retention root from [`collect_roots`], with chunks held apart (see
 /// [`LiveSet`]).
+///
+/// A [`SoftRoot`] whose object the store no longer holds, or whose closure
+/// lacks an object, is not a start of the closure. The result lists the state
+/// file that named each such root, once, in path order. A missing object that
+/// a hard root reaches still fails the mark.
 ///
 /// The closure follows commits, trees, tags and parents like
 /// [`super::graph::reachable_objects`]. The chunks of a manifest count toward
@@ -580,12 +609,50 @@ fn live_objects_with(
     store: &ObjectStore,
     layout: &RepoLayout,
     limits: MarkLimits,
-) -> Result<LiveSet, GcRootsError> {
-    mark_live(store, &collect_roots(layout)?, limits)
+) -> Result<(LiveSet, Vec<PathBuf>), GcRootsError> {
+    let (hard, soft) = collect_root_sets(layout)?;
+    let mut skipped = BTreeSet::new();
+    let mut present = Vec::new();
+    for root in soft {
+        match store.object_type(&root.hash) {
+            Ok(_) => present.push(root),
+            Err(StoreError::ObjectNotFound(_)) => {
+                skipped.insert(root.state_file);
+            }
+            // A read that fails for another reason is not a missing object.
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut roots = hard.clone();
+    roots.extend(present.iter().map(|root| root.hash));
+    let live = match mark_live(store, &roots, limits) {
+        Err(GcRootsError::Store(StoreError::ObjectNotFound(_))) => {
+            // An object is missing. A soft root whose closure an older gc
+            // pruned in part is what this can be, so walk each alone. Only a
+            // root whose own closure misses an object is skipped. The walk of
+            // the roots that stay then fails on a missing object that a hard
+            // root reaches, as it did before.
+            let mut kept = hard;
+            for root in present {
+                match mark_live(store, &BTreeSet::from([root.hash]), limits) {
+                    Ok(_) => {
+                        kept.insert(root.hash);
+                    }
+                    Err(GcRootsError::Store(StoreError::ObjectNotFound(_))) => {
+                        skipped.insert(root.state_file);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            mark_live(store, &kept, limits)?
+        }
+        other => other?,
+    };
+    Ok((live, skipped.into_iter().collect()))
 }
 
 /// Outcome of a [`run_gc`] sweep.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct GcReport {
     /// Objects examined in the store.
     pub scanned: usize,
@@ -605,6 +672,10 @@ pub struct GcReport {
     pub bytes_reclaimed: u64,
     /// True if this was a dry run (nothing deleted).
     pub dry_run: bool,
+    /// State files of an unfinished merge, cherry-pick, revert, rebase or
+    /// bisect that name an object, or a closure, that the store no longer
+    /// holds in full, which an older gc pruned. Gc skipped those roots and went on. Each file is listed once.
+    pub skipped_state_files: Vec<PathBuf>,
 }
 
 /// Mark-and-sweep prune: keep every object reachable from the retention
@@ -667,10 +738,11 @@ fn run_gc_with_hook(
 
     // Compute the keep-set FIRST, to the end; if this fails we list and
     // delete nothing.
-    let live = live_objects_with(store, layout, limits)?;
+    let (live, skipped_state_files) = live_objects_with(store, layout, limits)?;
 
     let mut report = GcReport {
         dry_run,
+        skipped_state_files,
         ..GcReport::default()
     };
     for shard in 0..=u8::MAX {
@@ -1054,7 +1126,7 @@ mod tests {
 
         // Sanity: the same closure with a generous cap succeeds and
         // contains every object from both commits.
-        let live = live_objects_with(&s, &md, MarkLimits::DEFAULT).unwrap();
+        let (live, _) = live_objects_with(&s, &md, MarkLimits::DEFAULT).unwrap();
         assert!(live.contains(&c1) && live.contains(&c2));
     }
 
@@ -1223,6 +1295,297 @@ mod tests {
         // A second gc finds nothing left to read, and still succeeds.
         run_gc(&s, &md, u64::MAX, 0, false).unwrap();
         assert!(s.contains(&kept));
+    }
+
+    #[test]
+    fn run_gc_skips_an_operation_root_whose_object_is_gone_and_names_the_file() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+
+        // An older gc pruned the result tree of a merge, the result tree of a
+        // rebase and the commits of a bisect. Their state files are left.
+        let (merge_result, _) = commit_one(&s, b"merge", b"merge", vec![]);
+        let merge_tree = tree_of(&s, &merge_result);
+        let (rebase_result, _) = commit_one(&s, b"rebase", b"rebase", vec![]);
+        let rebase_tree = tree_of(&s, &rebase_result);
+        let (start, _) = commit_one(&s, b"start", b"start", vec![]);
+        let (bad, _) = commit_one(&s, b"bad", b"bad", vec![]);
+        conflict_state::write_merge_state(
+            &md,
+            &conflict_state::MergeState {
+                merge_head: kept,
+                orig_head: kept,
+                message: b"merge".to_vec(),
+            },
+            &[],
+        )
+        .unwrap();
+        conflict_state::write_result_tree(md.worktree_state_dir(), &merge_tree).unwrap();
+        rebase::write_state(
+            &md,
+            &rebase::RebaseState {
+                head_name: "main".to_owned(),
+                orig_head: kept,
+                onto: kept,
+                todo: vec![],
+                actions: vec![],
+                done: vec![],
+            },
+        )
+        .unwrap();
+        conflict_state::write_result_tree(&md.rebase_dir(), &rebase_tree).unwrap();
+        bisect::write_state(
+            &md,
+            &bisect::BisectState {
+                orig_head: start,
+                orig_branch: None,
+                bad_hash: Some(bad),
+                good_hashes: vec![],
+                skipped: BTreeSet::new(),
+            },
+        )
+        .unwrap();
+        for gone in [merge_tree, rebase_tree, start, bad] {
+            s.remove_object(&gone).unwrap();
+        }
+
+        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        let mut expected = vec![
+            md.bisect_file(),
+            conflict_state::result_tree_path(&md.rebase_dir()),
+            conflict_state::result_tree_path(md.worktree_state_dir()),
+        ];
+        expected.sort();
+        // The bisect file names two missing commits and is listed once.
+        assert_eq!(report.skipped_state_files, expected);
+        assert!(s.contains(&kept));
+
+        // A state file whose objects are all there is not listed.
+        let (present, _) = commit_one(&s, b"present", b"present", vec![]);
+        let present_tree = tree_of(&s, &present);
+        conflict_state::write_result_tree(md.worktree_state_dir(), &present_tree).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, true).unwrap();
+        assert!(
+            !report
+                .skipped_state_files
+                .contains(&conflict_state::result_tree_path(md.worktree_state_dir()))
+        );
+        assert!(s.contains(&present_tree));
+    }
+
+    #[test]
+    fn run_gc_skips_an_operation_root_whose_closure_an_older_gc_pruned_in_part() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, kept_blob) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        // The result tree is there, but a file of it was pruned.
+        let (result, result_blob) = commit_one(&s, b"result", b"result", vec![]);
+        let result_tree = tree_of(&s, &result);
+        let path = conflict_state::result_tree_path(md.worktree_state_dir());
+        let merge = conflict_state::MergeState {
+            merge_head: kept,
+            orig_head: kept,
+            message: b"merge".to_vec(),
+        };
+        conflict_state::write_merge_state(&md, &merge, &[]).unwrap();
+        conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
+        s.remove_object(&result_blob).unwrap();
+
+        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert_eq!(report.skipped_state_files, [path]);
+        assert!(s.contains(&kept) && s.contains(&kept_blob));
+        // The rest of the closure is pruned, as the root is not one.
+        assert!(!s.contains(&result_tree));
+
+        // A file of a closure that a ref reaches still fails gc, whatever the
+        // state names.
+        let (other, other_blob) = commit_one(&s, b"other", b"other", vec![]);
+        write_ref(&md, "refs/heads/other", &other);
+        conflict_state::write_result_tree(md.worktree_state_dir(), &tree_of(&s, &other)).unwrap();
+        s.remove_object(&other_blob).unwrap();
+        assert!(matches!(
+            run_gc(&s, &md, u64::MAX, 0, false),
+            Err(GcRootsError::Store(StoreError::ObjectNotFound(_)))
+        ));
+    }
+
+    #[test]
+    fn run_gc_still_fails_on_a_missing_object_a_ref_reaches() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        let tree = tree_of(&s, &kept);
+        // The same tree is also the result tree of an unfinished merge, which
+        // gc may skip. The ref still reaches it.
+        conflict_state::write_merge_state(
+            &md,
+            &conflict_state::MergeState {
+                merge_head: kept,
+                orig_head: kept,
+                message: b"merge".to_vec(),
+            },
+            &[],
+        )
+        .unwrap();
+        conflict_state::write_result_tree(md.worktree_state_dir(), &tree).unwrap();
+        s.remove_object(&tree).unwrap();
+
+        assert!(matches!(
+            run_gc(&s, &md, u64::MAX, 0, false),
+            Err(GcRootsError::Store(StoreError::ObjectNotFound(_)))
+        ));
+        // A missing commit under a ref fails the same way.
+        s.remove_object(&kept).unwrap();
+        assert!(run_gc(&s, &md, u64::MAX, 0, false).is_err());
+    }
+
+    /// Only the roots that an older gc could prune are skipped when gone. The
+    /// older roots keep failing gc, as they did before the operation result
+    /// tree and the bisect commits were roots.
+    #[test]
+    #[allow(clippy::too_many_lines)] // one table of the roots, a setup each
+    fn run_gc_still_fails_on_a_missing_object_an_older_root_names() {
+        type Setup = fn(&RepoLayout, Hash, Hash);
+        let merge: Setup = |md, _, gone| {
+            conflict_state::write_merge_state(
+                md,
+                &conflict_state::MergeState {
+                    merge_head: gone,
+                    orig_head: gone,
+                    message: b"m".to_vec(),
+                },
+                &[],
+            )
+            .unwrap();
+        };
+        let merge_orig: Setup = |md, kept, gone| {
+            conflict_state::write_merge_state(
+                md,
+                &conflict_state::MergeState {
+                    merge_head: kept,
+                    orig_head: gone,
+                    message: b"m".to_vec(),
+                },
+                &[],
+            )
+            .unwrap();
+        };
+        let cherry_pick: Setup = |md, kept, gone| {
+            conflict_state::write_cherry_pick_state(
+                md,
+                &conflict_state::CherryPickState {
+                    cherry_pick_head: gone,
+                    orig_head: kept,
+                    message: b"c".to_vec(),
+                },
+                &[],
+            )
+            .unwrap();
+        };
+        let revert: Setup = |md, kept, gone| {
+            conflict_state::write_revert_state(
+                md,
+                &conflict_state::RevertState {
+                    revert_head: gone,
+                    orig_head: kept,
+                    message: b"r".to_vec(),
+                },
+                &[],
+            )
+            .unwrap();
+        };
+        let orig_head_file: Setup = |md, _, gone| {
+            fs::write(md.orig_head_file(), format!("{}\n", hash::to_hex(&gone))).unwrap();
+        };
+        let rebase_todo: Setup = |md, kept, gone| {
+            rebase::write_state(
+                md,
+                &rebase::RebaseState {
+                    head_name: "main".to_owned(),
+                    orig_head: kept,
+                    onto: kept,
+                    todo: vec![gone],
+                    actions: vec![],
+                    done: vec![],
+                },
+            )
+            .unwrap();
+        };
+        let rebase_onto: Setup = |md, kept, gone| {
+            rebase::write_state(
+                md,
+                &rebase::RebaseState {
+                    head_name: "main".to_owned(),
+                    orig_head: kept,
+                    onto: gone,
+                    todo: vec![],
+                    actions: vec![],
+                    done: vec![],
+                },
+            )
+            .unwrap();
+        };
+        let rebase_done: Setup = |md, kept, gone| {
+            rebase::write_state(
+                md,
+                &rebase::RebaseState {
+                    head_name: "main".to_owned(),
+                    orig_head: gone,
+                    onto: kept,
+                    todo: vec![],
+                    actions: vec![],
+                    done: vec![gone],
+                },
+            )
+            .unwrap();
+        };
+        let staged: Setup = |md, _, gone| {
+            let idx = index::Index::from_entries(vec![index::IndexEntry {
+                path: "staged.txt".into(),
+                status: index::EntryStatus::Blob,
+                object_hash: gone,
+                mtime_ns: 0,
+                size: 0,
+                ino: 0,
+                ctime_ns: 0,
+            }]);
+            index::write_index(md, &idx).unwrap();
+        };
+        let cases: [(&str, Setup); 8] = [
+            ("merge head", merge),
+            ("merge orig head", merge_orig),
+            ("cherry-pick head", cherry_pick),
+            ("revert head", revert),
+            ("ORIG_HEAD", orig_head_file),
+            ("rebase todo", rebase_todo),
+            ("rebase onto", rebase_onto),
+            ("rebase done", rebase_done),
+        ];
+        for (name, setup) in cases.into_iter().chain([("staged blob", staged)]) {
+            let (d, s) = repo();
+            let md = layout(&d);
+            let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+            write_ref(&md, "refs/heads/main", &kept);
+            let (gone, gone_blob) = commit_one(&s, name.as_bytes(), name.as_bytes(), vec![]);
+            // The staged blob is the object, the others name a commit.
+            let named = if name == "staged blob" {
+                gone_blob
+            } else {
+                gone
+            };
+            setup(&md, kept, named);
+            s.remove_object(&named).unwrap();
+            let result = run_gc(&s, &md, u64::MAX, 0, false);
+            assert!(
+                result.is_err(),
+                "a missing {name} must still fail gc, got {result:?}"
+            );
+            assert!(s.contains(&kept), "{name}: the ref's commit stays");
+        }
     }
 
     #[test]

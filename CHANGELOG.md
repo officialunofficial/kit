@@ -375,7 +375,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   period could prune them while the operation was waiting to resume. The
   result tree is a root only while its operation is in progress. `kit bisect
   reset` removes a state file it cannot read, so a damaged file no longer
-  blocks gc. `GcRootsError` has a `Bisect` variant for such a file.
+  blocks gc. `GcRootsError` has a `Bisect` variant for such a file. When an
+  older gc already pruned one of those objects, or part of the closure of one,
+  gc skips that root instead of failing, and `GcReport::skipped_state_files`
+  lists the state file that named it. `kit gc` prints one warning for each
+  such file. **Breaking:** `GcReport` is no longer `Copy`, and has the field
+  `skipped_state_files`. `conflict_state::result_tree_path` is public. A
+  missing object that a ref or any other root reaches still fails gc. The
+  objects of a skipped root's closure that the store still holds are not kept
+  for that root, so a gc prunes them like any other unreachable object.
 - A closure of exactly the walk cap is complete. The walk reported it cut when
   an object it had already seen was still queued, so a repository of exactly
   10,000,000 objects failed a fetch with `ClosureTooLarge`.
