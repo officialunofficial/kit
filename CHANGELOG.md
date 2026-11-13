@@ -334,6 +334,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `pack::MIN_TOTAL_DECODED` are public. `kit+file://`
   refuses to store a pack above the fetch body limit, as the S3 transport
   does.
+- A closure of exactly the walk cap is complete. The walk reported it cut when
+  an object it had already seen was still queued, so a repository of exactly
+  10,000,000 objects failed a fetch with `ClosureTooLarge`.
+
 ### Fixed
 
 - Two fetches of one clone no longer leave a record that makes every later

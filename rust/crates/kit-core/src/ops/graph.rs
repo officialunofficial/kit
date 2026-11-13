@@ -552,15 +552,17 @@ where
     let mut checked_chunks: BTreeSet<Hash> = BTreeSet::new();
     let mut truncated = false;
     while let Some(h) = queue.pop_front() {
+        if out.contains(&h) {
+            continue;
+        }
         if out.len() >= cap {
-            // Still had work to do but hit the cap — the closure is
-            // incomplete.
+            // A new object past the cap — the closure is incomplete. An
+            // object already seen does not count, so a closure of exactly
+            // `cap` objects is complete.
             truncated = true;
             break;
         }
-        if !out.insert(h) {
-            continue;
-        }
+        out.insert(h);
         // Classify the node via the cheap 6-byte prologue check
         // (`object_type`) instead of a full read+verify+decode
         // (`read_object`) — INV-14. Missing objects bubble up here
@@ -974,6 +976,29 @@ mod tests {
             }],
         );
         (make_commit(s, tree, &[], "c1"), chunks)
+    }
+
+    /// A closure of exactly `cap` objects is complete, even while an object
+    /// already seen is still queued.
+    #[test]
+    fn a_closure_of_exactly_the_cap_is_not_cut() {
+        let (_d, s) = store();
+        let tree = put_tree(
+            &s,
+            vec![TreeEntry {
+                name: b"f".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&s, b"content"),
+            }],
+        );
+        let c1 = make_commit(&s, tree, &[], "c1");
+        let c2 = make_commit(&s, tree, &[c1], "c2");
+        // c2, c1, the tree and the blob: four objects.
+        assert_eq!(reachable_objects(&s, &c2).unwrap().len(), 4);
+        assert!(
+            !check_closure_present_with_cap(&s, [&c2], 4, MAX_CHECKED_CHUNKS).unwrap(),
+            "four objects fit a cap of four"
+        );
     }
 
     #[test]
