@@ -600,11 +600,9 @@ mod tests {
             .iter()
             .map(|p| core_worktree_blob(&store, p))
             .collect::<Vec<_>>();
-        let manifest = kit_core::object::Object::ChunkedBlob(kit_core::object::ChunkedBlob {
-            total_size: 600,
-            chunk_size: 0,
-            chunks,
-        });
+        let manifest = kit_core::object::Object::ChunkedBlob(
+            kit_core::object::ChunkedBlob::new(600, 0, chunks).unwrap(),
+        );
         let h = store
             .write(&kit_core::serialize::serialize(&manifest).unwrap())
             .unwrap();

@@ -194,11 +194,9 @@ fn build_vectors() -> (MemSource, Vec<(&'static str, Hash)>) {
             }))
         })
         .collect();
-    let manifest = src.put(Object::ChunkedBlob(ChunkedBlob {
-        total_size: big.len() as u64,
-        chunk_size: 0,
-        chunks,
-    }));
+    let manifest = src.put(Object::ChunkedBlob(
+        ChunkedBlob::new(big.len() as u64, 0, chunks).unwrap(),
+    ));
     vectors.push(("chunked_blob", manifest));
 
     (src, vectors)

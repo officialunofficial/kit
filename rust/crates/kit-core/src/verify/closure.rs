@@ -370,7 +370,7 @@ pub(crate) fn walk(
         let child_ids = typed_children(&object, mode);
         if let Object::ChunkedBlob(manifest) = &object {
             let chunks = child_ids.iter().map(|(chunk, _)| *chunk).collect();
-            manifests.push((id, manifest.total_size, manifest.chunk_size, chunks));
+            manifests.push((id, manifest.total_size(), manifest.chunk_size(), chunks));
         }
         out.verified += 1;
         drop(object);
@@ -1214,11 +1214,9 @@ mod tests {
     }
 
     fn chunked(total_size: u64, chunks: &[Hash]) -> (Hash, Vec<u8>) {
-        object(&Object::ChunkedBlob(ChunkedBlob {
-            total_size,
-            chunk_size: 0,
-            chunks: chunks.to_vec(),
-        }))
+        object(&Object::ChunkedBlob(
+            ChunkedBlob::new(total_size, 0, chunks.to_vec()).unwrap(),
+        ))
     }
 
     fn commit_over(tree_hash: Hash, parents: Vec<Hash>) -> (Hash, Vec<u8>) {

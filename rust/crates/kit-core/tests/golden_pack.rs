@@ -150,7 +150,7 @@ fn fastcdc_v2_manifest_matches_golden() {
 
     let data = splitmix_bytes(0x4B49_5446_4344_4332, 2 * 1024 * 1024);
     let manifest = worktree::chunked_blob_from_bytes_with(&data, Chunker::FastCdcV2).unwrap();
-    assert_eq!(manifest.chunk_size, CHUNK_SIZE_FASTCDC_V2);
+    assert_eq!(manifest.chunk_size(), CHUNK_SIZE_FASTCDC_V2);
     let bytes = serialize::serialize(&Object::ChunkedBlob(manifest.clone())).unwrap();
     let golden = fs::read(fastcdc_dir().join("fastcdc_v2_manifest_2mib.bin")).unwrap();
     assert_eq!(bytes, golden);

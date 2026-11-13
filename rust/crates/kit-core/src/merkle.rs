@@ -362,13 +362,15 @@ impl ChunkedIdFold {
     /// Start a fold for a manifest with these header fields. The metadata
     /// leaf takes position 0.
     #[must_use]
+    // The expect cannot fire: the leaves before the chunks are few, far
+    // below `u32::MAX`.
+    #[allow(clippy::missing_panics_doc)]
     pub fn new(total_size: u64, chunk_size: u32) -> Self {
         let mut fold = BmtFold::new();
-        fold.pending[0] = Some(position_leaf(
-            0,
-            &chunked_meta_leaf_raw(total_size, chunk_size),
-        ));
-        fold.count = 1;
+        for leaf in ChunkedBlob::leaf_sequence(total_size, chunk_size, core::iter::empty()) {
+            fold.push(&leaf)
+                .expect("the leaves before the chunks fit u32");
+        }
         Self { fold }
     }
 
@@ -1012,21 +1014,16 @@ impl Proof {
 
 /// The position-0 metadata leaf digest for a `ChunkedBlob`'s
 /// `total_size`/`chunk_size`, without requiring a materialized
-/// [`ChunkedBlob`] value. Shared by [`chunked_meta_leaf`] (which has one)
-/// and [`verify_chunk_with_meta_leaf`] (which — by design — never does;
-/// see that function's docs).
+/// [`ChunkedBlob`] value. It binds both fields, since neither is derivable
+/// from the chunk list and without it they could be forged (a
+/// second-preimage hole). [`ChunkedBlob::leaf_sequence`] places it, and
+/// [`verify_chunk_with_meta_leaf`] (which, by design, never has a manifest;
+/// see that function's docs) takes it from a caller.
 pub(crate) fn chunked_meta_leaf_raw(total_size: u64, chunk_size: u32) -> Hash {
     let mut body = [0u8; 12];
     body[..8].copy_from_slice(&total_size.to_le_bytes());
     body[8..].copy_from_slice(&chunk_size.to_le_bytes());
     domain_digest(CBLOB_META_DOMAIN, &body)
-}
-
-/// The position-0 metadata leaf for a `ChunkedBlob`, binding its
-/// `total_size` and `chunk_size` (neither is derivable from the chunk
-/// list, so without this they could be forged — a second-preimage hole).
-fn chunked_meta_leaf(cb: &ChunkedBlob) -> Hash {
-    chunked_meta_leaf_raw(cb.total_size, cb.chunk_size)
 }
 
 /// The leaf digest for one `Tree` entry. The `name_len` u32-LE prefix is
@@ -1042,14 +1039,15 @@ pub(crate) fn tree_entry_leaf(e: &TreeEntry) -> Hash {
     domain_digest(TREE_ENTRY_DOMAIN, &body)
 }
 
-/// The raw leaves of a `ChunkedBlob`: the metadata leaf, then the chunks.
+/// The raw leaves of a `ChunkedBlob`, per [`ChunkedBlob::leaf_sequence`].
 fn chunked_leaves(cb: &ChunkedBlob) -> impl Iterator<Item = Hash> + '_ {
-    core::iter::once(chunked_meta_leaf(cb)).chain(cb.chunks.iter().copied())
+    cb.leaves()
 }
 
-/// The leaf count of a `ChunkedBlob`'s tree: the metadata leaf plus the chunks.
+/// The leaf count of a `ChunkedBlob`'s tree, counted from its leaves. A
+/// slice iterator counts in O(1), so this does not walk the chunks.
 fn chunked_leaf_count(cb: &ChunkedBlob) -> u32 {
-    u32_of(1 + cb.chunks.len())
+    u32_of(cb.leaves().count())
 }
 
 /// The raw leaves of a `Tree`: one per entry.
@@ -1070,12 +1068,7 @@ fn tree_leaves(tree: &Tree) -> impl Iterator<Item = Hash> + '_ {
 /// [`crate::serialize::MAX_CHUNKS`].
 #[must_use]
 pub fn chunked_inner_root(cb: &ChunkedBlob) -> Hash {
-    let mut fold = ChunkedIdFold::new(cb.total_size, cb.chunk_size);
-    for chunk in &cb.chunks {
-        fold.push(chunk)
-            .expect("merkle leaf count fits u32 (objects are decode-capped)");
-    }
-    fold.inner_root()
+    fold_root(cb.leaves())
 }
 
 /// Bare (pre-wrap) BMT root over a `Tree`'s entry leaves. A
@@ -1115,10 +1108,11 @@ pub const TREE_EMPTY_ID: Hash = [
 /// occupies position 0).
 #[must_use]
 pub fn chunk_position(cb: &ChunkedBlob, chunk_hash: &Hash) -> Option<u32> {
-    cb.chunks
-        .iter()
-        .position(|c| c == chunk_hash)
-        .map(|i| u32_of(i + 1))
+    cb.leaves()
+        .enumerate()
+        .skip(1)
+        .find(|(_, leaf)| leaf == chunk_hash)
+        .map(|(position, _)| u32_of(position))
 }
 
 /// BMT position (= entry index) of the entry named `name` within `tree`,
@@ -1348,11 +1342,7 @@ mod tests {
     use crate::object::EntryMode;
 
     fn cb(total: u64, chunk_size: u32, chunks: &[u8]) -> ChunkedBlob {
-        ChunkedBlob {
-            total_size: total,
-            chunk_size,
-            chunks: chunks.iter().map(|b| [*b; 32]).collect(),
-        }
+        ChunkedBlob::new(total, chunk_size, chunks.iter().map(|b| [*b; 32]).collect()).unwrap()
     }
 
     fn entry(name: &[u8], mode: EntryMode, h: u8) -> TreeEntry {
@@ -1383,9 +1373,9 @@ mod tests {
 
     #[test]
     fn chunked_id_changes_when_metadata_changes() {
-        let a = cb(100, 0, &[1, 2, 3]);
-        let b = cb(101, 0, &[1, 2, 3]);
-        let c = cb(100, 64, &[1, 2, 3]);
+        let a = cb(150, 0, &[1, 2, 3]);
+        let b = cb(151, 0, &[1, 2, 3]);
+        let c = cb(150, 64, &[1, 2, 3]);
         assert_ne!(compute_chunked_id(&a), compute_chunked_id(&b));
         assert_ne!(compute_chunked_id(&a), compute_chunked_id(&c));
     }
@@ -1436,6 +1426,31 @@ mod tests {
         assert_eq!(chunk_position(&c, &[0; 32]), None);
     }
 
+    /// A chunk id equal to the metadata leaf is still a chunk: its position
+    /// is its index plus one, never 0. A repeated id gives its first index.
+    #[test]
+    fn chunk_position_skips_the_meta_leaf_and_finds_the_first_repeat() {
+        let meta = chunked_meta_leaf_raw(100, 0);
+        let c = ChunkedBlob::new(100, 0, vec![[4; 32], meta, [4; 32]]).unwrap();
+        assert_eq!(chunk_position(&c, &meta), Some(2));
+        assert_eq!(chunk_position(&c, &[4; 32]), Some(1));
+    }
+
+    /// The leaf count, the proofs and the id all follow the one leaf
+    /// sequence, for every small count.
+    #[test]
+    fn chunked_leaf_count_and_inner_root_follow_the_leaf_sequence() {
+        for count in 0u8..=9 {
+            let ids: Vec<u8> = (1..=count).collect();
+            let c = cb(u64::from(count), 0, &ids);
+            assert_eq!(chunked_leaf_count(&c), u32::from(count) + 1);
+            assert_eq!(
+                chunked_inner_root(&c),
+                build_bmt(&chunked_leaves(&c).collect::<Vec<_>>()).root
+            );
+        }
+    }
+
     #[test]
     fn chunk_inclusion_proof_round_trips() {
         let c = cb(100, 0, &[10, 20, 30, 40]);
@@ -1453,7 +1468,7 @@ mod tests {
     fn verify_chunk_rejects_meta_leaf() {
         let c = cb(100, 0, &[10, 20, 30]);
         let id = compute_chunked_id(&c);
-        let meta_leaf = chunked_meta_leaf(&c);
+        let meta_leaf = chunked_meta_leaf_raw(c.total_size(), c.chunk_size());
         // Position 0 is a *valid* raw BMT proof of the meta leaf...
         let proof = build_chunk_proof(&c, 0).unwrap();
         proof
@@ -1598,14 +1613,14 @@ mod tests {
         let chunk_proof = build_chunks_multi_proof(&c, [1, 3]).unwrap();
         verify_chunks_multi(
             &chunked_id,
-            &[(c.chunks[0], 1), (c.chunks[2], 3)],
+            &[(c.chunks()[0], 1), (c.chunks()[2], 3)],
             &chunk_proof,
         )
         .unwrap();
         assert_eq!(
             verify_chunks_multi(
                 &chunked_id,
-                &[(c.chunks[2], 3), (c.chunks[0], 1)],
+                &[(c.chunks()[2], 3), (c.chunks()[0], 1)],
                 &chunk_proof
             ),
             Err(MerkleError::UnsortedPosition(1))
@@ -1627,12 +1642,12 @@ mod tests {
         let id = compute_chunked_id(&c);
         let proof = build_chunks_range_proof(&c, 0, 1).unwrap();
         assert_eq!(
-            verify_chunks_range(&id, 0, &c.chunks[..2], &proof),
+            verify_chunks_range(&id, 0, &c.chunks()[..2], &proof),
             Err(MerkleError::PositionOutOfRange(0))
         );
         let multi = build_chunks_multi_proof(&c, [0, 2]).unwrap();
         assert_eq!(
-            verify_chunks_multi(&id, &[(c.chunks[0], 0), (c.chunks[1], 2)], &multi),
+            verify_chunks_multi(&id, &[(c.chunks()[0], 0), (c.chunks()[1], 2)], &multi),
             Err(MerkleError::PositionOutOfRange(0))
         );
     }
@@ -1939,17 +1954,18 @@ mod tests {
     /// The id of a `FastCDC` manifest of `count` generated 16 KiB chunks.
     /// Chunk `i` is `i` as a little-endian u64, zero-padded to 32 bytes.
     fn generated_manifest(count: u32) -> ChunkedBlob {
-        ChunkedBlob {
-            total_size: u64::from(count) * 16 * 1024,
-            chunk_size: 0,
-            chunks: (0..count)
+        ChunkedBlob::new(
+            u64::from(count) * 16 * 1024,
+            0,
+            (0..count)
                 .map(|i| {
                     let mut id = [0u8; 32];
                     id[..8].copy_from_slice(&u64::from(i).to_le_bytes());
                     id
                 })
                 .collect(),
-        }
+        )
+        .unwrap()
     }
 
     /// The level-build ids of `generated_manifest(1_000_001)` and
@@ -2000,8 +2016,8 @@ mod tests {
     fn chunked_id_fold_matches_compute_chunked_id() {
         for n in [0u8, 1, 2, 3, 7, 8, 9] {
             let manifest = cb(u64::from(n) * 5, 0, &(1..=n).collect::<Vec<_>>());
-            let mut fold = ChunkedIdFold::new(manifest.total_size, manifest.chunk_size);
-            for chunk in &manifest.chunks {
+            let mut fold = ChunkedIdFold::new(manifest.total_size(), manifest.chunk_size());
+            for chunk in manifest.chunks() {
                 fold.push(chunk).unwrap();
             }
             assert_eq!(fold.id(), compute_chunked_id(&manifest));
@@ -2023,7 +2039,7 @@ mod tests {
                 .unwrap();
         // Prologue 6, total_size 8, chunk_size 4, chunk_count 4.
         let ids = &bytes[22..];
-        let mut fold = ChunkedIdFold::new(manifest.total_size, manifest.chunk_size);
+        let mut fold = ChunkedIdFold::new(manifest.total_size(), manifest.chunk_size());
         for slice in [&ids[..32], &ids[32..32 * 7], &ids[32 * 7..]] {
             fold.push_ids(slice).unwrap();
         }
@@ -2532,13 +2548,10 @@ mod kani_proofs {
     /// §3.1 leaf list `[meta, chunks…]`, and its id computed through the
     /// §2 domain wrap of the spec-built root.
     fn chunked_fixture<const N: usize>() -> (ChunkedBlob, Vec<Hash>) {
-        let cb = ChunkedBlob {
-            total_size: kani::any(),
-            chunk_size: kani::any(),
-            chunks: kani::any::<[Hash; N]>().to_vec(),
-        };
-        let mut leaves = vec![chunked_meta_leaf_raw(cb.total_size, cb.chunk_size)];
-        leaves.extend_from_slice(&cb.chunks);
+        let cb =
+            ChunkedBlob::new_unchecked(kani::any(), kani::any(), kani::any::<[Hash; N]>().to_vec());
+        let mut leaves = vec![chunked_meta_leaf_raw(cb.total_size(), cb.chunk_size())];
+        leaves.extend_from_slice(cb.chunks());
         (cb, leaves)
     }
 
@@ -2558,7 +2571,7 @@ mod kani_proofs {
             spec_sibling_count(proof.leaf_count, pos)
         );
         assert_eq!(
-            verify_chunk(&id, &cb.chunks[(pos - 1) as usize], pos, &proof),
+            verify_chunk(&id, &cb.chunks()[(pos - 1) as usize], pos, &proof),
             Ok(())
         );
     }

@@ -922,11 +922,10 @@ mod tests {
     fn chunked(store: &ObjectStore, chunks: &[Hash]) -> Hash {
         put(
             store,
-            &Object::ChunkedBlob(kit_core::object::ChunkedBlob {
-                total_size: 100 * chunks.len() as u64,
-                chunk_size: 0,
-                chunks: chunks.to_vec(),
-            }),
+            &Object::ChunkedBlob(
+                kit_core::object::ChunkedBlob::new(100 * chunks.len() as u64, 0, chunks.to_vec())
+                    .unwrap(),
+            ),
         )
     }
 
@@ -1633,11 +1632,9 @@ mod step_fit_tests {
     fn chunked(store: &ObjectStore, chunks: &[Hash]) -> Hash {
         put(
             store,
-            &Object::ChunkedBlob(ChunkedBlob {
-                total_size: 3000 * chunks.len() as u64,
-                chunk_size: 0,
-                chunks: chunks.to_vec(),
-            }),
+            &Object::ChunkedBlob(
+                ChunkedBlob::new(3000 * chunks.len() as u64, 0, chunks.to_vec()).unwrap(),
+            ),
         )
     }
 

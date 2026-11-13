@@ -175,7 +175,7 @@ fn git_type(obj: &Object) -> &'static str {
 fn object_size(store: &ObjectStore, h: &kit_core::hash::Hash, obj: &Object) -> Result<u64, String> {
     Ok(match obj {
         Object::Blob(b) => b.data.len() as u64,
-        Object::ChunkedBlob(c) => c.total_size,
+        Object::ChunkedBlob(c) => c.total_size(),
         _ => store.read(h).map_err(|e| format!("read: {e}"))?.len() as u64,
     })
 }

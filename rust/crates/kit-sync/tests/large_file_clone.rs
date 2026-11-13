@@ -150,11 +150,14 @@ fn large_file(chunks: usize, chunk_len: usize, per_pack: usize) -> LargeFile {
             upload(&mut pending);
         }
     }
-    let manifest = Object::ChunkedBlob(ChunkedBlob {
-        total_size: content.len() as u64,
-        chunk_size: u32::try_from(chunk_len).unwrap(),
-        chunks: chunk_ids,
-    });
+    let manifest = Object::ChunkedBlob(
+        ChunkedBlob::new(
+            content.len() as u64,
+            u32::try_from(chunk_len).unwrap(),
+            chunk_ids,
+        )
+        .unwrap(),
+    );
     let tree = Object::Tree(Tree {
         entries: vec![TreeEntry {
             name: b"large.bin".to_vec(),

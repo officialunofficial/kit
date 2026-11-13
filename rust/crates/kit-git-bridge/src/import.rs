@@ -529,11 +529,12 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         }
         let manifest = ser(
             id,
-            &Object::ChunkedBlob(ChunkedBlob {
-                total_size: body.len() as u64,
-                chunk_size: 0,
-                chunks,
-            }),
+            &Object::ChunkedBlob(ChunkedBlob::new(body.len() as u64, 0, chunks).map_err(|e| {
+                BridgeError::from(Refusal::Unrepresentable {
+                    object: hash20(id),
+                    detail: e.to_string(),
+                })
+            })?),
         )?;
         self.write_object(&manifest)
     }

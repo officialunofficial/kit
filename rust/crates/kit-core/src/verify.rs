@@ -1628,12 +1628,12 @@ fn build_payload<S: crate::store::ObjectSource + ?Sized>(
             let Object::ChunkedBlob(cb) = source.read_object(leaf_id)? else {
                 return Err(VerifyError::SelectorLeafMismatch);
             };
-            let leaf_count = u32::try_from(cb.chunks.len())
+            let leaf_count = u32::try_from(cb.chunks().len())
                 .ok()
                 .and_then(|n| n.checked_add(1))
                 .ok_or(VerifyError::TooManyChunks)?;
             let chunk_id = *cb
-                .chunks
+                .chunks()
                 .get(index as usize)
                 .ok_or(VerifyError::ChunkIndexOutOfRange { index, leaf_count })?;
             let position = index
@@ -1642,8 +1642,8 @@ fn build_payload<S: crate::store::ObjectSource + ?Sized>(
             let proof = merkle::build_chunks_multi_proof(&cb, [0, position])?;
             let bytes = source.read(&chunk_id)?;
             Ok(PayloadWire::Chunk {
-                total_size: cb.total_size,
-                chunk_size: cb.chunk_size,
+                total_size: cb.total_size(),
+                chunk_size: cb.chunk_size(),
                 index,
                 inner_root: merkle::chunked_inner_root(&cb),
                 proof,
@@ -1691,9 +1691,9 @@ fn build_chunked_range_payload<S: crate::store::ObjectSource + ?Sized>(
     len: u64,
     with_offsets: bool,
 ) -> Result<PayloadWire, VerifyError> {
-    if cb.total_size > crate::worktree::MAX_FILE_BYTES {
+    if cb.total_size() > crate::worktree::MAX_FILE_BYTES {
         return Err(VerifyError::ContentTooLarge {
-            size: cb.total_size,
+            size: cb.total_size(),
         });
     }
     // Read every chunk's canonical bytes once, up front: needed both to
@@ -1704,12 +1704,12 @@ fn build_chunked_range_payload<S: crate::store::ObjectSource + ?Sized>(
     // repeats one chunk cannot grow the read set past the in-memory limit.
     let mut chunk_bytes: Vec<Vec<u8>> = Vec::new();
     let mut read_len: u64 = 0;
-    for id in &cb.chunks {
+    for id in cb.chunks() {
         let bytes = source.read(id)?;
         read_len = read_len.saturating_add(bytes.len().saturating_sub(10) as u64);
-        if read_len > cb.total_size {
+        if read_len > cb.total_size() {
             return Err(KitError::ChunkedBlobSizeMismatch {
-                expected: cb.total_size,
+                expected: cb.total_size(),
                 actual: read_len,
             }
             .into());
@@ -1766,7 +1766,7 @@ fn build_chunked_range_payload<S: crate::store::ObjectSource + ?Sized>(
             let slice_j = extract_bao_slice(preceding_bytes, 0, 10)?;
             chunk_len_proofs.push(LenProof {
                 index: j_u32,
-                chunk_id: cb.chunks[j],
+                chunk_id: cb.chunks()[j],
                 proof: proof_j,
                 slice: slice_j,
             });
@@ -1775,11 +1775,11 @@ fn build_chunked_range_payload<S: crate::store::ObjectSource + ?Sized>(
 
     Ok(PayloadWire::Range {
         chunk: Some(ChunkHdr {
-            total_size: cb.total_size,
-            chunk_size: cb.chunk_size,
+            total_size: cb.total_size(),
+            chunk_size: cb.chunk_size(),
             index: index_u32,
             inner_root: merkle::chunked_inner_root(cb),
-            chunk_id: cb.chunks[index],
+            chunk_id: cb.chunks()[index],
             proof,
         }),
         offset_in_blob: offset_in_chunk,
@@ -1843,11 +1843,14 @@ mod tests {
     fn range_disclosure_refuses_a_file_above_the_memory_limit() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
-        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: crate::worktree::MAX_FILE_BYTES + 1,
-            chunk_size: 0,
-            chunks: vec![[1u8; 32], [2u8; 32]],
-        });
+        let manifest = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(
+                crate::worktree::MAX_FILE_BYTES + 1,
+                0,
+                vec![[1u8; 32], [2u8; 32]],
+            )
+            .unwrap(),
+        );
         let leaf = store
             .write(&crate::serialize::serialize(&manifest).unwrap())
             .unwrap();
@@ -1862,11 +1865,14 @@ mod tests {
         ));
 
         // At the limit the builder goes on to the chunks, which are missing.
-        let at_limit = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: crate::worktree::MAX_FILE_BYTES,
-            chunk_size: 0,
-            chunks: vec![[1u8; 32], [2u8; 32]],
-        });
+        let at_limit = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(
+                crate::worktree::MAX_FILE_BYTES,
+                0,
+                vec![[1u8; 32], [2u8; 32]],
+            )
+            .unwrap(),
+        );
         let leaf = store
             .write(&crate::serialize::serialize(&at_limit).unwrap())
             .unwrap();
@@ -1887,11 +1893,8 @@ mod tests {
         }))
         .unwrap();
         let chunk = store.write(&chunk_bytes).unwrap();
-        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 2000,
-            chunk_size: 0,
-            chunks: vec![chunk; 2],
-        });
+        let manifest =
+            Object::ChunkedBlob(crate::object::ChunkedBlob::new(2000, 0, vec![chunk; 2]).unwrap());
         let leaf = store
             .write(&crate::serialize::serialize(&manifest).unwrap())
             .unwrap();
@@ -1917,11 +1920,9 @@ mod tests {
         }))
         .unwrap();
         let chunk = store.write(&chunk_bytes).unwrap();
-        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 1500,
-            chunk_size: 0,
-            chunks: vec![chunk; 1000],
-        });
+        let manifest = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(1500, 0, vec![chunk; 1000]).unwrap(),
+        );
         let leaf = store
             .write(&crate::serialize::serialize(&manifest).unwrap())
             .unwrap();
@@ -2981,8 +2982,8 @@ mod tests {
         let Object::ChunkedBlob(cb) = f.store.read_object(&chunked_id).unwrap() else {
             panic!("expected a chunked blob");
         };
-        assert!(cb.chunks.len() > 1, "fixture must yield several chunks");
-        for i in 0..cb.chunks.len() {
+        assert!(cb.chunks().len() > 1, "fixture must yield several chunks");
+        for i in 0..cb.chunks().len() {
             let index = u32::try_from(i).unwrap();
             cases.push((c, vec![b"chunked.bin"], Selector::Chunk(index)));
         }
@@ -3125,7 +3126,7 @@ mod tests {
         for short_len in [0usize, 1, 9] {
             let liar = LyingSource {
                 inner: &map,
-                target: cb.chunks[0],
+                target: cb.chunks()[0],
                 lie: vec![0u8; short_len],
             };
             for with_offsets in [false, true] {
@@ -3291,11 +3292,8 @@ mod tests {
             })
             .collect();
         let total = total as u64;
-        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: total,
-            chunk_size,
-            chunks: ids,
-        });
+        let manifest =
+            Object::ChunkedBlob(crate::object::ChunkedBlob::new(total, chunk_size, ids).unwrap());
         let file_id = store
             .write(&crate::serialize::serialize(&manifest).unwrap())
             .unwrap();

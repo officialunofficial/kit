@@ -59,7 +59,7 @@ fn chunk_id(s: &ObjectStore, seed: u8) -> Hash {
 
 fn manifest_chunks(s: &ObjectStore, manifest: &Hash) -> Vec<Hash> {
     match s.read_object(manifest).unwrap() {
-        Object::ChunkedBlob(blob) => blob.chunks,
+        Object::ChunkedBlob(blob) => blob.into_chunks(),
         other => panic!("not a manifest: {other:?}"),
     }
 }
@@ -521,11 +521,7 @@ fn wide_file(s: &ObjectStore, chunks: usize) -> Hash {
         .collect();
     put(
         s,
-        &Object::ChunkedBlob(ChunkedBlob {
-            total_size: (chunks * 4) as u64,
-            chunk_size: 0,
-            chunks: ids,
-        }),
+        &Object::ChunkedBlob(ChunkedBlob::new((chunks * 4) as u64, 0, ids).unwrap()),
     )
 }
 
@@ -1098,11 +1094,7 @@ fn a_manifest_that_lists_a_non_blob_is_a_typed_error() {
     let tree = tree_of(&s, &[]);
     let m = put(
         &s,
-        &Object::ChunkedBlob(ChunkedBlob {
-            total_size: 1,
-            chunk_size: 0,
-            chunks: vec![tree],
-        }),
+        &Object::ChunkedBlob(ChunkedBlob::new(1, 0, vec![tree]).unwrap()),
     );
     let c = commit(&s, tree_of(&s, &[("f", m)]), &[], "bad");
     assert!(matches!(
@@ -1196,11 +1188,7 @@ fn pool_big(s: &ObjectStore, k: u8) -> Hash {
         .collect();
     put(
         s,
-        &Object::ChunkedBlob(ChunkedBlob {
-            total_size: chunks.len() as u64 * 600,
-            chunk_size: 0,
-            chunks,
-        }),
+        &Object::ChunkedBlob(ChunkedBlob::new(chunks.len() as u64 * 600, 0, chunks).unwrap()),
     )
 }
 
@@ -1378,11 +1366,9 @@ mod random_histories {
                 let chunks: Vec<Hash> = (0..count).map(|_| chunk(s, rng.below(16))).collect();
                 put(
                     s,
-                    &Object::ChunkedBlob(ChunkedBlob {
-                        total_size: chunks.len() as u64 * 600,
-                        chunk_size: 0,
-                        chunks,
-                    }),
+                    &Object::ChunkedBlob(
+                        ChunkedBlob::new(chunks.len() as u64 * 600, 0, chunks).unwrap(),
+                    ),
                 )
             }
         }

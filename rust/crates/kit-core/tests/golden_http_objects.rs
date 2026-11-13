@@ -275,9 +275,9 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
     let Object::ChunkedBlob(cb) = fixture.store.read_object(&chunked_id).unwrap() else {
         panic!("manifest")
     };
-    assert!(cb.chunks.len() >= 3);
+    assert!(cb.chunks().len() >= 3);
     let lengths: Vec<u64> = cb
-        .chunks
+        .chunks()
         .iter()
         .map(|id| {
             let Object::Blob(b) = fixture.store.read_object(id).unwrap() else {
@@ -912,8 +912,8 @@ fn chunk_boundaries(fixture: &common::Fixture) -> Vec<u64> {
         panic!("fixture file is not chunked")
     };
     let mut boundaries = vec![0u64];
-    for id in manifest.chunks {
-        let Object::Blob(blob) = fixture.store.read_object(&id).unwrap() else {
+    for id in manifest.chunks() {
+        let Object::Blob(blob) = fixture.store.read_object(id).unwrap() else {
             panic!("fixture chunk is not a blob")
         };
         boundaries.push(boundaries.last().unwrap() + blob.data.len() as u64);

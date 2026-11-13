@@ -242,7 +242,7 @@ pub(crate) fn typed_children(obj: &Object, mode: ClosureMode) -> Vec<(Hash, Chil
             .iter()
             .map(|e| (e.object_hash, ChildKind::Entry(e.mode)))
             .collect(),
-        Object::ChunkedBlob(cb) => cb.chunks.iter().map(|c| (*c, ChildKind::Chunk)).collect(),
+        Object::ChunkedBlob(cb) => cb.chunks().iter().map(|c| (*c, ChildKind::Chunk)).collect(),
         Object::Tag(t) => vec![(t.target, ChildKind::Type(t.target_type))],
         Object::Blob(_) | Object::Delta(_) => Vec::new(),
     }
@@ -644,11 +644,9 @@ mod tests {
         let (_d, s) = store();
         let c0 = put_blob(&s, b"A");
         let c1 = put_blob(&s, b"B");
-        let cb_bytes = serialize::serialize(&Object::ChunkedBlob(ChunkedBlob {
-            total_size: 2,
-            chunk_size: 1,
-            chunks: vec![c0, c1],
-        }))
+        let cb_bytes = serialize::serialize(&Object::ChunkedBlob(
+            ChunkedBlob::new(2, 1, vec![c0, c1]).unwrap(),
+        ))
         .unwrap();
         let cb = s.write(&cb_bytes).unwrap();
         let tree = put_tree(
@@ -719,11 +717,9 @@ mod tests {
         );
         let chunk_a = put_blob(&s, b"chunk-a");
         let chunk_b = put_blob(&s, b"chunk-b");
-        let cb_bytes = serialize::serialize(&Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 14,
-            chunk_size: 7,
-            chunks: vec![chunk_a, chunk_b],
-        }))
+        let cb_bytes = serialize::serialize(&Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(14, 7, vec![chunk_a, chunk_b]).unwrap(),
+        ))
         .unwrap();
         let cb = s.write(&cb_bytes).unwrap();
         let outer = put_tree(
@@ -757,11 +753,9 @@ mod tests {
             .map(|i| put_blob(s, format!("chunk-{i}").as_bytes()))
             .collect();
         let total_size = (0..count).map(|i| format!("chunk-{i}").len() as u64).sum();
-        let manifest = serialize::serialize(&Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size,
-            chunk_size: 0,
-            chunks: chunks.clone(),
-        }))
+        let manifest = serialize::serialize(&Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(total_size, 0, chunks.clone()).unwrap(),
+        ))
         .unwrap();
         let manifest = s.write(&manifest).unwrap();
         let tree = put_tree(
@@ -816,11 +810,9 @@ mod tests {
         let (c1, chunks) = chunked_history(s, 8);
         let mut changed = chunks.clone();
         changed[0] = put_blob(s, b"changed-0");
-        let manifest = serialize::serialize(&Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 1024,
-            chunk_size: 0,
-            chunks: changed,
-        }))
+        let manifest = serialize::serialize(&Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(1024, 0, changed).unwrap(),
+        ))
         .unwrap();
         let manifest = s.write(&manifest).unwrap();
         let tree = put_tree(

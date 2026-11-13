@@ -748,10 +748,10 @@ fn restore_blob(
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
             let result = (|| -> RestoreResult<()> {
                 let mut written: u64 = 0;
-                for ch in &cb.chunks {
+                for ch in cb.chunks() {
                     let buf = read_chunk_bytes(store, ch)?;
                     written += buf.len() as u64;
-                    if written > cb.total_size {
+                    if written > cb.total_size() {
                         break;
                     }
                     tmp.write_all(&buf)?;
@@ -813,8 +813,8 @@ where
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
             let result = write_chunk_batches(
                 store,
-                &cb.chunks,
-                cb.total_size,
+                cb.chunks(),
+                cb.total_size(),
                 batch_size,
                 read_chunks,
                 &mut tmp,
@@ -1695,11 +1695,7 @@ mod tests {
     fn temporary_file_entries(store: &ObjectStore) -> Vec<(&'static str, EntryMode, Hash)> {
         let plain = put_blob(store, b"data");
         let chunks = vec![put_blob(store, b"da"), put_blob(store, b"ta")];
-        let chunked = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 4,
-            chunk_size: 2,
-            chunks,
-        });
+        let chunked = Object::ChunkedBlob(crate::object::ChunkedBlob::new(4, 2, chunks).unwrap());
         let chunked = store
             .write(&serialize::serialize(&chunked).unwrap())
             .unwrap();
@@ -2128,11 +2124,14 @@ mod tests {
     fn an_unobserved_restore_reports_no_stat_fields() {
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();
-        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 8,
-            chunk_size: 0,
-            chunks: vec![put_blob(&store, b"big-"), put_blob(&store, b"file")],
-        });
+        let cb = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(
+                8,
+                0,
+                vec![put_blob(&store, b"big-"), put_blob(&store, b"file")],
+            )
+            .unwrap(),
+        );
         let big = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let plain = put_blob(&store, b"plain");
         let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
@@ -2165,11 +2164,14 @@ mod tests {
             put_blob(&store, b"a-new"),
             put_blob(&store, b"#!/bin/sh\n"),
         );
-        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 8,
-            chunk_size: 0,
-            chunks: vec![put_blob(&store, b"big-"), put_blob(&store, b"file")],
-        });
+        let cb = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(
+                8,
+                0,
+                vec![put_blob(&store, b"big-"), put_blob(&store, b"file")],
+            )
+            .unwrap(),
+        );
         let big = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let sub = put_tree_with(&store, vec![entry("big", EntryMode::Blob, big)]);
         let mk = |a| {
@@ -2390,11 +2392,9 @@ mod tests {
         let c0 = put_blob(&store, b"Hello, ");
         let c1 = put_blob(&store, b"chunked ");
         let c2 = put_blob(&store, b"world!");
-        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 7 + 8 + 6,
-            chunk_size: 8,
-            chunks: vec![c0, c1, c2],
-        });
+        let cb = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(7 + 8 + 6, 8, vec![c0, c1, c2]).unwrap(),
+        );
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_tree_with(
             &store,
@@ -2422,11 +2422,9 @@ mod tests {
         let c0 = put_blob(&store, b"Hello, ");
         let c1 = put_blob(&store, b"chunked ");
         let c2 = put_blob(&store, b"world!");
-        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 7 + 8 + 6,
-            chunk_size: 0,
-            chunks: vec![c0, c1, c2],
-        });
+        let cb = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(7 + 8 + 6, 0, vec![c0, c1, c2]).unwrap(),
+        );
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_tree_with(
             &store,
@@ -2473,11 +2471,9 @@ mod tests {
             .collect();
         let total_size: u64 = chunk_data.iter().map(|c| c.len() as u64).sum();
         let chunks: Vec<Hash> = chunk_data.iter().map(|c| put_blob(&store, c)).collect();
-        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size,
-            chunk_size: 0,
-            chunks: chunks.clone(),
-        });
+        let cb = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(total_size, 0, chunks.clone()).unwrap(),
+        );
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_tree_with(
             &store,
@@ -2537,11 +2533,9 @@ mod tests {
         let target = TempDir::new().unwrap();
         let c0 = put_blob(&store, b"Hello, ");
         let c1 = put_blob(&store, b"world!");
-        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 7 + 6 + 1,
-            chunk_size: 0,
-            chunks: vec![c0, c1],
-        });
+        let cb = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(7 + 6 + 1, 0, vec![c0, c1]).unwrap(),
+        );
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_tree_with(
             &store,
@@ -2573,11 +2567,7 @@ mod tests {
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();
         let big = put_blob(&store, &[7u8; 64]);
-        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 10,
-            chunk_size: 10,
-            chunks: vec![big],
-        });
+        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob::new(10, 10, vec![big]).unwrap());
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_tree_with(
             &store,
@@ -2609,11 +2599,9 @@ mod tests {
             let (_d, store) = fresh_store();
             let target = TempDir::new().unwrap();
             let big = put_blob(&store, &[7u8; 64]);
-            let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
-                total_size: declared,
-                chunk_size: 0,
-                chunks: vec![big; chunk_count],
-            });
+            let cb = Object::ChunkedBlob(
+                crate::object::ChunkedBlob::new(declared, 0, vec![big; chunk_count]).unwrap(),
+            );
             let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
             let tree = put_tree_with(
                 &store,

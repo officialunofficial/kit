@@ -1245,11 +1245,8 @@ fn store_chunk_manifest<S: ObjectSink + ?Sized>(
     total_size: u64,
     chunks: Vec<Hash>,
 ) -> WorktreeResult<Hash> {
-    let manifest = Object::ChunkedBlob(ChunkedBlob {
-        total_size,
-        chunk_size: 0, // 0 = content-defined (FastCDC) per SPEC-OBJECTS §7
-        chunks,
-    });
+    // 0 = content-defined (FastCDC) per SPEC-OBJECTS §7
+    let manifest = Object::ChunkedBlob(ChunkedBlob::new(total_size, 0, chunks)?);
     let manifest_bytes = serialize::serialize(&manifest)?;
     // Free the id list before the sink stores the bytes, so the typed list and
     // the serialized bytes are not held together with the sink's own copies.
@@ -1559,12 +1556,8 @@ pub fn store_file_object_with<S: ObjectSink + ?Sized>(
         })
         .collect::<Result<_, _>>()?;
 
-    let manifest = Object::ChunkedBlob(ChunkedBlob {
-        total_size,
-        // Names the content-defined chunker per SPEC-OBJECTS §7: 0 for v1.
-        chunk_size: chunker.chunk_size(),
-        chunks,
-    });
+    // Names the content-defined chunker per SPEC-OBJECTS §7: 0 for v1.
+    let manifest = Object::ChunkedBlob(ChunkedBlob::new(total_size, chunker.chunk_size(), chunks)?);
     let manifest_bytes = serialize::serialize(&manifest)?;
     // Free the id list before the sink stores the bytes, so the typed list and
     // the serialized bytes are not held together with the sink's own copies.
@@ -1595,7 +1588,9 @@ fn chunk_slices(data: &[u8], chunker: Chunker) -> impl Iterator<Item = &[u8]> {
 /// so every path agrees on the manifest — and thus on its merkle root.
 ///
 /// # Errors
-/// [`WorktreeError::Object`] if a chunk length exceeds the wire-format cap.
+/// [`WorktreeError::Object`] if a chunk length exceeds the wire-format cap,
+/// or the manifest breaks the header rules of SPEC-OBJECTS §7 (more than
+/// [`serialize::MAX_CHUNKS`] chunks, or a size above the chunked bound).
 pub fn chunked_blob_from_bytes(data: &[u8]) -> WorktreeResult<ChunkedBlob> {
     chunked_blob_from_bytes_with(data, Chunker::FastCdcV1)
 }
@@ -1604,7 +1599,8 @@ pub fn chunked_blob_from_bytes(data: &[u8]) -> WorktreeResult<ChunkedBlob> {
 /// [`store_file_object_with`].
 ///
 /// # Errors
-/// [`WorktreeError::Object`] if a chunk length exceeds the wire-format cap.
+/// [`WorktreeError::Object`] if a chunk length exceeds the wire-format cap,
+/// or the manifest breaks the header rules of SPEC-OBJECTS §7.
 pub fn chunked_blob_from_bytes_with(data: &[u8], chunker: Chunker) -> WorktreeResult<ChunkedBlob> {
     let chunks: Vec<Hash> = chunk_slices(data, chunker)
         .map(|chunk| {
@@ -1618,11 +1614,11 @@ pub fn chunked_blob_from_bytes_with(data: &[u8], chunker: Chunker) -> WorktreeRe
             Ok::<_, WorktreeError>(hasher.finalize())
         })
         .collect::<Result<_, _>>()?;
-    Ok(ChunkedBlob {
-        total_size: data.len() as u64,
-        chunk_size: chunker.chunk_size(),
+    Ok(ChunkedBlob::new(
+        data.len() as u64,
+        chunker.chunk_size(),
         chunks,
-    })
+    )?)
 }
 
 /// Content-address `data` exactly as [`store_file_object`] would,
@@ -2010,13 +2006,13 @@ mod tests {
             panic!("expected chunked_blob, got {entry:?}");
         };
 
-        assert_eq!(manifest.total_size, n as u64);
-        assert_eq!(manifest.chunk_size, 0, "0 = content-defined (FastCDC)");
-        assert!(!manifest.chunks.is_empty());
+        assert_eq!(manifest.total_size(), n as u64);
+        assert_eq!(manifest.chunk_size(), 0, "0 = content-defined (FastCDC)");
+        assert!(!manifest.chunks().is_empty());
         // Every chunk hash must resolve to a Blob in the store, and
         // the concatenation must reproduce the original file bytes.
         let mut reassembled: Vec<u8> = Vec::with_capacity(n);
-        for h in &manifest.chunks {
+        for h in manifest.chunks() {
             let Object::Blob(b) = store.read_object(h).unwrap() else {
                 panic!("chunk did not resolve to a Blob");
             };
@@ -2063,7 +2059,7 @@ mod tests {
             panic!("expected chunked_blob");
         };
         let mut reassembled = Vec::with_capacity(n);
-        for h in &manifest.chunks {
+        for h in manifest.chunks() {
             let Object::Blob(b) = store1.read_object(h).unwrap() else {
                 panic!("chunk did not resolve to a Blob");
             };
@@ -2202,7 +2198,7 @@ mod tests {
         let Object::ChunkedBlob(manifest) = store.read_object(&expected).unwrap() else {
             panic!("expected a chunked blob");
         };
-        assert!(manifest.chunks.len() > 32, "the file has many chunks");
+        assert!(manifest.chunks().len() > 32, "the file has many chunks");
 
         let window = 8;
         let sink = WindowSink::new(&store);
@@ -2214,7 +2210,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(streamed, expected, "windows do not change the id");
-        assert_eq!(sink.checkpoints.get(), manifest.chunks.len() / window);
+        assert_eq!(sink.checkpoints.get(), manifest.chunks().len() / window);
         // One window of chunks, and then the manifest after the last window.
         assert!(sink.most_between_checkpoints.get() <= window + 1);
         sink.batch.commit().unwrap();
@@ -2229,7 +2225,7 @@ mod tests {
         let Object::ChunkedBlob(manifest) = store.read_object(&expected).unwrap() else {
             panic!("expected a chunked blob");
         };
-        assert!(manifest.chunks.len() > 2 * STREAM_HASH_BATCH);
+        assert!(manifest.chunks().len() > 2 * STREAM_HASH_BATCH);
 
         let sink = WindowSink::new(&store);
         let streamed = store_large_file_streaming_batched(
@@ -2248,7 +2244,7 @@ mod tests {
         assert_eq!(streamed, expected);
         assert_eq!(
             sink.checkpoints.get(),
-            manifest.chunks.len() / STREAM_HASH_BATCH
+            manifest.chunks().len() / STREAM_HASH_BATCH
         );
         assert!(sink.most_between_checkpoints.get() <= STREAM_HASH_BATCH + 1);
         sink.batch.commit().unwrap();
@@ -2264,7 +2260,7 @@ mod tests {
         let Object::ChunkedBlob(manifest) = store.read_object(&expected).unwrap() else {
             panic!("expected a chunked blob");
         };
-        assert!(manifest.chunks.len() > 2 * STREAM_HASH_BATCH);
+        assert!(manifest.chunks().len() > 2 * STREAM_HASH_BATCH);
 
         let sink = WindowSink::new(&store);
         let streamed = store_large_file_streaming_pipelined(
@@ -2285,7 +2281,7 @@ mod tests {
         // A batch is the unit of the pipelined path, so a window ends on a
         // batch boundary.
         assert!(sink.most_between_checkpoints.get() <= STREAM_HASH_BATCH + 1);
-        assert!(sink.most_between_checkpoints.get() < manifest.chunks.len());
+        assert!(sink.most_between_checkpoints.get() < manifest.chunks().len());
         sink.batch.commit().unwrap();
         assert_eq!(read_blob(&store, &streamed).unwrap(), data);
     }
@@ -2294,7 +2290,7 @@ mod tests {
     fn a_checkpointed_chunk_is_visible_before_the_commit() {
         let data = pseudo_random(2 * 1024 * 1024, 0xC0DE);
         let expected = chunked_blob_from_bytes(&data).unwrap();
-        assert!(expected.chunks.len() > 8, "the file has several windows");
+        assert!(expected.chunks().len() > 8, "the file has several windows");
         let (_dir, store) = fresh_store();
         let batch = store.batch();
         let h = store_large_file_streaming_windowed(
@@ -2306,8 +2302,8 @@ mod tests {
         .unwrap();
         // No explicit checkpoint yet: the full windows are visible, and the
         // chunks and manifest after the last window are still staged.
-        assert!(store.contains(&expected.chunks[0]));
-        assert!(store.contains(&expected.chunks[3]));
+        assert!(store.contains(&expected.chunks()[0]));
+        assert!(store.contains(&expected.chunks()[3]));
         assert!(!store.contains(&h));
         batch.commit().unwrap();
         assert_eq!(read_blob(&store, &h).unwrap(), data);
@@ -3018,11 +3014,7 @@ mod tests {
         }))
         .unwrap();
         let chunk_hash = store.write(&chunk).unwrap();
-        let manifest = Object::ChunkedBlob(ChunkedBlob {
-            total_size: 999,
-            chunk_size: 0,
-            chunks: vec![chunk_hash],
-        });
+        let manifest = Object::ChunkedBlob(ChunkedBlob::new(999, 0, vec![chunk_hash]).unwrap());
         let h = store
             .write(&serialize::serialize(&manifest).unwrap())
             .unwrap();
@@ -3124,15 +3116,15 @@ mod tests {
         let Object::ChunkedBlob(manifest) = store.read_object(&v2).unwrap() else {
             panic!("v2 store must write a chunked blob");
         };
-        assert_eq!(manifest.chunk_size, crate::chunker::CHUNK_SIZE_FASTCDC_V2);
+        assert_eq!(manifest.chunk_size(), crate::chunker::CHUNK_SIZE_FASTCDC_V2);
         let built = chunked_blob_from_bytes_with(&data, Chunker::FastCdcV2).unwrap();
         assert_eq!(manifest, built);
         assert_eq!(crate::merkle::compute_chunked_id(&built), v2);
         let Object::ChunkedBlob(old) = store.read_object(&v1).unwrap() else {
             panic!("v1 store must write a chunked blob");
         };
-        assert_eq!(old.chunk_size, 0);
-        assert_ne!(old.chunks, manifest.chunks);
+        assert_eq!(old.chunk_size(), 0);
+        assert_ne!(old.chunks(), manifest.chunks());
     }
 
     /// Committing a staged index must cost exactly one full flush no

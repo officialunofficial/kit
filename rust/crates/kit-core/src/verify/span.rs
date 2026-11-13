@@ -580,7 +580,7 @@ fn range_payload(
 ) -> Result<PayloadWire, RangeProofError> {
     let index = u32::try_from(index).map_err(|_| VerifyError::TooManyChunks)?;
     let position = index.checked_add(1).ok_or(VerifyError::TooManyChunks)?;
-    let chunk_id = cb.chunks[index as usize];
+    let chunk_id = cb.chunks()[index as usize];
     let proof = merkle::build_chunks_multi_proof(cb, [0, position]).map_err(VerifyError::from)?;
     let bao_offset = offset_in_blob
         .checked_add(10)
@@ -588,8 +588,8 @@ fn range_payload(
     let slice = extract_bao_slice(bytes, bao_offset, len)?;
     Ok(PayloadWire::Range {
         chunk: Some(ChunkHdr {
-            total_size: cb.total_size,
-            chunk_size: cb.chunk_size,
+            total_size: cb.total_size(),
+            chunk_size: cb.chunk_size(),
             index,
             inner_root: merkle::chunked_inner_root(cb),
             chunk_id,
@@ -610,8 +610,8 @@ fn chunk_payload(
     let index = u32::try_from(index).map_err(|_| VerifyError::TooManyChunks)?;
     let position = index.checked_add(1).ok_or(VerifyError::TooManyChunks)?;
     Ok(PayloadWire::Chunk {
-        total_size: cb.total_size,
-        chunk_size: cb.chunk_size,
+        total_size: cb.total_size(),
+        chunk_size: cb.chunk_size(),
         index,
         inner_root: merkle::chunked_inner_root(cb),
         proof: merkle::build_chunks_multi_proof(cb, [0, position]).map_err(VerifyError::from)?,
@@ -761,13 +761,13 @@ pub fn build_range_proof_from<S: ObjectSource + ?Sized>(
         Object::ChunkedBlob(cb) => cb,
         _ => return Err(VerifyError::SelectorLeafMismatch.into()),
     };
-    if end > cb.total_size {
+    if end > cb.total_size() {
         return Err(RangeProofError::OutOfBounds);
     }
     let hinted_plan = if let Some(hints) = boundaries {
-        if hints.len() != cb.chunks.len() + 1
+        if hints.len() != cb.chunks().len() + 1
             || hints.first() != Some(&0)
-            || hints.last() != Some(&cb.total_size)
+            || hints.last() != Some(&cb.total_size())
             || hints.windows(2).any(|pair| pair[0] >= pair[1])
         {
             return Err(RangeProofError::InvalidBoundaries);
@@ -784,7 +784,7 @@ pub fn build_range_proof_from<S: ObjectSource + ?Sized>(
     let mut first = None;
     let mut anchor = None;
     let mut chunks = Vec::new();
-    for (i, id) in cb.chunks.iter().enumerate() {
+    for (i, id) in cb.chunks().iter().enumerate() {
         if hinted_plan.as_ref().is_some_and(|plan| i > plan.last) {
             break;
         }
@@ -792,7 +792,7 @@ pub fn build_range_proof_from<S: ObjectSource + ?Sized>(
         let next = cursor
             .checked_add(content_len)
             .ok_or(RangeProofError::OffsetOverflow)?;
-        if next > cb.total_size {
+        if next > cb.total_size() {
             return Err(RangeProofError::OutOfBounds);
         }
         if let Some(hints) = boundaries
@@ -1216,11 +1216,7 @@ mod tests {
             .unwrap();
             chunk_ids.push(store.write(&bytes).unwrap());
         }
-        let manifest = ChunkedBlob {
-            total_size: 8192,
-            chunk_size: 2048,
-            chunks: chunk_ids.clone(),
-        };
+        let manifest = ChunkedBlob::new(8192, 2048, chunk_ids.clone()).unwrap();
         let leaf_id = store
             .write(&crate::serialize::serialize(&Object::ChunkedBlob(manifest)).unwrap())
             .unwrap();
@@ -1320,11 +1316,7 @@ mod tests {
                 )
                 .unwrap()
         };
-        let cb = ChunkedBlob {
-            total_size: 20,
-            chunk_size: 10,
-            chunks: vec![chunk(1), chunk(2)],
-        };
+        let cb = ChunkedBlob::new(20, 10, vec![chunk(1), chunk(2)]).unwrap();
         let leaf = store
             .write(&crate::serialize::serialize(&Object::ChunkedBlob(cb)).unwrap())
             .unwrap();

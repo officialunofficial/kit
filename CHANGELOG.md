@@ -145,6 +145,19 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking:** the fields of `kit_core::object::ChunkedBlob` are private, so
+  every value is one that `deserialize` accepts. Build one with
+  `ChunkedBlob::new(total_size, chunk_size, chunks)`, which returns
+  `Result<ChunkedBlob, KitError>` and refuses what the decoder refuses:
+  `KitError::TooManyChunks` above `MAX_CHUNKS`, and
+  `KitError::ChunkedBlobTotalSizeInvalid` for a `total_size` above
+  `MAX_CHUNKED_TOTAL_SIZE` or impossible for the layout. Read a manifest with
+  `total_size()`, `chunk_size()` and `chunks()`, which returns `&[Hash]`, and
+  take the chunk list by value with `into_chunks()`. Struct literals,
+  destructuring and field reads no longer compile. The bytes, ids, golden
+  vectors and error text do not change. The leaf layout of a manifest's tree
+  (the metadata leaf, then the chunks) is stated once, and the leaf count,
+  the id fold, the proofs and the chunk positions derive from it.
 - A push plans from what changed. It reads the history of the remote head and
   walks only the commits the remote lacks, and for each one it keeps the tree
   entries that differ from the trees of its parents. It no longer walks two

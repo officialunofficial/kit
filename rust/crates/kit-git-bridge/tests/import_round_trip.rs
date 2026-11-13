@@ -437,8 +437,8 @@ fn big_blob_chunks_with_writer_rule() {
     let Object::ChunkedBlob(m) = de(&sink, &manifest_hash) else {
         panic!("big blob must import as a chunked manifest")
     };
-    assert_eq!(m.total_size, big.len() as u64);
-    assert_eq!(m.chunk_size, 0);
+    assert_eq!(m.total_size(), big.len() as u64);
+    assert_eq!(m.chunk_size(), 0);
     // The imported manifest is exportable: the export-side canonical
     // boundary check passes (writer-rule symmetry).
     let store = SinkSource(&sink);
@@ -779,11 +779,9 @@ fn cached_chunk_fixture() -> (tempfile::TempDir, kit_core::ObjectStore, Hash, Ha
         .unwrap();
     let manifest = store
         .write(
-            &kit_core::serialize(&Object::ChunkedBlob(ChunkedBlob {
-                total_size: 5,
-                chunk_size: 0,
-                chunks: vec![chunk],
-            }))
+            &kit_core::serialize(&Object::ChunkedBlob(
+                ChunkedBlob::new(5, 0, vec![chunk]).unwrap(),
+            ))
             .unwrap(),
         )
         .unwrap();

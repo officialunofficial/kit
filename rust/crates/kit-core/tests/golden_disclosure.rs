@@ -172,14 +172,10 @@ fn layout_commit(
     total_size: u64,
     chunk_size: u32,
     lens: &[usize],
-) -> (
-    tempfile::TempDir,
-    ObjectStore,
-    Hash,
-    kit_core::object::ChunkedBlob,
-) {
+) -> (tempfile::TempDir, ObjectStore, Hash, Vec<Hash>) {
     use kit_core::hash::ZERO;
-    use kit_core::object::{Blob, ChunkedBlob};
+    use kit_core::merkle::ChunkedIdFold;
+    use kit_core::object::Blob;
     use kit_core::serialize::serialize;
     use kit_core::sign::{KeyPair, sign_commit};
 
@@ -187,7 +183,7 @@ fn layout_commit(
     let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
     let data = common::prng_bytes(0xF1_7ED5, lens.iter().sum());
     let mut rest = data.as_slice();
-    let chunks = lens
+    let chunks: Vec<Hash> = lens
         .iter()
         .map(|&n| {
             let (chunk, tail) = rest.split_at(n);
@@ -198,22 +194,19 @@ fn layout_commit(
             store.write(&serialize(&blob).unwrap()).unwrap()
         })
         .collect();
-    let cb = ChunkedBlob {
-        total_size,
-        chunk_size,
-        chunks,
-    };
-    let manifest = Object::ChunkedBlob(cb.clone());
-    // Encoded by hand: the writer refuses a layout that a reader refuses,
-    // and some vectors need one. The id comes from the fields alone.
+    // Encoded by hand: a `ChunkedBlob` is always valid, and some vectors
+    // need a layout that a reader refuses. The id comes from the fields
+    // alone.
     let mut manifest_bytes = vec![0x05, b'K', b'O', b'B', b'1', 0x01];
-    manifest_bytes.extend_from_slice(&cb.total_size.to_le_bytes());
-    manifest_bytes.extend_from_slice(&cb.chunk_size.to_le_bytes());
-    manifest_bytes.extend_from_slice(&u32::try_from(cb.chunks.len()).unwrap().to_le_bytes());
-    for chunk in &cb.chunks {
+    manifest_bytes.extend_from_slice(&total_size.to_le_bytes());
+    manifest_bytes.extend_from_slice(&chunk_size.to_le_bytes());
+    manifest_bytes.extend_from_slice(&u32::try_from(chunks.len()).unwrap().to_le_bytes());
+    let mut fold = ChunkedIdFold::new(total_size, chunk_size);
+    for chunk in &chunks {
         manifest_bytes.extend_from_slice(chunk);
+        fold.push(chunk).unwrap();
     }
-    let file = kit_core::object::id_from_object(&manifest, &manifest_bytes);
+    let file = fold.id();
     if kit_core::serialize::deserialize(&manifest_bytes).is_ok() {
         assert_eq!(store.write(&manifest_bytes).unwrap(), file);
     }
@@ -241,7 +234,7 @@ fn layout_commit(
     let commit_id = store
         .write(&serialize(&Object::Commit(commit)).unwrap())
         .unwrap();
-    (dir, store, commit_id, cb)
+    (dir, store, commit_id, chunks)
 }
 
 /// Walk `path` from the fixture's root tree, independently of
@@ -507,7 +500,7 @@ fn build_vectors() -> Vec<Vector> {
         else {
             panic!("chunked.bin is a ChunkedBlob");
         };
-        let first_chunk_len = f.store.read(&cb.chunks[0]).unwrap().len() as u64 - 10;
+        let first_chunk_len = f.store.read(&cb.chunks()[0]).unwrap().len() as u64 - 10;
         first_chunk_len + 32 // safely inside chunk 1 (index > 0)
     };
 
@@ -722,17 +715,17 @@ fn build_vectors() -> Vec<Vector> {
         let Object::ChunkedBlob(cb) = f.store.read_object(&leaf).unwrap() else {
             panic!("expected ChunkedBlob");
         };
-        let position = merkle::chunk_position(&cb, &cb.chunks[1]).unwrap();
+        let position = merkle::chunk_position(&cb, &cb.chunks()[1]).unwrap();
         let proof = merkle::build_chunks_multi_proof(&cb, [0, position]).unwrap();
-        let chunk_bytes = canonical_bytes(&f.store, &cb.chunks[1]);
+        let chunk_bytes = canonical_bytes(&f.store, &cb.chunks()[1]);
         let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
         let bin = wire::bundle(
             &f.commit_id,
             &commit_bytes,
             &steps,
             &wire::chunk_payload(
-                cb.total_size + 1,
-                cb.chunk_size,
+                cb.total_size() + 1,
+                cb.chunk_size(),
                 1,
                 &merkle::chunked_inner_root(&cb),
                 &proof,
@@ -824,14 +817,14 @@ fn build_vectors() -> Vec<Vector> {
         // would leave an *empty* vec, indistinguishable from "offsets not
         // requested" — the gap must leave at least one other entry behind
         // to actually exercise incomplete-set detection.
-        let first_two_chunks_len: u64 = cb.chunks[..2]
+        let first_two_chunks_len: u64 = cb.chunks()[..2]
             .iter()
             .map(|id| f.store.read(id).unwrap().len() as u64 - 10)
             .sum();
         let target_offset = first_two_chunks_len + 32;
         let mut cumulative = 0u64;
         let mut target_index = 0usize;
-        for (idx, id) in cb.chunks.iter().enumerate() {
+        for (idx, id) in cb.chunks().iter().enumerate() {
             let content_len = f.store.read(id).unwrap().len() as u64 - 10;
             if target_offset < cumulative + content_len {
                 target_index = idx;
@@ -843,9 +836,9 @@ fn build_vectors() -> Vec<Vector> {
             target_index >= 2,
             "fixture assumption: target chunk index >= 2 (got {target_index})"
         );
-        let position = merkle::chunk_position(&cb, &cb.chunks[target_index]).unwrap();
+        let position = merkle::chunk_position(&cb, &cb.chunks()[target_index]).unwrap();
         let hdr_proof = merkle::build_chunks_multi_proof(&cb, [0, position]).unwrap();
-        let chunk_canonical = f.store.read(&cb.chunks[target_index]).unwrap();
+        let chunk_canonical = f.store.read(&cb.chunks()[target_index]).unwrap();
         let offset_in_chunk = target_offset - cumulative;
         let slice = bao_slice(&chunk_canonical, offset_in_chunk + 10, 16);
 
@@ -855,13 +848,13 @@ fn build_vectors() -> Vec<Vector> {
             if j == 0 {
                 continue; // the gap
             }
-            let jpos = merkle::chunk_position(&cb, &cb.chunks[j]).unwrap();
+            let jpos = merkle::chunk_position(&cb, &cb.chunks()[j]).unwrap();
             let jproof = merkle::build_chunk_proof(&cb, jpos).unwrap();
-            let jcanonical = f.store.read(&cb.chunks[j]).unwrap();
+            let jcanonical = f.store.read(&cb.chunks()[j]).unwrap();
             let jslice = bao_slice(&jcanonical, 0, 10);
             len_proofs.push(wire::LenProof {
                 index: u32::try_from(j).unwrap(),
-                chunk_id: cb.chunks[j],
+                chunk_id: cb.chunks()[j],
                 proof: jproof,
                 slice: jslice,
             });
@@ -873,11 +866,11 @@ fn build_vectors() -> Vec<Vector> {
             &steps,
             &wire::range_payload(
                 Some(&wire::ChunkHdr {
-                    total_size: cb.total_size,
-                    chunk_size: cb.chunk_size,
+                    total_size: cb.total_size(),
+                    chunk_size: cb.chunk_size(),
                     index: u32::try_from(target_index).unwrap(),
                     inner_root: merkle::chunked_inner_root(&cb),
-                    chunk_id: cb.chunks[target_index],
+                    chunk_id: cb.chunks()[target_index],
                     proof: hdr_proof,
                 }),
                 offset_in_chunk,
@@ -1016,9 +1009,9 @@ fn build_vectors() -> Vec<Vector> {
         let Object::ChunkedBlob(cb) = f.store.read_object(&leaf).unwrap() else {
             panic!("expected ChunkedBlob");
         };
-        let position0 = merkle::chunk_position(&cb, &cb.chunks[0]).unwrap();
+        let position0 = merkle::chunk_position(&cb, &cb.chunks()[0]).unwrap();
         let hdr_proof = merkle::build_chunks_multi_proof(&cb, [0, position0]).unwrap();
-        let chunk0_canonical = f.store.read(&cb.chunks[0]).unwrap();
+        let chunk0_canonical = f.store.read(&cb.chunks()[0]).unwrap();
         let slice = bao_slice(&chunk0_canonical, 10, 16); // offset 0, len 16 inside chunk 0
 
         // A plausible-looking but structurally invalid entry: it claims
@@ -1034,11 +1027,11 @@ fn build_vectors() -> Vec<Vector> {
             &steps,
             &wire::range_payload(
                 Some(&wire::ChunkHdr {
-                    total_size: cb.total_size,
-                    chunk_size: cb.chunk_size,
+                    total_size: cb.total_size(),
+                    chunk_size: cb.chunk_size(),
                     index: 0,
                     inner_root: merkle::chunked_inner_root(&cb),
-                    chunk_id: cb.chunks[0],
+                    chunk_id: cb.chunks()[0],
                     proof: hdr_proof,
                 }),
                 0,
@@ -1046,7 +1039,7 @@ fn build_vectors() -> Vec<Vector> {
                 &slice,
                 &[wire::LenProof {
                     index: 0,
-                    chunk_id: cb.chunks[0],
+                    chunk_id: cb.chunks()[0],
                     proof: len_proof_entry_proof,
                     slice: len_slice,
                 }],
@@ -1164,9 +1157,9 @@ fn build_vectors() -> Vec<Vector> {
         let Object::ChunkedBlob(cb) = f.store.read_object(&leaf).unwrap() else {
             panic!("expected ChunkedBlob");
         };
-        let position = merkle::chunk_position(&cb, &cb.chunks[1]).unwrap();
+        let position = merkle::chunk_position(&cb, &cb.chunks()[1]).unwrap();
         let hdr_proof = merkle::build_chunks_multi_proof(&cb, [0, position]).unwrap();
-        let chunk1_canonical = f.store.read(&cb.chunks[1]).unwrap();
+        let chunk1_canonical = f.store.read(&cb.chunks()[1]).unwrap();
         // A genuine, otherwise-valid slice; the payload's declared `len`
         // (0) is what must be rejected, independent of the slice content.
         let slice = bao_slice(&chunk1_canonical, 10 + 32, 1);
@@ -1177,11 +1170,11 @@ fn build_vectors() -> Vec<Vector> {
             &steps,
             &wire::range_payload(
                 Some(&wire::ChunkHdr {
-                    total_size: cb.total_size,
-                    chunk_size: cb.chunk_size,
+                    total_size: cb.total_size(),
+                    chunk_size: cb.chunk_size(),
                     index: 1,
                     inner_root: merkle::chunked_inner_root(&cb),
-                    chunk_id: cb.chunks[1],
+                    chunk_id: cb.chunks()[1],
                     proof: hdr_proof,
                 }),
                 32,
@@ -1212,9 +1205,9 @@ fn build_vectors() -> Vec<Vector> {
         let Object::ChunkedBlob(cb) = f.store.read_object(&leaf).unwrap() else {
             panic!("expected ChunkedBlob");
         };
-        let position = merkle::chunk_position(&cb, &cb.chunks[1]).unwrap();
+        let position = merkle::chunk_position(&cb, &cb.chunks()[1]).unwrap();
         let hdr_proof = merkle::build_chunks_multi_proof(&cb, [0, position]).unwrap();
-        let chunk1_canonical = f.store.read(&cb.chunks[1]).unwrap();
+        let chunk1_canonical = f.store.read(&cb.chunks()[1]).unwrap();
         let slice = bao_slice(&chunk1_canonical, 10 + 32, 16);
         let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
         let bin = wire::bundle(
@@ -1223,11 +1216,11 @@ fn build_vectors() -> Vec<Vector> {
             &steps,
             &wire::range_payload(
                 Some(&wire::ChunkHdr {
-                    total_size: cb.total_size + 1,
-                    chunk_size: cb.chunk_size,
+                    total_size: cb.total_size() + 1,
+                    chunk_size: cb.chunk_size(),
                     index: 1,
                     inner_root: merkle::chunked_inner_root(&cb),
-                    chunk_id: cb.chunks[1],
+                    chunk_id: cb.chunks()[1],
                     proof: hdr_proof,
                 }),
                 32,
@@ -1450,25 +1443,26 @@ fn build_vectors() -> Vec<Vector> {
     // three chunks of 10. No decoder accepts the manifest, but a forged
     // tree can still name its id, so the verifier checks total_size itself.
     {
-        let (_dir, store, commit_id, cb) = layout_commit(5, 10, &[10, 10, 0]);
+        let (_dir, store, commit_id, chunks) = layout_commit(5, 10, &[10, 10, 0]);
         let Object::Commit(commit) = store.read_object(&commit_id).unwrap() else {
             panic!("commit");
         };
         let (steps, _) = walk_path(&store, commit.tree_hash, &fixed_path);
-        let proof = merkle::build_chunks_multi_proof(&cb, [0, 3]).unwrap();
-        let chunk_bytes = canonical_bytes(&store, &cb.chunks[2]);
+        // The proof of positions 0 and 3 in four leaves holds the siblings
+        // of leaves 1 and 2, so it does not depend on the header. A manifest
+        // of the same chunks with a header that is valid gives its bytes.
+        let proof_source = kit_core::object::ChunkedBlob::new(25, 10, chunks.clone()).unwrap();
+        let proof = merkle::build_chunks_multi_proof(&proof_source, [0, 3]).unwrap();
+        let mut fold = merkle::ChunkedIdFold::new(5, 10);
+        for chunk in &chunks {
+            fold.push(chunk).unwrap();
+        }
+        let chunk_bytes = canonical_bytes(&store, &chunks[2]);
         let bin = wire::bundle(
             &commit_id,
             &canonical_bytes(&store, &commit_id),
             &steps,
-            &wire::chunk_payload(
-                cb.total_size,
-                cb.chunk_size,
-                2,
-                &merkle::chunked_inner_root(&cb),
-                &proof,
-                &chunk_bytes,
-            ),
+            &wire::chunk_payload(5, 10, 2, &fold.inner_root(), &proof, &chunk_bytes),
         );
         assert!(matches!(
             verify::verify_disclosure(&commit_id, &bin),

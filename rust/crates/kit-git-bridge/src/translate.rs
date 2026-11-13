@@ -87,29 +87,29 @@ pub fn translate_chunked<S: ObjectSource>(
     manifest: &ChunkedBlob,
     source: &S,
 ) -> Result<GitObject, BridgeError> {
-    if manifest.chunk_size == kit_core::chunker::CHUNK_SIZE_FASTCDC_V2 {
+    if manifest.chunk_size() == kit_core::chunker::CHUNK_SIZE_FASTCDC_V2 {
         return Err(Refusal::NonCanonicalChunking {
             object: *hash,
             detail: "FastCDC v2 manifests do not translate; reconstruction re-chunks with FastCDC v1",
         }
         .into());
     }
-    if manifest.chunk_size != 0 {
+    if manifest.chunk_size() != 0 {
         return Err(Refusal::FixedSizeChunking {
             object: *hash,
-            chunk_size: manifest.chunk_size,
+            chunk_size: manifest.chunk_size(),
         }
         .into());
     }
     // The git blob holds the whole file in memory.
-    if manifest.total_size > kit_core::worktree::MAX_FILE_BYTES {
+    if manifest.total_size() > kit_core::worktree::MAX_FILE_BYTES {
         return Err(Refusal::BlobTooLarge {
             object: *hash,
-            size: manifest.total_size,
+            size: manifest.total_size(),
         }
         .into());
     }
-    if manifest.total_size <= kit_core::worktree::CHUNK_THRESHOLD {
+    if manifest.total_size() <= kit_core::worktree::CHUNK_THRESHOLD {
         // A conformant writer stores this as a plain blob (§4 item 2).
         return Err(Refusal::NonCanonicalChunking {
             object: *hash,
@@ -118,17 +118,17 @@ pub fn translate_chunked<S: ObjectSource>(
         .into());
     }
     let mut body = Vec::new();
-    let mut lengths = Vec::with_capacity(manifest.chunks.len());
-    for chunk_hash in &manifest.chunks {
+    let mut lengths = Vec::with_capacity(manifest.chunks().len());
+    for chunk_hash in manifest.chunks() {
         match source.read_object(chunk_hash)? {
             Object::Blob(b) => {
                 // Stop at the first chunk that passes the declared total, so
                 // a manifest that repeats one chunk cannot grow `body`.
-                if (body.len() as u64).saturating_add(b.data.len() as u64) > manifest.total_size {
+                if (body.len() as u64).saturating_add(b.data.len() as u64) > manifest.total_size() {
                     return Err(BridgeError::Source(format!(
                         "chunked blob {}: chunks exceed the {} bytes the manifest declares",
                         kit_core::to_hex(hash),
-                        manifest.total_size
+                        manifest.total_size()
                     )));
                 }
                 lengths.push(b.data.len());
@@ -143,12 +143,12 @@ pub fn translate_chunked<S: ObjectSource>(
             }
         }
     }
-    if body.len() as u64 != manifest.total_size {
+    if body.len() as u64 != manifest.total_size() {
         return Err(BridgeError::Source(format!(
             "chunked blob {}: concatenated {} bytes, manifest says {}",
             kit_core::to_hex(hash),
             body.len(),
-            manifest.total_size
+            manifest.total_size()
         )));
     }
     // §4 item 3: boundaries must equal the pinned FastCDC output, or

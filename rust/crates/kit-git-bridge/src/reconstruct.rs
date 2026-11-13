@@ -96,11 +96,10 @@ pub fn reconstruct_blob(body: &[u8]) -> Result<Reconstructed, BridgeError> {
             Ok::<_, BridgeError>(h)
         })
         .collect::<Result<_, _>>()?;
-    let manifest = Object::ChunkedBlob(ChunkedBlob {
-        total_size: body.len() as u64,
-        chunk_size: 0,
-        chunks,
-    });
+    let manifest = Object::ChunkedBlob(
+        ChunkedBlob::new(body.len() as u64, 0, chunks)
+            .map_err(|e| BridgeError::Integrity(format!("reserialize: {e}")))?,
+    );
     finish(manifest, extras)
 }
 

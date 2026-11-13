@@ -649,15 +649,15 @@ mod tests {
         let Object::ChunkedBlob(manifest) = sink.read_object(&h).unwrap() else {
             panic!("expected a chunked blob");
         };
-        assert!(manifest.chunks.len() > 32);
+        assert!(manifest.chunks().len() > 32);
         // The overlay holds the manifest as bytes and every chunk as an origin.
         assert_eq!(sink.objects.lock().unwrap().len(), 1);
         assert_eq!(
             sink.chunks.lock().unwrap().by_id.len(),
-            manifest.chunks.len()
+            manifest.chunks().len()
         );
         assert!(!sink.has(&crate::hash::hash(b"no such object")));
-        for chunk in &manifest.chunks {
+        for chunk in manifest.chunks() {
             assert!(sink.has(chunk));
             assert!(!store.contains(chunk), "nothing reaches the store");
         }
