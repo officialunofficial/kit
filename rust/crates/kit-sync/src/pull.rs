@@ -385,7 +385,12 @@ fn ensure_pull_restore_safe(
         Some(&tracked),
         &mut Vec::new(),
     )
-    .map_err(|e| format!("working tree: {e}"))?;
+    .map_err(
+        |e| match crate::worktree::grown_tracked_file(root, &tracked, &e) {
+            Some(path) => pull_recovery_changes_message(&path),
+            None => format!("working tree: {e}"),
+        },
+    )?;
     let from_old =
         diff_trees(&snapshot, Some(before_tree), Some(current)).map_err(|e| e.to_string())?;
     let from_target =
@@ -402,12 +407,16 @@ fn ensure_pull_restore_safe(
                 && (entry.path == ".kitignore" || entry.path == ".gitignore")
                 && !target.has_tracked_file_at(&entry.path))
     }) {
-        return Err(format!(
-            "pull recovery would overwrite local changes at '{}'; copy it elsewhere or run `kit restore -f <path>`, then pull again",
-            entry.path
-        ));
+        return Err(pull_recovery_changes_message(&entry.path));
     }
     Ok(())
+}
+
+/// The refusal for a path the unfinished pull would overwrite.
+fn pull_recovery_changes_message(path: &str) -> String {
+    format!(
+        "pull recovery would overwrite local changes at '{path}'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
+    )
 }
 
 fn write_pull_head(

@@ -179,7 +179,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every tracked file again, and read each chunk of a large file again. An
   unchanged file keeps its inode, its mtime and its stat cache. The safety
   check that refuses to overwrite local work is unchanged, and so are its
-  messages. A resumed pull still writes every file.
+  messages. A tracked file that another process grows past the one-blob size
+  while the check reads it counts as a local change, so the pull refuses with
+  the usual message and does not fail the check. A resumed pull still writes
+  every file.
   `restore_tree_to_worktree_with` and `restore_tree_to_worktree_observed` skip
   entries equal to `base_tree` when `clean` is set too. They skipped only when
   it was not. A caller that passes both must have proved that the worktree

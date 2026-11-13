@@ -184,15 +184,29 @@ fn nested_tree(objects: &mut Vec<Object>, items: &[(&str, EntryMode, &[u8])]) ->
         if let Some((dir, rest)) = path.split_once('/') {
             dirs.entry(dir).or_default().push((rest, mode, data));
         } else {
-            let blob = Object::Blob(Blob {
-                data: data.to_vec(),
-            });
+            let object_hash = if data.len() as u64 > kit_core::worktree::CHUNK_THRESHOLD {
+                // A file above the threshold is a manifest and its chunks.
+                let dir = tempfile::tempdir().unwrap();
+                let store =
+                    kit_core::store::ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+                let id = kit_core::worktree::store_file_object(&store, data).unwrap();
+                for hash in store.iter_object_hashes().unwrap() {
+                    objects.push(store.read_object(&hash).unwrap());
+                }
+                id
+            } else {
+                let blob = Object::Blob(Blob {
+                    data: data.to_vec(),
+                });
+                let id = blob.id().unwrap();
+                objects.push(blob);
+                id
+            };
             entries.push(TreeEntry {
                 name: path.as_bytes().to_vec(),
                 mode,
-                object_hash: blob.id().unwrap(),
+                object_hash,
             });
-            objects.push(blob);
         }
     }
     for (dir, sub) in dirs {
@@ -2948,4 +2962,92 @@ fn the_restore_safety_messages_are_unchanged() {
         message.starts_with("unfinished pull cannot recover without a remote branch"),
         "{message}"
     );
+}
+
+/// A tracked file of many chunks that another process keeps appending to while
+/// the pull's safety check hashes it. The check must report the file as a local
+/// change, so the pull refuses with the usual message, and not fail with an
+/// error about a file that changed while it was read.
+#[cfg(unix)]
+#[test]
+fn a_file_growing_during_the_safety_check_makes_the_pull_refuse_cleanly() {
+    let chunked = 3_000_000;
+    assert_growing_file_refuses_the_pull(chunked);
+}
+
+/// The same race for a file just below the single-blob size, which grows past
+/// it between the length check and the read.
+#[cfg(unix)]
+#[test]
+fn a_small_file_growing_past_the_threshold_makes_the_pull_refuse_cleanly() {
+    let below = usize::try_from(kit_core::worktree::CHUNK_THRESHOLD).unwrap() - 16;
+    assert_growing_file_refuses_the_pull(below);
+}
+
+#[cfg(unix)]
+fn assert_growing_file_refuses_the_pull(len: usize) {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let big: Vec<u8> = (0..len)
+        .map(|i| i.wrapping_mul(2_654_435_761).to_le_bytes()[1])
+        .collect();
+    let mut refused = 0;
+    for round in 0..40 {
+        let remote = Remote::new();
+        let first = remote.publish_paths(
+            None,
+            &[
+                ("big.bin", EntryMode::Blob, &big),
+                ("small.txt", EntryMode::Blob, b"one\n"),
+            ],
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("work");
+        clone_into(&remote, &target);
+        remote.publish_paths(
+            Some(first),
+            &[
+                ("big.bin", EntryMode::Blob, &big),
+                ("small.txt", EntryMode::Blob, b"two\n"),
+            ],
+        );
+        // Same bytes, new mtime: the stat entry no longer matches, so the safety
+        // check has to hash the file instead of trusting the index.
+        std::fs::write(target.join("big.bin"), &big).unwrap();
+        let stop = AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(target.join("big.bin"))
+                    .unwrap();
+                std::thread::sleep(std::time::Duration::from_micros(200 * (round % 8)));
+                while !stop.load(Ordering::Relaxed) {
+                    file.write_all(b"x").unwrap();
+                    file.flush().unwrap();
+                }
+            });
+            let result = pull(
+                &target,
+                &remote.source(),
+                "default",
+                &SyncOptions::default(),
+                &NoopObserver,
+            );
+            stop.store(true, Ordering::Relaxed);
+            result
+        });
+        match result {
+            Err(SyncError::RestoreSafety(message)) => {
+                assert!(
+                    message.starts_with("restore would overwrite local changes; "),
+                    "{message}"
+                );
+                refused += 1;
+            }
+            other => panic!("expected the usual refusal, got {other:?}"),
+        }
+    }
+    assert_eq!(refused, 40);
 }
