@@ -9,13 +9,13 @@ use kit_core::repo_lock::{self, LockError, RepoLock};
 use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
 
-pub use kit_core::repo_lock::{SERVE_LOCK, WORKTREE_LOCK};
+use kit_core::repo_lock::WORKTREE_LOCK;
 
 /// Tell `observer` when at least one server process is currently alive
 /// against `layout`'s common dir. Detection, not coordination: a probe
 /// failure is swallowed.
-pub fn warn_if_served(layout: &RepoLayout, observer: &dyn Observer<SyncEvent>) {
-    if let Ok(false) = repo_lock::probe_exclusive(layout.common_dir(), SERVE_LOCK) {
+fn warn_if_served(layout: &RepoLayout, observer: &dyn Observer<SyncEvent>) {
+    if repo_lock::is_served(layout.common_dir()) {
         observer.event(&SyncEvent::RepositoryServed {
             worktree_root: layout.worktree_root().to_path_buf(),
         });

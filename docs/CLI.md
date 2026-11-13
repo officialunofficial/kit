@@ -1271,7 +1271,7 @@ Remote / sync:
   live, honest progress line on stderr while the network transfer runs &mdash;
   `Writing objects: N objects, B bytes` while building/uploading the
   outgoing pack, `Unpacking objects: N objects` while applying a
-  downloaded one. The counts are real (objects actually staged/unpacked,
+  downloaded one. The counts are real (objects actually unpacked,
   bytes actually handed to the transport); kit does not print git's
   `Enumerating/Counting/Compressing objects` or `Total N (delta D)` lines.
   Progress shows only when stderr is a tty; `-q`/`--quiet`

@@ -24,6 +24,7 @@ use crate::applied_packs::AppliedPacks;
 use crate::checkpoint::{self, Checkpoint};
 
 use crate::SyncOptions;
+use crate::apply::{ChainApplied, apply_pack_chain};
 use crate::error::SyncError;
 use crate::lock::wait_for_worktree_lock;
 use crate::observer::{Observer, SyncEvent};
@@ -32,7 +33,6 @@ use crate::packmap::{
     walk_pack_chain_until,
 };
 use crate::source::RemoteSource;
-use crate::stage::{ChainApplied, apply_pack_chain};
 
 /// What a fetch did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -239,9 +239,12 @@ pub(crate) fn apply_and_verify_chain(
 }
 
 /// Rewrite the applied-packs record atomically. The record is a cache, so a
-/// failure is reported and never fails the fetch.
+/// failure is reported, unless the fetch reported one already, and never fails
+/// the fetch.
 fn persist_record(applied: &mut AppliedPacks, observer: &dyn Observer<SyncEvent>, remote: &str) {
-    if let Err(e) = applied.persist() {
+    if let Err(e) = applied.persist()
+        && applied.first_failure()
+    {
         observer.event(&SyncEvent::AppliedPacksPersistFailed {
             remote: remote.to_owned(),
             error: e.to_string(),

@@ -518,13 +518,11 @@ fn multi_branch_fetch_loads_the_record_exactly_once() {
     }
 }
 
-/// Acceptance: the applied-packs record is persisted at most ONCE per
-/// fetch, not once per branch. Mirror of the load-counting test above: a
-/// read-only `applied-packs/` directory makes every persist attempt fail at
-/// tmp-file creation with exactly one "could not persist applied-packs
-/// record" warning, so stderr counts persist attempts — one, not three.
-/// The load stays clean (the record file is simply absent), and the fetch
-/// itself must still succeed (non-fatal cache I/O).
+/// Acceptance: a fetch reports an unwritable applied-packs record ONCE, not
+/// once per branch, pack or write. A read-only `applied-packs/` directory
+/// makes every write attempt fail, so stderr counts the warnings: one. The
+/// load stays clean (the record file is simply absent), and the fetch itself
+/// must still succeed (non-fatal cache I/O).
 #[cfg(unix)]
 #[test]
 fn multi_branch_fetch_persists_the_record_at_most_once() {
@@ -561,21 +559,14 @@ fn multi_branch_fetch_persists_the_record_at_most_once() {
     fs::set_permissions(&record_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // One warning is for the failed appends, reported once, and one is for
-    // the rewrite, which names its temporary file. The rewrite runs once, not
-    // once per branch.
+    // A record that cannot be written costs one warning for the fetch: the
+    // failed appends, the rewrite and the other branches report no more.
     assert_eq!(
         stderr
             .matches("could not persist applied-packs record")
             .count(),
-        2,
-        "expected one append warning and one rewrite warning; stderr:\n{stderr}"
-    );
-    assert_eq!(
-        stderr.matches("/.origin.tmp").count(),
         1,
-        "a three-branch fetch must rewrite the applied-packs record exactly once, \
-         not once per branch; stderr:\n{stderr}"
+        "a three-branch fetch must warn once about the unwritable record; stderr:\n{stderr}"
     );
     assert_eq!(
         stderr

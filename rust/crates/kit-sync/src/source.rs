@@ -602,7 +602,7 @@ mod tests {
         let mut applied = crate::AppliedPacks::load(&layout, "origin").unwrap();
         let Err(SyncError::AdvertisedPackMissing {
             source: pack_cause, ..
-        }) = crate::stage::apply_pack_chain(
+        }) = crate::apply::apply_pack_chain(
             &store,
             &source,
             &crate::NoopObserver,
@@ -611,7 +611,7 @@ mod tests {
             &[[0; 32]],
             &mut applied,
             false,
-            &mut crate::stage::ChainApplied::default(),
+            &mut crate::apply::ChainApplied::default(),
         )
         else {
             panic!("wrong pack error")

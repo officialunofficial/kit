@@ -48,11 +48,11 @@ pub mod packmap;
 mod pull;
 pub mod push;
 pub use push::{PushError, PushLease, PushOptions, PushReport, PushTarget, push};
+mod apply;
 #[doc(hidden)]
 pub mod restore_fanout;
 mod source;
 mod source_error;
-mod stage;
 mod verify;
 pub mod worktree;
 
@@ -68,7 +68,6 @@ pub use clone::{
 };
 pub use error::SyncError;
 pub use fetch::FetchReport;
-pub use lock::{SERVE_LOCK, WORKTREE_LOCK, warn_if_served};
 #[cfg(feature = "connect-native")]
 pub use native::{
     DEFAULT_METADATA_TIMEOUT, DEFAULT_TRANSFER_TIMEOUT, NativeClock, NativeHttp, NativeHttpError,

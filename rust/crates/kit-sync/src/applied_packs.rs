@@ -93,9 +93,10 @@ pub struct AppliedPacks {
     set: HashSet<Hash>,
     path: PathBuf,
     dirty: bool,
-    /// An append has failed and been reported once. Later failures stay
-    /// silent, so a read-only record costs one warning, not one per pack.
-    append_failed: bool,
+    /// A write to the record has failed and been reported. Later failures stay
+    /// silent, so an unwritable record costs one warning per fetch, not one
+    /// per pack.
+    failure_reported: bool,
 }
 
 impl AppliedPacks {
@@ -122,7 +123,7 @@ impl AppliedPacks {
             set,
             path,
             dirty: false,
-            append_failed: false,
+            failure_reported: false,
         })
     }
 
@@ -146,7 +147,7 @@ impl AppliedPacks {
                 set: HashSet::new(),
                 path: record_path(layout, remote),
                 dirty: false,
-                append_failed: false,
+                failure_reported: false,
             }
         })
     }
@@ -155,13 +156,6 @@ impl AppliedPacks {
     #[must_use]
     pub fn contains(&self, key: &PackKey) -> bool {
         self.set.contains(&key.into_hash())
-    }
-
-    /// Record `key`'s digest as applied. Marks the record dirty so the next
-    /// [`Self::persist`] call rewrites the file.
-    pub fn insert(&mut self, key: &PackKey) {
-        self.set.insert(key.into_hash());
-        self.dirty = true;
     }
 
     /// Record `key`'s digest as applied and append it to the on-disk record
@@ -173,19 +167,22 @@ impl AppliedPacks {
     ///
     /// # Errors
     ///
-    /// The I/O error of creating the directory or appending the line, for the
-    /// first failure of this record only. Later appends are still tried, and
-    /// their failures return `Ok`, so a caller that reports each error reports
-    /// an unwritable record once.
+    /// The I/O error of creating the directory or appending the line, when no
+    /// write to this record has failed before. Later failures return `Ok`, so a
+    /// caller that reports each error reports an unwritable record once.
     pub fn record_applied(&mut self, key: &PackKey) -> io::Result<()> {
-        self.insert(key);
+        self.set.insert(key.into_hash());
+        self.dirty = true;
         match self.append_line(key) {
-            Err(e) if !self.append_failed => {
-                self.append_failed = true;
-                Err(e)
-            }
+            Err(e) if self.first_failure() => Err(e),
             Err(_) | Ok(()) => Ok(()),
         }
+    }
+
+    /// Whether this is the first failed write to the record, which the caller
+    /// reports. Every later failed write is silent.
+    pub(crate) fn first_failure(&mut self) -> bool {
+        !std::mem::replace(&mut self.failure_reported, true)
     }
 
     fn append_line(&self, key: &PackKey) -> io::Result<()> {
@@ -213,7 +210,7 @@ impl AppliedPacks {
     }
 
     /// Atomically rewrite the on-disk record with the full current set
-    /// (sorted, for a deterministic file), but only if [`Self::insert`] has
+    /// (sorted, for a deterministic file), but only if [`Self::record_applied`] has
     /// been called since the last successful persist. A no-op call is free.
     /// Clears the dirty flag on a successful write so a subsequent no-op
     /// call really is free.
@@ -493,8 +490,8 @@ mod tests {
         let k2 = pk("pack-2");
         {
             let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
-            applied.insert(&k1);
-            applied.insert(&k2);
+            applied.record_applied(&k1).unwrap();
+            applied.record_applied(&k2).unwrap();
             applied.persist().unwrap();
         }
         let reloaded = AppliedPacks::load(&kit_dir, "origin").unwrap();
@@ -508,7 +505,7 @@ mod tests {
         let (_dir, kit_dir) = fresh_kit_dir();
         let k1 = pk("pack-1");
         let mut origin = AppliedPacks::load(&kit_dir, "origin").unwrap();
-        origin.insert(&k1);
+        origin.record_applied(&k1).unwrap();
         origin.persist().unwrap();
 
         let upstream = AppliedPacks::load(&kit_dir, "upstream").unwrap();
@@ -543,7 +540,7 @@ mod tests {
     fn atomic_rewrite_leaves_no_tmp_file_on_success() {
         let (_dir, kit_dir) = fresh_kit_dir();
         let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
-        applied.insert(&pk("pack-1"));
+        applied.record_applied(&pk("pack-1")).unwrap();
         applied.persist().unwrap();
 
         let dir = kit_dir.applied_packs_dir();
@@ -573,7 +570,7 @@ mod tests {
         let (_dir, kit_dir) = fresh_kit_dir();
         let k1 = pk("pack-1");
         let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
-        applied.insert(&k1);
+        applied.record_applied(&k1).unwrap();
         applied.persist().unwrap();
         assert!(applied.contains(&k1));
 
@@ -599,7 +596,7 @@ mod tests {
         let k1 = pk("pack-1");
         {
             let mut applied = AppliedPacks::load(&kit_dir, "team/upstream").unwrap();
-            applied.insert(&k1);
+            applied.record_applied(&k1).unwrap();
             applied.persist().unwrap();
         }
 
@@ -633,7 +630,7 @@ mod tests {
 
         let k1 = pk("pack-1");
         let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
-        applied.insert(&k1);
+        applied.record_applied(&k1).unwrap();
         applied.persist().unwrap();
         let path = kit_dir.applied_packs_dir().join("origin");
         assert!(path.is_file(), "precondition: record persisted");
@@ -652,7 +649,7 @@ mod tests {
         let (_dir, kit_dir) = fresh_kit_dir();
         let k1 = pk("pack-1");
         let mut applied = AppliedPacks::load(&kit_dir, "old").unwrap();
-        applied.insert(&k1);
+        applied.record_applied(&k1).unwrap();
         applied.persist().unwrap();
 
         AppliedPacks::rename_record(&kit_dir, "old", "new").unwrap();
@@ -682,7 +679,7 @@ mod tests {
         let (_dir, kit_dir) = fresh_kit_dir();
         let k1 = pk("pack-1");
         let mut applied = AppliedPacks::load(&kit_dir, "team/upstream").unwrap();
-        applied.insert(&k1);
+        applied.record_applied(&k1).unwrap();
         applied.persist().unwrap();
 
         AppliedPacks::rename_record(&kit_dir, "team/upstream", "archive/upstream").unwrap();

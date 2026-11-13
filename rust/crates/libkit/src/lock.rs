@@ -53,7 +53,7 @@ pub enum Error {
 /// directly calls this function right after it takes the lock. The two
 /// `acquire_*` functions do that already.
 pub fn warn_if_served(layout: &RepoLayout, observer: &dyn Observer<Event>) {
-    if let Ok(false) = repo_lock::probe_exclusive(layout.common_dir(), SERVE_LOCK) {
+    if repo_lock::is_served(layout.common_dir()) {
         observer.event(&Event::RepositoryServed {
             worktree_root: layout.worktree_root().to_path_buf(),
         });

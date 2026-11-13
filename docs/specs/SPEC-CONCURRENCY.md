@@ -106,11 +106,12 @@ non-blocking exclusive probe of that same `serve.lock`
 (`kit_core::repo_lock::probe_exclusive`); when the probe finds it busy
 (i.e. at least one `serve` is alive), the command prints a warning to
 stderr and proceeds anyway &mdash; it does not refuse or block. The paths that
-take `worktree.lock` without the helper call the same probe directly
-(`libkit::lock::warn_if_served`) right after acquiring it: the per-branch
+take `worktree.lock` without the helper run the same probe
+(`kit_core::repo_lock::is_served`) right after acquiring it: the per-branch
 publish step of `fetch`/`pull` and the fast-forward phase of
-`pull` (`kit_sync::fetch` and `kit_sync::pull`), and
-`status`'s opportunistic index refresh. So every command that takes
+`pull` (`kit_sync::fetch` and `kit_sync::pull`, through `kit-sync`'s own
+`warn_if_served`), and `status`'s opportunistic index refresh
+(`libkit::lock::warn_if_served`). So every command that takes
 `worktree.lock` or `worktrees.lock` emits the warning: the
 worktree-mutating commands, `gc` (which takes both), `tag` (create),
 `attest`, `fetch`/`pull`, `clean`, and the fast-forward of `kit git
