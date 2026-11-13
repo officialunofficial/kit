@@ -24,15 +24,15 @@ use crate::applied_packs::AppliedPacks;
 use crate::checkpoint::{self, Checkpoint};
 
 use crate::SyncOptions;
+use crate::apply::{ChainApplied, apply_pack_chain};
 use crate::error::SyncError;
-use crate::lock::wait_for_worktree_lock;
+use crate::lock::{LockWait, wait_for_worktree_lock};
 use crate::observer::{Observer, SyncEvent};
 use crate::packmap::{
     MAX_FETCH_PACKS, MAX_PACK_CHAIN_DEPTH, flatten_oldest_first, packmap_ref, resolve_pack_chain,
     walk_pack_chain_until,
 };
 use crate::source::RemoteSource;
-use crate::stage::{ChainApplied, apply_pack_chain};
 
 /// What a fetch did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -239,9 +239,12 @@ pub(crate) fn apply_and_verify_chain(
 }
 
 /// Rewrite the applied-packs record atomically. The record is a cache, so a
-/// failure is reported and never fails the fetch.
+/// failure is reported, unless the fetch reported one already, and never fails
+/// the fetch.
 fn persist_record(applied: &mut AppliedPacks, observer: &dyn Observer<SyncEvent>, remote: &str) {
-    if let Err(e) = applied.persist() {
+    if let Err(e) = applied.persist()
+        && applied.first_failure()
+    {
         observer.event(&SyncEvent::AppliedPacksPersistFailed {
             remote: remote.to_owned(),
             error: e.to_string(),
@@ -325,6 +328,7 @@ pub(crate) fn fetch_objects(
     observer: &dyn Observer<SyncEvent>,
     remote: &str,
     options: &SyncOptions,
+    lock_wait: &LockWait,
 ) -> Result<FetchReport, SyncError> {
     let _prune_guard = store.prune_guard()?;
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
@@ -336,6 +340,7 @@ pub(crate) fn fetch_objects(
         observer,
         remote,
         options,
+        lock_wait,
         &mut applied,
         &mut report,
     );
@@ -351,6 +356,7 @@ fn fetch_objects_inner(
     observer: &dyn Observer<SyncEvent>,
     remote: &str,
     options: &SyncOptions,
+    lock_wait: &LockWait,
     applied: &mut AppliedPacks,
     report: &mut FetchReport,
 ) -> Result<(), SyncError> {
@@ -402,6 +408,8 @@ fn fetch_objects_inner(
     // Unidentified sources retain batched tracking writes. Checkpoints need
     // each tracking rename durable before the checkpoint is published.
     let mut tracking = refs::RemoteRefBatch::new(layout, remote)?;
+    // The tracking refs this fetch published, with the tip it gave each.
+    let mut published: Vec<(String, Hash)> = Vec::new();
     let result: Result<(), SyncError> = (|| {
         for r in remote_refs {
             if observer.cancelled() {
@@ -504,10 +512,11 @@ fn fetch_objects_inner(
             // ends it. The fetch holds only the shared lock of the prune
             // guard, and no process blocks on the exclusive one, so this
             // wait cannot deadlock.
-            let _lock = wait_for_worktree_lock(layout, observer)?;
+            let _lock = wait_for_worktree_lock(layout, observer, lock_wait)?;
             // Make the tracking rename durable before its checkpoint; a
             // crash between them leaves the old record.
             tracking.write(&r.name, &completed.tip)?;
+            published.push((r.name.clone(), completed.tip));
             if require_signed && let Some(path) = &checkpoint_path {
                 let batch =
                     std::mem::replace(&mut tracking, refs::RemoteRefBatch::new(layout, remote)?);
@@ -526,19 +535,36 @@ fn fetch_objects_inner(
     tracking.commit()?;
     result?;
     if options.prune {
-        prune_tracking(layout, source, observer, remote, &listed, report)?;
+        prune_tracking(layout, source, observer, remote, &listed, lock_wait, report)?;
     }
     if let Some(cursor) = cursor {
         // A disposable cache: failing to write it costs the next fetch a
         // full walk, never this fetch.
-        let record = crate::cursor::CursorRecord {
-            cursor,
-            tracking: crate::cursor::tracking_digest(layout, remote)?,
-            signed: require_signed,
-        };
-        let _ = record.persist(&cursor_path);
+        let tracking_digest = crate::cursor::tracking_digest(layout, remote)?;
+        // Another fetch of this remote may have moved a ref this fetch
+        // published, for example back to the tip of an older listing. The
+        // digest above then describes refs that do not match the cursor, so
+        // no record is written and the next fetch lists the remote again. The
+        // refs are read after the digest: a ref that still holds its tip now
+        // held it when the digest was taken, or the digest no longer matches
+        // the refs on disk.
+        if tips_still_published(layout, remote, &published) {
+            let record = crate::cursor::CursorRecord {
+                cursor,
+                tracking: tracking_digest,
+                signed: require_signed,
+            };
+            let _ = record.persist(&cursor_path);
+        }
     }
     Ok(())
+}
+
+/// Whether every ref in `published` still holds the tip this fetch gave it.
+fn tips_still_published(layout: &RepoLayout, remote: &str, published: &[(String, Hash)]) -> bool {
+    published.iter().all(|(name, tip)| {
+        matches!(refs::read_remote_ref(layout, remote, name), Ok(Some(held)) if held == *tip)
+    })
 }
 
 /// Delete the tracking refs of `remote` whose branch the listing lacks. It
@@ -552,6 +578,7 @@ fn prune_tracking(
     observer: &dyn Observer<SyncEvent>,
     remote: &str,
     listed: &std::collections::HashSet<String>,
+    lock_wait: &LockWait,
     report: &mut FetchReport,
 ) -> Result<(), SyncError> {
     let mut gone = Vec::new();
@@ -567,7 +594,7 @@ fn prune_tracking(
     if gone.is_empty() {
         return Ok(());
     }
-    let _lock = wait_for_worktree_lock(layout, observer)?;
+    let _lock = wait_for_worktree_lock(layout, observer, lock_wait)?;
     for name in gone {
         match refs::delete_remote_ref(layout, remote, &name) {
             Ok(()) | Err(refs::RefError::NotFound(_)) => report.branches_pruned.push(name),

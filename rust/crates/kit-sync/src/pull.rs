@@ -15,7 +15,7 @@ use kit_core::store::ObjectStore;
 use crate::SyncOptions;
 use crate::error::SyncError;
 use crate::fetch::{FetchReport, fetch_objects};
-use crate::lock::acquire_worktree_lock;
+use crate::lock::{LockWait, acquire_worktree_lock};
 use crate::observer::{Observer, SyncEvent};
 use crate::source::RemoteSource;
 use crate::worktree::{
@@ -92,12 +92,15 @@ pub fn pull(
         return Err(SyncError::DetachedHead);
     }
     let store = open_store(&layout, options)?;
-    let fetch = fetch_objects(&store, &layout, source, observer, remote, options)?;
+    let lock_wait = LockWait::new(options.lock_wait);
+    let fetch = fetch_objects(
+        &store, &layout, source, observer, remote, options, &lock_wait,
+    )?;
     let remote_refs = list_remote_refs_parallel(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
         .collect::<Vec<_>>();
-    let _lock = acquire_worktree_lock(&layout, observer)?;
+    let _lock = acquire_worktree_lock(&layout, observer, &lock_wait)?;
     let pending = PullState::read(&layout)?;
     let original_head = refs::read_head(&layout).ok();
     if matches!(original_head, Some(Head::Detached(_))) {
@@ -206,7 +209,10 @@ pub fn fetch(
     // No outer lock: `fetch_objects` takes the repo lock itself, per branch,
     // around only the ref publish.
     let store = open_store(&layout, options)?;
-    fetch_objects(&store, &layout, source, observer, remote, options)
+    let lock_wait = LockWait::new(options.lock_wait);
+    fetch_objects(
+        &store, &layout, source, observer, remote, options, &lock_wait,
+    )
 }
 
 fn rollback_pull_ref_and_head(
@@ -386,7 +392,7 @@ fn ensure_pull_restore_safe(
         Some(&tracked),
         &mut Vec::new(),
     )
-    .map_err(|e| recovery_snapshot_error(root, &tracked, &e))?;
+    .map_err(|e| format!("working tree: {e}"))?;
     let from_old =
         diff_trees(&snapshot, Some(before_tree), Some(current)).map_err(|e| e.to_string())?;
     let from_target =
@@ -406,19 +412,6 @@ fn ensure_pull_restore_safe(
         return Err(pull_recovery_changes_message(&entry.path));
     }
     Ok(())
-}
-
-/// The error for a failed worktree snapshot during recovery: a growing tracked
-/// file is a local change, anything else fails the check.
-fn recovery_snapshot_error(
-    root: &Path,
-    tracked: &kit_core::index::Index,
-    error: &kit_core::worktree::WorktreeError,
-) -> String {
-    match crate::worktree::grown_tracked_file(root, tracked, error) {
-        Some(path) => pull_recovery_changes_message(&path),
-        None => format!("working tree: {error}"),
-    }
 }
 
 /// The refusal for a path the unfinished pull would overwrite.
@@ -468,35 +461,6 @@ fn clear_pull_head(layout: &RepoLayout) -> Result<(), SyncError> {
 
 #[cfg(test)]
 mod recovery_message_tests {
-    #[test]
-    fn a_growing_tracked_file_is_a_local_change_in_recovery() {
-        use kit_core::index::{EntryStatus, Index, IndexEntry};
-        let mut index = Index::new();
-        index.upsert_entry(IndexEntry {
-            path: "a.bin".to_owned(),
-            status: EntryStatus::Blob,
-            object_hash: [1; 32],
-            mtime_ns: 0,
-            size: 0,
-            ino: 0,
-            ctime_ns: 0,
-        });
-        let root = std::path::Path::new("/work");
-        let grew = kit_core::worktree::WorktreeError::FileTooLarge {
-            path: root.join("a.bin"),
-            limit: kit_core::worktree::CHUNK_THRESHOLD,
-        };
-        assert!(
-            super::recovery_snapshot_error(root, &index, &grew)
-                .starts_with("pull recovery would overwrite local changes at 'a.bin'; ")
-        );
-        let other = kit_core::worktree::WorktreeError::FileTooLarge {
-            path: root.join("b.bin"),
-            limit: kit_core::worktree::CHUNK_THRESHOLD,
-        };
-        assert!(super::recovery_snapshot_error(root, &index, &other).starts_with("working tree: "));
-    }
-
     #[test]
     fn the_recovery_refusal_text_is_unchanged() {
         assert_eq!(

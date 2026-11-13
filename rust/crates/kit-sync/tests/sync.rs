@@ -1386,7 +1386,8 @@ fn a_live_server_is_reported_as_an_event() {
     remote.publish(Some(first), &[("a.txt", b"two\n")], true);
     let layout = RepoLayout::single(&target);
     let _serving =
-        kit_core::repo_lock::acquire_default(layout.common_dir(), kit_sync::SERVE_LOCK).unwrap();
+        kit_core::repo_lock::acquire_default(layout.common_dir(), kit_core::repo_lock::SERVE_LOCK)
+            .unwrap();
     let observer = Recorder::default();
 
     pull(
@@ -2094,6 +2095,41 @@ fn checkpoint_directory_does_not_collide_with_a_remote_named_heads() {
             .iter()
             .any(|event| matches!(event, SyncEvent::AppliedPacksPersistFailed { .. }))
     );
+}
+
+/// A record that cannot be written costs one warning per fetch, however many
+/// packs the fetch applies.
+#[test]
+fn an_unwritable_applied_packs_record_is_reported_once_per_fetch() {
+    let remote = Remote::new();
+    let mut tip = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    // A file where the record directory belongs: no append and no rewrite can
+    // succeed.
+    let records = RepoLayout::single(dir.path()).applied_packs_dir();
+    std::fs::remove_dir_all(&records).unwrap();
+    std::fs::write(&records, b"not a directory").unwrap();
+    for body in [&b"two\n"[..], b"three\n", b"four\n"] {
+        tip = remote.publish(Some(tip), &[("a.txt", body)], true);
+    }
+    let observer = Recorder::default();
+    let report = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap();
+    assert!(report.fetch.packs_downloaded >= 3);
+    let failures = observer
+        .events
+        .borrow()
+        .iter()
+        .filter(|event| matches!(event, SyncEvent::AppliedPacksPersistFailed { .. }))
+        .count();
+    assert_eq!(failures, 1);
 }
 
 fn pending_restore() -> (Remote, tempfile::TempDir, RepoLayout, Hash, Hash) {
@@ -3023,9 +3059,9 @@ fn assert_growing_file_refuses_the_pull(len: usize) {
         match result {
             Ok(_) => {}
             Err(SyncError::RestoreSafety(message)) => {
-                assert!(
-                    message.starts_with("restore would overwrite local changes; "),
-                    "{message}"
+                assert_eq!(
+                    message,
+                    "restore would overwrite local changes; commit, stash, or reset 'big.bin' first"
                 );
                 refused += 1;
             }

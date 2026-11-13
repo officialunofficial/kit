@@ -447,12 +447,11 @@ impl ChunkedBlob {
     /// # Errors
     /// [`KitError::ChunkedBlobSizeMismatch`] when `reassembled_len`
     /// differs from `total_size`.
-    pub fn check_reassembled_size(&self, reassembled_len: usize) -> Result<(), KitError> {
-        let actual = reassembled_len as u64;
-        if actual != self.total_size {
+    pub fn check_reassembled_size(&self, reassembled_len: u64) -> Result<(), KitError> {
+        if reassembled_len != self.total_size {
             return Err(KitError::ChunkedBlobSizeMismatch {
                 expected: self.total_size,
-                actual,
+                actual: reassembled_len,
             });
         }
         Ok(())
@@ -768,6 +767,30 @@ impl fmt::Display for Object {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The size check compares full 64-bit lengths, so a file above 4 GiB
+    /// passes on a target with 32-bit pointers too.
+    #[test]
+    fn the_reassembled_size_check_takes_a_length_above_four_gib() {
+        let total_size = (5u64 << 30) + 7;
+        let manifest = ChunkedBlob {
+            total_size,
+            chunk_size: 0,
+            chunks: Vec::new(),
+        };
+        assert!(manifest.check_reassembled_size(total_size).is_ok());
+        assert!(matches!(
+            manifest.check_reassembled_size(total_size - 1),
+            Err(KitError::ChunkedBlobSizeMismatch { expected, actual })
+                if expected == total_size && actual == total_size - 1
+        ));
+        // The low 32 bits of the length are not what is compared.
+        assert!(
+            manifest
+                .check_reassembled_size(total_size & 0xffff_ffff)
+                .is_err()
+        );
+    }
 
     #[test]
     fn object_type_names() {

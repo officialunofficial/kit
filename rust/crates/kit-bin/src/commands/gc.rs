@@ -155,11 +155,17 @@ pub fn run(args: &[String]) -> u8 {
     } else {
         ("pruned", "expired")
     };
+    let temp_files = if report.temp_files_pruned > 0 {
+        format!(" and {} temp file(s)", report.temp_files_pruned)
+    } else {
+        String::new()
+    };
     let _ = writeln!(
         stderr,
-        "gc{}: {prune_verb} {} object(s), {} bytes; scanned {}, live {} ({} chunks), kept-recent {}; {expire_verb} {} recovery entr{}",
+        "gc{}: {prune_verb} {} object(s){}, {} bytes; scanned {}, live {} ({} chunks), kept-recent {}; {expire_verb} {} recovery entr{}",
         if report.dry_run { " (dry run)" } else { "" },
         report.pruned,
+        temp_files,
         report.bytes_reclaimed,
         report.scanned,
         report.live,

@@ -228,6 +228,16 @@ refuses the missing object. Lock contention or uncertain metadata keeps the
 candidate. No process ever blocks on the exclusive lock: the sweep only tries
 it. The lock order is specified by SPEC-CONCURRENCY.
 
+A writer that dies leaves its temp file in the shard directory of the object
+it was writing: `.<name>.tmp.*` from a single or batched write and
+`.kit.tmp.*` from a bulk write. The sweep removes such a file once its
+modification time is at least `grace` old, through the same final check as an
+object: under the exclusive lock of `format`, kept on contention, on uncertain
+metadata or when the file is younger. A fetch or a bulk write that is alive
+holds the shared lock, and any other writer holds a worktree lock that gc
+holds, so the sweep never removes the temp file of a live writer. The sweep
+touches no other file in the object directories.
+
 Objects are never renamed out of the canonical namespace during a sweep.
 A crash before unlink leaves the object there, and the kernel releases the
 lock. A subsequent open can read it and a subsequent gc applies the same

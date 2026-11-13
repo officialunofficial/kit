@@ -310,7 +310,7 @@ pub fn content_fingerprint<S: crate::store::ObjectSource + ?Sized>(
                     .ok_or(StoreError::ObjectTooLarge)?;
                 hasher.update(&data);
             }
-            manifest.check_reassembled_size(size)?;
+            manifest.check_reassembled_size(size as u64)?;
             Ok((size as u64, hasher.finalize()))
         }
         _ => Err(StoreError::Io(io::Error::other(

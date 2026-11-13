@@ -756,7 +756,7 @@ fn restore_blob(
                     }
                     tmp.write_all(&buf)?;
                 }
-                cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
+                cb.check_reassembled_size(written)?;
                 Ok(())
             })();
             #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
@@ -820,7 +820,7 @@ where
                 &mut tmp,
             )
             .and_then(|written| {
-                cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))
+                cb.check_reassembled_size(written)
                     .map_err(RestoreError::from)
             });
             let written = if observe && result.is_ok() {
@@ -3013,5 +3013,138 @@ mod tests {
             restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default())
                 .unwrap_err();
         assert!(matches!(err, RestoreError::InvalidSymlinkTarget(_)));
+    }
+}
+
+#[cfg(test)]
+mod random_input_tests {
+    #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)] // bounded random values
+
+    use super::*;
+    use crate::object::{Blob, Tree, TreeEntry};
+    use crate::serialize;
+    use tempfile::TempDir;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, bound: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % bound
+        }
+    }
+
+    fn put(store: &ObjectStore, object: &Object) -> Hash {
+        store.write(&serialize::serialize(object).unwrap()).unwrap()
+    }
+
+    fn blob(store: &ObjectStore, data: &[u8]) -> Hash {
+        put(
+            store,
+            &Object::Blob(Blob {
+                data: data.to_vec(),
+            }),
+        )
+    }
+
+    /// A random tree over a small pool of names, contents and kinds, so two
+    /// draws often share a path with the same or another kind.
+    fn random_tree(store: &ObjectStore, rng: &mut Rng, depth: u64) -> Hash {
+        let mut entries = Vec::new();
+        for name in ["a", "b", "c", "d", "e"] {
+            if rng.below(3) == 0 {
+                continue;
+            }
+            let content = [b"one".as_slice(), b"two", b"three"][rng.below(3) as usize];
+            let (mode, object_hash) = match rng.below(if depth < 3 { 6 } else { 4 }) {
+                0 | 1 => (EntryMode::Blob, blob(store, content)),
+                2 => (EntryMode::Executable, blob(store, content)),
+                3 => (
+                    EntryMode::Symlink,
+                    blob(store, [b"a".as_slice(), b"b/c"][rng.below(2) as usize]),
+                ),
+                _ => (EntryMode::Tree, random_tree(store, rng, depth + 1)),
+            };
+            entries.push(TreeEntry {
+                name: name.as_bytes().to_vec(),
+                mode,
+                object_hash,
+            });
+        }
+        if entries.is_empty() {
+            entries.push(TreeEntry {
+                name: b"a".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob(store, b"one"),
+            });
+        }
+        put(store, &Object::Tree(Tree { entries }))
+    }
+
+    /// Every path under `dir` with its kind, mode and bytes.
+    fn listing(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        for name in names {
+            let path = dir.join(&name);
+            let rel = format!("{prefix}/{name}");
+            let meta = fs::symlink_metadata(&path).unwrap();
+            if meta.file_type().is_symlink() {
+                out.push(format!(
+                    "{rel} -> {}",
+                    fs::read_link(&path).unwrap().display()
+                ));
+            } else if meta.is_dir() {
+                out.push(format!("{rel}/"));
+                listing(&path, &rel, out);
+            } else {
+                let executable = meta.permissions().mode() & 0o111 != 0;
+                out.push(format!(
+                    "{rel} x={executable} {:?}",
+                    fs::read(&path).unwrap()
+                ));
+            }
+        }
+    }
+
+    /// A worktree at `base` restored to `next` with `base` as the base tree
+    /// equals a fresh restore of `next`, for random pairs of trees.
+    #[cfg(unix)]
+    #[test]
+    fn an_incremental_restore_equals_a_fresh_one_for_random_trees() {
+        let dir = TempDir::new().unwrap();
+        let store = ObjectStore::init(&crate::layout::RepoLayout::single(dir.path())).unwrap();
+        let opts = RestoreOptions::default();
+        assert!(opts.clean);
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+        for round in 0..60 {
+            let base = random_tree(&store, &mut rng, 0);
+            let next = random_tree(&store, &mut rng, 0);
+            let incremental = TempDir::new().unwrap();
+            restore_tree_to_worktree_with(&store, &base, None, incremental.path(), &opts, &rd)
+                .unwrap();
+            restore_tree_to_worktree_with(
+                &store,
+                &next,
+                Some(base),
+                incremental.path(),
+                &opts,
+                &rd,
+            )
+            .unwrap();
+            let fresh = TempDir::new().unwrap();
+            restore_tree_to_worktree_with(&store, &next, None, fresh.path(), &opts, &rd).unwrap();
+            let (mut got, mut want) = (Vec::new(), Vec::new());
+            listing(incremental.path(), "", &mut got);
+            listing(fresh.path(), "", &mut want);
+            assert_eq!(got, want, "round {round}");
+        }
     }
 }

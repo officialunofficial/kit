@@ -249,6 +249,15 @@ pub fn probe_exclusive(dir: &Path, name: &str) -> LockResult<bool> {
     }
 }
 
+/// Whether a server process is alive against the repository whose common
+/// directory is `common_dir`: the probe of [`SERVE_LOCK`] finds it held. A
+/// probe that fails reports `false`, because the check only warns and never
+/// decides anything.
+#[must_use]
+pub fn is_served(common_dir: &Path) -> bool {
+    matches!(probe_exclusive(common_dir, SERVE_LOCK), Ok(false))
+}
+
 /// Validate `name` and open-or-create the never-unlinked sentinel file at
 /// `<dir>/<name>`. Shared by every acquire/probe entry point so the
 /// validation rules and sentinel-opening semantics never drift between
@@ -509,6 +518,16 @@ mod tests {
     /// `probe_exclusive` reports the lock as unavailable (`Ok(false)`)
     /// while a shared guard is alive, and available (`Ok(true)`) again
     /// once it is dropped.
+    #[test]
+    fn a_repository_is_served_while_a_server_holds_the_serve_lock() {
+        let dir = TempDir::new().unwrap();
+        assert!(!is_served(dir.path()));
+        let server = acquire_shared(dir.path(), SERVE_LOCK, Duration::from_millis(200)).unwrap();
+        assert!(is_served(dir.path()));
+        drop(server);
+        assert!(!is_served(dir.path()));
+    }
+
     #[test]
     fn probe_exclusive_reflects_a_live_shared_holder() {
         let dir = TempDir::new().unwrap();

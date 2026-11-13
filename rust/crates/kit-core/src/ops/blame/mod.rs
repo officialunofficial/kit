@@ -730,7 +730,7 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
                 }
                 buf.extend_from_slice(&b.data);
             }
-            cb.check_reassembled_size(buf.len())?;
+            cb.check_reassembled_size(buf.len() as u64)?;
             buf
         }
         _ => return Err(BlameError::NotABlob),

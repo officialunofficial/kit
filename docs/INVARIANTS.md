@@ -289,9 +289,10 @@ non-blocking-exclusive (`kit_core::repo_lock::probe_exclusive`) and, if it
 finds the lock busy, prints a warning to stderr naming the served root
 before proceeding. Most commands do this through
 `libkit::lock::acquire_worktree` / `libkit::lock::acquire_registry`; the
-paths that take `worktree.lock` directly (the `fetch`/`pull` publish step in
-`remote_dispatch` and `status`'s index refresh) call the same
-`libkit::lock::warn_if_served` probe (SPEC-CONCURRENCY §3.1). The one exclusive holder: at startup
+paths that take `worktree.lock` directly (the `fetch`/`pull` publish step and
+the fast-forward phase of `pull` in `kit-sync`, and `status`'s index refresh)
+run the same probe, `kit_core::repo_lock::is_served`, through `kit-sync`'s own
+`warn_if_served` or `libkit::lock::warn_if_served` (SPEC-CONCURRENCY §3.1). The one exclusive holder: at startup
 `kit serve` tries `serve.lock` exclusively without waiting, and only
 while it holds it (no other server is up) sweeps the temp files crashed
 uploads left in `packs/` (`.<hex>.tmp.<pid>.<seq>`, at least an hour

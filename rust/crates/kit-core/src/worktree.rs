@@ -44,8 +44,7 @@ pub enum WorktreeError {
     #[error("symlink target '{0}' is invalid (absolute or contains '..')")]
     InvalidSymlinkTarget(String),
     /// A file is larger than `limit`: [`MAX_FILE_BYTES`] for a reader that holds
-    /// the whole file, [`CHUNK_THRESHOLD`] for a file at or below it that grew
-    /// while it was read, [`serialize::MAX_CHUNKED_TOTAL_SIZE`] for ingest.
+    /// the whole file, [`serialize::MAX_CHUNKED_TOTAL_SIZE`] for ingest.
     #[error("file '{}' exceeds the {limit} byte limit", path.display())]
     FileTooLarge {
         /// The file that exceeded the limit.
@@ -989,6 +988,16 @@ fn file_too_large(path: &Path, limit: u64) -> WorktreeError {
     }
 }
 
+/// `total` plus one more chunk of `len` bytes, refused when the file would
+/// pass [`serialize::MAX_CHUNKED_TOTAL_SIZE`].
+fn add_within_chunked_bound(total: u64, len: usize, path: &Path) -> WorktreeResult<u64> {
+    u64::try_from(len)
+        .ok()
+        .and_then(|len| total.checked_add(len))
+        .filter(|&sum| sum <= serialize::MAX_CHUNKED_TOTAL_SIZE)
+        .ok_or_else(|| file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE))
+}
+
 /// Refuse a file of `len` bytes above `limit`.
 fn ensure_within(len: u64, limit: u64, path: &Path) -> WorktreeResult<()> {
     if len > limit {
@@ -1100,7 +1109,7 @@ pub fn hash_file_with_metadata_with<S: ObjectSink + ?Sized>(
 fn hash_file_with_metadata_using<S: ObjectSink + ?Sized>(
     sink: &S,
     path: &Path,
-    stream: impl FnOnce(&S, io::Take<fs::File>, &Path) -> WorktreeResult<Hash>,
+    stream: impl FnOnce(&S, StreamedFile<fs::File>, &Path) -> WorktreeResult<Hash>,
 ) -> WorktreeResult<(Hash, fs::Metadata)> {
     let file = open_regular_file(path)?;
     let meta = file.metadata()?;
@@ -1111,17 +1120,43 @@ fn hash_file_with_metadata_using<S: ObjectSink + ?Sized>(
         )));
     }
     ensure_within(meta.len(), serialize::MAX_CHUNKED_TOTAL_SIZE, path)?;
-
-    if meta.len() <= CHUNK_THRESHOLD {
-        // A file that grew past the single-blob size since its length was
-        // read fails here, so a blob never exceeds the threshold.
-        let data = read_whole(file, meta.len(), CHUNK_THRESHOLD, path)?;
-        let hash = store_file_object(sink, &data)?;
-        return Ok((hash, meta));
-    }
-
-    let hash = stream(sink, file.take(serialize::MAX_CHUNKED_TOTAL_SIZE + 1), path)?;
+    let hash = hash_reader_using(sink, file, meta.len(), path, stream)?;
     Ok((hash, meta))
+}
+
+/// What a streaming strategy reads: the bytes already taken from the file,
+/// then the rest of it, bounded by [`serialize::MAX_CHUNKED_TOTAL_SIZE`] plus
+/// one byte so that a longer file is seen as too large.
+type StreamedFile<R> = io::Take<io::Chain<io::Cursor<Vec<u8>>, R>>;
+
+/// Store the content of `reader`, which `declared` bytes were reported to
+/// hold. Content of at most [`CHUNK_THRESHOLD`] bytes is one blob. Anything
+/// longer goes to `stream`, whatever `declared` said: a file can grow between
+/// its stat and its read.
+fn hash_reader_using<S: ObjectSink + ?Sized, R: Read>(
+    sink: &S,
+    mut reader: R,
+    declared: u64,
+    path: &Path,
+    stream: impl FnOnce(&S, StreamedFile<R>, &Path) -> WorktreeResult<Hash>,
+) -> WorktreeResult<Hash> {
+    // The bytes read before the content was found to be longer than the
+    // single-blob size.
+    let mut head = Vec::new();
+    if declared <= CHUNK_THRESHOLD {
+        head.reserve_exact(usize::try_from(declared).unwrap_or(0).saturating_add(1));
+        // One byte past the threshold tells content that grew from content
+        // that is still a single blob.
+        reader
+            .by_ref()
+            .take(CHUNK_THRESHOLD + 1)
+            .read_to_end(&mut head)?;
+        if u64::try_from(head.len()).unwrap_or(u64::MAX) <= CHUNK_THRESHOLD {
+            return store_file_object(sink, &head);
+        }
+    }
+    let rest = io::Cursor::new(head).chain(reader);
+    stream(sink, rest.take(serialize::MAX_CHUNKED_TOTAL_SIZE + 1), path)
 }
 
 /// Number of chunks [`store_large_file_streaming_with`] buffers before
@@ -1194,10 +1229,7 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
             path,
             offset: total_size,
         };
-        total_size = total_size
-            .checked_add(chunk.len() as u64)
-            .filter(|&t| t <= serialize::MAX_CHUNKED_TOTAL_SIZE)
-            .ok_or_else(|| file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE))?;
+        total_size = add_within_chunked_bound(total_size, chunk.len(), path)?;
         let before = chunks.len();
         chunks.push(store_chunk_blob_at(sink, chunk, origin)?);
         if checkpoint_due(before, chunks.len(), window) {
@@ -1333,10 +1365,7 @@ fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
     let mut total_size: u64 = 0;
     let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
     while let Some(chunk) = chunker.next_chunk()? {
-        total_size = total_size
-            .checked_add(chunk.len() as u64)
-            .filter(|&t| t <= serialize::MAX_CHUNKED_TOTAL_SIZE)
-            .ok_or_else(|| file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE))?;
+        total_size = add_within_chunked_bound(total_size, chunk.len(), path)?;
         batch.push(chunk);
         if batch.len() == STREAM_HASH_BATCH {
             let before = chunks.len();
@@ -1418,14 +1447,12 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
                         return;
                     }
                 };
-                running_total = if let Some(t) = running_total
-                    .checked_add(chunk.len() as u64)
-                    .filter(|&t| t <= serialize::MAX_CHUNKED_TOTAL_SIZE)
-                {
-                    t
-                } else {
-                    let _ = tx.send(Err(file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE)));
-                    return;
+                running_total = match add_within_chunked_bound(running_total, chunk.len(), path) {
+                    Ok(total) => total,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
                 };
                 batch.push(chunk);
                 if batch.len() == STREAM_HASH_BATCH {
@@ -3620,10 +3647,24 @@ mod tests {
         }
     }
 
-    fn limit_of(result: &WorktreeResult<Vec<u8>>) -> Option<u64> {
+    fn limit_of<T>(result: &WorktreeResult<T>) -> Option<u64> {
         match result {
             Err(WorktreeError::FileTooLarge { limit, .. }) => Some(*limit),
             _ => None,
+        }
+    }
+
+    #[test]
+    fn the_chunked_total_may_reach_the_bound_and_not_pass_it() {
+        let path = Path::new("f");
+        let bound = serialize::MAX_CHUNKED_TOTAL_SIZE;
+        assert_eq!(add_within_chunked_bound(0, 0, path).unwrap(), 0);
+        assert_eq!(add_within_chunked_bound(bound - 5, 5, path).unwrap(), bound);
+        for (total, len) in [(bound - 5, 6), (bound, 1), (u64::MAX, 1)] {
+            assert_eq!(
+                limit_of(&add_within_chunked_bound(total, len, path)),
+                Some(bound)
+            );
         }
     }
 
@@ -3663,15 +3704,6 @@ mod tests {
     }
 
     #[test]
-    fn a_small_file_that_grew_past_the_threshold_is_refused() {
-        let grown = vec![1u8; usize::try_from(CHUNK_THRESHOLD).unwrap() + 1];
-        let result = read_whole(&grown[..], 10, CHUNK_THRESHOLD, Path::new("f"));
-        assert_eq!(limit_of(&result), Some(CHUNK_THRESHOLD));
-        let exact = vec![1u8; usize::try_from(CHUNK_THRESHOLD).unwrap()];
-        assert!(read_whole(&exact[..], 10, CHUNK_THRESHOLD, Path::new("f")).is_ok());
-    }
-
-    #[test]
     fn ingest_reads_at_most_the_chunked_bound_plus_one_byte() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("big.bin");
@@ -3688,6 +3720,53 @@ mod tests {
         })
         .unwrap();
         assert_eq!(hash, stub);
+    }
+
+    /// A file that was at most the threshold at stat time and is longer when
+    /// it is read is stored chunked, as the same bytes are when they are in
+    /// a file of that length to begin with.
+    #[test]
+    fn a_small_file_that_grows_past_the_threshold_while_read_is_stored_chunked() {
+        let (_dir, store) = fresh_store();
+        let grown: Vec<u8> = (0..usize::try_from(CHUNK_THRESHOLD).unwrap() + 700 * 1024)
+            .map(|i| u8::try_from(i.wrapping_mul(2_654_435_761) >> 13 & 0xff).unwrap())
+            .collect();
+        for declared in [0, 10, CHUNK_THRESHOLD] {
+            let id = hash_reader_using(
+                &store,
+                &grown[..],
+                declared,
+                Path::new("f"),
+                store_large_file_streaming,
+            )
+            .unwrap();
+            assert_eq!(id, store_file_object(&store, &grown).unwrap());
+            assert!(matches!(
+                store.read_object(&id).unwrap(),
+                crate::object::Object::ChunkedBlob(_)
+            ));
+        }
+        // One byte past the threshold is the smallest chunked file.
+        let just_over = &grown[..=usize::try_from(CHUNK_THRESHOLD).unwrap()];
+        let id = hash_reader_using(
+            &store,
+            just_over,
+            1,
+            Path::new("f"),
+            store_large_file_streaming,
+        )
+        .unwrap();
+        assert_eq!(id, store_file_object(&store, just_over).unwrap());
+        // Exactly the threshold is still one blob.
+        let exact = &grown[..usize::try_from(CHUNK_THRESHOLD).unwrap()];
+        let id = hash_reader_using(&store, exact, 1, Path::new("f"), |_, _, _| {
+            panic!("one blob does not stream")
+        })
+        .unwrap();
+        assert!(matches!(
+            store.read_object(&id).unwrap(),
+            crate::object::Object::Blob(_)
+        ));
     }
 
     #[test]

@@ -16,7 +16,22 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `SyncEvent::WaitingForRepoLock`, sent once for each time a fetch waits for
   the repository lock to publish a branch's ref. `kit` prints a line for it.
 - `AppliedPacks::record_applied` records a pack and appends its digest to the
-  on-disk record at once.
+  on-disk record at once. It replaces `AppliedPacks::insert`.
+- `kit gc` removes the temp files that a dead writer left in the object
+  directories (`.<name>.tmp.*` and `.kit.tmp.*`) once they are older than the
+  grace window. It deletes each one under the same exclusive lock as an
+  object, so a running fetch keeps its files. `GcReport::temp_files_pruned`
+  counts them, and `bytes_reclaimed` includes their bytes.
+- `SyncOptions::lock_wait` (`with_lock_wait`) bounds how long one clone, fetch
+  or pull waits for `worktree.lock` when it publishes. The default, `None`,
+  waits as long as it takes at each publish of a fetch, and a pull's final
+  update keeps its 5 second wait. With `Some`, one deadline starts at the
+  first failed attempt and covers every later wait of the call, on wall-clock
+  time. When it passes, the
+  call fails with `SyncError::RepoLock` and publishes nothing more, and the
+  next call resumes from the packs already applied. `kit` keeps the default.
+- `kit_core::repo_lock::is_served` tells whether a server process is alive
+  against a repository. `kit-sync` and `libkit` both use it.
 - `kit_core::store::HashOnlySink` hashes the objects put into it and keeps
   none. It counts the objects and the bytes.
 - The S3 transport offers a repository cursor (SPEC-TRANSPORT §6.8). It is a
@@ -235,20 +250,28 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   32 bytes each, while the manifest is stored. The line diff of text content
   above 1 GiB still fails with `ContentTooLarge`. The hasher refused a file
   above 1 GiB before it read a byte. A file of 1 MiB or less that grows past 1
-  MiB while it is read now fails with `FileTooLarge` naming 1 MiB, where it
-  was stored as one oversized blob. A file above 128 GiB still fails with
+  MiB while it is read is stored chunked. It was stored as one oversized blob.
+  A file above 128 GiB still fails with
   `WorktreeError::FileTooLarge`, which now carries the limit that applied
   (`FileTooLarge { path, limit }`), and nothing is written.
   `worktree::MAX_FILE_BYTES` keeps its value and its meaning, the limit of a
   reader that holds a whole file. Breaking: `WorktreeError::FileTooLarge`
   changes from a tuple to a struct variant.
+- A pull no longer removes an empty untracked directory inside a subtree the
+  new tip did not change.
+- **Breaking:** `ChunkedBlob::check_reassembled_size` takes a `u64`, so a
+  restore of a file above 4 GiB passes the check on a 32-bit target.
+  `kit-sync` no longer exports `warn_if_served`, `WORKTREE_LOCK` and
+  `SERVE_LOCK`; `kit_core::repo_lock` has the lock names and `is_served`.
+  `SyncEvent::AppliedPacksPersistFailed` is sent once for each fetch, not once
+  for each pack and again for the final rewrite.
 - A fast-forward pull rewrites only the files the new tip changed. It wrote
   every tracked file again, and read each chunk of a large file again. An
   unchanged file keeps its inode, its mtime and its stat cache. The safety
   check that refuses to overwrite local work is unchanged, and so are its
   messages. A tracked file that another process grows past the one-blob size
-  while the check reads it counts as a local change, so the pull refuses with
-  the usual message and does not fail the check. A resumed pull still writes
+  while the check reads it hashes differently from the index, so the pull
+  refuses with the usual message and does not fail the check. A resumed pull still writes
   every file.
   `restore_tree_to_worktree_with` and `restore_tree_to_worktree_observed` skip
   entries equal to `base_tree` when `clean` is set too. They skipped only when
@@ -286,6 +309,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Two fetches of one clone no longer leave a record that makes every later
+  fetch report the remote unchanged. A fetch that listed the remote earlier
+  can publish an older tip after a later fetch published the new one. A fetch
+  now writes its record only when each ref it published still holds its tip.
 - `kit diff`, `kit show` and `kit format-patch` print `Binary files differ`
   for a binary pair of stored blobs after a read of the first bytes of each
   side. They read both sides whole before. A stored text blob or a worktree

@@ -521,6 +521,64 @@ fn the_publish_wait_honours_an_interrupt_and_keeps_the_work() {
     assert_eq!(tracking_tip(&layout), Some(remote.tip()));
 }
 
+fn run_fetch_with(
+    target: &Path,
+    source: &dyn RemoteSource,
+    options: &SyncOptions,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<FetchReport, SyncError> {
+    fetch(target, source, "origin", options, observer)
+}
+
+#[test]
+fn a_deadline_ends_the_publish_wait_with_a_typed_error_and_the_next_fetch_resumes() {
+    let remote = Remote::with_commits(3);
+    let (_dir, target, layout) = fresh_target();
+    let held = repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK).unwrap();
+    let options = SyncOptions::default().with_lock_wait(Some(Duration::from_millis(200)));
+
+    let started = std::time::Instant::now();
+    let error = run_fetch_with(&target, &remote.source(), &options, &NoopObserver).unwrap_err();
+    assert!(
+        matches!(error, SyncError::RepoLock(repo_lock::LockError::Busy(_))),
+        "{error:?}"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    drop(held);
+
+    // Nothing was published, and the applied packs are recorded.
+    assert_eq!(tracking_tip(&layout), None);
+    let applied = AppliedPacks::load(&layout, "origin").unwrap();
+    for key in &remote.packs {
+        assert!(applied.contains(&PackKey::from_hash(*key)));
+    }
+    let source = HookSource::counting(&remote);
+    let report = run_fetch_with(&target, &source, &options, &NoopObserver).unwrap();
+    assert_eq!(source.downloads(), 0);
+    assert_eq!(report.packs_already_applied, 3);
+    assert_eq!(tracking_tip(&layout), Some(remote.tip()));
+}
+
+#[test]
+fn a_lock_released_before_the_deadline_lets_the_publish_proceed() {
+    let remote = Remote::with_commits(2);
+    let (_dir, target, layout) = fresh_target();
+    let probe = Probe::default();
+    let held = repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK).unwrap();
+    let options = SyncOptions::default().with_lock_wait(Some(Duration::from_secs(60)));
+
+    std::thread::scope(|scope| {
+        let fetching = scope.spawn(|| run_fetch_with(&target, &remote.source(), &options, &probe));
+        wait_until("the publish wait", || {
+            probe.waiting.load(Ordering::SeqCst) > 0
+        });
+        drop(held);
+        fetching.join().unwrap().unwrap();
+    });
+    assert_eq!(tracking_tip(&layout), Some(remote.tip()));
+}
+
 // ---------------------------------------------------------------------------
 // 3. gc during a fetch
 // ---------------------------------------------------------------------------
@@ -793,4 +851,136 @@ fn a_resumed_clone_equals_an_uninterrupted_one() {
             "a clone killed in download {k} and resumed"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Two fetches and the cursor record
+// ---------------------------------------------------------------------------
+
+/// What a fetch read from the remote before a push moved it: the cursor, the
+/// listing and the packmap head. Packs and packmap nodes never change, so
+/// they come from the live remote.
+struct ViewBeforePush<'a> {
+    inner: TransportSource<'a>,
+    cursor: Option<kit_core::protocol::RepoCursor>,
+    tip: Hash,
+    packmap: Option<Hash>,
+}
+
+impl RemoteSource for ViewBeforePush<'_> {
+    fn list_branches(&self) -> Result<Vec<refs::Ref>, SourceError> {
+        Ok(vec![refs::Ref {
+            name: "main".to_owned(),
+            hash: Some(self.tip),
+        }])
+    }
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
+        if name == "refs/kit/packmap/main" {
+            Ok(self.packmap)
+        } else {
+            self.inner.read_ref(name)
+        }
+    }
+    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_blob_via_ref(key, ref_name)
+    }
+    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_pack_via_ref(key, ref_name)
+    }
+    fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, SourceError> {
+        Ok(self.cursor.clone())
+    }
+}
+
+/// The live remote, pausing in the strong read of one ref.
+struct PauseOnRead<'a> {
+    inner: TransportSource<'a>,
+    name: &'static str,
+    gate: &'a Gate,
+}
+
+impl RemoteSource for PauseOnRead<'_> {
+    fn list_branches(&self) -> Result<Vec<refs::Ref>, SourceError> {
+        self.inner.list_branches()
+    }
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
+        if name == self.name {
+            self.gate.hit();
+        }
+        self.inner.read_ref(name)
+    }
+    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_blob_via_ref(key, ref_name)
+    }
+    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_pack_via_ref(key, ref_name)
+    }
+    fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, SourceError> {
+        self.inner.repo_cursor()
+    }
+}
+
+/// A fetch that listed the remote before a push finishes after a fetch that
+/// listed it after the push has published the new tip, and before that fetch
+/// writes its cursor record. The remote does not change again. The next fetch
+/// must still bring the tracking ref to the remote's tip.
+#[test]
+fn a_fetch_overtaken_by_a_slower_one_does_not_hide_the_new_tip_from_later_fetches() {
+    let mut remote = Remote::with_commits(1);
+    let old_tip = remote.tip();
+    let (cursor_before, packmap_before) = {
+        let source = remote.source();
+        (
+            source.repo_cursor().unwrap(),
+            source.read_ref("refs/kit/packmap/main").unwrap(),
+        )
+    };
+    remote.push_file("later.txt", b"later\n");
+    let new_tip = remote.tip();
+    assert_ne!(old_tip, new_tip);
+
+    let (_dir, target, layout) = fresh_target();
+    // A tracking ref of a branch the remote does not have, so a pruning fetch
+    // asks the remote about it after it has published `main`.
+    refs::write_remote_ref(&layout, "origin", "gone", &old_tip).unwrap();
+
+    let (gate, pause) = gate();
+    let newer = PauseOnRead {
+        inner: remote.source(),
+        name: "refs/heads/gone",
+        gate: &gate,
+    };
+    let slower = ViewBeforePush {
+        inner: remote.source(),
+        cursor: cursor_before,
+        tip: old_tip,
+        packmap: packmap_before,
+    };
+    std::thread::scope(|scope| {
+        let pruning = scope.spawn(|| {
+            fetch(
+                &target,
+                &newer,
+                "origin",
+                &SyncOptions::default().with_prune(true),
+                &NoopObserver,
+            )
+        });
+        {
+            let _resume = ResumeOnDrop(&pause);
+            pause.wait_reached();
+            assert_eq!(tracking_tip(&layout), Some(new_tip));
+            run_fetch(&target, &slower, &NoopObserver).unwrap();
+        }
+        pruning.join().unwrap().unwrap();
+    });
+
+    let report = run_fetch(&target, &remote.source(), &NoopObserver).unwrap();
+    assert_eq!(
+        tracking_tip(&layout).map(|tip| hash::to_hex(&tip)),
+        Some(hash::to_hex(&new_tip)),
+        "the remote's main is at the new tip and nothing changed it since; a fetch that reports remote_unchanged={} left the tracking ref at the older tip {}",
+        report.remote_unchanged,
+        hash::to_hex(&old_tip)
+    );
 }
