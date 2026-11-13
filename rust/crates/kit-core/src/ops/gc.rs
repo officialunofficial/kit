@@ -28,7 +28,7 @@
 //! [`super::recovery`] logs them (the commands record the old tip before
 //! moving the ref) and they are roots here.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -37,10 +37,11 @@ use crate::bounded_read;
 use crate::hash::{self, Hash};
 use crate::index;
 use crate::layout::RepoLayout;
+use crate::object::{Object, ObjectType};
 use crate::store::{ObjectStore, StoreError};
 
 use super::conflict_state;
-use super::graph::reachable_closure_checked;
+use super::graph::{ClosureMode, MAX_REACHABLE, children};
 use super::rebase;
 use super::recovery;
 use super::stash;
@@ -79,11 +80,41 @@ pub enum GcRootsError {
     BadHash(#[from] hash::FromHexError),
     #[error("io: {0}")]
     Io(#[from] io::Error),
-    /// The reachable-object walk hit [`super::graph::MAX_REACHABLE`]
-    /// before completing. The live set is incomplete, so a caller must
+    /// The mark reached [`super::graph::MAX_REACHABLE`] commits, trees,
+    /// manifests and other objects before completing. Chunks of a chunked
+    /// file are not counted. The live set is incomplete, so a caller must
     /// abort rather than treat beyond-cap objects as prunable.
-    #[error("object graph exceeds the reachability cap; refusing to compute a partial keep-set")]
+    #[error(
+        "object graph exceeds the reachability cap of {} objects (chunks are not counted); refusing to compute a partial keep-set",
+        MAX_REACHABLE
+    )]
     Truncated,
+    /// The distinct chunk ids that manifests list passed [`MAX_LIVE_CHUNKS`].
+    /// The list of ids must fit in memory, so gc refuses instead of marking
+    /// part of it.
+    #[error(
+        "{count} distinct chunk ids exceed the live chunk cap of {cap}; refusing to compute a partial keep-set"
+    )]
+    TooManyChunks {
+        /// Distinct chunk ids when the cap was found exceeded.
+        count: usize,
+        /// The cap that applied.
+        cap: usize,
+    },
+    /// A manifest lists an object that is neither a blob nor a delta. A chunk
+    /// is a leaf, so gc cannot tell what that object reaches and refuses.
+    #[error(
+        "chunk {} of manifest {} is not a blob or delta (fail closed)",
+        hash::to_hex(.chunk),
+        hash::to_hex(.manifest)
+    )]
+    ChunkNotBlob {
+        /// A manifest that lists the chunk. All zeros if none lists it any
+        /// more, which only a change to the store during the mark causes.
+        manifest: Hash,
+        /// The listed object.
+        chunk: Hash,
+    },
     /// A ref directory nested deeper than [`MAX_REF_WALK_DEPTH`], which is
     /// deeper than any ref name of the bounded length. Gc cannot tell what
     /// it holds, so it refuses instead of skipping it.
@@ -247,8 +278,245 @@ fn collect_tree_roots(
     Ok(())
 }
 
-/// The full live-object keep-set for `kit gc`: the reachable closure
-/// over every retention root from [`collect_roots`].
+/// Most distinct chunk ids [`live_objects`] holds: 134,217,728, which is 4 GiB
+/// of ids. Past it the mark fails with [`GcRootsError::TooManyChunks`]. The
+/// chunk id buffer is checked at a compaction, so before the error it can hold
+/// about twice that.
+pub const MAX_LIVE_CHUNKS: usize = 134_217_728;
+
+/// The chunk id buffer compacts only when its capacity would grow past this
+/// many ids (or twice its length after the last compaction, if larger).
+const CHUNK_COMPACT_FLOOR: usize = 1_048_576;
+
+/// The three bounds of a mark. Tests inject small ones.
+#[derive(Debug, Clone, Copy)]
+struct MarkLimits {
+    /// Most non-chunk objects.
+    cap: usize,
+    /// Most distinct chunk ids.
+    chunk_cap: usize,
+    /// See [`CHUNK_COMPACT_FLOOR`].
+    compact_floor: usize,
+}
+
+impl MarkLimits {
+    const DEFAULT: Self = Self {
+        cap: MAX_REACHABLE,
+        chunk_cap: MAX_LIVE_CHUNKS,
+        compact_floor: CHUNK_COMPACT_FLOOR,
+    };
+}
+
+/// The objects `kit gc` keeps, in two parts so that a chunk costs one hash in
+/// a sorted vector instead of one node in a tree.
+///
+/// - `objects`: commits, trees, tags, remixes, manifests, and blobs reached
+///   other than as a chunk. The mark caps it at [`MAX_REACHABLE`].
+/// - `chunks`: the ids that manifests list, sorted, without duplicates, and
+///   disjoint from `objects`. Each is a blob or a delta.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LiveSet {
+    objects: BTreeSet<Hash>,
+    chunks: Vec<Hash>,
+}
+
+/// Iterator over a [`LiveSet`]: the objects, then the chunks.
+pub type LiveIter<'a> =
+    std::iter::Chain<std::collections::btree_set::Iter<'a, Hash>, std::slice::Iter<'a, Hash>>;
+
+impl LiveSet {
+    /// True when `h` is live, as an object or as a chunk.
+    #[must_use]
+    pub fn contains(&self, h: &Hash) -> bool {
+        self.objects.contains(h) || self.contains_chunk(h)
+    }
+
+    /// True when `h` is a live chunk and no other kind of live object.
+    fn contains_chunk(&self, h: &Hash) -> bool {
+        // `chunks` is sorted when the mark returns it and is never appended
+        // to after that.
+        self.chunks.binary_search(h).is_ok()
+    }
+
+    /// Live objects and chunks.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.objects.len() + self.chunks.len()
+    }
+
+    /// True when nothing is live.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty() && self.chunks.is_empty()
+    }
+
+    /// Live chunks, counted in [`len`](Self::len) too.
+    #[must_use]
+    pub fn chunks_len(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// Every live id: the objects in order, then the chunks in order.
+    pub fn iter(&self) -> LiveIter<'_> {
+        self.objects.iter().chain(self.chunks.iter())
+    }
+}
+
+impl<'a> IntoIterator for &'a LiveSet {
+    type Item = &'a Hash;
+    type IntoIter = LiveIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// The chunk ids that manifests list, kept sorted and deduplicated often
+/// enough that memory stays near twice the number of distinct ids.
+struct ChunkIds {
+    ids: Vec<Hash>,
+    /// Length after the last compaction.
+    settled: usize,
+    floor: usize,
+    cap: usize,
+}
+
+impl ChunkIds {
+    fn new(floor: usize, cap: usize) -> Self {
+        Self {
+            ids: Vec::new(),
+            settled: 0,
+            floor,
+            cap,
+        }
+    }
+
+    /// Capacity above which the buffer compacts before it grows.
+    fn threshold(&self) -> usize {
+        self.settled.saturating_mul(2).max(self.floor)
+    }
+
+    /// Append `new`. Capacity doubles while it stays within the threshold.
+    /// A growth past it compacts first, and the buffer then holds at most
+    /// the threshold, or what `new` needs if that is more.
+    fn extend(&mut self, new: &[Hash]) -> Result<(), GcRootsError> {
+        let mut need = self.ids.len().saturating_add(new.len());
+        if need > self.ids.capacity() {
+            let mut target = self.ids.capacity().saturating_mul(2).max(need);
+            if target > self.threshold() {
+                self.compact()?;
+                need = self.ids.len().saturating_add(new.len());
+                target = need.max(self.threshold());
+            }
+            self.ids.reserve_exact(target - self.ids.len());
+        }
+        self.ids.extend_from_slice(new);
+        Ok(())
+    }
+
+    /// Sort and deduplicate, then refuse a buffer past the chunk cap.
+    fn compact(&mut self) -> Result<(), GcRootsError> {
+        self.ids.sort_unstable();
+        self.ids.dedup();
+        self.settled = self.ids.len();
+        if self.ids.len() > self.cap {
+            return Err(GcRootsError::TooManyChunks {
+                count: self.ids.len(),
+                cap: self.cap,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Mark every object `kit gc` keeps live: the closure over `roots` in
+/// [`ClosureMode::History`], with the chunks of each manifest held apart.
+///
+/// The walk is breadth-first over `objects`. A manifest queues nothing: its
+/// chunk ids go to a buffer, which is later checked once per distinct id for
+/// being a blob or a delta, as the old walk's leaf test did. An id that
+/// manifests list and another path also reaches stays an object, and so does
+/// a manifest reached as a file when another manifest lists it.
+///
+/// This function reads nothing for deletion and deletes nothing. A caller must
+/// run it to the end, every type read included, before it lists or deletes
+/// any object.
+fn mark_live(
+    store: &ObjectStore,
+    roots: &BTreeSet<Hash>,
+    limits: MarkLimits,
+) -> Result<LiveSet, GcRootsError> {
+    let mut objects: BTreeSet<Hash> = BTreeSet::new();
+    let mut queue: VecDeque<Hash> = roots.iter().copied().collect();
+    let mut ids = ChunkIds::new(limits.compact_floor, limits.chunk_cap);
+    while let Some(h) = queue.pop_front() {
+        if objects.contains(&h) {
+            continue;
+        }
+        if objects.len() >= limits.cap {
+            return Err(GcRootsError::Truncated);
+        }
+        objects.insert(h);
+        // A blob or delta is a leaf. Its type is all gc needs, so its
+        // content is not read or verified (see [`live_objects`]).
+        if matches!(store.object_type(&h)?, ObjectType::Blob | ObjectType::Delta) {
+            continue;
+        }
+        let object = store.read_object(&h)?;
+        let edges = children(&object, ClosureMode::History);
+        if matches!(object, Object::ChunkedBlob(_)) {
+            drop(object);
+            ids.extend(&edges)?;
+        } else {
+            queue.extend(edges);
+        }
+    }
+    drop(queue);
+
+    ids.compact()?;
+    let mut chunks = ids.ids;
+    chunks.retain(|c| !objects.contains(c));
+    for chunk in &chunks {
+        if !matches!(
+            store.object_type(chunk)?,
+            ObjectType::Blob | ObjectType::Delta
+        ) {
+            return Err(GcRootsError::ChunkNotBlob {
+                manifest: manifest_listing(store, &objects, chunk)?,
+                chunk: *chunk,
+            });
+        }
+    }
+    Ok(LiveSet { objects, chunks })
+}
+
+/// A live manifest that lists `chunk`, for an error message. Runs only after
+/// the mark found a bad chunk, so its cost is the cost of a failed run.
+fn manifest_listing(
+    store: &ObjectStore,
+    objects: &BTreeSet<Hash>,
+    chunk: &Hash,
+) -> Result<Hash, GcRootsError> {
+    for h in objects {
+        if store.object_type(h)? != ObjectType::ChunkedBlob {
+            continue;
+        }
+        if let Object::ChunkedBlob(manifest) = store.read_object(h)?
+            && manifest.chunks.contains(chunk)
+        {
+            return Ok(*h);
+        }
+    }
+    Ok(hash::ZERO)
+}
+
+/// The full live-object keep-set for `kit gc`: the closure over every
+/// retention root from [`collect_roots`], with chunks held apart (see
+/// [`LiveSet`]).
+///
+/// The closure follows commits, trees, tags and parents like
+/// [`super::graph::reachable_closure`]. The chunks of a manifest count toward
+/// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob or a delta.
 ///
 /// Does not verify leaf (blob/delta) content integrity as part of the
 /// walk — see [`super::graph::reachable_closure`]'s "Content integrity
@@ -259,18 +527,21 @@ fn collect_tree_roots(
 ///
 /// # Errors
 ///
-/// [`GcRootsError`] if roots cannot be collected, or a [`StoreError`]
-/// (e.g. a root or referenced object missing) during the walk.
-pub fn live_objects(
+/// [`GcRootsError`] if roots cannot be collected, a [`StoreError`] (e.g. a
+/// root, referenced object or chunk missing) during the walk,
+/// [`GcRootsError::Truncated`] past [`MAX_REACHABLE`] objects,
+/// [`GcRootsError::TooManyChunks`] past [`MAX_LIVE_CHUNKS`] distinct chunks,
+/// or [`GcRootsError::ChunkNotBlob`] for a chunk of another kind.
+pub fn live_objects(store: &ObjectStore, layout: &RepoLayout) -> Result<LiveSet, GcRootsError> {
+    live_objects_with(store, layout, MarkLimits::DEFAULT)
+}
+
+fn live_objects_with(
     store: &ObjectStore,
     layout: &RepoLayout,
-) -> Result<BTreeSet<Hash>, GcRootsError> {
-    let roots = collect_roots(layout)?;
-    let (live, truncated) = reachable_closure_checked(store, roots.iter())?;
-    if truncated {
-        return Err(GcRootsError::Truncated);
-    }
-    Ok(live)
+    limits: MarkLimits,
+) -> Result<LiveSet, GcRootsError> {
+    mark_live(store, &collect_roots(layout)?, limits)
 }
 
 /// Outcome of a [`run_gc`] sweep.
@@ -278,8 +549,10 @@ pub fn live_objects(
 pub struct GcReport {
     /// Objects examined in the store.
     pub scanned: usize,
-    /// Objects retained because they are reachable from a root.
+    /// Objects retained because they are reachable from a root. Chunks count.
     pub live: usize,
+    /// The part of `live` that is chunks of a chunked file.
+    pub live_chunks: usize,
     /// Unreachable objects retained anyway — within the grace window, or
     /// whose age could not be determined (kept fail-safe).
     pub kept_recent: usize,
@@ -297,14 +570,21 @@ pub struct GcReport {
 /// `dry_run`, computes the report without deleting anything.
 ///
 /// **Fail closed / fail safe.** If the live set can't be computed (a
-/// missing/corrupt root, a malformed ref, or the reachability cap), this
-/// returns an error and deletes nothing. An object whose age can't be
-/// read is kept, never pruned. The caller MUST hold the repo lock so the
-/// live set can't shift mid-sweep (see [`super::recovery`]); `gc` runs
-/// `recovery::expire` then this, all under that lock.
+/// missing/corrupt root, a malformed ref, a bad chunk, or a cap), this
+/// returns an error and deletes nothing: the whole mark, every type read
+/// included, ends before the sweep lists or deletes any object. An object
+/// whose age can't be read is kept, never pruned. The caller MUST hold the
+/// repo lock so the live set can't shift mid-sweep (see
+/// [`super::recovery`]); `gc` runs `recovery::expire` then this, all under
+/// that lock.
+///
+/// The sweep lists one `objects/<2 hex>/` directory at a time, so it never
+/// holds the id of every loose object.
 ///
 /// # Errors
 /// [`GcRootsError`] from [`live_objects`], store enumeration, or a delete.
+/// An error from the sweep itself leaves the objects of earlier directories
+/// pruned, which is safe because only unreachable objects are.
 pub fn run_gc(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -312,15 +592,27 @@ pub fn run_gc(
     grace_secs: u64,
     dry_run: bool,
 ) -> Result<GcReport, GcRootsError> {
-    run_gc_with_hook(store, layout, now_secs, grace_secs, dry_run, |_| {})
+    run_gc_with_hook(
+        store,
+        layout,
+        now_secs,
+        grace_secs,
+        dry_run,
+        MarkLimits::DEFAULT,
+        |_| {},
+    )
 }
 
+/// [`run_gc`] with injected mark limits and a `before_prune` call for every
+/// candidate of the sweep: each unreachable object old enough to prune, in a
+/// dry run as well as in a real run.
 fn run_gc_with_hook(
     store: &ObjectStore,
     layout: &RepoLayout,
     now_secs: u64,
     grace_secs: u64,
     dry_run: bool,
+    limits: MarkLimits,
     mut before_prune: impl FnMut(&Hash),
 ) -> Result<GcReport, GcRootsError> {
     // Refuse to delete through a symlinked store: if `.kit` or
@@ -330,43 +622,46 @@ fn run_gc_with_hook(
     reject_symlink(layout.common_dir())?;
     reject_symlink(store.objects_root())?;
 
-    // Compute the keep-set FIRST; if this fails we delete nothing.
-    let live = live_objects(store, layout)?;
-    let all = store.iter_object_hashes()?;
+    // Compute the keep-set FIRST, to the end; if this fails we list and
+    // delete nothing.
+    let live = live_objects_with(store, layout, limits)?;
 
     let mut report = GcReport {
         dry_run,
         ..GcReport::default()
     };
-    for h in all {
-        report.scanned += 1;
-        if live.contains(&h) {
-            report.live += 1;
-            continue;
-        }
-        // Unreachable. Keep it if it is within the grace window, or if
-        // its age cannot be determined (fail safe — never delete when
-        // uncertain).
-        let Ok(meta) = store.object_metadata(&h) else {
-            report.kept_recent += 1;
-            continue;
-        };
-        let age_known_old = crate::store::old_enough(&meta, now_secs, grace_secs);
-        if !age_known_old {
-            report.kept_recent += 1;
-            continue;
-        }
-        let mut len = meta.len();
-        if !dry_run {
-            before_prune(&h);
-            let Some(reclaimed) = store.prune_if_old(&h, now_secs, grace_secs)? else {
+    for shard in 0..=u8::MAX {
+        for h in store.list_shard(shard)? {
+            report.scanned += 1;
+            if live.contains(&h) {
+                report.live += 1;
+                report.live_chunks += usize::from(live.contains_chunk(&h));
+                continue;
+            }
+            // Unreachable. Keep it if it is within the grace window, or if
+            // its age cannot be determined (fail safe — never delete when
+            // uncertain).
+            let Ok(meta) = store.object_metadata(&h) else {
                 report.kept_recent += 1;
                 continue;
             };
-            len = reclaimed;
+            let age_known_old = crate::store::old_enough(&meta, now_secs, grace_secs);
+            if !age_known_old {
+                report.kept_recent += 1;
+                continue;
+            }
+            before_prune(&h);
+            let mut len = meta.len();
+            if !dry_run {
+                let Some(reclaimed) = store.prune_if_old(&h, now_secs, grace_secs)? else {
+                    report.kept_recent += 1;
+                    continue;
+                };
+                len = reclaimed;
+            }
+            report.pruned += 1;
+            report.bytes_reclaimed += len;
         }
-        report.pruned += 1;
-        report.bytes_reclaimed += len;
     }
     Ok(report)
 }
@@ -479,6 +774,9 @@ fn reject_symlink(path: &Path) -> Result<(), GcRootsError> {
         Err(e) => Err(e.into()),
     }
 }
+
+#[cfg(test)]
+mod mark_tests;
 
 #[cfg(test)]
 mod tests {
@@ -657,24 +955,6 @@ mod tests {
         );
     }
 
-    /// Test-only mirror of [`live_objects`] with an injectable
-    /// reachability cap, so the `GcRootsError::Truncated` fail-closed
-    /// abort can be exercised without constructing `MAX_REACHABLE` (10
-    /// million) objects.
-    fn live_objects_with_cap(
-        store: &ObjectStore,
-        layout: &RepoLayout,
-        cap: usize,
-    ) -> Result<BTreeSet<Hash>, GcRootsError> {
-        let roots = collect_roots(layout)?;
-        let (live, truncated) =
-            super::super::graph::reachable_closure_checked_with_cap(store, roots.iter(), cap)?;
-        if truncated {
-            return Err(GcRootsError::Truncated);
-        }
-        Ok(live)
-    }
-
     #[test]
     fn live_objects_aborts_truncated_when_closure_exceeds_cap() {
         // gc's fail-closed contract: beyond the reachability cap the
@@ -689,12 +969,16 @@ mod tests {
         let (c2, _) = commit_one(&s, b"b", b"b", vec![c1]);
         write_ref(&md, "refs/heads/main", &c2);
 
-        let err = live_objects_with_cap(&s, &md, 2).unwrap_err();
+        let small = MarkLimits {
+            cap: 2,
+            ..MarkLimits::DEFAULT
+        };
+        let err = live_objects_with(&s, &md, small).unwrap_err();
         assert!(matches!(err, GcRootsError::Truncated));
 
         // Sanity: the same closure with a generous cap succeeds and
         // contains every object from both commits.
-        let live = live_objects_with_cap(&s, &md, 1000).unwrap();
+        let live = live_objects_with(&s, &md, MarkLimits::DEFAULT).unwrap();
         assert!(live.contains(&c1) && live.contains(&c2));
     }
 
@@ -1015,12 +1299,20 @@ mod sweep_interleaving_tests {
             .unwrap()
             .set_modified(UNIX_EPOCH + Duration::from_secs(now - 100))
             .unwrap();
-        let report = run_gc_with_hook(&store, &layout, now, 10, false, |candidate| {
-            assert_eq!(candidate, &h);
-            let mut writer = store.bulk_writer();
-            writer.write(bytes).unwrap();
-            writer.commit().unwrap();
-        })
+        let report = run_gc_with_hook(
+            &store,
+            &layout,
+            now,
+            10,
+            false,
+            MarkLimits::DEFAULT,
+            |candidate| {
+                assert_eq!(candidate, &h);
+                let mut writer = store.bulk_writer();
+                writer.write(bytes).unwrap();
+                writer.commit().unwrap();
+            },
+        )
         .unwrap();
         assert!(
             store.contains(&h),

@@ -649,7 +649,8 @@ and builder byte-identity checks
 **Always:** every reachability walk &mdash; store-backed
 `reachable_objects` / `reachable_closure` / `reachable_snapshot`, the
 store-less `verify_closure` BFS, the pull-based `verify_closure_streaming`
-walk, push verification (`verify_push`), and push/fetch pack planning &mdash; takes
+walk, push verification (`verify_push`), push/fetch pack planning, and the
+`kit gc` mark (`ops::gc::mark_live`) &mdash; takes
 its edges from `ops::graph::children(obj, mode)`. The verifiers
 (`verify_closure*` and `verify_push`) share one BFS, `verify::closure::walk`;
 none keeps a walker of its own. Snapshot mode omits
@@ -934,6 +935,30 @@ entry decompression or retained delta targets.
 
 **Enforced by:** `pack::tests` resident-peak, bomb, retention-equivalence and
 maximum-wire-length regressions.
+
+## gc marks every chunk and fails closed before any delete
+
+**Always:** `kit gc` counts no chunk of a chunked file toward its 10,000,000
+object cap. Its live set holds the chunks apart, as a sorted vector of ids
+that holds no duplicate and no id that is also an object. Every chunk is a blob
+or a delta. A chunk of another kind, a missing or corrupt object, a distinct
+chunk count past 134,217,728 and a walk past the object cap each end the mark
+with an error. The whole mark, every chunk type read included, ends before gc
+lists or deletes an object. The sweep lists one `objects/<2 hex>/` directory at
+a time.
+
+**Because:** a chunk the mark missed is a live object gc deletes, and a mark
+that gave up half way is the same loss. Holding every chunk in the tree set
+that the walk uses costs a node per chunk, and a cap that a few large files
+reach.
+
+**If violated:** gc deletes data that a branch still reaches, or it refuses a
+repository that holds a few large files.
+
+**Enforced by:** `ops::gc::mark_tests`: a property test against a copy of the
+old one-set walk (equal live set, or an error and a byte-identical store), the
+fail-closed, cap, boundary and dry-run tests, and the reference walk run again
+after every gc.
 
 ## A fetch stages at most its budget
 
