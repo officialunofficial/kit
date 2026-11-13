@@ -9,9 +9,9 @@
 //!
 //! The cuts are a pure function of (store, tip, remote head, limits): a
 //! resumed push recomputes them from the new remote head and regenerates
-//! identical packs for the interrupted step, unless a commit that raised the
-//! pack size is already published; the resumed push then builds that step's
-//! packs at the smaller size.
+//! identical packs for the interrupted step, unless the pack size it was cut at
+//! came from a step that is already published; the resumed push then builds
+//! that step's packs at the size the rest of the chain needs.
 //!
 //! * [`walk_chain`] walks the tip's first parents back to the first commit the
 //!   remote already holds.
@@ -31,14 +31,13 @@
 //! The caller's pack payload cap is a preferred size. When one commit (or the
 //! first advance, forced to hold the remote head) weighs more than the budget
 //! can carry at that size, [`plan_split`] raises the cap for the whole push to
-//! what that step needs, found by the cut that cannot make it smaller and
-//! repeated, up to a few times, if a later step needs more, never past the format maximum or the
-//! largest pack the remote accepts. Every cut, probe and upload then uses the
-//! same value.
+//! what the largest such step needs, never past the format maximum or the
+//! largest pack the remote accepts, and cuts again. Every cut, probe and upload
+//! then uses the same value.
 
 use std::collections::HashSet;
 
-use kit_core::hash::{Hash, to_hex};
+use kit_core::hash::{HASH_LEN, Hash, to_hex};
 use kit_core::object::Object;
 use kit_core::ops::merge::is_ancestor;
 use kit_core::pack;
@@ -347,7 +346,7 @@ fn plan_weight(store: &ObjectStore, plan: &PackPlan) -> Result<StepWeight, PushE
         add(weight_of(store, object)?);
     }
     for delta in &plan.deltas {
-        add((delta.stream.len() as u64).saturating_add(pack::ENTRY_FRAME_LEN as u64));
+        add((HASH_LEN + delta.stream.len() + pack::ENTRY_FRAME_LEN) as u64);
     }
     Ok(weight)
 }
@@ -676,10 +675,13 @@ pub(super) fn plan_split(
     // such a step says what it weighs, and every cut starts again at the
     // larger size.
     let mut payload_cap = pack_payload_cap;
-    let mut attempts = 0;
-    'cut: loop {
+    loop {
         let mut steps = Vec::new();
         let mut from = 0;
+        // The largest pack size a step that did not fit needs, and the
+        // refusal of the first such step.
+        let mut needed: Option<u64> = None;
+        let mut refusal: Option<PushError> = None;
         while from < chain.commits.len() {
             if steps.len() >= ctl.max_steps {
                 return Err(PushError::PushSplitLimit(format!(
@@ -688,10 +690,7 @@ pub(super) fn plan_split(
                 )));
             }
             match cutter.cut(from)? {
-                Cut::To(to) => {
-                    from = to;
-                    steps.push(chain.commits[from - 1]);
-                }
+                Cut::To(to) => from = to,
                 Cut::TooBig(overflow) => {
                     let raised = raised_payload_cap(
                         limits,
@@ -709,18 +708,25 @@ pub(super) fn plan_split(
                             too_heavy(&cutter, budget, overflow.to - 1)
                         });
                     };
-                    let cap = effective_payload_cap(raised.max(cutter.cap), limits.max_pack_bytes)?;
-                    if cap <= cutter.cap || attempts >= MAX_RAISES {
-                        return Err(overflow.error);
-                    }
-                    attempts += 1;
-                    payload_cap = cap;
-                    cutter.cap = cap;
-                    continue 'cut;
+                    needed = needed.max(Some(raised));
+                    refusal.get_or_insert(overflow.error);
+                    // Go on, to see what the later steps need.
+                    from = overflow.to;
                 }
             }
+            steps.push(chain.commits[from - 1]);
         }
-        return Ok(SplitPlan { steps, payload_cap });
+        let Some(needed) = needed else {
+            return Ok(SplitPlan { steps, payload_cap });
+        };
+        // Cut again at the larger size. The size only grows, up to what the
+        // format and the remote allow, so this ends.
+        let cap = effective_payload_cap(needed.max(cutter.cap), limits.max_pack_bytes)?;
+        if cap <= cutter.cap {
+            return Err(refusal.unwrap_or_else(|| too_heavy(&cutter, budget, from - 1)));
+        }
+        payload_cap = cap;
+        cutter.cap = cap;
     }
 }
 
@@ -732,10 +738,6 @@ fn too_heavy(cutter: &Cutter<'_>, budget: usize, commit: usize) -> PushError {
         cutter.describe(cutter.chain.commits[commit])
     ))
 }
-
-/// Most times the pack size is raised after a cut finds a step the weights
-/// missed.
-const MAX_RAISES: usize = 8;
 
 #[cfg(test)]
 mod tests {

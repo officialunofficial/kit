@@ -133,8 +133,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`10,000,000-object push walk`). A
   file that returns at a path the remote head's snapshot does not hold, a file
   reverted to an older version, and a chunk shared with a file the remote lacks
-  are sent again, up to a whole file. A history the remote holds and this store
-  lacks no longer makes the push send everything. A pack seals at 10,000,000
+  are sent again, up to a whole file. In a push cut into steps, each step
+  counts as the remote head for the next, so a directory deleted in one step
+  and restored in a later one is sent again too. A history the remote holds and
+  this store lacks no longer makes the push send everything. A pack seals at 10,000,000
   entries.
 - **Breaking:** `kit_client::Limits` has a new field `max_tickets`, the most
   tickets one advance may name, the packlist node's included.
