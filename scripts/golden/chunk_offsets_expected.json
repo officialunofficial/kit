@@ -6,7 +6,7 @@
    "name": "meta_asymmetric_max",
    "comment": "plan 4.3: L[0] with le64(total_size) and le32(chunk_size) at asymmetric maxima; a big-endian or swapped field fails",
    "domain": "kit-cblob-meta-v2",
-   "total_size": 18446744073709551614,
+   "total_size": "18446744073709551614",
    "chunk_size": 4294967294,
    "body_hex": "fefffffffffffffffeffffff",
    "digest_hex": "75a3970993ceedb18a61e45902da625063942d1c5ab9ba9bb3bc57a80c3977b0"
@@ -15,7 +15,7 @@
    "name": "meta_zero",
    "comment": "plan 4.3/4.4: L[0] of the empty file",
    "domain": "kit-cblob-meta-v2",
-   "total_size": 0,
+   "total_size": "0",
    "chunk_size": 0,
    "body_hex": "000000000000000000000000",
    "digest_hex": "5a7cc53c36c821ae73c65d5d3fdfc06ddf8fd1c4a11d820c729fa079c58dcb2a"
@@ -24,8 +24,8 @@
    "name": "chunk_asymmetric_max",
    "comment": "plan 4.3: L[i + 1] = domain_digest(chunk-v1, le64(start) || le64(end) || id); start and end differ and are near u64::MAX",
    "domain": "kit-cblob-chunk-v1",
-   "start": 18446744073709551614,
-   "end": 18446744073709551615,
+   "start": "18446744073709551614",
+   "end": "18446744073709551615",
    "chunk_id_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
    "body_hex": "feffffffffffffffffffffffffffffff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
    "digest_hex": "f2de9d5f97a4f82d36bb079c833bc4aae9fea6607d6443c3a86238df9969d67f"
@@ -34,8 +34,8 @@
    "name": "chunk_start_end_swapped",
    "comment": "plan 4.3: the same two values swapped give another digest (start before end in the body)",
    "domain": "kit-cblob-chunk-v1",
-   "start": 18446744073709551615,
-   "end": 18446744073709551614,
+   "start": "18446744073709551615",
+   "end": "18446744073709551614",
    "chunk_id_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
    "body_hex": "fffffffffffffffffeffffffffffffff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
    "digest_hex": "ed843c5a914f2764464be6255606882e516858f930a788df928f5f2afdab7baf"
@@ -44,8 +44,8 @@
    "name": "chunk_small",
    "comment": "plan 4.3: low values; every byte of start and end distinct from the high bytes",
    "domain": "kit-cblob-chunk-v1",
-   "start": 1,
-   "end": 2,
+   "start": "1",
+   "end": "2",
    "chunk_id_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
    "body_hex": "01000000000000000200000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
    "digest_hex": "c934fe0cddcd0756eef894df03c42e616dfe00ade76ff4aaadfb9db36ddc185b"
@@ -78,8 +78,8 @@
    "chunk_count": 1,
    "chunks": [
     {
-     "start": 0,
-     "end": 300,
+     "start": "0",
+     "end": "300",
      "chunk_id_hex": "dd617a299e0e030e8a434246683e184c540fd21a265c8ef2dbdc464605007e1c",
      "blob_len": 300
     }
@@ -153,8 +153,8 @@
        "total_size": 300,
        "chunk_size": 0,
        "index": 0,
-       "start": 0,
-       "end": 300,
+       "start": "0",
+       "end": "300",
        "len": 310,
        "bytes_blake3": "dd617a299e0e030e8a434246683e184c540fd21a265c8ef2dbdc464605007e1c"
       }
@@ -192,8 +192,8 @@
         "total_size": 300,
         "chunk_size": 0,
         "index": 0,
-        "start": 0,
-        "end": 300
+        "start": "0",
+        "end": "300"
        }
       }
      },
@@ -211,14 +211,14 @@
    "chunk_count": 2,
    "chunks": [
     {
-     "start": 0,
-     "end": 700,
+     "start": "0",
+     "end": "700",
      "chunk_id_hex": "28b554e3ea01b6486647ac4dfc25fcf1769aa2c006b60a60ba1147b837c2a53b",
      "blob_len": 700
     },
     {
-     "start": 700,
-     "end": 2000,
+     "start": "700",
+     "end": "2000",
      "chunk_id_hex": "834edc20461e7c711c69c19d3b18688c986611b47d331a754fef3f39fee9447c",
      "blob_len": 1300
     }
@@ -295,8 +295,8 @@
        "total_size": 2000,
        "chunk_size": 0,
        "index": 0,
-       "start": 0,
-       "end": 700,
+       "start": "0",
+       "end": "700",
        "len": 710,
        "bytes_blake3": "28b554e3ea01b6486647ac4dfc25fcf1769aa2c006b60a60ba1147b837c2a53b"
       }
@@ -328,8 +328,8 @@
        "total_size": 2000,
        "chunk_size": 0,
        "index": 1,
-       "start": 700,
-       "end": 2000,
+       "start": "700",
+       "end": "2000",
        "len": 1310,
        "bytes_blake3": "834edc20461e7c711c69c19d3b18688c986611b47d331a754fef3f39fee9447c"
       }
@@ -367,8 +367,8 @@
         "total_size": 2000,
         "chunk_size": 0,
         "index": 1,
-        "start": 700,
-        "end": 2000
+        "start": "700",
+        "end": "2000"
        }
       }
      },
@@ -386,20 +386,20 @@
    "chunk_count": 3,
    "chunks": [
     {
-     "start": 0,
-     "end": 500,
+     "start": "0",
+     "end": "500",
      "chunk_id_hex": "cf39551ba93632ea04bbbe91f741fdf399ede1bbd48909dc181cfee14e6612be",
      "blob_len": 500
     },
     {
-     "start": 500,
-     "end": 1700,
+     "start": "500",
+     "end": "1700",
      "chunk_id_hex": "2f88aebb21b0262c65a2f9c94ae11763a9fae22dcf053221821219dcf82dddae",
      "blob_len": 1200
     },
     {
-     "start": 1700,
-     "end": 1780,
+     "start": "1700",
+     "end": "1780",
      "chunk_id_hex": "18912044dae1130ca13d017a704e289861fcdc9440307c9e9256c53666781c03",
      "blob_len": 80
     }
@@ -479,8 +479,8 @@
        "total_size": 1780,
        "chunk_size": 0,
        "index": 0,
-       "start": 0,
-       "end": 500,
+       "start": "0",
+       "end": "500",
        "len": 510,
        "bytes_blake3": "cf39551ba93632ea04bbbe91f741fdf399ede1bbd48909dc181cfee14e6612be"
       }
@@ -512,8 +512,8 @@
        "total_size": 1780,
        "chunk_size": 0,
        "index": 1,
-       "start": 500,
-       "end": 1700,
+       "start": "500",
+       "end": "1700",
        "len": 1210,
        "bytes_blake3": "2f88aebb21b0262c65a2f9c94ae11763a9fae22dcf053221821219dcf82dddae"
       }
@@ -545,8 +545,8 @@
        "total_size": 1780,
        "chunk_size": 0,
        "index": 2,
-       "start": 1700,
-       "end": 1780,
+       "start": "1700",
+       "end": "1780",
        "len": 90,
        "bytes_blake3": "18912044dae1130ca13d017a704e289861fcdc9440307c9e9256c53666781c03"
       }
@@ -584,8 +584,8 @@
         "total_size": 1780,
         "chunk_size": 0,
         "index": 2,
-        "start": 1700,
-        "end": 1780
+        "start": "1700",
+        "end": "1780"
        }
       }
      },
@@ -614,32 +614,32 @@
    "chunk_count": 5,
    "chunks": [
     {
-     "start": 0,
-     "end": 64,
+     "start": "0",
+     "end": "64",
      "chunk_id_hex": "18a6355ec1c82b52c7c6bd9d67b098a52ec04d189782d0176a3a0a4495958419",
      "blob_len": 64
     },
     {
-     "start": 64,
-     "end": 2564,
+     "start": "64",
+     "end": "2564",
      "chunk_id_hex": "e23d3db390eee281ddc1c2c3cbae6ad4849db95959a599664bf7c8b415c0d31d",
      "blob_len": 2500
     },
     {
-     "start": 2564,
-     "end": 2565,
+     "start": "2564",
+     "end": "2565",
      "chunk_id_hex": "720cb9e9003bcd6d7c0053f4da6b365fe6fb78355f5d0e4ffda7294d6cb2d33f",
      "blob_len": 1
     },
     {
-     "start": 2565,
-     "end": 3588,
+     "start": "2565",
+     "end": "3588",
      "chunk_id_hex": "15c16792253cf167ef91706c4c2c5124876928fbd4a4f31ac5ca7596ae7d1fd9",
      "blob_len": 1023
     },
     {
-     "start": 3588,
-     "end": 4613,
+     "start": "3588",
+     "end": "4613",
      "chunk_id_hex": "e4e54efc1abbc22a2d2b12c51c41af7e7171078caae6f6943b6a7b82411f067c",
      "blob_len": 1025
     }
@@ -721,8 +721,8 @@
        "total_size": 4613,
        "chunk_size": 0,
        "index": 0,
-       "start": 0,
-       "end": 64,
+       "start": "0",
+       "end": "64",
        "len": 74,
        "bytes_blake3": "18a6355ec1c82b52c7c6bd9d67b098a52ec04d189782d0176a3a0a4495958419"
       }
@@ -754,8 +754,8 @@
        "total_size": 4613,
        "chunk_size": 0,
        "index": 2,
-       "start": 2564,
-       "end": 2565,
+       "start": "2564",
+       "end": "2565",
        "len": 11,
        "bytes_blake3": "720cb9e9003bcd6d7c0053f4da6b365fe6fb78355f5d0e4ffda7294d6cb2d33f"
       }
@@ -787,8 +787,8 @@
        "total_size": 4613,
        "chunk_size": 0,
        "index": 4,
-       "start": 3588,
-       "end": 4613,
+       "start": "3588",
+       "end": "4613",
        "len": 1035,
        "bytes_blake3": "e4e54efc1abbc22a2d2b12c51c41af7e7171078caae6f6943b6a7b82411f067c"
       }
@@ -826,8 +826,8 @@
         "total_size": 4613,
         "chunk_size": 0,
         "index": 4,
-        "start": 3588,
-        "end": 4613
+        "start": "3588",
+        "end": "4613"
        }
       }
      },
@@ -845,44 +845,44 @@
    "chunk_count": 7,
    "chunks": [
     {
-     "start": 0,
-     "end": 100,
+     "start": "0",
+     "end": "100",
      "chunk_id_hex": "02539f879c64919d71f1bf09b8639f5d43bd30424d3524aacbf3f43f1996397b",
      "blob_len": 100
     },
     {
-     "start": 100,
-     "end": 300,
+     "start": "100",
+     "end": "300",
      "chunk_id_hex": "d69d32ca4f9ee9deb29adf274a3ebbed8005331bc682ea7db26a3c963bf04f2e",
      "blob_len": 200
     },
     {
-     "start": 300,
-     "end": 600,
+     "start": "300",
+     "end": "600",
      "chunk_id_hex": "004f646e8941efdadedb8ef72788a94765f0c3e6dfbd221de19fc8490e480ec4",
      "blob_len": 300
     },
     {
-     "start": 600,
-     "end": 1000,
+     "start": "600",
+     "end": "1000",
      "chunk_id_hex": "fb7a1c53e4ddf1036037706a9e58c958508354accac5702328f246e4bc2b69c6",
      "blob_len": 400
     },
     {
-     "start": 1000,
-     "end": 1500,
+     "start": "1000",
+     "end": "1500",
      "chunk_id_hex": "11e0db5200065cd4eedb0876601d39aa586d52eb8f10789b048e2e7ed055dc5e",
      "blob_len": 500
     },
     {
-     "start": 1500,
-     "end": 2100,
+     "start": "1500",
+     "end": "2100",
      "chunk_id_hex": "76be7a04e4936422c2dacebb7dade5136f67cd6adc1312c2fdda48f573c71029",
      "blob_len": 600
     },
     {
-     "start": 2100,
-     "end": 2800,
+     "start": "2100",
+     "end": "2800",
      "chunk_id_hex": "7300e41d2d41483023fcdebfe72fb8fac2223c5c7c0881184feed5b74bf8410a",
      "blob_len": 700
     }
@@ -966,8 +966,8 @@
        "total_size": 2800,
        "chunk_size": 0,
        "index": 0,
-       "start": 0,
-       "end": 100,
+       "start": "0",
+       "end": "100",
        "len": 110,
        "bytes_blake3": "02539f879c64919d71f1bf09b8639f5d43bd30424d3524aacbf3f43f1996397b"
       }
@@ -999,8 +999,8 @@
        "total_size": 2800,
        "chunk_size": 0,
        "index": 3,
-       "start": 600,
-       "end": 1000,
+       "start": "600",
+       "end": "1000",
        "len": 410,
        "bytes_blake3": "fb7a1c53e4ddf1036037706a9e58c958508354accac5702328f246e4bc2b69c6"
       }
@@ -1032,8 +1032,8 @@
        "total_size": 2800,
        "chunk_size": 0,
        "index": 6,
-       "start": 2100,
-       "end": 2800,
+       "start": "2100",
+       "end": "2800",
        "len": 710,
        "bytes_blake3": "7300e41d2d41483023fcdebfe72fb8fac2223c5c7c0881184feed5b74bf8410a"
       }
@@ -1071,8 +1071,8 @@
         "total_size": 2800,
         "chunk_size": 0,
         "index": 6,
-        "start": 2100,
-        "end": 2800
+        "start": "2100",
+        "end": "2800"
        }
       }
      },
@@ -1101,20 +1101,20 @@
    "chunk_count": 3,
    "chunks": [
     {
-     "start": 0,
-     "end": 900,
+     "start": "0",
+     "end": "900",
      "chunk_id_hex": "35a2772e2b0887f7bfd9c6ec5b78af1a33ea56d3fda3db7dd27182cf60ce8129",
      "blob_len": 900
     },
     {
-     "start": 900,
-     "end": 950,
+     "start": "900",
+     "end": "950",
      "chunk_id_hex": "4b4a9ae07364965c53d63f171feddb0746346708721b5f4206aa79844850ef20",
      "blob_len": 50
     },
     {
-     "start": 950,
-     "end": 4950,
+     "start": "950",
+     "end": "4950",
      "chunk_id_hex": "ff85452924764958458aac73d8d0d5793b04d4b8f3cdcb8a5482f4c3c1865b9e",
      "blob_len": 4000
     }
@@ -1194,8 +1194,8 @@
        "total_size": 4950,
        "chunk_size": 2147483650,
        "index": 0,
-       "start": 0,
-       "end": 900,
+       "start": "0",
+       "end": "900",
        "len": 910,
        "bytes_blake3": "35a2772e2b0887f7bfd9c6ec5b78af1a33ea56d3fda3db7dd27182cf60ce8129"
       }
@@ -1227,8 +1227,8 @@
        "total_size": 4950,
        "chunk_size": 2147483650,
        "index": 1,
-       "start": 900,
-       "end": 950,
+       "start": "900",
+       "end": "950",
        "len": 60,
        "bytes_blake3": "4b4a9ae07364965c53d63f171feddb0746346708721b5f4206aa79844850ef20"
       }
@@ -1260,8 +1260,8 @@
        "total_size": 4950,
        "chunk_size": 2147483650,
        "index": 2,
-       "start": 950,
-       "end": 4950,
+       "start": "950",
+       "end": "4950",
        "len": 4010,
        "bytes_blake3": "ff85452924764958458aac73d8d0d5793b04d4b8f3cdcb8a5482f4c3c1865b9e"
       }
@@ -1299,8 +1299,8 @@
         "total_size": 4950,
         "chunk_size": 2147483650,
         "index": 2,
-        "start": 950,
-        "end": 4950
+        "start": "950",
+        "end": "4950"
        }
       }
      },
@@ -1318,8 +1318,8 @@
    "chunk_count": 1,
    "chunks": [
     {
-     "start": 0,
-     "end": 400,
+     "start": "0",
+     "end": "400",
      "chunk_id_hex": "2dd2602398564ee1948ee96d660272b5fff531eef865a0b414ce271b72ed3636",
      "blob_len": 400
     }
@@ -1393,8 +1393,8 @@
        "total_size": 400,
        "chunk_size": 1000,
        "index": 0,
-       "start": 0,
-       "end": 400,
+       "start": "0",
+       "end": "400",
        "len": 410,
        "bytes_blake3": "2dd2602398564ee1948ee96d660272b5fff531eef865a0b414ce271b72ed3636"
       }
@@ -1432,8 +1432,8 @@
         "total_size": 400,
         "chunk_size": 1000,
         "index": 0,
-        "start": 0,
-        "end": 400
+        "start": "0",
+        "end": "400"
        }
       }
      },
@@ -1451,14 +1451,14 @@
    "chunk_count": 2,
    "chunks": [
     {
-     "start": 0,
-     "end": 1000,
+     "start": "0",
+     "end": "1000",
      "chunk_id_hex": "1d0fb2ef3d90d02955d9d88cf50e870ea3766b06f9344f0ba18611b19818828c",
      "blob_len": 1000
     },
     {
-     "start": 1000,
-     "end": 1333,
+     "start": "1000",
+     "end": "1333",
      "chunk_id_hex": "30f902170321d54d97fe712944c4aba39c5b52e0bb4badd8abc4e8fe667caae3",
      "blob_len": 333
     }
@@ -1535,8 +1535,8 @@
        "total_size": 1333,
        "chunk_size": 1000,
        "index": 0,
-       "start": 0,
-       "end": 1000,
+       "start": "0",
+       "end": "1000",
        "len": 1010,
        "bytes_blake3": "1d0fb2ef3d90d02955d9d88cf50e870ea3766b06f9344f0ba18611b19818828c"
       }
@@ -1568,8 +1568,8 @@
        "total_size": 1333,
        "chunk_size": 1000,
        "index": 1,
-       "start": 1000,
-       "end": 1333,
+       "start": "1000",
+       "end": "1333",
        "len": 343,
        "bytes_blake3": "30f902170321d54d97fe712944c4aba39c5b52e0bb4badd8abc4e8fe667caae3"
       }
@@ -1607,8 +1607,8 @@
         "total_size": 1333,
         "chunk_size": 1000,
         "index": 1,
-        "start": 1000,
-        "end": 1333
+        "start": "1000",
+        "end": "1333"
        }
       }
      },
@@ -1626,20 +1626,20 @@
    "chunk_count": 3,
    "chunks": [
     {
-     "start": 0,
-     "end": 1000,
+     "start": "0",
+     "end": "1000",
      "chunk_id_hex": "de862f7412e0f9d94015d250cc5e813c671baf2f3cc6b05540111658eef19830",
      "blob_len": 1000
     },
     {
-     "start": 1000,
-     "end": 2000,
+     "start": "1000",
+     "end": "2000",
      "chunk_id_hex": "65d5ac4ba8f211f3e30f7c1042ed105ff4fe6548031503ac75a1f6e78d63a709",
      "blob_len": 1000
     },
     {
-     "start": 2000,
-     "end": 2500,
+     "start": "2000",
+     "end": "2500",
      "chunk_id_hex": "60329fd8aaea92f3df0d3297c701b6321a98cb93a1ecc045c6a1df81b31902e6",
      "blob_len": 500
     }
@@ -1719,8 +1719,8 @@
        "total_size": 2500,
        "chunk_size": 1000,
        "index": 0,
-       "start": 0,
-       "end": 1000,
+       "start": "0",
+       "end": "1000",
        "len": 1010,
        "bytes_blake3": "de862f7412e0f9d94015d250cc5e813c671baf2f3cc6b05540111658eef19830"
       }
@@ -1752,8 +1752,8 @@
        "total_size": 2500,
        "chunk_size": 1000,
        "index": 1,
-       "start": 1000,
-       "end": 2000,
+       "start": "1000",
+       "end": "2000",
        "len": 1010,
        "bytes_blake3": "65d5ac4ba8f211f3e30f7c1042ed105ff4fe6548031503ac75a1f6e78d63a709"
       }
@@ -1785,8 +1785,8 @@
        "total_size": 2500,
        "chunk_size": 1000,
        "index": 2,
-       "start": 2000,
-       "end": 2500,
+       "start": "2000",
+       "end": "2500",
        "len": 510,
        "bytes_blake3": "60329fd8aaea92f3df0d3297c701b6321a98cb93a1ecc045c6a1df81b31902e6"
       }
@@ -1824,8 +1824,8 @@
         "total_size": 2500,
         "chunk_size": 1000,
         "index": 2,
-        "start": 2000,
-        "end": 2500
+        "start": "2000",
+        "end": "2500"
        }
       }
      },
@@ -1854,32 +1854,32 @@
    "chunk_count": 5,
    "chunks": [
     {
-     "start": 0,
-     "end": 600,
+     "start": "0",
+     "end": "600",
      "chunk_id_hex": "18e490297b52ae3610657b1843e677a91b1b1ea29dca78f624225ecf2c1f572a",
      "blob_len": 600
     },
     {
-     "start": 600,
-     "end": 1200,
+     "start": "600",
+     "end": "1200",
      "chunk_id_hex": "f31120b0503cbe1826ed28835033c967c8ed534a36d3ec63691676ed1a97ed7c",
      "blob_len": 600
     },
     {
-     "start": 1200,
-     "end": 1800,
+     "start": "1200",
+     "end": "1800",
      "chunk_id_hex": "53065780d8ec28e60ee1de6ec24cee9400a67a9ea4775d4f3e2e3638a2556058",
      "blob_len": 600
     },
     {
-     "start": 1800,
-     "end": 2400,
+     "start": "1800",
+     "end": "2400",
      "chunk_id_hex": "182f3fbabe503ee2199bdef50420f995463a49cfa4ec8756a5bb3aabe20bf3f7",
      "blob_len": 600
     },
     {
-     "start": 2400,
-     "end": 3000,
+     "start": "2400",
+     "end": "3000",
      "chunk_id_hex": "c3808f50525a83dbd10a2890b9822bc2615160a019bf46e8361583617abfadfd",
      "blob_len": 600
     }
@@ -1961,8 +1961,8 @@
        "total_size": 3000,
        "chunk_size": 600,
        "index": 0,
-       "start": 0,
-       "end": 600,
+       "start": "0",
+       "end": "600",
        "len": 610,
        "bytes_blake3": "18e490297b52ae3610657b1843e677a91b1b1ea29dca78f624225ecf2c1f572a"
       }
@@ -1994,8 +1994,8 @@
        "total_size": 3000,
        "chunk_size": 600,
        "index": 2,
-       "start": 1200,
-       "end": 1800,
+       "start": "1200",
+       "end": "1800",
        "len": 610,
        "bytes_blake3": "53065780d8ec28e60ee1de6ec24cee9400a67a9ea4775d4f3e2e3638a2556058"
       }
@@ -2027,8 +2027,8 @@
        "total_size": 3000,
        "chunk_size": 600,
        "index": 4,
-       "start": 2400,
-       "end": 3000,
+       "start": "2400",
+       "end": "3000",
        "len": 610,
        "bytes_blake3": "c3808f50525a83dbd10a2890b9822bc2615160a019bf46e8361583617abfadfd"
       }
@@ -2066,8 +2066,8 @@
         "total_size": 3000,
         "chunk_size": 600,
         "index": 4,
-        "start": 2400,
-        "end": 3000
+        "start": "2400",
+        "end": "3000"
        }
       }
      },
@@ -2085,20 +2085,20 @@
    "chunk_count": 3,
    "chunks": [
     {
-     "start": 0,
-     "end": 400,
+     "start": "0",
+     "end": "400",
      "chunk_id_hex": "09541708cfe06f53c5040b4fb23509e711511b6744063786641fd1a6ef1148eb",
      "blob_len": 400
     },
     {
-     "start": 400,
-     "end": 650,
+     "start": "400",
+     "end": "650",
      "chunk_id_hex": "ca5d17f17153b1bc71e784239e41c02bab9c7c7f8f08a493843d8f38c9773c8e",
      "blob_len": 250
     },
     {
-     "start": 650,
-     "end": 1050,
+     "start": "650",
+     "end": "1050",
      "chunk_id_hex": "09541708cfe06f53c5040b4fb23509e711511b6744063786641fd1a6ef1148eb",
      "blob_len": 400
     }
@@ -2178,8 +2178,8 @@
        "total_size": 1050,
        "chunk_size": 0,
        "index": 0,
-       "start": 0,
-       "end": 400,
+       "start": "0",
+       "end": "400",
        "len": 410,
        "bytes_blake3": "09541708cfe06f53c5040b4fb23509e711511b6744063786641fd1a6ef1148eb"
       }
@@ -2211,8 +2211,8 @@
        "total_size": 1050,
        "chunk_size": 0,
        "index": 1,
-       "start": 400,
-       "end": 650,
+       "start": "400",
+       "end": "650",
        "len": 260,
        "bytes_blake3": "ca5d17f17153b1bc71e784239e41c02bab9c7c7f8f08a493843d8f38c9773c8e"
       }
@@ -2244,8 +2244,8 @@
        "total_size": 1050,
        "chunk_size": 0,
        "index": 2,
-       "start": 650,
-       "end": 1050,
+       "start": "650",
+       "end": "1050",
        "len": 410,
        "bytes_blake3": "09541708cfe06f53c5040b4fb23509e711511b6744063786641fd1a6ef1148eb"
       }
@@ -2283,8 +2283,8 @@
         "total_size": 1050,
         "chunk_size": 0,
         "index": 2,
-        "start": 650,
-        "end": 1050
+        "start": "650",
+        "end": "1050"
        }
       }
      },
@@ -2322,15 +2322,27 @@
   },
   {
    "name": "last end below total_size",
-   "comment": "plan 4.4 check 5: the last end equals total_size",
+   "comment": "plan 13 item 1, check 5: the last end is not below total_size",
    "manifest_hex": "054b4f4231021900000000000000000000000200000001010101010101010101010101010101010101010101010101010101010101010a0000000000000002020202020202020202020202020202020202020202020202020202020202021400000000000000",
-   "refused_by": "last end differs from total_size"
+   "refused_by": "last end below total_size"
   },
   {
    "name": "last end above total_size",
-   "comment": "plan 4.4 check 5: the last end equals total_size",
+   "comment": "plan 13 item 1, check 4: end_i <= total_size is a per-entry check",
    "manifest_hex": "054b4f4231020f00000000000000000000000200000001010101010101010101010101010101010101010101010101010101010101010a0000000000000002020202020202020202020202020202020202020202020202020202020202021400000000000000",
-   "refused_by": "last end differs from total_size"
+   "refused_by": "end above total_size"
+  },
+  {
+   "name": "middle end above total_size",
+   "comment": "plan 13 item 1, check 4: end_i <= total_size at an interior entry",
+   "manifest_hex": "054b4f4231020f000000000000000000000003000000010101010101010101010101010101010101010101010101010101010101010105000000000000000202020202020202020202020202020202020202020202020202020202020202140000000000000003030303030303030303030303030303030303030303030303030303030303031900000000000000",
+   "refused_by": "end above total_size"
+  },
+  {
+   "name": "end above total_size before the fixed formula",
+   "comment": "plan 13 item 1: end <= total_size comes before the fixed formula in check 4",
+   "manifest_hex": "054b4f423102dc05000000000000e8030000020000000101010101010101010101010101010101010101010101010101010101010101e8030000000000000202020202020202020202020202020202020202020202020202020202020202d007000000000000",
+   "refused_by": "end above total_size"
   },
   {
    "name": "total_size without chunks",
@@ -2412,12 +2424,12 @@
   "chunk_size": 0,
   "spans": [
    [
-    0,
-    10
+    "0",
+    "10"
    ],
    [
-    5,
-    15
+    "5",
+    "15"
    ]
   ],
   "chunk_ids_hex": [
@@ -2453,8 +2465,8 @@
       "total_size": 15,
       "chunk_size": 0,
       "index": 0,
-      "start": 0,
-      "end": 10,
+      "start": "0",
+      "end": "10",
       "len": 20,
       "bytes_blake3": "e8491fa3e76d1c5f7ef0dc77ca0dc4d77995272545d571d48a6568cf39d42be8"
      }
@@ -2486,8 +2498,8 @@
       "total_size": 15,
       "chunk_size": 0,
       "index": 1,
-      "start": 5,
-      "end": 15,
+      "start": "5",
+      "end": "15",
       "len": 20,
       "bytes_blake3": "6b22c69db8db2e851ad250529f2694cb6ebf8cec8d286b91bd73da1504a21a89"
      }
@@ -2525,8 +2537,8 @@
        "total_size": 15,
        "chunk_size": 0,
        "index": 0,
-       "start": 0,
-       "end": 10
+       "start": "0",
+       "end": "10"
       }
      }
     },
@@ -2565,8 +2577,111 @@
        "total_size": 15,
        "chunk_size": 0,
        "index": 1,
-       "start": 5,
-       "end": 15
+       "start": "5",
+       "end": "15"
+      }
+     }
+    },
+    "offset_in_blob": 0,
+    "len": 5
+   }
+  ]
+ },
+ "long_chunk_range": {
+  "comment": "plan 13 item 3/4.9: spans [0,10) and [10,15), but chunk 1 holds 12 bytes; a Range inside [10,15) verifies",
+  "total_size": 15,
+  "chunk_size": 0,
+  "spans": [
+   [
+    "0",
+    "10"
+   ],
+   [
+    "10",
+    "15"
+   ]
+  ],
+  "chunk_blob_lens": [
+   10,
+   12
+  ],
+  "chunked_id_hex": "91d6e19e813d8c00237dbf15b81591b6f9cc71a380e4ac9ae7e23046b6272ba3",
+  "manifest": null,
+  "disclosures": [
+   {
+    "comment": "plan 13 item 3: a range inside the span of a real chunk that is longer than its span verifies",
+    "kind": "range",
+    "index": 1,
+    "commit_id_hex": "fcd65ecb7fc13434834f155ea50fbd8dfa571a93631dc682a17c69d049bf2b8f",
+    "bundle_hex": "4b44504203fcd65ecb7fc13434834f155ea50fbd8dfa571a93631dc682a17c69d049bf2b8f8602034b4f42310194fb1515c3f8d067e91a6fa5fd2a43c6f3608825c4f044ba0e088eb76d6942e800000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b64900000000000000000000000000000000000000000000000000000000000000004995b5f4826499b1af3a7ec2219e04444b7d57031211dbbb71e9e0fc2772c2b00af1c5c9c3d0d873bcb2aaf37f433381d3122ab3ddec845255f84d386abf420001076269672e62696e0191d6e19e813d8c00237dbf15b81591b6f9cc71a380e4ac9ae7e23046b6272ba345120f5d3d5d3f33d74337c2867119fb97197ba32ade0f588de565d40fd3eb910000000000000001000201000000000000000f0000000000000001000000000000000a000000000000000f533b042ffb1ffad9f605a1bf77141422cc88a85066d331956ac08bec537977a5bb60846574249b509fdecfdc5d6ae564e4d06b2acd42d9cd4bbd61b003f7ec670000000301020a2f4ba104eeca47a74708f2f7a5afdc6c60ea653da828860bd9d09bcceee2000000000000000100000000000000031e1600000000000000014b4f4231010c000000a68a61999e2a98fd5c9d4a4c",
+    "disclosed": {
+     "path": [
+      {
+       "mode": 1,
+       "name_hex": "6269672e62696e"
+      }
+     ],
+     "leaf_id_hex": "91d6e19e813d8c00237dbf15b81591b6f9cc71a380e4ac9ae7e23046b6272ba3",
+     "tree_hash_hex": "94fb1515c3f8d067e91a6fa5fd2a43c6f3608825c4f044ba0e088eb76d6942e8",
+     "step_inner_roots_hex": [
+      "45120f5d3d5d3f33d74337c2867119fb97197ba32ade0f588de565d40fd3eb91"
+     ],
+     "chunk_inner_root_hex": "533b042ffb1ffad9f605a1bf77141422cc88a85066d331956ac08bec537977a5",
+     "signer_hex": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+     "signature_valid": true,
+     "payload": {
+      "kind": "range",
+      "len": 3,
+      "bytes_blake3": "bc425bdc60a9dbc6a9f2998b4493d2460d29c7a3279850e2b8d068f157a65c89",
+      "offset_in_blob": 1,
+      "absolute_offset": 11,
+      "blob_id_hex": "bb60846574249b509fdecfdc5d6ae564e4d06b2acd42d9cd4bbd61b003f7ec67",
+      "chunk": {
+       "total_size": 15,
+       "chunk_size": 0,
+       "index": 1,
+       "start": "10",
+       "end": "15"
+      }
+     }
+    },
+    "offset_in_blob": 1,
+    "len": 3
+   },
+   {
+    "comment": "plan 13 item 3: the whole committed span (offset 0, len 5) of the longer chunk verifies",
+    "kind": "range",
+    "index": 1,
+    "commit_id_hex": "fcd65ecb7fc13434834f155ea50fbd8dfa571a93631dc682a17c69d049bf2b8f",
+    "bundle_hex": "4b44504203fcd65ecb7fc13434834f155ea50fbd8dfa571a93631dc682a17c69d049bf2b8f8602034b4f42310194fb1515c3f8d067e91a6fa5fd2a43c6f3608825c4f044ba0e088eb76d6942e800000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b64900000000000000000000000000000000000000000000000000000000000000004995b5f4826499b1af3a7ec2219e04444b7d57031211dbbb71e9e0fc2772c2b00af1c5c9c3d0d873bcb2aaf37f433381d3122ab3ddec845255f84d386abf420001076269672e62696e0191d6e19e813d8c00237dbf15b81591b6f9cc71a380e4ac9ae7e23046b6272ba345120f5d3d5d3f33d74337c2867119fb97197ba32ade0f588de565d40fd3eb910000000000000001000201000000000000000f0000000000000001000000000000000a000000000000000f533b042ffb1ffad9f605a1bf77141422cc88a85066d331956ac08bec537977a5bb60846574249b509fdecfdc5d6ae564e4d06b2acd42d9cd4bbd61b003f7ec670000000301020a2f4ba104eeca47a74708f2f7a5afdc6c60ea653da828860bd9d09bcceee2000000000000000000000000000000051e1600000000000000014b4f4231010c000000a68a61999e2a98fd5c9d4a4c",
+    "disclosed": {
+     "path": [
+      {
+       "mode": 1,
+       "name_hex": "6269672e62696e"
+      }
+     ],
+     "leaf_id_hex": "91d6e19e813d8c00237dbf15b81591b6f9cc71a380e4ac9ae7e23046b6272ba3",
+     "tree_hash_hex": "94fb1515c3f8d067e91a6fa5fd2a43c6f3608825c4f044ba0e088eb76d6942e8",
+     "step_inner_roots_hex": [
+      "45120f5d3d5d3f33d74337c2867119fb97197ba32ade0f588de565d40fd3eb91"
+     ],
+     "chunk_inner_root_hex": "533b042ffb1ffad9f605a1bf77141422cc88a85066d331956ac08bec537977a5",
+     "signer_hex": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+     "signature_valid": true,
+     "payload": {
+      "kind": "range",
+      "len": 5,
+      "bytes_blake3": "fa2e70b7a41de26c2bbe6f90f881d97ed50b693e3e90e7c1230ef023e0bc1e25",
+      "offset_in_blob": 0,
+      "absolute_offset": 10,
+      "blob_id_hex": "bb60846574249b509fdecfdc5d6ae564e4d06b2acd42d9cd4bbd61b003f7ec67",
+      "chunk": {
+       "total_size": 15,
+       "chunk_size": 0,
+       "index": 1,
+       "start": "10",
+       "end": "15"
       }
      }
     },
@@ -2633,6 +2748,13 @@
    "refused_by": "blob length differs from the span"
   },
   {
+   "name": "chunk_longer_than_span",
+   "comment": "plan 13 item 3: a Chunk payload holds the bytes, so its Blob length must equal end - start (12 against 5)",
+   "commit_id_hex": "f8c578df43fa616b6b05f34ffeaaa77ba0a6b0f1e1b555ec57f37f437be08f5e",
+   "bundle_hex": "4b44504203f8c578df43fa616b6b05f34ffeaaa77ba0a6b0f1e1b555ec57f37f437be08f5e8602034b4f423101e9fa25c5962c4123afe7aa69de5f32bcf194558da3fd35e3c1eba7dea6a1eb2400000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b64900000000000000000000000000000000000000000000000000000000000000002a7a29f502691b6339817e04ee08d4f93b231654e50bc08f4fd197193aef9c072d9890017fd95387ba30a99e802be83c058713805f44410037aba5e71a3a5a0501076269672e62696e01a37b8dbbc28798dc45cff4b2436c4f99cc9a3d80f66adc696d404651bdb8d0d1ad9c105d18683814087bcd1a560f22520dddad421264f080f68ccc49b70b522e00000000000000010001000000000000000f0000000000000001000000000000000a000000000000000f67260db25b27cf1a034f16d9bb3b97e8847ca2b4cec17cabe15832246ba43fd10000000301176fa53b0f1108a250eeb7d784dbe47159b44fc7c7c4fada8639f5ef2ec8873516014b4f4231010c000000504ab27fc2f6d46eac137c5a",
+   "refused_by": "blob length differs from the span"
+  },
+  {
    "name": "bytes_not_a_blob",
    "comment": "plan 4.7 step 6: decode bytes as a Blob",
    "commit_id_hex": "ccd4d18d46ad74b3ec272f760262831aa513369dc7be4b0c8308b257edbb913b",
@@ -2645,6 +2767,13 @@
    "commit_id_hex": "fcd65ecb7fc13434834f155ea50fbd8dfa571a93631dc682a17c69d049bf2b8f",
    "bundle_hex": "4b44504203fcd65ecb7fc13434834f155ea50fbd8dfa571a93631dc682a17c69d049bf2b8f8602034b4f42310194fb1515c3f8d067e91a6fa5fd2a43c6f3608825c4f044ba0e088eb76d6942e800000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b64900000000000000000000000000000000000000000000000000000000000000004995b5f4826499b1af3a7ec2219e04444b7d57031211dbbb71e9e0fc2772c2b00af1c5c9c3d0d873bcb2aaf37f433381d3122ab3ddec845255f84d386abf420001076269672e62696e0191d6e19e813d8c00237dbf15b81591b6f9cc71a380e4ac9ae7e23046b6272ba345120f5d3d5d3f33d74337c2867119fb97197ba32ade0f588de565d40fd3eb910000000000000001000201000000000000000f0000000000000001000000000000000a000000000000000f533b042ffb1ffad9f605a1bf77141422cc88a85066d331956ac08bec537977a5bb60846574249b509fdecfdc5d6ae564e4d06b2acd42d9cd4bbd61b003f7ec670000000301020a2f4ba104eeca47a74708f2f7a5afdc6c60ea653da828860bd9d09bcceee2000000000000000300000000000000081e1600000000000000014b4f4231010c000000a68a61999e2a98fd5c9d4a4c",
    "refused_by": "range past the committed span"
+  },
+  {
+   "name": "forged_total_size_proof_wins",
+   "comment": "plan 13 item 2: with total_size 1 below chunk_count 2 the proof fails first; the header-only total check never runs",
+   "commit_id_hex": "c500d278168c074b2445b87f43d71719283cb406b04b41e5bb43c8b8cb7638b1",
+   "bundle_hex": "4b44504203c500d278168c074b2445b87f43d71719283cb406b04b41e5bb43c8b8cb7638b18602034b4f423101d4b1277f1f014b5e58392764f179a0f8e735fa8b38de1237f0783424e5990c0100000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000ce617ef236ee3b40399753a6fccaf64d42a700bb000f58f1a35f5e4cdfee959e1053379ba1b33a190c1c3eb434811639a7bdcfdcefb47da0ec87cae633f0900001076269672e62696e01b283abbdad91679c1b45b5e8b3c14beabd38c6178ed21bfa5c8d174bcfe0a88b39be2dff71a821dc685c8cd9257ef81ea0b2964e612d84eb1cfb51ab8b363e6200000000000000010001000000000000000100000000000000000000000000000000000000000000000aedf29ac9c583f93d71683d4d47ec1d091d3b5dc13ec069f875bf534f020a5c860000000301b5e6e5c089af9f73f79935659c48c47266b4e1e14fbfafb5c8c35c3d0b655d6914014b4f4231010a000000b64044707aab7c0e2e4a",
+   "refused_by": "does not fold"
   },
   {
    "name": "bundle_version_2",
@@ -2696,6 +2825,84 @@
    "commit_id_hex": "bc4d53e04ab0b286768f68cf6826ef15198260b8bb382e060f8302b817150073",
    "span_hex": "4b44535002bc4d53e04ab0b286768f68cf6826ef15198260b8bb382e060f8302b8171500730000000000000005000000000000000a02fb034b44504203bc4d53e04ab0b286768f68cf6826ef15198260b8bb382e060f8302b8171500738602034b4f4231017e3207534bf71a2bfe9a5901fc1d941c7eca6ebc9386532e6814afbd7f0d3a1700000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b649000000000000000000000000000000000000000000000000000000000000000093bd4f3cbe6300a2b80d2c80a58b34ca5e0783fba5356516e09214248d18922cb3f0f918f33b20490a43806776821d8ca5ab0963b63f9628b04836cbfdc73e0001076269672e62696e012219983eccfe82143ebf3c397d0ed26ad2d3d99a8ab2af4764e54637390b666065e24608dd6b50e188d5592248029b951aaa70d6a7c835591439f96bb5ee583900000000000000010001000000000000001400000000000000000000000000000000000000000000000ac9fb5c9f6919fa1961593aa77c6ef4a8c5728d613d2ee01cdcbf4174d11d82520000000301cd7a95f538cf71e83ec181617e5e6c4954c095a6fc458c2f69f549d03f550aad14014b4f4231010a0000001532f032d28e44062988fa034b44504203bc4d53e04ab0b286768f68cf6826ef15198260b8bb382e060f8302b8171500738602034b4f4231017e3207534bf71a2bfe9a5901fc1d941c7eca6ebc9386532e6814afbd7f0d3a1700000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b649000000000000000000000000000000000000000000000000000000000000000093bd4f3cbe6300a2b80d2c80a58b34ca5e0783fba5356516e09214248d18922cb3f0f918f33b20490a43806776821d8ca5ab0963b63f9628b04836cbfdc73e0001076269672e62696e012219983eccfe82143ebf3c397d0ed26ad2d3d99a8ab2af4764e54637390b666065e24608dd6b50e188d5592248029b951aaa70d6a7c835591439f96bb5ee58390000000000000001000100000000000000140000000000000001000000000000000b0000000000000014c9fb5c9f6919fa1961593aa77c6ef4a8c5728d613d2ee01cdcbf4174d11d82520000000301982ffd5fd640f59e7d55f4dcec3d2317eed595dc83f1d280fa1caa3a7422673b13014b4f42310109000000547a8b079cd6dcd600",
    "refused_by": "span_chunk_chain"
+  },
+  {
+   "name": "span_too_large",
+   "comment": "plan 13 item 6: the size check runs first (64 MiB + 1 bytes, zero-filled after a magic)",
+   "commit_id_hex": "6e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a57119",
+   "span_hex": "4b445350",
+   "refused_by": "span_too_large",
+   "expand_to": 67108865
+  },
+  {
+   "name": "span_magic",
+   "comment": "plan 13 item 6: magic",
+   "commit_id_hex": "6e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a57119",
+   "span_hex": "4b445358026e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571190000000000000032000000000000006402d5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c000000000000000000000000000000000000000000000064a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131700000004011da81795abfdfd23471e7001a429421c3fde8fae564c154fb10659444d2bdcec6e014b4f42310164000000afc4b2a5085365b1ed79022180863db9cefd6e074fe5dcbc183089e699c4a17e98aa5807ce59564a3da41dd802cf4a006026b1e5543682c17e98776bc0f1bc7f94304ea2ca336142f37ad791705b0f378508e946ffb972d3726c7e58393307c56f3dc6b3f5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c0000000000000001000000000000006400000000000000c8a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa813170000000402a642c70d8146b9f6dc8e56097b9bb80f136fbf4be63598e385e56414b2e0c5b966976aac51c3d8a412f7dd153f092b0b030abc3835e3900fdcc9816e008fa62c6e014b4f4231016400000076bab6be645f6ef6215774bdcc677c07c08d2e022db3adcee7154966b7316349b0a2ffea4404218b5461733a6c058dd5b7844f06993ded1c703f92b239584ff2c8f7811f04b4f51b2b811add0626b98bac11773618c520f3e7950a3bd533e05db99f76ef",
+   "refused_by": "span_magic"
+  },
+  {
+   "name": "span_encoding_truncated",
+   "comment": "plan 13 item 6: a truncated container",
+   "commit_id_hex": "6e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a57119",
+   "span_hex": "4b445350026e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571190000000000000032000000000000006402d5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c000000000000000000000000000000000000000000000064a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131700000004011da81795abfdfd23471e7001a429421c3fde8fae564c154fb10659444d2bdcec6e014b4f42310164000000afc4b2a5085365b1ed79022180863db9cefd6e074fe5dcbc183089e699c4a17e98aa5807ce59564a3da41dd802cf4a006026b1e5543682c17e98776bc0f1bc7f94304ea2ca336142f37ad791705b0f378508e946ffb972d3726c7e58393307c56f3dc6b3f5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c0000000000000001000000000000006400000000000000c8a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa813170000000402a642c70d8146b9f6dc8e56097b9bb80f136fbf4be63598e385e56414b2e0c5b966976aac51c3d8a412f7dd153f092b0b030abc3835e3900fdcc9816e008fa62c6e014b4f4231016400000076bab6be645f6ef6215774bdcc677c07c08d2e022db3adcee7154966b7316349b0a2ffea4404218b5461733a6c058dd5b7844f06993ded1c703f92b239584ff2c8f7811f04b4f51b2b811add0626b98bac11773618c520f3e7950a3bd533e0",
+   "refused_by": "span_encoding"
+  },
+  {
+   "name": "span_trailing_bytes",
+   "comment": "plan 13 item 6: a byte after the last bundle",
+   "commit_id_hex": "6e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a57119",
+   "span_hex": "4b445350026e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571190000000000000032000000000000006402d5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c000000000000000000000000000000000000000000000064a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131700000004011da81795abfdfd23471e7001a429421c3fde8fae564c154fb10659444d2bdcec6e014b4f42310164000000afc4b2a5085365b1ed79022180863db9cefd6e074fe5dcbc183089e699c4a17e98aa5807ce59564a3da41dd802cf4a006026b1e5543682c17e98776bc0f1bc7f94304ea2ca336142f37ad791705b0f378508e946ffb972d3726c7e58393307c56f3dc6b3f5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c0000000000000001000000000000006400000000000000c8a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa813170000000402a642c70d8146b9f6dc8e56097b9bb80f136fbf4be63598e385e56414b2e0c5b966976aac51c3d8a412f7dd153f092b0b030abc3835e3900fdcc9816e008fa62c6e014b4f4231016400000076bab6be645f6ef6215774bdcc677c07c08d2e022db3adcee7154966b7316349b0a2ffea4404218b5461733a6c058dd5b7844f06993ded1c703f92b239584ff2c8f7811f04b4f51b2b811add0626b98bac11773618c520f3e7950a3bd533e05db99f76ef00",
+   "refused_by": "span_trailing_bytes"
+  },
+  {
+   "name": "span_commit",
+   "comment": "plan 13 item 6: the embedded commit differs from the trusted one",
+   "commit_id_hex": "379d20d6dd669d1e58ae06fc430332a2a51b8bee45238a8b64624e822771a2c2",
+   "span_hex": "4b445350026e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571190000000000000032000000000000006402d5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c000000000000000000000000000000000000000000000064a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131700000004011da81795abfdfd23471e7001a429421c3fde8fae564c154fb10659444d2bdcec6e014b4f42310164000000afc4b2a5085365b1ed79022180863db9cefd6e074fe5dcbc183089e699c4a17e98aa5807ce59564a3da41dd802cf4a006026b1e5543682c17e98776bc0f1bc7f94304ea2ca336142f37ad791705b0f378508e946ffb972d3726c7e58393307c56f3dc6b3f5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c0000000000000001000000000000006400000000000000c8a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa813170000000402a642c70d8146b9f6dc8e56097b9bb80f136fbf4be63598e385e56414b2e0c5b966976aac51c3d8a412f7dd153f092b0b030abc3835e3900fdcc9816e008fa62c6e014b4f4231016400000076bab6be645f6ef6215774bdcc677c07c08d2e022db3adcee7154966b7316349b0a2ffea4404218b5461733a6c058dd5b7844f06993ded1c703f92b239584ff2c8f7811f04b4f51b2b811add0626b98bac11773618c520f3e7950a3bd533e05db99f76ef",
+   "refused_by": "span_commit"
+  },
+  {
+   "name": "span_range_arithmetic_len_0",
+   "comment": "plan 13 item 6: len == 0",
+   "commit_id_hex": "6e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a57119",
+   "span_hex": "4b445350026e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571190000000000000032000000000000000002d5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c000000000000000000000000000000000000000000000064a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131700000004011da81795abfdfd23471e7001a429421c3fde8fae564c154fb10659444d2bdcec6e014b4f42310164000000afc4b2a5085365b1ed79022180863db9cefd6e074fe5dcbc183089e699c4a17e98aa5807ce59564a3da41dd802cf4a006026b1e5543682c17e98776bc0f1bc7f94304ea2ca336142f37ad791705b0f378508e946ffb972d3726c7e58393307c56f3dc6b3f5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c0000000000000001000000000000006400000000000000c8a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa813170000000402a642c70d8146b9f6dc8e56097b9bb80f136fbf4be63598e385e56414b2e0c5b966976aac51c3d8a412f7dd153f092b0b030abc3835e3900fdcc9816e008fa62c6e014b4f4231016400000076bab6be645f6ef6215774bdcc677c07c08d2e022db3adcee7154966b7316349b0a2ffea4404218b5461733a6c058dd5b7844f06993ded1c703f92b239584ff2c8f7811f04b4f51b2b811add0626b98bac11773618c520f3e7950a3bd533e05db99f76ef",
+   "refused_by": "span_range_arithmetic"
+  },
+  {
+   "name": "span_range_arithmetic_overflow",
+   "comment": "plan 13 item 6: offset + len overflows u64",
+   "commit_id_hex": "6e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a57119",
+   "span_hex": "4b445350026e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a57119ffffffffffffffff000000000000000202d5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c000000000000000000000000000000000000000000000064a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131700000004011da81795abfdfd23471e7001a429421c3fde8fae564c154fb10659444d2bdcec6e014b4f42310164000000afc4b2a5085365b1ed79022180863db9cefd6e074fe5dcbc183089e699c4a17e98aa5807ce59564a3da41dd802cf4a006026b1e5543682c17e98776bc0f1bc7f94304ea2ca336142f37ad791705b0f378508e946ffb972d3726c7e58393307c56f3dc6b3f5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c0000000000000001000000000000006400000000000000c8a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa813170000000402a642c70d8146b9f6dc8e56097b9bb80f136fbf4be63598e385e56414b2e0c5b966976aac51c3d8a412f7dd153f092b0b030abc3835e3900fdcc9816e008fa62c6e014b4f4231016400000076bab6be645f6ef6215774bdcc677c07c08d2e022db3adcee7154966b7316349b0a2ffea4404218b5461733a6c058dd5b7844f06993ded1c703f92b239584ff2c8f7811f04b4f51b2b811add0626b98bac11773618c520f3e7950a3bd533e05db99f76ef",
+   "refused_by": "span_range_arithmetic"
+  },
+  {
+   "name": "span_chunk_count_one",
+   "comment": "plan 13 item 6: at least two bundles",
+   "commit_id_hex": "6e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a57119",
+   "span_hex": "4b445350026e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571190000000000000032000000000000000a01d5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c000000000000000000000000000000000000000000000064a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131700000004011da81795abfdfd23471e7001a429421c3fde8fae564c154fb10659444d2bdcec6e014b4f42310164000000afc4b2a5085365b1ed79022180863db9cefd6e074fe5dcbc183089e699c4a17e98aa5807ce59564a3da41dd802cf4a006026b1e5543682c17e98776bc0f1bc7f94304ea2ca336142f37ad791705b0f378508e946ffb972d3726c7e58393307c56f3dc6b3",
+   "refused_by": "span_chunk_count"
+  },
+  {
+   "name": "span_chunk_selector",
+   "comment": "plan 13 item 6: every payload is a Chunk (here the second is a Range)",
+   "commit_id_hex": "6e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a57119",
+   "span_hex": "4b445350026e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571190000000000000032000000000000006402d5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c000000000000000000000000000000000000000000000064a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131700000004011da81795abfdfd23471e7001a429421c3fde8fae564c154fb10659444d2bdcec6e014b4f42310164000000afc4b2a5085365b1ed79022180863db9cefd6e074fe5dcbc183089e699c4a17e98aa5807ce59564a3da41dd802cf4a006026b1e5543682c17e98776bc0f1bc7f94304ea2ca336142f37ad791705b0f378508e946ffb972d3726c7e58393307c56f3dc6b3ae054b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb0280000000000000001000201000000000000012c0000000000000001000000000000006400000000000000c8a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131743b5fa9d5f5fb4aaecbf6e9dd0de6365407f0c7f43e818d791c743df382ee01e0000000402a642c70d8146b9f6dc8e56097b9bb80f136fbf4be63598e385e56414b2e0c5b966976aac51c3d8a412f7dd153f092b0b030abc3835e3900fdcc9816e008fa62c0000000000000000000000000000000a766e00000000000000014b4f4231016400000076bab6be645f6ef6215774bdcc677c07c08d2e022db3adcee7154966b7316349b0a2ffea4404218b5461733a6c058dd5b7844f06993ded1c703f92b239584ff2c8f7811f04b4f51b2b811add0626b98bac11773618c520f3e7950a3bd533e05db99f76ef",
+   "refused_by": "span_chunk_selector"
+  },
+  {
+   "name": "span_chunk_order_reversed",
+   "comment": "plan 13 item 6: indices are consecutive and ascending",
+   "commit_id_hex": "6e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a57119",
+   "span_hex": "4b445350026e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571190000000000000032000000000000006402f5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c0000000000000001000000000000006400000000000000c8a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa813170000000402a642c70d8146b9f6dc8e56097b9bb80f136fbf4be63598e385e56414b2e0c5b966976aac51c3d8a412f7dd153f092b0b030abc3835e3900fdcc9816e008fa62c6e014b4f4231016400000076bab6be645f6ef6215774bdcc677c07c08d2e022db3adcee7154966b7316349b0a2ffea4404218b5461733a6c058dd5b7844f06993ded1c703f92b239584ff2c8f7811f04b4f51b2b811add0626b98bac11773618c520f3e7950a3bd533e05db99f76efd5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c000000000000000000000000000000000000000000000064a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131700000004011da81795abfdfd23471e7001a429421c3fde8fae564c154fb10659444d2bdcec6e014b4f42310164000000afc4b2a5085365b1ed79022180863db9cefd6e074fe5dcbc183089e699c4a17e98aa5807ce59564a3da41dd802cf4a006026b1e5543682c17e98776bc0f1bc7f94304ea2ca336142f37ad791705b0f378508e946ffb972d3726c7e58393307c56f3dc6b3",
+   "refused_by": "span_chunk_order"
+  },
+  {
+   "name": "span_chunk_order_duplicate",
+   "comment": "plan 13 item 6: the same index twice",
+   "commit_id_hex": "6e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a57119",
+   "span_hex": "4b445350026e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571190000000000000032000000000000006402d5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c000000000000000000000000000000000000000000000064a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131700000004011da81795abfdfd23471e7001a429421c3fde8fae564c154fb10659444d2bdcec6e014b4f42310164000000afc4b2a5085365b1ed79022180863db9cefd6e074fe5dcbc183089e699c4a17e98aa5807ce59564a3da41dd802cf4a006026b1e5543682c17e98776bc0f1bc7f94304ea2ca336142f37ad791705b0f378508e946ffb972d3726c7e58393307c56f3dc6b3d5044b445042036e7418046c5fafbc8d8670759ec568271a0d68c1e150e065316b579a82a571198602034b4f423101e4d12291957e72259832359a343fa5f170fd370a7d0a0c518dea65814c6b229600000000012000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0d0000006368756e6b206f66667365747300f1536500000000197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6137a839611e6eadd31578de39cbaa9299c29ea7f50bf3af3bec6962b083b6b6490000000000000000000000000000000000000000000000000000000000000000f0b712a7d10c2d158c3c137dd022b7ce526e64ce7265c945019bd744db9a186464c7ad6327425bb31a31f294961d982901b656baf4f7306c5b780b2e9b2b160d01076269672e62696e01a8ec871df151c7c0d87fc2e2eb992d68283f29dc3624fac62aa1d98876f91ace473ff8564d17f39d0057bb737dffb7d15e4628eeb726be152bbd1fe90bdfb02800000000000000010001000000000000012c000000000000000000000000000000000000000000000064a90ece9e429f00dc5405e9f5939c3f180e9ed458deacf593a0be88579fa8131700000004011da81795abfdfd23471e7001a429421c3fde8fae564c154fb10659444d2bdcec6e014b4f42310164000000afc4b2a5085365b1ed79022180863db9cefd6e074fe5dcbc183089e699c4a17e98aa5807ce59564a3da41dd802cf4a006026b1e5543682c17e98776bc0f1bc7f94304ea2ca336142f37ad791705b0f378508e946ffb972d3726c7e58393307c56f3dc6b3",
+   "refused_by": "span_chunk_order"
   }
  ],
  "pins": [

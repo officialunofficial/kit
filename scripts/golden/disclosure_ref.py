@@ -281,11 +281,13 @@ def check_layout(hdr):
 
 
 def check_chunk_header(hdr, chunk_id, leaf_id):
-    """Plan 4.7, for a chunked leaf: the wrap check and the header rules, then
-    the five checks that depend on the span, in order."""
+    """Plan 4.7 as ordered by plan section 13, item 2, for a chunked leaf
+    (the leaf-type and len == 0 checks come before this): the wrap and
+    declared-root check, step 1 (the multi-proof), then the header-only total
+    check on (total_size, chunk_size, leaf_count - 1), then steps 2 to 5.
+    leaf_count is trusted only once the proof has folded to the id."""
     if domain_digest(o.CHUNKED_DOMAIN, hdr["inner_root"]) != leaf_id:
         raise Reject("chunk inner root does not wrap to the leaf id")
-    check_layout(hdr)
     start, end, index = hdr["start"], hdr["end"], hdr["index"]
     total, size = hdr["total_size"], hdr["chunk_size"]
     leaf_count, siblings = hdr["proof"]
@@ -298,6 +300,7 @@ def check_chunk_header(hdr, chunk_id, leaf_id):
         raise Reject(str(e))
     if folded != hdr["inner_root"]:
         raise Reject("chunk proof does not fold to the declared inner root")
+    check_layout(hdr)
     # 2. start < end <= total_size, and the chunk fits in one object.
     if not start < end <= total:
         raise Reject("span outside the file")
@@ -413,8 +416,9 @@ def verify_bundle(data, trusted_commit_id):
             "total_size": hdr["total_size"],
             "chunk_size": hdr["chunk_size"],
             "index": hdr["index"],
-            "start": hdr["start"],
-            "end": hdr["end"],
+            # Span values are decimal strings in every sidecar (plan section 13).
+            "start": str(hdr["start"]),
+            "end": str(hdr["end"]),
             "len": len(b["bytes"]),
             "bytes_blake3": blake3(b["bytes"]).hex(),
         }
@@ -428,8 +432,11 @@ def verify_bundle(data, trusted_commit_id):
             check_chunk_header(hdr, hdr["chunk_id"], leaf_id)
             result["chunk_inner_root_hex"] = hdr["inner_root"].hex()
             blob_id, start = hdr["chunk_id"], hdr["start"]
-            chunk = {k: hdr[k] for k in ("total_size", "chunk_size", "index", "start", "end")}
-            # 7. The range lies inside the committed span.
+            chunk = {k: hdr[k] for k in ("total_size", "chunk_size", "index")}
+            chunk["start"], chunk["end"] = str(hdr["start"]), str(hdr["end"])
+            # 7. The range lies inside the committed span, and only the span: a
+            # real chunk longer than its span is not measured (plan section 13,
+            # item 3), because bytes past the span cannot be disclosed.
             if b["offset"] + b["len"] > hdr["end"] - hdr["start"]:
                 raise Reject("range past the committed span")
         content, _ = bao_slice(b["slice"], blob_id, b["offset"] + 10, b["len"])

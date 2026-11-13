@@ -408,23 +408,29 @@ def check_chunked_layout(total, size, count):
 
 
 def check_chunk_end(index, size, total, prev_end, end):
-    """Plan 4.4 check 4: the per-entry rule that the decoder and the fold
-    share. Raises ValueError with one label per rule."""
+    """Plan 4.4 check 4 (as fixed by plan section 13, item 1): the per-entry
+    rule that the decoder and the fold share, so both refuse at the same entry
+    with the same label. In order: the end increases, the length cap,
+    end <= total_size, the fixed formula. Raises ValueError with one label per
+    rule."""
     if end <= prev_end:
         raise ValueError("end not increasing")
     if end - prev_end > MAX_CHUNK_LEN:
         raise ValueError("chunk length above the object limit")
+    if end > total:
+        raise ValueError("end above total_size")
     if size not in CONTENT_DEFINED and end != min((index + 1) * size, total):
         raise ValueError("fixed layout end")
 
 
 def check_last_end(total, count, last_end):
-    """Plan 4.4 check 5."""
+    """Plan 4.4 check 5. With check 4 done per entry, it catches only a last
+    end below total_size and a zero-chunk manifest with a non-zero total_size."""
     if count == 0:
         if total != 0:
             raise ValueError("total_size without chunks")
-    elif last_end != total:
-        raise ValueError("last end differs from total_size")
+    elif last_end < total:
+        raise ValueError("last end below total_size")
 
 
 def check_chunked_rules():
@@ -555,8 +561,10 @@ MANIFEST_CASES = [
     ("end_0 is 0", 0, 0, [(_h(1), 0)], None, "end not increasing"),
     ("zero-length chunk in the middle", 9, 0, [(_h(1), 5), (_h(2), 5), (_h(3), 9)], None, "end not increasing"),
     ("ends decrease", 20, 0, [(_h(1), 10), (_h(2), 5), (_h(3), 20)], None, "end not increasing"),
-    ("last end below total_size", 25, 0, [(_h(1), 10), (_h(2), 20)], None, "last end differs from total_size"),
-    ("last end above total_size", 15, 0, [(_h(1), 10), (_h(2), 20)], None, "last end differs from total_size"),
+    ("last end below total_size", 25, 0, [(_h(1), 10), (_h(2), 20)], None, "last end below total_size"),
+    ("last end above total_size", 15, 0, [(_h(1), 10), (_h(2), 20)], None, "end above total_size"),
+    ("middle end above total_size", 15, 0, [(_h(1), 5), (_h(2), 20), (_h(3), 25)], None, "end above total_size"),
+    ("end above total_size before the fixed formula", 1500, 1000, [(_h(1), 1000), (_h(2), 2000)], None, "end above total_size"),
     ("total_size without chunks", 1, 0, [], None, "total_size without chunks"),
     ("total_size above the limit", MAX_TOTAL_SIZE + 1, 0, [], None, "total_size above the file limit"),
     ("chunk above the length cap", MAX_CHUNK_LEN + 1, 0, [(_h(1), MAX_CHUNK_LEN + 1)], None, "chunk length above the object limit"),

@@ -22,11 +22,17 @@
 #                         failing check
 #   overlap               an id built from overlapping spans: no manifest
 #                         decodes to it, and two disclosures both verify
+#   long_chunk_range      a real chunk longer than its span: a Range inside
+#                         the span verifies (plan section 13, item 3)
 #   negative_disclosures  bundles and spans that a verifier refuses
 #   pins                  the manifest of 1,000,001 and 8,388,608 chunks (only
 #                         with --large: about 3 minutes on 10 cores)
 #
-# Each entry has a one-line "comment" that names the plan line it tests.
+# Each entry has a one-line "comment" that names the plan line it tests. The
+# plan is kit-080-final-plan.md; "plan 13" is its section 13, which overrides
+# section 4 where they differ. Span values (start, end) and the total_size of
+# the leaf digests are decimal strings in the file, because values near the
+# u64 maximum lose precision as JSON numbers.
 #
 # Usage:
 #   python3 -I -B scripts/golden/chunk_offsets_ref.py [--large] [--write]
@@ -160,15 +166,15 @@ class World:
             b"KDPB" + bytes([version]) + self.commit_id + vec(self.commit_bytes) + varint(1) + step
         )
 
-    def hdr(self, i, with_chunk_id):
+    def hdr(self, i, with_chunk_id, total_field=None):
         s, e = self.spans[i]
-        out = be64(self.total) + be32(self.chunk_size) + be32(i) + be64(s) + be64(e) + self.inner_root
+        out = be64(self.total if total_field is None else total_field) + be32(self.chunk_size) + be32(i) + be64(s) + be64(e) + self.inner_root
         if with_chunk_id:
             out += self.chunk_ids[i]
         return out + enc_proof(p.prove(self.leaves, [0, i + 1]))
 
-    def chunk_bundle(self, i, version=3):
-        return self._head(version) + bytes([1]) + self.hdr(i, False) + vec(self.blobs[i])
+    def chunk_bundle(self, i, version=3, total_field=None):
+        return self._head(version) + bytes([1]) + self.hdr(i, False, total_field) + vec(self.blobs[i])
 
     def range_bundle(self, i, offset, length, version=3):
         sl = bao_slice_encode(self.blobs[i], offset + 10, length)
@@ -209,6 +215,14 @@ class World:
                 "proof_hex": enc_proof(proof).hex(),
             }
         return out
+
+
+def span_raw(commit_id, offset, length, bundles, version=2):
+    """A KDSP container around the given bundles, whatever they hold."""
+    return (
+        b"KDSP" + bytes([version]) + commit_id + be64(offset) + be64(length)
+        + varint(len(bundles)) + b"".join(vec(b) for b in bundles)
+    )
 
 
 def contents(seed, lengths):
@@ -286,7 +300,7 @@ def case_entry(name, w, comment, layout_comment):
         "chunk_size": w.chunk_size,
         "chunk_count": len(w.blobs),
         "chunks": [
-            {"start": s, "end": e, "chunk_id_hex": h.hex(), "blob_len": len(b) - 10}
+            {"start": str(s), "end": str(e), "chunk_id_hex": h.hex(), "blob_len": len(b) - 10}
             for (s, e), h, b in zip(w.spans, w.chunk_ids, w.blobs)
         ],
         "manifest_len": len(w.manifest),
@@ -380,7 +394,7 @@ def build_leaf_digests():
         body = struct.pack("<Q", total) + struct.pack("<I", size)
         items.append({
             "name": name, "comment": comment, "domain": "kit-cblob-meta-v2",
-            "total_size": total, "chunk_size": size, "body_hex": body.hex(),
+            "total_size": str(total), "chunk_size": size, "body_hex": body.hex(),
             "digest_hex": o.meta_leaf(total, size).hex(),
         })
 
@@ -388,7 +402,7 @@ def build_leaf_digests():
         body = struct.pack("<QQ", start, end) + cid
         items.append({
             "name": name, "comment": comment, "domain": "kit-cblob-chunk-v1",
-            "start": start, "end": end, "chunk_id_hex": cid.hex(), "body_hex": body.hex(),
+            "start": str(start), "end": str(end), "chunk_id_hex": cid.hex(), "body_hex": body.hex(),
             "digest_hex": o.chunk_leaf(start, end, cid).hex(),
         })
 
@@ -406,8 +420,10 @@ def build_refusals():
         "end_0 is 0": "plan 4.4 check 4: end_0 > 0 (end_(-1) = 0); also a chunk of length 0 at the start",
         "zero-length chunk in the middle": "plan 4.4 check 4: a chunk of length 0 (end_i == end_(i-1)) is refused",
         "ends decrease": "plan 4.4 check 4: ends must increase",
-        "last end below total_size": "plan 4.4 check 5: the last end equals total_size",
-        "last end above total_size": "plan 4.4 check 5: the last end equals total_size",
+        "last end below total_size": "plan 13 item 1, check 5: the last end is not below total_size",
+        "last end above total_size": "plan 13 item 1, check 4: end_i <= total_size is a per-entry check",
+        "middle end above total_size": "plan 13 item 1, check 4: end_i <= total_size at an interior entry",
+        "end above total_size before the fixed formula": "plan 13 item 1: end <= total_size comes before the fixed formula in check 4",
         "total_size without chunks": "plan 4.4 check 5: with no chunks, total_size == 0",
         "total_size above the limit": "plan 4.4 check 3: total_size <= 128 GiB",
         "chunk above the length cap": "plan 4.4 check 4: end_i - end_(i-1) <= MAX_RAW_OBJECT_SIZE - 10 (a span above 1 GiB less 10)",
@@ -466,11 +482,34 @@ def build_overlap():
         "comment": "plan 4.2/4.9: overlapping spans under an id with no valid manifest; both disclosures verify and place different bytes at offsets 5..10",
         "total_size": 15,
         "chunk_size": 0,
-        "spans": [[0, 10], [5, 15]],
+        "spans": [["0", "10"], ["5", "15"]],
         "chunk_ids_hex": [h.hex() for h in w.chunk_ids],
         "chunked_id_hex": w.chunked_id.hex(),
         "manifest": None,
         "disclosures": [a, b, ra, rb],
+    }
+
+
+def build_long_chunk_range():
+    """Plan section 13, item 3: a Range checks the range against the committed
+    span only. The real chunk (12 bytes) is longer than its span (5 bytes);
+    ranges inside the span verify, and the same chunk as a Chunk payload does
+    not (see negative_disclosures)."""
+    blobs = [make_blob(contents(55, [10])[0]), make_blob(contents(56, [12])[0])]
+    w = World(15, 0, blobs, [(0, 10), (10, 15)])
+    a = disclosure_entry(w, "range", 1, "plan 13 item 3: a range inside the span of a real chunk that is longer than its span verifies", offset=1, length=3)
+    b = disclosure_entry(w, "range", 1, "plan 13 item 3: the whole committed span (offset 0, len 5) of the longer chunk verifies", offset=0, length=5)
+    assert a["disclosed"]["payload"]["absolute_offset"] == 11
+    assert b["disclosed"]["payload"]["absolute_offset"] == 10
+    return {
+        "comment": "plan 13 item 3/4.9: spans [0,10) and [10,15), but chunk 1 holds 12 bytes; a Range inside [10,15) verifies",
+        "total_size": 15,
+        "chunk_size": 0,
+        "spans": [["0", "10"], ["10", "15"]],
+        "chunk_blob_lens": [10, 12],
+        "chunked_id_hex": w.chunked_id.hex(),
+        "manifest": None,
+        "disclosures": [a, b],
     }
 
 
@@ -505,6 +544,8 @@ def build_negative():
     # Honest spans, chunk bytes of another length: a Blob whose length differs from end - start.
     short = [make_blob(contents(51, [10])[0]), make_blob(contents(52, [9])[0])]
     bad_chunk("blob_length_differs_from_span", "plan 4.7 step 6: the Blob length field equals end - start", [(0, 10), (10, 20)], 20, 0, [], 1, "blob length differs from the span", blobs=short)
+    longer = [make_blob(contents(57, [10])[0]), make_blob(contents(58, [12])[0])]
+    bad_chunk("chunk_longer_than_span", "plan 13 item 3: a Chunk payload holds the bytes, so its Blob length must equal end - start (12 against 5)", [(0, 10), (10, 15)], 15, 0, [], 1, "blob length differs from the span", blobs=longer)
     raw_bytes = [make_blob(contents(53, [10])[0]), contents(54, [10])[0]]
     bad_chunk("bytes_not_a_blob", "plan 4.7 step 6: decode bytes as a Blob", [(0, 10), (10, 20)], 20, 0, [], 1, "not a blob", blobs=raw_bytes)
     # Range past the committed span but inside the real chunk.
@@ -518,6 +559,18 @@ def build_negative():
     else:
         raise AssertionError("range past the span must be refused")
     out.append(neg_entry("range_past_span_inside_real_chunk", "plan 4.7 step 7: offset_in_blob + len <= end - start, with the real chunk (12 bytes) longer than its span (5)", raw, w.commit_id, "range past the committed span"))
+    # Plan section 13, item 2: the multi-proof runs before the header-only total
+    # check, so a forged total_size that also breaks the layout is refused by the
+    # proof (the meta leaf no longer folds), not by the layout rule.
+    w = honest_world(59, 0, [10, 10])
+    raw = w.chunk_bundle(0, total_field=1)
+    try:
+        d.verify_bundle(raw, w.commit_id)
+    except d.Reject as e:
+        assert "does not fold" in str(e), str(e)
+    else:
+        raise AssertionError("a forged total_size must be refused")
+    out.append(neg_entry("forged_total_size_proof_wins", "plan 13 item 2: with total_size 1 below chunk_count 2 the proof fails first; the header-only total check never runs", raw, w.commit_id, "does not fold"))
     # A v2 bundle: an honest world, version byte 2.
     w = honest_world(60, 0, [30, 40])
     raw = w.chunk_bundle(0, version=2)
@@ -531,14 +584,17 @@ def build_negative():
     # Spans.
     spans_out = []
 
-    def bad_span(name, comment, raw, commit_id, reason):
+    def bad_span(name, comment, raw, commit_id, reason, expand_to=None):
         try:
-            d.verify_span(raw, commit_id)
+            d.verify_span(raw if expand_to is None else raw + bytes(expand_to - len(raw)), commit_id)
         except d.SpanReject as e:
             assert e.reason == reason, (name, e.reason, reason)
         else:
             raise AssertionError(f"{name} must be refused")
-        spans_out.append({"name": name, "comment": comment, "commit_id_hex": commit_id.hex(), "span_hex": raw.hex(), "refused_by": reason})
+        entry = {"name": name, "comment": comment, "commit_id_hex": commit_id.hex(), "span_hex": raw.hex(), "refused_by": reason}
+        if expand_to is not None:
+            entry["expand_to"] = expand_to  # append zero bytes up to this length before verifying
+        spans_out.append(entry)
 
     w = honest_world(61, 0, [100, 100, 100])
     bad_span("span_of_v2_bundles", "plan 4.9: a span of KDPB v2 bundles", w.span_bundle(50, 100, 0, 1, inner_version=2), w.commit_id, "span_inner_invalid")
@@ -550,6 +606,22 @@ def build_negative():
     blobs = [make_blob(c) for c in contents(62, [10, 9])]
     wg = World(20, 0, blobs, [(0, 10), (11, 20)])
     bad_span("span_chain_breaks", "plan 4.7: end_i == start_(i+1) (new reason span_chunk_chain)", wg.span_bundle(5, 10, 0, 1), wg.commit_id, "span_chunk_chain")
+    # The sixteen reasons of plan section 13, item 6, in order. span_leaf_context
+    # needs two files under one commit and span_chunk_context cannot be reached
+    # by verified bundles of one leaf; neither has a vector here.
+    good = w.span_bundle(50, 100, 0, 1)
+    bad_span("span_too_large", "plan 13 item 6: the size check runs first (64 MiB + 1 bytes, zero-filled after a magic)", b"KDSP", w.commit_id, "span_too_large", expand_to=(64 << 20) + 1)
+    bad_span("span_magic", "plan 13 item 6: magic", b"KDSX" + good[4:], w.commit_id, "span_magic")
+    bad_span("span_encoding_truncated", "plan 13 item 6: a truncated container", good[:-5], w.commit_id, "span_encoding")
+    bad_span("span_trailing_bytes", "plan 13 item 6: a byte after the last bundle", good + b"\x00", w.commit_id, "span_trailing_bytes")
+    bad_span("span_commit", "plan 13 item 6: the embedded commit differs from the trusted one", good, blake3(b"another commit"), "span_commit")
+    bad_span("span_range_arithmetic_len_0", "plan 13 item 6: len == 0", w.span_bundle(50, 0, 0, 1), w.commit_id, "span_range_arithmetic")
+    bad_span("span_range_arithmetic_overflow", "plan 13 item 6: offset + len overflows u64", w.span_bundle((1 << 64) - 1, 2, 0, 1), w.commit_id, "span_range_arithmetic")
+    bad_span("span_chunk_count_one", "plan 13 item 6: at least two bundles", w.span_bundle(50, 10, 0, 0), w.commit_id, "span_chunk_count")
+    b0, b1 = w.chunk_bundle(0), w.range_bundle(1, 0, 10)
+    bad_span("span_chunk_selector", "plan 13 item 6: every payload is a Chunk (here the second is a Range)", span_raw(w.commit_id, 50, 100, [b0, b1]), w.commit_id, "span_chunk_selector")
+    bad_span("span_chunk_order_reversed", "plan 13 item 6: indices are consecutive and ascending", span_raw(w.commit_id, 50, 100, [w.chunk_bundle(1), b0]), w.commit_id, "span_chunk_order")
+    bad_span("span_chunk_order_duplicate", "plan 13 item 6: the same index twice", span_raw(w.commit_id, 50, 100, [b0, b0]), w.commit_id, "span_chunk_order")
     return out, spans_out
 
 
@@ -634,6 +706,7 @@ def generate():
         "cases": cases,
         "refusals": build_refusals(),
         "overlap": build_overlap(),
+        "long_chunk_range": build_long_chunk_range(),
         "negative_disclosures": neg,
         "negative_spans": neg_spans,
     }
@@ -678,6 +751,10 @@ def verify_stored(doc):
             bad.append(f"refusal {r['name']}: accepted")
         except ValueError as err:
             need(str(err) == r["refused_by"], f"refusal {r['name']}: {err}")
+    for e in doc["long_chunk_range"]["disclosures"]:
+        res = d.verify_bundle(bytes.fromhex(e["bundle_hex"]), bytes.fromhex(e["commit_id_hex"]))
+        need(summary(res) == e["disclosed"], "long_chunk_range: disclosure")
+        need(res["leaf_id_hex"] == doc["long_chunk_range"]["chunked_id_hex"], "long_chunk_range: leaf")
     ov = doc["overlap"]
     for e in ov["disclosures"]:
         res = d.verify_bundle(bytes.fromhex(e["bundle_hex"]), bytes.fromhex(e["commit_id_hex"]))
@@ -689,8 +766,11 @@ def verify_stored(doc):
         except d.Reject as err:
             need(e["refused_by"] in str(err), f"negative {e['name']}: {err}")
     for e in doc["negative_spans"]:
+        raw = bytes.fromhex(e["span_hex"])
+        if "expand_to" in e:
+            raw += bytes(e["expand_to"] - len(raw))
         try:
-            d.verify_span(bytes.fromhex(e["span_hex"]), bytes.fromhex(e["commit_id_hex"]))
+            d.verify_span(raw, bytes.fromhex(e["commit_id_hex"]))
             bad.append(f"negative span {e['name']}: accepted")
         except d.SpanReject as err:
             need(err.reason == e["refused_by"], f"negative span {e['name']}: {err.reason}")
