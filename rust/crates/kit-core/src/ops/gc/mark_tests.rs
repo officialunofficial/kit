@@ -219,6 +219,20 @@ fn live_set_holds_objects_and_chunks_apart() {
 }
 
 #[test]
+fn a_set_with_only_objects_or_only_chunks_is_not_empty() {
+    let objects_only = LiveSet {
+        objects: BTreeSet::from([[1u8; 32]]),
+        chunks: Vec::new(),
+    };
+    let chunks_only = LiveSet {
+        objects: BTreeSet::new(),
+        chunks: vec![[2u8; 32]],
+    };
+    assert!(!objects_only.is_empty() && !chunks_only.is_empty());
+    assert_eq!((objects_only.len(), chunks_only.len()), (1, 1));
+}
+
+#[test]
 fn contains_needs_either_part() {
     let live = LiveSet {
         objects: BTreeSet::from([[1u8; 32]]),
@@ -753,9 +767,17 @@ fn the_report_counts_live_chunks() {
     let fx = Fx::new();
     let chunks = fx.blobs("c", 7);
     fx.chunked_file_on_main(&chunks);
-    let _orphans = fx.blobs("orphan", 5);
+    let orphans = fx.blobs("orphan", 5);
+    let orphan_bytes: u64 = orphans
+        .iter()
+        .map(|h| fs::metadata(fx.store.path_for(h)).unwrap().len())
+        .sum();
 
+    let dry = fx.gc(MarkLimits::DEFAULT, true).unwrap();
+    assert_eq!(dry.bytes_reclaimed, orphan_bytes);
     let report = fx.gc(MarkLimits::DEFAULT, false).unwrap();
+    assert_eq!(report.bytes_reclaimed, orphan_bytes);
+    assert!(orphan_bytes > 0);
 
     assert_eq!(report.live, 3 + 7);
     assert_eq!(report.live_chunks, 7);
@@ -1018,7 +1040,11 @@ fn write_roots(fx: &Fx, spec: &Spec, graph: &Graph) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
+    #![proptest_config(ProptestConfig {
+        cases: 48,
+        max_shrink_iters: 32,
+        ..ProptestConfig::default()
+    })]
 
     /// The new live set equals the old one-set walk, or the new mark refuses
     /// and the store stays byte-identical. A gc at grace 0 prunes exactly the

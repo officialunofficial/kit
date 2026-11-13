@@ -1469,6 +1469,30 @@ mod tests {
         }
     }
 
+    /// A failure to look at a shard other than its absence is an error. If
+    /// it were an empty listing, a sweep would pass over objects it cannot see.
+    #[cfg(unix)]
+    #[test]
+    fn list_shard_reports_a_directory_it_cannot_inspect() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, store) = fresh_store();
+        let id = store.write(b"an object").unwrap();
+        let root = store.objects_root.clone();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        let listed = store.list_shard(id[0]);
+        // A superuser reads the directory anyway, and the test has nothing to
+        // show.
+        let denied = fs::read_dir(&root).is_err();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        if !denied {
+            return;
+        }
+        assert!(
+            matches!(listed, Err(StoreError::Io(ref e)) if e.kind() == io::ErrorKind::PermissionDenied),
+            "{listed:?}"
+        );
+    }
+
     #[test]
     fn temp_file_left_behind_does_not_satisfy_contains() {
         // Simulate a crash mid-write: drop a stale `.tmp.*` file in the

@@ -408,9 +408,7 @@ impl ChunkIds {
                 need = self.ids.len().saturating_add(new.len());
                 target = need.max(self.threshold());
             }
-            if target > self.ids.capacity() {
-                self.ids.reserve_exact(target - self.ids.len());
-            }
+            self.ids.reserve_exact(target - self.ids.len());
         }
         self.ids.extend_from_slice(new);
         Ok(())
