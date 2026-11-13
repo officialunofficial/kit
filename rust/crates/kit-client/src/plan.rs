@@ -31,6 +31,13 @@ pub fn advance_ticket_limit(info: &GetServerInfoResponse) -> u32 {
     }
 }
 
+/// The data packs one advance may carry when it may name `max_tickets`
+/// tickets: one ticket is the packmap node's. Never less than one.
+#[must_use]
+pub fn data_pack_budget(max_tickets: u32) -> usize {
+    (max_tickets as usize).saturating_sub(1).max(1)
+}
+
 /// Explicit limits for one advance. Larger histories are scheduled as
 /// separate advances by the host, with a fresh head lease for each step.
 #[derive(Clone, Copy, Debug)]
@@ -132,6 +139,10 @@ impl Plan {
     ) -> Result<Self, Error> {
         if limits.payload_bytes == 0 || limits.max_pack_bytes == 0 || limits.max_parts == 0 {
             return Err(Error::Limit("zero pack limit"));
+        }
+        // One ticket is the packmap node's, so fewer than two leave no data pack.
+        if limits.max_tickets < 2 {
+            return Err(Error::Limit("advance ticket limit leaves no data pack"));
         }
         // Reserve a prior pointer and the largest u32 length prefix. The
         // empty canonical node has a one-byte prefix, which can grow by four.
@@ -255,9 +266,8 @@ fn seal(
         && packs
             .iter()
             .filter(|p| p.bytes.len() as u64 >= limits.ticket_threshold_bytes)
-            .count() as u64
-            + 2
-            > u64::from(limits.max_tickets)
+            .count()
+            >= data_pack_budget(limits.max_tickets)
     {
         return Err(Error::Limit(
             "advance requires more ticketed data packs than the server allows",
@@ -440,6 +450,17 @@ mod tests {
         assert_eq!(limit(Some(1024)), 1024);
         assert_eq!(limit(Some(2000)), 1024);
         assert_eq!(limit(Some(u32::MAX)), 1024);
+    }
+
+    #[test]
+    fn the_data_pack_budget_is_the_allowance_minus_the_packmap_ticket() {
+        assert_eq!(data_pack_budget(2), 1);
+        assert_eq!(data_pack_budget(3), 2);
+        assert_eq!(data_pack_budget(DEFAULT_TICKETS_PER_ADVANCE), 6);
+        assert_eq!(data_pack_budget(1024), 1023);
+        // A limits value built by hand never gives a budget of zero.
+        assert_eq!(data_pack_budget(1), 1);
+        assert_eq!(data_pack_budget(0), 1);
     }
 
     #[test]

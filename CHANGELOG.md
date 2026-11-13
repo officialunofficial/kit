@@ -174,7 +174,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `Push::run` refuses a plan whose `max_tickets` is above the limit of the
   server it reaches. The public function `kit_client::advance_ticket_limit`
   holds the rule, with the constants `DEFAULT_TICKETS_PER_ADVANCE` and
-  `MAX_TICKETS_PER_ADVANCE`, and the sync client uses it too. Code that builds
+  `MAX_TICKETS_PER_ADVANCE`, and the sync client uses it too.
+  `Plan::prepare` refuses a `Limits` whose `max_tickets` is below two, which
+  leaves no ticket for a data pack. Code that builds
   a `Limits` with a struct literal adds the field or ends the literal with
   `..Limits::default()`. No trait or signature of the crate changes.
 - A pack read charges 896 bytes of memory per entry, up from 704. The old
@@ -334,6 +336,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `pack::MIN_TOTAL_DECODED` are public. `kit+file://`
   refuses to store a pack above the fetch body limit, as the S3 transport
   does.
+- **Breaking:** `kit_core::protocol::UploadLimits::tickets_per_advance` is
+  now `data_packs_per_advance`, the data packs one advance may carry: one
+  fewer than the ticket allowance. `kit_client::data_pack_budget` holds the
+  rule beside `advance_ticket_limit`, and the sync client takes the value
+  from it. The unticketed fallback of six is gone. `plan_push_steps` with no
+  ticket allowance returns one step. `Plan::prepare` is unchanged for
+  `max_tickets` of two or more.
 - Planning a push no longer pairs the chunks of a file with more than 65,536
   chunks (about 4 GiB) by content when an edit changes its chunk count. It
   read every chunk of both versions for that. Its changed chunks are sent

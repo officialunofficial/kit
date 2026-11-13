@@ -67,7 +67,7 @@ struct TicketTransport {
     upload_lengths: Mutex<Vec<usize>>,
     max_pack_bytes: Option<u64>,
     ticket_threshold_bytes: Option<u64>,
-    tickets_per_advance: Option<usize>,
+    data_packs_per_advance: Option<usize>,
 }
 
 impl TicketTransport {
@@ -86,7 +86,7 @@ impl TicketTransport {
             upload_lengths: Mutex::new(Vec::new()),
             max_pack_bytes: None,
             ticket_threshold_bytes: Some(0),
-            tickets_per_advance: Some(7),
+            data_packs_per_advance: Some(6),
         }
     }
 }
@@ -128,7 +128,7 @@ impl Transport for TicketTransport {
     fn upload_limits(&self) -> UploadLimits {
         UploadLimits {
             max_pack_bytes: self.max_pack_bytes,
-            tickets_per_advance: self.tickets_per_advance,
+            data_packs_per_advance: self.data_packs_per_advance,
             ticket_threshold_bytes: self.ticket_threshold_bytes,
         }
     }
@@ -335,13 +335,13 @@ fn ticketless_multi_pack_push_is_not_subject_to_ticket_cap() {
     repo.ok(&["add", "."]);
     repo.ok(&["commit", "-m", "many files"]);
     // A V2 server whose threshold no pack reaches, and one reached without a
-    // signer (tickets_per_advance None): neither is subject to the cap.
+    // signer (data_packs_per_advance None): neither is subject to the cap.
     for signer in [true, false] {
         let mut tx = TicketTransport::new(Fault::None);
         if signer {
             tx.ticket_threshold_bytes = Some(u64::MAX);
         } else {
-            tx.tickets_per_advance = None;
+            tx.data_packs_per_advance = None;
         }
         tx.max_pack_bytes = Some(4096);
         push(&repo, &tx, 4096).unwrap();
@@ -633,7 +633,7 @@ fn a_server_that_advertises_three_tickets_gets_at_most_three_per_advance() {
 
     let scratch = Repo::new();
     let mut tx = split_transport();
-    tx.tickets_per_advance = Some(3);
+    tx.data_packs_per_advance = Some(2);
     tx.verify_into = Some(scratch.path().to_path_buf());
     let three = planned_steps(&repo, &tx, None);
     assert!(three.len() > seven.len(), "{three:?} vs {seven:?}");
@@ -666,7 +666,7 @@ fn a_server_that_advertises_sixteen_tickets_gets_more_than_seven_in_one_advance(
 
     let scratch = Repo::new();
     let mut tx = split_transport();
-    tx.tickets_per_advance = Some(16);
+    tx.data_packs_per_advance = Some(15);
     tx.verify_into = Some(scratch.path().to_path_buf());
     let sixteen = planned_steps(&repo, &tx, None);
     assert!(sixteen.len() < seven.len(), "{sixteen:?} vs {seven:?}");
@@ -728,7 +728,7 @@ fn pushes_within_the_budget_are_not_split() {
     let big = Repo::new();
     long_history(&big, 14, 3000);
     let mut tx = split_transport();
-    tx.tickets_per_advance = None;
+    tx.data_packs_per_advance = None;
     let (result, _) = push_steps(
         &big,
         &tx,

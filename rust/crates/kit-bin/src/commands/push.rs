@@ -78,7 +78,7 @@ struct PushOpts {
 fn interrupted_hint(endpoint: &str, limits: UploadLimits) -> &'static str {
     let connect = endpoint.starts_with("kit+https://") || endpoint.starts_with("kit+http://");
     if connect
-        && limits.tickets_per_advance.is_some()
+        && limits.data_packs_per_advance.is_some()
         && limits.ticket_threshold_bytes != Some(u64::MAX)
     {
         "push: interrupted; if BeginUpload issued a ticket, re-run push to resume the upload"
@@ -537,7 +537,7 @@ mod interrupted_hint_tests {
     #[test]
     fn begin_upload_hint_only_for_ticketing_connect_remote() {
         let ticketing = UploadLimits {
-            tickets_per_advance: Some(7),
+            data_packs_per_advance: Some(6),
             ticket_threshold_bytes: Some(0),
             ..UploadLimits::default()
         };

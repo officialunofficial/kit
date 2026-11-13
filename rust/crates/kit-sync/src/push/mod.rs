@@ -352,9 +352,9 @@ fn run_steps(
         on_step(tip)?;
         Ok(1)
     };
-    if limits.tickets_per_advance.is_none() {
+    let Some(budget) = limits.data_packs_per_advance else {
         return single(None, pack_payload_cap);
-    }
+    };
     refs::check_pushable_branch(branch)?;
     let LeaseHead::Holds(remote_tip) = lease_head(tx, branch, condition, tip)? else {
         return single(None, pack_payload_cap);
@@ -363,9 +363,7 @@ fn run_steps(
     let cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
     // The total, not the ticketed count: compression can merge packs and carry
     // one past the ticket threshold, and only the exact dry seal below knows.
-    if estimate_pack_sizes(store, &plan, cap, limits.max_pack_bytes)?.len()
-        <= split::data_pack_budget(limits)
-    {
+    if estimate_pack_sizes(store, &plan, cap, limits.max_pack_bytes)?.len() <= budget {
         let force = force::snapshot(tx, branch, remote_tip, condition)?;
         return single(Some(PreparedPlan { pack: plan, force }), pack_payload_cap);
     }
@@ -619,10 +617,12 @@ fn push_branch_once(
     // A retry re-planned the push: make sure the new plan still fits before
     // uploading any of it, so the failure leaves no half-uploaded advance.
     if let Some(reason) = retry
-        && estimated_ticketed_count(
+        && let Some(budget) = limits.data_packs_per_advance
+        && estimate_exceeds_ticket_budget(
             &estimate_pack_sizes(store, &plan, effective_cap, limits.max_pack_bytes)?,
             limits,
-        ) > split::data_pack_budget(limits)
+            budget,
+        )
         && let Err(PushError::PushTooLarge { packs, limit, .. }) = build_and_upload_packs(
             PackSink::Count,
             store,
@@ -736,8 +736,13 @@ fn effective_payload_cap(requested: u64, advertised: Option<u64>) -> Result<u64,
 }
 
 fn ticketed_pack(limits: UploadLimits, serialized_size: u64) -> bool {
-    limits.tickets_per_advance.is_some()
+    limits.data_packs_per_advance.is_some()
         && serialized_size >= limits.ticket_threshold_bytes.unwrap_or(0)
+}
+
+/// Whether estimated pack `sizes` need more tickets than `budget` data packs.
+fn estimate_exceeds_ticket_budget(sizes: &[u64], limits: UploadLimits, budget: usize) -> bool {
+    estimated_ticketed_count(sizes, limits) > budget
 }
 
 fn estimated_ticketed_count(sizes: &[u64], limits: UploadLimits) -> usize {
@@ -1209,8 +1214,10 @@ fn seal_pack(
     let sealed = std::mem::replace(w, PackWriter::new());
     let pack = sealed.finish()?;
     let is_ticketed = ticketed_pack(limits, pack.len() as u64);
-    let budget = split::data_pack_budget(limits);
-    if is_ticketed && *ticketed_count >= budget {
+    if let Some(budget) = limits.data_packs_per_advance
+        && is_ticketed
+        && *ticketed_count >= budget
+    {
         return Err(PushError::PushTooLarge {
             packs: *ticketed_count + 1,
             limit: budget,
@@ -1549,6 +1556,10 @@ mod tests {
                 .unwrap()
                 .len()
         };
+        // The wire size of a pack is its deltas' bases and streams, framed.
+        let one = estimate_pack_sizes_with(&store, &plan(1), u64::MAX, None, usize::MAX).unwrap();
+        let stream = kit_core::delta::HEADER_LEN as u64;
+        assert_eq!(one, [serialized_bound(HASH_LEN as u64 + stream, 1)]);
         // Three of them (1.5 GiB) fit, a fourth reaches 2 GiB and a little more.
         assert_eq!(packs(3), 1);
         assert_eq!(packs(4), 2);
@@ -1557,10 +1568,38 @@ mod tests {
     }
 
     #[test]
+    fn the_pack_estimate_fits_a_pack_that_decodes_to_exactly_the_floor() {
+        let (_dir, store) = store();
+        // A result and a stream that together decode to half the floor.
+        let result = (pack::MIN_TOTAL_DECODED / 2) as usize - kit_core::delta::HEADER_LEN;
+        let delta = |salt: u8| {
+            let mut stream = vec![0_u8; kit_core::delta::HEADER_LEN];
+            stream[5..9].copy_from_slice(&u32::try_from(result).unwrap().to_le_bytes());
+            transfer::PlannedDelta {
+                target: [salt; 32],
+                base: [0; 32],
+                stream,
+            }
+        };
+        let packs = |count: u8| {
+            let plan = transfer::PackPlan {
+                raw: Vec::new(),
+                deltas: (0..count).map(delta).collect(),
+                self_contained: false,
+            };
+            estimate_pack_sizes_with(&store, &plan, u64::MAX, None, usize::MAX)
+                .unwrap()
+                .len()
+        };
+        assert_eq!(packs(2), 1);
+        assert_eq!(packs(3), 2);
+    }
+
+    #[test]
     fn only_packs_from_the_threshold_up_count_toward_the_ticket_budget() {
         let limits = |budget, threshold| UploadLimits {
             max_pack_bytes: None,
-            tickets_per_advance: budget,
+            data_packs_per_advance: budget,
             ticket_threshold_bytes: threshold,
         };
         // No tickets, no ticketed packs.
@@ -1572,6 +1611,23 @@ mod tests {
             estimated_ticketed_count(&[99, 100, 101], limits(Some(6), Some(100))),
             2
         );
+        // The budget itself is allowed; one pack past it is not.
+        let sizes = [100, 100, 100];
+        assert!(!estimate_exceeds_ticket_budget(
+            &sizes,
+            limits(Some(3), Some(100)),
+            3
+        ));
+        assert!(estimate_exceeds_ticket_budget(
+            &sizes,
+            limits(Some(2), Some(100)),
+            2
+        ));
+        assert!(!estimate_exceeds_ticket_budget(
+            &sizes,
+            limits(Some(4), Some(100)),
+            4
+        ));
     }
 
     #[test]

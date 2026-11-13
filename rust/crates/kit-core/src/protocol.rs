@@ -994,8 +994,10 @@ pub enum CommitOutcome {
 pub struct UploadLimits {
     /// Maximum accepted serialized pack bytes, if advertised.
     pub max_pack_bytes: Option<u64>,
-    /// Maximum number of upload tickets one advance may consume.
-    pub tickets_per_advance: Option<usize>,
+    /// Most data packs one advance may carry, when the transport issues upload
+    /// tickets. An advance names one ticket for its packmap node, so this is
+    /// one fewer than the ticket allowance. `None` means no tickets.
+    pub data_packs_per_advance: Option<usize>,
     /// First serialized pack size that requires a ticket, when known.
     /// A transport may stop requiring tickets after discovery fallback.
     pub ticket_threshold_bytes: Option<u64>,

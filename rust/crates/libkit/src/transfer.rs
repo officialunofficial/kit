@@ -380,7 +380,8 @@ pub fn push_branch_steps(
 }
 
 /// Plan the advances of a split push without uploading anything. Returns the
-/// commits where each advance ends.
+/// commits where each advance ends. When `limits` carry no ticket budget the
+/// push is not split: the answer is `[tip]`, and nothing is checked.
 ///
 /// # Errors
 /// The split is refused. A step needs more packs than the server permits, or

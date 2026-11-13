@@ -9,7 +9,7 @@ use std::time::Duration;
 use kit_client::proto::{self, GetServerInfoResponse, UploadTicket};
 use kit_client::{
     DEFAULT_TICKETS_PER_ADVANCE, Error, Identity, MemoryPartReceiptStore, PartReceiptStore,
-    StoredPart, TicketMetadata, advance_ticket_limit,
+    StoredPart, TicketMetadata, advance_ticket_limit, data_pack_budget,
 };
 use kit_core::hash::{Hash, to_hex};
 use kit_core::protocol::{AdvanceOutcome, CommitOutcome, PACK_BODY_LIMIT, PackKey, UploadLimits};
@@ -994,13 +994,14 @@ impl<
         match self.write_info() {
             Some(info) if info.spec_version.is_some_and(|version| version >= 2) => UploadLimits {
                 max_pack_bytes: info.max_pack_bytes,
-                tickets_per_advance: signed.then(|| advance_ticket_limit(&info) as usize),
+                data_packs_per_advance: signed
+                    .then(|| data_pack_budget(advance_ticket_limit(&info))),
                 ticket_threshold_bytes: signed
                     .then_some(info.begin_upload_threshold_bytes.unwrap_or(0)),
             },
             None if signed => UploadLimits {
                 max_pack_bytes: None,
-                tickets_per_advance: Some(DEFAULT_TICKETS_PER_ADVANCE as usize),
+                data_packs_per_advance: Some(data_pack_budget(DEFAULT_TICKETS_PER_ADVANCE)),
                 ticket_threshold_bytes: Some(0),
             },
             _ => UploadLimits::default(),
